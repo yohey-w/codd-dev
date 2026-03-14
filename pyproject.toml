@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codd-dev"
+version = "0.2.0a1"
+description = "CoDD: Coherence-Driven Development — cross-artifact change impact analysis"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Yohei Watanabe", email = "yohey-w@users.noreply.github.com" },
+]
+keywords = ["change-impact", "dependency-graph", "software-engineering", "claude-code", "plugin"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+scan = [
+    "tree-sitter>=0.22",
+    "tree-sitter-python>=0.22",
+    "tree-sitter-typescript>=0.22",
+    "tree-sitter-java>=0.22",
+]
+mcp = []
+
+[project.scripts]
+codd = "codd.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yohey-w/codd-dev"
+Repository = "https://github.com/yohey-w/codd-dev"
+Issues = "https://github.com/yohey-w/codd-dev/issues"
+
+[tool.hatch.build]
+include = [
+    "codd/**/*.py",
+    "codd/**/*.yaml",
+    "hooks/**/*",
+    "templates/**/*.tmpl",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["codd"]

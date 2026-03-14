@@ -1,0 +1,38 @@
+# CoDD プロジェクト設定
+version: "0.1.0"
+
+project:
+  name: "{{project_name}}"
+  language: "{{language}}"
+  frameworks: []
+
+ai_command: "claude --print"
+coding_principles: null
+
+scan:
+  source_dirs:
+    - "src/"
+  test_dirs:
+    - "tests/"
+  doc_dirs:
+    - "docs/"
+  config_files: []
+  exclude:
+    - "**/node_modules/**"
+    - "**/__pycache__/**"
+    - "**/dist/**"
+
+graph:
+  store: "sqlite"
+  path: "codd/graph.db"
+
+bands:
+  green:
+    min_confidence: 0.90
+    min_evidence_count: 2
+  amber:
+    min_confidence: 0.50
+
+propagation:
+  max_depth: 10
+  stop_at_contract_boundary: true

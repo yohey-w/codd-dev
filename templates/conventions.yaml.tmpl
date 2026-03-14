@@ -1,0 +1,15 @@
+# 暗黙のルール（熟練者の頭の中にあるもの）
+# 「ここを変えたらここも確認しろ」をYAMLで記録する
+#
+# Example:
+#   - id: "conv_001"
+#     description: "ユーザーマスターを変更したら認証モジュールも確認"
+#     when_changed: "db_table:users"
+#     must_review:
+#       - "module:auth"
+#       - "test:test_auth_*"
+#     reason: "過去にusersテーブル変更で認証が壊れた"
+#     added_by: "your_name"
+#     added_at: "2026-01-01"
+
+conventions: []
