@@ -325,12 +325,132 @@ Once TS/JS call graph is available, these features automatically improve:
 
 No changes needed in clustering.py, traceability.py, or risk.py — they already consume `ModuleInfo.call_edges` generically.
 
+## R8: Environment & Config Dependency Extraction
+
+Goal: Detect environment variable reads and configuration key accesses in source code, so that config changes propagate through `codd impact` to all modules that depend on those keys.
+
+### Problem Statement
+
+Environment variables and config keys are a top cause of production incidents. A developer renames `DB_HOST` to `DATABASE_HOST` in `.env` — no import or call edge connects that to the 5 modules that read `os.getenv("DB_HOST")`. Current extract has zero visibility into this dependency class.
+
+### R8.1: Environment Variable Detection
+
+Detect `os.getenv`, `os.environ`, and `os.environ.get` calls in Python source code.
+
+**Requirements:**
+- **Regex patterns** (no tree-sitter needed — env access patterns are simple):
+  | Pattern | Example | Extracted Key |
+  |---------|---------|---------------|
+  | `os.getenv("KEY")` | `os.getenv("DB_HOST", "localhost")` | `DB_HOST` |
+  | `os.environ["KEY"]` | `os.environ["SECRET_KEY"]` | `SECRET_KEY` |
+  | `os.environ.get("KEY")` | `os.environ.get("DEBUG", "false")` | `DEBUG` |
+  | `os.environ.pop("KEY")` | `os.environ.pop("TEMP_VAR")` | `TEMP_VAR` |
+- **TS/JS patterns**:
+  | Pattern | Example | Extracted Key |
+  |---------|---------|---------------|
+  | `process.env.KEY` | `process.env.DATABASE_URL` | `DATABASE_URL` |
+  | `process.env["KEY"]` | `process.env["API_KEY"]` | `API_KEY` |
+
+### R8.2: Config Key Detection
+
+Detect dictionary/object key accesses on known config objects.
+
+**Requirements:**
+- **Python patterns**:
+  | Pattern | Example | Extracted Key |
+  |---------|---------|---------------|
+  | `config["KEY"]` | `config["database"]["host"]` | `database.host` |
+  | `settings.KEY` | `settings.DEBUG` | `DEBUG` |
+  | `app.config["KEY"]` | `app.config["SECRET_KEY"]` | `SECRET_KEY` |
+- **Detection scope**: Only extract from variables named `config`, `settings`, `cfg`, `conf`, `app.config`, `current_app.config`
+- **Nested keys**: `config["database"]["host"]` → key is `database.host`
+
+### R8.3: Data Model & Pipeline Integration
+
+```python
+@dataclass
+class EnvRef:
+    key: str          # "DB_HOST", "DATABASE_URL"
+    kind: str         # "env" | "config"
+    file: str         # relative file path
+    line: int         # line number
+    has_default: bool # True if default value provided
+```
+
+- Collected in Stage 1 alongside symbols. Stored in `ModuleInfo.env_refs: list[EnvRef]`
+- Per-module design docs include `## Environment Dependencies` section listing keys
+- Architecture overview includes `## Environment Variables` summary table (key → modules that use it)
+- Frontmatter gains `env_depends` relation: module → env key (for future `codd impact` on .env changes)
+
+### R8.4: Impact Integration
+
+When modules share the same env key, changing one module's env access pattern should flag the other modules:
+- Architecture overview groups modules by shared env keys
+- Change risk score (R5.4) gains a bonus factor: modules that depend on env vars with no default (`has_default: false`) get +0.1 risk
+
+## R9: Inheritance Chain Impact Analysis
+
+Goal: When a parent class method changes, automatically flag all child classes that inherit or override that method — even if they're in different modules.
+
+### Problem Statement
+
+Current extract captures `bases` (parent classes) in Symbol data, but doesn't build an inheritance tree or track override relationships. If `Base.validate()` changes signature, `Child.validate()` in a different module may break silently — no import edge, no call edge, no current impact detection.
+
+### R9.1: Inheritance Tree Construction
+
+Build a project-wide class hierarchy from extracted Symbol data.
+
+**Requirements:**
+- **Input**: All `Symbol` objects with `kind == "class"` and non-empty `bases` field
+- **Resolution**: Resolve base class names to known project symbols (same logic as call graph resolution)
+- **Output**:
+  ```python
+  @dataclass
+  class InheritanceEdge:
+      child_class: str      # "module.ChildClass"
+      parent_class: str     # "module.ParentClass"
+      child_module: str     # module name
+      parent_module: str    # module name
+      child_file: str       # file:line
+      parent_file: str      # file:line
+  ```
+- Stored in `ProjectFacts.inheritance_edges: list[InheritanceEdge]`
+- Multi-level inheritance: if A → B → C, changing C should flag both A and B
+
+### R9.2: Override Detection
+
+Detect when a child class redefines a method that exists in a parent class.
+
+**Requirements:**
+- For each class in the inheritance tree, collect its method names
+- If child class defines a method with the same name as parent → it's an override
+- **Output per class**: `overrides: list[str]` — method names that override parent methods
+- **Non-override inheritance**: Methods NOT overridden are inherited and will break if parent changes signature
+
+### R9.3: Pipeline Integration
+
+- `ModuleInfo` gains `inheritance_edges: list[InheritanceEdge]` (edges where this module's classes are children)
+- Per-module design docs include `## Inheritance` section:
+  - Parent classes (with module reference)
+  - Overridden methods
+  - Inherited (non-overridden) methods from parent
+- Architecture overview includes `## Class Hierarchy` section (tree view of inheritance)
+- Frontmatter gains `inherits` relation type in `depends_on`
+
+### R9.4: Impact Integration
+
+- When `codd impact` detects a changed module, and that module contains parent classes:
+  - All child class modules are flagged as Amber (depth +1)
+  - Impact report shows: "Parent class `Base.validate` changed → affects `Child` in module X (inherits, does not override)"
+- Change risk score (R5.4): Classes with many subclasses (high fan-out) get higher risk
+- `dependents_count` in risk formula now includes inheritance dependents
+
 ## Acceptance Criteria
 
 1. `codd extract` on any Python/TS project produces correct design docs with CoDD frontmatter
 2. `codd verify` on codd-dev (Python) runs mypy + pytest and reports results
 3. `codd scan` recognizes all generated design documents
-4. All 200+ existing tests continue to pass
+4. All 220+ existing tests continue to pass
 5. `codd extract` with call graph flag produces per-module call_graph sections (R4.1)
 6. Architecture overview includes feature_clusters section when call graph data is available (R4.2)
 7. Per-module docs include public_api / internal_api distinction (R4.3)
@@ -343,3 +463,8 @@ No changes needed in clustering.py, traceability.py, or risk.py — they already
 14. `codd impact` on a source file change reports affected extracted design docs with depth and band (R6.3, R6.4)
 15. TypeScript call graph extraction produces `CallEdge` entries for TS projects (R7.1)
 16. JavaScript call graph extraction produces `CallEdge` entries for JS projects (R7.2)
+17. Per-module docs include `## Environment Dependencies` section listing env/config keys (R8.1, R8.2)
+18. Architecture overview includes `## Environment Variables` summary table (R8.3)
+19. Per-module docs include `## Inheritance` section with parent classes and overrides (R9.1, R9.2)
+20. Architecture overview includes `## Class Hierarchy` section (R9.3)
+21. Inheritance edges create `inherits` relations in frontmatter `depends_on` (R9.4)
