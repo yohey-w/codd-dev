@@ -372,6 +372,61 @@ Reuses TypeScript implementation with JS grammar. Additional patterns:
 - Tree-sitter unavailable → return `[]` (graceful degradation)
 - No changes needed in clustering.py, traceability.py, risk.py (they consume `call_edges` generically)
 
+## Environment & Config Dependencies (R8)
+
+### R8.1-R8.2: Detection
+
+Regex-based detection of environment variable and config key accesses:
+
+```python
+@dataclass
+class EnvRef:
+    key: str          # "DB_HOST"
+    kind: str         # "env" | "config"
+    file: str
+    line: int
+    has_default: bool
+```
+
+**Python patterns**: `os.getenv("KEY")`, `os.environ["KEY"]`, `os.environ.get("KEY")`
+**TS/JS patterns**: `process.env.KEY`, `process.env["KEY"]`
+**Config patterns**: `config["KEY"]`, `settings.KEY` (from known config variable names)
+
+### R8.3: Pipeline Integration
+
+- `detect_env_refs(content, file_path)` → `list[EnvRef]`
+- `build_env_refs(facts, project_root)` populates `ModuleInfo.env_refs`
+- Template: `## Environment Dependencies` section per module
+- Architecture template: `## Environment Variables` summary (key → modules)
+
+## Inheritance Chain Analysis (R9)
+
+### R9.1: Inheritance Tree
+
+```python
+@dataclass
+class InheritanceEdge:
+    child_class: str
+    parent_class: str
+    child_module: str
+    parent_module: str
+    child_file: str
+    parent_file: str
+```
+
+Build from Symbol data (`kind == "class"`, `bases` field). Resolve base names against project symbol table.
+
+### R9.2: Override Detection
+
+For each child class, compare method names with parent. Same name = override. Non-overridden = inherited (will break if parent changes signature).
+
+### R9.3: Pipeline Integration
+
+- `build_inheritance_tree(facts)` populates `ProjectFacts.inheritance_edges`
+- Per-module: `## Inheritance` section (parents, overrides, inherited methods)
+- Architecture: `## Class Hierarchy` tree view
+- Frontmatter: `inherits` relation in `depends_on`
+
 ## Files
 
 - `codd/extractor.py` — Pipeline orchestration, ProjectFacts, extract_facts(), run_extract()
@@ -385,4 +440,6 @@ Reuses TypeScript implementation with JS grammar. Additional patterns:
 - `codd/schema_refs.py` — Schema-code dependency detection (R5.2)
 - `codd/wiring.py` — Runtime wiring detection (R5.3)
 - `codd/risk.py` — Change risk scoring (R5.4)
-- `codd/templates/extracted/` — Jinja2 templates
+- `codd/env_refs.py` — Environment & config dependency detection (R8) [NEW]
+- `codd/inheritance.py` — Inheritance chain analysis (R9) [NEW]
+- `codd/templates/extracted/` — Jinja2 templates (updated for R8, R9 sections)

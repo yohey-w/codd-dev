@@ -12,7 +12,7 @@ codd:
 
 **Language**: python
 **Source**: codd/
-**Total**: 21 files, 9,776 lines, 21 modules
+**Total**: 23 files, 10,373 lines, 23 modules
 
 ## Module Map
 
@@ -22,19 +22,21 @@ codd:
 | clustering | 1 | 168 | 0 | 1 | 0 | 0 | — | extractor | — |
 | config | 1 | 85 | 0 | 2 | 0 | 0 | — | — | — |
 | contracts | 1 | 138 | 1 | 2 | 0 | 0 | — | extractor | — |
-| extractor | 1 | 983 | 6 | 4 | 0 | 0 | — | clustering, config, contracts, parsing, risk, schema_refs, synth, traceability, wiring | — |
+| env_refs | 1 | 204 | 1 | 2 | 0 | 0 | — | extractor | — |
+| extractor | 1 | 993 | 6 | 4 | 0 | 0 | — | clustering, config, contracts, env_refs, inheritance, parsing, risk, schema_refs, synth, traceability, wiring | — |
 | generator | 1 | 648 | 3 | 1 | 0 | 0 | — | config, scanner | — |
 | graph | 1 | 293 | 1 | 16 | 0 | 0 | — | — | — |
 | hooks | 1 | 110 | 0 | 2 | 0 | 0 | — | config, scanner, validator | — |
 | implementer | 1 | 846 | 3 | 1 | 0 | 0 | — | generator, scanner | — |
-| parsing | 1 | 2,233 | 19 | 51 | 0 | 0 | — | extractor | — |
+| inheritance | 1 | 223 | 1 | 3 | 0 | 0 | — | extractor | — |
+| parsing | 1 | 2,334 | 19 | 51 | 0 | 0 | — | extractor | — |
 | planner | 1 | 580 | 6 | 4 | 0 | 0 | — | config, generator, validator | — |
 | propagate | 1 | 308 | 0 | 1 | 0 | 0 | — | graph, scanner | — |
 | risk | 1 | 100 | 1 | 1 | 0 | 0 | — | extractor | — |
 | root | 1 | 3 | 0 | 0 | 0 | 0 | — | — | — |
 | scanner | 1 | 465 | 0 | 2 | 0 | 0 | — | generator, graph, parsing | — |
 | schema_refs | 1 | 122 | 1 | 2 | 0 | 0 | — | extractor | — |
-| synth | 1 | 869 | 0 | 2 | 0 | 0 | — | extractor | — |
+| synth | 1 | 928 | 0 | 2 | 0 | 0 | — | extractor, inheritance | — |
 | traceability | 1 | 67 | 1 | 1 | 0 | 0 | — | extractor | — |
 | validator | 1 | 500 | 4 | 10 | 0 | 0 | — | — | — |
 | verifier | 1 | 679 | 8 | 2 | 0 | 0 | — | config | — |
@@ -55,9 +57,12 @@ cli -> validator
 cli -> verifier
 clustering -> extractor
 contracts -> extractor
+env_refs -> extractor
 extractor -> clustering
 extractor -> config
 extractor -> contracts
+extractor -> env_refs
+extractor -> inheritance
 extractor -> parsing
 extractor -> risk
 extractor -> schema_refs
@@ -71,6 +76,7 @@ hooks -> scanner
 hooks -> validator
 implementer -> generator
 implementer -> scanner
+inheritance -> extractor
 parsing -> extractor
 planner -> config
 planner -> generator
@@ -83,6 +89,7 @@ scanner -> graph
 scanner -> parsing
 schema_refs -> extractor
 synth -> extractor
+synth -> inheritance
 traceability -> extractor
 verifier -> config
 wiring -> extractor

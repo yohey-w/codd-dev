@@ -51,6 +51,16 @@ Tests: tests/test_scanner.py
 **Uncovered symbols**: `build_document_node_path_map`
 
 
+## Environment Dependencies
+
+| Key | Kind | Location | Default |
+|-----|------|----------|---------|
+| `scan` | config | `codd/scanner.py:44` | no |
+| `project` | config | `codd/scanner.py:60` | no |
+| `scan` | config | `codd/scanner.py:61` | no |
+| `scan` | config | `codd/scanner.py:62` | no |
+
+
 ## Import Dependencies
 
 ### → generator

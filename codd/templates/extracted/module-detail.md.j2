@@ -131,6 +131,40 @@ Tests: {{ test_coverage.covering_tests | join(", ") }}
 {% endfor %}
 {% endif %}
 
+{% if env_refs %}
+## Environment Dependencies
+
+| Key | Kind | Location | Default |
+|-----|------|----------|---------|
+{% for ref in env_refs -%}
+| `{{ ref.key }}` | {{ ref.kind }} | `{{ ref.file }}:{{ ref.line }}` | {{ "yes" if ref.has_default else "no" }} |
+{% endfor %}
+{% endif %}
+
+{% if inheritance_edges %}
+## Inheritance
+
+{% for edge in inheritance_edges -%}
+- `{{ edge.child_class }}` extends `{{ edge.parent_class }}`
+{% endfor %}
+{% if overrides %}
+
+### Overrides
+
+{% for cls, methods in overrides.items() -%}
+**{{ cls }}**: {% for m in methods %}`{{ m }}`{% if not loop.last %}, {% endif %}{% endfor %}
+{% endfor %}
+{% endif %}
+{% if inherited_methods %}
+
+### Inherited Methods (silent-breakage risk)
+
+{% for cls, methods in inherited_methods.items() -%}
+**{{ cls }}**: {% for m in methods %}`{{ m }}`{% if not loop.last %}, {% endif %}{% endfor %}
+{% endfor %}
+{% endif %}
+{% endif %}
+
 {% if internal_dependencies %}
 ## Import Dependencies
 

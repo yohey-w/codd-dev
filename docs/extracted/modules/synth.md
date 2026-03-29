@@ -11,10 +11,13 @@ codd:
   - id: design:extract:extractor
     relation: imports
     semantic: technical
+  - id: design:extract:inheritance
+    relation: imports
+    semantic: technical
 ---
 # synth
 
-> 1 files, 869 lines
+> 1 files, 928 lines
 
 **Layer Guess**: Infrastructure
 **Responsibility**: Defaulted to infrastructure because no higher-level cues were detected
@@ -49,11 +52,17 @@ codd:
 **Uncovered symbols**: `synth_architecture`, `synth_docs`
 
 
+
+
 ## Import Dependencies
 
 ### → extractor
 
 - `from codd.extractor import ModuleInfo, ProjectFacts, Symbol`
+### → inheritance
+
+- `from codd.inheritance import get_overrides`
+- `from codd.inheritance import get_inherited_methods`
 
 ## External Dependencies
 

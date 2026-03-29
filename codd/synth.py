@@ -168,6 +168,8 @@ def synth_architecture(
         build_deps=_build_deps_context(facts.build_deps),
         deployment_hints=_deployment_hints(facts),
         change_risks=facts.change_risks,
+        env_var_summary=_env_var_summary(facts),
+        inheritance_edges=getattr(facts, "inheritance_edges", []),
     )
     architecture_path.write_text(content, encoding="utf-8")
     return architecture_path
@@ -271,6 +273,13 @@ def _render_module_detail(env: Environment, facts: ProjectFacts, module: ModuleI
         test_coverage=module.test_coverage,
         schema_refs=module.schema_refs,
         runtime_wires=module.runtime_wires,
+        env_refs=getattr(module, "env_refs", []),
+        inheritance_edges=[
+            e for e in getattr(facts, "inheritance_edges", [])
+            if e.child_module == module.name or e.parent_module == module.name
+        ],
+        overrides=_module_overrides(facts, module.name),
+        inherited_methods=_module_inherited_methods(facts, module.name),
     )
     return content
 
@@ -405,6 +414,16 @@ def _module_depends_on(facts: ProjectFacts, module: ModuleInfo) -> list[dict[str
                 {"id": nid, "relation": "runtime_wires", "semantic": "technical"}
             )
             seen_ids.add(nid)
+
+    # R9: inherits edges
+    for edge in getattr(facts, "inheritance_edges", []):
+        if edge.child_module == module.name and edge.parent_module != module.name:
+            nid = _module_node_id(edge.parent_module)
+            if nid not in seen_ids:
+                depends_on.append(
+                    {"id": nid, "relation": "inherits", "semantic": "technical"}
+                )
+                seen_ids.add(nid)
 
     return depends_on
 
@@ -867,3 +886,43 @@ def _contains_keyword(value: str, keywords: set[str]) -> bool:
 
 def _dedupe_strings(values: list[str]) -> list[str]:
     return sorted(dict.fromkeys(values))
+
+
+def _env_var_summary(facts: Any) -> list[dict[str, Any]]:
+    """Build env-var → modules mapping for architecture template."""
+    key_modules: dict[str, set[str]] = {}
+    for mod in facts.modules.values():
+        for ref in getattr(mod, "env_refs", []):
+            key_modules.setdefault(ref.key, set()).add(mod.name)
+    return [
+        {"key": k, "modules": sorted(v)}
+        for k, v in sorted(key_modules.items())
+    ]
+
+
+def _module_overrides(facts: Any, module_name: str) -> dict[str, list[str]]:
+    """Return {class: [overridden methods]} for classes in this module."""
+    try:
+        from codd.inheritance import get_overrides
+        all_overrides = get_overrides(facts)
+    except Exception:
+        return {}
+    return {
+        cls: methods
+        for cls, methods in all_overrides.items()
+        if cls.startswith(f"{module_name}.")
+    }
+
+
+def _module_inherited_methods(facts: Any, module_name: str) -> dict[str, list[str]]:
+    """Return {class: [inherited methods]} for classes in this module."""
+    try:
+        from codd.inheritance import get_inherited_methods
+        all_inherited = get_inherited_methods(facts)
+    except Exception:
+        return {}
+    return {
+        cls: methods
+        for cls, methods in all_inherited.items()
+        if cls.startswith(f"{module_name}.")
+    }

@@ -68,6 +68,24 @@ Evidence: {{ cluster.evidence | join("; ") }}
 {% endfor %}
 {% endif %}
 
+{% if env_var_summary %}
+## Environment Variables
+
+| Key | Used by |
+|-----|---------|
+{% for row in env_var_summary -%}
+| `{{ row.key }}` | {{ row.modules | join(", ") }} |
+{% endfor %}
+{% endif %}
+
+{% if inheritance_edges %}
+## Class Hierarchy
+
+{% for edge in inheritance_edges -%}
+- `{{ edge.child_class }}` extends `{{ edge.parent_class }}` ({{ edge.child_module }} → {{ edge.parent_module }})
+{% endfor %}
+{% endif %}
+
 ## Layer Violations
 
 {% if violations %}

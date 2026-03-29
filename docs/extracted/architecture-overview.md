@@ -21,6 +21,9 @@ codd:
   - id: design:extract:contracts
     relation: aggregates
     semantic: technical
+  - id: design:extract:env-refs
+    relation: aggregates
+    semantic: technical
   - id: design:extract:extractor
     relation: aggregates
     semantic: technical
@@ -34,6 +37,9 @@ codd:
     relation: aggregates
     semantic: technical
   - id: design:extract:implementer
+    relation: aggregates
+    semantic: technical
+  - id: design:extract:inheritance
     relation: aggregates
     semantic: technical
   - id: design:extract:parsing
@@ -91,7 +97,7 @@ codd:
 
 - `schema_refs` — Owns schema, persistence, or domain model concepts### Infrastructure
 
-- `clustering` — Defaulted to infrastructure because no higher-level cues were detected- `config` — Implements parsing, extraction, scanning, or adapters- `contracts` — Defaulted to infrastructure because no higher-level cues were detected- `extractor` — Implements parsing, extraction, scanning, or adapters- `graph` — Implements parsing, extraction, scanning, or adapters- `hooks` — Implements parsing, extraction, scanning, or adapters- `parsing` — Implements parsing, extraction, scanning, or adapters- `propagate` — Implements parsing, extraction, scanning, or adapters- `risk` — Defaulted to infrastructure because no higher-level cues were detected- `root` — Defaulted to infrastructure because no higher-level cues were detected- `scanner` — Implements parsing, extraction, scanning, or adapters- `synth` — Defaulted to infrastructure because no higher-level cues were detected- `traceability` — Defaulted to infrastructure because no higher-level cues were detected- `validator` — Implements parsing, extraction, scanning, or adapters- `wiring` — Defaulted to infrastructure because no higher-level cues were detected### Shared
+- `clustering` — Defaulted to infrastructure because no higher-level cues were detected- `config` — Implements parsing, extraction, scanning, or adapters- `contracts` — Defaulted to infrastructure because no higher-level cues were detected- `env_refs` — Defaulted to infrastructure because no higher-level cues were detected- `extractor` — Implements parsing, extraction, scanning, or adapters- `graph` — Implements parsing, extraction, scanning, or adapters- `hooks` — Implements parsing, extraction, scanning, or adapters- `inheritance` — Defaulted to infrastructure because no higher-level cues were detected- `parsing` — Implements parsing, extraction, scanning, or adapters- `propagate` — Implements parsing, extraction, scanning, or adapters- `risk` — Defaulted to infrastructure because no higher-level cues were detected- `root` — Defaulted to infrastructure because no higher-level cues were detected- `scanner` — Implements parsing, extraction, scanning, or adapters- `synth` — Defaulted to infrastructure because no higher-level cues were detected- `traceability` — Defaulted to infrastructure because no higher-level cues were detected- `validator` — Implements parsing, extraction, scanning, or adapters- `wiring` — Defaulted to infrastructure because no higher-level cues were detected### Shared
 
 - No modules classified into this layer.
 
@@ -110,11 +116,13 @@ Evidence: 2 cross-call edges
 | `clustering` | 1 | 0 | 1.0 | 0 |
 | `config` | 2 | 0 | 1.0 | 0 |
 | `contracts` | 3 | 0 | 1.0 | 0 |
+| `env_refs` | 3 | 0 | 1.0 | 0 |
 | `extractor` | 10 | 0 | 1.0 | 0 |
 | `generator` | 4 | 0 | 1.0 | 0 |
 | `graph` | 17 | 0 | 1.0 | 0 |
 | `hooks` | 2 | 0 | 1.0 | 0 |
 | `implementer` | 4 | 0 | 1.0 | 0 |
+| `inheritance` | 4 | 0 | 1.0 | 0 |
 | `parsing` | 70 | 0 | 1.0 | 0 |
 | `planner` | 10 | 0 | 1.0 | 0 |
 | `propagate` | 1 | 0 | 1.0 | 0 |
@@ -131,27 +139,42 @@ Evidence: 2 cross-call edges
 
 | Module | Risk | Dependents | Uncovered | API Surface | Violations |
 |--------|------|------------|-----------|-------------|------------|
-| `generator` | 0.62 | 0.4 | 1.0 | 1.0 | 0.0 |
-| `validator` | 0.59 | 0.3 | 1.0 | 1.0 | 0.0 |
-| `propagate` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
-| `verifier` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
-| `planner` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
-| `synth` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
-| `hooks` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
-| `parsing` | 0.53 | 0.2 | 0.9 | 1.0 | 0.0 |
-| `config` | 0.53 | 0.6 | 0.5 | 1.0 | 0.0 |
-| `implementer` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
+| `generator` | 0.6 | 0.33 | 1.0 | 1.0 | 0.0 |
+| `validator` | 0.57 | 0.25 | 1.0 | 1.0 | 0.0 |
+| `propagate` | 0.53 | 0.08 | 1.0 | 1.0 | 0.0 |
+| `verifier` | 0.53 | 0.08 | 1.0 | 1.0 | 0.0 |
+| `planner` | 0.53 | 0.08 | 1.0 | 1.0 | 0.0 |
+| `synth` | 0.53 | 0.08 | 1.0 | 1.0 | 0.0 |
+| `hooks` | 0.53 | 0.08 | 1.0 | 1.0 | 0.0 |
+| `implementer` | 0.53 | 0.08 | 1.0 | 1.0 | 0.0 |
 | `extractor` | 0.53 | 1.0 | 0.1 | 1.0 | 0.0 |
+| `parsing` | 0.52 | 0.17 | 0.9 | 1.0 | 0.0 |
 | `root` | 0.5 | 0.0 | 1.0 | 1.0 | 0.0 |
-| `scanner` | 0.5 | 0.5 | 0.5 | 1.0 | 0.0 |
-| `graph` | 0.36 | 0.2 | 0.35 | 1.0 | 0.0 |
+| `config` | 0.5 | 0.5 | 0.5 | 1.0 | 0.0 |
+| `scanner` | 0.48 | 0.42 | 0.5 | 1.0 | 0.0 |
+| `graph` | 0.35 | 0.17 | 0.35 | 1.0 | 0.0 |
 | `cli` | 0.29 | 0.0 | 0.31 | 1.0 | 0.0 |
-| `risk` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
-| `contracts` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
-| `wiring` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
-| `traceability` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
-| `clustering` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
-| `schema_refs` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
+| `inheritance` | 0.25 | 0.17 | 0.0 | 1.0 | 0.0 |
+| `risk` | 0.23 | 0.08 | 0.0 | 1.0 | 0.0 |
+| `contracts` | 0.23 | 0.08 | 0.0 | 1.0 | 0.0 |
+| `wiring` | 0.23 | 0.08 | 0.0 | 1.0 | 0.0 |
+| `traceability` | 0.23 | 0.08 | 0.0 | 1.0 | 0.0 |
+| `env_refs` | 0.23 | 0.08 | 0.0 | 1.0 | 0.0 |
+| `clustering` | 0.23 | 0.08 | 0.0 | 1.0 | 0.0 |
+| `schema_refs` | 0.23 | 0.08 | 0.0 | 1.0 | 0.0 |
+
+## Environment Variables
+
+| Key | Used by |
+|-----|---------|
+| `KEY` | env_refs |
+| `UPPER_CASE` | env_refs |
+| `UPPER_CASE_ATTR` | env_refs |
+| `project` | scanner |
+| `scan` | scanner |
+| `test_command` | verifier |
+| `wave_config` | planner |
+
 
 ## Layer Violations
 
@@ -171,9 +194,12 @@ cli -> validator
 cli -> verifier
 clustering -> extractor
 contracts -> extractor
+env_refs -> extractor
 extractor -> clustering
 extractor -> config
 extractor -> contracts
+extractor -> env_refs
+extractor -> inheritance
 extractor -> parsing
 extractor -> risk
 extractor -> schema_refs
@@ -187,6 +213,7 @@ hooks -> scanner
 hooks -> validator
 implementer -> generator
 implementer -> scanner
+inheritance -> extractor
 parsing -> extractor
 planner -> config
 planner -> generator
@@ -199,6 +226,7 @@ scanner -> graph
 scanner -> parsing
 schema_refs -> extractor
 synth -> extractor
+synth -> inheritance
 traceability -> extractor
 verifier -> config
 wiring -> extractor
@@ -248,6 +276,7 @@ wiring -> extractor
 ### Configuration
 
 - `config`
+- `env_refs`
 
 ## Entry Points & Deployment
 

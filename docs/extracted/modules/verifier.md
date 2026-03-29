@@ -83,6 +83,13 @@ codd:
 **Uncovered symbols**: `DesignRef`, `TestFailure`, `TestResult`, `TypecheckError`, `TypecheckResult`, `VerifyPreflightError`, `VerifyResult`, `_Verifier`, `run`, `run_verify`
 
 
+## Environment Dependencies
+
+| Key | Kind | Location | Default |
+|-----|------|----------|---------|
+| `test_command` | config | `codd/verifier.py:423` | no |
+
+
 ## Import Dependencies
 
 ### → config

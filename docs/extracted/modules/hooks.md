@@ -51,6 +51,8 @@ Tests: tests/test_hooks.py
 **Uncovered symbols**: `install_pre_commit_hook`, `run_pre_commit`
 
 
+
+
 ## Import Dependencies
 
 ### → config

@@ -79,6 +79,7 @@ class ModuleInfo:
     test_coverage: Any = None       # TestCoverage from traceability.py
     schema_refs: list[Any] = field(default_factory=list)    # SchemaRef from schema_refs.py
     runtime_wires: list[Any] = field(default_factory=list)  # RuntimeWire from wiring.py
+    env_refs: list[Any] = field(default_factory=list)      # EnvRef from env_refs.py
 
 
 @dataclass
@@ -108,6 +109,7 @@ class ProjectFacts:
     build_deps: BuildDepsInfo | None = None
     feature_clusters: list[FeatureCluster] = field(default_factory=list)
     change_risks: list[Any] = field(default_factory=list)  # ChangeRisk from risk.py
+    inheritance_edges: list[Any] = field(default_factory=list)  # InheritanceEdge from inheritance.py
 
 
 @dataclass
@@ -203,6 +205,14 @@ def extract_facts(project_root: Path, language: str | None = None,
     # R5.4: Change risk scoring (depends on R4.3, R5.1)
     from codd.risk import build_change_risks
     build_change_risks(facts)
+
+    # R8: Environment & config dependency detection
+    from codd.env_refs import build_env_refs
+    build_env_refs(facts, project_root)
+
+    # R9: Inheritance chain analysis
+    from codd.inheritance import build_inheritance_tree
+    build_inheritance_tree(facts)
 
     return facts
 

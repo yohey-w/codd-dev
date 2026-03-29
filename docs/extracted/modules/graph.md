@@ -74,9 +74,11 @@ codd:
 ## Test Coverage
 
 **Coverage**: 0.65 (11 / 17)
-Tests: tests/test_graph.py
+Tests: tests/test_bridge.py, tests/test_graph.py
 
 **Uncovered symbols**: `count_edges`, `count_human_evidence`, `count_nodes`, `find_nodes_by_path`, `get_convention_edges`, `purge_auto_generated`
+
+
 
 
 
@@ -87,4 +89,4 @@ Tests: tests/test_graph.py
 
 ## Tests
 
-- `tests/test_graph.py` — tests: test_upsert_and_get_node, test_add_edge_and_query, test_noisy_or_confidence, test_negative_evidence_reduces_confidence, test_propagation_bfs, test_propagation_max_depth, test_band_classification, test_stats; fixtures: ceg
+- `tests/test_bridge.py` — tests: test_build_frontmatter_with_source_files, test_build_frontmatter_without_source_files, test_build_frontmatter_empty_source_files, test_build_frontmatter_preserves_other_fields, test_load_frontmatter_source_files_creates_file_nodes, test_load_frontmatter_source_files_creates_bridge_edges, test_load_frontmatter_bridge_edge_relation_is_extracted_from, test_load_frontmatter_no_source_files_creates_no_bridge_edges, test_load_frontmatter_multiple_source_files_multiple_edges, test_load_frontmatter_bridge_edge_confidence_is_0_85; fixtures: ceg- `tests/test_graph.py` — tests: test_upsert_and_get_node, test_add_edge_and_query, test_noisy_or_confidence, test_negative_evidence_reduces_confidence, test_propagation_bfs, test_propagation_max_depth, test_band_classification, test_stats; fixtures: ceg

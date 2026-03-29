@@ -76,6 +76,13 @@ codd:
 **Uncovered symbols**: `PlanInitResult`, `PlanResult`, `PlannedArtifact`, `PlannedWave`, `RequirementDocument`, `_ExternalNode`, `build_plan`, `plan_init`, `plan_to_dict`, `render_plan_text`
 
 
+## Environment Dependencies
+
+| Key | Kind | Location | Default |
+|-----|------|----------|---------|
+| `wave_config` | config | `codd/planner.py:131` | no |
+
+
 ## Import Dependencies
 
 ### → config
