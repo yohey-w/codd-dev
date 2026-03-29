@@ -1,89 +1,74 @@
-[日本語](README_ja.md) | English
+<p align="center">
+  <strong>CoDD — Coherence-Driven Development</strong><br>
+  <em>Keep AI-built systems coherent when requirements change.</em>
+</p>
 
-# CoDD — Coherence-Driven Development
+<p align="center">
+  <a href="https://pypi.org/project/codd-dev/"><img src="https://img.shields.io/pypi/v/codd-dev?style=flat-square&color=blue" alt="PyPI"></a>
+  <a href="https://pypi.org/project/codd-dev/"><img src="https://img.shields.io/pypi/pyversions/codd-dev?style=flat-square" alt="Python"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License"></a>
+  <a href="https://github.com/yohey-w/codd-dev/stargazers"><img src="https://img.shields.io/github/stars/yohey-w/codd-dev?style=flat-square" alt="Stars"></a>
+</p>
 
-**CoDD keeps AI-built systems coherent as requirements change.**
+<p align="center">
+  <a href="README_ja.md">日本語</a> | English
+</p>
 
-Give CoDD your requirements and constraints. AI generates the design top-down, derives implementation and test strategy from those artifacts, and traces change impact across a dependency graph — so nothing falls out of sync.
+---
 
 > *Harnesses tell agents how to work. CoDD keeps artifacts coherent.*
 
 ```
-Harness (CLAUDE.md, AGENTS.md, Hooks, Skills)  ← Rules, guardrails, flow
-  └─ CoDD (methodology)                        ← Operates on the harness flow
-       └─ Design docs (docs/*.md)              ← Artifacts CoDD generates and maintains
+pip install codd-dev
 ```
 
-**Public Alpha** — `pip install codd-dev` — init / scan / impact / validate are stable today.
+**Public Alpha** — `init` / `scan` / `impact` / `validate` are stable today.
 
-## The Problem
+---
 
-AI can generate code from specs. But what happens when requirements change mid-project?
+## Why CoDD?
+
+AI can generate code from specs. But what happens when **requirements change mid-project?**
 
 - Which design docs are affected?
 - Which tests need updating?
 - Which API contracts broke?
 - Did anyone forget to update the database migration?
 
-Spec-driven tools help you write specs first. They don't track what happens when those specs change. That's where CoDD comes in.
-
-### Why not just AGENTS.md or hooks?
-
-AGENTS.md, CLAUDE.md, and hooks are **harness infrastructure** — they tell agents how to behave. CoDD is a **coherence layer** that sits on top of any harness and keeps design artifacts, implementation, and tests in sync when requirements change. CoDD is harness-agnostic: it works with Claude Code, GitHub Copilot, Cursor, or any agent framework.
-
-## Core Principle: Derive, Don't Configure
-
-**Upstream artifacts + best practices = downstream is self-evident.**
-
-- `system_design.md` says "Next.js + Supabase" → test strategy is vitest + Playwright. No config needed.
-- `api_design.md` says "FastAPI" → pytest + httpx. No config needed.
-- Requirements change → `codd impact` shows exactly what's affected.
-
-You define requirements and constraints. AI derives everything else.
+**Spec Kit** and **OpenSpec** answer *"how do I start?"*
+**CoDD** answers *"how do I keep going when things change?"*
 
 ## How It Works
 
 ```
-Phase 1: Requirements (human)        ─┐
-Phase 2: Design generation (AI)       │ V-Model left side
-Phase 3: Scan (auto)                  │
-Phase 4: Implementation (AI)         ─┘
-Phase 5: Verification (AI + human)   ─── V-Model right side
-Phase 6: Change impact analysis      ─┐
-Phase 7: Change propagation           │ Continuous coherence
-Phase 8: Customer review             ─┘
+Requirements (human)  →  Design docs (AI)  →  Code & tests (AI)
+                              ↑
+                    codd scan builds the
+                     dependency graph
+                              ↓
+            Something changes? codd impact tells you
+             exactly what's affected — automatically.
 ```
 
-Design docs are generated in **Wave order** — each wave depends on the previous:
+### The Three Layers
 
 ```
-Wave 1: Acceptance criteria + ADR        (← requirements only)
-Wave 2: System design                    (← req + Wave 1)
-Wave 3: Database design + API design     (← req + Wave 1-2)
-Wave 4: UI/UX design                     (← req + Wave 1-3)
-Wave 5: Implementation plan              (← all above)
+Harness (CLAUDE.md, Hooks, Skills)   ← Rules, guardrails, workflow
+  └─ CoDD (methodology)              ← Coherence across changes
+       └─ Design docs (docs/*.md)    ← Artifacts CoDD manages
 ```
 
-Verification runs bottom-up (IPA Common Frame):
-```
-Unit tests      ← verifies detailed design
-Integration     ← verifies system design
-E2E / System    ← verifies requirements + acceptance criteria
-```
+CoDD is **harness-agnostic** — works with Claude Code, Copilot, Cursor, or any agent framework.
 
-## Three Layers (Don't Confuse Them)
+## Core Principle: Derive, Don't Configure
 
-```
-Harness (CLAUDE.md, Hooks, Skills)   ← Rules, guardrails, flow
-  └─ CoDD (methodology)              ← Operates on the harness flow
-       └─ Design docs (docs/*.md)    ← Artifacts CoDD generates and maintains
-```
+| Architecture | Derived test strategy | Config needed? |
+|---|---|---|
+| Next.js + Supabase | vitest + Playwright | None |
+| FastAPI + Python | pytest + httpx | None |
+| CLI tool in Go | go test | None |
 
-- **Harness** = how agents work (any harness: Claude Code, Copilot, Cursor, etc.)
-- **CoDD** = how artifacts stay coherent across changes
-- **Docs** = what CoDD produces and maintains
-
-CoDD is **harness-agnostic**. It runs on top of whatever agent framework you use.
+**Upstream determines downstream.** You define requirements and constraints. AI derives everything else.
 
 ## Quick Start
 
@@ -91,47 +76,58 @@ CoDD is **harness-agnostic**. It runs on top of whatever agent framework you use
 # Install
 pip install codd-dev
 
-# Initialize
+# Initialize a new project
 codd init --project-name "my-project" --language "typescript"
 
-# Scan — build dependency graph from frontmatter
+# Build the dependency graph from frontmatter
 codd scan
 
-# Impact — what breaks if I change this?
+# What breaks if I change this?
 codd impact --diff HEAD~1
 ```
 
-## Claude Code Integration
-
-CoDD works well with Claude Code because project-level hooks can keep the dependency graph fresh while the agent edits. Use a shared `.claude/settings.json` plus a repo `pre-commit` hook so scan and validation happen inside the normal coding loop.
-
-Recommended Claude Code skill set:
-
-- `codd-init`
-- `codd-scan`
-- `codd-impact`
-- `codd-validate`
-- `codd-generate`
-
-See [docs/claude-code-setup.md](docs/claude-code-setup.md) for a complete setup example covering `skillsPath`, `PostToolUse` scan hooks, `pre-commit` validation, and the end-to-end CoDD workflow.
-
-## Real Project: Osato LMS
-
-CoDD was dogfooded on a production LMS (Learning Management System). All design documents, implementation code, and tests were generated by AI following CoDD's workflow. No manual review by the client.
+### Impact Analysis Output
 
 ```
-docs/
-├── requirements/       # What to build (client agreement, SSoT)
-├── design/             # How to build it (system design, API, DB, UI)
-├── detailed_design/    # Module-level specs
-├── plan/               # WBS, schedule, RACI
-├── governance/         # ADR, meeting minutes, change requests
-├── test/               # Acceptance criteria, test plans
-├── operations/         # Runbooks, monitoring design
-└── infra/              # Infrastructure specs
+Changed: docs/requirements/requirements.md
+
+Green Band (high confidence — auto-propagate)
+  design:system-design    depth:1  confidence:0.90
+  design:api-design       depth:1  confidence:0.90
+  detail:db-design        depth:2  confidence:0.90
+
+Amber Band (review needed)
+  detail:auth-design      depth:2  confidence:0.90
+
+Gray Band (informational)
+  test:test-strategy      depth:2  confidence:0.00
 ```
 
-Every doc has CoDD frontmatter declaring its dependencies:
+One change, every affected artifact identified with confidence levels.
+
+## Wave-Based Generation
+
+Design docs are generated in dependency order — each Wave depends on the previous:
+
+```
+Wave 1  Acceptance criteria + ADR       ← requirements only
+Wave 2  System design                   ← req + Wave 1
+Wave 3  DB design + API design          ← req + Wave 1-2
+Wave 4  UI/UX design                    ← req + Wave 1-3
+Wave 5  Implementation plan             ← all above
+```
+
+Verification runs bottom-up (V-Model):
+
+```
+Unit tests        ← verifies detailed design
+Integration       ← verifies system design
+E2E / System      ← verifies requirements + acceptance criteria
+```
+
+## Frontmatter = Single Source of Truth
+
+Dependencies are declared in Markdown frontmatter. No separate config files.
 
 ```yaml
 ---
@@ -145,85 +141,82 @@ codd:
 ---
 ```
 
-When the requirements changed mid-project, `codd impact` identified exactly which design docs, API endpoints, and test cases needed updating — and AI fixed them automatically.
+`graph.db` is a cache — regenerated on every `codd scan`.
 
-## How CoDD Differs from Spec Kit / OpenSpec
+## Commands
 
-|  | Spec Kit | OpenSpec | **CoDD** |
-|--|----------|---------|----------|
-| Write specs first | Yes | Yes | Yes |
-| AI generates code from specs | Yes | Yes | Yes |
-| **Change propagation** | No | No | **Dependency graph + impact analysis** |
-| **Derive test strategy from architecture** | No | No | **Automatic (derive, don't configure)** |
-| **V-Model verification** | No | No | **Unit → Integration → E2E** |
-| **Impact analysis on change** | No | No | **codd impact --diff HEAD~1** |
-| Harness-agnostic | GitHub Copilot focused | Multi-agent | **Any harness** |
-
-**Spec Kit and OpenSpec answer "how do I start?" CoDD answers "how do I keep going when things change?"**
-
-## What's Available Now (v0.2.0-alpha.1)
-
-| Command | Status | What it does |
+| Command | Status | Description |
 |---------|--------|-------------|
 | `codd init` | **Stable** | Initialize CoDD in any project |
 | `codd scan` | **Stable** | Build dependency graph from frontmatter |
-| `codd impact` | **Stable** | Analyze change impact (Green/Amber/Gray bands) |
-| `codd validate` | **Alpha** | Check frontmatter integrity and graph consistency |
+| `codd impact` | **Stable** | Change impact analysis (Green / Amber / Gray) |
+| `codd validate` | **Alpha** | Frontmatter integrity & graph consistency check |
 | `codd generate` | Experimental | Generate design docs in Wave order |
-| `codd plan` | Experimental | Wave execution status and auto-initialization |
-| `codd verify` | Experimental | V-Model verification (typecheck + tests → design tracing) |
+| `codd plan` | Experimental | Wave execution status |
+| `codd verify` | Experimental | V-Model verification |
 | `codd implement` | Experimental | Design-to-code generation |
 
-### Alpha Scope: What We Promise / What We Don't
+## Claude Code Integration
 
-| We promise | We don't promise (yet) |
-|------------|----------------------|
-| Frontmatter-based dependency graph works | Full semantic dependency types beyond Wave order |
-| `codd impact` correctly identifies affected nodes | Automatic fix of affected nodes |
-| `codd validate` catches broken references and cycles | Exhaustive validation of all edge cases |
-| Harness-agnostic (no vendor lock-in) | Turnkey integrations for every harness |
-| Derivation principle: architecture → test strategy | Fully automated end-to-end generation pipeline |
-| MIT license, stable CLI interface for core commands | API stability for experimental commands |
+CoDD ships with slash-command Skills for Claude Code. Combine with hooks for automatic coherence:
 
-## Frontmatter is the Single Source of Truth
-
-CoDD uses YAML frontmatter in Markdown files to declare dependencies. `graph.db` is a derived cache — regenerated on every `codd scan`. No separate config files to maintain.
-
-```yaml
----
-codd:
-  node_id: "design:system-design"
-  type: design
-  depends_on:
-    - id: "req:lms-requirements-v2.0"
-      relation: implements
-  conventions:
-    - targets: ["db:rls_policies"]
-      reason: "Tenant isolation is non-negotiable"
----
+```json
+{
+  "hooks": {
+    "PostToolUse": [{
+      "matcher": "Edit|Write",
+      "hooks": [{
+        "type": "command",
+        "command": "codd scan --path ."
+      }]
+    }]
+  }
+}
 ```
 
-## Real-World Example: Derive, Don't Configure
+Every file edit triggers `codd scan` — the dependency graph stays current without thinking about it.
+
+See [docs/claude-code-setup.md](docs/claude-code-setup.md) for complete setup.
+
+## Comparison
+
+|  | Spec Kit | OpenSpec | **CoDD** |
+|--|----------|---------|----------|
+| Spec-first generation | Yes | Yes | Yes |
+| **Change propagation** | No | No | **Dependency graph + impact analysis** |
+| **Derive test strategy** | No | No | **Automatic from architecture** |
+| **V-Model verification** | No | No | **Unit → Integration → E2E** |
+| **Impact analysis** | No | No | **`codd impact --diff HEAD~1`** |
+| Harness-agnostic | Copilot focused | Multi-agent | **Any harness** |
+
+## Real-World Usage
+
+Dogfooded on a production LMS — 18 design docs connected by a dependency graph. All docs, code, and tests generated by AI following CoDD. When requirements changed mid-project, `codd impact` identified affected artifacts and AI fixed them automatically.
 
 ```
-system_design.md says "Next.js + Supabase"
-→ Test strategy: vitest (unit) + Playwright (E2E). No config needed.
-
-system_design.md says "FastAPI + Python"
-→ Test strategy: pytest (unit/integration) + httpx (API). No config needed.
-
-system_design.md says "CLI tool in Go"
-→ Test strategy: go test (unit/integration). No config needed.
+docs/
+├── requirements/       # What to build (human input)
+├── design/             # System design, API, DB, UI (6 files)
+├── detailed_design/    # Module-level specs (4 files)
+├── governance/         # ADRs (3 files)
+├── plan/               # Implementation plan
+├── test/               # Acceptance criteria, test strategy
+├── operations/         # Runbooks
+└── infra/              # Infrastructure design
 ```
-
-The architecture determines the test strategy. CoDD derives it — you don't configure it.
 
 ## Roadmap
 
-- [ ] Semantic dependency types (requires, affects, verifies, implements)
-- [ ] `codd verify` — full docs ↔ code ↔ tests coherence check
-- [ ] Multi-agent integration examples (Claude Code, Copilot, Cursor)
+- [ ] Semantic dependency types (`requires`, `affects`, `verifies`, `implements`)
+- [ ] `codd extract` — reverse-generate design docs from existing codebases (brownfield support)
+- [ ] `codd verify` — full docs-code-tests coherence check
+- [ ] Multi-harness integration examples (Claude Code, Copilot, Cursor)
 - [ ] VS Code extension for impact visualization
+
+## Articles
+
+- [Zenn (Japanese): CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence)
+- [dev.to (English): What Happens After "Spec First"](https://dev.to/yohey-w/codd-coherence-driven-development-what-happens-after-spec-first-514f)
 
 ## License
 
