@@ -152,7 +152,7 @@ Scan complete:
 
 ### Step 5: Change requirements mid-project
 
-Your PM asks for SSO and audit logging. Add two lines to `spec.txt`:
+Your PM asks for SSO and audit logging. Open `docs/requirements/requirements.md` and add:
 
 ```text
 ## Additional Requirements (v1.1)
@@ -160,10 +160,12 @@ Your PM asks for SSO and audit logging. Add two lines to `spec.txt`:
 - Audit logging (record & export all operations)
 ```
 
-Commit and run:
+Commit the change, then ask CoDD what's affected:
 
 ```bash
-codd impact --diff HEAD~1
+git add docs/requirements/requirements.md
+git commit -m "req: add SSO and audit logging"
+codd impact --diff HEAD~1   # compare this commit vs the previous one
 ```
 
 ```
