@@ -156,7 +156,11 @@ def _load_project_config(project_root: Path) -> dict[str, Any]:
 def _load_wave_artifacts(config: dict[str, Any]) -> list[WaveArtifact]:
     wave_config = config.get("wave_config")
     if not isinstance(wave_config, dict) or not wave_config:
-        raise ValueError("codd.yaml is missing wave_config")
+        raise ValueError(
+            "codd.yaml is missing wave_config. "
+            "Run 'codd plan --init' to generate it from your requirements, "
+            "or 'codd generate' will auto-generate it for you."
+        )
 
     artifacts: list[WaveArtifact] = []
     for wave_key, entries in wave_config.items():

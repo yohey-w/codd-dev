@@ -94,7 +94,7 @@ def impact(diff: str, path: str, output: str):
 )
 def generate(wave: int, path: str, force: bool, ai_cmd: str | None):
     """Generate CoDD documents for a specific wave."""
-    from codd.generator import generate_wave
+    from codd.generator import generate_wave, _load_project_config
 
     project_root = Path(path).resolve()
     codd_dir = project_root / "codd"
@@ -102,6 +102,19 @@ def generate(wave: int, path: str, force: bool, ai_cmd: str | None):
     if not codd_dir.exists():
         click.echo("Error: codd/ not found. Run 'codd init' first.")
         raise SystemExit(1)
+
+    # Auto-generate wave_config if missing
+    config = _load_project_config(project_root)
+    if not config.get("wave_config"):
+        click.echo("wave_config not found. Auto-generating from requirements...")
+        from codd.planner import plan_init
+
+        try:
+            result = plan_init(project_root, ai_command=ai_cmd)
+            click.echo(f"wave_config generated from {len(result.requirement_paths)} requirement(s)")
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"Error auto-generating wave_config: {exc}")
+            raise SystemExit(1)
 
     try:
         results = generate_wave(project_root, wave, force=force, ai_command=ai_cmd)
