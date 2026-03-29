@@ -86,24 +86,108 @@ codd scan
 codd impact --diff HEAD~1
 ```
 
-### 影響分析の出力例
+## 5分で体験するデモ
 
-```
-Changed: docs/requirements/requirements.md
+LMSプロジェクトを題材に、**要件定義だけ書いて**、残りはAIに生成させて、要件を変えたら何が壊れるかを確認する。
 
-Green Band（高確信度 — 自動伝播）
-  design:system-design    depth:1  confidence:0.90
-  design:api-design       depth:1  confidence:0.90
-  detail:db-design        depth:2  confidence:0.90
+### Step 1: セットアップ
 
-Amber Band（要レビュー）
-  detail:auth-design      depth:2  confidence:0.90
-
-Gray Band（参考情報）
-  test:test-strategy      depth:2  confidence:0.00
+```bash
+pip install codd-dev
+mkdir demo-lms && cd demo-lms && git init
+codd init --project-name "demo-lms" --language "typescript"
 ```
 
-1つの変更で、影響を受ける全成果物が確信度付きで特定されます。
+### Step 2: 要件定義を書く（唯一の人間の入力）
+
+`docs/requirements/requirements.md` を作成:
+
+```markdown
+---
+codd:
+  node_id: "req:lms-requirements-v2.0"
+  type: requirement
+---
+# LMS要件定義 v2.0
+
+## 機能要件
+- テナント管理（組織単位の分離）
+- ユーザー認証（メール/Google OAuth）
+- コース管理（作成/編集/公開）
+- 進捗トラッキング
+
+## 制約
+- テナント間のデータ分離はRLSで実現
+- 認証はSupabase Auth + Google OAuth
+```
+
+### Step 3: AIが設計書を生成
+
+`codd generate` はAIを呼び出して、要件から設計書をWave順に生成する。`wave_config` が無ければ要件から自動生成される。
+
+```bash
+codd generate --wave 2   # システム設計・API設計を生成
+codd generate --wave 3   # DB設計・認証設計を生成
+codd generate --wave 4   # テスト戦略を生成
+```
+
+### Step 4: 依存グラフを構築
+
+```bash
+codd scan
+```
+
+```
+Frontmatter: 7 documents in docs
+Scan complete:
+  Documents with frontmatter: 7
+  Graph: 7 nodes, 15 edges
+  Evidence: 15 total (0 human, 15 auto)
+```
+
+7本の設計書から15本のエッジ。設定ファイルゼロ。
+
+### Step 5: 要件を変えて影響分析
+
+要件に3行追加:
+
+```markdown
+## 追加要件（v2.1）
+- SAML SSO対応（エンタープライズ顧客向け）
+- 監査ログ（全操作の記録・エクスポート）
+- APIレートリミット
+```
+
+```bash
+codd impact --diff HEAD~1
+```
+
+```
+Changed files: 1
+  - docs/requirements/requirements.md → req:lms-requirements-v2.0
+
+# CoDD Impact Report
+
+## Green Band (high confidence, auto-propagate)
+| Target                  | Depth | Confidence |
+|-------------------------|-------|------------|
+| design:system-design    | 1     | 0.90       |
+| design:api-design       | 1     | 0.90       |
+| detail:db-design        | 2     | 0.90       |
+| detail:auth-design      | 2     | 0.90       |
+
+## Amber Band (must review)
+| Target                  | Depth | Confidence |
+|-------------------------|-------|------------|
+| test:test-strategy      | 2     | 0.90       |
+
+## Gray Band (informational)
+| Target                  | Depth | Confidence |
+|-------------------------|-------|------------|
+| plan:implementation     | 2     | 0.00       |
+```
+
+**3行変えただけで7本中6本の設計書が影響を受けると判定。** Green帯域はAIが自動更新。Amber帯域は人間に提示。変更が怖くなくなる。
 
 ## Wave順生成
 
