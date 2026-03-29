@@ -1548,9 +1548,17 @@ class KubernetesExtractor:
 
 
 class TerraformExtractor:
-    """Extract Terraform resources when python-hcl2 is available."""
+    """Extract Terraform resources via python-hcl2 or a regex fallback."""
 
     format = "terraform"
+    _RESOURCE_BLOCK_RE = re.compile(
+        r'^\s*(resource|data)\s+"([^"]+)"\s+"([^"]+)"\s*\{',
+        re.MULTILINE,
+    )
+    _NAMED_BLOCK_RE = re.compile(
+        r'^\s*(module|variable)\s+"([^"]+)"\s*\{',
+        re.MULTILINE,
+    )
 
     @classmethod
     def is_available(cls) -> bool:
@@ -1562,12 +1570,12 @@ class TerraformExtractor:
     def extract_resources(self, content: str, file_path: str) -> ConfigInfo:
         info = ConfigInfo(format=self.format, file_path=file_path)
         if hcl2 is None:
-            return info
+            return self._extract_resources_regex(content, file_path)
 
         try:
             parsed = hcl2.load(io.StringIO(content))
         except Exception:
-            return info
+            return self._extract_resources_regex(content, file_path)
 
         for block in parsed.get("resource", []) or []:
             if not isinstance(block, dict):
@@ -1624,6 +1632,31 @@ class TerraformExtractor:
                         "attributes": attributes or {},
                     }
                 )
+
+        return info
+
+    def _extract_resources_regex(self, content: str, file_path: str) -> ConfigInfo:
+        """Fallback parser for simple Terraform blocks when python-hcl2 is unavailable."""
+        info = ConfigInfo(format=self.format, file_path=file_path)
+
+        for kind, block_type, name in self._RESOURCE_BLOCK_RE.findall(content):
+            info.resources.append(
+                {
+                    "kind": kind,
+                    "type": block_type,
+                    "name": name,
+                    "attributes": {},
+                }
+            )
+
+        for kind, name in self._NAMED_BLOCK_RE.findall(content):
+            info.resources.append(
+                {
+                    "kind": kind,
+                    "name": name,
+                    "attributes": {},
+                }
+            )
 
         return info
 

@@ -784,9 +784,6 @@ def _discover_config(facts: ProjectFacts, project_root: Path):
     ]
 
     for extractor, detect_method_name, extract_method_name in extractors:
-        if isinstance(extractor, TerraformExtractor) and not extractor.is_available():
-            continue
-
         detect_method = getattr(extractor, detect_method_name)
         extract_method = getattr(extractor, extract_method_name)
         for file_path in detect_method(project_root):
