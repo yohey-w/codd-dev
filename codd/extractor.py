@@ -31,6 +31,10 @@ class Symbol:
     file: str           # relative path
     line: int
     params: str = ""    # function parameters
+    return_type: str = ""
+    decorators: list[str] = field(default_factory=list)
+    visibility: str = "public"
+    is_async: bool = False
 
 
 @dataclass
@@ -58,6 +62,10 @@ class ProjectFacts:
     detected_orm: str = ""
     total_files: int = 0
     total_lines: int = 0
+    schemas: dict[str, Any] = field(default_factory=dict)
+    api_specs: dict[str, Any] = field(default_factory=dict)
+    infra_config: dict[str, Any] = field(default_factory=dict)
+    build_deps: Any = None
 
 
 @dataclass
