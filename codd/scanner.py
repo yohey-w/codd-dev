@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from codd.graph import CEG
+from codd.parsing import get_extractor
 
 
 def run_scan(project_root: Path, codd_dir: Path):
@@ -347,44 +348,55 @@ def _scan_source_directory(ceg: CEG, project_root: Path, src_dir: Path,
 
             ceg.upsert_node(f"file:{rel}", "file", path=rel, name=fname)
             file_count += 1
-            _extract_imports_basic(ceg, project_root, full, rel, language)
+            _extract_imports_basic(ceg, project_root, src_dir, full, rel, language)
 
     if file_count > 0:
         print(f"  Source: {file_count} {language} files in {src_dir.relative_to(project_root)}")
 
 
-def _extract_imports_basic(ceg: CEG, project_root: Path, file_path: Path,
+def _extract_imports_basic(ceg: CEG, project_root: Path, src_dir: Path, file_path: Path,
                            rel_path: str, language: str):
-    """Basic import extraction using regex (to be replaced with Tree-sitter)."""
+    """Basic import extraction using the shared parsing backend."""
     try:
         content = file_path.read_text(errors="ignore")
     except Exception:
         return
 
     source_id = f"file:{rel_path}"
+    extractor = get_extractor(language, "source")
+    internal, _ = extractor.extract_imports(content, file_path, project_root, src_dir)
 
     if language in ("typescript", "javascript"):
-        for match in re.finditer(r'''(?:import|from)\s+['"]([^'"]+)['"]''', content):
-            target_module = match.group(1)
-            if target_module.startswith("."):
+        for import_lines in internal.values():
+            for line in import_lines:
+                match = re.search(r'''(?:import|from)\s+['"]([^'"]+)['"]''', line)
+                if not match:
+                    continue
+                target_module = match.group(1)
+                if not target_module.startswith("."):
+                    continue
                 resolved = (file_path.parent / target_module).resolve()
-                for ext in [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx"]:
-                    candidate = Path(str(resolved) + ext)
-                    if candidate.exists():
+                extensions = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", "/index.ts", "/index.tsx", "/index.js", "/index.jsx"]
+                for ext in [""] + extensions:
+                    candidate = Path(f"{resolved}{ext}")
+                    if not candidate.exists():
+                        continue
+                    try:
                         target_rel = candidate.relative_to(project_root).as_posix()
-                        target_id = f"file:{target_rel}"
-                        ceg.upsert_node(target_id, "file", path=target_rel)
-                        edge_id = ceg.add_edge(source_id, target_id, "imports", "structural")
-                        ceg.add_evidence(edge_id, "static", "regex_import", 0.95)
-                        break
+                    except ValueError:
+                        continue
+                    target_id = f"file:{target_rel}"
+                    ceg.upsert_node(target_id, "file", path=target_rel)
+                    edge_id = ceg.add_edge(source_id, target_id, "imports", "structural")
+                    ceg.add_evidence(edge_id, "static", "ast_import", 0.95)
+                    break
 
     elif language == "python":
-        for match in re.finditer(r'(?:from|import)\s+([\w.]+)', content):
-            target_module = match.group(1)
+        for target_module in internal:
             target_id = f"module:{target_module}"
             ceg.upsert_node(target_id, "module", name=target_module)
             edge_id = ceg.add_edge(source_id, target_id, "imports", "structural")
-            ceg.add_evidence(edge_id, "static", "regex_import", 0.90)
+            ceg.add_evidence(edge_id, "static", "ast_import", 0.90)
 
 
 # ═══════════════════════════════════════════════════════════

@@ -173,7 +173,7 @@ class RegexExtractor:
 
     def __init__(self, language: str, category: str = "source"):
         self.language = language.lower()
-        self.category = category
+        self.category = category.lower()
 
     def extract_symbols(self, content: str, file_path: str) -> list[Symbol]:
         from codd import extractor as extractor_module
@@ -216,25 +216,38 @@ class RegexExtractor:
 
 
 class TreeSitterExtractor:
-    """Enhanced parser for languages where richer structural extraction is available."""
+    """Tree-sitter backend for Python and TypeScript/JavaScript source files."""
 
     def __init__(self, language: str, category: str = "source"):
         self.language = language.lower()
-        self.category = category
+        self.category = category.lower()
+        self._fallback = RegexExtractor(self.language, self.category)
+        self._parser = _build_parser(self.language)
 
     @classmethod
     def is_available(cls, language: str | None = None) -> bool:
-        """Return True for supported languages, even when using a local fallback parser."""
+        """Return True when Tree-sitter core and the language binding are importable."""
+        if find_spec("tree_sitter") is None:
+            return False
         if language is None:
             return True
-        return language.lower() in _TREE_SITTER_LANGUAGE_PACKAGES
+        package_name = _TREE_SITTER_LANGUAGE_PACKAGES.get(language.lower())
+        if package_name is None:
+            return False
+        return find_spec(package_name) is not None
 
     def extract_symbols(self, content: str, file_path: str) -> list[Symbol]:
-        if self.language == "python":
-            return _extract_python_symbols_ast(content, file_path)
-        if self.language in {"typescript", "javascript"}:
-            return _extract_typescript_symbols(content, file_path)
-        return RegexExtractor(self.language, self.category).extract_symbols(content, file_path)
+        if self.category != "source":
+            return []
+        try:
+            root = self._parse(content)
+            if self.language == "python":
+                return _extract_python_symbols_ast(root, content, file_path)
+            if self.language in {"typescript", "javascript"}:
+                return _extract_typescript_symbols(root, content, file_path)
+        except Exception:
+            return self._fallback.extract_symbols(content, file_path)
+        return self._fallback.extract_symbols(content, file_path)
 
     def extract_imports(
         self,
@@ -243,24 +256,893 @@ class TreeSitterExtractor:
         project_root: Path,
         src_dir: Path,
     ) -> tuple[dict[str, list[str]], set[str]]:
-        return RegexExtractor(self.language, self.category).extract_imports(
-            content,
-            file_path,
-            project_root,
-            src_dir,
-        )
+        if self.category != "source":
+            return {}, set()
+        try:
+            root = self._parse(content)
+            if self.language == "python":
+                return _extract_python_imports_ast(root, content, file_path, project_root, src_dir)
+            if self.language in {"typescript", "javascript"}:
+                return _extract_typescript_imports_ast(root, content, file_path, src_dir, self.language)
+        except Exception:
+            return self._fallback.extract_imports(content, file_path, project_root, src_dir)
+        return self._fallback.extract_imports(content, file_path, project_root, src_dir)
 
     def detect_code_patterns(self, mod: ModuleInfo, content: str) -> None:
-        if self.language == "python":
-            _detect_python_code_patterns(mod, content)
+        if self.category != "source":
             return None
-        if self.language in {"typescript", "javascript"}:
-            _detect_typescript_code_patterns(mod, content)
+        try:
+            root = self._parse(content)
+            if self.language == "python":
+                _detect_python_code_patterns(mod, root, content)
+                return None
+            if self.language in {"typescript", "javascript"}:
+                _detect_typescript_code_patterns(mod, root, content)
+                return None
+        except Exception:
+            self._fallback.detect_code_patterns(mod, content)
             return None
-        return RegexExtractor(self.language, self.category).detect_code_patterns(mod, content)
+        self._fallback.detect_code_patterns(mod, content)
+        return None
 
     def extract_schema(self, content: str, file_path: str | Path) -> SqlSchemaInfo | PrismaSchemaInfo | None:
-        return RegexExtractor(self.language, self.category).extract_schema(content, file_path)
+        return self._fallback.extract_schema(content, file_path)
+
+    def _parse(self, content: str):
+        return self._parser.parse(content.encode("utf-8", errors="ignore")).root_node
+
+
+class SqlDdlExtractor:
+    """Tree-sitter backed extractor for SQL DDL artifacts."""
+
+    language = "sql"
+    category = "schema"
+
+    def __init__(self):
+        self._fallback = RegexExtractor(self.language, self.category)
+        self._parser = _build_parser(self.language)
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return TreeSitterExtractor.is_available("sql")
+
+    def extract_symbols(self, content: str, file_path: str) -> list[Symbol]:
+        return []
+
+    def extract_imports(
+        self,
+        content: str,
+        file_path: Path,
+        project_root: Path,
+        src_dir: Path,
+    ) -> tuple[dict[str, list[str]], set[str]]:
+        return {}, set()
+
+    def detect_code_patterns(self, mod: ModuleInfo, content: str) -> None:
+        return None
+
+    def extract_schema(self, content: str, file_path: str | Path) -> SqlSchemaInfo | None:
+        path = Path(file_path).as_posix()
+        try:
+            root = self._parser.parse(content.encode("utf-8", errors="ignore")).root_node
+            return _extract_sql_schema_from_tree(root, content, path)
+        except Exception:
+            fallback = self._fallback.extract_schema(content, path)
+            return fallback if isinstance(fallback, SqlSchemaInfo) else None
+
+
+class PrismaSchemaExtractor:
+    """Regex extractor for Prisma schema files."""
+
+    language = "prisma"
+    category = "schema"
+
+    def extract_symbols(self, content: str, file_path: str) -> list[Symbol]:
+        return []
+
+    def extract_imports(
+        self,
+        content: str,
+        file_path: Path,
+        project_root: Path,
+        src_dir: Path,
+    ) -> tuple[dict[str, list[str]], set[str]]:
+        return {}, set()
+
+    def detect_code_patterns(self, mod: ModuleInfo, content: str) -> None:
+        return None
+
+    def extract_schema(self, content: str, file_path: str | Path) -> PrismaSchemaInfo | None:
+        return _extract_prisma_schema(content, Path(file_path).as_posix())
+
+
+def _build_parser(language: str):
+    from tree_sitter import Parser
+
+    parser = Parser()
+    parser.language = _load_tree_sitter_language(language)
+    return parser
+
+
+def _load_tree_sitter_language(language: str):
+    from tree_sitter import Language
+
+    normalized = language.lower()
+    if normalized == "python":
+        import tree_sitter_python
+
+        return Language(tree_sitter_python.language())
+    if normalized in {"typescript", "javascript"}:
+        import tree_sitter_typescript
+
+        return Language(tree_sitter_typescript.language_typescript())
+    if normalized == "sql":
+        import tree_sitter_sql
+
+        return Language(tree_sitter_sql.language())
+    raise ValueError(f"Unsupported Tree-sitter language: {language}")
+
+
+def _make_symbol(
+    name: str,
+    kind: str,
+    file_path: str,
+    line: int,
+    *,
+    params: str = "",
+    return_type: str = "",
+    decorators: list[str] | None = None,
+    is_async: bool = False,
+    bases: list[str] | None = None,
+    implements: list[str] | None = None,
+):
+    from codd.extractor import Symbol
+
+    return Symbol(
+        name=name,
+        kind=kind,
+        file=file_path,
+        line=line,
+        params=params,
+        return_type=return_type,
+        decorators=list(decorators or []),
+        is_async=is_async,
+        bases=list(bases or []),
+        implements=list(implements or []),
+    )
+
+
+def _node_text(content_bytes: bytes, node: Any) -> str:
+    if node is None:
+        return ""
+    return content_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+
+
+def _field_text(content_bytes: bytes, node: Any, field_name: str) -> str:
+    return _node_text(content_bytes, node.child_by_field_name(field_name))
+
+
+def _iter_named_nodes(node: Any):
+    yield node
+    for child in getattr(node, "named_children", []):
+        yield from _iter_named_nodes(child)
+
+
+def _normalize_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _strip_wrapping(text: str, opening: str, closing: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith(opening) and stripped.endswith(closing):
+        return stripped[len(opening):-len(closing)].strip()
+    return stripped
+
+
+def _split_csv(text: str) -> list[str]:
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _strip_type_annotation(text: str) -> str:
+    stripped = _normalize_ws(text)
+    if stripped.startswith(":"):
+        return stripped[1:].strip()
+    return stripped
+
+
+def _extract_string_literal(text: str) -> str | None:
+    stripped = text.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {'"', "'"}:
+        return stripped[1:-1]
+    return None
+
+
+def _is_async_node(node: Any) -> bool:
+    return any(child.type == "async" for child in node.children)
+
+
+def _resolve_python_relative_key(module: str, file_path: Path, src_dir: Path) -> str | None:
+    leading_dots = len(module) - len(module.lstrip("."))
+    relative_module = module.lstrip(".")
+    try:
+        rel_file = file_path.relative_to(src_dir)
+    except ValueError:
+        return None
+
+    package_parts = list(rel_file.with_suffix("").parts[:-1])
+    remove_count = max(leading_dots - 1, 0)
+    if remove_count > len(package_parts):
+        target_parts: list[str] = []
+    else:
+        target_parts = package_parts[: len(package_parts) - remove_count]
+
+    if relative_module:
+        target_parts.extend(relative_module.split("."))
+
+    return target_parts[0] if target_parts else "root"
+
+
+def _record_python_import(
+    module: str,
+    line: str,
+    internal: dict[str, list[str]],
+    external: set[str],
+    *,
+    project_root: Path,
+    src_dir: Path,
+    file_path: Path,
+):
+    normalized = module.strip()
+    if not normalized:
+        return
+
+    if normalized.startswith("."):
+        internal_key = _resolve_python_relative_key(normalized, file_path, src_dir)
+        if internal_key:
+            internal.setdefault(internal_key, []).append(line)
+        return
+
+    parts = normalized.split(".")
+    top_level = parts[0]
+    if not top_level:
+        return
+
+    src_pkg_name = src_dir.name if (src_dir / "__init__.py").exists() else None
+    is_internal = False
+    internal_key = top_level
+
+    if src_pkg_name and top_level == src_pkg_name and len(parts) >= 2:
+        is_internal = True
+        internal_key = parts[1]
+    else:
+        search_dirs = [src_dir]
+        search_dirs.extend(project_root / candidate for candidate in ("src", "lib", "app") if (project_root / candidate).is_dir())
+        for search_dir in search_dirs:
+            if (search_dir / top_level).is_dir() or (search_dir / f"{top_level}.py").is_file():
+                is_internal = True
+                break
+
+    if is_internal:
+        internal.setdefault(internal_key, []).append(line)
+    else:
+        external.add(top_level)
+
+
+def _resolve_js_import(import_path: str, file_path: Path, src_dir: Path, language: str) -> Path | None:
+    candidate_base = (file_path.parent / import_path).resolve()
+    for suffix in _JS_IMPORT_SUFFIXES.get(language, _JS_IMPORT_SUFFIXES["typescript"]):
+        candidate = candidate_base if suffix == "" else Path(f"{candidate_base}{suffix}")
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _record_js_import(
+    import_path: str,
+    line: str,
+    internal: dict[str, list[str]],
+    external: set[str],
+    *,
+    file_path: Path,
+    src_dir: Path,
+    language: str,
+):
+    if import_path.startswith("."):
+        resolved = _resolve_js_import(import_path, file_path, src_dir, language)
+        if resolved is None:
+            external.add(import_path)
+            return
+        try:
+            rel = resolved.relative_to(src_dir)
+        except ValueError:
+            external.add(import_path)
+            return
+        internal_key = rel.parts[0] if rel.parts else "root"
+        internal.setdefault(internal_key, []).append(line)
+        return
+
+    if import_path.startswith("@"):
+        parts = import_path.split("/")
+        external.add("/".join(parts[:2]) if len(parts) >= 2 else import_path)
+        return
+
+    external.add(import_path.split("/")[0])
+
+
+def _extract_python_decorators(content_bytes: bytes, node: Any) -> list[str]:
+    decorators: list[str] = []
+    for child in node.children:
+        if child.type != "decorator":
+            continue
+        decorator_text = _node_text(content_bytes, child).strip()
+        decorators.append(decorator_text[1:] if decorator_text.startswith("@") else decorator_text)
+    return decorators
+
+
+def _extract_python_symbols_ast(root: Any, content: str, file_path: str) -> list[Symbol]:
+    content_bytes = content.encode("utf-8", errors="ignore")
+    symbols: list[Symbol] = []
+
+    def visit(node: Any, decorators: list[str] | None = None):
+        if node.type == "decorated_definition":
+            definition = node.child_by_field_name("definition")
+            if definition is not None:
+                visit(definition, _extract_python_decorators(content_bytes, node))
+            return
+
+        if node.type == "class_definition":
+            name = _field_text(content_bytes, node, "name")
+            bases = _split_csv(_strip_wrapping(_field_text(content_bytes, node, "superclasses"), "(", ")"))
+            if name:
+                symbols.append(
+                    _make_symbol(
+                        name,
+                        "class",
+                        file_path,
+                        node.start_point.row + 1,
+                        decorators=decorators,
+                        bases=bases,
+                    )
+                )
+            body = node.child_by_field_name("body")
+            for child in getattr(body, "named_children", []):
+                visit(child)
+            return
+
+        if node.type == "function_definition":
+            name = _field_text(content_bytes, node, "name")
+            if name and not name.startswith("_"):
+                symbols.append(
+                    _make_symbol(
+                        name,
+                        "function",
+                        file_path,
+                        node.start_point.row + 1,
+                        params=_strip_wrapping(_normalize_ws(_field_text(content_bytes, node, "parameters")), "(", ")"),
+                        return_type=_normalize_ws(_field_text(content_bytes, node, "return_type")),
+                        decorators=decorators,
+                        is_async=_is_async_node(node),
+                    )
+                )
+            body = node.child_by_field_name("body")
+            for child in getattr(body, "named_children", []):
+                if child.type in {"class_definition", "decorated_definition", "function_definition"}:
+                    visit(child)
+            return
+
+        for child in getattr(node, "named_children", []):
+            visit(child)
+
+    visit(root)
+    return symbols
+
+
+def _extract_python_imports_ast(
+    root: Any,
+    content: str,
+    file_path: Path,
+    project_root: Path,
+    src_dir: Path,
+) -> tuple[dict[str, list[str]], set[str]]:
+    content_bytes = content.encode("utf-8", errors="ignore")
+    internal: dict[str, list[str]] = {}
+    external: set[str] = set()
+
+    for node in _iter_named_nodes(root):
+        if node.type == "import_statement":
+            line = _normalize_ws(_node_text(content_bytes, node))
+            for index, child in enumerate(node.children):
+                if node.field_name_for_child(index) != "name":
+                    continue
+                _record_python_import(
+                    _normalize_ws(_node_text(content_bytes, child)),
+                    line,
+                    internal,
+                    external,
+                    project_root=project_root,
+                    src_dir=src_dir,
+                    file_path=file_path,
+                )
+        elif node.type == "import_from_statement":
+            line = _normalize_ws(_node_text(content_bytes, node))
+            module = _field_text(content_bytes, node, "module_name")
+            if not module:
+                match = re.search(r"from\s+([.\w]+)\s+import", line)
+                module = match.group(1) if match else ""
+            _record_python_import(
+                module,
+                line,
+                internal,
+                external,
+                project_root=project_root,
+                src_dir=src_dir,
+                file_path=file_path,
+            )
+
+    external -= _python_stdlib()
+    return internal, external
+
+
+def _extract_typescript_heritage(content_bytes: bytes, node: Any) -> tuple[list[str], list[str]]:
+    bases: list[str] = []
+    implements: list[str] = []
+    for child in node.children:
+        if child.type == "class_heritage":
+            for heritage_child in getattr(child, "named_children", []):
+                text = _normalize_ws(_node_text(content_bytes, heritage_child))
+                if heritage_child.type == "extends_clause":
+                    bases.extend(_split_csv(text.removeprefix("extends ").strip()))
+                elif heritage_child.type == "implements_clause":
+                    implements.extend(_split_csv(text.removeprefix("implements ").strip()))
+        elif child.type == "extends_type_clause":
+            text = _normalize_ws(_node_text(content_bytes, child))
+            bases.extend(_split_csv(text.removeprefix("extends ").strip()))
+    return bases, implements
+
+
+def _extract_typescript_symbols(root: Any, content: str, file_path: str) -> list[Symbol]:
+    content_bytes = content.encode("utf-8", errors="ignore")
+    symbols: list[Symbol] = []
+
+    def visit(node: Any):
+        if node.type == "export_statement":
+            declaration = node.child_by_field_name("declaration")
+            if declaration is not None:
+                visit(declaration)
+            return
+
+        if node.type == "class_declaration":
+            name = _field_text(content_bytes, node, "name")
+            bases, implements = _extract_typescript_heritage(content_bytes, node)
+            if name:
+                symbols.append(
+                    _make_symbol(
+                        name,
+                        "class",
+                        file_path,
+                        node.start_point.row + 1,
+                        bases=bases,
+                        implements=implements,
+                    )
+                )
+            return
+
+        if node.type == "interface_declaration":
+            name = _field_text(content_bytes, node, "name")
+            bases, _ = _extract_typescript_heritage(content_bytes, node)
+            if name:
+                symbols.append(_make_symbol(name, "interface", file_path, node.start_point.row + 1, bases=bases))
+            return
+
+        if node.type == "type_alias_declaration":
+            name = _field_text(content_bytes, node, "name")
+            if name:
+                symbols.append(
+                    _make_symbol(
+                        name,
+                        "type_alias",
+                        file_path,
+                        node.start_point.row + 1,
+                        return_type=_normalize_ws(_field_text(content_bytes, node, "value")),
+                    )
+                )
+            return
+
+        if node.type == "enum_declaration":
+            name = _field_text(content_bytes, node, "name")
+            if name:
+                symbols.append(_make_symbol(name, "enum", file_path, node.start_point.row + 1))
+            return
+
+        if node.type == "function_declaration":
+            name = _field_text(content_bytes, node, "name")
+            if name:
+                symbols.append(
+                    _make_symbol(
+                        name,
+                        "function",
+                        file_path,
+                        node.start_point.row + 1,
+                        params=_strip_wrapping(_normalize_ws(_field_text(content_bytes, node, "parameters")), "(", ")"),
+                        return_type=_strip_type_annotation(_field_text(content_bytes, node, "return_type")),
+                        is_async=_is_async_node(node),
+                    )
+                )
+            return
+
+        if node.type == "lexical_declaration":
+            for declarator in getattr(node, "named_children", []):
+                if declarator.type != "variable_declarator":
+                    continue
+                value = declarator.child_by_field_name("value")
+                if value is None or value.type != "arrow_function":
+                    continue
+                name = _field_text(content_bytes, declarator, "name")
+                if not name:
+                    continue
+                symbols.append(
+                    _make_symbol(
+                        name,
+                        "function",
+                        file_path,
+                        declarator.start_point.row + 1,
+                        params=_strip_wrapping(_normalize_ws(_field_text(content_bytes, value, "parameters")), "(", ")"),
+                        return_type=_strip_type_annotation(_field_text(content_bytes, value, "return_type")),
+                        is_async=_is_async_node(value),
+                    )
+                )
+            return
+
+        for child in getattr(node, "named_children", []):
+            visit(child)
+
+    visit(root)
+    return symbols
+
+
+def _extract_typescript_imports_ast(
+    root: Any,
+    content: str,
+    file_path: Path,
+    src_dir: Path,
+    language: str,
+) -> tuple[dict[str, list[str]], set[str]]:
+    content_bytes = content.encode("utf-8", errors="ignore")
+    internal: dict[str, list[str]] = {}
+    external: set[str] = set()
+
+    for node in _iter_named_nodes(root):
+        if node.type not in {"export_statement", "import_statement"}:
+            continue
+        source_node = node.child_by_field_name("source")
+        if source_node is None:
+            continue
+        import_path = _extract_string_literal(_node_text(content_bytes, source_node))
+        if not import_path:
+            continue
+        _record_js_import(
+            import_path,
+            _normalize_ws(_node_text(content_bytes, node)),
+            internal,
+            external,
+            file_path=file_path,
+            src_dir=src_dir,
+            language=language,
+        )
+
+    return internal, external
+
+
+def _route_from_decorator(decorator: str) -> str | None:
+    match = re.search(
+        r'(?:^|\.)\s*(?:route|get|post|put|delete|patch)\s*\(\s*(?:path\s*=\s*)?["\']([^"\']+)["\']',
+        decorator.replace("\n", " "),
+    )
+    if match:
+        return match.group(1)
+    return None
+
+
+def _detect_python_code_patterns(mod: ModuleInfo, root: Any, content: str) -> None:
+    content_bytes = content.encode("utf-8", errors="ignore")
+    routes: list[str] = []
+    orm_models: list[str] = []
+    background_tasks: list[str] = []
+
+    def visit(node: Any):
+        if node.type == "decorated_definition":
+            decorators = _extract_python_decorators(content_bytes, node)
+            definition = node.child_by_field_name("definition")
+            for decorator in decorators:
+                route = _route_from_decorator(decorator)
+                if route:
+                    routes.append(route)
+                if decorator.endswith(".task"):
+                    background_tasks.append(decorator)
+            if definition is not None:
+                visit(definition)
+            return
+
+        if node.type == "class_definition":
+            name = _field_text(content_bytes, node, "name")
+            bases = _split_csv(_strip_wrapping(_field_text(content_bytes, node, "superclasses"), "(", ")"))
+            if name and any(base.endswith(("Base", "Model")) or base.endswith(".Model") for base in bases):
+                orm_models.append(name)
+            body = node.child_by_field_name("body")
+            for child in getattr(body, "named_children", []):
+                visit(child)
+            return
+
+        for child in getattr(node, "named_children", []):
+            visit(child)
+
+    visit(root)
+    if routes:
+        mod.patterns["api_routes"] = f"HTTP route handlers: {', '.join(sorted(set(routes)))}"
+    if orm_models:
+        mod.patterns["db_models"] = f"ORM models: {', '.join(sorted(set(orm_models)))}"
+    if background_tasks:
+        mod.patterns["background_tasks"] = "Async task handlers"
+    if "api_routes" not in mod.patterns and re.search(r"@(?:app|router)\.(get|post|put|delete|patch)\s*\(", content):
+        mod.patterns["api_routes"] = "HTTP route handlers"
+
+
+def _detect_typescript_code_patterns(mod: ModuleInfo, root: Any, content: str) -> None:
+    content_bytes = content.encode("utf-8", errors="ignore")
+    orm_models: list[str] = []
+
+    for node in _iter_named_nodes(root):
+        candidate = node
+        if node.type == "export_statement":
+            declaration = node.child_by_field_name("declaration")
+            if declaration is not None:
+                candidate = declaration
+        if candidate.type != "class_declaration":
+            continue
+        name = _field_text(content_bytes, candidate, "name")
+        bases, implements = _extract_typescript_heritage(content_bytes, candidate)
+        heritage = bases + implements
+        if name and any(item in {"BaseEntity", "Model"} or item.endswith(("Base", "Entity", "Model")) for item in heritage):
+            orm_models.append(name)
+
+    if orm_models:
+        mod.patterns["db_models"] = f"ORM models: {', '.join(sorted(set(orm_models)))}"
+
+    route_matches = re.findall(
+        r'(?:app|router)\.(?:get|post|put|delete|patch)\s*\(\s*["\']([^"\']+)["\']',
+        content,
+    )
+    if route_matches:
+        mod.patterns["api_routes"] = f"HTTP route handlers: {', '.join(sorted(set(route_matches)))}"
+    elif re.search(r"@(?:Controller|Get|Post|Put|Delete|Patch)\s*\(", content):
+        mod.patterns["api_routes"] = "NestJS controller"
+
+
+def _sql_first_object_name(content_bytes: bytes, node: Any) -> str:
+    for child in getattr(node, "named_children", []):
+        if child.type == "object_reference":
+            return _normalize_ws(_node_text(content_bytes, child))
+    return ""
+
+
+def _regex_foreign_keys(statement_text: str, table_name: str) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"(?:CONSTRAINT\s+(?P<name>\w+)\s+)?FOREIGN\s+KEY\s*\((?P<columns>[^)]+)\)\s+REFERENCES\s+(?P<ref_table>[^\s(]+)\s*\((?P<ref_columns>[^)]+)\)",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(statement_text):
+        matches.append(
+            {
+                "name": match.group("name") or "",
+                "table": table_name,
+                "columns": _split_csv(match.group("columns")),
+                "references_table": match.group("ref_table"),
+                "references_columns": _split_csv(match.group("ref_columns")),
+            }
+        )
+    return matches
+
+
+def _regex_create_index(statement_text: str) -> dict[str, Any] | None:
+    match = re.search(
+        r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?P<name>[^\s]+)\s+ON\s+(?P<table>[^\s(]+)\s*\((?P<columns>[^)]+)\)",
+        statement_text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return {
+        "name": match.group("name"),
+        "table": match.group("table"),
+        "columns": _split_csv(match.group("columns")),
+    }
+
+
+def _append_foreign_key(
+    schema: SqlSchemaInfo,
+    foreign_key: dict[str, Any],
+    seen_foreign_keys: set[tuple[str, tuple[str, ...], str, tuple[str, ...]]],
+):
+    key = (
+        str(foreign_key.get("table", "")),
+        tuple(foreign_key.get("columns", [])),
+        str(foreign_key.get("references_table", "")),
+        tuple(foreign_key.get("references_columns", [])),
+    )
+    if key in seen_foreign_keys:
+        return
+    seen_foreign_keys.add(key)
+    schema.foreign_keys.append(foreign_key)
+
+
+def _extract_sql_schema_from_tree(root: Any, content: str, file_path: str) -> SqlSchemaInfo:
+    content_bytes = content.encode("utf-8", errors="ignore")
+    schema = SqlSchemaInfo(file_path=file_path)
+    seen_foreign_keys: set[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = set()
+
+    for node in _iter_named_nodes(root):
+        statement_text = _normalize_ws(_node_text(content_bytes, node))
+        if node.type == "create_table":
+            table_name = _sql_first_object_name(content_bytes, node)
+            if not table_name:
+                continue
+            columns: list[dict[str, Any]] = []
+            constraints: list[str] = []
+            column_defs = next((child for child in getattr(node, "named_children", []) if child.type == "column_definitions"), None)
+            if column_defs is not None:
+                for child in getattr(column_defs, "named_children", []):
+                    if child.type == "column_definition":
+                        name = _field_text(content_bytes, child, "name")
+                        column_type = _normalize_ws(_field_text(content_bytes, child, "type"))
+                        column_text = _normalize_ws(_node_text(content_bytes, child))
+                        columns.append(
+                            {
+                                "name": name,
+                                "type": column_type,
+                                "constraints": column_text.replace(name, "", 1).strip(),
+                            }
+                        )
+                    elif child.type in {"constraint", "constraints", "ERROR"}:
+                        constraint_text = _normalize_ws(_node_text(content_bytes, child))
+                        if constraint_text:
+                            constraints.append(constraint_text)
+            schema.tables.append({"name": table_name, "columns": columns, "constraints": constraints})
+            for foreign_key in _regex_foreign_keys(statement_text, table_name):
+                _append_foreign_key(schema, foreign_key, seen_foreign_keys)
+        elif node.type == "alter_table":
+            table_name = _sql_first_object_name(content_bytes, node)
+            if table_name:
+                for foreign_key in _regex_foreign_keys(statement_text, table_name):
+                    _append_foreign_key(schema, foreign_key, seen_foreign_keys)
+        elif node.type == "create_index":
+            index = _regex_create_index(statement_text)
+            if index:
+                schema.indexes.append(index)
+        elif node.type == "create_view":
+            view_name = _sql_first_object_name(content_bytes, node)
+            if view_name:
+                schema.views.append({"name": view_name, "definition": statement_text})
+
+    return schema
+
+
+def _extract_sql_schema(content: str, file_path: str) -> SqlSchemaInfo:
+    schema = SqlSchemaInfo(file_path=file_path)
+    if TreeSitterExtractor.is_available("sql"):
+        try:
+            parser = _build_parser("sql")
+            root = parser.parse(content.encode("utf-8", errors="ignore")).root_node
+            return _extract_sql_schema_from_tree(root, content, file_path)
+        except Exception:
+            pass
+
+    for table_match in re.finditer(
+        r"CREATE\s+TABLE\s+(?P<name>[^\s(]+)\s*\((?P<body>.*?)\)\s*;",
+        content,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        table_name = table_match.group("name")
+        body = table_match.group("body")
+        columns: list[dict[str, Any]] = []
+        constraints: list[str] = []
+        for raw_line in body.splitlines():
+            line = raw_line.strip().rstrip(",")
+            if not line:
+                continue
+            if "FOREIGN KEY" in line.upper() or line.upper().startswith("CONSTRAINT "):
+                constraints.append(line)
+                continue
+            match = re.match(r"(?P<name>[^\s]+)\s+(?P<type>[^\s,]+)(?P<rest>.*)", line)
+            if not match:
+                continue
+            columns.append(
+                {
+                    "name": match.group("name"),
+                    "type": match.group("type"),
+                    "constraints": match.group("rest").strip(),
+                }
+            )
+        schema.tables.append({"name": table_name, "columns": columns, "constraints": constraints})
+        schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(table_match.group(0)), table_name))
+
+    for statement in re.findall(r"ALTER\s+TABLE\s+.*?;", content, re.IGNORECASE | re.DOTALL):
+        match = re.search(r"ALTER\s+TABLE\s+([^\s;]+)", statement, re.IGNORECASE)
+        if match:
+            schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(statement), match.group(1)))
+
+    for index_match in re.finditer(r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+.*?;", content, re.IGNORECASE | re.DOTALL):
+        index = _regex_create_index(_normalize_ws(index_match.group(0)))
+        if index:
+            schema.indexes.append(index)
+
+    for view_match in re.finditer(
+        r"CREATE\s+VIEW\s+(?P<name>[^\s]+)\s+AS\s+(?P<query>.*?);",
+        content,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        schema.views.append({"name": view_match.group("name"), "definition": _normalize_ws(view_match.group("query"))})
+
+    return schema
+
+
+def _extract_prisma_schema(content: str, file_path: str) -> PrismaSchemaInfo:
+    schema = PrismaSchemaInfo(file_path=file_path)
+    for name, block in _find_named_blocks(content, "model"):
+        fields: list[dict[str, Any]] = []
+        relations: list[dict[str, Any]] = []
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("//") or line.startswith("@@"):
+                continue
+            match = re.match(r"(\w+)\s+([^\s]+)\s*(.*)", line)
+            if not match:
+                continue
+            field_name = match.group(1)
+            field_type = match.group(2)
+            attributes = match.group(3).strip()
+            base_type = field_type.rstrip("?").rstrip("[]")
+            is_relation = "@relation" in attributes or base_type not in _PRISMA_SCALARS
+            field_info = {
+                "name": field_name,
+                "type": field_type,
+                "attributes": attributes,
+                "is_relation": is_relation,
+            }
+            fields.append(field_info)
+            if is_relation:
+                relations.append(field_info)
+        schema.models.append({"name": name, "fields": fields, "relations": relations})
+
+    for name, block in _find_named_blocks(content, "enum"):
+        values = [line.strip().split()[0] for line in block.splitlines() if line.strip() and not line.strip().startswith("//")]
+        schema.enums.append({"name": name, "values": values})
+
+    return schema
+
+
+def _python_stdlib() -> set[str]:
+    return {
+        "__future__",
+        "abc",
+        "argparse",
+        "asyncio",
+        "collections",
+        "dataclasses",
+        "datetime",
+        "functools",
+        "importlib",
+        "io",
+        "json",
+        "math",
+        "os",
+        "pathlib",
+        "re",
+        "subprocess",
+        "sys",
+        "textwrap",
+        "typing",
+    }
 
 
 class OpenApiExtractor:
@@ -953,6 +1835,15 @@ def get_extractor(language: str, category: str = "source") -> LanguageExtractor:
     normalized_language = language.lower()
     normalized_category = category.lower()
 
+    if normalized_category == "schema":
+        if normalized_language == "sql":
+            if SqlDdlExtractor.is_available():
+                return SqlDdlExtractor()
+            return RegexExtractor(normalized_language, normalized_category)
+        if normalized_language == "prisma":
+            return PrismaSchemaExtractor()
+        return RegexExtractor(normalized_language, normalized_category)
+
     if (
         normalized_category == "source"
         and normalized_language in _TREE_SITTER_LANGUAGE_PACKAGES
@@ -1188,372 +2079,6 @@ def _parse_proto_rpcs(block: str) -> list[dict[str, Any]]:
     return rpcs
 
 
-def _extract_sql_schema(content: str, file_path: str) -> SqlSchemaInfo:
-    schema = SqlSchemaInfo(file_path=file_path)
-    table_pattern = re.compile(r"CREATE\s+TABLE\s+(\w+)\s*\((.*?)\);", re.IGNORECASE | re.DOTALL)
-    fk_pattern = re.compile(
-        r"CONSTRAINT\s+(\w+)\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s+REFERENCES\s+(\w+)\s*\(([^)]+)\)",
-        re.IGNORECASE,
-    )
-    index_pattern = re.compile(
-        r"CREATE\s+INDEX\s+(\w+)\s+ON\s+(\w+)\s*\(([^)]+)\)",
-        re.IGNORECASE,
-    )
-    view_pattern = re.compile(r"CREATE\s+VIEW\s+(\w+)\s+AS", re.IGNORECASE)
-
-    for table_name, body in table_pattern.findall(content):
-        columns: list[dict[str, Any]] = []
-        for raw_line in body.splitlines():
-            line = raw_line.strip().rstrip(",")
-            if not line:
-                continue
-
-            fk_match = fk_pattern.search(line)
-            if fk_match:
-                schema.foreign_keys.append(
-                    {
-                        "name": fk_match.group(1),
-                        "table": table_name,
-                        "columns": [column.strip() for column in fk_match.group(2).split(",")],
-                        "references_table": fk_match.group(3),
-                        "references_columns": [column.strip() for column in fk_match.group(4).split(",")],
-                    }
-                )
-                continue
-
-            if line.upper().startswith(("CONSTRAINT ", "PRIMARY KEY", "UNIQUE ", "FOREIGN KEY")):
-                continue
-
-            column_match = re.match(r"^(\w+)\s+([^\s,]+)", line)
-            if column_match:
-                columns.append(
-                    {
-                        "name": column_match.group(1),
-                        "type": column_match.group(2),
-                    }
-                )
-
-        schema.tables.append({"name": table_name, "columns": columns})
-
-    for match in index_pattern.finditer(content):
-        schema.indexes.append(
-            {
-                "name": match.group(1),
-                "table": match.group(2),
-                "columns": [column.strip() for column in match.group(3).split(",")],
-            }
-        )
-
-    for match in view_pattern.finditer(content):
-        schema.views.append({"name": match.group(1)})
-
-    return schema
-
-
-def _extract_prisma_schema(content: str, file_path: str) -> PrismaSchemaInfo:
-    schema = PrismaSchemaInfo(file_path=file_path)
-    prisma_scalars = {
-        "BigInt",
-        "Boolean",
-        "Bytes",
-        "DateTime",
-        "Decimal",
-        "Float",
-        "Int",
-        "Json",
-        "String",
-    }
-
-    for name, body in _find_named_blocks(content, "model"):
-        fields: list[dict[str, Any]] = []
-        relations: list[dict[str, Any]] = []
-        for raw_line in body.splitlines():
-            line = raw_line.split("//", 1)[0].strip()
-            if not line:
-                continue
-            match = re.match(r"^(\w+)\s+([^\s]+)(.*)$", line)
-            if not match:
-                continue
-
-            field_type = match.group(2)
-            field = {
-                "name": match.group(1),
-                "type": field_type,
-                "attributes": match.group(3).strip(),
-            }
-            fields.append(field)
-
-            base_type = field_type.rstrip("?")
-            relation_type = base_type.rstrip("[]")
-            if base_type.endswith("[]") or (
-                relation_type not in prisma_scalars and relation_type[:1].isupper()
-            ):
-                relations.append(field)
-
-        schema.models.append(
-            {
-                "name": name,
-                "fields": fields,
-                "relations": relations,
-            }
-        )
-
-    for name, body in _find_named_blocks(content, "enum"):
-        values = [line.split()[0] for line in body.splitlines() if line.strip()]
-        schema.enums.append({"name": name, "values": values})
-
-    return schema
-
-
-def _extract_python_symbols_ast(content: str, file_path: str) -> list[Symbol]:
-    from codd.extractor import Symbol
-
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        return RegexExtractor("python", "source").extract_symbols(content, file_path)
-
-    symbols: list[Symbol] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            symbols.append(
-                Symbol(
-                    node.name,
-                    "class",
-                    file_path,
-                    getattr(node, "lineno", 1),
-                    decorators=[_normalize_decorator_string(_python_expr_to_string(decorator)) for decorator in node.decorator_list],
-                    visibility="private" if node.name.startswith("_") else "public",
-                    bases=[_python_expr_to_string(base) for base in node.bases if _python_expr_to_string(base)],
-                )
-            )
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
-            symbols.append(
-                Symbol(
-                    node.name,
-                    "function",
-                    file_path,
-                    getattr(node, "lineno", 1),
-                    params=_python_params_to_string(node.args),
-                    return_type=_python_expr_to_string(node.returns),
-                    decorators=[_normalize_decorator_string(_python_expr_to_string(decorator)) for decorator in node.decorator_list],
-                    visibility="private" if node.name.startswith("_") else "public",
-                    is_async=isinstance(node, ast.AsyncFunctionDef),
-                )
-            )
-
-    symbols.sort(key=lambda symbol: (symbol.line, symbol.name))
-    return symbols
-
-
-def _python_expr_to_string(node: ast.AST | None) -> str:
-    if node is None:
-        return ""
-    try:
-        return ast.unparse(node)
-    except Exception:
-        return ""
-
-
-def _python_params_to_string(args: ast.arguments) -> str:
-    params: list[str] = []
-    positional_args = list(args.posonlyargs) + list(args.args)
-    positional_defaults = [None] * (len(positional_args) - len(args.defaults)) + list(args.defaults)
-
-    for argument, default in zip(positional_args, positional_defaults):
-        rendered = argument.arg
-        if argument.annotation is not None:
-            rendered += f": {_python_expr_to_string(argument.annotation)}"
-        if default is not None:
-            rendered += f" = {_python_expr_to_string(default)}"
-        params.append(rendered)
-
-    if args.vararg is not None:
-        rendered = f"*{args.vararg.arg}"
-        if args.vararg.annotation is not None:
-            rendered += f": {_python_expr_to_string(args.vararg.annotation)}"
-        params.append(rendered)
-    elif args.kwonlyargs:
-        params.append("*")
-
-    kw_defaults = list(args.kw_defaults)
-    for argument, default in zip(args.kwonlyargs, kw_defaults):
-        rendered = argument.arg
-        if argument.annotation is not None:
-            rendered += f": {_python_expr_to_string(argument.annotation)}"
-        if default is not None:
-            rendered += f" = {_python_expr_to_string(default)}"
-        params.append(rendered)
-
-    if args.kwarg is not None:
-        rendered = f"**{args.kwarg.arg}"
-        if args.kwarg.annotation is not None:
-            rendered += f": {_python_expr_to_string(args.kwarg.annotation)}"
-        params.append(rendered)
-
-    return ", ".join(params)
-
-
-def _extract_typescript_symbols(content: str, file_path: str) -> list[Symbol]:
-    from codd.extractor import Symbol
-
-    symbols: list[Symbol] = []
-
-    def line_number(position: int) -> int:
-        return content.count("\n", 0, position) + 1
-
-    for match in re.finditer(
-        r"export\s+interface\s+(\w+)(?:\s+extends\s+([^{]+))?\s*\{",
-        content,
-    ):
-        bases = _split_csv(match.group(2))
-        symbols.append(
-            Symbol(
-                match.group(1),
-                "interface",
-                file_path,
-                line_number(match.start()),
-                bases=bases,
-            )
-        )
-
-    for match in re.finditer(r"export\s+type\s+(\w+)(?:<[^>]+>)?\s*=", content):
-        symbols.append(
-            Symbol(
-                match.group(1),
-                "type_alias",
-                file_path,
-                line_number(match.start()),
-            )
-        )
-
-    for match in re.finditer(r"export\s+enum\s+(\w+)\s*\{", content):
-        symbols.append(
-            Symbol(
-                match.group(1),
-                "enum",
-                file_path,
-                line_number(match.start()),
-            )
-        )
-
-    for match in re.finditer(
-        r"export\s+(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)\s*(?::\s*([^{]+))?\s*\{",
-        content,
-        re.DOTALL,
-    ):
-        symbols.append(
-            Symbol(
-                match.group(1),
-                "function",
-                file_path,
-                line_number(match.start()),
-                params=" ".join(match.group(2).split()),
-                return_type=" ".join((match.group(3) or "").split()),
-                is_async="async" in match.group(0).split("{", 1)[0],
-            )
-        )
-
-    for match in re.finditer(
-        r"export\s+const\s+(\w+)\s*=\s*(async\s+)?\(([^)]*)\)\s*:\s*([^=]+?)\s*=>",
-        content,
-        re.DOTALL,
-    ):
-        symbols.append(
-            Symbol(
-                match.group(1),
-                "function",
-                file_path,
-                line_number(match.start()),
-                params=" ".join(match.group(3).split()),
-                return_type=" ".join(match.group(4).split()),
-                is_async=bool(match.group(2)),
-            )
-        )
-
-    for match in re.finditer(
-        r"export\s+class\s+(\w+)(?:\s+extends\s+([^{\s]+))?(?:\s+implements\s+([^{]+))?\s*\{",
-        content,
-    ):
-        symbols.append(
-            Symbol(
-                match.group(1),
-                "class",
-                file_path,
-                line_number(match.start()),
-                bases=_split_csv(match.group(2)),
-                implements=_split_csv(match.group(3)),
-            )
-        )
-
-    symbols.sort(key=lambda symbol: (symbol.line, symbol.name))
-    return symbols
-
-
-def _split_csv(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _detect_python_code_patterns(mod: ModuleInfo, content: str) -> None:
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        return RegexExtractor("python", "source").detect_code_patterns(mod, content)
-
-    routes: list[str] = []
-    models: list[str] = []
-    background_tasks: list[str] = []
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            bases = [_python_expr_to_string(base) for base in node.bases]
-            if any(base in {"Base", "Model"} or base.endswith(".Model") for base in bases):
-                models.append(node.name)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            decorators = [_python_expr_to_string(decorator) for decorator in node.decorator_list]
-            for decorator in decorators:
-                if re.search(r"\.(get|post|put|delete|patch)\(", decorator):
-                    routes.append(_normalize_decorator_string(decorator))
-                if decorator.endswith(".task") or ".task(" in decorator:
-                    background_tasks.append(node.name)
-
-    if routes:
-        mod.patterns["api_routes"] = ", ".join(routes)
-    if models:
-        mod.patterns["db_models"] = ", ".join(models)
-    if background_tasks:
-        mod.patterns["background_tasks"] = ", ".join(background_tasks)
-
-
-def _detect_typescript_code_patterns(mod: ModuleInfo, content: str) -> None:
-    routes = re.findall(
-        r"(?:app|router)\.(?:get|post|put|delete|patch)\s*\(\s*['\"]([^'\"]+)['\"]",
-        content,
-    )
-    models = []
-    for match in re.finditer(
-        r"export\s+class\s+(\w+)(?:\s+extends\s+([^{\s]+))?(?:\s+implements\s+([^{]+))?\s*\{",
-        content,
-    ):
-        class_name = match.group(1)
-        base_name = match.group(2) or ""
-        if re.search(r"(Entity|Model)$", base_name):
-            models.append(class_name)
-
-    if routes:
-        mod.patterns["api_routes"] = ", ".join(routes)
-    if models:
-        mod.patterns["db_models"] = ", ".join(models)
-
-
-def _normalize_decorator_string(value: str) -> str:
-    if "'" in value and '"' not in value:
-        return value.replace("'", '"')
-    return value
-
-
 __all__ = [
     "ApiSpecInfo",
     "BuildDepsExtractor",
@@ -1564,9 +2089,11 @@ __all__ = [
     "KubernetesExtractor",
     "LanguageExtractor",
     "OpenApiExtractor",
+    "PrismaSchemaExtractor",
     "PrismaSchemaInfo",
     "ProtobufExtractor",
     "RegexExtractor",
+    "SqlDdlExtractor",
     "SqlSchemaInfo",
     "TerraformExtractor",
     "TestExtractor",
