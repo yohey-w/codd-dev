@@ -5,6 +5,8 @@ codd:
   source: extracted
   confidence: 0.65
   last_extracted: '2026-03-30'
+  source_files:
+  - codd/synth.py
   depends_on:
   - id: design:extract:extractor
     relation: imports
@@ -12,7 +14,7 @@ codd:
 ---
 # synth
 
-> 1 files, 782 lines
+> 1 files, 869 lines
 
 **Layer Guess**: Infrastructure
 **Responsibility**: Defaulted to infrastructure because no higher-level cues were detected
@@ -27,6 +29,24 @@ codd:
 
 
 
+
+
+## Public API
+
+- `synth_docs`
+- `synth_architecture`
+
+## Call Graph
+
+| Caller | Callee | Location | Async |
+|--------|--------|----------|-------|
+| `synth_docs` | `extractor.synth_architecture` | `codd/synth.py:104` | no |
+
+## Test Coverage
+
+**Coverage**: 0.0 (0 / 2)
+
+**Uncovered symbols**: `synth_architecture`, `synth_docs`
 
 
 ## Import Dependencies

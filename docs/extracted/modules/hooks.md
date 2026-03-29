@@ -5,6 +5,8 @@ codd:
   source: extracted
   confidence: 0.75
   last_extracted: '2026-03-30'
+  source_files:
+  - codd/hooks.py
   depends_on:
   - id: design:extract:config
     relation: imports
@@ -33,6 +35,20 @@ codd:
 
 
 
+
+
+## Public API
+
+- `install_pre_commit_hook`
+- `run_pre_commit`
+
+
+## Test Coverage
+
+**Coverage**: 0.0 (0 / 2)
+Tests: tests/test_hooks.py
+
+**Uncovered symbols**: `install_pre_commit_hook`, `run_pre_commit`
 
 
 ## Import Dependencies

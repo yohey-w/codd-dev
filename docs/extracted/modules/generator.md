@@ -5,6 +5,8 @@ codd:
   source: extracted
   confidence: 0.65
   last_extracted: '2026-03-30'
+  source_files:
+  - codd/generator.py
   depends_on:
   - id: design:extract:config
     relation: imports
@@ -32,6 +34,29 @@ codd:
 
 
 
+
+
+## Public API
+
+- `WaveArtifact`
+- `GenerationResult`
+- `DependencyDocument`
+- `generate_wave`
+
+## Call Graph
+
+| Caller | Callee | Location | Async |
+|--------|--------|----------|-------|
+| `generate_wave` | `GenerationResult` | `codd/generator.py:129` | no |
+| `generate_wave` | `GenerationResult` | `codd/generator.py:147` | no |
+| `_load_wave_artifacts` | `WaveArtifact` | `codd/generator.py:186` | no |
+| `_load_dependency_documents` | `DependencyDocument` | `codd/generator.py:339` | no |
+
+## Test Coverage
+
+**Coverage**: 0.0 (0 / 4)
+
+**Uncovered symbols**: `DependencyDocument`, `GenerationResult`, `WaveArtifact`, `generate_wave`
 
 
 ## Import Dependencies

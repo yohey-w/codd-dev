@@ -306,15 +306,83 @@ Where:
 11. Cross-Cutting Concerns
 12. Entry Points & Deployment
 
+## Extract→Impact Bridge (R6)
+
+### Problem
+
+Extracted design docs (`design:extract:*`) form a rich dependency sub-graph, but `codd impact` cannot reach them from source file changes because no `file:` → `design:` edge exists.
+
+### R6.1: Source File Mapping in Frontmatter
+
+`_build_frontmatter()` gains `source_files: list[str]` parameter. Per-module docs include the module's source files in YAML frontmatter:
+
+```yaml
+codd:
+  node_id: design:extract:extractor
+  source_files:
+    - codd/extractor.py
+```
+
+**Implementation**: `synth.py` passes `ModuleInfo.files` to `_build_frontmatter()`. Schema/API docs pass their artifact path.
+
+### R6.2: Scanner Bridge Edges
+
+In `_load_frontmatter()` (scanner.py Phase 1), when `codd.source_files` is present:
+
+1. For each source file path, ensure `file:{path}` node exists
+2. Create edge: `design:{node_id}` depends_on `file:{path}`
+3. Relation: `extracted_from`, confidence: 0.85
+4. Evidence: `{"origin": "auto:source_files"}`
+
+Edge direction: `design:extract:extractor` → `file:codd/extractor.py` (design depends on source). When the file changes, impact follows the **incoming** edge to the design doc, then propagates to all dependents.
+
+### R6.3: Impact Report Enhancement
+
+Impact report shows design doc context for `design:extract:*` hits:
+- Module name (human-readable)
+- Depth (1 = direct, 2+ = transitive)
+- Change risk score (if available)
+
+## TypeScript/JavaScript Call Graph (R7)
+
+### R7.1: TypeScript Call Graph via Tree-sitter
+
+Extend `TreeSitterExtractor.extract_call_graph()` for TypeScript AST:
+
+| AST Node | Example | Caller | Callee |
+|----------|---------|--------|--------|
+| `call_expression` | `foo()` | enclosing function | `foo` |
+| `call_expression` + `member_expression` | `service.process()` | enclosing function | `service.process` |
+| `new_expression` | `new Foo()` | enclosing function | `Foo` |
+| `await_expression` > `call_expression` | `await fetchData()` | enclosing function | `fetchData` (async) |
+
+**Resolution**: Callee names resolved against known symbols from `extract_symbols()`. Unresolved (stdlib/third-party) excluded.
+
+**Optional chaining**: `foo?.bar()` → callee is `foo.bar`.
+
+### R7.2: JavaScript Call Graph
+
+Reuses TypeScript implementation with JS grammar. Additional patterns:
+- `require('./foo').bar()` → callee `foo.bar`
+- Prototype method calls → callee `Class.method`
+
+### R7.3: Quality Constraints
+
+- Precision > recall (no false edges)
+- Tree-sitter unavailable → return `[]` (graceful degradation)
+- No changes needed in clustering.py, traceability.py, risk.py (they consume `call_edges` generically)
+
 ## Files
 
 - `codd/extractor.py` — Pipeline orchestration, ProjectFacts, extract_facts(), run_extract()
-- `codd/parsing.py` — All extractor implementations (A-F), call graph extraction (R4.1)
-- `codd/synth.py` — Jinja2 template engine, synth_docs(), synth_architecture(), feature clustering (R4.2)
+- `codd/parsing.py` — All extractor implementations (A-F), call graph extraction (R4.1, R7)
+- `codd/synth.py` — Jinja2 template engine, synth_docs(), synth_architecture(), source_files mapping (R6.1)
+- `codd/scanner.py` — Dependency graph builder, source_files bridge edges (R6.2)
+- `codd/propagate.py` — Impact analysis, node resolution
 - `codd/contracts.py` — Interface contract detection (R4.3)
 - `codd/clustering.py` — Feature clustering (R4.2)
-- `codd/traceability.py` — Test traceability (R5.1) [NEW]
-- `codd/schema_refs.py` — Schema-code dependency detection (R5.2) [NEW]
-- `codd/wiring.py` — Runtime wiring detection (R5.3) [NEW]
-- `codd/risk.py` — Change risk scoring (R5.4) [NEW]
-- `codd/templates/extracted/` — Jinja2 templates (updated for R5 sections)
+- `codd/traceability.py` — Test traceability (R5.1)
+- `codd/schema_refs.py` — Schema-code dependency detection (R5.2)
+- `codd/wiring.py` — Runtime wiring detection (R5.3)
+- `codd/risk.py` — Change risk scoring (R5.4)
+- `codd/templates/extracted/` — Jinja2 templates
