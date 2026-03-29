@@ -19,12 +19,13 @@ CODD_DIR_CANDIDATES = ("codd", ".codd")
 def find_codd_dir(project_root: Path) -> Path | None:
     """Discover the CoDD config directory under *project_root*.
 
+    A valid CoDD config directory must contain ``codd.yaml``.
     Checks ``codd/`` first, then ``.codd/``.  Returns ``None`` when
-    neither exists (caller decides whether that is an error).
+    neither qualifies (caller decides whether that is an error).
     """
     for name in CODD_DIR_CANDIDATES:
         candidate = project_root / name
-        if candidate.is_dir():
+        if candidate.is_dir() and (candidate / "codd.yaml").exists():
             return candidate
     return None
 
