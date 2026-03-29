@@ -1,0 +1,76 @@
+---
+{{ frontmatter }}---
+# API Contract: {{ relative_path }}
+
+> Auto-generated from extracted API definitions.
+
+**Format**: {{ spec.format }}
+
+{% if http_endpoints %}
+## OpenAPI Endpoints
+
+| Method | Path | Summary | Responses |
+|--------|------|---------|-----------|
+{% for endpoint in http_endpoints -%}
+| {{ endpoint.method }} | `{{ endpoint.path }}` | {{ endpoint.summary or "—" }} | {{ endpoint.responses | join(", ") or "—" }} |
+{% endfor %}
+{% endif %}
+
+{% if graphql_ops %}
+## GraphQL Operations
+
+{% for endpoint in graphql_ops -%}
+- `{{ endpoint.operation_type }}` `{{ endpoint.name }}`{% if endpoint.return_type %} -> `{{ endpoint.return_type }}`{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if rpc_endpoints %}
+## Protobuf RPCs
+
+{% for endpoint in rpc_endpoints -%}
+- `{{ endpoint.service }}.{{ endpoint.name }}`: `{{ endpoint.request_type }} -> {{ endpoint.response_type }}`
+{% endfor %}
+{% endif %}
+
+{% if spec.schemas %}
+## Schema Definitions
+
+{% for schema in spec.schemas -%}
+### {{ schema.name }}{% if schema.kind %} ({{ schema.kind }}){% endif %}
+
+{% if schema.properties %}
+| Property | Type |
+|----------|------|
+{% for prop in schema.properties -%}
+| {{ prop.name }} | {{ prop.type or "—" }} |
+{% endfor %}
+{% elif schema.fields %}
+| Field | Type |
+|-------|------|
+{% for field in schema.fields -%}
+| {{ field.name }} | {{ field.type or "—" }} |
+{% endfor %}
+{% elif schema.values %}
+- Values: {{ schema.values | join(", ") }}
+{% else %}
+- Structural details unavailable
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if spec.services %}
+## Services
+
+{% for service in spec.services -%}
+### {{ service.name or service.kind }}
+
+{% if service.url %}
+- URL: `{{ service.url }}`
+{% endif %}
+{% if service.rpcs %}
+{% for rpc in service.rpcs -%}
+- `{{ rpc.name }}({{ rpc.request_type }}) -> {{ rpc.response_type }}`
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
