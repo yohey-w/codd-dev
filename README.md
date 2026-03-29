@@ -1,3 +1,5 @@
+[日本語](README_ja.md) | English
+
 # CoDD — Coherence-Driven Development
 
 **CoDD keeps AI-built systems coherent as requirements change.**
