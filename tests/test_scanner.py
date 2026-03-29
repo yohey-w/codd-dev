@@ -131,8 +131,8 @@ scan:
     - "docs/"
   exclude: []
 graph:
-  store: sqlite
-  path: codd/graph.db
+  store: jsonl
+  path: codd/scan
 bands:
   green:
     min_confidence: 0.90

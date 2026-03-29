@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**パブリックアルファ** — `init` / `scan` / `impact` / `validate` は安定版です。
+**パブリックアルファ** — `init` / `scan` / `impact` は安定版、`validate` はアルファです。
 
 ---
 
@@ -229,7 +229,7 @@ codd:
 ---
 ```
 
-`graph.db` はキャッシュ — `codd scan` のたびに再生成されます。
+`codd/scan/` はキャッシュ — `codd scan` のたびに再生成されます。
 
 ## ブラウンフィールド？ ここから
 

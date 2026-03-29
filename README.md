@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**Public Alpha** — `init` / `scan` / `impact` / `validate` are stable today.
+**Public Alpha** — `init` / `scan` / `impact` are stable; `validate` is alpha.
 
 ---
 
@@ -229,7 +229,7 @@ codd:
 ---
 ```
 
-`graph.db` is a cache — regenerated on every `codd scan`.
+`codd/scan/` is a cache — regenerated on every `codd scan`.
 
 ## Brownfield? Start Here
 

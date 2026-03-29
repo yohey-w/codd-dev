@@ -18,7 +18,7 @@ def main():
 
 @main.command()
 @click.option("--project-name", prompt="Project name", help="Name of the project")
-@click.option("--language", prompt="Primary language", help="Primary language (python/typescript/java/go)")
+@click.option("--language", prompt="Primary language", help="Primary language (python/typescript/javascript/go — full support; java — symbols only)")
 @click.option("--dest", default=".", help="Destination directory (default: current dir)")
 @click.option(
     "--requirements",
@@ -248,7 +248,7 @@ def verify(path: str, sprint: int | None) -> None:
 
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
-@click.option("--language", default=None, help="Override language detection (python/typescript/javascript/java/go)")
+@click.option("--language", default=None, help="Override language detection (python/typescript/javascript/go — full support; java — symbols only)")
 @click.option("--source-dirs", default=None, help="Comma-separated source directories (default: auto-detect)")
 @click.option("--output", default=None, help="Output directory (default: codd/extracted/)")
 def extract(path: str, language: str | None, source_dirs: str | None, output: str | None):

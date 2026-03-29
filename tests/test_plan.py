@@ -59,7 +59,7 @@ BASE_CONFIG = {
         "config_files": [],
         "exclude": [],
     },
-    "graph": {"store": "sqlite", "path": "codd/graph.db"},
+    "graph": {"store": "jsonl", "path": "codd/scan"},
     "bands": {
         "green": {"min_confidence": 0.90, "min_evidence_count": 2},
         "amber": {"min_confidence": 0.50},

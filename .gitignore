@@ -22,5 +22,5 @@ htmlcov/
 .pytest_cache/
 
 # CoDD generated (for development/testing)
-codd/graph.db
+codd/scan/
 codd/reports/

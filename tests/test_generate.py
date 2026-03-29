@@ -29,8 +29,8 @@ scan:
     - "docs/test/"
   exclude: []
 graph:
-  store: sqlite
-  path: codd/graph.db
+  store: jsonl
+  path: codd/scan
 conventions:
   - targets:
       - "db:rls_policies"

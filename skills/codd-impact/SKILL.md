@@ -27,8 +27,8 @@ codd impact --diff <commit-hash> --path .
 ## Preflight
 
 1. Confirm you are at the project root and `codd/codd.yaml` exists.
-2. Confirm `codd/graph.db` exists.
-3. If `codd/graph.db` is missing, run:
+2. Confirm `codd/scan/` directory exists (contains nodes.jsonl and edges.jsonl).
+3. If `codd/scan/` is missing or empty, run:
 
 ```bash
 codd scan --path .
@@ -135,7 +135,7 @@ Always name the exact design documents you changed. If nothing needed an edit, s
 
 ## Troubleshooting
 
-### `graph.db not found`
+### Graph data not found
 
 The dependency graph has not been built yet or was deleted. Run:
 

@@ -11,7 +11,8 @@ All notable changes to CoDD are documented in this file.
   - No AI required — pure deterministic structural fact extraction
   - Philosophy: in V-Model, intent lives only in requirements; everything below
     is structural fact that static analysis can extract
-  - Supports Python, TypeScript, JavaScript, Java, Go
+  - Supports Python, TypeScript, JavaScript (full import + symbol extraction),
+    Go (symbol + import extraction), Java (symbol extraction only; import tracing planned)
   - Two-phase architecture: extract-facts (static analysis) → synth-docs (templated Markdown)
   - Auto-detects language, source directories, test directories, frameworks, ORMs
   - Generates `system-context.md` (module map + dependency graph) and per-module
@@ -49,7 +50,7 @@ and impact analysis are stable. Generation and verification are experimental.
 
 - **Renamed CPDD to CoDD** (Coherence-Driven Development)
 - Migrated graph store from SQLite to JSONL for portability
-- Frontmatter is now the Single Source of Truth (graph.db is a derived cache)
+- Frontmatter is now the Single Source of Truth (graph data in codd/scan/ is a derived cache)
 - README rewritten for competitive positioning against Spec Kit / OpenSpec
 
 ### Fixed
