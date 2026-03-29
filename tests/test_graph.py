@@ -68,7 +68,9 @@ def test_negative_evidence_reduces_confidence(ceg):
 
 
 def test_propagation_bfs(ceg):
-    # Build chain: a → b → c → d
+    # Build chain: a depends_on b depends_on c depends_on d
+    # Edge direction: a→b, b→c, c→d (source depends on target)
+    # When d changes, impact propagates: d → c (depth 1) → b (depth 2) → a (depth 3)
     for name in ["a", "b", "c", "d"]:
         ceg.upsert_node(f"file:{name}.py", "file", name=f"{name}.py")
 
@@ -76,13 +78,14 @@ def test_propagation_bfs(ceg):
     ceg.add_edge("file:b.py", "file:c.py", "imports", "structural", confidence=0.8)
     ceg.add_edge("file:c.py", "file:d.py", "imports", "structural", confidence=0.7)
 
-    impacts = ceg.propagate_impact("file:a.py", max_depth=10)
-    assert "file:b.py" in impacts
+    # d changes → c, b, a are all impacted (reverse propagation)
+    impacts = ceg.propagate_impact("file:d.py", max_depth=10)
     assert "file:c.py" in impacts
-    assert "file:d.py" in impacts
-    assert impacts["file:b.py"]["depth"] == 1
-    assert impacts["file:c.py"]["depth"] == 2
-    assert impacts["file:d.py"]["depth"] == 3
+    assert "file:b.py" in impacts
+    assert "file:a.py" in impacts
+    assert impacts["file:c.py"]["depth"] == 1
+    assert impacts["file:b.py"]["depth"] == 2
+    assert impacts["file:a.py"]["depth"] == 3
 
 
 def test_propagation_max_depth(ceg):
@@ -92,9 +95,10 @@ def test_propagation_max_depth(ceg):
     ceg.add_edge("file:b.py", "file:c.py", "imports", "structural", confidence=0.8)
     ceg.add_edge("file:c.py", "file:d.py", "imports", "structural", confidence=0.7)
 
-    impacts = ceg.propagate_impact("file:a.py", max_depth=1)
-    assert "file:b.py" in impacts
-    assert "file:c.py" not in impacts  # Depth 2, beyond max_depth=1
+    # d changes with max_depth=1 → only c (depth 1), not b (depth 2)
+    impacts = ceg.propagate_impact("file:d.py", max_depth=1)
+    assert "file:c.py" in impacts
+    assert "file:b.py" not in impacts  # Depth 2, beyond max_depth=1
 
 
 def test_band_classification(ceg):

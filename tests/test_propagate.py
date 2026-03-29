@@ -113,13 +113,18 @@ def test_check_conventions_from_graph_via_parent(ceg):
 
 
 def test_impact_propagation_from_document_node(ceg):
-    """Impact propagation works from document nodes (not just file: nodes)."""
+    """Impact propagation works from document nodes (not just file: nodes).
+
+    Edge semantics: source depends_on target.
+    db depends_on api depends_on ui depends_on plan.
+    When plan changes, impact propagates: plan → ui (1) → api (2) → db (3).
+    """
     ceg.upsert_node("design:db", "design")
     ceg.upsert_node("design:api", "design")
     ceg.upsert_node("design:ui", "design")
     ceg.upsert_node("design:plan", "design")
 
-    # db -> api -> ui -> plan
+    # db -> api -> ui -> plan (source depends on target)
     e1 = ceg.add_edge("design:db", "design:api", "derives_from", "governance")
     ceg.add_evidence(e1, "frontmatter", "frontmatter", 0.9)
     e2 = ceg.add_edge("design:api", "design:ui", "consumes", "governance")
@@ -127,13 +132,14 @@ def test_impact_propagation_from_document_node(ceg):
     e3 = ceg.add_edge("design:ui", "design:plan", "schedules", "governance")
     ceg.add_evidence(e3, "frontmatter", "frontmatter", 0.9)
 
-    impacts = ceg.propagate_impact("design:db", max_depth=10)
-    assert "design:api" in impacts
+    # plan changes → ui, api, db are impacted (reverse propagation)
+    impacts = ceg.propagate_impact("design:plan", max_depth=10)
     assert "design:ui" in impacts
-    assert "design:plan" in impacts
-    assert impacts["design:api"]["depth"] == 1
-    assert impacts["design:ui"]["depth"] == 2
-    assert impacts["design:plan"]["depth"] == 3
+    assert "design:api" in impacts
+    assert "design:db" in impacts
+    assert impacts["design:ui"]["depth"] == 1
+    assert impacts["design:api"]["depth"] == 2
+    assert impacts["design:db"]["depth"] == 3
 
 
 def test_find_nodes_by_path(ceg):
@@ -246,19 +252,19 @@ codd:
     assert ceg.get_node("design:api") is not None
     assert ceg.get_node("design:ui") is not None
 
-    # Simulate: db_design.md changed → should impact api, ui
-    start_nodes = _resolve_start_nodes(ceg, project, ["docs/db_design.md"])
+    # Simulate: ui_design.md changed → should impact api (depends on ui), db (depends on api)
+    # Edge semantics: db→api→ui means db depends on api depends on ui
+    # When ui changes, api and db are impacted (reverse propagation)
+    start_nodes = _resolve_start_nodes(ceg, project, ["docs/ui_design.md"])
     assert len(start_nodes) == 1
-    assert start_nodes[0][0] == "design:db"
+    assert start_nodes[0][0] == "design:ui"
 
-    impacts = ceg.propagate_impact("design:db", max_depth=10)
+    impacts = ceg.propagate_impact("design:ui", max_depth=10)
     assert "design:api" in impacts
-    assert "design:ui" in impacts
+    assert "design:db" in impacts
 
-    # Convention check
-    conventions = _check_conventions_from_graph(ceg, start_nodes)
-    # design:api has must_review → design:db, but we changed design:db
-    # so conventions from design:api (parent via incoming edge) should fire
-    # design:db's outgoing is design:api, and design:api has must_review to design:db
+    # Convention check from db_design change (for must_review edges)
+    db_start = _resolve_start_nodes(ceg, project, ["docs/db_design.md"])
+    conventions = _check_conventions_from_graph(ceg, db_start)
 
     ceg.close()

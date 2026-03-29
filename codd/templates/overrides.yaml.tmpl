@@ -1,0 +1,13 @@
+# 自動検出の上書き・否定証拠
+# パーサーが誤検出した依存関係を抑制するために使う
+#
+# Example:
+#   - edge_pattern:
+#       source: "src/legacy/old_billing.py"
+#       target: "src/services/billing_service.py"
+#     action: "suppress"
+#     reason: "old_billing.pyはdead code"
+#     added_by: "your_name"
+#     added_at: "2026-01-01"
+
+overrides: []

@@ -17,6 +17,7 @@ ALLOWED_NODE_PREFIXES = {
     "db_column",
     "db_table",
     "design",
+    "detail",
     "doc",
     "endpoint",
     "file",

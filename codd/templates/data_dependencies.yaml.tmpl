@@ -1,0 +1,12 @@
+# データ駆動依存 — DBの値がビジネスロジックを制御するケース
+# コードにはSELECT文しか見えないが、値が変わると挙動が変わるものを記録する
+#
+# Example:
+#   - table: "system_settings"
+#     column: "max_enrollments"
+#     affects:
+#       - "src/services/enrollment_service.py"
+#     condition: "値を増減すると受講可能人数の制限が変わる"
+#     semantic: "behavioral"
+
+data_dependencies: []

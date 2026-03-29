@@ -189,7 +189,12 @@ class CEG:
 
     def propagate_impact(self, start_node_id: str, max_depth: int = 10,
                          min_confidence: float = 0.0) -> dict:
-        """BFS propagation from a changed node."""
+        """BFS propagation from a changed node.
+
+        Traces REVERSE direction: finds nodes that depend ON the changed node.
+        Edge semantics: source depends_on target (source → target).
+        When target changes, source is impacted. So follow incoming edges.
+        """
         visited = {}
         queue = [(start_node_id, 0, [start_node_id])]
 
@@ -201,10 +206,10 @@ class CEG:
                 continue
             visited[current] = {"depth": depth, "path": path}
 
-            for edge in self.get_outgoing_edges(current, min_confidence):
-                target = edge["target_id"]
-                if target not in visited:
-                    queue.append((target, depth + 1, path + [target]))
+            for edge in self.get_incoming_edges(current, min_confidence):
+                dependent = edge["source_id"]
+                if dependent not in visited:
+                    queue.append((dependent, depth + 1, path + [dependent]))
 
         if start_node_id in visited:
             del visited[start_node_id]

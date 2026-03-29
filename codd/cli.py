@@ -6,11 +6,11 @@ import os
 import shutil
 from pathlib import Path
 
-TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 @click.group()
-@click.version_option(package_name="shogun-codd")
+@click.version_option(package_name="codd-dev")
 def main():
     """CoDD: Coherence-Driven Development."""
     pass
