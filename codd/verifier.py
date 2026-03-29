@@ -1,4 +1,9 @@
-"""CoDD verifier for typecheck and test validation with design traceability."""
+"""CoDD verifier for typecheck and test validation with design traceability.
+
+Supports Python and TypeScript/JavaScript projects. Language is detected from
+codd.yaml project.language, with per-language defaults for typecheck and test
+commands.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +36,9 @@ class TypecheckResult:
     errors: tuple[TypecheckError, ...]
 
 
+VerifyTypecheckResult = TypecheckResult  # alias for test compat
+
+
 @dataclass(frozen=True)
 class TestFailure:
     test_file_path: str
@@ -46,6 +54,9 @@ class TestResult:
     failed: int
     skipped: int
     failures: tuple[TestFailure, ...]
+
+
+VerifyTestResult = TestResult  # alias for test compat
 
 
 @dataclass(frozen=True)
@@ -70,24 +81,97 @@ class VerifyPreflightError(Exception):
     """Raised when the target project is missing required build/test inputs."""
 
 
-DEFAULT_VERIFY_CONFIG: dict[str, Any] = {
+# ---------------------------------------------------------------------------
+# Per-language default configurations
+# ---------------------------------------------------------------------------
+
+_PYTHON_DEFAULTS: dict[str, Any] = {
+    "typecheck_command": "mypy .",
+    "test_command": "pytest --tb=short -q",
+    "report_output": "docs/test/verify_report.md",
+    "preflight_files": ["pyproject.toml", "setup.py", "setup.cfg"],
+    "preflight_mode": "any",  # at least one must exist
+}
+
+_TYPESCRIPT_DEFAULTS: dict[str, Any] = {
     "typecheck_command": "npx tsc --noEmit",
     "test_command": "npx jest --ci --json --outputFile=.codd/test-results.json",
     "test_output_file": ".codd/test-results.json",
     "report_output": "docs/test/verify_report.md",
     "test_pattern": "tests/unit/sprint_{sprint}/**/*.test.ts",
+    "preflight_files": ["package.json", "tsconfig.json", "node_modules"],
+    "preflight_mode": "all",  # all must exist
 }
 
-GENERATED_FROM_RE = re.compile(
-    r"^//\s*@generated-from:\s*(?P<path>.+?)\s*\((?P<node_id>[^)]+)\)\s*$",
-    re.MULTILINE,
-)
+DEFAULT_VERIFY_CONFIGS: dict[str, dict[str, Any]] = {
+    "python": _PYTHON_DEFAULTS,
+    "typescript": _TYPESCRIPT_DEFAULTS,
+    "javascript": {
+        **_TYPESCRIPT_DEFAULTS,
+        "typecheck_command": "",
+        "preflight_files": ["package.json", "node_modules"],
+    },
+}
+
+# Keep old name for backwards compat in tests
+DEFAULT_VERIFY_CONFIG = _TYPESCRIPT_DEFAULTS
+
+# ---------------------------------------------------------------------------
+# Error / output regexes
+# ---------------------------------------------------------------------------
+
+# TypeScript: file(line,col): error TSxxxx: message
 TSC_ERROR_RE = re.compile(
     r"^(?P<file>[^(]+)\((?P<line>\d+),(?P<col>\d+)\):\s*error\s+(?P<code>TS\d+):\s*(?P<message>.+)$",
     re.MULTILINE,
 )
+
+# mypy: file.py:line: error: message  [code]
+MYPY_ERROR_RE = re.compile(
+    r"^(?P<file>[^:]+):(?P<line>\d+):\s*error:\s*(?P<message>.+?)\s*\[(?P<code>[^\]]+)\]\s*$",
+    re.MULTILINE,
+)
+
+# pyright: file.py:line:col - error: message (code)
+PYRIGHT_ERROR_RE = re.compile(
+    r"^\s*(?P<file>[^:]+):(?P<line>\d+):(?P<col>\d+)\s*-\s*error:\s*(?P<message>.+?)\s*\((?P<code>[^)]+)\)\s*$",
+    re.MULTILINE,
+)
+
+# pytest FAILED line: FAILED tests/test_foo.py::test_bar - reason
+PYTEST_FAILED_RE = re.compile(
+    r"^FAILED\s+(?P<file>[^:]+)::(?P<test>\S+?)(?:\s+-\s+(?P<message>.+))?$",
+    re.MULTILINE,
+)
+
+# pytest summary: "1 failed, 126 passed, 2 skipped in 1.10s"
+PYTEST_SUMMARY_RE = re.compile(
+    r"=+\s*(?P<summary>[^=]+?)\s*=+\s*$",
+    re.MULTILINE,
+)
+
+# Design traceability comments
+# TypeScript: // @generated-from: path (node_id)
+TS_GENERATED_FROM_RE = re.compile(
+    r"^//\s*@generated-from:\s*(?P<path>.+?)\s*\((?P<node_id>[^)]+)\)\s*$",
+    re.MULTILINE,
+)
+# Python: # @generated-from: path (node_id)
+PY_GENERATED_FROM_RE = re.compile(
+    r"^#\s*@generated-from:\s*(?P<path>.+?)\s*\((?P<node_id>[^)]+)\)\s*$",
+    re.MULTILINE,
+)
+
+# Keep old name for backwards compat in tests
+GENERATED_FROM_RE = TS_GENERATED_FROM_RE
+
+# Import regexes for design ref tracing
 TS_IMPORT_RE = re.compile(
     r"^\s*import\s+.*?\s+from\s+['\"](?P<path>[^'\"]+)['\"]",
+    re.MULTILINE,
+)
+PY_IMPORT_RE = re.compile(
+    r"^\s*(?:from\s+(?P<from>[^\s]+)\s+import|import\s+(?P<mod>[^\s,]+))",
     re.MULTILINE,
 )
 
@@ -101,28 +185,35 @@ def run_verify(
     sprint: int | None = None,
 ) -> VerifyResult:
     """Run build + test verification and trace failures to design documents."""
-    config = _load_project_config(project_root)
+    config = _load_verify_config(project_root)
     verifier = _Verifier(project_root.resolve(), config)
     return verifier.run(sprint)
 
 
-def _load_project_config(project_root: Path) -> dict[str, Any]:
-    """Load merged CoDD config and extract the verify section."""
-    config = dict(DEFAULT_VERIFY_CONFIG)
+def _load_verify_config(project_root: Path) -> dict[str, Any]:
+    """Load merged CoDD config with language-appropriate defaults."""
     project_config = load_project_config(project_root.resolve())
-    verify_config = project_config.get("verify", {})
-    if verify_config is None:
-        return config
-    if not isinstance(verify_config, dict):
+    language = (project_config.get("project") or {}).get("language", "typescript")
+
+    defaults = dict(DEFAULT_VERIFY_CONFIGS.get(language, _TYPESCRIPT_DEFAULTS))
+    defaults["_language"] = language
+
+    verify_overrides = project_config.get("verify") or {}
+    if not isinstance(verify_overrides, dict):
         raise ValueError("codd verify config must be a mapping")
-    config.update(verify_config)
-    return config
+    defaults.update(verify_overrides)
+    return defaults
+
+
+# Keep old name for backwards compat in tests
+_load_project_config = _load_verify_config
 
 
 class _Verifier:
     def __init__(self, project_root: Path, config: dict[str, Any]):
         self.project_root = project_root
         self.config = config
+        self.language = config.get("_language", "typescript")
 
     def run(self, sprint: int | None = None) -> VerifyResult:
         warnings: list[str] = []
@@ -172,41 +263,160 @@ class _Verifier:
             report_path=report_path,
         )
 
+    # ------------------------------------------------------------------
+    # Preflight
+    # ------------------------------------------------------------------
+
     def _preflight_check(self) -> None:
-        missing = []
-        for name in ("package.json", "tsconfig.json", "node_modules"):
-            if not (self.project_root / name).exists():
-                missing.append(name)
-        if missing:
-            raise VerifyPreflightError(f"Missing: {', '.join(missing)}. Run npm install first.")
+        preflight_files = self.config.get("preflight_files", [])
+        if not preflight_files:
+            return
+
+        mode = self.config.get("preflight_mode", "all")
+        missing = [f for f in preflight_files if not (self.project_root / f).exists()]
+
+        if mode == "any":
+            # At least one must exist
+            if len(missing) == len(preflight_files):
+                raise VerifyPreflightError(
+                    f"Preflight check failed: None of {', '.join(preflight_files)} found. "
+                    f"Is this a {self.language} project?"
+                )
+        else:
+            # All must exist
+            if missing:
+                raise VerifyPreflightError(
+                    f"Preflight check failed: Missing: {', '.join(missing)}. "
+                    f"Run setup first."
+                )
+
+    # ------------------------------------------------------------------
+    # Typecheck
+    # ------------------------------------------------------------------
 
     def _run_typecheck(self) -> TypecheckResult:
+        command = self.config.get("typecheck_command", "")
+        if not command:
+            return TypecheckResult(success=True, error_count=0, errors=())
+
         proc = subprocess.run(
-            shlex.split(self.config["typecheck_command"]),
+            shlex.split(command),
             cwd=str(self.project_root),
             env=os.environ.copy(),
             capture_output=True,
             text=True,
         )
         output = proc.stdout + proc.stderr
-        errors = tuple(
-            TypecheckError(
-                file_path=match.group("file").strip(),
-                line=int(match.group("line")),
-                col=int(match.group("col")),
-                code=match.group("code"),
-                message=match.group("message").strip(),
-            )
-            for match in TSC_ERROR_RE.finditer(output)
-        )
+        errors = self._parse_typecheck_errors(output)
         return TypecheckResult(
             success=proc.returncode == 0,
             error_count=len(errors),
             errors=errors,
         )
 
+    def _parse_typecheck_errors(self, output: str) -> tuple[TypecheckError, ...]:
+        if self.language == "python":
+            return self._parse_python_typecheck(output)
+        return self._parse_tsc_typecheck(output)
+
+    def _parse_tsc_typecheck(self, output: str) -> tuple[TypecheckError, ...]:
+        return tuple(
+            TypecheckError(
+                file_path=m.group("file").strip(),
+                line=int(m.group("line")),
+                col=int(m.group("col")),
+                code=m.group("code"),
+                message=m.group("message").strip(),
+            )
+            for m in TSC_ERROR_RE.finditer(output)
+        )
+
+    def _parse_python_typecheck(self, output: str) -> tuple[TypecheckError, ...]:
+        # Try mypy first, then pyright
+        errors: list[TypecheckError] = []
+        for m in MYPY_ERROR_RE.finditer(output):
+            errors.append(TypecheckError(
+                file_path=m.group("file").strip(),
+                line=int(m.group("line")),
+                col=0,
+                code=m.group("code"),
+                message=m.group("message").strip(),
+            ))
+        if errors:
+            return tuple(errors)
+
+        for m in PYRIGHT_ERROR_RE.finditer(output):
+            errors.append(TypecheckError(
+                file_path=m.group("file").strip(),
+                line=int(m.group("line")),
+                col=int(m.group("col")),
+                code=m.group("code"),
+                message=m.group("message").strip(),
+            ))
+        return tuple(errors)
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
     def _run_tests(self, sprint: int | None) -> TestResult:
-        output_path = self._resolve_path(self.config.get("test_output_file", ".codd/test-results.json"))
+        if self.language == "python":
+            return self._run_pytest(sprint)
+        return self._run_jest(sprint)
+
+    def _run_pytest(self, sprint: int | None) -> TestResult:
+        command = shlex.split(self.config.get("test_command", "pytest --tb=short -q"))
+
+        if sprint is not None:
+            pattern = self.config.get("test_pattern", "tests/sprint_{sprint}/")
+            command.append(pattern.format(sprint=sprint))
+
+        proc = subprocess.run(
+            command,
+            cwd=str(self.project_root),
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+        )
+        output = proc.stdout + proc.stderr
+        return self._parse_pytest_output(output, proc.returncode)
+
+    def _parse_pytest_output(self, output: str, returncode: int) -> TestResult:
+        failures: list[TestFailure] = []
+        for m in PYTEST_FAILED_RE.finditer(output):
+            failures.append(TestFailure(
+                test_file_path=m.group("file"),
+                test_name=m.group("test"),
+                failure_messages=(m.group("message") or "",),
+            ))
+
+        # Parse summary line: "1 failed, 126 passed, 2 skipped in 1.10s"
+        passed = failed = skipped = 0
+        total_match = re.search(r"(\d+)\s+passed", output)
+        if total_match:
+            passed = int(total_match.group(1))
+        fail_match = re.search(r"(\d+)\s+failed", output)
+        if fail_match:
+            failed = int(fail_match.group(1))
+        skip_match = re.search(r"(\d+)\s+skipped", output)
+        if skip_match:
+            skipped = int(skip_match.group(1))
+
+        total = passed + failed + skipped
+
+        return TestResult(
+            success=(returncode == 0),
+            total=total,
+            passed=passed,
+            failed=failed,
+            skipped=skipped,
+            failures=tuple(failures),
+        )
+
+    def _run_jest(self, sprint: int | None) -> TestResult:
+        output_path = self._resolve_path(
+            self.config.get("test_output_file", ".codd/test-results.json")
+        )
         if output_path.exists():
             output_path.unlink()
 
@@ -222,7 +432,7 @@ class _Verifier:
             capture_output=True,
             text=True,
         )
-        data = self._load_test_output(output_path, proc.stdout)
+        data = self._load_jest_output(output_path, proc.stdout)
 
         failures: list[TestFailure] = []
         for suite in data.get("testResults", []):
@@ -248,7 +458,7 @@ class _Verifier:
             failures=tuple(failures),
         )
 
-    def _load_test_output(self, output_path: Path, stdout: str) -> dict[str, Any]:
+    def _load_jest_output(self, output_path: Path, stdout: str) -> dict[str, Any]:
         if output_path.exists():
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
@@ -271,16 +481,20 @@ class _Verifier:
             "testResults": [],
         }
 
+    # ------------------------------------------------------------------
+    # Design traceability
+    # ------------------------------------------------------------------
+
     def _trace_from_typecheck_errors(
         self, errors: tuple[TypecheckError, ...]
     ) -> tuple[list[DesignRef], list[str]]:
         refs: list[DesignRef] = []
         warnings: list[str] = []
         for error in errors:
-            ts_file = Path(error.file_path)
-            if not ts_file.is_absolute():
-                ts_file = self.project_root / ts_file
-            new_refs, new_warnings = self._extract_design_refs(ts_file, "typecheck_error")
+            src_file = Path(error.file_path)
+            if not src_file.is_absolute():
+                src_file = self.project_root / src_file
+            new_refs, new_warnings = self._extract_design_refs(src_file, "typecheck_error")
             refs.extend(new_refs)
             warnings.extend(new_warnings)
         return refs, warnings
@@ -298,20 +512,48 @@ class _Verifier:
                 continue
 
             content = test_file.read_text(encoding="utf-8")
-            for import_match in TS_IMPORT_RE.finditer(content):
-                import_path = import_match.group("path")
-                if not import_path.startswith("."):
-                    continue
-                for candidate in self._resolve_import_candidates(test_file, import_path):
-                    if not candidate.exists():
-                        continue
+
+            if self.language == "python":
+                self._trace_python_imports(content, test_file, refs, warnings)
+            else:
+                self._trace_ts_imports(content, test_file, refs, warnings)
+        return refs, warnings
+
+    def _trace_python_imports(
+        self, content: str, test_file: Path,
+        refs: list[DesignRef], warnings: list[str],
+    ) -> None:
+        for m in PY_IMPORT_RE.finditer(content):
+            mod_path = m.group("from") or m.group("mod") or ""
+            if not mod_path:
+                continue
+            # Convert dotted module to file path
+            parts = mod_path.replace(".", "/")
+            for suffix in (".py", "/__init__.py"):
+                candidate = self.project_root / (parts + suffix)
+                if candidate.exists():
                     new_refs, new_warnings = self._extract_design_refs(candidate, "test_failure")
                     refs.extend(new_refs)
                     warnings.extend(new_warnings)
                     break
-        return refs, warnings
 
-    def _resolve_import_candidates(self, test_file: Path, import_path: str) -> tuple[Path, ...]:
+    def _trace_ts_imports(
+        self, content: str, test_file: Path,
+        refs: list[DesignRef], warnings: list[str],
+    ) -> None:
+        for import_match in TS_IMPORT_RE.finditer(content):
+            import_path = import_match.group("path")
+            if not import_path.startswith("."):
+                continue
+            for candidate in self._resolve_ts_import_candidates(test_file, import_path):
+                if not candidate.exists():
+                    continue
+                new_refs, new_warnings = self._extract_design_refs(candidate, "test_failure")
+                refs.extend(new_refs)
+                warnings.extend(new_warnings)
+                break
+
+    def _resolve_ts_import_candidates(self, test_file: Path, import_path: str) -> tuple[Path, ...]:
         base = (test_file.parent / import_path).resolve()
         candidates = [base]
         if base.suffix:
@@ -336,21 +578,27 @@ class _Verifier:
         return tuple(unique)
 
     def _extract_design_refs(
-        self, ts_file: Path, trace_source: str
+        self, source_file: Path, trace_source: str
     ) -> tuple[list[DesignRef], list[str]]:
         warnings: list[str] = []
         refs: list[DesignRef] = []
-        if not ts_file.exists():
+        if not source_file.exists():
             return refs, warnings
 
         try:
-            header = "\n".join(ts_file.read_text(encoding="utf-8").splitlines()[:30])
+            header = "\n".join(source_file.read_text(encoding="utf-8").splitlines()[:30])
         except OSError:
             return refs, warnings
 
-        matches = list(GENERATED_FROM_RE.finditer(header))
+        # Use language-appropriate comment regex
+        if self.language == "python":
+            pattern = PY_GENERATED_FROM_RE
+        else:
+            pattern = TS_GENERATED_FROM_RE
+
+        matches = list(pattern.finditer(header))
         if not matches:
-            warnings.append(f"No @generated-from header in {ts_file} — manual review required")
+            warnings.append(f"No @generated-from header in {source_file} — manual review required")
             return refs, warnings
 
         for match in matches:
@@ -359,10 +607,14 @@ class _Verifier:
                     node_id=match.group("node_id"),
                     doc_path=match.group("path"),
                     trace_source=trace_source,
-                    source_file=str(ts_file),
+                    source_file=str(source_file),
                 )
             )
         return refs, warnings
+
+    # ------------------------------------------------------------------
+    # Report generation
+    # ------------------------------------------------------------------
 
     def _generate_report(self, result: VerifyResult) -> str:
         report_path = self._resolve_path(self.config.get("report_output", "docs/test/verify_report.md"))
@@ -372,6 +624,7 @@ class _Verifier:
             "# CoDD Verify Report",
             "",
             f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Language: {self.language}",
             "",
             f"## Result: {'PASS' if result.success else 'FAIL'}",
             "",

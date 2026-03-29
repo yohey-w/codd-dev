@@ -1,0 +1,43 @@
+# CoDD プロジェクト設定
+version: "0.1.0"
+
+project:
+  name: "codd-dev"
+  language: "python"
+  frameworks: []
+
+ai_command: "claude --print"
+coding_principles: null
+
+scan:
+  source_dirs:
+    - "codd/"
+  test_dirs:
+    - "tests/"
+  doc_dirs:
+    - "docs/"
+  config_files: []
+  exclude:
+    - "**/__pycache__/**"
+    - "**/dist/**"
+    - "**/*.pyc"
+
+graph:
+  store: "jsonl"
+  path: ".codd/scan"
+
+bands:
+  green:
+    min_confidence: 0.90
+    min_evidence_count: 2
+  amber:
+    min_confidence: 0.50
+
+propagation:
+  max_depth: 10
+  stop_at_contract_boundary: true
+
+verify:
+  typecheck_command: ".venv/bin/mypy codd/"
+  test_command: ".venv/bin/pytest --tb=short -q"
+  report_output: "docs/test/verify_report.md"

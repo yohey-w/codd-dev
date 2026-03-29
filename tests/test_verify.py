@@ -281,6 +281,7 @@ def test_extract_design_refs_missing_header(tmp_path):
 def test_verify_cli_reports_propagate_targets(tmp_path):
     project = tmp_path / "project"
     (project / "codd").mkdir(parents=True)
+    (project / "codd" / "codd.yaml").write_text("version: '0.1.0'\n")
 
     result = VerifyResult(
         success=False,
