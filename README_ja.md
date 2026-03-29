@@ -231,6 +231,16 @@ codd:
 
 `codd/scan/` はキャッシュ — `codd scan` のたびに再生成されます。
 
+## 設定ディレクトリの自動検出
+
+デフォルトでは `codd init` は `codd/` ディレクトリを作成する。プロジェクトに既に `codd/` が存在する場合（例：ソースコードのパッケージ名）、`--config-dir` で別名を指定できる：
+
+```bash
+codd init --config-dir .codd --project-name "my-project" --language "python"
+```
+
+`scan`、`impact`、`generate` 等の全コマンドは、`codd/` → `.codd/` の順で設定ディレクトリを自動検出する。追加フラグは不要。
+
 ## ブラウンフィールド？ ここから
 
 既存コードベースがある場合、`codd extract` がソースコードから設計書を逆生成します。AI不要——純粋な静的解析。
@@ -264,7 +274,7 @@ codd impact
 
 | コマンド | ステータス | 説明 |
 |---------|--------|-------------|
-| `codd init` | **安定版** | プロジェクト初期化 |
+| `codd init` | **安定版** | プロジェクト初期化（`--config-dir .codd` で設定ディレクトリ名を変更可） |
 | `codd scan` | **安定版** | フロントマターから依存グラフ構築 |
 | `codd impact` | **安定版** | 変更影響分析（Green / Amber / Gray バンド） |
 | `codd validate` | **アルファ** | フロントマター整合性 & グラフ一貫性チェック |
