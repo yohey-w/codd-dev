@@ -85,7 +85,7 @@ codd generate --wave 2
 
 # Build dependency graph → analyze impact
 codd scan
-codd impact --diff HEAD~1
+codd impact
 ```
 
 ## 5-Minute Demo — See CoDD in Action
@@ -160,12 +160,10 @@ Your PM asks for SSO and audit logging. Open `docs/requirements/requirements.md`
 - Audit logging (record & export all operations)
 ```
 
-Commit the change, then ask CoDD what's affected:
+Save the file and ask CoDD what's affected:
 
 ```bash
-git add docs/requirements/requirements.md
-git commit -m "req: add SSO and audit logging"
-codd impact --diff HEAD~1   # compare this commit vs the previous one
+codd impact    # detects uncommitted changes automatically
 ```
 
 ```
@@ -276,7 +274,7 @@ See [docs/claude-code-setup.md](docs/claude-code-setup.md) for complete setup.
 | **Change propagation** | No | No | **Dependency graph + impact analysis** |
 | **Derive test strategy** | No | No | **Automatic from architecture** |
 | **V-Model verification** | No | No | **Unit → Integration → E2E** |
-| **Impact analysis** | No | No | **`codd impact --diff HEAD~1`** |
+| **Impact analysis** | No | No | **`codd impact`** |
 | Harness-agnostic | Copilot focused | Multi-agent | **Any harness** |
 
 ## Real-World Usage

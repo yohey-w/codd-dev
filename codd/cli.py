@@ -84,7 +84,7 @@ def scan(path: str):
 
 
 @main.command()
-@click.option("--diff", default="HEAD~1", help="Git diff target (default: HEAD~1)")
+@click.option("--diff", default="HEAD", help="Git diff target (default: HEAD, shows uncommitted changes)")
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--output", default=None, help="Output file (default: stdout)")
 def impact(diff: str, path: str, output: str):

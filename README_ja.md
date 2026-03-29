@@ -85,7 +85,7 @@ codd generate --wave 2
 
 # 依存グラフ構築 → 影響分析
 codd scan
-codd impact --diff HEAD~1
+codd impact
 ```
 
 ## 5分で体験するデモ
@@ -160,12 +160,10 @@ PMから「SSO対応と監査ログ追加して」と言われた。`docs/requir
 - 監査ログ（全操作の記録・エクスポート）
 ```
 
-変更をコミットして、CoDDに「何が影響受ける？」と聞く:
+ファイルを保存して、CoDDに「何が影響受ける？」と聞く:
 
 ```bash
-git add docs/requirements/requirements.md
-git commit -m "req: add SSO and audit logging"
-codd impact --diff HEAD~1   # 直前のコミットと比較して影響分析
+codd impact    # 未コミットの変更を自動検知
 ```
 
 ```
@@ -276,7 +274,7 @@ CoDDはClaude Code用のスラッシュコマンドSkillを同梱。フックと
 | **変更伝播** | No | No | **依存グラフ + 影響分析** |
 | **テスト戦略の自動導出** | No | No | **アーキテクチャから自動** |
 | **V-Model検証** | No | No | **Unit → Integration → E2E** |
-| **影響分析** | No | No | **`codd impact --diff HEAD~1`** |
+| **影響分析** | No | No | **`codd impact`** |
 | ハーネス非依存 | Copilot寄り | マルチエージェント | **どのハーネスでも** |
 
 ## 実プロジェクト実績
