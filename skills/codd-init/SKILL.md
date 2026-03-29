@@ -44,10 +44,12 @@ codd init --project-name "<project-name>" --language <language> --dest .
 
 7. Next steps immediately after init:
    1. If you used `--requirements`, the requirements document is already in `docs/requirements/requirements.md` with CoDD frontmatter. Skip to step 2.
-      If you did NOT use `--requirements`, write a requirements document (plain text is fine) and run:
+      If you did NOT use `--requirements`, write a requirements document (plain text is fine) and import it into the existing project:
 ```bash
-codd init --requirements <path-to-requirements> --dest .
+codd init --project-name "<project-name>" --language "<language>" \
+  --requirements <path-to-requirements> --dest .
 ```
+      This works even when `codd/` already exists — it only imports the file and adds frontmatter.
       Or manually create `docs/requirements/requirements.md` with frontmatter (`node_id` and `type: requirement`).
    2. Run `codd generate` to auto-generate wave_config and design docs:
 ```bash
