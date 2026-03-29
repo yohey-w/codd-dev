@@ -67,7 +67,7 @@ Use this decision guide after every scan:
 | Scan completed and counts look plausible | Run `codd validate --path <path>` to confirm references and frontmatter integrity |
 | Scan printed warnings or your tooling reports `SCAN_ERROR` | Run `codd validate --path <path>` immediately and fix the reported documents before moving on |
 | Orphan nodes are present | Check whether they are intentional. If not, add missing dependency metadata or remove obsolete docs, then rerun `codd scan` and `codd validate` |
-| You already trust the graph and now need blast-radius analysis for recent changes | Run `codd impact --diff HEAD~1 --path <path>` |
+| You already trust the graph and now need blast-radius analysis for recent changes | Run `codd impact --path <path>` |
 | You need impact for a specific commit or branch delta | Run `codd impact --diff <git-ref> --path <path>` |
 
 ## Autonomous Workflow
@@ -79,7 +79,7 @@ When using this skill without further user guidance:
 3. Run `codd scan --path <path>`
 4. Read the summary and warnings
 5. Run `codd validate --path <path>` if anything looks wrong, incomplete, or newly changed
-6. Run `codd impact --diff HEAD~1 --path <path>` only after the graph is fresh and you need downstream impact analysis
+6. Run `codd impact --path <path>` only after the graph is fresh and you need downstream impact analysis
 7. Report the scan summary in plain language: frontmatter coverage, node count, edge count, warnings, and whether follow-up validation or impact analysis is needed
 
 ## Troubleshooting

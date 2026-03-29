@@ -13,26 +13,19 @@ Run this skill when a repository does not have a `codd/` directory yet and you n
    - If `codd/` already exists, do not re-run init. Inspect the existing CoDD setup instead.
    - If the `codd` command is not available, install the package so the console script is on `PATH` before continuing.
 
-2. Collect the two required inputs:
+2. Collect the required inputs:
    - Project name: default to the current directory name unless the user provides a better product name.
    - Primary language: choose one of `python`, `typescript`, `java`, or `go`.
+   - Requirements file (optional): if the user already has a requirements document (any format — `.txt`, `.md`, `.doc`), use `--requirements` to import it. CoDD adds frontmatter automatically.
 
-3. Choose the command based on project type:
-   - Python project:
+3. Choose the command:
+   - With existing requirements file (recommended):
 ```bash
-codd init --project-name "<project-name>" --language python --dest .
+codd init --project-name "<project-name>" --language <language> --requirements <path-to-requirements> --dest .
 ```
-   - TypeScript project:
+   - Without requirements (user will add them later):
 ```bash
-codd init --project-name "<project-name>" --language typescript --dest .
-```
-   - Java project:
-```bash
-codd init --project-name "<project-name>" --language java --dest .
-```
-   - Go project:
-```bash
-codd init --project-name "<project-name>" --language go --dest .
+codd init --project-name "<project-name>" --language <language> --dest .
 ```
 
 4. Run the selected `codd init` command.
@@ -50,12 +43,16 @@ codd init --project-name "<project-name>" --language go --dest .
    - Legacy annotation files under `codd/annotations/` are optional and backward-compatible. Create them only if the project still uses that workflow.
 
 7. Next steps immediately after init:
-   1. Write requirement documents with CoDD frontmatter under the configured `doc_dirs` (e.g., `docs/requirements/requirements.md`). The frontmatter must include `node_id` and `type: requirement`.
+   1. If you used `--requirements`, the requirements document is already in `docs/requirements/requirements.md` with CoDD frontmatter. Skip to step 2.
+      If you did NOT use `--requirements`, write a requirements document (plain text is fine) and run:
+```bash
+codd init --requirements <path-to-requirements> --dest .
+```
+      Or manually create `docs/requirements/requirements.md` with frontmatter (`node_id` and `type: requirement`).
    2. Run `codd generate` to auto-generate wave_config and design docs:
 ```bash
 codd generate --wave 2 --path .
 ```
-   Since v0.2.0a4, `codd generate` auto-generates `wave_config` from requirements if missing. No need to manually create wave_config or run `codd plan --init`.
    3. Scan to build the dependency graph:
 ```bash
 codd scan --path .
@@ -67,7 +64,7 @@ codd validate --path .
    5. If validation passes, continue the normal operating cycle:
 ```bash
 codd scan --path .
-codd impact --diff HEAD~1 --path .
+codd impact --path .
 ```
 
 8. Report back with:

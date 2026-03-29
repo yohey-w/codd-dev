@@ -7,16 +7,18 @@ Use this skill after a requirements, design, code, or test change to determine w
 Run impact analysis from the project root:
 
 ```bash
-codd impact --diff HEAD~1 --path .
+codd impact --path .
 ```
+
+By default, this detects **uncommitted changes** (compares working tree to HEAD). No need to commit first.
 
 If you need a report file:
 
 ```bash
-codd impact --diff HEAD~1 --path . --output "codd/reports/impact_$(date +%Y%m%d_%H%M%S).md"
+codd impact --path . --output "codd/reports/impact_$(date +%Y%m%d_%H%M%S).md"
 ```
 
-If you need to compare against a specific change instead of `HEAD~1`:
+If you need to compare against a specific commit instead of uncommitted changes:
 
 ```bash
 codd impact --diff <commit-hash> --path .
@@ -32,7 +34,7 @@ codd impact --diff <commit-hash> --path .
 codd scan --path .
 ```
 
-4. Run `codd impact --diff HEAD~1 --path .`.
+4. Run `codd impact --path .`.
 5. Read the report in this order:
    - Convention Alerts
    - Green Band
@@ -65,7 +67,7 @@ Action:
 4. Update the body to reflect the new behavior, interface, data flow, constraints, acceptance criteria, or verification approach.
 5. Save the document.
 6. Run `codd scan --path .` to rebuild the graph after the document update.
-7. Re-run `codd impact --diff HEAD~1 --path .` to confirm the remaining impact set is reduced or reclassified.
+7. Re-run `codd impact --path .` to confirm the remaining impact set is reduced or reclassified.
 
 Use Green Band for autonomous propagation. Do not wait for human approval unless the change introduces a product decision that is not already justified in the source requirements or governance docs.
 
@@ -82,7 +84,7 @@ Action:
 1. Summarize why the document is impacted.
 2. Quote the document name and the change summary in the template above.
 3. Wait for confirmation before editing the document.
-4. If approved, update the document, run `codd scan --path .`, then re-run `codd impact --diff HEAD~1 --path .`.
+4. If approved, update the document, run `codd scan --path .`, then re-run `codd impact --path .`.
 
 ## Gray Band
 
@@ -117,7 +119,7 @@ When Green Band allows autonomous updates, or Amber Band gets approved, update a
 5. Preserve traceability. Do not add behavior that is not justified by requirements, governance, or the changed source artifact.
 6. Save the document.
 7. Run `codd scan --path .`.
-8. Run `codd impact --diff HEAD~1 --path .` again.
+8. Run `codd impact --path .` again.
 9. Report what changed, what was intentionally left unchanged, and whether any Amber or Gray items remain.
 
 ## Reporting Rules
@@ -144,7 +146,7 @@ codd scan --path .
 Then run:
 
 ```bash
-codd impact --diff HEAD~1 --path .
+codd impact --path .
 ```
 
 ### `No changes detected`
