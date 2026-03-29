@@ -73,58 +73,58 @@ CoDD is **harness-agnostic** — works with Claude Code, Copilot, Cursor, or any
 ## Quick Start
 
 ```bash
-# Install
 pip install codd-dev
+mkdir my-project && cd my-project && git init
 
-# Initialize a new project
-codd init --project-name "my-project" --language "typescript"
+# Initialize — pass your requirements file, any format works
+codd init --project-name "my-project" --language "typescript" \
+  --requirements spec.txt
 
-# Build the dependency graph from frontmatter
+# AI generates design docs (wave_config auto-generated)
+codd generate --wave 2
+
+# Build dependency graph → analyze impact
 codd scan
-
-# What breaks if I change this?
 codd impact --diff HEAD~1
 ```
 
 ## 5-Minute Demo — See CoDD in Action
 
-An LMS project. Write **requirements only**, let AI generate the rest, then change one thing and watch the impact ripple through.
+A task management app. Write **requirements in plain text**, let CoDD + AI handle everything else.
 
-### Step 1: Setup
+### Step 1: Write your requirements (any format — txt, md, doc)
+
+```text
+# TaskFlow — Requirements
+
+## Functional Requirements
+- User auth (email + Google OAuth)
+- Workspace management (teams, roles, invites)
+- Task CRUD with assignees, labels, due dates
+- Real-time updates (WebSocket)
+- File attachments (S3)
+- Notification system (in-app + email)
+
+## Constraints
+- Next.js + Prisma + PostgreSQL
+- Row-level security for workspace isolation
+- All API endpoints rate-limited
+```
+
+Save this as `spec.txt`. That's it — no special formatting needed.
+
+### Step 2: Initialize CoDD
 
 ```bash
 pip install codd-dev
-mkdir demo-lms && cd demo-lms && git init
-codd init --project-name "demo-lms" --language "typescript"
+mkdir taskflow && cd taskflow && git init
+codd init --project-name "taskflow" --language "typescript" \
+  --requirements spec.txt
 ```
 
-### Step 2: Write requirements (the only human input)
-
-Create `docs/requirements/requirements.md`:
-
-```markdown
----
-codd:
-  node_id: "req:lms-requirements-v2.0"
-  type: requirement
----
-# LMS Requirements v2.0
-
-## Functional Requirements
-- Tenant management (organization-level isolation)
-- User auth (email/Google OAuth)
-- Course management (create/edit/publish)
-- Progress tracking
-- Reports & dashboards
-
-## Constraints
-- Tenant isolation via RLS
-- Auth via Supabase Auth + Google OAuth
-```
+CoDD adds frontmatter (`node_id`, `type`, dependency metadata) automatically. You never touch it.
 
 ### Step 3: AI generates design docs
-
-`codd generate` calls your AI CLI to produce design docs in Wave order. If `wave_config` doesn't exist, it auto-generates one from your requirements.
 
 ```bash
 codd generate --wave 2   # System design + API design
@@ -132,7 +132,7 @@ codd generate --wave 3   # DB design + Auth design
 codd generate --wave 4   # Test strategy
 ```
 
-Each generated doc gets CoDD frontmatter automatically — `node_id`, `depends_on`, Wave number. No manual wiring.
+`wave_config` is auto-generated from your requirements. Each design doc gets frontmatter and `depends_on` declarations — all derived, nothing manual.
 
 ### Step 4: Build the dependency graph
 
@@ -148,22 +148,19 @@ Scan complete:
   Evidence: 15 total (0 human, 15 auto)
 ```
 
-7 docs, 15 dependency edges. Zero config files written by hand.
+7 docs, 15 dependency edges. Zero config written by hand.
 
 ### Step 5: Change requirements mid-project
 
-Add three lines to the requirements:
+Your PM asks for SSO and audit logging. Add two lines to `spec.txt`:
 
-```markdown
-## Additional Requirements (v2.1)
+```text
+## Additional Requirements (v1.1)
 - SAML SSO (enterprise customers)
 - Audit logging (record & export all operations)
-- API rate limiting
 ```
 
 Commit and run:
-
-### Step 6: Impact analysis
 
 ```bash
 codd impact --diff HEAD~1
@@ -171,7 +168,7 @@ codd impact --diff HEAD~1
 
 ```
 Changed files: 1
-  - docs/requirements/requirements.md → req:lms-requirements-v2.0
+  - docs/requirements/requirements.md → req:taskflow-requirements
 
 # CoDD Impact Report
 
@@ -194,7 +191,7 @@ Changed files: 1
 | plan:implementation     | 2     | 0.00       |
 ```
 
-**3 lines changed → 6 out of 7 docs affected.** Green band auto-propagates. Amber band needs human review. Gray is informational. You know exactly what to fix before anything breaks.
+**2 lines changed → 6 out of 7 docs affected.** Green band: AI auto-updates. Amber: human reviews. Gray: informational. You know exactly what to fix before anything breaks.
 
 ## Wave-Based Generation
 
@@ -227,7 +224,7 @@ codd:
   depends_on:
     - id: "design:system-design"
       relation: derives_from
-    - id: "req:lms-requirements-v2.0"
+    - id: "req:my-project-requirements"
       relation: implements
 ---
 ```
@@ -282,14 +279,14 @@ See [docs/claude-code-setup.md](docs/claude-code-setup.md) for complete setup.
 
 ## Real-World Usage
 
-Dogfooded on a production LMS — 18 design docs connected by a dependency graph. All docs, code, and tests generated by AI following CoDD. When requirements changed mid-project, `codd impact` identified affected artifacts and AI fixed them automatically.
+Battle-tested on a production web app — 18 design docs connected by a dependency graph. All docs, code, and tests generated by AI following CoDD. When requirements changed mid-project, `codd impact` identified affected artifacts and AI fixed them automatically.
 
 ```
 docs/
-├── requirements/       # What to build (human input)
-├── design/             # System design, API, DB, UI (6 files)
-├── detailed_design/    # Module-level specs (4 files)
-├── governance/         # ADRs (3 files)
+├── requirements/       # What to build (human input — plain text)
+├── design/             # System design, API, DB, UI (AI-generated)
+├── detailed_design/    # Module-level specs (AI-generated)
+├── governance/         # ADRs (AI-generated)
 ├── plan/               # Implementation plan
 ├── test/               # Acceptance criteria, test strategy
 ├── operations/         # Runbooks
