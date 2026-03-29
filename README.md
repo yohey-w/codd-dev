@@ -378,11 +378,24 @@ docs/
 └── infra/              # Infrastructure design
 ```
 
+### CoDD Manages Its Own Development
+
+CoDD dogfoods itself. The `.codd/` directory contains CoDD's own config, and `codd extract` reverse-engineers design docs from its own source code. The full V-Model lifecycle runs on itself:
+
+```bash
+codd init --config-dir .codd --project-name "codd-dev" --language "python"
+codd extract          # 15 modules → design docs with dependency frontmatter
+codd scan             # 49 nodes, 83 edges
+codd verify           # mypy + pytest (127/127 tests pass)
+```
+
+If CoDD can't manage itself, it shouldn't manage your project.
+
 ## Roadmap
 
 - [ ] Semantic dependency types (`requires`, `affects`, `verifies`, `implements`)
 - [x] `codd extract` — reverse-generate design docs from existing codebases (brownfield support)
-- [ ] `codd verify` — full docs-code-tests coherence check
+- [x] `codd verify` — language-agnostic verification (Python: mypy + pytest, TypeScript: tsc + jest)
 - [ ] Multi-harness integration examples (Claude Code, Copilot, Cursor)
 - [ ] VS Code extension for impact visualization
 

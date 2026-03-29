@@ -378,11 +378,24 @@ docs/
 └── infra/              # インフラ設計
 ```
 
+### CoDD自身の開発もCoDDで管理
+
+CoDDは自分自身をdogfoodingしている。`.codd/`ディレクトリにCoDD自身の設定があり、`codd extract`で自分のソースコードから設計書を逆生成する。V-Modelライフサイクル全体が自分自身に対して動く：
+
+```bash
+codd init --config-dir .codd --project-name "codd-dev" --language "python"
+codd extract          # 15モジュール → 依存フロントマター付き設計書
+codd scan             # 49ノード、83エッジ
+codd verify           # mypy + pytest（127/127テスト通過）
+```
+
+自分自身を管理できないツールに、あなたのプロジェクトは任せられない。
+
 ## ロードマップ
 
 - [ ] セマンティック依存関係タイプ (`requires`, `affects`, `verifies`, `implements`)
 - [x] `codd extract` — 既存コードベースから設計書を逆生成（ブラウンフィールド対応）
-- [ ] `codd verify` — 設計書↔コード↔テストの完全一貫性チェック
+- [x] `codd verify` — 言語非依存の検証（Python: mypy + pytest、TypeScript: tsc + jest）
 - [ ] マルチハーネス連携例（Claude Code, Copilot, Cursor）
 - [ ] VS Code拡張（影響分析の可視化）
 
