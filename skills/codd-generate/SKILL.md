@@ -15,12 +15,22 @@ CoDD design generation follows dependency order. Documents in the same wave may 
 - Wave 3: detailed design artifacts derived from approved system design
 - Wave 4+: later artifacts only after the previous wave is validated and approved
 
+## Auto Wave Config
+
+Since v0.2.0a4, `codd generate` automatically generates `wave_config` from requirement documents if it's missing from `codd.yaml`. You no longer need to run `codd plan --init` manually before generating. The flow is:
+
+1. Write requirement documents with CoDD frontmatter (`type: requirement`)
+2. Run `codd generate --wave 2` — wave_config is auto-generated from requirements
+3. Design docs are generated in the correct dependency order
+
+This means **the only human input is the requirements**. Everything else — wave_config, frontmatter, dependency declarations — is derived automatically.
+
 ## Prerequisite Checks
 
 Before every generation run, verify these conditions:
 
 1. `codd/codd.yaml` exists in the project root.
-2. The requirement documents referenced by the current wave already exist.
+2. At least one requirement document with CoDD frontmatter exists under configured `doc_dirs`.
 3. For Wave 1, `codd init` has been completed successfully.
 4. For Wave 2 and later, every output from the previous wave exists and `codd validate --path .` passes.
 5. Confirm you are in the intended project root before running generation commands.

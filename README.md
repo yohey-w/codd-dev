@@ -86,24 +86,115 @@ codd scan
 codd impact --diff HEAD~1
 ```
 
-### Impact Analysis Output
+## 5-Minute Demo — See CoDD in Action
 
-```
-Changed: docs/requirements/requirements.md
+An LMS project. Write **requirements only**, let AI generate the rest, then change one thing and watch the impact ripple through.
 
-Green Band (high confidence — auto-propagate)
-  design:system-design    depth:1  confidence:0.90
-  design:api-design       depth:1  confidence:0.90
-  detail:db-design        depth:2  confidence:0.90
+### Step 1: Setup
 
-Amber Band (review needed)
-  detail:auth-design      depth:2  confidence:0.90
-
-Gray Band (informational)
-  test:test-strategy      depth:2  confidence:0.00
+```bash
+pip install codd-dev
+mkdir demo-lms && cd demo-lms && git init
+codd init --project-name "demo-lms" --language "typescript"
 ```
 
-One change, every affected artifact identified with confidence levels.
+### Step 2: Write requirements (the only human input)
+
+Create `docs/requirements/requirements.md`:
+
+```markdown
+---
+codd:
+  node_id: "req:lms-requirements-v2.0"
+  type: requirement
+---
+# LMS Requirements v2.0
+
+## Functional Requirements
+- Tenant management (organization-level isolation)
+- User auth (email/Google OAuth)
+- Course management (create/edit/publish)
+- Progress tracking
+- Reports & dashboards
+
+## Constraints
+- Tenant isolation via RLS
+- Auth via Supabase Auth + Google OAuth
+```
+
+### Step 3: AI generates design docs
+
+`codd generate` calls your AI CLI to produce design docs in Wave order. If `wave_config` doesn't exist, it auto-generates one from your requirements.
+
+```bash
+codd generate --wave 2   # System design + API design
+codd generate --wave 3   # DB design + Auth design
+codd generate --wave 4   # Test strategy
+```
+
+Each generated doc gets CoDD frontmatter automatically — `node_id`, `depends_on`, Wave number. No manual wiring.
+
+### Step 4: Build the dependency graph
+
+```bash
+codd scan
+```
+
+```
+Frontmatter: 7 documents in docs
+Scan complete:
+  Documents with frontmatter: 7
+  Graph: 7 nodes, 15 edges
+  Evidence: 15 total (0 human, 15 auto)
+```
+
+7 docs, 15 dependency edges. Zero config files written by hand.
+
+### Step 5: Change requirements mid-project
+
+Add three lines to the requirements:
+
+```markdown
+## Additional Requirements (v2.1)
+- SAML SSO (enterprise customers)
+- Audit logging (record & export all operations)
+- API rate limiting
+```
+
+Commit and run:
+
+### Step 6: Impact analysis
+
+```bash
+codd impact --diff HEAD~1
+```
+
+```
+Changed files: 1
+  - docs/requirements/requirements.md → req:lms-requirements-v2.0
+
+# CoDD Impact Report
+
+## Green Band (high confidence, auto-propagate)
+| Target                  | Depth | Confidence |
+|-------------------------|-------|------------|
+| design:system-design    | 1     | 0.90       |
+| design:api-design       | 1     | 0.90       |
+| detail:db-design        | 2     | 0.90       |
+| detail:auth-design      | 2     | 0.90       |
+
+## Amber Band (must review)
+| Target                  | Depth | Confidence |
+|-------------------------|-------|------------|
+| test:test-strategy      | 2     | 0.90       |
+
+## Gray Band (informational)
+| Target                  | Depth | Confidence |
+|-------------------------|-------|------------|
+| plan:implementation     | 2     | 0.00       |
+```
+
+**3 lines changed → 6 out of 7 docs affected.** Green band auto-propagates. Amber band needs human review. Gray is informational. You know exactly what to fix before anything breaks.
 
 ## Wave-Based Generation
 

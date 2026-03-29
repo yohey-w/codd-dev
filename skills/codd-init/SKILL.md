@@ -50,13 +50,17 @@ codd init --project-name "<project-name>" --language go --dest .
    - Legacy annotation files under `codd/annotations/` are optional and backward-compatible. Create them only if the project still uses that workflow.
 
 7. Next steps immediately after init:
-   1. Register the initial design documents in `codd/annotations/doc_links.yaml` if the project uses legacy annotations. Create `codd/annotations/` first if it does not exist yet, or rely on Markdown frontmatter when the project is frontmatter-first.
-   2. Add or review CoDD frontmatter in the requirement and design documents you want included in the graph.
-   3. Run the first scan:
+   1. Write requirement documents with CoDD frontmatter under the configured `doc_dirs` (e.g., `docs/requirements/requirements.md`). The frontmatter must include `node_id` and `type: requirement`.
+   2. Run `codd generate` to auto-generate wave_config and design docs:
+```bash
+codd generate --wave 2 --path .
+```
+   Since v0.2.0a4, `codd generate` auto-generates `wave_config` from requirements if missing. No need to manually create wave_config or run `codd plan --init`.
+   3. Scan to build the dependency graph:
 ```bash
 codd scan --path .
 ```
-   4. Validate the graph inputs before moving on:
+   4. Validate the graph inputs:
 ```bash
 codd validate --path .
 ```
