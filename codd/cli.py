@@ -20,7 +20,13 @@ def main():
 @click.option("--project-name", prompt="Project name", help="Name of the project")
 @click.option("--language", prompt="Primary language", help="Primary language (python/typescript/java/go)")
 @click.option("--dest", default=".", help="Destination directory (default: current dir)")
-def init(project_name: str, language: str, dest: str):
+@click.option(
+    "--requirements",
+    default=None,
+    type=click.Path(exists=True),
+    help="Import a requirements file (any format: .md, .txt, .doc). CoDD adds frontmatter automatically.",
+)
+def init(project_name: str, language: str, dest: str, requirements: str | None):
     """Initialize CoDD in a project directory."""
     dest_path = Path(dest).resolve()
     codd_dir = dest_path / "codd"
@@ -43,12 +49,23 @@ def init(project_name: str, language: str, dest: str):
     # Version file
     (dest_path / ".codd_version").write_text("0.2.0\n")
 
-    click.echo(f"CoDD initialized in {codd_dir}")
-    click.echo(f"  codd.yaml    — project config")
-    click.echo(f"  scan/        — JSONL scan output (nodes.jsonl, edges.jsonl)")
-    click.echo(f"")
-    click.echo(f"Next: Add codd frontmatter to your documents (docs/*.md)")
-    click.echo(f"Then: codd scan → builds scan/*.jsonl from all frontmatter")
+    # Import requirements if provided
+    if requirements:
+        req_path = _import_requirements(dest_path, Path(requirements), project_name)
+        rel_req = req_path.relative_to(dest_path).as_posix()
+        click.echo(f"CoDD initialized in {codd_dir}")
+        click.echo(f"  codd.yaml         — project config")
+        click.echo(f"  {rel_req}  — requirements (frontmatter added)")
+        click.echo(f"")
+        click.echo(f"Next: codd generate --wave 2  (AI generates design docs)")
+    else:
+        click.echo(f"CoDD initialized in {codd_dir}")
+        click.echo(f"  codd.yaml    — project config")
+        click.echo(f"  scan/        — JSONL scan output (nodes.jsonl, edges.jsonl)")
+        click.echo(f"")
+        click.echo(f"Next: Write your requirements, then run:")
+        click.echo(f"  codd init --requirements your-spec.md --dest .")
+        click.echo(f"  or: codd generate --wave 2  (auto-generates everything)")
 
 
 @main.command()
@@ -350,7 +367,35 @@ def _render_template(template_name: str, dest: Path, variables: dict):
     dest.write_text(content)
 
 
-    # _init_graph_db removed — JSONL files are created on first scan
+def _import_requirements(project_root: Path, source: Path, project_name: str) -> Path:
+    """Import a requirements file, adding CoDD frontmatter if missing."""
+    import re
+
+    content = source.read_text(encoding="utf-8")
+
+    # Check if it already has CoDD frontmatter
+    has_frontmatter = content.strip().startswith("---") and "codd:" in content.split("---", 2)[1] if content.strip().startswith("---") and content.count("---") >= 2 else False
+
+    if not has_frontmatter:
+        # Derive node_id from project name
+        slug = re.sub(r"[^a-z0-9]+", "-", project_name.lower()).strip("-")
+        frontmatter = (
+            "---\n"
+            "codd:\n"
+            f'  node_id: "req:{slug}-requirements"\n'
+            "  type: requirement\n"
+            "  status: approved\n"
+            "  confidence: 0.95\n"
+            "---\n\n"
+        )
+        content = frontmatter + content
+
+    # Place in docs/requirements/
+    req_dir = project_root / "docs" / "requirements"
+    req_dir.mkdir(parents=True, exist_ok=True)
+    dest = req_dir / "requirements.md"
+    dest.write_text(content, encoding="utf-8")
+    return dest
 
 
 if __name__ == "__main__":
