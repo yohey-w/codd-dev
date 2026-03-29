@@ -76,6 +76,9 @@ class ModuleInfo:
     patterns: dict[str, str] = field(default_factory=dict)  # pattern_type -> detail
     call_edges: list[CallEdge] = field(default_factory=list)
     interface_contract: Any = None  # InterfaceContract from contracts.py
+    test_coverage: Any = None       # TestCoverage from traceability.py
+    schema_refs: list[Any] = field(default_factory=list)    # SchemaRef from schema_refs.py
+    runtime_wires: list[Any] = field(default_factory=list)  # RuntimeWire from wiring.py
 
 
 @dataclass
@@ -104,6 +107,7 @@ class ProjectFacts:
     infra_config: dict[str, ConfigInfo] = field(default_factory=dict)
     build_deps: BuildDepsInfo | None = None
     feature_clusters: list[FeatureCluster] = field(default_factory=list)
+    change_risks: list[Any] = field(default_factory=list)  # ChangeRisk from risk.py
 
 
 @dataclass
@@ -183,6 +187,22 @@ def extract_facts(project_root: Path, language: str | None = None,
     # R4.2: Feature clustering
     from codd.clustering import build_feature_clusters
     build_feature_clusters(facts)
+
+    # R5.1: Test traceability
+    from codd.traceability import build_test_traceability
+    build_test_traceability(facts, project_root)
+
+    # R5.2: Schema-code dependency
+    from codd.schema_refs import build_schema_refs
+    build_schema_refs(facts, project_root)
+
+    # R5.3: Runtime wiring detection
+    from codd.wiring import build_runtime_wires
+    build_runtime_wires(facts, project_root)
+
+    # R5.4: Change risk scoring (depends on R4.3, R5.1)
+    from codd.risk import build_change_risks
+    build_change_risks(facts)
 
     return facts
 

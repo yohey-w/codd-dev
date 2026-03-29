@@ -98,6 +98,39 @@
 {% endfor %}
 {% endif %}
 
+{% if test_coverage %}
+## Test Coverage
+
+**Coverage**: {{ test_coverage.coverage_ratio }} ({{ test_coverage.covered_symbols | length }} / {{ test_coverage.covered_symbols | length + test_coverage.uncovered_symbols | length }})
+{% if test_coverage.covering_tests %}
+Tests: {{ test_coverage.covering_tests | join(", ") }}
+{% endif %}
+{% if test_coverage.uncovered_symbols %}
+
+**Uncovered symbols**: {% for s in test_coverage.uncovered_symbols %}`{{ s }}`{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}
+{% endif %}
+
+{% if schema_refs %}
+## Schema Dependencies
+
+| Table/Model | Kind | Location |
+|-------------|------|----------|
+{% for ref in schema_refs -%}
+| `{{ ref.table_or_model }}` | {{ ref.kind }} | `{{ ref.file }}:{{ ref.line }}` |
+{% endfor %}
+{% endif %}
+
+{% if runtime_wires %}
+## Runtime Wiring
+
+| Kind | Target | Framework | Location |
+|------|--------|-----------|----------|
+{% for wire in runtime_wires -%}
+| {{ wire.kind }} | `{{ wire.target }}` | {{ wire.framework }} | `{{ wire.source }}` |
+{% endfor %}
+{% endif %}
+
 {% if internal_dependencies %}
 ## Import Dependencies
 

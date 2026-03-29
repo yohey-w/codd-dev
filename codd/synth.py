@@ -167,6 +167,7 @@ def synth_architecture(
         external_dependencies=_all_external_dependencies(facts),
         build_deps=_build_deps_context(facts.build_deps),
         deployment_hints=_deployment_hints(facts),
+        change_risks=facts.change_risks,
     )
     architecture_path.write_text(content, encoding="utf-8")
     return architecture_path
@@ -266,6 +267,9 @@ def _render_module_detail(env: Environment, facts: ProjectFacts, module: ModuleI
         tests=_tests_context(module),
         call_edges=module.call_edges,
         interface_contract=module.interface_contract,
+        test_coverage=module.test_coverage,
+        schema_refs=module.schema_refs,
+        runtime_wires=module.runtime_wires,
     )
     return content
 
@@ -366,6 +370,35 @@ def _module_depends_on(facts: ProjectFacts, module: ModuleInfo) -> list[dict[str
                             {"id": nid, "relation": "co_feature", "semantic": "technical"}
                         )
                         seen_ids.add(nid)
+
+    # R5.2: schema_uses edges
+    for ref in getattr(module, "schema_refs", []):
+        # Link to schema doc if one exists for this table
+        for schema_path in facts.schemas:
+            schema_obj = facts.schemas[schema_path]
+            tables = [t.get("name", "") for t in getattr(schema_obj, "tables", [])]
+            models = [m.get("name", "") for m in getattr(schema_obj, "models", [])]
+            if ref.table_or_model in tables or ref.table_or_model in models:
+                nid = _schema_node_id(schema_path)
+                if nid not in seen_ids:
+                    depends_on.append(
+                        {"id": nid, "relation": "schema_uses", "semantic": "technical"}
+                    )
+                    seen_ids.add(nid)
+
+    # R5.3: runtime_wires edges
+    wire_targets: set[str] = set()
+    for wire in getattr(module, "runtime_wires", []):
+        target = wire.target.split(".")[0]
+        if target in facts.modules and target != module.name:
+            wire_targets.add(target)
+    for target in sorted(wire_targets):
+        nid = _module_node_id(target)
+        if nid not in seen_ids:
+            depends_on.append(
+                {"id": nid, "relation": "runtime_wires", "semantic": "technical"}
+            )
+            seen_ids.add(nid)
 
     return depends_on
 

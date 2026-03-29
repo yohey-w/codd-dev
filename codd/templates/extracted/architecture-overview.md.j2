@@ -58,6 +58,16 @@ Evidence: {{ cluster.evidence | join("; ") }}
 {% endfor %}
 {% endif %}
 
+{% if change_risks %}
+## Change Risk Summary
+
+| Module | Risk | Dependents | Uncovered | API Surface | Violations |
+|--------|------|------------|-----------|-------------|------------|
+{% for risk in change_risks -%}
+| `{{ risk.module }}` | {{ risk.score }} | {{ risk.factors.dependents }} | {{ risk.factors.uncovered }} | {{ risk.factors.api_surface }} | {{ risk.factors.violations }} |
+{% endfor %}
+{% endif %}
+
 ## Layer Violations
 
 {% if violations %}
