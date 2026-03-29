@@ -24,11 +24,15 @@ dependencies = [
     "pyyaml>=6.0",
     "click>=8.0",
     "jinja2>=3.1.0",
+    "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 api-parsers = [
     "graphql-core>=3.2.0",
+]
+infra = [
+    "python-hcl2>=7.0.0",
 ]
 tree-sitter = [
     "tree-sitter>=0.25.0,<0.26.0",

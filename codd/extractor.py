@@ -18,7 +18,20 @@ from typing import Any
 
 import yaml
 
-from codd.parsing import GraphQlExtractor, OpenApiExtractor, ProtobufExtractor
+from codd.parsing import (
+    BuildDepsExtractor,
+    BuildDepsInfo,
+    ConfigInfo,
+    DockerComposeExtractor,
+    GraphQlExtractor,
+    KubernetesExtractor,
+    OpenApiExtractor,
+    ProtobufExtractor,
+    TerraformExtractor,
+    TestExtractor,
+    TestInfo,
+    get_extractor,
+)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -29,7 +42,7 @@ from codd.parsing import GraphQlExtractor, OpenApiExtractor, ProtobufExtractor
 class Symbol:
     """A class or function extracted from source code."""
     name: str
-    kind: str           # "class" | "function"
+    kind: str           # "class" | "function" | "interface" | "type_alias" | "enum"
     file: str           # relative path
     line: int
     params: str = ""    # function parameters
@@ -37,6 +50,8 @@ class Symbol:
     decorators: list[str] = field(default_factory=list)
     visibility: str = "public"
     is_async: bool = False
+    bases: list[str] = field(default_factory=list)
+    implements: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -48,6 +63,7 @@ class ModuleInfo:
     internal_imports: dict[str, list[str]] = field(default_factory=dict)  # module -> [import lines]
     external_imports: set[str] = field(default_factory=set)
     test_files: list[str] = field(default_factory=list)
+    test_details: list[TestInfo] = field(default_factory=list)
     line_count: int = 0
     patterns: dict[str, str] = field(default_factory=dict)  # pattern_type -> detail
 
@@ -66,8 +82,8 @@ class ProjectFacts:
     total_lines: int = 0
     schemas: dict[str, Any] = field(default_factory=dict)
     api_specs: dict[str, Any] = field(default_factory=dict)
-    infra_config: dict[str, Any] = field(default_factory=dict)
-    build_deps: Any = None
+    infra_config: dict[str, ConfigInfo] = field(default_factory=dict)
+    build_deps: BuildDepsInfo | None = None
 
 
 @dataclass
@@ -113,6 +129,16 @@ def extract_facts(project_root: Path, language: str | None = None,
             continue
         _discover_modules(facts, project_root, src_path, language, exclude_patterns)
 
+    # Discover DDL / schema artifacts
+    _discover_schemas(facts, project_root, exclude_patterns)
+
+    # Detect API definition files
+    _discover_api_specs(facts, project_root)
+
+    # Detect infrastructure/build metadata
+    _discover_config(facts, project_root)
+    facts.build_deps = _discover_build_deps(project_root)
+
     # Detect test files and map to modules
     test_dirs = _detect_test_dirs(project_root)
     for test_dir in test_dirs:
@@ -125,9 +151,6 @@ def extract_facts(project_root: Path, language: str | None = None,
 
     # Detect entry points
     _detect_entry_points(facts, project_root, language)
-
-    # Detect API definition files
-    _discover_api_specs(facts, project_root)
 
     return facts
 
@@ -212,6 +235,7 @@ def _discover_modules(facts: ProjectFacts, project_root: Path, src_dir: Path,
                       language: str, exclude_patterns: list[str]):
     """Walk source tree and discover modules with their symbols and imports."""
     exts = _language_extensions(language)
+    extractor = get_extractor(language, "source")
 
     for root, dirs, files in os.walk(src_dir):
         rel_root = Path(root).relative_to(project_root).as_posix()
@@ -251,16 +275,57 @@ def _discover_modules(facts: ProjectFacts, project_root: Path, src_dir: Path,
             facts.total_files += 1
 
             # Extract symbols
-            symbols = _extract_symbols(content, rel, language)
+            symbols = extractor.extract_symbols(content, rel)
             mod.symbols.extend(symbols)
 
             # Extract imports
-            internal, external = _extract_imports(
-                content, language, project_root, src_dir, full
-            )
+            internal, external = extractor.extract_imports(content, full, project_root, src_dir)
             for imp_module, imp_lines in internal.items():
                 mod.internal_imports.setdefault(imp_module, []).extend(imp_lines)
             mod.external_imports.update(external)
+
+
+def _discover_schemas(facts: ProjectFacts, project_root: Path, exclude_patterns: list[str]):
+    """Collect schema artifacts such as SQL DDL and Prisma schema files."""
+    schema_languages = {
+        ".prisma": "prisma",
+        ".sql": "sql",
+    }
+
+    for root, dirs, files in os.walk(project_root):
+        rel_root = Path(root).relative_to(project_root).as_posix()
+        if any(_match_glob(rel_root + "/x", pat) for pat in exclude_patterns):
+            dirs.clear()
+            continue
+
+        for fname in files:
+            language = schema_languages.get(Path(fname).suffix)
+            if language is None:
+                continue
+
+            full = Path(root) / fname
+            rel = full.relative_to(project_root).as_posix()
+            if any(_match_glob(rel, pat) for pat in exclude_patterns):
+                continue
+
+            try:
+                content = full.read_text(errors="ignore")
+            except Exception:
+                continue
+
+            extractor = get_extractor(language, "schema")
+            schema_info = extractor.extract_schema(content, full)
+            if _schema_has_data(schema_info):
+                facts.schemas[rel] = schema_info
+
+
+def _schema_has_data(schema_info: Any) -> bool:
+    if schema_info is None:
+        return False
+    return any(
+        getattr(schema_info, attr, None)
+        for attr in ("tables", "foreign_keys", "indexes", "views", "models", "enums")
+    )
 
 
 def _file_to_module(rel_path: str, project_root: Path, src_dir: Path,
@@ -463,30 +528,35 @@ def _map_tests_to_modules(facts: ProjectFacts, project_root: Path,
                           test_dir: Path, language: str):
     """Map test files to their target modules."""
     exts = _language_extensions(language)
+    source_extractor = get_extractor(language, "source")
+    test_extractor = TestExtractor(language)
 
     for root, dirs, files in os.walk(test_dir):
         for fname in files:
-            if Path(fname).suffix not in exts:
+            if Path(fname).suffix not in exts or not test_extractor._is_test_file(fname):
                 continue
             full = Path(root) / fname
             rel = full.relative_to(project_root).as_posix()
+            try:
+                content = full.read_text(errors="ignore")
+            except Exception:
+                content = ""
+            test_info = test_extractor.extract_test_info(content, rel)
 
             # Try to match test file to module
             target_module = _guess_test_target(fname, language)
             if target_module and target_module in facts.modules:
-                facts.modules[target_module].test_files.append(rel)
+                test_info.source_module = target_module
+                _attach_test_info(facts.modules[target_module], rel, test_info)
             else:
                 # Try reading imports to find target
+                src_dir = project_root / facts.source_dirs[0] if facts.source_dirs else project_root
                 try:
-                    content = full.read_text(errors="ignore")
-                    internal, _ = _extract_imports(
-                        content, language, project_root,
-                        project_root / facts.source_dirs[0] if facts.source_dirs else project_root,
-                        full
-                    )
+                    internal, _ = source_extractor.extract_imports(content, full, project_root, src_dir)
                     for mod_name in internal:
                         if mod_name in facts.modules:
-                            facts.modules[mod_name].test_files.append(rel)
+                            test_info.source_module = mod_name
+                            _attach_test_info(facts.modules[mod_name], rel, test_info)
                             break
                 except Exception:
                     pass
@@ -507,6 +577,17 @@ def _guess_test_target(test_filename: str, language: str) -> str | None:
                 return name[: -len(suffix)]
 
     return None
+
+
+def _attach_test_info(module: ModuleInfo, rel_path: str, test_info: TestInfo):
+    """Attach test metadata without duplicating filenames or test details."""
+    if rel_path not in module.test_files:
+        module.test_files.append(rel_path)
+    if not any(
+        existing.file_path == test_info.file_path and existing.source_module == test_info.source_module
+        for existing in module.test_details
+    ):
+        module.test_details.append(test_info)
 
 
 def _detect_patterns(facts: ProjectFacts, project_root: Path):
@@ -535,13 +616,14 @@ def _detect_patterns(facts: ProjectFacts, project_root: Path):
         _detect_go_patterns(facts, content)
 
     # Scan source files for framework-specific patterns
+    extractor = get_extractor(facts.language, "source")
     for mod in facts.modules.values():
         for fpath in mod.files:
             try:
                 content = (project_root / fpath).read_text(errors="ignore")
             except Exception:
                 continue
-            _detect_code_patterns(mod, content, facts.language)
+            extractor.detect_code_patterns(mod, content)
 
 
 def _detect_python_patterns(facts: ProjectFacts, content: str):
@@ -680,6 +762,63 @@ def _discover_api_specs(facts: ProjectFacts, project_root: Path):
             spec = extract_method(content, relative_path)
             if spec.endpoints or spec.schemas or spec.services:
                 facts.api_specs[relative_path] = spec
+
+
+def _discover_config(facts: ProjectFacts, project_root: Path):
+    """Collect infrastructure/configuration metadata across the project."""
+    extractors = [
+        (
+            DockerComposeExtractor(),
+            "detect_docker_compose",
+            "extract_services",
+        ),
+        (
+            KubernetesExtractor(),
+            "detect_k8s_manifests",
+            "extract_manifests",
+        ),
+        (
+            TerraformExtractor(),
+            "detect_tf_files",
+            "extract_resources",
+        ),
+    ]
+
+    for extractor, detect_method_name, extract_method_name in extractors:
+        if isinstance(extractor, TerraformExtractor) and not extractor.is_available():
+            continue
+
+        detect_method = getattr(extractor, detect_method_name)
+        extract_method = getattr(extractor, extract_method_name)
+        for file_path in detect_method(project_root):
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+
+            relative_path = file_path.relative_to(project_root).as_posix()
+            config = extract_method(content, relative_path)
+            if config.services or config.resources:
+                facts.infra_config[relative_path] = config
+
+
+def _discover_build_deps(project_root: Path) -> BuildDepsInfo | None:
+    """Collect dependency/build metadata from project manifests."""
+    extractor = BuildDepsExtractor()
+    discovered: list[BuildDepsInfo] = []
+
+    for file_path in extractor.detect_build_files(project_root):
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        relative_path = file_path.relative_to(project_root).as_posix()
+        build_info = extractor.extract_deps(content, file_path.name, relative_path)
+        if build_info.runtime or build_info.dev or build_info.scripts:
+            discovered.append(build_info)
+
+    return extractor.merge(discovered)
 
 
 # ═══════════════════════════════════════════════════════════
