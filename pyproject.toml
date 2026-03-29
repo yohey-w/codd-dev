@@ -27,6 +27,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+api-parsers = [
+    "graphql-core>=3.2.0",
+]
 tree-sitter = [
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-python>=0.25.0,<0.26.0",

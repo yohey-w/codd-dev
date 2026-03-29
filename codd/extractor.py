@@ -18,6 +18,8 @@ from typing import Any
 
 import yaml
 
+from codd.parsing import GraphQlExtractor, OpenApiExtractor, ProtobufExtractor
+
 
 # ═══════════════════════════════════════════════════════════
 # Data structures
@@ -123,6 +125,9 @@ def extract_facts(project_root: Path, language: str | None = None,
 
     # Detect entry points
     _detect_entry_points(facts, project_root, language)
+
+    # Detect API definition files
+    _discover_api_specs(facts, project_root)
 
     return facts
 
@@ -640,6 +645,41 @@ def _detect_entry_points(facts: ProjectFacts, project_root: Path, language: str)
         path = project_root / candidate
         if path.exists():
             facts.entry_points.append(candidate)
+
+
+def _discover_api_specs(facts: ProjectFacts, project_root: Path):
+    """Collect OpenAPI, GraphQL, and protobuf specs across the project."""
+    extractors = [
+        (
+            OpenApiExtractor(),
+            "detect_openapi_files",
+            "extract_endpoints",
+        ),
+        (
+            GraphQlExtractor(),
+            "detect_graphql_files",
+            "extract_schema",
+        ),
+        (
+            ProtobufExtractor(),
+            "detect_proto_files",
+            "extract_services",
+        ),
+    ]
+
+    for extractor, detect_method_name, extract_method_name in extractors:
+        detect_method = getattr(extractor, detect_method_name)
+        extract_method = getattr(extractor, extract_method_name)
+        for file_path in detect_method(project_root):
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+
+            relative_path = file_path.relative_to(project_root).as_posix()
+            spec = extract_method(content, relative_path)
+            if spec.endpoints or spec.schemas or spec.services:
+                facts.api_specs[relative_path] = spec
 
 
 # ═══════════════════════════════════════════════════════════
