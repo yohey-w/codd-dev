@@ -182,10 +182,139 @@ Frontmatter `depends_on` entries gain semantic relation types:
 11. Cross-Cutting Concerns
 12. Entry Points & Deployment
 
+## Extract v3: Impact-Accurate Extraction (R5)
+
+### Test Traceability (R5.1)
+
+Extends `TestInfo` with symbol-level coverage data:
+
+```python
+@dataclass
+class TestInfo:
+    file_path: str
+    test_functions: list[str]
+    fixtures: list[str]
+    source_module: str | None = None
+    # R5.1 additions:
+    tested_symbols: list[str] = field(default_factory=list)  # source symbols exercised
+```
+
+```python
+@dataclass
+class TestCoverage:
+    module: str
+    covered_symbols: list[str]
+    uncovered_symbols: list[str]
+    coverage_ratio: float         # covered / total
+    covering_tests: list[str]     # test file paths
+```
+
+**Algorithm**: For each test file:
+1. Extract call graph from test code (reuse R4.1 `extract_call_graph`)
+2. Resolve callee names against source module symbols
+3. Union of all resolved symbols = `tested_symbols`
+
+**Pipeline integration**: Post-Stage 1. Stored in `ModuleInfo.test_coverage: TestCoverage | None`. Stage 2 template adds `## Test Coverage` section. Stage 3 adds uncovered-module warnings.
+
+### Schema-Code Dependency (R5.2)
+
+Detects ORM model and raw SQL references in source code:
+
+```python
+@dataclass
+class SchemaRef:
+    table_or_model: str      # "users" or "User"
+    kind: str                # "sqlalchemy" | "django" | "prisma" | "raw_sql"
+    file: str
+    line: int
+```
+
+**Detection patterns**:
+| Framework | Pattern | Example |
+|-----------|---------|---------|
+| SQLAlchemy | `__tablename__ = 'X'` in class body | `class User(Base): __tablename__ = 'users'` |
+| Django | `class X(models.Model)` | `class User(models.Model)` |
+| Prisma | `prisma.X.find_many/create/update/delete` | `prisma.user.find_many()` |
+| Raw SQL | String literal containing SQL keywords + table name | `"SELECT * FROM users WHERE"` |
+
+**Pipeline integration**: Collected in Stage 1 alongside symbols. Stored in `ModuleInfo.schema_refs: list[SchemaRef]`. Frontmatter gains `schema_uses` relation linking module → schema doc.
+
+### Runtime Wiring Detection (R5.3)
+
+Detects framework-specific implicit dependencies:
+
+```python
+@dataclass
+class RuntimeWire:
+    kind: str           # "depends" | "middleware" | "signal" | "decorator"
+    source: str         # file:line
+    target: str         # the function/class wired
+    framework: str      # "fastapi" | "django" | "flask" | "celery"
+```
+
+**Detection patterns** (Tree-sitter + regex):
+| Pattern | Framework | AST Query |
+|---------|-----------|-----------|
+| `Depends(fn)` | FastAPI | Call node with `Depends` function, extract arg |
+| `MIDDLEWARE = [...]` | Django | Assignment to MIDDLEWARE variable |
+| `@app.before_request` | Flask | Decorator with `before_request`/`after_request` |
+| `signal.connect(fn)` | Django | Call to `.connect()` on signal objects |
+| `@celery.task` | Celery | Decorator containing `task` |
+
+**Pipeline integration**: Collected in Stage 1. Stored in `ModuleInfo.runtime_wires: list[RuntimeWire]`. Frontmatter gains `runtime_wires` relation. Confidence: 0.6 (heuristic).
+
+### Change Risk Scoring (R5.4)
+
+Post-extract analysis that scores each module's change risk:
+
+```python
+@dataclass
+class ChangeRisk:
+    module: str
+    score: float           # 0.0–1.0
+    factors: dict[str, float]  # breakdown per factor
+```
+
+**Formula**:
+```
+risk = 0.3 × (dependents / max_dependents)
+     + 0.3 × (1 - coverage_ratio)
+     + 0.2 × api_surface_ratio
+     + 0.2 × (violations / max_violations)
+```
+
+Where:
+- `dependents` = import + call + runtime_wire inbound edges
+- `coverage_ratio` = from R5.1 TestCoverage
+- `api_surface_ratio` = from R4.3 InterfaceContract
+- `violations` = encapsulation violation count from R4.3
+
+**Pipeline integration**: Computed post-Stage 1 (after R4 + R5.1-5.3). Stored in `ProjectFacts.change_risks: list[ChangeRisk]`. Stage 3 template adds `## Change Risk Summary` table.
+
+### Updated Stage 3 Architecture Overview Sections
+
+1. System Overview
+2. Architectural Layers (existing)
+3. Feature Clusters (R4.2)
+4. Interface Contracts Summary (R4.3)
+5. Layer Violations (existing)
+6. **Change Risk Summary** (NEW — R5.4)
+7. Module Dependency Graph (existing, enriched)
+8. Data Model Summary
+9. API Surface
+10. External Dependencies
+11. Cross-Cutting Concerns
+12. Entry Points & Deployment
+
 ## Files
 
 - `codd/extractor.py` — Pipeline orchestration, ProjectFacts, extract_facts(), run_extract()
 - `codd/parsing.py` — All extractor implementations (A-F), call graph extraction (R4.1)
 - `codd/synth.py` — Jinja2 template engine, synth_docs(), synth_architecture(), feature clustering (R4.2)
-- `codd/contracts.py` — Interface contract detection (R4.3) [NEW]
-- `codd/templates/extracted/` — Jinja2 templates (updated for R4 sections)
+- `codd/contracts.py` — Interface contract detection (R4.3)
+- `codd/clustering.py` — Feature clustering (R4.2)
+- `codd/traceability.py` — Test traceability (R5.1) [NEW]
+- `codd/schema_refs.py` — Schema-code dependency detection (R5.2) [NEW]
+- `codd/wiring.py` — Runtime wiring detection (R5.3) [NEW]
+- `codd/risk.py` — Change risk scoring (R5.4) [NEW]
+- `codd/templates/extracted/` — Jinja2 templates (updated for R5 sections)

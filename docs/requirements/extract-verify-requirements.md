@@ -123,12 +123,81 @@ Distinguish public API surface from internal implementation details.
   - `co_feature` (new) — feature cluster membership
 - Confidence scoring: call graph edges have higher confidence than import-only edges
 
+## R5: Extract v3 — Impact-Accurate Extraction for Safe Changes
+
+Goal: Make `codd impact` output actionable for bug fixes and enhancements without regressions. Three gaps remain between "knowing what's affected" and "safely changing it."
+
+### R5.1: Test Traceability (test → code → test)
+
+Current state: Test files are mapped to modules by filename heuristic (`test_foo.py → foo`) or import analysis. This tells you "module foo has tests" but NOT "if you change `foo.authenticate()`, which specific tests cover it."
+
+**Requirements:**
+- **Test import analysis**: For each test file, extract which source modules and symbols it imports and calls
+- **Test-to-symbol mapping**: Each test function maps to a set of source symbols it exercises (via call graph from test code)
+- **Output per module**: `test_coverage` section listing:
+  - `covered_symbols`: Source symbols that appear in at least one test's call graph
+  - `uncovered_symbols`: Source symbols with zero test references
+  - `coverage_ratio`: covered / total
+- **Impact integration**: When `codd impact` marks a module as Amber, include `affected_tests` list — the specific test files/functions that should be re-run
+- **Risk flag**: Modules with Amber impact + low coverage_ratio get `⚠ untested change` warning
+
+### R5.2: Schema-Code Dependency
+
+Current state: SQL/Prisma schemas are extracted (Category B) but stored separately from source modules. No link between "table `users`" and "code that queries `users`."
+
+**Requirements:**
+- **ORM model detection**: In source code, detect ORM model definitions that map to schema tables:
+  - SQLAlchemy: `class User(Base)` with `__tablename__`
+  - Django: `class User(models.Model)`
+  - Prisma client: `prisma.user.find_many()`
+  - Raw SQL: String literals containing `SELECT ... FROM users`, `INSERT INTO users`
+- **Schema-to-module edges**: New dependency relation `schema_uses` linking source modules to schema artifacts
+- **Output**: Per-module `schema_dependencies` section listing tables/models referenced
+- **Impact integration**: When a schema document is changed, `codd impact` follows `schema_uses` edges to affected source modules
+
+### R5.3: Runtime Wiring Detection
+
+Current state: Import dependencies and call graph capture explicit code references. Framework-level implicit wiring is invisible.
+
+**Requirements:**
+- **Dependency injection**: Detect framework DI patterns:
+  - FastAPI `Depends()` — the function passed to Depends is a runtime dependency
+  - Django `MIDDLEWARE` list in settings.py
+  - Flask `@app.before_request` / `@app.after_request`
+- **Event/signal handlers**: Detect pub/sub patterns:
+  - Django signals (`post_save.connect`)
+  - Python `asyncio` event handlers
+  - Custom event bus patterns (functions registered as handlers)
+- **Decorator-based routing**: Link route decorators to middleware chains:
+  - `@app.route` / `@router.get` → middleware pipeline
+  - `@celery.task` → async task dependency
+- **Output**: New dependency relation `runtime_wires` in frontmatter
+- **Confidence**: Runtime wiring edges get `confidence: 0.6` (lower than call graph) because detection is heuristic
+
+### R5.4: Change Risk Scoring
+
+Current state: `codd impact` shows Green/Amber/Gray but doesn't quantify how risky a change is.
+
+**Requirements:**
+- **Per-module risk score** (0.0–1.0) computed from:
+  - `dependents_count`: How many other modules depend on this one (import + call + runtime)
+  - `test_coverage_ratio`: From R5.1 (low coverage = higher risk)
+  - `api_surface_ratio`: From R4.3 (large public API = more breaking change surface)
+  - `encapsulation_violations`: From R4.3 (internal symbols used externally = fragile)
+- **Formula**: `risk = 0.3 * (dependents / max_dependents) + 0.3 * (1 - coverage_ratio) + 0.2 * api_surface_ratio + 0.2 * (violations / max_violations)`
+- **Output in architecture-overview.md**: `## Change Risk Summary` table sorted by risk score
+- **Impact integration**: `codd impact` output shows risk score next to each Amber module
+
 ## Acceptance Criteria
 
 1. `codd extract` on any Python/TS project produces correct design docs with CoDD frontmatter
 2. `codd verify` on codd-dev (Python) runs mypy + pytest and reports results
 3. `codd scan` recognizes all generated design documents
-4. All 127+ existing tests continue to pass
+4. All 150+ existing tests continue to pass
 5. `codd extract` with call graph flag produces per-module call_graph sections (R4.1)
 6. Architecture overview includes feature_clusters section when call graph data is available (R4.2)
 7. Per-module docs include public_api / internal_api distinction (R4.3)
+8. Per-module docs include test_coverage section with covered/uncovered symbols (R5.1)
+9. Schema artifacts link to source modules via schema_uses relation (R5.2)
+10. Runtime wiring (DI, middleware, signals) detected and included in dependency graph (R5.3)
+11. Architecture overview includes Change Risk Summary table (R5.4)
