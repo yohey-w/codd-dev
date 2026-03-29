@@ -1,0 +1,102 @@
+---
+{{ frontmatter }}---
+# {{ mod.name }}
+
+> {{ mod.files | length }} files, {{ "{:,}".format(mod.line_count) }} lines
+
+**Layer Guess**: {{ layer_name }}
+**Responsibility**: {{ layer_reason }}
+{% if mod.patterns %}
+**Detected Patterns**: {{ mod.patterns.values() | join("; ") }}
+{% endif %}
+
+## Symbol Inventory
+
+| Kind | Name | Location | Signature / Notes |
+|------|------|----------|-------------------|
+{% for symbol in classes -%}
+| class | `{{ symbol.name }}` | `{{ symbol.file }}:{{ symbol.line }}` | {% if symbol.bases %}bases: {{ symbol.bases | join(", ") }}{% else %}—{% endif %} |
+{% endfor -%}
+{% for symbol in functions -%}
+| function | `{{ symbol.name }}` | `{{ symbol.file }}:{{ symbol.line }}` | `{% if symbol.is_async %}async {% endif %}{{ symbol.name }}({{ symbol.params }}){% if symbol.return_type %} -> {{ symbol.return_type }}{% endif %}` |
+{% endfor -%}
+{% for symbol in type_definitions -%}
+| {{ symbol.kind }} | `{{ symbol.name }}` | `{{ symbol.file }}:{{ symbol.line }}` | {% if symbol.bases %}bases: {{ symbol.bases | join(", ") }}{% elif symbol.implements %}implements: {{ symbol.implements | join(", ") }}{% else %}—{% endif %} |
+{% endfor %}
+
+{% if route_paths %}
+## API Routes
+
+{% for route_path in route_paths -%}
+- `{{ route_path }}`
+{% endfor %}
+{% endif %}
+
+{% if type_definitions %}
+## Type Definitions
+
+{% for symbol in type_definitions -%}
+- `{{ symbol.name }}` ({{ symbol.kind }}){% if symbol.bases %} extends {{ symbol.bases | join(", ") }}{% endif %}{% if symbol.implements %} implements {{ symbol.implements | join(", ") }}{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if async_functions %}
+## Async Functions
+
+{% for symbol in async_functions -%}
+- `{{ symbol.name }}({{ symbol.params }}){% if symbol.return_type %} -> {{ symbol.return_type }}{% endif %}`
+{% endfor %}
+{% endif %}
+
+{% if related_schemas %}
+## Schema Definitions
+
+{% for schema in related_schemas -%}
+- `{{ schema.title }}`{% if schema.matches %} — matches: {{ schema.matches | join(", ") }}{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if related_api_specs %}
+## Related API Specs
+
+{% for api in related_api_specs -%}
+- `{{ api.title }}`{% if api.matches %} — {{ api.matches | join(", ") }}{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if internal_dependencies %}
+## Import Dependencies
+
+{% for dependency in internal_dependencies -%}
+### → {{ dependency.name }}
+
+{% for import_line in dependency.imports -%}
+- `{{ import_line }}`
+{% endfor %}
+{% if dependency.extra_count %}
+- ... and {{ dependency.extra_count }} more
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if mod.external_imports %}
+## External Dependencies
+
+{% for dependency in mod.external_imports | sort -%}
+- `{{ dependency }}`
+{% endfor %}
+{% endif %}
+
+## Files
+
+{% for file_path in files -%}
+- `{{ file_path }}`
+{% endfor %}
+
+{% if tests %}
+## Tests
+
+{% for test in tests -%}
+- `{{ test.file_path }}`{% if test.test_functions %} — tests: {{ test.test_functions | join(", ") }}{% endif %}{% if test.fixtures %}; fixtures: {{ test.fixtures | join(", ") }}{% endif %}
+{% endfor %}
+{% endif %}

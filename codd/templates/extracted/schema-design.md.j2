@@ -1,0 +1,72 @@
+---
+{{ frontmatter }}---
+# Schema Design: {{ relative_path }}
+
+> Auto-generated from extracted schema artifacts.
+
+{% if tables %}
+## Tables
+
+{% for table in tables -%}
+### {{ table.name }}
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+{% for column in table.columns -%}
+| {{ column.name }} | {{ column.type }} | {{ column.constraints or "—" }} |
+{% endfor %}
+{% if table.constraints %}
+
+Constraints:
+{% for constraint in table.constraints -%}
+- `{{ constraint }}`
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if foreign_keys %}
+## Foreign Keys
+
+{% for foreign_key in foreign_keys -%}
+- `{{ foreign_key.table }}({{ foreign_key.columns | join(", ") }}) -> {{ foreign_key.references_table }}({{ foreign_key.references_columns | join(", ") }})`{% if foreign_key.name %} (`{{ foreign_key.name }}`){% endif %}
+{% endfor %}
+{% endif %}
+
+{% if indexes %}
+## Indexes
+
+{% for index in indexes -%}
+- `{{ index.name }}` on `{{ index.table }}` ({{ index.columns | join(", ") }})
+{% endfor %}
+{% endif %}
+
+{% if views %}
+## Views
+
+{% for view in views -%}
+- `{{ view.name }}`
+{% endfor %}
+{% endif %}
+
+{% if prisma_models %}
+## Prisma Models
+
+{% for model in prisma_models -%}
+### {{ model.name }}
+
+| Field | Type | Attributes | Relation |
+|-------|------|------------|----------|
+{% for field in model.fields -%}
+| {{ field.name }} | {{ field.type }} | {{ field.attributes or "—" }} | {{ "yes" if field.is_relation else "no" }} |
+{% endfor %}
+{% endfor %}
+{% endif %}
+
+{% if prisma_enums %}
+## Prisma Enums
+
+{% for enum in prisma_enums -%}
+- `{{ enum.name }}`: {{ enum.values | join(", ") }}
+{% endfor %}
+{% endif %}
