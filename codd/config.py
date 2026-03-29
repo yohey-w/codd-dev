@@ -12,10 +12,32 @@ import yaml
 
 DEFAULTS_PATH = Path(__file__).with_name("defaults.yaml")
 
+# Supported CoDD config directory names, in priority order.
+CODD_DIR_CANDIDATES = ("codd", ".codd")
+
+
+def find_codd_dir(project_root: Path) -> Path | None:
+    """Discover the CoDD config directory under *project_root*.
+
+    Checks ``codd/`` first, then ``.codd/``.  Returns ``None`` when
+    neither exists (caller decides whether that is an error).
+    """
+    for name in CODD_DIR_CANDIDATES:
+        candidate = project_root / name
+        if candidate.is_dir():
+            return candidate
+    return None
+
 
 def load_project_config(project_root: Path) -> dict[str, Any]:
     """Load CoDD defaults and merge project-local overrides."""
-    config_path = project_root / "codd" / "codd.yaml"
+    codd_dir = find_codd_dir(project_root)
+    if codd_dir is None:
+        raise FileNotFoundError(
+            f"CoDD config dir not found in {project_root} "
+            f"(looked for {', '.join(CODD_DIR_CANDIDATES)})"
+        )
+    config_path = codd_dir / "codd.yaml"
     if not config_path.exists():
         raise FileNotFoundError(f"{config_path} not found")
 

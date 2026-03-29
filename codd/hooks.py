@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
+from codd.config import find_codd_dir
 from codd.scanner import _extract_frontmatter
 from codd.validator import run_validate
 
@@ -16,9 +17,9 @@ HOOK_SOURCE = Path(__file__).parent.parent / "hooks" / "pre-commit"
 
 def install_pre_commit_hook(project_root: Path) -> tuple[Path, bool]:
     """Install the packaged pre-commit hook into a Git repository."""
-    config_path = project_root / "codd" / "codd.yaml"
-    if not config_path.exists():
-        raise FileNotFoundError(f"{config_path} not found")
+    codd_dir = find_codd_dir(project_root)
+    if codd_dir is None:
+        raise FileNotFoundError("CoDD config dir not found (looked for codd/ and .codd/)")
 
     git_dir = project_root / ".git"
     if not git_dir.exists():
@@ -46,9 +47,14 @@ def install_pre_commit_hook(project_root: Path) -> tuple[Path, bool]:
 
 def run_pre_commit(project_root: Path) -> int:
     """Validate staged CoDD documents before commit."""
-    config_path = project_root / "codd" / "codd.yaml"
+    codd_dir = find_codd_dir(project_root)
+    if codd_dir is None:
+        print("ERROR: CoDD config dir not found (looked for codd/ and .codd/).")
+        return 1
+
+    config_path = codd_dir / "codd.yaml"
     if not config_path.exists():
-        print("ERROR: codd/codd.yaml not found.")
+        print(f"ERROR: {config_path} not found.")
         return 1
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -64,7 +70,7 @@ def run_pre_commit(project_root: Path) -> int:
         print(f"ERROR: {relative_path} is missing CoDD YAML frontmatter")
         return 1
 
-    return run_validate(project_root, project_root / "codd")
+    return run_validate(project_root, codd_dir)
 
 
 def _get_staged_markdown_files(project_root: Path, config: dict) -> list[Path]:

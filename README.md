@@ -231,6 +231,16 @@ codd:
 
 `codd/scan/` is a cache — regenerated on every `codd scan`.
 
+## Config Directory Discovery
+
+By default, `codd init` creates a `codd/` directory. If your project already has a `codd/` directory (e.g., it's your source code package), use `--config-dir`:
+
+```bash
+codd init --config-dir .codd --project-name "my-project" --language "python"
+```
+
+All other commands (`scan`, `impact`, `generate`, etc.) automatically discover whichever config directory exists — `codd/` first, then `.codd/`. No extra flags needed.
+
 ## Brownfield? Start Here
 
 Already have a codebase? `codd extract` reverse-engineers design documents from your source code. No AI required — pure static analysis.
@@ -264,7 +274,7 @@ codd impact
 
 | Command | Status | Description |
 |---------|--------|-------------|
-| `codd init` | **Stable** | Initialize CoDD in any project |
+| `codd init` | **Stable** | Initialize CoDD in any project (`--config-dir .codd` for projects where `codd/` exists) |
 | `codd scan` | **Stable** | Build dependency graph from frontmatter |
 | `codd impact` | **Stable** | Change impact analysis (Green / Amber / Gray) |
 | `codd validate` | **Alpha** | Frontmatter integrity & graph consistency check |

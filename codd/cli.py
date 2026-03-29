@@ -6,7 +6,18 @@ import os
 import shutil
 from pathlib import Path
 
+from codd.config import find_codd_dir
+
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+
+def _require_codd_dir(project_root: Path) -> Path:
+    """Return the CoDD config dir or exit with a helpful message."""
+    codd_dir = find_codd_dir(project_root)
+    if codd_dir is None:
+        click.echo("Error: CoDD config dir not found (looked for codd/ and .codd/). Run 'codd init' first.")
+        raise SystemExit(1)
+    return codd_dir
 
 
 @click.group()
@@ -26,10 +37,15 @@ def main():
     type=click.Path(exists=True),
     help="Import a requirements file (any format: .md, .txt, .doc). CoDD adds frontmatter automatically.",
 )
-def init(project_name: str, language: str, dest: str, requirements: str | None):
+@click.option(
+    "--config-dir",
+    default="codd",
+    help="Name of the CoDD config directory (default: codd). Use .codd when codd/ is your source directory.",
+)
+def init(project_name: str, language: str, dest: str, requirements: str | None, config_dir: str):
     """Initialize CoDD in a project directory."""
     dest_path = Path(dest).resolve()
-    codd_dir = dest_path / "codd"
+    codd_dir = dest_path / config_dir
 
     if codd_dir.exists():
         if requirements:
@@ -81,11 +97,7 @@ def scan(path: str):
     """Scan codebase and update dependency graph (Stage 1)."""
     from codd.scanner import run_scan
     project_root = Path(path).resolve()
-    codd_dir = project_root / "codd"
-
-    if not codd_dir.exists():
-        click.echo("Error: codd/ not found. Run 'codd init' first.")
-        raise SystemExit(1)
+    codd_dir = _require_codd_dir(project_root)
 
     run_scan(project_root, codd_dir)
 
@@ -98,11 +110,7 @@ def impact(diff: str, path: str, output: str):
     """Analyze change impact from git diff."""
     from codd.propagate import run_impact
     project_root = Path(path).resolve()
-    codd_dir = project_root / "codd"
-
-    if not codd_dir.exists():
-        click.echo("Error: codd/ not found. Run 'codd init' first.")
-        raise SystemExit(1)
+    codd_dir = _require_codd_dir(project_root)
 
     run_impact(project_root, codd_dir, diff, output)
 
@@ -121,11 +129,7 @@ def generate(wave: int, path: str, force: bool, ai_cmd: str | None):
     from codd.generator import generate_wave, _load_project_config
 
     project_root = Path(path).resolve()
-    codd_dir = project_root / "codd"
-
-    if not codd_dir.exists():
-        click.echo("Error: codd/ not found. Run 'codd init' first.")
-        raise SystemExit(1)
+    codd_dir = _require_codd_dir(project_root)
 
     # Auto-generate wave_config if missing
     config = _load_project_config(project_root)
@@ -174,11 +178,7 @@ def implement(sprint: int, path: str, task: str | None, ai_cmd: str | None):
     from codd.implementer import implement_sprint
 
     project_root = Path(path).resolve()
-    codd_dir = project_root / "codd"
-
-    if not codd_dir.exists():
-        click.echo("Error: codd/ not found. Run 'codd init' first.")
-        raise SystemExit(1)
+    codd_dir = _require_codd_dir(project_root)
 
     try:
         results = implement_sprint(project_root, sprint, task=task, ai_command=ai_cmd)
@@ -204,11 +204,7 @@ def verify(path: str, sprint: int | None) -> None:
     from codd.verifier import VerifyPreflightError, run_verify
 
     project_root = Path(path).resolve()
-    codd_dir = project_root / "codd"
-
-    if not codd_dir.exists():
-        click.echo("Error: codd/ not found. Run 'codd init' first.")
-        raise SystemExit(1)
+    codd_dir = _require_codd_dir(project_root)
 
     try:
         result = run_verify(project_root, sprint=sprint)
@@ -289,11 +285,7 @@ def validate(path: str):
     from codd.validator import run_validate
 
     project_root = Path(path).resolve()
-    codd_dir = project_root / "codd"
-
-    if not codd_dir.exists():
-        click.echo("Error: codd/ not found. Run 'codd init' first.")
-        raise SystemExit(1)
+    codd_dir = _require_codd_dir(project_root)
 
     raise SystemExit(run_validate(project_root, codd_dir))
 
@@ -313,11 +305,7 @@ def plan(path: str, as_json: bool, initialize: bool, force: bool, ai_cmd: str | 
     from codd.planner import build_plan, plan_init, plan_to_dict, render_plan_text
 
     project_root = Path(path).resolve()
-    codd_dir = project_root / "codd"
-
-    if not codd_dir.exists():
-        click.echo("Error: codd/ not found. Run 'codd init' first.")
-        raise SystemExit(1)
+    codd_dir = _require_codd_dir(project_root)
 
     if initialize:
         if as_json:

@@ -845,19 +845,27 @@ def run_extract(project_root: Path, language: str | None = None,
     """Run full extract pipeline: facts → docs."""
 
     # Try to load config if it exists
-    codd_yaml = project_root / "codd" / "codd.yaml"
-    if codd_yaml.exists() and (language is None or source_dirs is None):
-        config = yaml.safe_load(codd_yaml.read_text())
-        if language is None:
-            language = config.get("project", {}).get("language")
-        if source_dirs is None:
-            source_dirs = config.get("scan", {}).get("source_dirs")
+    from codd.config import find_codd_dir
+    codd_dir = find_codd_dir(project_root)
+    if codd_dir is not None and (language is None or source_dirs is None):
+        codd_yaml = codd_dir / "codd.yaml"
+        if codd_yaml.exists():
+            config = yaml.safe_load(codd_yaml.read_text())
+            if language is None:
+                language = config.get("project", {}).get("language")
+            if source_dirs is None:
+                source_dirs = config.get("scan", {}).get("source_dirs")
 
     # Phase 1: Extract facts
     facts = extract_facts(project_root, language, source_dirs)
 
     # Phase 2: Generate docs
-    output_dir = Path(output) if output else project_root / "codd" / "extracted"
+    if output:
+        output_dir = Path(output)
+    elif codd_dir is not None:
+        output_dir = codd_dir / "extracted"
+    else:
+        output_dir = project_root / "codd" / "extracted"
     generated = synth_docs(facts, output_dir)
 
     return ExtractResult(

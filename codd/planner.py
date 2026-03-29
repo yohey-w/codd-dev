@@ -127,8 +127,10 @@ def plan_init(
     raw_wave_config = generator_module._invoke_ai_command(resolved_ai_command, prompt)
     wave_config = _parse_wave_config_output(raw_wave_config)
 
+    from codd.config import find_codd_dir
     config["wave_config"] = wave_config
-    config_path = project_root / "codd" / "codd.yaml"
+    codd_dir = find_codd_dir(project_root)
+    config_path = (codd_dir or project_root / "codd") / "codd.yaml"
     config_path.write_text(
         yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
@@ -150,7 +152,9 @@ def build_plan(project_root: Path) -> PlanResult:
     artifacts_by_node = {artifact.node_id: artifact for artifact in artifacts}
     ordered_node_ids = _topological_order(artifacts)
 
-    validation = validate_project(project_root, project_root / "codd")
+    from codd.config import find_codd_dir
+    codd_dir = find_codd_dir(project_root) or project_root / "codd"
+    validation = validate_project(project_root, codd_dir)
     errors_by_location = _group_validation_errors(validation.issues)
     external_nodes = _index_external_nodes(project_root, config, errors_by_location, set(artifacts_by_node))
 
