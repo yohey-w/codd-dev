@@ -301,6 +301,8 @@ class TreeSitterExtractor:
             root = self._parse(content)
             if self.language == "python":
                 return _extract_python_call_graph(root, content, file_path, symbols)
+            if self.language in {"typescript", "javascript"}:
+                return _extract_ts_call_graph(root, content, file_path, symbols)
         except Exception:
             return []
         return []
@@ -998,6 +1000,105 @@ def _extract_python_call_graph(root: Any, content: str, file_path: str, symbols:
         caller = _current_scope(node)
         line_no = node.start_point.row + 1
         is_async = node.parent is not None and node.parent.type == "await"
+
+        edges.append(CallEdge(
+            caller=caller,
+            callee=callee_text,
+            call_site=f"{file_path}:{line_no}",
+            is_async=is_async,
+        ))
+
+    return edges
+
+
+_TS_BUILTIN_NAMES = {
+    "console", "Math", "JSON", "Object", "Array", "Promise",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "require", "parseInt", "parseFloat", "isNaN",
+    "encodeURIComponent", "decodeURIComponent",
+}
+
+
+def _extract_ts_call_graph(root: Any, content: str, file_path: str, symbols: list[Symbol]) -> list[CallEdge]:
+    """Extract function call edges from TypeScript/JavaScript AST using tree-sitter."""
+    from codd.extractor import CallEdge
+
+    content_bytes = content.encode("utf-8", errors="ignore")
+    edges: list[CallEdge] = []
+    symbol_names = {s.name for s in symbols}
+
+    def _current_scope(node: Any) -> str:
+        """Walk parents to find enclosing function/method/class scope."""
+        parts: list[str] = []
+        current = node.parent
+        while current is not None:
+            if current.type in (
+                "function_declaration",
+                "function",
+                "method_definition",
+                "arrow_function",
+                "class_declaration",
+                "class",
+            ):
+                name = _field_text(content_bytes, current, "name")
+                if name:
+                    parts.append(name)
+            current = current.parent
+        parts.reverse()
+        return ".".join(parts) if parts else "<module>"
+
+    def _callee_name(func_node: Any) -> str | None:
+        """Extract callee name from the function child of a call/new expression."""
+        if func_node is None:
+            return None
+        node_type = func_node.type
+        if node_type == "identifier":
+            return _node_text(content_bytes, func_node).strip()
+        if node_type in ("member_expression", "optional_chain"):
+            obj = func_node.child_by_field_name("object")
+            prop = func_node.child_by_field_name("property")
+            if obj is not None and prop is not None:
+                obj_text = _node_text(content_bytes, obj).strip()
+                prop_text = _node_text(content_bytes, prop).strip()
+                return f"{obj_text}.{prop_text}"
+            # Fallback: return full text
+            return _node_text(content_bytes, func_node).strip()
+        # Other node types (parenthesized_expression, etc.) — use full text
+        return _node_text(content_bytes, func_node).strip()
+
+    for node in _iter_named_nodes(root):
+        if node.type == "call_expression":
+            func_node = node.child_by_field_name("function")
+            is_async = node.parent is not None and node.parent.type == "await_expression"
+        elif node.type == "new_expression":
+            func_node = node.child_by_field_name("constructor")
+            is_async = False
+        else:
+            continue
+
+        callee_text = _callee_name(func_node)
+        if not callee_text:
+            continue
+
+        bare_name = callee_text.split(".")[-1] if "." in callee_text else callee_text
+
+        # Skip known JS/TS builtins
+        root_name = callee_text.split(".")[0]
+        if root_name in _TS_BUILTIN_NAMES or bare_name in _TS_BUILTIN_NAMES:
+            continue
+
+        # Only include calls to known project symbols (intra-project filter)
+        if bare_name not in symbol_names and callee_text not in symbol_names:
+            # Allow method calls on this/self (this.method)
+            if callee_text.startswith("this."):
+                method_name = callee_text[5:]
+                if method_name not in symbol_names:
+                    continue
+            else:
+                continue
+
+        caller = _current_scope(node)
+        line_no = node.start_point.row + 1
 
         edges.append(CallEdge(
             caller=caller,

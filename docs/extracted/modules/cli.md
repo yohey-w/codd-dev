@@ -5,6 +5,8 @@ codd:
   source: extracted
   confidence: 0.75
   last_extracted: '2026-03-30'
+  source_files:
+  - codd/cli.py
   depends_on:
   - id: design:extract:config
     relation: imports
@@ -65,6 +67,41 @@ codd:
 
 
 
+
+
+## Public API
+
+- `main`
+- `init`
+- `scan`
+- `impact`
+- `generate`
+- `implement`
+- `verify`
+- `extract`
+- `validate`
+- `plan`
+- `hooks`
+- `hooks_install`
+- `hooks_run_pre_commit`
+
+## Call Graph
+
+| Caller | Callee | Location | Async |
+|--------|--------|----------|-------|
+| `<module>` | `main` | `codd/cli.py:433` | no |
+
+## Test Coverage
+
+**Coverage**: 0.69 (9 / 13)
+Tests: tests/test_generate.py, tests/test_implement.py, tests/test_plan.py, tests/test_validate.py, tests/test_verify.py
+
+**Uncovered symbols**: `hooks`, `hooks_install`, `hooks_run_pre_commit`, `impact`
+## Schema Dependencies
+
+| Table/Model | Kind | Location |
+|-------------|------|----------|
+| `dependency` | raw_sql | `codd/cli.py:97` |
 
 
 ## Import Dependencies

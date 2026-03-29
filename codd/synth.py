@@ -242,6 +242,7 @@ def _render_module_detail(env: Environment, facts: ProjectFacts, module: ModuleI
             confidence=_module_confidence(module),
             today=today,
             depends_on=_module_depends_on(facts, module),
+            source_files=sorted(module.files),
         ),
         mod=module,
         layer_name=layer_name,
@@ -280,6 +281,7 @@ def _render_schema_design(env: Environment, relative_path: str, schema: Any, tod
             node_id=_schema_node_id(relative_path),
             confidence=_schema_confidence(schema),
             today=today,
+            source_files=[relative_path],
         ),
         relative_path=relative_path,
         slug=_slugify(Path(relative_path).with_suffix("").as_posix()),
@@ -302,6 +304,7 @@ def _render_api_contract(env: Environment, relative_path: str, spec: Any, today:
             node_id=_api_node_id(relative_path),
             confidence=_api_confidence(spec),
             today=today,
+            source_files=[relative_path],
         ),
         relative_path=relative_path,
         spec=spec,
@@ -318,6 +321,7 @@ def _build_frontmatter(
     confidence: float,
     today: str,
     depends_on: list[dict[str, Any]] | None = None,
+    source_files: list[str] | None = None,
 ) -> str:
     codd: dict[str, Any] = {
         "node_id": node_id,
@@ -326,6 +330,8 @@ def _build_frontmatter(
         "confidence": round(confidence, 2),
         "last_extracted": today,
     }
+    if source_files:
+        codd["source_files"] = source_files
     if depends_on:
         codd["depends_on"] = depends_on
     payload = yaml.safe_dump({"codd": codd}, sort_keys=False, allow_unicode=True)

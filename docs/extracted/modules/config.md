@@ -5,6 +5,8 @@ codd:
   source: extracted
   confidence: 0.75
   last_extracted: '2026-03-30'
+  source_files:
+  - codd/config.py
 ---
 # config
 
@@ -23,6 +25,25 @@ codd:
 
 
 
+
+
+## Public API
+
+- `find_codd_dir`
+- `load_project_config`
+
+## Call Graph
+
+| Caller | Callee | Location | Async |
+|--------|--------|----------|-------|
+| `load_project_config` | `find_codd_dir` | `codd/config.py:35` | no |
+
+## Test Coverage
+
+**Coverage**: 0.5 (1 / 2)
+Tests: tests/test_config.py
+
+**Uncovered symbols**: `find_codd_dir`
 
 
 

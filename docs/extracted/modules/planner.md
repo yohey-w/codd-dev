@@ -5,6 +5,8 @@ codd:
   source: extracted
   confidence: 0.65
   last_extracted: '2026-03-30'
+  source_files:
+  - codd/planner.py
   depends_on:
   - id: design:extract:config
     relation: imports
@@ -41,6 +43,37 @@ codd:
 
 
 
+
+
+## Public API
+
+- `PlannedArtifact`
+- `PlannedWave`
+- `PlanResult`
+- `RequirementDocument`
+- `PlanInitResult`
+- `_ExternalNode`
+- `plan_init`
+- `build_plan`
+- `render_plan_text`
+- `plan_to_dict`
+
+## Call Graph
+
+| Caller | Callee | Location | Async |
+|--------|--------|----------|-------|
+| `plan_init` | `PlanInitResult` | `codd/planner.py:139` | no |
+| `build_plan` | `PlannedArtifact` | `codd/planner.py:180` | no |
+| `build_plan` | `PlannedWave` | `codd/planner.py:191` | no |
+| `build_plan` | `PlanResult` | `codd/planner.py:207` | no |
+| `_load_requirement_documents` | `RequirementDocument` | `codd/planner.py:274` | no |
+| `_index_external_nodes` | `_ExternalNode` | `codd/planner.py:512` | no |
+
+## Test Coverage
+
+**Coverage**: 0.0 (0 / 10)
+
+**Uncovered symbols**: `PlanInitResult`, `PlanResult`, `PlannedArtifact`, `PlannedWave`, `RequirementDocument`, `_ExternalNode`, `build_plan`, `plan_init`, `plan_to_dict`, `render_plan_text`
 
 
 ## Import Dependencies

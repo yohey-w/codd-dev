@@ -5,6 +5,8 @@ codd:
   source: extracted
   confidence: 0.75
   last_extracted: '2026-03-30'
+  source_files:
+  - codd/graph.py
 ---
 # graph
 
@@ -38,6 +40,43 @@ codd:
 
 
 
+
+
+## Public API
+
+- `CEG`
+- `close`
+- `upsert_node`
+- `get_node`
+- `count_nodes`
+- `find_nodes_by_path`
+- `get_convention_edges`
+- `add_edge`
+- `get_outgoing_edges`
+- `get_incoming_edges`
+- `count_edges`
+- `add_evidence`
+- `propagate_impact`
+- `classify_band`
+- `purge_auto_generated`
+- `count_human_evidence`
+- `stats`
+
+## Call Graph
+
+| Caller | Callee | Location | Async |
+|--------|--------|----------|-------|
+| `CEG.propagate_impact` | `get_incoming_edges` | `codd/graph.py:209` | no |
+| `CEG.stats` | `count_nodes` | `codd/graph.py:289` | no |
+| `CEG.stats` | `count_edges` | `codd/graph.py:290` | no |
+| `CEG.stats` | `count_human_evidence` | `codd/graph.py:292` | no |
+
+## Test Coverage
+
+**Coverage**: 0.65 (11 / 17)
+Tests: tests/test_graph.py
+
+**Uncovered symbols**: `count_edges`, `count_human_evidence`, `count_nodes`, `find_nodes_by_path`, `get_convention_edges`, `purge_auto_generated`
 
 
 

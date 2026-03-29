@@ -5,6 +5,8 @@ codd:
   source: extracted
   confidence: 0.75
   last_extracted: '2026-03-30'
+  source_files:
+  - codd/scanner.py
   depends_on:
   - id: design:extract:generator
     relation: imports
@@ -18,7 +20,7 @@ codd:
 ---
 # scanner
 
-> 1 files, 457 lines
+> 1 files, 465 lines
 
 **Layer Guess**: Infrastructure
 **Responsibility**: Implements parsing, extraction, scanning, or adapters
@@ -33,6 +35,20 @@ codd:
 
 
 
+
+
+## Public API
+
+- `run_scan`
+- `build_document_node_path_map`
+
+
+## Test Coverage
+
+**Coverage**: 0.5 (1 / 2)
+Tests: tests/test_scanner.py
+
+**Uncovered symbols**: `build_document_node_path_map`
 
 
 ## Import Dependencies

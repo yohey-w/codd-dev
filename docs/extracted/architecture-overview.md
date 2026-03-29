@@ -12,7 +12,13 @@ codd:
   - id: design:extract:cli
     relation: aggregates
     semantic: technical
+  - id: design:extract:clustering
+    relation: aggregates
+    semantic: technical
   - id: design:extract:config
+    relation: aggregates
+    semantic: technical
+  - id: design:extract:contracts
     relation: aggregates
     semantic: technical
   - id: design:extract:extractor
@@ -39,19 +45,31 @@ codd:
   - id: design:extract:propagate
     relation: aggregates
     semantic: technical
+  - id: design:extract:risk
+    relation: aggregates
+    semantic: technical
   - id: design:extract:root
     relation: aggregates
     semantic: technical
   - id: design:extract:scanner
     relation: aggregates
     semantic: technical
+  - id: design:extract:schema-refs
+    relation: aggregates
+    semantic: technical
   - id: design:extract:synth
+    relation: aggregates
+    semantic: technical
+  - id: design:extract:traceability
     relation: aggregates
     semantic: technical
   - id: design:extract:validator
     relation: aggregates
     semantic: technical
   - id: design:extract:verifier
+    relation: aggregates
+    semantic: technical
+  - id: design:extract:wiring
     relation: aggregates
     semantic: technical
 ---
@@ -71,16 +89,73 @@ codd:
 
 - `generator` — Coordinates use cases or service-level workflows- `implementer` — Coordinates use cases or service-level workflows- `planner` — Coordinates use cases or service-level workflows- `verifier` — Coordinates use cases or service-level workflows### Domain
 
-- No modules classified into this layer.
-### Infrastructure
+- `schema_refs` — Owns schema, persistence, or domain model concepts### Infrastructure
 
-- `config` — Implements parsing, extraction, scanning, or adapters- `extractor` — Implements parsing, extraction, scanning, or adapters- `graph` — Implements parsing, extraction, scanning, or adapters- `hooks` — Implements parsing, extraction, scanning, or adapters- `parsing` — Implements parsing, extraction, scanning, or adapters- `propagate` — Implements parsing, extraction, scanning, or adapters- `root` — Defaulted to infrastructure because no higher-level cues were detected- `scanner` — Implements parsing, extraction, scanning, or adapters- `synth` — Defaulted to infrastructure because no higher-level cues were detected- `validator` — Implements parsing, extraction, scanning, or adapters### Shared
+- `clustering` — Defaulted to infrastructure because no higher-level cues were detected- `config` — Implements parsing, extraction, scanning, or adapters- `contracts` — Defaulted to infrastructure because no higher-level cues were detected- `extractor` — Implements parsing, extraction, scanning, or adapters- `graph` — Implements parsing, extraction, scanning, or adapters- `hooks` — Implements parsing, extraction, scanning, or adapters- `parsing` — Implements parsing, extraction, scanning, or adapters- `propagate` — Implements parsing, extraction, scanning, or adapters- `risk` — Defaulted to infrastructure because no higher-level cues were detected- `root` — Defaulted to infrastructure because no higher-level cues were detected- `scanner` — Implements parsing, extraction, scanning, or adapters- `synth` — Defaulted to infrastructure because no higher-level cues were detected- `traceability` — Defaulted to infrastructure because no higher-level cues were detected- `validator` — Implements parsing, extraction, scanning, or adapters- `wiring` — Defaulted to infrastructure because no higher-level cues were detected### Shared
 
 - No modules classified into this layer.
+
+## Feature Clusters
+
+### synth (confidence: 0.6)
+
+Modules: extractor, synth
+Evidence: 2 cross-call edges
+
+## Interface Contracts Summary
+
+| Module | Public | Internal | API Ratio | Violations |
+|--------|--------|----------|-----------|------------|
+| `cli` | 13 | 0 | 1.0 | 0 |
+| `clustering` | 1 | 0 | 1.0 | 0 |
+| `config` | 2 | 0 | 1.0 | 0 |
+| `contracts` | 3 | 0 | 1.0 | 0 |
+| `extractor` | 10 | 0 | 1.0 | 0 |
+| `generator` | 4 | 0 | 1.0 | 0 |
+| `graph` | 17 | 0 | 1.0 | 0 |
+| `hooks` | 2 | 0 | 1.0 | 0 |
+| `implementer` | 4 | 0 | 1.0 | 0 |
+| `parsing` | 70 | 0 | 1.0 | 0 |
+| `planner` | 10 | 0 | 1.0 | 0 |
+| `propagate` | 1 | 0 | 1.0 | 0 |
+| `risk` | 2 | 0 | 1.0 | 0 |
+| `scanner` | 2 | 0 | 1.0 | 0 |
+| `schema_refs` | 3 | 0 | 1.0 | 0 |
+| `synth` | 2 | 0 | 1.0 | 0 |
+| `traceability` | 2 | 0 | 1.0 | 0 |
+| `validator` | 14 | 0 | 1.0 | 0 |
+| `verifier` | 10 | 0 | 1.0 | 0 |
+| `wiring` | 3 | 0 | 1.0 | 0 |
+
+## Change Risk Summary
+
+| Module | Risk | Dependents | Uncovered | API Surface | Violations |
+|--------|------|------------|-----------|-------------|------------|
+| `generator` | 0.62 | 0.4 | 1.0 | 1.0 | 0.0 |
+| `validator` | 0.59 | 0.3 | 1.0 | 1.0 | 0.0 |
+| `propagate` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
+| `verifier` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
+| `planner` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
+| `synth` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
+| `hooks` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
+| `parsing` | 0.53 | 0.2 | 0.9 | 1.0 | 0.0 |
+| `config` | 0.53 | 0.6 | 0.5 | 1.0 | 0.0 |
+| `implementer` | 0.53 | 0.1 | 1.0 | 1.0 | 0.0 |
+| `extractor` | 0.53 | 1.0 | 0.1 | 1.0 | 0.0 |
+| `root` | 0.5 | 0.0 | 1.0 | 1.0 | 0.0 |
+| `scanner` | 0.5 | 0.5 | 0.5 | 1.0 | 0.0 |
+| `graph` | 0.36 | 0.2 | 0.35 | 1.0 | 0.0 |
+| `cli` | 0.29 | 0.0 | 0.31 | 1.0 | 0.0 |
+| `risk` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
+| `contracts` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
+| `wiring` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
+| `traceability` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
+| `clustering` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
+| `schema_refs` | 0.23 | 0.1 | 0.0 | 1.0 | 0.0 |
 
 ## Layer Violations
 
-- `scanner` (Infrastructure) imports `generator` (Application) via from codd.generator import _load_wave_artifacts; from codd.generator import _load_wave_artifacts
+- `extractor` (Infrastructure) imports `schema_refs` (Domain) via from codd.schema_refs import build_schema_refs- `scanner` (Infrastructure) imports `generator` (Application) via from codd.generator import _load_wave_artifacts; from codd.generator import _load_wave_artifacts
 ## Module Dependency Graph
 
 ```
@@ -94,9 +169,17 @@ cli -> propagate
 cli -> scanner
 cli -> validator
 cli -> verifier
+clustering -> extractor
+contracts -> extractor
+extractor -> clustering
 extractor -> config
+extractor -> contracts
 extractor -> parsing
+extractor -> risk
+extractor -> schema_refs
 extractor -> synth
+extractor -> traceability
+extractor -> wiring
 generator -> config
 generator -> scanner
 hooks -> config
@@ -110,11 +193,15 @@ planner -> generator
 planner -> validator
 propagate -> graph
 propagate -> scanner
+risk -> extractor
 scanner -> generator
 scanner -> graph
 scanner -> parsing
+schema_refs -> extractor
 synth -> extractor
+traceability -> extractor
 verifier -> config
+wiring -> extractor
 ```
 
 
@@ -155,6 +242,9 @@ verifier -> config
 
 ## Cross-Cutting Concerns
 
+### Logging & Observability
+
+- `traceability`
 ### Configuration
 
 - `config`

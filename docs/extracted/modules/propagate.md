@@ -5,6 +5,8 @@ codd:
   source: extracted
   confidence: 0.7
   last_extracted: '2026-03-30'
+  source_files:
+  - codd/propagate.py
   depends_on:
   - id: design:extract:graph
     relation: imports
@@ -29,6 +31,19 @@ codd:
 
 
 
+
+
+## Public API
+
+- `run_impact`
+
+
+## Test Coverage
+
+**Coverage**: 0.0 (0 / 1)
+Tests: tests/test_propagate.py
+
+**Uncovered symbols**: `run_impact`
 
 
 ## Import Dependencies

@@ -228,6 +228,14 @@ def _load_frontmatter(ceg: CEG, doc_path: str, codd: dict):
             ceg.add_evidence(edge_id, "frontmatter", "frontmatter", 0.75,
                              detail=data_dep.get("condition", ""))
 
+    # R6.2: source_files bridge edges (extracted design → source file)
+    for source_file in codd.get("source_files", []):
+        file_node_id = f"file:{source_file}"
+        ceg.upsert_node(file_node_id, "file", path=source_file, name=file_node_id)
+        edge_id = ceg.add_edge(node_id, file_node_id, "extracted_from", "technical")
+        ceg.add_evidence(edge_id, "frontmatter", "source_files", 0.85,
+                         detail=f"design doc maps to source file {source_file}")
+
 
 # ═══════════════════════════════════════════════════════════
 # Legacy: annotations/ YAML support (backward compatibility)

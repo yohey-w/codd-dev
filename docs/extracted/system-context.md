@@ -12,27 +12,33 @@ codd:
 
 **Language**: python
 **Source**: codd/
-**Total**: 15 files, 8,746 lines, 15 modules
+**Total**: 21 files, 9,776 lines, 21 modules
 
 ## Module Map
 
 | Module | Files | Lines | Classes | Functions | Async | Types | Route Paths | Dependencies | Patterns |
 |--------|-------|-------|---------|-----------|-------|-------|-------------|--------------|----------|
 | cli | 1 | 433 | 0 | 13 | 0 | 0 | — | config, extractor, generator, hooks, implementer, planner, propagate, scanner, validator, verifier | — |
+| clustering | 1 | 168 | 0 | 1 | 0 | 0 | — | extractor | — |
 | config | 1 | 85 | 0 | 2 | 0 | 0 | — | — | — |
-| extractor | 1 | 886 | 4 | 4 | 0 | 0 | — | config, parsing, synth | — |
+| contracts | 1 | 138 | 1 | 2 | 0 | 0 | — | extractor | — |
+| extractor | 1 | 983 | 6 | 4 | 0 | 0 | — | clustering, config, contracts, parsing, risk, schema_refs, synth, traceability, wiring | — |
 | generator | 1 | 648 | 3 | 1 | 0 | 0 | — | config, scanner | — |
 | graph | 1 | 293 | 1 | 16 | 0 | 0 | — | — | — |
 | hooks | 1 | 110 | 0 | 2 | 0 | 0 | — | config, scanner, validator | — |
 | implementer | 1 | 846 | 3 | 1 | 0 | 0 | — | generator, scanner | — |
-| parsing | 1 | 2,136 | 19 | 44 | 0 | 0 | — | extractor | — |
+| parsing | 1 | 2,233 | 19 | 51 | 0 | 0 | — | extractor | — |
 | planner | 1 | 580 | 6 | 4 | 0 | 0 | — | config, generator, validator | — |
 | propagate | 1 | 308 | 0 | 1 | 0 | 0 | — | graph, scanner | — |
+| risk | 1 | 100 | 1 | 1 | 0 | 0 | — | extractor | — |
 | root | 1 | 3 | 0 | 0 | 0 | 0 | — | — | — |
-| scanner | 1 | 457 | 0 | 2 | 0 | 0 | — | generator, graph, parsing | — |
-| synth | 1 | 782 | 0 | 2 | 0 | 0 | — | extractor | — |
+| scanner | 1 | 465 | 0 | 2 | 0 | 0 | — | generator, graph, parsing | — |
+| schema_refs | 1 | 122 | 1 | 2 | 0 | 0 | — | extractor | — |
+| synth | 1 | 869 | 0 | 2 | 0 | 0 | — | extractor | — |
+| traceability | 1 | 67 | 1 | 1 | 0 | 0 | — | extractor | — |
 | validator | 1 | 500 | 4 | 10 | 0 | 0 | — | — | — |
 | verifier | 1 | 679 | 8 | 2 | 0 | 0 | — | config | — |
+| wiring | 1 | 146 | 1 | 2 | 0 | 0 | — | extractor | — |
 
 ## Module Dependencies
 
@@ -47,9 +53,17 @@ cli -> propagate
 cli -> scanner
 cli -> validator
 cli -> verifier
+clustering -> extractor
+contracts -> extractor
+extractor -> clustering
 extractor -> config
+extractor -> contracts
 extractor -> parsing
+extractor -> risk
+extractor -> schema_refs
 extractor -> synth
+extractor -> traceability
+extractor -> wiring
 generator -> config
 generator -> scanner
 hooks -> config
@@ -63,11 +77,15 @@ planner -> generator
 planner -> validator
 propagate -> graph
 propagate -> scanner
+risk -> extractor
 scanner -> generator
 scanner -> graph
 scanner -> parsing
+schema_refs -> extractor
 synth -> extractor
+traceability -> extractor
 verifier -> config
+wiring -> extractor
 ```
 
 
