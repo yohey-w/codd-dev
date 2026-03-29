@@ -188,12 +188,149 @@ Current state: `codd impact` shows Green/Amber/Gray but doesn't quantify how ris
 - **Output in architecture-overview.md**: `## Change Risk Summary` table sorted by risk score
 - **Impact integration**: `codd impact` output shows risk score next to each Amber module
 
+## R6: Extract→Impact Bridge — End-to-End Brownfield Pipeline
+
+Goal: Close the pipeline gap where `codd extract` generates design docs but `codd impact` cannot trace source file changes back to those docs. Without this bridge, the entire brownfield promise ("extract → impact → safe changes") is broken.
+
+### Problem Statement
+
+Current behavior after `codd extract` + `codd scan` + `codd impact --diff HEAD~1`:
+
+1. Scanner creates `file:codd/extractor.py` nodes (from source scan, Phase 2)
+2. Scanner creates `design:extract:extractor` nodes (from extracted doc frontmatter, Phase 1)
+3. **No edge connects them.** The `file:` node has `path=codd/extractor.py`. The `design:` node has `path=.codd/extracted/modules/extractor.md`.
+4. When `codd/extractor.py` changes, `_resolve_start_nodes()` finds `file:codd/extractor.py` and does `find_nodes_by_path("codd/extractor.py")` — but no `design:` node has that path.
+5. Impact propagation starts from `file:codd/extractor.py` which has no dependents → "No impacts detected."
+
+The extracted design docs (`design:extract:*`) DO have `depends_on` edges to each other (import/call/co_feature relations), forming a rich dependency sub-graph. But that sub-graph is unreachable from source file changes because no `file:` → `design:` edge exists.
+
+### R6.1: Source File Mapping in Extracted Frontmatter
+
+Extracted design docs must declare which source files they describe.
+
+**Requirements:**
+- `_build_frontmatter()` in synth.py gains a `source_files` parameter: `list[str]` of relative source file paths
+- Per-module design docs include `source_files` in their CoDD YAML frontmatter:
+  ```yaml
+  codd:
+    node_id: design:extract:extractor
+    type: design
+    source: extracted
+    source_files:
+      - codd/extractor.py
+  ```
+- The `source_files` list comes from `ModuleInfo.files` (already populated by Stage 1)
+- Schema docs include their schema file path in `source_files`
+- API docs include their spec file path in `source_files`
+- Architecture overview and system-context do NOT have `source_files` (they are aggregations, not file-level)
+
+### R6.2: Scanner Recognizes `source_files` and Creates Bridge Edges
+
+The scanner must create `file:` → `design:` edges when it encounters `source_files` in frontmatter.
+
+**Requirements:**
+- In `_load_frontmatter()` (scanner.py Phase 1): when a document has `codd.source_files`, for each file path:
+  1. Ensure the `file:{path}` node exists (create if Phase 2 hasn't run yet)
+  2. Create an edge: `design:{node_id}` depends_on `file:{path}` with relation `extracted_from`
+  3. Evidence: `{"origin": "auto:source_files", "detail": "extracted design doc maps to source file"}`
+  4. Confidence: 0.85 (high — it's a direct 1:1 mapping from extraction)
+- Edge direction: `design:extract:extractor` → `file:codd/extractor.py` (design depends on source)
+- This means when `file:codd/extractor.py` changes, impact propagation follows the incoming edge to `design:extract:extractor`, then continues to all docs that depend on it
+
+### R6.3: Impact Report Shows Design Doc Context
+
+When `codd impact` detects that a source file change affects extracted design docs:
+
+**Requirements:**
+- Amber band items that are `design:extract:*` nodes should display:
+  - The design doc's node_id and path
+  - The module name (human-readable)
+  - Change risk score (from R5.4, if available in the doc's frontmatter or graph metadata)
+- The report should distinguish between:
+  - **Direct**: Source file changed → its own design doc (depth 1)
+  - **Transitive**: Source file changed → design doc → dependent design docs (depth 2+)
+
+### R6.4: End-to-End Acceptance Test
+
+The following sequence must produce meaningful impact output:
+
+```bash
+# 1. Extract design docs from source
+codd extract --path .
+
+# 2. Build dependency graph (with file→design bridge)
+codd scan --path .
+
+# 3. Change a source file
+echo "# comment" >> codd/extractor.py
+
+# 4. Impact analysis should find affected design docs
+codd impact --diff HEAD --path .
+# Expected: design:extract:extractor (Amber, depth 1)
+#           design:extract:synth (Amber, depth 2, because synth imports extractor)
+#           design:extract:architecture-overview (Amber, depth 2+)
+```
+
+## R7: TypeScript/JavaScript Call Graph Extraction
+
+Current state: `extract_call_graph()` is implemented for Python (Tree-sitter AST traversal of `call` nodes) but returns `[]` for TypeScript and JavaScript. This means R4.1 (call graph), R4.2 (feature clustering), R5.1 (test traceability), and R5.4 (change risk) are all degraded for TS/JS projects — they fall back to import-only analysis.
+
+### R7.1: TypeScript Call Graph via Tree-sitter
+
+Extend `TreeSitterExtractor.extract_call_graph()` to handle TypeScript AST.
+
+**Requirements:**
+- Parse TypeScript source using tree-sitter-typescript
+- Extract call expressions from AST nodes:
+  | AST Node Type | Example | Caller | Callee |
+  |---------------|---------|--------|--------|
+  | `call_expression` | `foo()` | enclosing function/method | `foo` |
+  | `call_expression` with `member_expression` | `this.bar()` | enclosing method | `ClassName.bar` |
+  | `call_expression` with `member_expression` | `service.process()` | enclosing function | `service.process` |
+  | `new_expression` | `new Foo()` | enclosing function | `Foo` (constructor) |
+  | `await_expression` > `call_expression` | `await fetchData()` | enclosing function | `fetchData` (async) |
+- Resolve callee names against known symbols from `extract_symbols()` output
+- Exclude standard library and third-party calls (not in project symbol table)
+- Handle TypeScript-specific patterns:
+  - Optional chaining calls: `foo?.bar()` → callee is `foo.bar`
+  - Type assertion calls: `(foo as Bar).baz()` → callee is `Bar.baz`
+  - Generic calls: `foo<T>()` → callee is `foo`
+
+### R7.2: JavaScript Call Graph (shared logic)
+
+JavaScript call graph uses the same logic as TypeScript minus type annotations.
+
+**Requirements:**
+- Reuse TypeScript call graph implementation with JavaScript tree-sitter grammar
+- Handle JavaScript-specific patterns:
+  | Pattern | Example | Handling |
+  |---------|---------|----------|
+  | CommonJS require + call | `require('./foo').bar()` | callee is `foo.bar` |
+  | Destructured import call | `const { bar } = require('./foo'); bar()` | callee is `foo.bar` |
+  | Prototype method call | `Foo.prototype.bar.call(this)` | callee is `Foo.bar` |
+- ES module imports (`import { bar } from './foo'`) already resolved by `extract_imports()`
+
+### R7.3: Call Graph Quality Constraints
+
+- **Precision over recall**: It's better to miss a call edge than to report a false one. Only emit edges where both caller and callee resolve to known project symbols.
+- **Performance**: Call graph extraction must not add >50% to extraction time for a 1000-file TS project
+- **Fallback**: If tree-sitter-typescript is not installed, return `[]` (same as current RegexExtractor behavior). Do not crash.
+
+### R7.4: Integration with Downstream Features
+
+Once TS/JS call graph is available, these features automatically improve:
+- **R4.2 Feature Clustering**: TS/JS modules can form feature clusters based on call adjacency (currently import-only)
+- **R5.1 Test Traceability**: Jest test files can map to source symbols via call graph (currently name-matching only)
+- **R5.4 Change Risk**: `dependents_count` includes call-graph dependents (currently import-only for TS/JS)
+
+No changes needed in clustering.py, traceability.py, or risk.py — they already consume `ModuleInfo.call_edges` generically.
+
 ## Acceptance Criteria
 
 1. `codd extract` on any Python/TS project produces correct design docs with CoDD frontmatter
 2. `codd verify` on codd-dev (Python) runs mypy + pytest and reports results
 3. `codd scan` recognizes all generated design documents
-4. All 150+ existing tests continue to pass
+4. All 200+ existing tests continue to pass
 5. `codd extract` with call graph flag produces per-module call_graph sections (R4.1)
 6. Architecture overview includes feature_clusters section when call graph data is available (R4.2)
 7. Per-module docs include public_api / internal_api distinction (R4.3)
@@ -201,3 +338,8 @@ Current state: `codd impact` shows Green/Amber/Gray but doesn't quantify how ris
 9. Schema artifacts link to source modules via schema_uses relation (R5.2)
 10. Runtime wiring (DI, middleware, signals) detected and included in dependency graph (R5.3)
 11. Architecture overview includes Change Risk Summary table (R5.4)
+12. Extracted design docs include `source_files` in frontmatter mapping to source file paths (R6.1)
+13. `codd scan` creates `extracted_from` edges between `design:extract:*` and `file:*` nodes (R6.2)
+14. `codd impact` on a source file change reports affected extracted design docs with depth and band (R6.3, R6.4)
+15. TypeScript call graph extraction produces `CallEdge` entries for TS projects (R7.1)
+16. JavaScript call graph extraction produces `CallEdge` entries for JS projects (R7.2)
