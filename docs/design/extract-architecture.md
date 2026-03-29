@@ -91,9 +91,101 @@ Output directory resolves via `find_codd_dir()`:
 - `codd/` found (with codd.yaml) → output to `codd/extracted/`
 - Neither → output to `codd/extracted/` (legacy default)
 
+## Extract v2: Beyond Import Dependencies (R4)
+
+### Call Graph Extraction (R4.1)
+
+Extends `LanguageExtractor` protocol with a new method:
+
+```python
+class LanguageExtractor(Protocol):
+    # ... existing methods ...
+    def extract_call_graph(self, content: str, file_path: str,
+                           symbols: list[Symbol]) -> list[CallEdge]
+```
+
+```python
+@dataclass
+class CallEdge:
+    caller: str          # "module.Class.method" or "module.function"
+    callee: str          # target symbol (resolved to module if possible)
+    call_site: str       # file:line
+    is_async: bool       # async call
+```
+
+**Implementation**: Tree-sitter query for `call` nodes in AST. Resolve callee name against known symbols from Stage 1 `extract_symbols()` output. Unresolved calls (stdlib, third-party) are excluded.
+
+**Pipeline integration**: Call edges collected in Stage 1 alongside imports. Stored in `ModuleInfo.call_edges: list[CallEdge]`.
+
+### Feature Clustering (R4.2)
+
+Post-Stage 1 analysis that groups modules by functional cohesion:
+
+```python
+@dataclass
+class FeatureCluster:
+    name: str                    # inferred feature name
+    modules: list[str]           # member module names
+    confidence: float            # 0.0-1.0
+    evidence: list[str]          # why these are grouped
+```
+
+**Algorithm**:
+1. Build call chain graph from CallEdges
+2. Identify strongly-connected components (modules that mutually call each other)
+3. Augment with heuristic signals:
+   - Shared naming prefixes (`security_*`, `oauth2_*`)
+   - Common caller analysis (modules called by the same parent)
+   - Cross-reference density
+4. Merge components with high affinity into clusters
+
+**Output**: `feature_clusters` section in `architecture-overview.md`.
+
+### Interface Contract Detection (R4.3)
+
+Analyzes `__init__.py` re-exports and `__all__` to distinguish public/internal API:
+
+```python
+@dataclass
+class InterfaceContract:
+    module: str
+    public_symbols: list[str]     # in __init__.py or __all__
+    internal_symbols: list[str]   # everything else
+    api_surface_ratio: float      # public / total
+    encapsulation_violations: list[str]  # internals used by other modules
+```
+
+**Pipeline integration**: Stage 2 per-module docs include `## Public API` / `## Internal API` sections. Stage 3 architecture overview includes encapsulation violation summary.
+
+### Updated Dependency Relation Types
+
+Frontmatter `depends_on` entries gain semantic relation types:
+
+| Relation | Source | Meaning |
+|----------|--------|---------|
+| `imports` | Stage 1 (existing) | A imports symbols from B |
+| `calls` | R4.1 call graph | A invokes functions in B at runtime |
+| `co_feature` | R4.2 clustering | A and B collaborate on the same feature |
+
+### Updated Stage 3 Architecture Overview Sections
+
+1. System Overview
+2. Architectural Layers (existing)
+3. **Request Pipeline** (NEW — derived from call graph)
+4. **Feature Clusters** (NEW — R4.2 output)
+5. Module Dependency Graph (existing, enriched with call edges)
+6. **Interface Contracts Summary** (NEW — R4.3 public vs internal)
+7. Layer Violations (existing, enriched with encapsulation violations)
+8. Data Model Summary
+9. API Surface
+10. External Dependencies
+11. Cross-Cutting Concerns
+12. Entry Points & Deployment
+
 ## Files
 
 - `codd/extractor.py` — Pipeline orchestration, ProjectFacts, extract_facts(), run_extract()
-- `codd/parsing.py` — All extractor implementations (A-F)
-- `codd/synth.py` — Jinja2 template engine, synth_docs(), synth_architecture()
-- `codd/templates/extracted/` — Jinja2 templates
+- `codd/parsing.py` — All extractor implementations (A-F), call graph extraction (R4.1)
+- `codd/synth.py` — Jinja2 template engine, synth_docs(), synth_architecture(), feature clustering (R4.2)
+- `codd/contracts.py` — Interface contract detection (R4.3) [NEW]
+- `codd/templates/extracted/` — Jinja2 templates (updated for R4 sections)

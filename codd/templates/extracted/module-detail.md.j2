@@ -64,6 +64,40 @@
 {% endfor %}
 {% endif %}
 
+{% if interface_contract %}
+## Public API
+
+{% for name in interface_contract.public_symbols -%}
+- `{{ name }}`
+{% endfor %}
+{% if interface_contract.internal_symbols %}
+
+## Internal API
+
+{% for name in interface_contract.internal_symbols -%}
+- `{{ name }}`
+{% endfor %}
+{% endif %}
+{% if interface_contract.encapsulation_violations %}
+
+### Encapsulation Violations
+
+{% for v in interface_contract.encapsulation_violations -%}
+- {{ v }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
+{% if call_edges %}
+## Call Graph
+
+| Caller | Callee | Location | Async |
+|--------|--------|----------|-------|
+{% for edge in call_edges -%}
+| `{{ edge.caller }}` | `{{ edge.callee }}` | `{{ edge.call_site }}` | {{ "yes" if edge.is_async else "no" }} |
+{% endfor %}
+{% endif %}
+
 {% if internal_dependencies %}
 ## Import Dependencies
 

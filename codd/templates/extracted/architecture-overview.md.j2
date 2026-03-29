@@ -31,6 +31,33 @@
 {% endif %}
 {% endfor %}
 
+{% if feature_clusters %}
+## Feature Clusters
+
+{% for cluster in feature_clusters -%}
+### {{ cluster.name }} (confidence: {{ cluster.confidence }})
+
+Modules: {{ cluster.modules | join(", ") }}
+{% if cluster.evidence %}
+Evidence: {{ cluster.evidence | join("; ") }}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if interface_contracts %}
+## Interface Contracts Summary
+
+| Module | Public | Internal | API Ratio | Violations |
+|--------|--------|----------|-----------|------------|
+{% for row in interface_contracts -%}
+| `{{ row.module }}` | {{ row.public_count }} | {{ row.internal_count }} | {{ row.ratio }} | {{ row.violations | length }} |
+{% endfor %}
+{% for row in interface_contracts if row.violations %}
+
+**{{ row.module }}**: {% for v in row.violations %}{{ v }}{% if not loop.last %}; {% endif %}{% endfor %}
+{% endfor %}
+{% endif %}
+
 ## Layer Violations
 
 {% if violations %}

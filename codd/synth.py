@@ -158,6 +158,8 @@ def synth_architecture(
         ],
         violations=violations,
         dependency_lines=dependency_lines,
+        feature_clusters=facts.feature_clusters,
+        interface_contracts=_interface_contracts_summary(facts),
         schema_rows=_schema_summary_rows(facts),
         api_rows=_api_summary_rows(facts),
         infra_rows=_infra_summary_rows(facts),
@@ -262,6 +264,8 @@ def _render_module_detail(env: Environment, facts: ProjectFacts, module: ModuleI
         related_api_specs=related_api_specs,
         files=sorted(module.files),
         tests=_tests_context(module),
+        call_edges=module.call_edges,
+        interface_contract=module.interface_contract,
     )
     return content
 
@@ -326,16 +330,43 @@ def _build_frontmatter(
 
 def _module_depends_on(facts: ProjectFacts, module: ModuleInfo) -> list[dict[str, Any]]:
     depends_on = []
+    seen_ids: set[str] = set()
     for dependency_name in sorted(module.internal_imports):
         if dependency_name not in facts.modules:
             continue
-        depends_on.append(
-            {
-                "id": _module_node_id(dependency_name),
-                "relation": "imports",
-                "semantic": "technical",
-            }
-        )
+        nid = _module_node_id(dependency_name)
+        if nid not in seen_ids:
+            depends_on.append(
+                {"id": nid, "relation": "imports", "semantic": "technical"}
+            )
+            seen_ids.add(nid)
+
+    # R4.1: call-graph edges
+    call_targets: set[str] = set()
+    for edge in module.call_edges:
+        target_mod = edge.callee.split(".")[0]
+        if target_mod in facts.modules and target_mod != module.name:
+            call_targets.add(target_mod)
+    for target in sorted(call_targets):
+        nid = _module_node_id(target)
+        if nid not in seen_ids:
+            depends_on.append(
+                {"id": nid, "relation": "calls", "semantic": "technical"}
+            )
+            seen_ids.add(nid)
+
+    # R4.2: co-feature edges
+    for cluster in facts.feature_clusters:
+        if module.name in cluster.modules:
+            for peer in cluster.modules:
+                if peer != module.name:
+                    nid = _module_node_id(peer)
+                    if nid not in seen_ids:
+                        depends_on.append(
+                            {"id": nid, "relation": "co_feature", "semantic": "technical"}
+                        )
+                        seen_ids.add(nid)
+
     return depends_on
 
 
@@ -501,6 +532,23 @@ def _all_external_dependencies(facts: ProjectFacts) -> list[str]:
         dependencies.update(facts.build_deps.runtime)
         dependencies.update(facts.build_deps.dev)
     return sorted(dependencies)
+
+
+def _interface_contracts_summary(facts: ProjectFacts) -> list[dict[str, Any]]:
+    """Build template-friendly interface contract rows."""
+    rows: list[dict[str, Any]] = []
+    for mod in facts.modules.values():
+        ic = mod.interface_contract
+        if ic is None:
+            continue
+        rows.append({
+            "module": ic.module,
+            "public_count": len(ic.public_symbols),
+            "internal_count": len(ic.internal_symbols),
+            "ratio": ic.api_surface_ratio,
+            "violations": ic.encapsulation_violations,
+        })
+    return sorted(rows, key=lambda r: r["module"])
 
 
 def _dependency_lines(facts: ProjectFacts) -> list[str]:

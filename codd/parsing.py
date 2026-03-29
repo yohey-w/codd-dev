@@ -28,7 +28,7 @@ except ModuleNotFoundError:
     hcl2 = None
 
 if TYPE_CHECKING:
-    from codd.extractor import ModuleInfo, Symbol
+    from codd.extractor import CallEdge, ModuleInfo, Symbol
 
 
 _TREE_SITTER_LANGUAGE_PACKAGES = {
@@ -167,6 +167,9 @@ class LanguageExtractor(Protocol):
     def extract_schema(self, content: str, file_path: str | Path) -> SqlSchemaInfo | PrismaSchemaInfo | None:
         """Return schema information when supported by the extractor."""
 
+    def extract_call_graph(self, content: str, file_path: str, symbols: list[Symbol]) -> list[CallEdge]:
+        """Return call edges found in the given source content."""
+
 
 class RegexExtractor:
     """Adapter for regex-based extraction and schema parsing."""
@@ -213,6 +216,9 @@ class RegexExtractor:
         if self.language == "prisma":
             return _extract_prisma_schema(content, normalized_path)
         return None
+
+    def extract_call_graph(self, content: str, file_path: str, symbols: list[Symbol]) -> list[CallEdge]:
+        return []  # Regex fallback doesn't support call graph
 
 
 class TreeSitterExtractor:
@@ -288,6 +294,17 @@ class TreeSitterExtractor:
     def extract_schema(self, content: str, file_path: str | Path) -> SqlSchemaInfo | PrismaSchemaInfo | None:
         return self._fallback.extract_schema(content, file_path)
 
+    def extract_call_graph(self, content: str, file_path: str, symbols: list[Symbol]) -> list[CallEdge]:
+        if self.category != "source":
+            return []
+        try:
+            root = self._parse(content)
+            if self.language == "python":
+                return _extract_python_call_graph(root, content, file_path, symbols)
+        except Exception:
+            return []
+        return []
+
     def _parse(self, content: str):
         return self._parser.parse(content.encode("utf-8", errors="ignore")).root_node
 
@@ -330,6 +347,9 @@ class SqlDdlExtractor:
             fallback = self._fallback.extract_schema(content, path)
             return fallback if isinstance(fallback, SqlSchemaInfo) else None
 
+    def extract_call_graph(self, content: str, file_path: str, symbols: list[Symbol]) -> list[CallEdge]:
+        return []
+
 
 class PrismaSchemaExtractor:
     """Regex extractor for Prisma schema files."""
@@ -354,6 +374,9 @@ class PrismaSchemaExtractor:
 
     def extract_schema(self, content: str, file_path: str | Path) -> PrismaSchemaInfo | None:
         return _extract_prisma_schema(content, Path(file_path).as_posix())
+
+    def extract_call_graph(self, content: str, file_path: str, symbols: list[Symbol]) -> list[CallEdge]:
+        return []
 
 
 def _build_parser(language: str):
@@ -916,6 +939,74 @@ def _detect_typescript_code_patterns(mod: ModuleInfo, root: Any, content: str) -
         mod.patterns["api_routes"] = f"HTTP route handlers: {', '.join(sorted(set(route_matches)))}"
     elif re.search(r"@(?:Controller|Get|Post|Put|Delete|Patch)\s*\(", content):
         mod.patterns["api_routes"] = "NestJS controller"
+
+
+def _extract_python_call_graph(root: Any, content: str, file_path: str, symbols: list[Symbol]) -> list[CallEdge]:
+    """Extract function call edges from Python AST using tree-sitter."""
+    from codd.extractor import CallEdge
+
+    content_bytes = content.encode("utf-8", errors="ignore")
+    edges: list[CallEdge] = []
+    symbol_names = {s.name for s in symbols}
+
+    def _current_scope(node: Any) -> str:
+        """Walk parents to find enclosing function/class scope."""
+        parts: list[str] = []
+        current = node.parent
+        while current is not None:
+            if current.type in ("function_definition", "class_definition"):
+                name = _field_text(content_bytes, current, "name")
+                if name:
+                    parts.append(name)
+            current = current.parent
+        parts.reverse()
+        return ".".join(parts) if parts else "<module>"
+
+    for node in _iter_named_nodes(root):
+        if node.type != "call":
+            continue
+
+        func_node = node.child_by_field_name("function")
+        if func_node is None:
+            continue
+
+        callee_text = _node_text(content_bytes, func_node).strip()
+
+        # Skip builtins and dunder calls
+        bare_name = callee_text.split(".")[-1] if "." in callee_text else callee_text
+        if bare_name.startswith("__") and bare_name.endswith("__"):
+            continue
+        if bare_name in ("print", "len", "range", "enumerate", "zip", "map", "filter",
+                         "sorted", "reversed", "list", "dict", "set", "tuple", "str",
+                         "int", "float", "bool", "type", "isinstance", "issubclass",
+                         "getattr", "setattr", "hasattr", "super", "property",
+                         "staticmethod", "classmethod", "open", "repr", "id", "vars",
+                         "dir", "any", "all", "min", "max", "sum", "abs", "round",
+                         "format", "iter", "next", "hash", "callable"):
+            continue
+
+        # Only include calls to known symbols (intra-project)
+        if bare_name not in symbol_names and callee_text not in symbol_names:
+            # Check if it's a method call on self (self.method)
+            if callee_text.startswith("self."):
+                method_name = callee_text[5:]  # strip "self."
+                if method_name not in symbol_names:
+                    continue
+            else:
+                continue
+
+        caller = _current_scope(node)
+        line_no = node.start_point.row + 1
+        is_async = node.parent is not None and node.parent.type == "await"
+
+        edges.append(CallEdge(
+            caller=caller,
+            callee=callee_text,
+            call_site=f"{file_path}:{line_no}",
+            is_async=is_async,
+        ))
+
+    return edges
 
 
 def _sql_first_object_name(content_bytes: bytes, node: Any) -> str:
@@ -1774,6 +1865,9 @@ class BuildDepsExtractor:
             scripts=scripts,
         )
 
+    def extract_call_graph(self, content: str, file_path: str, symbols: list[Symbol]) -> list[CallEdge]:
+        return []
+
 
 class TestExtractor:
     """Extract test metadata from test files."""
@@ -1861,6 +1955,9 @@ class TestExtractor:
         tests = re.findall(r"^\s*func\s+(Test\w+)\s*\(", content, re.MULTILINE)
         fixtures = re.findall(r"^\s*func\s+(TestMain)\s*\(", content, re.MULTILINE)
         return TestInfo(file_path=file_path, test_functions=tests, fixtures=fixtures)
+
+    def extract_call_graph(self, content: str, file_path: str, symbols: list[Symbol]) -> list[CallEdge]:
+        return []
 
 
 def get_extractor(language: str, category: str = "source") -> LanguageExtractor:

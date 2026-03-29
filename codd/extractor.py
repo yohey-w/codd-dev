@@ -54,6 +54,15 @@ class Symbol:
 
 
 @dataclass
+class CallEdge:
+    """A function-to-function call relationship."""
+    caller: str          # "module.Class.method" or "module.function"
+    callee: str          # target symbol (resolved to module if possible)
+    call_site: str       # file:line
+    is_async: bool = False
+
+
+@dataclass
 class ModuleInfo:
     """Aggregated info for a discovered module/package."""
     name: str
@@ -65,6 +74,17 @@ class ModuleInfo:
     test_details: list[TestInfo] = field(default_factory=list)
     line_count: int = 0
     patterns: dict[str, str] = field(default_factory=dict)  # pattern_type -> detail
+    call_edges: list[CallEdge] = field(default_factory=list)
+    interface_contract: Any = None  # InterfaceContract from contracts.py
+
+
+@dataclass
+class FeatureCluster:
+    """A group of modules that collaborate on a feature."""
+    name: str
+    modules: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    evidence: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -83,6 +103,7 @@ class ProjectFacts:
     api_specs: dict[str, Any] = field(default_factory=dict)
     infra_config: dict[str, ConfigInfo] = field(default_factory=dict)
     build_deps: BuildDepsInfo | None = None
+    feature_clusters: list[FeatureCluster] = field(default_factory=list)
 
 
 @dataclass
@@ -150,6 +171,18 @@ def extract_facts(project_root: Path, language: str | None = None,
 
     # Detect entry points
     _detect_entry_points(facts, project_root, language)
+
+    # R4.3: Interface contract detection
+    from codd.contracts import build_interface_contracts
+    build_interface_contracts(facts, project_root)
+
+    # R4.1: Call graph extraction + resolution
+    _extract_call_graphs(facts, project_root, language, exclude_patterns)
+    _resolve_call_graph(facts)
+
+    # R4.2: Feature clustering
+    from codd.clustering import build_feature_clusters
+    build_feature_clusters(facts)
 
     return facts
 
@@ -815,6 +848,50 @@ def _discover_build_deps(project_root: Path) -> BuildDepsInfo | None:
             discovered.append(build_info)
 
     return extractor.merge(discovered)
+
+
+# ── R4.1 helpers: call-graph extraction & resolution ──────
+
+def _extract_call_graphs(facts: ProjectFacts, project_root: Path,
+                         language: str, exclude_patterns: list[str] | None):
+    """Collect call edges for every module using the language extractor."""
+    extractor = get_extractor(language, "source")
+    if not hasattr(extractor, "extract_call_graph"):
+        return
+
+    for mod in facts.modules.values():
+        for rel_file in mod.files:
+            full = project_root / rel_file
+            try:
+                content = full.read_text(errors="ignore")
+            except Exception:
+                continue
+            edges = extractor.extract_call_graph(content, rel_file, mod.symbols)
+            mod.call_edges.extend(edges)
+
+
+def _resolve_call_graph(facts: ProjectFacts):
+    """Resolve callee names to fully-qualified module.symbol references."""
+    # Build symbol → module lookup
+    symbol_to_module: dict[str, str] = {}
+    for mod in facts.modules.values():
+        for sym in mod.symbols:
+            symbol_to_module[sym.name] = mod.name
+
+    for mod in facts.modules.values():
+        for edge in mod.call_edges:
+            callee = edge.callee
+            # Strip self. prefix
+            if callee.startswith("self."):
+                callee = callee[5:]
+            # Try to resolve bare name to module.name
+            bare = callee.split(".")[-1]
+            if bare in symbol_to_module:
+                target_mod = symbol_to_module[bare]
+                if target_mod != mod.name:
+                    edge.callee = f"{target_mod}.{bare}"
+                else:
+                    edge.callee = bare
 
 
 # ═══════════════════════════════════════════════════════════

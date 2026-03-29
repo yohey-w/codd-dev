@@ -75,9 +75,60 @@ The verifier must support multiple languages, not just TypeScript/Node.js.
 - `codd scan` builds the dependency graph including these docs
 - `codd verify` can verify codd-dev itself (Python project)
 
+## R4: Extract v2 — Beyond Import Dependencies
+
+Current `codd extract` captures only import dependencies (structural edges). This is the "skeleton" — what depends on what. But three critical dimensions are missing to understand how a codebase actually works.
+
+### R4.1: Call Graph Extraction
+
+Import dependencies show "A knows about B." Call graphs show "A calls B.foo() at runtime."
+
+- **Static call graph**: Tree-sitter AST analysis to extract function-to-function call edges
+- **Output**: Per-module `call_graph` section listing caller → callee relationships
+- **Scope**: Intra-project calls only (exclude stdlib/third-party)
+- **Data flow direction**: Enables "request pipeline" reconstruction (e.g., routing → dependencies → endpoint → serialization → response)
+- **Temporal ordering**: Call graph implies execution order, which import graph does not
+
+### R4.2: Feature Clustering
+
+Individual modules don't map 1:1 to user-visible features. Multiple modules collaborate to implement a feature.
+
+- **Co-call analysis**: Modules frequently called together in the same call chain form a feature cluster
+- **Heuristic signals**:
+  - Shared prefixes in function/class names (e.g., `security_*`, `oauth2_*`)
+  - Common callers (modules called by the same parent)
+  - Cross-reference density (modules with bidirectional or high-frequency mutual calls)
+- **Output**: `feature_clusters` section in architecture-overview.md listing inferred feature groups with member modules and confidence
+- **Example**: `Authentication = {security, dependencies(DI injection), openapi(schema reflection), params(Form receipt)}`
+
+### R4.3: Interface Contract Detection
+
+Distinguish public API surface from internal implementation details.
+
+- **Re-export analysis**: Symbols in `__init__.py` are public API; everything else is internal
+- **Output per module**:
+  - `public_api`: Symbols re-exported via `__init__.py` or explicitly in `__all__`
+  - `internal_api`: Everything else
+  - `api_surface_ratio`: public / total symbols
+- **Cross-module contracts**: When module A only uses module B's public API vs reaching into internals
+- **Encapsulation violations**: Internal symbols used by other modules = fragile coupling
+
+### R4.4: Integration with Existing Extract Pipeline
+
+- Call graph and feature clusters feed into Stage 3 (architecture overview) alongside import dependencies
+- Interface contracts feed into per-module design docs (Stage 2)
+- All new data included in CoDD frontmatter `depends_on` with semantic relation types:
+  - `imports` (existing) — structural dependency
+  - `calls` (new) — runtime invocation
+  - `co_feature` (new) — feature cluster membership
+- Confidence scoring: call graph edges have higher confidence than import-only edges
+
 ## Acceptance Criteria
 
 1. `codd extract` on any Python/TS project produces correct design docs with CoDD frontmatter
 2. `codd verify` on codd-dev (Python) runs mypy + pytest and reports results
 3. `codd scan` recognizes all generated design documents
 4. All 127+ existing tests continue to pass
+5. `codd extract` with call graph flag produces per-module call_graph sections (R4.1)
+6. Architecture overview includes feature_clusters section when call graph data is available (R4.2)
+7. Per-module docs include public_api / internal_api distinction (R4.3)
