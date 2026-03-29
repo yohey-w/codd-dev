@@ -2,6 +2,26 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [0.2.0a5] - 2026-03-29
+
+### Added
+
+- **`codd extract` — Brownfield bootstrap from existing codebases**
+  - Reverse-engineers CoDD design documents from source code using static analysis
+  - No AI required — pure deterministic structural fact extraction
+  - Philosophy: in V-Model, intent lives only in requirements; everything below
+    is structural fact that static analysis can extract
+  - Supports Python, TypeScript, JavaScript, Java, Go
+  - Two-phase architecture: extract-facts (static analysis) → synth-docs (templated Markdown)
+  - Auto-detects language, source directories, test directories, frameworks, ORMs
+  - Generates `system-context.md` (module map + dependency graph) and per-module
+    design documents with full CoDD frontmatter
+  - Module cards include: classes, public functions, internal/external dependencies,
+    file list, test mapping, detected patterns (API routes, DB models)
+  - Confidence scores capped below green band — human review always required
+  - Works without `codd init` (true brownfield: no prior CoDD setup needed)
+  - Output to `codd/extracted/` as draft documents; promote after review
+
 ## [0.2.0a1] - 2026-03-29
 
 ### Public Alpha Release

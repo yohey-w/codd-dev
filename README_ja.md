@@ -90,7 +90,7 @@ codd impact
 
 ## 5分で体験するデモ
 
-タスク管理アプリを題材に、**要件定義を平文で書いて**、残りは全部CoDD+AIに任せる。
+**TaskFlow**（タスク管理アプリ）を題材に、**要件定義を平文で書いて**、残りは全部CoDD+AIに任せる。
 
 ### Step 1: 要件定義を書く（平文でOK — txt, md, doc 何でもいい）
 
@@ -231,6 +231,35 @@ codd:
 
 `graph.db` はキャッシュ — `codd scan` のたびに再生成されます。
 
+## ブラウンフィールド？ ここから
+
+既存コードベースがある場合、`codd extract` がソースコードから設計書を逆生成します。AI不要——純粋な静的解析。
+
+```bash
+cd existing-project
+codd extract
+```
+
+```
+Extracted: 13 modules from 45 files (12,340 lines)
+Output: codd/extracted/
+  system-context.md     # モジュールマップ + 依存グラフ
+  modules/auth.md       # モジュール別設計書
+  modules/api.md
+  modules/db.md
+  ...
+```
+
+**設計思想**: V-Modelにおいて、意図は要件定義にのみ存在する。アーキテクチャ・詳細設計・テストは構造事実——コードから抽出可能。`codd extract` は構造を取り、「なぜ」は後から人が加える。
+
+```bash
+# 生成された文書をレビューし、確認済みのものを昇格
+mv codd/extracted/modules/auth.md docs/design/
+# 依存グラフを構築
+codd scan
+codd impact
+```
+
 ## コマンド
 
 | コマンド | ステータス | 説明 |
@@ -243,10 +272,46 @@ codd:
 | `codd plan` | 実験的 | Wave実行状況 |
 | `codd verify` | 実験的 | V-Model検証 |
 | `codd implement` | 実験的 | 設計書→コード生成 |
+| `codd extract` | **アルファ** | 既存コードから設計書を逆生成 |
 
 ## Claude Code 連携
 
-CoDDはClaude Code用のスラッシュコマンドSkillを同梱。フックと組み合わせれば自動で一貫性を維持：
+CoDDはClaude Code用のスラッシュコマンドSkillを同梱。CLIを直接叩く代わりに、Skillを使えばClaudeがプロジェクトの状態を読み取って適切なコマンドを実行する。
+
+### Skills デモ — 同じTaskFlowアプリ、CLIコマンド不要
+
+```
+殿:  /codd-init
+     → Claude: codd init --project-name "taskflow" --language "typescript" \
+                 --requirements spec.txt
+
+殿:  /codd-generate
+     → Claude: codd generate --wave 2 --path .
+     → Claude が生成された設計書を読み、スコープ確認、フロントマター検証
+     → 「Wave 2の設計書を確認しました。Wave 3に進みますか？」
+
+殿:  はい
+
+殿:  /codd-generate
+     → Claude: codd generate --wave 3 --path .
+
+殿:  /codd-scan
+     → Claude: codd scan --path .
+     → 報告: 「7ドキュメント、15エッジ。警告なし。」
+
+殿:  （要件を編集 — SSO対応と監査ログを追加）
+
+殿:  /codd-impact
+     → Claude: codd impact --path .
+     → Green帯域: system-design、api-design、db-design、auth-designを自動更新
+     → Amber帯域: 「test-strategyが影響を受けています。更新しますか？」
+```
+
+**CLIとの違い**: Skillはhuman-in-the-loopゲートを追加する。`/codd-generate` はWave間で承認を求めて停止。`/codd-impact` はGreen/Amber/Grayプロトコルに従い、安全な変更は自動更新、リスクのある変更は確認してから実行。
+
+### フック連携 — 一度設定したら、もう意識しなくていい
+
+このフックを入れれば、**`codd scan` を手動で叩く必要は二度とない。** ファイル編集のたびに自動実行 — 依存グラフは常に最新、常に正確、意識ゼロ：
 
 ```json
 {
@@ -262,9 +327,19 @@ CoDDはClaude Code用のスラッシュコマンドSkillを同梱。フックと
 }
 ```
 
-ファイル編集のたびに `codd scan` が自動実行 — 依存グラフが常に最新に保たれます。
+フックが有効なら、やることは**普通にファイルを編集して、影響を知りたくなったら `/codd-impact` を叩く。それだけ。** グラフのメンテナンスは完全に透明。
 
-詳細は [docs/claude-code-setup.md](docs/claude-code-setup.md) を参照。
+### 利用可能なSkill
+
+| Skill | 機能 |
+|-------|------|
+| `/codd-init` | 初期化 + 要件インポート |
+| `/codd-generate` | HITLゲート付きWave順設計書生成 |
+| `/codd-scan` | 依存グラフ再構築 |
+| `/codd-impact` | Green/Amber/Grayプロトコルで変更影響分析 |
+| `/codd-validate` | フロントマター & 依存関係の整合性チェック |
+
+詳細は [docs/claude-code-setup_ja.md](docs/claude-code-setup_ja.md) を参照。
 
 ## 比較
 
@@ -296,7 +371,7 @@ docs/
 ## ロードマップ
 
 - [ ] セマンティック依存関係タイプ (`requires`, `affects`, `verifies`, `implements`)
-- [ ] `codd extract` — 既存コードベースから設計書を逆生成（ブラウンフィールド対応）
+- [x] `codd extract` — 既存コードベースから設計書を逆生成（ブラウンフィールド対応）
 - [ ] `codd verify` — 設計書↔コード↔テストの完全一貫性チェック
 - [ ] マルチハーネス連携例（Claude Code, Copilot, Cursor）
 - [ ] VS Code拡張（影響分析の可視化）

@@ -32,7 +32,14 @@ def init(project_name: str, language: str, dest: str, requirements: str | None):
     codd_dir = dest_path / "codd"
 
     if codd_dir.exists():
-        click.echo(f"Error: {codd_dir} already exists.")
+        if requirements:
+            # Import requirements into existing CoDD project
+            req_path = _import_requirements(dest_path, Path(requirements), project_name)
+            rel_req = req_path.relative_to(dest_path).as_posix()
+            click.echo(f"Requirements imported: {rel_req} (frontmatter added)")
+            click.echo(f"\nNext: codd generate --wave 2  (AI generates design docs)")
+            return
+        click.echo(f"Error: {codd_dir} already exists. Use --requirements to import a requirements file.")
         raise SystemExit(1)
 
     # Create directory structure
@@ -237,6 +244,42 @@ def verify(path: str, sprint: int | None) -> None:
 
     click.echo(f"\nReport: {result.report_path}")
     raise SystemExit(0 if result.success else 1)
+
+
+@main.command()
+@click.option("--path", default=".", help="Project root directory")
+@click.option("--language", default=None, help="Override language detection (python/typescript/javascript/java/go)")
+@click.option("--source-dirs", default=None, help="Comma-separated source directories (default: auto-detect)")
+@click.option("--output", default=None, help="Output directory (default: codd/extracted/)")
+def extract(path: str, language: str | None, source_dirs: str | None, output: str | None):
+    """Extract design documents from existing codebase (brownfield bootstrap).
+
+    Reverse-engineers CoDD design docs from source code using static analysis.
+    No AI required — pure structural fact extraction.
+
+    Output goes to codd/extracted/ as draft documents. Review and promote
+    to codd/ when confirmed.
+    """
+    from codd.extractor import run_extract
+
+    project_root = Path(path).resolve()
+    dirs = [d.strip() for d in source_dirs.split(",")] if source_dirs else None
+
+    try:
+        result = run_extract(project_root, language, dirs, output)
+    except Exception as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(f"Extracted: {result.module_count} modules from {result.total_files} files ({result.total_lines:,} lines)")
+    click.echo(f"Output: {result.output_dir}/")
+    for f in result.generated_files:
+        click.echo(f"  {f.relative_to(result.output_dir)}")
+
+    click.echo(f"\nNext steps:")
+    click.echo(f"  1. Review generated docs in {result.output_dir}/")
+    click.echo(f"  2. Promote confirmed docs: mv codd/extracted/*.md docs/design/")
+    click.echo(f"  3. Run: codd scan  (to build the dependency graph)")
 
 
 @main.command()

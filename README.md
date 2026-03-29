@@ -90,7 +90,7 @@ codd impact
 
 ## 5-Minute Demo — See CoDD in Action
 
-A task management app. Write **requirements in plain text**, let CoDD + AI handle everything else.
+We'll build **TaskFlow**, a task management app. Write **requirements in plain text**, let CoDD + AI handle everything else.
 
 ### Step 1: Write your requirements (any format — txt, md, doc)
 
@@ -231,6 +231,35 @@ codd:
 
 `graph.db` is a cache — regenerated on every `codd scan`.
 
+## Brownfield? Start Here
+
+Already have a codebase? `codd extract` reverse-engineers design documents from your source code. No AI required — pure static analysis.
+
+```bash
+cd existing-project
+codd extract
+```
+
+```
+Extracted: 13 modules from 45 files (12,340 lines)
+Output: codd/extracted/
+  system-context.md     # Module map + dependency graph
+  modules/auth.md       # Per-module design doc
+  modules/api.md
+  modules/db.md
+  ...
+```
+
+**Philosophy**: In V-Model, intent lives only in requirements. Architecture, design, and tests are structural facts — extractable from code. `codd extract` gets the structure; you add the "why" later.
+
+```bash
+# Review generated docs, promote confirmed ones
+mv codd/extracted/modules/auth.md docs/design/
+# Then build the dependency graph
+codd scan
+codd impact
+```
+
 ## Commands
 
 | Command | Status | Description |
@@ -243,10 +272,46 @@ codd:
 | `codd plan` | Experimental | Wave execution status |
 | `codd verify` | Experimental | V-Model verification |
 | `codd implement` | Experimental | Design-to-code generation |
+| `codd extract` | **Alpha** | Reverse-engineer design docs from existing code |
 
 ## Claude Code Integration
 
-CoDD ships with slash-command Skills for Claude Code. Combine with hooks for automatic coherence:
+CoDD ships with slash-command Skills for Claude Code. Instead of running CLI commands yourself, use Skills — Claude reads the project context and runs the right command with the right flags.
+
+### Skills Demo — Same TaskFlow App, Zero CLI
+
+```
+You:  /codd-init
+      → Claude: codd init --project-name "taskflow" --language "typescript" \
+                  --requirements spec.txt
+
+You:  /codd-generate
+      → Claude: codd generate --wave 2 --path .
+      → Claude reads every generated doc, checks scope, validates frontmatter
+      → "Wave 2の設計書を確認しました。Wave 3に進みますか？"
+
+You:  yes
+
+You:  /codd-generate
+      → Claude: codd generate --wave 3 --path .
+
+You:  /codd-scan
+      → Claude: codd scan --path .
+      → Reports: "7 documents, 15 edges. No warnings."
+
+You:  (edit requirements — add SSO + audit logging)
+
+You:  /codd-impact
+      → Claude: codd impact --path .
+      → Green Band: auto-updates system-design, api-design, db-design, auth-design
+      → Amber Band: "test-strategyが影響を受けています。更新しますか？"
+```
+
+**Key difference**: Skills add human-in-the-loop gates. `/codd-generate` pauses between waves for approval. `/codd-impact` follows the Green/Amber/Gray protocol — auto-updating safe changes, asking before risky ones.
+
+### Hook Integration — Set It Once, Never Think Again
+
+Add this hook and **you never run `codd scan` manually again.** Every file edit triggers it automatically — the dependency graph is always current, always accurate, zero mental overhead:
 
 ```json
 {
@@ -262,7 +327,17 @@ CoDD ships with slash-command Skills for Claude Code. Combine with hooks for aut
 }
 ```
 
-Every file edit triggers `codd scan` — the dependency graph stays current without thinking about it.
+With hooks active, your entire workflow becomes: **edit files normally, then run `/codd-impact` when you want to know what's affected.** That's it. The graph maintenance is invisible.
+
+### Available Skills
+
+| Skill | What it does |
+|-------|-------------|
+| `/codd-init` | Initialize + import requirements |
+| `/codd-generate` | Generate design docs wave-by-wave with HITL gates |
+| `/codd-scan` | Rebuild dependency graph |
+| `/codd-impact` | Change impact analysis with Green/Amber/Gray protocol |
+| `/codd-validate` | Frontmatter & dependency consistency check |
 
 See [docs/claude-code-setup.md](docs/claude-code-setup.md) for complete setup.
 
@@ -296,7 +371,7 @@ docs/
 ## Roadmap
 
 - [ ] Semantic dependency types (`requires`, `affects`, `verifies`, `implements`)
-- [ ] `codd extract` — reverse-generate design docs from existing codebases (brownfield support)
+- [x] `codd extract` — reverse-generate design docs from existing codebases (brownfield support)
 - [ ] `codd verify` — full docs-code-tests coherence check
 - [ ] Multi-harness integration examples (Claude Code, Copilot, Cursor)
 - [ ] VS Code extension for impact visualization
