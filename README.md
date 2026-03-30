@@ -351,6 +351,21 @@ With hooks active, your entire workflow becomes: **edit files normally, then run
 
 See [docs/claude-code-setup.md](docs/claude-code-setup.md) for complete setup.
 
+## How CoDD Differs from Other Spec-Driven Tools
+
+All major spec-driven tools focus on **creating** design documents. None address what happens when those documents **change**. CoDD fills that gap with a dependency graph, impact analysis, and a band-based update protocol.
+
+| | **spec-kit** (GitHub) | **Kiro** (AWS) | **cc-sdd** (gotalab) | **CoDD** |
+|--|---|---|---|---|
+| Focus | Spec creation (req -> design -> tasks -> code) | Agentic IDE with native SDD pipeline | Kiro-style SDD for Claude Code | **Post-creation coherence maintenance** |
+| Stars | 83.7k | N/A (proprietary IDE) | 3k | -- |
+| Change propagation | No | No | No | **`codd impact` + dependency graph** |
+| Impact analysis | No | No | No | **Green / Amber / Gray bands** |
+| Spec notation | Markdown + 40 extensions | EARS notation | Quality gates + git worktree | Frontmatter `depends_on` |
+| Harness lock-in | GitHub Copilot | Kiro IDE | Claude Code | **Any agent / IDE** |
+
+In short: spec-kit, Kiro, and cc-sdd answer *"how do I create specs?"* CoDD answers *"how do I keep specs, code, and tests coherent when requirements change?"*
+
 ## Comparison
 
 |  | Spec Kit | OpenSpec | **CoDD** |
