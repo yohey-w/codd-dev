@@ -302,6 +302,30 @@ def implement(sprint: int, path: str, task: str | None, ai_cmd: str | None):
 
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
+@click.option("--output-dir", default=None, help="Output directory for assembled project (default: src/)")
+@click.option(
+    "--ai-cmd",
+    default=None,
+    help="Override AI CLI command (defaults to codd.yaml ai_command or 'claude --print')",
+)
+def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
+    """Assemble generated sprint fragments into a working project."""
+    from codd.assembler import assemble_project
+
+    project_root = Path(path).resolve()
+    _require_codd_dir(project_root)
+
+    try:
+        result = assemble_project(project_root, output_dir=output_dir, ai_command=ai_cmd)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(f"Assembled {result.files_written} files into {result.output_dir.relative_to(project_root)}/")
+
+
+@main.command()
+@click.option("--path", default=".", help="Project root directory")
 @click.option("--sprint", default=None, type=click.IntRange(min=1), help="Sprint number to verify")
 def verify(path: str, sprint: int | None) -> None:
     """Run build + test verification and trace failures to design documents."""
