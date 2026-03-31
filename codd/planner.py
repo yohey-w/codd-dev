@@ -92,6 +92,15 @@ class RequirementDocument:
 
 
 @dataclass(frozen=True)
+class ExtractedDocument:
+    """Extracted document used as brownfield context for wave_config synthesis."""
+
+    node_id: str
+    path: str
+    content: str
+
+
+@dataclass(frozen=True)
 class PlanInitResult:
     """Result of initializing wave_config from requirements."""
 
@@ -113,7 +122,7 @@ def plan_init(
     force: bool = False,
     ai_command: str | None = None,
 ) -> PlanInitResult:
-    """Initialize wave_config from requirement documents."""
+    """Initialize wave_config from requirement or extracted documents."""
     project_root = project_root.resolve()
     config = _load_project_config(project_root)
 
@@ -121,11 +130,24 @@ def plan_init(
         raise FileExistsError("codd.yaml already contains wave_config")
 
     requirement_documents = _load_requirement_documents(project_root, config)
-    if not requirement_documents:
-        raise ValueError("no requirement documents with CoDD frontmatter were found under configured doc_dirs")
+    extracted_documents: list[ExtractedDocument] = []
 
-    resolved_ai_command = generator_module._resolve_ai_command(config, ai_command)
-    prompt = _build_plan_init_prompt(config, requirement_documents)
+    if requirement_documents:
+        # Greenfield: use requirements
+        resolved_ai_command = generator_module._resolve_ai_command(config, ai_command)
+        prompt = _build_plan_init_prompt(config, requirement_documents)
+    else:
+        # Brownfield: try extracted docs
+        extracted_documents = _load_extracted_documents(project_root, config)
+        if not extracted_documents:
+            raise ValueError(
+                "no requirement documents or extracted documents found. "
+                "Run 'codd extract' first for brownfield projects, "
+                "or create requirement docs with CoDD frontmatter for greenfield projects."
+            )
+        resolved_ai_command = generator_module._resolve_ai_command(config, ai_command)
+        prompt = _build_brownfield_plan_init_prompt(config, extracted_documents)
+
     raw_wave_config = generator_module._invoke_ai_command(resolved_ai_command, prompt)
     wave_config = _parse_wave_config_output(raw_wave_config)
 
@@ -141,7 +163,7 @@ def plan_init(
     return PlanInitResult(
         project_root=str(project_root),
         config_path=str(config_path),
-        requirement_paths=[document.path for document in requirement_documents],
+        requirement_paths=[d.path for d in requirement_documents] or [d.path for d in extracted_documents],
         wave_config=wave_config,
     )
 
@@ -327,6 +349,7 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         "- Output ONLY YAML for the wave_config mapping. Do not emit prose or Markdown fences.",
         "- Use string wave numbers as the top-level keys.",
         "- Each artifact entry must include node_id, output, title, depends_on, and conventions.",
+        "- Each artifact entry must also include a `modules` list naming the source modules the document covers (e.g., ['auth', 'users']). This links design docs to source code for traceability.",
         "- Insert a dedicated detailed design wave between overview design and implementation planning when the project has multiple modules, integrations, workflows, or shared domain concepts.",
         "- Detailed design artifacts must live under docs/detailed_design/ and stay Markdown + Mermaid (text-first, no binary diagrams).",
         "- Decide which detailed design artifacts are necessary from the project context; do not hardcode a fixed set. Good candidates include shared domain ownership, component dependency maps, ER/CRUD views, key sequence diagrams, and state machines.",
@@ -351,6 +374,7 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         '      "title": "Document Title",',
         '      "depends_on": [{"id": "node:id", "relation": "derives_from", "semantic": "governance"}],',
         '      "conventions": [{"targets": ["node:id"], "reason": "release-blocking constraint"}]',
+        '      "modules": ["module_name_1", "module_name_2"]',
         "    }",
         "  ]",
         "}",
@@ -369,6 +393,7 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         '          - "db:rls_policies"',
         '          - "module:auth"',
         '        reason: "Tenant isolation and authenticated access are release-blocking constraints."',
+        '    modules: ["auth"]',
         '"2":',
         '  - node_id: "design:system-design"',
         '    output: "docs/design/system_design.md"',
@@ -410,6 +435,112 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
                 f"--- BEGIN REQUIREMENT {document.path} ({document.node_id}) ---",
                 document.content.rstrip(),
                 f"--- END REQUIREMENT {document.path} ---",
+                "",
+            ]
+        )
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _load_extracted_documents(project_root: Path, config: dict[str, Any]) -> list[ExtractedDocument]:
+    """Load extracted docs from codd/extracted/ directory."""
+    from codd.config import find_codd_dir
+    codd_dir = find_codd_dir(project_root) or project_root / "codd"
+    extracted_dir = codd_dir / "extracted"
+    if not extracted_dir.is_dir():
+        return []
+
+    documents: list[ExtractedDocument] = []
+    for doc_path in sorted(extracted_dir.rglob("*.md")):
+        parsed = _parse_codd_frontmatter(doc_path)
+        if parsed.error:
+            continue
+        codd = parsed.codd or {}
+        if codd.get("source") != "extracted":
+            continue
+        node_id = codd.get("node_id")
+        if not isinstance(node_id, str) or not node_id.strip():
+            continue
+        documents.append(
+            ExtractedDocument(
+                node_id=node_id.strip(),
+                path=doc_path.relative_to(project_root).as_posix(),
+                content=doc_path.read_text(encoding="utf-8"),
+            )
+        )
+    return documents
+
+
+def _build_brownfield_plan_init_prompt(
+    config: dict[str, Any],
+    extracted_documents: list[ExtractedDocument],
+) -> str:
+    project = config.get("project") or {}
+    scan = config.get("scan") or {}
+    doc_dirs = scan.get("doc_dirs") or []
+    project_name = project.get("name") or "(unknown)"
+    language = project.get("language") or "(unknown)"
+
+    lines = [
+        "You are initializing CoDD wave_config for a BROWNFIELD project from extracted documents.",
+        "These extracted documents were generated by 'codd extract' from existing source code.",
+        "Your job is to create a V-Model design document plan that covers the existing codebase.",
+        f"Project name: {project_name}",
+        f"Primary language: {language}",
+        "Configured doc_dirs: " + (", ".join(str(item) for item in doc_dirs) if doc_dirs else "(none)"),
+        "",
+        "MECE Document Structure (7 categories):",
+        MECE_DOCUMENT_STRUCTURE.rstrip(),
+        "",
+        "Standard V-model artifact patterns:",
+        STANDARD_V_MODEL_PATTERNS.rstrip(),
+        "",
+        "Instructions:",
+        "- Read the extracted documents below. They describe the existing codebase structure, modules, symbols, dependencies, and patterns.",
+        "- Design a wave_config that will produce design documents covering this existing system.",
+        "- Since this is brownfield (code already exists), the design documents serve as retroactive documentation, not forward planning.",
+        "- Each artifact entry must include node_id, output, title, depends_on, and conventions.",
+        "- Each artifact entry must also include a `modules` list naming the source modules the document covers (e.g., ['auth', 'users']).",
+        "- Map extracted modules to design documents. Group related modules into the same design doc where appropriate.",
+        "- Use the extracted document node_ids in depends_on to trace back to the source analysis.",
+        "- Insert detailed design documents for complex modules or module groups.",
+        "- conventions are release-blocking constraints. Extract them from the patterns detected in the extracted documents (e.g., authentication, database models, API routes).",
+        "- Do not add extracted documents themselves to wave_config — they are inputs, not outputs.",
+        "- Keep output paths under docs/design/, docs/detailed_design/, docs/plan/, docs/governance/, docs/test/, or docs/operations/.",
+        "- Set dependencies so earlier waves unlock later waves in a realistic order.",
+        "- Do not emit explanatory headings or summaries before the YAML.",
+        "",
+        "Required schema (JSON notation):",
+        "{",
+        '  "<wave-number>": [',
+        "    {",
+        '      "node_id": "category:name",',
+        '      "output": "docs/.../file.md",',
+        '      "title": "Document Title",',
+        '      "modules": ["module_name_1", "module_name_2"],',
+        '      "depends_on": [{"id": "node:id", "relation": "derives_from", "semantic": "governance"}],',
+        '      "conventions": [{"targets": ["node:id"], "reason": "release-blocking constraint"}]',
+        "    }",
+        "  ]",
+        "}",
+        "",
+        "Output ONLY YAML for the wave_config mapping. Do not emit prose or Markdown fences.",
+        "",
+        "User instruction:",
+        "以下のextractedドキュメント（既存コードベースから自動抽出された設計情報）を読み、",
+        "このプロジェクトの既存構造を網羅する設計成果物・依存順序・artifactごとのconventionsとmodulesを判断し、",
+        "wave_config形式のYAMLを出力せよ。",
+        "各artifactにはmodulesフィールドで対応するソースモジュール名のリストを必ず含めること。",
+        "",
+        "Extracted documents:",
+    ]
+
+    for document in extracted_documents:
+        lines.extend(
+            [
+                f"--- BEGIN EXTRACTED {document.path} ({document.node_id}) ---",
+                document.content.rstrip(),
+                f"--- END EXTRACTED {document.path} ---",
                 "",
             ]
         )
@@ -497,6 +628,8 @@ def _serialize_wave_config(artifacts: list[WaveArtifact]) -> dict[str, list[dict
             entry["depends_on"] = artifact.depends_on
         if artifact.conventions:
             entry["conventions"] = artifact.conventions
+        if artifact.modules:
+            entry["modules"] = list(artifact.modules)
         grouped[str(artifact.wave)].append(entry)
 
     return {wave: grouped[wave] for wave in sorted(grouped, key=int)}

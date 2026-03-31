@@ -544,3 +544,265 @@ def test_plan_command_init_force_overwrites_existing_wave_config(tmp_path, mock_
     assert config["wave_config"]["2"][0]["node_id"] == "design:system-design"
     assert config["wave_config"]["2"][0]["depends_on"][1]["relation"] == "informed_by"
     assert mock_plan_init_ai[0]["command"] == ["mock-ai", "--print"]
+
+
+def test_wave_config_modules_field_parsed_and_rendered(tmp_path):
+    """modules field in wave_config is preserved through load -> render -> serialize."""
+    project = _setup_project(tmp_path)
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+    # Add modules to existing wave_config
+    config["wave_config"]["1"][0]["modules"] = ["auth", "users"]
+    config["wave_config"]["2"][0]["modules"] = ["auth", "api"]
+    (project / "codd" / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    from codd.generator import _load_wave_artifacts, _render_document
+    from codd.planner import _serialize_wave_config
+    artifacts = _load_wave_artifacts(config)
+
+    # Parsed correctly
+    ac = next(a for a in artifacts if a.node_id == "design:acceptance-criteria")
+    assert ac.modules == ["auth", "users"]
+
+    sd = next(a for a in artifacts if a.node_id == "design:system-design")
+    assert sd.modules == ["auth", "api"]
+
+    # Serialization preserves modules
+    serialized = _serialize_wave_config(artifacts)
+    assert serialized["1"][0]["modules"] == ["auth", "users"]
+    assert serialized["2"][0]["modules"] == ["auth", "api"]
+
+    # Render includes modules in frontmatter
+    rendered = _render_document(
+        artifact=ac,
+        global_conventions=[],
+        depended_by=[],
+        body="# Test\n\n## Overview\n\nContent here.\n",
+    )
+    assert "modules:" in rendered
+    assert "auth" in rendered
+    assert "users" in rendered
+
+
+def test_wave_config_without_modules_field_defaults_to_empty(tmp_path):
+    """Existing wave_config without modules field continues to work."""
+    project = _setup_project(tmp_path)
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+
+    from codd.generator import _load_wave_artifacts, _render_document
+    from codd.planner import _serialize_wave_config
+    artifacts = _load_wave_artifacts(config)
+
+    ac = next(a for a in artifacts if a.node_id == "design:acceptance-criteria")
+    assert ac.modules == []
+
+    # Serialization does not include empty modules
+    serialized = _serialize_wave_config(artifacts)
+    assert "modules" not in serialized["1"][0]
+
+    # Render does not include modules in frontmatter when empty
+    rendered = _render_document(
+        artifact=ac,
+        global_conventions=[],
+        depended_by=[],
+        body="# Test\n\n## Overview\n\nContent here.\n",
+    )
+    assert "modules:" not in rendered
+
+
+def test_plan_init_prompt_includes_modules_field(tmp_path, mock_plan_init_ai):
+    """plan_init prompt includes modules in schema documentation."""
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+
+    planner_module.plan_init(project)
+
+    prompt = mock_plan_init_ai[0]["input"]
+    assert "modules" in prompt
+    assert "source modules" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# Brownfield plan_init tests
+# ---------------------------------------------------------------------------
+
+BROWNFIELD_AI_OUTPUT = '''```yaml
+"1":
+  - node_id: "design:acceptance-criteria"
+    output: "docs/test/acceptance_criteria.md"
+    title: "Acceptance Criteria"
+    modules: ["auth", "tasks"]
+    depends_on:
+      - id: "design:extract:system-context"
+        relation: "derives_from"
+        semantic: "technical"
+    conventions:
+      - targets:
+          - "module:auth"
+        reason: "Authentication is release-blocking."
+"2":
+  - node_id: "design:system-design"
+    output: "docs/design/system_design.md"
+    title: "System Design"
+    modules: ["auth", "tasks"]
+    depends_on:
+      - id: "design:acceptance-criteria"
+        relation: "constrained_by"
+        semantic: "governance"
+    conventions: []
+```'''
+
+
+def _write_extracted_docs(project: Path):
+    """Create extracted docs for a fictional TaskBoard app."""
+    extracted_dir = project / "codd" / "extracted"
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+    modules_dir = extracted_dir / "modules"
+    modules_dir.mkdir(exist_ok=True)
+
+    # System context
+    sc_frontmatter = yaml.safe_dump({
+        "codd": {
+            "node_id": "design:extract:system-context",
+            "type": "design",
+            "source": "extracted",
+            "confidence": 0.65,
+            "last_extracted": "2026-03-31",
+        }
+    }, sort_keys=False)
+    (extracted_dir / "system-context.md").write_text(
+        f"---\n{sc_frontmatter}---\n\n# TaskBoard System Context\n\n3 modules, 1,200 lines\n",
+        encoding="utf-8",
+    )
+
+    # Module: auth
+    auth_fm = yaml.safe_dump({
+        "codd": {
+            "node_id": "design:extract:auth",
+            "type": "design",
+            "source": "extracted",
+            "confidence": 0.75,
+            "last_extracted": "2026-03-31",
+            "source_files": ["src/auth/service.py", "src/auth/models.py"],
+        }
+    }, sort_keys=False)
+    (modules_dir / "auth.md").write_text(
+        f"---\n{auth_fm}---\n\n# auth\n\n## Symbol Inventory\n\n| Kind | Name |\n|------|------|\n| class | AuthService |\n| class | User |\n",
+        encoding="utf-8",
+    )
+
+    # Module: tasks
+    tasks_fm = yaml.safe_dump({
+        "codd": {
+            "node_id": "design:extract:tasks",
+            "type": "design",
+            "source": "extracted",
+            "confidence": 0.70,
+            "last_extracted": "2026-03-31",
+            "source_files": ["src/tasks/service.py", "src/tasks/models.py"],
+        }
+    }, sort_keys=False)
+    (modules_dir / "tasks.md").write_text(
+        f"---\n{tasks_fm}---\n\n# tasks\n\n## Symbol Inventory\n\n| Kind | Name |\n|------|------|\n| class | TaskService |\n| class | Task |\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def mock_brownfield_ai(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    def fake_run(command, *, input, capture_output, text, check):
+        calls.append(
+            {
+                "command": command,
+                "input": input,
+                "capture_output": capture_output,
+                "text": text,
+                "check": check,
+            }
+        )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=BROWNFIELD_AI_OUTPUT,
+            stderr="",
+        )
+
+    monkeypatch.setattr(planner_module.generator_module.subprocess, "run", fake_run)
+    return calls
+
+
+def test_plan_init_brownfield_uses_extracted_docs(tmp_path, mock_brownfield_ai):
+    """plan_init falls back to extracted docs when no requirement docs exist."""
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_extracted_docs(project)
+
+    result = planner_module.plan_init(project)
+
+    # wave_config is created
+    assert sorted(result.wave_config) == ["1", "2"]
+    assert result.wave_config["1"][0]["node_id"] == "design:acceptance-criteria"
+    assert result.wave_config["2"][0]["node_id"] == "design:system-design"
+
+    # prompt contains BROWNFIELD and extracted doc content
+    prompt = mock_brownfield_ai[0]["input"]
+    assert "BROWNFIELD" in prompt
+    assert "--- BEGIN EXTRACTED" in prompt
+    assert "--- END EXTRACTED" in prompt
+
+    # requirement_paths contains extracted doc paths
+    assert any("extracted" in p for p in result.requirement_paths)
+    assert len(result.requirement_paths) == 3  # system-context + auth + tasks
+
+
+def test_plan_init_brownfield_prompt_includes_extracted_content(tmp_path, mock_brownfield_ai):
+    """Brownfield prompt contains extracted doc content and module node_ids."""
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_extracted_docs(project)
+
+    planner_module.plan_init(project)
+
+    prompt = mock_brownfield_ai[0]["input"]
+    assert "TaskBoard System Context" in prompt
+    assert "design:extract:system-context" in prompt
+    assert "design:extract:auth" in prompt
+    assert "design:extract:tasks" in prompt
+    assert "modules" in prompt
+    assert '"modules": ["module_name_1", "module_name_2"]' in prompt
+
+
+def test_plan_init_prefers_requirements_over_extracted(tmp_path, mock_plan_init_ai):
+    """When both requirement docs and extracted docs exist, greenfield (requirements) is used."""
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+    _write_extracted_docs(project)
+
+    result = planner_module.plan_init(project)
+
+    # Greenfield prompt is used (not brownfield)
+    prompt = mock_plan_init_ai[0]["input"]
+    assert "BROWNFIELD" not in prompt
+    assert "--- BEGIN REQUIREMENT" in prompt
+    assert "req:project-requirements" in prompt
+
+    # requirement_paths contains requirement doc paths, not extracted
+    assert any("requirements" in p for p in result.requirement_paths)
+    assert not any("extracted" in p for p in result.requirement_paths)
+
+
+def test_plan_init_raises_when_no_requirements_and_no_extracted(tmp_path):
+    """plan_init raises ValueError with helpful message when neither doc type exists."""
+    project = _setup_project(tmp_path, include_wave_config=False)
+
+    with pytest.raises(ValueError, match="no requirement documents or extracted documents found"):
+        planner_module.plan_init(project)
+
+    # Also check the message mentions both options
+    with pytest.raises(ValueError, match="codd extract"):
+        planner_module.plan_init(project)
+
+    with pytest.raises(ValueError, match="greenfield"):
+        planner_module.plan_init(project)

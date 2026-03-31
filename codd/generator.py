@@ -82,6 +82,7 @@ class WaveArtifact:
     title: str
     depends_on: list[dict[str, Any]]
     conventions: list[dict[str, Any]]
+    modules: list[str] = ()
 
 
 @dataclass(frozen=True)
@@ -190,6 +191,7 @@ def _load_wave_artifacts(config: dict[str, Any]) -> list[WaveArtifact]:
                     title=str(entry["title"]),
                     depends_on=_normalize_dependencies(entry.get("depends_on", [])),
                     conventions=_normalize_conventions(entry.get("conventions", [])),
+                    modules=_normalize_modules(entry.get("modules", [])),
                 )
             )
 
@@ -251,6 +253,14 @@ def _normalize_conventions(entries: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _normalize_modules(entries: Any) -> list[str]:
+    if not entries:
+        return []
+    if not isinstance(entries, list):
+        raise ValueError("modules must be a list of strings")
+    return [str(m) for m in entries if isinstance(m, str) and m.strip()]
+
+
 def _build_depended_by_map(artifacts: list[WaveArtifact]) -> dict[str, list[dict[str, Any]]]:
     depended_by: dict[str, list[dict[str, Any]]] = {artifact.node_id: [] for artifact in artifacts}
 
@@ -287,6 +297,8 @@ def _render_document(
         "depended_by": deepcopy(depended_by),
         "conventions": deepcopy(global_conventions) + deepcopy(artifact.conventions),
     }
+    if artifact.modules:
+        codd_block["modules"] = list(artifact.modules)
     frontmatter = yaml.safe_dump(
         {"codd": codd_block},
         allow_unicode=True,

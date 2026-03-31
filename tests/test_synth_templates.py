@@ -259,3 +259,28 @@ def test_synth_architecture_classifies_layers_and_flags_violations(tmp_path):
     assert "### Domain" in content
     assert "### Shared" in content
     assert "`db` (Domain) imports `api` (Presentation)" in content
+
+
+def test_synth_module_detail_includes_modules_in_frontmatter(tmp_path):
+    """Extracted module docs include modules field in frontmatter."""
+    project_root = _seed_synth_project(tmp_path)
+    facts = extract_facts(project_root, "python", ["src"])
+
+    output_dir = project_root / "docs" / "extracted"
+    synth_docs(facts, output_dir)
+
+    import re
+    import yaml as _yaml
+
+    # Check a module doc for modules field in frontmatter
+    services_doc = (output_dir / "modules" / "services.md").read_text(encoding="utf-8")
+    match = re.match(r"^---\n(.*?)\n---", services_doc, re.DOTALL)
+    assert match, "frontmatter not found in services module doc"
+    fm = _yaml.safe_load(match.group(1))
+    assert fm["codd"]["modules"] == ["services"]
+
+    api_doc = (output_dir / "modules" / "api.md").read_text(encoding="utf-8")
+    match = re.match(r"^---\n(.*?)\n---", api_doc, re.DOTALL)
+    assert match, "frontmatter not found in api module doc"
+    fm = _yaml.safe_load(match.group(1))
+    assert fm["codd"]["modules"] == ["api"]
