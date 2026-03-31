@@ -252,6 +252,7 @@ ai_command: "claude --print --model claude-opus-4-6"   # global default
 ai_commands:
   generate: "claude --print --model claude-opus-4-6"    # design doc generation
   restore: "claude --print --model claude-opus-4-6"     # brownfield reconstruction
+  review: "claude --print --model claude-opus-4-6"      # quality evaluation
   plan_init: "claude --print --model claude-sonnet-4-6" # wave_config planning
   implement: "codex --print"                             # code generation
 ```
@@ -343,6 +344,7 @@ codd impact
 | `codd verify` | Experimental | V-Model verification |
 | `codd implement` | Experimental | Design-to-code generation |
 | `codd propagate` | Experimental | Reverse-propagate source code changes to design docs |
+| `codd review` | Experimental | AI-powered artifact quality evaluation (LLM-as-Judge) |
 | `codd extract` | **Alpha** | Reverse-engineer design docs from existing code |
 
 ## Claude Code Integration
@@ -423,8 +425,40 @@ With hooks active, your entire workflow becomes: **edit files normally, then run
 | `/codd-impact` | Change impact analysis with Green/Amber/Gray protocol |
 | `/codd-validate` | Frontmatter & dependency consistency check |
 | `/codd-propagate` | Reverse-propagate source code changes to design docs |
+| `/codd-review` | AI quality review with PASS/FAIL verdict and feedback |
 
 See [docs/claude-code-setup.md](docs/claude-code-setup.md) for complete setup.
+
+## Autonomous Quality Loop
+
+`codd review` evaluates artifacts using AI (LLM-as-Judge), and `--feedback` feeds results back into generation. Together they enable a fully autonomous quality loop:
+
+```bash
+# Generate → Review → Regenerate with feedback until PASS
+codd generate --wave 2 --force
+feedback=$(codd review --path . --json | jq -r '.results[0].feedback')
+verdict=$(codd review --path . --json | jq -r '.results[0].verdict')
+
+while [ "$verdict" = "FAIL" ]; do
+  codd generate --wave 2 --force --feedback "$feedback"
+  result=$(codd review --path . --json)
+  verdict=$(echo "$result" | jq -r '.results[0].verdict')
+  feedback=$(echo "$result" | jq -r '.results[0].feedback')
+done
+```
+
+Review criteria are type-specific:
+
+| Doc Type | Criteria |
+|----------|----------|
+| Requirement | Completeness, consistency, testability, ambiguity |
+| Design | Architecture soundness, API quality, security, upstream consistency |
+| Detailed Design | Implementation clarity, data model, error handling, interface contracts |
+| Test | Coverage, edge cases, independence, traceability |
+
+**Scoring**: 80+ = PASS. CRITICAL issues auto-cap at 59. Exit code 1 on FAIL — loop-friendly.
+
+**Model allocation**: Use Opus for review (`ai_commands.review`), Codex for implementation (`ai_commands.implement`). The `ai_commands` config makes this a one-line change.
 
 ## How CoDD Differs from Other Spec-Driven Tools
 
@@ -490,6 +524,8 @@ If CoDD can't manage itself, it shouldn't manage your project.
 - [x] `modules` field — design doc ↔ source code traceability
 - [x] Per-command AI model configuration (`ai_commands` in codd.yaml)
 - [x] `codd propagate` — reverse-propagate source code changes to design documents
+- [x] `codd review` — AI-powered quality evaluation with review-driven regeneration loop
+- [x] `--feedback` flag — feed review results back into generate/restore/propagate
 - [x] `codd verify` — language-agnostic verification (Python: mypy + pytest, TypeScript: tsc + jest)
 - [ ] Multi-harness integration examples (Claude Code, Copilot, Cursor)
 - [ ] VS Code extension for impact visualization

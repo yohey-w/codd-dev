@@ -45,6 +45,7 @@ This registers all CoDD Skills as slash commands:
 | `/codd-impact` | Change impact analysis with Green/Amber/Gray protocol |
 | `/codd-validate` | Frontmatter & dependency consistency check |
 | `/codd-propagate` | Reverse-propagate source code changes to design docs |
+| `/codd-review` | AI quality review with PASS/FAIL verdict and feedback |
 
 ## 3. Add Project Hooks in `.claude/settings.json`
 

@@ -45,6 +45,7 @@ Claude Codeの設定（`~/.claude/settings.json` または `.claude/settings.jso
 | `/codd-impact` | Green/Amber/Grayプロトコルで変更影響分析 |
 | `/codd-validate` | フロントマター & 依存関係の整合性チェック |
 | `/codd-propagate` | ソースコード変更を設計書に逆伝搬 |
+| `/codd-review` | AI品質レビュー（PASS/FAIL判定 + フィードバック） |
 
 ## 3. プロジェクトフックを `.claude/settings.json` に追加
 
