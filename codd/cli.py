@@ -381,6 +381,77 @@ def extract(path: str, language: str | None, source_dirs: str | None, output: st
 
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
+@click.option("--scope", default=None, help="Review a single document by node_id")
+@click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
+@click.option(
+    "--ai-cmd",
+    default=None,
+    help="Override AI CLI command (defaults to codd.yaml ai_command)",
+)
+def review(path: str, scope: str | None, as_json: bool, ai_cmd: str | None):
+    """Review design documents for content quality using AI.
+
+    Evaluates artifacts against type-specific criteria (architecture soundness,
+    completeness, consistency with upstream docs, etc.) and returns PASS/FAIL
+    with a score and detailed feedback.
+
+    Without --scope: reviews all documents.
+    With --scope: reviews a single document by node_id.
+    """
+    from codd.reviewer import run_review
+
+    project_root = Path(path).resolve()
+    _require_codd_dir(project_root)
+
+    try:
+        summary = run_review(project_root, scope=scope, ai_command=ai_cmd)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    if not summary.results:
+        click.echo("No documents found to review.")
+        return
+
+    if as_json:
+        output = {
+            "pass_count": summary.pass_count,
+            "fail_count": summary.fail_count,
+            "avg_score": round(summary.avg_score, 1),
+            "results": [
+                {
+                    "node_id": r.node_id,
+                    "path": r.path,
+                    "verdict": r.verdict,
+                    "score": r.score,
+                    "issues": [{"severity": i.severity, "message": i.message} for i in r.issues],
+                    "feedback": r.feedback,
+                }
+                for r in summary.results
+            ],
+        }
+        click.echo(json.dumps(output, ensure_ascii=False, indent=2))
+    else:
+        for r in summary.results:
+            icon = "PASS" if r.verdict == "PASS" else "FAIL"
+            click.echo(f"  [{icon}] {r.path} ({r.node_id}) — score: {r.score}")
+            for issue in r.issues:
+                click.echo(f"    [{issue.severity}] {issue.message}")
+            if r.feedback:
+                # Show first 200 chars of feedback in summary mode
+                preview = r.feedback[:200].replace("\n", " ")
+                if len(r.feedback) > 200:
+                    preview += "..."
+                click.echo(f"    Feedback: {preview}")
+
+        click.echo(f"\nSummary: {summary.pass_count} passed, {summary.fail_count} failed, avg score: {summary.avg_score:.0f}")
+
+    exit_code = 0 if summary.fail_count == 0 else 1
+    raise SystemExit(exit_code)
+
+
+@main.command()
+@click.option("--path", default=".", help="Project root directory")
 def validate(path: str):
     """Validate CoDD frontmatter and dependency references."""
     from codd.validator import run_validate
