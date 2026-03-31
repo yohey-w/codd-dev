@@ -494,12 +494,14 @@ def validate(path: str):
 @click.option("--json", "as_json", is_flag=True, help="Output plan as JSON")
 @click.option("--init", "initialize", is_flag=True, help="Generate wave_config from requirement docs")
 @click.option("--force", is_flag=True, help="Overwrite existing wave_config during --init")
+@click.option("--waves", is_flag=True, help="Output only the total wave count (for shell scripting)")
+@click.option("--sprints", is_flag=True, help="Output only the total sprint count (for shell scripting)")
 @click.option(
     "--ai-cmd",
     default=None,
     help="Override AI CLI command for --init (defaults to codd.yaml ai_command or 'claude --print')",
 )
-def plan(path: str, as_json: bool, initialize: bool, force: bool, ai_cmd: str | None):
+def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, sprints: bool, ai_cmd: str | None):
     """Show wave execution status from configured artifacts."""
     from codd.planner import build_plan, plan_init, plan_to_dict, render_plan_text
 
@@ -521,18 +523,36 @@ def plan(path: str, as_json: bool, initialize: bool, force: bool, ai_cmd: str | 
             click.echo(f"Error: {exc}")
             raise SystemExit(1)
 
+        wave_count = len(result.wave_config)
         artifact_count = sum(len(entries) for entries in result.wave_config.values())
         config_rel_path = Path(result.config_path).relative_to(project_root).as_posix()
+
+        if waves:
+            click.echo(wave_count)
+            return
+
         click.echo(
             f"Initialized wave_config in {config_rel_path} from {len(result.requirement_paths)} requirement document(s)."
         )
-        click.echo(f"Generated {artifact_count} artifact(s) across {len(result.wave_config)} wave(s).")
+        click.echo(f"Generated {artifact_count} artifact(s) across {wave_count} wave(s).")
         return
 
     if force:
         raise click.BadOptionUsage("force", "--force requires --init")
-    if ai_cmd is not None:
+    if ai_cmd is not None and not waves and not sprints:
         raise click.BadOptionUsage("ai_cmd", "--ai-cmd requires --init")
+
+    if waves:
+        from codd.generator import _load_project_config
+        config = _load_project_config(project_root)
+        wave_config = config.get("wave_config", {})
+        click.echo(len(wave_config))
+        return
+
+    if sprints:
+        from codd.implementer import count_sprints
+        click.echo(count_sprints(project_root))
+        return
 
     try:
         result = build_plan(project_root)

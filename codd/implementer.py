@@ -16,6 +16,49 @@ from codd.scanner import _extract_frontmatter, build_document_node_path_map
 
 DEFAULT_IMPLEMENT_NODE_ID = "plan:implementation-plan"
 FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
+
+
+def count_sprints(project_root: Path) -> int:
+    """Return the total number of sprints in the implementation plan.
+
+    Works with both explicit Sprint headings and Milestone-based plans.
+    """
+    config = _load_project_config(project_root)
+    try:
+        plan = _load_implementation_plan(project_root, config)
+    except (FileNotFoundError, ValueError):
+        return 0
+
+    # Try explicit Sprint headings first
+    matches = list(SPRINT_HEADING_RE.finditer(plan.content))
+    if matches:
+        return len(matches)
+
+    # Fallback: count deliverable rows across all milestones
+    milestones = _parse_milestone_rows(plan.content)
+    total = 0
+    for ms in milestones:
+        # Each deliverable row (pipe-delimited) becomes one sprint
+        rows = [
+            line for line in ms.get("deliverables", "").split(";")
+            if line.strip()
+        ]
+        # If deliverables isn't split by semicolons, count table rows in the section
+        if len(rows) <= 1:
+            total += 1
+        else:
+            total += len(rows)
+
+    # If milestone fallback gives implausible results, count by probing
+    if total <= len(milestones):
+        # Probe: try each sprint number until _select_tasks returns empty
+        total = 0
+        for i in range(1, 200):
+            tasks = _select_tasks(plan, i, None)
+            if not tasks:
+                break
+            total = i
+    return total
 SPRINT_HEADING_RE = re.compile(
     r"^####\s+Sprint\s+(?P<number>\d+)(?:（(?P<window>[^）]+)）)?(?:\s*:\s*(?P<title>.+))?\s*$",
     re.MULTILINE,
