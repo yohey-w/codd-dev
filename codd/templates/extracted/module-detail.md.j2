@@ -22,7 +22,20 @@
 {% endfor -%}
 {% for symbol in type_definitions -%}
 | {{ symbol.kind }} | `{{ symbol.name }}` | `{{ symbol.file }}:{{ symbol.line }}` | {% if symbol.bases %}bases: {{ symbol.bases | join(", ") }}{% elif symbol.implements %}implements: {{ symbol.implements | join(", ") }}{% else %}—{% endif %} |
+{% endfor -%}
+{% for symbol in const_objects -%}
+| const | `{{ symbol.name }}` | `{{ symbol.file }}:{{ symbol.line }}` | {% if symbol.return_type %}`{{ symbol.return_type }}` {% endif %}{{ symbol.params }} |
 {% endfor %}
+
+{% if const_objects %}
+## Exported Constants
+
+| Name | Type | Shape | Location |
+|------|------|-------|----------|
+{% for symbol in const_objects -%}
+| `{{ symbol.name }}` | {% if symbol.return_type %}`{{ symbol.return_type }}`{% else %}—{% endif %} | {{ symbol.params }} | `{{ symbol.file }}:{{ symbol.line }}` |
+{% endfor %}
+{% endif %}
 
 {% if route_paths %}
 ## API Routes

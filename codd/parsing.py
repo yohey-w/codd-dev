@@ -486,6 +486,44 @@ def _is_async_node(node: Any) -> bool:
     return any(child.type == "async" for child in node.children)
 
 
+def _extract_object_shape(content_bytes: bytes, node: Any) -> str:
+    """Extract top-level keys from an object literal node.
+
+    Returns a compact representation like ``keys: foo, bar, baz`` or
+    ``keys(4): foo, bar, baz, ...`` when truncated.
+    """
+    keys: list[str] = []
+    for child in getattr(node, "named_children", []):
+        if child.type == "pair":
+            key_node = child.child_by_field_name("key")
+            if key_node is not None:
+                keys.append(_node_text(content_bytes, key_node))
+        elif child.type == "shorthand_property_identifier":
+            keys.append(_node_text(content_bytes, child))
+        elif child.type == "spread_element":
+            keys.append("..." + _node_text(content_bytes, child)[3:].strip())
+    if not keys:
+        return "{}"
+    total = len(keys)
+    shown = keys[:8]
+    suffix = ", ..." if total > 8 else ""
+    return f"keys({total}): {', '.join(shown)}{suffix}"
+
+
+def _unwrap_value_node(node: Any) -> Any:
+    """Unwrap ``as const`` / ``satisfies Type`` wrappers to get the real value node."""
+    if node is None:
+        return None
+    if node.type in ("as_expression", "satisfies_expression"):
+        for child in getattr(node, "named_children", []):
+            if child.type in ("object", "array"):
+                return child
+        # Fallback: first named child
+        children = getattr(node, "named_children", [])
+        return children[0] if children else node
+    return node
+
+
 def _resolve_python_relative_key(module: str, file_path: Path, src_dir: Path) -> str | None:
     leading_dots = len(module) - len(module.lstrip("."))
     relative_module = module.lstrip(".")
@@ -799,23 +837,68 @@ def _extract_typescript_symbols(root: Any, content: str, file_path: str) -> list
             for declarator in getattr(node, "named_children", []):
                 if declarator.type != "variable_declarator":
                     continue
-                value = declarator.child_by_field_name("value")
-                if value is None or value.type != "arrow_function":
-                    continue
+                raw_value = declarator.child_by_field_name("value")
                 name = _field_text(content_bytes, declarator, "name")
                 if not name:
                     continue
-                symbols.append(
-                    _make_symbol(
-                        name,
-                        "function",
-                        file_path,
-                        declarator.start_point.row + 1,
-                        params=_strip_wrapping(_normalize_ws(_field_text(content_bytes, value, "parameters")), "(", ")"),
-                        return_type=_strip_type_annotation(_field_text(content_bytes, value, "return_type")),
-                        is_async=_is_async_node(value),
+
+                # Arrow function → function symbol (existing)
+                if raw_value is not None and raw_value.type == "arrow_function":
+                    symbols.append(
+                        _make_symbol(
+                            name,
+                            "function",
+                            file_path,
+                            declarator.start_point.row + 1,
+                            params=_strip_wrapping(_normalize_ws(_field_text(content_bytes, raw_value, "parameters")), "(", ")"),
+                            return_type=_strip_type_annotation(_field_text(content_bytes, raw_value, "return_type")),
+                            is_async=_is_async_node(raw_value),
+                        )
                     )
-                )
+                    continue
+
+                # Const object / array → const_object symbol
+                # Skip test files — their fixtures/mocks add noise, not domain knowledge
+                _fp = file_path.lower()
+                if ".test." in _fp or ".spec." in _fp or "test-harness" in _fp:
+                    continue
+                value = _unwrap_value_node(raw_value)
+                if value is not None and value.type == "object":
+                    type_ann = _strip_type_annotation(_field_text(content_bytes, declarator, "type"))
+                    shape = _extract_object_shape(content_bytes, value)
+                    symbols.append(
+                        _make_symbol(
+                            name,
+                            "const_object",
+                            file_path,
+                            declarator.start_point.row + 1,
+                            return_type=type_ann,
+                            params=shape,
+                        )
+                    )
+                elif value is not None and value.type == "array":
+                    type_ann = _strip_type_annotation(_field_text(content_bytes, declarator, "type"))
+                    elements = [
+                        c for c in getattr(value, "named_children", [])
+                        if c.type != "comment"
+                    ]
+                    count = len(elements)
+                    preview_items = [
+                        _normalize_ws(_node_text(content_bytes, e))[:40]
+                        for e in elements[:5]
+                    ]
+                    suffix = ", ..." if count > 5 else ""
+                    shape = f"[{count}]: {', '.join(preview_items)}{suffix}" if preview_items else "[]"
+                    symbols.append(
+                        _make_symbol(
+                            name,
+                            "const_object",
+                            file_path,
+                            declarator.start_point.row + 1,
+                            return_type=type_ann,
+                            params=shape,
+                        )
+                    )
             return
 
         for child in getattr(node, "named_children", []):

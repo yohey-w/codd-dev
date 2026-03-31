@@ -253,6 +253,7 @@ def _render_module_detail(env: Environment, facts: ProjectFacts, module: ModuleI
         classes=[symbol for symbol in module.symbols if symbol.kind == "class"],
         functions=[symbol for symbol in module.symbols if symbol.kind == "function"],
         type_definitions=[symbol for symbol in module.symbols if symbol.kind in {"interface", "type_alias", "enum"}],
+        const_objects=[symbol for symbol in module.symbols if symbol.kind == "const_object"],
         async_functions=[
             symbol for symbol in module.symbols if symbol.kind == "function" and symbol.is_async
         ],

@@ -41,7 +41,7 @@ from codd.parsing import (
 class Symbol:
     """A class or function extracted from source code."""
     name: str
-    kind: str           # "class" | "function" | "interface" | "type_alias" | "enum"
+    kind: str           # "class" | "function" | "interface" | "type_alias" | "enum" | "const_object"
     file: str           # relative path
     line: int
     params: str = ""    # function parameters

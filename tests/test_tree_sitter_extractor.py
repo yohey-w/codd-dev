@@ -102,6 +102,87 @@ def test_typescript_tree_sitter_extracts_interfaces_aliases_and_reexports(tmp_pa
     assert "Repo" in auth.patterns["db_models"]
 
 
+def test_typescript_tree_sitter_extracts_const_objects(tmp_path):
+    src = tmp_path / "src"
+    (src / "config").mkdir(parents=True)
+    (src / "config" / "index.ts").write_text(
+        textwrap.dedent(
+            """\
+            export type ProviderCaps = {
+              family: string;
+              hints: string[];
+            };
+
+            const DEFAULT_CAPS: ProviderCaps = {
+              family: "default",
+              hints: [],
+            };
+
+            const PROVIDER_FALLBACKS: Record<string, Partial<ProviderCaps>> = {
+              anthropic: {
+                family: "anthropic",
+                hints: ["claude"],
+              },
+              mistral: {
+                hints: ["mistral", "mixtral"],
+              },
+              moonshot: {
+                family: "moonshot",
+              },
+            };
+
+            export const TIMEOUT_MS = 5000;
+
+            export const ALLOWED_MODELS = [
+              "gpt-4",
+              "claude-3",
+              "gemini-pro",
+            ];
+
+            export const STATUS_MAP = {
+              ready: 1,
+              pending: 2,
+              error: 3,
+            } as const;
+
+            export function resolve(provider: string): ProviderCaps {
+              return { ...DEFAULT_CAPS, ...PROVIDER_FALLBACKS[provider] };
+            }
+            """
+        )
+    )
+
+    facts = extract_facts(tmp_path, "typescript", ["src"])
+    config = facts.modules["config"]
+    symbols = {symbol.name: symbol for symbol in config.symbols}
+
+    # Const objects captured
+    assert symbols["DEFAULT_CAPS"].kind == "const_object"
+    assert symbols["DEFAULT_CAPS"].return_type == "ProviderCaps"
+    assert "family" in symbols["DEFAULT_CAPS"].params
+    assert "hints" in symbols["DEFAULT_CAPS"].params
+
+    assert symbols["PROVIDER_FALLBACKS"].kind == "const_object"
+    assert "Record<string, Partial<ProviderCaps>>" in symbols["PROVIDER_FALLBACKS"].return_type
+    assert "anthropic" in symbols["PROVIDER_FALLBACKS"].params
+    assert "mistral" in symbols["PROVIDER_FALLBACKS"].params
+    assert "moonshot" in symbols["PROVIDER_FALLBACKS"].params
+
+    # Array captured
+    assert symbols["ALLOWED_MODELS"].kind == "const_object"
+    assert "3" in symbols["ALLOWED_MODELS"].params  # [3] elements
+
+    # as const unwrapped
+    assert symbols["STATUS_MAP"].kind == "const_object"
+    assert "ready" in symbols["STATUS_MAP"].params
+
+    # Regular function still works
+    assert symbols["resolve"].kind == "function"
+
+    # Scalar const (TIMEOUT_MS = 5000) is NOT captured — no object/array value
+    assert "TIMEOUT_MS" not in symbols
+
+
 def test_extract_facts_falls_back_to_regex_when_tree_sitter_is_unavailable(tmp_path, monkeypatch):
     src = tmp_path / "src"
     src.mkdir()
