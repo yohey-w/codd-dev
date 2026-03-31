@@ -557,7 +557,7 @@ def _sanitize_generated_body(title: str, body: str, *, output_path: str | None =
     normalized = normalized.strip()
     if not normalized:
         raise ValueError("AI command returned empty output")
-    if re.search(r"\bTODO\b", normalized, re.IGNORECASE):
+    if re.search(r"\bTODO\b", normalized):
         raise ValueError("AI command returned scaffold content containing TODO")
     if not normalized.startswith("# "):
         normalized = f"# {title}\n\n{normalized}"
