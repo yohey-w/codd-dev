@@ -42,7 +42,10 @@ codd init --project-name "<project-name>" --language <language> --dest .
    - Prefer adding frontmatter to the documents you want CoDD to track before treating scan results as authoritative.
    - Legacy annotation files under `codd/annotations/` are optional and backward-compatible. Create them only if the project still uses that workflow.
 
-7. Next steps immediately after init:
+7. Next steps immediately after init — choose greenfield or brownfield:
+
+   ### Greenfield (have requirements, no code yet)
+
    1. If you used `--requirements`, the requirements document is already in `docs/requirements/requirements.md` with CoDD frontmatter. Skip to step 2.
       If you did NOT use `--requirements`, write a requirements document (plain text is fine) and import it into the existing project:
 ```bash
@@ -66,6 +69,31 @@ codd validate --path .
    5. If validation passes, continue the normal operating cycle:
 ```bash
 codd scan --path .
+codd impact --path .
+```
+
+   ### Brownfield (have existing code, no requirements)
+
+   1. Extract code structure:
+```bash
+codd extract
+```
+   2. Generate wave_config from extracted docs (`plan --init` auto-detects brownfield):
+```bash
+codd plan --init
+```
+   3. Restore design docs from extracted facts (use `/codd-restore` skill or CLI):
+```bash
+codd restore --wave 0 --path .   # Infer requirements from code
+codd restore --wave 2 --path .   # Reconstruct system design
+```
+   4. Scan and validate:
+```bash
+codd scan --path .
+codd validate --path .
+```
+   5. Continue with the normal operating cycle:
+```bash
 codd impact --path .
 ```
 

@@ -126,7 +126,7 @@ CoDDがフロントマター（`node_id`, `type`, 依存メタデータ）を自
 
 ### Step 3: AIが設計書を生成
 
-`codd generate` はAIを呼び出して、要件から設計書をWave順に生成する。`wave_config` が無ければ要件から自動生成される。
+`codd generate` はAIを呼び出して、要件から設計書をWave順に生成する。`wave_config` が無ければ要件から自動生成される。各成果物には `modules` フィールドが含まれ、ソースコードモジュールとのトレーサビリティを維持する。
 
 ```bash
 codd generate --wave 2   # システム設計・API設計を生成
@@ -221,6 +221,7 @@ E2E/システムテスト ← 要件 + 受入基準を検証
 ---
 codd:
   node_id: "design:api-design"
+  modules: ["api", "auth"]        # ← ソースコードモジュールとの紐付け
   depends_on:
     - id: "design:system-design"
       relation: derives_from
@@ -229,7 +230,33 @@ codd:
 ---
 ```
 
+`modules` フィールドが逆方向トレーサビリティを実現する：ソースコードが変更されたとき、`codd extract` が影響モジュールを特定し、`modules` フィールドでそのモジュールに紐づく設計書を逆引きできる。
+
 `codd/scan/` はキャッシュ — `codd scan` のたびに再生成されます。
+
+## AIモデル設定
+
+CoDDは設計書生成に外部AI CLIを呼び出す。デフォルトはClaude Opus：
+
+```yaml
+# codd.yaml
+ai_command: "claude --print --model claude-opus-4-6"
+```
+
+### コマンド別オーバーライド
+
+コマンドごとに異なるモデルを使い分けられる。例えば、設計書生成はOpus、コード実装はCodex：
+
+```yaml
+ai_command: "claude --print --model claude-opus-4-6"   # グローバルデフォルト
+ai_commands:
+  generate: "claude --print --model claude-opus-4-6"    # 設計書生成
+  restore: "claude --print --model claude-opus-4-6"     # ブラウンフィールド復元
+  plan_init: "claude --print --model claude-sonnet-4-6" # wave_config計画
+  implement: "codex --print"                             # コード生成
+```
+
+**優先順位**: CLI `--ai-cmd` フラグ > `ai_commands.{コマンド}` > `ai_command` > ビルトインデフォルト（Opus）。
 
 ## 設定ディレクトリの自動検出
 
@@ -243,7 +270,11 @@ codd init --config-dir .codd --project-name "my-project" --language "python"
 
 ## ブラウンフィールド？ ここから
 
-既存コードベースがある場合、`codd extract` がソースコードから設計書を逆生成します。AI不要——純粋な静的解析。
+既存コードベースがある場合、CoDDはコード抽出から設計書復元までの完全なブラウンフィールドワークフローを提供する。
+
+### Step 1: コードから構造を抽出
+
+`codd extract` がソースコードから設計書を逆生成する。AI不要——純粋な静的解析。
 
 ```bash
 cd existing-project
@@ -260,15 +291,43 @@ Output: codd/extracted/
   ...
 ```
 
-**設計思想**: V-Modelにおいて、意図は要件定義にのみ存在する。アーキテクチャ・詳細設計・テストは構造事実——コードから抽出可能。`codd extract` は構造を取り、「なぜ」は後から人が加える。
+### Step 2: 抽出結果からwave_configを生成
+
+`codd plan --init` は抽出済み設計書を自動検出し、要件定義なしでwave_configを生成する。
 
 ```bash
-# 生成された文書をレビューし、確認済みのものを昇格
-mv codd/extracted/modules/auth.md docs/design/
-# 依存グラフを構築
+codd plan --init    # codd/extracted/ を検出し、ブラウンフィールド用wave_configを生成
+```
+
+生成されたwave_configの各成果物には `modules` フィールドが含まれ、ソースコードモジュールとの逆方向トレーサビリティを実現する。
+
+### Step 3: 設計書を復元
+
+`codd restore` は抽出された事実から設計書を復元する。`codd generate`（要件から設計書を生成）とは根本的に異なり、「現在の設計は何か？」をコード構造から再構築する。
+
+```bash
+codd restore --wave 2   # 抽出事実からシステム設計を復元
+codd restore --wave 3   # DB設計・API設計を復元
+```
+
+### Step 4: 依存グラフを構築
+
+```bash
 codd scan
 codd impact
 ```
+
+**設計思想**: V-Modelにおいて、意図は要件定義にのみ存在する。アーキテクチャ・詳細設計・テストは構造事実——コードから抽出可能。`codd extract` は構造を取り、`codd restore` は設計を復元し、「なぜ」は後から人が加える。
+
+### グリーンフィールド vs ブラウンフィールド
+
+| | グリーンフィールド | ブラウンフィールド |
+|--|-----------|-----------|
+| 起点 | 要件定義（人間が記述） | 既存コードベース |
+| 計画 | `codd plan --init`（要件から） | `codd plan --init`（抽出結果から） |
+| 設計書生成 | `codd generate`（順方向: 要件→設計） | `codd restore`（逆方向: コード事実→設計） |
+| トレーサビリティ | `modules` フィールドが設計書→コードを接続 | 同じ |
+| 変更時 | `codd extract` diff → `modules` 検索 → 影響設計書特定 → AI更新 | 同じ |
 
 ## コマンド
 
@@ -278,8 +337,9 @@ codd impact
 | `codd scan` | **安定版** | フロントマターから依存グラフ構築 |
 | `codd impact` | **安定版** | 変更影響分析（Green / Amber / Gray バンド） |
 | `codd validate` | **アルファ** | フロントマター整合性 & グラフ一貫性チェック |
-| `codd generate` | 実験的 | Wave順で設計書生成 |
-| `codd plan` | 実験的 | Wave実行状況 |
+| `codd generate` | 実験的 | Wave順で設計書生成（グリーンフィールド） |
+| `codd restore` | 実験的 | 抽出事実から設計書を復元（ブラウンフィールド） |
+| `codd plan` | 実験的 | Wave実行状況（`--init` はブラウンフィールドにも対応） |
 | `codd verify` | 実験的 | V-Model検証 |
 | `codd implement` | 実験的 | 設計書→コード生成 |
 | `codd extract` | **アルファ** | 既存コードから設計書を逆生成 |
@@ -344,7 +404,8 @@ CoDDはClaude Code用のスラッシュコマンドSkillを同梱。CLIを直接
 | Skill | 機能 |
 |-------|------|
 | `/codd-init` | 初期化 + 要件インポート |
-| `/codd-generate` | HITLゲート付きWave順設計書生成 |
+| `/codd-generate` | HITLゲート付きWave順設計書生成（グリーンフィールド） |
+| `/codd-restore` | 抽出事実から設計書復元（ブラウンフィールド） |
 | `/codd-scan` | 依存グラフ再構築 |
 | `/codd-impact` | Green/Amber/Grayプロトコルで変更影響分析 |
 | `/codd-validate` | フロントマター & 依存関係の整合性チェック |
@@ -395,6 +456,10 @@ codd verify           # mypy + pytest（127/127テスト通過）
 
 - [ ] セマンティック依存関係タイプ (`requires`, `affects`, `verifies`, `implements`)
 - [x] `codd extract` — 既存コードベースから設計書を逆生成（ブラウンフィールド対応）
+- [x] `codd restore` — 抽出事実から設計書を復元（ブラウンフィールド設計書生成）
+- [x] `codd plan --init` ブラウンフィールド対応 — 抽出結果からwave_config生成
+- [x] `modules` フィールド — 設計書 ↔ ソースコードのトレーサビリティ
+- [x] コマンド別AIモデル設定（`ai_commands` in codd.yaml）
 - [x] `codd verify` — 言語非依存の検証（Python: mypy + pytest、TypeScript: tsc + jest）
 - [ ] マルチハーネス連携例（Claude Code, Copilot, Cursor）
 - [ ] VS Code拡張（影響分析の可視化）
