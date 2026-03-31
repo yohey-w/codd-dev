@@ -141,9 +141,13 @@ def _build_assemble_prompt(
 
 1. Read the design documents below to understand the architecture, component tree, data model, and state management.
 2. Read all generated code fragments — they contain implementation pieces organized by sprint.
-3. Produce a set of files that form a complete, buildable project under `{output_dir}/`.
+3. Produce a COMPLETE, BUILDABLE project. This includes:
+   - **Project configuration files** at the project root: package.json, tsconfig.json, next.config.*, tailwind.config.*, postcss.config.*, etc. — whatever the tech stack requires to build and run.
+   - **Entry point / scaffold files**: app/layout.tsx, app/page.tsx (for Next.js), index.html, main.py, etc. — the files that wire the application together.
+   - **Source code** under `{output_dir}/`: components, utilities, types, styles, hooks, reducers.
+   - **Style entry points**: globals.css or equivalent with framework imports (e.g. @import "tailwindcss").
 4. Resolve conflicts between sprint fragments: later sprints may refine or replace earlier ones.
-5. Ensure all imports resolve correctly.
+5. Ensure all imports resolve correctly between files.
 6. Do NOT add features beyond what the design documents specify.
 7. Preserve traceability comments (@generated-by, @generated-from) where practical.
 
@@ -156,6 +160,12 @@ Output ONLY file contents in this exact format, one per file:
 
 === FILE: path/to/another.tsx ===
 <file content>
+
+File paths are relative to the project root. Examples:
+- `package.json` for the project manifest
+- `tsconfig.json` for TypeScript config
+- `{output_dir}/app/layout.tsx` for Next.js root layout
+- `{output_dir}/components/MyComponent.tsx` for source code
 
 Do not include explanations outside of the === FILE blocks.
 """)
