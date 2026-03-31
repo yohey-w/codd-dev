@@ -165,6 +165,50 @@ def generate(wave: int, path: str, force: bool, ai_cmd: str | None):
 
 
 @main.command()
+@click.option("--wave", required=True, type=click.IntRange(min=1), help="Wave number to restore")
+@click.option("--path", default=".", help="Project root directory")
+@click.option("--force", is_flag=True, help="Overwrite existing files")
+@click.option(
+    "--ai-cmd",
+    default=None,
+    help="Override AI CLI command (defaults to codd.yaml ai_command or 'claude --print')",
+)
+def restore(wave: int, path: str, force: bool, ai_cmd: str | None):
+    """Restore design documents from extracted codebase facts (brownfield).
+
+    Unlike 'generate' which creates design docs from requirements (greenfield),
+    'restore' reconstructs design documents from extracted code analysis.
+    The AI infers design intent from the actual codebase structure.
+
+    Run 'codd extract' first, then 'codd plan --init' to create wave_config,
+    then 'codd restore --wave N' to reconstruct design docs.
+    """
+    from codd.restore import restore_wave
+
+    project_root = Path(path).resolve()
+    _require_codd_dir(project_root)
+
+    try:
+        results = restore_wave(project_root, wave, force=force, ai_command=ai_cmd)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    restored = 0
+    skipped = 0
+
+    for result in results:
+        rel_path = result.path.relative_to(project_root).as_posix()
+        click.echo(f"{result.status.capitalize()}: {rel_path} ({result.node_id})")
+        if result.status == "restored":
+            restored += 1
+        else:
+            skipped += 1
+
+    click.echo(f"Wave {wave}: {restored} restored, {skipped} skipped")
+
+
+@main.command()
 @click.option("--sprint", required=True, type=click.IntRange(min=1), help="Sprint number to implement")
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--task", default=None, help="Generate only one task by task ID or title match")
