@@ -209,6 +209,63 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None):
 
 
 @main.command()
+@click.option("--diff", default="HEAD", help="Git diff target (default: HEAD, shows uncommitted changes)")
+@click.option("--path", default=".", help="Project root directory")
+@click.option("--update", is_flag=True, help="Actually update affected design docs via AI")
+@click.option(
+    "--ai-cmd",
+    default=None,
+    help="Override AI CLI command (defaults to codd.yaml ai_command)",
+)
+def propagate(diff: str, path: str, update: bool, ai_cmd: str | None):
+    """Propagate source code changes to design documents.
+
+    Detects changed source files, maps them to modules, and finds design
+    documents covering those modules via the 'modules' frontmatter field.
+
+    Without --update: analysis only (shows which docs are affected).
+    With --update: calls AI to update each affected design document.
+    """
+    from codd.propagator import run_propagate
+
+    project_root = Path(path).resolve()
+    _require_codd_dir(project_root)
+
+    try:
+        result = run_propagate(project_root, diff, update=update, ai_command=ai_cmd)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    if not result.changed_files:
+        click.echo("No changed files detected.")
+        return
+
+    click.echo(f"Changed files: {len(result.changed_files)}")
+    if not result.file_module_map:
+        click.echo("No source files changed (only non-source files in diff).")
+        return
+
+    click.echo(f"\nSource changes → modules:")
+    for f, m in sorted(result.file_module_map.items()):
+        click.echo(f"  {f} → {m}")
+
+    if not result.affected_docs:
+        click.echo("\nNo design docs found covering changed modules.")
+        click.echo("(Design docs need a 'modules' field in frontmatter to be tracked.)")
+        return
+
+    click.echo(f"\nAffected design docs: {len(result.affected_docs)}")
+    for doc in result.affected_docs:
+        status = "UPDATED" if doc.node_id in result.updated else "needs review"
+        click.echo(f"  [{status}] {doc.path} ({doc.node_id})")
+        click.echo(f"    modules: {', '.join(doc.matched_modules)}")
+
+    if not update and result.affected_docs:
+        click.echo(f"\nRun with --update to update these docs via AI.")
+
+
+@main.command()
 @click.option("--sprint", required=True, type=click.IntRange(min=1), help="Sprint number to implement")
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--task", default=None, help="Generate only one task by task ID or title match")
