@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codd-dev"
-version = "0.7.0"
+version = "1.0.0"
 description = "CoDD: Coherence-Driven Development — cross-artifact change impact analysis"
 readme = "README.md"
 license = "MIT"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["change-impact", "dependency-graph", "software-engineering", "claude-code", "plugin"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
