@@ -45,6 +45,7 @@ Typical wave patterns:
 - Wave 3-4: domain design such as API, database, auth, UX, and integration design
 - Wave 5: detailed design artifacts under docs/detailed_design/ with Mermaid diagrams, ownership boundaries, and runtime flows
 - Wave 6: implementation planning that depends on the approved overview + detailed design set
+- Baseline: after all waves are done and code is implemented, run codd extract to capture a factual snapshot of the codebase — this serves as the baseline for drift detection during maintenance
 """
 
 
@@ -78,6 +79,7 @@ class PlanResult:
     summary: dict[str, int]
     next_wave: int | None
     waves: list[PlannedWave]
+    baseline_status: str = STATUS_BLOCKED  # extract baseline: DONE/READY/BLOCKED
 
 
 @dataclass(frozen=True)
@@ -204,11 +206,23 @@ def build_plan(project_root: Path) -> PlanResult:
     }
     next_wave = next((wave.wave for wave in waves if any(node.status == STATUS_READY for node in wave.nodes)), None)
 
+    # Baseline extract: DONE if extracted docs exist, READY if all waves done, BLOCKED otherwise
+    all_waves_done = all(wave.status == STATUS_DONE for wave in waves) and waves
+    extracted_dir = codd_dir / "extracted"
+    has_baseline = extracted_dir.is_dir() and any(extracted_dir.glob("*.md"))
+    if has_baseline:
+        baseline_status = STATUS_DONE
+    elif all_waves_done:
+        baseline_status = STATUS_READY
+    else:
+        baseline_status = STATUS_BLOCKED
+
     return PlanResult(
         project_root=str(project_root),
         summary=summary,
         next_wave=next_wave,
         waves=waves,
+        baseline_status=baseline_status,
     )
 
 
@@ -232,6 +246,10 @@ def render_plan_text(plan: PlanResult) -> str:
                     lines.append(f"     error: {message}")
 
     lines.append("")
+    lines.append(f"Baseline Extract: {plan.baseline_status}")
+    lines.append(f"  {ICON_BY_STATUS[plan.baseline_status]} codd extract  [{plan.baseline_status}]")
+
+    lines.append("")
     lines.append(
         "Summary: "
         f"{plan.summary['done']} DONE, "
@@ -243,6 +261,10 @@ def render_plan_text(plan: PlanResult) -> str:
         lines.append(f"Next action: codd generate --wave {plan.next_wave}")
     elif plan.summary["error"]:
         lines.append("Next action: resolve validation errors")
+    elif plan.baseline_status == STATUS_READY:
+        lines.append("Next action: codd extract  (capture baseline for drift detection)")
+    elif plan.baseline_status == STATUS_DONE:
+        lines.append("Next action: all waves + baseline DONE — ready for maintenance")
     else:
         lines.append("Next action: all waves DONE")
 

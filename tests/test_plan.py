@@ -11,7 +11,7 @@ from click.testing import CliRunner
 
 import codd.planner as planner_module
 from codd.cli import main
-from codd.planner import STATUS_BLOCKED, STATUS_DONE, STATUS_ERROR, STATUS_READY, build_plan
+from codd.planner import STATUS_BLOCKED, STATUS_DONE, STATUS_ERROR, STATUS_READY, build_plan, render_plan_text
 
 
 WAVE_CONFIG = {
@@ -362,6 +362,22 @@ def test_plan_marks_all_waves_done_when_all_outputs_validate(tmp_path):
     assert plan.next_wave is None
     assert all(node.status == STATUS_DONE for node in nodes.values())
     assert [wave.status for wave in plan.waves] == [STATUS_DONE, STATUS_DONE]
+
+    # Baseline extract is READY when all waves DONE but no extracted docs
+    assert plan.baseline_status == STATUS_READY
+    text = render_plan_text(plan)
+    assert "Baseline Extract: READY" in text
+    assert "codd extract" in text
+
+    # After creating extracted docs, baseline becomes DONE
+    extracted_dir = project / "codd" / "extracted"
+    extracted_dir.mkdir(parents=True)
+    (extracted_dir / "system-context.md").write_text("# extracted\n")
+    plan2, _ = _plan_by_node(project)
+    assert plan2.baseline_status == STATUS_DONE
+    text2 = render_plan_text(plan2)
+    assert "Baseline Extract: DONE" in text2
+    assert "ready for maintenance" in text2
 
 
 def test_plan_keeps_wave_config_forward_reference_out_of_error_state(tmp_path):
