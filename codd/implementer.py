@@ -266,67 +266,6 @@ def _infer_sprint_tasks_from_milestones(plan: ImplementationPlan, sprint: int) -
         f"Deliverables: {milestone['deliverables']}"
     )
 
-    if sprint == 1:
-        return [
-            ImplementationTask(
-                sprint=sprint,
-                task_id="1-project-initialization",
-                title="Project initialization",
-                summary="Bootstrap the Next.js/TypeScript application shell and runtime foundations for Sprint 1.",
-                module_hint="Application bootstrap, providers, configuration defaults, app shell",
-                deliverable=milestone["deliverables"],
-                sprint_title=sprint_title,
-                sprint_window=sprint_window,
-                output_dir="src/generated/sprint_1/project_initialization",
-                dependency_node_ids=["design:system-design", "design:ux-design"],
-                sprint_context=sprint_context,
-            ),
-            ImplementationTask(
-                sprint=sprint,
-                task_id="1-database-foundation",
-                title="Database foundation",
-                summary="Create Prisma-oriented tenant-aware database foundations for Sprint 1.",
-                module_hint="Prisma client helpers, tenant session context, RLS-aware data access scaffolding",
-                deliverable=milestone["deliverables"],
-                sprint_title=sprint_title,
-                sprint_window=sprint_window,
-                output_dir="src/generated/sprint_1/database_foundation",
-                dependency_node_ids=["design:system-design", "design:database-design"],
-                sprint_context=sprint_context,
-            ),
-            ImplementationTask(
-                sprint=sprint,
-                task_id="1-authentication",
-                title="Authentication foundation",
-                summary="Create authentication, session, and RBAC code foundations for Sprint 1.",
-                module_hint="NextAuth-compatible configuration, session helpers, role guards",
-                deliverable=milestone["deliverables"],
-                sprint_title=sprint_title,
-                sprint_window=sprint_window,
-                output_dir="src/generated/sprint_1/authentication",
-                dependency_node_ids=["design:system-design", "design:auth-authorization-design"],
-                sprint_context=sprint_context,
-            ),
-            ImplementationTask(
-                sprint=sprint,
-                task_id="1-common-middleware",
-                title="Common middleware",
-                summary="Create shared request context, tenant guard, and audit middleware foundations for Sprint 1.",
-                module_hint="Request ID, tenant status checks, audit hooks, role evaluation pipeline",
-                deliverable=milestone["deliverables"],
-                sprint_title=sprint_title,
-                sprint_window=sprint_window,
-                output_dir="src/generated/sprint_1/common_middleware",
-                dependency_node_ids=[
-                    "design:system-design",
-                    "design:database-design",
-                    "design:auth-authorization-design",
-                    "design:api-design",
-                ],
-                sprint_context=sprint_context,
-            ),
-        ]
-
     title_slug = _slug_from_text(sprint_title) or f"sprint_{sprint}"
     summary_chunks = [chunk for chunk in _split_deliverable_chunks(milestone["deliverables"]) if chunk][:4]
     if not summary_chunks:
@@ -368,9 +307,16 @@ def _parse_markdown_table(section_text: str) -> list[list[str]]:
     return rows
 
 
+MILESTONE_HEADING_RE = re.compile(
+    r"^###\s+(?:Milestone\s+)?(?P<number>\d+)\s*(?:[—–-]\s*(?P<title>.+?))?\s*$",
+    re.MULTILINE,
+)
+DURATION_RE = re.compile(r"\*\*Duration:\*\*\s*(?P<period>.+?)$", re.MULTILINE)
+
+
 def _parse_milestone_rows(content: str) -> list[dict[str, str]]:
     match = re.search(
-        r"^##\s+3\.\s+Milestones（マイルストーン）\s*$",
+        r"^##\s+\d+\.\s+Milestones(?:（マイルストーン）)?\s*$",
         content,
         re.MULTILINE,
     )
@@ -380,6 +326,8 @@ def _parse_milestone_rows(content: str) -> list[dict[str, str]]:
     remaining = content[match.end():]
     next_heading = SECTION_HEADING_RE.search(remaining)
     section_text = remaining[: next_heading.start()] if next_heading else remaining
+
+    # Try table format first
     rows = _parse_markdown_table(section_text)
     milestones: list[dict[str, str]] = []
     for row in rows:
@@ -390,6 +338,27 @@ def _parse_milestone_rows(content: str) -> list[dict[str, str]]:
                 "period": row[0],
                 "title": row[1],
                 "deliverables": row[2],
+            }
+        )
+    if milestones:
+        return milestones
+
+    # Fallback: parse ### Milestone N — Title headings
+    heading_matches = list(MILESTONE_HEADING_RE.finditer(section_text))
+    for idx, h_match in enumerate(heading_matches):
+        start = h_match.end()
+        end = heading_matches[idx + 1].start() if idx + 1 < len(heading_matches) else len(section_text)
+        body = section_text[start:end]
+        dur_match = DURATION_RE.search(body)
+        period = dur_match.group("period").strip() if dur_match else ""
+        # Collect sub-section titles as deliverables summary
+        sub_headings = re.findall(r"^####\s+.+$", body, re.MULTILINE)
+        deliverables = "; ".join(h.lstrip("#").strip() for h in sub_headings[:6])
+        milestones.append(
+            {
+                "period": period,
+                "title": (h_match.group("title") or "").strip(),
+                "deliverables": deliverables,
             }
         )
     return milestones
