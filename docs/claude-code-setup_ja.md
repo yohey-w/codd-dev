@@ -39,7 +39,8 @@ Claude Codeの設定（`~/.claude/settings.json` または `.claude/settings.jso
 | Skill | 機能 |
 |-------|------|
 | `/codd-init` | プロジェクト初期化 + 要件インポート |
-| `/codd-generate` | HITLゲート付きWave順設計書生成 |
+| `/codd-generate` | HITLゲート付きWave順設計書生成（グリーンフィールド） |
+| `/codd-restore` | 抽出事実から設計書復元（ブラウンフィールド） |
 | `/codd-scan` | フロントマターから依存グラフ再構築 |
 | `/codd-impact` | Green/Amber/Grayプロトコルで変更影響分析 |
 | `/codd-validate` | フロントマター & 依存関係の整合性チェック |

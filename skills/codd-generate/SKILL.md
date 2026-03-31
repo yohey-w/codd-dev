@@ -2,9 +2,16 @@
 
 Generate CoDD design documents one wave at a time, validate their frontmatter, refresh the dependency graph, and stop for human approval before advancing to the next wave.
 
+**This is for greenfield projects** (requirements → design). For brownfield projects (existing code → design), use `/codd-restore` instead.
+
 ## Usage
 
 Use this skill after `codd init` and after requirement documents are ready. Generate only one wave at a time. Never auto-run the next wave without a human decision.
+
+If you have an existing codebase with no requirements, use the brownfield flow instead:
+1. `codd extract` — reverse-engineer code structure
+2. `codd plan --init` — generate wave_config from extracted docs
+3. `/codd-restore` — reconstruct design docs from extracted facts
 
 ## Wave Model
 

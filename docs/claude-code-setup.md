@@ -39,7 +39,8 @@ This registers all CoDD Skills as slash commands:
 | Skill | What it does |
 |-------|-------------|
 | `/codd-init` | Initialize project + import requirements |
-| `/codd-generate` | Generate design docs wave-by-wave with HITL gates |
+| `/codd-generate` | Generate design docs wave-by-wave with HITL gates (greenfield) |
+| `/codd-restore` | Reconstruct design docs from extracted code facts (brownfield) |
 | `/codd-scan` | Rebuild dependency graph from frontmatter |
 | `/codd-impact` | Change impact analysis with Green/Amber/Gray protocol |
 | `/codd-validate` | Frontmatter & dependency consistency check |

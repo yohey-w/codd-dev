@@ -132,7 +132,7 @@ codd generate --wave 3   # DB design + Auth design
 codd generate --wave 4   # Test strategy
 ```
 
-`wave_config` is auto-generated from your requirements. Each design doc gets frontmatter and `depends_on` declarations — all derived, nothing manual.
+`wave_config` is auto-generated from your requirements. Each design doc gets frontmatter, `depends_on` declarations, and a `modules` field linking it to source code modules — all derived, nothing manual.
 
 ### Step 4: Build the dependency graph
 
@@ -221,6 +221,7 @@ Dependencies are declared in Markdown frontmatter. No separate config files.
 ---
 codd:
   node_id: "design:api-design"
+  modules: ["api", "auth"]        # ← links to source code modules
   depends_on:
     - id: "design:system-design"
       relation: derives_from
@@ -229,7 +230,33 @@ codd:
 ---
 ```
 
+The `modules` field enables reverse traceability: when source code changes, `codd extract` identifies affected modules, and the `modules` field maps those modules back to the design docs that need updating.
+
 `codd/scan/` is a cache — regenerated on every `codd scan`.
+
+## AI Model Configuration
+
+CoDD calls an external AI CLI for document generation. The default is Claude Opus:
+
+```yaml
+# codd.yaml
+ai_command: "claude --print --model claude-opus-4-6"
+```
+
+### Per-Command Override
+
+Different commands can use different models. For example, use Opus for design doc generation but Codex for code implementation:
+
+```yaml
+ai_command: "claude --print --model claude-opus-4-6"   # global default
+ai_commands:
+  generate: "claude --print --model claude-opus-4-6"    # design doc generation
+  restore: "claude --print --model claude-opus-4-6"     # brownfield reconstruction
+  plan_init: "claude --print --model claude-sonnet-4-6" # wave_config planning
+  implement: "codex --print"                             # code generation
+```
+
+**Resolution priority**: CLI `--ai-cmd` flag > `ai_commands.{command}` > `ai_command` > built-in default (Opus).
 
 ## Config Directory Discovery
 
@@ -243,7 +270,11 @@ All other commands (`scan`, `impact`, `generate`, etc.) automatically discover w
 
 ## Brownfield? Start Here
 
-Already have a codebase? `codd extract` reverse-engineers design documents from your source code. No AI required — pure static analysis.
+Already have a codebase? CoDD provides a full brownfield workflow — from code extraction to design doc reconstruction.
+
+### Step 1: Extract structure from code
+
+`codd extract` reverse-engineers design documents from your source code. No AI required — pure static analysis.
 
 ```bash
 cd existing-project
@@ -260,15 +291,43 @@ Output: codd/extracted/
   ...
 ```
 
-**Philosophy**: In V-Model, intent lives only in requirements. Architecture, design, and tests are structural facts — extractable from code. `codd extract` gets the structure; you add the "why" later.
+### Step 2: Generate wave_config from extracted docs
+
+`codd plan --init` automatically detects extracted docs and generates a wave_config — no requirement docs needed.
 
 ```bash
-# Review generated docs, promote confirmed ones
-mv codd/extracted/modules/auth.md docs/design/
-# Then build the dependency graph
+codd plan --init    # Detects codd/extracted/, builds brownfield wave_config
+```
+
+Each artifact in the generated wave_config includes a `modules` field linking it to source code modules — enabling reverse traceability from code changes back to design docs.
+
+### Step 3: Restore design documents
+
+`codd restore` reconstructs design documents from extracted facts. Unlike `codd generate` (which creates docs from requirements), `restore` asks *"what IS the current design?"* — reconstructing intent from code structure.
+
+```bash
+codd restore --wave 2   # Reconstruct system design from extracted facts
+codd restore --wave 3   # Reconstruct DB/API design
+```
+
+### Step 4: Build the graph
+
+```bash
 codd scan
 codd impact
 ```
+
+**Philosophy**: In V-Model, intent lives only in requirements. Architecture, design, and tests are structural facts — extractable from code. `codd extract` gets the structure; `codd restore` reconstructs the design; you add the "why" later.
+
+### Greenfield vs Brownfield
+
+| | Greenfield | Brownfield |
+|--|-----------|-----------|
+| Starting point | Requirements (human-written) | Existing codebase |
+| Planning | `codd plan --init` (from requirements) | `codd plan --init` (from extracted docs) |
+| Doc generation | `codd generate` (forward: requirements → design) | `codd restore` (backward: code facts → design) |
+| Traceability | `modules` field links docs → code | `modules` field links docs → code |
+| Modification | `codd extract` diff → `modules` search → identify affected docs → AI updates | Same flow |
 
 ## Commands
 
@@ -278,8 +337,9 @@ codd impact
 | `codd scan` | **Stable** | Build dependency graph from frontmatter |
 | `codd impact` | **Stable** | Change impact analysis (Green / Amber / Gray) |
 | `codd validate` | **Alpha** | Frontmatter integrity & graph consistency check |
-| `codd generate` | Experimental | Generate design docs in Wave order |
-| `codd plan` | Experimental | Wave execution status |
+| `codd generate` | Experimental | Generate design docs in Wave order (greenfield) |
+| `codd restore` | Experimental | Reconstruct design docs from extracted facts (brownfield) |
+| `codd plan` | Experimental | Wave execution status (`--init` supports brownfield fallback) |
 | `codd verify` | Experimental | V-Model verification |
 | `codd implement` | Experimental | Design-to-code generation |
 | `codd extract` | **Alpha** | Reverse-engineer design docs from existing code |
@@ -344,7 +404,8 @@ With hooks active, your entire workflow becomes: **edit files normally, then run
 | Skill | What it does |
 |-------|-------------|
 | `/codd-init` | Initialize + import requirements |
-| `/codd-generate` | Generate design docs wave-by-wave with HITL gates |
+| `/codd-generate` | Generate design docs wave-by-wave with HITL gates (greenfield) |
+| `/codd-restore` | Reconstruct design docs from extracted code facts (brownfield) |
 | `/codd-scan` | Rebuild dependency graph |
 | `/codd-impact` | Change impact analysis with Green/Amber/Gray protocol |
 | `/codd-validate` | Frontmatter & dependency consistency check |
@@ -410,6 +471,10 @@ If CoDD can't manage itself, it shouldn't manage your project.
 
 - [ ] Semantic dependency types (`requires`, `affects`, `verifies`, `implements`)
 - [x] `codd extract` — reverse-generate design docs from existing codebases (brownfield support)
+- [x] `codd restore` — reconstruct design docs from extracted facts (brownfield doc generation)
+- [x] `codd plan --init` brownfield fallback — generate wave_config from extracted docs
+- [x] `modules` field — design doc ↔ source code traceability
+- [x] Per-command AI model configuration (`ai_commands` in codd.yaml)
 - [x] `codd verify` — language-agnostic verification (Python: mypy + pytest, TypeScript: tsc + jest)
 - [ ] Multi-harness integration examples (Claude Code, Copilot, Cursor)
 - [ ] VS Code extension for impact visualization
