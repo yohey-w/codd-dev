@@ -99,7 +99,7 @@ def implement_sprint(
             raise ValueError(f"no implementation task matched {task!r} in sprint {sprint}")
         raise ValueError(f"implementation plan does not define sprint {sprint}")
 
-    resolved_ai_command = generator_module._resolve_ai_command(config, ai_command)
+    resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="implement")
     global_conventions = _normalize_conventions(config.get("conventions", []))
     coding_principles = _load_coding_principles(project_root, config)
     node_paths = build_document_node_path_map(project_root, config)

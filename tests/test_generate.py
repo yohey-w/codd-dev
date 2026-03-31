@@ -494,3 +494,55 @@ Concrete content without diagrams.
             raw_body,
             output_path="docs/detailed_design/request_lifecycle_sequences.md",
         )
+
+
+# --- _resolve_ai_command per-command tests ---
+
+
+def test_resolve_ai_command_uses_default_when_no_config():
+    result = generator_module._resolve_ai_command({}, None)
+    assert result == generator_module.DEFAULT_AI_COMMAND
+
+
+def test_resolve_ai_command_cli_override_takes_precedence():
+    config = {
+        "ai_command": "global-ai",
+        "ai_commands": {"generate": "per-cmd-ai"},
+    }
+    result = generator_module._resolve_ai_command(config, "cli-override", command_name="generate")
+    assert result == "cli-override"
+
+
+def test_resolve_ai_command_per_command_overrides_global():
+    config = {
+        "ai_command": "global-ai",
+        "ai_commands": {"generate": "opus-for-design"},
+    }
+    result = generator_module._resolve_ai_command(config, None, command_name="generate")
+    assert result == "opus-for-design"
+
+
+def test_resolve_ai_command_falls_back_to_global_when_command_not_in_ai_commands():
+    config = {
+        "ai_command": "global-ai",
+        "ai_commands": {"generate": "opus-for-design"},
+    }
+    result = generator_module._resolve_ai_command(config, None, command_name="implement")
+    assert result == "global-ai"
+
+
+def test_resolve_ai_command_falls_back_to_default_when_no_ai_commands_dict():
+    config = {"ai_command": "global-ai"}
+    result = generator_module._resolve_ai_command(config, None, command_name="generate")
+    assert result == "global-ai"
+
+
+def test_resolve_ai_command_rejects_empty_string():
+    with pytest.raises(ValueError, match="ai_command must be a non-empty string"):
+        generator_module._resolve_ai_command({"ai_command": ""}, None)
+
+
+def test_resolve_ai_command_per_command_rejects_empty_string():
+    config = {"ai_commands": {"generate": "  "}}
+    with pytest.raises(ValueError, match="ai_command must be a non-empty string"):
+        generator_module._resolve_ai_command(config, None, command_name="generate")

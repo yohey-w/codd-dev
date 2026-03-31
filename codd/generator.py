@@ -15,7 +15,7 @@ import yaml
 from codd.config import load_project_config
 
 
-DEFAULT_AI_COMMAND = "claude --print"
+DEFAULT_AI_COMMAND = "claude --print --model claude-opus-4-6"
 DEFAULT_RELATION = "depends_on"
 DEFAULT_SEMANTIC = "governance"
 DOC_TYPE_BY_DIR = {
@@ -118,7 +118,7 @@ def generate_wave(
     if not selected:
         raise ValueError(f"wave_config has no entries for wave {wave}")
 
-    resolved_ai_command = _resolve_ai_command(config, ai_command)
+    resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="generate")
     global_conventions = _normalize_conventions(config.get("conventions", []))
     depended_by_map = _build_depended_by_map(artifacts)
     document_node_paths = build_document_node_path_map(project_root, config)
@@ -314,8 +314,17 @@ def _infer_doc_type(output_path: str) -> str:
     return "document"
 
 
-def _resolve_ai_command(config: dict[str, Any], override: str | None) -> str:
-    raw_command = override if override is not None else config.get("ai_command", DEFAULT_AI_COMMAND)
+def _resolve_ai_command(
+    config: dict[str, Any],
+    override: str | None,
+    command_name: str | None = None,
+) -> str:
+    if override is not None:
+        raw_command = override
+    elif command_name and isinstance(config.get("ai_commands"), dict):
+        raw_command = config["ai_commands"].get(command_name, config.get("ai_command", DEFAULT_AI_COMMAND))
+    else:
+        raw_command = config.get("ai_command", DEFAULT_AI_COMMAND)
     if not isinstance(raw_command, str) or not raw_command.strip():
         raise ValueError("ai_command must be a non-empty string")
     return raw_command.strip()

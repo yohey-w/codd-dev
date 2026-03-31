@@ -134,7 +134,7 @@ def plan_init(
 
     if requirement_documents:
         # Greenfield: use requirements
-        resolved_ai_command = generator_module._resolve_ai_command(config, ai_command)
+        resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="plan_init")
         prompt = _build_plan_init_prompt(config, requirement_documents)
     else:
         # Brownfield: try extracted docs
@@ -145,7 +145,7 @@ def plan_init(
                 "Run 'codd extract' first for brownfield projects, "
                 "or create requirement docs with CoDD frontmatter for greenfield projects."
             )
-        resolved_ai_command = generator_module._resolve_ai_command(config, ai_command)
+        resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="plan_init")
         prompt = _build_brownfield_plan_init_prompt(config, extracted_documents)
 
     raw_wave_config = generator_module._invoke_ai_command(resolved_ai_command, prompt)

@@ -1,7 +1,7 @@
 version: "0.2.0a1"
 project:
   frameworks: []
-ai_command: "claude --print"
+ai_command: "claude --print --model claude-opus-4-6"
 coding_principles: null
 scan:
   source_dirs:

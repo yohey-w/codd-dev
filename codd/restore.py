@@ -43,7 +43,7 @@ def restore_wave(
             "Run 'codd extract' first to generate them from source code."
         )
 
-    resolved_ai_command = _resolve_ai_command(config, ai_command)
+    resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="restore")
     depended_by_map = _build_depended_by_map(artifacts)
 
     results: list[GenerationResult] = []
