@@ -15,7 +15,7 @@ import yaml
 from codd.config import load_project_config
 
 
-DEFAULT_AI_COMMAND = "claude --print --model claude-opus-4-6"
+DEFAULT_AI_COMMAND = 'claude --print --model claude-opus-4-6 --tools ""'
 DEFAULT_RELATION = "depends_on"
 DEFAULT_SEMANTIC = "governance"
 DOC_TYPE_BY_DIR = {
@@ -48,6 +48,9 @@ FENCE_LINE_RE = re.compile(r"^\s*```(?:[a-zA-Z0-9_-]+)?\s*$")
 TITLE_HEADING_RE = re.compile(r"^\s*#\s+(?P<title>.+?)\s*$")
 SECTION_HEADING_RE = re.compile(r"^##\s+.+$", re.MULTILINE)
 MERMAID_FENCE_RE = re.compile(r"```mermaid\b", re.IGNORECASE)
+H1_HEADING_RE = re.compile(r"^#\s+(.+)$")
+H3_HEADING_RE = re.compile(r"^###\s+(.+)$")
+BOLD_HEADING_RE = re.compile(r"^\*\*(\d+\.\s+.+?)\*\*\s*$")
 META_PREAMBLE_PATTERNS = (
     re.compile(r"^\s*the\s+docs?(?:/[a-z0-9._-]+)*\s+directory\b.*$", re.IGNORECASE),
     re.compile(r"^\s*the\s+dependency\s+documents\s+provided\s+inline\b.*$", re.IGNORECASE),
@@ -559,6 +562,7 @@ def _sanitize_generated_body(title: str, body: str, *, output_path: str | None =
     if not normalized.startswith("# "):
         normalized = f"# {title}\n\n{normalized}"
     normalized = _normalize_title_heading_block(title, normalized)
+    normalized = _normalize_section_headings(normalized)
     normalized = _collapse_blank_line_runs(normalized)
     _validate_generated_body(title, normalized, output_path=output_path)
 
@@ -659,6 +663,78 @@ def _normalize_heading_text(line: str) -> str | None:
     if not match:
         return None
     return re.sub(r"\s+", " ", match.group("title")).strip().casefold()
+
+
+def _normalize_section_headings(body: str) -> str:
+    """Promote or demote misleveled headings so ``## `` section headings exist.
+
+    AI models sometimes emit ``###`` or bare ``#`` (non-title) headings instead
+    of the required ``## `` level.  This function detects the mismatch and
+    adjusts heading levels *outside* fenced code blocks.  Bold pseudo-headings
+    (``**1. Name**``) are also promoted.
+
+    If ``## `` headings already exist the body is returned unchanged.
+    """
+    if SECTION_HEADING_RE.search(body):
+        return body
+
+    lines = body.splitlines()
+    has_title = bool(lines and TITLE_HEADING_RE.match(lines[0]))
+
+    # Tally heading-like patterns (outside fences) to decide the strategy.
+    h1_non_title = 0
+    h3_count = 0
+    bold_count = 0
+    in_fence = False
+    for idx, line in enumerate(lines):
+        if FENCE_LINE_RE.match(line.strip()):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if idx == 0 and has_title:
+            continue
+        if H3_HEADING_RE.match(line):
+            h3_count += 1
+        elif H1_HEADING_RE.match(line):
+            h1_non_title += 1
+        elif BOLD_HEADING_RE.match(line):
+            bold_count += 1
+
+    if h3_count == 0 and h1_non_title == 0 and bold_count == 0:
+        return body  # Nothing we can safely fix
+
+    result: list[str] = []
+    in_fence = False
+    for idx, line in enumerate(lines):
+        if FENCE_LINE_RE.match(line.strip()):
+            in_fence = not in_fence
+            result.append(line)
+            continue
+        if in_fence:
+            result.append(line)
+            continue
+
+        # Skip the title heading
+        if idx == 0 and has_title:
+            result.append(line)
+            continue
+
+        # Strategy: promote/demote to ##
+        if h3_count > 0 and H3_HEADING_RE.match(line):
+            result.append(re.sub(r"^###", "##", line))
+        elif h1_non_title > 0 and H1_HEADING_RE.match(line) and not (idx == 0 and has_title):
+            result.append(re.sub(r"^#\s+", "## ", line))
+        elif bold_count > 0:
+            m = BOLD_HEADING_RE.match(line)
+            if m:
+                result.append(f"## {m.group(1)}")
+            else:
+                result.append(line)
+        else:
+            result.append(line)
+
+    return "\n".join(result)
 
 
 def _validate_generated_body(title: str, body: str, *, output_path: str | None = None) -> None:

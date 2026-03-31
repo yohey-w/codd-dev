@@ -546,3 +546,57 @@ def test_resolve_ai_command_per_command_rejects_empty_string():
     config = {"ai_commands": {"generate": "  "}}
     with pytest.raises(ValueError, match="ai_command must be a non-empty string"):
         generator_module._resolve_ai_command(config, None, command_name="generate")
+
+
+# --- _normalize_section_headings tests ---
+
+
+def test_normalize_section_headings_noop_when_h2_exists():
+    body = "# Title\n\n## Overview\n\nContent.\n"
+    assert generator_module._normalize_section_headings(body) == body
+
+
+def test_normalize_section_headings_promotes_h3_to_h2():
+    body = "# Title\n\n### 1. Overview\n\nContent.\n\n### 2. Scope\n\nMore content.\n"
+    result = generator_module._normalize_section_headings(body)
+    assert "## 1. Overview" in result
+    assert "## 2. Scope" in result
+    assert "### " not in result
+
+
+def test_normalize_section_headings_demotes_non_title_h1_to_h2():
+    body = "# Title\n\n# Overview\n\nContent.\n\n# Architecture\n\nMore.\n"
+    result = generator_module._normalize_section_headings(body)
+    assert result.startswith("# Title\n")  # title preserved
+    assert "## Overview" in result
+    assert "## Architecture" in result
+
+
+def test_normalize_section_headings_promotes_bold_pseudo_headings():
+    body = "# Title\n\n**1. Overview**\n\nContent.\n\n**2. Acceptance Criteria**\n\nCriteria.\n"
+    result = generator_module._normalize_section_headings(body)
+    assert "## 1. Overview" in result
+    assert "## 2. Acceptance Criteria" in result
+    assert "**1." not in result
+
+
+def test_normalize_section_headings_preserves_fenced_code_blocks():
+    body = "# Title\n\n### Overview\n\n```bash\n### this is a comment\n```\n\n### Scope\n\nEnd.\n"
+    result = generator_module._normalize_section_headings(body)
+    assert "## Overview" in result
+    assert "## Scope" in result
+    assert "### this is a comment" in result  # inside fence, unchanged
+
+
+def test_normalize_section_headings_returns_unchanged_when_no_patterns():
+    body = "# Title\n\nJust plain text without any section structure.\n"
+    assert generator_module._normalize_section_headings(body) == body
+
+
+def test_sanitize_normalizes_h3_before_validation():
+    """Integration: _sanitize_generated_body no longer rejects h3-only output."""
+    raw_body = "# Acceptance Criteria\n\n### 1. Overview\n\nContent.\n\n### 2. Acceptance Criteria\n\nCriteria.\n\n### 3. Failure Criteria\n\nFailures.\n"
+    result = generator_module._sanitize_generated_body("Acceptance Criteria", raw_body)
+    assert "## 1. Overview" in result
+    assert "## 2. Acceptance Criteria" in result
+    assert "## 3. Failure Criteria" in result
