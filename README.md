@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**Public Alpha** — `init` / `scan` / `impact` are stable; `validate` is alpha.
+**v1.2.0** — `init` / `scan` / `impact` are stable. `generate` / `implement` / `assemble` / `validate` / `extract` are alpha.
 
 ---
 
@@ -72,6 +72,8 @@ CoDD is **harness-agnostic** — works with Claude Code, Copilot, Cursor, or any
 
 ## Quick Start
 
+### Greenfield (new project)
+
 ```bash
 pip install codd-dev
 mkdir my-project && cd my-project && git init
@@ -80,19 +82,107 @@ mkdir my-project && cd my-project && git init
 codd init --project-name "my-project" --language "typescript" \
   --requirements spec.txt
 
-# AI generates design docs (wave_config auto-generated)
-codd generate --wave 2
+# AI designs the document dependency graph
+codd plan --init
 
-# Build dependency graph → analyze impact
-codd scan
-codd impact
+# Generate design docs wave by wave
+waves=$(codd plan --waves)
+for wave in $(seq 1 $waves); do
+  codd generate --wave $wave
+done
+
+# Quality gate — catch AI laziness (TODOs, placeholders)
+codd validate
+
+# Generate code from design docs
+sprints=$(codd plan --sprints)
+for sprint in $(seq 1 $sprints); do
+  codd implement --sprint $sprint
+done
+
+# Assemble code fragments into a buildable project
+codd assemble
 ```
 
-## 5-Minute Demo — See CoDD in Action
+### Brownfield (existing project)
 
-We'll build **TaskFlow**, a task management app. Write **requirements in plain text**, let CoDD + AI handle everything else.
+```bash
+codd extract              # Reverse-engineer design docs from code
+codd plan --init          # Generate wave_config from extracted docs
+codd scan                 # Build dependency graph
+codd impact               # Change impact analysis
+```
 
-### Step 1: Write your requirements (any format — txt, md, doc)
+## 5-Minute Greenfield Demo — Spec to Working App
+
+37 lines of spec → 6 design docs (1,353 lines) → 102 code files (6,445 lines) → TypeScript strict build passes.
+
+### Step 1: Write your requirements
+
+```text
+# TaskFlow — Personal Todo App
+
+## Functional Requirements
+- Task CRUD: create, read, update, delete tasks
+- Each task has: title, description (optional), due date (optional),
+  priority (low/medium/high), completed status
+- Task list with filtering by: status (all/active/completed), priority
+- Local state management (no backend, localStorage)
+
+## UI Requirements
+- Single-page app with responsive layout (mobile-first)
+- Dark theme with accent color (#3b82f6)
+- Floating action button opens a modal form
+- Toast notifications on create/update/delete
+- Keyboard shortcuts: Enter to submit, Escape to close modal
+
+## Constraints
+- Next.js 15 App Router with React Server Components
+- Tailwind CSS
+- TypeScript strict mode
+- Deploy-ready as static export
+```
+
+### Step 2: Run the pipeline
+
+```bash
+pip install codd-dev
+codd init --requirements spec.md
+codd plan --init                          # AI designs the wave structure
+
+waves=$(codd plan --waves)                # → 4
+for wave in $(seq 1 $waves); do
+  codd generate --wave $wave              # design docs, wave by wave
+done
+
+codd validate                             # quality gate
+
+sprints=$(codd plan --sprints)            # → 17
+for sprint in $(seq 1 $sprints); do
+  codd implement --sprint $sprint         # code from design docs
+done
+
+codd assemble                             # integrate into buildable project
+npm run build                             # TypeScript strict, zero errors
+```
+
+No interactive AI chat at any step. Every AI call goes through `claude --print` — prompt in, text out. **Harness as Code**: the entire workflow is a shell script.
+
+### Step 3: Model role separation
+
+```bash
+# Design docs — needs judgment, use Opus
+codd generate --wave 1 --ai-cmd 'claude --print --model claude-opus-4-6 --tools ""'
+
+# Code generation — needs volume, use Codex (or Sonnet)
+codd implement --sprint 1 --ai-cmd 'codex --full-auto -q'
+```
+
+## 5-Minute Brownfield Demo — Change Impact Analysis
+
+Already have a codebase? CoDD tracks what's affected when requirements change.
+
+### Step 1: Write requirements and generate design docs
 
 ```text
 # TaskFlow — Requirements
@@ -111,48 +201,23 @@ We'll build **TaskFlow**, a task management app. Write **requirements in plain t
 - All API endpoints rate-limited
 ```
 
-Save this as `spec.txt`. That's it — no special formatting needed.
-
-### Step 2: Initialize CoDD
-
 ```bash
-pip install codd-dev
-mkdir taskflow && cd taskflow && git init
-codd init --project-name "taskflow" --language "typescript" \
-  --requirements spec.txt
-```
-
-CoDD adds frontmatter (`node_id`, `type`, dependency metadata) automatically. You never touch it.
-
-### Step 3: AI generates design docs
-
-```bash
-codd generate --wave 2   # System design + API design
-codd generate --wave 3   # DB design + Auth design
-codd generate --wave 4   # Test strategy
-```
-
-`wave_config` is auto-generated from your requirements. Each design doc gets frontmatter, `depends_on` declarations, and a `modules` field linking it to source code modules — all derived, nothing manual.
-
-### Step 4: Build the dependency graph
-
-```bash
+codd init --requirements spec.txt
+codd plan --init
+waves=$(codd plan --waves)
+for wave in $(seq 1 $waves); do codd generate --wave $wave; done
 codd scan
 ```
 
 ```
-Frontmatter: 7 documents in docs
 Scan complete:
   Documents with frontmatter: 7
   Graph: 7 nodes, 15 edges
-  Evidence: 15 total (0 human, 15 auto)
 ```
 
-7 docs, 15 dependency edges. Zero config written by hand.
+### Step 2: Change requirements mid-project
 
-### Step 5: Change requirements mid-project
-
-Your PM asks for SSO and audit logging. Open `docs/requirements/requirements.md` and add:
+Your PM asks for SSO and audit logging. Add to `docs/requirements/requirements.md`:
 
 ```text
 ## Additional Requirements (v1.1)
@@ -160,16 +225,11 @@ Your PM asks for SSO and audit logging. Open `docs/requirements/requirements.md`
 - Audit logging (record & export all operations)
 ```
 
-Save the file and ask CoDD what's affected:
-
 ```bash
 codd impact    # detects uncommitted changes automatically
 ```
 
 ```
-Changed files: 1
-  - docs/requirements/requirements.md → req:taskflow-requirements
-
 # CoDD Impact Report
 
 ## Green Band (high confidence, auto-propagate)
@@ -184,14 +244,9 @@ Changed files: 1
 | Target                  | Depth | Confidence |
 |-------------------------|-------|------------|
 | test:test-strategy      | 2     | 0.90       |
-
-## Gray Band (informational)
-| Target                  | Depth | Confidence |
-|-------------------------|-------|------------|
-| plan:implementation     | 2     | 0.00       |
 ```
 
-**2 lines changed → 6 out of 7 docs affected.** Green band: AI auto-updates. Amber: human reviews. Gray: informational. You know exactly what to fix before anything breaks.
+**2 lines changed → 6 out of 7 docs affected.** Green band: AI auto-updates. Amber: human reviews. You know exactly what to fix before anything breaks.
 
 ## Wave-Based Generation
 
@@ -532,8 +587,10 @@ If CoDD can't manage itself, it shouldn't manage your project.
 
 ## Articles
 
-- [Zenn (Japanese): CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence)
+- [dev.to (English): Harness as Code — Treating AI Workflows Like Infrastructure](https://dev.to/yohey-w/harness-as-code-treating-ai-workflows-like-infrastructure-27ni)
 - [dev.to (English): What Happens After "Spec First"](https://dev.to/yohey-w/codd-coherence-driven-development-what-happens-after-spec-first-514f)
+- [Zenn (Japanese): Harness as Code — CoDD活用ガイド #1 spec → 設計書 → コード](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide)
+- [Zenn (Japanese): CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence)
 
 ## License
 
