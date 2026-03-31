@@ -36,6 +36,7 @@ def restore_wave(
     wave: int,
     force: bool = False,
     ai_command: str | None = None,
+    feedback: str | None = None,
 ) -> list[GenerationResult]:
     """Restore design documents for a wave from extracted facts."""
     config = load_project_config(project_root)
@@ -62,7 +63,7 @@ def restore_wave(
             continue
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        prompt = _build_restoration_prompt(artifact, extracted_documents)
+        prompt = _build_restoration_prompt(artifact, extracted_documents, feedback=feedback)
         raw_body = _invoke_ai_command(resolved_ai_command, prompt)
         body = _sanitize_generated_body(artifact.title, raw_body, output_path=artifact.output)
         content = _render_document(
@@ -80,6 +81,7 @@ def restore_wave(
 def _build_restoration_prompt(
     artifact: WaveArtifact,
     extracted_documents: list[ExtractedDocument],
+    feedback: str | None = None,
 ) -> str:
     """Build a prompt that asks AI to reconstruct design intent from extracted facts."""
     # Determine doc type and sections
@@ -204,6 +206,16 @@ def _build_restoration_prompt(
             f"--- BEGIN EXTRACTED {doc.path} ({doc.node_id}) ---",
             doc.content.rstrip(),
             f"--- END EXTRACTED {doc.path} ---",
+            "",
+        ])
+
+    if feedback:
+        lines.extend([
+            "--- REVIEW FEEDBACK (from previous restoration attempt) ---",
+            "A reviewer found issues with a previous version of this document.",
+            "You MUST address ALL of the following feedback in this restoration:",
+            feedback.rstrip(),
+            "--- END REVIEW FEEDBACK ---",
             "",
         ])
 

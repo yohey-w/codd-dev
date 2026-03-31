@@ -108,6 +108,7 @@ def generate_wave(
     wave: int,
     force: bool = False,
     ai_command: str | None = None,
+    feedback: str | None = None,
 ) -> list[GenerationResult]:
     """Generate or skip all documents configured for a wave."""
     from codd.scanner import build_document_node_path_map
@@ -142,6 +143,7 @@ def generate_wave(
                 dependency_documents=dependency_documents,
                 conventions=combined_conventions,
                 ai_command=resolved_ai_command,
+                feedback=feedback,
             ),
         )
         output_path.write_text(content, encoding="utf-8")
@@ -375,8 +377,9 @@ def _generate_document_body(
     dependency_documents: list[DependencyDocument],
     conventions: list[dict[str, Any]],
     ai_command: str,
+    feedback: str | None = None,
 ) -> str:
-    prompt = _build_generation_prompt(artifact, dependency_documents, conventions)
+    prompt = _build_generation_prompt(artifact, dependency_documents, conventions, feedback=feedback)
     return _sanitize_generated_body(
         artifact.title,
         _invoke_ai_command(ai_command, prompt),
@@ -388,6 +391,7 @@ def _build_generation_prompt(
     artifact: WaveArtifact,
     dependency_documents: list[DependencyDocument],
     conventions: list[dict[str, Any]],
+    feedback: str | None = None,
 ) -> str:
     doc_type = _infer_doc_type(artifact.output)
     is_detailed_design = _is_detailed_design_output(artifact.output)
@@ -486,6 +490,17 @@ def _build_generation_prompt(
                 "",
             ]
         )
+
+    if feedback:
+        lines.extend([
+            "",
+            "--- REVIEW FEEDBACK (from previous generation attempt) ---",
+            "A reviewer found issues with a previous version of this document.",
+            "You MUST address ALL of the following feedback in this generation:",
+            feedback.rstrip(),
+            "--- END REVIEW FEEDBACK ---",
+            "",
+        ])
 
     lines.extend(
         [

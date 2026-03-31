@@ -43,6 +43,7 @@ def run_propagate(
     diff_target: str = "HEAD",
     update: bool = False,
     ai_command: str | None = None,
+    feedback: str | None = None,
 ) -> PropagationResult:
     """Detect source code changes and find affected design documents.
 
@@ -81,7 +82,7 @@ def run_propagate(
             if not doc_path.exists():
                 continue
             current_content = doc_path.read_text(encoding="utf-8")
-            prompt = _build_update_prompt(doc, current_content, code_diff)
+            prompt = _build_update_prompt(doc, current_content, code_diff, feedback=feedback)
             raw_body = _invoke_ai_command(resolved_ai_command, prompt)
             body = _sanitize_update_body(raw_body)
 
@@ -229,6 +230,7 @@ def _build_update_prompt(
     doc: AffectedDoc,
     current_content: str,
     code_diff: str,
+    feedback: str | None = None,
 ) -> str:
     """Build a prompt for AI to update a design document based on code changes."""
     lines = [
@@ -260,9 +262,22 @@ def _build_update_prompt(
         code_diff[:8000] if code_diff else "(no diff available)",
         "--- END CODE DIFF ---",
         "",
+    ]
+
+    if feedback:
+        lines.extend([
+            "",
+            "--- REVIEW FEEDBACK (from previous update attempt) ---",
+            "A reviewer found issues with a previous version of this update.",
+            "You MUST address ALL of the following feedback:",
+            feedback.rstrip(),
+            "--- END REVIEW FEEDBACK ---",
+        ])
+
+    lines.append(
         "Output the updated document body now. If no design-level changes are needed, "
         "output the existing body unchanged. Start with the first section heading.",
-    ]
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 

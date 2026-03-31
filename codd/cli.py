@@ -124,7 +124,8 @@ def impact(diff: str, path: str, output: str):
     default=None,
     help="Override AI CLI command (defaults to codd.yaml ai_command or 'claude --print')",
 )
-def generate(wave: int, path: str, force: bool, ai_cmd: str | None):
+@click.option("--feedback", default=None, help="Review feedback to address in this generation (from codd review)")
+def generate(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str | None):
     """Generate CoDD documents for a specific wave."""
     from codd.generator import generate_wave, _load_project_config
 
@@ -145,7 +146,7 @@ def generate(wave: int, path: str, force: bool, ai_cmd: str | None):
             raise SystemExit(1)
 
     try:
-        results = generate_wave(project_root, wave, force=force, ai_command=ai_cmd)
+        results = generate_wave(project_root, wave, force=force, ai_command=ai_cmd, feedback=feedback)
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
@@ -173,7 +174,8 @@ def generate(wave: int, path: str, force: bool, ai_cmd: str | None):
     default=None,
     help="Override AI CLI command (defaults to codd.yaml ai_command or 'claude --print')",
 )
-def restore(wave: int, path: str, force: bool, ai_cmd: str | None):
+@click.option("--feedback", default=None, help="Review feedback to address in this restoration (from codd review)")
+def restore(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str | None):
     """Restore design documents from extracted codebase facts (brownfield).
 
     Unlike 'generate' which creates design docs from requirements (greenfield),
@@ -189,7 +191,7 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None):
     _require_codd_dir(project_root)
 
     try:
-        results = restore_wave(project_root, wave, force=force, ai_command=ai_cmd)
+        results = restore_wave(project_root, wave, force=force, ai_command=ai_cmd, feedback=feedback)
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
@@ -217,7 +219,8 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None):
     default=None,
     help="Override AI CLI command (defaults to codd.yaml ai_command)",
 )
-def propagate(diff: str, path: str, update: bool, ai_cmd: str | None):
+@click.option("--feedback", default=None, help="Review feedback to address in this update (from codd review)")
+def propagate(diff: str, path: str, update: bool, ai_cmd: str | None, feedback: str | None):
     """Propagate source code changes to design documents.
 
     Detects changed source files, maps them to modules, and finds design
@@ -232,7 +235,7 @@ def propagate(diff: str, path: str, update: bool, ai_cmd: str | None):
     _require_codd_dir(project_root)
 
     try:
-        result = run_propagate(project_root, diff, update=update, ai_command=ai_cmd)
+        result = run_propagate(project_root, diff, update=update, ai_command=ai_cmd, feedback=feedback)
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
