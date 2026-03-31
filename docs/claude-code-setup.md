@@ -44,6 +44,7 @@ This registers all CoDD Skills as slash commands:
 | `/codd-scan` | Rebuild dependency graph from frontmatter |
 | `/codd-impact` | Change impact analysis with Green/Amber/Gray protocol |
 | `/codd-validate` | Frontmatter & dependency consistency check |
+| `/codd-propagate` | Reverse-propagate source code changes to design docs |
 
 ## 3. Add Project Hooks in `.claude/settings.json`
 
@@ -160,6 +161,12 @@ You:  /codd-impact
       → Claude detects changes, follows Green/Amber/Gray protocol
       → Green Band: auto-updates safe docs
       → Amber Band: "test-strategy is affected. Update it?"
+
+You:  (modify source code — implement the feature)
+
+You:  /codd-propagate
+      → Claude detects code changes, maps to modules, finds affected design docs
+      → "auth module changed. 2 design docs affected. Update with --update?"
 ```
 
 ### What You Actually Do Day-to-Day

@@ -327,7 +327,7 @@ codd impact
 | 計画 | `codd plan --init`（要件から） | `codd plan --init`（抽出結果から） |
 | 設計書生成 | `codd generate`（順方向: 要件→設計） | `codd restore`（逆方向: コード事実→設計） |
 | トレーサビリティ | `modules` フィールドが設計書→コードを接続 | 同じ |
-| 変更時 | `codd extract` diff → `modules` 検索 → 影響設計書特定 → AI更新 | 同じ |
+| 変更時 | `codd propagate`（コード→影響設計書→AI更新） | 同じ |
 
 ## コマンド
 
@@ -342,6 +342,7 @@ codd impact
 | `codd plan` | 実験的 | Wave実行状況（`--init` はブラウンフィールドにも対応） |
 | `codd verify` | 実験的 | V-Model検証 |
 | `codd implement` | 実験的 | 設計書→コード生成 |
+| `codd propagate` | 実験的 | ソースコード変更を設計書に逆伝搬 |
 | `codd extract` | **アルファ** | 既存コードから設計書を逆生成 |
 
 ## Claude Code 連携
@@ -375,6 +376,18 @@ CoDDはClaude Code用のスラッシュコマンドSkillを同梱。CLIを直接
      → Claude: codd impact --path .
      → Green帯域: system-design、api-design、db-design、auth-designを自動更新
      → Amber帯域: 「test-strategyが影響を受けています。更新しますか？」
+
+殿:  （ソースコードを変更 — SSO機能を実装）
+
+殿:  /codd-propagate
+     → Claude: codd propagate --path .
+     → 「authモジュールで3ファイル変更。影響を受ける設計書2件:
+        design:system-design, design:auth-detail」
+     → 「--updateで設計書を更新しますか？」
+
+殿:  はい
+     → Claude: codd propagate --path . --update
+     → 更新された設計書をレビューし、変更内容が正確か確認
 ```
 
 **CLIとの違い**: Skillはhuman-in-the-loopゲートを追加する。`/codd-generate` はWave間で承認を求めて停止。`/codd-impact` はGreen/Amber/Grayプロトコルに従い、安全な変更は自動更新、リスクのある変更は確認してから実行。
@@ -409,6 +422,7 @@ CoDDはClaude Code用のスラッシュコマンドSkillを同梱。CLIを直接
 | `/codd-scan` | 依存グラフ再構築 |
 | `/codd-impact` | Green/Amber/Grayプロトコルで変更影響分析 |
 | `/codd-validate` | フロントマター & 依存関係の整合性チェック |
+| `/codd-propagate` | ソースコード変更を設計書に逆伝搬 |
 
 詳細は [docs/claude-code-setup_ja.md](docs/claude-code-setup_ja.md) を参照。
 
@@ -460,6 +474,7 @@ codd verify           # mypy + pytest（127/127テスト通過）
 - [x] `codd plan --init` ブラウンフィールド対応 — 抽出結果からwave_config生成
 - [x] `modules` フィールド — 設計書 ↔ ソースコードのトレーサビリティ
 - [x] コマンド別AIモデル設定（`ai_commands` in codd.yaml）
+- [x] `codd propagate` — ソースコード変更を設計書に逆伝搬
 - [x] `codd verify` — 言語非依存の検証（Python: mypy + pytest、TypeScript: tsc + jest）
 - [ ] マルチハーネス連携例（Claude Code, Copilot, Cursor）
 - [ ] VS Code拡張（影響分析の可視化）

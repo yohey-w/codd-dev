@@ -327,7 +327,7 @@ codd impact
 | Planning | `codd plan --init` (from requirements) | `codd plan --init` (from extracted docs) |
 | Doc generation | `codd generate` (forward: requirements → design) | `codd restore` (backward: code facts → design) |
 | Traceability | `modules` field links docs → code | `modules` field links docs → code |
-| Modification | `codd extract` diff → `modules` search → identify affected docs → AI updates | Same flow |
+| Modification | `codd propagate` (code → affected docs → optional AI update) | Same flow |
 
 ## Commands
 
@@ -342,6 +342,7 @@ codd impact
 | `codd plan` | Experimental | Wave execution status (`--init` supports brownfield fallback) |
 | `codd verify` | Experimental | V-Model verification |
 | `codd implement` | Experimental | Design-to-code generation |
+| `codd propagate` | Experimental | Reverse-propagate source code changes to design docs |
 | `codd extract` | **Alpha** | Reverse-engineer design docs from existing code |
 
 ## Claude Code Integration
@@ -374,7 +375,19 @@ You:  (edit requirements — add SSO + audit logging)
 You:  /codd-impact
       → Claude: codd impact --path .
       → Green Band: auto-updates system-design, api-design, db-design, auth-design
-      → Amber Band: "test-strategyが影響を受けています。更新しますか？"
+      → Amber Band: "test-strategy is affected. Update it?"
+
+You:  (modify source code — implement the SSO feature)
+
+You:  /codd-propagate
+      → Claude: codd propagate --path .
+      → "3 files changed in auth module. 2 design docs affected:
+         design:system-design, design:auth-detail"
+      → "Run with --update to update these docs?"
+
+You:  yes
+      → Claude: codd propagate --path . --update
+      → Reviews updated docs, confirms changes are accurate
 ```
 
 **Key difference**: Skills add human-in-the-loop gates. `/codd-generate` pauses between waves for approval. `/codd-impact` follows the Green/Amber/Gray protocol — auto-updating safe changes, asking before risky ones.
@@ -409,6 +422,7 @@ With hooks active, your entire workflow becomes: **edit files normally, then run
 | `/codd-scan` | Rebuild dependency graph |
 | `/codd-impact` | Change impact analysis with Green/Amber/Gray protocol |
 | `/codd-validate` | Frontmatter & dependency consistency check |
+| `/codd-propagate` | Reverse-propagate source code changes to design docs |
 
 See [docs/claude-code-setup.md](docs/claude-code-setup.md) for complete setup.
 
@@ -475,6 +489,7 @@ If CoDD can't manage itself, it shouldn't manage your project.
 - [x] `codd plan --init` brownfield fallback — generate wave_config from extracted docs
 - [x] `modules` field — design doc ↔ source code traceability
 - [x] Per-command AI model configuration (`ai_commands` in codd.yaml)
+- [x] `codd propagate` — reverse-propagate source code changes to design documents
 - [x] `codd verify` — language-agnostic verification (Python: mypy + pytest, TypeScript: tsc + jest)
 - [ ] Multi-harness integration examples (Claude Code, Copilot, Cursor)
 - [ ] VS Code extension for impact visualization
