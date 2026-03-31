@@ -11,12 +11,30 @@ import codd.generator as generator_module
 from codd.cli import main
 from codd.generator import WaveArtifact
 from codd.planner import ExtractedDocument
-from codd.restore import _build_restoration_prompt, _is_relevant_extracted_doc, restore_wave
+from codd.restore import (
+    INFERRED_REQUIREMENT_SECTIONS,
+    _build_requirement_inference_header,
+    _build_restoration_prompt,
+    _is_relevant_extracted_doc,
+    restore_wave,
+)
 
 
 # -- Fictional TaskBoard app wave_config (brownfield) ----------------------
 
 BROWNFIELD_WAVE_CONFIG = {
+    "0": [
+        {
+            "node_id": "req:taskboard-requirements",
+            "output": "docs/requirements/inferred_requirements.md",
+            "title": "TaskBoard Inferred Requirements",
+            "modules": ["auth", "tasks", "notifications"],
+            "depends_on": [
+                {"id": "design:extract:system-context", "relation": "derives_from", "semantic": "technical"}
+            ],
+            "conventions": [],
+        },
+    ],
     "1": [
         {
             "node_id": "design:acceptance-criteria",
@@ -204,6 +222,24 @@ def _make_restored_body(input_text: str) -> str:
             "The auth module owns AuthService.\n\n"
             "## 4. Implementation Implications\n\n"
             "No changes needed.\n\n"
+            "## 5. Open Questions\n\n"
+            "- No open questions at this time.\n"
+        )
+
+    # Detect requirements inference
+    if "docs/requirements/" in (input_text or ""):
+        return (
+            f"# {title}\n\n"
+            "## 1. Overview\n\n"
+            f"This document describes inferred requirements for {title} based on the existing codebase.\n\n"
+            "## 2. Functional Requirements\n\n"
+            "- User authentication via email/password [inferred]\n"
+            "- Task CRUD operations with assignee support [inferred]\n"
+            "- Email notifications for task events [inferred]\n\n"
+            "## 3. Non-Functional Requirements\n\n"
+            "- Async email sending suggests performance concern [inferred]\n\n"
+            "## 4. Constraints\n\n"
+            "- Python with BaseModel (Pydantic) for data validation [inferred]\n\n"
             "## 5. Open Questions\n\n"
             "- No open questions at this time.\n"
         )
@@ -417,3 +453,109 @@ def test_restore_detailed_design_includes_mermaid_guidance(tmp_path, mock_restor
     assert "detailed design document" in prompt.lower()
     assert "Mermaid diagrams" in prompt
     assert "```mermaid```" in prompt
+
+
+# -- Requirements inference tests -------------------------------------------
+
+
+def test_restore_requirements_generates_inferred_doc(tmp_path, mock_restore_ai):
+    """restore_wave creates inferred requirements doc from extracted facts."""
+    project = _setup_brownfield_project(tmp_path)
+
+    results = restore_wave(project, wave=0)
+
+    assert len(results) == 1
+    assert results[0].status == "restored"
+    assert results[0].node_id == "req:taskboard-requirements"
+
+    doc_path = project / "docs" / "requirements" / "inferred_requirements.md"
+    assert doc_path.exists()
+    content = doc_path.read_text(encoding="utf-8")
+    assert "req:taskboard-requirements" in content
+    assert "Functional Requirements" in content
+
+
+def test_restore_requirements_prompt_uses_inference_language(tmp_path, mock_restore_ai):
+    """Requirements restoration prompt uses inference-specific language, not design language."""
+    project = _setup_brownfield_project(tmp_path)
+
+    restore_wave(project, wave=0)
+
+    prompt = mock_restore_ai[0]["input"]
+    # Requirements inference-specific
+    assert "INFERRING REQUIREMENTS" in prompt
+    assert "REVERSE-ENGINEER" in prompt
+    assert "inferred requirements" in prompt.lower()
+    # Not design restoration language
+    assert "RESTORING a design" not in prompt
+
+
+def test_restore_requirements_prompt_warns_about_limitations(tmp_path, mock_restore_ai):
+    """Requirements inference prompt explicitly flags what cannot be known from code."""
+    project = _setup_brownfield_project(tmp_path)
+
+    restore_wave(project, wave=0)
+
+    prompt = mock_restore_ai[0]["input"]
+    assert "planned but never implemented" in prompt
+    assert "bugs from intentional behavior" in prompt.lower()
+    assert "business context" in prompt.lower()
+    assert "[inferred]" in prompt
+
+
+def test_restore_requirements_uses_inferred_sections():
+    """Requirements inference uses dedicated section list, not default requirement sections."""
+    artifact = WaveArtifact(
+        wave=0,
+        node_id="req:test",
+        output="docs/requirements/test.md",
+        title="Test Requirements",
+        depends_on=[],
+        conventions=[],
+        modules=[],
+    )
+    extracted = [
+        ExtractedDocument(
+            node_id="design:extract:system-context",
+            path="codd/extracted/system-context.md",
+            content="# System\n\n3 modules.\n",
+        )
+    ]
+
+    prompt = _build_restoration_prompt(artifact, extracted)
+
+    # Uses inferred requirement sections
+    for section in INFERRED_REQUIREMENT_SECTIONS:
+        assert f"## {INFERRED_REQUIREMENT_SECTIONS.index(section) + 1}. {section}" in prompt
+    # Specifically has Functional/Non-Functional/Constraints
+    assert "Functional Requirements" in prompt
+    assert "Non-Functional Requirements" in prompt
+    assert "Constraints" in prompt
+
+
+def test_restore_requirements_prompt_includes_all_modules(tmp_path, mock_restore_ai):
+    """Requirements inference includes all modules when artifact covers all."""
+    project = _setup_brownfield_project(tmp_path)
+
+    # Wave 0 covers ["auth", "tasks", "notifications"]
+    restore_wave(project, wave=0)
+
+    prompt = mock_restore_ai[0]["input"]
+    assert "AuthService" in prompt
+    assert "TaskService" in prompt
+    assert "NotificationService" in prompt
+
+
+def test_restore_requirements_final_instruction_differs(tmp_path, mock_restore_ai):
+    """Requirements inference final instruction differs from design restoration."""
+    project = _setup_brownfield_project(tmp_path)
+
+    restore_wave(project, wave=0)
+    prompt_req = mock_restore_ai[0]["input"]
+
+    restore_wave(project, wave=2, force=True)
+    prompt_design = mock_restore_ai[1]["input"]
+
+    assert "infer the requirements" in prompt_req.lower()
+    assert "INFERRED requirements" in prompt_req
+    assert "reconstruct the design document" in prompt_design.lower()
