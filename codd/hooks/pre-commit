@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "${project_root}" ]]; then
+  echo "ERROR: unable to determine Git project root." >&2
+  exit 1
+fi
+
+exec codd hooks run-pre-commit --path "${project_root}"

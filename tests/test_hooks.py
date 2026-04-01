@@ -77,7 +77,7 @@ def test_pre_commit_blocks_staged_markdown_without_frontmatter(tmp_path):
         {"docs/notes.md": "# Missing frontmatter\n"},
     )
     bin_dir = _make_codd_wrapper(tmp_path)
-    hook_path = Path(__file__).resolve().parent.parent / "hooks" / "pre-commit"
+    hook_path = Path(__file__).resolve().parent.parent / "codd" / "hooks" / "pre-commit"
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
@@ -110,7 +110,7 @@ codd:
         },
     )
     bin_dir = _make_codd_wrapper(tmp_path)
-    hook_path = Path(__file__).resolve().parent.parent / "hooks" / "pre-commit"
+    hook_path = Path(__file__).resolve().parent.parent / "codd" / "hooks" / "pre-commit"
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
@@ -149,4 +149,4 @@ codd:
     assert result.exit_code == 0
     installed = project / ".git" / "hooks" / "pre-commit"
     assert installed.is_symlink()
-    assert installed.resolve() == (Path(__file__).resolve().parent.parent / "hooks" / "pre-commit").resolve()
+    assert installed.resolve() == (Path(__file__).resolve().parent.parent / "codd" / "hooks" / "pre-commit").resolve()
