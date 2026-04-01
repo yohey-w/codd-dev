@@ -2,6 +2,26 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.2.1] - 2026-04-01
+
+### Fixed
+
+- `codd hooks install` failed with FileNotFoundError after `pip install codd-dev` — hooks/pre-commit was excluded from the wheel package ([#1](https://github.com/yohey-w/codd-dev/issues/1))
+  - Moved `hooks/` into `codd/hooks/` package so it's included in wheel builds
+  - Converted `codd/hooks.py` to `codd/hooks/__init__.py` package
+
+## [1.2.0] - 2026-03-31
+
+### Added
+
+- `codd plan --waves` and `--sprints` flags — return counts for shell scripting (no hardcoded magic numbers)
+- `codd-assemble` skill for Claude Code integration
+- Assembler prompt improvement for cleaner output
+
+### Changed
+
+- README overhauled: split Quick Start into Greenfield/Brownfield, added 5-Minute Demos, articles section
+
 ## [0.2.0a5] - 2026-03-29
 
 ### Added
