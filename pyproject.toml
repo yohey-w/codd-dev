@@ -61,7 +61,7 @@ include = [
     "codd/**/*.yaml",
     "codd/templates/**/*.j2",
     "codd/templates/**/*.tmpl",
-    "hooks/**/*",
+    "codd/hooks/pre-commit",
     "README.md",
     "LICENSE",
 ]

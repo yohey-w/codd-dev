@@ -12,7 +12,7 @@ from codd.scanner import _extract_frontmatter
 from codd.validator import run_validate
 
 
-HOOK_SOURCE = Path(__file__).parent.parent / "hooks" / "pre-commit"
+HOOK_SOURCE = Path(__file__).parent / "pre-commit"
 
 
 def install_pre_commit_hook(project_root: Path) -> tuple[Path, bool]:
