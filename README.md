@@ -314,6 +314,22 @@ ai_commands:
 
 **Resolution priority**: CLI `--ai-cmd` flag > `ai_commands.{command}` > `ai_command` > built-in default (Opus).
 
+### Claude Code Context Interference
+
+When `claude --print` runs inside a project directory, it auto-discovers `CLAUDE.md` and loads project-level system prompts. These instructions can conflict with CoDD's generation prompts, causing format validation failures like:
+
+```
+Error: AI command returned unstructured summary for 'ADR: ...'; missing section headings
+```
+
+**Fix**: Use `--system-prompt` to override project context with a focused instruction:
+
+```yaml
+ai_command: "claude --print --model claude-opus-4-6 --system-prompt 'You are a technical document generator. Output only the requested Markdown document. Follow section heading instructions exactly.'"
+```
+
+> **Note**: `--bare` strips all context but also disables OAuth authentication. Use `--system-prompt` instead — it overrides `CLAUDE.md` while preserving auth.
+
 ## Config Directory Discovery
 
 By default, `codd init` creates a `codd/` directory. If your project already has a `codd/` directory (e.g., it's your source code package), use `--config-dir`:

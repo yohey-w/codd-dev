@@ -314,6 +314,22 @@ ai_commands:
 
 **優先順位**: CLI `--ai-cmd` フラグ > `ai_commands.{コマンド}` > `ai_command` > ビルトインデフォルト（Opus）。
 
+### Claude Codeのコンテキスト干渉
+
+`claude --print` をプロジェクトディレクトリ内で実行すると、`CLAUDE.md` を自動検出してプロジェクトレベルのシステムプロンプトを読み込む。これらの指示がCoDDの生成プロンプトと競合し、フォーマットバリデーション失敗を起こすことがある：
+
+```
+Error: AI command returned unstructured summary for 'ADR: ...'; missing section headings
+```
+
+**対策**: `--system-prompt` でプロジェクトコンテキストを上書きし、文書生成に集中させる：
+
+```yaml
+ai_command: "claude --print --model claude-opus-4-6 --system-prompt 'You are a technical document generator. Output only the requested Markdown document. Follow section heading instructions exactly.'"
+```
+
+> **注意**: `--bare` は全コンテキストを排除するが、OAuth認証まで無効化してしまう。`--system-prompt` を使えば `CLAUDE.md` を上書きしつつ認証は維持できる。
+
 ## 設定ディレクトリの自動検出
 
 デフォルトでは `codd init` は `codd/` ディレクトリを作成する。プロジェクトに既に `codd/` が存在する場合（例：ソースコードのパッケージ名）、`--config-dir` で別名を指定できる：
