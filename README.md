@@ -494,6 +494,39 @@ policies:
 
 The policy checker runs as part of `codd audit` and independently via `codd policy`. Critical violations cause REJECT; warnings cause CONDITIONAL.
 
+## MCP Server
+
+CoDD exposes its tools via the [Model Context Protocol](https://modelcontextprotocol.io/) for direct AI tool integration. Zero external dependencies — works with any MCP-compatible client.
+
+```bash
+codd mcp-server --project /path/to/your/project
+```
+
+### Claude Code Configuration
+
+Add to `~/.claude/claude_code_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "codd": {
+      "command": "codd",
+      "args": ["mcp-server", "--project", "/path/to/your/project"]
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `codd_validate` | Check frontmatter integrity and graph consistency |
+| `codd_impact` | Analyze change impact for a given node or file |
+| `codd_policy` | Check source code against enterprise policy rules |
+| `codd_audit` | Consolidated change review (validate + impact + policy) |
+| `codd_scan` | Build dependency graph from design documents |
+
 ## Claude Code Integration
 
 CoDD ships with slash-command Skills for Claude Code. Instead of running CLI commands yourself, use Skills — Claude reads the project context and runs the right command with the right flags.

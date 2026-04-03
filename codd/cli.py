@@ -689,6 +689,25 @@ def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, s
     click.echo(render_plan_text(result))
 
 
+@main.command("mcp-server")
+@click.option("--project", default=".", help="Project root directory")
+def mcp_server(project: str):
+    """Start MCP server for AI tool integration (stdio).
+
+    Exposes CoDD tools (validate, impact, policy, audit, scan) via the
+    Model Context Protocol. Compatible with Claude Code, Cursor, and
+    other MCP clients.
+
+    Configure in Claude Code:
+        "mcpServers": {"codd": {"command": "codd", "args": ["mcp-server"]}}
+    """
+    from codd.mcp_server import run_stdio
+
+    project_root = Path(project).resolve()
+    _require_codd_dir(project_root)
+    run_stdio(project_root)
+
+
 @main.group()
 def hooks():
     """Manage Git hook integration."""
