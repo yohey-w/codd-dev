@@ -21,6 +21,7 @@ from codd.propagate import (
     _get_changed_files,
     _resolve_start_nodes,
 )
+from codd.policy import PolicyResult, run_policy
 from codd.reviewer import ReviewSummary, run_review
 from codd.validator import ValidationResult, validate_project
 
@@ -35,6 +36,7 @@ class AuditResult:
     validation: ValidationResult
     impact_nodes: dict[str, dict]
     convention_alerts: list[dict]
+    policy: PolicyResult
     review: ReviewSummary | None
     verdict: str  # APPROVE, CONDITIONAL, REJECT
 
@@ -99,7 +101,10 @@ def run_audit(
             finally:
                 ceg.close()
 
-    # Phase 3: AI review (optional — expensive)
+    # Phase 3: Policy check (source code against enterprise rules)
+    policy_result = run_policy(project_root, changed_files=changed_files or None)
+
+    # Phase 4: AI review (optional — expensive)
     review_summary: ReviewSummary | None = None
     if not skip_review:
         try:
@@ -108,7 +113,7 @@ def run_audit(
             pass  # No docs to review is OK
 
     # Verdict
-    verdict = _determine_verdict(validation, impact_nodes, convention_alerts, review_summary)
+    verdict = _determine_verdict(validation, impact_nodes, convention_alerts, policy_result, review_summary)
 
     return AuditResult(
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -117,6 +122,7 @@ def run_audit(
         validation=validation,
         impact_nodes=impact_nodes,
         convention_alerts=convention_alerts,
+        policy=policy_result,
         review=review_summary,
         verdict=verdict,
     )
@@ -126,11 +132,16 @@ def _determine_verdict(
     validation: ValidationResult,
     impact_nodes: dict[str, dict],
     convention_alerts: list[dict],
+    policy: PolicyResult,
     review: ReviewSummary | None,
 ) -> str:
     """Determine overall verdict: APPROVE, CONDITIONAL, REJECT."""
     # Hard reject: validation errors
     if validation.error_count > 0:
+        return "REJECT"
+
+    # Hard reject: policy critical violations
+    if policy.critical_count > 0:
         return "REJECT"
 
     # Hard reject: review failures with critical issues
@@ -143,8 +154,10 @@ def _determine_verdict(
         if has_critical:
             return "REJECT"
 
-    # Conditional: convention alerts or review warnings
+    # Conditional: convention alerts, policy warnings, or review warnings
     if convention_alerts:
+        return "CONDITIONAL"
+    if policy.warning_count > 0:
         return "CONDITIONAL"
     if review and review.fail_count > 0:
         return "CONDITIONAL"
@@ -203,7 +216,22 @@ def format_audit_text(result: AuditResult) -> str:
         lines.append("  (no impact graph data — run 'codd scan' first)")
     lines.append("")
 
-    # Section 4: Convention alerts
+    # Section 4: Policy check
+    p = result.policy
+    if p.rules_applied > 0:
+        p_status = "PASS" if p.pass_ else "FAIL"
+        lines.append(f"── Policy Check: {p_status} ──")
+        lines.append(f"  Files: {p.files_checked}  Rules: {p.rules_applied}")
+        lines.append(f"  Critical: {p.critical_count}  Warnings: {p.warning_count}")
+        for v in p.violations:
+            loc = f"{v.file}:{v.line}" if v.line else v.file
+            lines.append(f"  [{v.severity}] {loc} ({v.rule_id}): {v.message}")
+        lines.append("")
+    else:
+        lines.append("── Policy Check: NO RULES CONFIGURED ──")
+        lines.append("")
+
+    # Section 5: Convention alerts
     if result.convention_alerts:
         lines.append(f"── Convention Alerts ({len(result.convention_alerts)}) ──")
         for alert in result.convention_alerts:
@@ -263,6 +291,17 @@ def format_audit_json(result: AuditResult) -> str:
             },
         },
         "convention_alerts": result.convention_alerts,
+        "policy": {
+            "status": "PASS" if result.policy.pass_ else "FAIL",
+            "files_checked": result.policy.files_checked,
+            "rules_applied": result.policy.rules_applied,
+            "critical": result.policy.critical_count,
+            "warnings": result.policy.warning_count,
+            "violations": [
+                {"rule_id": v.rule_id, "severity": v.severity, "file": v.file, "line": v.line, "message": v.message}
+                for v in result.policy.violations
+            ],
+        },
         "review": None,
         "action_required": _action_required(result),
     }
@@ -295,6 +334,8 @@ def _action_required(result: AuditResult) -> str:
         reasons = []
         if result.validation.error_count > 0:
             reasons.append(f"{result.validation.error_count} validation error(s)")
+        if result.policy.critical_count > 0:
+            reasons.append(f"{result.policy.critical_count} policy violation(s)")
         if result.review and any(
             i.severity == "CRITICAL" for r in result.review.results for i in r.issues
         ):
@@ -304,6 +345,8 @@ def _action_required(result: AuditResult) -> str:
     reasons = []
     if result.convention_alerts:
         reasons.append(f"{len(result.convention_alerts)} convention alert(s)")
+    if result.policy.warning_count > 0:
+        reasons.append(f"{result.policy.warning_count} policy warning(s)")
     if result.review and result.review.fail_count > 0:
         reasons.append(f"{result.review.fail_count} review failure(s)")
     if result.validation.warning_count > 0:

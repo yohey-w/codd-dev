@@ -550,11 +550,12 @@ def validate(path: str):
 @click.option("--output", default=None, help="Output file (default: stdout)")
 @click.option("--ai-cmd", default=None, help="Override AI command for review phase")
 def audit(diff: str, path: str, as_json: bool, skip_review: bool, output: str | None, ai_cmd: str | None):
-    """Change review pack — validate + impact + review in one report.
+    """Change review pack — validate + impact + policy + review in one report.
 
     Produces a consolidated audit report for PM/QA to make merge/release
-    decisions. Runs three phases: structural validation, impact analysis,
-    and (optionally) AI quality review.
+    decisions. Runs four phases: structural validation, impact analysis,
+    policy check (enterprise rules from codd.yaml), and (optionally) AI
+    quality review.
 
     Exit code: 0 = APPROVE, 1 = CONDITIONAL or REJECT.
     """
@@ -583,6 +584,31 @@ def audit(diff: str, path: str, as_json: bool, skip_review: bool, output: str | 
         click.echo(text)
 
     raise SystemExit(0 if result.verdict == "APPROVE" else 1)
+
+
+@main.command()
+@click.option("--path", default=".", help="Project root directory")
+def policy(path: str):
+    """Check source code against enterprise policy rules.
+
+    Policies are defined in codd.yaml under the 'policies' key.
+    Each rule specifies a regex pattern and whether it's forbidden or required.
+
+    Exit code: 0 = all pass, 1 = critical violations found.
+    """
+    from codd.policy import run_policy, format_policy_text
+
+    project_root = Path(path).resolve()
+    _require_codd_dir(project_root)
+
+    try:
+        result = run_policy(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(format_policy_text(result))
+    raise SystemExit(0 if result.pass_ else 1)
 
 
 @main.command()
