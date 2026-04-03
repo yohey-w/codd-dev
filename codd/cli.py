@@ -543,6 +543,49 @@ def validate(path: str):
 
 
 @main.command()
+@click.option("--diff", default="HEAD", help="Git diff target (default: HEAD)")
+@click.option("--path", default=".", help="Project root directory")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--skip-review", is_flag=True, help="Skip AI review (faster, no AI cost)")
+@click.option("--output", default=None, help="Output file (default: stdout)")
+@click.option("--ai-cmd", default=None, help="Override AI command for review phase")
+def audit(diff: str, path: str, as_json: bool, skip_review: bool, output: str | None, ai_cmd: str | None):
+    """Change review pack — validate + impact + review in one report.
+
+    Produces a consolidated audit report for PM/QA to make merge/release
+    decisions. Runs three phases: structural validation, impact analysis,
+    and (optionally) AI quality review.
+
+    Exit code: 0 = APPROVE, 1 = CONDITIONAL or REJECT.
+    """
+    from codd.audit import run_audit, format_audit_text, format_audit_json
+
+    project_root = Path(path).resolve()
+    _require_codd_dir(project_root)
+
+    try:
+        result = run_audit(
+            project_root,
+            diff_target=diff,
+            ai_command=ai_cmd,
+            skip_review=skip_review,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    text = format_audit_json(result) if as_json else format_audit_text(result)
+
+    if output:
+        Path(output).write_text(text, encoding="utf-8")
+        click.echo(f"Audit report written to {output}")
+    else:
+        click.echo(text)
+
+    raise SystemExit(0 if result.verdict == "APPROVE" else 1)
+
+
+@main.command()
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--json", "as_json", is_flag=True, help="Output plan as JSON")
 @click.option("--init", "initialize", is_flag=True, help="Generate wave_config from requirement docs")
