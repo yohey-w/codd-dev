@@ -115,140 +115,19 @@ codd audit --skip-review  # Full change review: validate + impact + policy
 codd measure              # Project health score (0-100)
 ```
 
-## 5-Minute Greenfield Demo — Spec to Working App
+## Demos
 
-37 lines of spec → 6 design docs (1,353 lines) → 102 code files (6,445 lines) → TypeScript strict build passes.
+### Greenfield — Spec to Working App
 
-### Step 1: Write your requirements
+37 lines of spec → 6 design docs (1,353 lines) → 102 code files (6,445 lines) → TypeScript strict build passes. No interactive AI chat — the entire workflow is a shell script.
 
-```text
-# TaskFlow — Personal Todo App
+Full walkthrough: [Harness as Code — A Guide to CoDD #1](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide?locale=en)
 
-## Functional Requirements
-- Task CRUD: create, read, update, delete tasks
-- Each task has: title, description (optional), due date (optional),
-  priority (low/medium/high), completed status
-- Task list with filtering by: status (all/active/completed), priority
-- Local state management (no backend, localStorage)
+### Brownfield — Change Impact Analysis
 
-## UI Requirements
-- Single-page app with responsive layout (mobile-first)
-- Dark theme with accent color (#3b82f6)
-- Floating action button opens a modal form
-- Toast notifications on create/update/delete
-- Keyboard shortcuts: Enter to submit, Escape to close modal
+2 lines changed in requirements → `codd impact` identifies 6 out of 7 design docs affected. Green band: AI auto-updates. Amber band: human reviews. You know exactly what to fix before anything breaks.
 
-## Constraints
-- Next.js 15 App Router with React Server Components
-- Tailwind CSS
-- TypeScript strict mode
-- Deploy-ready as static export
-```
-
-### Step 2: Run the pipeline
-
-```bash
-pip install codd-dev
-codd init --requirements spec.md
-codd plan --init                          # AI designs the wave structure
-
-waves=$(codd plan --waves)                # → 4
-for wave in $(seq 1 $waves); do
-  codd generate --wave $wave              # design docs, wave by wave
-done
-
-codd validate                             # quality gate
-
-sprints=$(codd plan --sprints)            # → 17
-for sprint in $(seq 1 $sprints); do
-  codd implement --sprint $sprint         # code from design docs
-done
-
-codd assemble                             # integrate into buildable project
-npm run build                             # TypeScript strict, zero errors
-```
-
-No interactive AI chat at any step. Every AI call goes through `claude --print` — prompt in, text out. **Harness as Code**: the entire workflow is a shell script.
-
-### Step 3: Model role separation
-
-```bash
-# Design docs — needs judgment, use Opus
-codd generate --wave 1 --ai-cmd 'claude --print --model claude-opus-4-6 --tools ""'
-
-# Code generation — needs volume, use Codex (or Sonnet)
-codd implement --sprint 1 --ai-cmd 'codex --full-auto -q'
-```
-
-## 5-Minute Brownfield Demo — Change Impact Analysis
-
-Already have a codebase? CoDD tracks what's affected when requirements change.
-
-### Step 1: Write requirements and generate design docs
-
-```text
-# TaskFlow — Requirements
-
-## Functional Requirements
-- User auth (email + Google OAuth)
-- Workspace management (teams, roles, invites)
-- Task CRUD with assignees, labels, due dates
-- Real-time updates (WebSocket)
-- File attachments (S3)
-- Notification system (in-app + email)
-
-## Constraints
-- Next.js + Prisma + PostgreSQL
-- Row-level security for workspace isolation
-- All API endpoints rate-limited
-```
-
-```bash
-codd init --requirements spec.txt
-codd plan --init
-waves=$(codd plan --waves)
-for wave in $(seq 1 $waves); do codd generate --wave $wave; done
-codd scan
-```
-
-```
-Scan complete:
-  Documents with frontmatter: 7
-  Graph: 7 nodes, 15 edges
-```
-
-### Step 2: Change requirements mid-project
-
-Your PM asks for SSO and audit logging. Add to `docs/requirements/requirements.md`:
-
-```text
-## Additional Requirements (v1.1)
-- SAML SSO (enterprise customers)
-- Audit logging (record & export all operations)
-```
-
-```bash
-codd impact    # detects uncommitted changes automatically
-```
-
-```
-# CoDD Impact Report
-
-## Green Band (high confidence, auto-propagate)
-| Target                  | Depth | Confidence |
-|-------------------------|-------|------------|
-| design:system-design    | 1     | 0.90       |
-| design:api-design       | 1     | 0.90       |
-| detail:db-design        | 2     | 0.90       |
-| detail:auth-design      | 2     | 0.90       |
-
-## Amber Band (must review)
-| Target                  | Depth | Confidence |
-|-------------------------|-------|------------|
-| test:test-strategy      | 2     | 0.90       |
-```
-
-**2 lines changed → 6 out of 7 docs affected.** Green band: AI auto-updates. Amber: human reviews. You know exactly what to fix before anything breaks.
+Deep dive: [CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence?locale=en)
 
 ## Wave-Based Generation
 

@@ -1,6 +1,6 @@
 <p align="center">
   <strong>CoDD — Coherence-Driven Development（一貫性駆動開発）</strong><br>
-  <em>要件が変わっても、AIが構築したシステムの一貫性を保つ。</em>
+  <em>AI支援開発における変更管理のエビデンスエンジン。</em>
 </p>
 
 <p align="center">
@@ -16,27 +16,26 @@
 
 ---
 
-> *ハーネスはエージェントの動かし方を定義する。CoDDは成果物の一貫性を保つ。*
+> *コードが変わったとき、CoDDは影響範囲を追跡し、違反を検出し、マージ判断のためのエビデンスを生成する。*
 
 ```
 pip install codd-dev
 ```
 
-**v1.2.0** — `init` / `scan` / `impact` は安定版。`generate` / `implement` / `assemble` / `validate` / `extract` はアルファです。
+**v1.4.0** — `init` / `scan` / `impact` は安定版。`audit` / `policy` / `require` / `extract` / `validate` はアルファ。GitHub Action によるCI連携対応。
 
 ---
 
 ## なぜCoDD？
 
-AIは仕様書からコードを生成できる。でも、**プロジェクト途中で要件が変わったら？**
+AIはコードを生成できる。人間はPRをレビューできる。でも、**要件が変わったときのエビデンスは誰が追跡する？**
 
-- どの設計書が影響を受ける？
-- どのテストを更新すべき？
-- どのAPIの契約が壊れた？
-- DBマイグレーションの更新を誰か忘れてない？
+- どの設計書が古くなった？
+- どのポリシーに違反した？
+- 依存グラフ上の影響範囲は？
+- PMはこのマージを自信を持って承認できる？
 
-**Spec Kit** と **OpenSpec** は「どう始めるか」に答える。
-**CoDD** は「途中で変わった時にどうするか」に答える。
+**CoDDはエビデンスエンジン。** 依存グラフを構築し、変更影響を追跡し、エンタープライズポリシーを適用し、レビュー可能な監査パックを生成する — マージ判断を勘ではなくエビデンスに基づかせる。
 
 ## 動作の仕組み
 
@@ -108,145 +107,27 @@ codd assemble
 
 ```bash
 codd extract              # 既存コードから設計書を逆生成
+codd require              # コードから要件を推論（何が作られ、なぜか）
 codd plan --init          # 抽出結果からwave_config生成
 codd scan                 # 依存グラフ構築
 codd impact               # 変更影響分析
+codd audit --skip-review  # 変更レビュー一括実行: validate + impact + policy
+codd measure              # プロジェクト健全性スコア（0-100）
 ```
 
-## 5分デモ: グリーンフィールド — specから動くアプリまで
+## デモ
 
-37行のspec → 設計書6本（1,353行） → コード102ファイル（6,445行） → TypeScript strictビルド成功。
+### グリーンフィールド — specから動くアプリまで
 
-### Step 1: 要件定義を書く
+37行のspec → 設計書6本（1,353行） → コード102ファイル（6,445行） → TypeScript strictビルド成功。AIチャットなし — ワークフロー全体がシェルスクリプト。
 
-```text
-# TaskFlow — Personal Todo App
+詳細: [Harness as Code — CoDD活用ガイド #1](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide)
 
-## Functional Requirements
-- Task CRUD: create, read, update, delete tasks
-- Each task has: title, description (optional), due date (optional),
-  priority (low/medium/high), completed status
-- Task list with filtering by: status (all/active/completed), priority
-- Local state management (no backend, localStorage)
+### ブラウンフィールド — 変更影響分析
 
-## UI Requirements
-- Single-page app with responsive layout (mobile-first)
-- Dark theme with accent color (#3b82f6)
-- Floating action button opens a modal form
-- Toast notifications on create/update/delete
-- Keyboard shortcuts: Enter to submit, Escape to close modal
+要件を2行変えただけで、`codd impact` が7本中6本の設計書に影響ありと判定。Green帯域はAIが自動更新。Amber帯域は人間に提示。変更が怖くなくなる。
 
-## Constraints
-- Next.js 15 App Router with React Server Components
-- Tailwind CSS
-- TypeScript strict mode
-- Deploy-ready as static export
-```
-
-### Step 2: パイプラインを実行
-
-```bash
-pip install codd-dev
-codd init --requirements spec.md
-codd plan --init                          # AIがwave構成を自動設計
-
-waves=$(codd plan --waves)                # → 4
-for wave in $(seq 1 $waves); do
-  codd generate --wave $wave              # 設計書をwave順に生成
-done
-
-codd validate                             # 品質ゲート
-
-sprints=$(codd plan --sprints)            # → 17
-for sprint in $(seq 1 $sprints); do
-  codd implement --sprint $sprint         # 設計書からコード生成
-done
-
-codd assemble                             # コード断片をビルド可能なプロジェクトに統合
-npm run build                             # TypeScript strict、エラーゼロ
-```
-
-全ステップでAIチャットなし。AI呼び出しは全て `claude --print` 経由 — プロンプト入力、テキスト出力。**Harness as Code**: ワークフロー全体がシェルスクリプト。
-
-### Step 3: モデルの役割分担
-
-```bash
-# 設計書 — 判断力が必要、Opusを使う
-codd generate --wave 1 --ai-cmd 'claude --print --model claude-opus-4-6 --tools ""'
-
-# コード生成 — 量を捌く、Codex（またはSonnet）を使う
-codd implement --sprint 1 --ai-cmd 'codex --full-auto -q'
-```
-
-## 5分デモ: ブラウンフィールド — 変更影響分析
-
-既存コードベースがある場合。CoDDは要件変更時に何が影響を受けるかを追跡する。
-
-### Step 1: 要件定義を書いて設計書を生成
-
-```text
-# TaskFlow — 要件定義
-
-## 機能要件
-- ユーザー認証（メール + Google OAuth）
-- ワークスペース管理（チーム、ロール、招待）
-- タスクCRUD（担当者、ラベル、期限）
-- リアルタイム更新（WebSocket）
-- ファイル添付（S3）
-- 通知システム（アプリ内 + メール）
-
-## 制約
-- Next.js + Prisma + PostgreSQL
-- ワークスペース分離はRLSで実現
-- 全APIエンドポイントにレートリミット
-```
-
-```bash
-codd init --requirements spec.txt
-codd plan --init
-waves=$(codd plan --waves)
-for wave in $(seq 1 $waves); do codd generate --wave $wave; done
-codd scan
-```
-
-```
-Scan complete:
-  Documents with frontmatter: 7
-  Graph: 7 nodes, 15 edges
-```
-
-### Step 2: 要件を変えて影響分析
-
-PMから「SSO対応と監査ログ追加して」と言われた。`docs/requirements/requirements.md` に2行追加:
-
-```text
-## 追加要件（v1.1）
-- SAML SSO対応（エンタープライズ顧客向け）
-- 監査ログ（全操作の記録・エクスポート）
-```
-
-```bash
-codd impact    # 未コミットの変更を自動検知
-```
-
-```
-# CoDD Impact Report
-
-## Green Band (high confidence, auto-propagate)
-| Target                  | Depth | Confidence |
-|-------------------------|-------|------------|
-| design:system-design    | 1     | 0.90       |
-| design:api-design       | 1     | 0.90       |
-| detail:db-design        | 2     | 0.90       |
-| detail:auth-design      | 2     | 0.90       |
-
-## Amber Band (must review)
-| Target                  | Depth | Confidence |
-|-------------------------|-------|------------|
-| test:test-strategy      | 2     | 0.90       |
-```
-
-**2行変えただけで7本中6本の設計書が影響を受けると判定。** Green帯域はAIが自動更新。Amber帯域は人間に提示。変更が怖くなくなる。
+詳細: [CoDD 詳細解説](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence)
 
 ## Wave順生成
 
@@ -417,6 +298,118 @@ codd impact
 | `codd propagate` | 実験的 | ソースコード変更を設計書に逆伝搬 |
 | `codd review` | 実験的 | AI品質評価（LLM-as-Judge） |
 | `codd extract` | **アルファ** | 既存コードから設計書を逆生成 |
+| `codd require` | **アルファ** | 既存コードベースから要件を推論（ブラウンフィールド） |
+| `codd audit` | **アルファ** | 変更レビュー一括パック（validate + impact + policy + review） |
+| `codd policy` | **アルファ** | エンタープライズポリシーチェッカー（ソースコードの禁止/必須パターン） |
+| `codd measure` | **アルファ** | プロジェクト健全性メトリクス（グラフ、カバレッジ、品質、スコア 0-100） |
+| `codd mcp-server` | **アルファ** | AIツール連携用MCPサーバー（stdio、依存ゼロ） |
+
+## CI連携（GitHub Action）
+
+プルリクエストごとにCoDD監査を実行。判定結果（APPROVE / CONDITIONAL / REJECT）、バリデーション結果、ポリシー違反、影響分析をコメントとして投稿する。
+
+### クイックセットアップ
+
+プロジェクトに `.github/workflows/codd.yml` を追加:
+
+```yaml
+name: CoDD Audit
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: yohey-w/codd-dev@main
+        with:
+          diff-target: origin/${{ github.base_ref }}
+          skip-review: "true"  # AIレビューを有効にするには "false" に設定
+```
+
+### Action入力
+
+| 入力 | デフォルト | 説明 |
+|------|-----------|------|
+| `diff-target` | `origin/main` | 差分比較対象のGit ref |
+| `skip-review` | `true` | AIレビューフェーズをスキップ（高速、AIコスト不要） |
+| `python-version` | `3.12` | Pythonバージョン |
+| `codd-version` | 最新版 | 特定バージョン（例: `>=1.3.0`） |
+| `post-comment` | `true` | 結果をPRコメントとして投稿 |
+
+### Action出力
+
+| 出力 | 説明 |
+|------|------|
+| `verdict` | `APPROVE`、`CONDITIONAL`、または `REJECT` |
+| `risk-level` | `LOW`、`MEDIUM`、または `HIGH` |
+| `report-json` | JSON監査レポートへのパス |
+
+### エンタープライズポリシー
+
+`codd.yaml` でソースコードポリシーを定義:
+
+```yaml
+policies:
+  - id: SEC-001
+    description: "ハードコードされたパスワードの禁止"
+    severity: CRITICAL
+    kind: forbidden
+    pattern: 'password\s*=\s*[''"]'
+    glob: "*.py"
+
+  - id: LOG-001
+    description: "全モジュールにloggingのimportが必要"
+    severity: WARNING
+    kind: required
+    pattern: "import logging"
+    glob: "*.py"
+```
+
+ポリシーチェッカーは `codd audit` の一部として実行され、`codd policy` で単独実行も可能。CRITICAL違反はREJECT、WARNINGはCONDITIONALを返す。
+
+## MCPサ���バー
+
+CoDDは [Model Context Protocol](https://modelcontextprotocol.io/) 経由でツールを公開し、AIツールとの直接連携を実現する。外部依存ゼロ — MCP対応クライアントならどれでも動作。
+
+```bash
+codd mcp-server --project /path/to/your/project
+```
+
+### Claude Code設定
+
+`~/.claude/claude_code_config.json` に追加:
+
+```json
+{
+  "mcpServers": {
+    "codd": {
+      "command": "codd",
+      "args": ["mcp-server", "--project", "/path/to/your/project"]
+    }
+  }
+}
+```
+
+### 利用可��なMCPツール
+
+| ツール | 説明 |
+|--------|------|
+| `codd_validate` | フロントマター整合性とグラフ一貫性チェック |
+| `codd_impact` | 指定ノードまたはファイルの変更影響分析 |
+| `codd_policy` | エンタープライズポリシールールに対するソースコードチェック |
+| `codd_audit` | 変更レビュー一括実行（validate + impact + policy） |
+| `codd_scan` | 設計書から依存グラフ構築 |
+| `codd_measure` | プロジェクト健全性メトリクス（グラフ、カバレッジ、品質、スコア） |
 
 ## Claude Code 連携
 
@@ -531,6 +524,21 @@ done
 
 **モデル配置**: レビューはOpus（`ai_commands.review`）、実装はCodex（`ai_commands.implement`）。`ai_commands` 設定で1行で切り替え。
 
+## 他のSpec駆動ツールとの違い
+
+主要なSpec駆動ツールはすべて設計書の**作成**に焦点を当てている。設計書が**変更された後**に何が起きるかに対処するツールはない。CoDDは依存グラフ、影響分析、バンドベースの更新プロトコルでそのギャップを埋める。
+
+| | **spec-kit** (GitHub) | **Kiro** (AWS) | **cc-sdd** (gotalab) | **CoDD** |
+|--|---|---|---|---|
+| 焦点 | Spec作成（要件→設計→タスク→コード） | Agentic IDE + SDD | Kiro式SDDのClaude Code版 | **作成後の一貫性維持** |
+| Stars | 83.7k | N/A（プロプラIDE） | 3k | -- |
+| 変更伝播 | No | No | No | **`codd impact` + 依存グラフ** |
+| 影響分析 | No | No | No | **Green / Amber / Gray バンド** |
+| 仕様記法 | Markdown + 40拡�� | EARS記法 | 品質ゲート + git worktree | フロントマター `depends_on` |
+| ハーネスロックイン | GitHub Copilot | Kiro IDE | Claude Code | **任意のエージェント / IDE** |
+
+要約: spec-kit、Kiro、cc-sddは「仕様をどう作るか」に答える。CoDDは「要件が変わったとき、仕様・コード・テストの一貫性をどう保つか」に答える。
+
 ## 比較
 
 |  | Spec Kit | OpenSpec | **CoDD** |
@@ -566,7 +574,7 @@ CoDDは自分自身をdogfoodingしている。`.codd/`ディレクトリにCoDD
 codd init --config-dir .codd --project-name "codd-dev" --language "python"
 codd extract          # 15モジュール → 依存フロントマター付き設計書
 codd scan             # 49ノード、83エッジ
-codd verify           # mypy + pytest（127/127テスト通過）
+codd verify           # mypy + pytest（434テスト通過）
 ```
 
 自分自身を管理できないツールに、あなたのプロジェクトは任せられない。
@@ -583,6 +591,13 @@ codd verify           # mypy + pytest（127/127テスト通過）
 - [x] `codd review` — AI品質評価 + レビュー駆動の再生成ループ
 - [x] `--feedback` フラグ — レビュー結果をgenerate/restore/propagateに食わせて再生成
 - [x] `codd verify` — 言語非依存の検証（Python: mypy + pytest、TypeScript: tsc + jest）
+- [x] `codd require` — 既存コードベースから要件を推論（確信度タグ付き）
+- [x] `codd audit` — 変更レビュー一括パック（validate + impact + policy + review）
+- [x] `codd policy` — エンタープライズポリシーチェッカー（禁止/必須パターン）
+- [x] `codd measure` — プロジェクト健全性メトリクス（グラフ、カバレッジ、品質、スコア 0-100）
+- [x] GitHub Action — PRの自動監査コメント付きCI連携
+- [x] MCPサーバー — AIツール連携用stdio JSON-RPCサーバー
+- [x] プラグインシステム — 拡張可能なrequireプロンプト（タグ、エビデンス形式、出力セクション）
 - [ ] マルチハーネス連携例（Claude Code, Copilot, Cursor）
 - [ ] VS Code拡張（影響分析の可視化）
 
