@@ -1,4 +1,4 @@
-"""CoDD CLI — codd init / scan / impact / plan."""
+"""CoDD CLI — codd init / scan / impact / require / plan."""
 
 import click
 import json
@@ -208,6 +208,59 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str
             skipped += 1
 
     click.echo(f"Wave {wave}: {restored} restored, {skipped} skipped")
+
+
+@main.command()
+@click.option("--path", default=".", help="Project root directory")
+@click.option("--output", default="docs/requirements/", help="Output directory for generated requirements")
+@click.option("--scope", default=None, help="Limit to a specific service boundary")
+@click.option(
+    "--ai-cmd",
+    default=None,
+    help="Override AI CLI command (defaults to codd.yaml ai_command or merged CoDD defaults)",
+)
+@click.option("--force", is_flag=True, help="Overwrite existing files")
+@click.option("--feedback", default=None, help="Review feedback from previous generation")
+def require(path: str, output: str, scope: str | None, ai_cmd: str | None, force: bool, feedback: str | None):
+    """Infer requirements from extracted codebase facts (brownfield).
+
+    Unlike 'restore' which reconstructs design docs from extracted facts,
+    'require' reverse-engineers requirements documents from the same
+    extracted code analysis. Run 'codd extract' first.
+    """
+    from codd.require import run_require
+
+    project_root = Path(path).resolve()
+    _require_codd_dir(project_root)
+
+    try:
+        results = run_require(
+            project_root,
+            output_dir=output,
+            scope=scope,
+            ai_command=ai_cmd,
+            force=force,
+            feedback=feedback,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    generated = 0
+    skipped = 0
+
+    for result in results:
+        try:
+            rel_path = result.path.relative_to(project_root).as_posix()
+        except ValueError:
+            rel_path = result.path.as_posix()
+        click.echo(f"{result.status.capitalize()}: {rel_path} ({result.node_id})")
+        if result.status == "generated":
+            generated += 1
+        else:
+            skipped += 1
+
+    click.echo(f"Requirements: {generated} generated, {skipped} skipped")
 
 
 @main.command()
