@@ -156,4 +156,4 @@ class TestToolDefinitions:
             assert tool["inputSchema"]["type"] == "object"
 
     def test_tool_count(self):
-        assert len(TOOLS) == 5
+        assert len(TOOLS) == 6

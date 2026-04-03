@@ -689,6 +689,30 @@ def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, s
     click.echo(render_plan_text(result))
 
 
+@main.command()
+@click.option("--path", default=".", help="Project root directory")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def measure(path: str, as_json: bool):
+    """Show project metrics — graph health, coverage, quality, and health score.
+
+    Collects metrics about the dependency graph, document coverage,
+    validation status, and policy compliance. Useful for dashboards
+    and tracking CoDD effectiveness over time.
+    """
+    from codd.measure import run_measure, format_measure_text, format_measure_json
+
+    project_root = Path(path).resolve()
+    _require_codd_dir(project_root)
+
+    try:
+        result = run_measure(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(format_measure_json(result) if as_json else format_measure_text(result))
+
+
 @main.command("mcp-server")
 @click.option("--project", default=".", help="Project root directory")
 def mcp_server(project: str):

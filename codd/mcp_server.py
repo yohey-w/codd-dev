@@ -95,6 +95,15 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "codd_measure",
+        "description": "Show project metrics: graph health, document coverage, validation status, policy compliance, and overall health score (0-100).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 
@@ -185,12 +194,19 @@ def _handle_scan(project_root: Path, _args: dict) -> dict:
     return {"content": [{"type": "text", "text": f"Scan complete. Nodes: {result.get('nodes', 0)}, Edges: {result.get('edges', 0)}"}]}
 
 
+def _handle_measure(project_root: Path, _args: dict) -> dict:
+    from codd.measure import run_measure, format_measure_text
+    result = run_measure(project_root)
+    return {"content": [{"type": "text", "text": format_measure_text(result)}]}
+
+
 HANDLERS = {
     "codd_validate": _handle_validate,
     "codd_impact": _handle_impact,
     "codd_policy": _handle_policy,
     "codd_audit": _handle_audit,
     "codd_scan": _handle_scan,
+    "codd_measure": _handle_measure,
 }
 
 
