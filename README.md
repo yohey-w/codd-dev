@@ -107,9 +107,12 @@ codd assemble
 
 ```bash
 codd extract              # Reverse-engineer design docs from code
+codd require              # Infer requirements from code (what was built and why)
 codd plan --init          # Generate wave_config from extracted docs
 codd scan                 # Build dependency graph
 codd impact               # Change impact analysis
+codd audit --skip-review  # Full change review: validate + impact + policy
+codd measure              # Project health score (0-100)
 ```
 
 ## 5-Minute Greenfield Demo — Spec to Working App
@@ -419,6 +422,8 @@ codd impact
 | `codd require` | **Alpha** | Infer requirements from existing codebase (brownfield) |
 | `codd audit` | **Alpha** | Consolidated change review pack (validate + impact + policy + review) |
 | `codd policy` | **Alpha** | Enterprise policy checker (forbidden/required patterns in source code) |
+| `codd measure` | **Alpha** | Project health metrics (graph, coverage, quality, health score 0-100) |
+| `codd mcp-server` | **Alpha** | MCP server for AI tool integration (stdio, zero dependencies) |
 
 ## CI Integration (GitHub Action)
 
@@ -525,6 +530,7 @@ Add to `~/.claude/claude_code_config.json`:
 | `codd_policy` | Check source code against enterprise policy rules |
 | `codd_audit` | Consolidated change review (validate + impact + policy) |
 | `codd_scan` | Build dependency graph from design documents |
+| `codd_measure` | Project health metrics (graph, coverage, quality, health score) |
 
 ## Claude Code Integration
 
@@ -689,7 +695,7 @@ CoDD dogfoods itself. The `.codd/` directory contains CoDD's own config, and `co
 codd init --config-dir .codd --project-name "codd-dev" --language "python"
 codd extract          # 15 modules → design docs with dependency frontmatter
 codd scan             # 49 nodes, 83 edges
-codd verify           # mypy + pytest (127/127 tests pass)
+codd verify           # mypy + pytest (434 tests pass)
 ```
 
 If CoDD can't manage itself, it shouldn't manage your project.
@@ -706,6 +712,13 @@ If CoDD can't manage itself, it shouldn't manage your project.
 - [x] `codd review` — AI-powered quality evaluation with review-driven regeneration loop
 - [x] `--feedback` flag — feed review results back into generate/restore/propagate
 - [x] `codd verify` — language-agnostic verification (Python: mypy + pytest, TypeScript: tsc + jest)
+- [x] `codd require` — infer requirements from existing codebase with confidence tags
+- [x] `codd audit` — consolidated change review pack (validate + impact + policy + review)
+- [x] `codd policy` — enterprise policy checker (forbidden/required patterns)
+- [x] `codd measure` — project health metrics (graph, coverage, quality, score 0-100)
+- [x] GitHub Action — CI integration for PR audit with auto-commenting
+- [x] MCP Server — stdio JSON-RPC server for AI tool integration
+- [x] Plugin system — extensible require prompts (tags, evidence format, output sections)
 - [ ] Multi-harness integration examples (Claude Code, Copilot, Cursor)
 - [ ] VS Code extension for impact visualization
 

@@ -126,9 +126,7 @@ def _make_require_body(prompt: str) -> str:
         "## 4. Constraints\n\n"
         "- Python implementation with extracted-module traceability [observed]\n\n"
         "## 5. Open Questions\n\n"
-        "- Human validation needed for inferred business intent.\n\n"
-        "## 6. Human Review Issues\n\n"
-        "- **HRI-1**: Authentication strategy — code uses sessions but config hints at JWT. [contradictory]\n"
+        "- Human validation needed for inferred business intent.\n"
     )
 
 
