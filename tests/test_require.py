@@ -198,7 +198,9 @@ def test_build_require_prompt_contains_sections(tmp_path):
     assert "Functional Requirements" in prompt
     assert "Non-Functional Requirements" in prompt
     assert "Constraints" in prompt
-    assert "[observed], [inferred], [speculative], [unknown], or [contradictory]" in prompt
+    assert "[observed]" in prompt
+    assert "[inferred]" in prompt
+    assert "[speculative]" in prompt
     assert "Do not invent features" in prompt
     assert "login(email, password)" in prompt
 

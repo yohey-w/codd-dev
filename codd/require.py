@@ -96,7 +96,7 @@ def _build_require_header(cluster_name: str) -> list[str]:
         "- You CANNOT know features that were planned but never implemented.",
         "- You CANNOT distinguish bugs from intentional behavior — describe observed behavior.",
         "- You CANNOT know business context that isn't reflected in code (stakeholder decisions, trade-off reasoning).",
-        "- Mark any non-obvious inference with [inferred], [speculative], [unknown], or [contradictory] so humans can verify later.",
+        "- Mark any non-obvious inference with the appropriate confidence tag so humans can verify later.",
         "",
         "Inference scope:",
         f"  Cluster: {scope_name}",
@@ -108,8 +108,23 @@ def build_require_prompt(
     cluster_docs: list[ExtractedDocument],
     cross_cutting_docs: list[ExtractedDocument],
     feedback: str | None = None,
+    project_root: Path | None = None,
 ) -> str:
-    """Build the AI prompt for one requirements cluster."""
+    """Build the AI prompt for one requirements cluster.
+
+    If a require plugin is installed (project-local or site-wide),
+    the prompt is enhanced with additional tags, evidence format,
+    and output sections from the plugin.
+    """
+    from codd.require_plugins import (
+        build_evidence_instructions,
+        build_output_contract,
+        build_tag_instructions,
+        load_require_plugin,
+    )
+
+    plugin = load_require_plugin(project_root)
+
     required_headings = [
         f"## {index}. {section_name}"
         for index, section_name in enumerate(INFERRED_REQUIREMENT_SECTIONS, start=1)
@@ -128,30 +143,26 @@ def build_require_prompt(
             "Start directly with the document content.",
             "",
             "Inference guidelines:",
-            "- Tag each inferred requirement with one of [observed], [inferred], [speculative], [unknown], or [contradictory].",
-            "  - [observed]: directly evidenced in code (explicit route, exported function, DB table, test assertion).",
-            "  - [inferred]: reasonable inference from patterns (e.g., retry logic → reliability requirement).",
-            "  - [speculative]: weak evidence, needs human validation (commented-out code, naming conventions only).",
-            "  - [unknown]: no evidence found — the code neither confirms nor denies this capability.",
-            "  - [contradictory]: conflicting evidence exists (e.g., code implements feature X but tests assert the opposite, or two modules handle the same concern differently).",
-            "- Cite concrete evidence for every requirement: source file path, symbol name, related test file, and git-traceable module references.",
-            "  Example: `Evidence: src/auth/session.py:login() + tests/test_auth.py:test_login_success + module:auth`",
-            "- Functional Requirements: derive capabilities from modules, APIs, classes, functions, schemas, and integrations.",
-            "- Non-Functional Requirements: infer quality attributes from patterns such as auth, retries, caching, async execution, observability, and deployment setup.",
-            "- Constraints: capture concrete frameworks, data stores, protocols, architectural boundaries, and technology choices that the code imposes.",
-            "- Open Questions: call out ambiguities that need human confirmation.",
-            "- Do not invent features that are not evidenced in the extracted facts.",
-            "- Do not assume standard features exist unless the extracted facts show them.",
-            "- Do not write aspirational requirements or recommendations.",
-            "- Include explicit review-needed notes for [speculative], [unknown], or [contradictory] items.",
+        ]
+    )
+    # Tag instructions from plugin
+    lines.extend(build_tag_instructions(plugin))
+    # Evidence format from plugin (if any)
+    lines.extend(build_evidence_instructions(plugin))
+    # Standard + plugin guidelines
+    lines.extend(plugin.inference_guidelines)
+    lines.extend(
+        [
             "",
             "Output contract:",
             "- Write the finished Markdown requirements document body now.",
             "- The first content line after the title must be the first required section heading below.",
-            "- The 'Human Review Issues' section is a prioritized list of items that require human judgment.",
-            "  Each item must state: what the issue is, why it cannot be resolved from code alone,",
-            "  and what evidence exists on each side (for [contradictory] items).",
-            "  This section is the primary deliverable for human reviewers — make it actionable.",
+        ]
+    )
+    # Additional output sections from plugin
+    lines.extend(build_output_contract(plugin))
+    lines.extend(
+        [
             "- Use these section headings exactly once and in this order:",
         ]
     )
