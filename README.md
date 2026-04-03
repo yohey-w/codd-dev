@@ -1,6 +1,6 @@
 <p align="center">
   <strong>CoDD — Coherence-Driven Development</strong><br>
-  <em>Keep AI-built systems coherent when requirements change.</em>
+  <em>The evidence engine for change management in AI-assisted development.</em>
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 
 ---
 
-> *Harnesses tell agents how to work. CoDD keeps artifacts coherent.*
+> *When code changes, CoDD traces what's affected, checks what's violated, and produces the evidence trail for your merge decision.*
 
 ```
 pip install codd-dev
@@ -28,15 +28,14 @@ pip install codd-dev
 
 ## Why CoDD?
 
-AI can generate code from specs. But what happens when **requirements change mid-project?**
+AI can generate code. Humans can review PRs. But who tracks the **evidence trail** when requirements change?
 
-- Which design docs are affected?
-- Which tests need updating?
-- Which API contracts broke?
-- Did anyone forget to update the database migration?
+- Which design docs are now stale?
+- Which policy rules did the change violate?
+- What's the blast radius across the dependency graph?
+- Can the PM sign off on this merge with confidence?
 
-**Spec Kit** and **OpenSpec** answer *"how do I start?"*
-**CoDD** answers *"how do I keep going when things change?"*
+**CoDD is the evidence engine.** It builds the dependency graph, traces change impact, enforces enterprise policies, and produces a reviewer-ready audit pack — so your merge decision is based on evidence, not gut feeling.
 
 ## How It Works
 
