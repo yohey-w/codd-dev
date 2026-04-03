@@ -726,6 +726,8 @@ If CoDD can't manage itself, it shouldn't manage your project.
 
 - [dev.to (English): Harness as Code — Treating AI Workflows Like Infrastructure](https://dev.to/yohey-w/harness-as-code-treating-ai-workflows-like-infrastructure-27ni)
 - [dev.to (English): What Happens After "Spec First"](https://dev.to/yohey-w/codd-coherence-driven-development-what-happens-after-spec-first-514f)
+- [Zenn (English): Harness as Code — A Guide to CoDD #1 spec → design → code](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide?locale=en)
+- [Zenn (English): CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence?locale=en)
 - [Zenn (Japanese): Harness as Code — CoDD活用ガイド #1 spec → 設計書 → コード](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide)
 - [Zenn (Japanese): CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence)
 
