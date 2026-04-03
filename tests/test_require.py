@@ -126,7 +126,9 @@ def _make_require_body(prompt: str) -> str:
         "## 4. Constraints\n\n"
         "- Python implementation with extracted-module traceability [observed]\n\n"
         "## 5. Open Questions\n\n"
-        "- Human validation needed for inferred business intent.\n"
+        "- Human validation needed for inferred business intent.\n\n"
+        "## 6. Human Review Issues\n\n"
+        "- **HRI-1**: Authentication strategy — code uses sessions but config hints at JWT. [contradictory]\n"
     )
 
 
@@ -196,7 +198,7 @@ def test_build_require_prompt_contains_sections(tmp_path):
     assert "Functional Requirements" in prompt
     assert "Non-Functional Requirements" in prompt
     assert "Constraints" in prompt
-    assert "[observed], [inferred], or [speculative]" in prompt
+    assert "[observed], [inferred], [speculative], [unknown], or [contradictory]" in prompt
     assert "Do not invent features" in prompt
     assert "login(email, password)" in prompt
 
