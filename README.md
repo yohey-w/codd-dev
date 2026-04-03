@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.2.0** — `init` / `scan` / `impact` are stable. `generate` / `implement` / `assemble` / `validate` / `extract` are alpha.
+**v1.4.0** — `init` / `scan` / `impact` are stable. `audit` / `policy` / `require` / `extract` / `validate` are alpha. GitHub Action for CI integration.
 
 ---
 
@@ -417,6 +417,82 @@ codd impact
 | `codd propagate` | Experimental | Reverse-propagate source code changes to design docs |
 | `codd review` | Experimental | AI-powered artifact quality evaluation (LLM-as-Judge) |
 | `codd extract` | **Alpha** | Reverse-engineer design docs from existing code |
+| `codd require` | **Alpha** | Infer requirements from existing codebase (brownfield) |
+| `codd audit` | **Alpha** | Consolidated change review pack (validate + impact + policy + review) |
+| `codd policy` | **Alpha** | Enterprise policy checker (forbidden/required patterns in source code) |
+
+## CI Integration (GitHub Action)
+
+Run CoDD audit on every pull request. The action posts a comment with verdict (APPROVE / CONDITIONAL / REJECT), validation results, policy violations, and impact analysis.
+
+### Quick Setup
+
+Add `.github/workflows/codd.yml` to your project:
+
+```yaml
+name: CoDD Audit
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: yohey-w/codd-dev@main
+        with:
+          diff-target: origin/${{ github.base_ref }}
+          skip-review: "true"  # Set to "false" to enable AI review
+```
+
+### Action Inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `diff-target` | `origin/main` | Git ref to diff against |
+| `skip-review` | `true` | Skip AI review phase (faster, no AI cost) |
+| `python-version` | `3.12` | Python version |
+| `codd-version` | latest | Specific version (e.g., `>=1.3.0`) |
+| `post-comment` | `true` | Post results as PR comment |
+
+### Action Outputs
+
+| Output | Description |
+|--------|-------------|
+| `verdict` | `APPROVE`, `CONDITIONAL`, or `REJECT` |
+| `risk-level` | `LOW`, `MEDIUM`, or `HIGH` |
+| `report-json` | Path to the JSON audit report |
+
+### Enterprise Policies
+
+Define source code policies in your `codd.yaml`:
+
+```yaml
+policies:
+  - id: SEC-001
+    description: "No hardcoded passwords"
+    severity: CRITICAL
+    kind: forbidden
+    pattern: 'password\s*=\s*[''"]'
+    glob: "*.py"
+
+  - id: LOG-001
+    description: "All modules must import logging"
+    severity: WARNING
+    kind: required
+    pattern: "import logging"
+    glob: "*.py"
+```
+
+The policy checker runs as part of `codd audit` and independently via `codd policy`. Critical violations cause REJECT; warnings cause CONDITIONAL.
 
 ## Claude Code Integration
 
