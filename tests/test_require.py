@@ -199,6 +199,10 @@ def test_build_require_prompt_contains_sections(tmp_path):
     assert "[observed]" in prompt
     assert "[inferred]" in prompt
     assert "[speculative]" in prompt
+    assert "[unknown]" in prompt
+    assert "[contradictory]" in prompt
+    assert "Evidence:" in prompt
+    assert "Human Review Issues" in prompt
     assert "Do not invent features" in prompt
     assert "login(email, password)" in prompt
 

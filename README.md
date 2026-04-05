@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.4.0** — `init` / `scan` / `impact` are stable. `audit` / `policy` / `require` / `extract` / `validate` are alpha. GitHub Action for CI integration.
+**v1.5.0** — `init` / `scan` / `impact` are stable. `extract --ai` with baseline preset. `audit` / `policy` / `require` / `validate` are alpha. GitHub Action for CI integration.
 
 ---
 
@@ -224,6 +224,15 @@ All other commands (`scan`, `impact`, `generate`, etc.) automatically discover w
 ## Brownfield? Start Here
 
 Already have a codebase? CoDD provides a full brownfield workflow — from code extraction to design doc reconstruction.
+
+### AI-Powered Extraction (--ai)
+
+> **Note on presets**: `codd extract --ai` ships with a **baseline** extraction prompt. The extraction quality in published benchmarks (F1 0.953+) was achieved with a tuned preset and internal evaluation dataset — not the public baseline. The baseline uses the same workflow and output format, but results will vary depending on your codebase and prompt. Use `--prompt-file` to supply your own tuned prompt.
+
+```bash
+codd extract --ai                        # Uses built-in baseline preset
+codd extract --ai --prompt-file my.md    # Uses your custom prompt
+```
 
 ### Step 1: Extract structure from code
 

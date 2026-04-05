@@ -106,6 +106,8 @@ Every inferred requirement must be tagged with one of:
 | `[observed]` | Directly evidenced in code | Explicit route, exported function, DB table, test assertion |
 | `[inferred]` | Reasonable inference from patterns | Code pattern suggests intent (e.g., retry logic → reliability requirement) |
 | `[speculative]` | Weak evidence, needs human validation | Commented-out code, unused imports, naming conventions only |
+| `[unknown]` | No evidence found — gap requiring investigation | Expected capability absent from extracted facts |
+| `[contradictory]` | Conflicting evidence across modules | e.g., two auth strategies, inconsistent schema versions |
 
 ### R3.2: Section structure
 
@@ -113,18 +115,19 @@ Each requirements document must follow this structure:
 
 1. **Overview** — What this service/boundary does (1-2 paragraphs)
 2. **Functional Requirements** — Capabilities the code provides, each tagged with confidence
-3. **Non-Functional Requirements** — Quality attributes inferred from code patterns
+3. **Non-Functional Requirements** ��� Quality attributes inferred from code patterns
 4. **Constraints** — Technology choices and architectural decisions observed
 5. **Open Questions** — Ambiguities that need human clarification
+6. **Human Review Issues** — Prioritized list of items requiring human judgment (contradictions, gaps, ambiguous intent)
 
 ### R3.3: Traceability
 
-Each requirement must reference the source evidence:
+Every requirement must cite concrete source evidence:
 
 ```markdown
 ### FR-AUTH-01: Session-based authentication [observed]
-- Evidence: `src/services/auth/session.ts:L12-45`, `app/api/auth/[...nextauth]/route.ts`
-- The system uses NextAuth.js with session-based auth...
+Evidence: src/services/auth/session.ts:create_session() + tests/test_auth.py
+The system uses session-based auth...
 ```
 
 ### R3.4: Anti-hallucination rules
@@ -154,7 +157,7 @@ Generated requirements include review prompts for humans:
 ### R4.3: Promotion flow
 
 After human review:
-1. Human edits `docs/requirements/*.md` — removes `[speculative]` items, confirms `[inferred]` → `[observed]`, adds missing context
+1. Human edits `docs/requirements/*.md` — resolves `[contradictory]` items, investigates `[unknown]` gaps, removes `[speculative]` items, confirms `[inferred]` → `[observed]`, adds missing context
 2. `codd scan` picks up the reviewed requirements
 3. Requirements become the source-of-truth for forward CoDD pipeline (generate → implement → verify)
 

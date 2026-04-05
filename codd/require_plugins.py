@@ -1,17 +1,18 @@
-"""CoDD require plugins — extension point for pro/enterprise features.
+"""CoDD require plugins — extension point for governance/calibration features.
 
 The plugin system allows require prompts to be enhanced with additional
-inference guidelines, tag systems, and output contracts. This is the
-extension point where Pro/Enterprise features hook in.
+inference guidelines, tag systems, and output contracts. Plugins extend
+the built-in defaults with organisation-specific governance rules,
+calibration datasets, and approval workflows.
 
 Plugin resolution order:
 1. Project-local: {codd_dir}/plugins/require.py
 2. Site-wide: ~/.codd/plugins/require.py
-3. Built-in: default OSS guidelines (this module)
+3. Built-in: default guidelines (this module)
 
-Each plugin module must define:
+Each plugin module may define:
     INFERENCE_TAGS: list[dict]     — tag definitions (name, description)
-    EVIDENCE_FORMAT: str | None    — evidence citation format
+    EVIDENCE_FORMAT: str | None    — evidence citation format (overrides builtin)
     OUTPUT_SECTIONS: list[str]     — additional output contract sections
     INFERENCE_GUIDELINES: list[str] — additional inference guidelines
 """
@@ -42,6 +43,8 @@ _BUILTIN_TAGS = [
     {"name": "[observed]", "description": "directly evidenced in code (explicit route, exported function, DB table, test assertion)"},
     {"name": "[inferred]", "description": "reasonable inference from patterns (e.g., retry logic implies reliability requirement)"},
     {"name": "[speculative]", "description": "weak evidence, needs human validation (commented-out code, naming conventions only)"},
+    {"name": "[unknown]", "description": "no evidence found in extracted facts — gap that requires human investigation"},
+    {"name": "[contradictory]", "description": "conflicting evidence across modules (e.g., two auth strategies, inconsistent schema versions)"},
 ]
 
 _BUILTIN_GUIDELINES = [
@@ -53,13 +56,21 @@ _BUILTIN_GUIDELINES = [
     "- Do not assume standard features exist unless the extracted facts show them.",
     "- Do not write aspirational requirements or recommendations.",
     "- Include explicit review-needed notes for [speculative] items.",
+    "- Use [unknown] to flag gaps where code evidence is absent but requirements likely exist.",
+    "- Use [contradictory] when extracted facts conflict — describe both sides and flag for human resolution.",
+]
+
+_BUILTIN_EVIDENCE_FORMAT = "Evidence: src/module.py:function_name() + tests/test_module.py"
+
+_BUILTIN_OUTPUT_SECTIONS = [
+    "- Human Review Issues: prioritized list of items requiring human judgment (contradictions, gaps, ambiguous intent).",
 ]
 
 BUILTIN_PLUGIN = RequirePlugin(
     name="builtin",
     inference_tags=_BUILTIN_TAGS,
-    evidence_format=None,
-    output_sections=[],
+    evidence_format=_BUILTIN_EVIDENCE_FORMAT,
+    output_sections=_BUILTIN_OUTPUT_SECTIONS,
     inference_guidelines=_BUILTIN_GUIDELINES,
 )
 
