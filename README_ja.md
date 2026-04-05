@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.4.0** — `init` / `scan` / `impact` は安定版。`audit` / `policy` / `require` / `extract` / `validate` はアルファ。GitHub Action によるCI連携対応。
+**v1.5.0** — `init` / `scan` / `impact` は安定版。`extract --ai` にbaselineプリセット搭載。`audit` / `policy` / `require` / `validate` はアルファ。GitHub Action によるCI連携対応。
 
 ---
 
@@ -224,6 +224,15 @@ codd init --config-dir .codd --project-name "my-project" --language "python"
 ## ブラウンフィールド？ ここから
 
 既存コードベースがある場合、CoDDはコード抽出から設計書復元までの完全なブラウンフィールドワークフローを提供する。
+
+### AI抽出（--ai）
+
+> **プリセットについて**: `codd extract --ai` には**baseline**プリセット（公開用）が同梱されている。公開ベンチマーク（F1 0.953+）の数値は、チューニング済みプリセットと内部評価セットで測定した結果であり、公開版baselineとは異なる。baselineは同じワークフローと出力形式を使えるが、結果はコードベースやプロンプトにより変動する。`--prompt-file` で独自のプロンプトを渡すことも可能。
+
+```bash
+codd extract --ai                        # 組み込みbaselineプリセットを使用
+codd extract --ai --prompt-file my.md    # カスタムプロンプトを使用
+```
 
 ### Step 1: コードから構造を抽出
 
