@@ -428,35 +428,83 @@ def verify(path: str, sprint: int | None) -> None:
 @click.option("--language", default=None, help="Override language detection (python/typescript/javascript/go — full support; java — symbols only)")
 @click.option("--source-dirs", default=None, help="Comma-separated source directories (default: auto-detect)")
 @click.option("--output", default=None, help="Output directory (default: codd/extracted/)")
-def extract(path: str, language: str | None, source_dirs: str | None, output: str | None):
+@click.option("--ai", is_flag=True, default=False, help="Use AI-powered extraction (6-layer MECE design docs)")
+@click.option(
+    "--ai-cmd",
+    default=None,
+    help="Override AI CLI command (default: codd.yaml ai_command or claude --print)",
+)
+@click.option(
+    "--prompt-file",
+    default=None,
+    type=click.Path(exists=True),
+    help="Custom extraction prompt file (overrides built-in baseline preset)",
+)
+def extract(path: str, language: str | None, source_dirs: str | None, output: str | None, ai: bool, ai_cmd: str | None, prompt_file: str | None):
     """Extract design documents from existing codebase (brownfield bootstrap).
 
-    Reverse-engineers CoDD design docs from source code using static analysis.
-    No AI required — pure structural fact extraction.
+    Default mode: static analysis (no AI, pure structural facts).
+    With --ai: AI-powered 6-layer MECE extraction using claude --print.
 
     Output goes to codd/extracted/ as draft documents. Review and promote
     to codd/ when confirmed.
     """
-    from codd.extractor import run_extract
-
     project_root = Path(path).resolve()
-    dirs = [d.strip() for d in source_dirs.split(",")] if source_dirs else None
 
-    try:
-        result = run_extract(project_root, language, dirs, output)
-    except Exception as exc:
-        click.echo(f"Error: {exc}")
-        raise SystemExit(1)
+    if ai:
+        from codd.extract_ai import run_extract_ai
+        from codd.config import load_project_config, find_codd_dir
 
-    click.echo(f"Extracted: {result.module_count} modules from {result.total_files} files ({result.total_lines:,} lines)")
-    click.echo(f"Output: {result.output_dir}/")
-    for f in result.generated_files:
-        click.echo(f"  {f.relative_to(result.output_dir)}")
+        # Resolve AI command
+        if ai_cmd is None:
+            try:
+                cfg = load_project_config(project_root)
+                ai_cmd = cfg.get("ai_command", 'claude --print --model claude-opus-4-6 --tools ""')
+            except FileNotFoundError:
+                ai_cmd = 'claude --print --model claude-opus-4-6 --tools ""'
 
-    click.echo(f"\nNext steps:")
-    click.echo(f"  1. Review generated docs in {result.output_dir}/")
-    click.echo(f"  2. Promote confirmed docs: mv codd/extracted/*.md docs/design/")
-    click.echo(f"  3. Run: codd scan  (to build the dependency graph)")
+        preset_name = "custom" if prompt_file else "baseline"
+        click.echo(f"CoDD AI Extract v3")
+        click.echo(f"Using preset: {preset_name} ({'public' if not prompt_file else prompt_file})")
+        click.echo(f"Project: {project_root}")
+        click.echo(f"AI command: {ai_cmd}")
+        click.echo(f"Scanning project...")
+
+        try:
+            result = run_extract_ai(project_root, ai_cmd, output, prompt_file=prompt_file)
+        except Exception as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+
+        click.echo(f"\nExtracted: {result.module_count} source files analyzed")
+        click.echo(f"Output: {result.output_dir}/")
+        for f in result.generated_files:
+            click.echo(f"  {f.name}")
+
+        click.echo(f"\nNext steps:")
+        click.echo(f"  1. Review generated docs in {result.output_dir}/")
+        click.echo(f"  2. Promote confirmed docs: mv codd/extracted/*.md docs/design/")
+        click.echo(f"  3. Run: codd scan  (to build the dependency graph)")
+    else:
+        from codd.extractor import run_extract
+
+        dirs = [d.strip() for d in source_dirs.split(",")] if source_dirs else None
+
+        try:
+            result = run_extract(project_root, language, dirs, output)
+        except Exception as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+
+        click.echo(f"Extracted: {result.module_count} modules from {result.total_files} files ({result.total_lines:,} lines)")
+        click.echo(f"Output: {result.output_dir}/")
+        for f in result.generated_files:
+            click.echo(f"  {f.relative_to(result.output_dir)}")
+
+        click.echo(f"\nNext steps:")
+        click.echo(f"  1. Review generated docs in {result.output_dir}/")
+        click.echo(f"  2. Promote confirmed docs: mv codd/extracted/*.md docs/design/")
+        click.echo(f"  3. Run: codd scan  (to build the dependency graph)")
 
 
 @main.command()

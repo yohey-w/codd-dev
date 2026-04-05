@@ -18,18 +18,22 @@ from codd.require_plugins import (
 
 
 class TestBuiltinPlugin:
-    def test_has_three_tags(self):
-        assert len(BUILTIN_PLUGIN.inference_tags) == 3
+    def test_has_five_tags(self):
+        assert len(BUILTIN_PLUGIN.inference_tags) == 5
         names = [t["name"] for t in BUILTIN_PLUGIN.inference_tags]
         assert "[observed]" in names
         assert "[inferred]" in names
         assert "[speculative]" in names
+        assert "[unknown]" in names
+        assert "[contradictory]" in names
 
-    def test_no_evidence_format(self):
-        assert BUILTIN_PLUGIN.evidence_format is None
+    def test_has_evidence_format(self):
+        assert BUILTIN_PLUGIN.evidence_format is not None
+        assert "Evidence:" in BUILTIN_PLUGIN.evidence_format
 
-    def test_no_output_sections(self):
-        assert BUILTIN_PLUGIN.output_sections == []
+    def test_has_output_sections(self):
+        assert len(BUILTIN_PLUGIN.output_sections) == 1
+        assert "Human Review Issues" in BUILTIN_PLUGIN.output_sections[0]
 
     def test_has_guidelines(self):
         assert len(BUILTIN_PLUGIN.inference_guidelines) > 0
@@ -42,6 +46,8 @@ class TestBuildTagInstructions:
         assert "[observed]" in text
         assert "[inferred]" in text
         assert "[speculative]" in text
+        assert "[unknown]" in text
+        assert "[contradictory]" in text
 
     def test_custom_tags(self):
         plugin = RequirePlugin(
@@ -54,38 +60,45 @@ class TestBuildTagInstructions:
 
 
 class TestBuildEvidenceInstructions:
-    def test_no_format_returns_empty(self):
+    def test_builtin_has_evidence_format(self):
         lines = build_evidence_instructions(BUILTIN_PLUGIN)
+        assert len(lines) == 2
+        assert "Evidence:" in lines[1]
+
+    def test_no_format_returns_empty(self):
+        plugin = RequirePlugin(evidence_format=None)
+        lines = build_evidence_instructions(plugin)
         assert lines == []
 
-    def test_with_format(self):
+    def test_with_custom_format(self):
         plugin = RequirePlugin(
             evidence_format="Evidence: src/foo.py:bar() + tests/test_foo.py",
         )
         lines = build_evidence_instructions(plugin)
         assert len(lines) == 2
-        assert "Evidence:" in lines[1]
+        assert "src/foo.py" in lines[1]
 
 
 class TestBuildOutputContract:
-    def test_empty_sections(self):
+    def test_builtin_has_human_review(self):
         lines = build_output_contract(BUILTIN_PLUGIN)
-        assert lines == []
+        assert len(lines) == 1
+        assert "Human Review Issues" in lines[0]
 
-    def test_with_sections(self):
+    def test_with_custom_sections(self):
         plugin = RequirePlugin(
-            output_sections=["- Include Human Review Issues section."],
+            output_sections=["- Include Approval Ledger section."],
         )
         lines = build_output_contract(plugin)
         assert len(lines) == 1
-        assert "Human Review" in lines[0]
+        assert "Approval Ledger" in lines[0]
 
 
 class TestLoadRequirePlugin:
     def test_fallback_to_builtin(self, tmp_path):
         plugin = load_require_plugin(tmp_path)
         assert plugin.name == "builtin"
-        assert len(plugin.inference_tags) == 3
+        assert len(plugin.inference_tags) == 5
 
     def test_project_local_plugin(self, tmp_path):
         project = tmp_path / "project"

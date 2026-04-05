@@ -28,6 +28,7 @@ INFERRED_REQUIREMENT_SECTIONS = [
     "Non-Functional Requirements",
     "Constraints",
     "Open Questions",
+    "Human Review Issues",
 ]
 
 
