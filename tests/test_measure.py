@@ -117,6 +117,50 @@ class TestRunMeasure:
         assert result.quality.validation_errors == 0
         assert result.health_score > 0
 
+    def test_collects_graph_metrics_from_scan_dir(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        src = project / "src"
+        src.mkdir()
+        (src / "main.py").write_text("import util\n", encoding="utf-8")
+        (src / "util.py").write_text("x = 1\n", encoding="utf-8")
+
+        codd_dir = project / "codd"
+        codd_dir.mkdir()
+        config = {
+            "scan": {
+                "source_dirs": ["src/"],
+                "test_dirs": [],
+                "doc_dirs": [],
+                "config_files": [],
+                "exclude": [],
+            },
+            "policies": [],
+        }
+        (codd_dir / "codd.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+        scan_dir = codd_dir / "scan"
+        scan_dir.mkdir()
+        (scan_dir / "nodes.jsonl").write_text(
+            '{"id":"src/main.py","type":"file"}\n'
+            '{"id":"src/util.py","type":"file"}\n',
+            encoding="utf-8",
+        )
+        (scan_dir / "edges.jsonl").write_text(
+            '{"id":1,"source_id":"src/main.py","target_id":"src/util.py",'
+            '"relation":"depends_on","semantic":"import","confidence":1.0,'
+            '"is_active":true,"evidence":[]}\n',
+            encoding="utf-8",
+        )
+
+        result = run_measure(project)
+
+        assert result.graph.total_nodes == 2
+        assert result.graph.total_edges == 1
+        assert result.graph.orphan_nodes == 0
+        assert result.graph.max_depth == 1
+        assert result.graph.avg_out_degree == 0.5
+
     def test_no_codd_dir_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             run_measure(tmp_path)

@@ -136,30 +136,34 @@ def _collect_graph_metrics(codd_dir: Path) -> GraphMetrics:
 
     ceg = CEG(scan_dir)
     try:
-        nodes = list(ceg.nodes())
-        total_nodes = len(nodes)
+        node_ids = list(ceg.nodes.keys())
+        total_nodes = len(node_ids)
         total_edges = 0
-        out_degrees: list[int] = []
-        in_degree: dict[str, int] = {n: 0 for n in nodes}
+        out_degree_by_node: dict[str, int] = {}
+        in_degree: dict[str, int] = {node_id: 0 for node_id in node_ids}
 
-        for node_id in nodes:
-            deps = list(ceg.dependencies(node_id))
-            out_degrees.append(len(deps))
+        for node_id in node_ids:
+            deps = ceg.get_outgoing_edges(node_id)
+            out_degree_by_node[node_id] = len(deps)
             total_edges += len(deps)
-            for dep_id, _ in deps:
+            for edge in deps:
+                dep_id = edge["target_id"]
                 if dep_id in in_degree:
                     in_degree[dep_id] += 1
 
         # Orphans: no in-edges AND no out-edges
         orphan_count = sum(
-            1 for n in nodes
-            if in_degree.get(n, 0) == 0 and (out_degrees[nodes.index(n)] if n in nodes else 0) == 0
+            1
+            for node_id in node_ids
+            if in_degree.get(node_id, 0) == 0 and out_degree_by_node.get(node_id, 0) == 0
         )
 
-        avg_out = sum(out_degrees) / total_nodes if total_nodes > 0 else 0.0
+        avg_out = (
+            sum(out_degree_by_node.values()) / total_nodes if total_nodes > 0 else 0.0
+        )
 
         # Max depth via BFS from all root nodes
-        max_depth = _compute_max_depth(ceg, nodes, in_degree)
+        max_depth = _compute_max_depth(ceg, node_ids, in_degree)
 
     finally:
         ceg.close()
@@ -189,7 +193,8 @@ def _compute_max_depth(ceg, nodes: list[str], in_degree: dict[str, int]) -> int:
                 continue
             visited.add(node)
             max_depth = max(max_depth, depth)
-            for dep_id, _ in ceg.dependencies(node):
+            for edge in ceg.get_outgoing_edges(node):
+                dep_id = edge["target_id"]
                 if dep_id not in visited:
                     queue.append((dep_id, depth + 1))
 
