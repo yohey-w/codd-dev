@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -135,6 +136,7 @@ def validate_project(project_root: Path, codd_dir: Path | None = None) -> Valida
     documents: dict[str, DocumentRecord] = {}
     wave_expectations = _extract_wave_config_expectations(config)
     wave_defined_nodes = set(wave_expectations)
+    scanned_node_ids = _load_scanned_node_ids(project_root, config)
     service_boundary_modules = _extract_service_boundary_modules(config)
 
     for doc_path in _iter_doc_files(project_root, config):
@@ -180,6 +182,7 @@ def validate_project(project_root: Path, codd_dir: Path | None = None) -> Valida
         )
 
     defined_nodes = set(documents)
+    known_convention_targets = defined_nodes | scanned_node_ids
 
     for record in documents.values():
         for target_id in record.depends_on:
@@ -203,7 +206,7 @@ def validate_project(project_root: Path, codd_dir: Path | None = None) -> Valida
                 )
                 result.add(level, "dangling_depended_by", record.path, message)
         for target_id in record.conventions:
-            if target_id not in defined_nodes:
+            if target_id not in known_convention_targets:
                 result.add(
                     LEVEL_WARNING,
                     "dangling_convention",
@@ -416,6 +419,37 @@ def _extract_service_boundary_modules(config: dict[str, Any]) -> set[str]:
         if isinstance(name, str) and name:
             modules.add(name)
     return modules
+
+
+def _load_scanned_node_ids(project_root: Path, config: dict[str, Any]) -> set[str]:
+    graph_config = config.get("graph")
+    graph_path = "codd/scan"
+    if isinstance(graph_config, dict):
+        configured_path = graph_config.get("path")
+        if isinstance(configured_path, str) and configured_path.strip():
+            graph_path = configured_path
+
+    scan_dir = Path(graph_path)
+    if not scan_dir.is_absolute():
+        scan_dir = project_root / scan_dir
+
+    nodes_path = scan_dir / "nodes.jsonl"
+    if not nodes_path.exists():
+        return set()
+
+    node_ids: set[str] = set()
+    for line in nodes_path.read_text().splitlines():
+        payload = line.strip()
+        if not payload:
+            continue
+        try:
+            node = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        node_id = node.get("id")
+        if isinstance(node_id, str) and node_id:
+            node_ids.add(node_id)
+    return node_ids
 
 
 def _extract_wave_config_expectations(config: dict[str, Any]) -> dict[str, set[str]]:
