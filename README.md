@@ -225,6 +225,8 @@ All other commands (`scan`, `impact`, `generate`, etc.) automatically discover w
 
 Already have a codebase? CoDD provides a full brownfield workflow — from code extraction to design doc reconstruction.
 
+Full walkthrough: [Harness as Code — A Guide to CoDD #2 Brownfield](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield?locale=en)
+
 ### AI-Powered Extraction (--ai)
 
 > **Note on presets**: `codd extract --ai` ships with a **baseline** extraction prompt. The extraction quality in published benchmarks (F1 0.953+) was achieved with a tuned preset and internal evaluation dataset — not the public baseline. The baseline uses the same workflow and output format, but results will vary depending on your codebase and prompt. Use `--prompt-file` to supply your own tuned prompt.
@@ -615,6 +617,7 @@ If CoDD can't manage itself, it shouldn't manage your project.
 - [dev.to: Harness as Code — Treating AI Workflows Like Infrastructure](https://dev.to/yohey-w/harness-as-code-treating-ai-workflows-like-infrastructure-27ni)
 - [dev.to: What Happens After "Spec First"](https://dev.to/yohey-w/codd-coherence-driven-development-what-happens-after-spec-first-514f)
 - [Zenn: Harness as Code — A Guide to CoDD #1 spec → design → code](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide?locale=en)
+- [Zenn: Harness as Code — A Guide to CoDD #2 Brownfield](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield?locale=en)
 - [Zenn: CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence?locale=en)
 
 ## License

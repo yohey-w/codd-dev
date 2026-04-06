@@ -225,6 +225,8 @@ codd init --config-dir .codd --project-name "my-project" --language "python"
 
 既存コードベースがある場合、CoDDはコード抽出から設計書復元までの完全なブラウンフィールドワークフローを提供する。
 
+ウォークスルー: [Harness as Code — CoDD実践ガイド #2 ブラウンフィールド編](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield)
+
 ### AI抽出（--ai）
 
 > **プリセットについて**: `codd extract --ai` には**baseline**プリセット（公開用）が同梱されている。公開ベンチマーク（F1 0.953+）の数値は、チューニング済みプリセットと内部評価セットで測定した結果であり、公開版baselineとは異なる。baselineは同じワークフローと出力形式を使えるが、結果はコードベースやプロンプトにより変動する。`--prompt-file` で独自のプロンプトを渡すことも可能。
@@ -613,6 +615,7 @@ codd verify           # mypy + pytest（434テスト通過）
 ## 解説記事
 
 - [Zenn: Harness as Code — CoDD活用ガイド #1 spec → 設計書 → コード](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide)
+- [Zenn: Harness as Code — CoDD実践ガイド #2 ブラウンフィールド編](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield)
 - [Zenn: CoDD 詳細解説](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence)
 
 ## ライセンス
