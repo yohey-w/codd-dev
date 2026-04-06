@@ -2,6 +2,30 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.6.0] - 2026-04-06
+
+### Added
+
+- **OSS/Pro split** — `reviewer`, `verifier`, `audit`, `risk` modules moved to `codd-pro` private package
+- Entry-points based plugin discovery (`codd.plugins` group) — `require_plugins.py` now uses `importlib.metadata.entry_points`
+- Bridge pattern in `validator.py` and `policy.py` — Pro implementations override OSS fallback when `codd-pro` is installed
+- `bridge.py` — central plugin registry for Pro extensions
+- `codd-dev[ai]` optional dependency group for `extract_ai.py`
+- `codd-dev[mcp]` optional dependency group for `mcp_server.py`
+- Graceful degradation for `review`/`verify`/`audit`/`risk` commands — shows migration message when `codd-pro` is not installed
+
+### Removed
+
+- `codd/reviewer.py`, `codd/verifier.py`, `codd/audit.py`, `codd/risk.py` — moved to `codd-pro`
+
+### Migration
+
+Users who rely on `codd review`, `codd verify`, `codd audit`, or `codd risk` should install `codd-pro`:
+```
+pip install "codd-pro @ git+ssh://git@github.com/yohey-w/codd-pro.git"
+```
+All other commands (`scan`, `generate`, `propagate`, `extract`, `validate`, `require`, `restore`, `plan`, `measure`, `impact`) are unaffected.
+
 ## [1.5.1] - 2026-04-06
 
 ### Fixed
