@@ -1,29 +1,17 @@
 """CoDD require plugins — extension point for governance/calibration features.
 
-The plugin system allows require prompts to be enhanced with additional
-inference guidelines, tag systems, and output contracts. Plugins extend
-the built-in defaults with organisation-specific governance rules,
-calibration datasets, and approval workflows.
-
-Plugin resolution order:
-1. Project-local: {codd_dir}/plugins/require.py
-2. Site-wide: ~/.codd/plugins/require.py
-3. Built-in: default guidelines (this module)
-
-Each plugin module may define:
-    INFERENCE_TAGS: list[dict]     — tag definitions (name, description)
-    EVIDENCE_FORMAT: str | None    — evidence citation format (overrides builtin)
-    OUTPUT_SECTIONS: list[str]     — additional output contract sections
-    INFERENCE_GUIDELINES: list[str] — additional inference guidelines
+Bridge plugins register themselves via the ``codd.plugins`` entry-point
+group and can replace the built-in prompt enhancements by calling
+``registry.register_require_plugin(...)`` during plugin registration.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from codd.bridge import load_bridge_registry
 
 
 @dataclass
@@ -76,51 +64,13 @@ BUILTIN_PLUGIN = RequirePlugin(
 
 
 def load_require_plugin(project_root: Path | None = None) -> RequirePlugin:
-    """Load the require plugin, checking project-local and site-wide locations.
+    """Load the registered require plugin or fall back to the OSS defaults."""
+    del project_root  # Reserved for API compatibility with older callers.
 
-    Falls back to built-in OSS defaults if no plugin is found.
-    """
-    candidates: list[Path] = []
-
-    # Project-local
-    if project_root:
-        from codd.config import find_codd_dir
-
-        codd_dir = find_codd_dir(project_root)
-        if codd_dir:
-            candidates.append(codd_dir / "plugins" / "require.py")
-
-    # Site-wide
-    site_dir = Path.home() / ".codd" / "plugins"
-    candidates.append(site_dir / "require.py")
-
-    for path in candidates:
-        if path.is_file():
-            plugin = _load_plugin_from_file(path)
-            if plugin is not None:
-                return plugin
-
+    plugin = load_bridge_registry().require_plugin
+    if isinstance(plugin, RequirePlugin):
+        return plugin
     return BUILTIN_PLUGIN
-
-
-def _load_plugin_from_file(path: Path) -> RequirePlugin | None:
-    """Load a plugin module from a file path."""
-    try:
-        spec = importlib.util.spec_from_file_location("codd_require_plugin", path)
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    except Exception:
-        return None
-
-    return RequirePlugin(
-        name=getattr(module, "PLUGIN_NAME", path.stem),
-        inference_tags=getattr(module, "INFERENCE_TAGS", _BUILTIN_TAGS),
-        evidence_format=getattr(module, "EVIDENCE_FORMAT", None),
-        output_sections=getattr(module, "OUTPUT_SECTIONS", []),
-        inference_guidelines=getattr(module, "INFERENCE_GUIDELINES", _BUILTIN_GUIDELINES),
-    )
 
 
 def build_tag_instructions(plugin: RequirePlugin) -> list[str]:

@@ -25,6 +25,8 @@ import json
 import sys
 from pathlib import Path
 
+from codd.bridge import load_bridge_registry
+
 
 # ── JSON-RPC helpers ──────────────────────────────────────────────
 
@@ -68,21 +70,6 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "name": "codd_audit",
-        "description": "Run consolidated change review: validate + impact + policy. Returns APPROVE/CONDITIONAL/REJECT verdict with full details. Use this for PR review decisions.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "diff_target": {
-                    "type": "string",
-                    "description": "Git ref to diff against (default: HEAD)",
-                    "default": "HEAD",
-                },
-            },
             "required": [],
         },
     },
@@ -172,13 +159,6 @@ def _handle_policy(project_root: Path, _args: dict) -> dict:
     return {"content": [{"type": "text", "text": format_policy_text(result)}]}
 
 
-def _handle_audit(project_root: Path, args: dict) -> dict:
-    from codd.audit import run_audit, format_audit_json
-    diff_target = args.get("diff_target", "HEAD")
-    result = run_audit(project_root, diff_target=diff_target, skip_review=True)
-    return {"content": [{"type": "text", "text": format_audit_json(result)}]}
-
-
 def _handle_scan(project_root: Path, _args: dict) -> dict:
     from codd.config import find_codd_dir, load_project_config
     from codd.scanner import scan_project
@@ -204,10 +184,21 @@ HANDLERS = {
     "codd_validate": _handle_validate,
     "codd_impact": _handle_impact,
     "codd_policy": _handle_policy,
-    "codd_audit": _handle_audit,
     "codd_scan": _handle_scan,
     "codd_measure": _handle_measure,
 }
+
+
+def _registered_tools() -> list[dict]:
+    tools = list(TOOLS)
+    tools.extend(load_bridge_registry().mcp_tools.values())
+    return tools
+
+
+def _registered_handlers() -> dict[str, object]:
+    handlers = dict(HANDLERS)
+    handlers.update(load_bridge_registry().mcp_handlers)
+    return handlers
 
 
 # ── MCP Protocol Handler ─────────────────────────────────────────
@@ -226,7 +217,7 @@ def handle_request(request: dict, project_root: Path) -> dict | None:
             },
             "serverInfo": {
                 "name": "codd",
-                "version": "1.4.0",
+                "version": "1.6.0",
             },
         })
 
@@ -234,13 +225,13 @@ def handle_request(request: dict, project_root: Path) -> dict | None:
         return None  # No response for notifications
 
     if method == "tools/list":
-        return _jsonrpc_response(req_id, {"tools": TOOLS})
+        return _jsonrpc_response(req_id, {"tools": _registered_tools()})
 
     if method == "tools/call":
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
 
-        handler = HANDLERS.get(tool_name)
+        handler = _registered_handlers().get(tool_name)
         if handler is None:
             return _jsonrpc_error(req_id, -32601, f"Unknown tool: {tool_name}")
 

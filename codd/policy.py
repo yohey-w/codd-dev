@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from codd.bridge import load_bridge_registry
 from codd.config import load_project_config
 
 
@@ -99,7 +100,7 @@ def load_policies(config: dict[str, Any]) -> list[PolicyRule]:
     return rules
 
 
-def run_policy(
+def _run_policy_oss(
     project_root: Path,
     *,
     changed_files: list[str] | None = None,
@@ -170,6 +171,18 @@ def run_policy(
                     ))
 
     return result
+
+
+def run_policy(
+    project_root: Path,
+    *,
+    changed_files: list[str] | None = None,
+) -> PolicyResult:
+    """Run the OSS policy pack or delegate to a registered Pro policy pack."""
+    handler = load_bridge_registry().policy_handler
+    if handler is not None:
+        return handler(project_root, changed_files=changed_files, fallback=_run_policy_oss)
+    return _run_policy_oss(project_root, changed_files=changed_files)
 
 
 def format_policy_text(result: PolicyResult) -> str:

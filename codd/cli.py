@@ -6,9 +6,22 @@ import os
 import shutil
 from pathlib import Path
 
+from codd.bridge import PRO_COMMAND_INSTALL_MESSAGE, get_command_handler
 from codd.config import find_codd_dir
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+
+def _run_pro_command(name: str, **kwargs):
+    """Dispatch a Pro-only command when the bridge plugin is installed."""
+    handler = get_command_handler(name)
+    if handler is None:
+        click.echo(PRO_COMMAND_INSTALL_MESSAGE)
+        raise SystemExit(1)
+
+    result = handler(**kwargs)
+    if type(result) is int:
+        raise SystemExit(result)
 
 
 def _require_codd_dir(project_root: Path) -> Path:
@@ -442,45 +455,7 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 @click.option("--sprint", default=None, type=click.IntRange(min=1), help="Sprint number to verify")
 def verify(path: str, sprint: int | None) -> None:
     """Run build + test verification and trace failures to design documents."""
-    from codd.verifier import VerifyPreflightError, run_verify
-
-    project_root = Path(path).resolve()
-    codd_dir = _require_codd_dir(project_root)
-
-    try:
-        result = run_verify(project_root, sprint=sprint)
-    except VerifyPreflightError as exc:
-        click.echo(f"Preflight check failed: {exc}")
-        raise SystemExit(1)
-    except (FileNotFoundError, ValueError) as exc:
-        click.echo(f"Error: {exc}")
-        raise SystemExit(1)
-
-    if result.typecheck.success:
-        click.echo("Typecheck: PASS")
-    else:
-        click.echo(f"Typecheck: FAIL ({result.typecheck.error_count} errors)")
-
-    if result.tests.success:
-        click.echo(f"Tests: PASS ({result.tests.passed}/{result.tests.total})")
-    else:
-        click.echo(f"Tests: FAIL ({result.tests.failed} failed, {result.tests.passed} passed)")
-
-    if result.design_refs:
-        click.echo("\nDesign documents to review:")
-        for ref in result.design_refs:
-            click.echo(f"  {ref.node_id} -> {ref.doc_path} (from {ref.source_file})")
-        propagate_targets = tuple(dict.fromkeys(ref.node_id for ref in result.design_refs))
-        if propagate_targets:
-            click.echo("\nSuggested propagate targets:")
-            for target in propagate_targets:
-                click.echo(f"  {target}")
-
-    for warning in result.warnings:
-        click.echo(f"Warning: {warning}")
-
-    click.echo(f"\nReport: {result.report_path}")
-    raise SystemExit(0 if result.success else 1)
+    _run_pro_command("verify", path=path, sprint=sprint)
 
 
 @main.command()
@@ -612,56 +587,7 @@ def review(path: str, scope: str | None, as_json: bool, ai_cmd: str | None):
     Without --scope: reviews all documents.
     With --scope: reviews a single document by node_id.
     """
-    from codd.reviewer import run_review
-
-    project_root = Path(path).resolve()
-    _require_codd_dir(project_root)
-
-    try:
-        summary = run_review(project_root, scope=scope, ai_command=ai_cmd)
-    except (FileNotFoundError, ValueError) as exc:
-        click.echo(f"Error: {exc}")
-        raise SystemExit(1)
-
-    if not summary.results:
-        click.echo("No documents found to review.")
-        return
-
-    if as_json:
-        output = {
-            "pass_count": summary.pass_count,
-            "fail_count": summary.fail_count,
-            "avg_score": round(summary.avg_score, 1),
-            "results": [
-                {
-                    "node_id": r.node_id,
-                    "path": r.path,
-                    "verdict": r.verdict,
-                    "score": r.score,
-                    "issues": [{"severity": i.severity, "message": i.message} for i in r.issues],
-                    "feedback": r.feedback,
-                }
-                for r in summary.results
-            ],
-        }
-        click.echo(json.dumps(output, ensure_ascii=False, indent=2))
-    else:
-        for r in summary.results:
-            icon = "PASS" if r.verdict == "PASS" else "FAIL"
-            click.echo(f"  [{icon}] {r.path} ({r.node_id}) — score: {r.score}")
-            for issue in r.issues:
-                click.echo(f"    [{issue.severity}] {issue.message}")
-            if r.feedback:
-                # Show first 200 chars of feedback in summary mode
-                preview = r.feedback[:200].replace("\n", " ")
-                if len(r.feedback) > 200:
-                    preview += "..."
-                click.echo(f"    Feedback: {preview}")
-
-        click.echo(f"\nSummary: {summary.pass_count} passed, {summary.fail_count} failed, avg score: {summary.avg_score:.0f}")
-
-    exit_code = 0 if summary.fail_count == 0 else 1
-    raise SystemExit(exit_code)
+    _run_pro_command("review", path=path, scope=scope, as_json=as_json, ai_cmd=ai_cmd)
 
 
 @main.command()
@@ -693,31 +619,22 @@ def audit(diff: str, path: str, as_json: bool, skip_review: bool, output: str | 
 
     Exit code: 0 = APPROVE, 1 = CONDITIONAL or REJECT.
     """
-    from codd.audit import run_audit, format_audit_text, format_audit_json
+    _run_pro_command(
+        "audit",
+        diff=diff,
+        path=path,
+        as_json=as_json,
+        skip_review=skip_review,
+        output=output,
+        ai_cmd=ai_cmd,
+    )
 
-    project_root = Path(path).resolve()
-    _require_codd_dir(project_root)
 
-    try:
-        result = run_audit(
-            project_root,
-            diff_target=diff,
-            ai_command=ai_cmd,
-            skip_review=skip_review,
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        click.echo(f"Error: {exc}")
-        raise SystemExit(1)
-
-    text = format_audit_json(result) if as_json else format_audit_text(result)
-
-    if output:
-        Path(output).write_text(text, encoding="utf-8")
-        click.echo(f"Audit report written to {output}")
-    else:
-        click.echo(text)
-
-    raise SystemExit(0 if result.verdict == "APPROVE" else 1)
+@main.command()
+@click.option("--path", default=".", help="Project root directory")
+def risk(path: str):
+    """Analyze change risk using the codd-pro extension pack."""
+    _run_pro_command("risk", path=path)
 
 
 @main.command()

@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from codd.bridge import load_bridge_registry
+
 
 NODE_ID_PATTERN = re.compile(r"^(?P<prefix>[a-z_]+):(?P<name>.+)$")
 ALLOWED_NODE_PREFIXES = {
@@ -126,7 +128,7 @@ def run_validate(project_root: Path, codd_dir: Path) -> int:
     return result.exit_code
 
 
-def validate_project(project_root: Path, codd_dir: Path | None = None) -> ValidationResult:
+def _validate_project_oss(project_root: Path, codd_dir: Path | None = None) -> ValidationResult:
     """Validate CoDD frontmatter, references, wave config, and dependency cycles."""
     codd_dir = codd_dir or (project_root / "codd")
     config_path = codd_dir / "codd.yaml"
@@ -260,6 +262,14 @@ def validate_project(project_root: Path, codd_dir: Path | None = None) -> Valida
         result.add(LEVEL_ERROR, "circular_dependency", location, f"circular dependency detected: {cycle_text}")
 
     return result
+
+
+def validate_project(project_root: Path, codd_dir: Path | None = None) -> ValidationResult:
+    """Validate the project, delegating to a Pro bridge when registered."""
+    handler = load_bridge_registry().validator_handler
+    if handler is not None:
+        return handler(project_root, codd_dir, _validate_project_oss)
+    return _validate_project_oss(project_root, codd_dir)
 
 
 @dataclass

@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from codd.bridge import load_bridge_registry
 from codd.parsing import (
     BuildDepsExtractor,
     BuildDepsInfo,
@@ -204,9 +205,12 @@ def extract_facts(project_root: Path, language: str | None = None,
     from codd.wiring import build_runtime_wires
     build_runtime_wires(facts, project_root)
 
-    # R5.4: Change risk scoring (depends on R4.3, R5.1)
-    from codd.risk import build_change_risks
-    build_change_risks(facts)
+    # R5.4: Change risk scoring is provided by codd-pro when installed.
+    risk_builder = load_bridge_registry().risk_builder
+    if risk_builder is not None:
+        risk_builder(facts)
+    else:
+        facts.change_risks = []
 
     # R8: Environment & config dependency detection
     from codd.env_refs import build_env_refs

@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml
 
 from codd.mcp_server import TOOLS, handle_request
+
+
+class _FakeEntryPoint:
+    def __init__(self, loaded):
+        self._loaded = loaded
+
+    def load(self):
+        return self._loaded
 
 
 @pytest.fixture
@@ -53,8 +59,8 @@ class TestProtocol:
         assert "codd_validate" in tool_names
         assert "codd_impact" in tool_names
         assert "codd_policy" in tool_names
-        assert "codd_audit" in tool_names
         assert "codd_scan" in tool_names
+        assert "codd_measure" in tool_names
 
     def test_ping(self, codd_project):
         req = {"jsonrpc": "2.0", "id": 3, "method": "ping", "params": {}}
@@ -115,16 +121,34 @@ class TestToolCalls:
         assert "FAIL" in content
         assert "SEC-001" in content
 
-    def test_audit(self, codd_project):
-        req = {
-            "jsonrpc": "2.0", "id": 13,
+    def test_bridge_tool_registration(self, codd_project, monkeypatch):
+        def register(registry):
+            registry.register_mcp_tool(
+                {
+                    "name": "codd_pro_audit",
+                    "description": "Bridge-provided audit tool.",
+                    "inputSchema": {"type": "object", "properties": {}, "required": []},
+                },
+                lambda project_root, args: {"content": [{"type": "text", "text": f"audit:{project_root.name}:{args}"}]},
+            )
+
+        monkeypatch.setattr(
+            "codd.bridge.entry_points",
+            lambda *, group=None: (_FakeEntryPoint(register),),
+        )
+
+        list_req = {"jsonrpc": "2.0", "id": 13, "method": "tools/list", "params": {}}
+        list_resp = handle_request(list_req, codd_project)
+        tool_names = [t["name"] for t in list_resp["result"]["tools"]]
+        assert "codd_pro_audit" in tool_names
+
+        call_req = {
+            "jsonrpc": "2.0", "id": 14,
             "method": "tools/call",
-            "params": {"name": "codd_audit", "arguments": {}},
+            "params": {"name": "codd_pro_audit", "arguments": {"diff_target": "HEAD"}},
         }
-        resp = handle_request(req, codd_project)
-        content = resp["result"]["content"][0]["text"]
-        data = json.loads(content)
-        assert data["verdict"] in ("APPROVE", "CONDITIONAL", "REJECT")
+        call_resp = handle_request(call_req, codd_project)
+        assert "audit:project" in call_resp["result"]["content"][0]["text"]
 
     def test_impact_missing_target(self, codd_project):
         req = {
@@ -156,4 +180,4 @@ class TestToolDefinitions:
             assert tool["inputSchema"]["type"] == "object"
 
     def test_tool_count(self):
-        assert len(TOOLS) == 6
+        assert len(TOOLS) == 5

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codd-dev"
-version = "1.5.1"
+version = "1.6.0"
 description = "CoDD: Coherence-Driven Development — cross-artifact change impact analysis"
 readme = "README.md"
 license = "MIT"
@@ -28,6 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ai = []
 api-parsers = [
     "graphql-core>=3.2.0",
 ]
