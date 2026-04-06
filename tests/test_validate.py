@@ -205,6 +205,37 @@ codd:
     assert all(issue.level == "WARNING" for issue in result.issues)
 
 
+def test_validate_allows_convention_targets_present_in_scanned_nodes(tmp_path):
+    project, codd_dir = _setup_project(
+        tmp_path,
+        {
+            "docs/example.md": """---
+codd:
+  node_id: "design:example"
+  type: design
+  conventions:
+    - targets:
+        - "module:my_module"
+      reason: "Must match the scanned module"
+---
+
+# Example
+""",
+        },
+    )
+    scan_dir = codd_dir / "scan"
+    scan_dir.mkdir()
+    (scan_dir / "nodes.jsonl").write_text(
+        '{"id": "module:my_module", "type": "module", "name": "module:my_module"}\n'
+    )
+
+    result = validate_project(project, codd_dir)
+
+    assert not any(issue.code == "dangling_convention" for issue in result.issues)
+    assert result.status() == "OK"
+    assert result.exit_code == 0
+
+
 def test_validate_error_when_cycle_exists(tmp_path):
     project, codd_dir = _setup_project(
         tmp_path,
