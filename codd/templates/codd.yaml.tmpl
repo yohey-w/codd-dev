@@ -11,7 +11,7 @@ coding_principles: null
 
 scan:
   source_dirs:
-    - "src/"
+{{source_dirs}}
   test_dirs:
     - "tests/"
   doc_dirs:
@@ -24,7 +24,7 @@ scan:
 
 graph:
   store: "jsonl"
-  path: "codd/scan"
+  path: "{{graph_path}}"
 
 bands:
   green:

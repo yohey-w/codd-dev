@@ -5,6 +5,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 from codd.extractor import (
     ExtractResult,
@@ -363,3 +364,41 @@ class TestCLI:
         assert result.exit_code == 0
         assert "Extracted:" in result.output
         assert "modules" in result.output
+        config = yaml.safe_load((python_project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+        assert config["project"]["name"] == python_project.name
+        assert config["project"]["language"] == "python"
+        assert config["scan"]["source_dirs"] == ["src"]
+        assert config["graph"]["path"] == "codd/scan"
+        assert "Generated: codd/codd.yaml" in result.output
+
+    def test_extract_uses_hidden_config_when_codd_dir_is_source_tree(self, tmp_path):
+        from codd.cli import main
+        from click.testing import CliRunner
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "src").mkdir()
+        (project / "src" / "app.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+        (project / "codd").mkdir()
+        (project / "codd" / "__init__.py").write_text("", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "extract",
+            "--path", str(project),
+            "--language", "python",
+            "--source-dirs", "src",
+        ])
+
+        assert result.exit_code == 0
+        hidden_config = project / ".codd" / "codd.yaml"
+        assert hidden_config.exists()
+        assert (project / ".codd" / "extracted" / "system-context.md").exists()
+        assert not (project / "codd" / "codd.yaml").exists()
+
+        config = yaml.safe_load(hidden_config.read_text(encoding="utf-8"))
+        assert config["project"]["name"] == "project"
+        assert config["project"]["language"] == "python"
+        assert config["scan"]["source_dirs"] == ["src"]
+        assert config["graph"]["path"] == ".codd/scan"
+        assert "Generated: .codd/codd.yaml" in result.output

@@ -20,6 +20,64 @@ def _require_codd_dir(project_root: Path) -> Path:
     return codd_dir
 
 
+def _resolve_bootstrap_codd_dir(project_root: Path) -> Path:
+    """Choose a config dir for brownfield bootstrap without clobbering source code."""
+    existing = find_codd_dir(project_root)
+    if existing is not None:
+        return existing
+
+    hidden_dir = project_root / ".codd"
+    default_dir = project_root / "codd"
+    if hidden_dir.exists():
+        return hidden_dir
+    if default_dir.exists():
+        # Avoid writing config into projects whose source package is already named codd/.
+        return hidden_dir
+    return default_dir
+
+
+def _format_yaml_list(items: list[str], *, indent: int = 4) -> str:
+    """Render a YAML list block for the simple template engine."""
+    if not items:
+        return " " * indent + "[]"
+    return "\n".join(f'{" " * indent}- "{item}"' for item in items)
+
+
+def _display_path(path: Path, project_root: Path) -> str:
+    try:
+        return path.relative_to(project_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _ensure_bootstrap_codd_yaml(
+    project_root: Path,
+    *,
+    codd_dir: Path | None = None,
+    language: str,
+    source_dirs: list[str],
+) -> tuple[Path, bool]:
+    """Create a minimal codd.yaml after brownfield extract when none exists."""
+    codd_dir = codd_dir or _resolve_bootstrap_codd_dir(project_root)
+    config_path = codd_dir / "codd.yaml"
+    if config_path.exists():
+        return config_path, False
+
+    codd_dir.mkdir(parents=True, exist_ok=True)
+    codd_dir_name = _display_path(codd_dir, project_root)
+    _render_template(
+        "codd.yaml.tmpl",
+        config_path,
+        {
+            "project_name": project_root.name,
+            "language": language,
+            "source_dirs": _format_yaml_list(source_dirs),
+            "graph_path": f"{codd_dir_name}/scan",
+        },
+    )
+    return config_path, True
+
+
 @click.group()
 @click.version_option(package_name="codd-dev")
 def main():
@@ -66,6 +124,8 @@ def init(project_name: str, language: str, dest: str, requirements: str | None, 
     _render_template("codd.yaml.tmpl", codd_dir / "codd.yaml", {
         "project_name": project_name,
         "language": language,
+        "source_dirs": _format_yaml_list(["src/"]),
+        "graph_path": f"{config_dir}/scan",
     })
     _render_template("gitignore.tmpl", codd_dir / ".gitignore", {})
 
@@ -427,7 +487,7 @@ def verify(path: str, sprint: int | None) -> None:
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--language", default=None, help="Override language detection (python/typescript/javascript/go — full support; java — symbols only)")
 @click.option("--source-dirs", default=None, help="Comma-separated source directories (default: auto-detect)")
-@click.option("--output", default=None, help="Output directory (default: codd/extracted/)")
+@click.option("--output", default=None, help="Output directory (default: <config-dir>/extracted/)")
 @click.option("--ai", is_flag=True, default=False, help="Use AI-powered extraction (6-layer MECE design docs)")
 @click.option(
     "--ai-cmd",
@@ -446,14 +506,19 @@ def extract(path: str, language: str | None, source_dirs: str | None, output: st
     Default mode: static analysis (no AI, pure structural facts).
     With --ai: AI-powered 6-layer MECE extraction using claude --print.
 
-    Output goes to codd/extracted/ as draft documents. Review and promote
-    to codd/ when confirmed.
+    Output goes to the discovered CoDD config dir as draft documents
+    (`codd/extracted/` or `.codd/extracted/`). Review and promote
+    confirmed docs when ready.
     """
     project_root = Path(path).resolve()
+    bootstrap_codd_dir = _resolve_bootstrap_codd_dir(project_root)
+    dirs = [d.strip() for d in source_dirs.split(",") if d.strip()] if source_dirs else None
+    output_path = Path(output) if output else bootstrap_codd_dir / "extracted"
 
     if ai:
         from codd.extract_ai import run_extract_ai
-        from codd.config import load_project_config, find_codd_dir
+        from codd.extractor import extract_facts
+        from codd.config import load_project_config
 
         # Resolve AI command
         if ai_cmd is None:
@@ -471,39 +536,60 @@ def extract(path: str, language: str | None, source_dirs: str | None, output: st
         click.echo(f"Scanning project...")
 
         try:
-            result = run_extract_ai(project_root, ai_cmd, output, prompt_file=prompt_file)
+            result = run_extract_ai(project_root, ai_cmd, str(output_path), prompt_file=prompt_file)
         except Exception as exc:
             click.echo(f"Error: {exc}")
             raise SystemExit(1)
 
+        facts = extract_facts(project_root, language, dirs)
+        config_path, generated_config = _ensure_bootstrap_codd_yaml(
+            project_root,
+            codd_dir=bootstrap_codd_dir,
+            language=facts.language,
+            source_dirs=facts.source_dirs,
+        )
+        output_display = _display_path(result.output_dir, project_root)
+        config_display = _display_path(config_path, project_root)
+
         click.echo(f"\nExtracted: {result.module_count} source files analyzed")
-        click.echo(f"Output: {result.output_dir}/")
+        click.echo(f"Output: {output_display}/")
         for f in result.generated_files:
             click.echo(f"  {f.name}")
+        if generated_config:
+            click.echo(f"Generated: {config_display} (minimal brownfield config)")
 
         click.echo(f"\nNext steps:")
-        click.echo(f"  1. Review generated docs in {result.output_dir}/")
-        click.echo(f"  2. Promote confirmed docs: mv codd/extracted/*.md docs/design/")
+        click.echo(f"  1. Review generated docs in {output_display}/")
+        click.echo(f"  2. Promote confirmed docs: mv {output_display}/*.md docs/design/")
         click.echo(f"  3. Run: codd scan  (to build the dependency graph)")
     else:
         from codd.extractor import run_extract
 
-        dirs = [d.strip() for d in source_dirs.split(",")] if source_dirs else None
-
         try:
-            result = run_extract(project_root, language, dirs, output)
+            result = run_extract(project_root, language, dirs, str(output_path))
         except Exception as exc:
             click.echo(f"Error: {exc}")
             raise SystemExit(1)
 
+        config_path, generated_config = _ensure_bootstrap_codd_yaml(
+            project_root,
+            codd_dir=bootstrap_codd_dir,
+            language=result.language,
+            source_dirs=result.source_dirs,
+        )
+        output_display = _display_path(result.output_dir, project_root)
+        config_display = _display_path(config_path, project_root)
+
         click.echo(f"Extracted: {result.module_count} modules from {result.total_files} files ({result.total_lines:,} lines)")
-        click.echo(f"Output: {result.output_dir}/")
+        click.echo(f"Output: {output_display}/")
         for f in result.generated_files:
             click.echo(f"  {f.relative_to(result.output_dir)}")
+        if generated_config:
+            click.echo(f"Generated: {config_display} (minimal brownfield config)")
 
         click.echo(f"\nNext steps:")
-        click.echo(f"  1. Review generated docs in {result.output_dir}/")
-        click.echo(f"  2. Promote confirmed docs: mv codd/extracted/*.md docs/design/")
+        click.echo(f"  1. Review generated docs in {output_display}/")
+        click.echo(f"  2. Promote confirmed docs: mv {output_display}/*.md docs/design/")
         click.echo(f"  3. Run: codd scan  (to build the dependency graph)")
 
 

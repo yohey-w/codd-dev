@@ -120,6 +120,8 @@ class ExtractResult:
     module_count: int
     total_files: int
     total_lines: int
+    language: str
+    source_dirs: list[str]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -981,6 +983,8 @@ def run_extract(project_root: Path, language: str | None = None,
         module_count=len(facts.modules),
         total_files=facts.total_files,
         total_lines=facts.total_lines,
+        language=facts.language,
+        source_dirs=facts.source_dirs,
     )
 
 
