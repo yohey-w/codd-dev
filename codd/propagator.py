@@ -656,6 +656,8 @@ def _build_update_prompt(
         "- Do NOT add new sections or remove existing sections.",
         "- Do NOT change the title.",
         "- Do NOT emit YAML frontmatter — only the body content.",
+        "- Do NOT prepend analysis comments or preamble before the document body.",
+        "  Start directly with the first heading (# Title). No 'The code diff is...' lines.",
         "",
         f"Document: {doc.node_id}",
         f"Title: {doc.title}",
@@ -704,6 +706,12 @@ def _sanitize_update_body(body: str) -> str:
     fenced = MARKDOWN_FENCE_RE.match(normalized)
     if fenced:
         normalized = fenced.group("body")
+    # Strip AI preamble before the first heading.
+    # Some models emit analysis comments like "The code diff is..." before
+    # the actual document body.  Drop everything before the first "# " heading.
+    heading_match = re.search(r"^(# .+)$", normalized, re.MULTILINE)
+    if heading_match and heading_match.start() > 0:
+        normalized = normalized[heading_match.start():]
     if not normalized.strip():
         raise ValueError("AI command returned empty output for propagation update")
     return normalized.strip() + "\n"

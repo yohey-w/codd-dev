@@ -19,6 +19,7 @@ from codd.propagator import (
     _find_design_docs_by_modules,
     _get_doc_confidence,
     _map_files_to_modules,
+    _sanitize_update_body,
     _save_verify_state,
     _load_verify_state,
     _clear_verify_state,
@@ -742,3 +743,62 @@ def test_propagate_cli_commit_mode(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "Committed" in result.output or "committed" in result.output.lower()
     assert "Knowledge recorded" in result.output
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_update_body: AI preamble stripping
+# ---------------------------------------------------------------------------
+
+class TestSanitizeUpdateBody:
+    """AI sometimes emits analysis preamble before the document body.
+
+    _sanitize_update_body must strip everything before the first # heading.
+    """
+
+    def test_strips_single_line_preamble(self):
+        body = (
+            "The code diff is an initial scaffolding that matches the design.\n"
+            "\n"
+            "# Key Sequence Diagrams\n"
+            "\n"
+            "## 1. Overview\n"
+            "Content here.\n"
+        )
+        result = _sanitize_update_body(body)
+        assert result.startswith("# Key Sequence Diagrams")
+
+    def test_strips_multi_paragraph_preamble(self):
+        body = (
+            "The new code is an implementation of what is already documented.\n"
+            "No design-level changes are needed.\n"
+            "\n"
+            "However, some minor updates are warranted.\n"
+            "\n"
+            "# System Design\n"
+            "\n"
+            "## 1. Overview\n"
+        )
+        result = _sanitize_update_body(body)
+        assert result.startswith("# System Design")
+
+    def test_preserves_clean_heading(self):
+        body = "# ER Diagram\n\n## 1. Overview\nContent.\n"
+        result = _sanitize_update_body(body)
+        assert result.startswith("# ER Diagram")
+
+    def test_strips_frontmatter_and_preamble(self):
+        body = (
+            "---\ncodd:\n  node_id: test\n---\n\n"
+            "The design document already describes this.\n\n"
+            "# ER Diagram\n\nContent.\n"
+        )
+        result = _sanitize_update_body(body)
+        assert result.startswith("# ER Diagram")
+
+    def test_raises_on_empty_body(self):
+        with pytest.raises(ValueError, match="empty output"):
+            _sanitize_update_body("")
+
+    def test_raises_on_whitespace_only(self):
+        with pytest.raises(ValueError, match="empty output"):
+            _sanitize_update_body("   \n\n  ")
