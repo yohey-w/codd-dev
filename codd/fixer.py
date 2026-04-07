@@ -516,6 +516,8 @@ def _build_fix_prompt(
         "   - If tests fail, fix the source code so tests pass.",
         "   - If build fails (type errors, import errors), fix the source code.",
         "   - If lint fails, fix the lint issues.",
+        "   - If a tool prompted interactively in CI (missing config), create the required config file.",
+        "     Common examples: .eslintrc.json, .prettierrc, tsconfig.json, jest.config.*, playwright.config.*",
         "4. Do NOT modify test files unless the test itself has a bug (e.g., wrong import path).",
         "5. Do NOT modify design documents.",
         "6. Make minimal, focused changes. Don't refactor unrelated code.",
@@ -615,6 +617,9 @@ def _extract_file_paths_from_log(log: str) -> list[str]:
 def _detect_category_from_log(log: str) -> str:
     """Detect failure category from log content."""
     lower = log.lower()
+    # Interactive prompts in CI = missing config (tool asks "How would you like to configure...")
+    if "how would you like to" in lower or "would you like to set up" in lower:
+        return "config"
     if "tsc" in lower or "type error" in lower or "ts(" in lower or "ts2" in lower:
         return "typecheck"
     if "eslint" in lower or "lint" in lower:

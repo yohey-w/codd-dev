@@ -54,6 +54,12 @@ class TestDetectCategoryFromLog:
     def test_detects_build(self):
         assert _detect_category_from_log("Build failed with error") == "build"
 
+    def test_detects_config_interactive_prompt(self):
+        assert _detect_category_from_log("How would you like to configure ESLint?") == "config"
+
+    def test_detects_config_setup_prompt(self):
+        assert _detect_category_from_log("Would you like to set up TypeScript?") == "config"
+
     def test_defaults_to_test(self):
         assert _detect_category_from_log("some random output") == "test"
 
