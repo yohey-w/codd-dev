@@ -232,7 +232,7 @@ def test_generate_uses_dependency_documents_as_ai_context(tmp_path, mock_ai_cli)
     assert "tenant isolation in security/data model sections" in prompt
     assert "--- BEGIN DEPENDENCY docs/requirements/lms_requirements_v2.0.md (req:lms-requirements-v2.0) ---" in prompt
     assert "Tenant isolation and audit logging are mandatory." in prompt
-    assert "Prefer a structure that covers: Overview, Acceptance Criteria, Failure Criteria." in prompt
+    assert "Prefer a structure that covers: Overview, Acceptance Criteria, Failure Criteria, E2E Test Generation Meta-Prompt." in prompt
 
 
 def test_generate_supports_detailed_design_documents_with_mermaid_guidance(tmp_path, mock_ai_cli):

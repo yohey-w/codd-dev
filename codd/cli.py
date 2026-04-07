@@ -731,6 +731,101 @@ def risk(path: str):
 
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
+@click.option("--max-attempts", default=3, type=click.IntRange(min=1, max=10),
+              help="Maximum fix attempts (default: 3)")
+@click.option("--test-results", default=None, type=click.Path(exists=True),
+              help="Path to test results directory or file")
+@click.option("--ci-log", default=None, type=click.Path(exists=True),
+              help="Path to CI failure log file")
+@click.option("--ci", "ci_only", is_flag=True, help="Only check CI failures (skip local tests)")
+@click.option("--local", "local_only", is_flag=True, help="Only run local tests (skip CI check)")
+@click.option("--no-push", is_flag=True, help="Don't push fixes after successful fix")
+@click.option("--dry-run", is_flag=True, help="Show what would be fixed without making changes")
+@click.option("--ai-cmd", default=None, help="Override AI CLI command")
+def fix(path: str, max_attempts: int, test_results: str | None, ci_log: str | None,
+        ci_only: bool, local_only: bool, no_push: bool, dry_run: bool, ai_cmd: str | None):
+    """Fix test/build failures using AI guided by design documents.
+
+    \b
+    Auto-detects failure source (in order):
+      1. Explicit --test-results / --ci-log files
+      2. CI failures via `gh run view`
+      3. Local test execution
+
+    Maps failures to relevant design documents via the dependency graph,
+    then invokes Claude Code to fix implementation code.
+
+    \b
+    Examples:
+      codd fix                     # auto-detect and fix
+      codd fix --ci                # fix latest CI failure
+      codd fix --local             # run tests locally and fix
+      codd fix --dry-run           # show plan without fixing
+      codd fix --no-push           # fix but don't push
+    """
+    from codd.fixer import run_fix
+
+    project_root = Path(path).resolve()
+    _require_codd_dir(project_root)
+
+    if ci_only and local_only:
+        click.echo("Error: --ci and --local are mutually exclusive.")
+        raise SystemExit(1)
+
+    if dry_run:
+        click.echo("🔍 Dry run — analyzing failures without making changes...")
+
+    result = run_fix(
+        project_root,
+        ai_command=ai_cmd,
+        max_attempts=max_attempts,
+        test_results=test_results,
+        ci_log=ci_log,
+        ci_only=ci_only,
+        local_only=local_only,
+        push=not no_push,
+        dry_run=dry_run,
+    )
+
+    if not result.attempts:
+        click.echo("✅ All tests passed. Nothing to fix.")
+        return
+
+    if dry_run:
+        click.echo(f"\n📊 Found {len(result.attempts[0].failures)} failure(s):")
+        for f in result.attempts[0].failures:
+            click.echo(f"  [{f.category}] {f.summary}")
+            if f.failed_files:
+                click.echo(f"    Files: {', '.join(f.failed_files)}")
+        click.echo(f"\nSource: {result.source}")
+        click.echo("Run without --dry-run to fix.")
+        return
+
+    for attempt in result.attempts:
+        status = "✅" if attempt.fixed else "❌"
+        click.echo(f"\n{status} Attempt {attempt.attempt}/{max_attempts}")
+        click.echo(f"  Failures: {len(attempt.failures)}")
+
+    if result.fixed:
+        click.echo(f"\n✅ All failures fixed in {len(result.attempts)} attempt(s).")
+        if result.pushed:
+            click.echo("📤 Fixes pushed to remote.")
+            if result.ci_passed is True:
+                click.echo("✅ CI passed.")
+            elif result.ci_passed is False:
+                click.echo("❌ CI still failing after fix.")
+            elif result.ci_passed is None:
+                click.echo("👀 CI status unknown (gh CLI unavailable or timed out).")
+        elif not no_push:
+            click.echo("⚠️  Push failed. Run `git push` manually.")
+    else:
+        click.echo(f"\n❌ Could not fix all failures after {max_attempts} attempts.")
+        click.echo("Review the errors above and fix manually.")
+        raise SystemExit(1)
+
+
+@main.command()
+@click.option("--path", default=".", help="Project root directory")
 def policy(path: str):
     """Check source code against enterprise policy rules.
 

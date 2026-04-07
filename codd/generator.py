@@ -32,8 +32,8 @@ TYPE_SECTIONS = {
     "design": ["Overview", "Architecture", "Open Questions"],
     "plan": ["Overview", "Milestones", "Risks"],
     "governance": ["Overview", "Decision Log", "Follow-ups"],
-    "test": ["Overview", "Acceptance Criteria", "Failure Criteria"],
-    "operations": ["Overview", "Runbook", "Monitoring"],
+    "test": ["Overview", "Acceptance Criteria", "Failure Criteria", "E2E Test Generation Meta-Prompt"],
+    "operations": ["Overview", "Runbook", "Monitoring", "CI/CD Pipeline Generation Meta-Prompt"],
     "document": ["Overview", "Details", "Open Questions"],
 }
 DETAILED_DESIGN_SECTIONS = [
@@ -450,6 +450,40 @@ def _build_generation_prompt(
             [
                 "- Under '## 2. Mermaid Diagrams', include at least one ```mermaid``` fenced block.",
                 "- Use prose after each Mermaid block to explain ownership boundaries and implementation consequences.",
+            ]
+        )
+
+    if doc_type == "test":
+        lines.extend(
+            [
+                "",
+                "E2E Test Generation Meta-Prompt section rules:",
+                "- The final section '## E2E Test Generation Meta-Prompt' serves as a machine-readable instruction for `codd propagate` to auto-generate E2E tests.",
+                "- MECE domain decomposition: Split E2E tests into non-overlapping domain files (e.g. auth, rbac, tenant-isolation, core-features, integrations). Each file owns exactly one domain.",
+                "- Scenario derivation: For each domain, derive test scenarios from acceptance criteria (positive + negative) and failure criteria (inverted to assertions).",
+                "- Architecture adaptation: Include a rule that test generation must scan the actual route/endpoint structure and mark unimplemented endpoints with `test.fixme()` instead of skipping.",
+                "- Quality gate: Define pass criteria — all PASS, zero SKIP, acceptance criteria coverage, and any release-blocking constraints from conventions.",
+                "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`.",
+                "- Shared helpers: Mandate a `tests/e2e/helpers/` directory for auth flows, test data setup, and common assertions to avoid duplication across spec files.",
+                "- Generation markers: All generated files must include `// @generated-from:` and `// @generated-by: codd propagate` headers. Manual tests marked with `// @manual` must be preserved on regeneration.",
+            ]
+        )
+
+    if doc_type == "operations":
+        lines.extend(
+            [
+                "",
+                "CI/CD Pipeline Generation Meta-Prompt section rules:",
+                "- The final section '## CI/CD Pipeline Generation Meta-Prompt' serves as a machine-readable instruction for generating `.github/workflows/ci.yml`.",
+                "- Derive CI jobs from the test strategy document: for each test level (unit, integration, E2E, performance), create a corresponding CI job.",
+                "- Include build verification: `npm run build` (or equivalent) must pass before tests run.",
+                "- Database setup: If the project uses a database, include a service container (e.g. PostgreSQL) with seed step.",
+                "- Environment variables: List required env vars from the project config (e.g. NEXTAUTH_SECRET, DATABASE_URL) and mark which should be GitHub Secrets.",
+                "- Merge gate: All test jobs must pass before PR merge is allowed. Specify branch protection rule recommendations.",
+                "- Output file: `.github/workflows/ci.yml`. Include `// @generated-by: codd propagate` as a YAML comment.",
+                "- Trigger: `on: pull_request` to main/develop branches.",
+                "- Caching: Include dependency caching (node_modules, pip cache, etc.) for faster CI runs.",
+                "- Failure notification: Recommend but do not require Slack/email notification on failure.",
             ]
         )
 

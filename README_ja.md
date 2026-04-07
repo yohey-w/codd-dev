@@ -22,31 +22,31 @@
 pip install codd-dev
 ```
 
-**v1.5.0** — `init` / `scan` / `impact` は安定版。`extract --ai` にbaselineプリセット搭載。`audit` / `policy` / `require` / `validate` はアルファ。GitHub Action によるCI連携対応。
+**v1.6.0** — `init` / `scan` / `impact` は安定版。`propagate` でコード変更を下流設計書に伝搬。`extract --ai` にbaselineプリセット搭載。OSS/Proブリッジパターン分離。GitHub Action によるCI連携対応。
 
 ---
 
 ## なぜCoDD？
 
-AIはコードを生成できる。人間はPRをレビューできる。でも、**要件が変わったときのエビデンスは誰が追跡する？**
+AIは仕様を書ける。でも**上流が変わったら？**
 
-- どの設計書が古くなった？
-- どのポリシーに違反した？
-- 依存グラフ上の影響範囲は？
-- PMはこのマージを自信を持って承認できる？
+あらゆるSpec-firstツールは「作る」ところで止まる。CoDDはそこから始まる。要件が変わったとき、コードが更新されたとき、設計の前提が崩れたとき、CoDDが**変更を下流に自動伝搬**する — 影響を受ける設計書を更新し、古くなった成果物をフラグし、エビデンスの証跡を残す。
 
-**CoDDはエビデンスエンジン。** 依存グラフを構築し、変更影響を追跡し、エンタープライズポリシーを適用し、レビュー可能な監査パックを生成する — マージ判断を勘ではなくエビデンスに基づかせる。
+```
+要件が変わった → codd impact が影響設計書6本を特定
+コードが変わった → codd propagate が下流設計書を更新
+設計が変わった → CEGグラフが全依存先を追跡
+```
+
+他のツールにはこれができない。spec-kit、Kiro、cc-sddは文書を作る。**CoDDは文書の一貫性を維持する。**
 
 ## 動作の仕組み
 
 ```
 要件定義 (人間)  →  設計書生成 (AI)  →  コード & テスト (AI)
-                          ↑
-                  codd scan が
-                   依存グラフを構築
-                          ↓
-            何か変わった？ codd impact が
-             影響範囲を正確に特定 — 自動で。
+       ↕                   ↕                    ↕
+   codd impact       codd propagate        codd extract
+  (何が変わった？)    (下流を更新)         (逆生成)
 ```
 
 ### 3つのレイヤー
@@ -116,6 +116,50 @@ codd measure              # プロジェクト健全性スコア（0-100）
 ```
 
 ## デモ
+
+### 再現可能なE2Eデモ — 3つの伝搬パターン
+
+以下のデモはコミット [`d7d9f45`](https://github.com/yohey-w/codd-dev/commit/d7d9f45) に固定されている。ローカルで完全再現可能。
+
+**セットアップ:**
+```bash
+pip install codd-dev>=1.6.0
+mkdir demo && cd demo && git init
+cat > spec.txt << 'EOF'
+TaskFlow — Requirements
+- User authentication (email + Google OAuth)
+- Workspace management (teams, roles, invites)
+- Task CRUD with assignees, labels, due dates
+- Real-time updates (WebSocket)
+- File attachments (S3)
+- Notification system (in-app + email)
+EOF
+codd init --project-name "taskflow" --language "typescript" --requirements spec.txt
+```
+
+**パターン1 — Source → Doc**（仕様 → 設計書）:
+```bash
+codd plan --init
+for wave in $(seq 1 $(codd plan --waves)); do codd generate --wave $wave; done
+codd validate        # 期待値: PASS, エラー0件
+codd scan            # 期待値: 17ノード, 30+エッジ
+```
+
+**パターン2 — Doc → Doc**（要件変更 → 下流更新）:
+```bash
+# 要件を編集: 認証に「SSO (SAML 2.0)」を追加
+codd impact          # 期待値: 7本中6本がGreen/Amberバンド
+codd propagate --update  # 下流設計書を自動更新
+```
+
+**パターン3 — Doc → Doc via CEG**（コード変更 → 設計書更新）:
+```bash
+# authモジュールのソースコードを変更
+codd propagate       # 期待値: auth-design, system-designが影響あり
+codd propagate --update  # コードdiffからAIが影響設計書を更新
+```
+
+**期待出力**: 20行のspec → 17設計成果物（5,100行超） → 変更後もpropagateで全文書の一貫性を維持。パターン3（CEGベースの伝搬）は新規性が高い — コード変更を依存グラフ経由で設計書まで遡って更新するツールは他にない。
 
 ### グリーンフィールド — specから動くアプリまで
 
@@ -304,16 +348,38 @@ codd impact
 | `codd generate` | 実験的 | Wave順で設計書生成（グリーンフィールド） |
 | `codd restore` | 実験的 | 抽出事実から設計書を復元（ブラウンフィールド） |
 | `codd plan` | 実験的 | Wave実行状況（`--init` はブラウンフィールドにも対応） |
-| `codd verify` | 実験的 | V-Model検証 |
+| `codd verify` | 実験的 (Pro) | V-Model検証 |
 | `codd implement` | 実験的 | 設計書→コード生成 |
-| `codd propagate` | 実験的 | ソースコード変更を設計書に逆伝搬 |
-| `codd review` | 実験的 | AI品質評価（LLM-as-Judge） |
+| `codd propagate` | **アルファ** | コード/設計変更を下流の影響設計書に伝搬 |
+| `codd review` | 実験的 (Pro) | AI品質評価（LLM-as-Judge） |
 | `codd extract` | **アルファ** | 既存コードから設計書を逆生成 |
 | `codd require` | **アルファ** | 既存コードベースから要件を推論（ブラウンフィールド） |
-| `codd audit` | **アルファ** | 変更レビュー一括パック（validate + impact + policy + review） |
+| `codd audit` | **アルファ** (Pro) | 変更レビュー一括パック（validate + impact + policy + review） |
 | `codd policy` | **アルファ** | エンタープライズポリシーチェッカー（ソースコードの禁止/必須パターン） |
 | `codd measure` | **アルファ** | プロジェクト健全性メトリクス（グラフ、カバレッジ、品質、スコア 0-100） |
 | `codd mcp-server` | **アルファ** | AIツール連携用MCPサーバー（stdio、依存ゼロ） |
+
+## OSS / Pro 分離
+
+CoDD v1.6.0でOSS/Proの境界をブリッジパターンで明確化。
+
+**OSS（MIT、無料）** — 文書の一貫性維持に必要な全機能:
+
+`init` · `scan` · `impact` · `generate` · `restore` · `propagate` · `extract` · `require` · `plan` · `validate` · `measure` · `policy` · `mcp-server`
+
+**Pro（プライベート、有料）** — エンタープライズ向けレビュー・検証:
+
+`review` · `verify` · `audit` · `risk`
+
+```bash
+# OSSのみ
+pip install codd-dev
+
+# Pro拡張を追加
+pip install "codd-pro @ git+ssh://git@github.com/yohey-w/codd-pro.git"
+```
+
+`codd-pro` がインストールされていれば、entry-pointsプラグイン探索でPro実装がOSSフォールバックを自動的にオーバーライドする。未インストール時はマイグレーションメッセージを表示して正常終了。設定変更は不要。
 
 ## CI連携（GitHub Action）
 
@@ -548,7 +614,7 @@ done
 | 仕様記法 | Markdown + 40拡�� | EARS記法 | 品質ゲート + git worktree | フロントマター `depends_on` |
 | ハーネスロックイン | GitHub Copilot | Kiro IDE | Claude Code | **任意のエージェント / IDE** |
 
-要約: spec-kit、Kiro、cc-sddは「仕様をどう作るか」に答える。CoDDは「要件が変わったとき、仕様・コード・テストの一貫性をどう保つか」に答える。
+要約: spec-kit、Kiro、cc-sddは「仕様をどう作るか」に答える。CoDDは「上流が変わったとき、下流を自動で更新する」に答える。
 
 ## 比較
 
