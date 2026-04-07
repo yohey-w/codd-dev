@@ -16,8 +16,12 @@ from codd.fixer import (
     _detect_category_from_log,
     _detect_test_command,
     _extract_file_paths_from_log,
+    _find_impl_candidates,
+    _infer_impl_paths,
     _invoke_fix_ai,
+    _is_test_path,
     _parse_ci_log,
+    _run_local_tests,
     run_fix,
 )
 
@@ -242,3 +246,93 @@ class TestCollectSourceFiles:
         )]
         result = _collect_source_files(tmp_path, failures)
         assert "code here" in result
+
+    def test_infers_impl_from_test_paths(self, tmp_path):
+        """When only test files are in failures, infer impl paths."""
+        # Create a Next.js API route that should be found
+        route = tmp_path / "src" / "app" / "api" / "enrollments" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text("export function GET() { return Response.json([]); }")
+
+        failures = [FailureInfo(
+            source="ci", category="test", summary="fail",
+            log="", failed_files=["tests/e2e/enrollments.spec.ts"],
+        )]
+        result = _collect_source_files(tmp_path, failures)
+        assert "src/app/api/enrollments/route.ts" in result
+        assert "export function GET()" in result
+
+
+class TestIsTestPath:
+    def test_tests_directory(self):
+        assert _is_test_path("tests/e2e/auth.spec.ts") is True
+
+    def test_spec_file(self):
+        assert _is_test_path("src/auth.spec.ts") is True
+
+    def test_test_file(self):
+        assert _is_test_path("src/auth.test.ts") is True
+
+    def test_python_test(self):
+        assert _is_test_path("test_tasks.py") is True
+
+    def test_impl_file(self):
+        assert _is_test_path("src/app/api/auth/route.ts") is False
+
+    def test_service_file(self):
+        assert _is_test_path("src/services/auth.ts") is False
+
+
+class TestInferImplPaths:
+    def test_nextjs_api_route(self, tmp_path):
+        route = tmp_path / "src" / "app" / "api" / "courses" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text("handler")
+
+        result = _infer_impl_paths(tmp_path, ["tests/e2e/courses.spec.ts"])
+        assert "src/app/api/courses/route.ts" in result
+
+    def test_kebab_case_variant(self, tmp_path):
+        route = tmp_path / "src" / "app" / "api" / "lms-core" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text("handler")
+
+        result = _infer_impl_paths(tmp_path, ["tests/e2e/lms_core.spec.ts"])
+        assert "src/app/api/lms-core/route.ts" in result
+
+    def test_python_module(self, tmp_path):
+        module = tmp_path / "tasks_api" / "app.py"
+        module.parent.mkdir(parents=True)
+        module.write_text("from flask import Flask")
+
+        result = _infer_impl_paths(tmp_path, ["tests/test_tasks.py"])
+        assert any("app.py" in p for p in result)
+
+    def test_deduplicates(self, tmp_path):
+        route = tmp_path / "src" / "app" / "api" / "auth" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text("handler")
+
+        result = _infer_impl_paths(tmp_path, [
+            "tests/e2e/auth.spec.ts",
+            "tests/unit/auth.test.ts",
+        ])
+        assert result.count("src/app/api/auth/route.ts") == 1
+
+
+class TestRunLocalTestsNone:
+    def test_returns_none_when_no_command(self, tmp_path):
+        """No test command → None (unverified), not empty list (passed)."""
+        result = _run_local_tests(tmp_path, {})
+        assert result is None
+
+    def test_returns_empty_on_success(self, tmp_path):
+        config = {"fix": {"test_command": "true"}}
+        result = _run_local_tests(tmp_path, config)
+        assert result == []
+
+    def test_returns_failures_on_error(self, tmp_path):
+        config = {"fix": {"test_command": "false"}}
+        result = _run_local_tests(tmp_path, config)
+        assert result is not None
+        assert len(result) > 0

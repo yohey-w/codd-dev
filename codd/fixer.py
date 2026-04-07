@@ -121,6 +121,18 @@ def run_fix(
 
         # Re-run tests to verify
         new_failures = _run_local_tests(project_root, config)
+
+        if new_failures is None:
+            # Tests could not run — mark as unverified, not fixed
+            logger.warning("Local tests could not run. Fix is unverified.")
+            attempts.append(FixAttempt(
+                attempt=attempt_num,
+                failures=failures,
+                fixed=False,
+                ai_output=ai_output,
+            ))
+            break
+
         fixed = len(new_failures) == 0
 
         attempts.append(FixAttempt(
@@ -369,8 +381,14 @@ def _parse_playwright_results(data: dict) -> list[FailureInfo]:
     return failures
 
 
-def _run_local_tests(project_root: Path, config: dict[str, Any]) -> list[FailureInfo]:
-    """Run the project's test suite locally and return failures."""
+def _run_local_tests(project_root: Path, config: dict[str, Any]) -> list[FailureInfo] | None:
+    """Run the project's test suite locally and return failures.
+
+    Returns:
+        list[FailureInfo]: Failures found (empty list = all tests passed).
+        None: Tests could not be executed (no command, missing runtime, etc.).
+              Callers MUST treat None as "unverified", NOT as "fixed".
+    """
     fix_config = config.get("fix", {})
     test_command = fix_config.get("test_command")
 
@@ -379,8 +397,8 @@ def _run_local_tests(project_root: Path, config: dict[str, Any]) -> list[Failure
         test_command = _detect_test_command(project_root)
 
     if not test_command:
-        logger.warning("No test command configured or detected. Skipping local tests.")
-        return []
+        logger.warning("No test command configured or detected. Cannot verify fix.")
+        return None
 
     try:
         result = subprocess.run(
@@ -616,38 +634,52 @@ def _collect_source_files(
     failures: list[FailureInfo],
     max_chars: int = 50000,
 ) -> str:
-    """Read current source of files mentioned in failure logs."""
+    """Read current source of files mentioned in failure logs.
+
+    When only test files are mentioned (common for E2E failures), infers
+    implementation file paths from test names using naming conventions.
+    """
     # Collect unique file paths from failures
     candidate_paths: list[str] = []
+    test_paths: list[str] = []
     for f in failures:
         for fp in f.failed_files:
             # Normalize: strip CI runner prefixes, keep relative paths
             clean = fp
-            # Strip common CI prefixes like /home/runner/work/repo/repo/
             for prefix in ["/home/runner/work/", "/github/workspace/"]:
                 if clean.startswith(prefix):
                     parts = clean[len(prefix):].split("/", 2)
                     if len(parts) >= 3:
-                        clean = parts[2]  # Skip repo/repo/
+                        clean = parts[2]
                     break
             candidate_paths.append(clean)
 
-    # Deduplicate and resolve
+    # Separate implementation files from test files
+    impl_paths: list[str] = []
+    for p in candidate_paths:
+        if _is_test_path(p):
+            test_paths.append(p)
+        else:
+            impl_paths.append(p)
+
+    # If we only have test files, infer implementation paths from test names
+    if not impl_paths and test_paths:
+        impl_paths = _infer_impl_paths(project_root, test_paths)
+        logger.info("Inferred %d implementation paths from %d test paths",
+                     len(impl_paths), len(test_paths))
+
+    # Read implementation files
     seen: set[str] = set()
     source_parts: list[str] = []
     total_chars = 0
 
-    for rel_path in candidate_paths:
+    for rel_path in impl_paths:
         if rel_path in seen:
             continue
         seen.add(rel_path)
 
         target = project_root / rel_path
         if not target.is_file():
-            continue
-        # Skip test files — we don't want to include them as "source to fix"
-        rel_str = str(target.relative_to(project_root))
-        if rel_str.startswith("tests/") or rel_str.startswith("__tests__/"):
             continue
 
         try:
@@ -658,15 +690,115 @@ def _collect_source_files(
         if total_chars + len(content) > max_chars:
             remaining = max_chars - total_chars
             if remaining > 500:
+                rel_str = str(target.relative_to(project_root))
                 source_parts.append(
                     f"```{_guess_lang(target)} {rel_str}\n{content[:remaining]}\n```\n(truncated)"
                 )
             break
 
+        rel_str = str(target.relative_to(project_root))
         source_parts.append(f"```{_guess_lang(target)} {rel_str}\n{content}\n```")
         total_chars += len(content)
 
     return "\n\n".join(source_parts)
+
+
+def _is_test_path(path: str) -> bool:
+    """Check if a path looks like a test file."""
+    parts = path.replace("\\", "/").split("/")
+    # Directory-based: tests/, __tests__/, test/, spec/
+    if any(p in ("tests", "__tests__", "test", "spec") for p in parts):
+        return True
+    # File-based: *.spec.*, *.test.*, test_*
+    basename = parts[-1] if parts else ""
+    if ".spec." in basename or ".test." in basename or basename.startswith("test_"):
+        return True
+    return False
+
+
+def _infer_impl_paths(project_root: Path, test_paths: list[str]) -> list[str]:
+    """Infer implementation file paths from test file paths.
+
+    Uses naming conventions to find likely implementation files:
+    - tests/e2e/enrollments.spec.ts → src/app/api/enrollments/route.ts
+    - tests/e2e/admin.spec.ts → src/app/api/admin/route.ts
+    - tests/unit/auth.test.ts → src/auth.ts, src/services/auth/
+    - tests/test_tasks.py → tasks.py, app.py, src/tasks.py
+    """
+    inferred: list[str] = []
+
+    for test_path in test_paths:
+        # Extract the domain name from test file
+        basename = Path(test_path).stem  # e.g. "enrollments.spec" or "test_tasks"
+        # Strip common test suffixes/prefixes
+        domain = basename
+        for suffix in (".spec", ".test", "_spec", "_test"):
+            if domain.endswith(suffix):
+                domain = domain[: -len(suffix)]
+        if domain.startswith("test_"):
+            domain = domain[5:]
+
+        if not domain:
+            continue
+
+        # Search for matching implementation files
+        candidates = _find_impl_candidates(project_root, domain)
+        inferred.extend(candidates)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for p in inferred:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
+def _find_impl_candidates(project_root: Path, domain: str) -> list[str]:
+    """Find implementation files matching a domain name."""
+    candidates: list[str] = []
+    domain_lower = domain.lower().replace("-", "_")
+
+    # Strategy 1: Next.js API routes — src/app/api/{domain}/route.ts
+    for ext in ("ts", "tsx", "js"):
+        route = project_root / "src" / "app" / "api" / domain_lower / f"route.{ext}"
+        if route.is_file():
+            candidates.append(str(route.relative_to(project_root)))
+
+    # Strategy 2: Kebab-case variant — src/app/api/{domain-kebab}/route.ts
+    domain_kebab = domain_lower.replace("_", "-")
+    if domain_kebab != domain_lower:
+        for ext in ("ts", "tsx", "js"):
+            route = project_root / "src" / "app" / "api" / domain_kebab / f"route.{ext}"
+            if route.is_file():
+                candidates.append(str(route.relative_to(project_root)))
+
+    # Strategy 3: Generated/service files — src/**/domain*.ts
+    for pattern in (
+        f"src/**/*{domain_lower}*",
+        f"src/**/*{domain_kebab}*",
+        f"lib/**/*{domain_lower}*",
+    ):
+        for match in project_root.glob(pattern):
+            if match.is_file() and not _is_test_path(str(match.relative_to(project_root))):
+                rel = str(match.relative_to(project_root))
+                if rel not in candidates:
+                    candidates.append(rel)
+
+    # Strategy 4: Python — {domain}.py, app.py in same directory
+    for pattern in (
+        f"**/{domain_lower}.py",
+        f"**/app.py",
+        f"src/**/{domain_lower}.py",
+    ):
+        for match in project_root.glob(pattern):
+            if match.is_file() and not _is_test_path(str(match.relative_to(project_root))):
+                rel = str(match.relative_to(project_root))
+                if rel not in candidates:
+                    candidates.append(rel)
+
+    return candidates
 
 
 def _guess_lang(path: Path) -> str:
