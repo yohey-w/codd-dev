@@ -727,6 +727,16 @@ def _collect_source_files(
         logger.info("Inferred %d implementation paths from %d test paths",
                      len(impl_paths), len(test_paths))
 
+    # Also extract API endpoint paths from error logs and find route files
+    api_paths = _extract_api_endpoints_from_failures(failures)
+    if api_paths:
+        route_files = _find_route_files_for_endpoints(project_root, api_paths)
+        for rf in route_files:
+            if rf not in impl_paths:
+                impl_paths.append(rf)
+        logger.info("Found %d route files from %d API endpoints in logs",
+                     len(route_files), len(api_paths))
+
     # Read implementation files
     seen: set[str] = set()
     source_parts: list[str] = []
@@ -819,19 +829,16 @@ def _find_impl_candidates(project_root: Path, domain: str) -> list[str]:
     candidates: list[str] = []
     domain_lower = domain.lower().replace("-", "_")
 
-    # Strategy 1: Next.js API routes — src/app/api/{domain}/route.ts
-    for ext in ("ts", "tsx", "js"):
-        route = project_root / "src" / "app" / "api" / domain_lower / f"route.{ext}"
-        if route.is_file():
-            candidates.append(str(route.relative_to(project_root)))
-
-    # Strategy 2: Kebab-case variant — src/app/api/{domain-kebab}/route.ts
+    # Strategy 1: API route files — **/api/{domain}/route.{ts,js}
+    # Handles both standard (src/app/api/) and generated (src/generated/*/app/api/)
     domain_kebab = domain_lower.replace("_", "-")
-    if domain_kebab != domain_lower:
+    for domain_variant in {domain_lower, domain_kebab}:
         for ext in ("ts", "tsx", "js"):
-            route = project_root / "src" / "app" / "api" / domain_kebab / f"route.{ext}"
-            if route.is_file():
-                candidates.append(str(route.relative_to(project_root)))
+            for match in project_root.glob(f"**/api/{domain_variant}/route.{ext}"):
+                if match.is_file():
+                    rel = str(match.relative_to(project_root))
+                    if rel not in candidates:
+                        candidates.append(rel)
 
     # Strategy 3: Generated/service files — src/**/domain*.ts
     for pattern in (
@@ -858,6 +865,40 @@ def _find_impl_candidates(project_root: Path, domain: str) -> list[str]:
                     candidates.append(rel)
 
     return candidates
+
+
+def _extract_api_endpoints_from_failures(failures: list[FailureInfo]) -> list[str]:
+    """Extract API endpoint paths (e.g., /api/enrollments) from error logs."""
+    endpoint_re = re.compile(r"/api/[\w/-]+")
+    endpoints: list[str] = []
+    seen: set[str] = set()
+    for f in failures:
+        for match in endpoint_re.finditer(f.log):
+            ep = match.group(0).rstrip("/")
+            if ep not in seen:
+                seen.add(ep)
+                endpoints.append(ep)
+    return endpoints
+
+
+def _find_route_files_for_endpoints(
+    project_root: Path, endpoints: list[str],
+) -> list[str]:
+    """Find route files matching API endpoint paths.
+
+    E.g., /api/enrollments → **/api/enrollments/route.{ts,js}
+    """
+    found: list[str] = []
+    for ep in endpoints:
+        # Strip leading /
+        ep_path = ep.lstrip("/")
+        for ext in ("ts", "tsx", "js"):
+            for match in project_root.glob(f"**/{ep_path}/route.{ext}"):
+                if match.is_file():
+                    rel = str(match.relative_to(project_root))
+                    if rel not in found:
+                        found.append(rel)
+    return found
 
 
 def _guess_lang(path: Path) -> str:

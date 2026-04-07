@@ -15,8 +15,10 @@ from codd.fixer import (
     _collect_source_files,
     _detect_category_from_log,
     _detect_test_command,
+    _extract_api_endpoints_from_failures,
     _extract_file_paths_from_log,
     _find_impl_candidates,
+    _find_route_files_for_endpoints,
     _infer_impl_paths,
     _invoke_fix_ai,
     _is_test_path,
@@ -401,3 +403,62 @@ class TestRunLocalTestsNone:
         result = _run_local_tests(tmp_path, config)
         assert result is not None
         assert len(result) > 0
+
+
+class TestExtractApiEndpoints:
+    def test_extracts_endpoints_from_log(self):
+        failures = [FailureInfo(
+            source="ci", category="test", summary="fail",
+            log="GET /api/enrollments returned 405\nGET /api/admin/roles returned 405",
+            failed_files=[],
+        )]
+        result = _extract_api_endpoints_from_failures(failures)
+        assert "/api/enrollments" in result
+        assert "/api/admin/roles" in result
+
+    def test_deduplicates(self):
+        failures = [FailureInfo(
+            source="ci", category="test", summary="fail",
+            log="/api/enrollments 405\n/api/enrollments 500",
+            failed_files=[],
+        )]
+        result = _extract_api_endpoints_from_failures(failures)
+        assert result.count("/api/enrollments") == 1
+
+
+class TestFindRouteFilesForEndpoints:
+    def test_finds_standard_route(self, tmp_path):
+        route = tmp_path / "src" / "app" / "api" / "enrollments" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text("handler")
+
+        result = _find_route_files_for_endpoints(tmp_path, ["/api/enrollments"])
+        assert any("enrollments/route.ts" in p for p in result)
+
+    def test_finds_generated_route(self, tmp_path):
+        """Finds routes in generated/ subdirectories (example-app pattern)."""
+        route = tmp_path / "src" / "generated" / "sprint_1" / "api" / "enrollments" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text("handler")
+
+        result = _find_route_files_for_endpoints(tmp_path, ["/api/enrollments"])
+        assert any("enrollments/route.ts" in p for p in result)
+
+    def test_finds_nested_route(self, tmp_path):
+        route = tmp_path / "src" / "app" / "api" / "admin" / "roles" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text("handler")
+
+        result = _find_route_files_for_endpoints(tmp_path, ["/api/admin/roles"])
+        assert any("admin/roles/route.ts" in p for p in result)
+
+
+class TestFindImplCandidatesGlob:
+    def test_finds_route_in_generated_dir(self, tmp_path):
+        """Strategy 1 glob finds routes in non-standard locations."""
+        route = tmp_path / "src" / "generated" / "v1" / "app" / "api" / "courses" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text("handler")
+
+        result = _find_impl_candidates(tmp_path, "courses")
+        assert any("courses/route.ts" in p for p in result)
