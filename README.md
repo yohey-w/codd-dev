@@ -22,31 +22,31 @@
 pip install codd-dev
 ```
 
-**v1.5.0** — `init` / `scan` / `impact` are stable. `extract --ai` with baseline preset. `audit` / `policy` / `require` / `validate` are alpha. GitHub Action for CI integration.
+**v1.6.0** — `init` / `scan` / `impact` are stable. `propagate` traces code changes to downstream design docs. `extract --ai` with baseline preset. OSS/Pro split via bridge pattern. GitHub Action for CI integration.
 
 ---
 
 ## Why CoDD?
 
-AI can generate code. Humans can review PRs. But who tracks the **evidence trail** when requirements change?
+AI can generate specs. But **what happens when upstream changes?**
 
-- Which design docs are now stale?
-- Which policy rules did the change violate?
-- What's the blast radius across the dependency graph?
-- Can the PM sign off on this merge with confidence?
+Every spec-first tool stops at creation. CoDD starts there. When a requirement changes, code is updated, or a design assumption shifts, CoDD **automatically propagates the change downstream** — updating affected design docs, flagging stale artifacts, and producing an evidence trail.
 
-**CoDD is the evidence engine.** It builds the dependency graph, traces change impact, enforces enterprise policies, and produces a reviewer-ready audit pack — so your merge decision is based on evidence, not gut feeling.
+```
+Requirement changes → codd impact identifies 6 affected docs
+Code changes        → codd propagate updates downstream designs
+Design changes      → CEG graph traces all dependent artifacts
+```
+
+No other tool does this. spec-kit, Kiro, and cc-sdd create docs. **CoDD keeps them coherent.**
 
 ## How It Works
 
 ```
 Requirements (human)  →  Design docs (AI)  →  Code & tests (AI)
-                              ↑
-                    codd scan builds the
-                     dependency graph
-                              ↓
-            Something changes? codd impact tells you
-             exactly what's affected — automatically.
+         ↕                     ↕                     ↕
+     codd impact         codd propagate        codd extract
+    (what changed?)    (update downstream)   (reverse-engineer)
 ```
 
 ### The Three Layers
@@ -116,6 +116,50 @@ codd measure              # Project health score (0-100)
 ```
 
 ## Demos
+
+### Reproducible E2E Demo — 3 Propagation Patterns
+
+The following demo is pinned to commit [`d7d9f45`](https://github.com/yohey-w/codd-dev/commit/d7d9f45). You can reproduce the full cycle locally.
+
+**Setup:**
+```bash
+pip install codd-dev>=1.6.0
+mkdir demo && cd demo && git init
+cat > spec.txt << 'EOF'
+TaskFlow — Requirements
+- User authentication (email + Google OAuth)
+- Workspace management (teams, roles, invites)
+- Task CRUD with assignees, labels, due dates
+- Real-time updates (WebSocket)
+- File attachments (S3)
+- Notification system (in-app + email)
+EOF
+codd init --project-name "taskflow" --language "typescript" --requirements spec.txt
+```
+
+**Pattern 1 — Source → Doc** (spec → design docs):
+```bash
+codd plan --init
+for wave in $(seq 1 $(codd plan --waves)); do codd generate --wave $wave; done
+codd validate        # Expected: PASS, 0 errors
+codd scan            # Expected: 17 nodes, 30+ edges
+```
+
+**Pattern 2 — Doc → Doc** (requirement change → downstream update):
+```bash
+# Edit requirements: add "SSO (SAML 2.0)" to auth
+codd impact          # Expected: 6/7 design docs in Green/Amber band
+codd propagate --update  # Auto-updates downstream designs
+```
+
+**Pattern 3 — Doc → Doc via CEG** (code change → design update):
+```bash
+# Modify source code in auth module
+codd propagate       # Expected: identifies auth-design, system-design as affected
+codd propagate --update  # AI updates affected design docs from code diff
+```
+
+**Expected output**: 20-line spec → 17 design artifacts (5,100+ lines) → downstream propagation keeps all docs coherent after changes. Pattern 3 (CEG-based propagation) is novel — no other tool traces code changes back through the dependency graph to update design documents.
 
 ### Greenfield — Spec to Working App
 
@@ -304,16 +348,38 @@ codd impact
 | `codd generate` | Experimental | Generate design docs in Wave order (greenfield) |
 | `codd restore` | Experimental | Reconstruct design docs from extracted facts (brownfield) |
 | `codd plan` | Experimental | Wave execution status (`--init` supports brownfield fallback) |
-| `codd verify` | Experimental | V-Model verification |
+| `codd verify` | Experimental (Pro) | V-Model verification |
 | `codd implement` | Experimental | Design-to-code generation |
-| `codd propagate` | Experimental | Reverse-propagate source code changes to design docs |
-| `codd review` | Experimental | AI-powered artifact quality evaluation (LLM-as-Judge) |
+| `codd propagate` | **Alpha** | Propagate code/doc changes downstream to affected design docs |
+| `codd review` | Experimental (Pro) | AI-powered artifact quality evaluation (LLM-as-Judge) |
 | `codd extract` | **Alpha** | Reverse-engineer design docs from existing code |
 | `codd require` | **Alpha** | Infer requirements from existing codebase (brownfield) |
-| `codd audit` | **Alpha** | Consolidated change review pack (validate + impact + policy + review) |
+| `codd audit` | **Alpha** (Pro) | Consolidated change review pack (validate + impact + policy + review) |
 | `codd policy` | **Alpha** | Enterprise policy checker (forbidden/required patterns in source code) |
 | `codd measure` | **Alpha** | Project health metrics (graph, coverage, quality, health score 0-100) |
 | `codd mcp-server` | **Alpha** | MCP server for AI tool integration (stdio, zero dependencies) |
+
+## OSS / Pro Split
+
+CoDD v1.6.0 introduced a clean OSS/Pro boundary via a bridge pattern.
+
+**OSS (MIT, free)** — everything you need to keep docs coherent:
+
+`init` · `scan` · `impact` · `generate` · `restore` · `propagate` · `extract` · `require` · `plan` · `validate` · `measure` · `policy` · `mcp-server`
+
+**Pro (private, paid)** — enterprise review and verification:
+
+`review` · `verify` · `audit` · `risk`
+
+```bash
+# OSS only
+pip install codd-dev
+
+# Add Pro extensions
+pip install "codd-pro @ git+ssh://git@github.com/yohey-w/codd-pro.git"
+```
+
+When `codd-pro` is installed, Pro implementations automatically override OSS fallbacks via entry-points plugin discovery. When it's not installed, Pro commands show a migration message and exit gracefully. No configuration needed.
 
 ## CI Integration (GitHub Action)
 
@@ -548,7 +614,7 @@ All major spec-driven tools focus on **creating** design documents. None address
 | Spec notation | Markdown + 40 extensions | EARS notation | Quality gates + git worktree | Frontmatter `depends_on` |
 | Harness lock-in | GitHub Copilot | Kiro IDE | Claude Code | **Any agent / IDE** |
 
-In short: spec-kit, Kiro, and cc-sdd answer *"how do I create specs?"* CoDD answers *"how do I keep specs, code, and tests coherent when requirements change?"*
+In short: spec-kit, Kiro, and cc-sdd answer *"how do I create specs?"* CoDD answers *"when something changes upstream, how do I automatically update everything downstream?"*
 
 ## Comparison
 
