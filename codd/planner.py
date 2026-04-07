@@ -35,16 +35,17 @@ docs/
 ├── plan/              # When  — implementation sequencing and milestones
 ├── governance/        # Why   — decisions, ADRs, change requests
 ├── test/              # Verify — acceptance criteria and test strategy
-└── operations/        # Run   — runbooks, monitoring, incident handling
+├── operations/        # Run   — runbooks, monitoring, incident handling
+└── infra/             # Build — infrastructure, CI/CD, build and deployment setup
 """
 
 STANDARD_V_MODEL_PATTERNS = """\
 Typical wave patterns:
 - Wave 1: acceptance criteria and decision records derived directly from requirements
 - Wave 2: overview/system design that depends on requirements and wave 1 outputs
-- Wave 3-4: domain design such as API, database, auth, UX, and integration design
+- Wave 3-4: domain design such as API, database, auth, UX, infrastructure/CI/CD, and integration design
 - Wave 5: detailed design artifacts under docs/detailed_design/ with Mermaid diagrams, ownership boundaries, and runtime flows
-- Wave 6: implementation planning that depends on the approved overview + detailed design set
+- Wave 6: implementation planning and infrastructure/build setup that depend on the approved overview + detailed design set
 - Baseline: after all waves are done and code is implemented, run codd extract to capture a factual snapshot of the codebase — this serves as the baseline for drift detection during maintenance
 """
 
@@ -345,7 +346,8 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         STANDARD_V_MODEL_PATTERNS.rstrip(),
         "",
         "Instructions:",
-        "- Read the requirement documents below and decide the minimum complete document set needed for this project.",
+        "- Read the requirement documents below and decide the complete document set needed for this project.",
+        "- Every major section in the requirements (functional, non-functional, UX, infrastructure, security, integration) MUST map to at least one design artifact. If a requirement section has no corresponding artifact, you are missing a document.",
         "- Output ONLY YAML for the wave_config mapping. Do not emit prose or Markdown fences.",
         "- Use string wave numbers as the top-level keys.",
         "- Each artifact entry must include node_id, output, title, depends_on, and conventions.",
@@ -361,7 +363,7 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         "  non-functional requirements (SLA, latency, throughput, availability, recovery thresholds).",
         "- Assign the relevant conventions to each artifact entry. Use conventions: [] only when an artifact truly has no release-blocking constraints.",
         "- Do not add requirement documents themselves to wave_config.",
-        "- Keep output paths under docs/design/, docs/detailed_design/, docs/plan/, docs/governance/, docs/test/, or docs/operations/.",
+        "- Keep output paths under docs/design/, docs/detailed_design/, docs/plan/, docs/governance/, docs/test/, docs/operations/, or docs/infra/.",
         "- Set dependencies so earlier waves unlock later waves in a realistic order.",
         "- Do not emit explanatory headings or summaries such as 'Key conventions extracted:' or 'Notes:' before the YAML.",
         "",
@@ -506,7 +508,7 @@ def _build_brownfield_plan_init_prompt(
         "- Insert detailed design documents for complex modules or module groups.",
         "- conventions are release-blocking constraints. Extract them from the patterns detected in the extracted documents (e.g., authentication, database models, API routes).",
         "- Do not add extracted documents themselves to wave_config — they are inputs, not outputs.",
-        "- Keep output paths under docs/design/, docs/detailed_design/, docs/plan/, docs/governance/, docs/test/, or docs/operations/.",
+        "- Keep output paths under docs/design/, docs/detailed_design/, docs/plan/, docs/governance/, docs/test/, docs/operations/, or docs/infra/.",
         "- Set dependencies so earlier waves unlock later waves in a realistic order.",
         "- Do not emit explanatory headings or summaries before the YAML.",
         "",
