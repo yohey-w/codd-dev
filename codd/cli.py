@@ -340,25 +340,117 @@ def require(path: str, output: str, scope: str | None, ai_cmd: str | None, force
 @click.option("--diff", default="HEAD", help="Git diff target (default: HEAD, shows uncommitted changes)")
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--update", is_flag=True, help="Actually update affected design docs via AI")
+@click.option("--verify", is_flag=True, help="Auto-apply green band, list amber/gray for HITL review")
+@click.option("--commit", "do_commit", is_flag=True, help="Commit HITL changes and record knowledge")
+@click.option("--reason", default=None, help="Default reason for all HITL corrections (recorded as knowledge)")
+@click.option("--reason-file", default=None, type=click.Path(exists=True),
+              help="JSON file with per-file reasons: {\"path\": \"reason\", ...}")
 @click.option(
     "--ai-cmd",
     default=None,
     help="Override AI CLI command (defaults to codd.yaml ai_command)",
 )
 @click.option("--feedback", default=None, help="Review feedback to address in this update (from codd review)")
-def propagate(diff: str, path: str, update: bool, ai_cmd: str | None, feedback: str | None):
+def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
+              reason: str | None, reason_file: str | None,
+              ai_cmd: str | None, feedback: str | None):
     """Propagate source code changes to design documents.
 
     Detects changed source files, maps them to modules, and finds design
     documents covering those modules via the 'modules' frontmatter field.
 
-    Without --update: analysis only (shows which docs are affected).
-    With --update: calls AI to update each affected design document.
+    \b
+    Modes:
+      (default)    analysis only — shows which docs are affected
+      --update     update ALL affected docs via AI (no band filtering)
+      --verify     auto-apply green band via AI, list amber/gray for HITL
+      --commit     after HITL review, commit changes and record knowledge
     """
-    from codd.propagator import run_propagate
-
     project_root = Path(path).resolve()
     _require_codd_dir(project_root)
+
+    # Mutual exclusivity check
+    mode_count = sum([update, verify, do_commit])
+    if mode_count > 1:
+        click.echo("Error: --update, --verify, and --commit are mutually exclusive.")
+        raise SystemExit(1)
+
+    # --commit mode
+    if do_commit:
+        import json as _json
+        from codd.propagator import run_commit
+
+        # Load per-file reasons if provided
+        reason_map = None
+        if reason_file:
+            reason_map = _json.loads(Path(reason_file).read_text(encoding="utf-8"))
+
+        try:
+            result = run_commit(project_root, reason=reason, reason_map=reason_map)
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+
+        if result.committed_files:
+            click.echo(f"Committed {len(result.committed_files)} HITL-reviewed file(s).")
+            for f in result.committed_files:
+                click.echo(f"  {f}")
+        else:
+            click.echo("No HITL changes detected.")
+
+        if result.knowledge_recorded:
+            click.echo(f"Knowledge recorded: {result.knowledge_recorded} evidence entries added.")
+        click.echo("Propagation committed.")
+        return
+
+    # --verify mode
+    if verify:
+        from codd.propagator import run_verify
+
+        try:
+            result = run_verify(project_root, diff, ai_command=ai_cmd, feedback=feedback)
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+
+        if not result.changed_files:
+            click.echo("No changed files detected.")
+            return
+
+        click.echo(f"Changed files: {len(result.changed_files)}")
+        if not result.file_module_map:
+            click.echo("No source files changed (only non-source files in diff).")
+            return
+
+        click.echo(f"\nSource changes → modules:")
+        for f, m in sorted(result.file_module_map.items()):
+            click.echo(f"  {f} → {m}")
+
+        # Auto-applied (green band)
+        if result.auto_applied:
+            click.echo(f"\n✅ Auto-applied (green band): {len(result.auto_applied)}")
+            for vdoc in result.auto_applied:
+                status = "UPDATED" if vdoc.doc.node_id in result.updated else "FAILED"
+                click.echo(f"  [{status}] {vdoc.doc.path} ({vdoc.doc.node_id})")
+                click.echo(f"    confidence: {vdoc.confidence:.2f}, evidence: {vdoc.evidence_count}")
+
+        # HITL required (amber/gray)
+        if result.needs_hitl:
+            click.echo(f"\n🔶 Needs HITL review: {len(result.needs_hitl)}")
+            for vdoc in result.needs_hitl:
+                click.echo(f"  [{vdoc.band}] {vdoc.doc.path} ({vdoc.doc.node_id})")
+                click.echo(f"    confidence: {vdoc.confidence:.2f}, evidence: {vdoc.evidence_count}")
+                click.echo(f"    modules: {', '.join(vdoc.doc.matched_modules)}")
+
+            click.echo(f"\nReview the docs above, then run:")
+            click.echo(f"  codd propagate --commit --reason \"<why you changed it>\"")
+
+        if not result.auto_applied and not result.needs_hitl:
+            click.echo("\nNo design docs found covering changed modules.")
+        return
+
+    # Default / --update mode (existing behavior)
+    from codd.propagator import run_propagate
 
     try:
         result = run_propagate(project_root, diff, update=update, ai_command=ai_cmd, feedback=feedback)
