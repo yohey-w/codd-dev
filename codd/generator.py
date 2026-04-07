@@ -466,6 +466,11 @@ def _build_generation_prompt(
                 "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`.",
                 "- Shared helpers: Mandate a `tests/e2e/helpers/` directory for auth flows, test data setup, and common assertions to avoid duplication across spec files.",
                 "- Generation markers: All generated files must include `// @generated-from:` and `// @generated-by: codd propagate` headers. Manual tests marked with `// @manual` must be preserved on regeneration.",
+                "",
+                "E2E Runtime Environment rules:",
+                "- E2E tests for web applications require a running server. The meta-prompt MUST specify how to start the application under test before running E2E tests.",
+                "- Detect the project type from package.json scripts, framework config, or entry points. Include the appropriate startup sequence (e.g., build → start → wait-for-ready) in the E2E instructions.",
+                "- For CI environments, specify that the server must run in the background with a health-check wait before test execution begins.",
             ]
         )
 
@@ -484,6 +489,21 @@ def _build_generation_prompt(
                 "- Trigger: `on: pull_request` to main/develop branches.",
                 "- Caching: Include dependency caching (node_modules, pip cache, etc.) for faster CI runs.",
                 "- Failure notification: Recommend but do not require Slack/email notification on failure.",
+                "",
+                "Prerequisite Validation rules:",
+                "- Before referencing any tool or package in a CI step (e.g., a linter, test runner, build tool), verify it exists in the project's dependency manifest (package.json, requirements.txt, pyproject.toml, etc.).",
+                "- If a required tool is missing, either add an install step in CI or note it as a prerequisite that must be added to the project's dev dependencies.",
+                "- Do not generate CI steps that invoke tools the project has not installed.",
+                "",
+                "Runtime Compatibility rules:",
+                "- When generating configuration files or CI steps, detect the project's existing tool versions (framework, linter, test runner) and produce version-compatible output.",
+                "- Avoid generating config formats or flags that require a newer version than what the project uses (e.g., flat config for ESLint <9, or module syntax for older Node.js).",
+                "- If version information is available in package.json, requirements.txt, or lock files, use it to guide config format choices.",
+                "",
+                "E2E Job Server Startup rules:",
+                "- If the CI includes E2E tests for a web application, the E2E job MUST include steps to build and start the application server before running tests.",
+                "- Detect the project type (web app, CLI, library) from the project structure and only add server startup for web applications.",
+                "- Include a readiness check (e.g., wait-on, curl health endpoint) between server start and test execution to avoid race conditions.",
             ]
         )
 
