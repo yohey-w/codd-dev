@@ -83,6 +83,9 @@ def run_propagate(
     """Detect source code changes and find affected design documents.
 
     When update=True, calls AI to update each affected design doc.
+    Supports two propagation paths:
+      1. Source code change → design docs (via module mapping)
+      2. Design doc change → dependent design docs (via CEG graph)
     """
     config = load_project_config(project_root)
     source_dirs = config.get("scan", {}).get("source_dirs", [])
@@ -94,15 +97,27 @@ def run_propagate(
 
     # Step 2: Filter to source files and map to modules
     file_module_map = _map_files_to_modules(changed_files, source_dirs)
-    if not file_module_map:
-        return PropagationResult(changed_files, {}, [], [])
 
-    changed_modules = set(file_module_map.values())
+    affected_docs: list[AffectedDoc] = []
+    diff_text = ""
 
-    # Step 3: Find design docs covering those modules
-    affected_docs = _find_design_docs_by_modules(
-        project_root, config, changed_modules, file_module_map,
-    )
+    if file_module_map:
+        # Path A: source code → design docs (existing logic)
+        changed_modules = set(file_module_map.values())
+        affected_docs = _find_design_docs_by_modules(
+            project_root, config, changed_modules, file_module_map,
+        )
+        diff_text = _get_code_diff(project_root, diff_target, list(file_module_map.keys()))
+
+    if not affected_docs:
+        # Path B: design doc → dependent design docs (via graph)
+        changed_docs = _find_changed_docs(project_root, config, changed_files)
+        if changed_docs:
+            affected_docs = _find_docs_depending_on(
+                project_root, config, changed_docs,
+            )
+            diff_text = _get_code_diff(project_root, diff_target, changed_files)
+
     if not affected_docs:
         return PropagationResult(changed_files, file_module_map, [], [])
 
@@ -110,14 +125,13 @@ def run_propagate(
     updated: list[str] = []
     if update and affected_docs:
         resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="propagate")
-        code_diff = _get_code_diff(project_root, diff_target, list(file_module_map.keys()))
 
         for doc in affected_docs:
             doc_path = project_root / doc.path
             if not doc_path.exists():
                 continue
             current_content = doc_path.read_text(encoding="utf-8")
-            prompt = _build_update_prompt(doc, current_content, code_diff, feedback=feedback)
+            prompt = _build_update_prompt(doc, current_content, diff_text, feedback=feedback)
             raw_body = _invoke_ai_command(resolved_ai_command, prompt)
             body = _sanitize_update_body(raw_body)
 
@@ -145,19 +159,33 @@ def run_verify(
     source_dirs = config.get("scan", {}).get("source_dirs", [])
     bands_config = config.get("bands", {})
 
-    # Step 1: Get affected docs (reuse existing logic)
+    # Step 1: Get affected docs (source→doc or doc→doc)
     changed_files = _get_changed_files(project_root, diff_target)
     if not changed_files:
         return VerifyResult([], {}, [], [], [])
 
     file_module_map = _map_files_to_modules(changed_files, source_dirs)
-    if not file_module_map:
-        return VerifyResult(changed_files, {}, [], [], [])
 
-    changed_modules = set(file_module_map.values())
-    affected_docs = _find_design_docs_by_modules(
-        project_root, config, changed_modules, file_module_map,
-    )
+    affected_docs: list[AffectedDoc] = []
+    diff_text = ""
+
+    if file_module_map:
+        # Path A: source code → design docs
+        changed_modules = set(file_module_map.values())
+        affected_docs = _find_design_docs_by_modules(
+            project_root, config, changed_modules, file_module_map,
+        )
+        diff_text = _get_code_diff(project_root, diff_target, list(file_module_map.keys()))
+
+    if not affected_docs:
+        # Path B: design doc → dependent design docs (via graph)
+        changed_docs = _find_changed_docs(project_root, config, changed_files)
+        if changed_docs:
+            affected_docs = _find_docs_depending_on(
+                project_root, config, changed_docs,
+            )
+            diff_text = _get_code_diff(project_root, diff_target, changed_files)
+
     if not affected_docs:
         return VerifyResult(changed_files, file_module_map, [], [], [])
 
@@ -171,7 +199,6 @@ def run_verify(
     updated: list[str] = []
     if auto_apply:
         resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="propagate")
-        code_diff = _get_code_diff(project_root, diff_target, list(file_module_map.keys()))
 
         for vdoc in auto_apply:
             doc = vdoc.doc
@@ -179,7 +206,7 @@ def run_verify(
             if not doc_path.exists():
                 continue
             current_content = doc_path.read_text(encoding="utf-8")
-            prompt = _build_update_prompt(doc, current_content, code_diff, feedback=feedback)
+            prompt = _build_update_prompt(doc, current_content, diff_text, feedback=feedback)
             raw_body = _invoke_ai_command(resolved_ai_command, prompt)
             body = _sanitize_update_body(raw_body)
             _write_updated_doc(doc_path, current_content, body)
@@ -617,6 +644,109 @@ def _find_design_docs_by_modules(
     return affected
 
 
+def _find_changed_docs(
+    project_root: Path,
+    config: dict[str, Any],
+    changed_files: list[str],
+) -> list[dict]:
+    """Identify changed files that are CoDD design documents (have frontmatter).
+
+    Returns a list of dicts with node_id, path for each changed design doc.
+    """
+    changed_docs: list[dict] = []
+    doc_dirs = config.get("scan", {}).get("doc_dirs", [])
+
+    for f in changed_files:
+        # Check if the file is under a doc_dir and has frontmatter
+        md_path = project_root / f
+        if not md_path.exists() or not f.endswith(".md"):
+            continue
+
+        # Verify it's under a recognized doc_dir
+        in_doc_dir = any(f.startswith(d.rstrip("/") + "/") for d in doc_dirs)
+        if not in_doc_dir:
+            continue
+
+        codd_data = _extract_frontmatter(md_path)
+        if codd_data and "node_id" in codd_data:
+            changed_docs.append({
+                "node_id": codd_data["node_id"],
+                "path": f,
+                "title": codd_data.get("title", codd_data["node_id"]),
+            })
+
+    return changed_docs
+
+
+def _find_docs_depending_on(
+    project_root: Path,
+    config: dict[str, Any],
+    changed_docs: list[dict],
+) -> list[AffectedDoc]:
+    """Find design documents that depend on the changed design documents.
+
+    Uses the CEG graph: for each changed doc, find all docs that have an edge
+    pointing TO the changed doc (incoming edges = docs that depend on it).
+    """
+    graph = _load_graph(project_root, config)
+    if graph is None:
+        return []
+
+    changed_node_ids = {d["node_id"] for d in changed_docs}
+    changed_paths = {d["path"] for d in changed_docs}
+    dependent_node_ids: dict[str, set[str]] = {}  # node_id → set of triggering node_ids
+
+    for changed_doc in changed_docs:
+        # Find docs that depend on this changed doc
+        incoming = graph.get_incoming_edges(changed_doc["node_id"])
+        for edge in incoming:
+            source_id = edge["source_id"]
+            # Skip self-references and skip docs that are themselves changed
+            if source_id in changed_node_ids:
+                continue
+            if source_id not in dependent_node_ids:
+                dependent_node_ids[source_id] = set()
+            dependent_node_ids[source_id].add(changed_doc["node_id"])
+
+    if not dependent_node_ids:
+        return []
+
+    # Resolve node_ids to file paths by scanning doc_dirs
+    affected: list[AffectedDoc] = []
+    doc_dirs = config.get("scan", {}).get("doc_dirs", [])
+
+    for doc_dir in doc_dirs:
+        full_path = project_root / doc_dir
+        if not full_path.exists():
+            continue
+
+        for md_file in full_path.rglob("*.md"):
+            codd_data = _extract_frontmatter(md_file)
+            if not codd_data or "node_id" not in codd_data:
+                continue
+
+            node_id = codd_data["node_id"]
+            if node_id not in dependent_node_ids:
+                continue
+
+            rel_path = md_file.relative_to(project_root).as_posix()
+            if rel_path in changed_paths:
+                continue  # Don't update the doc that was changed
+
+            triggering = sorted(dependent_node_ids[node_id])
+            affected.append(AffectedDoc(
+                node_id=node_id,
+                path=rel_path,
+                title=codd_data.get("title", node_id),
+                modules=codd_data.get("modules", []),
+                matched_modules=[],  # not module-based
+                changed_files=[d["path"] for d in changed_docs
+                               if d["node_id"] in dependent_node_ids[node_id]],
+            ))
+
+    return affected
+
+
 def _get_code_diff(
     project_root: Path,
     diff_target: str,
@@ -641,18 +771,34 @@ def _build_update_prompt(
     code_diff: str,
     feedback: str | None = None,
 ) -> str:
-    """Build a prompt for AI to update a design document based on code changes."""
-    lines = [
-        "You are UPDATING an existing design document to reflect source code changes.",
-        "",
-        "The code diff below shows what changed in the source code.",
-        "The current design document is provided in full.",
-        "Your task is to update ONLY the parts of the design document that are affected by the code changes.",
+    """Build a prompt for AI to update a design document based on changes."""
+    # Detect whether the diff is from source code or design docs
+    is_doc_change = all(f.endswith(".md") for f in doc.changed_files) if doc.changed_files else False
+
+    if is_doc_change:
+        intro = [
+            "You are UPDATING an existing design document to reflect changes in an upstream design document.",
+            "",
+            "The diff below shows what changed in the upstream design document that this document depends on.",
+            "The current design document is provided in full.",
+            "Your task is to update ONLY the parts that reference, quote, or depend on values from the changed upstream document.",
+            "For example, if the upstream document changed a threshold from 100 to 200, update any reference to that threshold.",
+        ]
+    else:
+        intro = [
+            "You are UPDATING an existing design document to reflect source code changes.",
+            "",
+            "The code diff below shows what changed in the source code.",
+            "The current design document is provided in full.",
+            "Your task is to update ONLY the parts of the design document that are affected by the code changes.",
+        ]
+
+    lines = intro + [
         "",
         "CRITICAL RULES:",
         "- Preserve the existing document structure and frontmatter EXACTLY.",
-        "- Only modify sections that are directly affected by the code diff.",
-        "- If the code change is a bug fix or minor refactoring that doesn't affect the design, output the body UNCHANGED.",
+        "- Only modify sections that are directly affected by the diff.",
+        "- If the change doesn't affect this document's content, output the body UNCHANGED.",
         "- Do NOT add new sections or remove existing sections.",
         "- Do NOT change the title.",
         "- Do NOT emit YAML frontmatter — only the body content.",
@@ -661,8 +807,8 @@ def _build_update_prompt(
         "",
         f"Document: {doc.node_id}",
         f"Title: {doc.title}",
-        f"Covers modules: {', '.join(doc.modules)}",
-        f"Changed modules: {', '.join(doc.matched_modules)}",
+        f"Covers modules: {', '.join(doc.modules)}" if doc.modules else "",
+        f"Changed modules: {', '.join(doc.matched_modules)}" if doc.matched_modules else "",
         f"Changed files: {', '.join(doc.changed_files)}",
         "",
         "--- CURRENT DESIGN DOCUMENT ---",

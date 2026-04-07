@@ -265,8 +265,57 @@ def test_build_update_prompt_contains_key_elements():
     assert "src/auth/service.py" in prompt
     assert "Old content" in prompt  # current doc included
     assert "new_method" in prompt  # code diff included
-    assert "bug fix" in prompt.lower()  # mentions not updating for bug fixes
     assert "UNCHANGED" in prompt  # mentions leaving body unchanged
+    assert "source code" in prompt.lower()  # source code path used for .py files
+
+
+# -- Unit tests: doc→doc prompt -----------------------------------------------
+
+
+def test_build_update_prompt_doc_to_doc():
+    """When changed_files are all .md, prompt should use upstream design doc language."""
+    doc = AffectedDoc(
+        node_id="design:auth",
+        path="docs/design/auth_design.md",
+        title="Auth Design",
+        modules=[],
+        matched_modules=[],
+        changed_files=["docs/design/system_design.md"],
+    )
+    current = "---\ncodd:\n  node_id: design:auth\n---\n\n# Auth Design\n\n## Overview\n\nOld content.\n"
+    diff = "diff --git a/docs/design/system_design.md\n- 100 requests\n+ 200 requests\n"
+
+    prompt = _build_update_prompt(doc, current, diff)
+
+    assert "upstream design document" in prompt.lower()
+    assert "UNCHANGED" in prompt
+    assert "docs/design/system_design.md" in prompt
+    assert "Old content" in prompt
+
+
+# -- Unit tests: _find_changed_docs -------------------------------------------
+
+
+def test_find_changed_docs(tmp_path):
+    """_find_changed_docs identifies changed design docs with frontmatter."""
+    from codd.propagator import _find_changed_docs
+
+    # Setup: a doc dir with a design doc
+    doc_dir = tmp_path / "docs" / "design"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "system_design.md").write_text(
+        "---\ncodd:\n  node_id: design:system-design\n---\n\n# System Design\n"
+    )
+    # Non-doc file
+    (tmp_path / "README.md").write_text("# Readme\n")
+
+    config = {"scan": {"doc_dirs": ["docs"]}}
+    changed_files = ["docs/design/system_design.md", "README.md"]
+
+    result = _find_changed_docs(tmp_path, config, changed_files)
+
+    assert len(result) == 1
+    assert result[0]["node_id"] == "design:system-design"
 
 
 # -- Integration test: run_propagate with mocked git -------------------------
