@@ -514,14 +514,18 @@ def _build_fix_prompt(
         "2. Use the design documents to understand the INTENDED behavior.",
         "3. Fix the IMPLEMENTATION code to match the design, not the other way around.",
         "   - If tests fail, fix the source code so tests pass.",
+        "   - If a test expects an endpoint/method/feature that doesn't exist in code,",
+        "     ADD the missing implementation as described in the design documents.",
+        "     The test is correct (it matches the spec); the code is incomplete.",
         "   - If build fails (type errors, import errors), fix the source code.",
-        "   - If lint fails, fix the lint issues.",
+        "   - If lint fails, fix the lint issues in the source code.",
         "   - If a tool prompted interactively in CI (missing config), create the required config file.",
-        "     Common examples: .eslintrc.json, .prettierrc, tsconfig.json, jest.config.*, playwright.config.*",
         "4. Do NOT modify test files unless the test itself has a bug (e.g., wrong import path).",
         "5. Do NOT modify design documents.",
         "6. Make minimal, focused changes. Don't refactor unrelated code.",
-        "7. After making changes, briefly explain what you fixed and why.",
+        "7. Follow the target framework's lint rules and naming conventions.",
+        "   Avoid using global/reserved names (module, exports, require, etc.) as local variables.",
+        "8. After making changes, briefly explain what you fixed and why.",
     ]
 
     return "\n".join(lines)
