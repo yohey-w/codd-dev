@@ -12,9 +12,11 @@ from codd.fixer import (
     FailureInfo,
     _build_fix_context,
     _build_fix_prompt,
+    _collect_source_files,
     _detect_category_from_log,
     _detect_test_command,
     _extract_file_paths_from_log,
+    _invoke_fix_ai,
     _parse_ci_log,
     run_fix,
 )
@@ -155,3 +157,88 @@ class TestRunFix:
 
         assert result.fixed is True
         assert len(result.attempts) == 0
+
+
+class TestInvokeFixAi:
+    def test_applies_code_blocks_to_files(self, tmp_path):
+        """AI returns fenced code blocks with file paths → written to disk."""
+        ai_response = (
+            "Here is the fix:\n\n"
+            "```typescript src/api/route.ts\n"
+            "export function GET() {\n"
+            "  return Response.json({ ok: true });\n"
+            "}\n"
+            "```\n\n"
+            "This adds the missing GET handler.\n"
+        )
+        with patch("codd.fixer._invoke_ai_command", return_value=ai_response):
+            output = _invoke_fix_ai("claude --print", ai_response, tmp_path)
+
+        target = tmp_path / "src" / "api" / "route.ts"
+        assert target.exists()
+        content = target.read_text()
+        assert "export function GET()" in content
+        assert "Response.json" in content
+
+    def test_skips_files_outside_project(self, tmp_path):
+        """Files with paths escaping project root are rejected."""
+        ai_response = (
+            "```python ../../etc/passwd\n"
+            "malicious\n"
+            "```\n"
+        )
+        with patch("codd.fixer._invoke_ai_command", return_value=ai_response):
+            _invoke_fix_ai("claude --print", ai_response, tmp_path)
+
+        assert not (tmp_path / "../../etc/passwd").exists()
+
+    def test_handles_multiple_files(self, tmp_path):
+        ai_response = (
+            "```typescript src/a.ts\ncontent_a\n```\n\n"
+            "```typescript src/b.ts\ncontent_b\n```\n"
+        )
+        with patch("codd.fixer._invoke_ai_command", return_value=ai_response):
+            _invoke_fix_ai("claude --print", ai_response, tmp_path)
+
+        assert (tmp_path / "src" / "a.ts").read_text() == "content_a\n"
+        assert (tmp_path / "src" / "b.ts").read_text() == "content_b\n"
+
+
+class TestCollectSourceFiles:
+    def test_reads_source_files_from_failures(self, tmp_path):
+        src = tmp_path / "src" / "api.ts"
+        src.parent.mkdir(parents=True)
+        src.write_text("export function handler() {}")
+
+        failures = [FailureInfo(
+            source="ci", category="test", summary="fail",
+            log="", failed_files=["src/api.ts"],
+        )]
+        result = _collect_source_files(tmp_path, failures)
+        assert "export function handler()" in result
+        assert "src/api.ts" in result
+
+    def test_skips_test_files(self, tmp_path):
+        test_file = tmp_path / "tests" / "test_foo.py"
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("def test_foo(): pass")
+
+        failures = [FailureInfo(
+            source="ci", category="test", summary="fail",
+            log="", failed_files=["tests/test_foo.py"],
+        )]
+        result = _collect_source_files(tmp_path, failures)
+        assert result == ""
+
+    def test_strips_ci_runner_prefix(self, tmp_path):
+        src = tmp_path / "src" / "handler.ts"
+        src.parent.mkdir(parents=True)
+        src.write_text("code here")
+
+        failures = [FailureInfo(
+            source="ci", category="test", summary="fail",
+            log="",
+            failed_files=["/home/runner/work/myrepo/myrepo/src/handler.ts"],
+        )]
+        result = _collect_source_files(tmp_path, failures)
+        assert "code here" in result

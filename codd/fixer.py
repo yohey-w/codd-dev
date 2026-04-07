@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -113,9 +115,9 @@ def run_fix(
         # Map failures to design context
         context = _build_fix_context(project_root, config, failures)
 
-        # Build prompt and invoke AI
+        # Build prompt and invoke AI (fix mode: returns fixed source, writes to files)
         prompt = _build_fix_prompt(project_root, failures, context, config)
-        ai_output = _invoke_ai_command(resolved_ai, prompt)
+        ai_output = _invoke_fix_ai(resolved_ai, prompt, project_root)
 
         # Re-run tests to verify
         new_failures = _run_local_tests(project_root, config)
@@ -151,6 +153,57 @@ def run_fix(
         pushed=pushed,
         ci_passed=ci_passed,
     )
+
+
+# ---------------------------------------------------------------------------
+# AI invocation for fix (source-in → fixed-source-out → write back)
+# ---------------------------------------------------------------------------
+
+# Regex to extract fenced code blocks tagged with a file path.
+# Matches: ```python path/to/file.py  or  ```typescript src/app/route.ts
+import re
+
+_FIX_BLOCK_RE = re.compile(
+    r"```[a-zA-Z]*\s+([\w./_-]+)\s*\n(.*?)```",
+    re.DOTALL,
+)
+
+
+def _invoke_fix_ai(ai_command: str, prompt: str, project_root: Path) -> str:
+    """Invoke AI in --print mode and apply returned code blocks to files.
+
+    The prompt includes the original source and error log.  The AI returns
+    the **complete fixed source** for each file, wrapped in fenced code
+    blocks tagged with file paths::
+
+        ```typescript src/app/api/enrollments/route.ts
+        // ... fixed code ...
+        ```
+
+    This function parses those blocks and writes them back to disk.
+    """
+    ai_output = _invoke_ai_command(ai_command, prompt)
+
+    # Parse fenced code blocks with file paths and write them back
+    applied: list[str] = []
+    for match in _FIX_BLOCK_RE.finditer(ai_output):
+        file_path_str = match.group(1)
+        fixed_code = match.group(2)
+
+        target = project_root / file_path_str
+        if not target.resolve().is_relative_to(project_root.resolve()):
+            logger.warning("Skipping file outside project: %s", file_path_str)
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(fixed_code, encoding="utf-8")
+        applied.append(file_path_str)
+        logger.info("Applied fix to: %s", file_path_str)
+
+    if not applied:
+        logger.warning("AI output contained no parseable file blocks to apply")
+
+    return ai_output
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +537,12 @@ def _build_fix_prompt(
     design_context: str,
     config: dict[str, Any],
 ) -> str:
-    """Build the prompt for AI to fix failures."""
+    """Build the prompt for AI to fix failures.
+
+    The prompt includes: error logs, design docs, AND the current source
+    of files mentioned in failures.  The AI returns the complete fixed
+    source for each file in fenced code blocks tagged with file paths.
+    """
     project_name = config.get("project", {}).get("name", project_root.name)
     language = config.get("project", {}).get("language", "unknown")
 
@@ -497,13 +555,19 @@ def _build_fix_prompt(
         failure_section.append(f"```\n{f.log}\n```")
         failure_section.append("")
 
+    # Collect current source of files mentioned in failures
+    source_section = _collect_source_files(project_root, failures)
+
     lines = [
         f"You are fixing failures in the project '{project_name}' ({language}).",
-        f"Working directory: {project_root}",
         "",
         "## Failures to fix",
         "",
         *failure_section,
+        "## Current source code of relevant files",
+        "",
+        source_section if source_section else "(no source files found)",
+        "",
         "## Design documents (for context — these define the intended behavior)",
         "",
         design_context if design_context else "(no design documents found)",
@@ -525,10 +589,95 @@ def _build_fix_prompt(
         "6. Make minimal, focused changes. Don't refactor unrelated code.",
         "7. Follow the target framework's lint rules and naming conventions.",
         "   Avoid using global/reserved names (module, exports, require, etc.) as local variables.",
-        "8. After making changes, briefly explain what you fixed and why.",
+        "",
+        "## Output format (CRITICAL)",
+        "",
+        "For each file you fix or create, output the COMPLETE file content in a fenced",
+        "code block tagged with the language and the file path (relative to project root):",
+        "",
+        "```<language> <relative/path/to/file>",
+        "// ... complete fixed source code ...",
+        "```",
+        "",
+        "Example:",
+        "",
+        f"```{language} src/app/api/example/route.ts",
+        "// complete file content here",
+        "```",
+        "",
+        "After all code blocks, briefly explain what you fixed and why.",
     ]
 
     return "\n".join(lines)
+
+
+def _collect_source_files(
+    project_root: Path,
+    failures: list[FailureInfo],
+    max_chars: int = 50000,
+) -> str:
+    """Read current source of files mentioned in failure logs."""
+    # Collect unique file paths from failures
+    candidate_paths: list[str] = []
+    for f in failures:
+        for fp in f.failed_files:
+            # Normalize: strip CI runner prefixes, keep relative paths
+            clean = fp
+            # Strip common CI prefixes like /home/runner/work/repo/repo/
+            for prefix in ["/home/runner/work/", "/github/workspace/"]:
+                if clean.startswith(prefix):
+                    parts = clean[len(prefix):].split("/", 2)
+                    if len(parts) >= 3:
+                        clean = parts[2]  # Skip repo/repo/
+                    break
+            candidate_paths.append(clean)
+
+    # Deduplicate and resolve
+    seen: set[str] = set()
+    source_parts: list[str] = []
+    total_chars = 0
+
+    for rel_path in candidate_paths:
+        if rel_path in seen:
+            continue
+        seen.add(rel_path)
+
+        target = project_root / rel_path
+        if not target.is_file():
+            continue
+        # Skip test files — we don't want to include them as "source to fix"
+        rel_str = str(target.relative_to(project_root))
+        if rel_str.startswith("tests/") or rel_str.startswith("__tests__/"):
+            continue
+
+        try:
+            content = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        if total_chars + len(content) > max_chars:
+            remaining = max_chars - total_chars
+            if remaining > 500:
+                source_parts.append(
+                    f"```{_guess_lang(target)} {rel_str}\n{content[:remaining]}\n```\n(truncated)"
+                )
+            break
+
+        source_parts.append(f"```{_guess_lang(target)} {rel_str}\n{content}\n```")
+        total_chars += len(content)
+
+    return "\n\n".join(source_parts)
+
+
+def _guess_lang(path: Path) -> str:
+    """Guess language identifier from file extension."""
+    ext_map = {
+        ".ts": "typescript", ".tsx": "typescript", ".js": "javascript",
+        ".jsx": "javascript", ".py": "python", ".rb": "ruby",
+        ".go": "go", ".rs": "rust", ".java": "java",
+        ".yml": "yaml", ".yaml": "yaml", ".json": "json",
+    }
+    return ext_map.get(path.suffix.lower(), "")
 
 
 # ---------------------------------------------------------------------------
