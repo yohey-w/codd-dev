@@ -21,6 +21,7 @@ from codd.fixer import (
     _invoke_fix_ai,
     _is_test_path,
     _parse_ci_log,
+    _prepare_fix_ai_command,
     _run_local_tests,
     run_fix,
 )
@@ -206,6 +207,70 @@ class TestInvokeFixAi:
 
         assert (tmp_path / "src" / "a.ts").read_text() == "content_a\n"
         assert (tmp_path / "src" / "b.ts").read_text() == "content_b\n"
+
+    def test_fallback_preceded_by_bold_path(self, tmp_path):
+        """Fallback: **path/to/file** on line before code block."""
+        ai_response = (
+            "**src/handler.ts**:\n"
+            "```typescript\n"
+            "export function handler() { return 'fixed'; }\n"
+            "```\n"
+        )
+        with patch("codd.fixer._invoke_ai_command", return_value=ai_response):
+            _invoke_fix_ai("claude --print", ai_response, tmp_path)
+
+        target = tmp_path / "src" / "handler.ts"
+        assert target.exists()
+        assert "fixed" in target.read_text()
+
+    def test_fallback_comment_filepath(self, tmp_path):
+        """Fallback: // filepath: path/to/file as first line in block."""
+        ai_response = (
+            "```typescript\n"
+            "// filepath: src/utils.ts\n"
+            "export const add = (a: number, b: number) => a + b;\n"
+            "```\n"
+        )
+        with patch("codd.fixer._invoke_ai_command", return_value=ai_response):
+            _invoke_fix_ai("claude --print", ai_response, tmp_path)
+
+        target = tmp_path / "src" / "utils.ts"
+        assert target.exists()
+        assert "add" in target.read_text()
+
+    def test_primary_pattern_takes_precedence(self, tmp_path):
+        """Primary pattern wins when both primary and fallback match."""
+        ai_response = (
+            "```typescript src/route.ts\n"
+            "primary_content\n"
+            "```\n"
+        )
+        with patch("codd.fixer._invoke_ai_command", return_value=ai_response):
+            _invoke_fix_ai("claude --print", ai_response, tmp_path)
+
+        assert (tmp_path / "src" / "route.ts").read_text() == "primary_content\n"
+
+
+class TestPrepareFixAiCommand:
+    def test_replaces_document_system_prompt(self):
+        cmd = (
+            "claude --print --model opus --system-prompt "
+            "'You are a technical document generator.'"
+        )
+        result = _prepare_fix_ai_command(cmd)
+        assert "document generator" not in result
+        assert "code repair" in result
+
+    def test_adds_system_prompt_for_print_mode(self):
+        cmd = "claude --print --model opus"
+        result = _prepare_fix_ai_command(cmd)
+        assert "--system-prompt" in result
+        assert "code repair" in result
+
+    def test_no_change_for_non_print_command(self):
+        cmd = "codex exec --full-auto -m gpt-5.4"
+        result = _prepare_fix_ai_command(cmd)
+        assert "--system-prompt" not in result
 
 
 class TestCollectSourceFiles:

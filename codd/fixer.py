@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shlex
 import subprocess
 import tempfile
@@ -171,14 +172,62 @@ def run_fix(
 # AI invocation for fix (source-in → fixed-source-out → write back)
 # ---------------------------------------------------------------------------
 
-# Regex to extract fenced code blocks tagged with a file path.
-# Matches: ```python path/to/file.py  or  ```typescript src/app/route.ts
-import re
+# Regex patterns to extract fenced code blocks tagged with file paths.
 
+# Primary: ```language path/to/file.py
 _FIX_BLOCK_RE = re.compile(
     r"```[a-zA-Z]*\s+([\w./_-]+)\s*\n(.*?)```",
     re.DOTALL,
 )
+
+# Fallback 1: **path/to/file.py** or `path/to/file.py` on preceding line
+# followed by a code block
+_FIX_BLOCK_PRECEDED_RE = re.compile(
+    r"(?:\*\*|`)([\w./_-]+\.\w+)(?:\*\*|`)\s*:?\s*\n```[a-zA-Z]*\s*\n(.*?)```",
+    re.DOTALL,
+)
+
+# Fallback 2: // filepath: path/to/file.py as first line inside code block
+_FIX_BLOCK_COMMENT_RE = re.compile(
+    r"```[a-zA-Z]*\s*\n\s*(?://|#)\s*(?:filepath|file):\s*([\w./_-]+)\s*\n(.*?)```",
+    re.DOTALL,
+)
+
+# System prompt optimized for code fix (not document generation)
+_FIX_SYSTEM_PROMPT = (
+    "You are a code repair assistant. You receive error logs, current source code, "
+    "and design documents. Output the complete fixed source for each file in fenced "
+    "code blocks tagged with the file path. Do not output explanations before the "
+    "code blocks. Fix implementation to match the design specification."
+)
+
+
+def _prepare_fix_ai_command(ai_command: str) -> str:
+    """Adapt an AI command for fix mode.
+
+    If the command contains a --system-prompt intended for document generation,
+    replace it with the fix-optimized system prompt.
+    """
+    parts = shlex.split(ai_command)
+    cleaned: list[str] = []
+    skip_next = False
+    has_system_prompt = False
+
+    for tok in parts:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--system-prompt":
+            skip_next = True
+            has_system_prompt = True
+            continue
+        cleaned.append(tok)
+
+    # Add fix-specific system prompt
+    if has_system_prompt or "--print" in cleaned:
+        cleaned.extend(["--system-prompt", _FIX_SYSTEM_PROMPT])
+
+    return shlex.join(cleaned)
 
 
 def _invoke_fix_ai(ai_command: str, prompt: str, project_root: Path) -> str:
@@ -193,24 +242,34 @@ def _invoke_fix_ai(ai_command: str, prompt: str, project_root: Path) -> str:
         ```
 
     This function parses those blocks and writes them back to disk.
+    Uses multiple regex patterns for robustness (primary + 2 fallbacks).
     """
-    ai_output = _invoke_ai_command(ai_command, prompt)
+    fixed_command = _prepare_fix_ai_command(ai_command)
+    ai_output = _invoke_ai_command(fixed_command, prompt)
 
     # Parse fenced code blocks with file paths and write them back
     applied: list[str] = []
-    for match in _FIX_BLOCK_RE.finditer(ai_output):
-        file_path_str = match.group(1)
-        fixed_code = match.group(2)
+    seen_paths: set[str] = set()
 
-        target = project_root / file_path_str
-        if not target.resolve().is_relative_to(project_root.resolve()):
-            logger.warning("Skipping file outside project: %s", file_path_str)
-            continue
+    # Try all patterns, primary first
+    for pattern in (_FIX_BLOCK_RE, _FIX_BLOCK_PRECEDED_RE, _FIX_BLOCK_COMMENT_RE):
+        for match in pattern.finditer(ai_output):
+            file_path_str = match.group(1)
+            fixed_code = match.group(2)
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(fixed_code, encoding="utf-8")
-        applied.append(file_path_str)
-        logger.info("Applied fix to: %s", file_path_str)
+            if file_path_str in seen_paths:
+                continue  # Already applied by a higher-priority pattern
+
+            target = project_root / file_path_str
+            if not target.resolve().is_relative_to(project_root.resolve()):
+                logger.warning("Skipping file outside project: %s", file_path_str)
+                continue
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(fixed_code, encoding="utf-8")
+            seen_paths.add(file_path_str)
+            applied.append(file_path_str)
+            logger.info("Applied fix to: %s", file_path_str)
 
     if not applied:
         logger.warning("AI output contained no parseable file blocks to apply")
