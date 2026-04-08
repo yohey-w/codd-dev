@@ -758,7 +758,7 @@ def _detect_go_patterns(facts: ProjectFacts, content: str):
 
 
 def _detect_code_patterns(mod: ModuleInfo, content: str, language: str):
-    """Detect API routes, DB models from source code."""
+    """Detect API routes, DB models, page routes, auth redirects from source code."""
     if language == "python":
         if re.search(r'@(?:app|router)\.(get|post|put|delete|patch)\s*\(', content):
             mod.patterns["api_routes"] = "HTTP route handlers"
@@ -766,6 +766,10 @@ def _detect_code_patterns(mod: ModuleInfo, content: str, language: str):
             mod.patterns["db_models"] = "ORM models"
         if re.search(r'@(?:celery_app|app)\.task', content):
             mod.patterns["background_tasks"] = "Async task handlers"
+        if re.search(r'(?:redirect|RedirectResponse|HttpResponseRedirect)\s*\(', content):
+            mod.patterns["auth_redirects"] = "Server-side redirects"
+        if re.search(r'@login_required|@permission_required|LoginRequiredMixin', content):
+            mod.patterns["auth_guards"] = "Authentication guards"
 
     elif language in ("typescript", "javascript"):
         if re.search(r'(?:app|router)\.(get|post|put|delete|patch)\s*\(', content):
@@ -774,6 +778,21 @@ def _detect_code_patterns(mod: ModuleInfo, content: str, language: str):
             mod.patterns["api_routes"] = "NestJS controller"
         if re.search(r'(?:schema|model)\s*\(', content, re.IGNORECASE):
             mod.patterns["db_models"] = "Database models"
+        # Page routes: Next.js/Remix/SvelteKit page components with server-side logic
+        if re.search(r'export\s+default\s+(?:async\s+)?function\s+\w*Page', content):
+            mod.patterns["page_routes"] = "Page route components"
+        # Auth redirects: server-side redirect after auth checks
+        if re.search(r'(?:redirect|NextResponse\.redirect|Response\.redirect)\s*\(', content):
+            mod.patterns["auth_redirects"] = "Server-side redirects"
+        # Middleware with auth/redirect logic
+        if re.search(r'export\s+(?:async\s+)?function\s+middleware', content):
+            mod.patterns["middleware"] = "Request middleware"
+        # Client-side navigation: programmatic redirects after form submission
+        if re.search(r'(?:router\.push|router\.replace|window\.location\.assign|window\.location\.href\s*=)', content):
+            mod.patterns["client_redirects"] = "Client-side navigation"
+        # Auth provider configuration (NextAuth, Auth.js, etc.)
+        if re.search(r'(?:NextAuth|CredentialsProvider|signIn|signOut|useSession|getServerSession)', content):
+            mod.patterns["auth_provider"] = "Authentication provider"
 
 
 def _detect_entry_points(facts: ProjectFacts, project_root: Path, language: str):

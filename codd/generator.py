@@ -467,10 +467,19 @@ def _build_generation_prompt(
                 "- Shared helpers: Mandate a `tests/e2e/helpers/` directory for auth flows, test data setup, and common assertions to avoid duplication across spec files.",
                 "- Generation markers: All generated files must include `// @generated-from:` and `// @generated-by: codd propagate` headers. Manual tests marked with `// @manual` must be preserved on regeneration.",
                 "",
+                "E2E Test Level Separation (CRITICAL):",
+                "- E2E tests MUST be split into two distinct levels: API integration tests and browser tests. These are NOT interchangeable.",
+                "- API integration tests use HTTP client mode (e.g. Playwright `request` context, `supertest`, `fetch`) to verify endpoint responses, status codes, and data contracts. These test the server, not the user experience.",
+                "- Browser tests use real browser automation (e.g. Playwright `page`, Cypress `cy`) to simulate actual user interactions: clicking buttons, filling forms, navigating pages, and verifying visible UI state.",
+                "- For web applications with authentication, browser tests MUST include a login-redirect-render flow: (1) navigate to login page, (2) fill credentials and submit, (3) assert redirect to the correct post-login URL, (4) assert the target page renders expected content. This catches redirect misconfigurations and route mismatches that API tests cannot detect.",
+                "- For any page transition triggered by a user action (form submit, link click, button click), browser tests MUST verify both the resulting URL (via URL assertion) and at least one visible content element on the destination page. Checking only the HTTP status is insufficient — a 200 with wrong content or a silent redirect to a 404 page will be missed.",
+                "- Output file naming: API integration tests → `tests/e2e/<domain>.spec.ts`, browser tests → `tests/e2e/<domain>.browser.spec.ts`. This makes the test level immediately visible from the filename.",
+                "",
                 "E2E Runtime Environment rules:",
                 "- E2E tests for web applications require a running server. The meta-prompt MUST specify how to start the application under test before running E2E tests.",
                 "- Detect the project type from package.json scripts, framework config, or entry points. Include the appropriate startup sequence (e.g., build → start → wait-for-ready) in the E2E instructions.",
                 "- For CI environments, specify that the server must run in the background with a health-check wait before test execution begins.",
+                "- Browser tests require a headed or headless browser. Specify the browser launch configuration (e.g. `use: { headless: true }`) in the test config.",
             ]
         )
 

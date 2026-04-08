@@ -660,6 +660,38 @@ def extract(path: str, language: str | None, source_dirs: str | None, output: st
         click.echo(f"  3. Run: codd scan  (to build the dependency graph)")
 
 
+@main.command("repair-slice")
+@click.option("--path", default=".", help="Project root directory")
+@click.option("--files", required=True, help="Comma-separated list of located files to analyze")
+@click.option("--issue", default=None, help="Issue/bug description text for relevance scoring")
+@click.option("--issue-file", default=None, type=click.Path(exists=True), help="File containing issue text")
+@click.option("--language", default=None, help="Override language detection")
+@click.option("--source-dirs", default=None, help="Comma-separated source directories")
+@click.option("--top-n", default=3, type=int, help="Top N functions per file (default: 3)")
+def repair_slice_cmd(path, files, issue, issue_file, language, source_dirs, top_n):
+    """Generate compact repair context for located files (patch generation pipeline)."""
+    from codd.repair_slice import generate_repair_slices
+
+    project_root = Path(path).resolve()
+    file_list = [f.strip() for f in files.split(",") if f.strip()]
+
+    issue_text = issue or ""
+    if issue_file and not issue_text:
+        issue_text = Path(issue_file).read_text(errors="ignore")
+
+    dirs = [d.strip() for d in source_dirs.split(",") if d.strip()] if source_dirs else None
+
+    result = generate_repair_slices(
+        project_root,
+        file_list,
+        issue_text=issue_text,
+        language=language,
+        source_dirs=dirs,
+        top_n=top_n,
+    )
+    click.echo(result)
+
+
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--scope", default=None, help="Review a single document by node_id")
