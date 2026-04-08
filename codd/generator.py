@@ -294,6 +294,22 @@ def _render_document(
     depended_by: list[dict[str, Any]],
     body: str,
 ) -> str:
+    # For test code files, use comment-style headers instead of YAML frontmatter
+    if _is_test_code_output(artifact.output):
+        dep_paths = [d.get("id", "") for d in artifact.depends_on]
+        header_lines = [f"// @generated-from: {path}" for path in dep_paths]
+        header_lines.append("// @generated-by: codd generate")
+        header_lines.append(f"// @codd-node-id: {artifact.node_id}")
+        header = "\n".join(header_lines)
+        # Strip any markdown fences the AI might have wrapped the code in
+        cleaned = body.strip()
+        if cleaned.startswith("```"):
+            first_newline = cleaned.index("\n") if "\n" in cleaned else len(cleaned)
+            cleaned = cleaned[first_newline + 1:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        return f"{header}\n\n{cleaned.strip()}\n"
+
     doc_type = _infer_doc_type(artifact.output)
     codd_block = {
         "node_id": artifact.node_id,
@@ -390,12 +406,21 @@ def _generate_document_body(
     )
 
 
+def _is_test_code_output(output_path: str) -> bool:
+    """Check if the output target is an executable test file (not a design doc)."""
+    return output_path.endswith(('.spec.ts', '.test.ts', '.spec.js', '.test.js', '.spec.py', '.test.py'))
+
+
 def _build_generation_prompt(
     artifact: WaveArtifact,
     dependency_documents: list[DependencyDocument],
     conventions: list[dict[str, Any]],
     feedback: str | None = None,
 ) -> str:
+    # Test code generation mode: output executable test code, not a Markdown document
+    if _is_test_code_output(artifact.output):
+        return _build_test_code_prompt(artifact, dependency_documents, conventions, feedback=feedback)
+
     doc_type = _infer_doc_type(artifact.output)
     is_detailed_design = _is_detailed_design_output(artifact.output)
     section_names = DETAILED_DESIGN_SECTIONS if is_detailed_design else TYPE_SECTIONS.get(doc_type, TYPE_SECTIONS["document"])
@@ -578,6 +603,88 @@ def _build_generation_prompt(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _build_test_code_prompt(
+    artifact: WaveArtifact,
+    dependency_documents: list[DependencyDocument],
+    conventions: list[dict[str, Any]],
+    feedback: str | None = None,
+) -> str:
+    """Build a prompt that generates executable test code (not a Markdown document)."""
+    # Detect test framework from output filename
+    ext = PurePosixPath(artifact.output).suffix
+    if ext in ('.ts', '.js'):
+        framework = "Playwright"
+        lang = "TypeScript"
+    else:
+        framework = "pytest"
+        lang = "Python"
+
+    conv_text = ""
+    for c in conventions:
+        targets = ", ".join(c.get("targets", []))
+        reason = c.get("reason", "")
+        conv_text += f"  - [{targets}]: {reason}\n"
+
+    lines = [
+        f"You are generating executable {framework} test code in {lang}.",
+        f"Node ID: {artifact.node_id}",
+        f"Title: {artifact.title}",
+        f"Output file: {artifact.output}",
+        "",
+        "CRITICAL: Output ONLY executable test code. Do NOT output Markdown, frontmatter, design prose, or commentary.",
+        "The output must be a valid, runnable test file that can be executed directly by the test runner.",
+        "",
+        "Conventions to enforce in tests:",
+        conv_text,
+        "",
+        "Test separation rules:",
+        "- Tests that can run in CI (headless browser + test DB) must NOT be tagged.",
+        "- Tests that require a deployed environment (VPS, staging) must be tagged with @cdp-only in the describe block name.",
+        "  Example: test.describe('Deploy Smoke @cdp-only', () => { ... })",
+        "- The Playwright config uses `grepInvert: /@cdp-only/` in CI to exclude deploy-only tests.",
+        "- CI tests: login flow, redirect checks, route protection, role-based access.",
+        "- CDP-only tests: visual layout checks, mobile viewport, deployed URL smoke tests.",
+        "",
+    ]
+
+    if framework == "Playwright":
+        lines.extend([
+            "Playwright-specific rules:",
+            "- Import from '@playwright/test': test, expect, Page",
+            "- Use page object for browser tests, NOT playwrightRequest for API tests.",
+            "- For login forms: detect the actual form structure from dependency documents.",
+            "  Look for input labels, button text, tab switching if the form has multiple modes.",
+            "- Use getByRole, getByLabel, getByText for selectors (accessibility-first).",
+            "- For redirects: use page.waitForURL() with regex pattern and reasonable timeout.",
+            "- Assert both URL and visible content after navigation.",
+            "- Use process.env.BASE_URL for the server URL.",
+            "",
+            "File header format:",
+            f"// @generated-from: <dependency doc paths>",
+            "// @generated-by: codd generate",
+            "",
+        ])
+
+    lines.append("Use the following dependency documents as context for what to test:")
+    lines.append("")
+    for doc in dependency_documents:
+        lines.append(f"--- {doc.node_id} ({doc.path.as_posix()}) ---")
+        lines.append(doc.content[:8000])
+        lines.append("--- END ---")
+        lines.append("")
+
+    if feedback:
+        lines.extend([
+            "--- REVIEW FEEDBACK ---",
+            feedback.rstrip(),
+            "--- END REVIEW FEEDBACK ---",
+            "",
+        ])
+
+    lines.append(f"Output the complete {lang} test file now. No markdown fences. No prose. Just code.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _is_detailed_design_output(output_path: str) -> bool:
     parts = PurePosixPath(output_path).parts
     return len(parts) >= 2 and parts[0] == "docs" and parts[1] == "detailed_design"
@@ -610,6 +717,13 @@ def _invoke_ai_command(ai_command: str, prompt: str) -> str:
 
 
 def _sanitize_generated_body(title: str, body: str, *, output_path: str | None = None) -> str:
+    # For test code output, skip Markdown-specific sanitization
+    if output_path and _is_test_code_output(output_path):
+        cleaned = body.strip()
+        if not cleaned:
+            raise ValueError("AI command returned empty output")
+        return cleaned + "\n"
+
     normalized = body.lstrip()
     if normalized.startswith("---"):
         match = re.match(r"^---\s*\n.*?\n---\s*\n?", normalized, re.DOTALL)

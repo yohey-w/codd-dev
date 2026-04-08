@@ -600,3 +600,59 @@ def test_sanitize_normalizes_h3_before_validation():
     assert "## 1. Overview" in result
     assert "## 2. Acceptance Criteria" in result
     assert "## 3. Failure Criteria" in result
+
+
+# -- Test code output detection --
+
+def test_is_test_code_output_detects_spec_ts():
+    assert generator_module._is_test_code_output("tests/e2e/auth.spec.ts") is True
+    assert generator_module._is_test_code_output("tests/e2e/browser-nav.spec.js") is True
+    assert generator_module._is_test_code_output("tests/test_auth.test.py") is True
+
+
+def test_is_test_code_output_rejects_non_test_files():
+    assert generator_module._is_test_code_output("docs/test/strategy.md") is False
+    assert generator_module._is_test_code_output("tests/e2e/helpers/auth.ts") is False
+    assert generator_module._is_test_code_output("src/app.ts") is False
+
+
+def test_sanitize_generated_body_skips_markdown_checks_for_test_code():
+    """Test code output should not be forced into Markdown structure."""
+    code = 'import { test, expect } from "@playwright/test";\n\ntest("it works", async ({ page }) => {\n  await page.goto("/");\n});\n'
+    result = generator_module._sanitize_generated_body("E2E Tests", code, output_path="tests/e2e/auth.spec.ts")
+    assert "import" in result
+    assert "# E2E Tests" not in result  # No Markdown heading injected
+
+
+def test_render_document_uses_comment_headers_for_test_code():
+    """Test code output should use // comment headers, not YAML frontmatter."""
+    artifact = generator_module.WaveArtifact(
+        wave=9,
+        node_id="test:e2e-browser",
+        output="tests/e2e/browser.spec.ts",
+        title="Browser Tests",
+        depends_on=[{"id": "design:auth", "relation": "depends_on"}],
+        conventions=[],
+    )
+    body = 'import { test } from "@playwright/test";\n\ntest("smoke", async ({ page }) => {});\n'
+    result = generator_module._render_document(artifact, [], [], body)
+    assert result.startswith("// @generated-from: design:auth")
+    assert "// @codd-node-id: test:e2e-browser" in result
+    assert "---" not in result  # No YAML frontmatter
+    assert "import" in result
+
+
+def test_render_document_strips_markdown_fences_from_test_code():
+    """If AI wraps code in ```typescript fences, they should be stripped."""
+    artifact = generator_module.WaveArtifact(
+        wave=9,
+        node_id="test:e2e",
+        output="tests/e2e/auth.spec.ts",
+        title="Auth Tests",
+        depends_on=[],
+        conventions=[],
+    )
+    body = '```typescript\nimport { test } from "@playwright/test";\ntest("ok", async () => {});\n```'
+    result = generator_module._render_document(artifact, [], [], body)
+    assert "```" not in result
+    assert "import" in result
