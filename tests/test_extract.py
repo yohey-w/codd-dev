@@ -402,3 +402,86 @@ class TestCLI:
         assert config["scan"]["source_dirs"] == ["src"]
         assert config["graph"]["path"] == ".codd/scan"
         assert "Generated: .codd/codd.yaml" in result.output
+
+
+# -- Browser navigation pattern detection tests --
+
+class TestBrowserNavigationPatternDetection:
+    """Verify that _detect_code_patterns detects auth redirects, page routes,
+    middleware, client-side navigation, and auth provider patterns.
+    These patterns drive the E2E browser test generation in generator.py."""
+
+    def _detect(self, code: str, language: str) -> dict[str, str]:
+        from codd.extractor import _detect_code_patterns
+        mod = ModuleInfo(name="test", files=["test.ts"])
+        _detect_code_patterns(mod, code, language)
+        return mod.patterns
+
+    # -- TypeScript / JavaScript --
+
+    def test_nextjs_middleware_detected(self):
+        code = 'export function middleware(request) { return NextResponse.next(); }'
+        p = self._detect(code, "typescript")
+        assert "middleware" in p
+
+    def test_server_redirect_detected_ts(self):
+        code = 'redirect("/login");'
+        p = self._detect(code, "typescript")
+        assert "auth_redirects" in p
+
+    def test_nextresponse_redirect_detected(self):
+        code = 'return NextResponse.redirect(url);'
+        p = self._detect(code, "typescript")
+        assert "auth_redirects" in p
+
+    def test_page_route_component_detected(self):
+        code = 'export default async function LoginPage({ searchParams }) {}'
+        p = self._detect(code, "typescript")
+        assert "page_routes" in p
+
+    def test_client_redirect_location_assign(self):
+        code = 'window.location.assign(result.url);'
+        p = self._detect(code, "typescript")
+        assert "client_redirects" in p
+
+    def test_client_redirect_router_push(self):
+        code = 'router.push("/dashboard");'
+        p = self._detect(code, "typescript")
+        assert "client_redirects" in p
+
+    def test_auth_provider_nextauth(self):
+        code = 'const result = await signIn("credentials", opts);'
+        p = self._detect(code, "typescript")
+        assert "auth_provider" in p
+
+    def test_auth_provider_use_session(self):
+        code = 'const { data: session } = useSession();'
+        p = self._detect(code, "typescript")
+        assert "auth_provider" in p
+
+    def test_no_false_positive_on_plain_function(self):
+        code = 'export default function HomePage() { return <div>Hello</div>; }'
+        p = self._detect(code, "typescript")
+        assert "page_routes" in p  # matches *Page pattern
+
+    def test_no_false_positive_on_plain_code(self):
+        code = 'const x = 1 + 2; console.log(x);'
+        p = self._detect(code, "typescript")
+        assert len(p) == 0
+
+    # -- Python --
+
+    def test_python_redirect_response(self):
+        code = 'return RedirectResponse(url="/login")'
+        p = self._detect(code, "python")
+        assert "auth_redirects" in p
+
+    def test_python_login_required(self):
+        code = '@login_required\ndef my_view(request): pass'
+        p = self._detect(code, "python")
+        assert "auth_guards" in p
+
+    def test_python_redirect_function(self):
+        code = 'return redirect("/dashboard")'
+        p = self._detect(code, "python")
+        assert "auth_redirects" in p
