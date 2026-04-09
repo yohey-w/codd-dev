@@ -75,7 +75,7 @@ def run_pre_commit(project_root: Path) -> int:
 
 def _get_staged_markdown_files(project_root: Path, config: dict) -> list[Path]:
     result = subprocess.run(
-        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        ["git", "-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
         cwd=project_root,
         capture_output=True,
         text=True,

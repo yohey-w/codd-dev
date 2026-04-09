@@ -532,7 +532,7 @@ def _get_changed_files(project_root: Path, diff_target: str) -> list[str]:
     """Get changed files from git diff."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", diff_target],
+            ["git", "-c", "core.quotePath=false", "diff", "--name-only", diff_target],
             capture_output=True, text=True, cwd=str(project_root),
         )
         if result.returncode != 0:
@@ -755,7 +755,7 @@ def _get_code_diff(
     """Get the actual code diff for specific files."""
     try:
         result = subprocess.run(
-            ["git", "diff", diff_target, "--"] + files,
+            ["git", "-c", "core.quotePath=false", "diff", diff_target, "--"] + files,
             capture_output=True, text=True, cwd=str(project_root),
         )
         if result.returncode != 0:

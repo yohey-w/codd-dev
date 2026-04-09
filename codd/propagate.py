@@ -74,7 +74,7 @@ def _get_changed_files(project_root: Path, diff_target: str) -> list:
     """Get list of changed files from git diff."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", diff_target],
+            ["git", "-c", "core.quotePath=false", "diff", "--name-only", diff_target],
             capture_output=True, text=True, cwd=str(project_root)
         )
         if result.returncode != 0:
