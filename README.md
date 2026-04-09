@@ -684,6 +684,7 @@ If CoDD can't manage itself, it shouldn't manage your project.
 - [dev.to: What Happens After "Spec First"](https://dev.to/yohey-w/codd-coherence-driven-development-what-happens-after-spec-first-514f)
 - [Zenn: Harness as Code — A Guide to CoDD #1 spec → design → code](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide?locale=en)
 - [Zenn: Harness as Code — A Guide to CoDD #2 Brownfield](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield?locale=en)
+- [Zenn: Harness as Code — A Guide to CoDD #3 Bug Fixing with CoDD extract (SWE-bench)](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot?locale=en)
 - [Zenn: CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence?locale=en)
 
 ## License
