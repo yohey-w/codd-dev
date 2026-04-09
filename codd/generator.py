@@ -498,6 +498,7 @@ def _build_generation_prompt(
                 "- Browser tests use real browser automation (e.g. Playwright `page`, Cypress `cy`) to simulate actual user interactions: clicking buttons, filling forms, navigating pages, and verifying visible UI state.",
                 "- For web applications with authentication, browser tests MUST include a login-redirect-render flow: (1) navigate to login page, (2) fill credentials and submit, (3) assert redirect to the correct post-login URL, (4) assert the target page renders expected content. This catches redirect misconfigurations and route mismatches that API tests cannot detect.",
                 "- For any page transition triggered by a user action (form submit, link click, button click), browser tests MUST verify both the resulting URL (via URL assertion) and at least one visible content element on the destination page. Checking only the HTTP status is insufficient — a 200 with wrong content or a silent redirect to a 404 page will be missed.",
+                "- Server health baseline: Every HTTP request assertion MUST first verify the response status is < 500 before checking business-logic status codes (200, 302, 401, etc.). A 5xx is a server error (unhandled exception, DB down) — categorically different from a 4xx (auth failure, not found). Without this, a DB failure silently passes when tests only check for specific success codes.",
                 "- Output file naming: API integration tests → `tests/e2e/<domain>.spec.ts`, browser tests → `tests/e2e/<domain>.browser.spec.ts`. This makes the test level immediately visible from the filename.",
                 "",
                 "E2E Runtime Environment rules:",
@@ -644,6 +645,14 @@ def _build_test_code_prompt(
         "- The Playwright config uses `grepInvert: /@cdp-only/` in CI to exclude deploy-only tests.",
         "- CI tests: login flow, redirect checks, route protection, role-based access.",
         "- CDP-only tests: visual layout checks, mobile viewport, deployed URL smoke tests.",
+        "",
+        "Server health baseline (CRITICAL):",
+        "- Every test that makes an HTTP request MUST assert the response status is < 500 BEFORE any business-logic assertions.",
+        "  Example: expect(response.status()).toBeLessThan(500);",
+        "- 5xx = server broke (unhandled exception, DB down). 4xx = business logic rejection (auth failure, not found). These are categorically different.",
+        "- Without this assertion, a DB connection failure silently passes when the test only checks for specific success codes like [200, 302].",
+        "- For browser tests after page.goto() or form submission, check response?.status() < 500 before asserting page content.",
+        "- For API tests, assert < 500 first, then assert the specific expected status code.",
         "",
     ]
 

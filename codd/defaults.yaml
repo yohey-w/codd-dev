@@ -30,4 +30,12 @@ propagation:
 fix:
   test_command: null  # auto-detected from package.json / pyproject.toml
   max_attempts: 3
+verify:
+  typecheck_command: null
+  test_command: null
+  report_output: "docs/test/verify_report.md"
+  e2e_setup_command: null  # e.g. "npx playwright install chromium"
+  e2e_command: null         # all E2E tests
+  e2e_deploy_command: null  # deploy/CDP-only tests (e.g. @cdp-only)
+  e2e_ci_command: null      # CI-safe tests (excludes CDP-only)
 conventions: []
