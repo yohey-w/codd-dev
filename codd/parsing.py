@@ -1862,8 +1862,8 @@ class TerraformExtractor:
                     info.resources.append(
                         {
                             "kind": "resource",
-                            "type": resource_type,
-                            "name": name,
+                            "type": resource_type.strip('"'),
+                            "name": name.strip('"'),
                             "attributes": attributes or {},
                         }
                     )
@@ -1878,8 +1878,8 @@ class TerraformExtractor:
                     info.resources.append(
                         {
                             "kind": "data",
-                            "type": data_type,
-                            "name": name,
+                            "type": data_type.strip('"'),
+                            "name": name.strip('"'),
                             "attributes": attributes or {},
                         }
                     )
@@ -1891,7 +1891,7 @@ class TerraformExtractor:
                 info.resources.append(
                     {
                         "kind": "module",
-                        "name": name,
+                        "name": name.strip('"'),
                         "attributes": attributes or {},
                     }
                 )
@@ -1903,7 +1903,7 @@ class TerraformExtractor:
                 info.resources.append(
                     {
                         "kind": "variable",
-                        "name": name,
+                        "name": name.strip('"'),
                         "attributes": attributes or {},
                     }
                 )
