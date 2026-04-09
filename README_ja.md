@@ -454,7 +454,7 @@ policies:
 
 ポリシーチェッカーは `codd audit` の一部として実行され、`codd policy` で単独実行も可能。CRITICAL違反はREJECT、WARNINGはCONDITIONALを返す。
 
-## MCPサ���バー
+## MCPサーバー
 
 CoDDは [Model Context Protocol](https://modelcontextprotocol.io/) 経由でツールを公開し、AIツールとの直接連携を実現する。外部依存ゼロ — MCP対応クライアントならどれでも動作。
 
@@ -477,7 +477,7 @@ codd mcp-server --project /path/to/your/project
 }
 ```
 
-### 利用可��なMCPツール
+### 利用可能なMCPツール
 
 | ツール | 説明 |
 |--------|------|
@@ -611,7 +611,7 @@ done
 | Stars | 83.7k | N/A（プロプラIDE） | 3k | -- |
 | 変更伝播 | No | No | No | **`codd impact` + 依存グラフ** |
 | 影響分析 | No | No | No | **Green / Amber / Gray バンド** |
-| 仕様記法 | Markdown + 40拡�� | EARS記法 | 品質ゲート + git worktree | フロントマター `depends_on` |
+| 仕様記法 | Markdown + 40拡張 | EARS記法 | 品質ゲート + git worktree | フロントマター `depends_on` |
 | ハーネスロックイン | GitHub Copilot | Kiro IDE | Claude Code | **任意のエージェント / IDE** |
 
 要約: spec-kit、Kiro、cc-sddは「仕様をどう作るか」に答える。CoDDは「上流が変わったとき、下流を自動で更新する」に答える。
@@ -682,7 +682,10 @@ codd verify           # mypy + pytest（434テスト通過）
 
 - [Zenn: Harness as Code — CoDD活用ガイド #1 spec → 設計書 → コード](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide)
 - [Zenn: Harness as Code — CoDD実践ガイド #2 ブラウンフィールド編](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield)
+- [Zenn: Harness as Code — CoDD活用ガイド #3 既存コードのバグ修正（SWE-bench実験）](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot)
 - [Zenn: CoDD 詳細解説](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence)
+- [dev.to: Harness as Code — Treating AI Workflows Like Infrastructure](https://dev.to/yohey-w/harness-as-code-treating-ai-workflows-like-infrastructure-27ni)
+- [dev.to: What Happens After "Spec First"](https://dev.to/yohey-w/codd-coherence-driven-development-what-happens-after-spec-first-514f)
 
 ## ライセンス
 
