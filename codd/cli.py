@@ -418,13 +418,19 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
             return
 
         click.echo(f"Changed files: {len(result.changed_files)}")
-        if not result.file_module_map:
-            click.echo("No source files changed (only non-source files in diff).")
-            return
 
-        click.echo(f"\nSource changes → modules:")
-        for f, m in sorted(result.file_module_map.items()):
-            click.echo(f"  {f} → {m}")
+        if result.file_module_map:
+            click.echo(f"\nSource changes → modules:")
+            for f, m in sorted(result.file_module_map.items()):
+                click.echo(f"  {f} → {m}")
+
+        if not result.auto_applied and not result.needs_hitl and not getattr(result, 'affected_docs', None):
+            if result.file_module_map:
+                click.echo("\nNo design docs found covering changed modules.")
+                click.echo("(Design docs need a 'modules' field in frontmatter to be tracked.)")
+            else:
+                click.echo("No affected design docs found (no source or doc changes matched).")
+            return
 
         # Auto-applied (green band)
         if result.auto_applied:
@@ -445,8 +451,6 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
             click.echo(f"\nReview the docs above, then run:")
             click.echo(f"  codd propagate --commit --reason \"<why you changed it>\"")
 
-        if not result.auto_applied and not result.needs_hitl:
-            click.echo("\nNo design docs found covering changed modules.")
         return
 
     # Default / --update mode (existing behavior)
@@ -463,17 +467,17 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
         return
 
     click.echo(f"Changed files: {len(result.changed_files)}")
-    if not result.file_module_map:
-        click.echo("No source files changed (only non-source files in diff).")
-        return
-
-    click.echo(f"\nSource changes → modules:")
-    for f, m in sorted(result.file_module_map.items()):
-        click.echo(f"  {f} → {m}")
+    if result.file_module_map:
+        click.echo(f"\nSource changes → modules:")
+        for f, m in sorted(result.file_module_map.items()):
+            click.echo(f"  {f} → {m}")
 
     if not result.affected_docs:
-        click.echo("\nNo design docs found covering changed modules.")
-        click.echo("(Design docs need a 'modules' field in frontmatter to be tracked.)")
+        if result.file_module_map:
+            click.echo("\nNo design docs found covering changed modules.")
+            click.echo("(Design docs need a 'modules' field in frontmatter to be tracked.)")
+        else:
+            click.echo("No affected design docs found (no source or doc changes matched).")
         return
 
     click.echo(f"\nAffected design docs: {len(result.affected_docs)}")
@@ -545,8 +549,15 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--sprint", default=None, type=click.IntRange(min=1), help="Sprint number to verify")
-def verify(path: str, sprint: int | None) -> None:
+@click.option("--e2e", is_flag=True, default=False, help="Run E2E tests (CI-safe, excludes @cdp-only)")
+@click.option("--deploy", is_flag=True, default=False, help="Run deploy/CDP-only E2E tests against deployed URL")
+@click.option("--base-url", default=None, help="Override BASE_URL for E2E tests")
+def verify(path: str, sprint: int | None, e2e: bool, deploy: bool, base_url: str | None) -> None:
     """Run build + test verification and trace failures to design documents."""
+    if e2e or deploy:
+        from codd.e2e_runner import run_e2e
+        run_e2e(path=path, deploy=deploy, base_url=base_url)
+        return
     _run_pro_command("verify", path=path, sprint=sprint)
 
 
