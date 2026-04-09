@@ -14,7 +14,7 @@ from codd.bridge import load_bridge_registry
 
 
 NODE_ID_PATTERN = re.compile(r"^(?P<prefix>[a-z_]+):(?P<name>.+)$")
-ALLOWED_NODE_PREFIXES = {
+DEFAULT_NODE_PREFIXES = {
     "config",
     "db",
     "db_column",
@@ -34,6 +34,8 @@ ALLOWED_NODE_PREFIXES = {
     "req",
     "test",
 }
+# Backwards compat alias
+ALLOWED_NODE_PREFIXES = DEFAULT_NODE_PREFIXES
 LEVEL_ERROR = "ERROR"
 LEVEL_BLOCKED = "BLOCKED"
 LEVEL_WARNING = "WARNING"
@@ -128,6 +130,21 @@ def run_validate(project_root: Path, codd_dir: Path) -> int:
     return result.exit_code
 
 
+def _build_allowed_prefixes(config: dict[str, Any]) -> set[str]:
+    """Build the set of allowed node_id prefixes from config + defaults."""
+    custom = config.get("prefixes")
+    if not custom:
+        return DEFAULT_NODE_PREFIXES
+    if not isinstance(custom, list):
+        return DEFAULT_NODE_PREFIXES
+    # Validate each custom prefix matches the pattern (lowercase + underscore only)
+    valid_custom = set()
+    for p in custom:
+        if isinstance(p, str) and re.fullmatch(r"[a-z_]+", p):
+            valid_custom.add(p)
+    return DEFAULT_NODE_PREFIXES | valid_custom
+
+
 def _validate_project_oss(project_root: Path, codd_dir: Path | None = None) -> ValidationResult:
     """Validate CoDD frontmatter, references, wave config, and dependency cycles."""
     codd_dir = codd_dir or (project_root / "codd")
@@ -140,6 +157,7 @@ def _validate_project_oss(project_root: Path, codd_dir: Path | None = None) -> V
     wave_defined_nodes = set(wave_expectations)
     scanned_node_ids = _load_scanned_node_ids(project_root, config)
     service_boundary_modules = _extract_service_boundary_modules(config)
+    allowed_prefixes = _build_allowed_prefixes(config)
 
     for doc_path in _iter_doc_files(project_root, config):
         result.documents_checked += 1
@@ -151,7 +169,7 @@ def _validate_project_oss(project_root: Path, codd_dir: Path | None = None) -> V
 
         codd = frontmatter.codd or {}
         node_id = codd.get("node_id")
-        if not isinstance(node_id, str) or not _is_valid_node_id(node_id):
+        if not isinstance(node_id, str) or not _is_valid_node_id(node_id, allowed_prefixes):
             result.add(
                 "ERROR",
                 "invalid_node_id",
@@ -330,11 +348,12 @@ def _parse_codd_frontmatter(file_path: Path) -> FrontmatterParseResult:
     return FrontmatterParseResult(codd=frontmatter["codd"])
 
 
-def _is_valid_node_id(node_id: str) -> bool:
+def _is_valid_node_id(node_id: str, allowed_prefixes: set[str] | None = None) -> bool:
     match = NODE_ID_PATTERN.match(node_id.strip())
     if not match:
         return False
-    return match.group("prefix") in ALLOWED_NODE_PREFIXES
+    prefixes = allowed_prefixes if allowed_prefixes is not None else DEFAULT_NODE_PREFIXES
+    return match.group("prefix") in prefixes
 
 
 def _extract_reference_ids(entries: Any) -> list[str]:

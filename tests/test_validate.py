@@ -440,3 +440,125 @@ codd:
 
     assert cli_result.exit_code == 0
     assert "OK:" in cli_result.output
+
+
+def test_validate_rejects_unknown_prefix_without_config(tmp_path):
+    project, codd_dir = _setup_project(
+        tmp_path,
+        {
+            "docs/kb.md": """---
+codd:
+  node_id: "knowledge:domain-model"
+  type: design
+---
+
+# Knowledge Base
+""",
+        },
+    )
+
+    result = validate_project(project, codd_dir)
+
+    assert result.error_count == 1
+    assert any("invalid_node_id" in i.code for i in result.issues)
+
+
+def test_validate_accepts_custom_prefix_from_config(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "docs").mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+
+    config = dict(BASE_CONFIG)
+    config["prefixes"] = ["knowledge", "schema", "review"]
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    )
+
+    (project / "docs" / "kb.md").write_text("""---
+codd:
+  node_id: "knowledge:domain-model"
+  type: design
+---
+
+# Knowledge Base
+""")
+    (project / "docs" / "api.md").write_text("""---
+codd:
+  node_id: "schema:api-spec"
+  type: design
+---
+
+# API Schema
+""")
+
+    result = validate_project(project, codd_dir)
+
+    assert result.status() == "OK"
+    assert result.error_count == 0
+
+
+def test_validate_custom_prefix_merged_with_defaults(tmp_path):
+    """Custom prefixes add to defaults, not replace them."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "docs").mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+
+    config = dict(BASE_CONFIG)
+    config["prefixes"] = ["knowledge"]
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    )
+
+    (project / "docs" / "design.md").write_text("""---
+codd:
+  node_id: "design:system-design"
+  type: design
+---
+
+# Design
+""")
+    (project / "docs" / "kb.md").write_text("""---
+codd:
+  node_id: "knowledge:insights"
+  type: design
+---
+
+# Knowledge
+""")
+
+    result = validate_project(project, codd_dir)
+
+    assert result.status() == "OK"
+    assert result.documents_checked == 2
+
+
+def test_validate_rejects_invalid_custom_prefix_format(tmp_path):
+    """Prefixes with uppercase or special chars are silently ignored."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "docs").mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+
+    config = dict(BASE_CONFIG)
+    config["prefixes"] = ["Valid-Not", "UPPER", "ok_prefix"]
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    )
+
+    # ok_prefix should work, the others should be ignored
+    (project / "docs" / "good.md").write_text("""---
+codd:
+  node_id: "ok_prefix:my-doc"
+  type: design
+---
+
+# Good
+""")
+
+    result = validate_project(project, codd_dir)
+    assert result.status() == "OK"
