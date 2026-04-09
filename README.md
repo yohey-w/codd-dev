@@ -149,7 +149,11 @@ codd scan            # Expected: 17 nodes, 30+ edges
 ```bash
 # Edit requirements: add "SSO (SAML 2.0)" to auth
 codd impact          # Expected: 6/7 design docs in Green/Amber band
-codd propagate --update  # Auto-updates downstream designs
+
+# Regenerate affected waves (propagate is for code→doc only)
+codd generate --wave 1 --force   # Re-derive acceptance criteria from updated requirements
+codd generate --wave 2 --force   # Re-derive system design from updated Wave 1
+# Repeat for each affected wave in dependency order
 ```
 
 **Pattern 3 — Doc → Doc via CEG** (code change → design update):

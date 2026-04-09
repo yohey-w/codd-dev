@@ -149,7 +149,11 @@ codd scan            # 期待値: 17ノード, 30+エッジ
 ```bash
 # 要件を編集: 認証に「SSO (SAML 2.0)」を追加
 codd impact          # 期待値: 7本中6本がGreen/Amberバンド
-codd propagate --update  # 下流設計書を自動更新
+
+# 影響を受けたWaveを再生成（propagateはコード→設計書方向のみ）
+codd generate --wave 1 --force   # 更新された要件から受入基準を再導出
+codd generate --wave 2 --force   # 更新されたWave 1からシステム設計を再導出
+# 影響のある各Waveを依存順に繰り返す
 ```
 
 **パターン3 — Doc → Doc via CEG**（コード変更 → 設計書更新）:
