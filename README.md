@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.6.0** — `init` / `scan` / `impact` are stable. `propagate` traces code changes to downstream design docs. `extract --ai` with baseline preset. OSS/Pro split via bridge pattern. GitHub Action for CI integration.
+**v1.7.0** — `init` / `scan` / `impact` are stable. `propagate` traces code changes to downstream design docs and doc-to-doc changes via CEG graph. `extract --ai` with baseline preset. Custom `node_id` prefixes via `codd.yaml`. GitHub Action for CI integration.
 
 ---
 
@@ -217,6 +217,27 @@ codd:
 The `modules` field enables reverse traceability: when source code changes, `codd extract` identifies affected modules, and the `modules` field maps those modules back to the design docs that need updating.
 
 `codd/scan/` is a cache — regenerated on every `codd scan`.
+
+## Custom Node Prefixes
+
+By default, `node_id` values must use one of the built-in prefixes (`design:`, `req:`, `doc:`, `module:`, etc.). To use CoDD for non-software domains (knowledge bases, review documents, prompt management), add custom prefixes in `codd.yaml`:
+
+```yaml
+# codd.yaml
+prefixes:
+  - knowledge
+  - schema
+  - review
+  - prompt
+```
+
+Custom prefixes are **merged with** built-in defaults — you don't need to re-list `design`, `req`, etc. Prefix names must be lowercase letters and underscores only (`[a-z_]+`).
+
+```yaml
+# Now valid in frontmatter:
+codd:
+  node_id: "knowledge:domain-model"
+```
 
 ## AI Model Configuration
 

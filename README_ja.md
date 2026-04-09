@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.6.0** — `init` / `scan` / `impact` は安定版。`propagate` でコード変更を下流設計書に伝搬。`extract --ai` にbaselineプリセット搭載。OSS/Proブリッジパターン分離。GitHub Action によるCI連携対応。
+**v1.7.0** — `init` / `scan` / `impact` は安定版。`propagate` でコード変更を下流設計書に伝搬、設計書間の変更もCEGグラフ経由で追跡。`extract --ai` にbaselineプリセット搭載。`codd.yaml` でカスタム `node_id` プレフィックス対応。GitHub Action によるCI連携対応。
 
 ---
 
@@ -217,6 +217,27 @@ codd:
 `modules` フィールドが逆方向トレーサビリティを実現する：ソースコードが変更されたとき、`codd extract` が影響モジュールを特定し、`modules` フィールドでそのモジュールに紐づく設計書を逆引きできる。
 
 `codd/scan/` はキャッシュ — `codd scan` のたびに再生成されます。
+
+## カスタムノードプレフィックス
+
+デフォルトでは `node_id` に使えるプレフィックスは組み込みのもの（`design:`, `req:`, `doc:`, `module:` 等）に限定されています。ソフトウェア設計以外の用途（ナレッジベース、レビュー文書、プロンプト管理など）に使う場合、`codd.yaml` でカスタムプレフィックスを追加できます：
+
+```yaml
+# codd.yaml
+prefixes:
+  - knowledge
+  - schema
+  - review
+  - prompt
+```
+
+カスタムプレフィックスは組み込みデフォルトに**マージ**されます。`design` や `req` を再指定する必要はありません。プレフィックス名は小文字英字とアンダースコアのみ（`[a-z_]+`）です。
+
+```yaml
+# フロントマターで使用可能に:
+codd:
+  node_id: "knowledge:domain-model"
+```
 
 ## AIモデル設定
 
