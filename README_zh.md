@@ -386,6 +386,14 @@ codd verify           # mypy + pytest（434 个测试通过）
 - [Zenn: Harness as Code — CoDD 指南 #3 使用 CoDD extract 修复 Bug（SWE-bench）](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot?locale=en)
 - [Zenn: CoDD 深度解读](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence?locale=en)
 
+## 赞助
+
+<a href="https://github.com/sponsors/yohey-w">
+  <img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=for-the-badge&logo=github-sponsors" alt="Sponsor">
+</a>
+
+您的赞助让 CoDD 持续免费并推动开发。查看[赞助等级](https://github.com/sponsors/yohey-w)。
+
 ## 许可证
 
 MIT

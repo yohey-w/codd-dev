@@ -712,6 +712,14 @@ codd verify           # mypy + pytest（434テスト通過）
 - [dev.to: Harness as Code — Treating AI Workflows Like Infrastructure](https://dev.to/yohey-w/harness-as-code-treating-ai-workflows-like-infrastructure-27ni)
 - [dev.to: What Happens After "Spec First"](https://dev.to/yohey-w/codd-coherence-driven-development-what-happens-after-spec-first-514f)
 
+## スポンサー
+
+<a href="https://github.com/sponsors/yohey-w">
+  <img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=for-the-badge&logo=github-sponsors" alt="Sponsor">
+</a>
+
+スポンサーの支援がCoDD開発を継続可能にしています。[スポンサーTier](https://github.com/sponsors/yohey-w)を確認する。
+
 ## ライセンス
 
 MIT
