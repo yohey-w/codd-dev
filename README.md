@@ -712,6 +712,14 @@ If CoDD can't manage itself, it shouldn't manage your project.
 - [Zenn: Harness as Code — A Guide to CoDD #3 Bug Fixing with CoDD extract (SWE-bench)](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot?locale=en)
 - [Zenn: CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence?locale=en)
 
+## Sponsors
+
+<a href="https://github.com/sponsors/yohey-w">
+  <img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=for-the-badge&logo=github-sponsors" alt="Sponsor">
+</a>
+
+Your sponsorship keeps CoDD free and funds continued development. See [sponsor tiers](https://github.com/sponsors/yohey-w).
+
 ## License
 
 MIT
