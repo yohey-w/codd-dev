@@ -806,3 +806,34 @@ def test_plan_init_raises_when_no_requirements_and_no_extracted(tmp_path):
 
     with pytest.raises(ValueError, match="greenfield"):
         planner_module.plan_init(project)
+
+
+def test_plan_init_prompt_includes_framework_conventions(tmp_path, mock_plan_init_ai):
+    """When frameworks are configured, the plan prompt includes them and asks for implicit conventions."""
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+
+    # Inject frameworks into config
+    config_path = project / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["project"]["frameworks"] = ["Next.js", "Prisma"]
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+    planner_module.plan_init(project)
+
+    prompt = mock_plan_init_ai[0]["input"]
+    assert "Next.js" in prompt
+    assert "Prisma" in prompt
+    assert "framework implicit conventions" in prompt
+
+
+def test_plan_init_prompt_shows_none_when_no_frameworks(tmp_path, mock_plan_init_ai):
+    """When no frameworks are configured, the prompt shows (none) and still mentions the category."""
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+
+    planner_module.plan_init(project)
+
+    prompt = mock_plan_init_ai[0]["input"]
+    assert "Detected/configured frameworks: (none)" in prompt
+    assert "framework implicit conventions" in prompt

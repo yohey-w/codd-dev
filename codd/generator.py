@@ -482,6 +482,11 @@ def _build_generation_prompt(
         lines.extend(
             [
                 "",
+                "Design-to-test traceability (CRITICAL):",
+                "- Before defining test scenarios, enumerate ALL verifiable behaviors from the dependency design documents. A verifiable behavior is any system action, state transition, or output that the design specifies and that can be asserted in a test.",
+                "- Every verifiable behavior must map to at least one test scenario — if a design document specifies a transition chain (e.g. action → intermediate state → final state), each link in the chain requires a separate assertion.",
+                "- Include a traceability section in the test document that lists each verifiable behavior and its corresponding test scenario(s). Flag any behavior that lacks coverage.",
+                "",
                 "E2E Test Generation Meta-Prompt section rules:",
                 "- The final section '## E2E Test Generation Meta-Prompt' serves as a machine-readable instruction for `codd propagate` to auto-generate E2E tests.",
                 "- MECE domain decomposition: Split E2E tests into non-overlapping domain files (e.g. auth, rbac, tenant-isolation, core-features, integrations). Each file owns exactly one domain.",

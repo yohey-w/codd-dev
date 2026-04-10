@@ -642,6 +642,19 @@ def test_render_document_uses_comment_headers_for_test_code():
     assert "import" in result
 
 
+def test_generate_test_document_includes_design_to_test_traceability(tmp_path, mock_ai_cli):
+    """Test documents must include design-to-test traceability instructions."""
+    project = _setup_project(tmp_path)
+
+    generate_wave(project, 1)
+
+    # Wave 1 includes acceptance_criteria.md which is a test doc
+    prompt = mock_ai_cli[0]["input"]
+    assert "Design-to-test traceability" in prompt
+    assert "verifiable behaviors" in prompt
+    assert "traceability section" in prompt
+
+
 def test_render_document_strips_markdown_fences_from_test_code():
     """If AI wraps code in ```typescript fences, they should be stripped."""
     artifact = generator_module.WaveArtifact(
