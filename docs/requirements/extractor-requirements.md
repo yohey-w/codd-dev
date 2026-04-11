@@ -3,7 +3,7 @@ codd:
   node_id: req:extractor
   type: requirement
   depends_on: []
-  confidence: 1.0
+  confidence: 0.65
   source: codd-require
 ---
 

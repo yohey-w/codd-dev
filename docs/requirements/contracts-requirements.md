@@ -3,7 +3,7 @@ codd:
   node_id: req:contracts
   type: requirement
   depends_on: []
-  confidence: 1.0
+  confidence: 0.65
   source: codd-require
 ---
 

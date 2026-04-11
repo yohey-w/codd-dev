@@ -90,7 +90,7 @@ codd:
   node_id: "req:{boundary-name}"
   type: requirements
   depends_on: []
-  confidence: 1.0          # Average inference confidence
+  confidence: 0.65          # Average inference confidence
   source: "codd-require"    # Machine-generated marker
 ---
 ```
