@@ -3,7 +3,7 @@ codd:
   node_id: req:cli
   type: requirement
   depends_on: []
-  confidence: 0.65
+  confidence: 1.0
   source: codd-require
 ---
 
