@@ -163,6 +163,26 @@ codd scan --path .
 
 設計書に基づきAIがソースコード・単体テストを生成。コミット時に依存グラフが更新される。
 
+#### `src/generated/` ライフサイクル
+
+`codd implement` は `src/generated/sprint_N/<task_slug>/` にコードを生成する。
+
+**assemble後のfragments**: 保持する。`codd assemble` はfragmentsをread-onlyで参照するだけで削除しない。再assemble（設計変更後やモデル変更での再生成）にfragmentsが必要なため、削除は推奨しない。`.gitignore` への追加は運用者の判断。
+
+**同一sprintの再生成**:
+
+```bash
+# 方法1: 全面やり直し（--cleanで既存出力を削除してから再生成）
+codd implement --sprint 3 --clean
+
+# 方法2: 特定タスクのみ再生成（他タスクは保持）
+codd implement --sprint 3 --task "task_3_core"
+```
+
+`--clean` を使わずに再実行すると、同一パスのファイルは上書きされるが、リネーム・削除されたタスクの古いディレクトリは残留する。
+
+**orphan fragments（残骸）の検出**: `codd assemble` は実装計画と照合し、現行計画に存在しないタスクのディレクトリを自動検出・除外する。orphanが見つかった場合は警告を出力する。
+
 ### Phase 5: 検証 — V-Model右側（AI + 人間）
 
 V-Modelの左側（設計）が完了したら、右側（検証）を**下位から上位へ**昇順で実行する。

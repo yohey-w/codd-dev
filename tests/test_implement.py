@@ -303,3 +303,48 @@ def test_implement_includes_detailed_design_dependency_documents_in_prompt(tmp_p
     prompt = mock_implement_ai[0]["input"]
     assert "docs/detailed_design/shared_domain_model.md" in prompt
     assert "single canonical owner for Role, TenantStatus, and SessionUser" in prompt
+
+
+def test_implement_clean_removes_existing_sprint_output(tmp_path, mock_implement_ai):
+    """--clean should remove src/generated/sprint_N/ before re-generating."""
+    project = _setup_project(tmp_path, explicit_sprints=True, include_coding_principles=False)
+
+    # Pre-populate stale output
+    stale_dir = project / "src" / "generated" / "sprint_1" / "old_task"
+    stale_dir.mkdir(parents=True)
+    stale_file = stale_dir / "stale.ts"
+    stale_file.write_text("// stale")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["implement", "--sprint", "1", "--path", str(project), "--clean"])
+
+    assert result.exit_code == 0
+    assert "Cleaning" in result.output
+    # Stale directory should be gone
+    assert not stale_dir.exists()
+    assert not stale_file.exists()
+
+
+def test_get_task_slugs_by_sprint(tmp_path):
+    """get_task_slugs_by_sprint returns valid slug sets per sprint."""
+    from codd.implementer import get_task_slugs_by_sprint
+
+    project = _setup_project(tmp_path, explicit_sprints=True, include_coding_principles=False)
+    result = get_task_slugs_by_sprint(project)
+
+    assert "sprint_1" in result
+    assert len(result["sprint_1"]) >= 1
+
+
+def test_get_task_slugs_by_sprint_no_plan(tmp_path):
+    """Returns empty dict when implementation plan is missing."""
+    from codd.implementer import get_task_slugs_by_sprint
+
+    project = tmp_path / "empty"
+    project.mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text("project:\n  name: demo\n  language: typescript\n")
+
+    result = get_task_slugs_by_sprint(project)
+    assert result == {}

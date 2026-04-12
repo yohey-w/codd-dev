@@ -125,16 +125,64 @@ class ImplementationResult:
     generated_files: list[Path]
 
 
+def get_task_slugs_by_sprint(project_root: Path) -> dict[str, set[str]]:
+    """Return mapping of sprint dir names to valid task directory names.
+
+    Used by assembler to detect orphan fragments from renamed/deleted tasks.
+    Returns empty dict if implementation plan is not found.
+    """
+    config = _load_project_config(project_root)
+    try:
+        plan = _load_implementation_plan(project_root, config)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+    num_sprints = count_sprints(project_root)
+    result: dict[str, set[str]] = {}
+    for sprint_num in range(1, num_sprints + 1):
+        tasks = _select_tasks(plan, sprint_num, None)
+        sprint_key = f"sprint_{sprint_num}"
+        slugs: set[str] = set()
+        for t in tasks:
+            slug = PurePosixPath(t.output_dir).name
+            slugs.add(slug)
+        result[sprint_key] = slugs
+
+    return result
+
+
+def _clean_sprint_output(project_root: Path, config: dict[str, Any], sprint: int) -> None:
+    """Remove all generated files for a sprint before re-generation."""
+    import shutil
+
+    source_dirs = config.get("scan", {}).get("source_dirs", ["src/"])
+    for src_dir in source_dirs:
+        sprint_dir = project_root / src_dir / "generated" / f"sprint_{sprint}"
+        if sprint_dir.is_dir():
+            shutil.rmtree(sprint_dir)
+            return
+
+    # Fallback default path
+    sprint_dir = project_root / "src" / "generated" / f"sprint_{sprint}"
+    if sprint_dir.is_dir():
+        shutil.rmtree(sprint_dir)
+
+
 def implement_sprint(
     project_root: Path,
     sprint: int,
     *,
     task: str | None = None,
     ai_command: str | None = None,
+    clean: bool = False,
 ) -> list[ImplementationResult]:
     """Generate code for one sprint from implementation plan context."""
     project_root = project_root.resolve()
     config = _load_project_config(project_root)
+
+    if clean:
+        _clean_sprint_output(project_root, config, sprint)
+
     plan = _load_implementation_plan(project_root, config)
     selected_tasks = _select_tasks(plan, sprint, task)
     if not selected_tasks:

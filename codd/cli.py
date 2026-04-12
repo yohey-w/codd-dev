@@ -494,20 +494,24 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
 @click.option("--sprint", required=True, type=click.IntRange(min=1), help="Sprint number to implement")
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--task", default=None, help="Generate only one task by task ID or title match")
+@click.option("--clean", is_flag=True, default=False, help="Remove existing sprint output before re-generating")
 @click.option(
     "--ai-cmd",
     default=None,
     help="Override AI CLI command (defaults to codd.yaml ai_command or merged CoDD defaults)",
 )
-def implement(sprint: int, path: str, task: str | None, ai_cmd: str | None):
+def implement(sprint: int, path: str, task: str | None, clean: bool, ai_cmd: str | None):
     """Generate implementation code for a specific sprint."""
     from codd.implementer import implement_sprint
 
     project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
 
+    if clean:
+        click.echo(f"Cleaning src/generated/sprint_{sprint}/ ...")
+
     try:
-        results = implement_sprint(project_root, sprint, task=task, ai_command=ai_cmd)
+        results = implement_sprint(project_root, sprint, task=task, ai_command=ai_cmd, clean=clean)
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)

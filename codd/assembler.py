@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import warnings
+
 import codd.generator as generator_module
 from codd.generator import _load_project_config, _normalize_conventions
+from codd.implementer import get_task_slugs_by_sprint
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 
 
@@ -79,7 +82,11 @@ def _collect_design_documents(project_root: Path, config: dict[str, Any]) -> lis
 
 
 def _collect_generated_fragments(project_root: Path, config: dict[str, Any]) -> list[dict[str, str]]:
-    """Collect all generated code fragments from src/generated/sprint_N/."""
+    """Collect all generated code fragments from src/generated/sprint_N/.
+
+    Cross-references against the implementation plan to detect orphan fragments
+    from renamed or deleted tasks. Orphans are excluded with a warning.
+    """
     source_dirs = config.get("scan", {}).get("source_dirs", ["src/"])
     generated_base = None
     for src_dir in source_dirs:
@@ -94,19 +101,44 @@ def _collect_generated_fragments(project_root: Path, config: dict[str, Any]) -> 
     if not generated_base.is_dir():
         return []
 
+    # Load valid task slugs from implementation plan for orphan detection
+    valid_slugs = get_task_slugs_by_sprint(project_root)
+
+    code_extensions = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".css")
     fragments = []
     for sprint_dir in sorted(generated_base.iterdir()):
         if not sprint_dir.is_dir() or not sprint_dir.name.startswith("sprint_"):
             continue
+
+        # Identify orphan task directories
+        orphan_dirs: set[str] = set()
+        if valid_slugs and sprint_dir.name in valid_slugs:
+            expected = valid_slugs[sprint_dir.name]
+            for child in sprint_dir.iterdir():
+                if child.is_dir() and child.name not in expected:
+                    orphan_dirs.add(child.name)
+                    warnings.warn(
+                        f"Orphan fragment directory '{sprint_dir.name}/{child.name}' "
+                        f"does not match any task in the implementation plan. Skipping.",
+                        stacklevel=2,
+                    )
+
         for code_file in sorted(sprint_dir.rglob("*")):
-            if code_file.is_file() and code_file.suffix in (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".css"):
-                rel_path = code_file.relative_to(project_root)
-                content = code_file.read_text(encoding="utf-8")
-                fragments.append({
-                    "sprint_dir": sprint_dir.name,
-                    "path": str(rel_path),
-                    "content": content,
-                })
+            if not code_file.is_file() or code_file.suffix not in code_extensions:
+                continue
+
+            # Skip files under orphan task directories
+            rel_to_sprint = code_file.relative_to(sprint_dir)
+            if rel_to_sprint.parts and rel_to_sprint.parts[0] in orphan_dirs:
+                continue
+
+            rel_path = code_file.relative_to(project_root)
+            content = code_file.read_text(encoding="utf-8")
+            fragments.append({
+                "sprint_dir": sprint_dir.name,
+                "path": str(rel_path),
+                "content": content,
+            })
 
     return fragments
 
