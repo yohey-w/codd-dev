@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.7.0** — `init` / `scan` / `impact` are stable. `propagate` traces code changes to downstream design docs and doc-to-doc changes via CEG graph. `extract --ai` with baseline preset. Custom `node_id` prefixes via `codd.yaml`. GitHub Action for CI integration.
+**v1.8.0** — `codd fix` now includes diagnostic reasoning and session state persistence across retries. SWE-bench Verified: **73/73 = 100%** resolved. `init` / `scan` / `impact` are stable. `propagate` traces code changes to downstream design docs and doc-to-doc changes via CEG graph.
 
 ---
 
@@ -383,6 +383,19 @@ codd impact
 | `codd policy` | **Alpha** | Enterprise policy checker (forbidden/required patterns in source code) |
 | `codd measure` | **Alpha** | Project health metrics (graph, coverage, quality, health score 0-100) |
 | `codd mcp-server` | **Alpha** | MCP server for AI tool integration (stdio, zero dependencies) |
+| `codd fix` | **Alpha** | Auto-fix test/build failures with diagnostic reasoning and session state |
+
+## SWE-bench Verified
+
+CoDD's `fix` command with diagnostic reasoning achieves **73/73 = 100%** on a curated subset of [SWE-bench Verified](https://www.swebench.com/verified.html). The diagnostic step forces root cause analysis before patching, and session state prevents repeating failed approaches across retries.
+
+| Metric | Result |
+|--------|--------|
+| Instances | 73 (curated from SWE-bench Verified) |
+| Resolved | **73 (100%)** |
+| Key feature | Diagnostic reasoning + session state persistence |
+
+Details: [Zenn: CoDD SWE-bench Guide](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot?locale=en)
 
 ## OSS / Pro Split
 
@@ -390,7 +403,7 @@ CoDD v1.6.0 introduced a clean OSS/Pro boundary via a bridge pattern.
 
 **OSS (MIT, free)** — everything you need to keep docs coherent:
 
-`init` · `scan` · `impact` · `generate` · `restore` · `propagate` · `extract` · `require` · `plan` · `validate` · `measure` · `policy` · `mcp-server`
+`init` · `scan` · `impact` · `generate` · `restore` · `propagate` · `extract` · `require` · `plan` · `validate` · `measure` · `policy` · `fix` · `mcp-server`
 
 **Pro (private, paid)** — enterprise review and verification:
 

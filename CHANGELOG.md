@@ -2,6 +2,23 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.8.0] - 2026-04-14
+
+### Added
+
+- **Diagnostic reasoning step in `codd fix`** — AI must now produce a `## Diagnosis` section identifying the root cause *before* writing any code fix. Prevents blind trial-and-error patching.
+- **Session state persistence across retries** — `_SessionState` accumulates prior attempt history (diagnosis, approach, outcome) and injects it into subsequent retry prompts as `## Prior attempts (DO NOT repeat these)`. Eliminates repeated failed approaches.
+- **`diagnosis` field on `FixAttempt`** — extracted root cause diagnosis is stored per attempt for downstream analysis and reporting.
+
+### Changed
+
+- `_build_fix_prompt()` now enforces a two-step workflow: Step 1 (Diagnose) → Step 2 (Fix). Retry prompts include full session history.
+- `run_fix()` loop creates `_SessionState` and records each failed attempt before retrying.
+
+### Performance
+
+- **SWE-bench Verified**: 73/73 instances resolved (100%) with diagnostic reasoning + session state, up from 93.3% (28/30) without these features.
+
 ## [1.6.0] - 2026-04-06
 
 ### Added

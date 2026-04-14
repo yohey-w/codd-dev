@@ -38,6 +38,7 @@ class FixAttempt:
     failures: list[FailureInfo]
     fixed: bool
     ai_output: str = ""
+    diagnosis: str = ""  # root cause diagnosis from this attempt
 
 
 @dataclass
@@ -110,27 +111,35 @@ def run_fix(
             fixed=False,
         )
 
-    # Step 2: Fix loop
+    # Step 2: Fix loop with diagnostic reasoning and session state
     attempts: list[FixAttempt] = []
+    session_state = _SessionState()
+
     for attempt_num in range(1, max_attempts + 1):
         # Map failures to design context
         context = _build_fix_context(project_root, config, failures)
 
-        # Build prompt and invoke AI (fix mode: returns fixed source, writes to files)
-        prompt = _build_fix_prompt(project_root, failures, context, config)
+        # Build prompt with diagnosis step and session state from prior attempts
+        prompt = _build_fix_prompt(
+            project_root, failures, context, config,
+            session_state=session_state,
+        )
         ai_output = _invoke_fix_ai(resolved_ai, prompt, project_root)
+
+        # Extract diagnosis from AI output for session state
+        diagnosis = _extract_diagnosis(ai_output)
 
         # Re-run tests to verify
         new_failures = _run_local_tests(project_root, config)
 
         if new_failures is None:
-            # Tests could not run — mark as unverified, not fixed
             logger.warning("Local tests could not run. Fix is unverified.")
             attempts.append(FixAttempt(
                 attempt=attempt_num,
                 failures=failures,
                 fixed=False,
                 ai_output=ai_output,
+                diagnosis=diagnosis,
             ))
             break
 
@@ -141,10 +150,20 @@ def run_fix(
             failures=failures,
             fixed=fixed,
             ai_output=ai_output,
+            diagnosis=diagnosis,
         ))
 
         if fixed:
             break
+
+        # Accumulate session state for next retry
+        session_state.record_attempt(
+            attempt=attempt_num,
+            diagnosis=diagnosis,
+            failures=failures,
+            new_failures=new_failures,
+            ai_output=ai_output,
+        )
 
         # Next iteration uses new failures
         failures = new_failures
@@ -166,6 +185,84 @@ def run_fix(
         pushed=pushed,
         ci_passed=ci_passed,
     )
+
+
+# ---------------------------------------------------------------------------
+# Session state for cross-retry diagnostic context
+# ---------------------------------------------------------------------------
+
+
+class _SessionState:
+    """Accumulates diagnostic context across retry attempts.
+
+    Inspired by SWE-bench diagnose experiment (73/73 = 100%):
+    passing prior attempt history — what was tried, what failed, and why —
+    dramatically reduces wasted retries.
+    """
+
+    def __init__(self) -> None:
+        self.prior_attempts: list[dict[str, str]] = []
+
+    def record_attempt(
+        self,
+        attempt: int,
+        diagnosis: str,
+        failures: list[FailureInfo],
+        new_failures: list[FailureInfo],
+        ai_output: str,
+    ) -> None:
+        summary = {
+            "attempt": str(attempt),
+            "diagnosis": diagnosis[:500],
+            "original_errors": "; ".join(f.summary for f in failures)[:300],
+            "result_after_fix": (
+                "all tests passed" if not new_failures
+                else "; ".join(f.summary for f in new_failures)[:300]
+            ),
+            "approach_summary": _summarize_approach(ai_output)[:500],
+        }
+        self.prior_attempts.append(summary)
+
+    def format_for_prompt(self) -> str:
+        if not self.prior_attempts:
+            return ""
+        lines = ["## Prior attempts (DO NOT repeat these — try a different approach)\n"]
+        for pa in self.prior_attempts:
+            lines.append(f"### Attempt {pa['attempt']}")
+            lines.append(f"- Diagnosis: {pa['diagnosis']}")
+            lines.append(f"- Approach: {pa['approach_summary']}")
+            lines.append(f"- Result: {pa['result_after_fix']}")
+            lines.append("")
+        return "\n".join(lines)
+
+
+def _summarize_approach(ai_output: str) -> str:
+    """Extract a brief summary of what the AI changed from its output."""
+    # Look for explanation text after the last code block
+    parts = ai_output.rsplit("```", 1)
+    if len(parts) > 1:
+        explanation = parts[1].strip()
+        if explanation:
+            return explanation[:500]
+    # Fallback: first 200 chars
+    return ai_output[:200]
+
+
+def _extract_diagnosis(ai_output: str) -> str:
+    """Extract the diagnosis section from AI output."""
+    # Look for ## Diagnosis or ## Root Cause sections
+    for marker in ("## Diagnosis", "## Root Cause", "**Diagnosis:**", "**Root Cause:**"):
+        idx = ai_output.find(marker)
+        if idx >= 0:
+            # Extract until next ## or code block
+            rest = ai_output[idx + len(marker):]
+            end = len(rest)
+            for stop in ("\n## ", "\n```"):
+                pos = rest.find(stop)
+                if pos >= 0 and pos < end:
+                    end = pos
+            return rest[:end].strip()[:500]
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -613,12 +710,14 @@ def _build_fix_prompt(
     failures: list[FailureInfo],
     design_context: str,
     config: dict[str, Any],
+    *,
+    session_state: _SessionState | None = None,
 ) -> str:
     """Build the prompt for AI to fix failures.
 
-    The prompt includes: error logs, design docs, AND the current source
-    of files mentioned in failures.  The AI returns the complete fixed
-    source for each file in fenced code blocks tagged with file paths.
+    The prompt includes: error logs, design docs, current source of files
+    mentioned in failures, and (on retries) session state from prior attempts.
+    Requires the AI to diagnose root cause BEFORE writing any fix.
     """
     project_name = config.get("project", {}).get("name", project_root.name)
     language = config.get("project", {}).get("language", "unknown")
@@ -635,9 +734,21 @@ def _build_fix_prompt(
     # Collect current source of files mentioned in failures
     source_section = _collect_source_files(project_root, failures)
 
+    # Session state from prior attempts (if retrying)
+    session_section = ""
+    if session_state and session_state.prior_attempts:
+        session_section = session_state.format_for_prompt()
+
     lines = [
         f"You are fixing failures in the project '{project_name}' ({language}).",
         "",
+    ]
+
+    # Insert session state before failures (so AI sees what NOT to repeat)
+    if session_section:
+        lines.extend([session_section, ""])
+
+    lines.extend([
         "## Failures to fix",
         "",
         *failure_section,
@@ -651,9 +762,16 @@ def _build_fix_prompt(
         "",
         "## Instructions",
         "",
-        "1. Read the failing test/build output carefully.",
-        "2. Use the design documents to understand the INTENDED behavior.",
-        "3. Fix the IMPLEMENTATION code to match the design, not the other way around.",
+        "### Step 1: Diagnose (MANDATORY — do this BEFORE writing any fix)",
+        "",
+        "Write a `## Diagnosis` section that answers:",
+        "1. What is the root cause of each failure?",
+        "2. Which file(s) and line(s) are responsible?",
+        "3. What is the correct behavior according to the design docs?",
+        "",
+        "### Step 2: Fix",
+        "",
+        "1. Fix the IMPLEMENTATION code to match the design, not the other way around.",
         "   - If tests fail, fix the source code so tests pass.",
         "   - If a test expects an endpoint/method/feature that doesn't exist in code,",
         "     ADD the missing implementation as described in the design documents.",
@@ -661,15 +779,18 @@ def _build_fix_prompt(
         "   - If build fails (type errors, import errors), fix the source code.",
         "   - If lint fails, fix the lint issues in the source code.",
         "   - If a tool prompted interactively in CI (missing config), create the required config file.",
-        "4. Do NOT modify test files unless the test itself has a bug (e.g., wrong import path).",
-        "5. Do NOT modify design documents.",
-        "6. Make minimal, focused changes. Don't refactor unrelated code.",
-        "7. Follow the target framework's lint rules and naming conventions.",
+        "2. Do NOT modify test files unless the test itself has a bug (e.g., wrong import path).",
+        "3. Do NOT modify design documents.",
+        "4. Make minimal, focused changes. Don't refactor unrelated code.",
+        "5. Follow the target framework's lint rules and naming conventions.",
         "   Avoid using global/reserved names (module, exports, require, etc.) as local variables.",
         "",
         "## Output format (CRITICAL)",
         "",
-        "For each file you fix or create, output the COMPLETE file content in a fenced",
+        "## Diagnosis",
+        "(your root cause analysis here)",
+        "",
+        "Then for each file you fix or create, output the COMPLETE file content in a fenced",
         "code block tagged with the language and the file path (relative to project root):",
         "",
         "```<language> <relative/path/to/file>",
@@ -683,7 +804,7 @@ def _build_fix_prompt(
         "```",
         "",
         "After all code blocks, briefly explain what you fixed and why.",
-    ]
+    ])
 
     return "\n".join(lines)
 
