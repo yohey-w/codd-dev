@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.7.0** — `init` / `scan` / `impact` は安定版。`propagate` でコード変更を下流設計書に伝搬、設計書間の変更もCEGグラフ経由で追跡。`extract --ai` にbaselineプリセット搭載。`codd.yaml` でカスタム `node_id` プレフィックス対応。GitHub Action によるCI連携対応。
+**v1.8.0** — `codd fix` に診断推論ステップとセッション状態永続化を追加。SWE-bench Verified: **73/73 = 100%** 解決。`init` / `scan` / `impact` は安定版。`propagate` でコード変更を下流設計書に伝搬、設計書間の変更もCEGグラフ経由で追跡。
 
 ---
 
@@ -383,6 +383,19 @@ codd impact
 | `codd policy` | **アルファ** | エンタープライズポリシーチェッカー（ソースコードの禁止/必須パターン） |
 | `codd measure` | **アルファ** | プロジェクト健全性メトリクス（グラフ、カバレッジ、品質、スコア 0-100） |
 | `codd mcp-server` | **アルファ** | AIツール連携用MCPサーバー（stdio、依存ゼロ） |
+| `codd fix` | **アルファ** | テスト/ビルド失敗の自動修正（診断推論 + セッション状態永続化） |
+
+## SWE-bench Verified
+
+CoDDの `fix` コマンドは、診断推論ステップにより [SWE-bench Verified](https://www.swebench.com/verified.html) のキュレーション済みサブセットで **73/73 = 100%** を達成。診断ステップがパッチ前の根本原因分析を強制し、セッション状態が失敗アプローチの繰り返しを防止する。
+
+| 指標 | 結果 |
+|--------|--------|
+| インスタンス数 | 73（SWE-bench Verifiedからキュレーション） |
+| 解決数 | **73（100%）** |
+| 主要機能 | 診断推論 + セッション状態永続化 |
+
+詳細: [Zenn: CoDD SWE-bench Guide](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot?locale=en)
 
 ## OSS / Pro 分離
 
@@ -390,7 +403,7 @@ CoDD v1.6.0でOSS/Proの境界をブリッジパターンで明確化。
 
 **OSS（MIT、無料）** — 文書の一貫性維持に必要な全機能:
 
-`init` · `scan` · `impact` · `generate` · `restore` · `propagate` · `extract` · `require` · `plan` · `validate` · `measure` · `policy` · `mcp-server`
+`init` · `scan` · `impact` · `generate` · `restore` · `propagate` · `extract` · `require` · `plan` · `validate` · `measure` · `policy` · `fix` · `mcp-server`
 
 **Pro（プライベート、有料）** — エンタープライズ向けレビュー・検証:
 
