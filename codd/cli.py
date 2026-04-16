@@ -491,27 +491,26 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
 
 
 @main.command()
-@click.option("--sprint", required=True, type=click.IntRange(min=1), help="Sprint number to implement")
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--task", default=None, help="Generate only one task by task ID or title match")
-@click.option("--clean", is_flag=True, default=False, help="Remove existing sprint output before re-generating")
+@click.option("--clean", is_flag=True, default=False, help="Remove existing generated output before re-generating")
 @click.option(
     "--ai-cmd",
     default=None,
     help="Override AI CLI command (defaults to codd.yaml ai_command or merged CoDD defaults)",
 )
-def implement(sprint: int, path: str, task: str | None, clean: bool, ai_cmd: str | None):
-    """Generate implementation code for a specific sprint."""
-    from codd.implementer import implement_sprint
+def implement(path: str, task: str | None, clean: bool, ai_cmd: str | None):
+    """Generate implementation code from the implementation plan."""
+    from codd.implementer import implement_tasks
 
     project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
 
     if clean:
-        click.echo(f"Cleaning src/generated/sprint_{sprint}/ ...")
+        click.echo("Cleaning src/generated/ ...")
 
     try:
-        results = implement_sprint(project_root, sprint, task=task, ai_command=ai_cmd, clean=clean)
+        results = implement_tasks(project_root, task=task, ai_command=ai_cmd, clean=clean)
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
@@ -523,7 +522,7 @@ def implement(sprint: int, path: str, task: str | None, clean: bool, ai_cmd: str
             click.echo(f"Generated: {rel_path} ({result.task_id})")
             generated_files += 1
 
-    click.echo(f"Sprint {sprint}: {generated_files} files generated across {len(results)} task(s)")
+    click.echo(f"{generated_files} files generated across {len(results)} task(s)")
 
 
 @main.command()
@@ -552,7 +551,7 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
-@click.option("--sprint", default=None, type=click.IntRange(min=1), help="Sprint number to verify")
+@click.option("--sprint", default=None, type=click.IntRange(min=1), help="(deprecated, ignored) Sprint number", hidden=True)
 @click.option("--e2e", is_flag=True, default=False, help="Run E2E tests (CI-safe, excludes @cdp-only)")
 @click.option("--deploy", is_flag=True, default=False, help="Run deploy/CDP-only E2E tests against deployed URL")
 @click.option("--base-url", default=None, help="Override BASE_URL for E2E tests")
@@ -902,13 +901,13 @@ def policy(path: str):
 @click.option("--init", "initialize", is_flag=True, help="Generate wave_config from requirement docs")
 @click.option("--force", is_flag=True, help="Overwrite existing wave_config during --init")
 @click.option("--waves", is_flag=True, help="Output only the total wave count (for shell scripting)")
-@click.option("--sprints", is_flag=True, help="Output only the total sprint count (for shell scripting)")
+@click.option("--tasks", is_flag=True, help="Output only the total task count (for shell scripting)")
 @click.option(
     "--ai-cmd",
     default=None,
     help="Override AI CLI command for --init (defaults to codd.yaml ai_command or 'claude --print')",
 )
-def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, sprints: bool, ai_cmd: str | None):
+def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, tasks: bool, ai_cmd: str | None):
     """Show wave execution status from configured artifacts."""
     from codd.planner import build_plan, plan_init, plan_to_dict, render_plan_text
 
@@ -946,7 +945,7 @@ def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, s
 
     if force:
         raise click.BadOptionUsage("force", "--force requires --init")
-    if ai_cmd is not None and not waves and not sprints:
+    if ai_cmd is not None and not waves and not tasks:
         raise click.BadOptionUsage("ai_cmd", "--ai-cmd requires --init")
 
     if waves:
@@ -956,9 +955,9 @@ def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, s
         click.echo(len(wave_config))
         return
 
-    if sprints:
-        from codd.implementer import count_sprints
-        click.echo(count_sprints(project_root))
+    if tasks:
+        from codd.implementer import get_valid_task_slugs
+        click.echo(len(get_valid_task_slugs(project_root)))
         return
 
     try:

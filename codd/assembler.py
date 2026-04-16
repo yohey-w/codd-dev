@@ -1,4 +1,4 @@
-"""CoDD assembler — integrate generated sprint fragments into a working project."""
+"""CoDD assembler — integrate generated fragments into a working project."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import warnings
 
 import codd.generator as generator_module
 from codd.generator import _load_project_config, _normalize_conventions
-from codd.implementer import get_task_slugs_by_sprint
+from codd.implementer import get_valid_task_slugs
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 
 
@@ -71,7 +71,6 @@ def _collect_design_documents(project_root: Path, config: dict[str, Any]) -> lis
         full_path = project_root / rel_path
         if full_path.exists():
             content = full_path.read_text(encoding="utf-8")
-            # Strip frontmatter for the prompt
             stripped = _strip_frontmatter(content)
             docs.append({
                 "node_id": node_id,
@@ -82,10 +81,10 @@ def _collect_design_documents(project_root: Path, config: dict[str, Any]) -> lis
 
 
 def _collect_generated_fragments(project_root: Path, config: dict[str, Any]) -> list[dict[str, str]]:
-    """Collect all generated code fragments from src/generated/sprint_N/.
+    """Collect all generated code fragments from src/generated/.
 
-    Cross-references against the implementation plan to detect orphan fragments
-    from renamed or deleted tasks. Orphans are excluded with a warning.
+    Supports both flat layout (src/generated/<task>/) and legacy sprint layout
+    (src/generated/sprint_N/<task>/). Orphan directories are excluded with a warning.
     """
     source_dirs = config.get("scan", {}).get("source_dirs", ["src/"])
     generated_base = None
@@ -101,44 +100,39 @@ def _collect_generated_fragments(project_root: Path, config: dict[str, Any]) -> 
     if not generated_base.is_dir():
         return []
 
-    # Load valid task slugs from implementation plan for orphan detection
-    valid_slugs = get_task_slugs_by_sprint(project_root)
+    valid_slugs = get_valid_task_slugs(project_root)
 
     code_extensions = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".css")
     fragments = []
-    for sprint_dir in sorted(generated_base.iterdir()):
-        if not sprint_dir.is_dir() or not sprint_dir.name.startswith("sprint_"):
+
+    orphan_dirs: set[str] = set()
+    if valid_slugs:
+        for child in generated_base.iterdir():
+            if child.is_dir() and not child.name.startswith("sprint_") and child.name not in valid_slugs:
+                orphan_dirs.add(child.name)
+                warnings.warn(
+                    f"Orphan fragment directory 'generated/{child.name}' "
+                    f"does not match any task in the implementation plan. Skipping.",
+                    stacklevel=2,
+                )
+
+    for code_file in sorted(generated_base.rglob("*")):
+        if not code_file.is_file() or code_file.suffix not in code_extensions:
             continue
 
-        # Identify orphan task directories
-        orphan_dirs: set[str] = set()
-        if valid_slugs and sprint_dir.name in valid_slugs:
-            expected = valid_slugs[sprint_dir.name]
-            for child in sprint_dir.iterdir():
-                if child.is_dir() and child.name not in expected:
-                    orphan_dirs.add(child.name)
-                    warnings.warn(
-                        f"Orphan fragment directory '{sprint_dir.name}/{child.name}' "
-                        f"does not match any task in the implementation plan. Skipping.",
-                        stacklevel=2,
-                    )
+        rel_to_generated = code_file.relative_to(generated_base)
+        if rel_to_generated.parts and rel_to_generated.parts[0] in orphan_dirs:
+            continue
 
-        for code_file in sorted(sprint_dir.rglob("*")):
-            if not code_file.is_file() or code_file.suffix not in code_extensions:
-                continue
+        rel_path = code_file.relative_to(project_root)
+        content = code_file.read_text(encoding="utf-8")
 
-            # Skip files under orphan task directories
-            rel_to_sprint = code_file.relative_to(sprint_dir)
-            if rel_to_sprint.parts and rel_to_sprint.parts[0] in orphan_dirs:
-                continue
-
-            rel_path = code_file.relative_to(project_root)
-            content = code_file.read_text(encoding="utf-8")
-            fragments.append({
-                "sprint_dir": sprint_dir.name,
-                "path": str(rel_path),
-                "content": content,
-            })
+        task_group = rel_to_generated.parts[0] if rel_to_generated.parts else "unknown"
+        fragments.append({
+            "task_group": task_group,
+            "path": str(rel_path),
+            "content": content,
+        })
 
     return fragments
 
@@ -172,13 +166,13 @@ def _build_assemble_prompt(
 ## Instructions
 
 1. Read the design documents below to understand the architecture, component tree, data model, and state management.
-2. Read all generated code fragments — they contain implementation pieces organized by sprint.
+2. Read all generated code fragments — they contain implementation pieces organized by task.
 3. Produce a COMPLETE, BUILDABLE project. This includes:
    - **Project configuration files** at the project root: package.json, tsconfig.json, next.config.*, tailwind.config.*, postcss.config.*, etc. — whatever the tech stack requires to build and run.
    - **Entry point / scaffold files**: app/layout.tsx, app/page.tsx (for Next.js), index.html, main.py, etc. — the files that wire the application together.
    - **Source code** under `{output_dir}/`: components, utilities, types, styles, hooks, reducers.
    - **Style entry points**: globals.css or equivalent with framework imports (e.g. @import "tailwindcss").
-4. Resolve conflicts between sprint fragments: later sprints may refine or replace earlier ones.
+4. Resolve conflicts between fragments: later tasks may refine or replace earlier ones.
 5. Ensure all imports resolve correctly between files.
 6. Do NOT add features beyond what the design documents specify.
 7. Preserve traceability comments (@generated-by, @generated-from) where practical.
@@ -211,11 +205,11 @@ Do not include explanations outside of the === FILE blocks.
 
     # Add generated fragments
     parts.append("## Generated Code Fragments\n")
-    current_sprint = None
+    current_group = None
     for frag in fragments:
-        if frag["sprint_dir"] != current_sprint:
-            current_sprint = frag["sprint_dir"]
-            parts.append(f"\n### {current_sprint}\n")
+        if frag["task_group"] != current_group:
+            current_group = frag["task_group"]
+            parts.append(f"\n### {current_group}\n")
         parts.append(f"#### {frag['path']}\n```\n{frag['content']}\n```\n")
 
     return "\n".join(parts)

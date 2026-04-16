@@ -158,7 +158,7 @@ def _setup_project(
 
 ## 1. Overview
 
-Sprint 1 establishes auth and tenant foundations.
+Tasks for auth and tenant foundations.
 
 #### Sprint 1（4月1日〜4月14日）: 認証・テナント基盤
 
@@ -171,7 +171,7 @@ Sprint 1 establishes auth and tenant foundations.
 
 ## 1. Overview
 
-Sprint 1 establishes auth and tenant foundations.
+Tasks for auth and tenant foundations.
 
 ## 3. Milestones（マイルストーン）
 
@@ -242,10 +242,10 @@ def test_implement_command_generates_files_with_traceability_comments(tmp_path, 
     project = _setup_project(tmp_path, explicit_sprints=True, include_coding_principles=True)
     runner = CliRunner()
 
-    result = runner.invoke(main, ["implement", "--sprint", "1", "--path", str(project), "--task", "1-4"])
+    result = runner.invoke(main, ["implement", "--path", str(project), "--task", "1-4"])
 
     assert result.exit_code == 0
-    generated_file = project / "src" / "generated" / "sprint_1" / "authentication" / "index.ts"
+    generated_file = project / "src" / "generated" / "authentication" / "index.ts"
     assert generated_file.exists()
     content = generated_file.read_text(encoding="utf-8")
     assert content.startswith("// @generated-by: codd implement")
@@ -253,7 +253,7 @@ def test_implement_command_generates_files_with_traceability_comments(tmp_path, 
     assert "// @generated-from: docs/design/auth_authorization_design.md (design:auth-authorization-design)" in content
     assert "@task-id: 1-4" in content
     assert not (project / ".codd_meta").exists()
-    assert "Sprint 1: 1 files generated across 1 task(s)" in result.output
+    assert "1 files generated across 1 task(s)" in result.output
 
     prompt = mock_implement_ai[0]["input"]
     assert "Project coding principles" in prompt
@@ -262,7 +262,7 @@ def test_implement_command_generates_files_with_traceability_comments(tmp_path, 
     assert mock_implement_ai[0]["command"] == ["mock-ai", "--print"]
 
 
-def test_implement_falls_back_to_milestone_inference_for_sprint_one(tmp_path, mock_implement_ai):
+def test_implement_falls_back_to_milestone_inference(tmp_path, mock_implement_ai):
     project = _setup_project(
         tmp_path,
         explicit_sprints=False,
@@ -271,21 +271,20 @@ def test_implement_falls_back_to_milestone_inference_for_sprint_one(tmp_path, mo
     )
     runner = CliRunner()
 
-    result = runner.invoke(main, ["implement", "--sprint", "1", "--path", str(project), "--ai-cmd", "custom-ai --print"])
+    result = runner.invoke(main, ["implement", "--path", str(project), "--ai-cmd", "custom-ai --print"])
 
     assert result.exit_code == 0
     assert len(mock_implement_ai) >= 1
     assert mock_implement_ai[0]["command"] == ["custom-ai", "--print"]
 
-    # Verify at least one generated directory exists
-    sprint_dir = project / "src" / "generated" / "sprint_1"
-    assert sprint_dir.exists()
-    generated_files = list(sprint_dir.rglob("index.ts"))
+    generated_dir = project / "src" / "generated"
+    assert generated_dir.exists()
+    generated_files = list(generated_dir.rglob("index.ts"))
     assert len(generated_files) >= 1
 
     first_prompt = mock_implement_ai[0]["input"]
-    assert "Sprint: 1" in first_prompt
-    assert "Sprint 1:" in result.output
+    assert "Task ID:" in first_prompt
+    assert "files generated across" in result.output
 
 
 def test_implement_includes_detailed_design_dependency_documents_in_prompt(tmp_path, mock_implement_ai):
@@ -297,7 +296,7 @@ def test_implement_includes_detailed_design_dependency_documents_in_prompt(tmp_p
     )
     runner = CliRunner()
 
-    result = runner.invoke(main, ["implement", "--sprint", "1", "--path", str(project), "--task", "1-4"])
+    result = runner.invoke(main, ["implement", "--path", str(project), "--task", "1-4"])
 
     assert result.exit_code == 0
     prompt = mock_implement_ai[0]["input"]
@@ -305,40 +304,39 @@ def test_implement_includes_detailed_design_dependency_documents_in_prompt(tmp_p
     assert "single canonical owner for Role, TenantStatus, and SessionUser" in prompt
 
 
-def test_implement_clean_removes_existing_sprint_output(tmp_path, mock_implement_ai):
-    """--clean should remove src/generated/sprint_N/ before re-generating."""
+def test_implement_clean_removes_existing_generated_output(tmp_path, mock_implement_ai):
+    """--clean should remove src/generated/ before re-generating."""
     project = _setup_project(tmp_path, explicit_sprints=True, include_coding_principles=False)
 
     # Pre-populate stale output
-    stale_dir = project / "src" / "generated" / "sprint_1" / "old_task"
+    stale_dir = project / "src" / "generated" / "old_task"
     stale_dir.mkdir(parents=True)
     stale_file = stale_dir / "stale.ts"
     stale_file.write_text("// stale")
 
     runner = CliRunner()
-    result = runner.invoke(main, ["implement", "--sprint", "1", "--path", str(project), "--clean"])
+    result = runner.invoke(main, ["implement", "--path", str(project), "--clean"])
 
     assert result.exit_code == 0
     assert "Cleaning" in result.output
-    # Stale directory should be gone
     assert not stale_dir.exists()
     assert not stale_file.exists()
 
 
-def test_get_task_slugs_by_sprint(tmp_path):
-    """get_task_slugs_by_sprint returns valid slug sets per sprint."""
-    from codd.implementer import get_task_slugs_by_sprint
+def test_get_valid_task_slugs(tmp_path):
+    """get_valid_task_slugs returns valid slug set."""
+    from codd.implementer import get_valid_task_slugs
 
     project = _setup_project(tmp_path, explicit_sprints=True, include_coding_principles=False)
-    result = get_task_slugs_by_sprint(project)
+    result = get_valid_task_slugs(project)
 
-    assert "sprint_1" in result
-    assert len(result["sprint_1"]) >= 1
+    assert isinstance(result, set)
+    assert len(result) >= 1
 
 
-def test_get_task_slugs_by_sprint_no_plan(tmp_path):
-    """Returns empty dict when implementation plan is missing."""
-    from codd.implementer import get_task_slugs_by_sprint
+def test_get_valid_task_slugs_no_plan(tmp_path):
+    """Returns empty set when implementation plan is missing."""
+    from codd.implementer import get_valid_task_slugs
 
     project = tmp_path / "empty"
     project.mkdir()
@@ -346,5 +344,86 @@ def test_get_task_slugs_by_sprint_no_plan(tmp_path):
     codd_dir.mkdir()
     (codd_dir / "codd.yaml").write_text("project:\n  name: demo\n  language: typescript\n")
 
-    result = get_task_slugs_by_sprint(project)
-    assert result == {}
+    result = get_valid_task_slugs(project)
+    assert result == set()
+
+
+def test_deduplicate_slugs():
+    """Tasks with colliding slugs get task_id suffix."""
+    from codd.implementer import ImplementationTask, _deduplicate_slugs
+
+    tasks = [
+        ImplementationTask(
+            task_id="1-1",
+            title="Auth setup",
+            summary="Auth setup",
+            module_hint="lib/auth",
+            deliverable="認証基盤",
+            output_dir="src/generated/authentication",
+            dependency_node_ids=[],
+            task_context="",
+        ),
+        ImplementationTask(
+            task_id="2-1",
+            title="Auth middleware",
+            summary="Auth middleware",
+            module_hint="lib/auth/middleware",
+            deliverable="認証ミドルウェア",
+            output_dir="src/generated/authentication",
+            dependency_node_ids=[],
+            task_context="",
+        ),
+    ]
+
+    result = _deduplicate_slugs(tasks)
+    dirs = [t.output_dir for t in result]
+    assert dirs[0] != dirs[1]
+    assert "1_1" in dirs[0]
+    assert "2_1" in dirs[1]
+
+
+def test_extract_all_tasks_from_sprint_headings():
+    """Sprint headings produce flat output_dir without sprint_N prefix."""
+    from codd.implementer import ImplementationPlan, _extract_all_tasks
+
+    plan = ImplementationPlan(
+        node_id="plan:implementation-plan",
+        path=Path("docs/plan/implementation_plan.md"),
+        content="""# Implementation Plan
+
+#### Sprint 1（4月1日〜4月14日）: 認証基盤
+
+| # | 作業項目 | 対応モジュール | 成果物 |
+|---|---|---|---|
+| 1-1 | NextAuth設定 | lib/auth | 認証基盤 |
+
+#### Sprint 2（4月15日〜4月30日）: DB基盤
+
+| # | 作業項目 | 対応モジュール | 成果物 |
+|---|---|---|---|
+| 2-1 | Prisma DB設計 | lib/db | DB基盤 |
+""",
+        depends_on=[{"id": "design:system-design", "relation": "depends_on"}],
+        conventions=[],
+    )
+
+    tasks = _extract_all_tasks(plan)
+    assert len(tasks) == 2
+    assert tasks[0].output_dir == "src/generated/authentication"
+    assert tasks[1].output_dir == "src/generated/database_foundation"
+    assert "sprint_" not in tasks[0].output_dir
+    assert "sprint_" not in tasks[1].output_dir
+
+
+def test_no_sprint_in_prompt(tmp_path, mock_implement_ai):
+    """Generated prompt should not contain Sprint references."""
+    project = _setup_project(tmp_path, explicit_sprints=True, include_coding_principles=False)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["implement", "--path", str(project), "--task", "1-4"])
+
+    assert result.exit_code == 0
+    prompt = mock_implement_ai[0]["input"]
+    assert "Sprint:" not in prompt
+    assert "Sprint title:" not in prompt
+    assert "Sprint window:" not in prompt

@@ -94,10 +94,7 @@ done
 codd validate
 
 # 从设计文档生成代码
-sprints=$(codd plan --sprints)
-for sprint in $(seq 1 $sprints); do
-  codd implement --sprint $sprint
-done
+codd implement
 
 # 组装代码片段为可构建的项目
 codd assemble

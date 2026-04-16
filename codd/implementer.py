@@ -17,53 +17,17 @@ from codd.scanner import _extract_frontmatter, build_document_node_path_map
 DEFAULT_IMPLEMENT_NODE_ID = "plan:implementation-plan"
 FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
 
-
-def count_sprints(project_root: Path) -> int:
-    """Return the total number of sprints in the implementation plan.
-
-    Works with both explicit Sprint headings and Milestone-based plans.
-    """
-    config = _load_project_config(project_root)
-    try:
-        plan = _load_implementation_plan(project_root, config)
-    except (FileNotFoundError, ValueError):
-        return 0
-
-    # Try explicit Sprint headings first
-    matches = list(SPRINT_HEADING_RE.finditer(plan.content))
-    if matches:
-        return len(matches)
-
-    # Fallback: count deliverable rows across all milestones
-    milestones = _parse_milestone_rows(plan.content)
-    total = 0
-    for ms in milestones:
-        # Each deliverable row (pipe-delimited) becomes one sprint
-        rows = [
-            line for line in ms.get("deliverables", "").split(";")
-            if line.strip()
-        ]
-        # If deliverables isn't split by semicolons, count table rows in the section
-        if len(rows) <= 1:
-            total += 1
-        else:
-            total += len(rows)
-
-    # If milestone fallback gives implausible results, count by probing
-    if total <= len(milestones):
-        # Probe: try each sprint number until _select_tasks returns empty
-        total = 0
-        for i in range(1, 200):
-            tasks = _select_tasks(plan, i, None)
-            if not tasks:
-                break
-            total = i
-    return total
 SPRINT_HEADING_RE = re.compile(
     r"^####\s+Sprint\s+(?P<number>\d+)(?:（(?P<window>[^）]+)）)?(?:\s*:\s*(?P<title>.+))?\s*$",
     re.MULTILINE,
 )
 SECTION_HEADING_RE = re.compile(r"^##\s+\d+\.\s+(?P<title>.+?)\s*$", re.MULTILINE)
+MILESTONE_HEADING_RE = re.compile(
+    r"^###\s+(?:Milestone\s+)?(?P<number>\d+)\s*(?:[—–-]\s*(?P<title>.+?))?\s*$",
+    re.MULTILINE,
+)
+DURATION_RE = re.compile(r"\*\*Duration:\*\*\s*(?P<period>.+?)$", re.MULTILINE)
+
 EXPORT_TYPE_RE = re.compile(
     r"^\s*export\s+(?:declare\s+)?(?:type|interface|enum)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
@@ -99,96 +63,67 @@ class ImplementationPlan:
 
 @dataclass(frozen=True)
 class ImplementationTask:
-    """Concrete implementation task for one sprint."""
+    """Concrete implementation task extracted from the plan."""
 
-    sprint: int
     task_id: str
     title: str
     summary: str
     module_hint: str
     deliverable: str
-    sprint_title: str
-    sprint_window: str
     output_dir: str
     dependency_node_ids: list[str]
-    sprint_context: str
+    task_context: str
 
 
 @dataclass(frozen=True)
 class ImplementationResult:
     """Result of generating code for one implementation task."""
 
-    sprint: int
     task_id: str
     task_title: str
     output_dir: Path
     generated_files: list[Path]
 
 
-def get_task_slugs_by_sprint(project_root: Path) -> dict[str, set[str]]:
-    """Return mapping of sprint dir names to valid task directory names.
+def get_valid_task_slugs(project_root: Path) -> set[str]:
+    """Return set of valid task directory names under src/generated/.
 
-    Used by assembler to detect orphan fragments from renamed/deleted tasks.
-    Returns empty dict if implementation plan is not found.
+    Used by assembler to detect orphan fragments.
+    Returns empty set if implementation plan is not found.
     """
     config = _load_project_config(project_root)
     try:
         plan = _load_implementation_plan(project_root, config)
     except (FileNotFoundError, ValueError):
-        return {}
-
-    num_sprints = count_sprints(project_root)
-    result: dict[str, set[str]] = {}
-    for sprint_num in range(1, num_sprints + 1):
-        tasks = _select_tasks(plan, sprint_num, None)
-        sprint_key = f"sprint_{sprint_num}"
-        slugs: set[str] = set()
-        for t in tasks:
-            slug = PurePosixPath(t.output_dir).name
-            slugs.add(slug)
-        result[sprint_key] = slugs
-
-    return result
+        return set()
+    tasks = _extract_all_tasks(plan)
+    return {PurePosixPath(t.output_dir).name for t in tasks}
 
 
-def _clean_sprint_output(project_root: Path, config: dict[str, Any], sprint: int) -> None:
-    """Remove all generated files for a sprint before re-generation."""
-    import shutil
-
-    source_dirs = config.get("scan", {}).get("source_dirs", ["src/"])
-    for src_dir in source_dirs:
-        sprint_dir = project_root / src_dir / "generated" / f"sprint_{sprint}"
-        if sprint_dir.is_dir():
-            shutil.rmtree(sprint_dir)
-            return
-
-    # Fallback default path
-    sprint_dir = project_root / "src" / "generated" / f"sprint_{sprint}"
-    if sprint_dir.is_dir():
-        shutil.rmtree(sprint_dir)
-
-
-def implement_sprint(
+def implement_tasks(
     project_root: Path,
-    sprint: int,
     *,
     task: str | None = None,
     ai_command: str | None = None,
     clean: bool = False,
 ) -> list[ImplementationResult]:
-    """Generate code for one sprint from implementation plan context."""
+    """Generate code for tasks from implementation plan."""
     project_root = project_root.resolve()
     config = _load_project_config(project_root)
 
     if clean:
-        _clean_sprint_output(project_root, config, sprint)
+        _clean_generated_output(project_root, config)
 
     plan = _load_implementation_plan(project_root, config)
-    selected_tasks = _select_tasks(plan, sprint, task)
+    selected_tasks = _extract_all_tasks(plan)
+
+    if task:
+        selected_tasks = _filter_tasks(selected_tasks, task)
+
     if not selected_tasks:
         if task:
-            raise ValueError(f"no implementation task matched {task!r} in sprint {sprint}")
-        raise ValueError(f"implementation plan does not define sprint {sprint}")
+            raise ValueError(f"no implementation task matched {task!r}")
+        raise ValueError("implementation plan does not define any tasks")
 
     resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="implement")
     global_conventions = _normalize_conventions(config.get("conventions", []))
@@ -233,7 +168,6 @@ def implement_sprint(
         )
         results.append(
             ImplementationResult(
-                sprint=sprint,
                 task_id=selected_task.task_id,
                 task_title=selected_task.title,
                 output_dir=project_root / selected_task.output_dir,
@@ -276,14 +210,127 @@ def _load_coding_principles(project_root: Path, config: dict[str, Any]) -> str |
     return principles_path.read_text(encoding="utf-8")
 
 
-def _select_tasks(plan: ImplementationPlan, sprint: int, task_filter: str | None) -> list[ImplementationTask]:
-    tasks = _parse_explicit_sprint_tasks(plan, sprint)
-    if not tasks:
-        tasks = _infer_sprint_tasks_from_milestones(plan, sprint)
+def _extract_all_tasks(plan: ImplementationPlan) -> list[ImplementationTask]:
+    """Extract all implementation tasks from the plan.
 
-    if task_filter is None:
+    Supports both explicit Sprint heading format and milestone table format.
+    """
+    tasks = _extract_tasks_from_sprint_headings(plan)
+    if not tasks:
+        tasks = _extract_tasks_from_milestones(plan)
+    return _deduplicate_slugs(tasks)
+
+
+def _extract_tasks_from_sprint_headings(plan: ImplementationPlan) -> list[ImplementationTask]:
+    """Extract tasks from all #### Sprint N sections."""
+    matches = list(SPRINT_HEADING_RE.finditer(plan.content))
+    if not matches:
+        return []
+
+    tasks: list[ImplementationTask] = []
+    for index, match in enumerate(matches):
+        section_start = match.end()
+        section_end = matches[index + 1].start() if index + 1 < len(matches) else len(plan.content)
+        section_text = plan.content[section_start:section_end]
+        table_rows = _parse_markdown_table(section_text)
+
+        sprint_num = int(match.group("number"))
+        for row in table_rows:
+            if len(row) < 4:
+                continue
+            task_id = row[0] or f"{sprint_num}-{len(tasks) + 1}"
+            title = row[1] or f"Task {len(tasks) + 1}"
+            module_hint = row[2]
+            deliverable = row[3]
+            slug = _derive_task_slug(title, module_hint, task_id)
+            tasks.append(
+                ImplementationTask(
+                    task_id=task_id,
+                    title=title,
+                    summary=title,
+                    module_hint=module_hint,
+                    deliverable=deliverable,
+                    output_dir=f"src/generated/{slug}",
+                    dependency_node_ids=_infer_dependency_node_ids(plan, title, module_hint, deliverable),
+                    task_context=_clean_text_block(section_text),
+                )
+            )
+    return tasks
+
+
+def _extract_tasks_from_milestones(plan: ImplementationPlan) -> list[ImplementationTask]:
+    """Extract tasks from milestone table when no Sprint headings exist."""
+    milestones = _parse_milestone_rows(plan.content)
+    if not milestones:
+        return []
+
+    tasks: list[ImplementationTask] = []
+    for ms_index, milestone in enumerate(milestones, start=1):
+        task_context = (
+            f"Milestone: {milestone['title']}\n"
+            f"Period: {milestone['period']}\n"
+            f"Deliverables: {milestone['deliverables']}"
+        )
+        summary_chunks = [
+            chunk for chunk in _split_deliverable_chunks(milestone["deliverables"]) if chunk
+        ][:4]
+        if not summary_chunks:
+            summary_chunks = [milestone["deliverables"] or milestone["title"]]
+
+        for chunk_index, chunk in enumerate(summary_chunks, start=1):
+            task_id = f"{ms_index}-{chunk_index}"
+            slug = _derive_task_slug(chunk, "", task_id)
+            tasks.append(
+                ImplementationTask(
+                    task_id=task_id,
+                    title=chunk,
+                    summary=chunk,
+                    module_hint=f"src/generated/{slug}",
+                    deliverable=milestone["deliverables"],
+                    output_dir=f"src/generated/{slug}",
+                    dependency_node_ids=[entry["id"] for entry in plan.depends_on] or ["design:system-design"],
+                    task_context=task_context,
+                )
+            )
+    return tasks
+
+
+def _deduplicate_slugs(tasks: list[ImplementationTask]) -> list[ImplementationTask]:
+    """Ensure output_dir slugs are unique by appending task_id on collision."""
+    slug_counts: dict[str, int] = {}
+    for t in tasks:
+        slug = PurePosixPath(t.output_dir).name
+        slug_counts[slug] = slug_counts.get(slug, 0) + 1
+
+    duplicated = {slug for slug, count in slug_counts.items() if count > 1}
+    if not duplicated:
         return tasks
 
+    result: list[ImplementationTask] = []
+    for t in tasks:
+        slug = PurePosixPath(t.output_dir).name
+        if slug in duplicated:
+            id_suffix = _slug_from_text(t.task_id)
+            new_output_dir = f"src/generated/{slug}_{id_suffix}"
+            result.append(
+                ImplementationTask(
+                    task_id=t.task_id,
+                    title=t.title,
+                    summary=t.summary,
+                    module_hint=t.module_hint,
+                    deliverable=t.deliverable,
+                    output_dir=new_output_dir,
+                    dependency_node_ids=t.dependency_node_ids,
+                    task_context=t.task_context,
+                )
+            )
+        else:
+            result.append(t)
+    return result
+
+
+def _filter_tasks(tasks: list[ImplementationTask], task_filter: str) -> list[ImplementationTask]:
+    """Filter tasks by task_id, slug, or title match."""
     needle = task_filter.strip().casefold()
     return [
         task
@@ -297,90 +344,20 @@ def _select_tasks(plan: ImplementationPlan, sprint: int, task_filter: str | None
     ]
 
 
-def _parse_explicit_sprint_tasks(plan: ImplementationPlan, sprint: int) -> list[ImplementationTask]:
-    matches = list(SPRINT_HEADING_RE.finditer(plan.content))
-    if not matches:
-        return []
+def _clean_generated_output(project_root: Path, config: dict[str, Any]) -> None:
+    """Remove all generated files before re-generation."""
+    import shutil
 
-    for index, match in enumerate(matches):
-        if int(match.group("number")) != sprint:
-            continue
-        section_start = match.end()
-        section_end = matches[index + 1].start() if index + 1 < len(matches) else len(plan.content)
-        section_text = plan.content[section_start:section_end]
-        table_rows = _parse_markdown_table(section_text)
-        if not table_rows:
-            return []
+    source_dirs = config.get("scan", {}).get("source_dirs", ["src/"])
+    for src_dir in source_dirs:
+        generated_dir = project_root / src_dir / "generated"
+        if generated_dir.is_dir():
+            shutil.rmtree(generated_dir)
+            return
 
-        sprint_title = (match.group("title") or f"Sprint {sprint}").strip()
-        sprint_window = (match.group("window") or "").strip()
-        tasks: list[ImplementationTask] = []
-        for row in table_rows:
-            if len(row) < 4:
-                continue
-            task_id = row[0] or f"{sprint}-{len(tasks) + 1}"
-            title = row[1] or f"Sprint {sprint} Task {len(tasks) + 1}"
-            module_hint = row[2]
-            deliverable = row[3]
-            slug = _derive_task_slug(title, module_hint, task_id)
-            tasks.append(
-                ImplementationTask(
-                    sprint=sprint,
-                    task_id=task_id,
-                    title=title,
-                    summary=title,
-                    module_hint=module_hint,
-                    deliverable=deliverable,
-                    sprint_title=sprint_title,
-                    sprint_window=sprint_window,
-                    output_dir=f"src/generated/sprint_{sprint}/{slug}",
-                    dependency_node_ids=_infer_dependency_node_ids(plan, title, module_hint, deliverable),
-                    sprint_context=_clean_text_block(section_text),
-                )
-            )
-        return tasks
-
-    return []
-
-
-def _infer_sprint_tasks_from_milestones(plan: ImplementationPlan, sprint: int) -> list[ImplementationTask]:
-    milestones = _parse_milestone_rows(plan.content)
-    if sprint < 1 or sprint > len(milestones):
-        return []
-
-    milestone = milestones[sprint - 1]
-    sprint_title = milestone["title"] or f"Sprint {sprint}"
-    sprint_window = milestone["period"]
-    sprint_context = (
-        f"Milestone: {milestone['title']}\n"
-        f"Period: {milestone['period']}\n"
-        f"Deliverables: {milestone['deliverables']}"
-    )
-
-    title_slug = _slug_from_text(sprint_title) or f"sprint_{sprint}"
-    summary_chunks = [chunk for chunk in _split_deliverable_chunks(milestone["deliverables"]) if chunk][:4]
-    if not summary_chunks:
-        summary_chunks = [milestone["deliverables"] or sprint_title]
-
-    tasks: list[ImplementationTask] = []
-    for index, chunk in enumerate(summary_chunks, start=1):
-        slug = _derive_task_slug(chunk, "", f"{sprint}-{index}")
-        tasks.append(
-            ImplementationTask(
-                sprint=sprint,
-                task_id=f"{sprint}-{index}",
-                title=chunk,
-                summary=chunk,
-                module_hint=f"src/generated/sprint_{sprint}/{slug}",
-                deliverable=milestone["deliverables"],
-                sprint_title=sprint_title,
-                sprint_window=sprint_window,
-                output_dir=f"src/generated/sprint_{sprint}/{slug or title_slug}",
-                dependency_node_ids=[entry["id"] for entry in plan.depends_on] or ["design:system-design"],
-                sprint_context=sprint_context,
-            )
-        )
-    return tasks
+    generated_dir = project_root / "src" / "generated"
+    if generated_dir.is_dir():
+        shutil.rmtree(generated_dir)
 
 
 def _parse_markdown_table(section_text: str) -> list[list[str]]:
@@ -398,13 +375,6 @@ def _parse_markdown_table(section_text: str) -> list[list[str]]:
     return rows
 
 
-MILESTONE_HEADING_RE = re.compile(
-    r"^###\s+(?:Milestone\s+)?(?P<number>\d+)\s*(?:[—–-]\s*(?P<title>.+?))?\s*$",
-    re.MULTILINE,
-)
-DURATION_RE = re.compile(r"\*\*Duration:\*\*\s*(?P<period>.+?)$", re.MULTILINE)
-
-
 def _parse_milestone_rows(content: str) -> list[dict[str, str]]:
     match = re.search(
         r"^##\s+\d+\.\s+Milestones(?:（マイルストーン）)?\s*$",
@@ -418,7 +388,6 @@ def _parse_milestone_rows(content: str) -> list[dict[str, str]]:
     next_heading = SECTION_HEADING_RE.search(remaining)
     section_text = remaining[: next_heading.start()] if next_heading else remaining
 
-    # Try table format first
     rows = _parse_markdown_table(section_text)
     milestones: list[dict[str, str]] = []
     for row in rows:
@@ -434,7 +403,6 @@ def _parse_milestone_rows(content: str) -> list[dict[str, str]]:
     if milestones:
         return milestones
 
-    # Fallback: parse ### Milestone N — Title headings
     heading_matches = list(MILESTONE_HEADING_RE.finditer(section_text))
     for idx, h_match in enumerate(heading_matches):
         start = h_match.end()
@@ -442,7 +410,6 @@ def _parse_milestone_rows(content: str) -> list[dict[str, str]]:
         body = section_text[start:end]
         dur_match = DURATION_RE.search(body)
         period = dur_match.group("period").strip() if dur_match else ""
-        # Collect sub-section titles as deliverables summary
         sub_headings = re.findall(r"^####\s+.+$", body, re.MULTILINE)
         deliverables = "; ".join(h.lstrip("#").strip() for h in sub_headings[:6])
         milestones.append(
@@ -587,9 +554,6 @@ def _build_implementation_prompt(
         f"Primary language: {language}",
         f"Framework stack: {framework_text}",
         f"Implementation plan: {plan.path.as_posix()} ({plan.node_id})",
-        f"Sprint: {task.sprint}",
-        f"Sprint title: {task.sprint_title}",
-        f"Sprint window: {task.sprint_window or '(unspecified)'}",
         f"Task ID: {task.task_id}",
         f"Task title: {task.title}",
         f"Task summary: {task.summary}",
@@ -616,8 +580,8 @@ def _build_implementation_prompt(
         "",
         "ABSOLUTE PROHIBITION: Outputting prose, planning notes, TODO markers, or files outside the output directory is a CRITICAL ERROR.",
         "",
-        "Sprint context:",
-        task.sprint_context,
+        "Task context:",
+        task.task_context,
     ]
 
     if coding_principles:
@@ -648,8 +612,8 @@ def _build_implementation_prompt(
         lines.extend(
             [
                 "",
-                "Prior implementations (same sprint, earlier tasks only):",
-                "- The following summaries describe code that was already generated earlier in this sprint.",
+                "Prior implementations (earlier tasks):",
+                "- The following summaries describe code that was already generated for earlier tasks.",
                 "- ABSOLUTE PROHIBITION: Re-implementing the same type definitions, utility functions, classes, guards, middleware, or helpers is a CRITICAL ERROR and a release-blocking violation.",
                 "- Reuse these implementations via imports. If a needed symbol already exists below, import it instead of redefining it.",
             ]

@@ -94,10 +94,7 @@ done
 codd validate
 
 # 設計書からコード生成
-sprints=$(codd plan --sprints)
-for sprint in $(seq 1 $sprints); do
-  codd implement --sprint $sprint
-done
+codd implement
 
 # コード断片をビルド可能なプロジェクトに統合
 codd assemble

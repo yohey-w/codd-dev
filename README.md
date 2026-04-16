@@ -94,10 +94,7 @@ done
 codd validate
 
 # Generate code from design docs
-sprints=$(codd plan --sprints)
-for sprint in $(seq 1 $sprints); do
-  codd implement --sprint $sprint
-done
+codd implement
 
 # Assemble code fragments into a buildable project
 codd assemble

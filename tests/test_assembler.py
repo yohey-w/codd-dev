@@ -29,7 +29,7 @@ def _create_project_with_plan(tmp_path: Path, *, task_slugs: list[str]) -> Path:
         yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
     )
 
-    # Implementation plan with sprint 1 tasks
+    # Implementation plan with tasks
     plan_dir = project / "docs" / "plan"
     plan_dir.mkdir(parents=True)
     rows = "\n".join(
@@ -61,8 +61,8 @@ def test_collect_fragments_excludes_orphans(tmp_path):
     project = _create_project_with_plan(tmp_path, task_slugs=["auth", "database"])
     config = _load_project_config(project)
 
-    # Create valid fragment directories
-    gen_base = project / "src" / "generated" / "sprint_1"
+    # Create valid fragment directories (flat layout)
+    gen_base = project / "src" / "generated"
     for slug in ["authentication", "database_foundation"]:
         task_dir = gen_base / slug
         task_dir.mkdir(parents=True)
@@ -105,7 +105,8 @@ def test_collect_fragments_no_plan_collects_all(tmp_path):
         yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
     )
 
-    gen_base = project / "src" / "generated" / "sprint_1"
+    # Flat layout
+    gen_base = project / "src" / "generated"
     for slug in ["task_a", "task_b"]:
         d = gen_base / slug
         d.mkdir(parents=True)
@@ -122,3 +123,29 @@ def test_collect_fragments_no_plan_collects_all(tmp_path):
 
     # All fragments collected
     assert len(fragments) == 2
+
+
+def test_collect_fragments_legacy_sprint_dirs(tmp_path):
+    """Legacy sprint_N directories are still collected."""
+    project = tmp_path / "project"
+    project.mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+    config = {
+        "project": {"name": "demo", "language": "typescript"},
+        "scan": {"source_dirs": ["src/"]},
+    }
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+    )
+
+    # Legacy sprint_N layout
+    sprint_dir = project / "src" / "generated" / "sprint_1" / "auth"
+    sprint_dir.mkdir(parents=True)
+    (sprint_dir / "index.ts").write_text("// legacy auth")
+
+    config_loaded = _load_project_config(project)
+    fragments = _collect_generated_fragments(project, config_loaded)
+
+    assert len(fragments) == 1
+    assert "sprint_1" in fragments[0]["path"]
