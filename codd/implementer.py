@@ -60,7 +60,7 @@ def count_sprints(project_root: Path) -> int:
             total = i
     return total
 SPRINT_HEADING_RE = re.compile(
-    r"^####\s+Sprint\s+(?P<number>\d+)(?:（(?P<window>[^）]+)）)?(?:\s*:\s*(?P<title>.+))?\s*$",
+    r"^#{3,4}\s+Sprint\s+(?P<number>\d+)(?:（(?P<window>[^）]+)）)?(?:\s*[:\u2014\u2013\-]\s*(?P<title>.+))?\s*$",
     re.MULTILINE,
 )
 SECTION_HEADING_RE = re.compile(r"^##\s+\d+\.\s+(?P<title>.+?)\s*$", re.MULTILINE)

@@ -348,3 +348,89 @@ def test_get_task_slugs_by_sprint_no_plan(tmp_path):
 
     result = get_task_slugs_by_sprint(project)
     assert result == {}
+
+
+# Regression tests for issue #10: SPRINT_HEADING_RE should accept both ### and ####
+# as well as various separators (colon, em dash, en dash, hyphen) between the sprint
+# number and the title. AI-generated plans tend to use `### Sprint N — Title` while
+# the original regex only matched `#### Sprint N: Title`.
+
+
+def _build_plan_with_sprint_heading(tmp_path: Path, heading: str) -> Path:
+    """Create a minimal project with a single sprint heading for regex testing."""
+    project = tmp_path / "project"
+    project.mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        "project:\n  name: demo\n  language: typescript\n"
+    )
+    plan_body = (
+        "# Implementation Plan\n\n"
+        "## 1. Overview\n\n"
+        "Foundation work.\n\n"
+        f"{heading}\n\n"
+        "| # | 作業項目 | 対応モジュール | 成果物 |\n"
+        "|---|---|---|---|\n"
+        "| 1-1 | Setup | `lib/setup.ts` | Initial scaffold |\n"
+    )
+    _write_doc(
+        project,
+        "docs/plan/implementation_plan.md",
+        node_id="plan:implementation-plan",
+        doc_type="plan",
+        body=plan_body,
+    )
+    return project
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "#### Sprint 1: Foundation",
+        "### Sprint 1: Foundation",
+        "#### Sprint 1 — Foundation",
+        "### Sprint 1 — Foundation",
+        "### Sprint 1 – Foundation",
+        "### Sprint 1 - Foundation",
+        "#### Sprint 1（4月1日〜4月14日）: Foundation",
+        "### Sprint 1（4月1日〜4月14日）— Foundation",
+    ],
+)
+def test_count_sprints_accepts_h3_and_h4_with_various_separators(tmp_path, heading):
+    """Issue #10: Sprint headings should be recognized at ### or #### with any
+    of the common separators (colon, em dash, en dash, hyphen)."""
+    project = _build_plan_with_sprint_heading(tmp_path, heading)
+    assert implementer_module.count_sprints(project) == 1
+
+
+def test_count_sprints_parses_multiple_h3_sprints(tmp_path):
+    """Issue #10: Multiple ### Sprint headings in a single plan are all counted."""
+    project = tmp_path / "project"
+    project.mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        "project:\n  name: demo\n  language: typescript\n"
+    )
+    plan_body = (
+        "# Implementation Plan\n\n"
+        "## 1. Overview\n\n"
+        "Multi-sprint plan.\n\n"
+        "### Sprint 1 — Foundation\n\n"
+        "| # | 作業項目 | 対応モジュール | 成果物 |\n"
+        "|---|---|---|---|\n"
+        "| 1-1 | Setup | `lib/setup.ts` | Initial scaffold |\n\n"
+        "### Sprint 2 — Core\n\n"
+        "| # | 作業項目 | 対応モジュール | 成果物 |\n"
+        "|---|---|---|---|\n"
+        "| 2-1 | Domain | `lib/domain.ts` | Domain types |\n"
+    )
+    _write_doc(
+        project,
+        "docs/plan/implementation_plan.md",
+        node_id="plan:implementation-plan",
+        doc_type="plan",
+        body=plan_body,
+    )
+    assert implementer_module.count_sprints(project) == 2
