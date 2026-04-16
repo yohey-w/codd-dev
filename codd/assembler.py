@@ -51,7 +51,9 @@ def assemble_project(
     prompt = _build_assemble_prompt(config, design_docs, fragments, dest)
 
     # Invoke AI
-    raw_output = generator_module._invoke_ai_command(resolved_ai_command, prompt)
+    raw_output = generator_module._invoke_ai_command(
+        resolved_ai_command, prompt, project_root=project_root,
+    )
 
     # Parse and write files
     files_written = _write_assembled_files(project_root, dest_path, raw_output)

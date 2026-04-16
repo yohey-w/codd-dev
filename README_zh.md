@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.7.0** — `init` / `scan` / `impact` 已稳定。`propagate` 通过 CEG 图追踪代码变更到下游设计文档以及文档间的变更。`extract --ai` 支持基线预设。通过 `codd.yaml` 自定义 `node_id` 前缀。GitHub Action 支持 CI 集成。
+**v1.9.0** — `codd implement` 支持**多 AI 引擎**（Claude stdout + Codex 文件写入）和**阶段内自动并行执行**（通过 git worktree 隔离）。支持阶段里程碑格式（`#### M1.1`）。重度推理模型的超时时间延长至 1 小时。SWE-bench Verified: **73/73 = 100%** 已解决。
 
 ---
 

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from collections import deque
+import concurrent.futures
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 
 import codd.generator as generator_module
@@ -24,6 +29,10 @@ SPRINT_HEADING_RE = re.compile(
 SECTION_HEADING_RE = re.compile(r"^##\s+\d+\.\s+(?P<title>.+?)\s*$", re.MULTILINE)
 MILESTONE_HEADING_RE = re.compile(
     r"^###\s+(?:Milestone\s+)?(?P<number>\d+)\s*(?:[—–-]\s*(?P<title>.+?))?\s*$",
+    re.MULTILINE,
+)
+PHASE_MILESTONE_RE = re.compile(
+    r"^####\s+M(?P<phase>\d+)\.(?P<milestone>\d+)\s+(?P<title>.+?)(?:\s*（[^）]+）)?\s*$",
     re.MULTILINE,
 )
 DURATION_RE = re.compile(r"\*\*Duration:\*\*\s*(?P<period>.+?)$", re.MULTILINE)
@@ -131,51 +140,205 @@ def implement_tasks(
     node_paths = build_document_node_path_map(project_root, config)
     detailed_design_node_ids = _select_detailed_design_dependency_node_ids(plan.depends_on, node_paths)
 
+    phase_groups = _group_tasks_by_phase(selected_tasks)
+    use_worktree = generator_module._is_file_writing_agent(
+        __import__("shlex").split(resolved_ai_command),
+    )
+
     results: list[ImplementationResult] = []
     prior_task_outputs: list[dict[str, Any]] = []
-    for selected_task in selected_tasks:
-        dependency_node_ids = _ordered_unique(selected_task.dependency_node_ids + detailed_design_node_ids)
-        dependency_documents, document_conventions = _collect_dependency_documents(
-            project_root,
-            dependency_node_ids,
-            node_paths,
-        )
-        combined_conventions = _merge_conventions(
-            global_conventions,
-            plan.conventions,
-            document_conventions,
-        )
-        prompt = _build_implementation_prompt(
-            config=config,
-            plan=plan,
-            task=selected_task,
-            dependency_documents=dependency_documents,
-            conventions=combined_conventions,
-            coding_principles=coding_principles,
-            prior_task_outputs=prior_task_outputs,
-        )
-        raw_output = generator_module._invoke_ai_command(resolved_ai_command, prompt)
-        generated_files = _write_generated_files(
-            project_root=project_root,
-            plan=plan,
-            task=selected_task,
-            dependency_documents=dependency_documents,
-            output_dir=selected_task.output_dir,
-            raw_output=raw_output,
-        )
-        prior_task_outputs.append(
-            _summarize_generated_task_output(project_root, selected_task, generated_files)
-        )
-        results.append(
-            ImplementationResult(
-                task_id=selected_task.task_id,
-                task_title=selected_task.title,
-                output_dir=project_root / selected_task.output_dir,
-                generated_files=generated_files,
+
+    for phase_tasks in phase_groups:
+        if len(phase_tasks) == 1:
+            result, summary = _execute_task(
+                config, plan, phase_tasks[0], resolved_ai_command,
+                global_conventions, coding_principles, node_paths,
+                detailed_design_node_ids, prior_task_outputs, project_root,
             )
-        )
+            results.append(result)
+            prior_task_outputs.append(summary)
+        else:
+            phase_results = _execute_phase_parallel(
+                config, plan, phase_tasks, resolved_ai_command,
+                global_conventions, coding_principles, node_paths,
+                detailed_design_node_ids, prior_task_outputs, project_root,
+                use_worktree=use_worktree,
+            )
+            for result, summary in phase_results:
+                results.append(result)
+                prior_task_outputs.append(summary)
 
     return results
+
+
+def _group_tasks_by_phase(
+    tasks: list[ImplementationTask],
+) -> list[list[ImplementationTask]]:
+    """Group tasks by phase number. Same phase = independent, can run in parallel."""
+    phase_map: dict[str, list[ImplementationTask]] = {}
+    for t in tasks:
+        match = re.match(r"m(\d+)\.", t.task_id)
+        phase = match.group(1) if match else "0"
+        phase_map.setdefault(phase, []).append(t)
+    return [phase_map[k] for k in sorted(phase_map.keys())]
+
+
+def _execute_task(
+    config: dict[str, Any],
+    plan: ImplementationPlan,
+    task_item: ImplementationTask,
+    resolved_ai_command: str,
+    global_conventions: list[dict[str, Any]],
+    coding_principles: str,
+    node_paths: dict[str, Path],
+    detailed_design_node_ids: list[str],
+    prior_task_outputs: list[dict[str, Any]],
+    project_root: Path,
+) -> tuple[ImplementationResult, dict[str, Any]]:
+    """Execute a single implementation task. Returns (result, summary)."""
+    dependency_node_ids = _ordered_unique(
+        task_item.dependency_node_ids + detailed_design_node_ids,
+    )
+    dependency_documents, document_conventions = _collect_dependency_documents(
+        project_root, dependency_node_ids, node_paths,
+    )
+    combined_conventions = _merge_conventions(
+        global_conventions, plan.conventions, document_conventions,
+    )
+    prompt = _build_implementation_prompt(
+        config=config,
+        plan=plan,
+        task=task_item,
+        dependency_documents=dependency_documents,
+        conventions=combined_conventions,
+        coding_principles=coding_principles,
+        prior_task_outputs=prior_task_outputs,
+    )
+    raw_output = generator_module._invoke_ai_command(
+        resolved_ai_command, prompt, project_root=project_root,
+    )
+    generated_files = _write_generated_files(
+        project_root=project_root,
+        plan=plan,
+        task=task_item,
+        dependency_documents=dependency_documents,
+        output_dir=task_item.output_dir,
+        raw_output=raw_output,
+    )
+    summary = _summarize_generated_task_output(project_root, task_item, generated_files)
+    result = ImplementationResult(
+        task_id=task_item.task_id,
+        task_title=task_item.title,
+        output_dir=project_root / task_item.output_dir,
+        generated_files=generated_files,
+    )
+    return result, summary
+
+
+def _create_worktree(project_root: Path) -> tuple[Path, str]:
+    """Create a temporary git worktree for isolated parallel execution."""
+    worktree_dir = Path(tempfile.mkdtemp(prefix="codd-wt-"))
+    branch = f"codd-wt-{os.getpid()}-{id(worktree_dir)}"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", branch, str(worktree_dir), "HEAD"],
+        cwd=str(project_root),
+        capture_output=True,
+        check=True,
+    )
+    return worktree_dir, branch
+
+
+def _remove_worktree(project_root: Path, worktree_dir: Path, branch: str) -> None:
+    """Remove a temporary git worktree and its branch."""
+    subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree_dir)],
+        cwd=str(project_root),
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", branch],
+        cwd=str(project_root),
+        capture_output=True,
+    )
+    if worktree_dir.exists():
+        shutil.rmtree(worktree_dir, ignore_errors=True)
+
+
+def _execute_task_in_worktree(
+    config: dict[str, Any],
+    plan: ImplementationPlan,
+    task_item: ImplementationTask,
+    resolved_ai_command: str,
+    global_conventions: list[dict[str, Any]],
+    coding_principles: str,
+    node_paths: dict[str, Path],
+    detailed_design_node_ids: list[str],
+    prior_task_outputs: list[dict[str, Any]],
+    project_root: Path,
+) -> tuple[ImplementationResult, dict[str, Any]]:
+    """Execute task in a git worktree, copy output back to main project."""
+    worktree_dir, branch = _create_worktree(project_root)
+    try:
+        result, summary = _execute_task(
+            config, plan, task_item, resolved_ai_command,
+            global_conventions, coding_principles, node_paths,
+            detailed_design_node_ids, prior_task_outputs, worktree_dir,
+        )
+        output_dir = worktree_dir / task_item.output_dir
+        target_dir = project_root / task_item.output_dir
+        if output_dir.exists():
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for src_file in output_dir.iterdir():
+                if src_file.is_file():
+                    shutil.copy2(src_file, target_dir / src_file.name)
+        return ImplementationResult(
+            task_id=result.task_id,
+            task_title=result.task_title,
+            output_dir=target_dir,
+            generated_files=[
+                project_root / f.relative_to(worktree_dir)
+                for f in result.generated_files
+            ],
+        ), summary
+    finally:
+        _remove_worktree(project_root, worktree_dir, branch)
+
+
+def _execute_phase_parallel(
+    config: dict[str, Any],
+    plan: ImplementationPlan,
+    phase_tasks: list[ImplementationTask],
+    resolved_ai_command: str,
+    global_conventions: list[dict[str, Any]],
+    coding_principles: str,
+    node_paths: dict[str, Path],
+    detailed_design_node_ids: list[str],
+    prior_task_outputs: list[dict[str, Any]],
+    project_root: Path,
+    *,
+    use_worktree: bool = False,
+) -> list[tuple[ImplementationResult, dict[str, Any]]]:
+    """Execute all tasks in a phase concurrently."""
+    executor_fn = _execute_task_in_worktree if use_worktree else _execute_task
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(phase_tasks), 4),
+    ) as executor:
+        futures = {
+            executor.submit(
+                executor_fn,
+                config, plan, t, resolved_ai_command,
+                global_conventions, coding_principles, node_paths,
+                detailed_design_node_ids, prior_task_outputs, project_root,
+            ): t
+            for t in phase_tasks
+        }
+        phase_results: list[tuple[int, tuple[ImplementationResult, dict[str, Any]]]] = []
+        for future in concurrent.futures.as_completed(futures):
+            t = futures[future]
+            idx = phase_tasks.index(t)
+            phase_results.append((idx, future.result()))
+    phase_results.sort(key=lambda x: x[0])
+    return [r for _, r in phase_results]
 
 
 def _load_implementation_plan(project_root: Path, config: dict[str, Any]) -> ImplementationPlan:
@@ -213,9 +376,12 @@ def _load_coding_principles(project_root: Path, config: dict[str, Any]) -> str |
 def _extract_all_tasks(plan: ImplementationPlan) -> list[ImplementationTask]:
     """Extract all implementation tasks from the plan.
 
-    Supports both explicit Sprint heading format and milestone table format.
+    Supports phase milestones (M1.1), Sprint headings, and milestone tables.
+    Phase milestones are tried first (most specific format).
     """
-    tasks = _extract_tasks_from_sprint_headings(plan)
+    tasks = _extract_tasks_from_phase_milestones(plan)
+    if not tasks:
+        tasks = _extract_tasks_from_sprint_headings(plan)
     if not tasks:
         tasks = _extract_tasks_from_milestones(plan)
     return _deduplicate_slugs(tasks)
@@ -255,6 +421,60 @@ def _extract_tasks_from_sprint_headings(plan: ImplementationPlan) -> list[Implem
                     task_context=_clean_text_block(section_text),
                 )
             )
+    return tasks
+
+
+def _extract_tasks_from_phase_milestones(plan: ImplementationPlan) -> list[ImplementationTask]:
+    """Extract tasks from #### M<phase>.<milestone> headings (e.g., #### M1.1 DB Schema)."""
+    milestones_match = re.search(
+        r"^##\s+\d+\.\s+Milestones",
+        plan.content,
+        re.MULTILINE,
+    )
+    if not milestones_match:
+        return []
+
+    section_start = milestones_match.end()
+    next_section = SECTION_HEADING_RE.search(plan.content, section_start)
+    section_end = next_section.start() if next_section else len(plan.content)
+    milestones_text = plan.content[section_start:section_end]
+
+    matches = list(PHASE_MILESTONE_RE.finditer(milestones_text))
+    if not matches:
+        return []
+
+    tasks: list[ImplementationTask] = []
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(milestones_text)
+        body = milestones_text[start:end]
+
+        phase = match.group("phase")
+        milestone = match.group("milestone")
+        title = match.group("title").strip()
+        task_id = f"m{phase}.{milestone}"
+
+        table_rows = _parse_markdown_table(body)
+        deliverables = []
+        for row in table_rows:
+            if len(row) >= 2 and row[1].strip() and row[0] != "タスク":
+                deliverables.append(row[1].strip())
+
+        slug = _slug_from_text(f"m{phase}_{milestone}_{title}")
+        tasks.append(
+            ImplementationTask(
+                task_id=task_id,
+                title=f"M{phase}.{milestone} {title}",
+                summary=f"M{phase}.{milestone} {title}",
+                module_hint="",
+                deliverable="; ".join(deliverables[:6]),
+                output_dir=f"src/generated/{slug}",
+                dependency_node_ids=_infer_dependency_node_ids(
+                    plan, title, "", "; ".join(deliverables[:3]),
+                ),
+                task_context=_clean_text_block(body),
+            )
+        )
     return tasks
 
 

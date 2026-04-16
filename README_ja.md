@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.8.0** — `codd fix` に診断推論ステップとセッション状態永続化を追加。SWE-bench Verified: **73/73 = 100%** 解決。`init` / `scan` / `impact` は安定版。`propagate` でコード変更を下流設計書に伝搬、設計書間の変更もCEGグラフ経由で追跡。
+**v1.9.0** — `codd implement` が**マルチAIエンジン**（Claude stdout + Codex file-writing）と**フェーズ内自動並列実行**（git worktree分離）に対応。フェーズマイルストーン形式（`#### M1.1`）をサポート。重い推論モデル向けにタイムアウトを1時間に拡大。SWE-bench Verified: **73/73 = 100%** 解決。
 
 ---
 

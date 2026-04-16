@@ -22,7 +22,7 @@
 pip install codd-dev
 ```
 
-**v1.8.0** — `codd fix` now includes diagnostic reasoning and session state persistence across retries. SWE-bench Verified: **73/73 = 100%** resolved. `init` / `scan` / `impact` are stable. `propagate` traces code changes to downstream design docs and doc-to-doc changes via CEG graph.
+**v1.9.0** — `codd implement` now supports **multi-AI engine** (Claude stdout + Codex file-writing) and **automatic parallel execution** within phases via git worktree isolation. Phase milestone format (`#### M1.1`) supported. AI command timeout extended to 1 hour for heavy reasoning models. SWE-bench Verified: **73/73 = 100%** resolved.
 
 ---
 

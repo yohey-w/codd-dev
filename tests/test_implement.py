@@ -415,6 +415,146 @@ def test_extract_all_tasks_from_sprint_headings():
     assert "sprint_" not in tasks[1].output_dir
 
 
+def test_extract_all_tasks_from_phase_milestones():
+    """Phase milestones (#### M1.1 ...) are extracted correctly and take priority."""
+    from codd.implementer import ImplementationPlan, _extract_all_tasks
+
+    plan = ImplementationPlan(
+        node_id="plan:implementation-plan",
+        path=Path("docs/plan/implementation_plan.md"),
+        content="""# Implementation Plan
+
+## 1. Overview
+
+Tasks for the LMS project.
+
+## 2. Milestones
+
+### Phase 1: 基盤（2026-04-14 〜 2026-04-30）
+
+#### M1.1 データベーススキーマ（4/14 〜 4/18）
+
+| タスク | 成果物 | 優先度 | 依存 |
+|---|---|---|---|
+| Prisma スキーマ定義 | `prisma/schema.prisma` | P0 | なし |
+| RLS ポリシー | `migrations/rls.sql` | P0 | スキーマ |
+
+#### M1.2 認証基盤（4/18 〜 4/23）
+
+| タスク | 成果物 | 優先度 | 依存 |
+|---|---|---|---|
+| NextAuth.js 設定 | `src/lib/auth.config.ts` | P0 | DB |
+
+### Phase 2: コース（2026-05-01 〜 2026-05-21）
+
+#### M2.1 コース管理（5/1 〜 5/7）
+
+| タスク | 成果物 | 優先度 | 依存 |
+|---|---|---|---|
+| コース CRUD | `src/modules/courses/service.ts` | P0 | Phase 1 |
+
+## 3. Testing
+
+#### Sprint 13（6/11〜6/15）: テスト
+
+| # | 作業項目 | 対応モジュール | 成果物 |
+|---|---|---|---|
+| 13-1 | E2E テスト | tests/ | テスト |
+""",
+        depends_on=[{"id": "design:system-design", "relation": "depends_on"}],
+        conventions=[],
+    )
+
+    tasks = _extract_all_tasks(plan)
+    assert len(tasks) == 3
+    assert tasks[0].task_id == "m1.1"
+    assert tasks[0].title == "M1.1 データベーススキーマ"
+    assert tasks[1].task_id == "m1.2"
+    assert tasks[2].task_id == "m2.1"
+    assert "src/generated/m1_1" in tasks[0].output_dir
+    assert "Prisma" in tasks[0].task_context
+
+
+def test_phase_milestones_skip_header_rows():
+    """Header rows like 'タスク | 成果物' are not included in deliverables."""
+    from codd.implementer import ImplementationPlan, _extract_tasks_from_phase_milestones
+
+    plan = ImplementationPlan(
+        node_id="plan:implementation-plan",
+        path=Path("docs/plan/implementation_plan.md"),
+        content="""# Plan
+
+## 2. Milestones
+
+### Phase 1
+
+#### M1.1 DB スキーマ（4/14 〜 4/18）
+
+| タスク | 成果物 | 優先度 | 依存 |
+|---|---|---|---|
+| Prisma 定義 | `schema.prisma` | P0 | なし |
+""",
+        depends_on=[],
+        conventions=[],
+    )
+
+    tasks = _extract_tasks_from_phase_milestones(plan)
+    assert len(tasks) == 1
+    assert "タスク" not in tasks[0].title
+    assert "`schema.prisma`" in tasks[0].deliverable
+
+
+def test_group_tasks_by_phase():
+    """Tasks are grouped by phase number for parallel execution."""
+    from codd.implementer import ImplementationTask, _group_tasks_by_phase
+
+    tasks = [
+        ImplementationTask(
+            task_id="m1.1", title="DB", summary="", module_hint="",
+            deliverable="", output_dir="src/generated/m1_1_db",
+            dependency_node_ids=[], task_context="",
+        ),
+        ImplementationTask(
+            task_id="m1.2", title="Auth", summary="", module_hint="",
+            deliverable="", output_dir="src/generated/m1_2_auth",
+            dependency_node_ids=[], task_context="",
+        ),
+        ImplementationTask(
+            task_id="m2.1", title="Course", summary="", module_hint="",
+            deliverable="", output_dir="src/generated/m2_1_course",
+            dependency_node_ids=[], task_context="",
+        ),
+        ImplementationTask(
+            task_id="m2.2", title="Material", summary="", module_hint="",
+            deliverable="", output_dir="src/generated/m2_2_material",
+            dependency_node_ids=[], task_context="",
+        ),
+        ImplementationTask(
+            task_id="m3.1", title="API", summary="", module_hint="",
+            deliverable="", output_dir="src/generated/m3_1_api",
+            dependency_node_ids=[], task_context="",
+        ),
+    ]
+
+    groups = _group_tasks_by_phase(tasks)
+    assert len(groups) == 3
+    assert [t.task_id for t in groups[0]] == ["m1.1", "m1.2"]
+    assert [t.task_id for t in groups[1]] == ["m2.1", "m2.2"]
+    assert [t.task_id for t in groups[2]] == ["m3.1"]
+
+
+def test_is_file_writing_agent():
+    """Detect file-writing vs stdout agents correctly."""
+    from codd.generator import _is_file_writing_agent
+
+    assert _is_file_writing_agent(["codex", "exec", "--full-auto"]) is True
+    assert _is_file_writing_agent(["claude", "-p"]) is False
+    assert _is_file_writing_agent(["claude", "--print"]) is False
+    assert _is_file_writing_agent(["claude", "--dangerously-skip-permissions"]) is True
+    assert _is_file_writing_agent(["claude"]) is True
+    assert _is_file_writing_agent([]) is False
+
+
 def test_no_sprint_in_prompt(tmp_path, mock_implement_ai):
     """Generated prompt should not contain Sprint references."""
     project = _setup_project(tmp_path, explicit_sprints=True, include_coding_principles=False)

@@ -704,10 +704,96 @@ def _is_detailed_design_output(output_path: str) -> bool:
     return len(parts) >= 2 and parts[0] == "docs" and parts[1] == "detailed_design"
 
 
-def _invoke_ai_command(ai_command: str, prompt: str) -> str:
+def _is_file_writing_agent(command: list[str]) -> bool:
+    """Detect AI agents that write output to filesystem instead of stdout.
+
+    Codex always writes to filesystem.
+    Claude without -p/--print runs in interactive mode (file-writing).
+    Claude with -p/--print outputs to stdout.
+    """
+    if not command:
+        return False
+    if "codex" in command[0]:
+        return True
+    if "claude" in command[0]:
+        return "-p" not in command and "--print" not in command
+    return False
+
+
+def _invoke_file_writing_agent(
+    command: list[str], prompt: str, project_root: Path,
+) -> str:
+    """Invoke an AI agent that writes files directly, capture changes as === FILE: === blocks."""
+    cwd = str(project_root)
+
+    # Stage all current state as baseline for change detection
+    subprocess.run(["git", "add", "-A"], cwd=cwd, capture_output=True)
+
+    try:
+        result = subprocess.run(
+            command, input=prompt, capture_output=True, text=True,
+            check=False, cwd=cwd, timeout=3600,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError(f"AI command not found: {command[0]}") from exc
+    except subprocess.TimeoutExpired:
+        raise ValueError("AI command timed out (3600s)")
+
+    if result.returncode != 0:
+        detail = (result.stderr.strip() or result.stdout.strip()
+                  or f"exit code {result.returncode}")
+        raise ValueError(f"AI command failed: {detail}")
+
+    # Detect files changed by the agent (unstaged vs index = agent's work)
+    diff_out = subprocess.run(
+        ["git", "diff", "--name-only"],
+        cwd=cwd, capture_output=True, text=True,
+    ).stdout.strip()
+    untracked_out = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=cwd, capture_output=True, text=True,
+    ).stdout.strip()
+
+    changed_files = diff_out.splitlines() if diff_out else []
+    new_files = untracked_out.splitlines() if untracked_out else []
+    all_files = sorted(set(changed_files + new_files))
+
+    if not all_files:
+        raise ValueError("AI command did not produce any file changes")
+
+    # Read changed files and format as CoDD file blocks
+    parts: list[str] = []
+    for rel_path in all_files:
+        full_path = project_root / rel_path
+        if full_path.is_file():
+            content = full_path.read_text(encoding="utf-8", errors="replace")
+            parts.append(f"=== FILE: {rel_path} ===")
+            parts.append(content)
+            parts.append("")
+
+    if not parts:
+        raise ValueError("AI command did not produce any readable file changes")
+
+    # Revert: restore tracked files from index, remove agent-created files
+    subprocess.run(["git", "checkout", "--", "."], cwd=cwd, capture_output=True)
+    for f in new_files:
+        fp = project_root / f
+        if fp.is_file():
+            fp.unlink()
+    subprocess.run(["git", "reset", "--quiet"], cwd=cwd, capture_output=True)
+
+    return "\n".join(parts)
+
+
+def _invoke_ai_command(
+    ai_command: str, prompt: str, *, project_root: Path | None = None,
+) -> str:
     command = shlex.split(ai_command)
     if not command:
         raise ValueError("ai_command must not be empty")
+
+    if _is_file_writing_agent(command) and project_root is not None:
+        return _invoke_file_writing_agent(command, prompt, project_root)
 
     try:
         result = subprocess.run(

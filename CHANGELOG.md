@@ -2,6 +2,24 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.9.0] - 2026-04-16
+
+### Added
+
+- **Multi-AI engine support for `codd implement`** — file-writing agents (Codex) detected automatically via `_is_file_writing_agent()`. Git-based change capture: baseline → run agent → `git diff` → format as `=== FILE: ===` blocks → revert. Claude interactive mode (without `-p`) also supported as file-writing agent.
+- **Automatic parallel execution within phases** — tasks grouped by phase number (`m1.x`, `m2.x`). Same-phase tasks run concurrently via `ThreadPoolExecutor` (max 4 workers). File-writing agents use git worktree isolation to prevent conflicts. Stdout agents parallelize without overhead.
+- **Phase milestone parser** — `#### M1.1 Title（period）` format extracted from `## Milestones` section. Takes priority over Sprint and legacy Milestone formats.
+- **`_group_tasks_by_phase()`** — groups `ImplementationTask` list by phase number for parallel scheduling.
+- **`_execute_task()`** — extracted single-task execution into reusable function.
+- **`_execute_phase_parallel()`** — orchestrates concurrent execution with worktree isolation for file-writing agents.
+- **`_create_worktree()` / `_remove_worktree()`** — git worktree lifecycle management for parallel Codex execution.
+
+### Changed
+
+- AI command timeout increased from 600s to **3600s** (1 hour) for heavy reasoning models (e.g., GPT-5.4 xhigh).
+- `implement_tasks()` now processes phases sequentially with intra-phase parallelism by default. No flag needed.
+- `_invoke_ai_command()` accepts `project_root` kwarg to route file-writing agents.
+
 ## [1.8.0] - 2026-04-14
 
 ### Added
