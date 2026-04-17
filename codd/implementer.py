@@ -92,6 +92,7 @@ class ImplementationResult:
     task_title: str
     output_dir: Path
     generated_files: list[Path]
+    error: str | None = None
 
 
 def get_valid_task_slugs(project_root: Path) -> set[str]:
@@ -167,6 +168,26 @@ def implement_tasks(
             for result, summary in phase_results:
                 results.append(result)
                 prior_task_outputs.append(summary)
+
+    failed = [r for r in results if r.error]
+    if failed:
+        import sys
+        print(
+            f"\n[codd] WARNING: {len(failed)} of {len(results)} task(s) failed to generate files:",
+            file=sys.stderr,
+        )
+        for r in failed:
+            print(f"  - {r.task_id} ({r.task_title}): {r.error}", file=sys.stderr)
+
+    expected = len(selected_tasks)
+    actual = len(results)
+    if actual < expected:
+        import sys
+        print(
+            f"\n[codd] WARNING: expected {expected} task results but got {actual} "
+            f"({expected - actual} task(s) lost)",
+            file=sys.stderr,
+        )
 
     return results
 
@@ -345,6 +366,25 @@ def _execute_phase_parallel(
                     f"[codd] task {t.task_id} failed: {exc}",
                     file=sys.stderr,
                 )
+                error_result = ImplementationResult(
+                    task_id=t.task_id,
+                    task_title=t.title,
+                    output_dir=project_root / t.output_dir,
+                    generated_files=[],
+                    error=str(exc),
+                )
+                error_summary = {
+                    "task_id": t.task_id,
+                    "task_title": t.title,
+                    "directory": t.output_dir,
+                    "files": [],
+                    "exported_types": [],
+                    "exported_functions": [],
+                    "exported_classes": [],
+                    "exported_values": [],
+                    "error": str(exc),
+                }
+                phase_results.append((idx, (error_result, error_summary)))
     phase_results.sort(key=lambda x: x[0])
     return [r for _, r in phase_results]
 
