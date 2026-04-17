@@ -739,6 +739,13 @@ def _invoke_file_writing_agent(
     except subprocess.TimeoutExpired:
         raise ValueError("AI command timed out (3600s)")
 
+    import sys
+    print(
+        f"[codd] file-writing agent finished: returncode={result.returncode} "
+        f"stdout={len(result.stdout)}B stderr={len(result.stderr)}B cwd={cwd}",
+        file=sys.stderr,
+    )
+
     if result.returncode != 0:
         detail = (result.stderr.strip() or result.stdout.strip()
                   or f"exit code {result.returncode}")

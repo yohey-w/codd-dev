@@ -319,6 +319,8 @@ def _execute_phase_parallel(
     use_worktree: bool = False,
 ) -> list[tuple[ImplementationResult, dict[str, Any]]]:
     """Execute all tasks in a phase concurrently."""
+    import sys
+
     executor_fn = _execute_task_in_worktree if use_worktree else _execute_task
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=min(len(phase_tasks), 4),
@@ -336,7 +338,13 @@ def _execute_phase_parallel(
         for future in concurrent.futures.as_completed(futures):
             t = futures[future]
             idx = phase_tasks.index(t)
-            phase_results.append((idx, future.result()))
+            try:
+                phase_results.append((idx, future.result()))
+            except Exception as exc:
+                print(
+                    f"[codd] task {t.task_id} failed: {exc}",
+                    file=sys.stderr,
+                )
     phase_results.sort(key=lambda x: x[0])
     return [r for _, r in phase_results]
 
