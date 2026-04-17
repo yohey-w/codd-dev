@@ -82,6 +82,7 @@ class ImplementationTask:
     output_dir: str
     dependency_node_ids: list[str]
     task_context: str
+    blocked_by_task_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ def implement_tasks(
     detailed_design_node_ids = _select_detailed_design_dependency_node_ids(plan.depends_on, node_paths)
 
     phase_groups = _group_tasks_by_phase(selected_tasks)
+    phase_groups = _resolve_task_dependencies(phase_groups)
     use_worktree = generator_module._is_file_writing_agent(
         __import__("shlex").split(resolved_ai_command),
     )
@@ -150,9 +152,26 @@ def implement_tasks(
     prior_task_outputs: list[dict[str, Any]] = []
 
     for phase_tasks in phase_groups:
-        if len(phase_tasks) == 1:
+        executable: list[ImplementationTask] = []
+        for t in phase_tasks:
+            blocker_error = _check_blockers(t, results)
+            if blocker_error:
+                results.append(ImplementationResult(
+                    task_id=t.task_id,
+                    task_title=t.title,
+                    output_dir=Path(t.output_dir),
+                    generated_files=[],
+                    error=blocker_error,
+                ))
+            else:
+                executable.append(t)
+
+        if not executable:
+            continue
+
+        if len(executable) == 1:
             result, summary = _execute_task(
-                config, plan, phase_tasks[0], resolved_ai_command,
+                config, plan, executable[0], resolved_ai_command,
                 global_conventions, coding_principles, node_paths,
                 detailed_design_node_ids, prior_task_outputs, project_root,
             )
@@ -160,7 +179,7 @@ def implement_tasks(
             prior_task_outputs.append(summary)
         else:
             phase_results = _execute_phase_parallel(
-                config, plan, phase_tasks, resolved_ai_command,
+                config, plan, executable, resolved_ai_command,
                 global_conventions, coding_principles, node_paths,
                 detailed_design_node_ids, prior_task_outputs, project_root,
                 use_worktree=use_worktree,
@@ -202,6 +221,54 @@ def _group_tasks_by_phase(
         phase = match.group(1) if match else "0"
         phase_map.setdefault(phase, []).append(t)
     return [phase_map[k] for k in sorted(phase_map.keys())]
+
+
+def _resolve_task_dependencies(
+    phase_groups: list[list[ImplementationTask]],
+) -> list[list[ImplementationTask]]:
+    """Assign blocked_by_task_ids: each task is blocked by all tasks in prior phases."""
+    resolved: list[list[ImplementationTask]] = []
+    prior_task_ids: tuple[str, ...] = ()
+    for group in phase_groups:
+        resolved_group = []
+        for t in group:
+            if t.blocked_by_task_ids:
+                resolved_group.append(t)
+            else:
+                resolved_group.append(
+                    ImplementationTask(
+                        task_id=t.task_id,
+                        title=t.title,
+                        summary=t.summary,
+                        module_hint=t.module_hint,
+                        deliverable=t.deliverable,
+                        output_dir=t.output_dir,
+                        dependency_node_ids=t.dependency_node_ids,
+                        task_context=t.task_context,
+                        blocked_by_task_ids=prior_task_ids,
+                    )
+                )
+        resolved.append(resolved_group)
+        prior_task_ids = prior_task_ids + tuple(t.task_id for t in group)
+    return resolved
+
+
+def _check_blockers(
+    task: ImplementationTask,
+    results: list[ImplementationResult],
+) -> str | None:
+    """Return error message if any blocker task failed, else None."""
+    if not task.blocked_by_task_ids:
+        return None
+    result_map = {r.task_id: r for r in results}
+    failed_blockers = []
+    for blocker_id in task.blocked_by_task_ids:
+        result = result_map.get(blocker_id)
+        if result is not None and result.error:
+            failed_blockers.append(blocker_id)
+    if failed_blockers:
+        return f"skipped: blocked by failed task(s) {', '.join(failed_blockers)}"
+    return None
 
 
 def _execute_task(
@@ -939,6 +1006,7 @@ def _parse_file_payloads(raw_output: str, output_dir: str) -> list[tuple[str, st
         return [(f"{output_dir}/index{extension}", fallback_content.rstrip() + "\n")]
 
     payloads: list[tuple[str, str]] = []
+    skipped: list[str] = []
     output_prefix = PurePosixPath(output_dir)
     for index, match in enumerate(matches):
         start = match.end()
@@ -947,18 +1015,30 @@ def _parse_file_payloads(raw_output: str, output_dir: str) -> list[tuple[str, st
         path_text = match.group("path").strip()
         path = PurePosixPath(path_text)
         if path.is_absolute() or ".." in path.parts:
-            raise ValueError(f"generated file path must stay within project-relative src/, got {path_text!r}")
+            skipped.append(f"{path_text!r}: path traversal")
+            continue
         if not path.parts or path.parts[0] != "src":
-            raise ValueError(f"generated file path must stay under src/, got {path_text!r}")
+            skipped.append(f"{path_text!r}: outside src/")
+            continue
         if tuple(path.parts[: len(output_prefix.parts)]) != output_prefix.parts:
-            raise ValueError(
-                f"generated file path {path_text!r} is outside the requested output directory {output_dir!r}"
-            )
+            skipped.append(f"{path_text!r}: outside output directory {output_dir!r}")
+            continue
 
         content = _strip_code_fence(block).strip()
         if not content:
-            raise ValueError(f"generated file {path_text!r} was empty")
+            skipped.append(f"{path_text!r}: empty content")
+            continue
         payloads.append((path.as_posix(), content.rstrip() + "\n"))
+
+    if skipped:
+        import sys
+        for reason in skipped:
+            print(f"Warning: skipped generated file — {reason}", file=sys.stderr)
+
+    if not payloads:
+        raise ValueError(
+            f"AI produced {len(matches)} file block(s) but all were invalid: {'; '.join(skipped)}"
+        )
 
     return payloads
 

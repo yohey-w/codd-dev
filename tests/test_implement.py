@@ -567,3 +567,201 @@ def test_no_sprint_in_prompt(tmp_path, mock_implement_ai):
     assert "Sprint:" not in prompt
     assert "Sprint title:" not in prompt
     assert "Sprint window:" not in prompt
+
+
+def test_resolve_task_dependencies():
+    """Tasks in phase N are blocked by all tasks in phase N-1."""
+    from codd.implementer import ImplementationTask, _group_tasks_by_phase, _resolve_task_dependencies
+
+    tasks = [
+        ImplementationTask(
+            task_id="m1.1", title="DB", summary="", module_hint="",
+            deliverable="", output_dir="src/generated/m1_1_db",
+            dependency_node_ids=[], task_context="",
+        ),
+        ImplementationTask(
+            task_id="m1.2", title="Auth", summary="", module_hint="",
+            deliverable="", output_dir="src/generated/m1_2_auth",
+            dependency_node_ids=[], task_context="",
+        ),
+        ImplementationTask(
+            task_id="m2.1", title="Course", summary="", module_hint="",
+            deliverable="", output_dir="src/generated/m2_1_course",
+            dependency_node_ids=[], task_context="",
+        ),
+        ImplementationTask(
+            task_id="m3.1", title="API", summary="", module_hint="",
+            deliverable="", output_dir="src/generated/m3_1_api",
+            dependency_node_ids=[], task_context="",
+        ),
+    ]
+
+    groups = _group_tasks_by_phase(tasks)
+    resolved = _resolve_task_dependencies(groups)
+
+    # Phase 1 tasks have no blockers
+    assert resolved[0][0].blocked_by_task_ids == ()
+    assert resolved[0][1].blocked_by_task_ids == ()
+
+    # Phase 2 is blocked by all phase 1 tasks
+    assert resolved[1][0].blocked_by_task_ids == ("m1.1", "m1.2")
+
+    # Phase 3 is blocked by phase 1 + phase 2
+    assert resolved[2][0].blocked_by_task_ids == ("m1.1", "m1.2", "m2.1")
+
+
+def test_check_blockers_passes_when_all_succeed():
+    """No blocker error when all upstream tasks succeeded."""
+    from codd.implementer import ImplementationTask, ImplementationResult, _check_blockers
+
+    task = ImplementationTask(
+        task_id="m2.1", title="Course", summary="", module_hint="",
+        deliverable="", output_dir="src/generated/m2_1",
+        dependency_node_ids=[], task_context="",
+        blocked_by_task_ids=("m1.1", "m1.2"),
+    )
+    results = [
+        ImplementationResult(task_id="m1.1", task_title="DB", output_dir=Path("x"), generated_files=[Path("a.ts")]),
+        ImplementationResult(task_id="m1.2", task_title="Auth", output_dir=Path("x"), generated_files=[Path("b.ts")]),
+    ]
+
+    assert _check_blockers(task, results) is None
+
+
+def test_check_blockers_fails_when_upstream_failed():
+    """Blocker error when an upstream task produced no files."""
+    from codd.implementer import ImplementationTask, ImplementationResult, _check_blockers
+
+    task = ImplementationTask(
+        task_id="m2.1", title="Course", summary="", module_hint="",
+        deliverable="", output_dir="src/generated/m2_1",
+        dependency_node_ids=[], task_context="",
+        blocked_by_task_ids=("m1.1", "m1.2"),
+    )
+    results = [
+        ImplementationResult(task_id="m1.1", task_title="DB", output_dir=Path("x"), generated_files=[Path("a.ts")]),
+        ImplementationResult(task_id="m1.2", task_title="Auth", output_dir=Path("x"), generated_files=[], error="empty output"),
+    ]
+
+    error = _check_blockers(task, results)
+    assert error is not None
+    assert "m1.2" in error
+    assert "m1.1" not in error
+
+
+def test_check_blockers_cascades():
+    """A task skipped due to blockers also blocks downstream tasks."""
+    from codd.implementer import ImplementationTask, ImplementationResult, _check_blockers
+
+    results = [
+        ImplementationResult(task_id="m1.1", task_title="DB", output_dir=Path("x"), generated_files=[], error="empty"),
+        ImplementationResult(
+            task_id="m2.1", task_title="Course", output_dir=Path("x"), generated_files=[],
+            error="skipped: blocked by failed task(s) m1.1",
+        ),
+    ]
+
+    task_m3 = ImplementationTask(
+        task_id="m3.1", title="API", summary="", module_hint="",
+        deliverable="", output_dir="src/generated/m3_1",
+        dependency_node_ids=[], task_context="",
+        blocked_by_task_ids=("m1.1", "m2.1"),
+    )
+
+    error = _check_blockers(task_m3, results)
+    assert error is not None
+    assert "m1.1" in error
+    assert "m2.1" in error
+
+
+def test_implement_skips_downstream_on_failure(tmp_path, monkeypatch):
+    """When phase 1 fails, phase 2+ tasks are skipped with blocker error."""
+    import subprocess as sp
+    import codd.implementer as impl
+    from codd.cli import main
+
+    project = tmp_path / "project"
+    project.mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+
+    config = {
+        "project": {"name": "demo", "language": "typescript"},
+        "ai_command": "mock-ai",
+    }
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False), encoding="utf-8",
+    )
+
+    _write_doc(
+        project,
+        "docs/design/system_design.md",
+        node_id="design:system-design",
+        doc_type="design",
+        body="# System Design\n\nMinimal.\n",
+    )
+
+    plan_body = """# Implementation Plan
+
+## 1. Milestones
+
+#### M1.1 — DB Schema
+
+| タスク | 成果物 |
+|---|---|
+| Prisma schema | schema.prisma |
+
+#### M1.2 — Routes
+
+| タスク | 成果物 |
+|---|---|
+| API routes | route.ts |
+
+#### M2.1 — Tests
+
+| タスク | 成果物 |
+|---|---|
+| E2E tests | spec.ts |
+"""
+
+    _write_doc(
+        project,
+        "docs/plan/implementation_plan.md",
+        node_id="plan:implementation-plan",
+        doc_type="plan",
+        depends_on=[{"id": "design:system-design"}],
+        body=plan_body,
+    )
+
+    call_count = {"n": 0}
+
+    def fake_run(command, *, input, capture_output, text, check):
+        call_count["n"] += 1
+        task_match = re.search(r"Task ID: (m\d+\.\d+)", input)
+        task_id = task_match.group(1) if task_match else "?"
+
+        if task_id == "m1.1":
+            return sp.CompletedProcess(
+                args=command, returncode=0,
+                stdout=(
+                    "=== FILE: src/generated/m1_1_db_schema/schema.ts ===\n"
+                    "```ts\nexport const schema = true;\n```\n"
+                ),
+                stderr="",
+            )
+        # m1.2 fails (empty output)
+        return sp.CompletedProcess(
+            args=command, returncode=0, stdout="", stderr="",
+        )
+
+    monkeypatch.setattr(impl.generator_module.subprocess, "run", fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["implement", "--path", str(project)])
+
+    assert result.exit_code == 1
+
+    # m1.1 succeeded, m1.2 failed, m2.1 should be skipped (not executed)
+    assert call_count["n"] == 2  # only m1.1 and m1.2 were sent to AI
+    assert "m1.2" in result.output or "m1.2" in (result.stderr_bytes or b"").decode()
+    assert "blocked" in result.output.lower() or "skipped" in result.output.lower()
