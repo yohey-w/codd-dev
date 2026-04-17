@@ -516,13 +516,27 @@ def implement(path: str, task: str | None, clean: bool, ai_cmd: str | None):
         raise SystemExit(1)
 
     generated_files = 0
+    failed_tasks = []
     for result in results:
+        if result.error:
+            failed_tasks.append(result)
+            continue
         for generated_file in result.generated_files:
             rel_path = generated_file.relative_to(project_root)
             click.echo(f"Generated: {rel_path} ({result.task_id})")
             generated_files += 1
 
-    click.echo(f"{generated_files} files generated across {len(results)} task(s)")
+    succeeded = len(results) - len(failed_tasks)
+    click.echo(f"{generated_files} files generated across {succeeded} task(s)")
+
+    if failed_tasks:
+        click.echo(click.style(
+            f"\nFAILED: {len(failed_tasks)} task(s) produced no files:",
+            fg="red", bold=True,
+        ))
+        for ft in failed_tasks:
+            click.echo(click.style(f"  ✗ {ft.task_id} ({ft.task_title}): {ft.error}", fg="red"))
+        raise SystemExit(1)
 
 
 @main.command()
