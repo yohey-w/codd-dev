@@ -765,3 +765,69 @@ def test_implement_skips_downstream_on_failure(tmp_path, monkeypatch):
     assert call_count["n"] == 2  # only m1.1 and m1.2 were sent to AI
     assert "m1.2" in result.output or "m1.2" in (result.stderr_bytes or b"").decode()
     assert "blocked" in result.output.lower() or "skipped" in result.output.lower()
+
+
+def test_error_summaries_excluded_from_prompt():
+    """Failed task summaries should not contaminate downstream prompts."""
+    from codd.implementer import (
+        ImplementationPlan,
+        ImplementationTask,
+        _build_implementation_prompt,
+    )
+
+    plan = ImplementationPlan(
+        node_id="plan:test",
+        path=Path("docs/plan/test.md"),
+        content="# Test plan\nNo tasks.",
+        depends_on=[],
+        conventions=[],
+    )
+    task = ImplementationTask(
+        task_id="m2.1",
+        title="Test Task",
+        summary="Test task summary",
+        module_hint="courses",
+        deliverable="Service layer",
+        output_dir="src/generated/m2_1",
+        dependency_node_ids=[],
+        task_context="Test context",
+    )
+
+    prior_outputs = [
+        {
+            "task_id": "m1.1",
+            "task_title": "Successful Task",
+            "directory": "src/generated/m1_1",
+            "files": ["service.ts", "types.ts"],
+            "exported_types": ["User", "Tenant"],
+            "exported_functions": ["createUser"],
+            "exported_classes": [],
+            "exported_values": [],
+        },
+        {
+            "task_id": "m1.2",
+            "task_title": "Failed Task",
+            "directory": "src/generated/m1_2",
+            "files": [],
+            "exported_types": [],
+            "exported_functions": [],
+            "exported_classes": [],
+            "exported_values": [],
+            "error": "AI command returned empty implementation output",
+        },
+    ]
+
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "typescript", "frameworks": ["next.js"]}},
+        plan=plan,
+        task=task,
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+        prior_task_outputs=prior_outputs,
+    )
+
+    assert "m1.1" in prompt
+    assert "Successful Task" in prompt
+    assert "Failed Task" not in prompt
+    assert "empty implementation output" not in prompt

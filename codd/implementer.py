@@ -943,7 +943,8 @@ def _build_implementation_prompt(
             lines.append(f"{index}. Targets: {targets or '(no explicit targets)'}")
             lines.append(f"   Reason: {reason}")
 
-    if prior_task_outputs:
+    successful_prior_outputs = [s for s in prior_task_outputs if not s.get("error")]
+    if successful_prior_outputs:
         lines.extend(
             [
                 "",
@@ -953,7 +954,7 @@ def _build_implementation_prompt(
                 "- Reuse these implementations via imports. If a needed symbol already exists below, import it instead of redefining it.",
             ]
         )
-        for summary in prior_task_outputs:
+        for summary in successful_prior_outputs:
             lines.extend(_format_prior_task_summary(summary))
 
     lines.extend(
