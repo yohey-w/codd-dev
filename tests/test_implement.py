@@ -304,6 +304,121 @@ def test_implement_includes_detailed_design_dependency_documents_in_prompt(tmp_p
     assert "single canonical owner for Role, TenantStatus, and SessionUser" in prompt
 
 
+def test_implement_respects_python_project_language(tmp_path, monkeypatch):
+    project = _setup_project(
+        tmp_path,
+        explicit_sprints=True,
+        include_coding_principles=False,
+        minimal_config=True,
+    )
+    config_path = project / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["project"]["language"] = "python"
+    config["project"]["frameworks"] = ["fastapi"]
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run(command, *, input, capture_output, text, check):
+        match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
+        assert match is not None
+        output_dir = match.group("output")
+        calls.append({"command": command, "input": input})
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                f"=== FILE: {output_dir}/service.py ===\n"
+                "```python\n"
+                "def build_service() -> bool:\n"
+                "    return True\n"
+                "```\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(implementer_module.generator_module.subprocess, "run", fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["implement", "--path", str(project), "--task", "1-4", "--ai-cmd", "mock-ai --print"],
+    )
+
+    assert result.exit_code == 0
+    generated_file = project / "src" / "generated" / "authentication" / "service.py"
+    assert generated_file.exists()
+    content = generated_file.read_text(encoding="utf-8")
+    assert content.startswith("# @generated-by: codd implement")
+
+    prompt = calls[0]["input"]
+    assert "Primary language: python" in prompt
+    assert "Generate concrete production-oriented Python source files." in prompt
+    assert "Honor the configured framework stack (fastapi) when relevant." in prompt
+    assert "=== FILE: src/generated/authentication/<filename>.py ===" in prompt
+    assert "```python" in prompt
+    assert "TypeScript / TSX" not in prompt
+
+
+def test_implement_fallback_uses_rust_extension(tmp_path, monkeypatch):
+    project = _setup_project(
+        tmp_path,
+        explicit_sprints=True,
+        include_coding_principles=False,
+        minimal_config=True,
+    )
+    config_path = project / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["project"]["language"] = "rust"
+    config["project"]["frameworks"] = ["tauri"]
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run(command, *, input, capture_output, text, check):
+        calls.append({"command": command, "input": input})
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                "```rust\n"
+                "pub fn build_authentication() -> bool {\n"
+                "    true\n"
+                "}\n"
+                "```\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(implementer_module.generator_module.subprocess, "run", fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["implement", "--path", str(project), "--task", "1-4", "--ai-cmd", "mock-ai --print"],
+    )
+
+    assert result.exit_code == 0
+    generated_file = project / "src" / "generated" / "authentication" / "index.rs"
+    assert generated_file.exists()
+    content = generated_file.read_text(encoding="utf-8")
+    assert content.startswith("// @generated-by: codd implement")
+
+    prompt = calls[0]["input"]
+    assert "Primary language: rust" in prompt
+    assert "Generate concrete production-oriented Rust source files." in prompt
+    assert "Honor the configured framework stack (tauri) when relevant." in prompt
+    assert "=== FILE: src/generated/authentication/<filename>.rs ===" in prompt
+    assert "```rust" in prompt
+    assert "Otherwise prefer .ts files." not in prompt
+
+
 def test_implement_clean_removes_existing_generated_output(tmp_path, mock_implement_ai):
     """--clean should remove src/generated/ before re-generating."""
     project = _setup_project(tmp_path, explicit_sprints=True, include_coding_principles=False)
