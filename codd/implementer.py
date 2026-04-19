@@ -21,6 +21,79 @@ from codd.scanner import _extract_frontmatter, build_document_node_path_map
 
 DEFAULT_IMPLEMENT_NODE_ID = "plan:implementation-plan"
 FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
+LANGUAGE_EXT_MAP: dict[str, tuple[str, ...]] = {
+    "typescript": (".ts", ".tsx"),
+    "javascript": (".js", ".jsx"),
+    "python": (".py",),
+    "rust": (".rs",),
+    "go": (".go",),
+    "java": (".java",),
+    "kotlin": (".kt",),
+    "swift": (".swift",),
+    "cpp": (".cpp", ".cc", ".h"),
+    "c": (".c", ".h"),
+    "csharp": (".cs",),
+    "ruby": (".rb",),
+}
+LANGUAGE_ALIASES = {
+    "ts": "typescript",
+    "tsx": "typescript",
+    "js": "javascript",
+    "jsx": "javascript",
+    "py": "python",
+    "rs": "rust",
+    "golang": "go",
+    "c++": "cpp",
+    "cc": "cpp",
+    "c#": "csharp",
+    "cs": "csharp",
+}
+LANGUAGE_DISPLAY_NAMES = {
+    "typescript": "TypeScript",
+    "javascript": "JavaScript",
+    "python": "Python",
+    "rust": "Rust",
+    "go": "Go",
+    "java": "Java",
+    "kotlin": "Kotlin",
+    "swift": "Swift",
+    "cpp": "C++",
+    "c": "C",
+    "csharp": "C#",
+    "ruby": "Ruby",
+}
+LANGUAGE_CODE_FENCE_MAP = {
+    "typescript": "ts",
+    "javascript": "js",
+    "python": "python",
+    "rust": "rust",
+    "go": "go",
+    "java": "java",
+    "kotlin": "kotlin",
+    "swift": "swift",
+    "cpp": "cpp",
+    "c": "c",
+    "csharp": "csharp",
+    "ruby": "ruby",
+}
+COMMENT_PREFIX_BY_SUFFIX = {
+    ".ts": "//",
+    ".tsx": "//",
+    ".js": "//",
+    ".jsx": "//",
+    ".py": "#",
+    ".rs": "//",
+    ".go": "//",
+    ".java": "//",
+    ".kt": "//",
+    ".swift": "//",
+    ".cpp": "//",
+    ".cc": "//",
+    ".h": "//",
+    ".c": "//",
+    ".cs": "//",
+    ".rb": "#",
+}
 
 SPRINT_HEADING_RE = re.compile(
     r"^####\s+Sprint\s+(?P<number>\d+)(?:（(?P<window>[^）]+)）)?(?:\s*:\s*(?P<title>.+))?\s*$",
@@ -305,12 +378,14 @@ def _execute_task(
     raw_output = generator_module._invoke_ai_command(
         resolved_ai_command, prompt, project_root=project_root,
     )
+    language = _normalize_implementation_language((config.get("project") or {}).get("language"))
     generated_files = _write_generated_files(
         project_root=project_root,
         plan=plan,
         task=task_item,
         dependency_documents=dependency_documents,
         output_dir=task_item.output_dir,
+        language=language,
         raw_output=raw_output,
     )
     summary = _summarize_generated_task_output(project_root, task_item, generated_files)
@@ -880,8 +955,30 @@ def _build_implementation_prompt(
 ) -> str:
     project = config.get("project") or {}
     frameworks = project.get("frameworks") or []
-    language = project.get("language") or "typescript"
+    language = _normalize_implementation_language(project.get("language"))
+    language_name = LANGUAGE_DISPLAY_NAMES.get(language, language)
+    preferred_extensions = _implementation_language_extensions(language)
+    default_extension = _default_generated_extension(language)
+    code_fence_language = LANGUAGE_CODE_FENCE_MAP.get(language, language)
     framework_text = ", ".join(str(item) for item in frameworks) if frameworks else "(unspecified)"
+    if frameworks:
+        framework_guidance = f"- Honor the configured framework stack ({framework_text}) when relevant."
+    else:
+        framework_guidance = f"- Use idiomatic {language_name} patterns for the target project."
+
+    if language in {"typescript", "javascript"} and len(preferred_extensions) > 1:
+        jsx_extension = preferred_extensions[1]
+        extension_guidance = (
+            f"- If the task needs JSX-style UI components, emit {jsx_extension} files. "
+            f"Otherwise prefer {default_extension} files."
+        )
+    elif len(preferred_extensions) > 1:
+        extension_guidance = (
+            f"- Use {default_extension} files by default. "
+            f"Additional allowed extensions for this language family: {', '.join(preferred_extensions)}."
+        )
+    else:
+        extension_guidance = f"- Use {default_extension} files for generated source unless the task explicitly requires another file type."
 
     lines = [
         "You are generating implementation code from CoDD design documents.",
@@ -897,20 +994,20 @@ def _build_implementation_prompt(
         f"Output directory: {task.output_dir}",
         "",
         "Mandatory instructions:",
-        "- Generate concrete production-oriented TypeScript / TSX source files.",
-        "- Use Next.js App Router, TypeScript, and Prisma-compatible patterns when relevant.",
+        f"- Generate concrete production-oriented {language_name} source files.",
+        framework_guidance,
         "- Reflect tenant isolation, RLS context propagation, authentication, authorization, and auditability explicitly where the design requires them.",
         "- The tool will prepend traceability comments to each generated file; do not emit separate metadata files.",
         "- Do not emit prose, explanations, Markdown headings, YAML, TODOs, placeholders, or file descriptions outside the required FILE blocks.",
         "- Every generated file path must stay under the output directory shown above.",
-        "- If a React component is needed, emit .tsx files. Otherwise prefer .ts files.",
+        extension_guidance,
         "- Favor small coherent modules rather than one monolithic file.",
         "- Cross-file imports may use relative imports or '@/generated/...' style aliases, but keep the task internally coherent.",
         "",
         "Required output format (repeat this block for each file and output nothing else):",
-        f"=== FILE: {task.output_dir}/<filename>.ts ===",
-        "```ts",
-        "// code",
+        f"=== FILE: {task.output_dir}/<filename>{default_extension} ===",
+        f"```{code_fence_language}",
+        "# code" if default_extension in {".py", ".rb"} else "// code",
         "```",
         "",
         "ABSOLUTE PROHIBITION: Outputting prose, planning notes, TODO markers, or files outside the output directory is a CRITICAL ERROR.",
@@ -983,9 +1080,10 @@ def _write_generated_files(
     task: ImplementationTask,
     dependency_documents: list[DependencyDocument],
     output_dir: str,
+    language: str,
     raw_output: str,
 ) -> list[Path]:
-    file_payloads = _parse_file_payloads(raw_output, output_dir)
+    file_payloads = _parse_file_payloads(raw_output, output_dir, language)
     traceability_comment = _build_traceability_comment(plan, task, dependency_documents)
     generated_paths: list[Path] = []
     for relative_path, content in file_payloads:
@@ -996,14 +1094,14 @@ def _write_generated_files(
     return generated_paths
 
 
-def _parse_file_payloads(raw_output: str, output_dir: str) -> list[tuple[str, str]]:
+def _parse_file_payloads(raw_output: str, output_dir: str, language: str) -> list[tuple[str, str]]:
     cleaned_output = raw_output.strip()
     matches = list(FILE_BLOCK_RE.finditer(cleaned_output))
     if not matches:
         fallback_content = _strip_code_fence(cleaned_output).strip()
         if not fallback_content:
             raise ValueError("AI command returned empty implementation output")
-        extension = ".tsx" if _looks_like_tsx(fallback_content) else ".ts"
+        extension = _default_generated_extension(language, fallback_content)
         return [(f"{output_dir}/index{extension}", fallback_content.rstrip() + "\n")]
 
     payloads: list[tuple[str, str]] = []
@@ -1143,13 +1241,13 @@ def _build_traceability_comment(
 
 
 def _prepend_traceability_comment(relative_path: str, comment_block: str, content: str) -> str:
-    suffix = PurePosixPath(relative_path).suffix
-    if suffix not in {".ts", ".tsx", ".js", ".jsx"}:
+    prefix = COMMENT_PREFIX_BY_SUFFIX.get(PurePosixPath(relative_path).suffix.lower())
+    if prefix is None:
         return content
 
-    formatted_comment = "\n".join(f"// {line}" for line in comment_block.splitlines())
+    formatted_comment = "\n".join(f"{prefix} {line}" for line in comment_block.splitlines())
     stripped_content = content.lstrip()
-    if stripped_content.startswith("// @generated-by: codd implement"):
+    if stripped_content.startswith(f"{prefix} @generated-by: codd implement"):
         return content
     return f"{formatted_comment}\n\n{content.lstrip()}"
 
@@ -1164,6 +1262,26 @@ def _strip_code_fence(block: str) -> str:
 
 def _looks_like_tsx(content: str) -> bool:
     return bool(re.search(r"</?[A-Z][A-Za-z0-9]*|return\s*\(\s*<", content))
+
+
+def _normalize_implementation_language(language: Any) -> str:
+    normalized = str(language or "").strip().lower()
+    if not normalized:
+        return "typescript"
+    return LANGUAGE_ALIASES.get(normalized, normalized)
+
+
+def _implementation_language_extensions(language: Any) -> tuple[str, ...]:
+    normalized = _normalize_implementation_language(language)
+    return LANGUAGE_EXT_MAP.get(normalized, LANGUAGE_EXT_MAP["typescript"])
+
+
+def _default_generated_extension(language: Any, content: str | None = None) -> str:
+    normalized = _normalize_implementation_language(language)
+    extensions = _implementation_language_extensions(normalized)
+    if normalized in {"typescript", "javascript"} and len(extensions) > 1 and content and _looks_like_tsx(content):
+        return extensions[1]
+    return extensions[0]
 
 
 def _split_deliverable_chunks(text: str) -> list[str]:
