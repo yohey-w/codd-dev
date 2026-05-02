@@ -705,7 +705,7 @@ def repair_slice_cmd(path, files, issue, issue_file, language, source_dirs, top_
 
     issue_text = issue or ""
     if issue_file and not issue_text:
-        issue_text = Path(issue_file).read_text(errors="ignore")
+        issue_text = Path(issue_file).read_text(encoding="utf-8", errors="ignore")
 
     dirs = [d.strip() for d in source_dirs.split(",") if d.strip()] if source_dirs else None
 

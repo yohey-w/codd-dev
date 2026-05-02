@@ -309,7 +309,7 @@ def _iter_doc_files(project_root: Path, config: dict[str, Any]):
 
 def _parse_codd_frontmatter(file_path: Path) -> FrontmatterParseResult:
     try:
-        content = file_path.read_text(errors="ignore")
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
         return FrontmatterParseResult(
             error={

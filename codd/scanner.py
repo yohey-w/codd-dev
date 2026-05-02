@@ -116,7 +116,7 @@ def _extract_frontmatter(file_path: Path) -> dict | None:
       # Document content
     """
     try:
-        content = file_path.read_text(errors="ignore")
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return None
 
@@ -366,7 +366,7 @@ def _extract_imports_basic(ceg: CEG, project_root: Path, src_dir: Path, file_pat
                            rel_path: str, language: str):
     """Basic import extraction using the shared parsing backend."""
     try:
-        content = file_path.read_text(errors="ignore")
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return
 

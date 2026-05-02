@@ -332,7 +332,7 @@ def _discover_modules(facts: ProjectFacts, project_root: Path, src_dir: Path,
 
             # Count lines
             try:
-                content = full.read_text(errors="ignore")
+                content = full.read_text(encoding="utf-8", errors="ignore")
                 lines = len(content.splitlines())
                 mod.line_count += lines
                 facts.total_lines += lines
@@ -377,7 +377,7 @@ def _discover_schemas(facts: ProjectFacts, project_root: Path, exclude_patterns:
                 continue
 
             try:
-                content = full.read_text(errors="ignore")
+                content = full.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
 
@@ -606,7 +606,7 @@ def _map_tests_to_modules(facts: ProjectFacts, project_root: Path,
             full = Path(root) / fname
             rel = full.relative_to(project_root).as_posix()
             try:
-                content = full.read_text(errors="ignore")
+                content = full.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 content = ""
             test_info = test_extractor.extract_test_info(content, rel)
@@ -669,18 +669,18 @@ def _detect_patterns(facts: ProjectFacts, project_root: Path):
     pom_xml = project_root / "pom.xml"
 
     if pyproject.exists():
-        content = pyproject.read_text(errors="ignore")
+        content = pyproject.read_text(encoding="utf-8", errors="ignore")
         _detect_python_patterns(facts, content)
     elif setup_py.exists():
-        content = setup_py.read_text(errors="ignore")
+        content = setup_py.read_text(encoding="utf-8", errors="ignore")
         _detect_python_patterns(facts, content)
 
     if package_json.exists():
-        content = package_json.read_text(errors="ignore")
+        content = package_json.read_text(encoding="utf-8", errors="ignore")
         _detect_js_patterns(facts, content)
 
     if go_mod.exists():
-        content = go_mod.read_text(errors="ignore")
+        content = go_mod.read_text(encoding="utf-8", errors="ignore")
         _detect_go_patterns(facts, content)
 
     # Scan source files for framework-specific patterns
@@ -688,7 +688,7 @@ def _detect_patterns(facts: ProjectFacts, project_root: Path):
     for mod in facts.modules.values():
         for fpath in mod.files:
             try:
-                content = (project_root / fpath).read_text(errors="ignore")
+                content = (project_root / fpath).read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
             extractor.detect_code_patterns(mod, content)
@@ -918,7 +918,7 @@ def _extract_call_graphs(facts: ProjectFacts, project_root: Path,
         for rel_file in mod.files:
             full = project_root / rel_file
             try:
-                content = full.read_text(errors="ignore")
+                content = full.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
             edges = extractor.extract_call_graph(content, rel_file, mod.symbols)
