@@ -427,7 +427,7 @@ def test_implement_clean_removes_existing_generated_output(tmp_path, mock_implem
     stale_dir = project / "src" / "generated" / "old_task"
     stale_dir.mkdir(parents=True)
     stale_file = stale_dir / "stale.ts"
-    stale_file.write_text("// stale")
+    stale_file.write_text("// stale", encoding="utf-8")
 
     runner = CliRunner()
     result = runner.invoke(main, ["implement", "--path", str(project), "--clean"])
@@ -457,7 +457,7 @@ def test_get_valid_task_slugs_no_plan(tmp_path):
     project.mkdir()
     codd_dir = project / "codd"
     codd_dir.mkdir()
-    (codd_dir / "codd.yaml").write_text("project:\n  name: demo\n  language: typescript\n")
+    (codd_dir / "codd.yaml").write_text("project:\n  name: demo\n  language: typescript\n", encoding="utf-8")
 
     result = get_valid_task_slugs(project)
     assert result == set()

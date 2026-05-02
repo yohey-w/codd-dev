@@ -982,7 +982,7 @@ def run_extract(project_root: Path, language: str | None = None,
     if codd_dir is not None and (language is None or source_dirs is None):
         codd_yaml = codd_dir / "codd.yaml"
         if codd_yaml.exists():
-            config = yaml.safe_load(codd_yaml.read_text())
+            config = yaml.safe_load(codd_yaml.read_text(encoding="utf-8"))
             if language is None:
                 language = config.get("project", {}).get("language")
             if source_dirs is None:

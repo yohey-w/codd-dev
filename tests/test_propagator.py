@@ -94,7 +94,7 @@ def _setup_project(tmp_path: Path) -> Path:
 
     # Source files
     (project / "src" / "auth").mkdir(parents=True)
-    (project / "src" / "auth" / "service.py").write_text("class AuthService:\n    pass\n")
+    (project / "src" / "auth" / "service.py").write_text("class AuthService:\n    pass\n", encoding="utf-8")
     (project / "src" / "tasks").mkdir(parents=True)
     (project / "src" / "tasks" / "service.py").write_text("class TaskService:\n    pass\n")
 
@@ -204,7 +204,7 @@ def test_map_files_to_modules_multiple_source_dirs():
 
 def test_find_design_docs_by_modules(tmp_path):
     project = _setup_project(tmp_path)
-    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text())
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
 
     docs = _find_design_docs_by_modules(
         project, config, {"auth"}, {"src/auth/service.py": "auth"},
@@ -219,7 +219,7 @@ def test_find_design_docs_by_modules(tmp_path):
 
 def test_find_design_docs_excludes_unrelated_modules(tmp_path):
     project = _setup_project(tmp_path)
-    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text())
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
 
     docs = _find_design_docs_by_modules(
         project, config, {"notifications"}, {"src/notifications/service.py": "notifications"},
@@ -234,7 +234,7 @@ def test_find_design_docs_excludes_unrelated_modules(tmp_path):
 
 def test_find_design_docs_returns_empty_for_unknown_module(tmp_path):
     project = _setup_project(tmp_path)
-    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text())
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
 
     docs = _find_design_docs_by_modules(
         project, config, {"billing"}, {"src/billing/service.py": "billing"},
@@ -472,7 +472,7 @@ def test_get_doc_confidence_with_graph(tmp_path):
     from codd.graph import CEG
 
     project = _setup_project(tmp_path)
-    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text())
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
     _setup_graph(project, config)
 
     graph_path = project / config["graph"]["path"]
@@ -505,7 +505,7 @@ def test_get_doc_confidence_without_graph():
 def test_classify_docs_by_band(tmp_path):
     """Docs are classified into green/amber/gray based on graph evidence."""
     project = _setup_project(tmp_path)
-    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text())
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
     _setup_graph(project, config)
 
     bands_config = config.get("bands", {})
@@ -569,7 +569,7 @@ def test_verify_state_save_load_clear(tmp_path):
 def test_run_verify_splits_by_band(tmp_path, monkeypatch):
     """run_verify auto-applies green band and returns HITL list for amber/gray."""
     project = _setup_project(tmp_path)
-    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text())
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
     _setup_graph(project, config)
     ai_calls: list[dict] = []
 
@@ -643,7 +643,7 @@ def test_run_verify_no_graph_all_amber(tmp_path, monkeypatch):
 def test_run_commit_records_knowledge(tmp_path, monkeypatch):
     """run_commit records HITL corrections as human evidence."""
     project = _setup_project(tmp_path)
-    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text())
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
     _setup_graph(project, config)
 
     # Save a fake verify state with HITL docs
@@ -715,7 +715,7 @@ def test_propagate_cli_verify_mode(tmp_path, monkeypatch):
     from click.testing import CliRunner
 
     project = _setup_project(tmp_path)
-    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text())
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
     _setup_graph(project, config)
 
     def patched_subprocess(command, *, capture_output=False, text=False,
@@ -751,7 +751,7 @@ def test_propagate_cli_commit_mode(tmp_path, monkeypatch):
     from click.testing import CliRunner
 
     project = _setup_project(tmp_path)
-    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text())
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
     _setup_graph(project, config)
 
     # Create verify state

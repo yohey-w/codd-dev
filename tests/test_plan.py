@@ -372,7 +372,7 @@ def test_plan_marks_all_waves_done_when_all_outputs_validate(tmp_path):
     # After creating extracted docs, baseline becomes DONE
     extracted_dir = project / "codd" / "extracted"
     extracted_dir.mkdir(parents=True)
-    (extracted_dir / "system-context.md").write_text("# extracted\n")
+    (extracted_dir / "system-context.md").write_text("# extracted\n", encoding="utf-8")
     plan2, _ = _plan_by_node(project)
     assert plan2.baseline_status == STATUS_DONE
     text2 = render_plan_text(plan2)

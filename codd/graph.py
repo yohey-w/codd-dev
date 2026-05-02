@@ -37,14 +37,14 @@ class CEG:
     def _load(self):
         """Load JSONL files into memory."""
         if self.nodes_path.exists():
-            for line in self.nodes_path.read_text().splitlines():
+            for line in self.nodes_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line:
                     node = json.loads(line)
                     self.nodes[node["id"]] = node
 
         if self.edges_path.exists():
-            for line in self.edges_path.read_text().splitlines():
+            for line in self.edges_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line:
                     edge = json.loads(line)
@@ -61,13 +61,13 @@ class CEG:
         """Write all data back to JSONL files."""
         # Sort nodes by id for stable output
         sorted_nodes = sorted(self.nodes.values(), key=lambda n: n["id"])
-        with open(self.nodes_path, "w") as f:
+        with open(self.nodes_path, "w", encoding="utf-8") as f:
             for node in sorted_nodes:
                 f.write(json.dumps(node, ensure_ascii=False) + "\n")
 
         # Sort edges by id for stable output
         sorted_edges = sorted(self.edges, key=lambda e: e.get("id", 0))
-        with open(self.edges_path, "w") as f:
+        with open(self.edges_path, "w", encoding="utf-8") as f:
             for edge in sorted_edges:
                 f.write(json.dumps(edge, ensure_ascii=False) + "\n")
 
