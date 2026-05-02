@@ -259,7 +259,7 @@ def _make_restored_body(input_text: str) -> str:
 def mock_restore_ai(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         stdout = _make_restored_body(input)
         calls.append({"command": command, "input": input})
         return subprocess.CompletedProcess(

@@ -147,7 +147,7 @@ def _write_design_doc(
 def mock_propagate_ai(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append({"command": command, "input": input})
         # Return updated body
         return subprocess.CompletedProcess(

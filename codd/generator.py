@@ -731,7 +731,7 @@ def _invoke_file_writing_agent(
 
     try:
         result = subprocess.run(
-            command, input=prompt, capture_output=True, text=True,
+            command, input=prompt, capture_output=True, text=True, encoding="utf-8",
             check=False, cwd=cwd, timeout=3600,
         )
     except FileNotFoundError as exc:
@@ -754,11 +754,11 @@ def _invoke_file_writing_agent(
     # Detect files changed by the agent (unstaged vs index = agent's work)
     diff_out = subprocess.run(
         ["git", "diff", "--name-only"],
-        cwd=cwd, capture_output=True, text=True,
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8",
     ).stdout.strip()
     untracked_out = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
-        cwd=cwd, capture_output=True, text=True,
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8",
     ).stdout.strip()
 
     changed_files = diff_out.splitlines() if diff_out else []
@@ -807,7 +807,7 @@ def _invoke_ai_command(
             command,
             input=prompt,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=False,
         )
     except FileNotFoundError as exc:

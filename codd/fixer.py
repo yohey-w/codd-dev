@@ -389,7 +389,7 @@ def _detect_ci_failures(project_root: Path) -> list[FailureInfo]:
         result = subprocess.run(
             ["gh", "run", "list", "--limit", "1", "--json",
              "status,conclusion,databaseId,headBranch"],
-            capture_output=True, text=True, cwd=str(project_root),
+            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root),
         )
         if result.returncode != 0:
             return []
@@ -407,7 +407,7 @@ def _detect_ci_failures(project_root: Path) -> list[FailureInfo]:
         # Get failed job logs
         log_result = subprocess.run(
             ["gh", "run", "view", str(run_id), "--log-failed"],
-            capture_output=True, text=True, cwd=str(project_root),
+            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root),
         )
         if log_result.returncode != 0:
             return []
@@ -561,7 +561,7 @@ def _run_local_tests(project_root: Path, config: dict[str, Any]) -> list[Failure
             test_command,
             shell=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             cwd=str(project_root),
             timeout=300,  # 5 min timeout
         )
@@ -1061,7 +1061,7 @@ def _git_push(project_root: Path) -> bool:
         )
         result = subprocess.run(
             ["git", "push"],
-            cwd=str(project_root), capture_output=True, text=True,
+            cwd=str(project_root), capture_output=True, text=True, encoding="utf-8",
         )
         return result.returncode == 0
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -1077,7 +1077,7 @@ def _watch_ci(project_root: Path) -> bool | None:
         result = subprocess.run(
             ["gh", "run", "watch", "--exit-status"],
             cwd=str(project_root),
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
             timeout=600,  # 10 min max
         )
         return result.returncode == 0
@@ -1094,7 +1094,7 @@ def _has_gh_cli() -> bool:
     """Check if `gh` CLI is available."""
     try:
         result = subprocess.run(
-            ["gh", "--version"], capture_output=True, text=True,
+            ["gh", "--version"], capture_output=True, text=True, encoding="utf-8",
         )
         return result.returncode == 0
     except FileNotFoundError:

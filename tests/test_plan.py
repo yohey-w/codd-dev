@@ -165,7 +165,7 @@ def _plan_by_node(project: Path):
 def mock_plan_init_ai(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(
             {
                 "command": command,
@@ -262,7 +262,7 @@ def test_plan_init_accepts_detailed_design_artifacts_from_ai(tmp_path, monkeypat
     conventions: []
 """
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
@@ -714,7 +714,7 @@ def _write_extracted_docs(project: Path):
 def mock_brownfield_ai(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(
             {
                 "command": command,

@@ -212,7 +212,7 @@ Tasks for auth and tenant foundations.
 def mock_implement_ai(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
         assert match is not None
         output_dir = match.group("output")
@@ -322,7 +322,7 @@ def test_implement_respects_python_project_language(tmp_path, monkeypatch):
 
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
         assert match is not None
         output_dir = match.group("output")
@@ -381,7 +381,7 @@ def test_implement_fallback_uses_rust_extension(tmp_path, monkeypatch):
 
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append({"command": command, "input": input})
         return subprocess.CompletedProcess(
             args=command,
@@ -850,7 +850,7 @@ def test_implement_skips_downstream_on_failure(tmp_path, monkeypatch):
 
     call_count = {"n": 0}
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         call_count["n"] += 1
         task_match = re.search(r"Task ID: (m\d+\.\d+)", input)
         task_id = task_match.group(1) if task_match else "?"

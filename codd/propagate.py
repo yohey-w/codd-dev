@@ -75,7 +75,7 @@ def _get_changed_files(project_root: Path, diff_target: str) -> list:
     try:
         result = subprocess.run(
             ["git", "-c", "core.quotePath=false", "diff", "--name-only", diff_target],
-            capture_output=True, text=True, cwd=str(project_root)
+            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root)
         )
         if result.returncode != 0:
             print(f"Warning: git diff failed: {result.stderr.strip()}")
