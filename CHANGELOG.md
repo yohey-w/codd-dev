@@ -2,6 +2,51 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.19.0] - 2026-05-05
+
+### Added — Screen Transition Edge Support (画面遷移エッジ完全対応)
+
+- **`codd extract --layer routes-edges`** (cmd_364, commit 23ed3d1): tree-sitter AST 解析で
+  JSX/TSX 内の `<Link href>` / `redirect()` / `router.push()` / `signIn(callbackUrl=...)` /
+  `NextResponse.redirect()` 等を抽出し `docs/extracted/screen-transitions.yaml` を生成
+  - `codd.yaml [screen_transitions] patterns` で project ごとに override 可能
+  - `codd/screen_transitions/defaults.yaml` に Next.js / Nuxt / SvelteKit / Astro / Remix の
+    慣例 transition pattern を分離 (CoDD core にハードコードなし)
+- **`codd e2e-generate --mode transitions`** (cmd_365, commit 34b3bc7): screen-transitions.yaml
+  から `page.goto(from) → click(trigger) → toHaveURL(to)` 形式の Playwright/Cypress
+  テストを自動生成。`TransitionTestGenerator` クラス追加
+- **`codd validate --screen-flow --edges`** (cmd_366, commit 303a6e2): screen-transitions.yaml と
+  screen-flow.md の edge 整合性チェック
+  - orphan ルート (in_edges + out_edges = 0) 検出
+  - dead-end ルート (out_edges = 0 で end-state でないノード) 検出
+  - edge_to_unknown_node 検出
+  - `coverage_metrics.compute_edge_coverage` 追加で CI gate に統合
+- **`codd drift --e2e`** (cmd_367, commit 9de2aa0): 設計書 transition vs E2E `toHaveURL`
+  assertion 差分検知
+  - `extract_e2e_have_url_assertions()` で .spec.ts / .cy.ts から URL 到達 assertion を抽出
+  - `ScreenTransitionDrift` dataclass + `detect_screen_transition_drift()` 関数
+  - DriftEvent (kind=screen_transition_drift, severity=amber) として Coherence Engine 統合
+- **implementer wrapper rules** (cmd_368, commit fc61df2):
+  - `_is_wrapper_task()` で thin wrapper page (e.g., `src/app/login/page.tsx` が
+    `<SignInForm>` を呼ぶだけ) を検出
+  - `UI_WRAPPER_PROMPT_RULES` で AI prompt に callback wiring 必須 + spec component 名
+    一致 + middleware 単一インスタンス を命令
+  - `_check_guard_files_uniqueness()` で `codd.yaml [implementer] guard_files` リストの
+    重複ファイル (root middleware.ts と generated/middleware.ts 等) 検出 → CoddCLIError 昇格
+
+### Notes
+
+- 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
+  e2e-generate / extract) はすべて変更なし。新フラグはすべて opt-in。
+- 既存テスト 852 (v1.18.0) → 915 (v1.19.0)、+63 件追加 (cmd_364: 12 + cmd_365: 16 +
+  cmd_366: 13 + cmd_367: 11 + cmd_368: 11)、全件 PASS / 0 FAIL / 0 SKIP
+- Generality Gate: framework 固有名 (Next.js/NextAuth/Clerk/Nuxt/SvelteKit) は
+  defaults.yaml と codd.yaml override に分離、CoDD core にハードコードなし。
+  Playwright/Cypress は e2e_generator の switch 範疇 (cmd_342 で確立した汎用 pattern)。
+- cmd_350 Phase C.5 NG #2 (login 後遷移なし) の根本原因 (CoDD のノード only / エッジ非対応)
+  を構造的に解消。osato-lms login/page.tsx の callback wiring 漏れも cmd_368 の wrapper
+  rules で再発防止。
+
 ## [1.18.0] - 2026-05-05
 
 ### Added

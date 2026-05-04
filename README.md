@@ -22,6 +22,36 @@
 pip install codd-dev
 ```
 
+## 🆕 v1.19.0 — Screen Transition Edge 完全対応
+
+CoDD が **画面遷移エッジ** (Link / redirect / router.push / signIn callback) を扱える
+ようになった節目のリリース。これまで「ノード only」だった screen-flow 抽出に **edge** を
+追加し、validate / e2e-generate / drift / implementer 全層で transition を一気通貫に
+管理できる。
+
+| コマンド | 役割 |
+|---|---|
+| `codd extract --layer routes-edges` | tree-sitter AST で `<Link>`/`redirect`/`router.push` 等を抽出 → `screen-transitions.yaml` |
+| `codd e2e-generate --mode transitions` | transitions.yaml から `goto → click → toHaveURL` 形式の Playwright/Cypress テスト自動生成 |
+| `codd validate --screen-flow --edges` | edge 整合性 + orphan / dead-end / unknown_node 検出 + coverage gate |
+| `codd drift --e2e` | 設計書 transition vs E2E `toHaveURL` assertion 差分検知 → Coherence Engine DriftEvent |
+| `implement` wrapper rules (cmd_368) | thin wrapper の callback wiring 必須化 + middleware.ts 二重存在 ERROR |
+
+```bash
+codd extract --layer routes-edges               # screen-transitions.yaml 生成
+codd e2e-generate --mode transitions            # 遷移テスト自動生成
+codd validate --screen-flow --edges             # edge 整合性 + orphan 検知
+codd drift --e2e                                # 設計 vs E2E assertion drift
+codd coverage --edge-threshold 0                # CI で edge drift をブロック
+```
+
+framework 固有 transition pattern (Next.js / NextAuth / Clerk / Nuxt / SvelteKit / Astro /
+Remix 等) は `codd/screen_transitions/defaults.yaml` に分離、`codd.yaml [screen_transitions]`
+で project ごとに override 可能。CoDD core にはハードコードなし。テスト 915 PASS / 0 FAIL /
+0 SKIP (v1.18.0 852 → v1.19.0 +63)。
+
+---
+
 ## 🆕 v1.18.0 — screen-flow 完全統合 + UX surface coverage
 
 `codd validate --screen-flow` の盲点 (filesystem_routes 設定ミス時 silent OK) を塞ぎ、
