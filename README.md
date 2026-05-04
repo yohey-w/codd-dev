@@ -22,6 +22,33 @@
 pip install codd-dev
 ```
 
+## 🆕 v1.18.0 — screen-flow 完全統合 + UX surface coverage
+
+`codd validate --screen-flow` の盲点 (filesystem_routes 設定ミス時 silent OK) を塞ぎ、
+`CoverageAuditor` に **auth_ui_surface** (login / root / signup) セクションを追加、
+さらに `codd implement` が **screen-flow.md** を AI prompt に inject するよう改修。
+UI route が page 生成リストから漏れて 404 になる従来の事故源を構造的に解消。
+
+| 改修 | 効果 |
+|---|---|
+| `validate --screen-flow` `CoddCLIError` 昇格 | base_dir 誤設定で routes 0 件のとき即停止、configured 値を明示 |
+| `coverage --screen-flow-threshold` | CI gate で screen-flow drift をブロック |
+| CoverageAuditor `ux:auth:signin/signup` + `ux:landing:root` | UX surface 欠落を ASK class で人間レビュー要求 |
+| `codd.yaml [ux] required_routes` override | NextAuth/Clerk/nuxt-auth 等の慣例差を project ごとに上書き |
+| `implement` screen-flow.md inject + `_is_ui_task` 検出 | UI task が page 生成リストから漏れない |
+| 0-file generation `CoddCLIError` (skip_generation: true 例外) | silent pass を排除、意図的 skip は明示要求 |
+
+```bash
+codd validate --screen-flow              # base_dir 誤設定で即 ERROR
+codd coverage --screen-flow-threshold 0  # CI gate (default: 0 drift)
+codd implement                            # UI task は screen-flow.md inject、0 file は ERROR
+```
+
+Generality Gate: framework 固有名 (NextAuth / Clerk 等) は依存検出列挙 + codd.yaml override
+で吸収。CoDD core にはハードコードなし。テスト 852 PASS / 0 FAIL / 0 SKIP。
+
+---
+
 ## 🆕 v1.17.0 — `codd deploy` + 双方向伝搬パス完成
 
 整合性駆動が「設計→実装→デプロイ」を一気通貫に統合する v1.17.0 リリース。
