@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 from click.testing import CliRunner
 
-from codd.cli import main
+from codd.cli import CoddCLIError, main
 from codd.coherence_engine import EventBus
 from codd.screen_flow_validator import (
     compute_screen_flow_drifts,
@@ -68,6 +69,51 @@ def test_compute_drifts_no_diff():
 
 def test_validate_no_screen_flow_file(tmp_path):
     assert validate_screen_flow(tmp_path, {"filesystem_routes": []}) == []
+
+
+def test_no_routes_with_configured_base_dir_raises(tmp_path):
+    (tmp_path / "screen-flow.md").write_text("## /login\n", encoding="utf-8")
+
+    with pytest.raises(CoddCLIError, match="No filesystem routes found"):
+        validate_screen_flow(
+            tmp_path,
+            {
+                "filesystem_routes": [
+                    {
+                        "base_dir": "app",
+                        "page_pattern": "page.tsx",
+                        "url_template": "/{relative_dir}",
+                    }
+                ]
+            },
+        )
+
+
+def test_no_routes_without_config_returns_empty(tmp_path):
+    (tmp_path / "screen-flow.md").write_text("## /login\n", encoding="utf-8")
+
+    assert validate_screen_flow(tmp_path, {}) == []
+
+
+def test_error_message_includes_configured_dir(tmp_path):
+    (tmp_path / "screen-flow.md").write_text("## /dashboard\n", encoding="utf-8")
+
+    with pytest.raises(CoddCLIError) as exc_info:
+        validate_screen_flow(
+            tmp_path,
+            {
+                "filesystem_routes": [
+                    {
+                        "base_dir": "src/app",
+                        "page_pattern": "page.tsx",
+                    }
+                ]
+            },
+        )
+
+    message = str(exc_info.value)
+    assert "src/app" in message
+    assert "base_dir should be 'src/app' not 'app'" in message
 
 
 def test_validate_screen_flow_compares_filesystem_routes(tmp_path):
