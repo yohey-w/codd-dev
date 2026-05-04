@@ -22,6 +22,38 @@
 pip install codd-dev
 ```
 
+## 🆕 v1.17.0 — `codd deploy` + 双方向伝搬パス完成
+
+整合性駆動が「設計→実装→デプロイ」を一気通貫に統合する v1.17.0 リリース。
+
+| コマンド | 役割 |
+|---|---|
+| `codd deploy --target vps --apply` | `deploy.yaml` ベースで VPS (Docker Compose) / Azure App Service へデプロイ。dry-run デフォルト + healthcheck + auto rollback |
+| `codd propagate --reverse` | DESIGN.md / lexicon の git 変更を検知 → Coherence Engine の DriftEvent として逆伝搬 |
+| `codd require --propagate` | requirements.md frontmatter 変更を CEG `depends_on` 逆走 → 関連設計書を AI 更新提案 |
+| `codd validate --screen-flow` | screen-flow.md の routes と filesystem routes の drift 検出 |
+| `codd coverage` | E2E + design-token + lexicon の統合 coverage gate (CI exit code 1 on fail) |
+
+```bash
+# deploy
+codd deploy --target vps --apply
+codd deploy --target azure --apply
+
+# 双方向伝搬
+codd propagate --reverse --source design_token --apply
+codd require --propagate --apply
+
+# 品質ゲート
+codd validate --screen-flow
+codd coverage --e2e-threshold 100 --lexicon-threshold 100 --json
+```
+
+deploy target は `@register_target` デコレータで plug-in 追加可能 (cmd_344 fixup-drift Strategy
+と同思想)。Generality Gate 適合: Docker / Azure / SSH は target plug-in 内に閉じ、core は
+`DeployTarget` 抽象のみ。テスト 821 PASS / 0 FAIL / 0 SKIP。
+
+---
+
 ## 🆕 v1.16.0 — `codd fixup-drift` (Coherence Engine の自動修正出口)
 
 `codd fixup-drift` で Coherence Engine 検知 drift を自動修正。**デフォルト `--dry-run`** で本流を保護し、`--apply` 指定時は **git worktree 隔離** で適用 (失敗時は worktree 破棄で本流無傷)。
