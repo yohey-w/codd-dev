@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 from typing import Any
+import warnings
+
+from codd.screen_flow_validator import EdgeCoverageResult
 
 
 @dataclass(frozen=True)
@@ -164,6 +167,33 @@ def compute_screen_flow_coverage(
     )
 
 
+def check_edge_coverage_gate(result: EdgeCoverageResult, config: dict[str, Any] | None = None) -> bool:
+    """Return True when transition edge coverage meets the configured threshold."""
+
+    threshold = _edge_coverage_threshold(config)
+    if result.unreachable_nodes:
+        warnings.warn(
+            "Screen-flow nodes not covered by any edge: "
+            f"{result.unreachable_nodes}. Run 'codd extract --layer routes-edges' "
+            "to generate docs/extracted/screen-transitions.yaml.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if result.orphan_nodes:
+        warnings.warn(
+            f"Orphan nodes (no outbound edges): {result.orphan_nodes}.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if result.dead_end_nodes:
+        warnings.warn(
+            f"Dead-end nodes (no inbound edges): {result.dead_end_nodes}.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return result.coverage_ratio >= threshold
+
+
 def run_coverage(
     project_root: Path | str,
     e2e_threshold: float = 100.0,
@@ -193,6 +223,15 @@ def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
         return load_project_config(project_root)
     except (FileNotFoundError, ValueError):
         return {}
+
+
+def _edge_coverage_threshold(config: dict[str, Any] | None = None) -> float:
+    if not config:
+        return 0.5
+    screen_flow_config = config.get("screen_flow", {})
+    if not isinstance(screen_flow_config, dict):
+        return 0.5
+    return float(screen_flow_config.get("edge_coverage_threshold", 0.5))
 
 
 def _load_e2e_scenarios(scenarios_path: Path) -> list[Any]:

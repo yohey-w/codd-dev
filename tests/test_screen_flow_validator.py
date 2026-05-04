@@ -113,7 +113,7 @@ def test_error_message_includes_configured_dir(tmp_path):
 
     message = str(exc_info.value)
     assert "src/app" in message
-    assert "base_dir should be 'src/app' not 'app'" in message
+    assert "base_dir should point to the actual route directory" in message
 
 
 def test_validate_screen_flow_compares_filesystem_routes(tmp_path):
