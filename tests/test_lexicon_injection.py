@@ -12,6 +12,7 @@ import codd.generator as generator_module
 import codd.implementer as implementer_module
 from codd.generator import _inject_lexicon, generate_wave
 from codd.implementer import implement_tasks
+from codd.planner import plan_init
 from codd.require import run_require
 
 
@@ -257,3 +258,63 @@ def test_implement_ai_prompt_includes_project_lexicon(tmp_path, monkeypatch):
     assert calls[0].startswith("## Project Lexicon")
     assert "**route_node**" in calls[0]
     assert "Route helper module" in calls[0]
+
+
+def test_plan_init_ai_prompt_includes_project_lexicon(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_lexicon(project)
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "project": {"name": "demo", "language": "python"},
+                "ai_command": "mock-ai --print",
+                "scan": {
+                    "source_dirs": [],
+                    "doc_dirs": ["docs/requirements/"],
+                    "exclude": [],
+                },
+                "graph": {"store": "jsonl", "path": "codd/scan"},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_doc(
+        project,
+        "docs/requirements/routes.md",
+        node_id="req:routes",
+        doc_type="requirement",
+        body="# Route Requirements\n\nRoutes use stable names.\n",
+    )
+    calls: list[str] = []
+
+    def fake_run(command, *, input, capture_output, text, check):
+        calls.append(input)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                '"1":\n'
+                '  - node_id: "design:routes"\n'
+                '    output: "docs/design/routes.md"\n'
+                '    title: "Routes Design"\n'
+                '    depends_on:\n'
+                '      - id: "req:routes"\n'
+                '        relation: "derives_from"\n'
+                '        semantic: "governance"\n'
+                '    conventions: []\n'
+                '    modules: ["routes"]\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(generator_module.subprocess, "run", fake_run)
+
+    plan_init(project, force=True)
+
+    assert calls[0].startswith("## Project Lexicon")
+    assert "**route_node**" in calls[0]
+    assert "Routes use stable names." in calls[0]

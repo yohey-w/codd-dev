@@ -149,6 +149,7 @@ def plan_init(
         resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="plan_init")
         prompt = _build_brownfield_plan_init_prompt(config, extracted_documents)
 
+    prompt = generator_module._inject_lexicon(prompt, project_root)
     raw_wave_config = generator_module._invoke_ai_command(resolved_ai_command, prompt)
     wave_config = _parse_wave_config_output(raw_wave_config)
 
