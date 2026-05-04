@@ -2,10 +2,30 @@
 
 All notable changes to CoDD are documented in this file.
 
-## [Unreleased]
+## [1.17.0] - 2026-05-05
 
-### Added (preview, ships in v1.17.0)
+### Added
 
+- **`codd deploy`** (cmd_354): `deploy.yaml`-driven deploy CLI with plug-in target registry
+  - `--target TEXT` / `--config FILE` / `--apply` (default dry-run) / `--rollback` /
+    `--healthcheck-timeout SECONDS`
+  - **VPS Docker Compose target** (commit 03f1baf): SSH + git pull + docker compose pull/up
+    で deploy。snapshot は git rev-parse HEAD、rollback は git checkout で復元
+  - **Azure App Service target** (commit e975b31): az CLI 経由で webapp deploy + slot swap
+    で snapshot/rollback
+  - healthcheck (HTTP GET + timeout + retries) で deploy 後検証、失敗時 auto rollback
+  - `@register_target` デコレータで新規 target plug-in 追加可能 (cmd_344 strategy registry と同思想)
+- **`codd propagate --reverse`** (cmd_345, commit 04c6b2c): DESIGN.md / lexicon 変更を git diff
+  で検知し Coherence Engine の DriftEvent として発行
+  - `--source [design_token|lexicon]`: 変更検知対象
+  - `--base TEXT`: 基準 git ref (default: `HEAD~1`)
+  - `--apply`: safe な置換のみ apply (default は dry-run)
+- **`codd require --propagate`** (cmd_346, commit 9b7bbcb + 1ee4048): requirements.md frontmatter
+  変更を CEG `depends_on` 逆走で関連設計書に反映
+  - `--base TEXT`: 基準 git ref (default: `HEAD~1`)
+  - `--apply`: AI-generated update proposals を該当ファイルに適用 (default は dry-run)
+  - CEG `find_depended_by(node_id)` で逆走、循環検出付き
+  - propagator `_build_update_prompt` を再利用、AI 呼出経路は既存と統合
 - **`codd validate --screen-flow`** (cmd_347, commit c4616e9): screen-flow.md の routes と
   filesystem routes (codd.yaml `filesystem_routes`) を比較して drift を検出。Coherence
   Engine と統合し、`screen_flow_drift` kind として DriftEvent を発行可能 (opt-in
@@ -15,9 +35,21 @@ All notable changes to CoDD are documented in this file.
   - `--e2e-threshold FLOAT` (デフォルト 100.0): E2E 網羅率の閾値
   - `--lexicon-threshold FLOAT` (デフォルト 100.0): lexicon 準拠率の閾値
   - `--json`: 機械可読 JSON 出力 (CI 連携向け)
+  - exit code 1 on threshold failure (CI gate 利用想定)
 
-両 cmd ともテスト 21 件全 PASS、Generality Gate 適合 (framework 固有コード 0 件)、
-全体回帰は 747/0/0 を維持。
+### Backward Compatibility
+
+- 既存 CLI (`codd drift` / `validate` / `propagate` / `fix` / `implement` / `verify`) はすべて変更なし
+- 新フラグ (`--reverse` / `--propagate` / `--screen-flow` / `--coverage` / `deploy`) は opt-in
+- 既存テスト 747 (v1.16.0) → 821 (v1.17.0)、+74 件追加、全件 PASS、regression なし
+
+### Notes
+
+- Coherence Engine (v1.16.0-alpha + v1.16.0) の双方向伝搬パスが本リリースで完成。
+  forward = `propagate` / reverse = `propagate --reverse` / requirements → design = `require --propagate` / deploy = `codd deploy` で
+  CoDD の整合性駆動が「設計→実装→デプロイ」を一気通貫に統合。
+- Generality Gate: deploy_targets / require_propagate / propagator に framework 固有コードゼロ。
+  Docker / Azure / SSH は plug-in 内に閉じ、core は target 抽象 (`DeployTarget` インターフェース) のみ。
 
 ## [1.16.0] - 2026-05-04
 
