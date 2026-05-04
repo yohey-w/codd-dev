@@ -184,11 +184,13 @@ def _ensure_lexicon(project_root: Path) -> None:
 
     questions_text = _read_lexicon_questions()
     detected_context = _detect_lexicon_context(project_root)
+    design_md_suggestion = _suggest_design_md_for_ui(project_root, detected_context)
     fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     draft = _build_lexicon_draft(
         project_root=project_root,
         questions_text=questions_text,
         detected_context=detected_context,
+        design_md_suggestion=design_md_suggestion,
         fetched_at=fetched_at,
     )
     lexicon_path.write_text(
@@ -218,18 +220,120 @@ def _detect_lexicon_context(project_root: Path) -> list[str]:
         return []
 
 
+def _suggest_design_md_for_ui(project_root: Path, detected_context: list[str]) -> dict[str, str] | None:
+    try:
+        from codd.knowledge_fetcher import KnowledgeFetcher
+    except ImportError:
+        return None
+
+    try:
+        return KnowledgeFetcher(project_root).suggest_design_md_for_ui(detected_context)
+    except Exception:
+        return None
+
+
 def _build_lexicon_draft(
     *,
     project_root: Path,
     questions_text: str,
     detected_context: list[str],
     fetched_at: str,
+    design_md_suggestion: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     provenance = "inferred"
     confidence = 0.5
     entry_defaults = {"provenance": provenance, "confidence": confidence, "fetched_at": fetched_at}
     question_count = len(re.findall(r"^###\s+Q\d+:", questions_text, flags=re.MULTILINE))
     context_label = ", ".join(detected_context) if detected_context else "unknown"
+    node_vocabulary = [
+        {
+            "id": "url_route",
+            "description": "Browser or API path exposed by the project.",
+            "extractor": "filesystem_routes",
+            "naming_convention": "kebab-case",
+            **entry_defaults,
+        },
+        {
+            "id": "db_table",
+            "description": "Persistent database table or collection name.",
+            "naming_convention": "snake_case",
+            **entry_defaults,
+        },
+        {
+            "id": "env_var",
+            "description": "Runtime configuration environment variable.",
+            "naming_convention": "SCREAMING_SNAKE_CASE",
+            **entry_defaults,
+        },
+        {
+            "id": "cli_command",
+            "description": "Command-line command, subcommand, or flag namespace.",
+            "naming_convention": "kebab-case",
+            **entry_defaults,
+        },
+        {
+            "id": "role",
+            "description": "User, operator, or system role used for access and routing decisions.",
+            "naming_convention": "snake_case",
+            **entry_defaults,
+        },
+        {
+            "id": "domain_event",
+            "description": "Domain event or lifecycle state transition name.",
+            "naming_convention": "snake_case",
+            **entry_defaults,
+        },
+        {
+            "id": "module_file",
+            "description": "Source module or file path naming unit.",
+            "naming_convention": "snake_case",
+            **entry_defaults,
+        },
+    ]
+    naming_conventions = [
+        {"id": "kebab-case", "regex": "^[a-z][a-z0-9-]*$"},
+        {"id": "snake_case", "regex": "^[a-z][a-z0-9_]*$"},
+        {"id": "SCREAMING_SNAKE_CASE", "regex": "^[A-Z][A-Z0-9_]*$"},
+        {"id": "PascalCase", "regex": "^[A-Z][A-Za-z0-9]*$"},
+    ]
+    design_principles = [
+        "This project_lexicon.yaml is an inferred draft and must be reviewed before conventions are treated as human-approved.",
+        f"Detected project context: {context_label}. Confirm or replace any convention that does not match the project.",
+        "Use one canonical name for the same domain concept across docs, code, config, and CLI unless an exception is documented.",
+    ]
+
+    if design_md_suggestion:
+        node_vocabulary.append(
+            {
+                "id": "design_token",
+                "description": "UI design token from DESIGN.md.",
+                "naming_convention": "design-token-path",
+                "examples": [
+                    "colors.Primary",
+                    "typography.body",
+                    "spacing.sm",
+                    "components.Button.primary",
+                ],
+                "categories": ["color", "typography", "spacing", "component"],
+                **entry_defaults,
+            }
+        )
+        naming_conventions.append(
+            {
+                "id": "design-token-path",
+                "regex": "^[A-Za-z][A-Za-z0-9]*(\\.[A-Za-z][A-Za-z0-9]*)+$",
+            }
+        )
+        design_principles.append(
+            f"UI design token conventions should be reconciled with {design_md_suggestion['ui_design_source']}."
+        )
+    draft_context: dict[str, Any] = {
+        "detected_context": detected_context,
+        "question_template": "codd/templates/lexicon_questions.md",
+        "question_count": question_count,
+    }
+    if design_md_suggestion:
+        draft_context["ui_design"] = design_md_suggestion
 
     return {
         "version": "1.0",
@@ -237,67 +341,10 @@ def _build_lexicon_draft(
         "provenance": provenance,
         "confidence": confidence,
         "fetched_at": fetched_at,
-        "draft_context": {
-            "detected_context": detected_context,
-            "question_template": "codd/templates/lexicon_questions.md",
-            "question_count": question_count,
-        },
-        "node_vocabulary": [
-            {
-                "id": "url_route",
-                "description": "Browser or API path exposed by the project.",
-                "extractor": "filesystem_routes",
-                "naming_convention": "kebab-case",
-                **entry_defaults,
-            },
-            {
-                "id": "db_table",
-                "description": "Persistent database table or collection name.",
-                "naming_convention": "snake_case",
-                **entry_defaults,
-            },
-            {
-                "id": "env_var",
-                "description": "Runtime configuration environment variable.",
-                "naming_convention": "SCREAMING_SNAKE_CASE",
-                **entry_defaults,
-            },
-            {
-                "id": "cli_command",
-                "description": "Command-line command, subcommand, or flag namespace.",
-                "naming_convention": "kebab-case",
-                **entry_defaults,
-            },
-            {
-                "id": "role",
-                "description": "User, operator, or system role used for access and routing decisions.",
-                "naming_convention": "snake_case",
-                **entry_defaults,
-            },
-            {
-                "id": "domain_event",
-                "description": "Domain event or lifecycle state transition name.",
-                "naming_convention": "snake_case",
-                **entry_defaults,
-            },
-            {
-                "id": "module_file",
-                "description": "Source module or file path naming unit.",
-                "naming_convention": "snake_case",
-                **entry_defaults,
-            },
-        ],
-        "naming_conventions": [
-            {"id": "kebab-case", "regex": "^[a-z][a-z0-9-]*$"},
-            {"id": "snake_case", "regex": "^[a-z][a-z0-9_]*$"},
-            {"id": "SCREAMING_SNAKE_CASE", "regex": "^[A-Z][A-Z0-9_]*$"},
-            {"id": "PascalCase", "regex": "^[A-Z][A-Za-z0-9]*$"},
-        ],
-        "design_principles": [
-            "This project_lexicon.yaml is an inferred draft and must be reviewed before conventions are treated as human-approved.",
-            f"Detected project context: {context_label}. Confirm or replace any convention that does not match the project.",
-            "Use one canonical name for the same domain concept across docs, code, config, and CLI unless an exception is documented.",
-        ],
+        "draft_context": draft_context,
+        "node_vocabulary": node_vocabulary,
+        "naming_conventions": naming_conventions,
+        "design_principles": design_principles,
         "failure_modes": [
             {"id": "case_drift", "pattern": "The same concept appears with multiple naming cases.", "detector": "lexicon_validate"},
             {"id": "prefix_omission", "pattern": "A role, area, or environment prefix is missing where the project requires one.", "detector": "lexicon_validate"},

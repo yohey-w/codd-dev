@@ -15,6 +15,20 @@ provenance_values:
   - human
   - inferred
 
+node_vocabulary:
+  design_token:
+    description: "UI design tokens from DESIGN.md (W3C Design Tokens spec)"
+    examples:
+      - "colors.Primary"
+      - "typography.body"
+      - "spacing.sm"
+      - "components.Button.primary"
+    categories:
+      - color
+      - typography
+      - spacing
+      - component
+
 node_vocabulary_item:
   required_fields: [id, description]
   optional_fields:
@@ -26,6 +40,8 @@ node_vocabulary_item:
     - provenance
     - confidence
     - fetched_at
+    - examples
+    - categories
 
 naming_convention_item:
   required_fields: [id, regex]
