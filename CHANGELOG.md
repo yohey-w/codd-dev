@@ -2,6 +2,36 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.16.0-alpha] - 2026-05-04
+
+### Added
+
+- **Coherence Engine** (`codd/coherence_engine.py`): DriftEvent 統一フォーマット +
+  EventBus (in-process pub/sub) + Orchestrator
+  - severity ルーティング: `red` → auto-fix dispatch / `amber` → pending HITL 記録 / `green` → log
+  - auto-fix 失敗時 amber 自動ダウングレード (payload に `auto_fix_error` / `downgraded_from` 記録)
+  - ntfy 通知レート制限 (デフォルト 60 秒クールダウン、`ntfy_rate_limit_seconds` で設定可)
+  - severity と fix_strategy の直交化、event 個別 override + codd.yaml `[coherence] routing` で override 可能
+- **Coherence Adapters** (`codd/coherence_adapters.py`):
+  drift / validation / design-token violation 出力 → DriftEvent 変換アダプター
+  - `codd/drift.py` / `codd/validator.py` に opt-in `set_coherence_bus()` hooks 追加
+  - 既存出力フォーマット (`DriftResult` / `ValidationResult` / `DesignTokenViolation`) は維持
+- **Propagator Coherence Injection**: `codd propagate --coherence` フラグで lexicon と
+  DESIGN.md を AI プロンプトに注入 (用語ぶれ・色値矛盾の自動防止)
+- **Fixer Coherence-Mode**: `run_fix(coherence_event=...)` で DriftEvent 入力時のみ
+  設計書修正を許可 (test 失敗修正フローは従来通り、入口分岐で完全分離)
+
+### Backward Compatibility
+
+- 既存 CLI (`codd drift` / `validate` / `propagate` / `fix`) は全件動作不変。
+  `--coherence` / `coherence_event=...` を渡さない限り従来挙動を完全維持。
+- 既存テスト 636 件 → 679 件 (+43 件 Coherence 系) すべて PASS、regression なし。
+
+### Notes
+
+- ⚠️ alpha 版: Phase 4+ (Detector ↔ Applier の直接配管 / `codd fixup-drift` サブコマンド) は
+  cmd_344 以降で実装予定。本リリースはアーキテクチャ確立段階。
+
 ## [1.14.0] - 2026-05-04
 
 ### Added
