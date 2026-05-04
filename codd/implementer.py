@@ -96,18 +96,45 @@ COMMENT_PREFIX_BY_SUFFIX = {
     ".rb": "#",
 }
 UI_FILE_EXTENSIONS = {".tsx", ".jsx", ".vue", ".svelte", ".swift", ".kt", ".dart"}
-UI_TASK_KEYWORDS = {
-    "component",
-    "frontend",
-    "layout",
-    "page",
-    "screen",
-    "ui",
-    "ux",
-    "view",
-    "widget",
-    "画面",
+SCREEN_FLOW_PROMPT_LIMIT = 8000
+_SKIP_GENERATION_RE = re.compile(
+    r"(?mi)^\s*(?:[-*]\s*)?skip_generation\s*:\s*true\s*$",
+)
+_ROUTE_TOKEN_RE = re.compile(r"(?<![:\w])/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*")
+_ROUTE_HOME_KEYWORDS = {"home", "homepage", "landing", "root", "top", "トップ", "ホーム"}
+_ROUTE_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+_FRAMEWORK_KEYWORDS = {
+    "angular",
+    "astro",
+    "next",
+    "next.js",
+    "nextjs",
+    "nuxt",
+    "react",
+    "remix",
+    "svelte",
+    "vue",
 }
+_UI_TASK_KEYWORDS = frozenset(
+    {
+        "component",
+        "frontend",
+        "layout",
+        "login",
+        "page",
+        "route",
+        "screen",
+        "signup",
+        "ui",
+        "ux",
+        "view",
+        "widget",
+        "ログイン",
+        "画面",
+    }
+    - _FRAMEWORK_KEYWORDS
+)
+UI_TASK_KEYWORDS = _UI_TASK_KEYWORDS
 
 SPRINT_HEADING_RE = re.compile(
     r"^####\s+Sprint\s+(?P<number>\d+)(?:（(?P<window>[^）]+)）)?(?:\s*:\s*(?P<title>.+))?\s*$",
@@ -171,6 +198,7 @@ class ImplementationTask:
     task_context: str
     wave: int | None = None
     blocked_by_task_ids: tuple[str, ...] = ()
+    skip_generation: bool = False
 
 
 @dataclass(frozen=True)
@@ -429,6 +457,16 @@ def _execute_task(
         if _task_generates_ui_file(task_item, (config.get("project") or {}).get("language"))
         else None
     )
+    screen_flow_content = (
+        _load_screen_flow_for_implementation(project_root)
+        if _task_looks_ui_facing(task_item)
+        else None
+    )
+    screen_flow_routes = (
+        _select_screen_flow_routes_for_task(task_item, screen_flow_content)
+        if screen_flow_content
+        else []
+    )
     prompt = _build_implementation_prompt(
         config=config,
         plan=plan,
@@ -438,21 +476,40 @@ def _execute_task(
         coding_principles=coding_principles,
         prior_task_outputs=prior_task_outputs,
         design_md_content=design_md_content,
+        screen_flow_content=screen_flow_content,
+        screen_flow_routes=screen_flow_routes,
     )
     prompt = generator_module._inject_lexicon(prompt, project_root)
-    raw_output = generator_module._invoke_ai_command(
-        resolved_ai_command, prompt, project_root=project_root,
-    )
+    try:
+        raw_output = generator_module._invoke_ai_command(
+            resolved_ai_command, prompt, project_root=project_root,
+        )
+    except ValueError as exc:
+        if "empty output" not in str(exc).casefold():
+            raise
+        if _task_skip_generation_enabled(task_item):
+            raw_output = ""
+        else:
+            raise _zero_generated_files_error(task_item) from exc
     language = _normalize_implementation_language((config.get("project") or {}).get("language"))
-    generated_files = _write_generated_files(
-        project_root=project_root,
-        plan=plan,
-        task=task_item,
-        dependency_documents=dependency_documents,
-        output_dir=task_item.output_dir,
-        language=language,
-        raw_output=raw_output,
-    )
+    if _task_skip_generation_enabled(task_item) and not raw_output.strip():
+        generated_files = []
+    else:
+        try:
+            generated_files = _write_generated_files(
+                project_root=project_root,
+                plan=plan,
+                task=task_item,
+                dependency_documents=dependency_documents,
+                output_dir=task_item.output_dir,
+                language=language,
+                raw_output=raw_output,
+            )
+        except ValueError as exc:
+            raise _zero_generated_files_error(task_item) from exc
+
+    if len(generated_files) == 0 and not _task_skip_generation_enabled(task_item):
+        raise _zero_generated_files_error(task_item)
     summary = _summarize_generated_task_output(project_root, task_item, generated_files)
     result = ImplementationResult(
         task_id=task_item.task_id,
@@ -656,6 +713,121 @@ def _load_design_md_content(project_root: Path) -> str | None:
     return "\n".join(lines)
 
 
+def _load_screen_flow_for_implementation(project_root: Path) -> str | None:
+    """Load screen-flow.md for implementer prompt injection. None if not found."""
+    try:
+        from codd.screen_flow_validator import find_screen_flow_path
+
+        screen_flow_path = find_screen_flow_path(project_root)
+    except ImportError:
+        default_path = project_root / "docs" / "extracted" / "screen-flow.md"
+        screen_flow_path = default_path if default_path.exists() else None
+
+    if screen_flow_path is None:
+        warnings.warn(
+            "screen-flow.md not found. UI file generation will proceed without "
+            "route definitions. Consider creating docs/extracted/screen-flow.md.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return None
+    return screen_flow_path.read_text(encoding="utf-8")
+
+
+def _is_ui_task(task_title: str, task_description: str = "") -> bool:
+    """Return True if task appears to implement a UI page/route."""
+    text = f"{task_title} {task_description}".casefold()
+    for keyword in _UI_TASK_KEYWORDS:
+        if re.search(rf"(?<![a-z0-9]){re.escape(keyword.casefold())}(?![a-z0-9])", text):
+            return True
+    return False
+
+
+def _select_screen_flow_routes_for_task(
+    task: ImplementationTask,
+    screen_flow_content: str | None,
+) -> list[str]:
+    """Return screen-flow routes most relevant to a UI implementation task."""
+    if not screen_flow_content:
+        return []
+
+    routes = _parse_screen_flow_routes_from_text(screen_flow_content)
+    if not routes:
+        return []
+
+    relevant = [route for route in routes if _route_matches_task(route, task)]
+    return relevant or routes[:20]
+
+
+def _parse_screen_flow_routes_from_text(screen_flow_content: str) -> list[str]:
+    """Extract unique route tokens from screen-flow text without requiring a file."""
+    routes: list[str] = []
+    for match in _ROUTE_TOKEN_RE.finditer(screen_flow_content):
+        route = _normalize_screen_flow_route(match.group(0))
+        if route and route not in routes:
+            routes.append(route)
+    return routes
+
+
+def _normalize_screen_flow_route(route: str) -> str:
+    normalized = route.strip().strip("`\"'")
+    normalized = normalized.rstrip(".,;。、)")
+    if not normalized.startswith("/") or normalized.startswith("//"):
+        return ""
+    return normalized.rstrip("/") or "/"
+
+
+def _route_matches_task(route: str, task: ImplementationTask) -> bool:
+    task_text = " ".join(
+        [
+            task.title,
+            task.summary,
+            task.module_hint,
+            task.deliverable,
+            task.output_dir,
+            task.task_context,
+        ]
+    ).casefold()
+    if route.casefold() in task_text:
+        return True
+
+    if route == "/":
+        return any(keyword in task_text for keyword in _ROUTE_HOME_KEYWORDS)
+
+    segments = [_normalize_route_segment(segment) for segment in route.split("/") if segment]
+    return any(segment and segment in task_text for segment in segments)
+
+
+def _normalize_route_segment(segment: str) -> str:
+    return _ROUTE_NORMALIZE_RE.sub("", segment.casefold())
+
+
+def _task_skip_generation_enabled(task: ImplementationTask) -> bool:
+    if task.skip_generation:
+        return True
+    text = "\n".join(
+        [
+            task.title,
+            task.summary,
+            task.module_hint,
+            task.deliverable,
+            task.task_context,
+        ]
+    )
+    return bool(_SKIP_GENERATION_RE.search(text))
+
+
+def _zero_generated_files_error(task: ImplementationTask) -> Exception:
+    from codd.cli import CoddCLIError
+
+    return CoddCLIError(
+        f"Task '{task.task_id}' produced 0 generated files. "
+        "If this is intentional, add 'skip_generation: true' to the task frontmatter. "
+        "Otherwise, check screen-flow.md for missing route definitions or "
+        "verify the task description contains sufficient implementation details."
+    )
+
+
 def _task_generates_ui_file(task: ImplementationTask, language: Any) -> bool:
     """Return True when the task is expected to emit a UI file."""
     for path in _candidate_generated_paths(task, language):
@@ -691,19 +863,17 @@ def _candidate_generated_paths(task: ImplementationTask, language: Any) -> list[
 
 
 def _task_looks_ui_facing(task: ImplementationTask) -> bool:
-    text = " ".join(
-        [
-            task.title,
-            task.summary,
-            task.module_hint,
-            task.deliverable,
-            task.task_context,
-        ]
-    ).casefold()
-    for keyword in UI_TASK_KEYWORDS:
-        if re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", text):
-            return True
-    return False
+    return _is_ui_task(
+        task.title,
+        " ".join(
+            [
+                task.summary,
+                task.module_hint,
+                task.deliverable,
+                task.task_context,
+            ]
+        ),
+    )
 
 
 def _extract_all_tasks(plan: ImplementationPlan) -> list[ImplementationTask]:
@@ -882,6 +1052,7 @@ def _deduplicate_slugs(tasks: list[ImplementationTask]) -> list[ImplementationTa
                     task_context=t.task_context,
                     wave=t.wave,
                     blocked_by_task_ids=t.blocked_by_task_ids,
+                    skip_generation=t.skip_generation,
                 )
             )
         else:
@@ -1103,6 +1274,8 @@ def _build_implementation_prompt(
     coding_principles: str | None,
     prior_task_outputs: list[dict[str, Any]] | None = None,
     design_md_content: str | None = None,
+    screen_flow_content: str | None = None,
+    screen_flow_routes: list[str] | None = None,
 ) -> str:
     project = config.get("project") or {}
     frameworks = project.get("frameworks") or []
@@ -1131,6 +1304,7 @@ def _build_implementation_prompt(
     else:
         extension_guidance = f"- Use {default_extension} files for generated source unless the task explicitly requires another file type."
 
+    prior_task_outputs = prior_task_outputs or []
     lines = [
         "You are generating implementation code from CoDD design documents.",
         f"Project name: {project.get('name') or '(unknown)'}",
@@ -1227,6 +1401,26 @@ def _build_implementation_prompt(
                 "DESIGN.md design token context:",
                 "- Apply these W3C-style design tokens when generating UI files.",
                 design_md_content.rstrip(),
+                "",
+            ]
+        )
+
+    if screen_flow_content:
+        route_lines = list(screen_flow_routes or [])
+        lines.extend(
+            [
+                "--- SCREEN-FLOW (UI ROUTE DEFINITIONS) ---",
+            ]
+        )
+        if route_lines:
+            lines.append("This UI task must implement the relevant route(s):")
+            for route in route_lines:
+                lines.append(f"- {route}")
+            lines.append("")
+        lines.append(screen_flow_content[:SCREEN_FLOW_PROMPT_LIMIT].rstrip())
+        lines.extend(
+            [
+                "--- END SCREEN-FLOW ---",
                 "",
             ]
         )
