@@ -37,8 +37,8 @@ class DesignTokenDriftLinker:
 
     kind: str = "design_token"
 
-    def __init__(self, project_root: Path):
-        self.project_root = project_root
+    def __init__(self, project_root: Path | str):
+        self.project_root = Path(project_root)
 
     def detect_drift(self) -> list[dict[str, str]]:
         design_md_path = self.project_root / "DESIGN.md"
