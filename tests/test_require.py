@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+from click.testing import CliRunner
 
 import codd.generator as generator_module
+from codd.cli import main
 from codd.require import (
     CROSS_CUTTING_CLUSTER,
     _build_frontmatter,
@@ -289,3 +291,26 @@ def test_run_require_no_extracted_docs_error(tmp_path):
 
     with pytest.raises(ValueError, match="Run 'codd extract' first"):
         run_require(project)
+
+
+def test_require_audit_cli_writes_coverage_report(tmp_path):
+    project = _setup_project(tmp_path)
+    req_dir = project / "docs" / "requirements"
+    req_dir.mkdir(parents=True, exist_ok=True)
+    (req_dir / "lms.md").write_text(
+        "Learning management system for course learners and instructors.",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["require", "--path", str(project), "--audit"])
+
+    assert result.exit_code == 0, result.output
+    assert "Coverage audit complete:" in result.output
+    assert "Report: docs/requirements/coverage_audit_report.md" in result.output
+    report = project / "docs" / "requirements" / "coverage_audit_report.md"
+    assert report.exists()
+    text = report.read_text(encoding="utf-8")
+    assert "## AUTO_ACCEPT" in text
+    assert "## ASK" in text
+    assert "## AUTO_REJECT" in text

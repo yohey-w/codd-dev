@@ -294,7 +294,21 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str
 )
 @click.option("--force", is_flag=True, help="Overwrite existing files")
 @click.option("--feedback", default=None, help="Review feedback from previous generation")
-def require(path: str, output: str, scope: str | None, ai_cmd: str | None, force: bool, feedback: str | None):
+@click.option(
+    "--audit",
+    is_flag=True,
+    default=False,
+    help="Run CoverageAuditor 3-class requirement gap analysis.",
+)
+def require(
+    path: str,
+    output: str,
+    scope: str | None,
+    ai_cmd: str | None,
+    force: bool,
+    feedback: str | None,
+    audit: bool,
+):
     """Infer requirements from extracted codebase facts (brownfield).
 
     Unlike 'restore' which reconstructs design docs from extracted facts,
@@ -305,6 +319,21 @@ def require(path: str, output: str, scope: str | None, ai_cmd: str | None, force
 
     project_root = Path(path).resolve()
     _require_codd_dir(project_root)
+
+    if audit:
+        from codd.coverage_auditor import CoverageAuditor
+
+        output_dir = Path(output)
+        if not output_dir.is_absolute():
+            output_dir = project_root / output_dir
+        report_path = output_dir / "coverage_audit_report.md"
+
+        auditor = CoverageAuditor(project_root)
+        result = auditor.audit()
+        auditor.generate_report(result, report_path)
+        click.echo(f"Coverage audit complete: {result.summary()}")
+        click.echo(f"Report: {_display_path(report_path, project_root)}")
+        return
 
     try:
         results = run_require(
