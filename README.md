@@ -22,7 +22,21 @@
 pip install codd-dev
 ```
 
-## 🆕 v1.11.0 — Filesystem-Routing Aware Drift Detection
+## 🆕 v1.12.0 — Meta-Design Context Layer (project_lexicon)
+
+CoDD now has a **meta-design context layer**: declare your project's vocabulary, naming conventions, and design principles once in `project_lexicon.yaml`, and every AI command (require / plan / generate / implement) automatically uses it.
+
+- 📖 `ProjectLexicon` — declare node vocabulary, naming conventions, design principles, failure modes
+- 🌐 `KnowledgeFetcher` — Web Search-first knowledge layer with 30-day cache; CoDD core has zero hardcoded framework knowledge
+- 🔍 `codd validate --lexicon` — detect naming convention violations in your lexicon
+- 🔌 Extractor registry — declare extractor classes by Python module path; `FileSystemRouteExtractor` is the first entry
+- 🧙 Lexicon wizard — `codd plan` auto-generates a draft `project_lexicon.yaml` when absent
+- 📋 `CoverageAuditor` — requirement gap detection with AUTO_ACCEPT / ASK / AUTO_REJECT 3-class rule
+- 🏷️ Provenance tracking — every lexicon entry carries `provenance`, `confidence`, and `fetched_at`
+
+---
+
+## v1.11.0 — Filesystem-Routing Aware Drift Detection
 
 CoDD now understands filesystem-routing frameworks (Next.js, SvelteKit, Nuxt, Astro, Remix) and can detect URL drift between your design docs and actual implementation.
 

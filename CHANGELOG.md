@@ -2,6 +2,25 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.12.0] - 2026-05-04
+
+### Added
+
+- **`ProjectLexicon` — meta-design context layer** (`codd/lexicon.py`, `codd/templates/lexicon_schema.yaml`) — declare project vocabulary (node types, naming conventions, design principles, failure modes, extractor registry) in `project_lexicon.yaml`. All CoDD commands (`codd require`, `codd plan`, `codd generate`, `codd implement`) now auto-inject lexicon context into AI prompts.
+- **`KnowledgeFetcher`** (`codd/knowledge_fetcher.py`) — Web Search-first knowledge layer. Fetches framework/language-specific knowledge at runtime with 30-day cache (`.codd/knowledge_cache/`). Returns `KnowledgeEntry` with `provenance` / `confidence` / `fetched_at` fields. Eliminates hardcoded framework knowledge from CoDD core.
+- **Lexicon provenance/confidence fields** — every lexicon entry now carries `provenance` (`web_search` / `official_doc` / `human` / `inferred`), `confidence` (0.0–1.0), and `fetched_at` (ISO 8601). Entries with `confidence < 0.6` emit a warning in `as_context_string()`. Out-of-range values raise `LexiconError` at load time.
+- **`codd validate --lexicon`** — new subcommand (`codd/validator.py`) that checks naming convention references within `project_lexicon.yaml`. Reports unknown conventions as violations.
+- **Extractor registry** (`codd/registry.py`) — dynamic loader: declare extractor classes by Python module path in `project_lexicon.yaml` `extractor_registry:` block. `load_extractor()` / `get_extractor()` / `list_extractors()` API. `FileSystemRouteExtractor` (v1.11.0) is the first registry entry.
+- **Lexicon wizard in `codd plan`** (`_ensure_lexicon()`) — when `project_lexicon.yaml` is absent, `codd plan` auto-generates a draft file (`provenance=inferred`, `confidence=0.5`) using `KnowledgeFetcher.detect_tech_stack()`. Draft includes detected tech stack context and a reminder to confirm before relying on it.
+- **`CoverageAuditor`** (`codd/coverage_auditor.py`) — requirement gap detection with 3-class rule: `AUTO_ACCEPT` (industry-standard / legal mandate, recorded silently), `ASK` (project-specific trade-off, presented to human), `AUTO_REJECT` (clearly out of scope, recorded in `scope_exclusions`). Confidence < 0.85 forces `ASK`. Outputs `docs/requirements/coverage_audit_report.md`.
+- **`context_acquisition` section in `codd.yaml.tmpl`** — `strategy: web_search_first`, `cache_ttl_days: 30`, `fact_check.min_confidence: 0.6` template defaults.
+- **Lexicon question template** (`codd/templates/lexicon_questions.md`) — 21 structured questions across 8 categories (URL/route naming, DB/model naming, environment variables, CLI, roles/permissions, events, components, modules) to guide project lexicon creation.
+
+### Notes
+
+- Generality Gate: no framework-specific knowledge hardcoded into CoDD core. All domain knowledge is fetched at runtime or declared in `project_lexicon.yaml`.
+- Full regression: 598 passed / 0 failed / 0 skipped (`.venv`). Pre-existing `tree_sitter` / `synth_templates` failures remain in system Python only.
+
 ## [1.11.0] - 2026-05-04
 
 ### Added
