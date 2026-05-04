@@ -42,6 +42,7 @@ def test_dry_run_no_ssh(monkeypatch):
     actions = DockerComposeTarget(_config()).dry_run()
 
     assert any("deploy@example.com" in action for action in actions)
+    assert any("docker compose -f docker-compose.production.yml build" in action for action in actions)
     assert any("docker compose -f docker-compose.production.yml up -d" in action for action in actions)
 
 
@@ -94,6 +95,7 @@ def test_deploy_calls_docker_compose(monkeypatch):
     target.deploy()
 
     assert "docker compose -f docker-compose.production.yml pull" in commands[1]
+    assert "docker compose -f docker-compose.production.yml build" in commands[1]
     assert "docker compose -f docker-compose.production.yml up -d" in commands[1]
 
 
@@ -123,6 +125,7 @@ def test_rollback_calls_git_checkout(monkeypatch):
 
     assert target.rollback({"git_commit": "abc123"}) is True
     assert "git checkout abc123" in commands[0]
+    assert "docker compose -f docker-compose.production.yml build" in commands[0]
     assert "docker compose -f docker-compose.production.yml up -d" in commands[0]
 
 

@@ -53,6 +53,7 @@ class DockerComposeTarget(DeployTarget):
             f"[ssh] {self.ssh_user}@{self.host}: cd {self.working_dir}",
             f"[ssh] git fetch {self.git_remote} && git checkout {self.git_branch} && git pull {self.git_remote} {self.git_branch}",
             f"[ssh] docker compose -f {self.compose_file} pull",
+            f"[ssh] docker compose -f {self.compose_file} build",
             f"[ssh] docker compose -f {self.compose_file} up -d",
             "[healthcheck] Wait for service ready",
         ]
@@ -70,6 +71,7 @@ class DockerComposeTarget(DeployTarget):
             compose_cmd = (
                 f"cd {self._q(self.working_dir)} && "
                 f"docker compose -f {self._q(self.compose_file)} pull && "
+                f"docker compose -f {self._q(self.compose_file)} build && "
                 f"docker compose -f {self._q(self.compose_file)} up -d"
             )
             self._run_ssh(compose_cmd)
@@ -102,6 +104,7 @@ class DockerComposeTarget(DeployTarget):
             rollback_cmd = (
                 f"cd {self._q(self.working_dir)} && "
                 f"git checkout {self._q(str(commit))} && "
+                f"docker compose -f {self._q(self.compose_file)} build && "
                 f"docker compose -f {self._q(self.compose_file)} up -d"
             )
             self._run_ssh(rollback_cmd)
