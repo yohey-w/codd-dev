@@ -152,6 +152,43 @@ class CEG:
         results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
         return results
 
+    def find_depended_by(
+        self,
+        node_id: str,
+        visited: set[str] | None = None,
+        min_confidence: float = 0.0,
+    ) -> list[dict]:
+        """Return active depends_on edges whose sources depend on node_id.
+
+        Edge semantics: source depends_on target. This reverse traversal starts
+        from target and walks incoming depends_on edges. The visited set prevents
+        cycles from recursing forever and suppresses already-seen dependers.
+        """
+        if visited is None:
+            visited = set()
+        if node_id in visited:
+            return []
+        visited.add(node_id)
+
+        results: list[dict] = []
+        for edge in self.get_incoming_edges(node_id, min_confidence=min_confidence):
+            if edge.get("relation") != "depends_on":
+                continue
+            depender_id = edge.get("source_id")
+            if not depender_id or depender_id in visited:
+                continue
+
+            source = self.nodes.get(depender_id, {})
+            results.append({**edge, "source_path": source.get("path")})
+            results.extend(
+                self.find_depended_by(
+                    depender_id,
+                    visited=visited,
+                    min_confidence=min_confidence,
+                )
+            )
+        return results
+
     def count_edges(self) -> int:
         return sum(1 for e in self.edges if e.get("is_active", True))
 

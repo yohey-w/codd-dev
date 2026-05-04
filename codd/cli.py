@@ -376,6 +376,19 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str
 @click.option("--force", is_flag=True, help="Overwrite existing files")
 @click.option("--feedback", default=None, help="Review feedback from previous generation")
 @click.option(
+    "--propagate",
+    "propagate_changes",
+    is_flag=True,
+    default=False,
+    help="Propagate requirements changes to dependent design docs via CEG",
+)
+@click.option(
+    "--base",
+    "base_ref",
+    default=None,
+    help="Base git ref for change detection (default: HEAD~1)",
+)
+@click.option(
     "--audit",
     is_flag=True,
     default=False,
@@ -388,6 +401,8 @@ def require(
     ai_cmd: str | None,
     force: bool,
     feedback: str | None,
+    propagate_changes: bool,
+    base_ref: str | None,
     audit: bool,
 ):
     """Infer requirements from extracted codebase facts (brownfield).
@@ -396,9 +411,15 @@ def require(
     'require' reverse-engineers requirements documents from the same
     extracted code analysis. Run 'codd extract' first.
     """
+    project_root = Path(path).resolve()
+
+    if propagate_changes:
+        from codd.require_propagate import require_propagate
+
+        raise SystemExit(require_propagate(project_root, base_ref))
+
     from codd.require import run_require
 
-    project_root = Path(path).resolve()
     _require_codd_dir(project_root)
 
     if audit:
