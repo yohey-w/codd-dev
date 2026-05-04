@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +131,8 @@ def plan_init(
     if config.get("wave_config") and not force:
         raise FileExistsError("codd.yaml already contains wave_config")
 
+    _ensure_lexicon(project_root)
+
     requirement_documents = _load_requirement_documents(project_root, config)
     extracted_documents: list[ExtractedDocument] = []
 
@@ -168,6 +171,145 @@ def plan_init(
         requirement_paths=[d.path for d in requirement_documents] or [d.path for d in extracted_documents],
         wave_config=wave_config,
     )
+
+
+def _ensure_lexicon(project_root: Path) -> None:
+    """Create an inferred draft project_lexicon.yaml when plan --init starts without one."""
+    from codd.lexicon import LEXICON_FILENAME
+
+    project_root = Path(project_root).resolve()
+    lexicon_path = project_root / LEXICON_FILENAME
+    if lexicon_path.exists():
+        return
+
+    questions_text = _read_lexicon_questions()
+    detected_context = _detect_lexicon_context(project_root)
+    fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    draft = _build_lexicon_draft(
+        project_root=project_root,
+        questions_text=questions_text,
+        detected_context=detected_context,
+        fetched_at=fetched_at,
+    )
+    lexicon_path.write_text(
+        yaml.safe_dump(draft, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    context_label = ", ".join(detected_context) if detected_context else "unknown"
+    print(f"Created draft {LEXICON_FILENAME} (detected_context={context_label}). Please review and update.")
+
+
+def _read_lexicon_questions() -> str:
+    questions_path = Path(__file__).parent / "templates" / "lexicon_questions.md"
+    if not questions_path.exists():
+        return ""
+    return questions_path.read_text(encoding="utf-8")
+
+
+def _detect_lexicon_context(project_root: Path) -> list[str]:
+    try:
+        from codd.knowledge_fetcher import KnowledgeFetcher
+    except ImportError:
+        return []
+
+    try:
+        return list(KnowledgeFetcher(project_root).detect_tech_stack())
+    except Exception:
+        return []
+
+
+def _build_lexicon_draft(
+    *,
+    project_root: Path,
+    questions_text: str,
+    detected_context: list[str],
+    fetched_at: str,
+) -> dict[str, Any]:
+    provenance = "inferred"
+    confidence = 0.5
+    entry_defaults = {"provenance": provenance, "confidence": confidence, "fetched_at": fetched_at}
+    question_count = len(re.findall(r"^###\s+Q\d+:", questions_text, flags=re.MULTILINE))
+    context_label = ", ".join(detected_context) if detected_context else "unknown"
+
+    return {
+        "version": "1.0",
+        "project_id": project_root.name,
+        "provenance": provenance,
+        "confidence": confidence,
+        "fetched_at": fetched_at,
+        "draft_context": {
+            "detected_context": detected_context,
+            "question_template": "codd/templates/lexicon_questions.md",
+            "question_count": question_count,
+        },
+        "node_vocabulary": [
+            {
+                "id": "url_route",
+                "description": "Browser or API path exposed by the project.",
+                "extractor": "filesystem_routes",
+                "naming_convention": "kebab-case",
+                **entry_defaults,
+            },
+            {
+                "id": "db_table",
+                "description": "Persistent database table or collection name.",
+                "naming_convention": "snake_case",
+                **entry_defaults,
+            },
+            {
+                "id": "env_var",
+                "description": "Runtime configuration environment variable.",
+                "naming_convention": "SCREAMING_SNAKE_CASE",
+                **entry_defaults,
+            },
+            {
+                "id": "cli_command",
+                "description": "Command-line command, subcommand, or flag namespace.",
+                "naming_convention": "kebab-case",
+                **entry_defaults,
+            },
+            {
+                "id": "role",
+                "description": "User, operator, or system role used for access and routing decisions.",
+                "naming_convention": "snake_case",
+                **entry_defaults,
+            },
+            {
+                "id": "domain_event",
+                "description": "Domain event or lifecycle state transition name.",
+                "naming_convention": "snake_case",
+                **entry_defaults,
+            },
+            {
+                "id": "module_file",
+                "description": "Source module or file path naming unit.",
+                "naming_convention": "snake_case",
+                **entry_defaults,
+            },
+        ],
+        "naming_conventions": [
+            {"id": "kebab-case", "regex": "^[a-z][a-z0-9-]*$"},
+            {"id": "snake_case", "regex": "^[a-z][a-z0-9_]*$"},
+            {"id": "SCREAMING_SNAKE_CASE", "regex": "^[A-Z][A-Z0-9_]*$"},
+            {"id": "PascalCase", "regex": "^[A-Z][A-Za-z0-9]*$"},
+        ],
+        "design_principles": [
+            "This project_lexicon.yaml is an inferred draft and must be reviewed before conventions are treated as human-approved.",
+            f"Detected project context: {context_label}. Confirm or replace any convention that does not match the project.",
+            "Use one canonical name for the same domain concept across docs, code, config, and CLI unless an exception is documented.",
+        ],
+        "failure_modes": [
+            {"id": "case_drift", "pattern": "The same concept appears with multiple naming cases.", "detector": "lexicon_validate"},
+            {"id": "prefix_omission", "pattern": "A role, area, or environment prefix is missing where the project requires one.", "detector": "lexicon_validate"},
+            {"id": "untracked_vocabulary", "pattern": "A release-relevant node type is used without a lexicon entry.", "detector": "lexicon_validate"},
+        ],
+        "extractor_registry": {
+            "filesystem_routes": {
+                "type": "codd.parsing.FileSystemRouteExtractor",
+                "description": "Extract filesystem-driven route paths from configured project directories.",
+            }
+        },
+    }
 
 
 def build_plan(project_root: Path) -> PlanResult:
