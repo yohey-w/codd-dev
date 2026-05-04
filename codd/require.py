@@ -10,7 +10,12 @@ from typing import Any
 import yaml
 
 from codd.config import load_project_config
-from codd.generator import _invoke_ai_command, _resolve_ai_command, _sanitize_generated_body
+from codd.generator import (
+    _inject_lexicon,
+    _invoke_ai_command,
+    _resolve_ai_command,
+    _sanitize_generated_body,
+)
 from codd.planner import ExtractedDocument, _load_extracted_documents
 from codd.restore import INFERRED_REQUIREMENT_SECTIONS
 
@@ -214,7 +219,8 @@ def build_require_prompt(
         "Output the Markdown body now."
     )
 
-    return "\n".join(lines).rstrip() + "\n"
+    prompt = "\n".join(lines).rstrip() + "\n"
+    return _inject_lexicon(prompt, project_root)
 
 
 def _build_frontmatter(cluster_name: str) -> str:
@@ -269,6 +275,7 @@ def run_require(
             clusters.get(cluster_name, []),
             cross_cutting_docs,
             feedback=feedback,
+            project_root=project_root,
         )
         title = _cluster_title(cluster_name)
         raw_body = _invoke_ai_command(resolved_ai_command, prompt)

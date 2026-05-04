@@ -146,6 +146,7 @@ def generate_wave(
                 dependency_documents=dependency_documents,
                 conventions=combined_conventions,
                 ai_command=resolved_ai_command,
+                project_root=project_root,
                 feedback=feedback,
             ),
         )
@@ -391,14 +392,28 @@ def _load_dependency_documents(
     return documents
 
 
+def _inject_lexicon(base_prompt: str, project_root: str | Path | None) -> str:
+    """Prepend project lexicon context to a prompt if project_lexicon.yaml exists."""
+    if project_root is None:
+        return base_prompt
+    from codd.lexicon import load_lexicon
+
+    lexicon = load_lexicon(project_root)
+    if lexicon is None:
+        return base_prompt
+    return lexicon.as_context_string() + "\n\n---\n\n" + base_prompt
+
+
 def _generate_document_body(
     artifact: WaveArtifact,
     dependency_documents: list[DependencyDocument],
     conventions: list[dict[str, Any]],
     ai_command: str,
+    project_root: Path | None = None,
     feedback: str | None = None,
 ) -> str:
     prompt = _build_generation_prompt(artifact, dependency_documents, conventions, feedback=feedback)
+    prompt = _inject_lexicon(prompt, project_root)
     return _sanitize_generated_body(
         artifact.title,
         _invoke_ai_command(ai_command, prompt),
