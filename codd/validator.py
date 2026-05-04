@@ -11,6 +11,8 @@ from typing import Any
 import yaml
 
 from codd.bridge import load_bridge_registry
+from codd.coherence_adapters import design_token_violation_to_event, validation_issue_to_event
+from codd.coherence_engine import EventBus
 
 
 NODE_ID_PATTERN = re.compile(r"^(?P<prefix>[a-z_]+):(?P<name>.+)$")
@@ -50,6 +52,7 @@ IMPLEMENTATION_NODE_PREFIXES = {
     "test",
 }
 IMPLEMENTATION_DESIGN_SUFFIXES = ("-service", "-integration", "-delivery")
+_coherence_bus: EventBus | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +168,7 @@ def validate_with_lexicon(project_root: str | Path, graph=None) -> list[dict[str
                 }
             )
 
+    _publish_validation_issues(violations)
     return violations
 
 
@@ -233,6 +237,7 @@ def validate_design_tokens(project_root: str | Path) -> list[DesignTokenViolatio
                     )
                 )
 
+    _publish_design_token_violations(violations)
     return violations
 
 
@@ -392,8 +397,31 @@ def validate_project(project_root: Path, codd_dir: Path | None = None) -> Valida
     """Validate the project, delegating to a Pro bridge when registered."""
     handler = load_bridge_registry().validator_handler
     if handler is not None:
-        return handler(project_root, codd_dir, _validate_project_oss)
-    return _validate_project_oss(project_root, codd_dir)
+        result = handler(project_root, codd_dir, _validate_project_oss)
+    else:
+        result = _validate_project_oss(project_root, codd_dir)
+    _publish_validation_issues(result.issues)
+    return result
+
+
+def set_coherence_bus(bus: EventBus | None) -> None:
+    """Set an opt-in bus used to publish validation events."""
+    global _coherence_bus
+    _coherence_bus = bus
+
+
+def _publish_validation_issues(issues: list[Any]) -> None:
+    if _coherence_bus is None:
+        return
+    for issue in issues:
+        validation_issue_to_event(issue, bus=_coherence_bus)
+
+
+def _publish_design_token_violations(violations: list[Any]) -> None:
+    if _coherence_bus is None:
+        return
+    for violation in violations:
+        design_token_violation_to_event(violation, bus=_coherence_bus)
 
 
 @dataclass
