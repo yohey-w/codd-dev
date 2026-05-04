@@ -2,6 +2,23 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [Unreleased]
+
+### Added (preview, ships in v1.17.0)
+
+- **`codd validate --screen-flow`** (cmd_347, commit c4616e9): screen-flow.md の routes と
+  filesystem routes (codd.yaml `filesystem_routes`) を比較して drift を検出。Coherence
+  Engine と統合し、`screen_flow_drift` kind として DriftEvent を発行可能 (opt-in
+  `set_coherence_bus()` フック)
+- **`codd coverage`** (cmd_348, commit 0401d28): E2E カバレッジ + design-token カバレッジ +
+  lexicon コンプライアンスを統合した merge gate
+  - `--e2e-threshold FLOAT` (デフォルト 100.0): E2E 網羅率の閾値
+  - `--lexicon-threshold FLOAT` (デフォルト 100.0): lexicon 準拠率の閾値
+  - `--json`: 機械可読 JSON 出力 (CI 連携向け)
+
+両 cmd ともテスト 21 件全 PASS、Generality Gate 適合 (framework 固有コード 0 件)、
+全体回帰は 747/0/0 を維持。
+
 ## [1.16.0] - 2026-05-04
 
 ### Added
