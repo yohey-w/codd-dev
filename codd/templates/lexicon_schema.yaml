@@ -9,9 +9,23 @@ optional_sections:
   - failure_modes
   - extractor_registry
 
+provenance_values:
+  - web_search
+  - official_doc
+  - human
+  - inferred
+
 node_vocabulary_item:
   required_fields: [id, description]
-  optional_fields: [extractor, naming_convention, drift_detector, prefix_rules, plurality]
+  optional_fields:
+    - extractor
+    - naming_convention
+    - drift_detector
+    - prefix_rules
+    - plurality
+    - provenance
+    - confidence
+    - fetched_at
 
 naming_convention_item:
   required_fields: [id, regex]
