@@ -1100,6 +1100,71 @@ def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, path: str):
     raise SystemExit(run_validate(project_root, codd_dir))
 
 
+@main.command()
+@click.option("--path", default=".", show_default=True, help="Project root directory")
+@click.option(
+    "--e2e-threshold",
+    default=100.0,
+    show_default=True,
+    type=float,
+    help="E2E coverage threshold percentage.",
+)
+@click.option(
+    "--lexicon-threshold",
+    default=100.0,
+    show_default=True,
+    type=float,
+    help="Lexicon compliance threshold percentage.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
+def coverage(path: str, e2e_threshold: float, lexicon_threshold: float, as_json: bool):
+    """Coverage metrics merge gate: E2E, design tokens, and lexicon."""
+    from codd.coverage_metrics import run_coverage
+
+    project_root = Path(path).resolve()
+    report = run_coverage(
+        project_root,
+        e2e_threshold=e2e_threshold,
+        design_token_threshold=0.0,
+        lexicon_threshold=lexicon_threshold,
+    )
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "all_passed": report.all_passed,
+                    "results": [
+                        {
+                            "metric": result.metric,
+                            "total": result.total,
+                            "covered": result.covered,
+                            "uncovered": result.uncovered,
+                            "pct": result.pct,
+                            "threshold": result.threshold,
+                            "passed": result.passed,
+                            "details": result.details,
+                        }
+                        for result in report.results
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        for result in report.results:
+            status = "PASS" if result.passed else "FAIL"
+            click.echo(
+                f"[{status}] {result.metric}: {result.pct:.0f}% "
+                f"(threshold: {result.threshold:.0f}%, uncovered: {result.uncovered})"
+            )
+            for detail in result.details:
+                click.echo(f"    {detail}")
+        click.echo("Coverage gate PASSED" if report.all_passed else "Coverage gate FAILED")
+
+    raise SystemExit(0 if report.all_passed else 1)
+
+
 @main.command("fixup-drift")
 @click.option("--path", default=".", show_default=True, help="Project root directory")
 @click.option(
