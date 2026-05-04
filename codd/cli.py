@@ -33,6 +33,38 @@ def _require_codd_dir(project_root: Path) -> Path:
     return codd_dir
 
 
+def _run_design_md_lint(project_root: Path) -> None:
+    """Run the external DESIGN.md linter when the local toolchain supports it."""
+    design_md_path = project_root / "DESIGN.md"
+    if not design_md_path.exists():
+        click.echo("WARNING: DESIGN.md not found. Skipping lint.")
+        return
+    if not shutil.which("npx"):
+        click.echo("WARNING: npx not available. Skipping @google/design.md lint.")
+        return
+
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["npx", "--yes", "@google/design.md", "lint", str(design_md_path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        click.echo("DESIGN.md lint: FAIL\nnpx @google/design.md lint timed out after 60 seconds.")
+        raise SystemExit(1)
+
+    if result.returncode == 0:
+        click.echo("DESIGN.md lint: PASS")
+        return
+
+    output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+    click.echo(f"DESIGN.md lint: FAIL\n{output}")
+    raise SystemExit(1)
+
+
 def _resolve_bootstrap_codd_dir(project_root: Path) -> Path:
     """Choose a config dir for brownfield bootstrap without clobbering source code."""
     existing = find_codd_dir(project_root)
@@ -598,8 +630,17 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 @click.option("--e2e", is_flag=True, default=False, help="Run E2E tests (CI-safe, excludes @cdp-only)")
 @click.option("--deploy", is_flag=True, default=False, help="Run deploy/CDP-only E2E tests against deployed URL")
 @click.option("--base-url", default=None, help="Override BASE_URL for E2E tests")
-def verify(path: str, sprint: int | None, e2e: bool, deploy: bool, base_url: str | None) -> None:
+@click.option(
+    "--design-md",
+    is_flag=True,
+    default=False,
+    help="Run npx @google/design.md lint on DESIGN.md (skip if npx unavailable).",
+)
+def verify(path: str, sprint: int | None, e2e: bool, deploy: bool, base_url: str | None, design_md: bool) -> None:
     """Run build + test verification and trace failures to design documents."""
+    if design_md:
+        _run_design_md_lint(Path(path).resolve())
+        return
     if e2e or deploy:
         from codd.e2e_runner import run_e2e
         run_e2e(path=path, deploy=deploy, base_url=base_url)
@@ -1035,20 +1076,25 @@ def drift(path: str, output_format: str):
     result = run_drift(project_root, codd_dir)
 
     if output_format == "json":
+        drift_entries = []
+        for entry in result.drift:
+            payload = {
+                "kind": entry.kind,
+                "url": entry.url,
+                "source": entry.source,
+                "closest_match": entry.closest_match,
+            }
+            if entry.status:
+                payload["status"] = entry.status
+            if entry.token:
+                payload["token"] = entry.token
+            drift_entries.append(payload)
         click.echo(
             json.dumps(
                 {
                     "design_urls": result.design_urls,
                     "impl_urls": result.impl_urls,
-                    "drift": [
-                        {
-                            "kind": entry.kind,
-                            "url": entry.url,
-                            "source": entry.source,
-                            "closest_match": entry.closest_match,
-                        }
-                        for entry in result.drift
-                    ],
+                    "drift": drift_entries,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -1056,10 +1102,12 @@ def drift(path: str, output_format: str):
         )
     else:
         for entry in result.drift:
-            label = f"[drift {entry.kind}]"
+            status = f":{entry.status}" if entry.status else ""
+            label = f"[drift {entry.kind}{status}]"
+            value = entry.token or entry.url
             closest = f"  (closest: {entry.closest_match})" if entry.closest_match else ""
             source = f"  in {entry.source}" if entry.source else ""
-            click.echo(f"{label} {entry.url}{source}{closest}")
+            click.echo(f"{label} {value}{source}{closest}")
         if not result.drift:
             click.echo("No drift detected.")
         else:
