@@ -9,12 +9,17 @@ import re
 from typing import Any
 
 try:
-    from codd.knowledge_fetcher import KnowledgeEntry, KnowledgeFetcher
+    from codd.knowledge_fetcher import (
+        KnowledgeEntry,
+        KnowledgeFetcher,
+        load_ux_required_routes,
+    )
 
     _HAS_KNOWLEDGE_FETCHER = True
 except ImportError:  # pragma: no cover - exercised by monkeypatched fallback test
     KnowledgeEntry = Any  # type: ignore[misc, assignment]
     KnowledgeFetcher = None  # type: ignore[assignment]
+    load_ux_required_routes = None  # type: ignore[assignment]
     _HAS_KNOWLEDGE_FETCHER = False
 
 
@@ -36,6 +41,10 @@ class GapItem:
     rationale: str = ""
     question: str = ""
     reject_reason: str = ""
+    category: str = ""
+    description: str = ""
+    expected_routes: Any | None = None
+    audit_class: str = ""
 
     def __post_init__(self) -> None:
         if not self.fetched_at:
@@ -76,6 +85,11 @@ class CoverageAuditor:
             self._fetcher = KnowledgeFetcher(self.project_root)
         else:
             self._fetcher = None
+        self._ux_required_routes = (
+            load_ux_required_routes(self.project_root)
+            if load_ux_required_routes is not None
+            else {}
+        )
 
     def detect_project_type(self) -> str:
         """Detect a broad project type from manifests and requirement/design docs."""
@@ -220,6 +234,7 @@ class CoverageAuditor:
 
         lms = [
             *base_web,
+            *self._build_auth_ui_surface_checklist(),
             {
                 "id": "role_access_control",
                 "label": "Role-based access control",
@@ -375,6 +390,68 @@ class CoverageAuditor:
         }
         return list(checklists.get(project_type, base_web))
 
+    def _build_auth_ui_surface_checklist(self) -> list[dict[str, Any]]:
+        route_keys = {
+            "ux:auth:signin": "signin",
+            "ux:landing:root": "root",
+            "ux:auth:signup": "signup",
+        }
+        checklist = [
+            {
+                "id": "ux:auth:signin",
+                "label": "User sign-in/login form",
+                "category": "auth_ui_surface",
+                "description": "User sign-in/login form",
+                "expected_routes": None,
+                "audit_class": ASK,
+                "classification": ASK,
+                "confidence": 0.8,
+                "provenance": "project_config:codd.yaml[ux].required_routes",
+                "question": (
+                    "Which route implements the user sign-in/login form? "
+                    "Configure ux.required_routes.signin in codd.yaml if needed."
+                ),
+                "aliases": ["sign in", "signin", "login", "login form", "auth ui"],
+            },
+            {
+                "id": "ux:landing:root",
+                "label": "Root landing page or redirect",
+                "category": "auth_ui_surface",
+                "description": "Root landing page or redirect to dashboard/login",
+                "expected_routes": None,
+                "audit_class": ASK,
+                "classification": ASK,
+                "confidence": 0.8,
+                "provenance": "project_config:codd.yaml[ux].required_routes",
+                "question": (
+                    "What should the root route show or redirect to? "
+                    "Configure ux.required_routes.root in codd.yaml if needed."
+                ),
+                "aliases": ["root landing", "landing page", "home page", "redirect"],
+            },
+            {
+                "id": "ux:auth:signup",
+                "label": "Sign-up/registration flow",
+                "category": "auth_ui_surface",
+                "description": "Sign-up/registration flow if user registration is required",
+                "expected_routes": None,
+                "audit_class": ASK,
+                "classification": ASK,
+                "confidence": 0.75,
+                "provenance": "project_config:codd.yaml[ux].required_routes",
+                "question": (
+                    "Is user self-registration required, and which route implements it? "
+                    "Configure ux.required_routes.signup in codd.yaml if needed."
+                ),
+                "aliases": ["sign up", "signup", "registration", "register"],
+            },
+        ]
+        for item in checklist:
+            route_key = route_keys[item["id"]]
+            if route_key in self._ux_required_routes:
+                item["expected_routes"] = self._ux_required_routes[route_key]
+        return checklist
+
     def classify_gaps(self, project_type: str, existing_keywords: list[str]) -> AuditResult:
         """Detect missing checklist items and classify each gap."""
         result = AuditResult(project_type=project_type)
@@ -387,12 +464,16 @@ class CoverageAuditor:
             gap = GapItem(
                 id=item["id"],
                 label=item["label"],
-                classification=item["classification"],
+                classification=item.get("classification", item.get("audit_class", ASK)),
                 confidence=item.get("confidence", 0.9),
                 provenance=item.get("provenance", "web_search"),
                 rationale=item.get("rationale", ""),
                 question=item.get("question", ""),
                 reject_reason=item.get("reject_reason", ""),
+                category=item.get("category", ""),
+                description=item.get("description", ""),
+                expected_routes=item.get("expected_routes"),
+                audit_class=item.get("audit_class", item.get("classification", "")),
             )
             if gap.classification == AUTO_ACCEPT:
                 result.auto_accept.append(gap)
@@ -451,6 +532,7 @@ class CoverageAuditor:
                     f"  - Question: {item.question or 'Please confirm applicability.'}",
                     f"  - Provenance: {item.provenance}",
                     f"  - Confidence: {item.confidence:.2f}",
+                    *_gap_metadata_lines(item),
                 ]
             )
 
@@ -509,6 +591,17 @@ class CoverageAuditor:
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _gap_metadata_lines(item: GapItem) -> list[str]:
+    lines: list[str] = []
+    if item.category:
+        lines.append(f"  - Category: {item.category}")
+    if item.description and item.description != item.label:
+        lines.append(f"  - Description: {item.description}")
+    if item.expected_routes is not None:
+        lines.append(f"  - Expected routes: {item.expected_routes}")
+    return lines
 
 
 def _iter_project_text(project_root: Path) -> list[str]:
