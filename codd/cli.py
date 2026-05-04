@@ -744,6 +744,87 @@ def verify(path: str, sprint: int | None, e2e: bool, deploy: bool, base_url: str
     _run_pro_command("verify", path=path, sprint=sprint)
 
 
+def _run_e2e_generate(path: str, base_url: str, output: str | None, framework: str) -> None:
+    """Generate E2E test files from saved or freshly extracted scenarios."""
+    from codd.e2e_extractor import ScenarioExtractor
+    from codd.e2e_generator import TestGenerator, load_scenarios_from_markdown
+
+    project_root = Path(path).resolve()
+    scenarios_path = project_root / "docs" / "e2e" / "scenarios.md"
+    if scenarios_path.exists():
+        collection = load_scenarios_from_markdown(scenarios_path)
+    else:
+        collection = ScenarioExtractor(project_root).extract()
+
+    if not collection.scenarios:
+        click.echo("No scenarios found. Run `codd e2e extract` first or check docs/e2e/scenarios.md.")
+        return
+
+    output_dir = None
+    if output:
+        output_dir = Path(output).expanduser()
+        if not output_dir.is_absolute():
+            output_dir = project_root / output_dir
+
+    generator = TestGenerator(project_root, base_url=base_url, framework=framework)
+    generated = generator.generate(collection, output_dir=output_dir)
+
+    click.echo(f"Generated {len(generated)} test file(s):")
+    for test_file in generated:
+        routes = ", ".join(test_file.routes[:3]) or "none"
+        if len(test_file.routes) > 3:
+            routes += "..."
+        click.echo(f"  {test_file.file_name} ({test_file.steps_count} steps, routes: {routes})")
+
+
+@main.group()
+def e2e():
+    """Generate and manage E2E test artifacts."""
+    pass
+
+
+@e2e.command("generate")
+@click.option("--path", default=".", show_default=True, help="Project root")
+@click.option(
+    "--base-url",
+    default="http://localhost:3000",
+    show_default=True,
+    help="Base URL for generated E2E tests",
+)
+@click.option("--output", default=None, help="Output directory for test files")
+@click.option(
+    "--framework",
+    default="playwright",
+    show_default=True,
+    type=click.Choice(["playwright", "cypress"]),
+    help="E2E test framework",
+)
+def e2e_generate(path: str, base_url: str, output: str | None, framework: str) -> None:
+    """Generate Playwright or Cypress test files from E2E scenarios."""
+    _run_e2e_generate(path=path, base_url=base_url, output=output, framework=framework)
+
+
+@main.command("e2e-generate")
+@click.option("--path", default=".", show_default=True, help="Project root")
+@click.option(
+    "--base-url",
+    default="http://localhost:3000",
+    show_default=True,
+    help="Base URL for generated E2E tests",
+)
+@click.option("--output", default=None, help="Output directory for test files")
+@click.option(
+    "--framework",
+    default="playwright",
+    show_default=True,
+    type=click.Choice(["playwright", "cypress"]),
+    help="E2E test framework",
+)
+def e2e_generate_legacy(path: str, base_url: str, output: str | None, framework: str) -> None:
+    """Generate Playwright or Cypress test files from E2E scenarios."""
+    _run_e2e_generate(path=path, base_url=base_url, output=output, framework=framework)
+
+
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--language", default=None, help="Override language detection (python/typescript/javascript/go — full support; java — symbols only)")
