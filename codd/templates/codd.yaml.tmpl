@@ -36,3 +36,20 @@ bands:
 propagation:
   max_depth: 10
   stop_at_contract_boundary: true
+
+context_acquisition:
+  enabled: true
+  strategy: web_search_first   # web_search_first | offline | human_only
+  sources:
+    - type: official_docs
+      priority: high
+    - type: github_search
+      priority: medium
+    - type: web_search
+      priority: medium
+  cache_ttl_days: 30
+  freshness_check_on_startup: false
+  fact_check:
+    enabled: true
+    min_sources: 2
+    min_confidence: 0.6
