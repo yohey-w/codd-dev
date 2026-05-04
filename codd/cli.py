@@ -996,6 +996,57 @@ def validate(lexicon: bool, design_tokens: bool, path: str):
     raise SystemExit(run_validate(project_root, codd_dir))
 
 
+@main.command("fixup-drift")
+@click.option("--path", default=".", show_default=True, help="Project root directory")
+@click.option(
+    "--dry-run/--apply",
+    default=True,
+    show_default=True,
+    help="Dry-run shows proposals; --apply writes via an isolated git worktree.",
+)
+@click.option(
+    "--severity",
+    type=click.Choice(["red", "amber", "green", "all"]),
+    default="red",
+    show_default=True,
+    help="Severity to process.",
+)
+@click.option(
+    "--kind",
+    type=click.Choice(["url_drift", "design_token_drift", "lexicon_violation", "screen_flow_drift", "all"]),
+    default="all",
+    show_default=True,
+    help="Drift kind to fix.",
+)
+def fixup_drift(path: str, dry_run: bool, severity: str, kind: str):
+    """Detect drift and dispatch registered Coherence Engine fix strategies."""
+    from codd.fixup_drift import run_fixup_drift
+
+    project_root = Path(path).resolve()
+    result = run_fixup_drift(
+        project_root,
+        dry_run=dry_run,
+        severity_filter=severity,
+        kind_filter=kind,
+    )
+
+    proposals = result.get("proposals", [])
+    if dry_run:
+        click.echo(f"[Dry-run] {len(proposals)} fix proposal(s) found.")
+        for proposal in proposals:
+            click.echo(f"  [{proposal.kind}] {proposal.file_path}: {proposal.description}")
+            if proposal.diff:
+                click.echo(proposal.diff[:500])
+        return
+
+    click.echo(
+        f"Applied: {result.get('applied', 0)}, "
+        f"HITL logged: {result.get('hitl_logged', 0)}"
+    )
+    for error in result.get("errors", []):
+        click.echo(f"Error: {error}")
+
+
 @main.command()
 @click.option("--diff", default="HEAD", help="Git diff target (default: HEAD)")
 @click.option("--path", default=".", help="Project root directory")
