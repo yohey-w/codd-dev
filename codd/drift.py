@@ -32,6 +32,13 @@ class DriftResult:
     exit_code: int = 0
 
 
+@dataclass
+class ScreenTransitionDrift:
+    missing_in_e2e: list[str]
+    extra_in_e2e: list[str]
+    coverage_ratio: float
+
+
 _DESIGN_TOKEN_REF_RE = re.compile(r"\{([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)\}")
 _DESIGN_TOKEN_ID_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\b")
 _SKIPPED_PATH_PARTS = {".codd", ".git", ".hg", ".mypy_cache", ".pytest_cache", ".venv", "node_modules"}
@@ -155,6 +162,70 @@ def run_drift(project_root: Path, codd_dir: Path) -> DriftResult:
     return result
 
 
+def extract_e2e_have_url_assertions(
+    project_root: Path,
+    config: dict[str, Any] | None = None,
+) -> list[str]:
+    """Extract configured URL assertion values from E2E test files."""
+    project_root = Path(project_root)
+    e2e_config = _e2e_config(config)
+    assertion_pattern = _string_config(e2e_config.get("assertion_pattern"), "toHaveURL")
+    test_dir = _resolve_project_path(
+        project_root,
+        _string_config(e2e_config.get("test_dir"), "tests/e2e"),
+    )
+    spec_globs = _string_list_config(
+        e2e_config.get("spec_globs", e2e_config.get("file_globs")),
+        ["*.spec.ts"],
+    )
+
+    if not assertion_pattern or not test_dir.exists():
+        return []
+
+    assertion_re = re.compile(rf"{re.escape(assertion_pattern)}\s*\(\s*(['\"])(?P<url>[^'\"]+)\1")
+    urls: list[str] = []
+    for spec_file in _iter_e2e_spec_files(test_dir, spec_globs, project_root):
+        try:
+            content = spec_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        urls.extend(match.group("url") for match in assertion_re.finditer(content))
+    return _unique_urls(urls)
+
+
+def detect_screen_transition_drift(
+    project_root: Path,
+    config: dict[str, Any] | None = None,
+) -> ScreenTransitionDrift:
+    """Compare extracted screen-transition destinations against E2E URL assertions."""
+    project_root = Path(project_root)
+    e2e_config = _e2e_config(config)
+    transitions_path = _resolve_project_path(
+        project_root,
+        _string_config(
+            e2e_config.get("screen_transitions_path"),
+            "docs/extracted/screen-transitions.yaml",
+        ),
+    )
+
+    if not transitions_path.exists():
+        return ScreenTransitionDrift(missing_in_e2e=[], extra_in_e2e=[], coverage_ratio=1.0)
+
+    design_routes = _read_screen_transition_routes(transitions_path)
+    e2e_routes = set(extract_e2e_have_url_assertions(project_root, config))
+
+    missing = sorted(design_routes - e2e_routes)
+    extra = sorted(e2e_routes - design_routes)
+    coverage = len(design_routes & e2e_routes) / len(design_routes) if design_routes else 1.0
+    result = ScreenTransitionDrift(
+        missing_in_e2e=missing,
+        extra_in_e2e=extra,
+        coverage_ratio=coverage,
+    )
+    _publish_screen_transition_drift_events(result)
+    return result
+
+
 def set_coherence_bus(bus: EventBus | None) -> None:
     """Set an opt-in bus used to publish drift events."""
     global _coherence_bus
@@ -166,6 +237,30 @@ def _publish_drift_events(entries: Sequence[Any]) -> None:
         return
     for entry in entries:
         drift_entry_to_event(entry, bus=_coherence_bus)
+
+
+def _publish_screen_transition_drift_events(result: ScreenTransitionDrift) -> None:
+    entries: list[DriftEntry] = [
+        DriftEntry(
+            kind="screen_transition_e2e",
+            url=route,
+            source="screen-transitions.yaml",
+            closest_match="",
+            status="missing_in_e2e",
+        )
+        for route in result.missing_in_e2e
+    ]
+    entries.extend(
+        DriftEntry(
+            kind="screen_transition_e2e",
+            url=route,
+            source="tests/e2e",
+            closest_match="",
+            status="extra_in_e2e",
+        )
+        for route in result.extra_in_e2e
+    )
+    _publish_drift_events(entries)
 
 
 def _extract_defined_design_tokens(design_md_path: Path) -> set[str]:
@@ -291,3 +386,63 @@ def _route_url(route: Any) -> str:
     if isinstance(route, dict):
         return str(route.get("url", ""))
     return str(getattr(route, "url", ""))
+
+
+def _e2e_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    value = config.get("e2e", {})
+    return value if isinstance(value, dict) else {}
+
+
+def _string_config(value: Any, default: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default
+
+
+def _string_list_config(value: Any, default: list[str]) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if isinstance(value, list):
+        items = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        if items:
+            return items
+    return default
+
+
+def _resolve_project_path(project_root: Path, path_text: str) -> Path:
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return path
+    return project_root / path
+
+
+def _iter_e2e_spec_files(e2e_dir: Path, spec_globs: list[str], project_root: Path):
+    seen: set[Path] = set()
+    for spec_glob in spec_globs:
+        for spec_file in sorted(e2e_dir.rglob(spec_glob)):
+            if not spec_file.is_file() or _should_skip_path(spec_file, project_root):
+                continue
+            resolved = spec_file.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            yield spec_file
+
+
+def _read_screen_transition_routes(transitions_path: Path) -> set[str]:
+    import yaml
+
+    payload = yaml.safe_load(transitions_path.read_text(encoding="utf-8")) or {}
+    edges = payload.get("edges", []) if isinstance(payload, dict) else []
+    routes: set[str] = set()
+    if not isinstance(edges, list):
+        return routes
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        route = edge.get("to") or edge.get("to_route")
+        if route:
+            routes.add(str(route))
+    return routes

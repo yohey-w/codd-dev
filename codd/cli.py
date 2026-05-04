@@ -1598,15 +1598,44 @@ def policy(path: str):
     type=click.Choice(["text", "json"]),
     help="Output format",
 )
-def drift(path: str, output_format: str):
+@click.option("--e2e", is_flag=True, help="Compare screen-transitions.yaml routes with E2E URL assertions")
+def drift(path: str, output_format: str, e2e: bool):
     """Detect drift between design-referenced URLs and implementation endpoints.
 
     Exit code 0 = no drift. Exit code 1 = drift detected (use in CI).
     """
-    from codd.drift import run_drift
+    from codd.drift import detect_screen_transition_drift, run_drift
 
     project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
+
+    if e2e:
+        result = detect_screen_transition_drift(project_root, load_project_config(project_root))
+        if output_format == "json":
+            click.echo(
+                json.dumps(
+                    {
+                        "missing_in_e2e": result.missing_in_e2e,
+                        "extra_in_e2e": result.extra_in_e2e,
+                        "coverage_ratio": result.coverage_ratio,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            for route in result.missing_in_e2e:
+                click.echo(f"[drift e2e:missing_in_e2e] {route}  in screen-transitions.yaml")
+            for route in result.extra_in_e2e:
+                click.echo(f"[drift e2e:extra_in_e2e] {route}  in tests/e2e")
+            click.echo(f"E2E route coverage: {result.coverage_ratio:.2%}")
+            if not result.missing_in_e2e and not result.extra_in_e2e:
+                click.echo("No E2E drift detected.")
+            else:
+                count = len(result.missing_in_e2e) + len(result.extra_in_e2e)
+                click.echo(f"\n{count} E2E drift(s) found.")
+        raise SystemExit(1 if result.missing_in_e2e else 0)
+
     result = run_drift(project_root, codd_dir)
 
     if output_format == "json":
