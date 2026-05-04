@@ -22,6 +22,95 @@
 pip install codd-dev
 ```
 
+## 🆕 v1.16.0-alpha — Coherence Engine（一致性驱动的中央枢纽）
+
+**通过 `DriftEvent` 统一格式连接 drift / validate / propagate / fix 的中央枢纽。**
+
+| 组件 | 作用 |
+|------|------|
+| `DriftEvent` | 包含 source/target/change_type/payload/severity/fix_strategy/kind 的统一事件类型 |
+| `EventBus` | 进程内 pub/sub。Detector publish、Orchestrator subscribe |
+| `Orchestrator` | severity 路由: `red` → auto-fix / `amber` → pending HITL / `green` → log |
+| `coherence_adapters` | drift / validate / design-token violation 输出 → DriftEvent 转换 |
+| `codd propagate --coherence` | 注入 lexicon + DESIGN.md 到 AI prompt（防止术语漂移、色值不一致） |
+| Fixer Coherence-Mode | `run_fix(coherence_event=...)` 时允许修改设计文档（test 失败修复流程保持分离） |
+
+auto-fix 失败时自动降级为 amber，记录到 `docs/coherence/pending_hitl.md` 作为待人工审查的条目。ntfy 通知带速率限制（默认 60 秒）防止通知爆炸。**现有 CLI（`codd drift` / `validate` / `propagate` / `fix`）100% 向后兼容**，不传 `--coherence` 时维持原有行为。
+
+⚠️ **alpha 版本**: Phase 4+（Detector ↔ Applier 直接配管 / `codd fixup-drift` 子命令）将在下一版本实现。本次发布为中央枢纽的架构确立阶段。
+
+---
+
+## 🆕 v1.14.0 — `codd implement` 的 Batch guard
+
+`codd implement` 支持 `--max-tasks N`（默认 30）和 `--wave WAVE_ID`，可安全分批执行大型 implementation plan。**preflight task count guard** 防止 AI 失控 fan-out，并返回包含 `--wave` / `--max-tasks` / `--task` 替代方案的 actionable error message。
+
+```bash
+codd implement --max-tasks 30           # 超过 30 个则 abort
+codd implement --wave wave_2_1          # 仅执行 wave_2_1 的 tasks
+```
+
+> v1.13.1 是 `DesignTokenDriftLinker` 的 `project_root` Path 转换 bug 修复补丁。
+
+---
+
+## 🆕 v1.13.0 — DESIGN.md 集成（Google Stitch OSS, W3C Design Tokens）
+
+**实现从 UI 设计到代码生成的完整可追溯性。**
+
+| 功能 | 说明 |
+|------|------|
+| `DesignMdExtractor` | 自动解析 DESIGN.md（W3C Design Tokens spec） |
+| `KnowledgeFetcher` UI 检测 | 自动识别 React/Vue/Svelte/Flutter 等并建议采用 DESIGN.md |
+| `codd implement` 注入 | 生成 UI 文件时自动将 DESIGN.md tokens 加入 AI prompt |
+| `codd validate --design-tokens` | 检测硬编码的 #hex/px 值并推荐参照 DESIGN.md |
+| `codd drift` design_token | 比对 UI 实现的 token 引用与 DESIGN.md 定义集合 |
+| `codd verify --design-md` | 集成 `npx @google/design.md lint` 到 CoDD 报告 |
+
+```yaml
+# DESIGN.md 示例（放在项目根目录）
+---
+version: "1.0"
+name: "My App"
+colors:
+  Primary: "#1A73E8"
+components:
+  Button.primary:
+    background: "{colors.Primary}"
+---
+```
+
+规格说明: [google-labs-code/design.md](https://github.com/google-labs-code/design.md)
+
+---
+
+## 🆕 v1.12.0 — 元设计上下文层（project_lexicon）
+
+CoDD 增加 **元设计上下文层**。在 `project_lexicon.yaml` 中一次性声明项目的术语表、命名规约、设计原则后，所有 AI 命令（require / plan / generate / implement）都会自动使用。
+
+- 📖 `ProjectLexicon` — 声明节点术语、命名规约、设计原则、failure modes
+- 🌐 `KnowledgeFetcher` — Web Search 优先的知识层，30 天缓存。CoDD 核心零硬编码框架知识
+- 🔍 `codd validate --lexicon` — 检测 lexicon 内的命名规约违反
+- 🔌 Extractor registry — 通过 Python module path 声明 extractor 类。`FileSystemRouteExtractor` 是首个注册示例
+- 🧙 Lexicon wizard — `codd plan` 在 lexicon 不存在时自动生成 draft `project_lexicon.yaml`
+- 📋 `CoverageAuditor` — 需求 gap 检测，AUTO_ACCEPT / ASK / AUTO_REJECT 三分类规则
+- 🏷️ Provenance tracking — 每个 lexicon 条目带 `provenance` / `confidence` / `fetched_at`
+
+---
+
+## 🆕 v1.11.0 — 文件系统路由感知的 Drift 检测
+
+CoDD 现在理解文件系统路由框架（Next.js, SvelteKit, Nuxt, Astro, Remix），可检测设计文档与实现之间的 URL drift。
+
+- 📐 `FileSystemRouteExtractor` — 从目录结构提取 endpoint 节点
+- 🔗 `DocumentUrlLinker` — 自动将设计文档的 URL 链接到 endpoint
+- 🔍 `codd drift` — 检测设计与实现的 URL gap
+- 🎨 `codd extract --layer routes` — 反向生成 screen-flow 图
+
+详细信息请参阅英文版 README 的 [Filesystem Routing Adapter Recipes](README.md#filesystem-routing-adapter-recipes)。
+
+---
+
 **v1.9.0** — `codd implement` 支持**多 AI 引擎**（Claude stdout + Codex 文件写入）和**阶段内自动并行执行**（通过 git worktree 隔离）。支持阶段里程碑格式（`#### M1.1`）。重度推理模型的超时时间延长至 1 小时。SWE-bench Verified: **73/73 = 100%** 已解决。
 
 ---

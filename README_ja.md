@@ -22,6 +22,95 @@
 pip install codd-dev
 ```
 
+## 🆕 v1.16.0-alpha — Coherence Engine（整合性駆動の中央ハブ）
+
+**drift / validate / propagate / fix を `DriftEvent` 統一フォーマットで結ぶ中央ハブ。**
+
+| コンポーネント | 役割 |
+|----------------|------|
+| `DriftEvent` | source/target/change_type/payload/severity/fix_strategy/kind を持つ統一イベント型 |
+| `EventBus` | in-process pub/sub。Detector が publish、Orchestrator が subscribe |
+| `Orchestrator` | severity ルーティング: `red` → auto-fix / `amber` → pending HITL / `green` → log |
+| `coherence_adapters` | drift / validate / design-token violation 出力 → DriftEvent 変換 |
+| `codd propagate --coherence` | lexicon + DESIGN.md を AI プロンプトに注入（用語ぶれ・色値矛盾の自動防止） |
+| Fixer Coherence-Mode | `run_fix(coherence_event=...)` で設計書修正を許可（test 失敗修正フローは分離維持） |
+
+auto-fix が失敗した場合は自動で amber にダウングレードし、`docs/coherence/pending_hitl.md` に HITL レビュー待ちエントリとして記録。ntfy 通知はレート制限（デフォルト 60 秒）で過剰通知を抑止。**既存CLI (`codd drift` / `validate` / `propagate` / `fix`) は100%後方互換**、`--coherence` を渡さない限り従来挙動を維持。
+
+⚠️ **alpha 版**: Phase 4+（Detector ↔ Applier の直接配管 / `codd fixup-drift` サブコマンド）は次バージョンで実装予定。本リリースは中央ハブのアーキテクチャ確立段階。
+
+---
+
+## 🆕 v1.14.0 — `codd implement` の Batch guard
+
+`codd implement` で `--max-tasks N`（デフォルト30）と `--wave WAVE_ID` をサポート。大規模な implementation plan を安全に分割実行するための **preflight task count guard** で AI の暴走 fan-out を防止し、`--wave` / `--max-tasks` / `--task` の代替案を含む actionable error message を返す。
+
+```bash
+codd implement --max-tasks 30           # 30件超なら abort
+codd implement --wave wave_2_1          # wave_2_1 の tasks のみ実行
+```
+
+> v1.13.1 は `DesignTokenDriftLinker` の `project_root` Path 変換バグ修正パッチ。
+
+---
+
+## 🆕 v1.13.0 — DESIGN.md統合（Google Stitch OSS, W3C Design Tokens）
+
+**UI設計からコード生成まで完全なトレーサビリティを実現。**
+
+| 機能 | 説明 |
+|------|------|
+| `DesignMdExtractor` | DESIGN.md（W3C Design Tokens spec）を自動パース |
+| `KnowledgeFetcher` UI検出 | React/Vue/Svelte/Flutter 等を自動認識し DESIGN.md 採用を提案 |
+| `codd implement` 注入 | UIファイル生成時に DESIGN.md トークンを AI prompt に自動付与 |
+| `codd validate --design-tokens` | ハードコードされた #hex/px 値を検出し DESIGN.md 参照を推奨 |
+| `codd drift` design_token | UI実装のトークン参照と DESIGN.md 定義集合を比較 |
+| `codd verify --design-md` | `npx @google/design.md lint` を CoDD レポートに統合 |
+
+```yaml
+# DESIGN.md サンプル（プロジェクトルートに配置）
+---
+version: "1.0"
+name: "My App"
+colors:
+  Primary: "#1A73E8"
+components:
+  Button.primary:
+    background: "{colors.Primary}"
+---
+```
+
+仕様: [google-labs-code/design.md](https://github.com/google-labs-code/design.md)
+
+---
+
+## 🆕 v1.12.0 — Meta-Design Context Layer（project_lexicon）
+
+CoDD に **メタ設計コンテキスト層** が追加。プロジェクトの語彙・命名規約・設計原則を `project_lexicon.yaml` に一度宣言すれば、すべてのAIコマンド（require / plan / generate / implement）が自動でそれを使用する。
+
+- 📖 `ProjectLexicon` — ノード語彙、命名規約、設計原則、failure modes を宣言
+- 🌐 `KnowledgeFetcher` — Web Search 優先のナレッジ層、30日キャッシュ。CoDD コアにフレームワーク知識のハードコードゼロ
+- 🔍 `codd validate --lexicon` — lexicon 内の命名規約違反を検出
+- 🔌 Extractor registry — Python module path で extractor クラスを宣言。`FileSystemRouteExtractor` が初の登録例
+- 🧙 Lexicon wizard — `codd plan` が lexicon 不在時に draft `project_lexicon.yaml` を自動生成
+- 📋 `CoverageAuditor` — 要件ギャップ検出、AUTO_ACCEPT / ASK / AUTO_REJECT の3クラスルール
+- 🏷️ Provenance tracking — 各 lexicon エントリは `provenance` / `confidence` / `fetched_at` を保持
+
+---
+
+## 🆕 v1.11.0 — Filesystem-Routing Aware Drift Detection
+
+CoDD が filesystem-routing フレームワーク（Next.js, SvelteKit, Nuxt, Astro, Remix）を理解し、設計書と実装間の URL drift を検出可能に。
+
+- 📐 `FileSystemRouteExtractor` — ディレクトリ構造から endpoint ノードを抽出
+- 🔗 `DocumentUrlLinker` — 設計書の URL を endpoint に自動リンク
+- 🔍 `codd drift` — 設計と実装の URL ギャップを検出
+- 🎨 `codd extract --layer routes` — screen-flow ダイアグラムを逆生成
+
+詳細は英語版README の [Filesystem Routing Adapter Recipes](README.md#filesystem-routing-adapter-recipes) を参照。
+
+---
+
 **v1.9.0** — `codd implement` が**マルチAIエンジン**（Claude stdout + Codex file-writing）と**フェーズ内自動並列実行**（git worktree分離）に対応。フェーズマイルストーン形式（`#### M1.1`）をサポート。重い推論モデル向けにタイムアウトを1時間に拡大。SWE-bench Verified: **73/73 = 100%** 解決。
 
 ---
