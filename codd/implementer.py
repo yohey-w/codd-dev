@@ -97,6 +97,7 @@ COMMENT_PREFIX_BY_SUFFIX = {
 }
 UI_FILE_EXTENSIONS = {".tsx", ".jsx", ".vue", ".svelte", ".swift", ".kt", ".dart"}
 SCREEN_FLOW_PROMPT_LIMIT = 8000
+_DEFAULT_GUARD_FILES = ["middleware.ts", "middleware.js"]
 _SKIP_GENERATION_RE = re.compile(
     r"(?mi)^\s*(?:[-*]\s*)?skip_generation\s*:\s*true\s*$",
 )
@@ -135,6 +136,16 @@ _UI_TASK_KEYWORDS = frozenset(
     - _FRAMEWORK_KEYWORDS
 )
 UI_TASK_KEYWORDS = _UI_TASK_KEYWORDS
+_WRAPPER_TASK_KEYWORDS = frozenset(
+    {
+        "page wrapper",
+        "root page",
+        "thin wrapper",
+        "wrapper",
+        "ページラッパー",
+        "ラッパー",
+    }
+)
 
 SPRINT_HEADING_RE = re.compile(
     r"^####\s+Sprint\s+(?P<number>\d+)(?:（(?P<window>[^）]+)）)?(?:\s*:\s*(?P<title>.+))?\s*$",
@@ -244,6 +255,7 @@ def implement_tasks(
         raise ValueError("--wave must be at least 1")
 
     config = _load_project_config(project_root)
+    _check_guard_files_uniqueness(project_root, config)
 
     plan = _load_implementation_plan(project_root, config)
     selected_tasks = _extract_all_tasks(plan)
@@ -741,6 +753,45 @@ def _is_ui_task(task_title: str, task_description: str = "") -> bool:
         if re.search(rf"(?<![a-z0-9]){re.escape(keyword.casefold())}(?![a-z0-9])", text):
             return True
     return False
+
+
+def _is_wrapper_task(task_title: str, task_description: str = "") -> bool:
+    """Return True if task appears to generate a UI page wrapper component."""
+    text = f"{task_title} {task_description}".casefold()
+    for keyword in _WRAPPER_TASK_KEYWORDS:
+        if re.search(rf"(?<![a-z0-9]){re.escape(keyword.casefold())}(?![a-z0-9])", text):
+            return True
+    return _is_ui_task(task_title, task_description)
+
+
+def _check_guard_files_uniqueness(project_root: Path, config: dict[str, Any] | None = None) -> None:
+    """Warn when duplicate guard files such as middleware.ts exist."""
+    guard_files = list(_DEFAULT_GUARD_FILES)
+    if config:
+        implementer_config = config.get("implementer") or {}
+        override = (
+            implementer_config.get("guard_files")
+            if isinstance(implementer_config, dict)
+            else None
+        )
+        if isinstance(override, str) and override.strip():
+            guard_files = [override.strip()]
+        elif isinstance(override, list):
+            configured = [str(item).strip() for item in override if str(item).strip()]
+            if configured:
+                guard_files = configured
+
+    for filename in guard_files:
+        candidates = sorted(project_root.rglob(filename))
+        if len(candidates) > 1:
+            warnings.warn(
+                f"Multiple '{filename}' detected: {[str(p.relative_to(project_root)) for p in candidates]}. "
+                f"Keep only ONE (usually the root-level file). "
+                f"Remove duplicates to avoid dead code. "
+                f"Override this check via codd.yaml [implementer] guard_files.",
+                UserWarning,
+                stacklevel=3,
+            )
 
 
 def _select_screen_flow_routes_for_task(
@@ -1421,6 +1472,29 @@ def _build_implementation_prompt(
         lines.extend(
             [
                 "--- END SCREEN-FLOW ---",
+                "",
+            ]
+        )
+
+    wrapper_task_context = " ".join(
+        part
+        for part in (task.summary, task.module_hint, task.deliverable, task.task_context)
+        if part
+    )
+    if _is_wrapper_task(task.title, wrapper_task_context):
+        lines.extend(
+            [
+                "--- WRAPPER COMPONENT RULES ---",
+                "When generating a UI page wrapper that wraps a form, "
+                "screen, or route component:",
+                "1. Identify the component name from screen-flow.md or design docs. "
+                "Do not rename it.",
+                "2. Wire all callbacks the component requires "
+                "(for example onCredentialsSubmit, onError, onSuccess, onCancel).",
+                "3. Pass required props from router, session, context, "
+                "or equivalent platform services as needed.",
+                "4. Do not generate a thin wrapper that ignores required component props.",
+                "--- END WRAPPER RULES ---",
                 "",
             ]
         )
