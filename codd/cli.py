@@ -86,6 +86,13 @@ def _read_optional_context_file(project_root: Path, path_text: str) -> str | Non
     return path.read_text(encoding="utf-8")
 
 
+def _screen_flow_strict_edges(config: dict) -> bool:
+    screen_flow_config = config.get("screen_flow", {})
+    if not isinstance(screen_flow_config, dict):
+        return True
+    return bool(screen_flow_config.get("strict_edges", True))
+
+
 def _run_design_md_lint(project_root: Path) -> None:
     """Run the external DESIGN.md linter when the local toolchain supports it."""
     design_md_path = project_root / "DESIGN.md"
@@ -1174,8 +1181,14 @@ def review(path: str, scope: str | None, as_json: bool, ai_cmd: str | None):
     default=False,
     help="Validate screen-flow.md routes against filesystem routes.",
 )
+@click.option(
+    "--edges",
+    is_flag=True,
+    default=False,
+    help="Also validate screen-flow route coverage by extracted transition edges.",
+)
 @click.option("--path", default=".", help="Project root directory")
-def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, path: str):
+def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, edges: bool, path: str):
     """Validate CoDD frontmatter and dependency references."""
     project_root = Path(path).resolve()
     if lexicon:
@@ -1206,20 +1219,48 @@ def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, path: str):
         click.echo("No design token violations found.")
         raise SystemExit(0)
 
-    if screen_flow:
-        from codd.screen_flow_validator import validate_screen_flow
+    if screen_flow or edges:
+        from codd.coverage_metrics import check_edge_coverage_gate
+        from codd.screen_flow_validator import (
+            find_screen_flow_path,
+            parse_screen_flow_routes,
+            validate_screen_flow,
+            validate_screen_flow_edges,
+        )
 
         try:
             config = load_project_config(project_root)
         except (FileNotFoundError, ValueError):
             config = {}
         drifts = validate_screen_flow(project_root, config)
+        edge_result = None
+        edge_ok = True
+        strict_edges = _screen_flow_strict_edges(config)
+        if edges:
+            screen_flow_path = find_screen_flow_path(project_root)
+            screen_flow_nodes = parse_screen_flow_routes(screen_flow_path) if screen_flow_path else []
+            edge_result = validate_screen_flow_edges(project_root, screen_flow_nodes, config)
+            edge_ok = check_edge_coverage_gate(edge_result, config)
         if drifts:
             click.echo(f"Screen-flow drift detected: {len(drifts)} route(s)")
             for drift in drifts:
                 click.echo(f"  [{drift.source}] {drift.route}: {drift.detail}")
+        else:
+            click.echo("Screen-flow validation: OK (no drift)")
+        if edge_result is not None:
+            click.echo(
+                "Screen-flow edge coverage: "
+                f"{edge_result.coverage_ratio:.0%} "
+                f"({len(edge_result.covered_nodes)} covered node(s), {edge_result.total_edges} edge(s))"
+            )
+            if edge_result.unreachable_nodes:
+                click.echo("  Unreachable nodes: " + ", ".join(edge_result.unreachable_nodes))
+            if edge_result.orphan_nodes:
+                click.echo("  Orphan nodes: " + ", ".join(edge_result.orphan_nodes))
+            if edge_result.dead_end_nodes:
+                click.echo("  Dead-end nodes: " + ", ".join(edge_result.dead_end_nodes))
+        if drifts or not edge_ok or (edge_result is not None and strict_edges and edge_result.orphan_nodes):
             raise SystemExit(1)
-        click.echo("Screen-flow validation: OK (no drift)")
         raise SystemExit(0)
 
     from codd.validator import run_validate
