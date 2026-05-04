@@ -488,9 +488,36 @@ def require(
     default=False,
     help="Inject lexicon and DESIGN.md context into propagation prompt",
 )
+@click.option(
+    "--reverse",
+    is_flag=True,
+    default=False,
+    help="Reverse propagation: DESIGN.md/lexicon changes to existing implementation",
+)
+@click.option(
+    "--source",
+    type=click.Choice(["design_token", "lexicon"]),
+    default="design_token",
+    show_default=True,
+    help="Source of reverse propagation",
+)
+@click.option(
+    "--base",
+    "base_ref",
+    default=None,
+    help="Base git ref for change detection (default: HEAD~1)",
+)
+@click.option(
+    "--apply",
+    "apply_reverse",
+    is_flag=True,
+    default=False,
+    help="Apply safe reverse propagation replacements (default is dry-run)",
+)
 def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
               reason: str | None, reason_file: str | None,
-              ai_cmd: str | None, feedback: str | None, coherence: bool):
+              ai_cmd: str | None, feedback: str | None, coherence: bool,
+              reverse: bool, source: str, base_ref: str | None, apply_reverse: bool):
     """Propagate source code changes to design documents.
 
     Detects changed source files, maps them to modules, and finds design
@@ -506,6 +533,27 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
     project_root = Path(path).resolve()
     _require_codd_dir(project_root)
     coherence_context = _load_coherence_context(project_root) if coherence else None
+
+    if reverse:
+        from codd.propagator import propagate_reverse
+
+        try:
+            exit_code = propagate_reverse(
+                project_root,
+                source=source,
+                base_ref=base_ref,
+                apply=apply_reverse,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+        if exit_code:
+            raise SystemExit(exit_code)
+        return
+
+    if apply_reverse:
+        click.echo("Error: --apply is only valid with --reverse.")
+        raise SystemExit(1)
 
     # Mutual exclusivity check
     mode_count = sum([update, verify, do_commit])

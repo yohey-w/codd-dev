@@ -7,8 +7,10 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from importlib import import_module
 from typing import Any, Literal
 
 ArtifactKind = Literal[
@@ -69,6 +71,34 @@ class EventBus:
     def clear(self) -> None:
         """Clear published event history."""
         self._published.clear()
+
+
+def set_coherence_bus(bus: EventBus | None) -> None:
+    """Set the opt-in coherence bus on detectors that publish DriftEvents."""
+    for module_name in (
+        "codd.drift",
+        "codd.validator",
+        "codd.screen_flow_validator",
+    ):
+        try:
+            module = import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if exc.name != module_name:
+                raise
+            continue
+        setter = getattr(module, "set_coherence_bus", None)
+        if setter is not None:
+            setter(bus)
+
+
+@contextmanager
+def use_coherence_bus(bus: EventBus):
+    """Temporarily install a coherence bus and always clear it on exit."""
+    set_coherence_bus(bus)
+    try:
+        yield bus
+    finally:
+        set_coherence_bus(None)
 
 
 DEFAULT_ROUTING: dict[Severity, FixStrategy] = {
