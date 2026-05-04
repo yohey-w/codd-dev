@@ -79,6 +79,7 @@ def run_propagate(
     update: bool = False,
     ai_command: str | None = None,
     feedback: str | None = None,
+    coherence_context: dict[str, Any] | None = None,
 ) -> PropagationResult:
     """Detect source code changes and find affected design documents.
 
@@ -131,7 +132,13 @@ def run_propagate(
             if not doc_path.exists():
                 continue
             current_content = doc_path.read_text(encoding="utf-8")
-            prompt = _build_update_prompt(doc, current_content, diff_text, feedback=feedback)
+            prompt = _build_update_prompt(
+                doc,
+                current_content,
+                diff_text,
+                feedback=feedback,
+                coherence_context=coherence_context,
+            )
             raw_body = _invoke_ai_command(resolved_ai_command, prompt)
             body = _sanitize_update_body(raw_body)
 
@@ -146,6 +153,7 @@ def run_verify(
     diff_target: str = "HEAD",
     ai_command: str | None = None,
     feedback: str | None = None,
+    coherence_context: dict[str, Any] | None = None,
 ) -> VerifyResult:
     """Verify propagation: auto-apply green band, return HITL list for amber/gray.
 
@@ -206,7 +214,13 @@ def run_verify(
             if not doc_path.exists():
                 continue
             current_content = doc_path.read_text(encoding="utf-8")
-            prompt = _build_update_prompt(doc, current_content, diff_text, feedback=feedback)
+            prompt = _build_update_prompt(
+                doc,
+                current_content,
+                diff_text,
+                feedback=feedback,
+                coherence_context=coherence_context,
+            )
             raw_body = _invoke_ai_command(resolved_ai_command, prompt)
             body = _sanitize_update_body(raw_body)
             _write_updated_doc(doc_path, current_content, body)
@@ -770,6 +784,7 @@ def _build_update_prompt(
     current_content: str,
     code_diff: str,
     feedback: str | None = None,
+    coherence_context: dict[str, Any] | None = None,
 ) -> str:
     """Build a prompt for AI to update a design document based on changes."""
     # Detect whether the diff is from source code or design docs
@@ -831,11 +846,37 @@ def _build_update_prompt(
             "--- END REVIEW FEEDBACK ---",
         ])
 
+    if coherence_context:
+        lexicon = coherence_context.get("lexicon")
+        if lexicon:
+            lines.extend([
+                "",
+                "## Project Lexicon (must respect naming conventions)",
+                _format_coherence_text(lexicon),
+            ])
+
+        design_md = coherence_context.get("design_md")
+        if design_md:
+            lines.extend([
+                "",
+                "## Design Tokens (must respect these values)",
+                _format_coherence_text(design_md)[:2000],
+            ])
+
     lines.append(
         "Output the updated document body now. If no design-level changes are needed, "
         "output the existing body unchanged. Start with the first section heading.",
     )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _format_coherence_text(value: Any) -> str:
+    """Render optional coherence context into prompt-friendly text."""
+    if hasattr(value, "as_context_string"):
+        return str(value.as_context_string()).strip()
+    if isinstance(value, str):
+        return value.strip()
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def _sanitize_update_body(body: str) -> str:

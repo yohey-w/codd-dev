@@ -68,6 +68,7 @@ def run_fix(
     local_only: bool = False,
     push: bool = True,
     dry_run: bool = False,
+    coherence_event: "DriftEvent | None" = None,
 ) -> FixResult:
     """Main entry point for codd fix.
 
@@ -80,6 +81,12 @@ def run_fix(
     """
     config = load_project_config(project_root)
     resolved_ai = _resolve_ai_command(config, ai_command, command_name="fix")
+    allow_design_fix = coherence_event is not None
+    coherence_context = (
+        _build_coherence_fix_context(coherence_event)
+        if coherence_event is not None
+        else None
+    )
 
     # Step 1: Detect failures
     failures: list[FailureInfo] = []
@@ -123,6 +130,8 @@ def run_fix(
         prompt = _build_fix_prompt(
             project_root, failures, context, config,
             session_state=session_state,
+            allow_design_fix=allow_design_fix,
+            coherence_context=coherence_context,
         )
         ai_output = _invoke_fix_ai(resolved_ai, prompt, project_root)
 
@@ -700,6 +709,35 @@ def _build_fix_context(
     return "\n\n".join(context_parts)
 
 
+def _build_coherence_fix_context(coherence_event: object) -> str:
+    """Build prompt context from a DriftEvent for coherence-aware fixing."""
+    payload = getattr(coherence_event, "payload", {}) or {}
+    if not isinstance(payload, dict):
+        payload = {"value": payload}
+
+    fields = [
+        ("Event ID", getattr(coherence_event, "event_id", "")),
+        ("Kind", getattr(coherence_event, "kind", "")),
+        ("Source artifact", getattr(coherence_event, "source_artifact", "")),
+        ("Target artifact", getattr(coherence_event, "target_artifact", "")),
+        ("Change type", getattr(coherence_event, "change_type", "")),
+        ("Severity", getattr(coherence_event, "severity", "")),
+        ("Fix strategy", getattr(coherence_event, "fix_strategy", "")),
+    ]
+
+    lines = ["## Coherence Drift Event"]
+    for label, value in fields:
+        if value:
+            lines.append(f"- {label}: {value}")
+    if payload:
+        lines.extend([
+            "",
+            "### Payload",
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        ])
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Fix prompt
 # ---------------------------------------------------------------------------
@@ -712,6 +750,8 @@ def _build_fix_prompt(
     config: dict[str, Any],
     *,
     session_state: _SessionState | None = None,
+    allow_design_fix: bool = False,
+    coherence_context: str | None = None,
 ) -> str:
     """Build the prompt for AI to fix failures.
 
@@ -739,6 +779,42 @@ def _build_fix_prompt(
     if session_state and session_state.prior_attempts:
         session_section = session_state.format_for_prompt()
 
+    if allow_design_fix:
+        fix_rules = [
+            "1. Fix implementation code and/or design documents to restore coherence.",
+            "   - If tests fail, fix the source code so tests pass.",
+            "   - If the coherence event shows the design docs are stale or incomplete,",
+            "     update the affected design document as part of the minimal fix.",
+            "   - If build fails (type errors, import errors), fix the source code.",
+            "   - If lint fails, fix the lint issues in the source code.",
+            "   - If a tool prompted interactively in CI (missing config), create the required config file.",
+            "2. Do NOT modify test files unless the test itself has a bug (e.g., wrong import path).",
+            "3. Design document changes are allowed only when required by the coherence event.",
+            "4. Make minimal, focused changes. Don't refactor unrelated code.",
+            "5. Follow the target framework's lint rules and naming conventions.",
+            "   Avoid using global/reserved names (module, exports, require, etc.) as local variables.",
+        ]
+        output_hint = "file"
+        output_body_label = "file content"
+    else:
+        fix_rules = [
+            "1. Fix the IMPLEMENTATION code to match the design, not the other way around.",
+            "   - If tests fail, fix the source code so tests pass.",
+            "   - If a test expects an endpoint/method/feature that doesn't exist in code,",
+            "     ADD the missing implementation as described in the design documents.",
+            "     The test is correct (it matches the spec); the code is incomplete.",
+            "   - If build fails (type errors, import errors), fix the source code.",
+            "   - If lint fails, fix the lint issues in the source code.",
+            "   - If a tool prompted interactively in CI (missing config), create the required config file.",
+            "2. Do NOT modify test files unless the test itself has a bug (e.g., wrong import path).",
+            "3. Do NOT modify design documents.",
+            "4. Make minimal, focused changes. Don't refactor unrelated code.",
+            "5. Follow the target framework's lint rules and naming conventions.",
+            "   Avoid using global/reserved names (module, exports, require, etc.) as local variables.",
+        ]
+        output_hint = "source"
+        output_body_label = "source code"
+
     lines = [
         f"You are fixing failures in the project '{project_name}' ({language}).",
         "",
@@ -747,6 +823,12 @@ def _build_fix_prompt(
     # Insert session state before failures (so AI sees what NOT to repeat)
     if session_section:
         lines.extend([session_section, ""])
+
+    if coherence_context:
+        lines.extend([
+            coherence_context,
+            "",
+        ])
 
     lines.extend([
         "## Failures to fix",
@@ -771,26 +853,14 @@ def _build_fix_prompt(
         "",
         "### Step 2: Fix",
         "",
-        "1. Fix the IMPLEMENTATION code to match the design, not the other way around.",
-        "   - If tests fail, fix the source code so tests pass.",
-        "   - If a test expects an endpoint/method/feature that doesn't exist in code,",
-        "     ADD the missing implementation as described in the design documents.",
-        "     The test is correct (it matches the spec); the code is incomplete.",
-        "   - If build fails (type errors, import errors), fix the source code.",
-        "   - If lint fails, fix the lint issues in the source code.",
-        "   - If a tool prompted interactively in CI (missing config), create the required config file.",
-        "2. Do NOT modify test files unless the test itself has a bug (e.g., wrong import path).",
-        "3. Do NOT modify design documents.",
-        "4. Make minimal, focused changes. Don't refactor unrelated code.",
-        "5. Follow the target framework's lint rules and naming conventions.",
-        "   Avoid using global/reserved names (module, exports, require, etc.) as local variables.",
+        *fix_rules,
         "",
         "## Output format (CRITICAL)",
         "",
         "## Diagnosis",
         "(your root cause analysis here)",
         "",
-        "Then for each file you fix or create, output the COMPLETE file content in a fenced",
+        f"Then for each {output_hint} file you fix or create, output the COMPLETE {output_body_label} in a fenced",
         "code block tagged with the language and the file path (relative to project root):",
         "",
         "```<language> <relative/path/to/file>",
