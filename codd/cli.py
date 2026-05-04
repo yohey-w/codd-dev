@@ -756,7 +756,7 @@ def implement(
             max_tasks=max_tasks,
             wave=wave,
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, CoddCLIError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
 
