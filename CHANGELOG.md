@@ -2,6 +2,27 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.16.0] - 2026-05-04
+
+### Added
+
+- **`codd fixup-drift`** CLI: Coherence Engine 検知後の自動修正コマンド
+  - `--dry-run` (デフォルト): 修正提案を diff/text 形式で表示のみ、本流無傷
+  - `--apply`: git worktree で隔離して適用 (失敗時は worktree 削除で本流無傷)
+  - `--severity [red|amber|green|all]`: 処理対象の severity フィルタ
+  - `--kind [url_drift|design_token_drift|lexicon_violation|screen_flow_drift|all]`: drift kind フィルタ
+- **Fix Strategy plug-in registry**: `@register_strategy` デコレータで kind→Strategy を登録、`list_registered_kinds()` で確認可能
+- **`UrlDriftFixStrategy`** (`codd/fixup_drift_strategies/url_drift.py`): URL drift は破壊的変更を伴うため **HITL only** (pending_hitl.md に記録)
+- **`DesignTokenDriftFixStrategy`** (`codd/fixup_drift_strategies/design_token_drift.py`): 大小文字統一など safe な正規化は auto-apply、値変更/削除は HITL
+- **`LexiconViolationFixStrategy`** (`codd/fixup_drift_strategies/lexicon_violation.py`): lexicon 違反 (用語規約・circular dependency 等) は **HITL only**
+- 全 strategy は dry-run でも HITL 候補を `docs/coherence/pending_hitl.md` に追記し、人間レビュー導線を確保
+
+### Notes
+
+- 後方互換: 既存 CLI (`codd drift` / `validate` / `propagate` / `fix`) はすべて変更なし
+- v1.16.0-alpha (Coherence Engine 中央ハブ) と本リリースで Phase 1〜4 が一貫完成
+- alpha リリースは別 tag (`v1.16.0-alpha`) として歴史保存
+
 ## [1.15.0] - 2026-05-04 (retroactive)
 
 ### Added

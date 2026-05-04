@@ -22,6 +22,26 @@
 pip install codd-dev
 ```
 
+## 🆕 v1.16.0 — `codd fixup-drift` (Coherence Engine の自動修正出口)
+
+`codd fixup-drift` で Coherence Engine 検知 drift を自動修正。**デフォルト `--dry-run`** で本流を保護し、`--apply` 指定時は **git worktree 隔離** で適用 (失敗時は worktree 破棄で本流無傷)。
+
+```bash
+codd fixup-drift                                              # dry-run / red / all kinds
+codd fixup-drift --apply --severity red --kind url_drift      # worktree で適用
+codd fixup-drift --dry-run --severity all --kind design_token_drift
+```
+
+| Strategy | 振る舞い |
+|---|---|
+| `UrlDriftFixStrategy` | URL drift は **HITL only** (pending_hitl.md に記録) |
+| `DesignTokenDriftFixStrategy` | 大小文字統一など safe な正規化は auto-apply、値変更/削除は HITL |
+| `LexiconViolationFixStrategy` | lexicon 違反 (用語規約・circular dependency) は **HITL only** |
+
+新しい Fix Strategy は `@register_strategy("kind_name")` デコレータで plug-in 登録できる。
+
+---
+
 ## 🆕 v1.16.0-alpha — Coherence Engine (整合性駆動の中央ハブ)
 
 **drift / validate / propagate / fix を DriftEvent 統一フォーマットで結ぶ中央ハブ。**
