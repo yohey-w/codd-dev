@@ -130,6 +130,36 @@ def run_validate(project_root: Path, codd_dir: Path) -> int:
     return result.exit_code
 
 
+def validate_with_lexicon(project_root: str | Path, graph=None) -> list[dict[str, Any]]:
+    """
+    Validate project nodes against project_lexicon.yaml conventions.
+    Returns list of violation dicts: [{node_id, violation_type, expected, actual, message}]
+    """
+    from codd.lexicon import load_lexicon
+
+    lexicon = load_lexicon(project_root)
+    if lexicon is None:
+        return []
+
+    violations = []
+    conventions = lexicon.naming_conventions
+
+    for vocab_item in lexicon.node_vocabulary:
+        conv_id = vocab_item.get("naming_convention")
+        if conv_id and conv_id not in conventions:
+            violations.append(
+                {
+                    "node_id": vocab_item["id"],
+                    "violation_type": "unknown_convention",
+                    "expected": list(conventions.keys()),
+                    "actual": conv_id,
+                    "message": f"naming_convention '{conv_id}' not defined in naming_conventions",
+                }
+            )
+
+    return violations
+
+
 def _build_allowed_prefixes(config: dict[str, Any]) -> set[str]:
     """Build the set of allowed node_id prefixes from config + defaults."""
     custom = config.get("prefixes")
