@@ -393,6 +393,13 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str
     help="Base git ref for change detection (default: HEAD~1)",
 )
 @click.option(
+    "--apply",
+    "apply_mode",
+    is_flag=True,
+    default=False,
+    help="Apply AI-generated update proposals to affected design docs",
+)
+@click.option(
     "--audit",
     is_flag=True,
     default=False,
@@ -407,6 +414,7 @@ def require(
     feedback: str | None,
     propagate_changes: bool,
     base_ref: str | None,
+    apply_mode: bool,
     audit: bool,
 ):
     """Infer requirements from extracted codebase facts (brownfield).
@@ -420,7 +428,14 @@ def require(
     if propagate_changes:
         from codd.require_propagate import require_propagate
 
-        raise SystemExit(require_propagate(project_root, base_ref))
+        raise SystemExit(
+            require_propagate(
+                project_root,
+                base_ref,
+                apply=apply_mode,
+                ai_command=ai_cmd,
+            )
+        )
 
     from codd.require import run_require
 
