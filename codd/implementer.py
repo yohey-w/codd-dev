@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import warnings
 from typing import Any
 
 import codd.generator as generator_module
@@ -93,6 +94,19 @@ COMMENT_PREFIX_BY_SUFFIX = {
     ".c": "//",
     ".cs": "//",
     ".rb": "#",
+}
+UI_FILE_EXTENSIONS = {".tsx", ".jsx", ".vue", ".svelte", ".swift", ".kt", ".dart"}
+UI_TASK_KEYWORDS = {
+    "component",
+    "frontend",
+    "layout",
+    "page",
+    "screen",
+    "ui",
+    "ux",
+    "view",
+    "widget",
+    "画面",
 }
 
 SPRINT_HEADING_RE = re.compile(
@@ -366,6 +380,11 @@ def _execute_task(
     combined_conventions = _merge_conventions(
         global_conventions, plan.conventions, document_conventions,
     )
+    design_md_content = (
+        _load_design_md_content(project_root)
+        if _task_generates_ui_file(task_item, (config.get("project") or {}).get("language"))
+        else None
+    )
     prompt = _build_implementation_prompt(
         config=config,
         plan=plan,
@@ -374,6 +393,7 @@ def _execute_task(
         conventions=combined_conventions,
         coding_principles=coding_principles,
         prior_task_outputs=prior_task_outputs,
+        design_md_content=design_md_content,
     )
     prompt = generator_module._inject_lexicon(prompt, project_root)
     raw_output = generator_module._invoke_ai_command(
@@ -562,6 +582,84 @@ def _load_coding_principles(project_root: Path, config: dict[str, Any]) -> str |
         raise FileNotFoundError(f"coding_principles file not found: {raw_path}")
 
     return principles_path.read_text(encoding="utf-8")
+
+
+def _load_design_md_content(project_root: Path) -> str | None:
+    """Load DESIGN.md tokens for prompt injection when available."""
+    try:
+        from codd.design_md import DesignMdExtractor
+    except ImportError:
+        return None
+
+    design_md_path = project_root / "DESIGN.md"
+    if not design_md_path.exists():
+        warnings.warn(
+            "DESIGN.md not found. UI file generation will proceed without design tokens. "
+            "Consider creating DESIGN.md (https://github.com/google-labs-code/design.md)",
+            UserWarning,
+            stacklevel=3,
+        )
+        return None
+
+    result = DesignMdExtractor().extract(design_md_path)
+    if result.error:
+        warnings.warn(f"DESIGN.md parse error: {result.error}", UserWarning, stacklevel=3)
+        return None
+
+    lines = ["# DESIGN.md tokens (W3C Design Tokens spec)"]
+    for token in result.tokens:
+        lines.append(f"- {token.id} ({token.category}): {token.value}")
+    return "\n".join(lines)
+
+
+def _task_generates_ui_file(task: ImplementationTask, language: Any) -> bool:
+    """Return True when the task is expected to emit a UI file."""
+    for path in _candidate_generated_paths(task, language):
+        if path.suffix.lower() in UI_FILE_EXTENSIONS:
+            return True
+    return False
+
+
+def _candidate_generated_paths(task: ImplementationTask, language: Any) -> list[PurePosixPath]:
+    candidates: list[PurePosixPath] = []
+    fields = [
+        task.title,
+        task.summary,
+        task.module_hint,
+        task.deliverable,
+        task.output_dir,
+        task.task_context,
+    ]
+    for field in fields:
+        for match in re.findall(r"[\w@./-]+\.(?:tsx|jsx|vue|svelte|swift|kt|dart)\b", field or "", re.IGNORECASE):
+            candidates.append(PurePosixPath(match))
+
+    default_extension = _default_generated_extension(language)
+    candidates.append(PurePosixPath(task.output_dir) / f"index{default_extension}")
+
+    normalized_language = _normalize_implementation_language(language)
+    if normalized_language in {"typescript", "javascript"} and _task_looks_ui_facing(task):
+        extensions = _implementation_language_extensions(normalized_language)
+        if len(extensions) > 1:
+            candidates.append(PurePosixPath(task.output_dir) / f"index{extensions[1]}")
+
+    return candidates
+
+
+def _task_looks_ui_facing(task: ImplementationTask) -> bool:
+    text = " ".join(
+        [
+            task.title,
+            task.summary,
+            task.module_hint,
+            task.deliverable,
+            task.task_context,
+        ]
+    ).casefold()
+    for keyword in UI_TASK_KEYWORDS:
+        if re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", text):
+            return True
+    return False
 
 
 def _extract_all_tasks(plan: ImplementationPlan) -> list[ImplementationTask]:
@@ -953,6 +1051,7 @@ def _build_implementation_prompt(
     conventions: list[dict[str, Any]],
     coding_principles: str | None,
     prior_task_outputs: list[dict[str, Any]] | None = None,
+    design_md_content: str | None = None,
 ) -> str:
     project = config.get("project") or {}
     frameworks = project.get("frameworks") or []
@@ -1067,6 +1166,16 @@ def _build_implementation_prompt(
                 f"--- BEGIN DEPENDENCY {document.path.as_posix()} ({document.node_id}) ---",
                 document.content.rstrip(),
                 f"--- END DEPENDENCY {document.path.as_posix()} ---",
+                "",
+            ]
+        )
+
+    if design_md_content:
+        lines.extend(
+            [
+                "DESIGN.md design token context:",
+                "- Apply these W3C-style design tokens when generating UI files.",
+                design_md_content.rstrip(),
                 "",
             ]
         )
