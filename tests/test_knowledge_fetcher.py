@@ -1,12 +1,15 @@
 from datetime import UTC, datetime, timedelta
+import json
 import re
 
 from codd.knowledge_fetcher import (
     KnowledgeEntry,
     KnowledgeFetcher,
     _load_cache,
+    _project_has_auth_ui,
     _save_cache,
     _slugify,
+    suggest_ux_required_routes,
 )
 
 
@@ -99,3 +102,65 @@ def test_cache_save_load_roundtrip_preserves_entry(tmp_path):
 
 def _utc_iso(value):
     return value.isoformat().replace("+00:00", "Z")
+
+
+def test_project_has_auth_ui_with_next_auth_package(tmp_path):
+    (tmp_path / "package.json").write_text(
+        json.dumps({"dependencies": {"next-auth": "^5.0.0"}}),
+        encoding="utf-8",
+    )
+
+    assert _project_has_auth_ui(tmp_path, "React")
+
+
+def test_project_has_auth_ui_with_auth_dir(tmp_path):
+    (tmp_path / "src" / "auth").mkdir(parents=True)
+
+    assert _project_has_auth_ui(tmp_path, None)
+
+
+def test_project_has_auth_ui_no_auth(tmp_path):
+    (tmp_path / "package.json").write_text(
+        json.dumps({"dependencies": {"react": "^19.0.0"}}),
+        encoding="utf-8",
+    )
+
+    assert not _project_has_auth_ui(tmp_path, "React")
+
+
+def test_suggest_ux_routes_with_auth():
+    routes = suggest_ux_required_routes("React", has_auth_ui=True)
+
+    assert routes == {"root": "/", "signin": "/login"}
+
+
+def test_suggest_ux_routes_no_auth():
+    routes = suggest_ux_required_routes("React", has_auth_ui=False)
+
+    assert routes == {"root": "/"}
+
+
+def test_suggest_ux_routes_returns_generics():
+    routes = suggest_ux_required_routes("React", has_auth_ui=True)
+    rendered = " ".join(routes.values()).lower()
+
+    assert "next" not in rendered
+    assert "clerk" not in rendered
+    assert "supabase" not in rendered
+
+
+def test_codd_yaml_ux_override_respected(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        "ux:\n"
+        "  required_routes:\n"
+        "    signin: /sign-in\n"
+        "    root: /\n"
+        "    signup: /sign-up\n",
+        encoding="utf-8",
+    )
+
+    routes = KnowledgeFetcher(tmp_path).suggest_ux_required_routes("React")
+
+    assert routes == {"signin": "/sign-in", "root": "/", "signup": "/sign-up"}

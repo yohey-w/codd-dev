@@ -89,3 +89,66 @@ def test_coverage_auditor_instantiates_without_knowledge_fetcher(tmp_path, monke
     auditor = CoverageAuditor(tmp_path)
 
     assert auditor.detect_project_type() == "General/Web"
+
+
+def test_lms_checklist_has_auth_ui_surface(tmp_path):
+    checklist = CoverageAuditor(tmp_path).get_standard_checklist("LMS/EdTech")
+
+    signin = next(item for item in checklist if item["id"] == "ux:auth:signin")
+
+    assert signin["category"] == "auth_ui_surface"
+    assert signin["description"] == "User sign-in/login form"
+
+
+def test_lms_checklist_has_root_landing(tmp_path):
+    checklist = CoverageAuditor(tmp_path).get_standard_checklist("LMS/EdTech")
+
+    assert any(item["id"] == "ux:landing:root" for item in checklist)
+
+
+def test_lms_checklist_auth_class_is_ask(tmp_path):
+    checklist = CoverageAuditor(tmp_path).get_standard_checklist("LMS/EdTech")
+    auth_items = [item for item in checklist if item.get("category") == "auth_ui_surface"]
+
+    assert auth_items
+    assert {item["audit_class"] for item in auth_items} == {ASK}
+    assert {item["classification"] for item in auth_items} == {ASK}
+
+
+def test_coverage_auditor_ux_section_present(tmp_path):
+    docs_dir = tmp_path / "docs" / "requirements"
+    docs_dir.mkdir(parents=True)
+    (docs_dir / "requirements.md").write_text(
+        "Learning management system for learners and instructors.",
+        encoding="utf-8",
+    )
+
+    result = CoverageAuditor(tmp_path).audit()
+
+    assert any(gap.category == "auth_ui_surface" for gap in result.ask)
+
+
+def test_coverage_auditor_uses_codd_yaml_ux_routes(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        "ux:\n"
+        "  required_routes:\n"
+        "    signin: /sign-in\n"
+        "    root: /\n"
+        "    signup: /sign-up\n",
+        encoding="utf-8",
+    )
+
+    checklist = CoverageAuditor(tmp_path).get_standard_checklist("LMS/EdTech")
+
+    routes_by_id = {
+        item["id"]: item.get("expected_routes")
+        for item in checklist
+        if item.get("category") == "auth_ui_surface"
+    }
+    assert routes_by_id == {
+        "ux:auth:signin": "/sign-in",
+        "ux:landing:root": "/",
+        "ux:auth:signup": "/sign-up",
+    }

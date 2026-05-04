@@ -12,12 +12,38 @@ import shlex
 import subprocess
 from typing import Any
 
+import yaml
+
 
 CACHE_DIR = ".codd/knowledge_cache"
 CACHE_TTL_DAYS = 30
 SEARCH_COMMAND_ENV = "CODD_KNOWLEDGE_SEARCH_COMMAND"
 SEARCH_TIMEOUT_SECONDS = 30
 UI_TECH_STACKS = {"React", "Vue", "Svelte", "Flutter", "SwiftUI", "Jetpack Compose"}
+AUTH_UI_PACKAGES = {
+    "@auth0/nextjs-auth0",
+    "@clerk/nextjs",
+    "@supabase/supabase-js",
+    "django-allauth",
+    "dj-rest-auth",
+    "lucia",
+    "next-auth",
+    "nuxt-auth",
+    "supabase",
+}
+AUTH_UI_PACKAGE_PREFIXES = ("@clerk/", "@auth/")
+AUTH_UI_DIRS = (
+    "auth",
+    "src/auth",
+    "app/(auth)",
+    "src/app/(auth)",
+    "app/login",
+    "src/app/login",
+    "pages/login",
+    "src/pages/login",
+    "routes/auth",
+    "src/routes/auth",
+)
 PACKAGE_DEPENDENCY_SECTIONS = (
     "dependencies",
     "devDependencies",
@@ -132,6 +158,20 @@ class KnowledgeFetcher:
             ),
             "spec": "https://github.com/google-labs-code/design.md",
         }
+
+    def detect_auth_ui(self, ui_stack: str | None = None) -> bool:
+        """Detect whether the project appears to include an auth UI surface."""
+        return _project_has_auth_ui(self.project_root, ui_stack)
+
+    def suggest_ux_required_routes(self, ui_stack: str | None = None) -> dict[str, Any]:
+        """Suggest generic UX routes, preferring project codd.yaml overrides."""
+        overrides = load_ux_required_routes(self.project_root)
+        if overrides:
+            return overrides
+        return suggest_ux_required_routes(
+            ui_stack,
+            _project_has_auth_ui(self.project_root, ui_stack),
+        )
 
     def _search_web(self, query: str) -> KnowledgeEntry:
         """Run an optional web-search command, otherwise return an explicit fallback."""
@@ -296,6 +336,66 @@ def _detect_package_ui_stack(package_json_path: Path) -> list[str]:
     return stacks
 
 
+def _project_has_auth_ui(project_root: Path, ui_stack: str | None = None) -> bool:
+    """Detect if a project uses an auth UI library or auth surface."""
+    _ = ui_stack
+    dependencies = set(_read_package_dependencies(project_root / "package.json"))
+    dependencies.update(_read_python_dependencies(project_root))
+    if _has_dependency(
+        dependencies,
+        exact=AUTH_UI_PACKAGES,
+        prefixes=AUTH_UI_PACKAGE_PREFIXES,
+    ):
+        return True
+    return any((project_root / dirname).exists() for dirname in AUTH_UI_DIRS)
+
+
+def suggest_ux_required_routes(ui_stack: str | None, has_auth_ui: bool) -> dict[str, str]:
+    """Return generic UX route suggestions for codd.yaml ux.required_routes."""
+    _ = ui_stack
+    defaults = {"root": "/"}
+    if has_auth_ui:
+        defaults["signin"] = "/login"
+    return defaults
+
+
+def load_ux_required_routes(project_root: Path) -> dict[str, Any]:
+    """Load project-defined UX route overrides from codd.yaml if present."""
+    for config_path in (
+        project_root / "codd" / "codd.yaml",
+        project_root / ".codd" / "codd.yaml",
+        project_root / "codd.yaml",
+    ):
+        if not config_path.exists():
+            continue
+        try:
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        ux_config = payload.get("ux", {})
+        if not isinstance(ux_config, dict):
+            continue
+        return _coerce_ux_required_routes(ux_config.get("required_routes", {}))
+    return {}
+
+
+def _coerce_ux_required_routes(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    routes: dict[str, Any] = {}
+    for key, route in value.items():
+        route_key = str(key)
+        if isinstance(route, str) and route:
+            routes[route_key] = route
+        elif isinstance(route, list):
+            route_values = [str(item) for item in route if item]
+            if route_values:
+                routes[route_key] = route_values
+    return routes
+
+
 def _read_package_dependencies(package_json_path: Path) -> set[str]:
     if not package_json_path.exists():
         return set()
@@ -310,6 +410,74 @@ def _read_package_dependencies(package_json_path: Path) -> set[str]:
         if isinstance(section_dependencies, dict):
             dependencies.update(str(name) for name in section_dependencies)
     return dependencies
+
+
+def _read_python_dependencies(project_root: Path) -> set[str]:
+    dependencies: set[str] = set()
+    for requirements_path in (
+        project_root / "requirements.txt",
+        project_root / "requirements-dev.txt",
+    ):
+        dependencies.update(_read_requirements_file(requirements_path))
+
+    requirements_dir = project_root / "requirements"
+    if requirements_dir.is_dir():
+        for requirements_path in requirements_dir.glob("*.txt"):
+            dependencies.update(_read_requirements_file(requirements_path))
+
+    dependencies.update(_read_pyproject_dependencies(project_root / "pyproject.toml"))
+    return dependencies
+
+
+def _read_requirements_file(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    dependencies: set[str] = set()
+    for line in _read_text(path).splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped or stripped.startswith(("-", "git+", "http://", "https://")):
+            continue
+        name = re.split(r"\s*(?:==|>=|<=|~=|>|<|!=|\[)", stripped, maxsplit=1)[0]
+        if name:
+            dependencies.add(name.lower())
+    return dependencies
+
+
+def _read_pyproject_dependencies(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    try:
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # pragma: no cover - py310 fallback
+            import tomli as tomllib  # type: ignore[no-redef]
+
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+
+    dependencies: set[str] = set()
+    project = payload.get("project", {})
+    if isinstance(project, dict):
+        dependencies.update(_dependency_names(project.get("dependencies", [])))
+        optional = project.get("optional-dependencies", {})
+        if isinstance(optional, dict):
+            for values in optional.values():
+                dependencies.update(_dependency_names(values))
+    return dependencies
+
+
+def _dependency_names(values: Any) -> set[str]:
+    if not isinstance(values, list):
+        return set()
+    names: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        name = re.split(r"\s*(?:==|>=|<=|~=|>|<|!=|\[)", value, maxsplit=1)[0]
+        if name:
+            names.add(name.lower())
+    return names
 
 
 def _has_dependency(
