@@ -66,6 +66,11 @@ def run_scan(project_root: Path, codd_dir: Path):
         if full_path.exists():
             _scan_source_directory(ceg, project_root, full_path, language, exclude_patterns)
 
+    # Phase 3: Extract endpoints from filesystem-based routing conventions.
+    fs_route_configs = config.get("filesystem_routes", [])
+    if fs_route_configs:
+        _scan_filesystem_routes(ceg, project_root, fs_route_configs)
+
     warnings.extend(_collect_wave_config_warnings(project_root, config))
     for warning in warnings:
         print(f"WARNING: {warning}")
@@ -408,12 +413,62 @@ def _extract_imports_basic(ceg: CEG, project_root: Path, src_dir: Path, file_pat
 
 
 # ═══════════════════════════════════════════════════════════
+# Phase 3: Filesystem route scanning
+# ═══════════════════════════════════════════════════════════
+
+def _scan_filesystem_routes(ceg: CEG, project_root: Path, fs_route_configs: list[dict]):
+    """Scan framework filesystem routes and add endpoint nodes."""
+    try:
+        from codd.parsing import FileSystemRouteExtractor
+    except ImportError:
+        return
+
+    extractor = FileSystemRouteExtractor()
+    route_info = extractor.extract_routes(project_root, fs_route_configs)
+
+    endpoint_count = 0
+    for route in getattr(route_info, "routes", []):
+        url = route.get("url")
+        route_file = route.get("file")
+        if not url or not route_file:
+            continue
+
+        rel_file = _project_relative_path(project_root, route_file)
+        node_id = f"endpoint:{url}"
+        ceg.upsert_node(node_id, "endpoint", path=rel_file, name=url)
+
+        node = ceg.get_node(node_id)
+        if node is not None:
+            node["url"] = url
+            node["endpoint_kind"] = route.get("kind", "page")
+            node["source_type"] = "static"
+
+        file_node_id = f"file:{rel_file}"
+        ceg.upsert_node(file_node_id, "file", path=rel_file, name=Path(rel_file).name)
+        edge_id = ceg.add_edge(file_node_id, node_id, "implements", "structural")
+        ceg.add_evidence(edge_id, "static", "filesystem_route", 0.95)
+        endpoint_count += 1
+
+    print(f"  Filesystem routes: {endpoint_count} endpoint nodes generated")
+
+
+# ═══════════════════════════════════════════════════════════
 # Utilities
 # ═══════════════════════════════════════════════════════════
 
 def _match_glob(path: str, pattern: str) -> bool:
     import fnmatch
     return fnmatch.fnmatch(path, pattern)
+
+
+def _project_relative_path(project_root: Path, file_path: str) -> str:
+    path = Path(file_path)
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.relative_to(project_root).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def _collect_document_warnings(rel_path: str, codd_data: dict) -> list[str]:
