@@ -1018,3 +1018,44 @@ def run_extract(project_root: Path, language: str | None = None,
 def _match_glob(path: str, pattern: str) -> bool:
     import fnmatch
     return fnmatch.fnmatch(path, pattern)
+
+
+@dataclass
+class DocumentUrlLinkInfo:
+    """URLs extracted from a document node."""
+    node_id: str
+    urls: list[str]
+
+
+class DocumentUrlLinker:
+    """Scan design/requirement document text for URL patterns.
+
+    Extracts URL strings referenced in documents (Mermaid diagrams, prose,
+    code blocks) and returns them for downstream drift analysis.
+    FW-agnostic: pattern driven by codd.yaml document_url_linking config.
+    """
+
+    DEFAULT_URL_PATTERN = r"(?:^|[\s`(\[])(/(?:[a-z0-9][a-z0-9/\-:_\[\]]*)?)"
+    DEFAULT_EDGE_TYPE = "references"
+
+    def __init__(self, config: dict | None = None):
+        cfg = config or {}
+        self._pattern = re.compile(
+            cfg.get("url_pattern", self.DEFAULT_URL_PATTERN),
+            re.MULTILINE,
+        )
+        self.edge_type = cfg.get("edge_type", self.DEFAULT_EDGE_TYPE)
+
+    def extract_urls(self, text: str, node_id: str = "") -> DocumentUrlLinkInfo:
+        """Extract and normalize URLs from document text."""
+        raw = self._pattern.findall(text)
+        normalized = sorted(set(self._normalize_url(url) for url in raw if url))
+        return DocumentUrlLinkInfo(node_id=node_id, urls=normalized)
+
+    def _normalize_url(self, url: str) -> str:
+        url = url.strip()
+        while url.endswith("]") and url.count("]") > url.count("["):
+            url = url[:-1]
+        if url != "/" and url.endswith("/"):
+            url = url.rstrip("/")
+        return url
