@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from codd._git_helper import _diff_files, _resolve_base_ref
 from codd.config import find_codd_dir, load_project_config
+from codd.coherence_engine import DriftEvent, EventBus, Orchestrator, use_coherence_bus
+from codd.fixup_drift_strategies import FixProposal, get_strategy
 from codd.generator import (
     _invoke_ai_command,
     _resolve_ai_command,
@@ -69,8 +73,48 @@ class CommitResult:
     knowledge_recorded: int  # number of HITL evidence entries added
 
 
+@dataclass
+class ReversePropagationResult:
+    """Result of propagate --reverse."""
+
+    source: str
+    base_ref: str
+    changes: list[dict[str, str]]
+    events: list[DriftEvent]
+    proposals: list[FixProposal]
+    applied_files: list[str]
+
+
 # Path for verify state persistence (relative to codd dir)
 VERIFY_STATE_FILE = "propagate_state.json"
+DESIGN_MD_DIFF_PATHS = ["DESIGN.md", "docs/design/DESIGN.md"]
+LEXICON_DIFF_PATHS = ["project_lexicon.yaml", "docs/lexicon/project_lexicon.yaml"]
+_YAML_KEY_VALUE_RE = re.compile(r"^(?P<indent>\s*)(?:-\s*)?(?P<key>[A-Za-z0-9_.$-]+)\s*:\s*(?P<value>.*)$")
+_DIFF_HEADER_RE = re.compile(r"^diff --git a/(.*?) b/(.*)$")
+_IMPLEMENTATION_EXTENSIONS = {
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".vue",
+    ".svelte",
+    ".swift",
+    ".kt",
+    ".dart",
+}
+_SKIPPED_REVERSE_DIRS = {
+    ".codd",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".venv",
+    "node_modules",
+}
 
 
 def run_propagate(
@@ -297,6 +341,443 @@ def run_commit(
     _clear_verify_state(project_root)
 
     return CommitResult(committed_files=committed_files, knowledge_recorded=knowledge_count)
+
+
+def _detect_design_md_changes(project_root: Path, base_ref: str) -> list[dict[str, str]]:
+    """Detect DESIGN.md token value changes via git diff."""
+    diff_text = _diff_files(base_ref, cwd=project_root, paths=DESIGN_MD_DIFF_PATHS)
+    changes: list[dict[str, str]] = []
+    pending: list[dict[str, str]] = []
+    context_stack: list[tuple[int, str]] = []
+    current_file = ""
+
+    for line in diff_text.splitlines():
+        header = _DIFF_HEADER_RE.match(line)
+        if header:
+            current_file = header.group(2)
+            pending.clear()
+            context_stack.clear()
+            continue
+        if not current_file or current_file not in DESIGN_MD_DIFF_PATHS:
+            continue
+        if line.startswith("@@"):
+            pending.clear()
+            continue
+        if line.startswith(" ") and not line.startswith(" ---"):
+            _update_yaml_context(context_stack, line[1:])
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            candidate = _extract_design_md_candidate(line[1:], context_stack, current_file)
+            if candidate is not None:
+                pending.append(candidate)
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            candidate = _extract_design_md_candidate(line[1:], context_stack, current_file)
+            if candidate is None:
+                continue
+            match_index = _find_pending_change(pending, candidate, keys=("token",))
+            if match_index is None:
+                continue
+            old = pending.pop(match_index)
+            if old["value"] == candidate["value"]:
+                continue
+            changes.append(
+                {
+                    "token": candidate["token"],
+                    "old": old["value"],
+                    "new": candidate["value"],
+                    "source_file": current_file,
+                }
+            )
+
+    return changes
+
+
+def _detect_lexicon_changes(project_root: Path, base_ref: str) -> list[dict[str, str]]:
+    """Detect project_lexicon.yaml naming_convention changes via git diff."""
+    diff_text = _diff_files(base_ref, cwd=project_root, paths=LEXICON_DIFF_PATHS)
+    changes: list[dict[str, str]] = []
+    pending: list[dict[str, str]] = []
+    current_file = ""
+    current_convention = ""
+
+    for line in diff_text.splitlines():
+        header = _DIFF_HEADER_RE.match(line)
+        if header:
+            current_file = header.group(2)
+            current_convention = ""
+            pending.clear()
+            continue
+        if not current_file or current_file not in LEXICON_DIFF_PATHS:
+            continue
+        if line.startswith("@@"):
+            pending.clear()
+            continue
+        if line.startswith(" "):
+            parsed = _parse_yaml_key_value(line[1:])
+            if parsed and parsed[0] == "id":
+                current_convention = parsed[1]
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            candidate = _extract_lexicon_candidate(line[1:], current_convention, current_file)
+            if candidate is not None:
+                pending.append(candidate)
+            if candidate is not None and candidate["kind"] == "id":
+                current_convention = candidate["value"]
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            candidate = _extract_lexicon_candidate(line[1:], current_convention, current_file)
+            if candidate is None:
+                continue
+            match_index = _find_pending_change(
+                pending,
+                candidate,
+                keys=("convention", "kind"),
+                fallback_keys=("kind",),
+            )
+            if match_index is None:
+                continue
+            old = pending.pop(match_index)
+            if old["value"] == candidate["value"]:
+                continue
+            convention = candidate["convention"] if candidate["kind"] != "id" else candidate["value"]
+            changes.append(
+                {
+                    "convention": convention,
+                    "old": old["value"],
+                    "new": candidate["value"],
+                    "kind": candidate["kind"],
+                    "source_file": current_file,
+                }
+            )
+            if candidate["kind"] == "id":
+                current_convention = candidate["value"]
+
+    return changes
+
+
+def propagate_reverse(
+    project_root: Path,
+    source: str,
+    base_ref: str | None,
+    apply: bool = False,
+) -> int:
+    """Reverse-propagate DESIGN.md or lexicon changes toward implementation."""
+    project_root = Path(project_root).resolve()
+    resolved_base = _resolve_base_ref(base_ref, cwd=project_root)
+    if source == "design_token":
+        changes = _detect_design_md_changes(project_root, resolved_base)
+    elif source == "lexicon":
+        changes = _detect_lexicon_changes(project_root, resolved_base)
+    else:
+        raise ValueError(f"Unknown source: {source!r}")
+
+    if not changes:
+        print(f"No changes detected: no {source} changes detected since {resolved_base}.")
+        return 0
+
+    bus = EventBus()
+    routing = None if apply else {"red": "manual", "amber": "manual", "green": "manual"}
+    Orchestrator(
+        bus,
+        routing=routing,
+        hitl_path=str(project_root / "docs" / "coherence" / "pending_hitl.md"),
+    )
+
+    events = _build_reverse_drift_events(source, changes)
+    with use_coherence_bus(bus):
+        for event in events:
+            bus.publish(event)
+
+    proposals = _build_reverse_fix_proposals(project_root, events)
+    applied_files = _apply_reverse_changes(project_root, source, changes) if apply else []
+    result = ReversePropagationResult(
+        source=source,
+        base_ref=resolved_base,
+        changes=changes,
+        events=events,
+        proposals=proposals,
+        applied_files=applied_files,
+    )
+    _print_reverse_result(result, apply=apply)
+    return 0
+
+
+def _build_reverse_drift_events(source: str, changes: list[dict[str, str]]) -> list[DriftEvent]:
+    events: list[DriftEvent] = []
+    for change in changes:
+        if source == "design_token":
+            token = change["token"]
+            old_value = change["old"]
+            new_value = change["new"]
+            safe_literal = _is_safe_literal_replacement(old_value, new_value)
+            events.append(
+                DriftEvent(
+                    source_artifact="design_md",
+                    target_artifact="implementation",
+                    change_type="modified",
+                    payload={
+                        "description": (
+                            f"DESIGN.md token {token!r} changed from "
+                            f"{old_value!r} to {new_value!r}."
+                        ),
+                        "suggested_action": "Update implementation references that still use the old token value.",
+                        "token": token,
+                        "token_name": token,
+                        "old_value": old_value,
+                        "new_value": new_value,
+                        "actual_value": old_value,
+                        "expected_value": new_value,
+                        "file": change.get("source_file", "DESIGN.md"),
+                    },
+                    severity="red" if safe_literal else "amber",
+                    fix_strategy="auto" if safe_literal else "hitl",
+                    kind="design_token_drift",
+                )
+            )
+            continue
+
+        convention = change["convention"]
+        events.append(
+            DriftEvent(
+                source_artifact="lexicon",
+                target_artifact="implementation",
+                change_type="modified",
+                payload={
+                    "description": (
+                        f"Lexicon naming convention {convention!r} "
+                        f"{change['kind']} changed from {change['old']!r} to {change['new']!r}."
+                    ),
+                    "suggested_action": "Review identifiers and design nodes that use this convention.",
+                    "convention": convention,
+                    "term": convention,
+                    "violation_type": f"naming_convention_{change['kind']}_changed",
+                    "old_value": change["old"],
+                    "new_value": change["new"],
+                    "file": change.get("source_file", "project_lexicon.yaml"),
+                },
+                severity="amber",
+                fix_strategy="hitl",
+                kind="lexicon_violation",
+            )
+        )
+    return events
+
+
+def _build_reverse_fix_proposals(project_root: Path, events: list[DriftEvent]) -> list[FixProposal]:
+    proposals: list[FixProposal] = []
+    for event in events:
+        strategy = get_strategy(event.kind, project_root)
+        if strategy is None:
+            continue
+        proposals.extend(strategy.propose(event))
+    return proposals
+
+
+def _apply_reverse_changes(
+    project_root: Path,
+    source: str,
+    changes: list[dict[str, str]],
+) -> list[str]:
+    if source != "design_token":
+        return []
+
+    changed_files: set[str] = set()
+    safe_changes = [
+        change
+        for change in changes
+        if _is_safe_literal_replacement(change.get("old", ""), change.get("new", ""))
+    ]
+    if not safe_changes:
+        return []
+
+    for path in _iter_reverse_implementation_files(project_root):
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        updated = content
+        for change in safe_changes:
+            updated = updated.replace(change["old"], change["new"])
+        if updated == content:
+            continue
+        path.write_text(updated, encoding="utf-8")
+        changed_files.add(path.relative_to(project_root).as_posix())
+
+    return sorted(changed_files)
+
+
+def _iter_reverse_implementation_files(project_root: Path):
+    for path in project_root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in _IMPLEMENTATION_EXTENSIONS:
+            continue
+        try:
+            relative_parts = path.relative_to(project_root).parts
+        except ValueError:
+            relative_parts = path.parts
+        if any(part in _SKIPPED_REVERSE_DIRS for part in relative_parts):
+            continue
+        yield path
+
+
+def _print_reverse_result(result: ReversePropagationResult, apply: bool) -> None:
+    print(
+        f"Reverse propagation source={result.source} base={result.base_ref}: "
+        f"{len(result.changes)} change(s), {len(result.events)} event(s)."
+    )
+    for change in result.changes:
+        name = change.get("token", change.get("convention", "<unknown>"))
+        print(f"  - {name}: {change['old']} -> {change['new']}")
+    if result.proposals:
+        print(f"Fix proposals: {len(result.proposals)}")
+        for proposal in result.proposals:
+            mode = "auto" if proposal.can_auto_apply else "hitl"
+            print(f"  - [{mode}] {proposal.kind}: {proposal.description}")
+    if apply:
+        print(f"Applied implementation files: {len(result.applied_files)}")
+        for file_path in result.applied_files:
+            print(f"  - {file_path}")
+    else:
+        print("Dry run: no implementation files changed. Re-run with --apply to apply safe literal replacements.")
+
+
+def _extract_design_md_candidate(
+    line: str,
+    context_stack: list[tuple[int, str]],
+    source_file: str,
+) -> dict[str, str] | None:
+    parsed = _parse_yaml_key_value(line)
+    if parsed:
+        key, value = parsed
+        if key in {"$type", "type", "description"}:
+            return None
+        token_path = ".".join(key for _, key in context_stack if key not in {"codd"})
+        if key in {"$value", "value"} and token_path:
+            token = token_path
+        elif token_path and "." not in key:
+            token = f"{token_path}.{key}"
+        else:
+            token = key
+        if not token or value in {"", "{}", "[]"}:
+            return None
+        return {"token": token, "value": value, "source_file": source_file}
+
+    table = _parse_markdown_token_row(line)
+    if table is not None:
+        token, value = table
+        return {"token": token, "value": value, "source_file": source_file}
+    return None
+
+
+def _extract_lexicon_candidate(
+    line: str,
+    current_convention: str,
+    source_file: str,
+) -> dict[str, str] | None:
+    parsed = _parse_yaml_key_value(line)
+    if parsed is None:
+        return None
+    key, value = parsed
+    if key == "id":
+        return {
+            "convention": value,
+            "kind": "id",
+            "value": value,
+            "source_file": source_file,
+        }
+    if key in {"regex", "pattern"}:
+        return {
+            "convention": current_convention,
+            "kind": key,
+            "value": value,
+            "source_file": source_file,
+        }
+    return None
+
+
+def _parse_yaml_key_value(line: str) -> tuple[str, str] | None:
+    match = _YAML_KEY_VALUE_RE.match(line.rstrip())
+    if not match:
+        return None
+    key = match.group("key")
+    value = _clean_yaml_value(match.group("value"))
+    return key, value
+
+
+def _clean_yaml_value(value: str) -> str:
+    value = value.strip()
+    if " #" in value:
+        value = value.split(" #", 1)[0].rstrip()
+    if value.endswith(","):
+        value = value[:-1].rstrip()
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        value = value[1:-1]
+    return value
+
+
+def _parse_markdown_token_row(line: str) -> tuple[str, str] | None:
+    stripped = line.strip()
+    if not stripped.startswith("|") or stripped.count("|") < 3:
+        return None
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    if len(cells) < 2 or set(cells[0]) <= {"-", ":"}:
+        return None
+    token = cells[0].strip("`")
+    value = cells[1].strip("`")
+    if not token or not value or token.lower() in {"token", "name"}:
+        return None
+    return token, value
+
+
+def _update_yaml_context(context_stack: list[tuple[int, str]], line: str) -> None:
+    match = _YAML_KEY_VALUE_RE.match(line.rstrip())
+    if not match:
+        return
+    key = match.group("key")
+    if key.startswith("$"):
+        return
+    value = _clean_yaml_value(match.group("value"))
+    if value not in {"", "|", ">", "{}"}:
+        return
+    indent = len(match.group("indent"))
+    while context_stack and context_stack[-1][0] >= indent:
+        context_stack.pop()
+    context_stack.append((indent, key))
+
+
+def _find_pending_change(
+    pending: list[dict[str, str]],
+    candidate: dict[str, str],
+    keys: tuple[str, ...],
+    fallback_keys: tuple[str, ...] = (),
+) -> int | None:
+    for index, item in enumerate(pending):
+        if all(item.get(key) == candidate.get(key) for key in keys):
+            return index
+    if fallback_keys:
+        for index, item in enumerate(pending):
+            if all(item.get(key) == candidate.get(key) for key in fallback_keys):
+                return index
+    if len(pending) == 1:
+        return 0
+    return None
+
+
+def _is_safe_literal_replacement(old_value: str, new_value: str) -> bool:
+    old_value = old_value.strip()
+    new_value = new_value.strip()
+    hex_re = re.compile(r"^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$")
+    px_re = re.compile(r"^\d+(?:\.\d+)?px$")
+    return bool(
+        old_value
+        and new_value
+        and (
+            (hex_re.match(old_value) and hex_re.match(new_value))
+            or (px_re.match(old_value) and px_re.match(new_value))
+        )
+    )
 
 
 def _format_commit_reason(
