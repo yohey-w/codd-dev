@@ -12,6 +12,10 @@ from codd.config import find_codd_dir, load_project_config
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
+class CoddCLIError(RuntimeError):
+    """Error raised for CLI-facing validation failures."""
+
+
 def _run_pro_command(name: str, **kwargs):
     """Dispatch a Pro-only command when the bridge plugin is installed."""
     handler = get_command_handler(name)
@@ -1232,6 +1236,54 @@ def coverage(path: str, e2e_threshold: float, lexicon_threshold: float, as_json:
         click.echo("Coverage gate PASSED" if report.all_passed else "Coverage gate FAILED")
 
     raise SystemExit(0 if report.all_passed else 1)
+
+
+@main.command("deploy")
+@click.option("--target", default=None, help="Deploy target name from deploy.yaml")
+@click.option(
+    "--config",
+    "config_file",
+    default="deploy.yaml",
+    show_default=True,
+    help="Path to deploy config file",
+)
+@click.option(
+    "--apply",
+    "apply_mode",
+    is_flag=True,
+    default=False,
+    help="Actually execute deploy (default: dry-run)",
+)
+@click.option("--rollback", is_flag=True, default=False, help="Rollback to last snapshot")
+@click.option(
+    "--healthcheck-timeout",
+    default=60,
+    show_default=True,
+    help="Healthcheck timeout in seconds",
+)
+def deploy(target, config_file, apply_mode, rollback, healthcheck_timeout):
+    """Deploy project to configured target.
+
+    Dry-run by default — pass --apply to execute.
+    Use in CI: codd deploy --target vps --apply
+    """
+    from codd.deployer import run_deploy
+
+    project_root = Path(".").resolve()
+    try:
+        exit_code = run_deploy(
+            project_root,
+            target_name=target,
+            config_path=project_root / config_file,
+            dry_run=not apply_mode,
+            rollback_flag=rollback,
+            healthcheck_timeout=healthcheck_timeout,
+        )
+    except CoddCLIError as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    raise SystemExit(exit_code)
 
 
 @main.command("fixup-drift")
