@@ -169,6 +169,7 @@ class ImplementationTask:
     output_dir: str
     dependency_node_ids: list[str]
     task_context: str
+    wave: int | None = None
     blocked_by_task_ids: tuple[str, ...] = ()
 
 
@@ -204,16 +205,23 @@ def implement_tasks(
     task: str | None = None,
     ai_command: str | None = None,
     clean: bool = False,
+    max_tasks: int = 30,
+    wave: int | None = None,
 ) -> list[ImplementationResult]:
     """Generate code for tasks from implementation plan."""
     project_root = project_root.resolve()
-    config = _load_project_config(project_root)
+    if max_tasks < 1:
+        raise ValueError("--max-tasks must be at least 1")
+    if wave is not None and wave < 1:
+        raise ValueError("--wave must be at least 1")
 
-    if clean:
-        _clean_generated_output(project_root, config)
+    config = _load_project_config(project_root)
 
     plan = _load_implementation_plan(project_root, config)
     selected_tasks = _extract_all_tasks(plan)
+
+    if wave is not None:
+        selected_tasks = [t for t in selected_tasks if _task_wave(t) == wave]
 
     if task:
         selected_tasks = _filter_tasks(selected_tasks, task)
@@ -221,7 +229,21 @@ def implement_tasks(
     if not selected_tasks:
         if task:
             raise ValueError(f"no implementation task matched {task!r}")
+        if wave is not None:
+            return []
         raise ValueError("implementation plan does not define any tasks")
+
+    if task is None and len(selected_tasks) > max_tasks:
+        raise ValueError(
+            f"Plan contains {len(selected_tasks)} tasks, which exceeds --max-tasks={max_tasks}.\n"
+            "Options:\n"
+            "  1. Filter by wave:     codd implement --wave WAVE_ID\n"
+            f"  2. Increase limit:     codd implement --max-tasks {len(selected_tasks)}\n"
+            "  3. Execute one task:   codd implement --task TASK_ID"
+        )
+
+    if clean:
+        _clean_generated_output(project_root, config)
 
     resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="implement")
     global_conventions = _normalize_conventions(config.get("conventions", []))
@@ -310,6 +332,27 @@ def _group_tasks_by_phase(
     return [phase_map[k] for k in sorted(phase_map.keys())]
 
 
+def _task_wave(task: ImplementationTask) -> int | None:
+    """Return the batch wave associated with a task, when one can be inferred."""
+    if task.wave is not None:
+        return task.wave
+
+    task_id_match = re.match(r"m(?P<wave>\d+)\.", task.task_id.casefold())
+    if task_id_match:
+        return int(task_id_match.group("wave"))
+
+    sprint_id_match = re.match(r"(?P<wave>\d+)-", task.task_id)
+    if sprint_id_match:
+        return int(sprint_id_match.group("wave"))
+
+    for text in (task.task_context, task.summary, task.title):
+        text_match = re.search(r"\bwave\s+(?P<wave>\d+)\b", text, re.IGNORECASE)
+        if text_match:
+            return int(text_match.group("wave"))
+
+    return None
+
+
 def _resolve_task_dependencies(
     phase_groups: list[list[ImplementationTask]],
 ) -> list[list[ImplementationTask]]:
@@ -332,6 +375,7 @@ def _resolve_task_dependencies(
                         output_dir=t.output_dir,
                         dependency_node_ids=t.dependency_node_ids,
                         task_context=t.task_context,
+                        wave=t.wave,
                         blocked_by_task_ids=prior_task_ids,
                     )
                 )
@@ -708,6 +752,7 @@ def _extract_tasks_from_sprint_headings(plan: ImplementationPlan) -> list[Implem
                     output_dir=f"src/generated/{slug}",
                     dependency_node_ids=_infer_dependency_node_ids(plan, title, module_hint, deliverable),
                     task_context=_clean_text_block(section_text),
+                    wave=sprint_num,
                 )
             )
     return tasks
@@ -762,6 +807,7 @@ def _extract_tasks_from_phase_milestones(plan: ImplementationPlan) -> list[Imple
                     plan, title, "", "; ".join(deliverables[:3]),
                 ),
                 task_context=_clean_text_block(body),
+                wave=int(phase),
             )
         )
     return tasks
@@ -797,8 +843,11 @@ def _extract_tasks_from_milestones(plan: ImplementationPlan) -> list[Implementat
                     module_hint=f"src/generated/{slug}",
                     deliverable=milestone["deliverables"],
                     output_dir=f"src/generated/{slug}",
-                    dependency_node_ids=[entry["id"] for entry in plan.depends_on] or ["design:system-design"],
+                    dependency_node_ids=[
+                        entry["id"] for entry in plan.depends_on
+                    ] or ["design:system-design"],
                     task_context=task_context,
+                    wave=ms_index,
                 )
             )
     return tasks
@@ -831,6 +880,8 @@ def _deduplicate_slugs(tasks: list[ImplementationTask]) -> list[ImplementationTa
                     output_dir=new_output_dir,
                     dependency_node_ids=t.dependency_node_ids,
                     task_context=t.task_context,
+                    wave=t.wave,
+                    blocked_by_task_ids=t.blocked_by_task_ids,
                 )
             )
         else:

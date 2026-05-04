@@ -556,11 +556,31 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
 @click.option("--task", default=None, help="Generate only one task by task ID or title match")
 @click.option("--clean", is_flag=True, default=False, help="Remove existing generated output before re-generating")
 @click.option(
+    "--max-tasks",
+    default=30,
+    type=click.IntRange(min=1),
+    show_default=True,
+    help="Maximum number of tasks to process per session. Abort if plan exceeds this limit.",
+)
+@click.option(
+    "--wave",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Execute only tasks belonging to this wave number.",
+)
+@click.option(
     "--ai-cmd",
     default=None,
     help="Override AI CLI command (defaults to codd.yaml ai_command or merged CoDD defaults)",
 )
-def implement(path: str, task: str | None, clean: bool, ai_cmd: str | None):
+def implement(
+    path: str,
+    task: str | None,
+    clean: bool,
+    max_tasks: int,
+    wave: int | None,
+    ai_cmd: str | None,
+):
     """Generate implementation code from the implementation plan."""
     from codd.implementer import implement_tasks
 
@@ -571,7 +591,14 @@ def implement(path: str, task: str | None, clean: bool, ai_cmd: str | None):
         click.echo("Cleaning src/generated/ ...")
 
     try:
-        results = implement_tasks(project_root, task=task, ai_command=ai_cmd, clean=clean)
+        results = implement_tasks(
+            project_root,
+            task=task,
+            ai_command=ai_cmd,
+            clean=clean,
+            max_tasks=max_tasks,
+            wave=wave,
+        )
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)

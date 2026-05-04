@@ -2,6 +2,14 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.14.0] - 2026-05-04
+
+### Added
+
+- `codd implement --max-tasks N` option (default: 30): abort if plan contains more tasks than limit
+- `codd implement --wave WAVE_ID` option: execute only tasks in the specified wave
+- Preflight task count guard with actionable error message (wave/max-tasks/task options)
+
 ## [1.13.1] - 2026-05-04
 
 ### Fixed
