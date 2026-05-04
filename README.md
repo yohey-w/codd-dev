@@ -22,6 +22,19 @@
 pip install codd-dev
 ```
 
+## 🆕 v1.11.0 — Filesystem-Routing Aware Drift Detection
+
+CoDD now understands filesystem-routing frameworks (Next.js, SvelteKit, Nuxt, Astro, Remix) and can detect URL drift between your design docs and actual implementation.
+
+- 📐 `FileSystemRouteExtractor` — endpoint nodes from directory structure
+- 🔗 `DocumentUrlLinker` — auto-link design doc URLs to endpoints
+- 🔍 `codd drift` — find URL gaps between design and implementation
+- 🎨 `codd extract --layer routes` — reverse-engineer screen-flow diagrams
+
+See [Filesystem Routing Adapter Recipes](#filesystem-routing-adapter-recipes) for setup.
+
+---
+
 **v1.9.0** — `codd implement` now supports **multi-AI engine** (Claude stdout + Codex file-writing) and **automatic parallel execution** within phases via git worktree isolation. Phase milestone format (`#### M1.1`) supported. AI command timeout extended to 1 hour for heavy reasoning models. SWE-bench Verified: **73/73 = 100%** resolved.
 
 ---
