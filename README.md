@@ -22,6 +22,27 @@
 pip install codd-dev
 ```
 
+## 🆕 v1.16.0-alpha — Coherence Engine (整合性駆動の中央ハブ)
+
+**drift / validate / propagate / fix を DriftEvent 統一フォーマットで結ぶ中央ハブ。**
+
+| コンポーネント | 役割 |
+|----------------|------|
+| `DriftEvent` | source/target/change_type/payload/severity/fix_strategy/kind を持つ統一イベント型 |
+| `EventBus` | in-process pub/sub。Detector が publish、Orchestrator が subscribe |
+| `Orchestrator` | severity ルーティング: `red` → auto-fix / `amber` → pending HITL / `green` → log |
+| `coherence_adapters` | drift / validate / design-token violation 出力 → DriftEvent 変換 |
+| `codd propagate --coherence` | lexicon + DESIGN.md を AI プロンプトに注入 (用語ぶれ・色値矛盾防止) |
+| Fixer Coherence-Mode | `run_fix(coherence_event=...)` で設計書修正を許可 (test 失敗修正フローは分離維持) |
+
+auto-fix が失敗した場合は自動で amber にダウングレードし、`docs/coherence/pending_hitl.md`
+に HITL レビュー待ちエントリとして記録。ntfy 通知はレート制限 (デフォルト 60 秒) で過剰通知を抑止。
+
+⚠️ **alpha 版**: Phase 4+ (Detector ↔ Applier 直接配管 / `codd fixup-drift` サブコマンド) は
+cmd_344 以降で実装予定。本リリースは中央ハブのアーキテクチャ確立段階。
+
+---
+
 ## 🆕 v1.13.0 — DESIGN.md統合 (Google Stitch OSS, W3C Design Tokens)
 
 **UI設計からコード生成まで完全なトレーサビリティを実現。**
