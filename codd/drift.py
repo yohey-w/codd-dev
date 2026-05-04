@@ -7,6 +7,12 @@ from pathlib import Path
 import re
 from typing import Any, Sequence
 
+from codd.coherence_adapters import drift_entry_to_event
+from codd.coherence_engine import EventBus
+
+
+_coherence_bus: EventBus | None = None
+
 
 @dataclass
 class DriftEntry:
@@ -91,12 +97,14 @@ def compute_drift(
                 )
             )
 
-    return DriftResult(
+    result = DriftResult(
         design_urls=normalized_design_urls,
         impl_urls=normalized_impl_urls,
         drift=drift,
         exit_code=1 if drift else 0,
     )
+    _publish_drift_events(result.drift)
+    return result
 
 
 def _find_closest(url: str, candidates: list[str]) -> str:
@@ -126,23 +134,38 @@ def run_drift(project_root: Path, codd_dir: Path) -> DriftResult:
     design_urls, design_sources = _extract_design_urls(project_root, config)
 
     result = compute_drift(design_urls, impl_urls, design_sources)
+    design_token_entries: list[DriftEntry] = []
     for drift in DesignTokenDriftLinker(project_root).detect_drift():
         token = drift["token"]
         status = drift["status"]
-        result.drift.append(
-            DriftEntry(
-                kind=drift["kind"],
-                url=token,
-                source="implementation" if status == "missing_in_design_md" else "DESIGN.md",
-                closest_match="",
-                status=status,
-                token=token,
-            )
+        entry = DriftEntry(
+            kind=drift["kind"],
+            url=token,
+            source="implementation" if status == "missing_in_design_md" else "DESIGN.md",
+            closest_match="",
+            status=status,
+            token=token,
         )
+        result.drift.append(entry)
+        design_token_entries.append(entry)
 
     if result.drift:
         result.exit_code = 1
+    _publish_drift_events(design_token_entries)
     return result
+
+
+def set_coherence_bus(bus: EventBus | None) -> None:
+    """Set an opt-in bus used to publish drift events."""
+    global _coherence_bus
+    _coherence_bus = bus
+
+
+def _publish_drift_events(entries: Sequence[Any]) -> None:
+    if _coherence_bus is None:
+        return
+    for entry in entries:
+        drift_entry_to_event(entry, bus=_coherence_bus)
 
 
 def _extract_defined_design_tokens(design_md_path: Path) -> set[str]:
