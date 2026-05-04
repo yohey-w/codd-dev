@@ -17,6 +17,29 @@ CACHE_DIR = ".codd/knowledge_cache"
 CACHE_TTL_DAYS = 30
 SEARCH_COMMAND_ENV = "CODD_KNOWLEDGE_SEARCH_COMMAND"
 SEARCH_TIMEOUT_SECONDS = 30
+UI_TECH_STACKS = {"React", "Vue", "Svelte", "Flutter", "SwiftUI", "Jetpack Compose"}
+PACKAGE_DEPENDENCY_SECTIONS = (
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+)
+IGNORED_SCAN_DIRS = {
+    ".codd",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+}
 
 
 @dataclass
@@ -75,11 +98,40 @@ class KnowledgeFetcher:
             "pom.xml": "Java/Maven",
             "build.gradle": "Java/Kotlin/Gradle",
         }
-        return [
-            stack
-            for filename, stack in markers.items()
-            if (self.project_root / filename).exists()
-        ]
+        stacks: list[str] = []
+        for filename, stack in markers.items():
+            if (self.project_root / filename).exists():
+                _append_unique(stacks, stack)
+
+        for stack in _detect_package_ui_stack(self.project_root / "package.json"):
+            _append_unique(stacks, stack)
+        if _detect_flutter(self.project_root / "pubspec.yaml"):
+            _append_unique(stacks, "Flutter")
+        if _detect_swiftui(self.project_root):
+            _append_unique(stacks, "SwiftUI")
+        if _detect_jetpack_compose(self.project_root):
+            _append_unique(stacks, "Jetpack Compose")
+        return stacks
+
+    def suggest_design_md_for_ui(self, stacks: list[str]) -> dict[str, str] | None:
+        """Return a DESIGN.md spec suggestion when a UI stack is present."""
+        if not any(stack in UI_TECH_STACKS for stack in stacks):
+            return None
+
+        design_md_path = self.project_root / "DESIGN.md"
+        if design_md_path.exists():
+            return {
+                "ui_design_source": "DESIGN.md (found)",
+                "spec": "https://github.com/google-labs-code/design.md",
+            }
+        return {
+            "ui_design_source": "DESIGN.md (recommended, not found)",
+            "warning": (
+                "DESIGN.md not found. Consider creating it "
+                "(https://github.com/google-labs-code/design.md)"
+            ),
+            "spec": "https://github.com/google-labs-code/design.md",
+        }
 
     def _search_web(self, query: str) -> KnowledgeEntry:
         """Run an optional web-search command, otherwise return an explicit fallback."""
@@ -217,3 +269,101 @@ def _fallback_entry(query: str) -> KnowledgeEntry:
         confidence=0.1,
         provenance="inferred",
     )
+
+
+def _append_unique(items: list[str], item: str) -> None:
+    if item not in items:
+        items.append(item)
+
+
+def _detect_package_ui_stack(package_json_path: Path) -> list[str]:
+    dependencies = _read_package_dependencies(package_json_path)
+    stacks: list[str] = []
+    if _has_dependency(
+        dependencies,
+        exact={"react", "next", "@react-native-community"},
+        prefixes=("@react-native-community/",),
+    ):
+        stacks.append("React")
+    if _has_dependency(dependencies, exact={"vue", "@vue/core", "nuxt"}):
+        stacks.append("Vue")
+    if _has_dependency(
+        dependencies,
+        exact={"svelte", "@sveltejs"},
+        prefixes=("@sveltejs/",),
+    ):
+        stacks.append("Svelte")
+    return stacks
+
+
+def _read_package_dependencies(package_json_path: Path) -> set[str]:
+    if not package_json_path.exists():
+        return set()
+    try:
+        payload = json.loads(package_json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    dependencies: set[str] = set()
+    for section in PACKAGE_DEPENDENCY_SECTIONS:
+        section_dependencies = payload.get(section, {})
+        if isinstance(section_dependencies, dict):
+            dependencies.update(str(name) for name in section_dependencies)
+    return dependencies
+
+
+def _has_dependency(
+    dependencies: set[str],
+    *,
+    exact: set[str],
+    prefixes: tuple[str, ...] = (),
+) -> bool:
+    if dependencies.intersection(exact):
+        return True
+    return any(
+        dependency.startswith(prefix)
+        for dependency in dependencies
+        for prefix in prefixes
+    )
+
+
+def _detect_flutter(pubspec_path: Path) -> bool:
+    if not pubspec_path.exists():
+        return False
+    text = _read_text(pubspec_path).lower()
+    return bool(re.search(r"(?m)^\s*flutter\s*:", text))
+
+
+def _detect_swiftui(project_root: Path) -> bool:
+    has_swift_file = any(_iter_project_files(project_root, ("*.swift",)))
+    if not has_swift_file:
+        return False
+    return any(
+        "SwiftUI" in _read_text(path)
+        for path in _iter_project_files(project_root, ("Packages.resolved",))
+    )
+
+
+def _detect_jetpack_compose(project_root: Path) -> bool:
+    return any(
+        "compose" in _read_text(path).lower()
+        for path in _iter_project_files(project_root, ("build.gradle*", "*.kt", "*.kts"))
+    )
+
+
+def _iter_project_files(project_root: Path, patterns: tuple[str, ...]):
+    for pattern in patterns:
+        for path in project_root.rglob(pattern):
+            if path.is_file() and not _is_ignored_path(path):
+                yield path
+
+
+def _is_ignored_path(path: Path) -> bool:
+    return any(part in IGNORED_SCAN_DIRS for part in path.parts)
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
