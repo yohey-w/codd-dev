@@ -1278,6 +1278,7 @@ def deploy(target, config_file, apply_mode, rollback, healthcheck_timeout):
             dry_run=not apply_mode,
             rollback_flag=rollback,
             healthcheck_timeout=healthcheck_timeout,
+            emit_output=True,
         )
     except CoddCLIError as exc:
         click.echo(f"Error: {exc}")

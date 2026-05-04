@@ -80,6 +80,7 @@ def run_deploy(
     dry_run: bool = True,
     rollback_flag: bool = False,
     healthcheck_timeout: int = 60,
+    emit_output: bool = False,
 ) -> int:
     """Main deploy entry point. Returns exit code."""
     project_root = Path(project_root).resolve()
@@ -109,6 +110,8 @@ def run_deploy(
             actions = target.dry_run()
             log_context["actions"] = actions
             log_context["status"] = "dry_run"
+            if emit_output:
+                _emit_dry_run_actions(selected_target, actions)
             _write_deploy_log(project_root, deploy_config, selected_target, log_context)
             return 0
 
@@ -189,6 +192,13 @@ def _maybe_rollback(
         return
     log_context["rollback_attempted"] = True
     log_context["rollback_succeeded"] = bool(target.rollback(snapshot))
+
+
+def _emit_dry_run_actions(target_name: str, actions: list[str]) -> None:
+    print("Proposed actions:")
+    print(f"Target: {target_name}")
+    for action in actions:
+        print(f"- {action}")
 
 
 def _write_deploy_log(
