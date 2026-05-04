@@ -2,6 +2,13 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.13.1] - 2026-05-04
+
+### Fixed
+
+- **DesignTokenDriftLinker**: `__init__` で `project_root` を `Path` に変換していなかったため
+  CLI から文字列パスを渡すと `TypeError` が発生するバグを修正 (commit 90f016f)
+
 ## [1.13.0] - 2026-05-04
 
 ### Added
