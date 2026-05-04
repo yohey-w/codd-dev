@@ -126,19 +126,73 @@ def compute_lexicon_compliance(project_root: Path | str, threshold: float = 100.
     )
 
 
+def compute_screen_flow_coverage(
+    project_root: Path | str,
+    config: dict[str, Any],
+    threshold: float = 0.0,
+) -> CoverageResult:
+    """Measure screen-flow drift as a coverage gate metric."""
+
+    try:
+        from codd.cli import CoddCLIError
+        from codd.screen_flow_validator import validate_screen_flow
+
+        drifts = validate_screen_flow(Path(project_root), config)
+    except CoddCLIError as exc:
+        return CoverageResult(
+            metric="screen_flow_coverage",
+            total=1,
+            covered=0,
+            uncovered=1,
+            pct=0.0,
+            threshold=threshold,
+            passed=False,
+            details=[f"error: {exc}"],
+        )
+
+    drift_count = len(drifts)
+    pct = 100.0 if drift_count == 0 else max(0.0, 100.0 - drift_count * 10.0)
+    return CoverageResult(
+        metric="screen_flow_coverage",
+        total=1,
+        covered=1 if drift_count == 0 else 0,
+        uncovered=drift_count,
+        pct=pct,
+        threshold=threshold,
+        passed=pct >= threshold,
+        details=[f"drift_count: {drift_count}"],
+    )
+
+
 def run_coverage(
     project_root: Path | str,
     e2e_threshold: float = 100.0,
     design_token_threshold: float = 0.0,
     lexicon_threshold: float = 100.0,
+    screen_flow_threshold: float = 0.0,
+    config: dict[str, Any] | None = None,
 ) -> CoverageReport:
     """Run all coverage metrics and return an aggregated report."""
+
+    project_root = Path(project_root)
+    if config is None:
+        config = _load_optional_project_config(project_root)
 
     report = CoverageReport()
     report.add(compute_e2e_coverage(project_root, threshold=e2e_threshold))
     report.add(compute_design_token_coverage(project_root, threshold=design_token_threshold))
     report.add(compute_lexicon_compliance(project_root, threshold=lexicon_threshold))
+    report.add(compute_screen_flow_coverage(project_root, config, threshold=screen_flow_threshold))
     return report
+
+
+def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
+    try:
+        from codd.config import load_project_config
+
+        return load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return {}
 
 
 def _load_e2e_scenarios(scenarios_path: Path) -> list[Any]:

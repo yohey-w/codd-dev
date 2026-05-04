@@ -106,6 +106,20 @@ def validate_screen_flow(project_root: Path, config: dict[str, Any]) -> list[Scr
     screen_flow_routes = parse_screen_flow_routes(screen_flow_path)
     filesystem_routes = get_filesystem_routes(project_root, config)
     if not filesystem_routes:
+        configured_dirs = [
+            route_config.get("base_dir", "(unset)")
+            for route_config in config.get("filesystem_routes", [])
+            if isinstance(route_config, dict)
+        ]
+        if configured_dirs:
+            from codd.cli import CoddCLIError
+
+            raise CoddCLIError(
+                "No filesystem routes found. "
+                "Check filesystem_routes.base_dir in codd.yaml "
+                f"(currently configured: {configured_dirs}). "
+                "Example: base_dir should be 'src/app' not 'app' for Next.js App Router."
+            )
         return []
 
     drifts = compute_screen_flow_drifts(screen_flow_routes, filesystem_routes)

@@ -4,12 +4,13 @@ from dataclasses import dataclass
 
 from click.testing import CliRunner
 
-from codd import validator
-from codd.cli import main
+from codd import screen_flow_validator, validator
+from codd.cli import CoddCLIError, main
 from codd.coverage_metrics import (
     compute_design_token_coverage,
     compute_e2e_coverage,
     compute_lexicon_compliance,
+    compute_screen_flow_coverage,
     run_coverage,
 )
 
@@ -119,6 +120,47 @@ def test_design_token_coverage_default_threshold_is_informational(tmp_path, monk
     assert result.passed is True
 
 
+def test_screen_flow_coverage_no_drift(tmp_path, monkeypatch):
+    monkeypatch.setattr(screen_flow_validator, "validate_screen_flow", lambda project_root, config: [])
+
+    result = compute_screen_flow_coverage(tmp_path, {}, threshold=100.0)
+
+    assert result.metric == "screen_flow_coverage"
+    assert result.pct == 100.0
+    assert result.uncovered == 0
+    assert result.passed is True
+    assert result.details == ["drift_count: 0"]
+
+
+def test_screen_flow_coverage_with_drift(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        screen_flow_validator,
+        "validate_screen_flow",
+        lambda project_root, config: [object(), object()],
+    )
+
+    result = compute_screen_flow_coverage(tmp_path, {}, threshold=95.0)
+
+    assert result.pct == 80.0
+    assert result.uncovered == 2
+    assert result.passed is False
+    assert result.details == ["drift_count: 2"]
+
+
+def test_screen_flow_coverage_coddclierror(tmp_path, monkeypatch):
+    def raise_misconfigured_base_dir(project_root, config):
+        raise CoddCLIError("bad filesystem_routes.base_dir")
+
+    monkeypatch.setattr(screen_flow_validator, "validate_screen_flow", raise_misconfigured_base_dir)
+
+    result = compute_screen_flow_coverage(tmp_path, {"filesystem_routes": [{"base_dir": "app"}]})
+
+    assert result.pct == 0.0
+    assert result.passed is False
+    assert result.uncovered == 1
+    assert result.details == ["error: bad filesystem_routes.base_dir"]
+
+
 def test_run_coverage_all_pass(tmp_path):
     report = run_coverage(tmp_path)
 
@@ -127,7 +169,14 @@ def test_run_coverage_all_pass(tmp_path):
         "e2e_coverage",
         "design_token_coverage",
         "lexicon_compliance",
+        "screen_flow_coverage",
     ]
+
+
+def test_run_coverage_includes_screen_flow(tmp_path):
+    report = run_coverage(tmp_path)
+
+    assert any(result.metric == "screen_flow_coverage" for result in report.results)
 
 
 def test_cli_coverage_help():
