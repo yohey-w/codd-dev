@@ -1039,8 +1039,15 @@ def review(path: str, scope: str | None, as_json: bool, ai_cmd: str | None):
     default=False,
     help="Check UI files for hardcoded #hex/px values not in DESIGN.md tokens.",
 )
+@click.option(
+    "--screen-flow",
+    "screen_flow",
+    is_flag=True,
+    default=False,
+    help="Validate screen-flow.md routes against filesystem routes.",
+)
 @click.option("--path", default=".", help="Project root directory")
-def validate(lexicon: bool, design_tokens: bool, path: str):
+def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, path: str):
     """Validate CoDD frontmatter and dependency references."""
     project_root = Path(path).resolve()
     if lexicon:
@@ -1069,6 +1076,22 @@ def validate(lexicon: bool, design_tokens: bool, path: str):
                 )
             raise SystemExit(1)
         click.echo("No design token violations found.")
+        raise SystemExit(0)
+
+    if screen_flow:
+        from codd.screen_flow_validator import validate_screen_flow
+
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+        drifts = validate_screen_flow(project_root, config)
+        if drifts:
+            click.echo(f"Screen-flow drift detected: {len(drifts)} route(s)")
+            for drift in drifts:
+                click.echo(f"  [{drift.source}] {drift.route}: {drift.detail}")
+            raise SystemExit(1)
+        click.echo("Screen-flow validation: OK (no drift)")
         raise SystemExit(0)
 
     from codd.validator import run_validate
