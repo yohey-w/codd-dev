@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import Optional
 
@@ -63,3 +64,13 @@ def get_strategy(kind: str, project_root: Path) -> Optional[BaseFixStrategy]:
 def list_registered_kinds() -> list[str]:
     """Return registered strategy kinds in stable order."""
     return sorted(_REGISTRY)
+
+
+# Auto-register concrete strategies.
+for _module_name in ("url_drift", "design_token_drift", "lexicon_violation"):
+    _qualified_name = f"{__name__}.{_module_name}"
+    try:
+        import_module(_qualified_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != _qualified_name:
+            raise
