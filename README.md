@@ -43,6 +43,19 @@ cmd_344 以降で実装予定。本リリースは中央ハブのアーキテク
 
 ---
 
+## 🆕 v1.14.0 — Batch guard for `codd implement`
+
+`codd implement` で `--max-tasks N` (default: 30) と `--wave WAVE_ID` をサポート。大規模な implementation plan を安全に分割実行するための **preflight task count guard** で AI の暴走 fan-out を防止し、`--wave` / `--max-tasks` / `--task` の代替案を含む actionable error message を返す。
+
+```bash
+codd implement --max-tasks 30           # 30件超なら abort
+codd implement --wave wave_2_1          # wave_2_1 の tasks のみ実行
+```
+
+> v1.13.1 は `DesignTokenDriftLinker` の `project_root` Path 変換バグ修正パッチ。
+
+---
+
 ## 🆕 v1.13.0 — DESIGN.md統合 (Google Stitch OSS, W3C Design Tokens)
 
 **UI設計からコード生成まで完全なトレーサビリティを実現。**
