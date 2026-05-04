@@ -35,6 +35,14 @@ class ProjectLexicon:
         return self._data.get("design_principles", [])
 
     @property
+    def provenance(self) -> str:
+        return self._data.get("provenance", "human")
+
+    @property
+    def confidence(self) -> float:
+        return float(self._data.get("confidence", 1.0))
+
+    @property
     def failure_modes(self) -> list[dict[str, Any]]:
         return self._data.get("failure_modes", [])
 
@@ -53,9 +61,17 @@ class ProjectLexicon:
         lines = ["## Project Lexicon", ""]
         lines.append("### Node Vocabulary")
         for item in self.node_vocabulary:
-            lines.append(f"- **{item['id']}**: {item['description']}")
+            confidence = float(item.get("confidence", 1.0))
+            provenance = item.get("provenance", "human")
+            warning = " ⚠️ (confidence: low, requires confirmation)" if confidence < 0.6 else ""
+            lines.append(f"- **{item['id']}**: {item['description']}{warning}")
             if "naming_convention" in item:
                 lines.append(f"  - naming: {item['naming_convention']}")
+            if provenance and provenance != "human":
+                source = f"  - source: {provenance}"
+                if item.get("fetched_at"):
+                    source += f" ({item['fetched_at']})"
+                lines.append(source)
             if "prefix_rules" in item:
                 for rule in item.get("prefix_rules", []):
                     lines.append(f"  - prefix for {rule.get('role', '?')}: {rule.get('prefix', '?')}")
@@ -92,6 +108,18 @@ def validate_lexicon(data: dict[str, Any]) -> None:
         for field in schema["node_vocabulary_item"].get("required_fields", []):
             if field not in item:
                 raise LexiconError(f"node_vocabulary item missing required field '{field}': {item}")
+        confidence = item.get("confidence")
+        if confidence is not None:
+            try:
+                confidence_value = float(confidence)
+            except (TypeError, ValueError) as exc:
+                raise LexiconError(
+                    f"confidence must be numeric, got '{confidence}' for '{item.get('id')}'"
+                ) from exc
+            if not (0.0 <= confidence_value <= 1.0):
+                raise LexiconError(
+                    f"confidence must be 0.0-1.0, got {confidence_value} for '{item.get('id')}'"
+                )
 
     conventions = data.get("naming_conventions", [])
     _validate_list_of_mappings(conventions, "naming_conventions")

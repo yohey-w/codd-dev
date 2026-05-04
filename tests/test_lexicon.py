@@ -67,6 +67,26 @@ def test_load_project_lexicon_and_access_fields(tmp_path):
     assert lexicon.extractor_registry["filesystem_routes"]["type"] == (
         "codd.extractors.FileSystemRouteExtractor"
     )
+    assert lexicon.provenance == "human"
+    assert lexicon.confidence == 1.0
+
+
+def test_load_project_lexicon_with_provenance_fields(tmp_path):
+    data = _valid_lexicon()
+    data["provenance"] = "web_search"
+    data["confidence"] = 0.8
+    data["node_vocabulary"][0]["provenance"] = "official_doc"
+    data["node_vocabulary"][0]["confidence"] = 0.7
+    data["node_vocabulary"][0]["fetched_at"] = "2026-05-04T15:30:00+09:00"
+    _write_lexicon(tmp_path, data)
+
+    lexicon = load_lexicon(tmp_path)
+
+    assert lexicon.provenance == "web_search"
+    assert lexicon.confidence == 0.8
+    assert lexicon.node_vocabulary[0]["provenance"] == "official_doc"
+    assert lexicon.node_vocabulary[0]["confidence"] == 0.7
+    assert lexicon.node_vocabulary[0]["fetched_at"] == "2026-05-04T15:30:00+09:00"
 
 
 def test_load_lexicon_returns_none_when_file_missing(tmp_path):
@@ -100,6 +120,21 @@ def test_as_context_string_contains_node_id_description_and_prefix_rules(tmp_pat
     assert "prefix for member: /my" in context
 
 
+def test_as_context_string_flags_low_confidence_items(tmp_path):
+    data = _valid_lexicon()
+    data["node_vocabulary"][0]["provenance"] = "web_search"
+    data["node_vocabulary"][0]["confidence"] = 0.4
+    data["node_vocabulary"][0]["fetched_at"] = "2026-05-04T15:30:00+09:00"
+    _write_lexicon(tmp_path, data)
+    lexicon = load_lexicon(tmp_path)
+
+    context = lexicon.as_context_string()
+
+    assert "⚠️" in context
+    assert "confidence: low, requires confirmation" in context
+    assert "source: web_search (2026-05-04T15:30:00+09:00)" in context
+
+
 def test_get_vocabulary_item_returns_match_or_none(tmp_path):
     _write_lexicon(tmp_path, _valid_lexicon())
     lexicon = load_lexicon(tmp_path)
@@ -123,4 +158,12 @@ def test_extractor_registry_item_requires_type():
     data["extractor_registry"]["filesystem_routes"].pop("type")
 
     with pytest.raises(LexiconError, match="extractor_registry item 'filesystem_routes'"):
+        validate_lexicon(data)
+
+
+def test_node_vocabulary_confidence_out_of_range_raises_lexicon_error():
+    data = _valid_lexicon()
+    data["node_vocabulary"][0]["confidence"] = 1.5
+
+    with pytest.raises(LexiconError, match="confidence must be 0.0-1.0"):
         validate_lexicon(data)
