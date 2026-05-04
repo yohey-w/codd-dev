@@ -785,14 +785,27 @@ def review(path: str, scope: str | None, as_json: bool, ai_cmd: str | None):
 
 
 @main.command()
+@click.option("--lexicon", is_flag=True, default=False, help="Validate against project_lexicon.yaml")
 @click.option("--path", default=".", help="Project root directory")
-def validate(path: str):
+def validate(lexicon: bool, path: str):
     """Validate CoDD frontmatter and dependency references."""
+    project_root = Path(path).resolve()
+    if lexicon:
+        from codd.validator import validate_with_lexicon
+
+        violations = validate_with_lexicon(project_root)
+        if violations:
+            for violation in violations:
+                click.echo(
+                    f"[{violation['violation_type']}] {violation['node_id']}: {violation['message']}"
+                )
+            raise SystemExit(1)
+        click.echo("Lexicon validation: OK (no violations)")
+        raise SystemExit(0)
+
     from codd.validator import run_validate
 
-    project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
-
     raise SystemExit(run_validate(project_root, codd_dir))
 
 
