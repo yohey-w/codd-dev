@@ -375,6 +375,7 @@ def _execute_task(
         coding_principles=coding_principles,
         prior_task_outputs=prior_task_outputs,
     )
+    prompt = generator_module._inject_lexicon(prompt, project_root)
     raw_output = generator_module._invoke_ai_command(
         resolved_ai_command, prompt, project_root=project_root,
     )
