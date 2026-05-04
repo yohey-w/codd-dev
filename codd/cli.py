@@ -832,12 +832,27 @@ def verify(path: str, sprint: int | None, e2e: bool, deploy: bool, base_url: str
     _run_pro_command("verify", path=path, sprint=sprint)
 
 
-def _run_e2e_generate(path: str, base_url: str, output: str | None, framework: str) -> None:
+def _run_e2e_generate(path: str, base_url: str, output: str | None, framework: str, mode: str = "scenarios") -> None:
     """Generate E2E test files from saved or freshly extracted scenarios."""
+    project_root = Path(path).resolve()
+    if mode == "transitions":
+        from codd.e2e_generator import TransitionTestGenerator
+
+        output_path = None
+        if output:
+            output_path = Path(output).expanduser()
+            if not output_path.is_absolute():
+                output_path = project_root / output_path
+
+        generator = TransitionTestGenerator(project_root)
+        transition_count = len(generator.load_transitions())
+        written_path = generator.write_tests(output_path=output_path)
+        click.echo(f"Generated transition test file: {_display_path(written_path, project_root)} ({transition_count} transitions)")
+        return
+
     from codd.e2e_extractor import ScenarioExtractor
     from codd.e2e_generator import TestGenerator, load_scenarios_from_markdown
 
-    project_root = Path(path).resolve()
     scenarios_path = project_root / "docs" / "e2e" / "scenarios.md"
     if scenarios_path.exists():
         collection = load_scenarios_from_markdown(scenarios_path)
@@ -879,7 +894,7 @@ def e2e():
     show_default=True,
     help="Base URL for generated E2E tests",
 )
-@click.option("--output", default=None, help="Output directory for test files")
+@click.option("--output", default=None, help="Output directory for scenario mode, or output file for transition mode")
 @click.option(
     "--framework",
     default="playwright",
@@ -887,9 +902,16 @@ def e2e():
     type=click.Choice(["playwright", "cypress"]),
     help="E2E test framework",
 )
-def e2e_generate(path: str, base_url: str, output: str | None, framework: str) -> None:
-    """Generate Playwright or Cypress test files from E2E scenarios."""
-    _run_e2e_generate(path=path, base_url=base_url, output=output, framework=framework)
+@click.option(
+    "--mode",
+    default="scenarios",
+    show_default=True,
+    type=click.Choice(["scenarios", "transitions"]),
+    help="Input source for generated E2E tests",
+)
+def e2e_generate(path: str, base_url: str, output: str | None, framework: str, mode: str) -> None:
+    """Generate Playwright or Cypress test files from scenarios or screen transitions."""
+    _run_e2e_generate(path=path, base_url=base_url, output=output, framework=framework, mode=mode)
 
 
 @main.command("e2e-generate")
@@ -900,7 +922,7 @@ def e2e_generate(path: str, base_url: str, output: str | None, framework: str) -
     show_default=True,
     help="Base URL for generated E2E tests",
 )
-@click.option("--output", default=None, help="Output directory for test files")
+@click.option("--output", default=None, help="Output directory for scenario mode, or output file for transition mode")
 @click.option(
     "--framework",
     default="playwright",
@@ -908,9 +930,16 @@ def e2e_generate(path: str, base_url: str, output: str | None, framework: str) -
     type=click.Choice(["playwright", "cypress"]),
     help="E2E test framework",
 )
-def e2e_generate_legacy(path: str, base_url: str, output: str | None, framework: str) -> None:
-    """Generate Playwright or Cypress test files from E2E scenarios."""
-    _run_e2e_generate(path=path, base_url=base_url, output=output, framework=framework)
+@click.option(
+    "--mode",
+    default="scenarios",
+    show_default=True,
+    type=click.Choice(["scenarios", "transitions"]),
+    help="Input source for generated E2E tests",
+)
+def e2e_generate_legacy(path: str, base_url: str, output: str | None, framework: str, mode: str) -> None:
+    """Generate Playwright or Cypress test files from scenarios or screen transitions."""
+    _run_e2e_generate(path=path, base_url=base_url, output=output, framework=framework, mode=mode)
 
 
 @main.command()
