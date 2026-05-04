@@ -111,6 +111,14 @@ class DocumentRecord:
     conventions: list[str]
 
 
+@dataclass(frozen=True)
+class DesignTokenViolation:
+    file: str
+    line: int
+    pattern: str
+    suggestion: str
+
+
 def run_validate(project_root: Path, codd_dir: Path) -> int:
     """Validate CoDD documents and print a human-readable report."""
     result = validate_project(project_root, codd_dir)
@@ -156,6 +164,74 @@ def validate_with_lexicon(project_root: str | Path, graph=None) -> list[dict[str
                     "message": f"naming_convention '{conv_id}' not defined in naming_conventions",
                 }
             )
+
+    return violations
+
+
+def validate_design_tokens(project_root: str | Path) -> list[DesignTokenViolation]:
+    """Check UI files for hardcoded hex colors and px values against DESIGN.md tokens."""
+    project_root = Path(project_root)
+    violations: list[DesignTokenViolation] = []
+    design_md_path = project_root / "DESIGN.md"
+    if not design_md_path.exists():
+        return violations
+
+    try:
+        from codd.design_md import DesignMdExtractor
+    except ImportError:
+        return violations
+
+    extractor = DesignMdExtractor()
+    result = extractor.extract(design_md_path)
+    if getattr(result, "error", None):
+        return violations
+
+    token_values: dict[str, str] = {}
+    for token in getattr(result, "tokens", []):
+        token_value = token.get("value") if isinstance(token, dict) else getattr(token, "value", None)
+        token_id = token.get("id") if isinstance(token, dict) else getattr(token, "id", None)
+        if isinstance(token_value, str) and isinstance(token_id, str):
+            token_values.setdefault(token_value.lower(), token_id)
+
+    ui_extensions = {".tsx", ".jsx", ".vue", ".svelte", ".swift", ".kt", ".dart"}
+    ignored_dirs = {".codd", "node_modules"}
+    hex_pattern = re.compile(r"#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})\b")
+    px_pattern = re.compile(r"\b(\d+(?:\.\d+)?px)\b")
+
+    for ui_file in project_root.rglob("*"):
+        if not ui_file.is_file() or ui_file.suffix.lower() not in ui_extensions:
+            continue
+        relative_path = ui_file.relative_to(project_root)
+        if ignored_dirs.intersection(relative_path.parts):
+            continue
+        try:
+            lines = ui_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+
+        for lineno, line in enumerate(lines, 1):
+            for match in hex_pattern.finditer(line):
+                hex_value = match.group(0).lower()
+                violations.append(
+                    DesignTokenViolation(
+                        file=relative_path.as_posix(),
+                        line=lineno,
+                        pattern=hex_value,
+                        suggestion=token_values.get(hex_value, "no matching token"),
+                    )
+                )
+            for match in px_pattern.finditer(line):
+                px_value = match.group(0).lower()
+                if px_value in token_values:
+                    continue
+                violations.append(
+                    DesignTokenViolation(
+                        file=relative_path.as_posix(),
+                        line=lineno,
+                        pattern=px_value,
+                        suggestion="no matching token",
+                    )
+                )
 
     return violations
 
