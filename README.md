@@ -43,6 +43,19 @@ cmd_344 以降で実装予定。本リリースは中央ハブのアーキテク
 
 ---
 
+## 🆕 v1.15.0 — E2E test stub generator (`codd e2e-generate`)
+
+`screen-flow.md` + `requirements.md` から **Playwright / Cypress テストスタブ** を自動生成する `codd e2e-generate` を追加。`ScenarioExtractor` がルート / アクション / 受入条件を `docs/e2e/scenarios.md` に抽出し、`TestGenerator` が各 UserScenario を `.spec.ts` / `.cy.ts` に書き出す。**Generality Gate 適合** (フレームワーク非依存、Markdown / パス操作のみ)。
+
+```bash
+codd e2e-generate --framework playwright --output docs/e2e/tests
+codd e2e-generate --framework cypress    --output docs/e2e/tests
+```
+
+design token / lexicon ヒントを生成テストに自動注入し、Coherence Engine と連携する。
+
+---
+
 ## 🆕 v1.14.0 — Batch guard for `codd implement`
 
 `codd implement` で `--max-tasks N` (default: 30) と `--wave WAVE_ID` をサポート。大規模な implementation plan を安全に分割実行するための **preflight task count guard** で AI の暴走 fan-out を防止し、`--wave` / `--max-tasks` / `--task` の代替案を含む actionable error message を返す。

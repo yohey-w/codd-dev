@@ -2,6 +2,26 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.15.0] - 2026-05-04 (retroactive)
+
+### Added
+
+- **`codd e2e-generate`** CLI: screen-flow.md + requirements.md から Playwright/Cypress
+  テストスタブを自動生成 (`--framework playwright|cypress` で切替、`--base-url`/`--output` 指定可)
+- **`ScenarioExtractor`** (`codd/e2e_extractor.py`): screen-flow と requirements を解析し、
+  routes / actions / acceptance_criteria を `docs/e2e/scenarios.md` に出力
+- **`TestGenerator`** (`codd/e2e_generator.py`): scenarios.md の各 UserScenario から
+  `.spec.ts` (Playwright) / `.cy.ts` (Cypress) ファイルを `docs/e2e/tests/` に生成
+- design token / lexicon ヒントを生成テストに自動注入 (Coherence Engine 連携)
+- Generality Gate 適合: Next.js / React / Vue / Svelte / Flutter 等フレームワーク非依存
+  (Markdown パース + パス操作のみ、特定 FW の import なし)
+
+### Notes
+
+- Phase commits: a686374 (ScenarioExtractor) + 73bc7e7 (TestGenerator + CLI)
+- このリリースは **retroactive**: v1.16.0-alpha が先に release 化されたため、tag は
+  73bc7e7 に逆打ちされている。pyproject.toml は HEAD で 1.16.0a0 のまま (タグ時点のスナップショット参照)。
+
 ## [1.16.0-alpha] - 2026-05-04
 
 ### Added
