@@ -595,7 +595,32 @@ def verify(path: str, sprint: int | None, e2e: bool, deploy: bool, base_url: str
     type=click.Path(exists=True),
     help="Custom extraction prompt file (overrides built-in baseline preset)",
 )
-def extract(path: str, language: str | None, source_dirs: str | None, output: str | None, ai: bool, ai_cmd: str | None, prompt_file: str | None):
+@click.option(
+    "--layer",
+    default=None,
+    type=click.Choice(["routes"]),
+    help="Extract specific layer (routes: filesystem routes as Mermaid diagram)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    default="mermaid",
+    type=click.Choice(["mermaid"]),
+    help="Output format for --layer extraction",
+)
+@click.option("--output-file", default=None, help="Output file for --layer routes (default: stdout)")
+def extract(
+    path: str,
+    language: str | None,
+    source_dirs: str | None,
+    output: str | None,
+    ai: bool,
+    ai_cmd: str | None,
+    prompt_file: str | None,
+    layer: str | None,
+    output_format: str,
+    output_file: str | None,
+):
     """Extract design documents from existing codebase (brownfield bootstrap).
 
     Default mode: static analysis (no AI, pure structural facts).
@@ -609,6 +634,23 @@ def extract(path: str, language: str | None, source_dirs: str | None, output: st
     bootstrap_codd_dir = _resolve_bootstrap_codd_dir(project_root)
     dirs = [d.strip() for d in source_dirs.split(",") if d.strip()] if source_dirs else None
     output_path = Path(output) if output else bootstrap_codd_dir / "extracted"
+
+    if layer == "routes":
+        from codd.config import load_project_config
+        from codd.routes_extractor import generate_mermaid_screen_flow
+
+        config = load_project_config(project_root)
+        route_configs = config.get("filesystem_routes", [])
+        result = generate_mermaid_screen_flow(project_root, route_configs)
+        content = f"```{output_format}\n{result.mermaid}\n```\n"
+        if output_file:
+            destination = Path(output_file)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(content, encoding="utf-8")
+            click.echo(f"Extracted {result.route_count} routes -> {output_file}")
+        else:
+            click.echo(content)
+        return
 
     if ai:
         from codd.extract_ai import run_extract_ai
@@ -907,6 +949,60 @@ def policy(path: str):
 
     click.echo(format_policy_text(result))
     raise SystemExit(0 if result.pass_ else 1)
+
+
+@main.command("drift")
+@click.option("--path", default=".", help="Project root directory")
+@click.option(
+    "--format",
+    "output_format",
+    default="text",
+    type=click.Choice(["text", "json"]),
+    help="Output format",
+)
+def drift(path: str, output_format: str):
+    """Detect drift between design-referenced URLs and implementation endpoints.
+
+    Exit code 0 = no drift. Exit code 1 = drift detected (use in CI).
+    """
+    from codd.drift import run_drift
+
+    project_root = Path(path).resolve()
+    codd_dir = _require_codd_dir(project_root)
+    result = run_drift(project_root, codd_dir)
+
+    if output_format == "json":
+        click.echo(
+            json.dumps(
+                {
+                    "design_urls": result.design_urls,
+                    "impl_urls": result.impl_urls,
+                    "drift": [
+                        {
+                            "kind": entry.kind,
+                            "url": entry.url,
+                            "source": entry.source,
+                            "closest_match": entry.closest_match,
+                        }
+                        for entry in result.drift
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        for entry in result.drift:
+            label = f"[drift {entry.kind}]"
+            closest = f"  (closest: {entry.closest_match})" if entry.closest_match else ""
+            source = f"  in {entry.source}" if entry.source else ""
+            click.echo(f"{label} {entry.url}{source}{closest}")
+        if not result.drift:
+            click.echo("No drift detected.")
+        else:
+            click.echo(f"\n{len(result.drift)} drift(s) found.")
+
+    raise SystemExit(result.exit_code)
 
 
 @main.command()

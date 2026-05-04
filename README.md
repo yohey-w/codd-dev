@@ -287,6 +287,133 @@ codd init --config-dir .codd --project-name "my-project" --language "python"
 
 All other commands (`scan`, `impact`, `generate`, etc.) automatically discover whichever config directory exists — `codd/` first, then `.codd/`. No extra flags needed.
 
+## Filesystem Routing Adapter Recipes
+
+CoDD detects URL drift between your design documents and implementation
+using framework conventions declared in `codd.yaml`.
+These recipes cover the five major filesystem-routing frameworks.
+
+| Framework              | Base dir      | Page glob        | API glob                  | Dynamic segment       |
+|------------------------|---------------|------------------|---------------------------|-----------------------|
+| Next.js (App Router)   | `app/`        | `page.{tsx,jsx}` | `route.{ts,js}`           | `[param]` → `:param`  |
+| Next.js (Pages Router) | `pages/`      | `*.{tsx,jsx}`    | `api/**/*.{ts,js}`        | `[param]` → `:param`  |
+| SvelteKit              | `src/routes/` | `+page.svelte`   | `+server.{ts,js}`         | `[param]` → `:param`  |
+| Nuxt 3                 | `pages/`      | `*.vue`          | `server/api/**/*.{ts,js}` | `[param]` → `:param`  |
+| Astro                  | `src/pages/`  | `*.astro`        | `*.{ts,js}` (in pages)    | `[...slug]` → `:slug` |
+| Remix                  | `app/routes/` | `*.{tsx,jsx}`    | `*.{ts,js}`               | `$param` → `:param`   |
+
+### Next.js (App Router)
+
+```yaml
+filesystem_routes:
+  - base_dir: app/
+    page_pattern: "page.{tsx,jsx,ts,js}"
+    api_pattern: "route.{ts,js}"
+    url_template: "/{relative_dir}"
+    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
+    ignore_segment: ["\\(.*\\)", "@.*"]
+    base_url: ""
+```
+
+### Next.js (Pages Router)
+
+```yaml
+filesystem_routes:
+  - base_dir: pages/
+    page_pattern: "*.{tsx,jsx,ts,js}"
+    api_pattern: ""
+    url_template: "/{relative_dir}/{stem}"
+    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
+    ignore_segment: ["^_.*"]
+    base_url: ""
+  - base_dir: pages/api/
+    page_pattern: ""
+    api_pattern: "*.{ts,js}"
+    url_template: "/api/{relative_dir}/{stem}"
+    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
+    ignore_segment: []
+    base_url: ""
+```
+
+### SvelteKit
+
+```yaml
+filesystem_routes:
+  - base_dir: src/routes/
+    page_pattern: "+page.svelte"
+    api_pattern: "+server.{ts,js}"
+    url_template: "/{relative_dir}"
+    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
+    ignore_segment: ["\\(.*\\)"]
+    base_url: ""
+```
+
+### Nuxt 3
+
+```yaml
+filesystem_routes:
+  - base_dir: pages/
+    page_pattern: "*.vue"
+    api_pattern: ""
+    url_template: "/{relative_dir}/{stem}"
+    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
+    ignore_segment: []
+    base_url: ""
+  - base_dir: server/api/
+    page_pattern: ""
+    api_pattern: "*.{ts,js}"
+    url_template: "/api/{relative_dir}/{stem}"
+    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
+    ignore_segment: []
+    base_url: ""
+```
+
+### Astro
+
+```yaml
+filesystem_routes:
+  - base_dir: src/pages/
+    page_pattern: "*.astro"
+    api_pattern: "*.{ts,js}"
+    url_template: "/{relative_dir}/{stem}"
+    dynamic_segment: { from: "\\[\\.\\.\\.(\\w+)\\]", to: ":$1" }
+    ignore_segment: []
+    base_url: ""
+```
+
+### Remix
+
+```yaml
+filesystem_routes:
+  - base_dir: app/routes/
+    page_pattern: "*.{tsx,jsx}"
+    api_pattern: "*.{ts,js}"
+    url_template: "/{segments}"
+    dynamic_segment: { from: "\\$(\\w+)", to: ":$1" }
+    ignore_segment: ["^_.*"]
+    base_url: ""
+```
+
+### Enable URL Drift Detection
+
+Add to `codd.yaml` to automatically link design doc URLs to endpoints:
+
+```yaml
+document_url_linking:
+  enabled: true
+  applies_to: [design, requirement]
+  url_pattern: "(?:^|[\\s`(\\[])(/[a-z0-9][a-z0-9/\\-:_\\[\\]]*)"
+  edge_type: references
+```
+
+Then run:
+
+```bash
+codd drift          # detect URL drift between design docs and implementation
+codd drift --format json  # machine-readable output
+codd extract --layer routes --format mermaid  # generate screen-flow diagram
+```
+
 ## Brownfield? Start Here
 
 Already have a codebase? CoDD provides a full brownfield workflow — from code extraction to design doc reconstruction.
