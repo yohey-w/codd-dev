@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 from codd.bridge import PRO_COMMAND_INSTALL_MESSAGE, get_command_handler
-from codd.config import find_codd_dir
+from codd.config import find_codd_dir, load_project_config
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -31,6 +31,55 @@ def _require_codd_dir(project_root: Path) -> Path:
         click.echo("Error: CoDD config dir not found (looked for codd/ and .codd/). Run 'codd init' first.")
         raise SystemExit(1)
     return codd_dir
+
+
+def _load_coherence_context(project_root: Path) -> dict[str, str]:
+    """Load optional lexicon and DESIGN.md context for coherence-aware prompts."""
+    config = load_project_config(project_root)
+    coherence_config = config.get("coherence", {})
+    if not isinstance(coherence_config, dict):
+        coherence_config = {}
+
+    lexicon_path = _config_path(
+        config.get("lexicon_path", coherence_config.get("lexicon_path", coherence_config.get("lexicon")))
+    )
+    design_md_path = _config_path(
+        config.get(
+            "design_md",
+            config.get("design_md_path", coherence_config.get("design_md", coherence_config.get("design_md_path"))),
+        )
+    )
+
+    context: dict[str, str] = {}
+    lexicon_text = _read_optional_context_file(project_root, lexicon_path or "project_lexicon.yaml")
+    if lexicon_text:
+        context["lexicon"] = lexicon_text
+
+    design_text = _read_optional_context_file(project_root, design_md_path or "DESIGN.md")
+    if design_text:
+        context["design_md"] = design_text
+
+    return context
+
+
+def _config_path(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value
+    if isinstance(value, dict):
+        for key in ("path", "file", "source"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+    return None
+
+
+def _read_optional_context_file(project_root: Path, path_text: str) -> str | None:
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = project_root / path
+    if not path.is_file():
+        return None
+    return path.read_text(encoding="utf-8")
 
 
 def _run_design_md_lint(project_root: Path) -> None:
@@ -412,9 +461,15 @@ def require(
     help="Override AI CLI command (defaults to codd.yaml ai_command)",
 )
 @click.option("--feedback", default=None, help="Review feedback to address in this update (from codd review)")
+@click.option(
+    "--coherence",
+    is_flag=True,
+    default=False,
+    help="Inject lexicon and DESIGN.md context into propagation prompt",
+)
 def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
               reason: str | None, reason_file: str | None,
-              ai_cmd: str | None, feedback: str | None):
+              ai_cmd: str | None, feedback: str | None, coherence: bool):
     """Propagate source code changes to design documents.
 
     Detects changed source files, maps them to modules, and finds design
@@ -429,6 +484,7 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
     """
     project_root = Path(path).resolve()
     _require_codd_dir(project_root)
+    coherence_context = _load_coherence_context(project_root) if coherence else None
 
     # Mutual exclusivity check
     mode_count = sum([update, verify, do_commit])
@@ -469,7 +525,13 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
         from codd.propagator import run_verify
 
         try:
-            result = run_verify(project_root, diff, ai_command=ai_cmd, feedback=feedback)
+            result = run_verify(
+                project_root,
+                diff,
+                ai_command=ai_cmd,
+                feedback=feedback,
+                coherence_context=coherence_context,
+            )
         except (FileNotFoundError, ValueError) as exc:
             click.echo(f"Error: {exc}")
             raise SystemExit(1)
@@ -518,7 +580,14 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
     from codd.propagator import run_propagate
 
     try:
-        result = run_propagate(project_root, diff, update=update, ai_command=ai_cmd, feedback=feedback)
+        result = run_propagate(
+            project_root,
+            diff,
+            update=update,
+            ai_command=ai_cmd,
+            feedback=feedback,
+            coherence_context=coherence_context,
+        )
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
