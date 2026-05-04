@@ -2,6 +2,45 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.18.0] - 2026-05-05
+
+### Added
+
+- **`codd validate --screen-flow` 強化** (cmd_359, commit eb6a298):
+  filesystem_routes が空のときに silent return するのをやめ、`CoddCLIError` を昇格。
+  error message に configured `base_dir` 値を含めて debug 容易化。
+  greenfield 初期 (screen-flow.md 不在) は warning level で許容を維持。
+- **`codd coverage --screen-flow-threshold`** (cmd_359):
+  既存 e2e / design_token / lexicon に並んで `screen_flow_coverage` metric を追加。
+  CI gate で screen-flow drift をブロックできる。
+- **CoverageAuditor `auth_ui_surface` セクション** (cmd_360, commit 0e2238b):
+  LMS checklist に `ux:auth:signin` / `ux:landing:root` / `ux:auth:signup` の
+  3 entry を追加。OWASP / コンプラ偏重で UX surface (login画面 / root landing /
+  signup) が抜け落ちる従来の盲点を解消。
+- **`codd.yaml [ux] required_routes` override**:
+  framework / SDK で異なる auth route 名 (NextAuth `/auth/signin`, Clerk `/sign-in`,
+  nuxt-auth `/auth/login` 等) を codd.yaml で project ごとに上書き可能に。
+  `KnowledgeFetcher.suggest_ux_required_routes()` は **defaults のみ** 提示し、
+  CoDD core に framework 固有名をハードコードしない設計。
+- **`codd implement` screen-flow.md injection** (cmd_361, commit 885799c):
+  implementation_plan.md に加えて `docs/extracted/screen-flow.md` (or
+  `docs/screen-flow.md`) を AI prompt に注入。UI route ('/login' / '/' 等) の
+  task が page 生成リストから漏れる従来の問題を解消。
+- **UI task 検出 + 0-file generation ERROR**:
+  task description に `page`/`screen`/`login`/`route`/`view`/`widget`/`画面`/`ログイン`
+  等のキーワードが含まれる task を `_is_ui_task()` で判定。生成ファイル数が 0 で
+  `skip_generation: true` 未指定の場合は `CoddCLIError` を昇格 (silent pass を排除)。
+
+### Notes
+
+- 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy 等)
+  はすべて変更なし。新挙動はすべて opt-in or 安全側。
+- 既存テスト 821 (v1.17.0) → 852 (v1.18.0)、+31 件追加、全件 PASS / 0 FAIL / 0 SKIP
+  (Python 3.12 .venv + tree_sitter installed)。
+- Generality Gate: knowledge_fetcher の AUTH_UI_PACKAGES / implementer の
+  _FRAMEWORK_KEYWORDS は依存検出列挙 (cmd_343 で確立した汎用検出パターンと同思想)、
+  CoDD core の中核ロジックには framework 固有名を焼き込んでいない。
+
 ## [1.17.0] - 2026-05-05
 
 ### Added
