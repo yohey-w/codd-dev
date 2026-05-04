@@ -2,6 +2,31 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.13.0] - 2026-05-04
+
+### Added
+
+- **DesignMdExtractor** (`codd/design_md.py`): DESIGN.md (Google Stitch OSS, W3C Design Tokens
+  spec) を YAML front matter としてパースし、design_token ノード・参照 edge を生成
+- **lexicon design_token vocabulary**: `codd/templates/lexicon_schema.yaml` に `design_token`
+  標準カテゴリ (color/typography/spacing/component) を追加
+- **KnowledgeFetcher UI framework detection**: React/Vue/Svelte/Flutter/SwiftUI/Jetpack Compose
+  を `detect_tech_stack()` で検出し、DESIGN.md spec を lexicon draft に提案
+- **DESIGN.md prompt injection** (`codd implement`): `.tsx/.jsx/.vue/.svelte/.swift/.kt/.dart`
+  生成時に DESIGN.md トークンを AI prompt に自動注入 (未存在時は warning + skip)
+- **`codd validate --design-tokens`**: UI ファイル内の #hex リテラル / px 値を DESIGN.md
+  トークン集合と照合し、ハードコードを violation として報告
+- **DesignTokenDriftLinker** (`codd drift`): UI 実装で使用されるトークン参照と DESIGN.md
+  定義を比較し design_token drift を検出
+- **`codd verify --design-md`**: `npx @google/design.md lint` を呼び出し lint 結果を CoDD
+  レポートに統合 (npx 不可の場合は skip + warning)
+
+### Notes
+
+- Generality Gate 準拠: UI 言語非依存 (Web/Mobile/Desktop 汎用。React 特化なし)
+- DESIGN.md 未存在プロジェクトでも CoDD は通常動作 (warning のみ、強制しない)
+- 新規 unit test 22 件追加 (合計 629 PASS / 0 SKIP)
+
 ## [1.12.0] - 2026-05-04
 
 ### Added

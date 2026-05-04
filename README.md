@@ -22,6 +22,36 @@
 pip install codd-dev
 ```
 
+## 🆕 v1.13.0 — DESIGN.md統合 (Google Stitch OSS, W3C Design Tokens)
+
+**UI設計からコード生成まで完全なトレーサビリティを実現。**
+
+| 機能 | 説明 |
+|------|------|
+| `DesignMdExtractor` | DESIGN.md (W3C Design Tokens spec) を自動パース |
+| `KnowledgeFetcher` UI検出 | React/Vue/Svelte/Flutter 等を自動認識、DESIGN.md 採用を提案 |
+| `codd implement` 注入 | UIファイル生成時に DESIGN.md トークンを AI prompt に自動付与 |
+| `codd validate --design-tokens` | ハードコードされた #hex/px 値を検出して DESIGN.md 参照を推奨 |
+| `codd drift` design_token | UI実装のトークン参照と DESIGN.md 定義集合を比較 |
+| `codd verify --design-md` | `npx @google/design.md lint` を CoDD レポートに統合 |
+
+```yaml
+# DESIGN.md サンプル (プロジェクトルートに配置)
+---
+version: "1.0"
+name: "My App"
+colors:
+  Primary: "#1A73E8"
+components:
+  Button.primary:
+    background: "{colors.Primary}"
+---
+```
+
+仕様: [google-labs-code/design.md](https://github.com/google-labs-code/design.md)
+
+---
+
 ## 🆕 v1.12.0 — Meta-Design Context Layer (project_lexicon)
 
 CoDD now has a **meta-design context layer**: declare your project's vocabulary, naming conventions, and design principles once in `project_lexicon.yaml`, and every AI command (require / plan / generate / implement) automatically uses it.
