@@ -1,0 +1,25 @@
+# Framework-agnostic defaults for screen transition pattern detection.
+# Projects can override via codd.yaml screen_transitions patterns.
+frameworks:
+  next_js:
+    patterns:
+      - { kind: link, ast_node: "jsx_element", attr: "href", element: "Link" }
+      - { kind: redirect, ast_node: "call_expression", callee: "redirect" }
+      - { kind: router_push, ast_node: "call_expression", callee: "router.push" }
+      - { kind: redirect, ast_node: "call_expression", callee: "NextResponse.redirect" }
+      - { kind: signin_cb, ast_node: "call_expression", callee: "signIn", url_arg: "callbackUrl" }
+  nuxt:
+    patterns:
+      - { kind: link, ast_node: "jsx_element", attr: "to", element: "NuxtLink" }
+      - { kind: redirect, ast_node: "call_expression", callee: "navigateTo" }
+  sveltekit:
+    patterns:
+      - { kind: redirect, ast_node: "call_expression", callee: "goto" }
+      - { kind: redirect, ast_node: "call_expression", callee: "redirect" }
+  astro:
+    patterns:
+      - { kind: redirect, ast_node: "member_expression", object: "Astro", property: "redirect" }
+  remix:
+    patterns:
+      - { kind: redirect, ast_node: "call_expression", callee: "redirect" }
+      - { kind: link, ast_node: "jsx_element", attr: "to", element: "Link" }

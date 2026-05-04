@@ -933,8 +933,8 @@ def e2e_generate_legacy(path: str, base_url: str, output: str | None, framework:
 @click.option(
     "--layer",
     default=None,
-    type=click.Choice(["routes"]),
-    help="Extract specific layer (routes: filesystem routes as Mermaid diagram)",
+    type=click.Choice(["routes", "routes-edges"]),
+    help="Extract specific layer (routes: filesystem routes, routes-edges: screen transition edges)",
 )
 @click.option(
     "--format",
@@ -985,6 +985,17 @@ def extract(
             click.echo(f"Extracted {result.route_count} routes -> {output_file}")
         else:
             click.echo(content)
+        return
+
+    if layer == "routes-edges":
+        from codd.screen_transition_extractor import extract_transitions, write_screen_transitions_yaml
+
+        destination = Path(output_file or output) if (output_file or output) else project_root / "docs" / "extracted" / "screen-transitions.yaml"
+        if not destination.is_absolute():
+            destination = project_root / destination
+        transitions = extract_transitions(project_root, dirs)
+        write_screen_transitions_yaml(transitions, destination)
+        click.echo(f"Extracted {len(transitions)} screen transitions -> {_display_path(destination, project_root)}")
         return
 
     if ai:
