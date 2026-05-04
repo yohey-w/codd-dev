@@ -1,0 +1,21 @@
+# project_lexicon.yaml schema definition and validation spec
+version: "1.0"
+required_sections:
+  - node_vocabulary
+  - naming_conventions
+  - design_principles
+
+optional_sections:
+  - failure_modes
+  - extractor_registry
+
+node_vocabulary_item:
+  required_fields: [id, description]
+  optional_fields: [extractor, naming_convention, drift_detector, prefix_rules, plurality]
+
+naming_convention_item:
+  required_fields: [id, regex]
+
+extractor_registry_item:
+  required_fields: [type]
+  optional_fields: [config_schema, description]
