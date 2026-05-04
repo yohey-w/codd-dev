@@ -815,8 +815,14 @@ def review(path: str, scope: str | None, as_json: bool, ai_cmd: str | None):
 
 @main.command()
 @click.option("--lexicon", is_flag=True, default=False, help="Validate against project_lexicon.yaml")
+@click.option(
+    "--design-tokens",
+    is_flag=True,
+    default=False,
+    help="Check UI files for hardcoded #hex/px values not in DESIGN.md tokens.",
+)
 @click.option("--path", default=".", help="Project root directory")
-def validate(lexicon: bool, path: str):
+def validate(lexicon: bool, design_tokens: bool, path: str):
     """Validate CoDD frontmatter and dependency references."""
     project_root = Path(path).resolve()
     if lexicon:
@@ -830,6 +836,21 @@ def validate(lexicon: bool, path: str):
                 )
             raise SystemExit(1)
         click.echo("Lexicon validation: OK (no violations)")
+        raise SystemExit(0)
+
+    if design_tokens:
+        from codd.validator import validate_design_tokens
+
+        violations = validate_design_tokens(project_root)
+        if violations:
+            click.echo(f"Design token violations found: {len(violations)}")
+            for violation in violations:
+                click.echo(
+                    f"  {violation.file}:{violation.line} - hardcoded {violation.pattern} "
+                    f"(suggest: {violation.suggestion})"
+                )
+            raise SystemExit(1)
+        click.echo("No design token violations found.")
         raise SystemExit(0)
 
     from codd.validator import run_validate
