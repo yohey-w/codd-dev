@@ -217,7 +217,7 @@ def run_deploy(
 
 
 def _run_deploy_gates(project_root: Path) -> DeployGateResult:
-    """Run validate, drift, coverage, DAG, and C6 deploy gates before apply deploy."""
+    """Run validate, drift, coverage, DAG, C6, and C7 gates before apply deploy."""
     project_root = Path(project_root).resolve()
     settings = _load_gate_settings(project_root)
     codd_dir = _find_gate_codd_dir(project_root)
@@ -230,6 +230,7 @@ def _run_deploy_gates(project_root: Path) -> DeployGateResult:
     _collect_coverage_gate(project_root, settings, result)
     _collect_dag_completeness_gate(project_root, settings, result)
     _collect_deployment_completeness_gate_result(project_root, settings, result)
+    _collect_user_journey_coherence_gate_result(project_root, settings, result)
     return result
 
 
@@ -461,6 +462,68 @@ def _collect_deployment_completeness_gate_result(
     _ntfy_deploy_incomplete(violations, settings)
 
 
+def _collect_user_journey_coherence_gate(
+    dag: Any | None,
+    project_root: Path,
+    codd_config: dict[str, Any],
+) -> Any:
+    """Run the C7 user_journey_coherence check and return its result."""
+
+    from codd.dag.checks.user_journey_coherence import UserJourneyCoherenceCheck
+
+    project_root = Path(project_root).resolve()
+    settings = codd_config
+    target_dag = dag
+    if target_dag is None:
+        from codd.dag.builder import build_dag, load_dag_settings
+
+        settings = load_dag_settings(project_root, codd_config)
+        target_dag = build_dag(project_root, settings)
+
+    return UserJourneyCoherenceCheck().run(
+        target_dag,
+        project_root=project_root,
+        codd_config=settings,
+    )
+
+
+def _collect_user_journey_coherence_gate_result(
+    project_root: Path,
+    settings: dict[str, Any],
+    result: DeployGateResult,
+) -> None:
+    try:
+        check_result = _collect_user_journey_coherence_gate(None, project_root, settings)
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        result.add_failure("user_journey_coherence", str(exc))
+        return
+
+    violations = list(_result_value(check_result, "violations") or [])
+    if not violations:
+        return
+
+    from codd.dag.checks.user_journey_coherence import UserJourneyCoherenceCheck
+
+    report = UserJourneyCoherenceCheck().format_report(check_result)
+    result.add_report("user_journey_coherence_report", _parse_user_journey_coherence_report(report))
+
+    red_violations = _red_user_journey_violations(violations)
+    amber_violations = _amber_user_journey_violations(violations)
+    if amber_violations:
+        result.add_warning(f"user_journey_coherence: {len(amber_violations)} amber violation(s)")
+
+    if not red_violations:
+        return
+
+    result.add_failure(
+        "user_journey_coherence",
+        f"C7 user_journey_coherence: {len(red_violations)} red violation(s)",
+        [report],
+    )
+    _publish_user_journey_coherence_events(red_violations)
+    _ntfy_user_journey_coherence_fail(red_violations, settings)
+
+
 def _screen_flow_strict_edges(settings: dict[str, Any]) -> bool:
     screen_flow_config = settings.get("screen_flow", {})
     if not isinstance(screen_flow_config, dict):
@@ -610,6 +673,37 @@ def _publish_deployment_completeness_events(violations: list[Any]) -> None:
         )
 
 
+def _publish_user_journey_coherence_events(violations: list[Any]) -> None:
+    """Publish one DriftEvent per C7 user_journey_coherence violation."""
+
+    if _coherence_bus is None:
+        return
+
+    try:
+        from codd.coherence_engine import DriftEvent
+    except Exception:  # pragma: no cover - optional coherence integration
+        return
+
+    for violation in violations:
+        severity = _user_journey_violation_severity(violation)
+        _coherence_bus.publish(
+            DriftEvent(
+                source_artifact="design_doc",
+                target_artifact="implementation",
+                change_type="modified",
+                payload={
+                    "type": _violation_attr(violation, "type"),
+                    "design_doc": _violation_attr(violation, "design_doc"),
+                    "user_journey": _violation_attr(violation, "user_journey"),
+                    "violation": violation,
+                },
+                severity=severity if severity in {"red", "amber", "green"} else "red",
+                fix_strategy="auto" if severity == "red" else "hitl",
+                kind="user_journey_coherence",
+            )
+        )
+
+
 def _ntfy_deploy_incomplete(violations: list[Any], settings: dict[str, Any]) -> bool:
     topic = _deployment_ntfy_topic(settings)
     if not topic:
@@ -624,6 +718,32 @@ def _ntfy_deploy_incomplete(violations: list[Any], settings: dict[str, Any]) -> 
             "Priority": "urgent",
             "Tags": "warning",
             "Title": "CoDD deploy incomplete",
+        },
+    )
+    try:
+        with urlopen(request, timeout=5):
+            return True
+    except (OSError, URLError):
+        return False
+
+
+def _ntfy_user_journey_coherence_fail(violations: list[Any], settings: dict[str, Any]) -> bool:
+    red_violations = _red_user_journey_violations(violations)
+    if not red_violations:
+        return False
+
+    topic = _deployment_ntfy_topic(settings)
+    if not topic:
+        return False
+
+    request = Request(
+        _ntfy_url(topic),
+        data=_format_user_journey_coherence_ntfy(red_violations).encode("utf-8"),
+        method="POST",
+        headers={
+            "Priority": "urgent",
+            "Tags": "warning",
+            "Title": "CoDD user journey coherence",
         },
     )
     try:
@@ -671,6 +791,10 @@ def _format_deploy_incomplete_ntfy(violation: Any) -> str:
     return f"CRITICAL deploy INCOMPLETE: {design_doc} -> {broken_at}\n{remediation}"
 
 
+def _format_user_journey_coherence_ntfy(violations: list[Any]) -> str:
+    return f"C7 user_journey_coherence FAIL: {len(violations)} violations"
+
+
 def _format_deployment_violation_message(violation: Any) -> str:
     formatter = getattr(violation, "format_as_message", None)
     if callable(formatter):
@@ -685,6 +809,27 @@ def _parse_incomplete_chain_report(report: str) -> list[dict[str, Any]]:
         return []
     value = payload.get("incomplete_chain_report")
     return value if isinstance(value, list) else []
+
+
+def _parse_user_journey_coherence_report(report: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(report)
+    except json.JSONDecodeError:
+        return []
+    value = payload.get("user_journey_coherence_report")
+    return value if isinstance(value, list) else []
+
+
+def _red_user_journey_violations(violations: list[Any]) -> list[Any]:
+    return [violation for violation in violations if _user_journey_violation_severity(violation) == "red"]
+
+
+def _amber_user_journey_violations(violations: list[Any]) -> list[Any]:
+    return [violation for violation in violations if _user_journey_violation_severity(violation) == "amber"]
+
+
+def _user_journey_violation_severity(violation: Any) -> str:
+    return str(_violation_attr(violation, "severity") or "red")
 
 
 def _violation_attr(violation: Any, key: str) -> Any:
