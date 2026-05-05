@@ -4,6 +4,106 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.26.0] - 2026-05-06
+
+### Added — CDP-Browser E2E Verification + LLM Test Pipeline (cmd_397)
+
+cmd_393 で declarative に書ける `user_journeys` を **実ブラウザで自動実行**する
+verification template (CdpBrowser) を追加。さらに、設計書に書かれていない暗黙の
+検証留意点を LLM が動的に補完する LLM test consideration pipeline を追加。
+「declarative + 実行 + LLM 補完」で coherence の UX 軸が一周する。
+
+### 新 node kind: 0 / 新 edge kind: 0
+
+cmd_393 で確立した「新次元 = attribute schema 拡張で吸収」パターンを継承し、
+本 release でも CdpBrowser engine + LLM 補完層をすべて既存 schema 上に乗せた。
+
+### 新 verification template: cdp_browser
+
+`codd/deployment/providers/verification/cdp_browser.py` に新 plug-in 追加 (cmd_392d
+verification template registry を流用)。3 軸 plug-in で stack 多様性を吸収:
+
+- `BrowserEngine` (Edge / Chromium / Firefox / WebKit) — `@register_browser_engine`
+- `CdpLauncher` (PowerShell / shell / external_running / WebDriver) — `@register_cdp_launcher`
+- `FormInteractionStrategy` (React state setter / 標準 input event / Vue / Angular) — `@register_form_strategy`
+
+CoDD core にはどれも **bundle されない**。cookbook (`docs/cookbook/cdp_browser/`) で
+コピペ用テンプレート提供のみ。
+
+### 標準 AssertionHandler 3 種 (CoDD core 同梱)
+
+- `expect_url` (location.href の startsWith / contains / regex 検証)
+- `expect_browser_state` (cookie / localStorage / sessionStorage の存在/値検証)
+- `expect_dom_visible` (querySelector + 表示判定)
+
+これらは journey.steps の標準語彙であり stack 中立として core bundle。
+
+### CDP wire 最小実装 (websocket-client 依存追加)
+
+`codd/deployment/providers/verification/cdp_wire.py` に websocket + JSON-RPC 最小 client。
+依存は `websocket-client` のみ (~50KB)。method 名は launcher / strategy plug-in が指定し、
+core は generic な request/response router として動作 (Chrome / Edge / Chromium 中立)。
+
+### LLM Test Consideration Pipeline (cmd_397_f-h)
+
+`codd/llm/` に新 module 一式:
+
+- `LlmConsiderationProvider` ABC + `@register_llm_provider` decorator
+- subprocess + ai_command 抽象 (codd/extract_ai 既存 pattern 流用、SDK 依存ゼロ)
+- META_INSTRUCTION_TEMPLATE (domain-neutral) + means_catalog hint slot
+- 出力 schema validator (cmd_393 user_journeys schema 準拠)
+- HITL approval gate (`required` / `per_consideration` / `auto` の 3 mode)
+- `verification_strategy` field 追加 (LLM が engine 選択も導出)
+
+### Means Catalog (cmd_397_i)
+
+`codd/llm/templates/verification_means_catalog.yaml` に 6 ドメイン default hint:
+web_app / mobile_app / desktop_app / cli_tool / backend_api / embedded。
+
+3-stage fallback resolution:
+1. `project_lexicon.yaml [verification_means_catalog]` (project override、最優先)
+2. `codd.yaml [llm.verification_means_catalog_path]`
+3. CoDD core default
+
+catalog 固有名 (Appium / WinAppDriver) は **YAML hint** として許容、core code は
+yaml 内容で if 分岐しない (Generality Gate layer B)。
+
+### 新 CLI
+
+- `codd dag run-journey <journey_name>` (cmd_397_e、journey 単発実行)
+- `codd llm derive [--design-doc <path>] [--force]` (cmd_397_f、考慮事項生成)
+- `codd llm approve <design_doc> [--consideration <id>] [--all]` (cmd_397_h、HITL 承認)
+- `codd llm list [--design-doc <path>]` (cmd_397_h)
+
+### Generality Gate 二層化
+
+- layer A (code): `codd/llm/*.py` + `codd/deployment/providers/verification/*.py` に
+  framework / stack 固有名 zero hit (`expect_browser_state` 内の標準 target 語彙
+  cookie/localStorage/sessionStorage は journey schema の一部として例外)
+- layer B (hint yaml): catalog 固有名 OK、ただし core code が yaml 内容で
+  if 分岐しないことを AST 検査で保証
+
+### osato-lms 実証 (cmd_397_lms)
+
+osato-lms に `codd.yaml [verification.templates.cdp_browser]` 追加 + cookbook plug-in
+(PowerShell launcher / Edge engine / React state strategy) を copy。実ブラウザで
+login → /learner/dashboard 動線が自動化された。LLM derive で auth_design.md → 10+
+considerations 生成 + HITL approve + C7 merge も実証。
+
+### Backwards compatibility
+
+- `codd.yaml [verification.templates.cdp_browser]` 不在 → 既存挙動 (playwright/curl)
+- `design_doc.user_journeys` 不在 → CdpBrowser を選択する path がない
+- `codd.yaml [llm.*]` 不在 → `codd llm derive` はエラー、C7 は manual user_journeys のみ
+- 既存 v1.25.0 ユーザは挙動変化ゼロ (cmd_397 関連は完全 opt-in)
+
+### 設計の経緯
+
+- cmd_397_g0 (CDP-Browser engine) と cmd_397_g1_llm_design (LLM 補完) を一本化設計
+- 殿確定 4 制約 (3 層モデル禁止 / 戦略導出 LLM 動的 / 手段カタログ hint / Generality 二層) を
+  設計書に統合
+- 11 phases (pre/a/b/c/d/e/f/g/h/i/lms) で並列実装、足軽 5 名 + 軍師 + 家老体制で完走
+
 ## [1.25.0] - 2026-05-06
 
 ### Added — User Journey Coherence Layer (cmd_393)
