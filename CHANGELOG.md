@@ -2,6 +2,64 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [1.20.0] - 2026-05-05
+
+### Added — AI-driven Design Artifact Derivation (要件→AI動的設計書群導出)
+
+CoDD の本質的方向性 (memory: project_codd_questioning_ai.md) を具体化する 5 cmd 統合
+リリース。テンプレ固定 wave_config を廃止し、要件→AI判断→必要設計書群→wave_config
+を動的導出する。HITL 協業型 (recommended 先行進行 + after-fact patch) を初実装。
+
+- **`codd require --completeness-audit`** (cmd_375, commit c52ec80):
+  要件文書から設計書導出に必要な情報の欠落を監査し、選択式 ASK を生成
+  - `RequirementCompletenessAuditor` + project_type 別 defaults (web / cli / mobile / iot)
+  - `AskItem` / `AskOption` を `project_lexicon.yaml:coverage_decisions` に永続化
+  - `HitlSession` による HITL 協業型 (`RECOMMENDED_PROCEEDING`) と blocking mode 互換
+  - AskUserQuestion / ntfy / lexicon の 3 チャネル送信。Claude 非依存環境では ntfy + lexicon で動作
+- **`codd drift --screen-flow`** (cmd_373, commit 7f0010b):
+  screen-transitions.yaml と実装コード抽出 transition の双方向差分検知
+  - `ScreenFlowDriftResult` dataclass + `compute_screen_flow_drift()` 関数
+  - design-only / impl-only / trigger mismatch を `from`/`to` edge 単位で比較
+  - DriftEvent (kind=screen_flow_design_drift, severity=amber) として Coherence Engine 統合
+- **`codd plan --derive`** (cmd_370, commit c1d7ba9):
+  要件文書 + `project_lexicon.yaml:coverage_decisions` から必要設計書群を AI 導出し、
+  `project_lexicon.yaml:required_artifacts` に永続化
+  - `RequiredArtifactsDeriver` + project_type 別 defaults (web / cli / mobile / iot)
+  - `source` は `ai_derived` / `user_override` / `default_template` を必須化
+  - cmd_375 の `RECOMMENDED_PROCEEDING` / 確定回答を prompt hint として注入
+  - `codd.yaml [project] type` と `[required_artifacts]` override で汎用プロジェクトに適用可能
+- **`codd require --audit` required artifact gap detection** (cmd_371, commit 1e92484):
+  `project_lexicon.yaml:required_artifacts` と既存 `docs/design/*.md` を比較し、
+  AI 導出された必須設計書の欠落を ASK / AUTO_REJECT として監査
+  - `ArtifactGap` + `CoverageAuditor.audit_required_artifacts()` / `_discover_existing_artifacts()`
+  - `artifact_discovery.paths` / `mappings` / `artifact_paths` による codd.yaml override 対応
+  - coverage audit report に `Required Artifacts Audit` セクションを追記し、
+    missing artifact の作成先候補と scope exclusion を記録
+- **`codd plan --derive --regenerate-wave-config`** (cmd_372, commit c24a868):
+  `project_lexicon.yaml:required_artifacts` を topological sort し、`wave_config` を明示フラグ時のみ再生成
+  - `generate_wave_config_from_artifacts()` で required_artifacts の `depends_on` から wave を決定
+  - 既存 `wave_config` は通常の `codd plan --derive` では変更せず、後方互換を維持
+  - 再生成前に `codd.yaml.bak` を作成し、既存設定を保護
+  - `codd/codd.yaml.bak` / `.codd/codd.yaml.bak` を gitignore に追加
+
+### 思想転換
+
+wave_config テンプレ固定廃止。要件→AI判断→必要設計書群を動的に決定する仕組みを実装。
+**AI は問いつつ進む** (HITL 協業型): ASK 発生 → recommended 値で先行進行 → 殿空き時間で
+10 秒判断 → 違ったら after-fact patch。osato-lms screen-flow 不在事故のような「設計書
+漏れ」を構造的に再発防止。
+
+### Notes
+
+- 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
+  e2e-generate / extract / plan / require) はすべて変更なし。新フラグはすべて opt-in。
+- 既存テスト 915 (v1.19.0) → 993 (v1.20.0)、+78 件追加 (cmd_373: 9 + cmd_375: 25 +
+  cmd_370: 19 + cmd_371: 11 + cmd_372: 14)、全件 PASS / 0 FAIL / 0 SKIP
+- Generality Gate: project_type 別 defaults yaml 分離 (web/cli/mobile/iot 各 4 種、
+  required_artifacts と requirement_completeness の両方) + codd.yaml override で汎用適用。
+  CoDD core に framework 固有名のハードコードなし。
+- HitlSession class は cmd_376 (v1.21.0 候補) で全 CoDD コマンドへの横串改修ベースとなる。
+
 ## [1.19.0] - 2026-05-05
 
 ### Added — Screen Transition Edge Support (画面遷移エッジ完全対応)
@@ -26,11 +84,6 @@ All notable changes to CoDD are documented in this file.
   - `extract_e2e_have_url_assertions()` で .spec.ts / .cy.ts から URL 到達 assertion を抽出
   - `ScreenTransitionDrift` dataclass + `detect_screen_transition_drift()` 関数
   - DriftEvent (kind=screen_transition_drift, severity=amber) として Coherence Engine 統合
-- **`codd drift --screen-flow`** (cmd_373): screen-transitions.yaml と実装コード抽出 transition
-  の双方向差分検知
-  - `ScreenFlowDriftResult` dataclass + `compute_screen_flow_drift()` 関数
-  - design-only / impl-only / trigger mismatch を `from`/`to` edge 単位で比較
-  - DriftEvent (kind=screen_flow_design_drift, severity=amber) として Coherence Engine 統合
 - **implementer wrapper rules** (cmd_368, commit fc61df2):
   - `_is_wrapper_task()` で thin wrapper page (e.g., `src/app/login/page.tsx` が
     `<SignInForm>` を呼ぶだけ) を検出
@@ -38,41 +91,13 @@ All notable changes to CoDD are documented in this file.
     一致 + middleware 単一インスタンス を命令
   - `_check_guard_files_uniqueness()` で `codd.yaml [implementer] guard_files` リストの
     重複ファイル (root middleware.ts と generated/middleware.ts 等) 検出 → CoddCLIError 昇格
-- **`codd require --completeness-audit`** (cmd_375):
-  要件文書から設計書導出に必要な情報の欠落を監査し、選択式ASKを生成
-  - `RequirementCompletenessAuditor` + project_type 別 defaults (web / cli / mobile / iot)
-  - `AskItem` / `AskOption` を `project_lexicon.yaml:coverage_decisions` に永続化
-  - `HitlSession` による HITL 協業型 (`RECOMMENDED_PROCEEDING`) と blocking mode 互換
-  - AskUserQuestion / ntfy / lexicon の3チャネル送信。Claude非依存環境では ntfy + lexicon で動作
-- **`codd plan --derive`** (cmd_370):
-  要件文書 + `project_lexicon.yaml:coverage_decisions` から必要設計書群をAI導出し、
-  `project_lexicon.yaml:required_artifacts` に永続化
-  - `RequiredArtifactsDeriver` + project_type 別 defaults (web / cli / mobile / iot)
-  - `source` は `ai_derived` / `user_override` / `default_template` を必須化
-  - cmd_375 の `RECOMMENDED_PROCEEDING` / 確定回答を prompt hint として注入
-  - `codd.yaml [project] type` と `[required_artifacts]` override で汎用プロジェクトに適用可能
-- **`codd require --audit` required artifact gap detection** (cmd_371):
-  `project_lexicon.yaml:required_artifacts` と既存 `docs/design/*.md` を比較し、
-  AI導出された必須設計書の欠落を ASK / AUTO_REJECT として監査
-  - `ArtifactGap` + `CoverageAuditor.audit_required_artifacts()` / `_discover_existing_artifacts()`
-  - `artifact_discovery.paths` / `mappings` / `artifact_paths` による codd.yaml override 対応
-  - coverage audit report に `Required Artifacts Audit` セクションを追記し、
-    missing artifact の作成先候補と scope exclusion を記録
-- **`codd plan --derive --regenerate-wave-config`** (cmd_372):
-  `project_lexicon.yaml:required_artifacts` を topological sort し、`wave_config` を明示フラグ時のみ再生成
-  - `generate_wave_config_from_artifacts()` で required_artifacts の `depends_on` から wave を決定
-  - 既存 `wave_config` は通常の `codd plan --derive` では変更せず、後方互換を維持
-  - 再生成前に `codd.yaml.bak` を作成し、既存設定を保護
-  - `codd/codd.yaml.bak` / `.codd/codd.yaml.bak` を gitignore に追加
 
 ### Notes
 
 - 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
   e2e-generate / extract) はすべて変更なし。新フラグはすべて opt-in。
-- 既存テスト 852 (v1.18.0) → 993 (v1.19.0)、+141 件追加 (cmd_364: 12 + cmd_365: 16 +
-  cmd_366: 13 + cmd_367: 11 + cmd_368: 11 + cmd_373: 9 + cmd_375: 25 + cmd_370: 19 +
-  cmd_371: 11 + cmd_372: 14)、
-  全件 PASS / 0 FAIL / 0 SKIP
+- 既存テスト 852 (v1.18.0) → 915 (v1.19.0)、+63 件追加 (cmd_364: 12 + cmd_365: 16 +
+  cmd_366: 13 + cmd_367: 11 + cmd_368: 11)、全件 PASS / 0 FAIL / 0 SKIP
 - Generality Gate: framework 固有名 (Next.js/NextAuth/Clerk/Nuxt/SvelteKit) は
   defaults.yaml と codd.yaml override に分離、CoDD core にハードコードなし。
   Playwright/Cypress は e2e_generator の switch 範疇 (cmd_342 で確立した汎用 pattern)。
