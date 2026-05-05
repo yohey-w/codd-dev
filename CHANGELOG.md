@@ -4,6 +4,78 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.25.0] - 2026-05-06
+
+### Added — User Journey Coherence Layer (cmd_393)
+
+cmd_392 v1.24.0 release 直後に発生した実ブラウザログイン失敗
+(HTTP 環境 × `__Secure-` Cookie 不整合) を構造的に検出するための C7 check 追加。
+C6 deployment_completeness は API/DB レベルのチェーン検証だが、ブラウザ側の
+journey 成立条件 (実環境 capability / 実装証跡 / browser 期待値) は捕捉できなかった。
+v1.25.0 では **新 node kind / 新 edge kind を 1 つも追加せず**、既存 4 カテゴリ
+(design_doc / impl_file / plan_task / expected_value) の attribute schema 拡張のみで
+UX レベルの coherence を担保する。
+
+### 新 node kind: 0 / 新 edge kind: 0
+
+- `Generality Gate` 最強水準: CoDD core に NextAuth / Cookie / `__Secure-` /
+  SameSite / Chromium 等の固有名はゼロ
+- すべての stack 知識はプロジェクトの `design_doc.frontmatter` /
+  `project_lexicon.yaml` / `codd.yaml [coherence.capability_patterns]` に declarative
+- CoDD core は string match と set 演算のみの宣言的 coherence engine
+
+### 既存 node の attribute schema 拡張
+
+- `design_doc.attributes`: `runtime_constraints`, `user_journeys` (frontmatter passthrough)
+- `impl_file.attributes`: `runtime_evidence` (project 宣言の capability_patterns regex 経由)
+- `plan_task.expected_outputs`: `lexicon:` / `design:` 接頭辞対応 (produces edge 拡張)
+- `expected (lexicon).attributes`: `journey`, `browser_requirements`, `runtime_requirements`
+- `runtime_state.attributes`: `capabilities_provided` (deploy.yaml 由来、yaml ルール上書き可)
+
+### 新 check C7 user_journey_coherence
+
+`design_doc (NFR + journey) → impl_file (evidence) → runtime_state (capabilities)
+→ expected (browser/runtime requirements) → verification_test (E2E)` のチェーンを
+declarative に検証し、8 violation を検知:
+
+- `missing_journey_lexicon`: design_doc が user_journey を宣言したが lexicon entry なし
+- `no_plan_task_for_journey`: journey を expected_outputs に含む plan_task 不在
+- `no_e2e_test_for_journey`: plan_task → verification_test (E2E) チェーン断絶
+- `e2e_not_in_post_deploy`: E2E test が deploy.yaml post_deploy に未統合
+- `unsatisfied_runtime_capability`: design_doc.runtime_constraints が要求する capability を
+  runtime_state が満たさない (今夜事故の主検出器)
+- `impl_evidence_runtime_mismatch`: impl_file の runtime_evidence が runtime capability と矛盾
+  (今夜事故の補強検出器)
+- `browser_expected_not_asserted`: lexicon の browser_requirements が E2E で assert されず
+- `journey_step_no_assertion`: journey.steps に検証 step 不在
+
+C7 violation 検出時は deploy 'INCOMPLETE_JOURNEY' マーク + DriftEvent
+(kind=`user_journey_coherence`, severity=red) publish + ntfy critical 送信。
+
+### 新 CLI
+
+- `codd dag verify --check user_journey_coherence` (C1-C6 と同列で plug)
+- `codd dag journeys` (design_doc 横断で user_journey 一覧表示)
+
+### osato-lms 実証 (HTTP × `__Secure-` 事故の構造的検出)
+
+- C7 → `unsatisfied_runtime_capability (tls_termination)` + `impl_evidence_runtime_mismatch`
+  + `no_plan_task_for_journey` を red で検出
+- C6 deployment_completeness は PASS のまま (回帰なし)
+- 修復は cmd_394 (将来 release) の範囲、cmd_393 は検出層完成のみ
+
+### Backwards compatibility
+
+- `user_journeys` / `runtime_constraints` 未宣言 design_doc → C7 SKIP (INFO)
+- `capability_patterns` 未宣言プロジェクト → `runtime_evidence` 空 → 検出対象外
+- 既存 v1.24.0 プロジェクトは挙動変化ゼロ、opt-in で C7 active 化
+
+### 設計の経緯
+
+- 初期設計案 (新 node 3 種 / 新 edge 3 種) は殿により Generality Gate 違反として却下
+- 再設計 (本 release): attribute schema 拡張 + 既存 edge 流用のみで等価機能を実現
+- 「新次元 = attribute 拡張で吸収」のパターンを確立、cmd_385 個別 detector 量産路線を回避
+
 ## [1.24.0] - 2026-05-05
 
 ### Added — Deploy Verification Gate (cmd_392)
