@@ -8,6 +8,7 @@ required_sections:
 optional_sections:
   - failure_modes
   - extractor_registry
+  - coverage_decisions
 
 provenance_values:
   - web_search

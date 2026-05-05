@@ -2,14 +2,44 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
 
 SCHEMA_PATH = Path(__file__).parent / "templates" / "lexicon_schema.yaml"
 LEXICON_FILENAME = "project_lexicon.yaml"
+
+
+@dataclass
+class AskOption:
+    id: str
+    label: str
+    description: str = ""
+    cost_effort: Literal["low", "medium", "high"] = "medium"
+    pros: str = ""
+    cons: str = ""
+    recommended: bool = False
+    recommendation_rationale: str = ""
+    type: str = "option"
+
+
+@dataclass
+class AskItem:
+    id: str
+    question: str
+    type: Literal["select", "multiselect", "free_text"] = "select"
+    options: list[AskOption] = field(default_factory=list)
+    blocking: bool = False
+    status: Literal["ASK", "RECOMMENDED_PROCEEDING", "CONFIRMED", "OVERRIDDEN"] = "ASK"
+    recommended_id: str | None = None
+    proceeded_with: str | None = None
+    answer: str | None = None
+    asked_at: str = ""
+    answered_at: str = ""
 
 
 class LexiconError(Exception):
@@ -49,6 +79,22 @@ class ProjectLexicon:
     @property
     def extractor_registry(self) -> dict[str, dict[str, Any]]:
         return self._data.get("extractor_registry", {})
+
+    @property
+    def coverage_decisions(self) -> list[AskItem]:
+        return [
+            ask_item_from_dict(item)
+            for item in self._data.get("coverage_decisions", [])
+        ]
+
+    def set_coverage_decisions(self, decisions: list[AskItem]) -> None:
+        self._data["coverage_decisions"] = [
+            ask_item_to_dict(item)
+            for item in decisions
+        ]
+
+    def as_dict(self) -> dict[str, Any]:
+        return deepcopy(self._data)
 
     def get_vocabulary_item(self, node_id: str) -> dict[str, Any] | None:
         for item in self.node_vocabulary:
@@ -90,6 +136,68 @@ def load_lexicon(project_root: str | Path) -> ProjectLexicon | None:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     validate_lexicon(data)
     return ProjectLexicon(data)
+
+
+def ask_option_from_dict(data: dict[str, Any]) -> AskOption:
+    """Build an AskOption from YAML-safe dict data."""
+    if not isinstance(data, dict):
+        raise LexiconError(f"coverage_decisions option must be a mapping: {data}")
+    return AskOption(
+        id=str(data.get("id", "")),
+        label=str(data.get("label", "")),
+        description=str(data.get("description", "")),
+        cost_effort=_literal_or_default(
+            data.get("cost_effort"),
+            {"low", "medium", "high"},
+            "medium",
+        ),
+        pros=str(data.get("pros", "")),
+        cons=str(data.get("cons", "")),
+        recommended=bool(data.get("recommended", False)),
+        recommendation_rationale=str(data.get("recommendation_rationale", "")),
+        type=str(data.get("type", "option")),
+    )
+
+
+def ask_item_from_dict(data: dict[str, Any]) -> AskItem:
+    """Build an AskItem from YAML-safe dict data."""
+    if not isinstance(data, dict):
+        raise LexiconError(f"coverage_decisions item must be a mapping: {data}")
+    return AskItem(
+        id=str(data.get("id", "")),
+        question=str(data.get("question", "")),
+        type=_literal_or_default(
+            data.get("type"),
+            {"select", "multiselect", "free_text"},
+            "select",
+        ),
+        options=[
+            ask_option_from_dict(option)
+            for option in data.get("options", [])
+        ],
+        blocking=bool(data.get("blocking", False)),
+        status=_literal_or_default(
+            data.get("status"),
+            {"ASK", "RECOMMENDED_PROCEEDING", "CONFIRMED", "OVERRIDDEN"},
+            "ASK",
+        ),
+        recommended_id=_optional_str(data.get("recommended_id")),
+        proceeded_with=_optional_str(data.get("proceeded_with")),
+        answer=_optional_str(data.get("answer")),
+        asked_at=str(data.get("asked_at", "")),
+        answered_at=str(data.get("answered_at", "")),
+    )
+
+
+def ask_option_to_dict(option: AskOption) -> dict[str, Any]:
+    return asdict(option)
+
+
+def ask_item_to_dict(item: AskItem) -> dict[str, Any]:
+    return {
+        **asdict(item),
+        "options": [ask_option_to_dict(option) for option in item.options],
+    }
 
 
 def validate_lexicon(data: dict[str, Any]) -> None:
@@ -147,6 +255,16 @@ def validate_lexicon(data: dict[str, Any]) -> None:
                     f"extractor_registry item '{extractor_id}' missing required field '{field}'"
                 )
 
+    decisions = data.get("coverage_decisions", [])
+    _validate_list_of_mappings(decisions, "coverage_decisions")
+    for decision in decisions:
+        for field_name in ("id", "question"):
+            if field_name not in decision:
+                raise LexiconError(
+                    f"coverage_decisions item missing required field '{field_name}': {decision}"
+                )
+        _validate_list_of_mappings(decision.get("options", []), "coverage_decisions.options")
+
 
 def _load_schema() -> dict[str, Any]:
     data = yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -161,3 +279,14 @@ def _validate_list_of_mappings(value: Any, name: str) -> None:
     for item in value:
         if not isinstance(item, dict):
             raise LexiconError(f"{name} items must be mappings: {item}")
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _literal_or_default(value: Any, allowed: set[str], default: str) -> Any:
+    text = str(value) if value is not None else default
+    return text if text in allowed else default

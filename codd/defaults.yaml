@@ -27,6 +27,20 @@ bands:
 propagation:
   max_depth: 10
   stop_at_contract_boundary: true
+hitl:
+  mode: cooperative
+requirement_completeness:
+  project_type: null
+  channels:
+    - askuserquestion
+    - ntfy
+    - lexicon
+  ntfy_topic: ""
+  questions: []
+  ai_missing_items: false
+  semantic_check: false
+  ai_generate_options: false
+  ai_timeout_seconds: 30
 fix:
   test_command: null  # auto-detected from package.json / pyproject.toml
   max_attempts: 3

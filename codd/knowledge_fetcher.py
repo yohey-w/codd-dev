@@ -139,6 +139,31 @@ class KnowledgeFetcher:
             _append_unique(stacks, "Jetpack Compose")
         return stacks
 
+    def detect_project_type(self) -> str:
+        """Detect a broad requirement-completeness project type."""
+        package_dependencies = _read_package_dependencies(self.project_root / "package.json")
+        if _looks_like_iot_project(self.project_root):
+            return "iot"
+        if (
+            {"react-native", "expo", "@react-native-community/cli"} & package_dependencies
+            or (self.project_root / "pubspec.yaml").exists()
+            or _detect_swiftui(self.project_root)
+            or _detect_jetpack_compose(self.project_root)
+        ):
+            return "mobile"
+        if (
+            (self.project_root / "package.json").exists()
+            or (self.project_root / "index.html").exists()
+            or any((self.project_root / dirname).exists() for dirname in ("app", "pages", "src/app"))
+        ):
+            return "web"
+        if any(
+            (self.project_root / filename).exists()
+            for filename in ("pyproject.toml", "setup.py", "go.mod", "Cargo.toml")
+        ):
+            return "cli"
+        return "web"
+
     def suggest_design_md_for_ui(self, stacks: list[str]) -> dict[str, str] | None:
         """Return a DESIGN.md spec suggestion when a UI stack is present."""
         if not any(stack in UI_TECH_STACKS for stack in stacks):
@@ -517,6 +542,12 @@ def _detect_jetpack_compose(project_root: Path) -> bool:
         "compose" in _read_text(path).lower()
         for path in _iter_project_files(project_root, ("build.gradle*", "*.kt", "*.kts"))
     )
+
+
+def _looks_like_iot_project(project_root: Path) -> bool:
+    if any((project_root / filename).exists() for filename in ("platformio.ini", "zephyr", "sdkconfig")):
+        return True
+    return any(_iter_project_files(project_root, ("*.ino", "*.dts", "*.overlay")))
 
 
 def _iter_project_files(project_root: Path, patterns: tuple[str, ...]):

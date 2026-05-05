@@ -8,6 +8,7 @@ from pathlib import Path
 
 from codd.bridge import PRO_COMMAND_INSTALL_MESSAGE, get_command_handler
 from codd.config import find_codd_dir, load_project_config
+from codd.lexicon import LEXICON_FILENAME
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -412,6 +413,12 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str
     default=False,
     help="Run CoverageAuditor 3-class requirement gap analysis.",
 )
+@click.option(
+    "--completeness-audit",
+    is_flag=True,
+    default=False,
+    help="Audit requirement documents for completeness before deriving design artifacts.",
+)
 def require(
     path: str,
     output: str,
@@ -423,6 +430,7 @@ def require(
     base_ref: str | None,
     apply_mode: bool,
     audit: bool,
+    completeness_audit: bool,
 ):
     """Infer requirements from extracted codebase facts (brownfield).
 
@@ -462,6 +470,38 @@ def require(
         click.echo(f"Coverage audit complete: {result.summary()}")
         click.echo(f"Report: {_display_path(report_path, project_root)}")
         return
+
+    if completeness_audit:
+        from codd.requirement_completeness_auditor import RequirementCompletenessAuditor
+
+        auditor = RequirementCompletenessAuditor(
+            project_root,
+            ai_command=ai_cmd or "claude --print",
+        )
+        try:
+            session = auditor.audit([])
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+
+        blocking_asks = [
+            item
+            for item in session.ask_items
+            if item.blocking and item.status == "ASK"
+        ]
+        proceeding = [
+            item
+            for item in session.ask_items
+            if item.status == "RECOMMENDED_PROCEEDING"
+        ]
+        click.echo(
+            "Requirement completeness audit complete: "
+            f"ASK={len(session.ask_items)}, "
+            f"RECOMMENDED_PROCEEDING={len(proceeding)}, "
+            f"BLOCKING={len(blocking_asks)}"
+        )
+        click.echo(f"Decisions: {LEXICON_FILENAME}:coverage_decisions")
+        raise SystemExit(1 if blocking_asks else 0)
 
     try:
         results = run_require(
