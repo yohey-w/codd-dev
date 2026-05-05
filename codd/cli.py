@@ -2284,6 +2284,119 @@ def test_cmd(project_path: str, related: tuple[str, ...], dry_run: bool):
 
 
 @main.group()
+def llm():
+    """Manage LLM-derived considerations."""
+    pass
+
+
+@llm.command("derive")
+@click.argument("design_doc", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--ai-cmd", default=None, help="Override AI CLI command")
+@click.option("--model", default=None, help="Override AI model")
+@click.option("--force", is_flag=True, help="Bypass cached derived considerations")
+def llm_derive(design_doc: Path, project_path: str, ai_cmd: str | None, model: str | None, force: bool):
+    """Derive considerations for a design document."""
+    from codd.deployment.providers.ai_command import SubprocessAiCommand
+    from codd.deployment.providers.llm_consideration import LlmConsiderationProvider
+    from codd.llm.approval import notify_pending_considerations
+
+    project_root = Path(project_path).resolve()
+    config = _load_optional_project_config(project_root)
+    provider = LlmConsiderationProvider(
+        SubprocessAiCommand(command=ai_cmd, project_root=project_root, config=config),
+        project_root=project_root,
+        cache_dir=project_root / ".codd" / "consideration_cache",
+        model=model,
+        use_cache=not force,
+    )
+    result = provider.provide(design_doc.read_text(encoding="utf-8"), {"model": model} if model else {})
+    notify_pending_considerations(result.considerations, config)
+    click.echo(f"Derived considerations: {len(result.considerations)}")
+
+
+@llm.command("approve")
+@click.argument("consideration_id", required=False)
+@click.option("--all", "approve_all", is_flag=True, help="Approve all pending considerations")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def llm_approve(consideration_id: str | None, approve_all: bool, project_path: str):
+    """Approve one or all pending considerations."""
+    from codd.llm.approval import ApprovalCache, consideration_status, load_cached_considerations
+
+    project_root = Path(project_path).resolve()
+    considerations = load_cached_considerations(project_root)
+    by_id = {consideration.id: consideration for consideration in considerations}
+
+    if approve_all:
+        targets = [
+            consideration
+            for consideration in considerations
+            if consideration_status(consideration, project_root) == "pending"
+        ]
+    else:
+        if not consideration_id:
+            click.echo("Error: consideration_id or --all is required")
+            raise SystemExit(2)
+        if consideration_id not in by_id:
+            click.echo(f"Error: consideration not found: {consideration_id}")
+            raise SystemExit(1)
+        targets = [by_id[consideration_id]]
+
+    for consideration in targets:
+        ApprovalCache.save(consideration.id, "approved", project_root)
+    click.echo(f"Approved considerations: {len(targets)}")
+
+
+@llm.command("skip")
+@click.argument("consideration_id")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def llm_skip(consideration_id: str, project_path: str):
+    """Skip one consideration."""
+    from codd.llm.approval import ApprovalCache, load_cached_considerations
+
+    project_root = Path(project_path).resolve()
+    known = {consideration.id for consideration in load_cached_considerations(project_root)}
+    if consideration_id not in known:
+        click.echo(f"Error: consideration not found: {consideration_id}")
+        raise SystemExit(1)
+    ApprovalCache.save(consideration_id, "skipped", project_root)
+    click.echo(f"Skipped consideration: {consideration_id}")
+
+
+@llm.command("list")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--format", "output_format", default="text", type=click.Choice(["text", "json"]))
+def llm_list(project_path: str, output_format: str):
+    """List generated considerations with approval status."""
+    from codd.llm.approval import consideration_status, consideration_to_dict, load_cached_considerations
+
+    project_root = Path(project_path).resolve()
+    rows = []
+    for consideration in sorted(load_cached_considerations(project_root), key=lambda item: item.id):
+        row = consideration_to_dict(consideration)
+        row["status"] = consideration_status(consideration, project_root)
+        rows.append(row)
+
+    if output_format == "json":
+        click.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+
+    if not rows:
+        click.echo("No considerations found")
+        return
+    for row in rows:
+        description = str(row.get("description") or "")
+        click.echo(f"{row['id']}\t{row['status']}\t{description}")
+
+
+def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
+    try:
+        return load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+@main.group()
 def dag():
     """DAG Completeness Gate commands."""
     pass
@@ -2429,7 +2542,7 @@ def dag_journeys(project_path: str, output_format: str):
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
 
-    journeys = _collect_dag_journeys(built_dag)
+    journeys = _collect_dag_journeys(built_dag, project_root, _load_optional_project_config(project_root))
     if output_format == "json":
         click.echo(json.dumps(journeys, ensure_ascii=False, indent=2))
         return
@@ -2470,7 +2583,7 @@ def dag_run_journey(journey_name: str, project_path: str, config_section: str):
         click.echo(f"Error: {exc}")
         raise SystemExit(2)
 
-    journey_record = _find_dag_journey(built_dag, journey_name)
+    journey_record = _find_dag_journey(built_dag, journey_name, project_root, config)
     if journey_record is None:
         click.echo(f"Error: user_journey not found: {journey_name}")
         raise SystemExit(2)
@@ -2497,11 +2610,16 @@ def _journey_template_config(config: dict[str, Any], config_section: str) -> dic
     return dict(section)
 
 
-def _find_dag_journey(dag: Any, journey_name: str) -> dict[str, Any] | None:
+def _find_dag_journey(
+    dag: Any,
+    journey_name: str,
+    project_root: Path | None = None,
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     for node in sorted(dag.nodes.values(), key=lambda item: item.id):
         if node.kind != "design_doc":
             continue
-        for journey in _node_user_journeys(node):
+        for journey in _node_user_journeys(node, project_root, settings):
             if str(journey.get("name") or "") == journey_name:
                 return {
                     "design_doc": node.path or node.id,
@@ -2546,12 +2664,16 @@ def _journey_target(journey: dict[str, Any]) -> str:
     return str(target or "")
 
 
-def _collect_dag_journeys(dag: Any) -> list[dict[str, Any]]:
+def _collect_dag_journeys(
+    dag: Any,
+    project_root: Path | None = None,
+    settings: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     journeys: list[dict[str, Any]] = []
     for node in sorted(dag.nodes.values(), key=lambda item: item.id):
         if node.kind != "design_doc":
             continue
-        for journey in _node_user_journeys(node):
+        for journey in _node_user_journeys(node, project_root, settings):
             journeys.append(
                 {
                     "design_doc": node.path or node.id,
@@ -2563,7 +2685,16 @@ def _collect_dag_journeys(dag: Any) -> list[dict[str, Any]]:
     return journeys
 
 
-def _node_user_journeys(node: Any) -> list[dict[str, Any]]:
+def _node_user_journeys(
+    node: Any,
+    project_root: Path | None = None,
+    settings: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if project_root is not None:
+        from codd.dag.checks.user_journey_coherence import UserJourneyCoherenceCheck
+
+        return UserJourneyCoherenceCheck(project_root=project_root, settings=settings or {})._journey_entries(node)
+
     attributes = getattr(node, "attributes", {}) or {}
     value = attributes.get("user_journeys")
     if not isinstance(value, list):

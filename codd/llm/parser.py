@@ -68,6 +68,8 @@ def _parse_entry(entry: Any, index: int) -> DerivedConsideration | None:
         id=item_id,
         description=description,
         domain_hints=[str(item) for item in domain_hints],
+        source_design_doc=str(entry.get("source_design_doc") or ""),
+        generated_user_journeys=_generated_user_journeys(entry.get("generated_user_journeys")),
         verification_strategy=_parse_strategy(entry.get("verification_strategy")),
         approval_status=_approval_status(entry.get("approval_status")),
     )
@@ -94,6 +96,12 @@ def _parse_strategy(payload: Any) -> VerificationStrategy | None:
 def _approval_status(value: Any) -> str:
     text = str(value or "pending")
     return text if text in {"pending", "approved", "skipped"} else "pending"
+
+
+def _generated_user_journeys(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
 
 
 def _strip_json_fence(raw_output: str) -> str:
