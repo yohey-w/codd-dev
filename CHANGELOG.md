@@ -4,6 +4,63 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-05-05
+
+### Added — DAG Completeness Gate (cmd_386)
+
+設計書・実装ファイル・計画タスク・期待値を単一 DAG (Directed Acyclic Graph) の
+node として表現し、`expects` / `imports` / `depends_on` / `produces` / `represents`
+の edge で関係を明示する。DAG 上の完全性を 5 種の check で統一検査することで、
+cmd_385 個別 detector 路線の責務分散・値整合二重実装・task 非紐付けを構造的に解消する。
+
+- **`codd dag build`** (cmd_386_pre + cmd_386a, 9f4f8de + 74b401e):
+  設計書 / 実装 / 計画 / 期待値から node + edge を抽出し `.codd/dag.json` を生成
+  - `codd/dag/__init__.py`: DAG / Node / Edge dataclass + Tarjan による cycle 検出
+  - `codd/dag/builder.py` + `codd/dag/extractor.py`: 既存 `extractor.py` を流用した node 抽出
+  - `--format mermaid` で `.codd/dag.mmd` 可視化出力
+- **`codd dag verify --check <name>`** (cmd_386b/c/d/e/f, a00397b/62d2b01/123bf28/6eb1d30/795057d):
+  5 種の DAG completeness check を `@register_dag_check` decorator で plug
+  - C1 `node_completeness`: design_doc が `expects` する impl_file の存在確認 (severity=red)
+  - C2 `edge_validity`: orphan / dangling reference 検出 (severity=red)
+  - C3 `depends_on_consistency`: `propagator.py` output を消費し URL/型/値の整合検証 (severity=red)
+  - C4 `task_completion`: `plan_task` の expected impl_file 存在 + drift なし判定 (severity=red)
+  - C5 `transitive_closure`: root design_doc から leaf impl_file まで unreachable な node 検出 (severity=amber)
+- **`codd dag visualize`** (cmd_386g, f792c59):
+  Mermaid 形式で DAG を stdout 出力
+- **Deploy gate 統合** (cmd_386g, f792c59):
+  `_collect_dag_completeness_gate` を `_run_deploy_gates` に追加 (5 つ目 gate)。
+  `codd deploy --apply` 時に既存 4 gate (validate / drift / drift_linker / coverage) と
+  並んで実行される。red severity FAIL 時は deploy block。
+- **DriftEvent integration** (cmd_386g):
+  red severity check failure を `DriftEvent (kind="dag_completeness", severity="red")`
+  として CoherenceEngine に publish。既存 routing (auto/hitl/manual) と統合。
+
+### 思想転換
+
+cmd_385 (個別 drift detector × 4) → cmd_386 (統一 DAG 完全性 gate) への上位統合。
+新しい drift type を追加する際、cmd_385 では linker 1 ファイル丸ごと書く必要があったが、
+cmd_386 では check 1 つまたは extractor 拡張のみで済む。既存 `scan` / `impact` /
+`propagate` / `CoherenceEngine` を流用し、新規実装を最小化する設計。
+
+osato-lms の「役割別ホーム未実装」(cmd_350 Phase C.5 NG #2) のような task 完了漏れも、
+C4 task_completion で構造的に検出可能になる。
+
+### Notes
+
+- 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
+  e2e-generate / extract / plan / require / preflight / gungi) はすべて変更なし。
+  新フラグ・新コマンドはすべて opt-in。
+- 既存テスト 1077 (v1.21.0) → 1185 (v1.22.0)、+108 件追加 (DAG 全 9 test ファイル)、
+  全件 PASS / 0 FAIL / 0 SKIP
+- Generality Gate: framework 固有名 (Next.js / NextAuth / Prisma / TypeScript) の
+  CoDD core ハードコードなし。`codd/dag/defaults/{web,cli,mobile,iot}.yaml` +
+  `codd.yaml [dag]` override で project ごと制御。
+- cmd_385 残存資産 (`codd/drift_linkers/api.py` / `schema.py` / `screen_flow.py`、
+  計 917 LOC) は別タスク (cmd_391 cleanup) で整理予定。registry skeleton と
+  defaults yaml は cmd_386 で rename 流用済。
+- 3 要素セット (cmd_376/377/378) との整合: dag_completeness 違反は cmd_377 preflight
+  critical 候補、re-plan trigger は cmd_378 GLPF medium 級として処理可能。
+
 ## [1.21.0] - 2026-05-05
 
 ### Added
