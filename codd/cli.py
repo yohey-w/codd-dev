@@ -2447,6 +2447,105 @@ def dag_journeys(project_path: str, output_format: str):
         click.echo(f"  {journey['name']} [{journey['criticality']}]  requires: {requires}")
 
 
+@dag.command("run-journey")
+@click.argument("journey_name")
+@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@click.option(
+    "--config-section",
+    default="cdp_browser",
+    show_default=True,
+    help="verification.templates section used for browser config",
+)
+def dag_run_journey(journey_name: str, project_path: str, config_section: str):
+    """Run one declared user_journey with the CDP browser template."""
+    from codd.dag.builder import build_dag
+    from codd.deployment.providers.verification.cdp_browser import CdpBrowser
+
+    project_root = Path(project_path).resolve()
+    try:
+        config = load_project_config(project_root)
+        template_config = _journey_template_config(config, config_section)
+        built_dag = build_dag(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(2)
+
+    journey_record = _find_dag_journey(built_dag, journey_name)
+    if journey_record is None:
+        click.echo(f"Error: user_journey not found: {journey_name}")
+        raise SystemExit(2)
+
+    command = json.dumps(
+        _journey_execution_plan(project_root, journey_record, template_config),
+        sort_keys=True,
+    )
+    result = CdpBrowser(config=template_config).execute(command)
+    if result.output:
+        click.echo(result.output)
+    raise SystemExit(0 if result.passed else 1)
+
+
+def _journey_template_config(config: dict[str, Any], config_section: str) -> dict[str, Any]:
+    verification = config.get("verification")
+    templates = verification.get("templates") if isinstance(verification, dict) else None
+    if not isinstance(templates, dict) or config_section not in templates:
+        raise ValueError(f"verification.templates.{config_section} config not found")
+
+    section = templates[config_section]
+    if not isinstance(section, dict):
+        raise ValueError(f"verification.templates.{config_section} must be a mapping")
+    return dict(section)
+
+
+def _find_dag_journey(dag: Any, journey_name: str) -> dict[str, Any] | None:
+    for node in sorted(dag.nodes.values(), key=lambda item: item.id):
+        if node.kind != "design_doc":
+            continue
+        for journey in _node_user_journeys(node):
+            if str(journey.get("name") or "") == journey_name:
+                return {
+                    "design_doc": node.path or node.id,
+                    "journey": dict(journey),
+                }
+    return None
+
+
+def _journey_execution_plan(
+    project_root: Path,
+    journey_record: dict[str, Any],
+    template_config: dict[str, Any],
+) -> dict[str, Any]:
+    journey = dict(journey_record["journey"])
+    journey_name = str(journey.get("name") or "")
+    steps = journey.get("steps")
+    return {
+        "template": "cdp_browser",
+        "test_kind": "e2e",
+        "target": _journey_target(journey),
+        "identifier": f"journey:{journey_name}",
+        "journey": journey_name,
+        "steps": steps if isinstance(steps, list) else [],
+        "project_root": str(project_root),
+        "design_doc": journey_record["design_doc"],
+        "config": template_config,
+    }
+
+
+def _journey_target(journey: dict[str, Any]) -> str:
+    steps = journey.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            if step.get("action") == "navigate":
+                target = step.get("target") or step.get("url")
+                if target:
+                    return str(target)
+
+    target = journey.get("target") or journey.get("url")
+    return str(target or "")
+
+
 def _collect_dag_journeys(dag: Any) -> list[dict[str, Any]]:
     journeys: list[dict[str, Any]] = []
     for node in sorted(dag.nodes.values(), key=lambda item: item.id):
