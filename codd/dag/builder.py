@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from codd.deployment.extractor import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
 DEFAULTS_DIR = Path(__file__).parent / "defaults"
 DEFAULT_PROJECT_TYPE = "web"
 IMPLEMENTATION_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java")
@@ -32,6 +34,7 @@ TEST_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".bats")
 PLAN_HEADER_RE = re.compile(r"^#{2,6}\s+([A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)(?:\s+(.+))?$", re.MULTILINE)
 OUTPUTS_RE = re.compile(r"(?im)^outputs?[ \t]*:[ \t]*(.*)$")
 PY_IMPORT_RE = re.compile(r"(?m)^\s*(?:from\s+([A-Za-z_][\w.]*)(?:\s+import\s+)|import\s+([A-Za-z_][\w.]*))")
+LEXICON_OUTPUT_PREFIX = "lexicon:"
 EXPECTED_ARTIFACT_ATTRIBUTE_KEYS = (
     "id",
     "title",
@@ -72,8 +75,8 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
     _add_design_edges(dag, root, design_docs, impl_nodes)
     _add_import_edges(dag, root, impl_nodes, dag_settings)
     _add_tested_by_edges(dag, root, impl_nodes, test_nodes, dag_settings)
-    _add_plan_tasks(dag, root, dag_settings)
     _add_expected_nodes(dag, root, dag_settings, impl_nodes)
+    _add_plan_tasks(dag, root, dag_settings)
     _add_deployment_graph(dag, root, design_docs, impl_nodes)
 
     write_dag_json(dag, root, default_dag_json_path(root))
@@ -344,7 +347,9 @@ def _add_plan_tasks(dag: DAG, project_root: Path, settings: dict[str, Any]) -> N
             ),
         )
         for output in outputs:
-            dag.add_edge(Edge(from_id=node_id, to_id=_normalize_output_path(output), kind="produces"))
+            edge = _plan_task_output_edge(dag, node_id, output)
+            if edge is not None:
+                dag.add_edge(edge)
 
 
 def _add_expected_nodes(
@@ -427,7 +432,10 @@ def _add_deployment_graph(
             ),
         )
 
-    existing_edges = {(edge.from_id, edge.to_id, edge.kind, repr(sorted(edge.attributes.items()))) for edge in dag.edges}
+    existing_edges = {
+        (edge.from_id, edge.to_id, edge.kind, _edge_attributes_key(edge.attributes))
+        for edge in dag.edges
+    }
     for from_id, to_id, kind, attributes in infer_deployment_edges(
         project_root,
         deployment_docs,
@@ -438,7 +446,7 @@ def _add_deployment_graph(
     ):
         if from_id not in dag.nodes or to_id not in dag.nodes:
             continue
-        edge_key = (from_id, to_id, kind, repr(sorted(attributes.items())))
+        edge_key = (from_id, to_id, kind, _edge_attributes_key(attributes))
         if edge_key in existing_edges:
             continue
         dag.add_edge(Edge(from_id=from_id, to_id=to_id, kind=kind, attributes=attributes))
@@ -486,6 +494,33 @@ def _expected_artifact_attributes(artifact: dict[str, Any]) -> dict[str, Any]:
         if key in artifact:
             attributes[key] = artifact[key]
     return attributes
+
+
+def _plan_task_output_edge(dag: DAG, task_node_id: str, output: str) -> Edge | None:
+    output_id = str(output).strip()
+    if output_id.startswith(LEXICON_OUTPUT_PREFIX):
+        if output_id not in dag.nodes:
+            LOGGER.warning("plan task %s references unknown lexicon expected output: %s", task_node_id, output_id)
+            return None
+        return Edge(
+            from_id=task_node_id,
+            to_id=output_id,
+            kind="produces",
+            attributes=_lexicon_produces_attributes(dag.nodes[output_id]),
+        )
+
+    return Edge(from_id=task_node_id, to_id=_normalize_output_path(output_id), kind="produces")
+
+
+def _lexicon_produces_attributes(expected_node: Node) -> dict[str, Any] | None:
+    journey = expected_node.attributes.get("journey")
+    if isinstance(journey, str) and journey:
+        return {"journey": journey}
+    return None
+
+
+def _edge_attributes_key(attributes: dict[str, Any] | None) -> str:
+    return repr(sorted((attributes or {}).items()))
 
 
 def _resolve_design_dependency(

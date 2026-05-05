@@ -333,8 +333,9 @@ class DeploymentCompletenessCheck:
         edge: Edge,
     ) -> list[str]:
         steps: list[str] = []
+        edge_attributes = edge.attributes or {}
         for key in ("required_steps", "steps", "keywords"):
-            steps.extend(self._coerce_steps(self._as_list(edge.attributes.get(key))))
+            steps.extend(self._coerce_steps(self._as_list(edge_attributes.get(key))))
 
         if not steps:
             steps.extend(self._steps_from_design_doc(design_doc))
@@ -380,7 +381,7 @@ class DeploymentCompletenessCheck:
         return matching or produces_edges
 
     def _edge_matches_step(self, edge: Edge, step: str) -> bool:
-        section = edge.attributes.get("section")
+        section = (edge.attributes or {}).get("section")
         if section and self._same_step(step, str(section)):
             return True
         return self._path_matches_step(edge.to_id, step)
