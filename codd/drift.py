@@ -8,7 +8,7 @@ import re
 from typing import Any, Sequence
 
 from codd.coherence_adapters import drift_entry_to_event
-from codd.coherence_engine import EventBus
+from codd.coherence_engine import DriftEvent, EventBus
 
 
 _coherence_bus: EventBus | None = None
@@ -37,6 +37,15 @@ class ScreenTransitionDrift:
     missing_in_e2e: list[str]
     extra_in_e2e: list[str]
     coverage_ratio: float
+
+
+@dataclass
+class ScreenFlowDriftResult:
+    design_only: list[dict[str, Any]]
+    impl_only: list[dict[str, Any]]
+    mismatch: list[dict[str, Any]]
+    total_design: int
+    total_impl: int
 
 
 _DESIGN_TOKEN_REF_RE = re.compile(r"\{([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)\}")
@@ -226,6 +235,35 @@ def detect_screen_transition_drift(
     return result
 
 
+def compute_screen_flow_drift(
+    project_root: str | Path,
+    screen_transitions_yaml_path: str | Path | None = None,
+    extractor_config: dict[str, Any] | None = None,
+) -> ScreenFlowDriftResult:
+    """Compare designed screen transitions with implementation-extracted transitions."""
+    project_root = Path(project_root)
+    transitions_path = (
+        _resolve_project_path(project_root, str(screen_transitions_yaml_path))
+        if screen_transitions_yaml_path is not None
+        else _screen_flow_transitions_path(project_root, extractor_config)
+    )
+
+    if not transitions_path.exists():
+        return ScreenFlowDriftResult(
+            design_only=[],
+            impl_only=[],
+            mismatch=[],
+            total_design=0,
+            total_impl=0,
+        )
+
+    design_edges = _read_screen_transition_edges(transitions_path, project_root)
+    impl_edges = _extract_impl_screen_transition_edges(project_root, extractor_config)
+    result = _compute_screen_flow_edge_diff(design_edges, impl_edges)
+    _publish_screen_flow_design_drift_events(result)
+    return result
+
+
 def set_coherence_bus(bus: EventBus | None) -> None:
     """Set an opt-in bus used to publish drift events."""
     global _coherence_bus
@@ -261,6 +299,40 @@ def _publish_screen_transition_drift_events(result: ScreenTransitionDrift) -> No
         for route in result.extra_in_e2e
     )
     _publish_drift_events(entries)
+
+
+def _publish_screen_flow_design_drift_events(result: ScreenFlowDriftResult) -> None:
+    if _coherence_bus is None:
+        return
+    for edge in result.design_only:
+        _coherence_bus.publish(_screen_flow_design_drift_to_event("design_only", edge))
+    for edge in result.impl_only:
+        _coherence_bus.publish(_screen_flow_design_drift_to_event("impl_only", edge))
+    for mismatch in result.mismatch:
+        _coherence_bus.publish(_screen_flow_design_drift_to_event("mismatch", mismatch))
+
+
+def _screen_flow_design_drift_to_event(drift_type: str, payload: dict[str, Any]) -> DriftEvent:
+    route = payload.get("edge", payload)
+    if isinstance(route, dict):
+        route_text = f"{route.get('from', '')} -> {route.get('to', '')}"
+    else:
+        route_text = str(route)
+    return DriftEvent(
+        source_artifact="screen_transitions",
+        target_artifact="implementation",
+        change_type="modified",
+        payload={
+            "description": f"Screen-flow design/implementation drift: {drift_type} {route_text}",
+            "drift_type": drift_type,
+            "source": "screen_transitions",
+            "target": "implementation",
+            **payload,
+        },
+        severity="amber",
+        fix_strategy="hitl",
+        kind="screen_flow_design_drift",
+    )
 
 
 def _extract_defined_design_tokens(design_md_path: Path) -> set[str]:
@@ -446,3 +518,180 @@ def _read_screen_transition_routes(transitions_path: Path) -> set[str]:
         if route:
             routes.add(str(route))
     return routes
+
+
+def _screen_flow_transitions_path(project_root: Path, config: dict[str, Any] | None) -> Path:
+    config = config if isinstance(config, dict) else {}
+    drift_config = config.get("screen_flow_drift", {})
+    path_value = drift_config.get("screen_transitions_path") if isinstance(drift_config, dict) else None
+    if not path_value:
+        path_value = _e2e_config(config).get("screen_transitions_path")
+    return _resolve_project_path(
+        project_root,
+        _string_config(path_value, "docs/extracted/screen-transitions.yaml"),
+    )
+
+
+def _read_screen_transition_edges(transitions_path: Path, project_root: Path) -> list[dict[str, Any]]:
+    import yaml
+
+    payload = yaml.safe_load(transitions_path.read_text(encoding="utf-8")) or {}
+    raw_edges = payload.get("edges", []) if isinstance(payload, dict) else []
+    if not isinstance(raw_edges, list):
+        return []
+
+    edges: list[dict[str, Any]] = []
+    for raw_edge in raw_edges:
+        edge = _screen_transition_edge_from_mapping(raw_edge)
+        if edge is None:
+            continue
+        edge["source"] = _relative_project_path(transitions_path, project_root)
+        edges.append(edge)
+    return edges
+
+
+def _extract_impl_screen_transition_edges(
+    project_root: Path,
+    extractor_config: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    from codd.screen_transition_extractor import extract_transitions
+
+    src_dirs = _screen_flow_drift_src_dirs(extractor_config)
+    transitions = extract_transitions(project_root, src_dirs=src_dirs)
+    edges: list[dict[str, Any]] = []
+    for transition in transitions:
+        edge = _screen_transition_edge_from_object(transition)
+        if edge is not None:
+            edges.append(edge)
+    return edges
+
+
+def _screen_flow_drift_src_dirs(config: dict[str, Any] | None) -> list[str] | None:
+    if not isinstance(config, dict):
+        return None
+    drift_config = config.get("screen_flow_drift", {})
+    if isinstance(drift_config, dict):
+        src_dirs = _string_list_config(drift_config.get("src_dirs"), [])
+        if src_dirs:
+            return src_dirs
+    return None
+
+
+def _screen_transition_edge_from_mapping(raw_edge: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_edge, dict):
+        return None
+    edge = _base_screen_transition_edge(
+        raw_edge.get("from", raw_edge.get("from_route", "")),
+        raw_edge.get("to", raw_edge.get("to_route", "")),
+        raw_edge.get("trigger", ""),
+    )
+    if edge is None:
+        return None
+    _copy_optional_edge_fields(edge, raw_edge)
+    return edge
+
+
+def _screen_transition_edge_from_object(transition: Any) -> dict[str, Any] | None:
+    edge = _base_screen_transition_edge(
+        getattr(transition, "from_route", ""),
+        getattr(transition, "to_route", ""),
+        getattr(transition, "trigger", ""),
+    )
+    if edge is None:
+        return None
+    for field_name in ("kind", "source_file", "source_line"):
+        value = getattr(transition, field_name, None)
+        if value not in (None, ""):
+            edge[field_name] = value
+    return edge
+
+
+def _base_screen_transition_edge(from_route: Any, to_route: Any, trigger: Any) -> dict[str, Any] | None:
+    source = _normalize_screen_flow_route(str(from_route))
+    target = _normalize_screen_flow_route(str(to_route))
+    if not source or not target:
+        return None
+    return {
+        "from": source,
+        "to": target,
+        "trigger": str(trigger or "").strip(),
+    }
+
+
+def _copy_optional_edge_fields(edge: dict[str, Any], raw_edge: dict[str, Any]) -> None:
+    for source_name, target_name in (
+        ("type", "type"),
+        ("kind", "kind"),
+        ("source_file", "source_file"),
+        ("source_line", "source_line"),
+    ):
+        value = raw_edge.get(source_name)
+        if value not in (None, ""):
+            edge[target_name] = value
+
+
+def _compute_screen_flow_edge_diff(
+    design_edges: list[dict[str, Any]],
+    impl_edges: list[dict[str, Any]],
+) -> ScreenFlowDriftResult:
+    design_by_pair = _group_edges_by_pair(design_edges)
+    impl_by_pair = _group_edges_by_pair(impl_edges)
+    design_pairs = set(design_by_pair)
+    impl_pairs = set(impl_by_pair)
+
+    design_only: list[dict[str, Any]] = []
+    for pair in sorted(design_pairs - impl_pairs):
+        design_only.extend(design_by_pair[pair])
+
+    impl_only: list[dict[str, Any]] = []
+    for pair in sorted(impl_pairs - design_pairs):
+        impl_only.extend(impl_by_pair[pair])
+
+    mismatch: list[dict[str, Any]] = []
+    for pair in sorted(design_pairs & impl_pairs):
+        design_triggers = _edge_triggers(design_by_pair[pair])
+        impl_triggers = _edge_triggers(impl_by_pair[pair])
+        if design_triggers == impl_triggers:
+            continue
+        mismatch.append(
+            {
+                "edge": {"from": pair[0], "to": pair[1]},
+                "design_trigger": " | ".join(design_triggers),
+                "impl_trigger": " | ".join(impl_triggers),
+            }
+        )
+
+    return ScreenFlowDriftResult(
+        design_only=design_only,
+        impl_only=impl_only,
+        mismatch=mismatch,
+        total_design=len(design_edges),
+        total_impl=len(impl_edges),
+    )
+
+
+def _group_edges_by_pair(edges: list[dict[str, Any]]) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for edge in edges:
+        grouped.setdefault((str(edge["from"]), str(edge["to"])), []).append(edge)
+    return grouped
+
+
+def _edge_triggers(edges: list[dict[str, Any]]) -> list[str]:
+    triggers = sorted({str(edge.get("trigger", "")).strip() for edge in edges})
+    return [trigger for trigger in triggers if trigger]
+
+
+def _normalize_screen_flow_route(route: str) -> str:
+    normalized = route.strip().strip("`\"'")
+    normalized = normalized.rstrip(".,;。、)")
+    if not normalized.startswith("/") or normalized.startswith("//"):
+        return ""
+    return normalized.rstrip("/") or "/"
+
+
+def _relative_project_path(path: Path, project_root: Path) -> str:
+    try:
+        return path.relative_to(project_root).as_posix()
+    except ValueError:
+        return path.as_posix()

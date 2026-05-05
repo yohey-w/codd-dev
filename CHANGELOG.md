@@ -26,6 +26,11 @@ All notable changes to CoDD are documented in this file.
   - `extract_e2e_have_url_assertions()` で .spec.ts / .cy.ts から URL 到達 assertion を抽出
   - `ScreenTransitionDrift` dataclass + `detect_screen_transition_drift()` 関数
   - DriftEvent (kind=screen_transition_drift, severity=amber) として Coherence Engine 統合
+- **`codd drift --screen-flow`** (cmd_373): screen-transitions.yaml と実装コード抽出 transition
+  の双方向差分検知
+  - `ScreenFlowDriftResult` dataclass + `compute_screen_flow_drift()` 関数
+  - design-only / impl-only / trigger mismatch を `from`/`to` edge 単位で比較
+  - DriftEvent (kind=screen_flow_design_drift, severity=amber) として Coherence Engine 統合
 - **implementer wrapper rules** (cmd_368, commit fc61df2):
   - `_is_wrapper_task()` で thin wrapper page (e.g., `src/app/login/page.tsx` が
     `<SignInForm>` を呼ぶだけ) を検出
@@ -38,8 +43,8 @@ All notable changes to CoDD are documented in this file.
 
 - 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
   e2e-generate / extract) はすべて変更なし。新フラグはすべて opt-in。
-- 既存テスト 852 (v1.18.0) → 915 (v1.19.0)、+63 件追加 (cmd_364: 12 + cmd_365: 16 +
-  cmd_366: 13 + cmd_367: 11 + cmd_368: 11)、全件 PASS / 0 FAIL / 0 SKIP
+- 既存テスト 852 (v1.18.0) → 924 (v1.19.0)、+72 件追加 (cmd_364: 12 + cmd_365: 16 +
+  cmd_366: 13 + cmd_367: 11 + cmd_368: 11 + cmd_373: 9)、全件 PASS / 0 FAIL / 0 SKIP
 - Generality Gate: framework 固有名 (Next.js/NextAuth/Clerk/Nuxt/SvelteKit) は
   defaults.yaml と codd.yaml override に分離、CoDD core にハードコードなし。
   Playwright/Cypress は e2e_generator の switch 範疇 (cmd_342 で確立した汎用 pattern)。
