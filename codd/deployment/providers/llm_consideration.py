@@ -40,6 +40,8 @@ class Consideration:
     id: str
     description: str
     domain_hints: list[str] = field(default_factory=list)
+    source_design_doc: str = ""
+    generated_user_journeys: list[dict[str, Any]] = field(default_factory=list)
     verification_strategy: VerificationStrategy | None = None
     approval_status: ApprovalStatus = "pending"
 
@@ -237,6 +239,8 @@ def _consideration_from_mapping(payload: Mapping[str, Any]) -> Consideration:
         id=item_id,
         description=str(payload.get("description") or payload.get("rationale") or item_id),
         domain_hints=_string_list(payload.get("domain_hints")),
+        source_design_doc=str(payload.get("source_design_doc") or ""),
+        generated_user_journeys=_list_of_dicts(payload.get("generated_user_journeys")),
         verification_strategy=_strategy_from_mapping(payload.get("verification_strategy")),
         approval_status=approval_status,  # type: ignore[arg-type]
     )
@@ -284,6 +288,12 @@ def _list_of_mappings(value: Any) -> list[Mapping[str, Any]]:
     if not isinstance(value, list):
         raise ValueError("considerations must be a list")
     return [item for item in value if isinstance(item, Mapping)]
+
+
+def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
 
 
 def _string_list(value: Any) -> list[str]:

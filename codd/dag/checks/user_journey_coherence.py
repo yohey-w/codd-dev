@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from codd.config import load_project_config
 from codd.dag import DAG, Edge, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.dag.checks.deployment_completeness import DeploymentCompletenessCheck
+from codd.llm.approval import (
+    approval_mode_from_config,
+    filter_approved,
+    load_cached_considerations,
+    require_auto_optin,
+)
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -456,7 +467,90 @@ class UserJourneyCoherenceCheck(DagCheck):
 
     def _journey_entries(self, design_doc: Node) -> list[dict[str, Any]]:
         entries = design_doc.attributes.get("user_journeys", [])
-        return [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+        manual = [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+        return [*manual, *self._approved_derived_journey_entries(design_doc)]
+
+    def _approved_derived_journey_entries(self, design_doc: Node) -> list[dict[str, Any]]:
+        if self.project_root is None:
+            return []
+
+        considerations = self._llm_considerations()
+        if not considerations:
+            return []
+
+        config = self._approval_config()
+        approved = filter_approved(
+            considerations,
+            approval_mode_from_config(config),
+            cache_dir=self.project_root,
+            require_explicit_optin=require_auto_optin(config),
+        )
+        approved_ids = {consideration.id for consideration in approved}
+        for consideration in considerations:
+            if consideration.id in approved_ids or not consideration.generated_user_journeys:
+                continue
+            if not self._consideration_matches_design_doc(consideration, design_doc):
+                continue
+            warned = getattr(self, "_warned_unapproved_considerations", set())
+            key = (design_doc.id, consideration.id)
+            if key not in warned:
+                LOGGER.warning(
+                    "Skipping unapproved LLM consideration %s for %s",
+                    consideration.id,
+                    design_doc.id,
+                )
+                warned.add(key)
+                self._warned_unapproved_considerations = warned
+
+        journeys: list[dict[str, Any]] = []
+        for consideration in approved:
+            if not self._consideration_matches_design_doc(consideration, design_doc):
+                continue
+            strategy = consideration.verification_strategy
+            strategy_payload = asdict(strategy) if strategy is not None else None
+            for journey in consideration.generated_user_journeys:
+                enriched = dict(journey)
+                enriched.setdefault("source", "llm_derived")
+                enriched.setdefault("consideration_id", consideration.id)
+                if strategy_payload is not None:
+                    enriched.setdefault("verification_strategy", strategy_payload)
+                journeys.append(enriched)
+        return journeys
+
+    def _llm_considerations(self):
+        if not hasattr(self, "_cached_llm_considerations"):
+            self._cached_llm_considerations = load_cached_considerations(self.project_root or Path.cwd())
+        return self._cached_llm_considerations
+
+    def _approval_config(self) -> dict[str, Any]:
+        if hasattr(self, "_cached_approval_config"):
+            return self._cached_approval_config
+        config: dict[str, Any] = {}
+        if self.project_root is not None:
+            try:
+                loaded = load_project_config(self.project_root)
+                if isinstance(loaded, dict):
+                    config.update(loaded)
+            except (FileNotFoundError, ValueError):
+                pass
+        if isinstance(self.settings, dict):
+            for key in ("llm", "notification"):
+                if key in self.settings:
+                    config[key] = self.settings[key]
+        self._cached_approval_config = config
+        return config
+
+    def _consideration_matches_design_doc(self, consideration: Any, design_doc: Node) -> bool:
+        source = str(getattr(consideration, "source_design_doc", "") or "")
+        if not source:
+            return True
+        candidates = {design_doc.id}
+        if design_doc.path:
+            candidates.add(design_doc.path)
+        node_id = design_doc.attributes.get("node_id")
+        if node_id:
+            candidates.add(str(node_id))
+        return source in candidates
 
     def _lexicon_refs(self, journey: dict[str, Any]) -> list[str]:
         refs: list[str] = []
