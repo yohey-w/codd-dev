@@ -14,7 +14,7 @@ class VerificationMeansCatalog:
     """Load verification means from project override or bundled defaults."""
 
     DEFAULT_CATALOG_PATH: ClassVar[str] = str(
-        Path(__file__).parents[2] / "defaults" / "verification_means_catalog.yaml"
+        Path(__file__).parents[3] / "llm" / "templates" / "verification_means_catalog.yaml"
     )
 
     @classmethod
