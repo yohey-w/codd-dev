@@ -44,6 +44,8 @@ class NodeCompletenessCheck:
 
             node = dag.nodes.get(edge.to_id)
             if node is None or node.kind != "impl_file":
+                if node is not None and node.kind == "expected":
+                    continue
                 _append_once(missing, seen, edge.to_id)
                 continue
 

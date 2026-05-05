@@ -64,13 +64,14 @@ def test_design_doc_frontmatter_without_user_journey_keys_keeps_existing_metadat
     attributes = dag.nodes["docs/design/api.md"].attributes
 
     assert metadata["depends_on"] == ["system.md"]
-    assert metadata["attributes"] == {}
-    assert "runtime_constraints" not in attributes
-    assert "user_journeys" not in attributes
+    assert metadata["attributes"]["runtime_constraints"] == []
+    assert metadata["attributes"]["user_journeys"] == []
+    assert attributes["runtime_constraints"] == []
+    assert attributes["user_journeys"] == []
 
 
 def test_runtime_constraints_frontmatter_is_passed_through_to_design_doc_attributes(tmp_path):
-    constraints = [{"capability": "tls_termination", "required": True}]
+    constraints = [{"capability": "tls_termination", "required": True, "rationale": "auth session transport"}]
     doc = _write(
         tmp_path / "docs" / "design" / "auth.md",
         yaml.safe_dump({"runtime_constraints": constraints}, explicit_start=True) + "---\n# Auth\n",
@@ -84,7 +85,15 @@ def test_runtime_constraints_frontmatter_is_passed_through_to_design_doc_attribu
 
 
 def test_user_journeys_frontmatter_is_passed_through_to_design_doc_attributes(tmp_path):
-    journeys = [{"name": "login_to_dashboard", "steps": [{"action": "navigate", "target": "/login"}]}]
+    journeys = [
+        {
+            "name": "login_to_dashboard",
+            "criticality": "critical",
+            "steps": [{"action": "navigate", "target": "/login"}],
+            "required_capabilities": ["browser_cookie_persistence"],
+            "expected_outcome_refs": [],
+        }
+    ]
     doc = _write(
         tmp_path / "docs" / "design" / "auth.md",
         yaml.safe_dump({"user_journeys": journeys}, explicit_start=True) + "---\n# Auth\n",

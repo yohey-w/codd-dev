@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import warnings
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,9 @@ _IMPORT_SPECIFIER_RE = re.compile(
 )
 
 DESIGN_DOC_ATTRIBUTE_KEYS = ("runtime_constraints", "user_journeys")
+RUNTIME_CONSTRAINT_REQUIRED_FIELDS = ("capability", "required", "rationale")
+USER_JOURNEY_REQUIRED_FIELDS = ("name", "criticality", "steps", "required_capabilities", "expected_outcome_refs")
+USER_JOURNEY_LIST_FIELDS = ("steps", "required_capabilities", "expected_outcome_refs")
 LANGUAGE_SUFFIXES = {
     ".py": "python",
     ".ts": "typescript",
@@ -100,7 +105,7 @@ def extract_design_doc_metadata(md_path: Path) -> dict[str, Any]:
         "frontmatter": frontmatter,
         "depends_on": depends_on,
         "node_id": codd_meta.get("node_id") or frontmatter.get("node_id"),
-        "attributes": _extract_design_doc_attributes(frontmatter),
+        "attributes": extract_design_doc_journey_attrs(frontmatter),
         "body": body,
     }
 
@@ -115,14 +120,81 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-def _extract_design_doc_attributes(frontmatter: dict[str, Any]) -> dict[str, Any]:
-    """Return declarative DAG attributes that CoDD core passes through."""
+def extract_design_doc_journey_attrs(frontmatter: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
+    """Extract declarative journey attributes from design-doc frontmatter.
 
-    attributes: dict[str, Any] = {}
-    for key in DESIGN_DOC_ATTRIBUTE_KEYS:
-        if key in frontmatter:
-            attributes[key] = frontmatter[key]
+    Invalid entries emit warnings by default so existing design documents stay
+    buildable while authors get actionable feedback.
+    """
+
+    attributes: dict[str, Any] = {"runtime_constraints": [], "user_journeys": []}
+    if "runtime_constraints" in frontmatter:
+        attributes["runtime_constraints"] = _extract_structured_entries(
+            frontmatter,
+            key="runtime_constraints",
+            required_fields=RUNTIME_CONSTRAINT_REQUIRED_FIELDS,
+            list_fields=(),
+            strict=strict,
+        )
+    if "user_journeys" in frontmatter:
+        attributes["user_journeys"] = _extract_structured_entries(
+            frontmatter,
+            key="user_journeys",
+            required_fields=USER_JOURNEY_REQUIRED_FIELDS,
+            list_fields=USER_JOURNEY_LIST_FIELDS,
+            strict=strict,
+        )
     return attributes
+
+
+def _extract_structured_entries(
+    frontmatter: dict[str, Any],
+    *,
+    key: str,
+    required_fields: tuple[str, ...],
+    list_fields: tuple[str, ...],
+    strict: bool,
+) -> list[dict[str, Any]]:
+    value = frontmatter.get(key, [])
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        _warn_or_raise(f"design_doc.{key} must be a list; ignoring {type(value).__name__}", strict=strict)
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            _warn_or_raise(f"design_doc.{key}[{index}] must be a mapping; ignoring entry", strict=strict)
+            continue
+
+        entry = deepcopy(item)
+        missing = [field for field in required_fields if field not in entry]
+        if missing:
+            _warn_or_raise(
+                f"design_doc.{key}[{index}] missing required field(s): {', '.join(missing)}",
+                strict=strict,
+            )
+
+        for field in list_fields:
+            if field not in entry or entry[field] is None:
+                entry[field] = []
+                continue
+            if not isinstance(entry[field], list):
+                _warn_or_raise(
+                    f"design_doc.{key}[{index}].{field} should be a list; coercing value",
+                    strict=strict,
+                )
+                entry[field] = _as_list(entry[field])
+
+        entries.append(entry)
+    return entries
+
+
+def _warn_or_raise(message: str, *, strict: bool) -> None:
+    if strict:
+        raise ValueError(message)
+    warnings.warn(message, UserWarning, stacklevel=3)
 
 
 def _capability_matchers(capability_patterns: dict, impl_file_path: Path) -> list[tuple[str, re.Pattern[str], Any]]:

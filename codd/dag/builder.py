@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import warnings
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +77,7 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
     _add_import_edges(dag, root, impl_nodes, dag_settings)
     _add_tested_by_edges(dag, root, impl_nodes, test_nodes, dag_settings)
     _add_expected_nodes(dag, root, dag_settings, impl_nodes)
+    _add_design_doc_expected_outcome_edges(dag, design_docs)
     _add_plan_tasks(dag, root, dag_settings)
     _add_deployment_graph(dag, root, design_docs, impl_nodes)
 
@@ -184,6 +186,8 @@ def _add_design_docs(dag: DAG, project_root: Path, settings: dict[str, Any]) -> 
             continue
         node_id = _relative_id(md_path, project_root)
         metadata = extract_design_doc_metadata(md_path)
+        attributes = metadata.get("attributes") or {}
+        _validate_design_doc_journey_attributes(node_id, attributes)
         _add_node_once(
             dag,
             Node(
@@ -194,11 +198,11 @@ def _add_design_docs(dag: DAG, project_root: Path, settings: dict[str, Any]) -> 
                     "frontmatter": metadata["frontmatter"],
                     "depends_on": metadata["depends_on"],
                     "node_id": metadata.get("node_id"),
-                    **(metadata.get("attributes") or {}),
+                    **attributes,
                 },
             ),
         )
-        design_docs[node_id] = {**metadata, "path": md_path}
+        design_docs[node_id] = {**metadata, "attributes": attributes, "path": md_path}
         if metadata.get("node_id"):
             aliases[str(metadata["node_id"])] = node_id
 
@@ -384,6 +388,51 @@ def _add_expected_nodes(
                 dag.add_edge(Edge(from_id=node_id, to_id=target_id, kind="represents"))
 
 
+def _add_design_doc_expected_outcome_edges(dag: DAG, design_docs: dict[str, dict[str, Any]]) -> None:
+    existing_edges = {
+        (edge.from_id, edge.to_id, edge.kind, _edge_attributes_key(edge.attributes))
+        for edge in dag.edges
+    }
+
+    for node_id, metadata in design_docs.items():
+        attributes = metadata.get("attributes", {})
+        journey_names = _design_doc_journey_names(attributes)
+        for journey in _design_doc_journey_entries(attributes):
+            journey_name = journey.get("name") if isinstance(journey.get("name"), str) else None
+            for ref in _as_list(journey.get("expected_outcome_refs")):
+                if not isinstance(ref, str) or not ref.strip():
+                    continue
+                ref = ref.strip()
+                if ref.startswith("lexicon:"):
+                    if ref not in dag.nodes or dag.nodes[ref].kind != "expected":
+                        warnings.warn(
+                            f"{node_id} user_journeys expected_outcome_refs points to missing lexicon node: {ref}",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                        continue
+                    edge_attributes = {"source": "expected_outcome_refs", "ref": ref}
+                    if journey_name:
+                        edge_attributes["journey"] = journey_name
+                    edge_key = (node_id, ref, "expects", _edge_attributes_key(edge_attributes))
+                    if edge_key not in existing_edges:
+                        dag.add_edge(Edge(from_id=node_id, to_id=ref, kind="expects", attributes=edge_attributes))
+                        existing_edges.add(edge_key)
+                    continue
+
+                if ref.startswith("design:"):
+                    # Same-document journey refs are represented inside the
+                    # design_doc attributes, so node-level self edges are skipped.
+                    _ = ref.removeprefix("design:") in journey_names
+                    continue
+
+                warnings.warn(
+                    f"{node_id} user_journeys expected_outcome_refs has unknown prefix: {ref}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+
 def _add_deployment_graph(
     dag: DAG,
     project_root: Path,
@@ -494,6 +543,43 @@ def _expected_artifact_attributes(artifact: dict[str, Any]) -> dict[str, Any]:
         if key in artifact:
             attributes[key] = artifact[key]
     return attributes
+
+
+def _validate_design_doc_journey_attributes(node_id: str, attributes: dict[str, Any]) -> None:
+    required_fields = {
+        "runtime_constraints": ("capability", "required", "rationale"),
+        "user_journeys": ("name", "criticality", "steps", "required_capabilities", "expected_outcome_refs"),
+    }
+    for key, required in required_fields.items():
+        entries = attributes.get(key, [])
+        if not isinstance(entries, list):
+            warnings.warn(f"{node_id} {key} must be a list; ignoring validation", UserWarning, stacklevel=2)
+            continue
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                warnings.warn(f"{node_id} {key}[{index}] must be a mapping", UserWarning, stacklevel=2)
+                continue
+            missing = [field for field in required if field not in entry]
+            if missing:
+                warnings.warn(
+                    f"{node_id} {key}[{index}] missing required field(s): {', '.join(missing)}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+
+def _design_doc_journey_entries(attributes: dict[str, Any]) -> list[dict[str, Any]]:
+    journeys = attributes.get("user_journeys", [])
+    return [journey for journey in journeys if isinstance(journey, dict)] if isinstance(journeys, list) else []
+
+
+def _design_doc_journey_names(attributes: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for journey in _design_doc_journey_entries(attributes):
+        name = journey.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
 
 
 def _plan_task_output_edge(dag: DAG, task_node_id: str, output: str) -> Edge | None:
