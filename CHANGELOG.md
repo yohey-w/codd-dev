@@ -51,13 +51,21 @@ All notable changes to CoDD are documented in this file.
   - `source` は `ai_derived` / `user_override` / `default_template` を必須化
   - cmd_375 の `RECOMMENDED_PROCEEDING` / 確定回答を prompt hint として注入
   - `codd.yaml [project] type` と `[required_artifacts]` override で汎用プロジェクトに適用可能
+- **`codd require --audit` required artifact gap detection** (cmd_371):
+  `project_lexicon.yaml:required_artifacts` と既存 `docs/design/*.md` を比較し、
+  AI導出された必須設計書の欠落を ASK / AUTO_REJECT として監査
+  - `ArtifactGap` + `CoverageAuditor.audit_required_artifacts()` / `_discover_existing_artifacts()`
+  - `artifact_discovery.paths` / `mappings` / `artifact_paths` による codd.yaml override 対応
+  - coverage audit report に `Required Artifacts Audit` セクションを追記し、
+    missing artifact の作成先候補と scope exclusion を記録
 
 ### Notes
 
 - 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
   e2e-generate / extract) はすべて変更なし。新フラグはすべて opt-in。
-- 既存テスト 852 (v1.18.0) → 968 (v1.19.0)、+116 件追加 (cmd_364: 12 + cmd_365: 16 +
-  cmd_366: 13 + cmd_367: 11 + cmd_368: 11 + cmd_373: 9 + cmd_375: 25 + cmd_370: 19)、
+- 既存テスト 852 (v1.18.0) → 979 (v1.19.0)、+127 件追加 (cmd_364: 12 + cmd_365: 16 +
+  cmd_366: 13 + cmd_367: 11 + cmd_368: 11 + cmd_373: 9 + cmd_375: 25 + cmd_370: 19 +
+  cmd_371: 11)、
   全件 PASS / 0 FAIL / 0 SKIP
 - Generality Gate: framework 固有名 (Next.js/NextAuth/Clerk/Nuxt/SvelteKit) は
   defaults.yaml と codd.yaml override に分離、CoDD core にハードコードなし。
