@@ -2409,6 +2409,75 @@ def dag_visualize(project_path: str):
     click.echo(render_mermaid(built_dag), nl=False)
 
 
+@dag.command("journeys")
+@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@click.option(
+    "--format",
+    "output_format",
+    default="text",
+    type=click.Choice(["text", "json"]),
+    help="Output format",
+)
+def dag_journeys(project_path: str, output_format: str):
+    """List user_journeys declared on design_doc DAG nodes."""
+    from codd.dag.builder import build_dag
+
+    project_root = Path(project_path).resolve()
+    try:
+        built_dag = build_dag(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    journeys = _collect_dag_journeys(built_dag)
+    if output_format == "json":
+        click.echo(json.dumps(journeys, ensure_ascii=False, indent=2))
+        return
+
+    current_doc: str | None = None
+    for journey in journeys:
+        design_doc = journey["design_doc"]
+        if design_doc != current_doc:
+            if current_doc is not None:
+                click.echo()
+            click.echo(design_doc)
+            current_doc = design_doc
+        required = journey["required_capabilities"]
+        requires = ", ".join(required) if required else "-"
+        click.echo(f"  {journey['name']} [{journey['criticality']}]  requires: {requires}")
+
+
+def _collect_dag_journeys(dag: Any) -> list[dict[str, Any]]:
+    journeys: list[dict[str, Any]] = []
+    for node in sorted(dag.nodes.values(), key=lambda item: item.id):
+        if node.kind != "design_doc":
+            continue
+        for journey in _node_user_journeys(node):
+            journeys.append(
+                {
+                    "design_doc": node.path or node.id,
+                    "name": str(journey.get("name") or ""),
+                    "criticality": str(journey.get("criticality") or ""),
+                    "required_capabilities": _string_list(journey.get("required_capabilities")),
+                }
+            )
+    return journeys
+
+
+def _node_user_journeys(node: Any) -> list[dict[str, Any]]:
+    attributes = getattr(node, "attributes", {}) or {}
+    value = attributes.get("user_journeys")
+    if not isinstance(value, list):
+        return []
+    return [journey for journey in value if isinstance(journey, dict)]
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str) and item]
+
+
 def _dag_result_to_dict(result: Any) -> dict[str, Any]:
     if is_dataclass(result):
         return asdict(result)
