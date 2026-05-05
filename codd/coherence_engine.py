@@ -80,6 +80,7 @@ def set_coherence_bus(bus: EventBus | None) -> None:
     """Set the opt-in coherence bus on detectors that publish DriftEvents."""
     for module_name in (
         "codd.drift",
+        "codd.drift_linkers.api",
         "codd.hitl_session",
         "codd.validator",
         "codd.screen_flow_validator",
