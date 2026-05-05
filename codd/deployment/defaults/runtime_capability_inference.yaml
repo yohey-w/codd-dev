@@ -1,0 +1,12 @@
+# Default runtime capability inference rules.
+inference_rules:
+  - target_type: docker_compose
+    capabilities: [container_runtime, server_running]
+  - target_type: k8s
+    capabilities: [container_runtime, server_running, orchestrated_containers]
+  - target_type: vercel
+    capabilities: [tls_termination, serverless_runtime]
+  - target_type: azure
+    capabilities: [tls_termination, cloud_runtime]
+  - healthcheck_url_prefix: "https://"
+    capabilities: [tls_termination]

@@ -37,6 +37,7 @@ class RuntimeStateNode:
     target: str
     expected_value: Any = None
     actual_check_command: Optional[str] = None
+    capabilities_provided: list[str] = field(default_factory=list)
 
 
 @dataclass

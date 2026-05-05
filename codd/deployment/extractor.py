@@ -29,6 +29,7 @@ URL_PATH_RE = re.compile(r"(?<![:\w])/[A-Za-z0-9_./{}:-]+")
 DEPLOYMENT_DOC_PATTERNS = ("DEPLOYMENT.md", "DEPLOY.md", "docs/deploy/*.md")
 SMOKE_TEST_PATTERNS = ("tests/smoke/*.test.ts", "tests/smoke/*.spec.ts", "tests/smoke/*.sh")
 E2E_TEST_PATTERNS = ("tests/e2e/*.spec.ts", "tests/e2e/*.test.ts")
+RUNTIME_CAPABILITY_INFERENCE_DEFAULTS = Path(__file__).parent / "defaults" / "runtime_capability_inference.yaml"
 
 
 def extract_deployment_nodes(project_root: Path, codd_config: dict[str, Any] | None = None) -> dict[str, list]:
@@ -38,7 +39,7 @@ def extract_deployment_nodes(project_root: Path, codd_config: dict[str, Any] | N
     config = codd_config if codd_config is not None else _load_project_config_or_empty(root)
     deployment_docs = extract_deployment_docs(root, config)
     design_docs = _load_design_doc_records(root, config)
-    runtime_states = extract_runtime_states(root, deployment_docs, design_docs)
+    runtime_states = extract_runtime_states(root, deployment_docs, design_docs, config)
     verification_tests = extract_verification_tests(root)
     return {
         "deployment_docs": deployment_docs,
@@ -93,10 +94,13 @@ def extract_runtime_states(
     project_root: Path,
     deployment_docs: list[DeploymentDocNode],
     design_docs: list,
+    codd_config: dict[str, Any] | None = None,
 ) -> list[RuntimeStateNode]:
     """Infer runtime states from deployment sections and design acceptance criteria."""
 
-    _ = project_root
+    root = Path(project_root).resolve()
+    config = codd_config if codd_config is not None else _load_project_config_or_empty(root)
+    capabilities_provided = _infer_project_capabilities(root, config)
     states: dict[str, RuntimeStateNode] = {}
     for deployment_doc in deployment_docs:
         for section in deployment_doc.sections:
@@ -112,6 +116,7 @@ def extract_runtime_states(
                     target=target,
                     expected_value=True,
                     actual_check_command=command,
+                    capabilities_provided=capabilities_provided,
                 ),
             )
 
@@ -130,6 +135,17 @@ def extract_runtime_states(
             )
 
     return [states[key] for key in sorted(states)]
+
+
+def infer_capabilities_provided(deploy_yaml: dict[str, Any], codd_yaml: dict[str, Any]) -> list[str]:
+    """Infer runtime capabilities from declarative project rules."""
+
+    facts = _deploy_capability_facts(deploy_yaml)
+    capabilities: list[str] = []
+    for rule in _runtime_capability_inference_rules(codd_yaml):
+        if _capability_rule_matches(rule, facts):
+            capabilities.extend(_as_str_list(rule.get("capabilities")))
+    return _dedupe_strings(capabilities)
 
 
 def extract_verification_tests(project_root: Path) -> list[VerificationTestNode]:
@@ -254,7 +270,88 @@ def runtime_state_attributes(node: RuntimeStateNode) -> dict[str, Any]:
 
     payload = asdict(node)
     payload["kind"] = node.kind.value
+    payload["capabilities_provided"] = _dedupe_strings(_as_str_list(payload.get("capabilities_provided")))
     return payload
+
+
+def _infer_project_capabilities(project_root: Path, config: dict[str, Any]) -> list[str]:
+    capabilities: list[str] = []
+    for path in _deploy_yaml_candidates(project_root):
+        if path.is_file():
+            capabilities.extend(infer_capabilities_provided(_read_yaml_mapping(path), config))
+    return _dedupe_strings(capabilities)
+
+
+def _runtime_capability_inference_rules(config: dict[str, Any]) -> list[dict[str, Any]]:
+    coherence = config.get("coherence")
+    override = coherence.get("runtime_capability_inference") if isinstance(coherence, dict) else None
+    if override is not None:
+        return _coerce_inference_rules(override)
+    return _coerce_inference_rules(_read_yaml_mapping(RUNTIME_CAPABILITY_INFERENCE_DEFAULTS))
+
+
+def _coerce_inference_rules(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        rules = payload.get("inference_rules")
+    else:
+        rules = payload
+    if not isinstance(rules, list):
+        return []
+    return [rule for rule in rules if isinstance(rule, dict)]
+
+
+def _deploy_capability_facts(deploy_yaml: dict[str, Any]) -> dict[str, set[str]]:
+    target_types: set[str] = set()
+    healthcheck_urls: set[str] = set()
+
+    targets = _deploy_target_mappings(deploy_yaml)
+    for target in targets:
+        _add_text_fact(target_types, target.get("type"))
+        healthcheck = target.get("healthcheck")
+        if isinstance(healthcheck, dict):
+            _add_text_fact(healthcheck_urls, healthcheck.get("url"))
+        _add_text_fact(healthcheck_urls, target.get("url"))
+
+    _add_text_fact(target_types, deploy_yaml.get("type"))
+    healthcheck = deploy_yaml.get("healthcheck")
+    if isinstance(healthcheck, dict):
+        _add_text_fact(healthcheck_urls, healthcheck.get("url"))
+    _add_text_fact(healthcheck_urls, deploy_yaml.get("url"))
+    return {"target_types": target_types, "healthcheck_urls": healthcheck_urls}
+
+
+def _deploy_target_mappings(deploy_yaml: dict[str, Any]) -> list[dict[str, Any]]:
+    targets = deploy_yaml.get("targets")
+    if isinstance(targets, dict):
+        return [target for target in targets.values() if isinstance(target, dict)]
+
+    target = deploy_yaml.get("target")
+    if isinstance(target, dict):
+        return [target]
+    return []
+
+
+def _capability_rule_matches(rule: dict[str, Any], facts: dict[str, set[str]]) -> bool:
+    matched = False
+
+    target_type = rule.get("target_type")
+    if isinstance(target_type, str):
+        matched = True
+        if target_type not in facts["target_types"]:
+            return False
+
+    url_prefix = rule.get("healthcheck_url_prefix")
+    if isinstance(url_prefix, str):
+        matched = True
+        if not any(url.startswith(url_prefix) for url in facts["healthcheck_urls"]):
+            return False
+
+    return matched
+
+
+def _add_text_fact(target: set[str], value: Any) -> None:
+    if isinstance(value, str) and value.strip():
+        target.add(value.strip())
 
 
 def verification_test_attributes(node: VerificationTestNode) -> dict[str, Any]:
