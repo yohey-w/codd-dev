@@ -13,14 +13,19 @@ from codd.deployment.providers.verification.means_catalog import VerificationMea
 class MeansCatalogLoader:
     """Resolve catalog overrides and render them as prompt hint text."""
 
-    DEFAULT_CATALOG_PATH: ClassVar[str] = "codd/deployment/defaults/verification_means_catalog.yaml"
+    DEFAULT_CATALOG_PATH: ClassVar[str] = "codd/llm/templates/verification_means_catalog.yaml"
 
     def resolve(
         self,
         project_lexicon_path: str | None = None,
         codd_yaml_path: str | None = None,
+        *,
+        project_lexicon_catalog: Mapping[str, Any] | None = None,
     ) -> dict[str, list[str]]:
         """Resolve project lexicon override, config override, then bundled default."""
+
+        if project_lexicon_catalog is not None:
+            return _normalize_catalog(project_lexicon_catalog)
 
         lexicon_catalog = _catalog_from_project_lexicon(_path_or_none(project_lexicon_path))
         if lexicon_catalog is not None:
@@ -53,7 +58,9 @@ def _catalog_path_from_codd_yaml(path: Path | None) -> Path | None:
     if path is None or not path.exists():
         return None
     payload = _read_yaml_mapping(path)
-    configured = _nested_value(payload, ("llm", "means_catalog_path"))
+    configured = _nested_value(payload, ("llm", "verification_means_catalog_path"))
+    if not isinstance(configured, str) or not configured.strip():
+        configured = _nested_value(payload, ("llm", "means_catalog_path"))
     if not isinstance(configured, str) or not configured.strip():
         return None
     return _resolve_config_relative_path(Path(configured), path)
