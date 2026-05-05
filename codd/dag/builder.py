@@ -32,6 +32,27 @@ TEST_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".bats")
 PLAN_HEADER_RE = re.compile(r"^#{2,6}\s+([A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)(?:\s+(.+))?$", re.MULTILINE)
 OUTPUTS_RE = re.compile(r"(?im)^outputs?[ \t]*:[ \t]*(.*)$")
 PY_IMPORT_RE = re.compile(r"(?m)^\s*(?:from\s+([A-Za-z_][\w.]*)(?:\s+import\s+)|import\s+([A-Za-z_][\w.]*))")
+EXPECTED_ARTIFACT_ATTRIBUTE_KEYS = (
+    "id",
+    "title",
+    "scope",
+    "source",
+    "path",
+    "file",
+    "output",
+    "artifact_path",
+    "value",
+    "depends_on",
+    "derived_from",
+    "description",
+    "acceptance_criteria",
+    "tags",
+    "priority",
+    "owner",
+    "journey",
+    "browser_requirements",
+    "runtime_requirements",
+)
 
 
 def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG:
@@ -169,6 +190,7 @@ def _add_design_docs(dag: DAG, project_root: Path, settings: dict[str, Any]) -> 
                     "frontmatter": metadata["frontmatter"],
                     "depends_on": metadata["depends_on"],
                     "node_id": metadata.get("node_id"),
+                    **(metadata.get("attributes") or {}),
                 },
             ),
         )
@@ -346,7 +368,7 @@ def _add_expected_nodes(
         node_id = artifact_id if artifact_id.startswith("lexicon:") else f"lexicon:{artifact_id}"
         _add_node_once(
             dag,
-            Node(id=node_id, kind="expected", path=None, attributes={"source": "project_lexicon.yaml", **artifact}),
+            Node(id=node_id, kind="expected", path=None, attributes=_expected_artifact_attributes(artifact)),
         )
         for target in _artifact_target_paths(artifact):
             target_id = _normalize_output_path(target)
@@ -453,6 +475,14 @@ def _artifact_target_paths(artifact: dict[str, Any]) -> list[str]:
         elif isinstance(value, list):
             targets.extend(str(item) for item in value if _looks_like_project_path(str(item)))
     return targets
+
+
+def _expected_artifact_attributes(artifact: dict[str, Any]) -> dict[str, Any]:
+    attributes: dict[str, Any] = {"source": "project_lexicon.yaml"}
+    for key in EXPECTED_ARTIFACT_ATTRIBUTE_KEYS:
+        if key in artifact:
+            attributes[key] = artifact[key]
+    return attributes
 
 
 def _resolve_design_dependency(

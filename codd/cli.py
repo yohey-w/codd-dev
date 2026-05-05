@@ -2447,6 +2447,7 @@ def _dag_result_has_findings(result: Any) -> bool:
 def _dag_result_details(result: Any) -> list[str]:
     details: list[str] = []
     for key in (
+        "message",
         "missing_impl_files",
         "orphan_edges",
         "dangling_refs",
