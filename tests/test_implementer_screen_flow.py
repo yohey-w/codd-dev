@@ -105,7 +105,7 @@ def _write_screen_flow(project: Path, content: str = "# Login\n- /login\n") -> N
 def _mock_ai(monkeypatch: pytest.MonkeyPatch, stdout: str | None = None) -> list[str]:
     calls: list[str] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(input)
         match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
         output_dir = match.group("output") if match else "src/generated/fallback"

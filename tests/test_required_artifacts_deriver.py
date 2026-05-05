@@ -112,7 +112,7 @@ def _mock_ai(monkeypatch, response: dict | str = AI_RESPONSE):
     calls: list[dict] = []
     stdout = response if isinstance(response, str) else json.dumps(response)
 
-    def fake_run(command, *, input, capture_output, text, timeout, check):
+    def fake_run(command, *, input, capture_output, text, timeout, check, **kwargs):
         calls.append(
             {
                 "command": command,
