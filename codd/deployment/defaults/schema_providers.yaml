@@ -1,0 +1,6 @@
+default: prisma
+providers:
+  prisma:
+    schema_file: "prisma/schema.prisma"
+    seed_file: "prisma/seed.ts"
+    migrations_dir: "prisma/migrations"

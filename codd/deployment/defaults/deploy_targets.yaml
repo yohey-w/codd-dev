@@ -1,0 +1,5 @@
+default: docker_compose
+targets:
+  docker_compose:
+    compose_file: "docker-compose.production.yml"
+    service_name: "app"

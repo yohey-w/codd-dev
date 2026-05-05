@@ -1,0 +1,7 @@
+templates:
+  curl:
+    timeout: 30
+    retry: 3
+  playwright:
+    headless: true
+    timeout: 60000
