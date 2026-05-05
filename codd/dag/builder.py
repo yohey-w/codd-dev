@@ -13,7 +13,7 @@ import yaml
 
 from codd.config import load_project_config
 from codd.dag import DAG, Edge, Node
-from codd.dag.extractor import extract_design_doc_metadata, extract_imports
+from codd.dag.extractor import extract_design_doc_metadata, extract_imports, scan_capability_evidence
 from codd.deployment.extractor import (
     deployment_doc_attributes,
     extract_deployment_docs,
@@ -92,6 +92,7 @@ def load_dag_settings(project_root: Path, settings: dict[str, Any] | None = None
     merged = _deep_merge(merged, _dag_overrides(requested_settings))
     _apply_scan_patterns(merged, project_config)
     _apply_scan_patterns(merged, requested_settings)
+    merged["coherence"] = _coherence_settings(project_config, requested_settings)
     merged["project_type"] = project_type
     merged.setdefault("design_doc_patterns", [])
     merged.setdefault("impl_file_patterns", [])
@@ -205,6 +206,7 @@ def _add_design_docs(dag: DAG, project_root: Path, settings: dict[str, Any]) -> 
 
 def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> dict[str, Path]:
     impl_nodes: dict[str, Path] = {}
+    capability_patterns = _capability_patterns(settings)
     for file_path in _glob_project_paths(project_root, settings.get("impl_file_patterns", [])):
         if (
             not file_path.is_file()
@@ -223,6 +225,7 @@ def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
                 attributes={
                     "language": _language_for_path(file_path),
                     "imports": extract_imports(file_path),
+                    "runtime_evidence": _runtime_evidence_for_file(file_path, node_id, capability_patterns),
                 },
             ),
         )
@@ -753,6 +756,36 @@ def _dag_overrides(config: dict[str, Any]) -> dict[str, Any]:
         if key in config:
             overrides[key] = deepcopy(config[key])
     return overrides
+
+
+def _coherence_settings(*configs: dict[str, Any]) -> dict[str, Any]:
+    coherence: dict[str, Any] = {"capability_patterns": {}}
+    for config in configs:
+        section = config.get("coherence", {})
+        if isinstance(section, dict):
+            coherence = _deep_merge(coherence, section)
+    if not isinstance(coherence.get("capability_patterns"), dict):
+        coherence["capability_patterns"] = {}
+    return coherence
+
+
+def _capability_patterns(settings: dict[str, Any]) -> dict[str, Any]:
+    coherence = settings.get("coherence", {})
+    if not isinstance(coherence, dict):
+        return {}
+    patterns = coherence.get("capability_patterns", {})
+    return patterns if isinstance(patterns, dict) else {}
+
+
+def _runtime_evidence_for_file(file_path: Path, node_id: str, capability_patterns: dict[str, Any]) -> list[dict]:
+    evidence = scan_capability_evidence(file_path, capability_patterns)
+    absolute_prefix = f"{file_path.as_posix()}:"
+    relative_prefix = f"{node_id}:"
+    for item in evidence:
+        line_ref = item.get("line_ref")
+        if isinstance(line_ref, str) and line_ref.startswith(absolute_prefix):
+            item["line_ref"] = relative_prefix + line_ref.removeprefix(absolute_prefix)
+    return evidence
 
 
 def _apply_scan_patterns(settings: dict[str, Any], config: dict[str, Any]) -> None:
