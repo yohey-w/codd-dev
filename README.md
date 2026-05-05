@@ -912,23 +912,49 @@ You:  yes
 
 ### Hook Integration — Set It Once, Never Think Again
 
-Add this hook and **you never run `codd scan` manually again.** Every file edit triggers it automatically — the dependency graph is always current, always accurate, zero mental overhead:
+CoDD ships copyable hook recipes in `codd/hooks/recipes/` so Claude, Codex, and Git can all trigger the same change-driven propagation path:
+`codd propagate-from --files <changed-file>`.
+
+#### Claude PostToolUse
+
+Use `codd/hooks/recipes/claude_settings_example.json` as the starting point for `.claude/settings.json`. It listens for Edit / Write / MultiEdit and extracts changed files from `TOOL_INPUT` before calling `propagate-from`.
 
 ```json
 {
   "hooks": {
     "PostToolUse": [{
-      "matcher": "Edit|Write",
+      "matcher": "Edit|Write|MultiEdit",
       "hooks": [{
         "type": "command",
-        "command": "codd scan --path ."
+        "command": "python -m codd propagate-from --files <changed-file> --source editor_hook --editor claude"
       }]
     }]
   }
 }
 ```
 
-With hooks active, your entire workflow becomes: **edit files normally, then run `/codd-impact` when you want to know what's affected.** That's it. The graph maintenance is invisible.
+#### Codex Post-Edit
+
+Use `codd/hooks/recipes/codex_hook.sh` when your Codex wrapper can pass edited files through `CODEX_EDITED_FILES`:
+
+```bash
+export CODEX_EDITED_FILES="src/app.ts,docs/design/api.md"
+bash codd/hooks/recipes/codex_hook.sh
+```
+
+#### Git Hooks
+
+Use the git recipes as a final catch for manual edits and non-editor workflows:
+
+```bash
+cp codd/hooks/recipes/git_pre_commit.sh .git/hooks/pre-commit
+cp codd/hooks/recipes/git_post_commit.sh .git/hooks/post-commit
+chmod +x .git/hooks/pre-commit .git/hooks/post-commit
+```
+
+The pre-commit hook runs `propagate-from` in `--dry-run` mode against staged files. The post-commit hook runs propagation against the committed file set.
+
+With hooks active, your entire workflow becomes: **edit files normally, and CoDD propagates the change from the files that actually changed.** The graph maintenance is invisible.
 
 ### Available Skills
 

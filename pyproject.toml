@@ -61,6 +61,8 @@ Issues = "https://github.com/yohey-w/codd-dev/issues"
 include = [
     "codd/**/*.py",
     "codd/**/*.yaml",
+    "codd/hooks/recipes/*.json",
+    "codd/hooks/recipes/*.sh",
     "codd/templates/**/*.j2",
     "codd/templates/**/*.tmpl",
     "codd/hooks/pre-commit",

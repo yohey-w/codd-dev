@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json, os, subprocess, sys; data=json.loads(os.environ.get('TOOL_INPUT') or '{}'); raw=data.get('file_paths') or data.get('file_path') or []; paths=raw if isinstance(raw, list) else [raw]; files=[str(path) for path in paths if path]; cmd=[sys.executable, '-m', 'codd', 'propagate-from', '--source', 'editor_hook', '--editor', 'claude']; [cmd.extend(['--files', path]) for path in files]; sys.exit(subprocess.call(cmd) if files else 0)\""
+          }
+        ]
+      }
+    ]
+  }
+}
