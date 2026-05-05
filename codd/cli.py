@@ -1,6 +1,7 @@
 """CoDD CLI — codd init / scan / impact / require / plan."""
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timezone
 import json
 import os
 import shutil
@@ -19,6 +20,13 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 class CoddCLIError(RuntimeError):
     """Error raised for CLI-facing validation failures."""
+
+
+@dataclass
+class _CliVerificationResult:
+    passed: bool
+    exit_code: int
+    failure: Any | None = None
 
 
 def _run_pro_command(name: str, **kwargs):
@@ -1046,7 +1054,20 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
     default=False,
     help="Run npx @google/design.md lint on DESIGN.md (skip if npx unavailable).",
 )
-def verify(path: str, sprint: int | None, e2e: bool, deploy: bool, base_url: str | None, design_md: bool) -> None:
+@click.option("--auto-repair", is_flag=True, default=False, help="Run RepairLoop when verification fails")
+@click.option("--max-attempts", default=None, type=click.IntRange(min=1), help="Maximum repair attempts")
+@click.option("--engine", "engine_name", default=None, help="Repair engine name")
+def verify(
+    path: str,
+    sprint: int | None,
+    e2e: bool,
+    deploy: bool,
+    base_url: str | None,
+    design_md: bool,
+    auto_repair: bool,
+    max_attempts: int | None,
+    engine_name: str | None,
+) -> None:
     """Run build + test verification and trace failures to design documents."""
     if design_md:
         _run_design_md_lint(Path(path).resolve())
@@ -1055,7 +1076,31 @@ def verify(path: str, sprint: int | None, e2e: bool, deploy: bool, base_url: str
         from codd.e2e_runner import run_e2e
         run_e2e(path=path, deploy=deploy, base_url=base_url)
         return
-    _run_pro_command("verify", path=path, sprint=sprint)
+
+    if not auto_repair:
+        _run_pro_command("verify", path=path, sprint=sprint)
+        return
+
+    project_root = Path(path).resolve()
+    result = _run_verify_once(path=path, sprint=sprint)
+    if result.passed:
+        return
+
+    repair_config = _load_required_repair_config(project_root)
+    if repair_config is None:
+        raise SystemExit(1)
+
+    outcome = _run_repair_loop(
+        project_root,
+        result.failure,
+        repair_config=repair_config,
+        max_attempts=max_attempts,
+        engine_name=engine_name,
+        verify_callable=lambda: _run_verify_once(path=path, sprint=sprint),
+    )
+    click.echo(f"Repair outcome: {outcome.status}")
+    click.echo(f"Repair history: {_display_path(outcome.history_session_dir, project_root)}")
+    raise SystemExit(_repair_exit_code(outcome.status))
 
 
 def _run_e2e_generate(path: str, base_url: str, output: str | None, framework: str, mode: str = "scenarios") -> None:
@@ -2394,6 +2439,358 @@ def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
         return load_project_config(project_root)
     except (FileNotFoundError, ValueError):
         return {}
+
+
+def _run_verify_once(path: str, sprint: int | None = None) -> _CliVerificationResult:
+    try:
+        _run_pro_command("verify", path=path, sprint=sprint)
+    except SystemExit as exc:
+        exit_code = _system_exit_code(exc)
+        passed = exit_code == 0
+        failure = None
+        if not passed:
+            failure = _verification_failure_report(
+                "verify",
+                [],
+                [f"codd verify exited with code {exit_code}"],
+                {},
+            )
+        return _CliVerificationResult(passed=passed, exit_code=exit_code, failure=failure)
+    return _CliVerificationResult(passed=True, exit_code=0, failure=None)
+
+
+def _system_exit_code(exc: SystemExit) -> int:
+    code = exc.code
+    if code is None:
+        return 0
+    try:
+        return int(code)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _load_required_repair_config(project_root: Path) -> dict[str, Any] | None:
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"WARN: codd.yaml repair config is required for repair: {exc}")
+        return None
+
+    repair = config.get("repair")
+    if not isinstance(repair, dict) or not repair:
+        click.echo("WARN: codd.yaml [repair] section is required for repair.")
+        return None
+    return config
+
+
+def _run_repair_loop(
+    project_root: Path,
+    failure: Any,
+    *,
+    repair_config: dict[str, Any],
+    max_attempts: int | None,
+    engine_name: str | None,
+    verify_callable,
+):
+    from codd.dag import DAG
+    from codd.dag.builder import build_dag
+    from codd.repair import RepairLoop, RepairLoopConfig
+
+    try:
+        dag = build_dag(project_root)
+    except (FileNotFoundError, ValueError):
+        dag = DAG()
+
+    resolved_failure = failure if failure is not None else _verification_failure_report("verify", [], [], {})
+    if getattr(resolved_failure, "dag_snapshot", None) in ({}, None):
+        resolved_failure.dag_snapshot = _dag_snapshot(dag, project_root)
+
+    repair = repair_config.get("repair") if isinstance(repair_config.get("repair"), dict) else {}
+    config = RepairLoopConfig(
+        max_attempts=_repair_max_attempts(repair, max_attempts),
+        approval_mode=str(repair.get("approval_mode") or "required"),  # type: ignore[arg-type]
+        history_dir=Path(str(repair.get("history_dir") or ".codd/repair_history")),
+        engine_name=str(engine_name or repair.get("engine_name") or repair.get("engine") or "llm"),
+    )
+    return RepairLoop(config, project_root).run(resolved_failure, dag, verify_callable=verify_callable)
+
+
+def _repair_max_attempts(repair: dict[str, Any], max_attempts: int | None) -> int:
+    raw = max_attempts if max_attempts is not None else repair.get("max_attempts", 3)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _dag_snapshot(dag: Any, project_root: Path) -> dict[str, Any]:
+    try:
+        from codd.dag.builder import dag_to_dict
+
+        return dag_to_dict(dag, project_root)
+    except Exception:  # noqa: BLE001 - repair reports should survive DAG serialization failures.
+        return {}
+
+
+def _verification_failure_report(
+    check_name: str,
+    failed_nodes: list[str],
+    error_messages: list[str],
+    dag_snapshot: dict[str, Any],
+):
+    from codd.repair.schema import VerificationFailureReport
+
+    return VerificationFailureReport(
+        check_name=check_name,
+        failed_nodes=failed_nodes,
+        error_messages=error_messages,
+        dag_snapshot=dag_snapshot,
+        timestamp=_utc_timestamp(),
+    )
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _repair_exit_code(status: str) -> int:
+    return {
+        "REPAIR_SUCCESS": 0,
+        "REPAIR_REJECTED_BY_HITL": 1,
+        "REPAIR_EXHAUSTED": 2,
+        "REPAIR_FAILED": 3,
+    }.get(str(status), 3)
+
+
+def _load_failure_report(path: Path) -> Any:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError("failure report must contain a YAML mapping")
+    return _verification_failure_report(
+        str(payload.get("check_name") or payload.get("name") or "verify"),
+        _repair_string_list(payload.get("failed_nodes") or payload.get("nodes")),
+        _repair_string_list(payload.get("error_messages") or payload.get("errors") or payload.get("messages")),
+        payload.get("dag_snapshot") if isinstance(payload.get("dag_snapshot"), dict) else {},
+    )
+
+
+def _repair_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    if value is None:
+        return []
+    return [str(value)]
+
+
+def _repair_history_dir(project_root: Path, config: dict[str, Any] | None = None) -> Path:
+    repair = config.get("repair") if isinstance(config, dict) and isinstance(config.get("repair"), dict) else {}
+    history_dir = Path(str(repair.get("history_dir") or ".codd/repair_history"))
+    if history_dir.is_absolute():
+        return history_dir
+    return project_root / history_dir
+
+
+def _session_attempt_dirs(session_dir: Path) -> list[Path]:
+    return sorted(
+        [path for path in session_dir.glob("attempt_*") if path.is_dir()],
+        key=lambda path: _attempt_number(path.name),
+    )
+
+
+def _attempt_number(name: str) -> int:
+    try:
+        return int(name.removeprefix("attempt_"))
+    except ValueError:
+        return 10**9
+
+
+def _read_repair_yaml(path: Path) -> Any:
+    if not path.exists():
+        return None
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _repair_session_summary(session_dir: Path) -> dict[str, Any]:
+    final_status = _read_repair_yaml(session_dir / "final_status.yaml") or {}
+    attempts = _session_attempt_dirs(session_dir)
+    return {
+        "history_id": session_dir.name,
+        "timestamp": final_status.get("timestamp") or session_dir.name,
+        "status": final_status.get("outcome") or final_status.get("status") or "IN_PROGRESS",
+        "attempts": len(attempts),
+        "path": str(session_dir),
+    }
+
+
+def _session_matches_design_doc(session_dir: Path, design_doc: str | None) -> bool:
+    if not design_doc:
+        return True
+    needle = str(design_doc)
+    for path in session_dir.glob("**/*.yaml"):
+        try:
+            if needle in path.read_text(encoding="utf-8"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _resolve_history_session(project_root: Path, history_id: str, config: dict[str, Any] | None = None) -> Path:
+    raw = Path(history_id).expanduser()
+    if raw.is_absolute() and raw.is_dir():
+        return raw
+    if raw.is_dir():
+        return raw.resolve()
+    session_dir = _repair_history_dir(project_root, config) / history_id
+    if session_dir.is_dir():
+        return session_dir
+    raise FileNotFoundError(f"repair history session not found: {history_id}")
+
+
+def _load_repair_proposal(path: Path) -> Any:
+    from codd.repair.schema import RepairProposal
+
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError("repair proposal must contain a YAML mapping")
+    return RepairProposal(**payload)
+
+
+@main.group(invoke_without_command=True)
+@click.option("--from-report", "from_report", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--max-attempts", default=None, type=click.IntRange(min=1), help="Maximum repair attempts")
+@click.option("--engine", "engine_name", default=None, help="Repair engine name")
+@click.pass_context
+def repair(ctx, from_report: Path | None, project_path: str, max_attempts: int | None, engine_name: str | None):
+    """Run and inspect repair sessions."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if from_report is None:
+        click.echo(ctx.get_help())
+        return
+
+    project_root = Path(project_path).resolve()
+    repair_config = _load_required_repair_config(project_root)
+    if repair_config is None:
+        raise SystemExit(1)
+
+    try:
+        failure = _load_failure_report(from_report)
+        outcome = _run_repair_loop(
+            project_root,
+            failure,
+            repair_config=repair_config,
+            max_attempts=max_attempts,
+            engine_name=engine_name,
+            verify_callable=lambda: _run_verify_once(path=str(project_root), sprint=None),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(f"Repair outcome: {outcome.status}")
+    click.echo(f"Repair history: {_display_path(outcome.history_session_dir, project_root)}")
+    raise SystemExit(_repair_exit_code(outcome.status))
+
+
+@repair.command("history")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--last", "last", default=10, type=click.IntRange(min=1), show_default=True, help="Number of sessions")
+@click.option("--design-doc", "design_doc", default=None, help="Filter sessions containing a design doc path")
+def repair_history(project_path: str, last: int, design_doc: str | None):
+    """List repair history sessions."""
+    from codd.repair.history import RepairHistory
+
+    project_root = Path(project_path).resolve()
+    config = _load_optional_project_config(project_root)
+    sessions = [
+        session
+        for session in RepairHistory().list_sessions(_repair_history_dir(project_root, config))
+        if _session_matches_design_doc(session, design_doc)
+    ][:last]
+
+    if not sessions:
+        click.echo("No repair history found.")
+        return
+
+    for session_dir in sessions:
+        summary = _repair_session_summary(session_dir)
+        click.echo(
+            f"{summary['history_id']}\t{summary['status']}\t"
+            f"attempts={summary['attempts']}\t{summary['timestamp']}"
+        )
+
+
+@repair.command("approve")
+@click.argument("history_id")
+@click.option("--attempt", "attempt", default=None, type=click.IntRange(min=0), help="Attempt number")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def repair_approve(history_id: str, attempt: int | None, project_path: str):
+    """Approve a repair proposal in history."""
+    from codd.repair.approval_repair import approve_repair_proposal
+
+    project_root = Path(project_path).resolve()
+    config = _load_optional_project_config(project_root)
+    try:
+        session_dir = _resolve_history_session(project_root, history_id, config)
+        attempt_dirs = _session_attempt_dirs(session_dir)
+        if not attempt_dirs:
+            raise FileNotFoundError("repair attempt not found")
+        attempt_dir = session_dir / f"attempt_{attempt}" if attempt is not None else attempt_dirs[-1]
+        proposal = _load_repair_proposal(attempt_dir / "repair_proposal.yaml")
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    approval_config = dict(config)
+    repair_config = dict(approval_config.get("repair") if isinstance(approval_config.get("repair"), dict) else {})
+    repair_config["approval_decision"] = "approved"
+    approval_config["repair"] = repair_config
+    approved = approve_repair_proposal(
+        proposal,
+        approval_mode="required",
+        codd_yaml=approval_config,
+        notify_callable=click.echo,
+    )
+    if not approved:
+        click.echo("Repair proposal not approved.")
+        raise SystemExit(1)
+
+    (attempt_dir / "approval.yaml").write_text(
+        yaml.safe_dump({"status": "approved", "timestamp": _utc_timestamp()}, sort_keys=False),
+        encoding="utf-8",
+    )
+    click.echo(f"Approved repair proposal: {session_dir.name} attempt={attempt_dir.name.removeprefix('attempt_')}")
+
+
+@repair.command("status")
+@click.argument("history_id", required=False)
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def repair_status(history_id: str | None, project_path: str):
+    """Show repair session status."""
+    from codd.repair.history import RepairHistory
+
+    project_root = Path(project_path).resolve()
+    config = _load_optional_project_config(project_root)
+    try:
+        if history_id is None:
+            sessions = RepairHistory().list_sessions(_repair_history_dir(project_root, config))
+            if not sessions:
+                click.echo("No repair history found.")
+                raise SystemExit(1)
+            session_dir = sessions[0]
+        else:
+            session_dir = _resolve_history_session(project_root, history_id, config)
+    except FileNotFoundError as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    summary = _repair_session_summary(session_dir)
+    click.echo(f"history_id: {summary['history_id']}")
+    click.echo(f"status: {summary['status']}")
+    click.echo(f"attempts: {summary['attempts']}")
+    click.echo(f"timestamp: {summary['timestamp']}")
 
 
 @main.group()
