@@ -7,7 +7,7 @@ import yaml
 from click.testing import CliRunner
 
 from codd.cli import CoddCLIError, main
-from codd.deployer import load_deploy_config, run_deploy, run_healthcheck
+from codd.deployer import DeployGateResult, load_deploy_config, run_deploy, run_healthcheck
 from codd.deploy_targets import get_target, list_registered_target_types, register_target
 from codd.deploy_targets.base import DeployTarget
 
@@ -86,6 +86,11 @@ class _ScreenFlowGateStub:
     def __init__(self, passed: bool) -> None:
         self.passed = passed
         self.details = ["screen_flow_design_drift: 1"]
+
+
+def _allow_deploy_gates(monkeypatch) -> None:
+    monkeypatch.setattr("codd.deployer._run_deploy_gates", lambda project_root: DeployGateResult())
+    monkeypatch.setattr("codd.deployer._run_screen_flow_apply_gate", lambda project_root: DeployGateResult())
 
 
 def test_load_deploy_config_valid(tmp_path):
@@ -184,8 +189,9 @@ def test_deploy_dry_run_skips_screen_flow_gate(tmp_path, monkeypatch):
     assert DummyDeployTarget.instances[-1].calls == ["dry_run"]
 
 
-def test_deploy_apply_calls_target(tmp_path):
+def test_deploy_apply_calls_target(tmp_path, monkeypatch):
     _reset_dummy()
+    _allow_deploy_gates(monkeypatch)
     config_path = _write_deploy_yaml(tmp_path)
 
     exit_code = run_deploy(tmp_path, config_path=config_path, dry_run=False)
@@ -196,6 +202,7 @@ def test_deploy_apply_calls_target(tmp_path):
 
 def test_deploy_apply_blocks_on_screen_flow_gate_failure(tmp_path, monkeypatch):
     _reset_dummy()
+    _allow_deploy_gates(monkeypatch)
     config_path = _write_deploy_yaml(tmp_path)
     monkeypatch.setattr(
         "codd.deployer._run_screen_flow_apply_gate",
@@ -210,6 +217,7 @@ def test_deploy_apply_blocks_on_screen_flow_gate_failure(tmp_path, monkeypatch):
 
 def test_deploy_healthcheck_fail_triggers_rollback(tmp_path, monkeypatch):
     _reset_dummy()
+    _allow_deploy_gates(monkeypatch)
     config = _deploy_config()
     config["targets"]["vps"]["healthcheck"] = {
         "url": "http://example.test/health",
@@ -226,8 +234,9 @@ def test_deploy_healthcheck_fail_triggers_rollback(tmp_path, monkeypatch):
     assert DummyDeployTarget.instances[-1].calls == ["snapshot", "deploy", "rollback"]
 
 
-def test_deploy_log_written(tmp_path):
+def test_deploy_log_written(tmp_path, monkeypatch):
     _reset_dummy()
+    _allow_deploy_gates(monkeypatch)
     config_path = _write_deploy_yaml(tmp_path)
 
     exit_code = run_deploy(tmp_path, config_path=config_path, dry_run=False)
