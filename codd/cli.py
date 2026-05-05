@@ -2183,6 +2183,64 @@ def mcp_server(project: str):
 
 
 @main.group()
+def dag():
+    """DAG Completeness Gate commands."""
+    pass
+
+
+@dag.command("build")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option(
+    "--format",
+    "output_format",
+    default="json",
+    type=click.Choice(["json", "mermaid"]),
+    help="Output format",
+)
+@click.option("--cache", is_flag=True, help="Use cached DAG if output exists")
+@click.option("--output", default=None, help="Output file (default: .codd/dag.json or .codd/dag.mmd)")
+def dag_build(project_path: str, output_format: str, cache: bool, output: str | None):
+    """Build the project DAG and output it under .codd/."""
+    from codd.dag.builder import (
+        build_dag,
+        default_dag_json_path,
+        default_dag_mermaid_path,
+        write_dag_json,
+        write_dag_mermaid,
+    )
+
+    project_root = Path(project_path).resolve()
+    default_output = default_dag_json_path(project_root) if output_format == "json" else default_dag_mermaid_path(project_root)
+    output_path = Path(output).expanduser() if output else default_output
+    if not output_path.is_absolute():
+        output_path = project_root / output_path
+
+    if cache and output_path.exists():
+        click.echo(f"Using cached DAG: {_display_path(output_path, project_root)}")
+        return
+
+    try:
+        built_dag = build_dag(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    if output_format == "json":
+        if output_path != default_dag_json_path(project_root):
+            write_dag_json(built_dag, project_root, output_path)
+    else:
+        write_dag_mermaid(built_dag, output_path)
+
+    click.echo(
+        "Built DAG: "
+        f"{len(built_dag.nodes)} nodes, "
+        f"{len(built_dag.edges)} edges, "
+        f"{len(built_dag.detect_cycles())} cycles -> "
+        f"{_display_path(output_path, project_root)}"
+    )
+
+
+@main.group()
 def hooks():
     """Manage Git hook integration."""
     pass
