@@ -5,15 +5,17 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from typing import ClassVar, Literal
 
-ChangeSource = Literal["watch", "git_hook", "editor_hook"]
+ChangeSource = Literal["watch", "git_hook", "editor_hook", "manual"]
 EditorKind = Literal["claude", "codex", "manual"]
 
 
 @dataclass
 class FileChangeEvent:
     """Represents a file change event from any source."""
+
+    kind: ClassVar[str] = "file_change"
 
     files: list[str]
     source: ChangeSource
