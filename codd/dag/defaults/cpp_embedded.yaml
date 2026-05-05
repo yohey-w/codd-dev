@@ -1,0 +1,2 @@
+implementation_suffixes: [".c", ".cpp", ".h", ".hpp"]
+test_suffixes: [".cpp", ".test.cpp"]

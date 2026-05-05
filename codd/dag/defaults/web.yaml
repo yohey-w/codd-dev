@@ -21,4 +21,6 @@ test_file_patterns:
   - "**/*.test.tsx"
   - "**/*.spec.ts"
   - "**/*.spec.tsx"
+implementation_suffixes: [".ts", ".tsx", ".js", ".jsx"]
+test_suffixes: [".ts", ".tsx", ".js", ".jsx", ".test.ts", ".spec.ts", ".test.js", ".spec.js"]
 plan_task_file: "docs/design/implementation_plan.md"

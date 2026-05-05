@@ -1,0 +1,2 @@
+implementation_suffixes: [".ex", ".exs"]
+test_suffixes: [".exs"]
