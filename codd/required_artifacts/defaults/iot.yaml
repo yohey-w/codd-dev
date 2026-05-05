@@ -1,0 +1,47 @@
+project_type: iot
+default_artifacts:
+  - id: "design:requirements"
+    title: "Requirements Definition"
+    depends_on: []
+    scope: "Device goals, operating conditions, constraints, acceptance criteria, and safety boundaries"
+    always_required: true
+  - id: "design:system_design"
+    title: "System Design"
+    depends_on: ["design:requirements"]
+    scope: "Device/cloud topology, components, protocol boundaries, deployment model, and lifecycle"
+    always_required: true
+  - id: "design:device_firmware_design"
+    title: "Device Firmware Design"
+    depends_on: ["design:system_design"]
+    scope: "Firmware modules, sensor/actuator control, resource limits, boot lifecycle, and diagnostics"
+    condition: "requirements mention firmware, embedded logic, sensors, actuators, or on-device control"
+  - id: "design:connectivity_protocol_design"
+    title: "Connectivity & Protocol Design"
+    depends_on: ["design:system_design"]
+    scope: "Network protocols, pairing, message schemas, retry/backoff, buffering, and offline handling"
+    condition: "requirements mention Wi-Fi, cellular, BLE, MQTT, network connectivity, or gateways"
+  - id: "design:cloud_backend_design"
+    title: "Cloud Backend Design"
+    depends_on: ["design:system_design"]
+    scope: "Ingestion, device registry, command/control, telemetry processing, and external integrations"
+    condition: "requirements mention cloud, backend, fleet management, telemetry ingestion, or remote commands"
+  - id: "design:data_retention_design"
+    title: "Data Retention Design"
+    depends_on: ["design:cloud_backend_design"]
+    scope: "Telemetry schema, storage lifecycle, retention windows, aggregation, and privacy controls"
+    condition: "requirements mention telemetry, history, analytics, retention, storage, or reporting"
+  - id: "design:security_design"
+    title: "Security Design"
+    depends_on: ["design:system_design"]
+    scope: "Device identity, credential provisioning, encryption, secure boot, authorization, and incident response"
+    condition: "requirements mention device identity, secrets, encryption, auth, tamper resistance, or access control"
+  - id: "design:ota_update_design"
+    title: "OTA Update Design"
+    depends_on: ["design:device_firmware_design"]
+    scope: "Firmware update delivery, signing, rollback, rollout policy, compatibility, and failure recovery"
+    condition: "requirements mention firmware updates, OTA, rollback, versioning, or remote maintenance"
+  - id: "design:safety_design"
+    title: "Safety Design"
+    depends_on: ["design:system_design"]
+    scope: "Hazard analysis, fail-safe states, watchdogs, manual override, and regulatory constraints"
+    condition: "requirements mention safety, hazards, regulated operation, physical controls, or fail-safe behavior"

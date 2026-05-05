@@ -1,0 +1,42 @@
+project_type: web
+default_artifacts:
+  - id: "design:requirements"
+    title: "Requirements Definition"
+    depends_on: []
+    scope: "Functional and non-functional requirements, assumptions, constraints, and acceptance boundaries"
+    always_required: true
+  - id: "design:system_design"
+    title: "System Design"
+    depends_on: ["design:requirements"]
+    scope: "Overall architecture, component boundaries, runtime topology, and integration points"
+    always_required: true
+  - id: "design:api_design"
+    title: "API Design"
+    depends_on: ["design:system_design"]
+    scope: "REST/GraphQL/RPC endpoints, payload contracts, errors, and versioning"
+    condition: "requirements mention API, backend, integration, webhook, or external clients"
+  - id: "design:database_design"
+    title: "Database Design"
+    depends_on: ["design:system_design"]
+    scope: "Entities, tables/collections, indexes, migrations, retention, and consistency rules"
+    condition: "requirements mention data persistence, records, accounts, reports, or history"
+  - id: "design:ux_design"
+    title: "UX Design"
+    depends_on: ["design:requirements"]
+    scope: "Information architecture, screens, interactions, accessibility, and user-facing states"
+    condition: "requirements mention UI, users, browser flows, dashboards, forms, or interaction"
+  - id: "design:screen_flow_design"
+    title: "Screen Flow Design"
+    depends_on: ["design:ux_design"]
+    scope: "Screens, navigation graph, transition conditions, entry points, and terminal states"
+    condition: "requirements mention multiple screens, navigation, redirects, flows, or page transitions"
+  - id: "design:auth_authorization_design"
+    title: "Authentication & Authorization Design"
+    depends_on: ["design:system_design"]
+    scope: "Identity, sessions/tokens, role policy, tenant boundaries, and access-control checks"
+    condition: "requirements mention login, auth, accounts, permissions, tenant isolation, or roles"
+  - id: "design:screen_transitions"
+    title: "Screen Transitions (Edge Data)"
+    depends_on: ["design:screen_flow_design"]
+    scope: "Concrete transition edges with from/to/trigger/guard metadata for validation and E2E generation"
+    condition: "requirements mention navigation transitions, redirects, or multi-step user flows"

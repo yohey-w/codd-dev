@@ -9,6 +9,12 @@ optional_sections:
   - failure_modes
   - extractor_registry
   - coverage_decisions
+  - required_artifacts
+
+required_artifact_source_values:
+  - ai_derived
+  - user_override
+  - default_template
 
 provenance_values:
   - web_search

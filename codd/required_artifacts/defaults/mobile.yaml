@@ -1,0 +1,47 @@
+project_type: mobile
+default_artifacts:
+  - id: "design:requirements"
+    title: "Requirements Definition"
+    depends_on: []
+    scope: "User journeys, platform scope, constraints, non-functional requirements, and acceptance criteria"
+    always_required: true
+  - id: "design:system_design"
+    title: "System Design"
+    depends_on: ["design:requirements"]
+    scope: "App architecture, platform boundaries, backend dependencies, release topology, and shared services"
+    always_required: true
+  - id: "design:ux_design"
+    title: "UX Design"
+    depends_on: ["design:requirements"]
+    scope: "Screens, mobile interaction patterns, accessibility, empty/loading/error states, and platform conventions"
+    condition: "requirements mention mobile UI, screens, user journeys, forms, or interaction"
+  - id: "design:navigation_design"
+    title: "Navigation Design"
+    depends_on: ["design:ux_design"]
+    scope: "Navigation graph, deep links, tab/stack/modal flows, back behavior, and transition guards"
+    condition: "requirements mention navigation, multiple screens, deep links, onboarding, or multi-step flows"
+  - id: "design:api_integration_design"
+    title: "API Integration Design"
+    depends_on: ["design:system_design"]
+    scope: "Backend APIs, network errors, retries, offline constraints, serialization, and compatibility"
+    condition: "requirements mention backend, API, remote sync, server data, or external integrations"
+  - id: "design:local_data_sync_design"
+    title: "Local Data & Sync Design"
+    depends_on: ["design:system_design"]
+    scope: "Local storage, cache strategy, sync conflict rules, retention, and offline behavior"
+    condition: "requirements mention offline, local data, cache, sync, persistence, or conflict resolution"
+  - id: "design:auth_authorization_design"
+    title: "Authentication & Authorization Design"
+    depends_on: ["design:system_design"]
+    scope: "Identity, token storage, biometric/passkey unlock, role checks, and session lifecycle"
+    condition: "requirements mention login, auth, biometrics, passkeys, permissions, or user roles"
+  - id: "design:notification_design"
+    title: "Notification Design"
+    depends_on: ["design:system_design"]
+    scope: "Push notification categories, permissions, delivery rules, opt-outs, and failure handling"
+    condition: "requirements mention push notifications, reminders, alerts, or messaging"
+  - id: "design:release_distribution_design"
+    title: "Release & Distribution Design"
+    depends_on: ["design:system_design"]
+    scope: "Store submission, signing, release channels, rollout, compatibility, and update policy"
+    condition: "requirements mention app stores, enterprise distribution, signing, releases, or platform versions"
