@@ -19,6 +19,7 @@ class Edge:
     from_id: str
     to_id: str
     kind: str
+    attributes: dict[str, Any] = field(default_factory=dict)
 
 
 class DAG:

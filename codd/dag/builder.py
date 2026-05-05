@@ -14,6 +14,15 @@ import yaml
 from codd.config import load_project_config
 from codd.dag import DAG, Edge, Node
 from codd.dag.extractor import extract_design_doc_metadata, extract_imports
+from codd.deployment.extractor import (
+    deployment_doc_attributes,
+    extract_deployment_docs,
+    extract_runtime_states,
+    extract_verification_tests,
+    infer_deployment_edges,
+    runtime_state_attributes,
+    verification_test_attributes,
+)
 
 
 DEFAULTS_DIR = Path(__file__).parent / "defaults"
@@ -44,6 +53,7 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
     _add_tested_by_edges(dag, root, impl_nodes, test_nodes, dag_settings)
     _add_plan_tasks(dag, root, dag_settings)
     _add_expected_nodes(dag, root, dag_settings, impl_nodes)
+    _add_deployment_graph(dag, root, design_docs, impl_nodes)
 
     write_dag_json(dag, root, default_dag_json_path(root))
     return dag
@@ -52,11 +62,7 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
 def load_dag_settings(project_root: Path, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     """Load project-type defaults and apply ``codd.yaml dag:`` overrides."""
 
-    project_config: dict[str, Any] = {}
-    try:
-        project_config = load_project_config(project_root)
-    except (FileNotFoundError, ValueError):
-        project_config = {}
+    project_config = _load_project_config_or_empty(project_root)
 
     requested_settings = settings or {}
     project_type = _project_type(requested_settings) or _project_type(project_config) or DEFAULT_PROJECT_TYPE
@@ -72,6 +78,13 @@ def load_dag_settings(project_root: Path, settings: dict[str, Any] | None = None
     merged.setdefault("plan_task_file", "docs/design/implementation_plan.md")
     merged.setdefault("lexicon_file", "project_lexicon.yaml")
     return merged
+
+
+def _load_project_config_or_empty(project_root: Path) -> dict[str, Any]:
+    try:
+        return load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return {}
 
 
 def default_dag_json_path(project_root: Path) -> Path:
@@ -98,16 +111,20 @@ def dag_to_dict(dag: DAG, project_root: Path) -> dict[str, Any]:
             }
             for node in sorted(dag.nodes.values(), key=lambda item: item.id)
         ],
-        "edges": [
-            {
-                "from_id": edge.from_id,
-                "to_id": edge.to_id,
-                "kind": edge.kind,
-            }
-            for edge in sorted(dag.edges, key=lambda item: (item.from_id, item.to_id, item.kind))
-        ],
+        "edges": [_edge_to_dict(edge) for edge in sorted(dag.edges, key=lambda item: (item.from_id, item.to_id, item.kind))],
         "cycles": dag.detect_cycles(),
     }
+
+
+def _edge_to_dict(edge: Edge) -> dict[str, Any]:
+    payload = {
+        "from_id": edge.from_id,
+        "to_id": edge.to_id,
+        "kind": edge.kind,
+    }
+    if edge.attributes:
+        payload["attributes"] = edge.attributes
+    return payload
 
 
 def write_dag_json(dag: DAG, project_root: Path, output_path: Path) -> None:
@@ -335,6 +352,72 @@ def _add_expected_nodes(
             target_id = _normalize_output_path(target)
             if target_id in impl_nodes:
                 dag.add_edge(Edge(from_id=node_id, to_id=target_id, kind="represents"))
+
+
+def _add_deployment_graph(
+    dag: DAG,
+    project_root: Path,
+    design_docs: dict[str, dict[str, Any]],
+    impl_nodes: dict[str, Path],
+) -> None:
+    project_config = _load_project_config_or_empty(project_root)
+    deployment_docs = extract_deployment_docs(project_root, project_config)
+    runtime_states = extract_runtime_states(
+        project_root,
+        deployment_docs,
+        [{"id": node_id, **metadata} for node_id, metadata in design_docs.items()],
+    )
+    verification_tests = extract_verification_tests(project_root)
+
+    for deployment_doc in deployment_docs:
+        _add_node_once(
+            dag,
+            Node(
+                id=deployment_doc.path,
+                kind="deployment_doc",
+                path=deployment_doc.path,
+                attributes=deployment_doc_attributes(deployment_doc),
+            ),
+        )
+    for runtime_state in runtime_states:
+        _add_node_once(
+            dag,
+            Node(
+                id=runtime_state.identifier,
+                kind="runtime_state",
+                path=None,
+                attributes=runtime_state_attributes(runtime_state),
+            ),
+        )
+    for verification_test in verification_tests:
+        _add_node_once(
+            dag,
+            Node(
+                id=verification_test.identifier,
+                kind="verification_test",
+                path=verification_test.expected_outcome.get("source")
+                if isinstance(verification_test.expected_outcome, dict)
+                else None,
+                attributes=verification_test_attributes(verification_test),
+            ),
+        )
+
+    existing_edges = {(edge.from_id, edge.to_id, edge.kind, repr(sorted(edge.attributes.items()))) for edge in dag.edges}
+    for from_id, to_id, kind, attributes in infer_deployment_edges(
+        project_root,
+        deployment_docs,
+        runtime_states,
+        verification_tests,
+        list(impl_nodes),
+        design_docs,
+    ):
+        if from_id not in dag.nodes or to_id not in dag.nodes:
+            continue
+        edge_key = (from_id, to_id, kind, repr(sorted(attributes.items())))
+        if edge_key in existing_edges:
+            continue
+        dag.add_edge(Edge(from_id=from_id, to_id=to_id, kind=kind, attributes=attributes))
+        existing_edges.add(edge_key)
 
 
 def _extract_outputs(section: str) -> list[str]:
