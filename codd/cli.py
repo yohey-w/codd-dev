@@ -357,6 +357,48 @@ def impact(diff: str, path: str, output: str):
     run_impact(project_root, codd_dir, diff, output)
 
 
+@main.command("watch")
+@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@click.option("--debounce", default=500, show_default=True, type=int, help="Debounce interval in milliseconds")
+@click.option("--background", is_flag=True, default=False, help="Run watcher in background mode")
+@click.option("--status", is_flag=True, default=False, help="Show watcher status")
+def watch_cmd(project_path: str, debounce: int, background: bool, status: bool) -> None:
+    """Watch for file changes and emit CDAP file-change events."""
+    project_root = Path(project_path).resolve()
+    pid_file = project_root / ".codd" / "watch.pid"
+
+    if status:
+        if pid_file.exists():
+            click.echo(f"Watcher running (PID: {pid_file.read_text(encoding='utf-8').strip()})")
+        else:
+            click.echo("Watcher not running")
+        return
+
+    from codd.watch.events import FileChangeEvent
+    from codd.watch.watcher import start_watch
+
+    if not project_root.exists():
+        click.echo(f"Error: Project path does not exist: {project_root}")
+        raise SystemExit(1)
+    if not project_root.is_dir():
+        click.echo(f"Error: Project path is not a directory: {project_root}")
+        raise SystemExit(1)
+
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    def on_change(event: FileChangeEvent) -> None:
+        preview = ", ".join(event.files[:3])
+        suffix = "" if len(event.files) <= 3 else f", ... {len(event.files) - 3} more"
+        click.echo(f"[watch] {len(event.files)} file(s) changed: {preview}{suffix}")
+
+    click.echo(f"Watching {project_root} (debounce={debounce}ms)")
+    observer = start_watch(project_root, on_change, debounce_ms=debounce, background=background)
+    if background:
+        click.echo(f"Watcher running in background mode (PID: {os.getpid()})")
+        observer.join(timeout=0)
+
+
 @main.command()
 @click.option("--wave", required=True, type=click.IntRange(min=1), help="Wave number to generate")
 @click.option("--path", default=".", help="Project root directory")
