@@ -61,6 +61,7 @@ Issues = "https://github.com/yohey-w/codd-dev/issues"
 [tool.hatch.build]
 include = [
     "codd/**/*.py",
+    "codd/**/*.md",
     "codd/**/*.yaml",
     "codd/hooks/recipes/*.json",
     "codd/hooks/recipes/*.sh",
