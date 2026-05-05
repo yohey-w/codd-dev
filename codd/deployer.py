@@ -7,6 +7,7 @@ rollback orchestration, and structured logging.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -19,6 +20,56 @@ import yaml
 
 from codd.cli import CoddCLIError
 from codd.deploy_targets import get_target
+
+
+@dataclass(frozen=True)
+class DeployGateFailure:
+    """One deploy gate failure, ready for CLI/log output."""
+
+    gate: str
+    message: str
+    details: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DeployGateResult:
+    """Aggregated deploy gate result."""
+
+    failures: list[DeployGateFailure] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return not self.failures
+
+    def add_failure(self, gate: str, message: str, details: list[str] | None = None) -> None:
+        self.failures.append(DeployGateFailure(gate=gate, message=message, details=details or []))
+
+    def add_warning(self, message: str) -> None:
+        self.warnings.append(message)
+
+    def format_failures(self) -> str:
+        if self.passed:
+            return "No deploy gate failures."
+
+        lines: list[str] = []
+        for failure in self.failures:
+            lines.append(f"- {failure.gate}: {failure.message}")
+            for detail in failure.details[:5]:
+                lines.append(f"  - {detail}")
+            if len(failure.details) > 5:
+                lines.append(f"  - ... {len(failure.details) - 5} more")
+        return "\n".join(lines)
+
+    def as_log_payload(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "failures": [
+                {"gate": failure.gate, "message": failure.message, "details": failure.details}
+                for failure in self.failures
+            ],
+            "warnings": self.warnings,
+        }
 
 
 def load_deploy_config(config_path: Path) -> dict[str, Any]:
@@ -100,6 +151,16 @@ def run_deploy(
         "errors": [],
     }
 
+    if not dry_run and not rollback_flag:
+        gate_result = _run_deploy_gates(project_root)
+        log_context["gates"] = gate_result.as_log_payload()
+        if not gate_result.passed:
+            message = gate_result.format_failures()
+            log_context["status"] = "gate_failed"
+            log_context["errors"].append(message)
+            _write_deploy_log(project_root, deploy_config, selected_target, log_context)
+            raise CoddCLIError(f"Deploy blocked: gate failed\n{message}")
+
     try:
         if rollback_flag:
             log_context["status"] = "rollback_succeeded" if target.rollback({}) else "rollback_failed"
@@ -144,6 +205,294 @@ def run_deploy(
         log_context["errors"].append(str(exc))
         _write_deploy_log(project_root, deploy_config, selected_target, log_context)
         raise
+
+
+def _run_deploy_gates(project_root: Path) -> DeployGateResult:
+    """Run validate, drift, linker, and coverage gates before apply deploy."""
+    project_root = Path(project_root).resolve()
+    settings = _load_gate_settings(project_root)
+    codd_dir = _find_gate_codd_dir(project_root)
+    result = DeployGateResult()
+
+    _collect_validate_gate(project_root, codd_dir, settings, result)
+    _collect_drift_gate(project_root, codd_dir, result)
+    if codd_dir is None:
+        return result
+    _collect_drift_linker_gate(project_root, settings, result)
+    _collect_coverage_gate(project_root, settings, result)
+    return result
+
+
+def _load_gate_settings(project_root: Path) -> dict[str, Any]:
+    try:
+        from codd.config import load_project_config
+
+        return load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _find_gate_codd_dir(project_root: Path) -> Path | None:
+    from codd.config import find_codd_dir
+
+    return find_codd_dir(project_root)
+
+
+def _collect_validate_gate(
+    project_root: Path,
+    codd_dir: Path | None,
+    settings: dict[str, Any],
+    result: DeployGateResult,
+) -> None:
+    if codd_dir is None:
+        result.add_failure("validate", "CoDD config dir not found")
+        return
+
+    try:
+        from codd.coverage_metrics import check_edge_coverage_gate
+        from codd.screen_flow_validator import (
+            find_screen_flow_path,
+            parse_screen_flow_routes,
+            validate_screen_flow,
+            validate_screen_flow_edges,
+        )
+        from codd.validator import run_validate, validate_design_tokens, validate_with_lexicon
+
+        if run_validate(project_root, codd_dir) != 0:
+            result.add_failure("validate", "frontmatter/dependency validation failed")
+
+        lexicon_violations = validate_with_lexicon(project_root)
+        if lexicon_violations:
+            result.add_failure(
+                "validate --lexicon",
+                f"{len(lexicon_violations)} violation(s)",
+                [_format_mapping_detail(violation) for violation in lexicon_violations],
+            )
+
+        design_token_violations = validate_design_tokens(project_root)
+        if design_token_violations:
+            result.add_failure(
+                "validate --design-tokens",
+                f"{len(design_token_violations)} violation(s)",
+                [_format_object_detail(violation) for violation in design_token_violations],
+            )
+
+        screen_flow_drifts = validate_screen_flow(project_root, settings)
+        if screen_flow_drifts:
+            result.add_failure(
+                "validate --screen-flow",
+                f"{len(screen_flow_drifts)} route drift(s)",
+                [_format_object_detail(drift) for drift in screen_flow_drifts],
+            )
+
+        screen_flow_path = find_screen_flow_path(project_root)
+        screen_flow_nodes = parse_screen_flow_routes(screen_flow_path) if screen_flow_path else []
+        edge_result = validate_screen_flow_edges(project_root, screen_flow_nodes, settings)
+        edge_ok = check_edge_coverage_gate(edge_result, settings)
+        if not edge_ok:
+            result.add_failure(
+                "validate --edges",
+                f"edge coverage {edge_result.coverage_ratio:.0%} below threshold",
+                _format_edge_result(edge_result),
+            )
+        if _screen_flow_strict_edges(settings) and edge_result.orphan_nodes:
+            result.add_failure(
+                "validate --edges",
+                "orphan screen-flow nodes detected",
+                [", ".join(edge_result.orphan_nodes)],
+            )
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        result.add_failure("validate", str(exc))
+
+
+def _collect_drift_gate(
+    project_root: Path,
+    codd_dir: Path | None,
+    result: DeployGateResult,
+) -> None:
+    if codd_dir is None:
+        result.add_failure("drift", "CoDD config dir not found")
+        return
+
+    try:
+        from codd.drift import run_drift
+
+        drift_result = run_drift(project_root, codd_dir)
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        result.add_failure("drift", str(exc))
+        return
+
+    if drift_result.exit_code != 0 or drift_result.drift:
+        result.add_failure(
+            "drift",
+            f"{len(drift_result.drift)} drift(s)",
+            [_format_object_detail(entry) for entry in drift_result.drift],
+        )
+
+
+def _collect_drift_linker_gate(
+    project_root: Path,
+    settings: dict[str, Any],
+    result: DeployGateResult,
+) -> None:
+    if not _drift_linkers_enabled(settings):
+        return
+
+    try:
+        from codd.drift_linkers import run_all_linkers
+
+        linker_settings = _linker_settings(settings)
+        linker_results = run_all_linkers(
+            expected_catalog_path=project_root / "docs" / "extracted" / "expected_catalog.yaml",
+            project_root=project_root,
+            settings=linker_settings,
+        )
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        result.add_failure("drift_linkers", str(exc))
+        return
+
+    failures: list[str] = []
+    for linker_result in linker_results:
+        verdict = _classify_linker_result(linker_result)
+        detail = _format_linker_result(linker_result)
+        if verdict == "fail":
+            failures.append(detail)
+        elif verdict == "warn":
+            result.add_warning(f"drift_linkers: {detail}")
+
+    if failures:
+        result.add_failure("drift_linkers", f"{len(failures)} linker failure(s)", failures)
+
+
+def _collect_coverage_gate(
+    project_root: Path,
+    settings: dict[str, Any],
+    result: DeployGateResult,
+) -> None:
+    try:
+        from codd.coverage_metrics import run_coverage
+
+        coverage_report = run_coverage(project_root, config=settings)
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        result.add_failure("coverage", str(exc))
+        return
+
+    failed_metrics = [metric for metric in coverage_report.results if not metric.passed]
+    if failed_metrics:
+        result.add_failure(
+            "coverage",
+            f"{len(failed_metrics)} metric(s) failed",
+            [_format_coverage_metric(metric) for metric in failed_metrics],
+        )
+
+
+def _drift_linkers_enabled(settings: dict[str, Any]) -> bool:
+    linker_config = settings.get("drift_linkers")
+    if isinstance(linker_config, bool):
+        return linker_config
+    if not isinstance(linker_config, dict):
+        return False
+    return bool(linker_config.get("enabled", False))
+
+
+def _linker_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    linker_config = settings.get("drift_linkers")
+    if not isinstance(linker_config, dict):
+        return settings
+    return {**settings, **linker_config}
+
+
+def _screen_flow_strict_edges(settings: dict[str, Any]) -> bool:
+    screen_flow_config = settings.get("screen_flow", {})
+    if not isinstance(screen_flow_config, dict):
+        return True
+    return bool(screen_flow_config.get("strict_edges", True))
+
+
+def _classify_linker_result(linker_result: Any) -> str:
+    if linker_result is None or linker_result is True:
+        return "pass"
+    if linker_result is False:
+        return "fail"
+
+    status = _result_value(linker_result, "status")
+    if isinstance(status, str):
+        normalized = status.strip().lower()
+        if normalized in {"skip", "skipped", "warn", "warning"} or normalized.startswith(
+            ("skipped:", "warn:", "warning:")
+        ):
+            return "warn"
+        if normalized in {"drift", "fail", "failed", "error"}:
+            return "fail"
+        if normalized in {"pass", "passed", "ok", "success"}:
+            return "pass"
+
+    passed = _result_value(linker_result, "passed")
+    if passed is False:
+        return "fail"
+    if _result_value(linker_result, "has_drift") is True:
+        return "fail"
+    return "pass"
+
+
+def _result_value(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _format_mapping_detail(value: dict[str, Any]) -> str:
+    node = value.get("node_id") or value.get("id") or value.get("name")
+    message = value.get("message") or value.get("detail") or value.get("status") or value
+    return f"{node}: {message}" if node else str(message)
+
+
+def _format_object_detail(value: Any) -> str:
+    if isinstance(value, dict):
+        return _format_mapping_detail(value)
+    for attrs in (("file", "line", "pattern"), ("kind", "url", "status"), ("source", "route", "detail")):
+        parts = [str(getattr(value, attr)) for attr in attrs if getattr(value, attr, None)]
+        if parts:
+            return " ".join(parts)
+    return str(value)
+
+
+def _format_edge_result(edge_result: Any) -> list[str]:
+    details = [f"covered nodes: {len(edge_result.covered_nodes)}", f"total edges: {edge_result.total_edges}"]
+    if edge_result.unreachable_nodes:
+        details.append("unreachable: " + ", ".join(edge_result.unreachable_nodes))
+    if edge_result.orphan_nodes:
+        details.append("orphan: " + ", ".join(edge_result.orphan_nodes))
+    if edge_result.dead_end_nodes:
+        details.append("dead-end: " + ", ".join(edge_result.dead_end_nodes))
+    return details
+
+
+def _format_linker_result(linker_result: Any) -> str:
+    if isinstance(linker_result, dict):
+        name = linker_result.get("name") or linker_result.get("linker")
+        warnings = linker_result.get("warnings")
+        warning = warnings[0] if isinstance(warnings, list) and warnings else None
+        message = linker_result.get("message") or linker_result.get("detail") or warning or linker_result.get("status")
+        return f"{name}: {message}" if name else str(message or linker_result)
+    name = getattr(linker_result, "name", None) or getattr(linker_result, "linker", None)
+    warnings = getattr(linker_result, "warnings", None)
+    warning = warnings[0] if isinstance(warnings, list) and warnings else None
+    message = (
+        getattr(linker_result, "message", None)
+        or getattr(linker_result, "detail", None)
+        or warning
+        or getattr(linker_result, "status", None)
+        or linker_result
+    )
+    return f"{name}: {message}" if name else str(message)
+
+
+def _format_coverage_metric(metric: Any) -> str:
+    return (
+        f"{metric.metric}: {metric.pct:.0f}% "
+        f"(threshold: {metric.threshold:.0f}%, uncovered: {metric.uncovered})"
+    )
 
 
 def _validate_target_config(target_name: str, target_config: Any) -> None:
