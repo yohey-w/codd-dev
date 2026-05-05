@@ -914,11 +914,9 @@ def _has_any_file(project_root: Path, patterns: tuple[str, ...]) -> bool:
 def _load_suffix_config(project_root: Path, codd_yaml: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     implementation_suffixes = _suffixes_from_config(codd_yaml, "implementation_suffixes")
     test_suffixes = _suffixes_from_config(codd_yaml, "test_suffixes")
-    if implementation_suffixes and test_suffixes:
-        return implementation_suffixes, test_suffixes
-
     project_type = _project_type(codd_yaml) or _detect_project_type(project_root)
     defaults = _read_suffix_default_mapping(project_type)
+
     if implementation_suffixes is None:
         implementation_suffixes = _suffixes_from_config(defaults, "implementation_suffixes")
         if implementation_suffixes is None:
@@ -935,6 +933,15 @@ def _load_suffix_config(project_root: Path, codd_yaml: dict[str, Any]) -> tuple[
                 project_type,
             )
             test_suffixes = LEGACY_TEST_SUFFIXES
+
+    implementation_suffixes = _extend_suffixes(
+        implementation_suffixes,
+        _suffixes_from_config(codd_yaml, "implementation_suffixes_extend"),
+    )
+    test_suffixes = _extend_suffixes(
+        test_suffixes,
+        _suffixes_from_config(codd_yaml, "test_suffixes_extend"),
+    )
     return implementation_suffixes, test_suffixes
 
 
@@ -978,6 +985,14 @@ def _suffix_tuple(value: Any) -> tuple[str, ...] | None:
     return tuple(suffixes) if suffixes else None
 
 
+def _extend_suffixes(base: tuple[str, ...], extensions: tuple[str, ...] | None) -> tuple[str, ...]:
+    suffixes = list(base)
+    for suffix in extensions or ():
+        if suffix not in suffixes:
+            suffixes.append(suffix)
+    return tuple(suffixes)
+
+
 def _dag_overrides(config: dict[str, Any]) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
     dag_section = config.get("dag", {})
@@ -989,7 +1004,9 @@ def _dag_overrides(config: dict[str, Any]) -> dict[str, Any]:
         "impl_file_patterns",
         "test_file_patterns",
         "implementation_suffixes",
+        "implementation_suffixes_extend",
         "test_suffixes",
+        "test_suffixes_extend",
         "plan_task_file",
         "lexicon_file",
         "import_aliases",

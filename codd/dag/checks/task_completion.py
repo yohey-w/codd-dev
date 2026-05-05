@@ -122,7 +122,9 @@ class TaskCompletionCheck:
     def _impl_file_exists(self, impl_node: Any, fallback_path: str, project_root: Path | None) -> bool:
         if project_root is None:
             return True
-        node_path = getattr(impl_node, "path", None) or fallback_path
+        attributes = getattr(impl_node, "attributes", {}) or {}
+        attribute_path = attributes.get("path") if isinstance(attributes, dict) else None
+        node_path = getattr(impl_node, "path", None) or attribute_path or fallback_path
         candidate = Path(node_path)
         if not candidate.is_absolute():
             candidate = project_root / candidate

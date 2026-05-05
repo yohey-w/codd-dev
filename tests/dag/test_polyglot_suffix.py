@@ -260,3 +260,168 @@ def test_package_json_web_project_keeps_existing_typescript_behavior(tmp_path):
 
     assert dag.nodes["src/app/page.tsx"].kind == "impl_file"
     assert dag.nodes["src/app/page.tsx"].attributes["language"] == "typescript"
+
+
+def test_codd_yaml_direct_mixed_suffix_override_beats_detected_project_type(tmp_path):
+    _write(tmp_path / "package.json", "{}\n")
+    _write_codd_yaml(
+        tmp_path,
+        {
+            "implementation_suffixes": [".py", ".rs"],
+            "test_suffixes": [".py", ".rs"],
+        },
+    )
+    _write(tmp_path / "src" / "worker.py", "def run(): pass\n")
+    _write(tmp_path / "src" / "engine.rs", "pub fn run() {}\n")
+    _write(tmp_path / "src" / "page.tsx", "export default function Page() { return null; }\n")
+
+    dag = build_dag(tmp_path)
+
+    assert "src/worker.py" in dag.nodes
+    assert "src/engine.rs" in dag.nodes
+    assert "src/page.tsx" not in dag.nodes
+
+
+def test_codd_yaml_project_type_bypasses_auto_detection(tmp_path):
+    _write(tmp_path / "package.json", "{}\n")
+    _write_codd_yaml(tmp_path, {"project_type": "rust"})
+
+    settings = load_dag_settings(tmp_path)
+
+    assert settings["project_type"] == "rust"
+    assert settings["implementation_suffixes"] == (".rs",)
+    assert "src/**/*.rs" in settings["impl_file_patterns"]
+    assert "src/**/*.tsx" not in settings["impl_file_patterns"]
+
+
+def test_project_type_generic_uses_generic_suffixes_even_with_package_json(tmp_path):
+    _write(tmp_path / "package.json", "{}\n")
+    _write_codd_yaml(tmp_path, {"project_type": "generic"})
+
+    settings = load_dag_settings(tmp_path)
+
+    assert settings["project_type"] == "generic"
+    assert ".rs" in settings["implementation_suffixes"]
+    assert ".swift" in settings["implementation_suffixes"]
+    assert "src/**/*.rs" in settings["impl_file_patterns"]
+
+
+def test_implementation_suffixes_extend_appends_to_detected_defaults(tmp_path):
+    _write(tmp_path / "package.json", "{}\n")
+    _write_codd_yaml(
+        tmp_path,
+        {
+            "implementation_suffixes_extend": [".pyx", "tsx"],
+            "test_suffixes_extend": [".cytest"],
+        },
+    )
+
+    settings = load_dag_settings(tmp_path)
+
+    assert settings["implementation_suffixes"] == (".ts", ".tsx", ".js", ".jsx", ".pyx")
+    assert settings["test_suffixes"][-1] == ".cytest"
+    assert "src/**/*.pyx" in settings["impl_file_patterns"]
+
+
+def test_dag_section_suffixes_extend_appends_to_detected_defaults(tmp_path):
+    _write(tmp_path / "Cargo.toml", "[package]\nname = 'demo'\n")
+    _write_codd_yaml(
+        tmp_path,
+        {
+            "dag": {
+                "implementation_suffixes_extend": [".py"],
+                "test_suffixes_extend": [".py"],
+            }
+        },
+    )
+
+    settings = load_dag_settings(tmp_path)
+
+    assert settings["implementation_suffixes"] == (".rs", ".py")
+    assert settings["test_suffixes"] == (".rs", ".py")
+    assert "src/**/*.py" in settings["impl_file_patterns"]
+
+
+def test_suffix_override_and_extend_uses_override_as_base(tmp_path):
+    _write(tmp_path / "package.json", "{}\n")
+    _write_codd_yaml(
+        tmp_path,
+        {
+            "implementation_suffixes": [".py"],
+            "implementation_suffixes_extend": [".pyx", ".py"],
+            "test_suffixes": [".py"],
+            "test_suffixes_extend": [".feature", ".py"],
+        },
+    )
+
+    settings = load_dag_settings(tmp_path)
+
+    assert settings["implementation_suffixes"] == (".py", ".pyx")
+    assert settings["test_suffixes"] == (".py", ".feature")
+
+
+def test_extended_implementation_suffix_builds_impl_node(tmp_path):
+    _write(tmp_path / "package.json", "{}\n")
+    _write_codd_yaml(tmp_path, {"implementation_suffixes_extend": [".pyx"]})
+    _write(tmp_path / "src" / "extension.pyx", "def run(): pass\n")
+
+    dag = build_dag(tmp_path)
+
+    assert dag.nodes["src/extension.pyx"].kind == "impl_file"
+
+
+def test_web_suffixes_include_typescript_and_javascript_defaults(tmp_path):
+    _write(tmp_path / "package.json", "{}\n")
+
+    implementation_suffixes, test_suffixes = builder._load_suffix_config(tmp_path, {})
+
+    assert {".ts", ".tsx", ".js", ".jsx"}.issubset(implementation_suffixes)
+    assert {".ts", ".tsx", ".js", ".jsx"}.issubset(test_suffixes)
+
+
+def test_go_mod_project_resolves_go_suffixes(tmp_path):
+    _write(tmp_path / "go.mod", "module example.com/demo\n")
+    _write_codd_yaml(tmp_path)
+
+    settings = load_dag_settings(tmp_path)
+
+    assert settings["project_type"] == "go"
+    assert ".go" in settings["implementation_suffixes"]
+    assert "src/**/*.go" in settings["impl_file_patterns"]
+
+
+def test_cargo_toml_project_resolves_rust_suffixes(tmp_path):
+    _write(tmp_path / "Cargo.toml", "[package]\nname = 'demo'\n")
+    _write_codd_yaml(tmp_path)
+
+    settings = load_dag_settings(tmp_path)
+
+    assert settings["project_type"] == "rust"
+    assert settings["implementation_suffixes"] == (".rs",)
+    assert settings["test_suffixes"] == (".rs",)
+
+
+def test_unrecognized_project_uses_generic_fallback_with_major_language_coverage(tmp_path):
+    _write_codd_yaml(tmp_path)
+
+    settings = load_dag_settings(tmp_path)
+
+    assert settings["project_type"] == "generic"
+    assert len(settings["implementation_suffixes"]) >= 10
+    assert {".ts", ".py", ".go", ".java", ".rs", ".rb", ".cs", ".kt", ".swift", ".cpp"}.issubset(
+        settings["implementation_suffixes"]
+    )
+
+
+def test_osato_lms_package_json_resolves_web_suffixes_and_test_patterns(tmp_path):
+    osato_root = Path("/home/tono/osato-lms")
+    project_root = osato_root if (osato_root / "package.json").is_file() else tmp_path / "osato-lms"
+    if project_root != osato_root:
+        _write(project_root / "package.json", "{}\n")
+        _write_codd_yaml(project_root)
+
+    settings = load_dag_settings(project_root)
+
+    assert settings["project_type"] == "web"
+    assert settings["implementation_suffixes"] == (".ts", ".tsx", ".js", ".jsx")
+    assert any(pattern.startswith("tests/") for pattern in settings["test_file_patterns"])

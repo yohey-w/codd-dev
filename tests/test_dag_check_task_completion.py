@@ -61,6 +61,25 @@ def test_all_outputs_exist_pass(tmp_path):
     assert result.completed_tasks == 1
 
 
+def test_expected_output_uses_attribute_path_for_completion(tmp_path):
+    dag, task_id = _dag_with_plan_task()
+    _write(tmp_path / "tests" / "e2e" / "login.spec.ts", "ok\n")
+    dag.add_node(
+        Node(
+            id="lexicon:e2e_login_journey",
+            kind="expected",
+            path=None,
+            attributes={"path": "tests/e2e/login.spec.ts"},
+        )
+    )
+    dag.add_edge(Edge(from_id=task_id, to_id="lexicon:e2e_login_journey", kind="produces"))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is True
+    assert result.incomplete_tasks == []
+
+
 def test_missing_output_file_fail(tmp_path):
     dag, task_id = _dag_with_plan_task()
     _add_output(dag, task_id, "src/missing.py", exists=False, project_root=tmp_path)
