@@ -56,8 +56,9 @@ class RepairHistory:
     def finalize(self, session_dir: Path, outcome: str) -> None:
         """Write the final repair session outcome."""
 
-        if outcome not in {"REPAIR_SUCCESS", "REPAIR_EXHAUSTED", "REPAIR_FAILED"}:
-            raise ValueError("outcome must be REPAIR_SUCCESS, REPAIR_EXHAUSTED, or REPAIR_FAILED")
+        allowed = {"REPAIR_SUCCESS", "REPAIR_EXHAUSTED", "REPAIR_REJECTED_BY_HITL", "REPAIR_FAILED"}
+        if outcome not in allowed:
+            raise ValueError(f"outcome must be one of {sorted(allowed)}")
         _write_yaml(
             Path(session_dir) / "final_status.yaml",
             {"outcome": outcome, "timestamp": _timestamp()},
