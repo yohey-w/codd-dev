@@ -30,6 +30,7 @@ from codd.deployment.extractor import (
 LOGGER = logging.getLogger(__name__)
 DEFAULTS_DIR = Path(__file__).parent / "defaults"
 DEFAULT_PROJECT_TYPE = "generic"
+_DAG_BUILD_CACHE: dict[str, Any] = {}
 LEGACY_IMPLEMENTATION_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java")
 LEGACY_TEST_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".bats")
 PLAN_HEADER_RE = re.compile(r"^#{2,6}\s+([A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)(?:\s+(.+))?$", re.MULTILINE)
@@ -83,6 +84,19 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
 
     write_dag_json(dag, root, default_dag_json_path(root))
     return dag
+
+
+def reset_dag_cache(project_root: Path | None = None) -> None:
+    """Clear in-process DAG builder cache state.
+
+    The builder currently rebuilds eagerly, but repair verification calls this
+    public hook per attempt so future memoization cannot leak stale DAG state.
+    """
+
+    if project_root is None:
+        _DAG_BUILD_CACHE.clear()
+        return
+    _DAG_BUILD_CACHE.pop(str(Path(project_root).resolve()), None)
 
 
 def load_dag_settings(project_root: Path, settings: dict[str, Any] | None = None) -> dict[str, Any]:

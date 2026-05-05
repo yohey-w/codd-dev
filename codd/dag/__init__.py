@@ -6,6 +6,14 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
+def reset_dag_cache(project_root=None) -> None:
+    """Clear DAG builder cache state for a fresh verification attempt."""
+
+    from codd.dag.builder import reset_dag_cache as _reset_dag_cache
+
+    _reset_dag_cache(project_root)
+
+
 @dataclass
 class Node:
     id: str
