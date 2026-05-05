@@ -184,6 +184,48 @@ def compute_screen_flow_coverage(
     )
 
 
+def compute_dag_completeness(
+    project_root: Path | str,
+    config: dict[str, Any] | None = None,
+    threshold: float = 100.0,
+) -> CoverageResult:
+    """Measure red-severity DAG completeness checks as a coverage metric."""
+
+    try:
+        from codd.dag.runner import run_all_checks
+
+        results = run_all_checks(Path(project_root), settings=config or {})
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        return _exception_result("dag_completeness", threshold, exc)
+
+    red_results = [result for result in results if _dag_result_severity(result) == "red"]
+    failed_red = [result for result in red_results if _dag_result_passed(result) is False]
+    amber_findings = [
+        result
+        for result in results
+        if _dag_result_severity(result) == "amber" and _dag_result_has_findings(result)
+    ]
+
+    total = len(red_results)
+    uncovered = len(failed_red)
+    covered = max(0, total - uncovered)
+    pct = _coverage_pct(covered, total)
+    details = [f"checks: {len(results)}", f"red_failures: {uncovered}"]
+    details.extend(_format_dag_result(result) for result in failed_red[:5])
+    details.extend(f"warning: {_format_dag_result(result)}" for result in amber_findings[:5])
+
+    return CoverageResult(
+        metric="dag_completeness",
+        total=total,
+        covered=covered,
+        uncovered=uncovered,
+        pct=pct,
+        threshold=threshold,
+        passed=pct >= threshold,
+        details=details,
+    )
+
+
 def check_edge_coverage_gate(result: EdgeCoverageResult, config: dict[str, Any] | None = None) -> bool:
     """Return True when transition edge coverage meets the configured threshold."""
 
@@ -230,6 +272,7 @@ def run_coverage(
     report.add(compute_design_token_coverage(project_root, threshold=design_token_threshold))
     report.add(compute_lexicon_compliance(project_root, threshold=lexicon_threshold))
     report.add(compute_screen_flow_coverage(project_root, config, threshold=screen_flow_threshold))
+    report.add(compute_dag_completeness(project_root, config=config))
     return report
 
 
@@ -324,3 +367,53 @@ def _exception_result(metric: str, threshold: float, exc: Exception) -> Coverage
         passed=False,
         details=[f"error: {type(exc).__name__}: {exc}"],
     )
+
+
+def _dag_result_severity(result: Any) -> str:
+    return str(_dag_result_value(result, "severity") or "red")
+
+
+def _dag_result_passed(result: Any) -> bool:
+    return _dag_result_value(result, "passed") is not False
+
+
+def _dag_result_name(result: Any) -> str:
+    return str(_dag_result_value(result, "check_name") or result.__class__.__name__)
+
+
+def _dag_result_has_findings(result: Any) -> bool:
+    for key in (
+        "violations",
+        "missing_impl_files",
+        "orphan_edges",
+        "dangling_refs",
+        "incomplete_tasks",
+        "unreachable_nodes",
+    ):
+        if _dag_result_value(result, key):
+            return True
+    return False
+
+
+def _format_dag_result(result: Any) -> str:
+    details = []
+    for key in (
+        "missing_impl_files",
+        "orphan_edges",
+        "dangling_refs",
+        "violations",
+        "incomplete_tasks",
+        "unreachable_nodes",
+        "warnings",
+    ):
+        value = _dag_result_value(result, key)
+        if not value:
+            continue
+        details.append(f"{key}: {value}")
+    return f"{_dag_result_name(result)} ({'; '.join(details)})" if details else _dag_result_name(result)
+
+
+def _dag_result_value(result: Any, key: str) -> Any:
+    if isinstance(result, dict):
+        return result.get(key)
+    return getattr(result, key, None)

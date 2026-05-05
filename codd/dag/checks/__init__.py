@@ -24,11 +24,16 @@ def get_registry() -> dict[str, type[Any]]:
     return dict(_REGISTRY)
 
 
-def run_all_checks(dag, project_root, settings) -> list[Any]:
+def run_all_checks(dag, project_root, settings, check_names: list[str] | tuple[str, ...] | None = None) -> list[Any]:
     """Instantiate each registered DAG check and collect its ``run()`` result."""
 
     results = []
-    for cls in _REGISTRY.values():
+    selected = list(check_names) if check_names is not None else list(_REGISTRY)
+    unknown = [name for name in selected if name not in _REGISTRY]
+    if unknown:
+        raise ValueError(f"Unknown DAG check(s): {', '.join(unknown)}")
+    for name in selected:
+        cls = _REGISTRY[name]
         check = cls(dag, project_root, settings)
         results.append(check.run())
     return results

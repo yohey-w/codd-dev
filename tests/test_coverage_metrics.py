@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from codd import screen_flow_validator, validator
 from codd.cli import CoddCLIError, main
 from codd.coverage_metrics import (
+    compute_dag_completeness,
     compute_design_token_coverage,
     compute_e2e_coverage,
     compute_lexicon_compliance,
@@ -161,6 +162,14 @@ def test_screen_flow_coverage_coddclierror(tmp_path, monkeypatch):
     assert result.details == ["error: bad filesystem_routes.base_dir"]
 
 
+def test_dag_completeness_empty_project_passes(tmp_path):
+    result = compute_dag_completeness(tmp_path)
+
+    assert result.metric == "dag_completeness"
+    assert result.passed is True
+    assert result.uncovered == 0
+
+
 def test_run_coverage_all_pass(tmp_path):
     report = run_coverage(tmp_path)
 
@@ -170,6 +179,7 @@ def test_run_coverage_all_pass(tmp_path):
         "design_token_coverage",
         "lexicon_compliance",
         "screen_flow_coverage",
+        "dag_completeness",
     ]
 
 
@@ -177,6 +187,12 @@ def test_run_coverage_includes_screen_flow(tmp_path):
     report = run_coverage(tmp_path)
 
     assert any(result.metric == "screen_flow_coverage" for result in report.results)
+
+
+def test_run_coverage_includes_dag_completeness(tmp_path):
+    report = run_coverage(tmp_path)
+
+    assert any(result.metric == "dag_completeness" for result in report.results)
 
 
 def test_cli_coverage_help():

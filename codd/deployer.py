@@ -21,6 +21,8 @@ import yaml
 from codd.cli import CoddCLIError
 from codd.deploy_targets import get_target
 
+_coherence_bus: Any | None = None
+
 
 @dataclass(frozen=True)
 class DeployGateFailure:
@@ -122,6 +124,13 @@ def run_healthcheck(
     return False
 
 
+def set_coherence_bus(bus: Any | None) -> None:
+    """Set an optional EventBus used to publish deploy-gate DriftEvents."""
+
+    global _coherence_bus
+    _coherence_bus = bus
+
+
 def run_deploy(
     project_root: Path,
     target_name: str | None = None,
@@ -208,7 +217,7 @@ def run_deploy(
 
 
 def _run_deploy_gates(project_root: Path) -> DeployGateResult:
-    """Run validate, drift, linker, and coverage gates before apply deploy."""
+    """Run validate, drift, linker, coverage, and DAG gates before apply deploy."""
     project_root = Path(project_root).resolve()
     settings = _load_gate_settings(project_root)
     codd_dir = _find_gate_codd_dir(project_root)
@@ -220,6 +229,7 @@ def _run_deploy_gates(project_root: Path) -> DeployGateResult:
         return result
     _collect_drift_linker_gate(project_root, settings, result)
     _collect_coverage_gate(project_root, settings, result)
+    _collect_dag_completeness_gate(project_root, settings, result)
     return result
 
 
@@ -386,6 +396,39 @@ def _collect_coverage_gate(
         )
 
 
+def _collect_dag_completeness_gate(
+    project_root: Path,
+    settings: dict[str, Any],
+    result: DeployGateResult,
+) -> None:
+    try:
+        from codd.dag.runner import run_all_checks
+
+        check_results = run_all_checks(project_root, settings=settings)
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        result.add_failure("dag_completeness", str(exc))
+        return
+
+    failed_red = [
+        check_result
+        for check_result in check_results
+        if _dag_result_severity(check_result) == "red" and _result_value(check_result, "passed") is False
+    ]
+    amber_findings = [
+        check_result
+        for check_result in check_results
+        if _dag_result_severity(check_result) == "amber" and _dag_result_has_findings(check_result)
+    ]
+
+    for check_result in amber_findings:
+        result.add_warning(f"dag_completeness: {_format_dag_check_result(check_result)}")
+
+    if failed_red:
+        details = [_format_dag_check_result(check_result) for check_result in failed_red]
+        result.add_failure("dag_completeness", f"{len(failed_red)} DAG check(s) failed", details)
+        _publish_dag_completeness_events(failed_red)
+
+
 def _drift_linkers_enabled(settings: dict[str, Any]) -> bool:
     linker_config = settings.get("drift_linkers")
     if isinstance(linker_config, bool):
@@ -493,6 +536,79 @@ def _format_coverage_metric(metric: Any) -> str:
         f"{metric.metric}: {metric.pct:.0f}% "
         f"(threshold: {metric.threshold:.0f}%, uncovered: {metric.uncovered})"
     )
+
+
+def _dag_result_severity(check_result: Any) -> str:
+    return str(_result_value(check_result, "severity") or "red")
+
+
+def _dag_result_name(check_result: Any) -> str:
+    return str(_result_value(check_result, "check_name") or check_result.__class__.__name__)
+
+
+def _dag_result_has_findings(check_result: Any) -> bool:
+    for key in (
+        "violations",
+        "missing_impl_files",
+        "orphan_edges",
+        "dangling_refs",
+        "incomplete_tasks",
+        "unreachable_nodes",
+    ):
+        if _result_value(check_result, key):
+            return True
+    return False
+
+
+def _format_dag_check_result(check_result: Any) -> str:
+    name = _dag_result_name(check_result)
+    details: list[str] = []
+    for key in (
+        "missing_impl_files",
+        "orphan_edges",
+        "dangling_refs",
+        "violations",
+        "incomplete_tasks",
+        "unreachable_nodes",
+        "warnings",
+    ):
+        value = _result_value(check_result, key)
+        if not value:
+            continue
+        if isinstance(value, list):
+            rendered = ", ".join(str(item) for item in value[:3])
+            if len(value) > 3:
+                rendered += f", ... {len(value) - 3} more"
+            details.append(f"{key}={rendered}")
+        else:
+            details.append(f"{key}={value}")
+    return f"{name}: {'; '.join(details)}" if details else name
+
+
+def _publish_dag_completeness_events(failed_results: list[Any]) -> None:
+    if _coherence_bus is None:
+        return
+
+    try:
+        from codd.coherence_engine import DriftEvent
+    except Exception:  # pragma: no cover - optional coherence integration
+        return
+
+    for check_result in failed_results:
+        _coherence_bus.publish(
+            DriftEvent(
+                source_artifact="design_doc",
+                target_artifact="implementation",
+                change_type="deleted",
+                payload={
+                    "check_name": _dag_result_name(check_result),
+                    "result": _format_dag_check_result(check_result),
+                },
+                severity="red",
+                fix_strategy="auto",
+                kind="dag_completeness",
+            )
+        )
 
 
 def _validate_target_config(target_name: str, target_config: Any) -> None:

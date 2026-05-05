@@ -1,5 +1,6 @@
 """CoDD CLI — codd init / scan / impact / require / plan."""
 
+from dataclasses import asdict, is_dataclass
 import json
 import os
 import shutil
@@ -2238,6 +2239,139 @@ def dag_build(project_path: str, output_format: str, cache: bool, output: str | 
         f"{len(built_dag.detect_cycles())} cycles -> "
         f"{_display_path(output_path, project_root)}"
     )
+
+
+@dag.command("verify")
+@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@click.option("--check", "check_names", multiple=True, help="Run specific check(s) only")
+@click.option(
+    "--format",
+    "output_format",
+    default="text",
+    type=click.Choice(["text", "json"]),
+    help="Output format",
+)
+def dag_verify(project_path: str, check_names: tuple[str, ...], output_format: str):
+    """Run DAG completeness checks."""
+    from codd.dag.runner import run_all_checks
+
+    project_root = Path(project_path).resolve()
+    try:
+        results = run_all_checks(project_root, check_names=list(check_names) or None)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    failed_red = [
+        result
+        for result in results
+        if not _dag_result_passed(result) and _dag_result_severity(result) == "red"
+    ]
+    amber_findings = [
+        result
+        for result in results
+        if _dag_result_severity(result) == "amber" and _dag_result_has_findings(result)
+    ]
+
+    if output_format == "json":
+        click.echo(json.dumps([_dag_result_to_dict(result) for result in results], indent=2, default=str))
+    else:
+        for result in results:
+            severity = _dag_result_severity(result)
+            if _dag_result_passed(result):
+                status = "PASS"
+            else:
+                status = "WARN" if severity == "amber" else "FAIL"
+            click.echo(f"  {status}  {_dag_result_name(result)} [{severity}]")
+            for detail in _dag_result_details(result):
+                click.echo(f"    {detail}")
+
+        if failed_red:
+            click.echo(f"\n{len(failed_red)} check(s) FAILED (severity=red)")
+        elif amber_findings:
+            click.echo(f"\n{len(amber_findings)} check(s) WARN (severity=amber, deploy allowed)")
+
+    raise SystemExit(1 if failed_red else 0)
+
+
+@dag.command("visualize")
+@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+def dag_visualize(project_path: str):
+    """Build and print the project DAG as Mermaid."""
+    from codd.dag.builder import build_dag, render_mermaid
+
+    project_root = Path(project_path).resolve()
+    try:
+        built_dag = build_dag(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+    click.echo(render_mermaid(built_dag), nl=False)
+
+
+def _dag_result_to_dict(result: Any) -> dict[str, Any]:
+    if is_dataclass(result):
+        return asdict(result)
+    if isinstance(result, dict):
+        return result
+    return dict(vars(result))
+
+
+def _dag_result_name(result: Any) -> str:
+    return str(_dag_result_value(result, "check_name") or result.__class__.__name__)
+
+
+def _dag_result_severity(result: Any) -> str:
+    return str(_dag_result_value(result, "severity") or "red")
+
+
+def _dag_result_passed(result: Any) -> bool:
+    return _dag_result_value(result, "passed") is not False
+
+
+def _dag_result_has_findings(result: Any) -> bool:
+    for key in (
+        "violations",
+        "missing_impl_files",
+        "orphan_edges",
+        "dangling_refs",
+        "incomplete_tasks",
+        "unreachable_nodes",
+    ):
+        value = _dag_result_value(result, key)
+        if value:
+            return True
+    return False
+
+
+def _dag_result_details(result: Any) -> list[str]:
+    details: list[str] = []
+    for key in (
+        "missing_impl_files",
+        "orphan_edges",
+        "dangling_refs",
+        "violations",
+        "incomplete_tasks",
+        "unreachable_nodes",
+        "warnings",
+    ):
+        value = _dag_result_value(result, key)
+        if not value:
+            continue
+        if isinstance(value, list):
+            rendered = ", ".join(str(item) for item in value[:5])
+            if len(value) > 5:
+                rendered += f", ... {len(value) - 5} more"
+            details.append(f"{key}: {rendered}")
+        else:
+            details.append(f"{key}: {value}")
+    return details
+
+
+def _dag_result_value(result: Any, key: str) -> Any:
+    if isinstance(result, dict):
+        return result.get(key)
+    return getattr(result, key, None)
 
 
 @main.group()
