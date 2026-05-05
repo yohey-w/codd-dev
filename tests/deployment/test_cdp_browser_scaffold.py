@@ -86,9 +86,13 @@ def test_cdp_browser_generate_test_command_returns_json_plan():
     }
 
 
-def test_cdp_browser_execute_is_scaffold_only():
-    with pytest.raises(NotImplementedError):
-        CdpBrowser().execute("{}")
+def test_cdp_browser_execute_reports_missing_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = CdpBrowser().execute("{}")
+
+    assert result.passed is False
+    assert "config" in result.output
 
 
 def test_browser_engine_is_abstract():
