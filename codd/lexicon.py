@@ -12,6 +12,7 @@ import yaml
 
 SCHEMA_PATH = Path(__file__).parent / "templates" / "lexicon_schema.yaml"
 LEXICON_FILENAME = "project_lexicon.yaml"
+REQUIRED_ARTIFACT_SOURCES = {"ai_derived", "user_override", "default_template"}
 
 
 @dataclass
@@ -87,11 +88,18 @@ class ProjectLexicon:
             for item in self._data.get("coverage_decisions", [])
         ]
 
+    @property
+    def required_artifacts(self) -> list[dict[str, Any]]:
+        return deepcopy(self._data.get("required_artifacts", []))
+
     def set_coverage_decisions(self, decisions: list[AskItem]) -> None:
         self._data["coverage_decisions"] = [
             ask_item_to_dict(item)
             for item in decisions
         ]
+
+    def set_required_artifacts(self, artifacts: list[dict[str, Any]]) -> None:
+        self._data["required_artifacts"] = deepcopy(artifacts)
 
     def as_dict(self) -> dict[str, Any]:
         return deepcopy(self._data)
@@ -264,6 +272,26 @@ def validate_lexicon(data: dict[str, Any]) -> None:
                     f"coverage_decisions item missing required field '{field_name}': {decision}"
                 )
         _validate_list_of_mappings(decision.get("options", []), "coverage_decisions.options")
+
+    required_artifacts = data.get("required_artifacts", [])
+    _validate_list_of_mappings(required_artifacts, "required_artifacts")
+    for artifact in required_artifacts:
+        for field_name in ("id", "title", "scope", "source"):
+            if field_name not in artifact:
+                raise LexiconError(
+                    f"required_artifacts item missing required field '{field_name}': {artifact}"
+                )
+        if artifact["source"] not in REQUIRED_ARTIFACT_SOURCES:
+            raise LexiconError(
+                "required_artifacts source must be one of "
+                f"{sorted(REQUIRED_ARTIFACT_SOURCES)}, got '{artifact['source']}'"
+            )
+        depends_on = artifact.get("depends_on", [])
+        if not isinstance(depends_on, list):
+            raise LexiconError(f"required_artifacts depends_on must be a list: {artifact}")
+        derived_from = artifact.get("derived_from", [])
+        if derived_from is not None and not isinstance(derived_from, list):
+            raise LexiconError(f"required_artifacts derived_from must be a list: {artifact}")
 
 
 def _load_schema() -> dict[str, Any]:

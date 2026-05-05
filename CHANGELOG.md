@@ -44,13 +44,20 @@ All notable changes to CoDD are documented in this file.
   - `AskItem` / `AskOption` を `project_lexicon.yaml:coverage_decisions` に永続化
   - `HitlSession` による HITL 協業型 (`RECOMMENDED_PROCEEDING`) と blocking mode 互換
   - AskUserQuestion / ntfy / lexicon の3チャネル送信。Claude非依存環境では ntfy + lexicon で動作
+- **`codd plan --derive`** (cmd_370):
+  要件文書 + `project_lexicon.yaml:coverage_decisions` から必要設計書群をAI導出し、
+  `project_lexicon.yaml:required_artifacts` に永続化
+  - `RequiredArtifactsDeriver` + project_type 別 defaults (web / cli / mobile / iot)
+  - `source` は `ai_derived` / `user_override` / `default_template` を必須化
+  - cmd_375 の `RECOMMENDED_PROCEEDING` / 確定回答を prompt hint として注入
+  - `codd.yaml [project] type` と `[required_artifacts]` override で汎用プロジェクトに適用可能
 
 ### Notes
 
 - 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
   e2e-generate / extract) はすべて変更なし。新フラグはすべて opt-in。
-- 既存テスト 852 (v1.18.0) → 949 (v1.19.0)、+97 件追加 (cmd_364: 12 + cmd_365: 16 +
-  cmd_366: 13 + cmd_367: 11 + cmd_368: 11 + cmd_373: 9 + cmd_375: 25)、
+- 既存テスト 852 (v1.18.0) → 968 (v1.19.0)、+116 件追加 (cmd_364: 12 + cmd_365: 16 +
+  cmd_366: 13 + cmd_367: 11 + cmd_368: 11 + cmd_373: 9 + cmd_375: 25 + cmd_370: 19)、
   全件 PASS / 0 FAIL / 0 SKIP
 - Generality Gate: framework 固有名 (Next.js/NextAuth/Clerk/Nuxt/SvelteKit) は
   defaults.yaml と codd.yaml override に分離、CoDD core にハードコードなし。

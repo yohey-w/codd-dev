@@ -1,10 +1,13 @@
 """CoDD CLI — codd init / scan / impact / require / plan."""
 
-import click
 import json
 import os
 import shutil
 from pathlib import Path
+from typing import Any
+
+import click
+import yaml
 
 from codd.bridge import PRO_COMMAND_INSTALL_MESSAGE, get_command_handler
 from codd.config import find_codd_dir, load_project_config
@@ -1820,20 +1823,86 @@ def drift(path: str, output_format: str, e2e: bool, screen_flow: bool):
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--json", "as_json", is_flag=True, help="Output plan as JSON")
 @click.option("--init", "initialize", is_flag=True, help="Generate wave_config from requirement docs")
+@click.option(
+    "--derive",
+    is_flag=True,
+    help="Derive required design artifacts from requirement documents using AI",
+)
 @click.option("--force", is_flag=True, help="Overwrite existing wave_config during --init")
 @click.option("--waves", is_flag=True, help="Output only the total wave count (for shell scripting)")
 @click.option("--tasks", is_flag=True, help="Output only the total task count (for shell scripting)")
 @click.option(
     "--ai-cmd",
     default=None,
-    help="Override AI CLI command for --init (defaults to codd.yaml ai_command or 'claude --print')",
+    help="Override AI CLI command for --init/--derive (defaults to codd.yaml ai_command or 'claude --print')",
 )
-def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, tasks: bool, ai_cmd: str | None):
+def plan(
+    path: str,
+    as_json: bool,
+    initialize: bool,
+    derive: bool,
+    force: bool,
+    waves: bool,
+    tasks: bool,
+    ai_cmd: str | None,
+):
     """Show wave execution status from configured artifacts."""
     from codd.planner import build_plan, plan_init, plan_to_dict, render_plan_text
 
     project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
+
+    if derive:
+        if initialize:
+            raise click.BadOptionUsage("derive", "--derive cannot be used with --init")
+        if force:
+            raise click.BadOptionUsage("force", "--force requires --init")
+        if waves:
+            raise click.BadOptionUsage("waves", "--waves cannot be used with --derive")
+        if tasks:
+            raise click.BadOptionUsage("tasks", "--tasks cannot be used with --derive")
+
+        from codd import generator as generator_module
+        from codd.required_artifacts_deriver import RequiredArtifactsDeriver
+
+        config = load_project_config(project_root)
+        resolved_ai_command = generator_module._resolve_ai_command(
+            config,
+            ai_cmd,
+            command_name="plan_derive",
+        )
+        lexicon_path = project_root / LEXICON_FILENAME
+        lexicon_data = _load_lexicon_data_for_update(lexicon_path)
+        requirement_docs = _requirement_docs_from_lexicon_data(lexicon_data)
+
+        try:
+            from codd.lexicon import ProjectLexicon, validate_lexicon
+
+            lexicon = ProjectLexicon(lexicon_data)
+            artifacts = RequiredArtifactsDeriver(
+                project_root,
+                ai_command=resolved_ai_command,
+            ).derive(requirement_docs, lexicon.coverage_decisions)
+            lexicon.set_required_artifacts(artifacts)
+            output = lexicon.as_dict()
+            validate_lexicon(output)
+            lexicon_path.write_text(
+                yaml.safe_dump(output, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+
+        if as_json:
+            click.echo(json.dumps({"required_artifacts": artifacts}, ensure_ascii=False, indent=2))
+            return
+
+        click.echo(f"Derived {len(artifacts)} required artifact(s).")
+        click.echo(f"Updated {LEXICON_FILENAME}:required_artifacts")
+        for artifact in artifacts:
+            click.echo(f"  - {artifact['id']}: {artifact['title']}")
+        return
 
     if initialize:
         if as_json:
@@ -1867,7 +1936,7 @@ def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, t
     if force:
         raise click.BadOptionUsage("force", "--force requires --init")
     if ai_cmd is not None and not waves and not tasks:
-        raise click.BadOptionUsage("ai_cmd", "--ai-cmd requires --init")
+        raise click.BadOptionUsage("ai_cmd", "--ai-cmd requires --init or --derive")
 
     if waves:
         from codd.generator import _load_project_config
@@ -1892,6 +1961,39 @@ def plan(path: str, as_json: bool, initialize: bool, force: bool, waves: bool, t
         return
 
     click.echo(render_plan_text(result))
+
+
+def _load_lexicon_data_for_update(lexicon_path: Path) -> dict[str, Any]:
+    if not lexicon_path.exists():
+        return {
+            "node_vocabulary": [],
+            "naming_conventions": [],
+            "design_principles": [],
+            "coverage_decisions": [],
+            "required_artifacts": [],
+        }
+    data = yaml.safe_load(lexicon_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{LEXICON_FILENAME} must contain a YAML mapping")
+    data.setdefault("node_vocabulary", [])
+    data.setdefault("naming_conventions", [])
+    data.setdefault("design_principles", [])
+    data.setdefault("coverage_decisions", [])
+    data.setdefault("required_artifacts", [])
+    return data
+
+
+def _requirement_docs_from_lexicon_data(data: dict[str, Any]) -> list[str]:
+    value = (
+        data.get("requirement_docs_path")
+        or data.get("requirement_doc_paths")
+        or data.get("requirement_docs")
+    )
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return []
 
 
 @main.command()

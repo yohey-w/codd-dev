@@ -1,0 +1,42 @@
+project_type: cli
+default_artifacts:
+  - id: "design:requirements"
+    title: "Requirements Definition"
+    depends_on: []
+    scope: "Command goals, operator workflows, runtime constraints, error expectations, and acceptance criteria"
+    always_required: true
+  - id: "design:system_design"
+    title: "System Design"
+    depends_on: ["design:requirements"]
+    scope: "Package structure, command dispatch, service boundaries, dependency strategy, and runtime lifecycle"
+    always_required: true
+  - id: "design:command_interface_design"
+    title: "Command Interface Design"
+    depends_on: ["design:requirements"]
+    scope: "Commands, subcommands, flags, arguments, exit codes, help text, and compatibility rules"
+    condition: "requirements mention commands, flags, operators, shell usage, or automation"
+  - id: "design:configuration_design"
+    title: "Configuration Design"
+    depends_on: ["design:system_design"]
+    scope: "Config file schema, environment variables, precedence, defaults, and validation"
+    condition: "requirements mention configuration, environment variables, profiles, or runtime options"
+  - id: "design:io_contract_design"
+    title: "Input/Output Contract Design"
+    depends_on: ["design:command_interface_design"]
+    scope: "Input files/streams, output formats, structured JSON/YAML, diagnostics, and stable machine-readable contracts"
+    condition: "requirements mention JSON, YAML, stdin/stdout, files, reports, or CI consumption"
+  - id: "design:error_handling_design"
+    title: "Error Handling Design"
+    depends_on: ["design:command_interface_design"]
+    scope: "Failure classes, retryability, exit-code mapping, human messages, and machine diagnostics"
+    condition: "requirements mention failures, validation, retries, partial success, or non-interactive operation"
+  - id: "design:distribution_design"
+    title: "Distribution Design"
+    depends_on: ["design:system_design"]
+    scope: "Packaging, installation, upgrades, platform support, and release channels"
+    condition: "requirements mention installation, package managers, binaries, containers, or distribution"
+  - id: "design:auth_integration_design"
+    title: "Authentication & Integration Design"
+    depends_on: ["design:system_design"]
+    scope: "API credentials, token storage, device flow, service endpoints, and secret handling"
+    condition: "requirements mention API access, authentication, tokens, OAuth, secrets, or remote services"
