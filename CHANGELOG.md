@@ -4,6 +4,90 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.24.0] - 2026-05-05
+
+### Added — Deploy Verification Gate (cmd_392)
+
+cmd_390 deploy 事故 (殿ログイン不可) の構造的解決。設計→実装の静的整合 (cmd_386)
+だけでは捕捉できない、デプロイ手順書 / runtime state / verification test の
+**動的成立条件** を DAG node として表現し、設計→デプロイ→runtime→検証 の
+連続性を C6 check で担保する。
+
+### 新 node 3 種
+
+- `deployment_doc`: `DEPLOYMENT.md` / `deploy.yaml` 等のデプロイ手順書
+- `runtime_state`: DB schema / seed 状況 / 起動状況など実行時の成立条件
+- `verification_test`: smoke test / health check / login E2E など検証テスト
+
+### 新 edge 4 種
+
+- `requires_deployment_step`: design_doc → deployment_doc
+- `executes_in_order`: deployment_doc → impl_file (順序付き)
+- `produces_state`: impl_file → runtime_state
+- `verified_by`: runtime_state → verification_test
+
+### 新 check C6 deployment_completeness
+
+`design_doc → deployment_doc → impl_file → runtime_state → verification_test`
+の連続チェーンを traverse し、6 種の violation を検知:
+
+- `missing_deployment_doc`: 設計書が要求する DEPLOYMENT.md 不在
+- `missing_step_in_deployment_doc`: deployment_doc に migrate / seed step 記載なし
+- `missing_impl_for_step`: deploy step が指す impl_file (prisma/seed.ts) 不在 / Dockerfile に COPY なし
+- `state_not_produced`: deploy 実行で runtime_state が生成されない
+- `no_verification_test`: runtime_state を確認する smoke test 不在
+- `verification_test_not_in_deploy_flow`: smoke test が deploy.yaml `post_deploy` に組み込まれていない
+
+C6 violation 検出時は deploy 'INCOMPLETE' マーク + DriftEvent
+(kind=`deployment_completeness`, severity=red) を CoherenceEngine publish +
+ntfy critical 送信 (cmd_377 severity classifier 連携)。
+
+### Generality Gate — 3 plug-in
+
+`codd/deployment/providers/` に registry-decorator pattern の 3 plug-in 追加。
+CoDD core (`codd/deployment/__init__.py`) には Prisma / Docker Compose / Playwright
+等のプロジェクト固有名のハードコードなし。
+
+- **schema_provider** (`@register_schema_provider`):
+  - `prisma`: `prisma/schema.prisma` + `prisma/seed.ts` + `prisma/migrations/` 検出
+  - 将来: SQLAlchemy / TypeORM / raw SQL plug-in を追加可能
+- **deploy_target** (`@register_deploy_target`):
+  - `docker_compose`: `deploy.yaml targets.<name>.type=docker_compose` を parse、`compose_file` から起動順序抽出、`steps` / `post_deploy` フィールド対応
+  - 将来: Kubernetes / Vercel / Azure App Service / Cloudflare Workers plug-in を追加可能
+- **verification_template** (`@register_verification_template`):
+  - `playwright`: e2e/login スマートテスト spec 実行
+  - `curl`: health endpoint smoke test
+  - 将来: k6 / Cypress / Artillery plug-in を追加可能
+
+### Deploy gate integration (cmd_392f)
+
+`_collect_deployment_completeness_gate` を `_run_deploy_gates` に追加 (6 つ目 gate)。
+`codd deploy --apply` で C6 が既存 5 gate と並んで実行される。
+
+- C6 violation 時: deploy block + DriftEvent publish + ntfy critical
+- `incomplete_chain_report` JSON 形式で deploy log に記録
+- `remediation` hint 自動生成 (例: "Add prisma/seed.ts and ensure Dockerfile COPY includes it")
+
+### osato-lms 実証 (cmd_392_lms)
+
+cmd_390 deploy 事故の再発防止を実環境で確認:
+
+- `DEPLOYMENT.md` 新規作成 (migrate / seed / build / smoke test sections)
+- `deploy.yaml` 拡張 (`steps` + `post_deploy` フィールドで migrate → seed → build → start → smoke test を順序実行)
+- `tests/smoke/login.test.ts` 新規 (curl POST /api/auth/login 検証)
+- `Dockerfile.production` に `COPY prisma ./prisma` 追加 (事故原因の seed.ts 欠落解消)
+- `codd dag verify --check deployment_completeness` → osato-lms で **PASS**
+- VPS 144.91.125.163:3000 root + /login 共に **200**、殿ログイン可能 を確認
+
+### Notes
+
+- 後方互換: `deployment_doc` node 0 件のプロジェクトでは C6 check SKIP with INFO (deploy block しない)
+- 既存 `deploy.yaml` (healthcheck のみ、`steps` / `post_deploy` 不在) は旧形式として valid、C6 は SKIP for that target
+- 既存テスト 1210 (v1.23.0) → 1319 (v1.24.0)、+109 件 (cmd_392 新規 7 test ファイル)、全件 PASS / 0 FAIL / 0 SKIP
+- Generality Gate: framework 固有名のハードコードなし。`codd.yaml [deployment]` override + `defaults yaml` で project 別制御
+- 3 要素セット (cmd_376/377/378) との整合: C6 violation は cmd_377 preflight critical 候補、cmd_378 GLPF re-plan trigger
+- CoDD 自律性 6 要素 (cmd_376/377/378 agent 自律 + cmd_386 静的整合 + cmd_388 動的連鎖 + cmd_392 deploy 連鎖) で production deployment まで貫通する自律ガード完成
+
 ## [1.23.0] - 2026-05-05
 
 ### Added — Change-Driven Auto-Propagation Pipeline (CDAP, cmd_388)
