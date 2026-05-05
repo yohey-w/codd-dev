@@ -1,0 +1,7 @@
+test_framework: pytest
+test_runners:
+  pytest: "python -m pytest {files} -q"
+  jest: "npx jest {files}"
+  vitest: "npx vitest run {files}"
+  bats: "bats {files}"
+  go_test: "go test {files}"

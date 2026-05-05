@@ -2261,6 +2261,28 @@ def mcp_server(project: str):
     run_stdio(project_root)
 
 
+@main.command("test")
+@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@click.option("--related", multiple=True, help="Run only tests related to these files")
+@click.option("--dry-run", is_flag=True, default=False, help="Print the related test command without running it")
+def test_cmd(project_path: str, related: tuple[str, ...], dry_run: bool):
+    """Run tests. Use --related <file> to run only related tests."""
+    from codd.watch.test_runner import run_related_tests
+
+    project_root = Path(project_path).resolve()
+    if not related:
+        click.echo("Use --related <file> to specify files. Full test run not supported via this command.")
+        return
+
+    result = run_related_tests(project_root, list(related), dry_run=dry_run)
+    click.echo(f"Related tests: {result['related']}")
+    if result.get("cmd"):
+        click.echo(f"Command: {result['cmd']}")
+    click.echo(f"Status: {result['status']}")
+    if result.get("exit_code") not in (None, 0):
+        raise SystemExit(1)
+
+
 @main.group()
 def dag():
     """DAG Completeness Gate commands."""

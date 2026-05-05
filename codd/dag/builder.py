@@ -19,8 +19,10 @@ from codd.dag.extractor import extract_design_doc_metadata, extract_imports
 DEFAULTS_DIR = Path(__file__).parent / "defaults"
 DEFAULT_PROJECT_TYPE = "web"
 IMPLEMENTATION_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java")
+TEST_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".bats")
 PLAN_HEADER_RE = re.compile(r"^#{2,6}\s+([A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)(?:\s+(.+))?$", re.MULTILINE)
 OUTPUTS_RE = re.compile(r"(?im)^outputs?[ \t]*:[ \t]*(.*)$")
+PY_IMPORT_RE = re.compile(r"(?m)^\s*(?:from\s+([A-Za-z_][\w.]*)(?:\s+import\s+)|import\s+([A-Za-z_][\w.]*))")
 
 
 def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG:
@@ -35,9 +37,11 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
     dag = DAG()
     design_docs = _add_design_docs(dag, root, dag_settings)
     impl_nodes = _add_impl_files(dag, root, dag_settings)
+    test_nodes = _add_test_files(dag, root, dag_settings)
 
     _add_design_edges(dag, root, design_docs, impl_nodes)
     _add_import_edges(dag, root, impl_nodes, dag_settings)
+    _add_tested_by_edges(dag, root, impl_nodes, test_nodes, dag_settings)
     _add_plan_tasks(dag, root, dag_settings)
     _add_expected_nodes(dag, root, dag_settings, impl_nodes)
 
@@ -59,9 +63,12 @@ def load_dag_settings(project_root: Path, settings: dict[str, Any] | None = None
     merged = _read_default_settings(project_type)
     merged = _deep_merge(merged, _dag_overrides(project_config))
     merged = _deep_merge(merged, _dag_overrides(requested_settings))
+    _apply_scan_patterns(merged, project_config)
+    _apply_scan_patterns(merged, requested_settings)
     merged["project_type"] = project_type
     merged.setdefault("design_doc_patterns", [])
     merged.setdefault("impl_file_patterns", [])
+    merged.setdefault("test_file_patterns", [])
     merged.setdefault("plan_task_file", "docs/design/implementation_plan.md")
     merged.setdefault("lexicon_file", "project_lexicon.yaml")
     return merged
@@ -160,7 +167,11 @@ def _add_design_docs(dag: DAG, project_root: Path, settings: dict[str, Any]) -> 
 def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> dict[str, Path]:
     impl_nodes: dict[str, Path] = {}
     for file_path in _glob_project_paths(project_root, settings.get("impl_file_patterns", [])):
-        if not file_path.is_file() or file_path.suffix not in IMPLEMENTATION_SUFFIXES:
+        if (
+            not file_path.is_file()
+            or file_path.suffix not in IMPLEMENTATION_SUFFIXES
+            or _is_test_file(file_path, project_root)
+        ):
             continue
         node_id = _relative_id(file_path, project_root)
         impl_nodes[node_id] = file_path.resolve()
@@ -177,6 +188,28 @@ def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
             ),
         )
     return impl_nodes
+
+
+def _add_test_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> dict[str, Path]:
+    test_nodes: dict[str, Path] = {}
+    for file_path in _glob_project_paths(project_root, settings.get("test_file_patterns", [])):
+        if not file_path.is_file() or file_path.suffix not in TEST_SUFFIXES or not _is_test_file(file_path, project_root):
+            continue
+        node_id = _relative_id(file_path, project_root)
+        test_nodes[node_id] = file_path.resolve()
+        _add_node_once(
+            dag,
+            Node(
+                id=node_id,
+                kind="test_file",
+                path=node_id,
+                attributes={
+                    "language": _language_for_path(file_path),
+                    "imports": _extract_test_imports(file_path),
+                },
+            ),
+        )
+    return test_nodes
 
 
 def _add_design_edges(
@@ -215,6 +248,25 @@ def _add_import_edges(
             target_id = _resolve_import_target(import_ref, file_path, project_root, path_to_node, aliases)
             if target_id and target_id != node_id:
                 dag.add_edge(Edge(from_id=node_id, to_id=target_id, kind="imports"))
+
+
+def _add_tested_by_edges(
+    dag: DAG,
+    project_root: Path,
+    impl_nodes: dict[str, Path],
+    test_nodes: dict[str, Path],
+    settings: dict[str, Any],
+) -> None:
+    path_to_node = {path: node_id for node_id, path in impl_nodes.items()}
+    aliases = _load_import_aliases(project_root, settings)
+    existing_edges = {(edge.from_id, edge.to_id, edge.kind) for edge in dag.edges}
+
+    for test_id, test_path in test_nodes.items():
+        for target_id in _infer_test_targets(test_path, project_root, path_to_node, aliases):
+            edge_key = (target_id, test_id, "tested_by")
+            if edge_key not in existing_edges:
+                dag.add_edge(Edge(from_id=target_id, to_id=test_id, kind="tested_by"))
+                existing_edges.add(edge_key)
 
 
 def _add_plan_tasks(dag: DAG, project_root: Path, settings: dict[str, Any]) -> None:
@@ -374,6 +426,52 @@ def _resolve_import_target(
     return None
 
 
+def _infer_test_targets(
+    test_path: Path,
+    project_root: Path,
+    path_to_node: dict[Path, str],
+    aliases: dict[str, list[str]],
+) -> set[str]:
+    targets: set[str] = set()
+
+    for import_ref in _extract_test_imports(test_path):
+        target_id = _resolve_import_target(import_ref, test_path, project_root, path_to_node, aliases)
+        if not target_id and "." in import_ref and not import_ref.startswith("."):
+            target_id = _resolve_python_import_target(import_ref, project_root, path_to_node)
+        if target_id:
+            targets.add(target_id)
+
+    convention_key = _test_convention_key(test_path, project_root)
+    if convention_key:
+        targets.update(_match_impl_by_convention(convention_key, path_to_node))
+        for candidate in _convention_path_candidates(test_path, project_root, convention_key):
+            target_id = _resolve_file_candidate(candidate, path_to_node)
+            if target_id:
+                targets.add(target_id)
+
+    return targets
+
+
+def _extract_test_imports(file_path: Path) -> list[str]:
+    imports = extract_imports(file_path)
+    if file_path.suffix != ".py":
+        return imports
+
+    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    python_imports = [match.group(1) or match.group(2) for match in PY_IMPORT_RE.finditer(content)]
+    return [*imports, *python_imports]
+
+
+def _resolve_python_import_target(import_ref: str, project_root: Path, path_to_node: dict[Path, str]) -> str | None:
+    module_path = (project_root / import_ref.replace(".", "/")).resolve()
+    resolved = _resolve_file_candidate(module_path, path_to_node)
+    if resolved:
+        return resolved
+
+    init_path = module_path / "__init__.py"
+    return path_to_node.get(init_path)
+
+
 def _resolve_file_candidate(candidate: Path, path_to_node: dict[Path, str]) -> str | None:
     if candidate in path_to_node:
         return path_to_node[candidate]
@@ -388,7 +486,73 @@ def _resolve_file_candidate(candidate: Path, path_to_node: dict[Path, str]) -> s
         indexed = candidate / f"index{suffix}"
         if indexed in path_to_node:
             return path_to_node[indexed]
+    init_file = candidate / "__init__.py"
+    if init_file in path_to_node:
+        return path_to_node[init_file]
     return None
+
+
+def _test_convention_key(test_path: Path, project_root: Path) -> str | None:
+    relative_parts = _relative_id(test_path, project_root).split("/")
+    name = test_path.name
+
+    for marker in (".test.", ".spec."):
+        if marker in name:
+            return name.split(marker, 1)[0]
+
+    if test_path.suffix == ".py" and any(part in {"tests", "test"} for part in relative_parts[:-1]):
+        stem = test_path.stem
+        if stem.startswith("test_"):
+            return stem.removeprefix("test_")
+        if stem.endswith("_test"):
+            return stem.removesuffix("_test")
+
+    return None
+
+
+def _match_impl_by_convention(convention_key: str, path_to_node: dict[Path, str]) -> set[str]:
+    matches: set[str] = set()
+    for _impl_path, node_id in path_to_node.items():
+        if convention_key in _impl_convention_tokens(node_id):
+            matches.add(node_id)
+    return matches
+
+
+def _impl_convention_tokens(node_id: str) -> set[str]:
+    path = Path(node_id)
+    parts = [*path.with_suffix("").parts]
+    tokens = {path.stem}
+    if len(parts) >= 2:
+        tokens.add("_".join(parts[-2:]))
+    if len(parts) >= 3:
+        tokens.add("_".join(parts[-3:]))
+    return tokens
+
+
+def _convention_path_candidates(test_path: Path, project_root: Path, convention_key: str) -> list[Path]:
+    candidates: list[Path] = []
+    suffixes = [".py"] if test_path.suffix == ".py" else [".ts", ".tsx", ".js", ".jsx"]
+
+    if any(marker in test_path.name for marker in (".test.", ".spec.")):
+        candidates.append((test_path.parent / convention_key).resolve())
+
+    for root_name in ("codd", "src"):
+        for suffix in suffixes:
+            candidates.append((project_root / root_name / f"{convention_key}{suffix}").resolve())
+
+    return candidates
+
+
+def _is_test_file(file_path: Path, project_root: Path) -> bool:
+    relative_parts = _relative_id(file_path, project_root).split("/")
+    name = file_path.name
+    if any(marker in name for marker in (".test.", ".spec.")):
+        return True
+    if file_path.suffix == ".bats":
+        return True
+    if file_path.suffix == ".py" and any(part in {"tests", "test"} for part in relative_parts[:-1]):
+        return name.startswith("test_") or name.endswith("_test.py")
+    return False
 
 
 def _load_import_aliases(project_root: Path, settings: dict[str, Any]) -> dict[str, list[str]]:
@@ -467,6 +631,7 @@ def _dag_overrides(config: dict[str, Any]) -> dict[str, Any]:
     direct_keys = {
         "design_doc_patterns",
         "impl_file_patterns",
+        "test_file_patterns",
         "plan_task_file",
         "lexicon_file",
         "import_aliases",
@@ -477,6 +642,31 @@ def _dag_overrides(config: dict[str, Any]) -> dict[str, Any]:
     return overrides
 
 
+def _apply_scan_patterns(settings: dict[str, Any], config: dict[str, Any]) -> None:
+    scan = config.get("scan", {})
+    if not isinstance(scan, dict):
+        return
+
+    source_dirs = _as_list(scan.get("source_dirs"))
+    test_dirs = _as_list(scan.get("test_dirs"))
+    doc_dirs = _as_list(scan.get("doc_dirs"))
+
+    if source_dirs:
+        _extend_unique(
+            settings,
+            "impl_file_patterns",
+            _file_patterns_for_dirs(source_dirs, IMPLEMENTATION_SUFFIXES),
+        )
+    if test_dirs:
+        _extend_unique(
+            settings,
+            "test_file_patterns",
+            _file_patterns_for_dirs(test_dirs, TEST_SUFFIXES),
+        )
+    if doc_dirs:
+        _extend_unique(settings, "design_doc_patterns", _file_patterns_for_dirs(doc_dirs, (".md",)))
+
+
 def _normalize_dag_section(section: dict[str, Any]) -> dict[str, Any]:
     normalized = deepcopy(section)
     node_extraction = normalized.pop("node_extraction", None)
@@ -485,6 +675,8 @@ def _normalize_dag_section(section: dict[str, Any]) -> dict[str, Any]:
             normalized["design_doc_patterns"] = node_extraction["design_glob"]
         if "impl_glob" in node_extraction:
             normalized["impl_file_patterns"] = node_extraction["impl_glob"]
+        if "test_glob" in node_extraction:
+            normalized["test_file_patterns"] = node_extraction["test_glob"]
         if "plan_path" in node_extraction:
             normalized["plan_task_file"] = node_extraction["plan_path"]
     return normalized
@@ -520,6 +712,27 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, tuple):
         return list(value)
     return [value]
+
+
+def _file_patterns_for_dirs(dirs: list[Any], suffixes: tuple[str, ...]) -> list[str]:
+    patterns: list[str] = []
+    for directory in dirs:
+        if not isinstance(directory, str) or not directory.strip():
+            continue
+        base = directory.strip().strip("/")
+        if not base or base == ".":
+            base = "**"
+        for suffix in suffixes:
+            patterns.append(f"{base}/**/*{suffix}")
+    return patterns
+
+
+def _extend_unique(settings: dict[str, Any], key: str, values: list[str]) -> None:
+    current = [str(item) for item in _as_list(settings.get(key)) if item]
+    for value in values:
+        if value not in current:
+            current.append(value)
+    settings[key] = current
 
 
 def _add_node_once(dag: DAG, node: Node) -> None:
