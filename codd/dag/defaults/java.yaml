@@ -1,0 +1,2 @@
+implementation_suffixes: [".java"]
+test_suffixes: [".java"]

@@ -37,7 +37,8 @@ def _write_codd_yaml(project: Path, payload: dict | None = None) -> None:
         ("demo.csproj", "csharp"),
         ("demo.sln", "csharp"),
         ("CMakeLists.txt", "cpp_embedded"),
-        ("build.gradle", "kotlin"),
+        ("build.gradle.kts", "kotlin"),
+        ("pom.xml", "java"),
         ("mix.exs", "elixir"),
         ("build.sbt", "scala"),
         ("Sources/App.swift", "swift"),
@@ -65,6 +66,20 @@ def test_detect_project_type_uses_first_priority_match(tmp_path):
     _write(tmp_path / "package.json", "{}\n")
 
     assert builder._detect_project_type(tmp_path) == "rust"
+
+
+def test_detect_project_type_build_gradle_with_kotlin_file_returns_kotlin(tmp_path):
+    _write(tmp_path / "build.gradle", "plugins { id 'org.jetbrains.kotlin.jvm' version '1.9.0' }\n")
+    _write(tmp_path / "src" / "main" / "kotlin" / "App.kt", "fun main() {}\n")
+
+    assert builder._detect_project_type(tmp_path) == "kotlin"
+
+
+def test_detect_project_type_build_gradle_without_kotlin_files_returns_java(tmp_path):
+    _write(tmp_path / "build.gradle", "plugins { id 'java' }\n")
+    _write(tmp_path / "src" / "main" / "java" / "App.java", "class App {}\n")
+
+    assert builder._detect_project_type(tmp_path) == "java"
 
 
 def test_load_suffix_config_project_override_wins(tmp_path):
@@ -117,6 +132,16 @@ def test_load_dag_settings_reads_web_yaml_suffix_section(tmp_path):
     assert settings["implementation_suffixes"] == (".ts", ".tsx", ".js", ".jsx")
 
 
+def test_load_suffix_config_resolves_java_defaults(tmp_path):
+    _write(tmp_path / "pom.xml", "<project />\n")
+
+    settings = load_dag_settings(tmp_path)
+
+    assert settings["project_type"] == "java"
+    assert settings["implementation_suffixes"] == (".java",)
+    assert settings["test_suffixes"] == (".java",)
+
+
 @pytest.mark.parametrize(
     "project_type",
     [
@@ -124,6 +149,7 @@ def test_load_dag_settings_reads_web_yaml_suffix_section(tmp_path):
         "ruby",
         "csharp",
         "cpp_embedded",
+        "java",
         "kotlin",
         "elixir",
         "scala",
@@ -147,6 +173,7 @@ def test_polyglot_default_yaml_files_have_suffix_schema(project_type):
         ("Cargo.toml", "src/lib.rs", "src/lib.rs", "rust"),
         ("Gemfile", "src/app.rb", "src/app.rb", "ruby"),
         ("demo.csproj", "src/Program.cs", "src/Program.cs", "csharp"),
+        ("pom.xml", "src/main/java/App.java", "src/main/java/App.java", "java"),
     ],
 )
 def test_build_dag_extracts_polyglot_impl_files(tmp_path, marker, source, node_id, language):

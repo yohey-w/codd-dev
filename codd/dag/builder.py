@@ -893,8 +893,14 @@ def _detect_project_type(project_root: Path) -> str:
         (root / "Makefile").is_file() and _has_any_file(root, ("*.c", "*.cpp"))
     ):
         return "cpp_embedded"
-    if (root / "build.gradle").is_file() or any(root.glob("*.gradle")):
+    if any(root.glob("*.gradle.kts")):
         return "kotlin"
+    if (root / "pom.xml").is_file():
+        return "java"
+    if (root / "build.gradle").is_file() or any(root.glob("*.gradle")):
+        if _has_any_file(root, ("*.kt", "*.kts")):
+            return "kotlin"
+        return "java"
     if (root / "mix.exs").is_file():
         return "elixir"
     if (root / "build.sbt").is_file():
