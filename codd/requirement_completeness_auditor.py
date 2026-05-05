@@ -20,7 +20,7 @@ from codd.lexicon import AskItem, AskOption, LEXICON_FILENAME
 
 DEFAULTS_DIR = Path(__file__).parent / "requirement_completeness" / "defaults"
 SUPPORTED_PROJECT_TYPES = ("web", "cli", "mobile", "iot")
-AI_TIMEOUT_SECONDS = 30
+AI_TIMEOUT_SECONDS = 300
 
 
 class RequirementCompletenessAuditor:

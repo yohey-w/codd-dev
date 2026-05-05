@@ -20,7 +20,7 @@ from codd.lexicon import AskItem
 DEFAULTS_DIR = Path(__file__).parent / "required_artifacts" / "defaults"
 SUPPORTED_PROJECT_TYPES = ("web", "cli", "mobile", "iot")
 VALID_ARTIFACT_SOURCES = {"ai_derived", "user_override", "default_template"}
-AI_TIMEOUT_SECONDS = 60
+AI_TIMEOUT_SECONDS = 300
 
 
 class RequiredArtifactsDeriver:
