@@ -1,0 +1,8 @@
+project_type: mobile
+critical_operations:
+  - app_store_submit
+  - google_play_submit
+  - push_notification_send_bulk
+  - firmware_update_ota
+  - in_app_purchase_change
+  - privacy_policy_change

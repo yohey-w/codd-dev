@@ -129,7 +129,7 @@ class Orchestrator:
         self._hitl_path = hitl_path
         self._ntfy_rate_limit = ntfy_rate_limit_seconds
         self._last_ntfy_time: float = 0.0
-        self._pending_amber: list[DriftEvent] = []
+        self._pending_ntfy_events: list[DriftEvent] = []
         bus.subscribe("*", self._handle)
 
     def resolve_fix_strategy(self, event: DriftEvent) -> FixStrategy:
@@ -200,8 +200,9 @@ class Orchestrator:
                 handle.write("# Pending HITL Reviews\n")
             handle.write(self._format_hitl_entry(event))
 
-        self._pending_amber.append(event)
-        self._maybe_send_ntfy()
+        if event.severity == "red":
+            self._pending_ntfy_events.append(event)
+        self._maybe_send_ntfy(event)
 
     def _format_hitl_entry(self, event: DriftEvent) -> str:
         original_severity = event.payload.get("downgraded_from", event.severity)
@@ -223,17 +224,19 @@ class Orchestrator:
             f"- **Reviewer**: (pending)\n"
         )
 
-    def _maybe_send_ntfy(self) -> None:
-        """Send at most one ntfy notification per rate-limit window."""
+    def _maybe_send_ntfy(self, event: DriftEvent) -> None:
+        """Send at most one red-severity ntfy notification per rate-limit window."""
+        if event.severity != "red":
+            return
         now = time.time()
         if now - self._last_ntfy_time < self._ntfy_rate_limit:
             return
-        count = len(self._pending_amber)
+        count = len(self._pending_ntfy_events)
         if count == 0:
             return
         self._send_ntfy(f"CoDD Coherence: {count} HITL event(s) pending review")
         self._last_ntfy_time = now
-        self._pending_amber.clear()
+        self._pending_ntfy_events.clear()
 
     def _send_ntfy(self, message: str) -> None:
         """Send an ntfy notification when NTFY_URL is configured."""

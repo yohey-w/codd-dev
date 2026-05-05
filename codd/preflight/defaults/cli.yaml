@@ -1,0 +1,9 @@
+project_type: cli
+critical_operations:
+  - pypi_publish
+  - npm_publish
+  - dependency_lock_change
+  - config_schema_breaking_change
+  - remove_public_api
+  - rename_public_api
+  - major_version_bump

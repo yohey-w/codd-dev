@@ -13,6 +13,7 @@ from codd.lexicon import AskItem
 
 
 DEFAULT_CHANNELS = ["askuserquestion", "ntfy", "lexicon"]
+SEVERITY_ORDER = ["critical", "high", "medium", "low"]
 
 
 def send_ask_items(
@@ -20,6 +21,7 @@ def send_ask_items(
     channels: list[str] = DEFAULT_CHANNELS,
     ntfy_topic: str = "",
     lexicon_path: str | Path | None = None,
+    ntfy_severity_threshold: str = "critical",
 ) -> None:
     """Send ASK items through Claude, ntfy, and lexicon channels when available."""
     normalized_channels = {channel.lower() for channel in channels}
@@ -30,6 +32,8 @@ def send_ask_items(
 
     if "ntfy" in normalized_channels and ntfy_topic:
         for item in ask_items:
+            if not _severity_at_or_above(_ask_item_severity(item), ntfy_severity_threshold):
+                continue
             _post_ntfy(ntfy_topic, format_ask_for_ntfy(item))
 
     if "lexicon" in normalized_channels and lexicon_path is not None:
@@ -63,6 +67,21 @@ def parse_user_answer(raw: str, item: AskItem) -> str:
         if answer.lower() == option.label.lower():
             return option.id
     return answer
+
+
+def _severity_at_or_above(item_severity: str, threshold: str) -> bool:
+    """Return True when item_severity is at least as severe as threshold."""
+    try:
+        return SEVERITY_ORDER.index(item_severity) <= SEVERITY_ORDER.index(threshold)
+    except ValueError:
+        return True
+
+
+def _ask_item_severity(item: AskItem) -> str:
+    severity = getattr(item, "severity", "")
+    if isinstance(severity, str) and severity:
+        return severity.lower()
+    return "critical" if item.blocking else "high"
 
 
 def _send_ask_user_question(item: AskItem) -> bool:
