@@ -6,7 +6,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Literal
+
+from codd.config import load_project_config
 
 try:
     from codd.knowledge_fetcher import (
@@ -57,6 +59,15 @@ class GapItem:
                     f"{self.label} has confidence={self.confidence:.2f}, "
                     "below the auto-accept threshold. Please confirm."
                 )
+
+
+@dataclass
+class ArtifactGap:
+    artifact_id: str
+    title: str
+    severity: Literal["ASK", "AUTO_REJECT"]
+    rationale: str
+    source: str = "ai_derived"
 
 
 @dataclass
@@ -492,6 +503,115 @@ class CoverageAuditor:
         existing = self.load_existing_requirements()
         return self.classify_gaps(project_type, existing)
 
+    def audit_required_artifacts(
+        self,
+        required_artifacts: list[dict[str, Any]],
+        project_root: Path,
+    ) -> list[ArtifactGap]:
+        """Compare lexicon.required_artifacts with existing design documents."""
+        root = Path(project_root)
+        discovery_config = _load_artifact_discovery_config(root)
+        existing = self._discover_existing_artifacts(root)
+        gaps: list[ArtifactGap] = []
+
+        for artifact in required_artifacts:
+            artifact_id = str(artifact.get("id", "")).strip()
+            if not artifact_id:
+                continue
+            if _artifact_exists(artifact_id, root, existing, discovery_config):
+                continue
+
+            source = str(artifact.get("source", "ai_derived") or "ai_derived")
+            scope = str(artifact.get("scope", "") or "").strip()
+            severity: Literal["ASK", "AUTO_REJECT"]
+            if scope or source in {"ai_derived", "user_override"}:
+                severity = ASK
+            else:
+                severity = AUTO_REJECT
+
+            gaps.append(
+                ArtifactGap(
+                    artifact_id=artifact_id,
+                    title=str(artifact.get("title", artifact_id) or artifact_id),
+                    severity=severity,
+                    rationale=str(artifact.get("rationale", "") or ""),
+                    source=source,
+                )
+            )
+        return gaps
+
+    def _discover_existing_artifacts(self, project_root: Path) -> set[str]:
+        """Discover existing design artifact ids from configured design-doc paths."""
+        root = Path(project_root)
+        discovery_config = _load_artifact_discovery_config(root)
+        mappings = _artifact_file_mappings(discovery_config)
+        artifacts: set[str] = set()
+
+        for configured_path in _artifact_discovery_paths(discovery_config):
+            path = _resolve_project_path(root, configured_path)
+            if path.is_file():
+                candidates = [path]
+            elif path.exists():
+                candidates = list(path.rglob("*.md"))
+            else:
+                candidates = []
+            for md_path in candidates:
+                artifact_id = _artifact_id_from_path(root, md_path, mappings)
+                if artifact_id:
+                    artifacts.add(artifact_id)
+
+        for artifact_id, paths in _artifact_path_overrides(discovery_config).items():
+            if any(_resolve_project_path(root, path).exists() for path in paths):
+                artifacts.add(artifact_id)
+        return artifacts
+
+    def generate_required_artifacts_report(
+        self,
+        required_artifacts: list[dict[str, Any]],
+        gaps: list[ArtifactGap],
+        project_root: Path,
+    ) -> str:
+        """Render a Markdown section for required artifact coverage."""
+        root = Path(project_root)
+        existing = self._discover_existing_artifacts(root)
+        discovery_config = _load_artifact_discovery_config(root)
+        ask_count = sum(1 for gap in gaps if gap.severity == ASK)
+        auto_reject_count = sum(1 for gap in gaps if gap.severity == AUTO_REJECT)
+
+        lines = [
+            "## Required Artifacts Audit",
+            "",
+            f"Required artifacts (from AI derivation): {len(required_artifacts)}",
+            f"Existing design docs found: {len(existing)}",
+            "",
+        ]
+        if not gaps:
+            lines.append("✅ All required artifacts present")
+            return "\n".join(lines) + "\n"
+
+        lines.append("### Missing required artifacts")
+        lines.append("")
+        for gap in gaps:
+            action = _suggest_artifact_path(gap.artifact_id, root, discovery_config)
+            lines.extend(
+                [
+                    f"- [{gap.severity}] {gap.artifact_id}",
+                    f"  - Title: {gap.title}",
+                    f"  - Rationale: {gap.rationale or 'Required artifact is missing.'}",
+                    f"  - Source: {gap.source}",
+                    f"  - Action: Create {action}",
+                ]
+            )
+
+        scope_exclusions = [gap for gap in gaps if gap.severity == AUTO_REJECT]
+        if scope_exclusions:
+            lines.extend(["", "### Scope exclusions (AUTO_REJECT)", ""])
+            for gap in scope_exclusions:
+                lines.append(f"- {gap.artifact_id}: omitted unless project scope requires it")
+
+        lines.extend(["", f"Summary: {ask_count} ASK, {auto_reject_count} AUTO_REJECT"])
+        return "\n".join(lines) + "\n"
+
     def generate_report(self, result: AuditResult, output_path: Path | None = None) -> str:
         """Generate a Markdown coverage audit report."""
         lines = [
@@ -664,3 +784,157 @@ def _is_covered(item: dict[str, Any], existing: set[str]) -> bool:
         if alias_terms and alias_terms.issubset(existing):
             return True
     return False
+
+
+def _load_artifact_discovery_config(project_root: Path) -> dict[str, Any]:
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return {}
+    artifact_config = config.get("artifact_discovery", {})
+    return artifact_config if isinstance(artifact_config, dict) else {}
+
+
+def _artifact_discovery_paths(config: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("path", "paths", "design_path", "design_paths", "directories"):
+        configured = config.get(key)
+        if isinstance(configured, str) and configured.strip():
+            values.append(configured)
+        elif isinstance(configured, list):
+            values.extend(str(path) for path in configured if str(path).strip())
+    return values or ["docs/design"]
+
+
+def _artifact_file_mappings(config: dict[str, Any]) -> dict[str, str]:
+    mappings: dict[str, str] = {}
+    for key in ("mappings", "file_mappings", "filename_mappings"):
+        configured = config.get(key, {})
+        if not isinstance(configured, dict):
+            continue
+        for filename, artifact_id in configured.items():
+            if isinstance(artifact_id, str) and artifact_id.strip():
+                mappings[_normalize_mapping_key(str(filename))] = artifact_id.strip()
+    return mappings
+
+
+def _artifact_path_overrides(config: dict[str, Any]) -> dict[str, list[str]]:
+    configured = config.get("artifact_paths", {})
+    if not isinstance(configured, dict):
+        return {}
+    overrides: dict[str, list[str]] = {}
+    for artifact_id, paths in configured.items():
+        if isinstance(paths, str):
+            overrides[str(artifact_id)] = [paths]
+        elif isinstance(paths, list):
+            overrides[str(artifact_id)] = [str(path) for path in paths if str(path).strip()]
+    return overrides
+
+
+def _resolve_project_path(project_root: Path, configured_path: str) -> Path:
+    path = Path(configured_path)
+    return path if path.is_absolute() else project_root / path
+
+
+def _artifact_id_from_path(project_root: Path, path: Path, mappings: dict[str, str]) -> str:
+    relative = _safe_relative_path(project_root, path)
+    relative_key = _normalize_mapping_key(relative)
+    for mapped_path, artifact_id in mappings.items():
+        if relative_key == mapped_path or relative_key.endswith(f"/{mapped_path}"):
+            return artifact_id
+    for key in (
+        relative_key,
+        _normalize_mapping_key(path.name),
+        _normalize_mapping_key(path.stem),
+    ):
+        if key in mappings:
+            return mappings[key]
+    return _default_artifact_id_from_filename(path)
+
+
+def _default_artifact_id_from_filename(path: Path) -> str:
+    stem = _normalize_artifact_stem(path.stem)
+    if stem in {"screen_flow", "screen_flow_design"}:
+        return "design:screen_flow_design"
+    if stem in {"auth_design", "authorization_design", "auth_authorization_design"}:
+        return "design:auth_authorization_design"
+    return f"design:{stem}"
+
+
+def _artifact_exists(
+    artifact_id: str,
+    project_root: Path,
+    existing: set[str],
+    config: dict[str, Any],
+) -> bool:
+    if artifact_id in existing:
+        return True
+    return any(
+        _resolve_project_path(project_root, candidate).exists()
+        for candidate in _candidate_artifact_paths(artifact_id, config)
+    )
+
+
+def _candidate_artifact_paths(artifact_id: str, config: dict[str, Any]) -> list[str]:
+    override_paths = _artifact_path_overrides(config).get(artifact_id, [])
+    if override_paths:
+        return override_paths
+
+    artifact_key = artifact_id.split(":", 1)[-1]
+    stems = _candidate_artifact_stems(artifact_key)
+    paths: list[str] = []
+    for design_path in _artifact_discovery_paths(config):
+        for stem in stems:
+            paths.append(str(Path(design_path) / f"{stem}.md"))
+    return paths
+
+
+def _candidate_artifact_stems(artifact_key: str) -> list[str]:
+    normalized = _normalize_artifact_stem(artifact_key)
+    special = {
+        "requirements": ["requirements"],
+        "screen_flow_design": ["screen-flow", "screen_flow_design", "screen-flow-design"],
+        "auth_authorization_design": [
+            "auth-design",
+            "auth_authorization_design",
+            "authorization-design",
+        ],
+    }
+    if normalized in special:
+        return special[normalized]
+
+    stems: list[str] = []
+    if normalized.endswith("_design"):
+        base = normalized.removesuffix("_design")
+        stems.extend([f"{base}-design", normalized.replace("_", "-"), normalized])
+        if base:
+            stems.extend([base.replace("_", "-"), base])
+    else:
+        stems.extend([normalized.replace("_", "-"), normalized])
+
+    deduped: list[str] = []
+    for stem in stems:
+        if stem and stem not in deduped:
+            deduped.append(stem)
+    return deduped
+
+
+def _suggest_artifact_path(artifact_id: str, project_root: Path, config: dict[str, Any]) -> str:
+    del project_root
+    candidates = _candidate_artifact_paths(artifact_id, config)
+    return candidates[0] if candidates else f"docs/design/{artifact_id.split(':', 1)[-1]}.md"
+
+
+def _safe_relative_path(project_root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(project_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _normalize_mapping_key(value: str) -> str:
+    return value.replace("\\", "/").strip().lower()
+
+
+def _normalize_artifact_stem(value: str) -> str:
+    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", value.lower())).strip("_")

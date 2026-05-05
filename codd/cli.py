@@ -11,7 +11,7 @@ import yaml
 
 from codd.bridge import PRO_COMMAND_INSTALL_MESSAGE, get_command_handler
 from codd.config import find_codd_dir, load_project_config
-from codd.lexicon import LEXICON_FILENAME
+from codd.lexicon import LEXICON_FILENAME, load_lexicon
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -469,8 +469,33 @@ def require(
 
         auditor = CoverageAuditor(project_root)
         result = auditor.audit()
-        auditor.generate_report(result, report_path)
+        lexicon = load_lexicon(project_root)
+        required_artifacts = lexicon.required_artifacts if lexicon is not None else []
+        artifact_gaps = auditor.audit_required_artifacts(required_artifacts, project_root)
+        report = auditor.generate_report(result)
+        report += "\n" + auditor.generate_required_artifacts_report(
+            required_artifacts,
+            artifact_gaps,
+            project_root,
+        )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
+
+        ask_count = sum(1 for gap in artifact_gaps if gap.severity == "ASK")
+        auto_reject_count = sum(1 for gap in artifact_gaps if gap.severity == "AUTO_REJECT")
         click.echo(f"Coverage audit complete: {result.summary()}")
+        click.echo(
+            "Required artifacts audit complete: "
+            f"REQUIRED={len(required_artifacts)}, "
+            f"ASK={ask_count}, "
+            f"AUTO_REJECT={auto_reject_count}"
+        )
+        if artifact_gaps:
+            click.echo("Missing required artifacts:")
+            for gap in artifact_gaps:
+                click.echo(f"  [{gap.severity}] {gap.artifact_id} - {gap.title}")
+        else:
+            click.echo("Required artifacts audit: ✅ All required artifacts present")
         click.echo(f"Report: {_display_path(report_path, project_root)}")
         return
 
