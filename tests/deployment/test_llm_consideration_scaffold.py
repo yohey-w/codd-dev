@@ -261,6 +261,11 @@ def test_resolve_command_and_model_from_config_and_env(monkeypatch):
 def test_means_catalog_loads_all_default_domains():
     catalog = VerificationMeansCatalog.load()
 
+    assert Path(VerificationMeansCatalog.DEFAULT_CATALOG_PATH).parts[-3:] == (
+        "llm",
+        "templates",
+        "verification_means_catalog.yaml",
+    )
     assert sorted(catalog) == [
         "backend_api",
         "cli_tool",
