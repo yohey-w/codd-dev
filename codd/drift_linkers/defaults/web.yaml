@@ -1,8 +1,0 @@
-enabled:
-  - api
-  - schema
-  - screen_flow
-design_files:
-  api: "docs/design/api_design.md"
-  schema: "docs/design/database_design.md"
-  rbac: "docs/design/auth_authorization_design.md"

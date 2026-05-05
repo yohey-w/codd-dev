@@ -82,15 +82,8 @@ def _reset_dummy() -> None:
     DummyDeployTarget.instances.clear()
 
 
-class _ScreenFlowGateStub:
-    def __init__(self, passed: bool) -> None:
-        self.passed = passed
-        self.details = ["screen_flow_design_drift: 1"]
-
-
 def _allow_deploy_gates(monkeypatch) -> None:
     monkeypatch.setattr("codd.deployer._run_deploy_gates", lambda project_root: DeployGateResult())
-    monkeypatch.setattr("codd.deployer._run_screen_flow_apply_gate", lambda project_root: DeployGateResult())
 
 
 def test_load_deploy_config_valid(tmp_path):
@@ -174,21 +167,6 @@ def test_deploy_dry_run(tmp_path):
     assert DummyDeployTarget.instances[-1].calls == ["dry_run"]
 
 
-def test_deploy_dry_run_skips_screen_flow_gate(tmp_path, monkeypatch):
-    _reset_dummy()
-    config_path = _write_deploy_yaml(tmp_path)
-
-    def fail_gate(project_root):
-        raise AssertionError("dry-run must not run screen-flow gate")
-
-    monkeypatch.setattr("codd.deployer._run_screen_flow_apply_gate", fail_gate)
-
-    exit_code = run_deploy(tmp_path, config_path=config_path, dry_run=True)
-
-    assert exit_code == 0
-    assert DummyDeployTarget.instances[-1].calls == ["dry_run"]
-
-
 def test_deploy_apply_calls_target(tmp_path, monkeypatch):
     _reset_dummy()
     _allow_deploy_gates(monkeypatch)
@@ -198,21 +176,6 @@ def test_deploy_apply_calls_target(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert DummyDeployTarget.instances[-1].calls == ["snapshot", "deploy", "healthcheck"]
-
-
-def test_deploy_apply_blocks_on_screen_flow_gate_failure(tmp_path, monkeypatch):
-    _reset_dummy()
-    _allow_deploy_gates(monkeypatch)
-    config_path = _write_deploy_yaml(tmp_path)
-    monkeypatch.setattr(
-        "codd.deployer._run_screen_flow_apply_gate",
-        lambda project_root: _ScreenFlowGateStub(False),
-    )
-
-    exit_code = run_deploy(tmp_path, config_path=config_path, dry_run=False)
-
-    assert exit_code == 1
-    assert DummyDeployTarget.instances[-1].calls == []
 
 
 def test_deploy_healthcheck_fail_triggers_rollback(tmp_path, monkeypatch):

@@ -185,13 +185,6 @@ def run_deploy(
             _write_deploy_log(project_root, deploy_config, selected_target, log_context)
             return 0
 
-        gate_result = _run_screen_flow_apply_gate(project_root)
-        if not gate_result.passed:
-            log_context["status"] = "screen_flow_gate_failed"
-            log_context["errors"].extend(gate_result.details)
-            _write_deploy_log(project_root, deploy_config, selected_target, log_context)
-            return 1
-
         snapshot = target.snapshot()
         log_context["snapshot"] = snapshot
         if not target.deploy():
@@ -217,7 +210,7 @@ def run_deploy(
 
 
 def _run_deploy_gates(project_root: Path) -> DeployGateResult:
-    """Run validate, drift, linker, coverage, and DAG gates before apply deploy."""
+    """Run validate, drift, coverage, and DAG gates before apply deploy."""
     project_root = Path(project_root).resolve()
     settings = _load_gate_settings(project_root)
     codd_dir = _find_gate_codd_dir(project_root)
@@ -227,7 +220,6 @@ def _run_deploy_gates(project_root: Path) -> DeployGateResult:
     _collect_drift_gate(project_root, codd_dir, result)
     if codd_dir is None:
         return result
-    _collect_drift_linker_gate(project_root, settings, result)
     _collect_coverage_gate(project_root, settings, result)
     _collect_dag_completeness_gate(project_root, settings, result)
     return result
@@ -340,40 +332,6 @@ def _collect_drift_gate(
         )
 
 
-def _collect_drift_linker_gate(
-    project_root: Path,
-    settings: dict[str, Any],
-    result: DeployGateResult,
-) -> None:
-    if not _drift_linkers_enabled(settings):
-        return
-
-    try:
-        from codd.drift_linkers import run_all_linkers
-
-        linker_settings = _linker_settings(settings)
-        linker_results = run_all_linkers(
-            expected_catalog_path=project_root / "docs" / "extracted" / "expected_catalog.yaml",
-            project_root=project_root,
-            settings=linker_settings,
-        )
-    except Exception as exc:  # pragma: no cover - defensive gate behavior
-        result.add_failure("drift_linkers", str(exc))
-        return
-
-    failures: list[str] = []
-    for linker_result in linker_results:
-        verdict = _classify_linker_result(linker_result)
-        detail = _format_linker_result(linker_result)
-        if verdict == "fail":
-            failures.append(detail)
-        elif verdict == "warn":
-            result.add_warning(f"drift_linkers: {detail}")
-
-    if failures:
-        result.add_failure("drift_linkers", f"{len(failures)} linker failure(s)", failures)
-
-
 def _collect_coverage_gate(
     project_root: Path,
     settings: dict[str, Any],
@@ -429,53 +387,11 @@ def _collect_dag_completeness_gate(
         _publish_dag_completeness_events(failed_red)
 
 
-def _drift_linkers_enabled(settings: dict[str, Any]) -> bool:
-    linker_config = settings.get("drift_linkers")
-    if isinstance(linker_config, bool):
-        return linker_config
-    if not isinstance(linker_config, dict):
-        return False
-    return bool(linker_config.get("enabled", False))
-
-
-def _linker_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    linker_config = settings.get("drift_linkers")
-    if not isinstance(linker_config, dict):
-        return settings
-    return {**settings, **linker_config}
-
-
 def _screen_flow_strict_edges(settings: dict[str, Any]) -> bool:
     screen_flow_config = settings.get("screen_flow", {})
     if not isinstance(screen_flow_config, dict):
         return True
     return bool(screen_flow_config.get("strict_edges", True))
-
-
-def _classify_linker_result(linker_result: Any) -> str:
-    if linker_result is None or linker_result is True:
-        return "pass"
-    if linker_result is False:
-        return "fail"
-
-    status = _result_value(linker_result, "status")
-    if isinstance(status, str):
-        normalized = status.strip().lower()
-        if normalized in {"skip", "skipped", "warn", "warning"} or normalized.startswith(
-            ("skipped:", "warn:", "warning:")
-        ):
-            return "warn"
-        if normalized in {"drift", "fail", "failed", "error"}:
-            return "fail"
-        if normalized in {"pass", "passed", "ok", "success"}:
-            return "pass"
-
-    passed = _result_value(linker_result, "passed")
-    if passed is False:
-        return "fail"
-    if _result_value(linker_result, "has_drift") is True:
-        return "fail"
-    return "pass"
 
 
 def _result_value(value: Any, key: str) -> Any:
@@ -509,26 +425,6 @@ def _format_edge_result(edge_result: Any) -> list[str]:
     if edge_result.dead_end_nodes:
         details.append("dead-end: " + ", ".join(edge_result.dead_end_nodes))
     return details
-
-
-def _format_linker_result(linker_result: Any) -> str:
-    if isinstance(linker_result, dict):
-        name = linker_result.get("name") or linker_result.get("linker")
-        warnings = linker_result.get("warnings")
-        warning = warnings[0] if isinstance(warnings, list) and warnings else None
-        message = linker_result.get("message") or linker_result.get("detail") or warning or linker_result.get("status")
-        return f"{name}: {message}" if name else str(message or linker_result)
-    name = getattr(linker_result, "name", None) or getattr(linker_result, "linker", None)
-    warnings = getattr(linker_result, "warnings", None)
-    warning = warnings[0] if isinstance(warnings, list) and warnings else None
-    message = (
-        getattr(linker_result, "message", None)
-        or getattr(linker_result, "detail", None)
-        or warning
-        or getattr(linker_result, "status", None)
-        or linker_result
-    )
-    return f"{name}: {message}" if name else str(message)
 
 
 def _format_coverage_metric(metric: Any) -> str:
@@ -650,21 +546,6 @@ def _run_target_healthcheck(target: Any, target_config: dict[str, Any], timeout_
             retries=int(healthcheck.get("retries", 1)),
         )
     return bool(target.healthcheck())
-
-
-def _run_screen_flow_apply_gate(project_root: Path) -> Any:
-    """Run screen-flow drift gate only for apply deploys."""
-
-    from codd.drift_linkers.screen_flow import ScreenFlowGate
-
-    settings: dict[str, Any] = {"apply": True}
-    try:
-        from codd.config import load_project_config
-
-        settings = {**load_project_config(project_root), "apply": True}
-    except (FileNotFoundError, ValueError):
-        pass
-    return ScreenFlowGate(project_root=project_root, settings=settings).run()
 
 
 def _maybe_rollback(

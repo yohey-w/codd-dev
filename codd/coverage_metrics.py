@@ -134,7 +134,7 @@ def compute_screen_flow_coverage(
     config: dict[str, Any],
     threshold: float = 100.0,
 ) -> CoverageResult:
-    """Measure screen-flow drift as a coverage gate metric."""
+    """Measure screen-flow route drift as a coverage gate metric."""
 
     try:
         from codd.cli import CoddCLIError
@@ -153,25 +153,9 @@ def compute_screen_flow_coverage(
             details=[f"error: {exc}"],
         )
 
-    design_drift_details: list[str] = []
-    design_drift_count = 0
-    try:
-        from codd.drift_linkers.screen_flow import ScreenFlowGate
-
-        gate_result = ScreenFlowGate(
-            project_root=project_root,
-            settings={**config, "apply": True},
-        ).run()
-        if not gate_result.skipped:
-            design_drift_count = gate_result.drift_count
-            design_drift_details = gate_result.details
-    except Exception as exc:  # pragma: no cover - defensive gate behavior
-        return _exception_result("screen_flow_coverage", threshold, exc)
-
-    drift_count = len(drifts) + design_drift_count
+    drift_count = len(drifts)
     pct = 100.0 if drift_count == 0 else max(0.0, 100.0 - drift_count * 10.0)
     details = [f"drift_count: {drift_count}"]
-    details.extend(design_drift_details)
     return CoverageResult(
         metric="screen_flow_coverage",
         total=1,
