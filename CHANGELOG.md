@@ -4,6 +4,103 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.27.0] - 2026-05-06
+
+### Added — Auto-Repair Layer + Polyglot Suffix Support (cmd_398 + cmd_402 + cmd_403)
+
+cmd_393 (declarative) → cmd_392/393 (検証) → cmd_397 (実行) に続く第 4 層として、
+**verification 失敗 → LLM 分析 → 試行修復 → 再 verify ループ** (cmd_398) を追加。
+さらに、Web/TypeScript 専用の暗黙仮定を解消する polyglot suffix support (cmd_402)、
+重複 default catalog yaml の統合 (cmd_403) を同 release で吸収。
+
+「declarative + 検証 + 実行 + 自己修復」で coherence の閉ループが完成し、CoDD は
+Agent 性を獲得する。殿哲学「静的ガイドライン < 動的試行修復」が core 実装される。
+
+### Auto-Repair Layer (cmd_398)
+
+#### 5 components (codd/repair/)
+
+- `RepairEngine` ABC + `@register_repair_engine` decorator (engine.py)
+- `LlmRepairEngine` — analyze + propose_fix + apply の default 実装 (llm_repair_engine.py)
+- `RepairLoop` — max_attempts 制御 + approval_mode 統合 + history 永続化 (loop.py)
+- 5 dataclass schema (VerificationFailureReport / RootCauseAnalysis / RepairProposal /
+  ApplyResult / RepairLoopOutcome、schema.py)
+- CLI 拡張 (`codd verify --auto-repair` / `codd repair --from-report` /
+  `codd repair history` / `codd repair approve`)
+
+#### サポート module
+
+- `git_patcher.py` — D-1=A unified diff primary + C full_file fallback (git apply --3way)
+- `history.py` — `.codd/repair_history/{ISO8601}/attempt_N/` 永続化 (D-4)
+- `verify_runner.py` — Python import 経由の verify 再実行 (D-3、subprocess fork ゼロ)
+- `approval_repair.py` — cmd_397_h approval.py を repair 用に extend
+- `templates/analyze_meta.md` / `propose_meta.md` — domain-neutral LLM prompt
+
+#### approval_mode (二重 opt-in)
+
+- `required` (default): 各 attempt に HITL approval 必須
+- `per_attempt`: attempt ごとに ntfy + inbox
+- `auto`: `require_explicit_optin: true` 必須 + `max_files_per_proposal>5` で required にエスカレート
+
+#### cmd_397 抽象の流用
+
+`codd/llm/invoke.py` (cmd_397_f) + `codd/llm/approval.py` (cmd_397_h) を import 利用、
+重複実装ゼロ。codd/repair/ は subprocess + JSON + git apply + DAG kind 判定のみ。
+
+### Polyglot Suffix Support (cmd_402 + cmd_402b)
+
+- `IMPLEMENTATION_SUFFIXES` / `TEST_SUFFIXES` を defaults yaml + project override に移管
+- 9 言語 default yaml 追加: `rust` / `ruby` / `swift` / `kotlin` / `csharp` / `cpp_embedded` /
+  `elixir` / `scala` / `generic` (全主要言語包含 fallback)
+- `_detect_project_type` で 10+ marker 自動判定 (Cargo.toml / Gemfile / package.json /
+  go.mod / .csproj / CMakeLists.txt / build.gradle / mix.exs / build.sbt / *.swift)
+- 4 段 resolution chain: codd.yaml → defaults/{type}.yaml → generic.yaml → LEGACY (warning)
+- `implementation_suffixes_extend` / `test_suffixes_extend` で base + extend pattern サポート
+- **Java vs Kotlin 判別 fix (cmd_402b)**: build.gradle 単独 → java、build.gradle + *.kt → kotlin、
+  pom.xml → java の優先順序で正しく分岐
+
+これにより Rust / Ruby / Swift / Kotlin / C# / C++ / Elixir / Scala project でも CoDD が
+impl_file node を生成し、C1-C7 全 check が動作する。**「CoDD = Web/TypeScript 専用」誤解を
+構造的に脱する**。
+
+### Means Catalog Consolidation (cmd_403)
+
+cmd_397 で発生した重複 default catalog yaml (codd/llm/templates/ と codd/deployment/defaults/
+の 2 箇所に同一内容) を統合。`codd/llm/templates/verification_means_catalog.yaml` のみが
+正規 path として残り、`codd/deployment/providers/verification/means_catalog.py` の
+DEFAULT_CATALOG_PATH を更新。
+
+### osato-lms 実証
+
+- 意図的に auth design_doc の runtime constraint を破壊 → C7 FAIL 3 件検出
+- RepairLoop → REPAIR_SUCCESS (attempts=1)
+- C1-C7 全 PASS regression
+- `.codd/repair_history/2026-05-05T22:36:24.836307Z/attempt_0/` に永続化
+- D-1=C full_file_replacement fallback path も実証 (3way merge 失敗時の挙動確認)
+
+### Generality Gate 二層 (継続)
+
+- layer A (codd/repair/*.py): zero hit (claude/openai/cookie/oauth/nextauth/safari/iphone/
+  chromium/powershell/react/smoke/headless/osato-lms)
+- layer B (codd/repair/templates/*.md): zero hit
+- means catalog 重複も解消 (cmd_403)
+
+### 新 node kind: 0 / 新 edge kind: 0
+
+cmd_393 で確立した「新次元 = attribute schema 拡張」パターンを継続。本 release でも
+auto-repair / polyglot を新 kind なしで実装。
+
+### Backwards compatibility
+
+- `codd.yaml [repair.*]` / `[ai_commands.repair_*]` 不在 → `codd verify --auto-repair` はエラー、
+  既存 codd verify 挙動不変
+- `codd.yaml [implementation_suffixes]` 不在 → 既存挙動 (web defaults or auto-detect)
+- 既存 v1.26.0 ユーザは挙動変化ゼロ (cmd_398 関連は完全 opt-in、cmd_402 は既存挙動継承)
+
+### 1763 tests PASS / SKIP=0
+
+v1.26.0 baseline 1708 tests → 現状 1763 (+55 from cmd_398 b/c/d/lms + cmd_403 等)。
+
 ## [1.26.0] - 2026-05-06
 
 ### Added — CDP-Browser E2E Verification + LLM Test Pipeline (cmd_397)
