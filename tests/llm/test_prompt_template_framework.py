@@ -125,7 +125,7 @@ def test_extract_parameter_placeholders_ignores_invalid_patterns():
 
 
 def test_default_catalog_path_points_to_phase_f_default():
-    assert MeansCatalogLoader.DEFAULT_CATALOG_PATH == "codd/deployment/defaults/verification_means_catalog.yaml"
+    assert MeansCatalogLoader.DEFAULT_CATALOG_PATH == "codd/llm/templates/verification_means_catalog.yaml"
 
 
 def test_means_catalog_resolve_uses_project_lexicon_override(tmp_path: Path):

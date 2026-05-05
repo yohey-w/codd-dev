@@ -110,6 +110,18 @@ def extract_design_doc_metadata(md_path: Path) -> dict[str, Any]:
     }
 
 
+def extract_verification_means_catalog(project_lexicon_path: Path) -> dict[str, Any] | None:
+    """Return a project lexicon catalog override for LLM prompt resolution."""
+
+    if not project_lexicon_path.is_file():
+        return None
+    payload = yaml.safe_load(project_lexicon_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        return None
+    catalog = payload.get("verification_means_catalog")
+    return deepcopy(catalog) if isinstance(catalog, dict) else None
+
+
 def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []

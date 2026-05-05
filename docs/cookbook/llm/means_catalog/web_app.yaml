@@ -1,0 +1,2 @@
+verification_means_catalog:
+  web_app: [cdp_browser, playwright, selenium, cypress, curl_smoke]
