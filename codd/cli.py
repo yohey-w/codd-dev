@@ -1589,6 +1589,68 @@ def policy(path: str):
     raise SystemExit(0 if result.pass_ else 1)
 
 
+def _screen_flow_drift_payload(result):
+    return {
+        "design_only": result.design_only,
+        "impl_only": result.impl_only,
+        "mismatch": result.mismatch,
+        "total_design": result.total_design,
+        "total_impl": result.total_impl,
+    }
+
+
+def _screen_flow_edge_source(edge: dict) -> str:
+    source = edge.get("source") or edge.get("source_file") or ""
+    source_line = edge.get("source_line")
+    if source and source_line:
+        return f"{source}:{source_line}"
+    return str(source)
+
+
+def _emit_screen_flow_drift_text(result) -> None:
+    click.echo("=== Screen Flow Drift (Design vs Implementation) ===")
+    click.echo(f"Total design transitions: {result.total_design}")
+    click.echo(f"Total impl transitions: {result.total_impl}")
+
+    click.echo("\nDesign-only (in design, missing from implementation):")
+    if result.design_only:
+        for edge in result.design_only:
+            click.echo(f"  [AMBER] {edge['from']} -> {edge['to']} (trigger: {edge.get('trigger', '')})")
+            source = _screen_flow_edge_source(edge)
+            if source:
+                click.echo(f"          Source: {source}")
+            click.echo("          Status: No matching transition found in implementation code")
+    else:
+        click.echo("  none")
+
+    click.echo("\nImpl-only (in implementation, missing from design):")
+    if result.impl_only:
+        for edge in result.impl_only:
+            click.echo(f"  [AMBER] {edge['from']} -> {edge['to']} (trigger: {edge.get('trigger', '')})")
+            source = _screen_flow_edge_source(edge)
+            if source:
+                click.echo(f"          Source: {source}")
+    else:
+        click.echo("  none")
+
+    click.echo("\nMismatch (transition exists but trigger differs):")
+    if result.mismatch:
+        for mismatch in result.mismatch:
+            edge = mismatch["edge"]
+            click.echo(f"  [WARN]  {edge['from']} -> {edge['to']}")
+            click.echo(f"          Design trigger: {mismatch.get('design_trigger', '')}")
+            click.echo(f"          Impl trigger: {mismatch.get('impl_trigger', '')}")
+    else:
+        click.echo("  none")
+
+    click.echo(
+        "\nSummary: "
+        f"{len(result.design_only)} design-only, "
+        f"{len(result.impl_only)} impl-only, "
+        f"{len(result.mismatch)} mismatch"
+    )
+
+
 @main.command("drift")
 @click.option("--path", default=".", help="Project root directory")
 @click.option(
@@ -1599,42 +1661,77 @@ def policy(path: str):
     help="Output format",
 )
 @click.option("--e2e", is_flag=True, help="Compare screen-transitions.yaml routes with E2E URL assertions")
-def drift(path: str, output_format: str, e2e: bool):
+@click.option(
+    "--screen-flow",
+    "screen_flow",
+    is_flag=True,
+    help="Compare screen-transitions.yaml with implementation-extracted transition edges",
+)
+def drift(path: str, output_format: str, e2e: bool, screen_flow: bool):
     """Detect drift between design-referenced URLs and implementation endpoints.
 
     Exit code 0 = no drift. Exit code 1 = drift detected (use in CI).
     """
-    from codd.drift import detect_screen_transition_drift, run_drift
+    from codd.drift import compute_screen_flow_drift, detect_screen_transition_drift, run_drift
 
     project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
 
-    if e2e:
-        result = detect_screen_transition_drift(project_root, load_project_config(project_root))
+    if e2e or screen_flow:
+        config = load_project_config(project_root)
+        exit_code = 0
+        e2e_payload = None
+        screen_flow_payload = None
+        screen_flow_result = None
+
+        if e2e:
+            result = detect_screen_transition_drift(project_root, config)
+            e2e_payload = {
+                "missing_in_e2e": result.missing_in_e2e,
+                "extra_in_e2e": result.extra_in_e2e,
+                "coverage_ratio": result.coverage_ratio,
+            }
+            if result.missing_in_e2e:
+                exit_code = 1
+
+        if screen_flow:
+            screen_flow_result = compute_screen_flow_drift(project_root, extractor_config=config)
+            screen_flow_payload = _screen_flow_drift_payload(screen_flow_result)
+            if screen_flow_result.design_only:
+                exit_code = 1
+
         if output_format == "json":
+            payload = (
+                {"e2e": e2e_payload, "screen_flow": screen_flow_payload}
+                if e2e and screen_flow
+                else e2e_payload
+                if e2e
+                else screen_flow_payload
+            )
             click.echo(
                 json.dumps(
-                    {
-                        "missing_in_e2e": result.missing_in_e2e,
-                        "extra_in_e2e": result.extra_in_e2e,
-                        "coverage_ratio": result.coverage_ratio,
-                    },
+                    payload,
                     ensure_ascii=False,
                     indent=2,
                 )
             )
         else:
-            for route in result.missing_in_e2e:
-                click.echo(f"[drift e2e:missing_in_e2e] {route}  in screen-transitions.yaml")
-            for route in result.extra_in_e2e:
-                click.echo(f"[drift e2e:extra_in_e2e] {route}  in tests/e2e")
-            click.echo(f"E2E route coverage: {result.coverage_ratio:.2%}")
-            if not result.missing_in_e2e and not result.extra_in_e2e:
-                click.echo("No E2E drift detected.")
-            else:
-                count = len(result.missing_in_e2e) + len(result.extra_in_e2e)
-                click.echo(f"\n{count} E2E drift(s) found.")
-        raise SystemExit(1 if result.missing_in_e2e else 0)
+            if e2e_payload is not None:
+                for route in e2e_payload["missing_in_e2e"]:
+                    click.echo(f"[drift e2e:missing_in_e2e] {route}  in screen-transitions.yaml")
+                for route in e2e_payload["extra_in_e2e"]:
+                    click.echo(f"[drift e2e:extra_in_e2e] {route}  in tests/e2e")
+                click.echo(f"E2E route coverage: {e2e_payload['coverage_ratio']:.2%}")
+                if not e2e_payload["missing_in_e2e"] and not e2e_payload["extra_in_e2e"]:
+                    click.echo("No E2E drift detected.")
+                else:
+                    count = len(e2e_payload["missing_in_e2e"]) + len(e2e_payload["extra_in_e2e"])
+                    click.echo(f"\n{count} E2E drift(s) found.")
+            if screen_flow_payload is not None:
+                if e2e_payload is not None:
+                    click.echo("")
+                _emit_screen_flow_drift_text(screen_flow_result)
+        raise SystemExit(exit_code)
 
     result = run_drift(project_root, codd_dir)
 

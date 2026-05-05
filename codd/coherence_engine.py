@@ -19,6 +19,7 @@ ArtifactKind = Literal[
     "design_md",
     "design_doc",
     "screen_flow",
+    "screen_transitions",
     "implementation",
     "unit_test",
     "e2e_test",
