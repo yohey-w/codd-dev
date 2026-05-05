@@ -4,6 +4,8 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-05-05
+
 ### Added
 
 - **`codd preflight` / `codd gungi`** (cmd_377): autonomous execution preflight checks with
