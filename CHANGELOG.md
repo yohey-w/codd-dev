@@ -4,6 +4,58 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.23.0] - 2026-05-05
+
+### Added — Change-Driven Auto-Propagation Pipeline (CDAP, cmd_388)
+
+cmd_386 (静的整合性 / deploy 前 gate) と対をなす **動的連鎖** 機構。
+ファイル変更を起点に impact → propagate → verify → fix → drift の連鎖を
+自動実行し、関連テストのみを抽出して走らせる。Claude / Codex / 手動編集の
+すべてを CLI 非依存で同じ propagation 経路に集約する。
+
+- **`codd watch`** (cmd_388_pre + cmd_388a, 9d3599e + 857bbfa):
+  watchdog ベースのファイル監視 daemon。Linux / macOS / Windows 全対応
+  - `codd/watch/events.py`: `FileChangeEvent` dataclass + EventBus 拡張
+  - `codd/watch/propagation_log.py`: `.codd/propagation_log.jsonl` ring buffer
+  - `codd/watch/watcher.py`: `Observer` 経由のファイル監視 + debounce
+  - `--debounce <ms>` (default: 500) で連続変更 throttle、`--background` daemon mode、`--status` 状態確認
+- **`codd propagate-from --files <list>`** (cmd_388b, 65204ab):
+  変更ファイル群から impact → propagate → verify → fix → drift の連鎖を 1 回実行
+  - `codd/watch/propagation_pipeline.py`: 連鎖 step 統合
+  - `--source [watch|git_hook|editor_hook|manual]`, `--editor [claude|codex|manual]` で trigger source 識別
+  - `--dry-run` で impact 計算のみ実行、fix / log 書き込み skip
+  - `propagation_log.jsonl` に各 step 結果を JSON Lines で記録
+- **`codd test --related <file>`** (cmd_388c, 120ed5f):
+  DAG `tested_by` edge 経由で関連テストのみ抽出 + 実行
+  - `codd/watch/test_runner.py`: `FRAMEWORK_RUNNERS` (jest/vitest/pytest/bats/go test 等) 対応
+  - `codd/dag/defaults/test_frameworks.yaml` で project ごと override 可能
+  - `--dry-run` で実行コマンドを stdout 出力 (CI 統合用)
+- **Hook recipes** (cmd_388d, e0ad7b4):
+  Claude / Codex / git の各 hook recipe を `codd/hooks/recipes/` に同梱
+  - `claude_settings_example.json`: Claude PostToolUse hook (Edit/Write 後に `codd propagate-from` 自動発火)
+  - `codex_hook.sh`: Codex post-edit wrapper
+  - `git_pre_commit.sh` / `git_post_commit.sh`: git diff --name-only 経由で propagation 発火
+  - README に "Hook Integration — Set It Once, Never Think Again" section 追加
+- **cmd_391 cleanup** (eaba5e4): cmd_385 残存 drift_linkers 個別 linker 削除
+  - `codd/drift_linkers/api.py` (484 LOC) / `schema.py` (262 LOC) / `screen_flow.py` (171 LOC) を削除
+  - registry skeleton (`codd/drift_linkers/__init__.py`) と defaults yaml は cmd_386 で rename 流用済のため別 module で維持
+  - 計 -917 LOC、責務が cmd_386 DAG 完全性 gate に上位統合
+
+### 思想
+
+- **静的 + 動的の両輪完成**: cmd_386 (deploy 前 gate) + cmd_388 (ファイル変更時連鎖) で真の Coherence-Driven Development が成立。設計→実装の漏れは静的に止め、変更による波及は動的に追従する。
+- **CLI 非依存**: Claude / Codex / 手動編集すべてが同じ `codd propagate-from` 経由で連鎖。multi-CLI orchestrator (memory: project_shogun_repositioning) の差別化を強化。
+- **テスト局所性**: 全テストを毎回走らせず、変更起点の reverse closure 上のテストのみ実行。CI 時間短縮 + 開発時 feedback loop 高速化。
+
+### Notes
+
+- 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
+  e2e-generate / extract / plan / require / preflight / gungi / dag / test 含む既存) はすべて変更なし。
+  新フラグ・新コマンドはすべて opt-in。
+- 既存テスト 1185 (v1.22.0) → 1210 (v1.23.0)、+25 件 net (+70 cdap tests / -45 cmd_385 obsolete tests via cmd_391 cleanup)、全件 PASS / 0 FAIL / 0 SKIP
+- Generality Gate: framework 固有名 (Next.js / NextAuth / Prisma / TypeScript) の CoDD core ハードコードなし。`FRAMEWORK_RUNNERS` + `codd/dag/defaults/test_frameworks.yaml` で project ごと override 可能。
+- 3 要素セット (cmd_376/377/378) との整合: `FileChangeEvent` 連鎖は autonomous-by-default の典型実装、cmd_377 preflight critical 候補、cmd_378 GLPF re-plan trigger と接続可能。
+
 ## [1.22.0] - 2026-05-05
 
 ### Added — DAG Completeness Gate (cmd_386)
