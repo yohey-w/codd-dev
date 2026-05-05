@@ -856,6 +856,42 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
         click.echo(f"\nRun with --update to update these docs via AI.")
 
 
+@main.command("propagate-from")
+@click.option("--project-path", default=".", show_default=True, help="Project root directory")
+@click.option("--files", multiple=True, required=True, help="Changed file path. Can be repeated.")
+@click.option(
+    "--source",
+    default="manual",
+    show_default=True,
+    type=click.Choice(["watch", "git_hook", "editor_hook", "manual"]),
+    help="Change source that triggered propagation.",
+)
+@click.option(
+    "--editor",
+    default=None,
+    type=click.Choice(["claude", "codex", "manual"]),
+    help="Editor that produced the change, when known.",
+)
+@click.option("--dry-run", is_flag=True, default=False, help="Compute impact without propagate/fix/log writes.")
+def propagate_from(project_path: str, files: tuple[str, ...], source: str, editor: str | None, dry_run: bool):
+    """Run the CDAP propagation pipeline from changed files."""
+    from codd.watch.events import FileChangeEvent
+    from codd.watch.propagation_pipeline import run_propagation_pipeline
+
+    project_root = Path(project_path).resolve()
+    event = FileChangeEvent(files=list(files), source=source, editor=editor)
+    result = run_propagation_pipeline(project_root, list(files), dry_run=dry_run, event=event)
+
+    click.echo(f"Impacted nodes: {len(result.impacted_nodes)}")
+    click.echo(f"Propagated: {result.propagated_count}")
+    click.echo(f"Fixed: {result.fixed_count}")
+    if result.errors:
+        click.echo(f"Errors: {result.errors}", err=True)
+
+    if not result.success:
+        raise SystemExit(1)
+
+
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--task", default=None, help="Generate only one task by task ID or title match")
