@@ -24,3 +24,5 @@ htmlcov/
 # CoDD generated (for development/testing)
 codd/scan/
 codd/reports/
+codd/codd.yaml.bak
+.codd/codd.yaml.bak

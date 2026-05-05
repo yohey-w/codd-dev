@@ -1853,6 +1853,11 @@ def drift(path: str, output_format: str, e2e: bool, screen_flow: bool):
     is_flag=True,
     help="Derive required design artifacts from requirement documents using AI",
 )
+@click.option(
+    "--regenerate-wave-config",
+    is_flag=True,
+    help="Regenerate wave_config from required_artifacts (WARNING: overwrites existing wave_config)",
+)
 @click.option("--force", is_flag=True, help="Overwrite existing wave_config during --init")
 @click.option("--waves", is_flag=True, help="Output only the total wave count (for shell scripting)")
 @click.option("--tasks", is_flag=True, help="Output only the total task count (for shell scripting)")
@@ -1866,13 +1871,21 @@ def plan(
     as_json: bool,
     initialize: bool,
     derive: bool,
+    regenerate_wave_config: bool,
     force: bool,
     waves: bool,
     tasks: bool,
     ai_cmd: str | None,
 ):
     """Show wave execution status from configured artifacts."""
-    from codd.planner import build_plan, plan_init, plan_to_dict, render_plan_text
+    from codd.planner import (
+        backup_codd_yaml,
+        build_plan,
+        generate_wave_config_from_artifacts,
+        plan_init,
+        plan_to_dict,
+        render_plan_text,
+    )
 
     project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
@@ -1886,6 +1899,8 @@ def plan(
             raise click.BadOptionUsage("waves", "--waves cannot be used with --derive")
         if tasks:
             raise click.BadOptionUsage("tasks", "--tasks cannot be used with --derive")
+        if as_json and regenerate_wave_config:
+            raise click.BadOptionUsage("json", "--json cannot be used with --regenerate-wave-config")
 
         from codd import generator as generator_module
         from codd.required_artifacts_deriver import RequiredArtifactsDeriver
@@ -1925,6 +1940,21 @@ def plan(
 
         click.echo(f"Derived {len(artifacts)} required artifact(s).")
         click.echo(f"Updated {LEXICON_FILENAME}:required_artifacts")
+        if regenerate_wave_config:
+            click.echo("Regenerating wave_config from required_artifacts...")
+            backup_path = backup_codd_yaml(project_root)
+            raw_config_path = codd_dir / "codd.yaml"
+            raw_config = yaml.safe_load(raw_config_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw_config, dict):
+                click.echo("Error: codd.yaml must contain a YAML mapping")
+                raise SystemExit(1)
+            raw_config["wave_config"] = generate_wave_config_from_artifacts(artifacts)
+            raw_config_path.write_text(
+                yaml.safe_dump(raw_config, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            click.echo(f"Backed up codd.yaml to {backup_path.relative_to(project_root).as_posix()}")
+            click.echo(f"Updated {raw_config_path.relative_to(project_root).as_posix()}:wave_config")
         for artifact in artifacts:
             click.echo(f"  - {artifact['id']}: {artifact['title']}")
         return
@@ -1958,6 +1988,8 @@ def plan(
         click.echo(f"Generated {artifact_count} artifact(s) across {wave_count} wave(s).")
         return
 
+    if regenerate_wave_config:
+        raise click.BadOptionUsage("regenerate_wave_config", "--regenerate-wave-config requires --derive")
     if force:
         raise click.BadOptionUsage("force", "--force requires --init")
     if ai_cmd is not None and not waves and not tasks:
