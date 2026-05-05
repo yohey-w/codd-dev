@@ -92,7 +92,7 @@ spacing:
 def _mock_ai(monkeypatch: pytest.MonkeyPatch, extension: str) -> list[str]:
     calls: list[str] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
         assert match is not None
         output_dir = match.group("output")

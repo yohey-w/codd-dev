@@ -124,7 +124,7 @@ def test_require_ai_prompt_includes_project_lexicon(tmp_path, monkeypatch):
     )
     calls: list[str] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(input)
         return subprocess.CompletedProcess(
             args=command,
@@ -183,7 +183,7 @@ def test_generate_ai_prompt_includes_project_lexicon(tmp_path, monkeypatch):
     )
     calls: list[str] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(input)
         return subprocess.CompletedProcess(
             args=command,
@@ -234,7 +234,7 @@ def test_implement_ai_prompt_includes_project_lexicon(tmp_path, monkeypatch):
     )
     calls: list[str] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(input)
         match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
         assert match is not None
@@ -291,7 +291,7 @@ def test_plan_init_ai_prompt_includes_project_lexicon(tmp_path, monkeypatch):
     )
     calls: list[str] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(input)
         return subprocess.CompletedProcess(
             args=command,

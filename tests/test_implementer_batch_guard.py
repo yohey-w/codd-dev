@@ -62,7 +62,7 @@ def _write_project(tmp_path: Path, wave_counts: dict[int, int]) -> Path:
 def _mock_ai(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(input)
         match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
         assert match is not None
