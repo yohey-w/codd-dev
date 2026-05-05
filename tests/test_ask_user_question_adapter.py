@@ -1,4 +1,5 @@
 from codd.ask_user_question_adapter import (
+    _severity_at_or_above,
     format_ask_for_ntfy,
     parse_user_answer,
     send_ask_items,
@@ -8,10 +9,11 @@ from codd.hitl_session import HitlSession
 from codd.lexicon import AskItem, AskOption, load_lexicon
 
 
-def _ask_item() -> AskItem:
+def _ask_item(*, blocking: bool = False) -> AskItem:
     return AskItem(
         id="q_auth",
         question="Which auth method?",
+        blocking=blocking,
         options=[
             AskOption(id="password", label="Password"),
             AskOption(id="oauth", label="OAuth", recommended=True),
@@ -48,11 +50,34 @@ def test_send_ask_items_non_claude_uses_ntfy_and_lexicon(monkeypatch, tmp_path):
     monkeypatch.setattr("codd.ask_user_question_adapter._send_ask_user_question", lambda item: asked.append(item.id))
     lexicon_path = tmp_path / "project_lexicon.yaml"
 
-    send_ask_items([_ask_item()], ntfy_topic="topic", lexicon_path=lexicon_path)
+    send_ask_items([_ask_item(blocking=True)], ntfy_topic="topic", lexicon_path=lexicon_path)
 
-    assert posted == [("topic", format_ask_for_ntfy(_ask_item()))]
+    assert posted == [("topic", format_ask_for_ntfy(_ask_item(blocking=True)))]
     assert asked == []
     assert load_lexicon(tmp_path).coverage_decisions[0].id == "q_auth"
+
+
+def test_send_ask_items_skips_ntfy_below_default_threshold(monkeypatch, tmp_path):
+    posted: list[tuple[str, str]] = []
+    monkeypatch.setattr("codd.ask_user_question_adapter.is_claude_code_env", lambda: False)
+    monkeypatch.setattr("codd.ask_user_question_adapter._post_ntfy", lambda topic, msg: posted.append((topic, msg)))
+
+    send_ask_items([_ask_item()], ntfy_topic="topic", lexicon_path=tmp_path / "project_lexicon.yaml")
+
+    assert posted == []
+
+
+def test_send_ask_items_allows_high_threshold(monkeypatch):
+    posted: list[tuple[str, str]] = []
+    monkeypatch.setattr("codd.ask_user_question_adapter._post_ntfy", lambda topic, msg: posted.append((topic, msg)))
+
+    send_ask_items([_ask_item()], channels=["ntfy"], ntfy_topic="topic", ntfy_severity_threshold="high")
+
+    assert posted == [("topic", format_ask_for_ntfy(_ask_item()))]
+
+
+def test_severity_at_or_above_unknown_severity_is_safe_side():
+    assert _severity_at_or_above("unknown", "critical") is True
 
 
 def test_send_ask_items_claude_env_uses_askuserquestion(monkeypatch):

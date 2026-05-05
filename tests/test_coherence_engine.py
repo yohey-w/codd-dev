@@ -235,10 +235,20 @@ def test_orchestrator_rate_limit(tmp_path, monkeypatch):
     )
     messages = _patch_ntfy(monkeypatch, orchestrator)
 
-    bus.publish(_event(kind="url_drift"))
-    bus.publish(_event(kind="lexicon_violation"))
+    bus.publish(_event(severity="red", fix_strategy="hitl", kind="url_drift"))
+    bus.publish(_event(severity="red", fix_strategy="hitl", kind="lexicon_violation"))
 
     assert messages == ["CoDD Coherence: 1 HITL event(s) pending review"]
+
+
+def test_orchestrator_amber_hitl_does_not_send_ntfy(tmp_path, monkeypatch):
+    bus = EventBus()
+    orchestrator = Orchestrator(bus, hitl_path=str(tmp_path / "pending_hitl.md"))
+    messages = _patch_ntfy(monkeypatch, orchestrator)
+
+    bus.publish(_event())
+
+    assert messages == []
 
 
 def test_full_flow(tmp_path, monkeypatch):

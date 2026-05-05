@@ -2,6 +2,20 @@
 
 All notable changes to CoDD are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **`codd preflight` / `codd gungi`** (cmd_377): autonomous execution preflight checks with
+  goal clarity, context completeness, judgment material, and rollback criteria audits.
+- Project-type defaults for critical operations under `codd/preflight/defaults/`
+  (`web`, `cli`, `mobile`, `iot`) plus `codd.yaml [preflight] critical_operations` overrides.
+
+### Changed
+
+- ntfy delivery is severity-filtered by default: ASK notifications send only for critical
+  items, and Coherence Engine HITL notifications send only for red events.
+
 ## [1.20.0] - 2026-05-05
 
 ### Added — AI-driven Design Artifact Derivation (要件→AI動的設計書群導出)

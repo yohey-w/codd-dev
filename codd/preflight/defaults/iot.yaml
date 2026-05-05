@@ -1,0 +1,7 @@
+project_type: iot
+critical_operations:
+  - firmware_ota_deploy
+  - device_factory_reset
+  - telemetry_protocol_change
+  - remote_command_send_bulk
+  - provisioning_key_change

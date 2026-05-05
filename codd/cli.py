@@ -194,6 +194,78 @@ def main():
     pass
 
 
+@main.command("preflight")
+@click.argument("task_yaml", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--strict", is_flag=True, help="Treat high severity as halt-worthy")
+@click.option("--ntfy-topic", default="", help="ntfy topic for critical alerts")
+@click.option(
+    "--ntfy-severity-threshold",
+    default=None,
+    help="Minimum severity sent to ntfy (default: codd.yaml preflight.ntfy_severity_threshold or critical)",
+)
+def preflight(task_yaml: Path, project_path: str, strict: bool, ntfy_topic: str, ntfy_severity_threshold: str | None):
+    """Run preflight checks on a task YAML before autonomous execution."""
+    _run_preflight_command(task_yaml, project_path, strict, ntfy_topic, ntfy_severity_threshold)
+
+
+@main.command("gungi")
+@click.argument("task_yaml", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--strict", is_flag=True, help="Treat high severity as halt-worthy")
+@click.option("--ntfy-topic", default="", help="ntfy topic for critical alerts")
+@click.option(
+    "--ntfy-severity-threshold",
+    default=None,
+    help="Minimum severity sent to ntfy (default: codd.yaml preflight.ntfy_severity_threshold or critical)",
+)
+def gungi(task_yaml: Path, project_path: str, strict: bool, ntfy_topic: str, ntfy_severity_threshold: str | None):
+    """Alias for preflight."""
+    _run_preflight_command(task_yaml, project_path, strict, ntfy_topic, ntfy_severity_threshold)
+
+
+def _run_preflight_command(
+    task_yaml: Path,
+    project_path: str,
+    strict: bool,
+    ntfy_topic: str,
+    ntfy_severity_threshold: str | None,
+) -> None:
+    from codd.ask_user_question_adapter import _post_ntfy, _severity_at_or_above
+    from codd.preflight import PreflightAuditor
+
+    project_root = Path(project_path).resolve()
+    auditor = PreflightAuditor(project_root=project_root)
+    result = auditor.run(task_yaml)
+    strict_halt = strict and result.severity == "high"
+    if strict_halt:
+        result.halt_recommended = True
+
+    threshold = ntfy_severity_threshold or str(
+        auditor.preflight_config.get("ntfy_severity_threshold") or "critical"
+    )
+    if ntfy_topic and _severity_at_or_above(result.severity, threshold):
+        result.ntfy_sent = _post_ntfy(ntfy_topic, _format_preflight_ntfy(result))
+
+    for check in result.checks:
+        click.echo(f"[{check.status}] {check.name}: {check.message}")
+        for detail in check.details:
+            click.echo(f"  - {detail}")
+    click.echo(f"Overall severity: {result.severity}")
+    click.echo(f"ntfy_sent: {str(result.ntfy_sent).lower()}")
+
+    if result.halt_recommended:
+        reason = "strict high severity" if strict_halt else "critical issue found"
+        click.echo(f"HALT recommended: {reason}")
+        raise SystemExit(1)
+
+
+def _format_preflight_ntfy(result: Any) -> str:
+    failed = [check.name for check in result.checks if check.status in {"FAIL", "WARN"}]
+    suffix = f" ({', '.join(failed)})" if failed else ""
+    return f"CoDD preflight: {result.task_id} severity={result.severity}{suffix}"
+
+
 @main.command()
 @click.option("--project-name", prompt="Project name", help="Name of the project")
 @click.option("--language", prompt="Primary language", help="Primary language (python/typescript/javascript/go — full support; java — symbols only)")

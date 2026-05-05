@@ -1,0 +1,14 @@
+project_type: web
+critical_operations:
+  - deploy_to_production
+  - deploy_to_prod
+  - db_migration_production
+  - db_migration_prod
+  - drop_table
+  - alter_table_production
+  - api_key_publish
+  - oauth_client_secret_publish
+  - external_link_publish
+  - send_email_bulk
+  - charge_payment
+  - gdpr_data_delete
