@@ -46,7 +46,6 @@ def _write_codd_yaml(project):
 def _disable_other_gates(monkeypatch):
     monkeypatch.setattr("codd.deployer._collect_validate_gate", lambda *args: None)
     monkeypatch.setattr("codd.deployer._collect_drift_gate", lambda *args: None)
-    monkeypatch.setattr("codd.deployer._collect_drift_linker_gate", lambda *args: None)
     monkeypatch.setattr("codd.deployer._collect_coverage_gate", lambda *args: None)
 
 
