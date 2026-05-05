@@ -34,6 +34,8 @@ RoutingKey = Severity | tuple[Severity, str] | str
 class DriftEvent:
     """Unified representation of cross-artifact drift."""
 
+    # DriftEvent kind for requirement override:
+    # kind=requirement_override_drift, source=requirement_decision, target=design_documents.
     source_artifact: ArtifactKind
     target_artifact: ArtifactKind
     change_type: ChangeType
@@ -78,6 +80,7 @@ def set_coherence_bus(bus: EventBus | None) -> None:
     """Set the opt-in coherence bus on detectors that publish DriftEvents."""
     for module_name in (
         "codd.drift",
+        "codd.hitl_session",
         "codd.validator",
         "codd.screen_flow_validator",
     ):

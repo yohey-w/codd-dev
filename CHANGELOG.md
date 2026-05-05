@@ -38,13 +38,20 @@ All notable changes to CoDD are documented in this file.
     一致 + middleware 単一インスタンス を命令
   - `_check_guard_files_uniqueness()` で `codd.yaml [implementer] guard_files` リストの
     重複ファイル (root middleware.ts と generated/middleware.ts 等) 検出 → CoddCLIError 昇格
+- **`codd require --completeness-audit`** (cmd_375):
+  要件文書から設計書導出に必要な情報の欠落を監査し、選択式ASKを生成
+  - `RequirementCompletenessAuditor` + project_type 別 defaults (web / cli / mobile / iot)
+  - `AskItem` / `AskOption` を `project_lexicon.yaml:coverage_decisions` に永続化
+  - `HitlSession` による HITL 協業型 (`RECOMMENDED_PROCEEDING`) と blocking mode 互換
+  - AskUserQuestion / ntfy / lexicon の3チャネル送信。Claude非依存環境では ntfy + lexicon で動作
 
 ### Notes
 
 - 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
   e2e-generate / extract) はすべて変更なし。新フラグはすべて opt-in。
-- 既存テスト 852 (v1.18.0) → 924 (v1.19.0)、+72 件追加 (cmd_364: 12 + cmd_365: 16 +
-  cmd_366: 13 + cmd_367: 11 + cmd_368: 11 + cmd_373: 9)、全件 PASS / 0 FAIL / 0 SKIP
+- 既存テスト 852 (v1.18.0) → 949 (v1.19.0)、+97 件追加 (cmd_364: 12 + cmd_365: 16 +
+  cmd_366: 13 + cmd_367: 11 + cmd_368: 11 + cmd_373: 9 + cmd_375: 25)、
+  全件 PASS / 0 FAIL / 0 SKIP
 - Generality Gate: framework 固有名 (Next.js/NextAuth/Clerk/Nuxt/SvelteKit) は
   defaults.yaml と codd.yaml override に分離、CoDD core にハードコードなし。
   Playwright/Cypress は e2e_generator の switch 範疇 (cmd_342 で確立した汎用 pattern)。

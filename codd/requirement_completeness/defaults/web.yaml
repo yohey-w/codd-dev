@@ -1,0 +1,108 @@
+project_type: web
+default_questions:
+  - id: q_auth_method
+    question: "Which authentication method should the product assume?"
+    type: select
+    blocking: true
+    aliases: ["authentication", "auth", "login", "sign in", "oauth", "oidc", "sso"]
+    search_query: "web application authentication method comparison 2026"
+    options:
+      - id: oauth_oidc
+        label: "OAuth/OIDC with session cookies"
+        description: "Use a standards-based identity provider and secure browser sessions."
+        cost_effort: medium
+        pros: "Common SaaS baseline; supports future SSO."
+        cons: "Requires identity provider setup."
+        recommended: true
+        recommendation_rationale: "Best default for most modern web products."
+      - id: email_password
+        label: "Email and password"
+        description: "Application-owned credentials with password reset."
+        cost_effort: medium
+        pros: "Simple user mental model."
+        cons: "Higher password storage and recovery burden."
+      - id: enterprise_sso
+        label: "Enterprise SSO"
+        description: "SAML or OIDC SSO controlled by customer organizations."
+        cost_effort: high
+        pros: "Fits B2B security expectations."
+        cons: "More tenant and support complexity."
+      - id: custom
+        label: "Other / custom"
+        type: free_text
+  - id: q_concurrent_users
+    question: "What concurrent user scale should designs target?"
+    type: select
+    blocking: false
+    aliases: ["concurrent users", "traffic", "scale", "load", "users"]
+    search_query: "web app concurrent users scale planning 2026"
+    options:
+      - id: small
+        label: "Up to 100 concurrent users"
+        cost_effort: low
+      - id: medium
+        label: "100 to 1,000 concurrent users"
+        cost_effort: medium
+        recommended: true
+        recommendation_rationale: "Conservative baseline until product traction is known."
+      - id: large
+        label: "More than 1,000 concurrent users"
+        cost_effort: high
+      - id: custom
+        label: "Other / custom"
+        type: free_text
+  - id: q_wcag_level
+    question: "Which WCAG accessibility level is required?"
+    type: select
+    blocking: false
+    aliases: ["accessibility", "wcag", "a11y"]
+    search_query: "WCAG level A AA AAA requirements"
+    options:
+      - id: wcag_a
+        label: "WCAG A"
+        cost_effort: low
+      - id: wcag_aa
+        label: "WCAG AA"
+        cost_effort: medium
+        recommended: true
+        recommendation_rationale: "Common public-facing product baseline."
+      - id: wcag_aaa
+        label: "WCAG AAA"
+        cost_effort: high
+      - id: not_required
+        label: "No formal WCAG target"
+        cost_effort: low
+  - id: q_offline_support
+    question: "Is offline support required?"
+    type: select
+    blocking: false
+    aliases: ["offline", "pwa", "service worker", "cache"]
+    search_query: "web app offline support PWA requirements"
+    options:
+      - id: online_only
+        label: "Online only"
+        cost_effort: low
+        recommended: true
+      - id: read_only_offline
+        label: "Read-only offline mode"
+        cost_effort: medium
+      - id: full_offline_sync
+        label: "Full offline write and sync"
+        cost_effort: high
+  - id: q_i18n
+    question: "Is multilingual support required?"
+    type: select
+    blocking: false
+    aliases: ["i18n", "internationalization", "locale", "language", "multilingual"]
+    search_query: "web app i18n requirements 2026"
+    options:
+      - id: single_language
+        label: "Single language"
+        cost_effort: low
+        recommended: true
+      - id: two_languages
+        label: "Two languages"
+        cost_effort: medium
+      - id: many_languages
+        label: "Three or more languages"
+        cost_effort: high

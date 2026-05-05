@@ -1,0 +1,87 @@
+project_type: mobile
+default_questions:
+  - id: q_target_platform
+    question: "Which mobile platforms are in scope?"
+    type: multiselect
+    blocking: true
+    aliases: ["ios", "android", "platform", "mobile"]
+    search_query: "mobile app platform scope iOS Android 2026"
+    options:
+      - id: ios_android
+        label: "iOS and Android"
+        cost_effort: high
+        recommended: true
+      - id: ios_only
+        label: "iOS only"
+        cost_effort: medium
+      - id: android_only
+        label: "Android only"
+        cost_effort: medium
+  - id: q_auth_method
+    question: "Which mobile authentication method is required?"
+    type: select
+    blocking: true
+    aliases: ["authentication", "login", "oauth", "biometric", "passkey"]
+    search_query: "mobile app authentication biometric passkey OAuth 2026"
+    options:
+      - id: oauth_with_biometrics
+        label: "OAuth/OIDC plus biometric unlock"
+        cost_effort: medium
+        recommended: true
+      - id: email_password
+        label: "Email and password"
+        cost_effort: medium
+      - id: passkeys
+        label: "Passkeys"
+        cost_effort: high
+  - id: q_push_notifications
+    question: "Are push notifications required?"
+    type: select
+    blocking: false
+    aliases: ["push", "notification", "apns", "fcm"]
+    search_query: "mobile push notification requirements APNs FCM"
+    options:
+      - id: none
+        label: "No push notifications"
+        cost_effort: low
+      - id: transactional_only
+        label: "Transactional notifications only"
+        cost_effort: medium
+        recommended: true
+      - id: transactional_marketing
+        label: "Transactional and marketing notifications"
+        cost_effort: high
+  - id: q_offline_sync
+    question: "Does the app need offline sync?"
+    type: select
+    blocking: false
+    aliases: ["offline", "sync", "local storage", "cache"]
+    search_query: "mobile offline sync requirements conflict resolution"
+    options:
+      - id: online_only
+        label: "Online only"
+        cost_effort: low
+        recommended: true
+      - id: read_cache
+        label: "Read cache only"
+        cost_effort: medium
+      - id: bidirectional_sync
+        label: "Bidirectional offline sync"
+        cost_effort: high
+  - id: q_store_distribution
+    question: "How will the app be distributed?"
+    type: select
+    blocking: false
+    aliases: ["app store", "play store", "distribution", "enterprise"]
+    search_query: "mobile app distribution app store enterprise MDM"
+    options:
+      - id: public_stores
+        label: "Public app stores"
+        cost_effort: medium
+        recommended: true
+      - id: enterprise_mdm
+        label: "Enterprise MDM"
+        cost_effort: high
+      - id: internal_testing
+        label: "Internal testing only"
+        cost_effort: low

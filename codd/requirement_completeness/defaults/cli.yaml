@@ -1,0 +1,90 @@
+project_type: cli
+default_questions:
+  - id: q_distribution
+    question: "How will the CLI be distributed?"
+    type: select
+    blocking: true
+    aliases: ["distribution", "install", "package", "homebrew", "pip", "npm", "binary"]
+    search_query: "CLI distribution options package manager binary 2026"
+    options:
+      - id: package_manager
+        label: "Language package manager"
+        cost_effort: low
+        recommended: true
+      - id: standalone_binary
+        label: "Standalone binary releases"
+        cost_effort: medium
+      - id: container_image
+        label: "Container image"
+        cost_effort: medium
+      - id: custom
+        label: "Other / custom"
+        type: free_text
+  - id: q_config_source
+    question: "Where should runtime configuration come from?"
+    type: select
+    blocking: false
+    aliases: ["configuration", "config file", "environment", "flags"]
+    search_query: "CLI configuration flags environment file best practices 2026"
+    options:
+      - id: flags_env_file
+        label: "Flags, environment, and config file"
+        cost_effort: medium
+        recommended: true
+      - id: flags_only
+        label: "Flags only"
+        cost_effort: low
+      - id: interactive_prompts
+        label: "Interactive prompts"
+        cost_effort: medium
+  - id: q_output_format
+    question: "Which output formats are required?"
+    type: multiselect
+    blocking: false
+    aliases: ["output", "json", "yaml", "table", "format"]
+    search_query: "CLI output format JSON table YAML best practices"
+    options:
+      - id: human_text
+        label: "Human-readable text"
+        cost_effort: low
+        recommended: true
+      - id: json
+        label: "JSON"
+        cost_effort: low
+      - id: yaml
+        label: "YAML"
+        cost_effort: low
+      - id: custom
+        label: "Other / custom"
+        type: free_text
+  - id: q_auth_method
+    question: "Does the CLI need authentication?"
+    type: select
+    blocking: false
+    aliases: ["authentication", "token", "oauth", "api key", "login"]
+    search_query: "CLI authentication API token OAuth device flow 2026"
+    options:
+      - id: no_auth
+        label: "No authentication"
+        cost_effort: low
+        recommended: true
+      - id: api_token
+        label: "API token"
+        cost_effort: medium
+      - id: oauth_device_flow
+        label: "OAuth device flow"
+        cost_effort: high
+  - id: q_ci_integration
+    question: "Must the CLI run non-interactively in CI?"
+    type: select
+    blocking: false
+    aliases: ["ci", "automation", "non-interactive", "exit code"]
+    search_query: "CLI CI non-interactive mode exit codes"
+    options:
+      - id: ci_required
+        label: "Yes, CI-safe mode is required"
+        cost_effort: medium
+        recommended: true
+      - id: local_only
+        label: "No, local use only"
+        cost_effort: low

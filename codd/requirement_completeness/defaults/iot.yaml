@@ -1,0 +1,87 @@
+project_type: iot
+default_questions:
+  - id: q_device_class
+    question: "What class of device is being designed for?"
+    type: select
+    blocking: true
+    aliases: ["device", "sensor", "gateway", "embedded", "hardware"]
+    search_query: "IoT device class sensor gateway embedded requirements"
+    options:
+      - id: constrained_sensor
+        label: "Constrained sensor device"
+        cost_effort: medium
+      - id: edge_gateway
+        label: "Edge gateway"
+        cost_effort: high
+        recommended: true
+      - id: actuator_control
+        label: "Actuator or control device"
+        cost_effort: high
+  - id: q_connectivity
+    question: "Which connectivity model is required?"
+    type: select
+    blocking: true
+    aliases: ["connectivity", "wifi", "cellular", "mqtt", "ble", "network"]
+    search_query: "IoT connectivity Wi-Fi cellular BLE MQTT requirements 2026"
+    options:
+      - id: wifi_mqtt
+        label: "Wi-Fi plus MQTT"
+        cost_effort: medium
+        recommended: true
+      - id: cellular
+        label: "Cellular"
+        cost_effort: high
+      - id: ble_gateway
+        label: "BLE to gateway"
+        cost_effort: medium
+  - id: q_update_method
+    question: "How should device firmware updates work?"
+    type: select
+    blocking: false
+    aliases: ["firmware", "ota", "update", "rollback"]
+    search_query: "IoT OTA firmware update rollback requirements"
+    options:
+      - id: signed_ota
+        label: "Signed OTA with rollback"
+        cost_effort: high
+        recommended: true
+      - id: manual_update
+        label: "Manual update"
+        cost_effort: low
+      - id: no_updates
+        label: "No remote updates"
+        cost_effort: low
+  - id: q_data_retention
+    question: "How long should telemetry be retained?"
+    type: select
+    blocking: false
+    aliases: ["telemetry", "retention", "storage", "data"]
+    search_query: "IoT telemetry retention requirements"
+    options:
+      - id: thirty_days
+        label: "30 days"
+        cost_effort: low
+        recommended: true
+      - id: one_year
+        label: "1 year"
+        cost_effort: medium
+      - id: custom
+        label: "Other / custom"
+        type: free_text
+  - id: q_safety_level
+    question: "Are safety-critical controls in scope?"
+    type: select
+    blocking: false
+    aliases: ["safety", "critical", "hazard", "fail safe"]
+    search_query: "IoT safety critical requirements fail safe"
+    options:
+      - id: non_safety_critical
+        label: "No safety-critical controls"
+        cost_effort: low
+        recommended: true
+      - id: safety_relevant
+        label: "Safety-relevant controls"
+        cost_effort: high
+      - id: regulated_safety
+        label: "Regulated safety-critical system"
+        cost_effort: high
