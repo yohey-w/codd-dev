@@ -14,7 +14,7 @@ def _seed_synth_project(tmp_path: Path) -> Path:
     (src / "db").mkdir(parents=True)
     (src / "utils").mkdir(parents=True)
 
-    (src / "api" / "__init__.py").write_text("")
+    (src / "api" / "__init__.py").write_text("", encoding="utf-8")
     (src / "api" / "routes.py").write_text(
         textwrap.dedent(
             """\
@@ -31,7 +31,7 @@ def _seed_synth_project(tmp_path: Path) -> Path:
         )
     )
 
-    (src / "services" / "__init__.py").write_text("")
+    (src / "services" / "__init__.py").write_text("", encoding="utf-8")
     (src / "services" / "auth.py").write_text(
         textwrap.dedent(
             """\
@@ -48,7 +48,7 @@ def _seed_synth_project(tmp_path: Path) -> Path:
         )
     )
 
-    (src / "db" / "__init__.py").write_text("")
+    (src / "db" / "__init__.py").write_text("", encoding="utf-8")
     (src / "db" / "models.py").write_text(
         textwrap.dedent(
             """\
@@ -66,7 +66,7 @@ def _seed_synth_project(tmp_path: Path) -> Path:
         )
     )
 
-    (src / "utils" / "__init__.py").write_text("")
+    (src / "utils" / "__init__.py").write_text("", encoding="utf-8")
     (src / "utils" / "crypto.py").write_text(
         textwrap.dedent(
             """\
@@ -164,8 +164,8 @@ def test_synth_docs_renders_system_context_and_architecture(tmp_path):
     assert system_context in generated
     assert architecture in generated
 
-    system_content = system_context.read_text()
-    architecture_content = architecture.read_text()
+    system_content = system_context.read_text(encoding="utf-8")
+    architecture_content = architecture.read_text(encoding="utf-8")
 
     assert "Module Map" in system_content
     assert "Schema Artifacts" in system_content
@@ -182,7 +182,7 @@ def test_module_detail_includes_api_routes_and_async_functions(tmp_path):
     output_dir = project_root / "docs" / "extracted"
     synth_docs(facts, output_dir)
 
-    api_doc = (output_dir / "modules" / "api.md").read_text()
+    api_doc = (output_dir / "modules" / "api.md").read_text(encoding="utf-8")
 
     assert "## API Routes" in api_doc
     assert "`/health`" in api_doc
@@ -197,7 +197,7 @@ def test_schema_design_renders_foreign_keys_and_indexes(tmp_path):
     output_dir = project_root / "docs" / "extracted"
     synth_docs(facts, output_dir)
 
-    schema_doc = next((output_dir / "schemas").glob("*.md")).read_text()
+    schema_doc = next((output_dir / "schemas").glob("*.md")).read_text(encoding="utf-8")
 
     assert "## Foreign Keys" in schema_doc
     assert "users(role_id) -> roles(id)" in schema_doc
@@ -212,7 +212,7 @@ def test_api_contract_renders_openapi_endpoints(tmp_path):
     output_dir = project_root / "docs" / "extracted"
     synth_docs(facts, output_dir)
 
-    api_doc = next((output_dir / "api").glob("*.md")).read_text()
+    api_doc = next((output_dir / "api").glob("*.md")).read_text(encoding="utf-8")
 
     assert "## OpenAPI Endpoints" in api_doc
     assert "`/health`" in api_doc
@@ -252,7 +252,7 @@ def test_synth_architecture_classifies_layers_and_flags_violations(tmp_path):
     output_dir.mkdir(parents=True)
 
     architecture_path = synth_architecture(facts, output_dir)
-    content = architecture_path.read_text()
+    content = architecture_path.read_text(encoding="utf-8")
 
     assert "### Presentation" in content
     assert "### Application" in content

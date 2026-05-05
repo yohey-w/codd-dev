@@ -13,7 +13,7 @@ from codd.scanner import _extract_frontmatter
 def run_impact(project_root: Path, codd_dir: Path, diff_target: str,
                output_path: str = None):
     """Run impact analysis from git diff."""
-    config = yaml.safe_load((codd_dir / "codd.yaml").read_text())
+    config = yaml.safe_load((codd_dir / "codd.yaml").read_text(encoding="utf-8"))
     scan_dir = codd_dir / "scan"
     ceg = CEG(scan_dir)
 
@@ -62,7 +62,7 @@ def run_impact(project_root: Path, codd_dir: Path, diff_target: str,
     )
 
     if output_path:
-        Path(output_path).write_text(report)
+        Path(output_path).write_text(report, encoding="utf-8")
         print(f"Report written to {output_path}")
     else:
         print("\n" + report)
@@ -75,7 +75,7 @@ def _get_changed_files(project_root: Path, diff_target: str) -> list:
     try:
         result = subprocess.run(
             ["git", "-c", "core.quotePath=false", "diff", "--name-only", diff_target],
-            capture_output=True, text=True, cwd=str(project_root)
+            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root)
         )
         if result.returncode != 0:
             print(f"Warning: git diff failed: {result.stderr.strip()}")

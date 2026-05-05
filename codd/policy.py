@@ -138,7 +138,7 @@ def _run_policy_oss(
 
         result.files_checked += 1
         try:
-            content = file_path.read_text(errors="ignore")
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
 

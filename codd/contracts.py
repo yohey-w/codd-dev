@@ -94,7 +94,7 @@ def build_interface_contracts(facts: ProjectFacts, project_root: Path) -> None:
         if init_files:
             init_path = project_root / init_files[0]
             try:
-                init_content = init_path.read_text(errors="ignore")
+                init_content = init_path.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 init_content = ""
             public = detect_init_exports(init_content)

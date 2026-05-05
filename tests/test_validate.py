@@ -42,7 +42,7 @@ def _setup_project(tmp_path, docs: dict[str, str], wave_config=None):
     for relative_path, content in docs.items():
         doc_path = project / relative_path
         doc_path.parent.mkdir(parents=True, exist_ok=True)
-        doc_path.write_text(content)
+        doc_path.write_text(content, encoding="utf-8")
 
     return project, codd_dir
 
@@ -194,7 +194,7 @@ codd:
 """,
         },
     )
-    codd_config = yaml.safe_load((codd_dir / "codd.yaml").read_text())
+    codd_config = yaml.safe_load((codd_dir / "codd.yaml").read_text(encoding="utf-8"))
     codd_config["service_boundaries"] = [{"name": "auth", "modules": ["src/services/auth/"]}]
     (codd_dir / "codd.yaml").write_text(yaml.safe_dump(codd_config, sort_keys=False, allow_unicode=True))
 

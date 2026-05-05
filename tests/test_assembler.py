@@ -66,12 +66,12 @@ def test_collect_fragments_excludes_orphans(tmp_path):
     for slug in ["authentication", "database_foundation"]:
         task_dir = gen_base / slug
         task_dir.mkdir(parents=True)
-        (task_dir / "index.ts").write_text(f"// {slug}")
+        (task_dir / "index.ts").write_text(f"// {slug}", encoding="utf-8")
 
     # Create an orphan directory (old task that was renamed)
     orphan_dir = gen_base / "old_removed_task"
     orphan_dir.mkdir(parents=True)
-    (orphan_dir / "stale.ts").write_text("// should be excluded")
+    (orphan_dir / "stale.ts").write_text("// should be excluded", encoding="utf-8")
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")

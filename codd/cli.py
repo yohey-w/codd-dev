@@ -311,7 +311,7 @@ def init(project_name: str, language: str, dest: str, requirements: str | None, 
     _render_template("gitignore.tmpl", codd_dir / ".gitignore", {})
 
     # Version file
-    (dest_path / ".codd_version").write_text("0.2.0\n")
+    (dest_path / ".codd_version").write_text("0.2.0\n", encoding="utf-8")
 
     # Import requirements if provided
     if requirements:
@@ -1269,7 +1269,7 @@ def repair_slice_cmd(path, files, issue, issue_file, language, source_dirs, top_
 
     issue_text = issue or ""
     if issue_file and not issue_text:
-        issue_text = Path(issue_file).read_text(errors="ignore")
+        issue_text = Path(issue_file).read_text(encoding="utf-8", errors="ignore")
 
     dirs = [d.strip() for d in source_dirs.split(",") if d.strip()] if source_dirs else None
 
@@ -2209,13 +2209,13 @@ def _render_template(template_name: str, dest: Path, variables: dict):
     tmpl_path = TEMPLATES_DIR / template_name
     if not tmpl_path.exists():
         # Create empty file if template doesn't exist yet
-        dest.write_text(f"# TODO: template {template_name} not yet created\n")
+        dest.write_text(f"# TODO: template {template_name} not yet created\n", encoding="utf-8")
         return
 
-    content = tmpl_path.read_text()
+    content = tmpl_path.read_text(encoding="utf-8")
     for key, value in variables.items():
         content = content.replace(f"{{{{{key}}}}}", value)
-    dest.write_text(content)
+    dest.write_text(content, encoding="utf-8")
 
 
 def _import_requirements(project_root: Path, source: Path, project_name: str) -> Path:

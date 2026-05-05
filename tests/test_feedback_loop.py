@@ -173,7 +173,7 @@ def test_generate_cli_feedback_flag(tmp_path, monkeypatch):
     project = _setup_cli_project(tmp_path)
     prompts: list[str] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         prompts.append(input)
         return subprocess.CompletedProcess(
             args=command, returncode=0,

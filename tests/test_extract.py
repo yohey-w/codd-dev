@@ -24,7 +24,7 @@ def python_project(tmp_path):
     # Source code
     src = tmp_path / "src"
     (src / "auth").mkdir(parents=True)
-    (src / "auth" / "__init__.py").write_text("")
+    (src / "auth" / "__init__.py").write_text("", encoding="utf-8")
     (src / "auth" / "service.py").write_text(textwrap.dedent("""\
         from db.models import User
         from utils.crypto import hash_password
@@ -47,7 +47,7 @@ def python_project(tmp_path):
     """))
 
     (src / "db").mkdir(parents=True)
-    (src / "db" / "__init__.py").write_text("")
+    (src / "db" / "__init__.py").write_text("", encoding="utf-8")
     (src / "db" / "models.py").write_text(textwrap.dedent("""\
         from sqlalchemy import Column, Integer, String
         from sqlalchemy.ext.declarative import declarative_base
@@ -68,7 +68,7 @@ def python_project(tmp_path):
     """))
 
     (src / "utils").mkdir(parents=True)
-    (src / "utils" / "__init__.py").write_text("")
+    (src / "utils" / "__init__.py").write_text("", encoding="utf-8")
     (src / "utils" / "crypto.py").write_text(textwrap.dedent("""\
         import hashlib
 
@@ -80,7 +80,7 @@ def python_project(tmp_path):
     """))
 
     (src / "api").mkdir(parents=True)
-    (src / "api" / "__init__.py").write_text("")
+    (src / "api" / "__init__.py").write_text("", encoding="utf-8")
     (src / "api" / "routes.py").write_text(textwrap.dedent("""\
         from fastapi import FastAPI
         from auth.service import AuthService
@@ -101,7 +101,7 @@ def python_project(tmp_path):
     # Tests
     tests = tmp_path / "tests"
     tests.mkdir()
-    (tests / "__init__.py").write_text("")
+    (tests / "__init__.py").write_text("", encoding="utf-8")
     (tests / "test_auth.py").write_text(textwrap.dedent("""\
         from auth.service import AuthService
 
@@ -268,7 +268,7 @@ class TestSynthDocs:
         assert system_ctx.exists()
         assert system_ctx in generated
 
-        content = system_ctx.read_text()
+        content = system_ctx.read_text(encoding="utf-8")
         assert "design:extract:system-context" in content
         assert "source: extracted" in content
         assert "Module Map" in content
@@ -283,7 +283,7 @@ class TestSynthDocs:
 
         auth_doc = modules_dir / "auth.md"
         assert auth_doc.exists()
-        content = auth_doc.read_text()
+        content = auth_doc.read_text(encoding="utf-8")
         assert "design:extract:auth" in content
         assert "AuthService" in content
         assert "source: extracted" in content
@@ -293,7 +293,7 @@ class TestSynthDocs:
         output_dir = python_project / "codd" / "extracted"
         synth_docs(facts, output_dir)
 
-        auth_doc = (output_dir / "modules" / "auth.md").read_text()
+        auth_doc = (output_dir / "modules" / "auth.md").read_text(encoding="utf-8")
         assert "depends_on:" in auth_doc
         assert "design:extract:db" in auth_doc
 
@@ -304,7 +304,7 @@ class TestSynthDocs:
         synth_docs(facts, output_dir)
 
         for f in (output_dir / "modules").iterdir():
-            content = f.read_text()
+            content = f.read_text(encoding="utf-8")
             # confidence should be < 0.90 (green threshold)
             import re
             m = re.search(r'confidence:\s*([\d.]+)', content)

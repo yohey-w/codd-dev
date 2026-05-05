@@ -50,7 +50,7 @@ title: Just a normal document
 
 def test_extract_frontmatter_no_frontmatter(tmp_path):
     doc = tmp_path / "test.md"
-    doc.write_text("# No frontmatter here\n")
+    doc.write_text("# No frontmatter here\n", encoding="utf-8")
     result = _extract_frontmatter(doc)
     assert result is None
 
@@ -275,7 +275,7 @@ def test_scan_warns_when_wave_config_output_is_missing(tmp_path, capsys):
 
     project, codd_dir = _setup_project(tmp_path)
     config_path = codd_dir / "codd.yaml"
-    config = yaml.safe_load(config_path.read_text())
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     config["wave_config"] = {
         "1": [
             {

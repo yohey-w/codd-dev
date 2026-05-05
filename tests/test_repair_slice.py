@@ -97,7 +97,7 @@ class TestExtractFunctionLineRanges:
                 def method(self):
                     return 3
         """)
-        (tmp_path / "test.py").write_text(code)
+        (tmp_path / "test.py").write_text(code, encoding="utf-8")
         ranges = extract_function_line_ranges(code, "test.py", "python")
         assert "foo" in ranges
         assert "bar" in ranges
@@ -187,7 +187,7 @@ class TestBuildRepairSlice:
                 return 3
         """)
         (tmp_path / "src").mkdir()
-        (tmp_path / "src" / "mod.py").write_text(code)
+        (tmp_path / "src" / "mod.py").write_text(code, encoding="utf-8")
 
         mod = ModuleInfo(
             name="mod",
@@ -208,7 +208,7 @@ class TestBuildRepairSlice:
         assert rs.functions[0].name in ("bar", "baz", "foo")
 
     def test_empty_file(self, tmp_path):
-        (tmp_path / "empty.py").write_text("")
+        (tmp_path / "empty.py").write_text("", encoding="utf-8")
         facts = make_facts()
         rs = build_repair_slice(tmp_path, "empty.py", facts)
         assert rs.functions == []
@@ -220,7 +220,7 @@ class TestBuildRepairSlice:
 
     def test_top_n_limits(self, tmp_path):
         code = "\n".join(f"def func_{i}():\n    return {i}\n" for i in range(10))
-        (tmp_path / "many.py").write_text(code)
+        (tmp_path / "many.py").write_text(code, encoding="utf-8")
 
         syms = [make_symbol(f"func_{i}", line=i * 3 + 1) for i in range(10)]
         mod = ModuleInfo(name="many", files=["many.py"], symbols=syms, call_edges=[])
@@ -237,7 +237,7 @@ class TestBuildRepairSlice:
             def callee():
                 return 42
         """)
-        (tmp_path / "call.py").write_text(code)
+        (tmp_path / "call.py").write_text(code, encoding="utf-8")
 
         mod = ModuleInfo(
             name="call",
@@ -312,7 +312,7 @@ class TestGenerateRepairSlices:
     def test_end_to_end(self, tmp_path):
         src = tmp_path / "src"
         src.mkdir()
-        (src / "__init__.py").write_text("")
+        (src / "__init__.py").write_text("", encoding="utf-8")
         (src / "main.py").write_text(textwrap.dedent("""\
             def process(data):
                 if not data:

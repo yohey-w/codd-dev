@@ -183,7 +183,7 @@ class TestInvokeFixAi:
 
         target = tmp_path / "src" / "api" / "route.ts"
         assert target.exists()
-        content = target.read_text()
+        content = target.read_text(encoding="utf-8")
         assert "export function GET()" in content
         assert "Response.json" in content
 
@@ -207,8 +207,8 @@ class TestInvokeFixAi:
         with patch("codd.fixer._invoke_ai_command", return_value=ai_response):
             _invoke_fix_ai("claude --print", ai_response, tmp_path)
 
-        assert (tmp_path / "src" / "a.ts").read_text() == "content_a\n"
-        assert (tmp_path / "src" / "b.ts").read_text() == "content_b\n"
+        assert (tmp_path / "src" / "a.ts").read_text(encoding="utf-8") == "content_a\n"
+        assert (tmp_path / "src" / "b.ts").read_text(encoding="utf-8") == "content_b\n"
 
     def test_fallback_preceded_by_bold_path(self, tmp_path):
         """Fallback: **path/to/file** on line before code block."""
@@ -223,7 +223,7 @@ class TestInvokeFixAi:
 
         target = tmp_path / "src" / "handler.ts"
         assert target.exists()
-        assert "fixed" in target.read_text()
+        assert "fixed" in target.read_text(encoding="utf-8")
 
     def test_fallback_comment_filepath(self, tmp_path):
         """Fallback: // filepath: path/to/file as first line in block."""
@@ -238,7 +238,7 @@ class TestInvokeFixAi:
 
         target = tmp_path / "src" / "utils.ts"
         assert target.exists()
-        assert "add" in target.read_text()
+        assert "add" in target.read_text(encoding="utf-8")
 
     def test_primary_pattern_takes_precedence(self, tmp_path):
         """Primary pattern wins when both primary and fallback match."""
@@ -250,7 +250,7 @@ class TestInvokeFixAi:
         with patch("codd.fixer._invoke_ai_command", return_value=ai_response):
             _invoke_fix_ai("claude --print", ai_response, tmp_path)
 
-        assert (tmp_path / "src" / "route.ts").read_text() == "primary_content\n"
+        assert (tmp_path / "src" / "route.ts").read_text(encoding="utf-8") == "primary_content\n"
 
 
 class TestPrepareFixAiCommand:
@@ -354,7 +354,7 @@ class TestInferImplPaths:
     def test_nextjs_api_route(self, tmp_path):
         route = tmp_path / "src" / "app" / "api" / "courses" / "route.ts"
         route.parent.mkdir(parents=True)
-        route.write_text("handler")
+        route.write_text("handler", encoding="utf-8")
 
         result = _infer_impl_paths(tmp_path, ["tests/e2e/courses.spec.ts"])
         assert "src/app/api/courses/route.ts" in result
@@ -362,7 +362,7 @@ class TestInferImplPaths:
     def test_kebab_case_variant(self, tmp_path):
         route = tmp_path / "src" / "app" / "api" / "lms-core" / "route.ts"
         route.parent.mkdir(parents=True)
-        route.write_text("handler")
+        route.write_text("handler", encoding="utf-8")
 
         result = _infer_impl_paths(tmp_path, ["tests/e2e/lms_core.spec.ts"])
         assert "src/app/api/lms-core/route.ts" in result
@@ -378,7 +378,7 @@ class TestInferImplPaths:
     def test_deduplicates(self, tmp_path):
         route = tmp_path / "src" / "app" / "api" / "auth" / "route.ts"
         route.parent.mkdir(parents=True)
-        route.write_text("handler")
+        route.write_text("handler", encoding="utf-8")
 
         result = _infer_impl_paths(tmp_path, [
             "tests/e2e/auth.spec.ts",
@@ -430,7 +430,7 @@ class TestFindRouteFilesForEndpoints:
     def test_finds_standard_route(self, tmp_path):
         route = tmp_path / "src" / "app" / "api" / "enrollments" / "route.ts"
         route.parent.mkdir(parents=True)
-        route.write_text("handler")
+        route.write_text("handler", encoding="utf-8")
 
         result = _find_route_files_for_endpoints(tmp_path, ["/api/enrollments"])
         assert any("enrollments/route.ts" in p for p in result)
@@ -439,7 +439,7 @@ class TestFindRouteFilesForEndpoints:
         """Finds routes in generated/ subdirectories (osato-lms pattern)."""
         route = tmp_path / "src" / "generated" / "sprint_1" / "api" / "enrollments" / "route.ts"
         route.parent.mkdir(parents=True)
-        route.write_text("handler")
+        route.write_text("handler", encoding="utf-8")
 
         result = _find_route_files_for_endpoints(tmp_path, ["/api/enrollments"])
         assert any("enrollments/route.ts" in p for p in result)
@@ -447,7 +447,7 @@ class TestFindRouteFilesForEndpoints:
     def test_finds_nested_route(self, tmp_path):
         route = tmp_path / "src" / "app" / "api" / "admin" / "roles" / "route.ts"
         route.parent.mkdir(parents=True)
-        route.write_text("handler")
+        route.write_text("handler", encoding="utf-8")
 
         result = _find_route_files_for_endpoints(tmp_path, ["/api/admin/roles"])
         assert any("admin/roles/route.ts" in p for p in result)
@@ -458,7 +458,7 @@ class TestFindImplCandidatesGlob:
         """Strategy 1 glob finds routes in non-standard locations."""
         route = tmp_path / "src" / "generated" / "v1" / "app" / "api" / "courses" / "route.ts"
         route.parent.mkdir(parents=True)
-        route.write_text("handler")
+        route.write_text("handler", encoding="utf-8")
 
         result = _find_impl_candidates(tmp_path, "courses")
         assert any("courses/route.ts" in p for p in result)
