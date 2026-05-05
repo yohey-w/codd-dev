@@ -27,6 +27,8 @@ bands:
 propagation:
   max_depth: 10
   stop_at_contract_boundary: true
+coherence:
+  capability_patterns: {}
 hitl:
   mode: cooperative
 requirement_completeness:

@@ -22,6 +22,8 @@ _IMPORT_SPECIFIER_RE = re.compile(
     re.VERBOSE,
 )
 
+DESIGN_DOC_ATTRIBUTE_KEYS = ("runtime_constraints", "user_journeys")
+
 
 def extract_imports(file_path: Path) -> list[str]:
     """Return import specifiers from a source file.
@@ -62,6 +64,7 @@ def extract_design_doc_metadata(md_path: Path) -> dict[str, Any]:
         "frontmatter": frontmatter,
         "depends_on": depends_on,
         "node_id": codd_meta.get("node_id") or frontmatter.get("node_id"),
+        "attributes": _extract_design_doc_attributes(frontmatter),
         "body": body,
     }
 
@@ -74,3 +77,13 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, tuple):
         return list(value)
     return [value]
+
+
+def _extract_design_doc_attributes(frontmatter: dict[str, Any]) -> dict[str, Any]:
+    """Return declarative DAG attributes that CoDD core passes through."""
+
+    attributes: dict[str, Any] = {}
+    for key in DESIGN_DOC_ATTRIBUTE_KEYS:
+        if key in frontmatter:
+            attributes[key] = frontmatter[key]
+    return attributes

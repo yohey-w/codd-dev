@@ -17,6 +17,7 @@ CHECK_MODULES = (
     "codd.dag.checks.task_completion",
     "codd.dag.checks.transitive_closure",
     "codd.dag.checks.deployment_completeness",
+    "codd.dag.checks.user_journey_coherence",
 )
 
 
