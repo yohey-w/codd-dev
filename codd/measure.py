@@ -240,7 +240,7 @@ def _collect_coverage_metrics(
 def _extract_source_refs(doc_path: Path, tracked: set[str]) -> None:
     """Extract source file references from a design document's frontmatter."""
     try:
-        content = doc_path.read_text(errors="ignore")
+        content = doc_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return
 

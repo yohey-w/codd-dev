@@ -260,7 +260,7 @@ def _validate_project_oss(project_root: Path, codd_dir: Path | None = None) -> V
     """Validate CoDD frontmatter, references, wave config, and dependency cycles."""
     codd_dir = codd_dir or (project_root / "codd")
     config_path = codd_dir / "codd.yaml"
-    config = yaml.safe_load(config_path.read_text()) or {}
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
 
     result = ValidationResult()
     documents: dict[str, DocumentRecord] = {}
@@ -443,7 +443,7 @@ def _iter_doc_files(project_root: Path, config: dict[str, Any]):
 
 def _parse_codd_frontmatter(file_path: Path) -> FrontmatterParseResult:
     try:
-        content = file_path.read_text(errors="ignore")
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
         return FrontmatterParseResult(
             error={
@@ -601,7 +601,7 @@ def _load_scanned_node_ids(project_root: Path, config: dict[str, Any]) -> set[st
         return set()
 
     node_ids: set[str] = set()
-    for line in nodes_path.read_text().splitlines():
+    for line in nodes_path.read_text(encoding="utf-8").splitlines():
         payload = line.strip()
         if not payload:
             continue

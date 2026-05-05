@@ -396,7 +396,7 @@ def _invoke_ai_command(ai_command: str, prompt: str) -> str:
             command,
             input=prompt,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=False,
         )
     except FileNotFoundError as exc:

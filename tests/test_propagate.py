@@ -27,7 +27,7 @@ codd:
 ---
 
 # FR-01
-""")
+""", encoding="utf-8")
     # Register node in graph
     ceg.upsert_node("req:FR-01", "requirement", path="docs/requirements.md")
 
@@ -62,7 +62,7 @@ codd:
 ---
 
 # System Design
-""")
+""", encoding="utf-8")
     ceg.upsert_node("design:system", "design", path="design.md")
 
     start_nodes = _resolve_start_nodes(ceg, tmp_path, ["design.md"])
@@ -204,7 +204,7 @@ def test_full_impact_from_document_change(tmp_path):
     (project / "docs").mkdir()
     codd_dir = project / "codd"
     codd_dir.mkdir()
-    (codd_dir / "codd.yaml").write_text(CoDD_YAML)
+    (codd_dir / "codd.yaml").write_text(CoDD_YAML, encoding="utf-8")
 
     # Create docs with frontmatter
     (project / "docs" / "db_design.md").write_text("""---
@@ -217,7 +217,7 @@ codd:
 ---
 
 # DB Design
-""")
+""", encoding="utf-8")
 
     (project / "docs" / "api_design.md").write_text("""---
 codd:
@@ -232,7 +232,7 @@ codd:
 ---
 
 # API Design
-""")
+""", encoding="utf-8")
 
     (project / "docs" / "ui_design.md").write_text("""---
 codd:
@@ -241,7 +241,7 @@ codd:
 ---
 
 # UI Design
-""")
+""", encoding="utf-8")
 
     # Scan to build graph
     run_scan(project, codd_dir)

@@ -162,7 +162,7 @@ def test_build_test_traceability_coverage_ratio_rounded(tmp_path):
     test_dir = tmp_path / "tests"
     test_dir.mkdir()
     # Only 1 of 3 symbols appears → ratio = 0.33
-    (test_dir / "test_mod.py").write_text("sym_a\n")
+    (test_dir / "test_mod.py").write_text("sym_a\n", encoding="utf-8")
 
     mod = ModuleInfo(name="mod")
     mod.symbols = [make_symbol("sym_a"), make_symbol("sym_b"), make_symbol("sym_c")]
@@ -179,7 +179,7 @@ def test_build_test_traceability_multiple_modules(tmp_path):
     """build_test_traceability processes all modules independently."""
     test_dir = tmp_path / "tests"
     test_dir.mkdir()
-    (test_dir / "test_a.py").write_text("func_a\n")
+    (test_dir / "test_a.py").write_text("func_a\n", encoding="utf-8")
     (test_dir / "test_b.py").write_text("func_b\n")
 
     mod_a = ModuleInfo(name="mod_a")

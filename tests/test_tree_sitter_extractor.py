@@ -10,9 +10,9 @@ def test_python_tree_sitter_extracts_multiline_signature_and_decorators(tmp_path
     src = tmp_path / "src"
     (src / "api").mkdir(parents=True)
     (src / "services").mkdir(parents=True)
-    (src / "services" / "__init__.py").write_text("")
-    (src / "services" / "auth.py").write_text("class AuthService:\n    pass\n")
-    (src / "api" / "__init__.py").write_text("")
+    (src / "services" / "__init__.py").write_text("", encoding="utf-8")
+    (src / "services" / "auth.py").write_text("class AuthService:\n    pass\n", encoding="utf-8")
+    (src / "api" / "__init__.py").write_text("", encoding="utf-8")
     (src / "api" / "routes.py").write_text(
         textwrap.dedent(
             """\

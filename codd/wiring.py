@@ -138,7 +138,7 @@ def build_runtime_wires(facts: ProjectFacts, project_root: Path) -> None:
         for rel_file in mod.files:
             full = project_root / rel_file
             try:
-                content = full.read_text(errors="ignore")
+                content = full.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
             wires = detect_runtime_wires(content, rel_file)

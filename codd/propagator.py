@@ -1004,7 +1004,7 @@ def _git_commit_propagation(
     try:
         add_result = subprocess.run(
             ["git", "add"] + files,
-            cwd=str(project_root), capture_output=True, text=True,
+            cwd=str(project_root), capture_output=True, text=True, encoding="utf-8",
         )
         if add_result.returncode != 0:
             logger.warning("git add failed: %s", add_result.stderr.strip())
@@ -1015,7 +1015,7 @@ def _git_commit_propagation(
             msg += f"\n\n{reason}"
         commit_result = subprocess.run(
             ["git", "commit", "-m", msg],
-            cwd=str(project_root), capture_output=True, text=True,
+            cwd=str(project_root), capture_output=True, text=True, encoding="utf-8",
         )
         if commit_result.returncode != 0:
             logger.warning("git commit failed: %s", commit_result.stderr.strip())
@@ -1028,7 +1028,7 @@ def _get_changed_files(project_root: Path, diff_target: str) -> list[str]:
     try:
         result = subprocess.run(
             ["git", "-c", "core.quotePath=false", "diff", "--name-only", diff_target],
-            capture_output=True, text=True, cwd=str(project_root),
+            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root),
         )
         if result.returncode != 0:
             return []
@@ -1251,7 +1251,7 @@ def _get_code_diff(
     try:
         result = subprocess.run(
             ["git", "-c", "core.quotePath=false", "diff", diff_target, "--"] + files,
-            capture_output=True, text=True, cwd=str(project_root),
+            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root),
         )
         if result.returncode != 0:
             return ""

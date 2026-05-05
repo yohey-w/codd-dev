@@ -196,7 +196,7 @@ def build_env_refs(facts: "ProjectFacts", project_root: Path) -> None:
         for rel_file in getattr(mod, "files", []):
             full = project_root / rel_file
             try:
-                content = full.read_text(errors="ignore")
+                content = full.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
             refs = detect_env_refs(content, rel_file)

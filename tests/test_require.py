@@ -136,7 +136,7 @@ def _make_require_body(prompt: str) -> str:
 def mock_require_ai(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append({"command": command, "input": input})
         return subprocess.CompletedProcess(
             args=command,

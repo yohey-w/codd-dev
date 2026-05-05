@@ -259,7 +259,7 @@ def _make_restored_body(input_text: str) -> str:
 def mock_restore_ai(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         stdout = _make_restored_body(input)
         calls.append({"command": command, "input": input})
         return subprocess.CompletedProcess(
@@ -334,7 +334,7 @@ def test_restore_skips_existing_docs(tmp_path, mock_restore_ai):
     # Create the output file first
     doc_path = project / "docs" / "test" / "acceptance_criteria.md"
     doc_path.parent.mkdir(parents=True, exist_ok=True)
-    doc_path.write_text("# existing\n")
+    doc_path.write_text("# existing\n", encoding="utf-8")
 
     results = restore_wave(project, wave=1)
     assert results[0].status == "skipped"

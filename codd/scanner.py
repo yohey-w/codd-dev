@@ -28,7 +28,7 @@ def run_scan(project_root: Path, codd_dir: Path):
         print("Error: codd/codd.yaml not found.")
         raise SystemExit(1)
 
-    config = yaml.safe_load(config_path.read_text())
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     scan_dir = codd_dir / "scan"
 
     ceg = CEG(scan_dir)
@@ -121,7 +121,7 @@ def _extract_frontmatter(file_path: Path) -> dict | None:
       # Document content
     """
     try:
-        content = file_path.read_text(errors="ignore")
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return None
 
@@ -252,21 +252,21 @@ def _load_legacy_annotations(ceg: CEG, annotations_dir: Path):
 
     conv_path = annotations_dir / "conventions.yaml"
     if conv_path.exists():
-        data = yaml.safe_load(conv_path.read_text())
+        data = yaml.safe_load(conv_path.read_text(encoding="utf-8"))
         for conv in (data or {}).get("conventions", []):
             _load_legacy_convention(ceg, conv)
             loaded = True
 
     links_path = annotations_dir / "doc_links.yaml"
     if links_path.exists():
-        data = yaml.safe_load(links_path.read_text())
+        data = yaml.safe_load(links_path.read_text(encoding="utf-8"))
         for link in (data or {}).get("links", []):
             _load_legacy_doc_link(ceg, link)
             loaded = True
 
     deps_path = annotations_dir / "data_dependencies.yaml"
     if deps_path.exists():
-        data = yaml.safe_load(deps_path.read_text())
+        data = yaml.safe_load(deps_path.read_text(encoding="utf-8"))
         for dep in (data or {}).get("data_dependencies", []):
             _load_legacy_data_dependency(ceg, dep)
             loaded = True
@@ -371,7 +371,7 @@ def _extract_imports_basic(ceg: CEG, project_root: Path, src_dir: Path, file_pat
                            rel_path: str, language: str):
     """Basic import extraction using the shared parsing backend."""
     try:
-        content = file_path.read_text(errors="ignore")
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return
 

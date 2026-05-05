@@ -78,7 +78,7 @@ def _get_staged_markdown_files(project_root: Path, config: dict) -> list[Path]:
         ["git", "-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
         cwd=project_root,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8",
         check=False,
     )
     if result.returncode != 0:

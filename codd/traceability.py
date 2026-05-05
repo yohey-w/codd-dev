@@ -43,7 +43,7 @@ def build_test_traceability(facts: ProjectFacts, project_root: Path) -> None:
             # Read test file and scan for symbol references
             test_path = project_root / test_detail.file_path
             try:
-                test_content = test_path.read_text(errors="ignore")
+                test_content = test_path.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
             # Any source symbol name that appears in the test file = covered

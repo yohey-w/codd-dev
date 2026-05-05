@@ -280,7 +280,7 @@ def build_repair_slice(
     if not full_path.exists():
         return RepairSlice(file=file_path, module_name=module_name)
 
-    content = full_path.read_text(errors="ignore")
+    content = full_path.read_text(encoding="utf-8", errors="ignore")
     language = facts.language or "python"
 
     # Extract line ranges (all functions, including private)

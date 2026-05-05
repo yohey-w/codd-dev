@@ -102,7 +102,7 @@ Tenant isolation and audit logging are mandatory.
 def mock_ai_cli(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         stdout = "# Generated Content\n\n## Overview\n\nThis document contains concrete content.\n"
         if "docs/detailed_design/" in input:
             stdout = (

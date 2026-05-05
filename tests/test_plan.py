@@ -165,7 +165,7 @@ def _plan_by_node(project: Path):
 def mock_plan_init_ai(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(
             {
                 "command": command,
@@ -262,7 +262,7 @@ def test_plan_init_accepts_detailed_design_artifacts_from_ai(tmp_path, monkeypat
     conventions: []
 """
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
@@ -372,7 +372,7 @@ def test_plan_marks_all_waves_done_when_all_outputs_validate(tmp_path):
     # After creating extracted docs, baseline becomes DONE
     extracted_dir = project / "codd" / "extracted"
     extracted_dir.mkdir(parents=True)
-    (extracted_dir / "system-context.md").write_text("# extracted\n")
+    (extracted_dir / "system-context.md").write_text("# extracted\n", encoding="utf-8")
     plan2, _ = _plan_by_node(project)
     assert plan2.baseline_status == STATUS_DONE
     text2 = render_plan_text(plan2)
@@ -714,7 +714,7 @@ def _write_extracted_docs(project: Path):
 def mock_brownfield_ai(monkeypatch):
     calls: list[dict[str, object]] = []
 
-    def fake_run(command, *, input, capture_output, text, check):
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(
             {
                 "command": command,
