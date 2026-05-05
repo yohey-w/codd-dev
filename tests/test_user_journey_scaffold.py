@@ -147,7 +147,7 @@ def test_user_journey_coherence_without_declared_journeys_returns_skip_pass():
     assert "SKIP" in result.message
 
 
-def test_user_journey_coherence_with_declared_journeys_returns_skeleton_pass():
+def test_user_journey_coherence_with_declared_journeys_without_chain_reports_failure():
     dag = DAG()
     dag.add_node(
         Node(
@@ -159,8 +159,8 @@ def test_user_journey_coherence_with_declared_journeys_returns_skeleton_pass():
 
     result = UserJourneyCoherenceCheck().run(dag)
 
-    assert result.passed is True
-    assert "cmd_393e not yet implemented" in result.message
+    assert result.passed is False
+    assert "no_plan_task_for_journey" in {violation["type"] for violation in result.violations}
 
 
 def test_codd_yaml_coherence_capability_patterns_are_loaded_as_dict(tmp_path):
