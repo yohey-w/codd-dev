@@ -1,0 +1,2 @@
+implementation_suffixes: [".cs"]
+test_suffixes: [".cs"]

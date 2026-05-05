@@ -1,0 +1,2 @@
+implementation_suffixes: [".rs"]
+test_suffixes: [".rs"]

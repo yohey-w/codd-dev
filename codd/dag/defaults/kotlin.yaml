@@ -1,0 +1,2 @@
+implementation_suffixes: [".kt", ".kts"]
+test_suffixes: [".kt"]

@@ -1,0 +1,2 @@
+implementation_suffixes: [".rb"]
+test_suffixes: [".rb"]

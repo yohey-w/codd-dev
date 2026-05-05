@@ -1,0 +1,2 @@
+implementation_suffixes: [".scala"]
+test_suffixes: [".scala"]

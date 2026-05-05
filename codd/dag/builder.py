@@ -29,9 +29,9 @@ from codd.deployment.extractor import (
 
 LOGGER = logging.getLogger(__name__)
 DEFAULTS_DIR = Path(__file__).parent / "defaults"
-DEFAULT_PROJECT_TYPE = "web"
-IMPLEMENTATION_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java")
-TEST_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".bats")
+DEFAULT_PROJECT_TYPE = "generic"
+LEGACY_IMPLEMENTATION_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java")
+LEGACY_TEST_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".bats")
 PLAN_HEADER_RE = re.compile(r"^#{2,6}\s+([A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)(?:\s+(.+))?$", re.MULTILINE)
 OUTPUTS_RE = re.compile(r"(?im)^outputs?[ \t]*:[ \t]*(.*)$")
 PY_IMPORT_RE = re.compile(r"(?m)^\s*(?:from\s+([A-Za-z_][\w.]*)(?:\s+import\s+)|import\s+([A-Za-z_][\w.]*))")
@@ -88,17 +88,21 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
 def load_dag_settings(project_root: Path, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     """Load project-type defaults and apply ``codd.yaml dag:`` overrides."""
 
-    project_config = _load_project_config_or_empty(project_root)
+    root = Path(project_root).resolve()
+    project_config = _load_project_config_or_empty(root)
 
     requested_settings = settings or {}
-    project_type = _project_type(requested_settings) or _project_type(project_config) or DEFAULT_PROJECT_TYPE
+    project_type = _project_type(requested_settings) or _project_type(project_config) or _detect_project_type(root)
     merged = _read_default_settings(project_type)
     merged = _deep_merge(merged, _dag_overrides(project_config))
     merged = _deep_merge(merged, _dag_overrides(requested_settings))
+    merged["project_type"] = project_type
+    implementation_suffixes, test_suffixes = _load_suffix_config(root, merged)
+    merged["implementation_suffixes"] = implementation_suffixes
+    merged["test_suffixes"] = test_suffixes
     _apply_scan_patterns(merged, project_config)
     _apply_scan_patterns(merged, requested_settings)
     merged["coherence"] = _coherence_settings(project_config, requested_settings)
-    merged["project_type"] = project_type
     merged.setdefault("design_doc_patterns", [])
     merged.setdefault("impl_file_patterns", [])
     merged.setdefault("test_file_patterns", [])
@@ -214,10 +218,11 @@ def _add_design_docs(dag: DAG, project_root: Path, settings: dict[str, Any]) -> 
 def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> dict[str, Path]:
     impl_nodes: dict[str, Path] = {}
     capability_patterns = _capability_patterns(settings)
+    implementation_suffixes = _suffix_tuple(settings.get("implementation_suffixes")) or LEGACY_IMPLEMENTATION_SUFFIXES
     for file_path in _glob_project_paths(project_root, settings.get("impl_file_patterns", [])):
         if (
             not file_path.is_file()
-            or file_path.suffix not in IMPLEMENTATION_SUFFIXES
+            or file_path.suffix not in implementation_suffixes
             or _is_test_file(file_path, project_root)
         ):
             continue
@@ -241,8 +246,9 @@ def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
 
 def _add_test_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> dict[str, Path]:
     test_nodes: dict[str, Path] = {}
+    test_suffixes = _suffix_tuple(settings.get("test_suffixes")) or LEGACY_TEST_SUFFIXES
     for file_path in _glob_project_paths(project_root, settings.get("test_file_patterns", [])):
-        if not file_path.is_file() or file_path.suffix not in TEST_SUFFIXES or not _is_test_file(file_path, project_root):
+        if not file_path.is_file() or file_path.suffix not in test_suffixes or not _is_test_file(file_path, project_root):
             continue
         node_id = _relative_id(file_path, project_root)
         test_nodes[node_id] = file_path.resolve()
@@ -769,7 +775,18 @@ def _impl_convention_tokens(node_id: str) -> set[str]:
 
 def _convention_path_candidates(test_path: Path, project_root: Path, convention_key: str) -> list[Path]:
     candidates: list[Path] = []
-    suffixes = [".py"] if test_path.suffix == ".py" else [".ts", ".tsx", ".js", ".jsx"]
+    suffix_groups = {
+        ".py": [".py"],
+        ".rs": [".rs"],
+        ".rb": [".rb"],
+        ".cs": [".cs"],
+        ".kt": [".kt", ".kts"],
+        ".swift": [".swift"],
+        ".exs": [".ex", ".exs"],
+        ".scala": [".scala"],
+        ".cpp": [".cpp", ".c", ".h", ".hpp"],
+    }
+    suffixes = suffix_groups.get(test_path.suffix, [".ts", ".tsx", ".js", ".jsx"])
 
     if any(marker in test_path.name for marker in (".test.", ".spec.")):
         candidates.append((test_path.parent / convention_key).resolve())
@@ -860,6 +877,107 @@ def _read_default_settings(project_type: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _detect_project_type(project_root: Path) -> str:
+    root = Path(project_root)
+    if (root / "Cargo.toml").is_file():
+        return "rust"
+    if (root / "Gemfile").is_file():
+        return "ruby"
+    if (root / "package.json").is_file():
+        return "web"
+    if (root / "go.mod").is_file():
+        return "go"
+    if any(root.glob("*.csproj")) or any(root.glob("*.sln")):
+        return "csharp"
+    if (root / "CMakeLists.txt").is_file() or (
+        (root / "Makefile").is_file() and _has_any_file(root, ("*.c", "*.cpp"))
+    ):
+        return "cpp_embedded"
+    if (root / "build.gradle").is_file() or any(root.glob("*.gradle")):
+        return "kotlin"
+    if (root / "mix.exs").is_file():
+        return "elixir"
+    if (root / "build.sbt").is_file():
+        return "scala"
+    if _has_any_file(root, ("*.swift",)):
+        return "swift"
+    return "generic"
+
+
+def _has_any_file(project_root: Path, patterns: tuple[str, ...]) -> bool:
+    for pattern in patterns:
+        if any(path.is_file() for path in project_root.rglob(pattern)):
+            return True
+    return False
+
+
+def _load_suffix_config(project_root: Path, codd_yaml: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    implementation_suffixes = _suffixes_from_config(codd_yaml, "implementation_suffixes")
+    test_suffixes = _suffixes_from_config(codd_yaml, "test_suffixes")
+    if implementation_suffixes and test_suffixes:
+        return implementation_suffixes, test_suffixes
+
+    project_type = _project_type(codd_yaml) or _detect_project_type(project_root)
+    defaults = _read_suffix_default_mapping(project_type)
+    if implementation_suffixes is None:
+        implementation_suffixes = _suffixes_from_config(defaults, "implementation_suffixes")
+        if implementation_suffixes is None:
+            LOGGER.warning(
+                "DAG suffix defaults for project_type=%s missing implementation_suffixes; using legacy fallback",
+                project_type,
+            )
+            implementation_suffixes = LEGACY_IMPLEMENTATION_SUFFIXES
+    if test_suffixes is None:
+        test_suffixes = _suffixes_from_config(defaults, "test_suffixes")
+        if test_suffixes is None:
+            LOGGER.warning(
+                "DAG suffix defaults for project_type=%s missing test_suffixes; using legacy fallback",
+                project_type,
+            )
+            test_suffixes = LEGACY_TEST_SUFFIXES
+    return implementation_suffixes, test_suffixes
+
+
+def _read_suffix_default_mapping(project_type: str) -> dict[str, Any]:
+    for suffix_type in (project_type, DEFAULT_PROJECT_TYPE):
+        path = DEFAULTS_DIR / f"{suffix_type}.yaml"
+        if not path.is_file():
+            continue
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            LOGGER.warning("Could not load DAG suffix defaults from %s: %s", path, exc)
+            return {}
+        if isinstance(payload, dict):
+            return payload
+        LOGGER.warning("DAG suffix defaults %s must contain a YAML mapping; using legacy fallback", path)
+        return {}
+    LOGGER.warning("DAG suffix defaults for project_type=%s not found; using legacy fallback", project_type)
+    return {}
+
+
+def _suffixes_from_config(config: dict[str, Any], key: str) -> tuple[str, ...] | None:
+    value = config.get(key)
+    if value is None and isinstance(config.get("dag"), dict):
+        value = config["dag"].get(key)
+    return _suffix_tuple(value)
+
+
+def _suffix_tuple(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    suffixes: list[str] = []
+    for item in _as_list(value):
+        if not isinstance(item, str) or not item.strip():
+            continue
+        suffix = item.strip()
+        if not suffix.startswith("."):
+            suffix = f".{suffix}"
+        if suffix not in suffixes:
+            suffixes.append(suffix)
+    return tuple(suffixes) if suffixes else None
+
+
 def _dag_overrides(config: dict[str, Any]) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
     dag_section = config.get("dag", {})
@@ -870,6 +988,8 @@ def _dag_overrides(config: dict[str, Any]) -> dict[str, Any]:
         "design_doc_patterns",
         "impl_file_patterns",
         "test_file_patterns",
+        "implementation_suffixes",
+        "test_suffixes",
         "plan_task_file",
         "lexicon_file",
         "import_aliases",
@@ -923,13 +1043,16 @@ def _apply_scan_patterns(settings: dict[str, Any], config: dict[str, Any]) -> No
         _extend_unique(
             settings,
             "impl_file_patterns",
-            _file_patterns_for_dirs(source_dirs, IMPLEMENTATION_SUFFIXES),
+            _file_patterns_for_dirs(
+                source_dirs,
+                _suffix_tuple(settings.get("implementation_suffixes")) or LEGACY_IMPLEMENTATION_SUFFIXES,
+            ),
         )
     if test_dirs:
         _extend_unique(
             settings,
             "test_file_patterns",
-            _file_patterns_for_dirs(test_dirs, TEST_SUFFIXES),
+            _file_patterns_for_dirs(test_dirs, _suffix_tuple(settings.get("test_suffixes")) or LEGACY_TEST_SUFFIXES),
         )
     if doc_dirs:
         _extend_unique(settings, "design_doc_patterns", _file_patterns_for_dirs(doc_dirs, (".md",)))
@@ -1035,11 +1158,25 @@ def _language_for_path(path: Path) -> str:
         ".jsx": "javascript",
         ".go": "go",
         ".java": "java",
+        ".rs": "rust",
+        ".rb": "ruby",
+        ".cs": "csharp",
+        ".c": "c",
+        ".cpp": "cpp",
+        ".h": "cpp",
+        ".hpp": "cpp",
+        ".kt": "kotlin",
+        ".kts": "kotlin",
+        ".swift": "swift",
+        ".ex": "elixir",
+        ".exs": "elixir",
+        ".scala": "scala",
     }.get(path.suffix, "unknown")
 
 
 def _looks_like_project_path(value: str) -> bool:
-    return "/" in value and Path(value).suffix in IMPLEMENTATION_SUFFIXES
+    generic_suffixes, _ = _load_suffix_config(Path.cwd(), {"project_type": DEFAULT_PROJECT_TYPE})
+    return "/" in value and Path(value).suffix in generic_suffixes
 
 
 def _mermaid_id(node_id: str) -> str:

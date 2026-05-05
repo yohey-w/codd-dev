@@ -1,0 +1,5 @@
+# Fallback suffix coverage for common project types.
+implementation_suffixes:
+  [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".rs", ".rb", ".cs", ".kt", ".swift", ".ex", ".scala", ".c", ".cpp"]
+test_suffixes:
+  [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".rs", ".rb", ".cs", ".kt", ".swift", ".ex", ".scala", ".cpp"]
