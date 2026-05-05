@@ -445,8 +445,9 @@ def _add_deployment_graph(
         project_root,
         deployment_docs,
         [{"id": node_id, **metadata} for node_id, metadata in design_docs.items()],
+        project_config,
     )
-    verification_tests = extract_verification_tests(project_root)
+    verification_tests = extract_verification_tests(project_root, project_config, design_docs)
 
     for deployment_doc in deployment_docs:
         _add_node_once(

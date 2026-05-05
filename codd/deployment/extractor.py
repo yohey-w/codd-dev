@@ -40,7 +40,7 @@ def extract_deployment_nodes(project_root: Path, codd_config: dict[str, Any] | N
     deployment_docs = extract_deployment_docs(root, config)
     design_docs = _load_design_doc_records(root, config)
     runtime_states = extract_runtime_states(root, deployment_docs, design_docs, config)
-    verification_tests = extract_verification_tests(root)
+    verification_tests = extract_verification_tests(root, config, design_docs)
     return {
         "deployment_docs": deployment_docs,
         "runtime_states": runtime_states,
@@ -148,10 +148,15 @@ def infer_capabilities_provided(deploy_yaml: dict[str, Any], codd_yaml: dict[str
     return _dedupe_strings(capabilities)
 
 
-def extract_verification_tests(project_root: Path) -> list[VerificationTestNode]:
+def extract_verification_tests(
+    project_root: Path,
+    codd_config: dict[str, Any] | None = None,
+    design_docs: list | dict | None = None,
+) -> list[VerificationTestNode]:
     """Extract smoke and E2E verification tests."""
 
     root = Path(project_root).resolve()
+    config = codd_config if codd_config is not None else _load_project_config_or_empty(root)
     tests: dict[str, VerificationTestNode] = {}
     for path in _glob_paths(root, SMOKE_TEST_PATTERNS):
         _add_verification_test(tests, root, path, VerificationKind.SMOKE)
@@ -168,6 +173,10 @@ def extract_verification_tests(project_root: Path) -> list[VerificationTestNode]
             verification_template_ref="document",
             expected_outcome={"source": rel_path},
         )
+
+    if _has_cdp_browser_template(config):
+        records = design_docs if design_docs is not None else _load_design_doc_records(root, config)
+        _add_cdp_browser_journey_tests(tests, records)
 
     return [tests[key] for key in sorted(tests)]
 
@@ -359,6 +368,11 @@ def verification_test_attributes(node: VerificationTestNode) -> dict[str, Any]:
 
     payload = asdict(node)
     payload["kind"] = node.kind.value
+    payload["template_ref"] = node.verification_template_ref
+    if isinstance(node.expected_outcome, dict):
+        journey_name = node.expected_outcome.get("journey_name")
+        if isinstance(journey_name, str) and journey_name:
+            payload["journey_name"] = journey_name
     return payload
 
 
@@ -383,6 +397,28 @@ def _add_verification_test(
         verification_template_ref=_verification_template_ref(path),
         expected_outcome={"source": rel_path},
     )
+
+
+def _add_cdp_browser_journey_tests(
+    tests: dict[str, VerificationTestNode],
+    design_docs: list | dict,
+) -> None:
+    for source_id, journey in _iter_design_doc_user_journeys(design_docs):
+        journey_name = _journey_name(journey)
+        if not journey_name:
+            continue
+        identifier = _unique_verification_identifier(tests, f"verification:cdp_browser:{journey_name}", source_id)
+        tests[identifier] = VerificationTestNode(
+            identifier=identifier,
+            kind=VerificationKind.E2E,
+            target=_verification_target_for_journey(journey, journey_name),
+            verification_template_ref=_verification_template_ref(Path(journey_name), cdp_browser_journey=True),
+            expected_outcome={
+                "source": source_id,
+                "journey_name": journey_name,
+                "journey": journey,
+            },
+        )
 
 
 def _deployment_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -552,12 +588,102 @@ def _verification_target(path: Path) -> str:
     return path.stem
 
 
-def _verification_template_ref(path: Path) -> str:
+def _verification_template_ref(path: Path, *, cdp_browser_journey: bool = False) -> str:
+    if cdp_browser_journey:
+        return "cdp_browser"
     if path.suffix in {".ts", ".tsx", ".js", ".jsx"}:
         return "playwright"
     if path.suffix == ".sh":
         return "curl"
     return "document"
+
+
+def _has_cdp_browser_template(config: dict[str, Any]) -> bool:
+    verification = config.get("verification")
+    if not isinstance(verification, dict):
+        return False
+    templates = verification.get("templates")
+    return isinstance(templates, dict) and "cdp_browser" in templates
+
+
+def _iter_design_doc_user_journeys(design_docs: list | dict) -> Iterable[tuple[str, dict[str, Any]]]:
+    if isinstance(design_docs, dict):
+        iterable = design_docs.items()
+    else:
+        iterable = enumerate(design_docs)
+
+    for key, metadata in iterable:
+        if not isinstance(metadata, dict):
+            continue
+        source_id = _design_doc_source_id(key, metadata)
+        journeys = _design_doc_user_journey_entries(metadata)
+        for journey in journeys:
+            yield source_id, journey
+
+
+def _design_doc_source_id(key: Any, metadata: dict[str, Any]) -> str:
+    if isinstance(key, str):
+        return _normalize_output_path(key)
+    for field in ("id", "node_id", "path"):
+        value = metadata.get(field)
+        if isinstance(value, Path):
+            return _normalize_output_path(value.as_posix())
+        if isinstance(value, str) and value:
+            return _normalize_output_path(value)
+    return f"design_doc:{key}"
+
+
+def _design_doc_user_journey_entries(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    attributes = metadata.get("attributes")
+    if isinstance(attributes, dict):
+        journeys = attributes.get("user_journeys")
+        if isinstance(journeys, list):
+            return [journey for journey in journeys if isinstance(journey, dict)]
+
+    frontmatter = metadata.get("frontmatter")
+    if isinstance(frontmatter, dict):
+        journeys = frontmatter.get("user_journeys")
+        if isinstance(journeys, list):
+            return [journey for journey in journeys if isinstance(journey, dict)]
+
+    return []
+
+
+def _journey_name(journey: dict[str, Any]) -> str | None:
+    value = journey.get("name")
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    return name or None
+
+
+def _verification_target_for_journey(journey: dict[str, Any], fallback: str) -> str:
+    for step in _as_list(journey.get("steps")):
+        if not isinstance(step, dict):
+            continue
+        target = step.get("target") or step.get("url") or step.get("path")
+        if isinstance(target, str) and target.strip():
+            return target.strip()
+    return fallback
+
+
+def _unique_verification_identifier(
+    tests: dict[str, VerificationTestNode],
+    base_identifier: str,
+    source_id: str,
+) -> str:
+    if base_identifier not in tests:
+        return base_identifier
+
+    source_slug = _slug(source_id)
+    candidate = f"{base_identifier}:{source_slug}"
+    if candidate not in tests:
+        return candidate
+
+    index = 2
+    while f"{candidate}:{index}" in tests:
+        index += 1
+    return f"{candidate}:{index}"
 
 
 def _load_design_doc_records(project_root: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
