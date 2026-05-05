@@ -16,6 +16,7 @@ CHECK_MODULES = (
     "codd.dag.checks.depends_on_consistency",
     "codd.dag.checks.task_completion",
     "codd.dag.checks.transitive_closure",
+    "codd.dag.checks.deployment_completeness",
 )
 
 
