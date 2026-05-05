@@ -1,0 +1,14 @@
+enabled_checks:
+  - node_completeness
+  - edge_validity
+  - depends_on_consistency
+  - task_completion
+  - transitive_closure
+design_doc_patterns:
+  - "docs/design/*.md"
+impl_file_patterns:
+  - "src/**/*.ts"
+  - "src/**/*.tsx"
+  - "app/**/*.ts"
+  - "app/**/*.tsx"
+plan_task_file: "docs/design/implementation_plan.md"
