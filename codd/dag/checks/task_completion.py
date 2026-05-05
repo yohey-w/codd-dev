@@ -160,4 +160,3 @@ class TaskCompletionCheck:
             return float(value)
         except (TypeError, ValueError):
             return 1.0
-

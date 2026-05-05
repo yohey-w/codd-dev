@@ -146,4 +146,3 @@ def test_threshold_override_via_settings(tmp_path):
     result = _run(dag, tmp_path, {"task_completion_threshold": 0.5})
 
     assert result.passed is True
-
