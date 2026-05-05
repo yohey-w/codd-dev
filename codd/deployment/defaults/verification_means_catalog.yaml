@@ -1,0 +1,6 @@
+web_app: [cdp_browser, playwright, selenium, cypress, curl_smoke]
+mobile_app: [appium, xcuitest, espresso]
+desktop_app: [winappdriver, autoit, native_ui_test]
+cli_tool: [bats, pytest_subprocess, shell_integration]
+backend_api: [curl_smoke, pact_contract, k6_load]
+embedded: [hil_test, sil_test]
