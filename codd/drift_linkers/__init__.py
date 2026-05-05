@@ -37,3 +37,10 @@ def run_all_linkers(expected_catalog_path, project_root, settings) -> list[Any]:
         linker = cls(expected_catalog_path, project_root, settings)
         results.append(linker.run())
     return results
+
+
+# Import built-in linkers after registry helpers are defined so decorators run.
+try:  # pragma: no cover - import side effect only
+    from codd.drift_linkers import screen_flow as _screen_flow  # noqa: F401
+except ImportError:
+    pass

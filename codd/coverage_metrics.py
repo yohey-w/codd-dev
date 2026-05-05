@@ -132,7 +132,7 @@ def compute_lexicon_compliance(project_root: Path | str, threshold: float = 100.
 def compute_screen_flow_coverage(
     project_root: Path | str,
     config: dict[str, Any],
-    threshold: float = 0.0,
+    threshold: float = 100.0,
 ) -> CoverageResult:
     """Measure screen-flow drift as a coverage gate metric."""
 
@@ -153,8 +153,25 @@ def compute_screen_flow_coverage(
             details=[f"error: {exc}"],
         )
 
-    drift_count = len(drifts)
+    design_drift_details: list[str] = []
+    design_drift_count = 0
+    try:
+        from codd.drift_linkers.screen_flow import ScreenFlowGate
+
+        gate_result = ScreenFlowGate(
+            project_root=project_root,
+            settings={**config, "apply": True},
+        ).run()
+        if not gate_result.skipped:
+            design_drift_count = gate_result.drift_count
+            design_drift_details = gate_result.details
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        return _exception_result("screen_flow_coverage", threshold, exc)
+
+    drift_count = len(drifts) + design_drift_count
     pct = 100.0 if drift_count == 0 else max(0.0, 100.0 - drift_count * 10.0)
+    details = [f"drift_count: {drift_count}"]
+    details.extend(design_drift_details)
     return CoverageResult(
         metric="screen_flow_coverage",
         total=1,
@@ -163,7 +180,7 @@ def compute_screen_flow_coverage(
         pct=pct,
         threshold=threshold,
         passed=pct >= threshold,
-        details=[f"drift_count: {drift_count}"],
+        details=details,
     )
 
 
@@ -199,7 +216,7 @@ def run_coverage(
     e2e_threshold: float = 100.0,
     design_token_threshold: float = 0.0,
     lexicon_threshold: float = 100.0,
-    screen_flow_threshold: float = 0.0,
+    screen_flow_threshold: float = 100.0,
     config: dict[str, Any] | None = None,
 ) -> CoverageReport:
     """Run all coverage metrics and return an aggregated report."""
