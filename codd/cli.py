@@ -1425,8 +1425,21 @@ def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, edges: bool,
     type=float,
     help="Lexicon compliance threshold percentage.",
 )
+@click.option(
+    "--screen-flow-threshold",
+    default=100.0,
+    show_default=True,
+    type=float,
+    help="Screen-flow coverage threshold percentage.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
-def coverage(path: str, e2e_threshold: float, lexicon_threshold: float, as_json: bool):
+def coverage(
+    path: str,
+    e2e_threshold: float,
+    lexicon_threshold: float,
+    screen_flow_threshold: float,
+    as_json: bool,
+):
     """Coverage metrics merge gate: E2E, design tokens, and lexicon."""
     from codd.coverage_metrics import run_coverage
 
@@ -1436,6 +1449,7 @@ def coverage(path: str, e2e_threshold: float, lexicon_threshold: float, as_json:
         e2e_threshold=e2e_threshold,
         design_token_threshold=0.0,
         lexicon_threshold=lexicon_threshold,
+        screen_flow_threshold=screen_flow_threshold,
     )
 
     if as_json:

@@ -115,6 +115,13 @@ def run_deploy(
             _write_deploy_log(project_root, deploy_config, selected_target, log_context)
             return 0
 
+        gate_result = _run_screen_flow_apply_gate(project_root)
+        if not gate_result.passed:
+            log_context["status"] = "screen_flow_gate_failed"
+            log_context["errors"].extend(gate_result.details)
+            _write_deploy_log(project_root, deploy_config, selected_target, log_context)
+            return 1
+
         snapshot = target.snapshot()
         log_context["snapshot"] = snapshot
         if not target.deploy():
@@ -178,6 +185,21 @@ def _run_target_healthcheck(target: Any, target_config: dict[str, Any], timeout_
             retries=int(healthcheck.get("retries", 1)),
         )
     return bool(target.healthcheck())
+
+
+def _run_screen_flow_apply_gate(project_root: Path) -> Any:
+    """Run screen-flow drift gate only for apply deploys."""
+
+    from codd.drift_linkers.screen_flow import ScreenFlowGate
+
+    settings: dict[str, Any] = {"apply": True}
+    try:
+        from codd.config import load_project_config
+
+        settings = {**load_project_config(project_root), "apply": True}
+    except (FileNotFoundError, ValueError):
+        pass
+    return ScreenFlowGate(project_root=project_root, settings=settings).run()
 
 
 def _maybe_rollback(
