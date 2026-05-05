@@ -7,8 +7,10 @@ rollback orchestration, and structured logging.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
 import re
 import time
@@ -39,6 +41,7 @@ class DeployGateResult:
 
     failures: list[DeployGateFailure] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    reports: dict[str, Any] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
@@ -49,6 +52,9 @@ class DeployGateResult:
 
     def add_warning(self, message: str) -> None:
         self.warnings.append(message)
+
+    def add_report(self, name: str, payload: Any) -> None:
+        self.reports[name] = payload
 
     def format_failures(self) -> str:
         if self.passed:
@@ -71,6 +77,7 @@ class DeployGateResult:
                 for failure in self.failures
             ],
             "warnings": self.warnings,
+            **self.reports,
         }
 
 
@@ -210,7 +217,7 @@ def run_deploy(
 
 
 def _run_deploy_gates(project_root: Path) -> DeployGateResult:
-    """Run validate, drift, coverage, and DAG gates before apply deploy."""
+    """Run validate, drift, coverage, DAG, and C6 deploy gates before apply deploy."""
     project_root = Path(project_root).resolve()
     settings = _load_gate_settings(project_root)
     codd_dir = _find_gate_codd_dir(project_root)
@@ -222,6 +229,7 @@ def _run_deploy_gates(project_root: Path) -> DeployGateResult:
         return result
     _collect_coverage_gate(project_root, settings, result)
     _collect_dag_completeness_gate(project_root, settings, result)
+    _collect_deployment_completeness_gate_result(project_root, settings, result)
     return result
 
 
@@ -362,7 +370,17 @@ def _collect_dag_completeness_gate(
     try:
         from codd.dag.runner import run_all_checks
 
-        check_results = run_all_checks(project_root, settings=settings)
+        check_results = run_all_checks(
+            project_root,
+            settings=settings,
+            check_names=[
+                "node_completeness",
+                "edge_validity",
+                "depends_on_consistency",
+                "task_completion",
+                "transitive_closure",
+            ],
+        )
     except Exception as exc:  # pragma: no cover - defensive gate behavior
         result.add_failure("dag_completeness", str(exc))
         return
@@ -385,6 +403,62 @@ def _collect_dag_completeness_gate(
         details = [_format_dag_check_result(check_result) for check_result in failed_red]
         result.add_failure("dag_completeness", f"{len(failed_red)} DAG check(s) failed", details)
         _publish_dag_completeness_events(failed_red)
+
+
+def _collect_deployment_completeness_gate(
+    dag: Any | None,
+    project_root: Path,
+    codd_config: dict[str, Any],
+) -> list[Any]:
+    """Run the C6 deployment_completeness check and return violations.
+
+    Projects without deployment_doc nodes or deploy-chain edges return an empty
+    list for backward compatibility.
+    """
+    from codd.dag.checks.deployment_completeness import DeploymentCompletenessCheck
+
+    project_root = Path(project_root).resolve()
+    settings = codd_config
+    target_dag = dag
+    if target_dag is None:
+        from codd.dag.builder import build_dag, load_dag_settings
+
+        settings = load_dag_settings(project_root, codd_config)
+        target_dag = build_dag(project_root, settings)
+
+    check_result = DeploymentCompletenessCheck().run(
+        target_dag,
+        project_root=project_root,
+        codd_config=settings,
+    )
+    return list(getattr(check_result, "violations", []) or [])
+
+
+def _collect_deployment_completeness_gate_result(
+    project_root: Path,
+    settings: dict[str, Any],
+    result: DeployGateResult,
+) -> None:
+    try:
+        violations = _collect_deployment_completeness_gate(None, project_root, settings)
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        result.add_failure("deployment_completeness", str(exc))
+        return
+
+    if not violations:
+        return
+
+    from codd.dag.checks.deployment_completeness import DeploymentCompletenessCheck
+
+    report = DeploymentCompletenessCheck().format_report(violations)
+    result.add_failure(
+        "deployment_completeness",
+        "C6 deployment_completeness: INCOMPLETE chain detected",
+        [report],
+    )
+    result.add_report("incomplete_chain_report", _parse_incomplete_chain_report(report))
+    _publish_deployment_completeness_events(violations)
+    _ntfy_deploy_incomplete(violations, settings)
 
 
 def _screen_flow_strict_edges(settings: dict[str, Any]) -> bool:
@@ -505,6 +579,123 @@ def _publish_dag_completeness_events(failed_results: list[Any]) -> None:
                 kind="dag_completeness",
             )
         )
+
+
+def _publish_deployment_completeness_events(violations: list[Any]) -> None:
+    if _coherence_bus is None:
+        return
+
+    try:
+        from codd.coherence_engine import DriftEvent
+    except Exception:  # pragma: no cover - optional coherence integration
+        return
+
+    for violation in violations:
+        _coherence_bus.publish(
+            DriftEvent(
+                source_artifact="design_doc",
+                target_artifact="implementation",
+                change_type="modified",
+                payload={
+                    "design_doc": _violation_attr(violation, "design_doc"),
+                    "broken_at": _violation_attr(violation, "broken_at"),
+                    "message": _format_deployment_violation_message(violation),
+                    "remediation": _violation_attr(violation, "remediation"),
+                    "expected_chain": _violation_attr(violation, "expected_chain") or [],
+                },
+                severity="red",
+                fix_strategy="auto",
+                kind="deployment_completeness",
+            )
+        )
+
+
+def _ntfy_deploy_incomplete(violations: list[Any], settings: dict[str, Any]) -> bool:
+    topic = _deployment_ntfy_topic(settings)
+    if not topic:
+        return False
+
+    message = _format_deploy_incomplete_ntfy(violations[0])
+    request = Request(
+        _ntfy_url(topic),
+        data=message.encode("utf-8"),
+        method="POST",
+        headers={
+            "Priority": "urgent",
+            "Tags": "warning",
+            "Title": "CoDD deploy incomplete",
+        },
+    )
+    try:
+        with urlopen(request, timeout=5):
+            return True
+    except (OSError, URLError):
+        return False
+
+
+def _deployment_ntfy_topic(settings: dict[str, Any]) -> str:
+    env_topic = os.environ.get("CODD_NTFY_TOPIC") or os.environ.get("NTFY_TOPIC")
+    if env_topic:
+        return env_topic
+
+    candidates = [
+        settings.get("ntfy_topic"),
+        _nested_setting(settings, "deployment", "ntfy_topic"),
+        _nested_setting(settings, "deploy", "ntfy_topic"),
+        _nested_setting(settings, "preflight", "ntfy_topic"),
+        _nested_setting(settings, "requirement_completeness", "ntfy_topic"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _nested_setting(settings: dict[str, Any], section: str, key: str) -> Any:
+    value = settings.get(section)
+    if isinstance(value, dict):
+        return value.get(key)
+    return None
+
+
+def _ntfy_url(topic: str) -> str:
+    from codd.ask_user_question_adapter import _ntfy_url as build_ntfy_url
+
+    return build_ntfy_url(topic)
+
+
+def _format_deploy_incomplete_ntfy(violation: Any) -> str:
+    design_doc = _violation_attr(violation, "design_doc") or "deployment chain"
+    broken_at = _violation_attr(violation, "broken_at") or "unknown"
+    remediation = _violation_attr(violation, "remediation") or "Complete the deployment verification chain."
+    return f"CRITICAL deploy INCOMPLETE: {design_doc} -> {broken_at}\n{remediation}"
+
+
+def _format_deployment_violation_message(violation: Any) -> str:
+    formatter = getattr(violation, "format_as_message", None)
+    if callable(formatter):
+        return str(formatter())
+    return _format_deploy_incomplete_ntfy(violation)
+
+
+def _parse_incomplete_chain_report(report: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(report)
+    except json.JSONDecodeError:
+        return []
+    value = payload.get("incomplete_chain_report")
+    return value if isinstance(value, list) else []
+
+
+def _violation_attr(violation: Any, key: str) -> Any:
+    if isinstance(violation, dict):
+        return violation.get(key)
+    if hasattr(violation, key):
+        return getattr(violation, key)
+    try:
+        return asdict(violation).get(key)
+    except TypeError:
+        return None
 
 
 def _validate_target_config(target_name: str, target_config: Any) -> None:

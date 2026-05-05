@@ -23,7 +23,7 @@ class _CheckResult:
 
 
 def _patch_results(monkeypatch, results):
-    monkeypatch.setattr(dag_runner, "run_all_checks", lambda project_root, settings=None: results)
+    monkeypatch.setattr(dag_runner, "run_all_checks", lambda project_root, settings=None, check_names=None: results)
 
 
 def _write_codd_yaml(project):
@@ -92,7 +92,7 @@ def test_deploy_gate_passes_on_amber_warn(tmp_path, monkeypatch):
 
 
 def test_deploy_gate_error_handled_gracefully(tmp_path, monkeypatch):
-    def raise_runner(project_root, settings=None):
+    def raise_runner(project_root, settings=None, check_names=None):
         raise RuntimeError("dag exploded")
 
     monkeypatch.setattr(dag_runner, "run_all_checks", raise_runner)
