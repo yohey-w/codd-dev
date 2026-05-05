@@ -58,14 +58,20 @@ All notable changes to CoDD are documented in this file.
   - `artifact_discovery.paths` / `mappings` / `artifact_paths` による codd.yaml override 対応
   - coverage audit report に `Required Artifacts Audit` セクションを追記し、
     missing artifact の作成先候補と scope exclusion を記録
+- **`codd plan --derive --regenerate-wave-config`** (cmd_372):
+  `project_lexicon.yaml:required_artifacts` を topological sort し、`wave_config` を明示フラグ時のみ再生成
+  - `generate_wave_config_from_artifacts()` で required_artifacts の `depends_on` から wave を決定
+  - 既存 `wave_config` は通常の `codd plan --derive` では変更せず、後方互換を維持
+  - 再生成前に `codd.yaml.bak` を作成し、既存設定を保護
+  - `codd/codd.yaml.bak` / `.codd/codd.yaml.bak` を gitignore に追加
 
 ### Notes
 
 - 後方互換: 既存 CLI (drift / validate / propagate / fix / implement / coverage / deploy /
   e2e-generate / extract) はすべて変更なし。新フラグはすべて opt-in。
-- 既存テスト 852 (v1.18.0) → 979 (v1.19.0)、+127 件追加 (cmd_364: 12 + cmd_365: 16 +
+- 既存テスト 852 (v1.18.0) → 993 (v1.19.0)、+141 件追加 (cmd_364: 12 + cmd_365: 16 +
   cmd_366: 13 + cmd_367: 11 + cmd_368: 11 + cmd_373: 9 + cmd_375: 25 + cmd_370: 19 +
-  cmd_371: 11)、
+  cmd_371: 11 + cmd_372: 14)、
   全件 PASS / 0 FAIL / 0 SKIP
 - Generality Gate: framework 固有名 (Next.js/NextAuth/Clerk/Nuxt/SvelteKit) は
   defaults.yaml と codd.yaml override に分離、CoDD core にハードコードなし。

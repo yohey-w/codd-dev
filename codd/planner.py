@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import shutil
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -116,6 +118,238 @@ class PlanInitResult:
 class _ExternalNode:
     path: str
     status: str
+
+
+def generate_wave_config_from_artifacts(
+    required_artifacts: list[dict[str, Any]],
+    existing_wave_config: dict[str, Any] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Generate CoDD wave_config from lexicon required_artifacts.
+
+    When existing_wave_config is provided, entries already present there are
+    preserved byte-for-byte in append mode. Only missing required artifacts are
+    appended after the last existing wave.
+    """
+    if not required_artifacts:
+        return deepcopy(existing_wave_config) if existing_wave_config is not None else {}
+
+    artifacts_by_id = _index_required_artifacts(required_artifacts)
+    existing = deepcopy(existing_wave_config) if existing_wave_config is not None else None
+    existing_node_waves = _index_wave_config_nodes(existing or {})
+    missing_ids = [artifact_id for artifact_id in artifacts_by_id if artifact_id not in existing_node_waves]
+
+    if existing is not None and not missing_ids:
+        return existing
+
+    selected_ids = missing_ids if existing is not None else list(artifacts_by_id)
+    selected_artifacts = [artifacts_by_id[artifact_id] for artifact_id in selected_ids]
+    relative_waves = _assign_required_artifact_waves(selected_artifacts, artifacts_by_id)
+
+    if existing is None:
+        base_wave = 0
+        wave_config: dict[str, list[dict[str, Any]]] = {}
+    else:
+        base_wave = _max_wave_number(existing)
+        wave_config = existing
+
+    for artifact in selected_artifacts:
+        wave = base_wave + relative_waves[artifact["id"]]
+        wave_key = str(wave)
+        wave_config.setdefault(wave_key, []).append(_required_artifact_to_wave_entry(artifact))
+
+    return {
+        key: wave_config[key]
+        for key in sorted(wave_config, key=_wave_key_sort_value)
+    }
+
+
+def backup_codd_yaml(project_root: Path) -> Path:
+    """Copy the project codd.yaml to codd.yaml.bak when it exists."""
+    from codd.config import find_codd_dir
+
+    project_root = Path(project_root).resolve()
+    codd_dir = find_codd_dir(project_root)
+    src = codd_dir / "codd.yaml" if codd_dir else project_root / "codd.yaml"
+    bak = src.with_name("codd.yaml.bak")
+    if src.exists():
+        shutil.copy2(src, bak)
+    return bak
+
+
+def _index_required_artifacts(required_artifacts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    artifacts_by_id: dict[str, dict[str, Any]] = {}
+    for raw_artifact in required_artifacts:
+        if not isinstance(raw_artifact, dict):
+            raise ValueError("required_artifacts entries must be mappings")
+        artifact = deepcopy(raw_artifact)
+        artifact_id = artifact.get("id")
+        if not isinstance(artifact_id, str) or not artifact_id.strip():
+            raise ValueError("required_artifacts entries must include id")
+        artifact_id = artifact_id.strip()
+        if artifact_id in artifacts_by_id:
+            raise ValueError(f"duplicate required artifact id: {artifact_id}")
+        artifact["id"] = artifact_id
+        artifacts_by_id[artifact_id] = artifact
+    return artifacts_by_id
+
+
+def _assign_required_artifact_waves(
+    artifacts: list[dict[str, Any]],
+    artifacts_by_id: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    selected_ids = {artifact["id"] for artifact in artifacts}
+    indegree = {artifact["id"]: 0 for artifact in artifacts}
+    adjacency = {artifact["id"]: set() for artifact in artifacts}
+    input_order = {artifact["id"]: index for index, artifact in enumerate(artifacts)}
+
+    for artifact in artifacts:
+        artifact_id = artifact["id"]
+        for dependency_id in _required_artifact_dependency_ids(artifact):
+            if dependency_id not in selected_ids:
+                continue
+            if artifact_id in adjacency[dependency_id]:
+                continue
+            adjacency[dependency_id].add(artifact_id)
+            indegree[artifact_id] += 1
+
+    ready = sorted(
+        [artifact_id for artifact_id, degree in indegree.items() if degree == 0],
+        key=lambda artifact_id: (input_order[artifact_id], artifact_id),
+    )
+    order: list[str] = []
+    while ready:
+        artifact_id = ready.pop(0)
+        order.append(artifact_id)
+        for child_id in sorted(adjacency[artifact_id], key=lambda item: (input_order[item], item)):
+            indegree[child_id] -= 1
+            if indegree[child_id] == 0:
+                ready.append(child_id)
+        ready.sort(key=lambda item: (input_order[item], item))
+
+    if len(order) != len(artifacts):
+        cycle_nodes = sorted(artifact_id for artifact_id, degree in indegree.items() if degree > 0)
+        raise ValueError(f"required_artifacts contains a dependency cycle: {', '.join(cycle_nodes)}")
+
+    waves: dict[str, int] = {}
+    for artifact_id in order:
+        dependency_waves = [
+            waves[dependency_id]
+            for dependency_id in _required_artifact_dependency_ids(artifacts_by_id[artifact_id])
+            if dependency_id in waves
+        ]
+        waves[artifact_id] = (max(dependency_waves) + 1) if dependency_waves else 1
+    return waves
+
+
+def _required_artifact_dependency_ids(artifact: dict[str, Any]) -> list[str]:
+    dependencies = artifact.get("depends_on", [])
+    if not dependencies:
+        return []
+    if not isinstance(dependencies, list):
+        raise ValueError("required_artifacts depends_on must be a list")
+
+    dependency_ids: list[str] = []
+    for dependency in dependencies:
+        if isinstance(dependency, str):
+            dependency_id = dependency
+        elif isinstance(dependency, dict):
+            dependency_id = dependency.get("id", "")
+        else:
+            raise ValueError("required_artifacts depends_on entries must be strings or mappings")
+        dependency_id = str(dependency_id).strip()
+        if dependency_id:
+            dependency_ids.append(dependency_id)
+    return dependency_ids
+
+
+def _required_artifact_to_wave_entry(artifact: dict[str, Any]) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "node_id": artifact["id"],
+        "output": _required_artifact_output_path(artifact),
+        "title": str(artifact.get("title") or artifact["id"]),
+    }
+
+    dependencies = [
+        {"id": dependency_id, "relation": "depends_on"}
+        for dependency_id in _required_artifact_dependency_ids(artifact)
+    ]
+    if dependencies:
+        entry["depends_on"] = dependencies
+
+    conventions = artifact.get("conventions")
+    if isinstance(conventions, list) and conventions:
+        entry["conventions"] = deepcopy(conventions)
+
+    modules = artifact.get("modules")
+    if isinstance(modules, list) and modules:
+        entry["modules"] = [str(module) for module in modules if str(module).strip()]
+
+    return entry
+
+
+def _required_artifact_output_path(artifact: dict[str, Any]) -> str:
+    configured_output = artifact.get("output")
+    if isinstance(configured_output, str) and configured_output.strip():
+        return configured_output.strip()
+
+    node_id = str(artifact["id"])
+    category, _, name = node_id.partition(":")
+    filename_source = name or category or "artifact"
+    filename = re.sub(r"[^A-Za-z0-9_-]+", "_", filename_source).strip("_-").lower() or "artifact"
+    directory = {
+        "requirements": "docs/requirements",
+        "req": "docs/requirements",
+        "design": "docs/design",
+        "detailed_design": "docs/detailed_design",
+        "detail": "docs/detailed_design",
+        "plan": "docs/plan",
+        "governance": "docs/governance",
+        "test": "docs/test",
+        "operations": "docs/operations",
+        "infra": "docs/infra",
+    }.get(category, "docs/design")
+    return f"{directory}/{filename}.md"
+
+
+def _index_wave_config_nodes(wave_config: dict[str, Any]) -> dict[str, int]:
+    node_waves: dict[str, int] = {}
+    for wave_key, entries in wave_config.items():
+        wave_number = _parse_wave_number(wave_key)
+        if wave_number is None or not isinstance(entries, list):
+            continue
+        for entry in entries:
+            node_id: str | None = None
+            if isinstance(entry, dict) and isinstance(entry.get("node_id"), str):
+                node_id = entry["node_id"]
+            elif isinstance(entry, str):
+                node_id = entry
+            if node_id:
+                node_waves[node_id] = wave_number
+    return node_waves
+
+
+def _max_wave_number(wave_config: dict[str, Any]) -> int:
+    wave_numbers = [
+        wave_number
+        for wave_key in wave_config
+        if (wave_number := _parse_wave_number(wave_key)) is not None
+    ]
+    return max(wave_numbers, default=0)
+
+
+def _parse_wave_number(wave_key: Any) -> int | None:
+    if isinstance(wave_key, int):
+        return wave_key
+    text = str(wave_key)
+    match = re.fullmatch(r"(?:wave_)?(\d+)", text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _wave_key_sort_value(wave_key: str) -> tuple[int, str]:
+    wave_number = _parse_wave_number(wave_key)
+    return (wave_number if wave_number is not None else 10**9, str(wave_key))
 
 
 def plan_init(
