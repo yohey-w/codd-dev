@@ -1213,7 +1213,7 @@ def e2e_generate_legacy(path: str, base_url: str, output: str | None, framework:
     _run_e2e_generate(path=path, base_url=base_url, output=output, framework=framework, mode=mode)
 
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--language", default=None, help="Override language detection (python/typescript/javascript/go — full support; java — symbols only)")
 @click.option("--source-dirs", default=None, help="Comma-separated source directories (default: auto-detect)")
@@ -1244,7 +1244,9 @@ def e2e_generate_legacy(path: str, base_url: str, output: str | None, framework:
     help="Output format for --layer extraction",
 )
 @click.option("--output-file", default=None, help="Output file for --layer routes (default: stdout)")
+@click.pass_context
 def extract(
+    ctx: click.Context,
     path: str,
     language: str | None,
     source_dirs: str | None,
@@ -1265,6 +1267,9 @@ def extract(
     (`codd/extracted/` or `.codd/extracted/`). Review and promote
     confirmed docs when ready.
     """
+    if ctx.invoked_subcommand is not None:
+        return
+
     project_root = Path(path).resolve()
     bootstrap_codd_dir = _resolve_bootstrap_codd_dir(project_root)
     dirs = [d.strip() for d in source_dirs.split(",") if d.strip()] if source_dirs else None
@@ -1374,6 +1379,47 @@ def extract(
         click.echo(f"  1. Review generated docs in {output_display}/")
         click.echo(f"  2. Promote confirmed docs: mv {output_display}/*.md docs/design/")
         click.echo(f"  3. Run: codd scan  (to build the dependency graph)")
+
+
+@extract.command("design")
+@click.option("--path", "project_path", default=".", show_default=True, help="Project root directory")
+@click.option("--design-doc", required=True, type=click.Path(dir_okay=False, path_type=Path), help="Design document path")
+@click.option("--force", is_flag=True, help="Ignore cached expected extraction and run extraction again")
+def extract_design(project_path: str, design_doc: Path, force: bool):
+    """Extract expected implementation coverage hints from one design document."""
+    from codd.llm.design_doc_extractor import (
+        expected_extraction_cache_path,
+        extract_expected_artifacts_for_file,
+    )
+
+    project_root = Path(project_path).resolve()
+    doc_path = design_doc.expanduser()
+    if not doc_path.is_absolute():
+        doc_path = project_root / doc_path
+    doc_path = doc_path.resolve()
+
+    if not doc_path.is_file():
+        click.echo(f"Error: design document not found: {doc_path}")
+        raise SystemExit(1)
+
+    try:
+        extraction = extract_expected_artifacts_for_file(
+            doc_path,
+            project_root,
+            config=_load_optional_project_config(project_root),
+            force=force,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    cache_path = expected_extraction_cache_path(project_root, doc_path)
+    click.echo(
+        "Extracted expected artifacts: "
+        f"{len(extraction.expected_nodes)} node(s), "
+        f"{len(extraction.expected_edges)} edge(s) -> "
+        f"{_display_path(cache_path, project_root)}"
+    )
 
 
 @main.command("repair-slice")
