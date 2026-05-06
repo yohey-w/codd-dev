@@ -33,6 +33,10 @@ propagation:
   stop_at_contract_boundary: true
 coherence:
   capability_patterns: {}
+  path_prefix_tolerant:
+    - "src/"
+    - "lib/"
+    - "app/"
 hitl:
   mode: cooperative
 requirement_completeness:

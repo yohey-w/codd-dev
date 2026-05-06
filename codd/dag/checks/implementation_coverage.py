@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import fnmatch
+from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Any
 
 from codd.dag import DAG, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.llm.design_doc_extractor import ExpectedExtraction, ExpectedNode
+
+
+DEFAULT_PATH_PREFIX_TOLERANT = ("src/", "lib/", "app/")
+_BRACKET_SEGMENT_RE = re.compile(r"\[[^\]]+\]")
 
 
 @dataclass
@@ -55,7 +61,7 @@ class ImplementationCoverageCheck(DagCheck):
             for expected_node in expected.expected_nodes:
                 if expected_node.kind == "impl_file":
                     expected_impl_nodes.append(expected_node)
-                if _matches_any_artifact(target_dag, expected_node, root):
+                if _matches_any_artifact(target_dag, expected_node, root, self.settings):
                     continue
                 violations.append(
                     {
@@ -71,7 +77,10 @@ class ImplementationCoverageCheck(DagCheck):
 
         if expected_impl_nodes:
             for impl_node in _nodes_by_kind(target_dag, "impl_file"):
-                if any(_hint_matches_node(expected.path_hint, impl_node, root) for expected in expected_impl_nodes):
+                if any(
+                    _hint_matches_node(expected.path_hint, impl_node, root, self.settings)
+                    for expected in expected_impl_nodes
+                ):
                     continue
                 violations.append(
                     {
@@ -119,13 +128,20 @@ def _expected_extraction(design_doc: Node) -> ExpectedExtraction | None:
     return None
 
 
-def _matches_any_artifact(dag: DAG, expected_node: ExpectedNode, project_root: Path) -> bool:
+def _matches_any_artifact(
+    dag: DAG,
+    expected_node: ExpectedNode,
+    project_root: Path,
+    settings: dict[str, Any] | None = None,
+) -> bool:
     if expected_node.kind == "config_file":
         hint_path = project_root / _normalize_hint(expected_node.path_hint)
         if hint_path.is_file():
             return True
+    if expected_node.kind == "impl_file":
+        return _matches_any_impl(dag, expected_node.path_hint, project_root, settings)
     for candidate in _candidate_nodes(dag, expected_node.kind):
-        if _hint_matches_node(expected_node.path_hint, candidate, project_root):
+        if _hint_matches_node(expected_node.path_hint, candidate, project_root, settings):
             return True
     return False
 
@@ -137,26 +153,164 @@ def _candidate_nodes(dag: DAG, expected_kind: str) -> list[Node]:
         return [
             node
             for node in sorted(dag.nodes.values(), key=lambda item: item.id)
-            if node.kind in {"config_file", "deployment_doc"}
+            if node.kind in {"config_file", "deployment_doc", "impl_file"}
         ]
     return _nodes_by_kind(dag, "impl_file")
 
 
-def _hint_matches_node(path_hint: str, node: Node, project_root: Path | None = None) -> bool:
+def _matches_any_impl(
+    dag: DAG,
+    path_hint: str,
+    project_root: Path | None = None,
+    settings: dict[str, Any] | None = None,
+) -> bool:
     hint = _normalize_hint(path_hint)
     if not hint:
         return False
-    candidates = [_normalize_hint(value) for value in (node.id, node.path) if value]
+    candidates = [candidate for node in _nodes_by_kind(dag, "impl_file") for candidate in _node_path_candidates(node)]
+
+    if any(_exact_path_match(hint, candidate) for candidate in candidates):
+        return True
+    if any(_glob_path_match(hint, candidate) for candidate in candidates):
+        return True
+    if any(_bracket_path_match(hint, candidate) for candidate in candidates):
+        return True
+    if any(_match_with_src_prefix_tolerance(hint, candidate, settings) for candidate in candidates):
+        return True
+    if any(_soft_path_match(hint, candidate) for candidate in candidates):
+        return True
+
+    if project_root is not None and any(char in hint for char in "*?[]"):
+        return any((project_root / match).is_file() for match in fnmatch.filter(_project_files(project_root), hint))
+    return False
+
+
+def _hint_matches_node(
+    path_hint: str,
+    node: Node,
+    project_root: Path | None = None,
+    settings: dict[str, Any] | None = None,
+) -> bool:
+    hint = _normalize_hint(path_hint)
+    if not hint:
+        return False
+    candidates = _node_path_candidates(node)
     for candidate in candidates:
-        if hint == candidate or hint == Path(candidate).name:
+        if _exact_path_match(hint, candidate):
             return True
-        if fnmatch.fnmatchcase(candidate, hint):
+        if _glob_path_match(hint, candidate):
+            return True
+        if _bracket_path_match(hint, candidate):
+            return True
+        if _match_with_src_prefix_tolerance(hint, candidate, settings):
             return True
         if _soft_path_match(hint, candidate):
             return True
     if project_root is not None and any(char in hint for char in "*?[]"):
         return any((project_root / match).is_file() for match in fnmatch.filter(_project_files(project_root), hint))
     return False
+
+
+def _node_path_candidates(node: Node) -> list[str]:
+    candidates: list[str] = []
+    for value in (node.path, node.id):
+        candidate = _normalize_hint(value or "")
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _exact_path_match(hint: str, candidate: str) -> bool:
+    return hint == candidate or hint == Path(candidate).name
+
+
+def _glob_path_match(hint: str, candidate: str) -> bool:
+    return fnmatch.fnmatchcase(candidate, hint) or fnmatch.fnmatchcase(candidate, _escape_literal_brackets(hint))
+
+
+def _bracket_path_match(hint: str, candidate: str) -> bool:
+    normalized_hint = _normalize_bracket_segments(hint)
+    normalized_candidate = _normalize_bracket_segments(candidate)
+    if normalized_hint == hint and normalized_candidate == candidate:
+        return False
+    if normalized_hint == normalized_candidate:
+        return True
+    return _glob_path_match(normalized_hint, normalized_candidate)
+
+
+def _normalize_bracket_segments(path: str) -> str:
+    return _BRACKET_SEGMENT_RE.sub("*", path)
+
+
+def _match_with_src_prefix_tolerance(
+    path_hint: str,
+    impl_path: str,
+    settings: dict[str, Any] | None = None,
+) -> bool:
+    prefixes = _path_prefix_tolerant(settings)
+    if not prefixes:
+        return False
+
+    hint = _normalize_hint(path_hint)
+    candidate = _normalize_hint(impl_path)
+    for hint_variant in _prefix_variants(hint, prefixes):
+        for candidate_variant in _prefix_variants(candidate, prefixes):
+            if hint_variant == candidate_variant:
+                return True
+            if _glob_path_match(hint_variant, candidate_variant):
+                return True
+            if _bracket_path_match(hint_variant, candidate_variant):
+                return True
+    return False
+
+
+def _path_prefix_tolerant(settings: dict[str, Any] | None = None) -> list[str]:
+    coherence = settings.get("coherence", {}) if isinstance(settings, dict) else {}
+    configured = coherence.get("path_prefix_tolerant") if isinstance(coherence, dict) else None
+    if configured is None:
+        return list(DEFAULT_PATH_PREFIX_TOLERANT)
+
+    prefixes: list[str] = []
+    values = [configured] if isinstance(configured, str) else configured
+    if not isinstance(values, (list, tuple, set)):
+        return list(DEFAULT_PATH_PREFIX_TOLERANT)
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        prefix = _normalize_hint(value)
+        if not prefix:
+            continue
+        if not prefix.endswith("/"):
+            prefix = f"{prefix}/"
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+    return prefixes
+
+
+def _prefix_variants(path: str, prefixes: list[str]) -> list[str]:
+    variants = [path]
+    for prefix in prefixes:
+        if path.startswith(prefix):
+            variants.append(path.removeprefix(prefix))
+        else:
+            variants.append(f"{prefix}{path}")
+    deduped: list[str] = []
+    for variant in variants:
+        if variant and variant not in deduped:
+            deduped.append(variant)
+    return deduped
+
+
+def _escape_literal_brackets(pattern: str) -> str:
+    escaped: list[str] = []
+    for char in pattern:
+        if char == "[":
+            escaped.append("[[]")
+        elif char == "]":
+            escaped.append("[]]")
+        else:
+            escaped.append(char)
+    return "".join(escaped)
 
 
 def _soft_path_match(hint: str, candidate: str) -> bool:
@@ -176,8 +330,24 @@ def _normalize_hint(value: str) -> str:
     return normalized.lstrip("/")
 
 
+@lru_cache(maxsize=16)
 def _project_files(project_root: Path) -> list[str]:
-    return [path.relative_to(project_root).as_posix() for path in project_root.rglob("*") if path.is_file()]
+    excluded_parts = {
+        ".codd",
+        ".git",
+        ".next",
+        "__pycache__",
+        "dist",
+        "node_modules",
+    }
+    files: list[str] = []
+    for path in project_root.rglob("*"):
+        relative = path.relative_to(project_root)
+        if excluded_parts.intersection(relative.parts):
+            continue
+        if path.is_file():
+            files.append(relative.as_posix())
+    return files
 
 
 __all__ = ["ImplementationCoverageCheck", "ImplementationCoverageResult"]

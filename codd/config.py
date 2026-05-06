@@ -57,15 +57,18 @@ def _read_yaml_mapping(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _deep_merge(defaults: Any, project: Any) -> Any:
+def _deep_merge(defaults: Any, project: Any, path: tuple[str, ...] = ()) -> Any:
     if isinstance(defaults, dict) and isinstance(project, dict):
         merged = deepcopy(defaults)
         for key, value in project.items():
             if key in merged:
-                merged[key] = _deep_merge(merged[key], value)
+                merged[key] = _deep_merge(merged[key], value, (*path, str(key)))
             else:
                 merged[key] = deepcopy(value)
         return merged
+
+    if path == ("coherence", "path_prefix_tolerant"):
+        return deepcopy(project)
 
     if isinstance(defaults, list) and isinstance(project, list):
         return _merge_lists(defaults, project)
