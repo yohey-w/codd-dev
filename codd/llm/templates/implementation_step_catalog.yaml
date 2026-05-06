@@ -1,0 +1,35 @@
+catalog:
+  - domain_hint: web_app
+    step_kinds:
+      - ui_input
+      - client_validation
+      - server_handler
+      - db_persist
+      - ui_feedback
+      - error_recovery
+  - domain_hint: mobile_app
+    step_kinds:
+      - view
+      - view_model
+      - repository
+      - network_layer
+      - state_observer
+      - error_state
+  - domain_hint: cli_tool
+    step_kinds:
+      - arg_parse
+      - command_handler
+      - output_formatter
+      - exit_code
+  - domain_hint: backend_api
+    step_kinds:
+      - request_validation
+      - business_logic
+      - persistence
+      - response_serialization
+  - domain_hint: embedded
+    step_kinds:
+      - interrupt_handler
+      - driver_call
+      - state_machine_transition
+      - peripheral_init
