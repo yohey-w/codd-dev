@@ -281,6 +281,20 @@ def test_c1_to_c5_deploy_gate_excludes_deployment_completeness(tmp_path, monkeyp
     assert "deployment_completeness" not in captured["check_names"]
 
 
+def test_deploy_gate_includes_environment_coverage(tmp_path, monkeypatch):
+    captured: dict[str, list[str] | tuple[str, ...] | None] = {}
+
+    def fake_run_all_checks(project_root, settings=None, check_names=None):
+        captured["check_names"] = check_names
+        return []
+
+    monkeypatch.setattr("codd.dag.runner.run_all_checks", fake_run_all_checks)
+
+    _collect_dag_completeness_gate(tmp_path, {}, DeployGateResult())
+
+    assert "environment_coverage" in captured["check_names"]
+
+
 def test_cli_deploy_apply_target_vps_runs_c6_gate(tmp_path, monkeypatch):
     _reset_target()
     called: list[Path] = []

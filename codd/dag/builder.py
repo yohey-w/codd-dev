@@ -16,6 +16,7 @@ import yaml
 
 from codd.config import load_project_config
 from codd.dag import DAG, Edge, Node
+from codd.dag.coverage_axes import CoverageAxis, extract_coverage_axes_from_design_doc, extract_coverage_axes_from_lexicon
 from codd.dag.extractor import extract_design_doc_metadata, extract_imports, scan_capability_evidence
 from codd.llm.design_doc_extractor import (
     ExpectedExtraction,
@@ -88,6 +89,7 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
     _add_design_doc_expected_outcome_edges(dag, design_docs)
     _add_plan_tasks(dag, root, dag_settings)
     _add_deployment_graph(dag, root, design_docs, impl_nodes)
+    _attach_coverage_axes(dag, root, dag_settings)
 
     write_dag_json(dag, root, default_dag_json_path(root))
     return dag
@@ -151,7 +153,7 @@ def default_dag_mermaid_path(project_root: Path) -> Path:
 def dag_to_dict(dag: DAG, project_root: Path) -> dict[str, Any]:
     """Serialize a DAG using the stable `.codd/dag.json` schema."""
 
-    return {
+    payload = {
         "version": "1",
         "built_at": datetime.now(timezone.utc).isoformat(),
         "project_root": str(Path(project_root).resolve()),
@@ -167,6 +169,12 @@ def dag_to_dict(dag: DAG, project_root: Path) -> dict[str, Any]:
         "edges": [_edge_to_dict(edge) for edge in sorted(dag.edges, key=lambda item: (item.from_id, item.to_id, item.kind))],
         "cycles": dag.detect_cycles(),
     }
+    coverage_axes = getattr(dag, "coverage_axes", [])
+    if coverage_axes:
+        payload["coverage_axes"] = [
+            axis.to_dict() if isinstance(axis, CoverageAxis) else axis for axis in coverage_axes
+        ]
+    return payload
 
 
 def _edge_to_dict(edge: Edge) -> dict[str, Any]:
@@ -654,6 +662,32 @@ def _add_deployment_graph(
             continue
         dag.add_edge(Edge(from_id=from_id, to_id=to_id, kind=kind, attributes=attributes))
         existing_edges.add(edge_key)
+
+
+def _attach_coverage_axes(dag: DAG, project_root: Path, settings: dict[str, Any]) -> None:
+    lexicon_path = _project_path(project_root, str(settings.get("lexicon_file", "project_lexicon.yaml")))
+    axes = extract_coverage_axes_from_lexicon(lexicon_path)
+    for node in sorted(dag.nodes.values(), key=lambda item: item.id):
+        if node.kind == "design_doc":
+            axes.extend(extract_coverage_axes_from_design_doc(node))
+    dag.coverage_axes = _dedupe_coverage_axes(axes)
+
+
+def _dedupe_coverage_axes(axes: list[CoverageAxis]) -> list[CoverageAxis]:
+    deduped: list[CoverageAxis] = []
+    seen: set[tuple[str, tuple[str, ...], str, str]] = set()
+    for axis in axes:
+        key = (
+            axis.axis_type,
+            tuple(variant.id for variant in axis.variants),
+            axis.source,
+            axis.owner_section,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(axis)
+    return deduped
 
 
 def _extract_outputs(section: str) -> list[str]:

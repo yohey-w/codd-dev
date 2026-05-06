@@ -380,6 +380,7 @@ def _collect_dag_completeness_gate(
                 "depends_on_consistency",
                 "task_completion",
                 "transitive_closure",
+                "environment_coverage",
             ],
         )
     except Exception as exc:  # pragma: no cover - defensive gate behavior
