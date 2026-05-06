@@ -85,10 +85,29 @@ def test_auto_repair_standalone_failure_requires_repair_config(tmp_path: Path, m
     assert "WARN: codd.yaml [repair] section is required" in result.output
 
 
-def test_auto_repair_keeps_pro_verify_when_handler_exists(tmp_path: Path, monkeypatch):
+def test_auto_repair_prefers_standalone_when_pro_handler_exists(tmp_path: Path, monkeypatch):
+    project = _write_project(tmp_path)
+    calls = []
+    monkeypatch.setattr(cli, "get_command_handler", lambda name: object())
+    monkeypatch.setattr(
+        "codd.repair.verify_runner.run_standalone_verify",
+        lambda project_root: calls.append(project_root) or VerificationResult(True),
+    )
+
+    def run_pro(name, **kwargs):
+        raise AssertionError("pro called")
+
+    monkeypatch.setattr(cli, "_run_pro_command", run_pro)
+
+    result = CliRunner().invoke(main, ["verify", "--path", str(project), "--auto-repair"])
+
+    assert result.exit_code == 0
+    assert calls == [project.resolve()]
+
+
+def test_verify_without_auto_repair_keeps_pro_verify_when_handler_exists(tmp_path: Path, monkeypatch):
     project = _write_project(tmp_path)
     captured = {}
-    monkeypatch.setattr(cli, "get_command_handler", lambda name: object())
     monkeypatch.setattr("codd.repair.verify_runner.run_standalone_verify", lambda project_root: (_ for _ in ()).throw(AssertionError("standalone called")))
 
     def run_pro(name, **kwargs):
@@ -97,7 +116,7 @@ def test_auto_repair_keeps_pro_verify_when_handler_exists(tmp_path: Path, monkey
 
     monkeypatch.setattr(cli, "_run_pro_command", run_pro)
 
-    result = CliRunner().invoke(main, ["verify", "--path", str(project), "--auto-repair"])
+    result = CliRunner().invoke(main, ["verify", "--path", str(project)])
 
     assert result.exit_code == 0
     assert captured == {"name": "verify", "kwargs": {"path": str(project), "sprint": None}}

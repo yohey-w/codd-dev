@@ -1,0 +1,19 @@
+project:
+  name: standalone-repair-skeleton
+  type: generic
+project_type: generic
+scan:
+  source_dirs:
+    - src
+  test_dirs:
+    - tests
+  doc_dirs:
+    - docs/design
+dag:
+  plan_task_file: docs/design/implementation_plan.md
+repair:
+  approval_mode: auto
+  engine_name: scripted-create-status
+  max_attempts: 2
+  allow_auto:
+    require_explicit_optin: true
