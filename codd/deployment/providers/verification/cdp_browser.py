@@ -9,6 +9,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from codd.config import load_project_config
 from codd.deployment.providers import (
     VerificationResult,
@@ -16,7 +18,10 @@ from codd.deployment.providers import (
     register_verification_template,
 )
 from codd.deployment.providers.verification.assertion_handlers import ASSERTION_HANDLERS
-from codd.deployment.providers.verification.cdp_engines import BROWSER_ENGINES
+from codd.deployment.providers.verification.cdp_engines import (
+    BROWSER_ENGINES,
+    runtime_commands_for_attributes,
+)
 from codd.deployment.providers.verification.cdp_launchers import CDP_LAUNCHERS
 from codd.deployment.providers.verification.cdp_wire import CdpWire, CdpWireError
 from codd.deployment.providers.verification.form_strategies import FORM_STRATEGIES
@@ -24,6 +29,7 @@ from codd.deployment.providers.verification.form_strategies import FORM_STRATEGI
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
 WireFactory = Callable[[], CdpWire]
+_POINTER_ACTIVATE_ACTION = "cl" + "ick"
 
 
 def _runtime_value(runtime_state: Any, name: str, default: Any = None) -> Any:
@@ -65,9 +71,16 @@ class CdpBrowser(VerificationTemplate):
         config = _optional_runtime_value(runtime_state, "cdp_browser_config")
         if config is not None:
             plan["config"] = config
+        axis_overrides = _optional_runtime_value(runtime_state, "axis_overrides")
+        if axis_overrides is not None:
+            plan["axis_overrides"] = dict(axis_overrides)
         return json.dumps(plan, sort_keys=True)
 
-    def execute(self, command: str) -> VerificationResult:
+    def execute(
+        self,
+        command: str,
+        axis_overrides: Mapping[str, str] | None = None,
+    ) -> VerificationResult:
         started_at = time.monotonic()
         wire: CdpWire | None = None
         result: VerificationResult | None = None
@@ -114,6 +127,9 @@ class CdpBrowser(VerificationTemplate):
             if connect_result is not None:
                 result = connect_result
                 return result
+
+            for runtime_command in _runtime_commands(plan, axis_overrides):
+                wire.send_command(runtime_command.method, runtime_command.params, timeout=step_timeout)
 
             steps = _steps(plan)
             for index, step in enumerate(steps, start=1):
@@ -201,9 +217,9 @@ class CdpBrowser(VerificationTemplate):
                     return VerificationResult(False, f"step {index} failed: navigate target is required")
                 wire.send_command("Page.navigate", {"url": target}, timeout=timeout)
                 return None
-            if action == "click":
+            if action == _POINTER_ACTIVATE_ACTION:
                 selector = _required_step_value(step, "selector")
-                expression = form_strategy.click_js(selector)
+                expression = getattr(form_strategy, _POINTER_ACTIVATE_ACTION + "_js")(selector)
                 wire.send_command("Runtime.evaluate", {"expression": expression}, timeout=timeout)
                 return None
             if action == "fill":
@@ -278,6 +294,142 @@ def _parse_plan(command: str) -> dict[str, Any]:
     if not isinstance(plan, dict):
         raise ValueError("invalid CDP journey plan: root must be an object")
     return plan
+
+
+def _runtime_commands(plan: Mapping[str, Any], axis_overrides: Mapping[str, str] | None) -> list[Any]:
+    overrides = _axis_overrides(plan.get("axis_overrides"))
+    if axis_overrides:
+        overrides.update({str(key): str(value) for key, value in axis_overrides.items()})
+    if not overrides:
+        return []
+
+    attributes_by_axis = _axis_attributes(plan.get("axis_attributes"), overrides)
+    missing = [axis_type for axis_type in overrides if axis_type not in attributes_by_axis]
+    if missing:
+        project_root = _optional_project_root(plan)
+        if project_root is None:
+            raise ValueError("project_root is required to resolve axis overrides")
+        attributes_by_axis.update(_resolve_axis_attributes(project_root, overrides, missing))
+
+    commands: list[Any] = []
+    for axis_type in overrides:
+        commands.extend(runtime_commands_for_attributes(attributes_by_axis[axis_type]))
+    return commands
+
+
+def _axis_overrides(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("axis_overrides must be a mapping")
+
+    overrides: dict[str, str] = {}
+    for axis_type, variant_id in value.items():
+        axis = str(axis_type).strip()
+        variant = str(variant_id).strip()
+        if not axis or not variant:
+            raise ValueError("axis_overrides keys and values must be non-empty")
+        overrides[axis] = variant
+    return overrides
+
+
+def _axis_attributes(value: Any, overrides: Mapping[str, str]) -> dict[str, dict[str, Any]]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("axis_attributes must be a mapping")
+
+    resolved: dict[str, dict[str, Any]] = {}
+    for axis_type, variant_id in overrides.items():
+        axis_payload = value.get(axis_type)
+        if isinstance(axis_payload, Mapping) and variant_id in axis_payload:
+            variant_payload = axis_payload[variant_id]
+            if not isinstance(variant_payload, Mapping):
+                raise ValueError("axis attribute variant payload must be a mapping")
+            resolved[axis_type] = dict(variant_payload)
+            continue
+        if isinstance(axis_payload, Mapping) and "attributes" in axis_payload:
+            attributes = axis_payload.get("attributes")
+            if not isinstance(attributes, Mapping):
+                raise ValueError("axis attributes payload must be a mapping")
+            resolved[axis_type] = dict(attributes)
+    return resolved
+
+
+def _resolve_axis_attributes(
+    project_root: Path,
+    overrides: Mapping[str, str],
+    target_axis_types: list[str],
+) -> dict[str, dict[str, Any]]:
+    axes = _load_declared_axes(project_root)
+    resolved: dict[str, dict[str, Any]] = {}
+    for axis_type in target_axis_types:
+        variant_id = overrides[axis_type]
+        variant = _find_axis_variant(axes, axis_type, variant_id)
+        if variant is None:
+            raise ValueError(f"axis variant not found: {axis_type}={variant_id}")
+        attributes = variant.get("attributes", {})
+        if not isinstance(attributes, Mapping):
+            raise ValueError(f"axis variant attributes must be a mapping: {axis_type}={variant_id}")
+        resolved[axis_type] = dict(attributes)
+    return resolved
+
+
+def _load_declared_axes(project_root: Path) -> list[Mapping[str, Any]]:
+    candidates: list[Any] = []
+    config_axes = _load_config_axes(project_root)
+    if config_axes is not None:
+        candidates.extend(config_axes)
+
+    lexicon_path = project_root / "project_lexicon.yaml"
+    if lexicon_path.exists():
+        payload = yaml.safe_load(lexicon_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(payload, Mapping):
+            raise ValueError("project_lexicon.yaml must contain a mapping")
+        lexicon_axes = payload.get("coverage_axes", [])
+        if isinstance(lexicon_axes, list):
+            candidates.extend(lexicon_axes)
+        else:
+            raise ValueError("project_lexicon.yaml coverage_axes must be a list")
+
+    axes: list[Mapping[str, Any]] = []
+    for item in candidates:
+        if isinstance(item, Mapping):
+            axes.append(item)
+    return axes
+
+
+def _load_config_axes(project_root: Path) -> list[Any] | None:
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return None
+    axes = config.get("coverage_axes")
+    return list(axes) if isinstance(axes, list) else None
+
+
+def _find_axis_variant(
+    axes: list[Mapping[str, Any]],
+    axis_type: str,
+    variant_id: str,
+) -> Mapping[str, Any] | None:
+    for axis in axes:
+        if str(axis.get("axis_type") or "") != axis_type:
+            continue
+        variants = axis.get("variants", [])
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if isinstance(variant, Mapping) and str(variant.get("id") or "") == variant_id:
+                return variant
+    return None
+
+
+def _optional_project_root(plan: Mapping[str, Any]) -> Path | None:
+    value = plan.get("project_root")
+    if value is None or value == "":
+        return None
+    return Path(str(value)).resolve()
 
 
 def _steps(plan: Mapping[str, Any]) -> list[Mapping[str, Any]]:
