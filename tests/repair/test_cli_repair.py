@@ -126,6 +126,8 @@ def test_verify_auto_repair_fail_launches_repair_loop(tmp_path: Path, monkeypatc
     ("status", "exit_code"),
     [
         ("REPAIR_SUCCESS", 0),
+        ("PARTIAL_SUCCESS", 2),
+        ("MAX_ATTEMPTS_REACHED", 2),
         ("REPAIR_REJECTED_BY_HITL", 1),
         ("REPAIR_EXHAUSTED", 2),
         ("REPAIR_FAILED", 3),

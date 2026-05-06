@@ -139,7 +139,7 @@ def _run_loop(
 def test_repair_loop_config_defaults():
     config = RepairLoopConfig()
 
-    assert config.max_attempts == 3
+    assert config.max_attempts == 10
     assert config.approval_mode == "required"
     assert config.history_dir == Path(".codd/repair_history")
     assert config.engine_name == "llm"
@@ -165,7 +165,7 @@ def test_repair_loop_exhausts_after_max_attempts(tmp_path: Path):
 
     outcome = _run_loop(tmp_path, "exhaust", verify, max_attempts=3)
 
-    assert outcome.status == "REPAIR_EXHAUSTED"
+    assert outcome.status == "PARTIAL_SUCCESS"
     assert len(outcome.attempts) == 3
     assert verify_calls == 3
     assert len(engine_cls.analyze_inputs) == 3
@@ -377,7 +377,7 @@ def test_failed_verify_result_becomes_next_attempt_input(tmp_path: Path):
 
     outcome = _run_loop(tmp_path, "next-failure", lambda: results.pop(0), max_attempts=2)
 
-    assert outcome.status == "REPAIR_EXHAUSTED"
+    assert outcome.status == "PARTIAL_SUCCESS"
     assert engine_cls.analyze_inputs[1] is next_failure
 
 

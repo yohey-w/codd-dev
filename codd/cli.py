@@ -30,6 +30,7 @@ class _CliVerificationResult:
     passed: bool
     exit_code: int
     failure: Any | None = None
+    failures: list[Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1733,6 +1734,7 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 )
 @click.option("--auto-repair", is_flag=True, default=False, help="Run RepairLoop when verification fails")
 @click.option("--max-attempts", default=None, type=click.IntRange(min=1), help="Maximum repair attempts")
+@click.option("--baseline-ref", default=None, help="Baseline git ref for repair classification")
 @click.option("--engine", "engine_name", default=None, help="Repair engine name")
 def verify(
     path: str,
@@ -1743,6 +1745,7 @@ def verify(
     design_md: bool,
     auto_repair: bool,
     max_attempts: int | None,
+    baseline_ref: str | None,
     engine_name: str | None,
 ) -> None:
     """Run build + test verification and trace failures to design documents."""
@@ -1772,8 +1775,10 @@ def verify(
         result.failure,
         repair_config=repair_config,
         max_attempts=max_attempts,
+        baseline_ref=baseline_ref,
         engine_name=engine_name,
         verify_callable=lambda: _run_verify_once(path=path, sprint=sprint, prefer_standalone=True),
+        initial_verify_result=result,
     )
     click.echo(f"Repair outcome: {outcome.status}")
     click.echo(f"Repair history: {_display_path(outcome.history_session_dir, project_root)}")
@@ -3586,6 +3591,7 @@ def _cli_result_from_standalone_verify(result: Any) -> _CliVerificationResult:
         passed=bool(result.passed),
         exit_code=0 if result.passed else 1,
         failure=getattr(result, "failure", None),
+        failures=list(getattr(result, "failures", []) or []),
     )
 
 
@@ -3619,8 +3625,10 @@ def _run_repair_loop(
     *,
     repair_config: dict[str, Any],
     max_attempts: int | None,
+    baseline_ref: str | None = None,
     engine_name: str | None,
     verify_callable,
+    initial_verify_result: Any | None = None,
 ):
     from codd.dag import DAG
     from codd.dag.builder import build_dag
@@ -3642,15 +3650,21 @@ def _run_repair_loop(
         history_dir=Path(str(repair.get("history_dir") or ".codd/repair_history")),
         engine_name=str(engine_name or repair.get("engine_name") or repair.get("engine") or "llm"),
     )
-    return RepairLoop(config, project_root).run(resolved_failure, dag, verify_callable=verify_callable)
+    return RepairLoop(config, project_root).run(
+        resolved_failure,
+        dag,
+        verify_callable=verify_callable,
+        baseline_ref=baseline_ref,
+        initial_verify_result=initial_verify_result,
+    )
 
 
 def _repair_max_attempts(repair: dict[str, Any], max_attempts: int | None) -> int:
-    raw = max_attempts if max_attempts is not None else repair.get("max_attempts", 3)
+    raw = max_attempts if max_attempts is not None else repair.get("max_attempts", 10)
     try:
         return max(1, int(raw))
     except (TypeError, ValueError):
-        return 3
+        return 10
 
 
 def _dag_snapshot(dag: Any, project_root: Path) -> dict[str, Any]:
@@ -3686,6 +3700,8 @@ def _utc_timestamp() -> str:
 def _repair_exit_code(status: str) -> int:
     return {
         "REPAIR_SUCCESS": 0,
+        "PARTIAL_SUCCESS": 2,
+        "MAX_ATTEMPTS_REACHED": 2,
         "REPAIR_REJECTED_BY_HITL": 1,
         "REPAIR_EXHAUSTED": 2,
         "REPAIR_FAILED": 3,
@@ -3790,9 +3806,17 @@ def _load_repair_proposal(path: Path) -> Any:
 @click.option("--from-report", "from_report", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--path", "project_path", default=".", help="Project root directory")
 @click.option("--max-attempts", default=None, type=click.IntRange(min=1), help="Maximum repair attempts")
+@click.option("--baseline-ref", default=None, help="Baseline git ref for repair classification")
 @click.option("--engine", "engine_name", default=None, help="Repair engine name")
 @click.pass_context
-def repair(ctx, from_report: Path | None, project_path: str, max_attempts: int | None, engine_name: str | None):
+def repair(
+    ctx,
+    from_report: Path | None,
+    project_path: str,
+    max_attempts: int | None,
+    baseline_ref: str | None,
+    engine_name: str | None,
+):
     """Run and inspect repair sessions."""
     if ctx.invoked_subcommand is not None:
         return
@@ -3812,6 +3836,7 @@ def repair(ctx, from_report: Path | None, project_path: str, max_attempts: int |
             failure,
             repair_config=repair_config,
             max_attempts=max_attempts,
+            baseline_ref=baseline_ref,
             engine_name=engine_name,
             verify_callable=lambda: _run_verify_once(path=str(project_root), sprint=None),
         )

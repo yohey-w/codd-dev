@@ -210,7 +210,7 @@ def test_repair_loop_returns_exhausted_after_max_attempts(project: Path):
     )
 
     assert result.exit_code == 2
-    assert "Repair outcome: REPAIR_EXHAUSTED" in result.output
+    assert "Repair outcome: MAX_ATTEMPTS_REACHED" in result.output
     assert not (project / STATUS_FILE).exists()
 
 
