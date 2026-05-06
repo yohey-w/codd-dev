@@ -2,6 +2,10 @@ version: "0.2.0a1"
 project:
   frameworks: []
 ai_command: "claude --print --model claude-opus-4-6 --tools \"\""
+ai_commands:
+  plan_derive: null
+  design_doc_extract: null
+  criteria_expand: null
 coding_principles: null
 scan:
   source_dirs:
