@@ -246,6 +246,7 @@ def implement_tasks(
     clean: bool = False,
     max_tasks: int = 30,
     wave: int | None = None,
+    use_derived_steps: bool | None = None,
 ) -> list[ImplementationResult]:
     """Generate code for tasks from implementation plan."""
     project_root = project_root.resolve()
@@ -255,6 +256,7 @@ def implement_tasks(
         raise ValueError("--wave must be at least 1")
 
     config = _load_project_config(project_root)
+    derived_steps_enabled = _use_derived_steps_enabled(config, use_derived_steps)
     _check_guard_files_uniqueness(project_root, config)
 
     plan = _load_implementation_plan(project_root, config)
@@ -323,6 +325,7 @@ def implement_tasks(
                 config, plan, executable[0], resolved_ai_command,
                 global_conventions, coding_principles, node_paths,
                 detailed_design_node_ids, prior_task_outputs, project_root,
+                use_derived_steps=derived_steps_enabled,
             )
             results.append(result)
             prior_task_outputs.append(summary)
@@ -332,6 +335,7 @@ def implement_tasks(
                 global_conventions, coding_principles, node_paths,
                 detailed_design_node_ids, prior_task_outputs, project_root,
                 use_worktree=use_worktree,
+                use_derived_steps=derived_steps_enabled,
             )
             for result, summary in phase_results:
                 results.append(result)
@@ -442,6 +446,164 @@ def _check_blockers(
     return None
 
 
+def _use_derived_steps_enabled(config: dict[str, Any], override: bool | None) -> bool:
+    if override is not None:
+        return bool(override)
+    implementer_config = config.get("implementer")
+    if isinstance(implementer_config, dict) and "use_derived_steps" in implementer_config:
+        return bool(implementer_config.get("use_derived_steps"))
+    return False
+
+
+def _implementation_steps_context(
+    *,
+    config: dict[str, Any],
+    task: ImplementationTask,
+    dependency_documents: list[DependencyDocument],
+    project_root: Path,
+) -> str | None:
+    from codd.llm.impl_step_deriver import render_impl_steps_for_prompt
+
+    steps = _load_or_derive_implementation_steps(config, task, dependency_documents, project_root)
+    explicit = _filter_layer1_impl_steps([step for step in steps if not step.inferred], config)
+    implicit = _filter_layer2_impl_steps([step for step in steps if step.inferred], config)
+    if not explicit and not implicit:
+        return None
+
+    lines: list[str] = []
+    if explicit:
+        lines.extend(
+            [
+                "[Layer 1 - Explicit, from design]",
+                render_impl_steps_for_prompt(explicit),
+            ]
+        )
+    if implicit:
+        if lines:
+            lines.append("")
+        lines.extend(
+            [
+                "[Layer 2 - Inferred, best-practice augment]",
+                render_impl_steps_for_prompt(implicit),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _load_or_derive_implementation_steps(
+    config: dict[str, Any],
+    task: ImplementationTask,
+    dependency_documents: list[DependencyDocument],
+    project_root: Path,
+) -> list[Any]:
+    from codd.deployment.providers.ai_command import SubprocessAiCommand
+    from codd.llm.best_practice_augmenter import SubprocessAiCommandBestPracticeAugmenter
+    from codd.llm.impl_step_deriver import (
+        ImplStepCacheRecord,
+        SubprocessAiCommandImplStepDeriver,
+        impl_step_cache_path,
+        merge_impl_steps,
+        read_impl_step_cache,
+        utc_timestamp,
+        write_impl_step_cache,
+    )
+
+    context = {"project_root": project_root, "config": config, "project_context": {"project": config.get("project", {})}}
+    cache_path = impl_step_cache_path(task, context)
+    record = read_impl_step_cache(cache_path)
+    steps = list(record.steps) if record is not None else []
+    explicit = [step for step in steps if not step.inferred]
+    implicit = [step for step in steps if step.inferred]
+    nodes = _dependency_documents_as_nodes(dependency_documents)
+
+    derive_command = _ai_command_from_config(config, "impl_step_derive")
+    if not explicit and derive_command and nodes:
+        deriver = SubprocessAiCommandImplStepDeriver(
+            SubprocessAiCommand(command=derive_command, project_root=project_root, config=config),
+        )
+        explicit = deriver.derive_steps(task, nodes, context)
+        record = read_impl_step_cache(cache_path)
+        steps = list(record.steps) if record is not None else explicit
+
+    augment_command = _ai_command_from_config(config, "best_practice_augment")
+    if explicit and not implicit and augment_command and _best_practice_augment_enabled(config):
+        augmenter = SubprocessAiCommandBestPracticeAugmenter(
+            SubprocessAiCommand(command=augment_command, project_root=project_root, config=config),
+        )
+        implicit = augmenter.suggest_implicit_steps(task, nodes, explicit, context)
+        if implicit:
+            merged = merge_impl_steps(explicit, implicit)
+            base_record = read_impl_step_cache(cache_path)
+            write_impl_step_cache(
+                cache_path,
+                ImplStepCacheRecord(
+                    provider_id=(base_record.provider_id if base_record else "subprocess_ai_command"),
+                    cache_key=((base_record.cache_key if base_record else task.task_id) + ":augmented"),
+                    task_id=(base_record.task_id if base_record else task.task_id),
+                    design_doc_sha=(base_record.design_doc_sha if base_record else ""),
+                    prompt_template_sha=(base_record.prompt_template_sha if base_record else ""),
+                    generated_at=utc_timestamp(),
+                    design_docs=(base_record.design_docs if base_record else [node.path or node.id for node in nodes]),
+                    steps=merged,
+                ),
+            )
+            steps = merged
+
+    return steps
+
+
+def _dependency_documents_as_nodes(dependency_documents: list[DependencyDocument]):
+    from codd.dag import Node
+
+    return [
+        Node(
+            id=document.node_id,
+            kind="design_doc",
+            path=document.path.as_posix(),
+            attributes={"content": document.content},
+        )
+        for document in dependency_documents
+    ]
+
+
+def _filter_layer1_impl_steps(steps: list[Any], config: dict[str, Any]) -> list[Any]:
+    implementer_config = config.get("implementer") if isinstance(config.get("implementer"), dict) else {}
+    per_kind = implementer_config.get("approval_mode_per_step_kind") if isinstance(implementer_config, dict) else {}
+    if not isinstance(per_kind, dict):
+        per_kind = {}
+    approved: list[Any] = []
+    for step in steps:
+        mode = str(per_kind.get(step.kind, "required"))
+        if mode == "auto" or bool(getattr(step, "approved", False)):
+            approved.append(step)
+    return approved
+
+
+def _filter_layer2_impl_steps(steps: list[Any], config: dict[str, Any]) -> list[Any]:
+    from codd.llm.approval import filter_layer_2_impl_steps
+
+    return filter_layer_2_impl_steps(steps, config)
+
+
+def _ai_command_from_config(config: dict[str, Any], name: str) -> str | None:
+    ai_commands = config.get("ai_commands")
+    if not isinstance(ai_commands, dict):
+        return None
+    value = ai_commands.get(name)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("command"), str):
+        return value["command"]
+    return None
+
+
+def _best_practice_augment_enabled(config: dict[str, Any]) -> bool:
+    implementer_config = config.get("implementer")
+    if not isinstance(implementer_config, dict):
+        return True
+    return bool(implementer_config.get("use_best_practice_augmenter", True))
+
+
 def _execute_task(
     config: dict[str, Any],
     plan: ImplementationPlan,
@@ -453,6 +615,8 @@ def _execute_task(
     detailed_design_node_ids: list[str],
     prior_task_outputs: list[dict[str, Any]],
     project_root: Path,
+    *,
+    use_derived_steps: bool = False,
 ) -> tuple[ImplementationResult, dict[str, Any]]:
     """Execute a single implementation task. Returns (result, summary)."""
     dependency_node_ids = _ordered_unique(
@@ -479,6 +643,16 @@ def _execute_task(
         if screen_flow_content
         else []
     )
+    impl_steps_context = (
+        _implementation_steps_context(
+            config=config,
+            task=task_item,
+            dependency_documents=dependency_documents,
+            project_root=project_root,
+        )
+        if use_derived_steps
+        else None
+    )
     prompt = _build_implementation_prompt(
         config=config,
         plan=plan,
@@ -490,6 +664,7 @@ def _execute_task(
         design_md_content=design_md_content,
         screen_flow_content=screen_flow_content,
         screen_flow_routes=screen_flow_routes,
+        impl_steps_context=impl_steps_context,
     )
     prompt = generator_module._inject_lexicon(prompt, project_root)
     try:
@@ -572,6 +747,8 @@ def _execute_task_in_worktree(
     detailed_design_node_ids: list[str],
     prior_task_outputs: list[dict[str, Any]],
     project_root: Path,
+    *,
+    use_derived_steps: bool = False,
 ) -> tuple[ImplementationResult, dict[str, Any]]:
     """Execute task in a git worktree, copy output back to main project."""
     worktree_dir, branch = _create_worktree(project_root)
@@ -580,6 +757,7 @@ def _execute_task_in_worktree(
             config, plan, task_item, resolved_ai_command,
             global_conventions, coding_principles, node_paths,
             detailed_design_node_ids, prior_task_outputs, worktree_dir,
+            use_derived_steps=use_derived_steps,
         )
         output_dir = worktree_dir / task_item.output_dir
         target_dir = project_root / task_item.output_dir
@@ -614,6 +792,7 @@ def _execute_phase_parallel(
     project_root: Path,
     *,
     use_worktree: bool = False,
+    use_derived_steps: bool = False,
 ) -> list[tuple[ImplementationResult, dict[str, Any]]]:
     """Execute all tasks in a phase concurrently."""
     import sys
@@ -628,6 +807,7 @@ def _execute_phase_parallel(
                 config, plan, t, resolved_ai_command,
                 global_conventions, coding_principles, node_paths,
                 detailed_design_node_ids, prior_task_outputs, project_root,
+                use_derived_steps=use_derived_steps,
             ): t
             for t in phase_tasks
         }
@@ -1327,6 +1507,7 @@ def _build_implementation_prompt(
     design_md_content: str | None = None,
     screen_flow_content: str | None = None,
     screen_flow_routes: list[str] | None = None,
+    impl_steps_context: str | None = None,
 ) -> str:
     project = config.get("project") or {}
     frameworks = project.get("frameworks") or []
@@ -1391,6 +1572,15 @@ def _build_implementation_prompt(
         "Task context:",
         task.task_context,
     ]
+
+    if impl_steps_context:
+        lines.extend(
+            [
+                "",
+                "Implementation steps to follow (LLM-derived, project-approved):",
+                impl_steps_context.rstrip(),
+            ]
+        )
 
     if coding_principles:
         lines.extend(
