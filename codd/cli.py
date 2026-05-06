@@ -4091,18 +4091,31 @@ def dag_journeys(project_path: str, output_format: str):
 @click.argument("journey_name")
 @click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
 @click.option(
+    "--axis",
+    "axis_overrides",
+    multiple=True,
+    metavar="TYPE=VARIANT",
+    help="Runtime axis override. Repeat for multiple axes.",
+)
+@click.option(
     "--config-section",
     default="cdp_browser",
     show_default=True,
     help="verification.templates section used for browser config",
 )
-def dag_run_journey(journey_name: str, project_path: str, config_section: str):
+def dag_run_journey(
+    journey_name: str,
+    project_path: str,
+    axis_overrides: tuple[str, ...],
+    config_section: str,
+):
     """Run one declared user_journey with the CDP browser template."""
     from codd.dag.builder import build_dag
     from codd.deployment.providers.verification.cdp_browser import CdpBrowser
 
     project_root = Path(project_path).resolve()
     try:
+        parsed_axes = _parse_axis_overrides(axis_overrides)
         config = load_project_config(project_root)
         template_config = _journey_template_config(config, config_section)
         built_dag = build_dag(project_root)
@@ -4116,7 +4129,7 @@ def dag_run_journey(journey_name: str, project_path: str, config_section: str):
         raise SystemExit(2)
 
     command = json.dumps(
-        _journey_execution_plan(project_root, journey_record, template_config),
+        _journey_execution_plan(project_root, journey_record, template_config, parsed_axes),
         sort_keys=True,
     )
     result = CdpBrowser(config=template_config).execute(command)
@@ -4135,6 +4148,20 @@ def _journey_template_config(config: dict[str, Any], config_section: str) -> dic
     if not isinstance(section, dict):
         raise ValueError(f"verification.templates.{config_section} must be a mapping")
     return dict(section)
+
+
+def _parse_axis_overrides(axis_overrides: tuple[str, ...]) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw in axis_overrides:
+        if "=" not in raw:
+            raise ValueError("--axis must use TYPE=VARIANT")
+        axis_type, variant_id = raw.split("=", 1)
+        axis = axis_type.strip()
+        variant = variant_id.strip()
+        if not axis or not variant:
+            raise ValueError("--axis must use non-empty TYPE=VARIANT")
+        parsed[axis] = variant
+    return parsed
 
 
 def _find_dag_journey(
@@ -4159,11 +4186,12 @@ def _journey_execution_plan(
     project_root: Path,
     journey_record: dict[str, Any],
     template_config: dict[str, Any],
+    axis_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     journey = dict(journey_record["journey"])
     journey_name = str(journey.get("name") or "")
     steps = journey.get("steps")
-    return {
+    plan = {
         "template": "cdp_browser",
         "test_kind": "e2e",
         "target": _journey_target(journey),
@@ -4174,6 +4202,9 @@ def _journey_execution_plan(
         "design_doc": journey_record["design_doc"],
         "config": template_config,
     }
+    if axis_overrides:
+        plan["axis_overrides"] = dict(axis_overrides)
+    return plan
 
 
 def _journey_target(journey: dict[str, Any]) -> str:
