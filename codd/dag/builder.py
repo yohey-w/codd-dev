@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import fnmatch
 import re
 import warnings
 from copy import deepcopy
@@ -16,6 +17,11 @@ import yaml
 from codd.config import load_project_config
 from codd.dag import DAG, Edge, Node
 from codd.dag.extractor import extract_design_doc_metadata, extract_imports, scan_capability_evidence
+from codd.llm.design_doc_extractor import (
+    ExpectedExtraction,
+    extract_expected_artifacts_for_file,
+    load_cached_expected_extraction,
+)
 from codd.deployment.extractor import (
     deployment_doc_attributes,
     extract_deployment_docs,
@@ -75,6 +81,7 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
     test_nodes = _add_test_files(dag, root, dag_settings)
 
     _add_design_edges(dag, root, design_docs, impl_nodes)
+    _add_design_doc_expected_extractions(dag, root, dag_settings, design_docs)
     _add_import_edges(dag, root, impl_nodes, dag_settings)
     _add_tested_by_edges(dag, root, impl_nodes, test_nodes, dag_settings)
     _add_expected_nodes(dag, root, dag_settings, impl_nodes)
@@ -152,7 +159,7 @@ def dag_to_dict(dag: DAG, project_root: Path) -> dict[str, Any]:
                 "id": node.id,
                 "kind": node.kind,
                 "path": node.path,
-                "attributes": node.attributes,
+                "attributes": _dag_json_attributes(node.attributes),
             }
             for node in sorted(dag.nodes.values(), key=lambda item: item.id)
         ],
@@ -170,6 +177,10 @@ def _edge_to_dict(edge: Edge) -> dict[str, Any]:
     if edge.attributes:
         payload["attributes"] = edge.attributes
     return payload
+
+
+def _dag_json_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in attributes.items() if key != "expected_extraction"}
 
 
 def write_dag_json(dag: DAG, project_root: Path, output_path: Path) -> None:
@@ -451,6 +462,126 @@ def _add_design_doc_expected_outcome_edges(dag: DAG, design_docs: dict[str, dict
                     UserWarning,
                     stacklevel=2,
                 )
+
+
+def _add_design_doc_expected_extractions(
+    dag: DAG,
+    project_root: Path,
+    settings: dict[str, Any],
+    design_docs: dict[str, dict[str, Any]],
+) -> None:
+    if not design_docs:
+        return
+
+    project_config = _load_project_config_or_empty(project_root)
+    extraction_settings = _design_doc_extraction_settings(settings, project_config)
+    enabled = bool(extraction_settings.get("enabled") or extraction_settings.get("auto_extract"))
+    force = bool(extraction_settings.get("force"))
+
+    for node_id, metadata in design_docs.items():
+        doc_path = metadata.get("path")
+        if not isinstance(doc_path, Path):
+            continue
+        extraction = None
+        if not force:
+            extraction = load_cached_expected_extraction(project_root, doc_path)
+        if extraction is None and enabled:
+            try:
+                extraction = extract_expected_artifacts_for_file(
+                    doc_path,
+                    project_root,
+                    config=project_config,
+                    force=force,
+                )
+            except Exception as exc:
+                warnings.warn(
+                    f"{node_id} expected extraction failed: {exc}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                continue
+        if extraction is None:
+            continue
+        dag.nodes[node_id].attributes["expected_extraction"] = extraction.to_dict()
+        _add_expected_extraction_edges(dag, node_id, extraction)
+
+
+def _design_doc_extraction_settings(settings: dict[str, Any], project_config: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for source in (
+        project_config.get("design_doc_extraction"),
+        (project_config.get("llm") or {}).get("design_doc_extraction") if isinstance(project_config.get("llm"), dict) else None,
+        settings.get("design_doc_extraction"),
+    ):
+        if isinstance(source, dict):
+            merged = _deep_merge(merged, source)
+    return merged
+
+
+def _add_expected_extraction_edges(dag: DAG, design_doc_id: str, extraction: ExpectedExtraction) -> None:
+    existing_edges = {
+        (edge.from_id, edge.to_id, edge.kind, _edge_attributes_key(edge.attributes))
+        for edge in dag.edges
+    }
+
+    for expected_node in extraction.expected_nodes:
+        target_id = _resolve_expected_hint(dag, expected_node.path_hint)
+        if not target_id:
+            continue
+        attributes = {
+            "source": "expected_extraction",
+            "path_hint": expected_node.path_hint,
+        }
+        edge_key = (design_doc_id, target_id, "expects", _edge_attributes_key(attributes))
+        if edge_key not in existing_edges:
+            dag.add_edge(Edge(from_id=design_doc_id, to_id=target_id, kind="expects", attributes=attributes))
+            existing_edges.add(edge_key)
+
+    for expected_edge in extraction.expected_edges:
+        from_id = _resolve_expected_hint(dag, expected_edge.from_path_hint)
+        to_id = _resolve_expected_hint(dag, expected_edge.to_path_hint)
+        if not from_id or not to_id:
+            continue
+        attributes = {
+            "source": "expected_extraction",
+            "rationale": expected_edge.rationale,
+            **expected_edge.attributes,
+        }
+        edge_key = (from_id, to_id, expected_edge.kind, _edge_attributes_key(attributes))
+        if edge_key not in existing_edges:
+            dag.add_edge(Edge(from_id=from_id, to_id=to_id, kind=expected_edge.kind, attributes=attributes))
+            existing_edges.add(edge_key)
+
+
+def _resolve_expected_hint(dag: DAG, path_hint: str) -> str | None:
+    hint = _normalize_expected_hint(path_hint)
+    if not hint:
+        return None
+    nodes = sorted(dag.nodes.values(), key=lambda item: item.id)
+    for node in nodes:
+        for candidate in _expected_node_candidates(node):
+            if hint == candidate or hint == Path(candidate).name:
+                return node.id
+    for node in nodes:
+        for candidate in _expected_node_candidates(node):
+            if fnmatch.fnmatchcase(candidate, hint):
+                return node.id
+    for node in nodes:
+        for candidate in _expected_node_candidates(node):
+            if hint.lower() in candidate.lower() or Path(hint).stem.lower() == Path(candidate).stem.lower():
+                return node.id
+    return None
+
+
+def _expected_node_candidates(node: Node) -> list[str]:
+    return [_normalize_expected_hint(value) for value in (node.id, node.path) if value]
+
+
+def _normalize_expected_hint(value: str) -> str:
+    normalized = str(value or "").strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.lstrip("/")
 
 
 def _add_deployment_graph(
@@ -1030,6 +1161,7 @@ def _dag_overrides(config: dict[str, Any]) -> dict[str, Any]:
         "plan_task_file",
         "lexicon_file",
         "import_aliases",
+        "design_doc_extraction",
     }
     for key in direct_keys:
         if key in config:

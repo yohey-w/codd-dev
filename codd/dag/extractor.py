@@ -101,11 +101,16 @@ def extract_design_doc_metadata(md_path: Path) -> dict[str, Any]:
         frontmatter.get("depends_on", codd_meta.get("depends_on", frontmatter.get("dependencies", [])))
     )
 
+    attributes = extract_design_doc_journey_attrs(frontmatter)
+    expected_extraction = codd_meta.get("expected_extraction", frontmatter.get("expected_extraction"))
+    if isinstance(expected_extraction, dict):
+        attributes["expected_extraction"] = deepcopy(expected_extraction)
+
     return {
         "frontmatter": frontmatter,
         "depends_on": depends_on,
         "node_id": codd_meta.get("node_id") or frontmatter.get("node_id"),
-        "attributes": extract_design_doc_journey_attrs(frontmatter),
+        "attributes": attributes,
         "body": body,
     }
 

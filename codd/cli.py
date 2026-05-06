@@ -2677,6 +2677,126 @@ def llm_list(project_path: str, output_format: str):
         click.echo(f"{row['id']}\t{row['status']}\t{description}")
 
 
+@main.group()
+def qc():
+    """Expand and evaluate task criteria."""
+    pass
+
+
+@qc.command("expand")
+@click.option("--task", "task_id", required=True, help="Task id or task YAML path")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--force", is_flag=True, help="Bypass cached expanded criteria")
+@click.option(
+    "--design-doc",
+    "design_docs",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Design document path. Can be repeated.",
+)
+@click.option(
+    "--expected-extraction",
+    "expected_extractions",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Expected extraction YAML/JSON path. Can be repeated.",
+)
+@click.option("--ai-cmd", default=None, help="Override AI CLI command")
+@click.option("--model", default=None, help="Override AI model")
+def qc_expand(
+    task_id: str,
+    project_path: str,
+    force: bool,
+    design_docs: tuple[Path, ...],
+    expected_extractions: tuple[Path, ...],
+    ai_cmd: str | None,
+    model: str | None,
+):
+    """Generate .codd/expanded_criteria/{task}.yaml."""
+    from codd.llm.criteria_expander import (
+        SubprocessAiCommandCriteriaExpander,
+        expanded_criteria_cache_path,
+        load_design_docs,
+        load_expected_extractions,
+        load_task_criteria,
+    )
+
+    project_root = Path(project_path).resolve()
+    try:
+        task_source = load_task_criteria(project_root, task_id)
+        loaded_design_docs = load_design_docs(project_root, design_docs)
+        loaded_expected_extractions = load_expected_extractions(expected_extractions)
+        expander = SubprocessAiCommandCriteriaExpander(
+            ai_command=ai_cmd,
+            project_root=project_root,
+            model=model,
+            use_cache=not force,
+        )
+        expanded = expander.expand(
+            task_source.task_id,
+            task_source.static_criteria,
+            loaded_design_docs,
+            loaded_expected_extractions,
+            {
+                "project_root": project_root,
+                "task_path": str(task_source.path) if task_source.path else "",
+                "model": model or "",
+                "use_cache": not force,
+            },
+        )
+    except (FileNotFoundError, ValueError, TypeError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    cache_path = expanded_criteria_cache_path(project_root, expanded.task_id)
+    click.echo(
+        "Expanded criteria: "
+        f"static={len(expanded.static_items)} "
+        f"dynamic={len(expanded.dynamic_items)} -> "
+        f"{_display_path(cache_path, project_root)}"
+    )
+
+
+@qc.command("evaluate")
+@click.option("--task", "task_id", required=True, help="Task id or task YAML path")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--report-json", is_flag=True, help="Output a machine-readable report")
+def qc_evaluate(task_id: str, project_path: str, report_json: bool):
+    """Evaluate the saved expanded criteria file."""
+    from codd.llm.criteria_expander import (
+        evaluate_expanded_criteria,
+        expanded_criteria_cache_path,
+        load_task_criteria,
+        read_expanded_criteria,
+    )
+
+    project_root = Path(project_path).resolve()
+    try:
+        task_source = load_task_criteria(project_root, task_id)
+        cache_path = expanded_criteria_cache_path(project_root, task_source.task_id)
+        expanded = read_expanded_criteria(cache_path)
+        report = evaluate_expanded_criteria(expanded)
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    if report_json:
+        click.echo(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        click.echo(
+            "Criteria evaluation: "
+            f"PASS={report['pass_count']} "
+            f"FAIL={report['fail_count']} "
+            f"TOTAL={report['total']} "
+            f"(static={report['static_count']}, dynamic={report['dynamic_count']})"
+        )
+        for item in report["items"]:
+            if item["status"] == "FAIL":
+                click.echo(f"  FAIL {item['id']}: {', '.join(item['failures'])}")
+
+    raise SystemExit(1 if report["fail_count"] else 0)
+
+
 def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
     try:
         return load_project_config(project_root)
