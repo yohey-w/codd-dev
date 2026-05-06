@@ -1,6 +1,5 @@
 <p align="center">
-  <strong>CoDD — Coherence-Driven Development</strong><br>
-  <em>The evidence engine for change management in AI-assisted development.</em>
+  <strong>CoDD - Coherence-Driven Development</strong>
 </p>
 
 <p align="center">
@@ -16,1086 +15,222 @@
 
 ---
 
-> *When code changes, CoDD traces what's affected, checks what's violated, and produces the evidence trail for your merge decision.*
+## Write requirements + constraints. CoDD does the rest.
 
-```
+CoDD is a development engine that treats **requirements -> design -> implementation -> tests** as one DAG, mechanically verifies the coherence of every node, and lets an LLM repair inconsistencies automatically when they appear.
+
+Humans write only **what to build** and **where the boundaries are**. CoDD and the LLM take care of **how to build it**.
+
+```bash
 pip install codd-dev
 ```
 
-## 🆕 v1.19.0 — Screen Transition Edge 完全対応
-
-CoDD が **画面遷移エッジ** (Link / redirect / router.push / signIn callback) を扱える
-ようになった節目のリリース。これまで「ノード only」だった screen-flow 抽出に **edge** を
-追加し、validate / e2e-generate / drift / implementer 全層で transition を一気通貫に
-管理できる。
-
-| コマンド | 役割 |
-|---|---|
-| `codd extract --layer routes-edges` | tree-sitter AST で `<Link>`/`redirect`/`router.push` 等を抽出 → `screen-transitions.yaml` |
-| `codd e2e-generate --mode transitions` | transitions.yaml から `goto → click → toHaveURL` 形式の Playwright/Cypress テスト自動生成 |
-| `codd validate --screen-flow --edges` | edge 整合性 + orphan / dead-end / unknown_node 検出 + coverage gate |
-| `codd drift --e2e` | 設計書 transition vs E2E `toHaveURL` assertion 差分検知 → Coherence Engine DriftEvent |
-| `implement` wrapper rules (cmd_368) | thin wrapper の callback wiring 必須化 + middleware.ts 二重存在 ERROR |
-
-```bash
-codd extract --layer routes-edges               # screen-transitions.yaml 生成
-codd e2e-generate --mode transitions            # 遷移テスト自動生成
-codd validate --screen-flow --edges             # edge 整合性 + orphan 検知
-codd drift --e2e                                # 設計 vs E2E assertion drift
-codd coverage --edge-threshold 0                # CI で edge drift をブロック
-```
-
-framework 固有 transition pattern (Next.js / NextAuth / Clerk / Nuxt / SvelteKit / Astro /
-Remix 等) は `codd/screen_transitions/defaults.yaml` に分離、`codd.yaml [screen_transitions]`
-で project ごとに override 可能。CoDD core にはハードコードなし。テスト 915 PASS / 0 FAIL /
-0 SKIP (v1.18.0 852 → v1.19.0 +63)。
-
 ---
 
-## 🆕 v1.18.0 — screen-flow 完全統合 + UX surface coverage
+## Quick Start (5 min)
 
-`codd validate --screen-flow` の盲点 (filesystem_routes 設定ミス時 silent OK) を塞ぎ、
-`CoverageAuditor` に **auth_ui_surface** (login / root / signup) セクションを追加、
-さらに `codd implement` が **screen-flow.md** を AI prompt に inject するよう改修。
-UI route が page 生成リストから漏れて 404 になる従来の事故源を構造的に解消。
-
-| 改修 | 効果 |
-|---|---|
-| `validate --screen-flow` `CoddCLIError` 昇格 | base_dir 誤設定で routes 0 件のとき即停止、configured 値を明示 |
-| `coverage --screen-flow-threshold` | CI gate で screen-flow drift をブロック |
-| CoverageAuditor `ux:auth:signin/signup` + `ux:landing:root` | UX surface 欠落を ASK class で人間レビュー要求 |
-| `codd.yaml [ux] required_routes` override | NextAuth/Clerk/nuxt-auth 等の慣例差を project ごとに上書き |
-| `implement` screen-flow.md inject + `_is_ui_task` 検出 | UI task が page 生成リストから漏れない |
-| 0-file generation `CoddCLIError` (skip_generation: true 例外) | silent pass を排除、意図的 skip は明示要求 |
-
-```bash
-codd validate --screen-flow              # base_dir 誤設定で即 ERROR
-codd coverage --screen-flow-threshold 0  # CI gate (default: 0 drift)
-codd implement                            # UI task は screen-flow.md inject、0 file は ERROR
-```
-
-Generality Gate: framework 固有名 (NextAuth / Clerk 等) は依存検出列挙 + codd.yaml override
-で吸収。CoDD core にはハードコードなし。テスト 852 PASS / 0 FAIL / 0 SKIP。
-
----
-
-## 🆕 v1.17.0 — `codd deploy` + 双方向伝搬パス完成
-
-整合性駆動が「設計→実装→デプロイ」を一気通貫に統合する v1.17.0 リリース。
-
-| コマンド | 役割 |
-|---|---|
-| `codd deploy --target vps --apply` | `deploy.yaml` ベースで VPS (Docker Compose) / Azure App Service へデプロイ。dry-run デフォルト + healthcheck + auto rollback |
-| `codd propagate --reverse` | DESIGN.md / lexicon の git 変更を検知 → Coherence Engine の DriftEvent として逆伝搬 |
-| `codd require --propagate` | requirements.md frontmatter 変更を CEG `depends_on` 逆走 → 関連設計書を AI 更新提案 |
-| `codd validate --screen-flow` | screen-flow.md の routes と filesystem routes の drift 検出 |
-| `codd coverage` | E2E + design-token + lexicon の統合 coverage gate (CI exit code 1 on fail) |
-
-```bash
-# deploy
-codd deploy --target vps --apply
-codd deploy --target azure --apply
-
-# 双方向伝搬
-codd propagate --reverse --source design_token --apply
-codd require --propagate --apply
-
-# 品質ゲート
-codd validate --screen-flow
-codd coverage --e2e-threshold 100 --lexicon-threshold 100 --json
-```
-
-deploy target は `@register_target` デコレータで plug-in 追加可能 (cmd_344 fixup-drift Strategy
-と同思想)。Generality Gate 適合: Docker / Azure / SSH は target plug-in 内に閉じ、core は
-`DeployTarget` 抽象のみ。テスト 821 PASS / 0 FAIL / 0 SKIP。
-
----
-
-## 🆕 v1.16.0 — `codd fixup-drift` (Coherence Engine の自動修正出口)
-
-`codd fixup-drift` で Coherence Engine 検知 drift を自動修正。**デフォルト `--dry-run`** で本流を保護し、`--apply` 指定時は **git worktree 隔離** で適用 (失敗時は worktree 破棄で本流無傷)。
-
-```bash
-codd fixup-drift                                              # dry-run / red / all kinds
-codd fixup-drift --apply --severity red --kind url_drift      # worktree で適用
-codd fixup-drift --dry-run --severity all --kind design_token_drift
-```
-
-| Strategy | 振る舞い |
-|---|---|
-| `UrlDriftFixStrategy` | URL drift は **HITL only** (pending_hitl.md に記録) |
-| `DesignTokenDriftFixStrategy` | 大小文字統一など safe な正規化は auto-apply、値変更/削除は HITL |
-| `LexiconViolationFixStrategy` | lexicon 違反 (用語規約・circular dependency) は **HITL only** |
-
-新しい Fix Strategy は `@register_strategy("kind_name")` デコレータで plug-in 登録できる。
-
----
-
-## 🆕 v1.16.0-alpha — Coherence Engine (整合性駆動の中央ハブ)
-
-**drift / validate / propagate / fix を DriftEvent 統一フォーマットで結ぶ中央ハブ。**
-
-| コンポーネント | 役割 |
-|----------------|------|
-| `DriftEvent` | source/target/change_type/payload/severity/fix_strategy/kind を持つ統一イベント型 |
-| `EventBus` | in-process pub/sub。Detector が publish、Orchestrator が subscribe |
-| `Orchestrator` | severity ルーティング: `red` → auto-fix / `amber` → pending HITL / `green` → log |
-| `coherence_adapters` | drift / validate / design-token violation 出力 → DriftEvent 変換 |
-| `codd propagate --coherence` | lexicon + DESIGN.md を AI プロンプトに注入 (用語ぶれ・色値矛盾防止) |
-| Fixer Coherence-Mode | `run_fix(coherence_event=...)` で設計書修正を許可 (test 失敗修正フローは分離維持) |
-
-auto-fix が失敗した場合は自動で amber にダウングレードし、`docs/coherence/pending_hitl.md`
-に HITL レビュー待ちエントリとして記録。ntfy 通知はレート制限 (デフォルト 60 秒) で過剰通知を抑止。
-
-⚠️ **alpha 版**: Phase 4+ (Detector ↔ Applier 直接配管 / `codd fixup-drift` サブコマンド) は
-cmd_344 以降で実装予定。本リリースは中央ハブのアーキテクチャ確立段階。
-
----
-
-## 🆕 v1.15.0 — E2E test stub generator (`codd e2e-generate`)
-
-`screen-flow.md` + `requirements.md` から **Playwright / Cypress テストスタブ** を自動生成する `codd e2e-generate` を追加。`ScenarioExtractor` がルート / アクション / 受入条件を `docs/e2e/scenarios.md` に抽出し、`TestGenerator` が各 UserScenario を `.spec.ts` / `.cy.ts` に書き出す。**Generality Gate 適合** (フレームワーク非依存、Markdown / パス操作のみ)。
-
-```bash
-codd e2e-generate --framework playwright --output docs/e2e/tests
-codd e2e-generate --framework cypress    --output docs/e2e/tests
-```
-
-design token / lexicon ヒントを生成テストに自動注入し、Coherence Engine と連携する。
-
----
-
-## 🆕 v1.14.0 — Batch guard for `codd implement`
-
-`codd implement` で `--max-tasks N` (default: 30) と `--wave WAVE_ID` をサポート。大規模な implementation plan を安全に分割実行するための **preflight task count guard** で AI の暴走 fan-out を防止し、`--wave` / `--max-tasks` / `--task` の代替案を含む actionable error message を返す。
-
-```bash
-codd implement --max-tasks 30           # 30件超なら abort
-codd implement --wave wave_2_1          # wave_2_1 の tasks のみ実行
-```
-
-> v1.13.1 は `DesignTokenDriftLinker` の `project_root` Path 変換バグ修正パッチ。
-
----
-
-## 🆕 v1.13.0 — DESIGN.md統合 (Google Stitch OSS, W3C Design Tokens)
-
-**UI設計からコード生成まで完全なトレーサビリティを実現。**
-
-| 機能 | 説明 |
-|------|------|
-| `DesignMdExtractor` | DESIGN.md (W3C Design Tokens spec) を自動パース |
-| `KnowledgeFetcher` UI検出 | React/Vue/Svelte/Flutter 等を自動認識、DESIGN.md 採用を提案 |
-| `codd implement` 注入 | UIファイル生成時に DESIGN.md トークンを AI prompt に自動付与 |
-| `codd validate --design-tokens` | ハードコードされた #hex/px 値を検出して DESIGN.md 参照を推奨 |
-| `codd drift` design_token | UI実装のトークン参照と DESIGN.md 定義集合を比較 |
-| `codd verify --design-md` | `npx @google/design.md lint` を CoDD レポートに統合 |
-
-```yaml
-# DESIGN.md サンプル (プロジェクトルートに配置)
----
-version: "1.0"
-name: "My App"
-colors:
-  Primary: "#1A73E8"
-components:
-  Button.primary:
-    background: "{colors.Primary}"
----
-```
-
-仕様: [google-labs-code/design.md](https://github.com/google-labs-code/design.md)
-
----
-
-## 🆕 v1.12.0 — Meta-Design Context Layer (project_lexicon)
-
-CoDD now has a **meta-design context layer**: declare your project's vocabulary, naming conventions, and design principles once in `project_lexicon.yaml`, and every AI command (require / plan / generate / implement) automatically uses it.
-
-- 📖 `ProjectLexicon` — declare node vocabulary, naming conventions, design principles, failure modes
-- 🌐 `KnowledgeFetcher` — Web Search-first knowledge layer with 30-day cache; CoDD core has zero hardcoded framework knowledge
-- 🔍 `codd validate --lexicon` — detect naming convention violations in your lexicon
-- 🔌 Extractor registry — declare extractor classes by Python module path; `FileSystemRouteExtractor` is the first entry
-- 🧙 Lexicon wizard — `codd plan` auto-generates a draft `project_lexicon.yaml` when absent
-- 📋 `CoverageAuditor` — requirement gap detection with AUTO_ACCEPT / ASK / AUTO_REJECT 3-class rule
-- 🏷️ Provenance tracking — every lexicon entry carries `provenance`, `confidence`, and `fetched_at`
-
----
-
-## v1.11.0 — Filesystem-Routing Aware Drift Detection
-
-CoDD now understands filesystem-routing frameworks (Next.js, SvelteKit, Nuxt, Astro, Remix) and can detect URL drift between your design docs and actual implementation.
-
-- 📐 `FileSystemRouteExtractor` — endpoint nodes from directory structure
-- 🔗 `DocumentUrlLinker` — auto-link design doc URLs to endpoints
-- 🔍 `codd drift` — find URL gaps between design and implementation
-- 🎨 `codd extract --layer routes` — reverse-engineer screen-flow diagrams
-
-See [Filesystem Routing Adapter Recipes](#filesystem-routing-adapter-recipes) for setup.
-
----
-
-**v1.9.0** — `codd implement` now supports **multi-AI engine** (Claude stdout + Codex file-writing) and **automatic parallel execution** within phases via git worktree isolation. Phase milestone format (`#### M1.1`) supported. AI command timeout extended to 1 hour for heavy reasoning models. SWE-bench Verified: **73/73 = 100%** resolved.
-
----
-
-## Why CoDD?
-
-AI can generate specs. But **what happens when upstream changes?**
-
-Every spec-first tool stops at creation. CoDD starts there. When a requirement changes, code is updated, or a design assumption shifts, CoDD **automatically propagates the change downstream** — updating affected design docs, flagging stale artifacts, and producing an evidence trail.
-
-```
-Requirement changes → codd impact identifies 6 affected docs
-Code changes        → codd propagate updates downstream designs
-Design changes      → CEG graph traces all dependent artifacts
-```
-
-No other tool does this. spec-kit, Kiro, and cc-sdd create docs. **CoDD keeps them coherent.**
-
-## How It Works
-
-```
-Requirements (human)  →  Design docs (AI)  →  Code & tests (AI)
-         ↕                     ↕                     ↕
-     codd impact         codd propagate        codd extract
-    (what changed?)    (update downstream)   (reverse-engineer)
-```
-
-### The Three Layers
-
-```
-Harness (CLAUDE.md, Hooks, Skills)   ← Rules, guardrails, workflow
-  └─ CoDD (methodology)              ← Coherence across changes
-       └─ Design docs (docs/*.md)    ← Artifacts CoDD manages
-```
-
-CoDD is **harness-agnostic** — works with Claude Code, Copilot, Cursor, or any agent framework.
-
-## Core Principle: Derive, Don't Configure
-
-| Architecture | Derived test strategy | Config needed? |
-|---|---|---|
-| Next.js + Supabase | vitest + Playwright | None |
-| FastAPI + Python | pytest + httpx | None |
-| CLI tool in Go | go test | None |
-
-**Upstream determines downstream.** You define requirements and constraints. AI derives everything else.
-
-## Quick Start
-
-### Greenfield (new project)
+### 1. Install
 
 ```bash
 pip install codd-dev
-mkdir my-project && cd my-project && git init
-
-# Initialize — pass your requirements file, any format works
-codd init --project-name "my-project" --language "typescript" \
-  --requirements spec.txt
-
-# AI designs the document dependency graph
-codd plan --init
-
-# Generate design docs wave by wave
-waves=$(codd plan --waves)
-for wave in $(seq 1 $waves); do
-  codd generate --wave $wave
-done
-
-# Quality gate — catch AI laziness (TODOs, placeholders)
-codd validate
-
-# Generate code from design docs
-codd implement
-
-# Assemble code fragments into a buildable project
-codd assemble
+codd --version  # 1.34.0 or later
 ```
 
-### Brownfield (existing project)
-
-```bash
-codd extract              # Reverse-engineer design docs from code
-codd require              # Infer requirements from code (what was built and why)
-codd plan --init          # Generate wave_config from extracted docs
-codd scan                 # Build dependency graph
-codd impact               # Change impact analysis
-codd audit --skip-review  # Full change review: validate + impact + policy
-codd measure              # Project health score (0-100)
-```
-
-## Demos
-
-### Reproducible E2E Demo — 3 Propagation Patterns
-
-The following demo is pinned to commit [`d7d9f45`](https://github.com/yohey-w/codd-dev/commit/d7d9f45). You can reproduce the full cycle locally.
-
-**Setup:**
-```bash
-pip install codd-dev>=1.6.0
-mkdir demo && cd demo && git init
-cat > spec.txt << 'EOF'
-TaskFlow — Requirements
-- User authentication (email + Google OAuth)
-- Workspace management (teams, roles, invites)
-- Task CRUD with assignees, labels, due dates
-- Real-time updates (WebSocket)
-- File attachments (S3)
-- Notification system (in-app + email)
-EOF
-codd init --project-name "taskflow" --language "typescript" --requirements spec.txt
-```
-
-**Pattern 1 — Source → Doc** (spec → design docs):
-```bash
-codd plan --init
-for wave in $(seq 1 $(codd plan --waves)); do codd generate --wave $wave; done
-codd validate        # Expected: PASS, 0 errors
-codd scan            # Expected: 17 nodes, 30+ edges
-```
-
-**Pattern 2 — Doc → Doc** (requirement change → downstream update):
-```bash
-# Edit requirements: add "SSO (SAML 2.0)" to auth
-codd impact          # Expected: 6/7 design docs in Green/Amber band
-
-# Regenerate affected waves (propagate is for code→doc only)
-codd generate --wave 1 --force   # Re-derive acceptance criteria from updated requirements
-codd generate --wave 2 --force   # Re-derive system design from updated Wave 1
-# Repeat for each affected wave in dependency order
-```
-
-**Pattern 3 — Doc → Doc via CEG** (code change → design update):
-```bash
-# Modify source code in auth module
-codd propagate       # Expected: identifies auth-design, system-design as affected
-codd propagate --update  # AI updates affected design docs from code diff
-```
-
-**Expected output**: 20-line spec → 17 design artifacts (5,100+ lines) → downstream propagation keeps all docs coherent after changes. Pattern 3 (CEG-based propagation) is novel — no other tool traces code changes back through the dependency graph to update design documents.
-
-### Greenfield — Spec to Working App
-
-37 lines of spec → 6 design docs (1,353 lines) → 102 code files (6,445 lines) → TypeScript strict build passes. No interactive AI chat — the entire workflow is a shell script.
-
-Full walkthrough: [Harness as Code — A Guide to CoDD #1](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide?locale=en)
-
-### Brownfield — Change Impact Analysis
-
-2 lines changed in requirements → `codd impact` identifies 6 out of 7 design docs affected. Green band: AI auto-updates. Amber band: human reviews. You know exactly what to fix before anything breaks.
-
-Deep dive: [CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence?locale=en)
-
-## Wave-Based Generation
-
-Design docs are generated in dependency order — each Wave depends on the previous:
-
-```
-Wave 1  Acceptance criteria + ADR       ← requirements only
-Wave 2  System design                   ← req + Wave 1
-Wave 3  DB design + API design          ← req + Wave 1-2
-Wave 4  UI/UX design                    ← req + Wave 1-3
-Wave 5  Implementation plan             ← all above
-```
-
-Verification runs bottom-up (V-Model):
-
-```
-Unit tests        ← verifies detailed design
-Integration       ← verifies system design
-E2E / System      ← verifies requirements + acceptance criteria
-```
-
-## Frontmatter = Single Source of Truth
-
-Dependencies are declared in Markdown frontmatter. No separate config files.
-
-```yaml
----
-codd:
-  node_id: "design:api-design"
-  modules: ["api", "auth"]        # ← links to source code modules
-  depends_on:
-    - id: "design:system-design"
-      relation: derives_from
-    - id: "req:my-project-requirements"
-      relation: implements
----
-```
-
-The `modules` field enables reverse traceability: when source code changes, `codd extract` identifies affected modules, and the `modules` field maps those modules back to the design docs that need updating.
-
-`codd/scan/` is a cache — regenerated on every `codd scan`.
-
-## Custom Node Prefixes
-
-By default, `node_id` values must use one of the built-in prefixes (`design:`, `req:`, `doc:`, `module:`, etc.). To use CoDD for non-software domains (knowledge bases, review documents, prompt management), add custom prefixes in `codd.yaml`:
+### 2. Add codd.yaml to your project
 
 ```yaml
 # codd.yaml
-prefixes:
-  - knowledge
-  - schema
-  - review
-  - prompt
+codd_required_version: ">=1.34.0"
+
+dag:
+  design_docs:
+    - "docs/design/**/*.md"
+  implementations:
+    - "src/**/*.{ts,tsx,py}"
+  tests:
+    - "tests/**/*.{spec,test}.{ts,tsx,py}"
+
+repair:
+  approval_mode: required   # automatic repair requires human approval
+  max_attempts: 10
+
+llm:
+  ai_command: "claude"      # any LLM CLI can be invoked (claude / codex / gemini, etc.)
 ```
 
-Custom prefixes are **merged with** built-in defaults — you don't need to re-list `design`, `req`, etc. Prefix names must be lowercase letters and underscores only (`[a-z_]+`).
-
-```yaml
-# Now valid in frontmatter:
-codd:
-  node_id: "knowledge:domain-model"
-```
-
-## AI Model Configuration
-
-CoDD calls an external AI CLI for document generation. The default is Claude Opus:
-
-```yaml
-# codd.yaml
-ai_command: "claude --print --model claude-opus-4-6"
-```
-
-### Per-Command Override
-
-Different commands can use different models. For example, use Opus for design doc generation but Codex for code implementation:
-
-```yaml
-ai_command: "claude --print --model claude-opus-4-6"   # global default
-ai_commands:
-  generate: "claude --print --model claude-opus-4-6"    # design doc generation
-  restore: "claude --print --model claude-opus-4-6"     # brownfield reconstruction
-  review: "claude --print --model claude-opus-4-6"      # quality evaluation
-  plan_init: "claude --print --model claude-sonnet-4-6" # wave_config planning
-  implement: "codex --print"                             # code generation
-```
-
-**Resolution priority**: CLI `--ai-cmd` flag > `ai_commands.{command}` > `ai_command` > built-in default (Opus).
-
-### Claude Code Context Interference
-
-When `claude --print` runs inside a project directory, it auto-discovers `CLAUDE.md` and loads project-level system prompts. These instructions can conflict with CoDD's generation prompts, causing format validation failures like:
-
-```
-Error: AI command returned unstructured summary for 'ADR: ...'; missing section headings
-```
-
-**Fix**: Use `--system-prompt` to override project context with a focused instruction:
-
-```yaml
-ai_command: "claude --print --model claude-opus-4-6 --system-prompt 'You are a technical document generator. Output only the requested Markdown document. Follow section heading instructions exactly.'"
-```
-
-> **Note**: `--bare` strips all context but also disables OAuth authentication. Use `--system-prompt` instead — it overrides `CLAUDE.md` while preserving auth.
-
-## Config Directory Discovery
-
-By default, `codd init` creates a `codd/` directory. If your project already has a `codd/` directory (e.g., it's your source code package), use `--config-dir`:
+### 3. Common commands
 
 ```bash
-codd init --config-dir .codd --project-name "my-project" --language "python"
+# Coherence verification (checks consistency across requirements, design, implementation, and tests)
+codd dag verify
+
+# Verification with auto-repair (when violations are found, an LLM generates and applies patches)
+codd dag verify --auto-repair --max-attempts 10
+
+# Confirm User Journey PASS in a real browser (browser control via CDP)
+codd dag run-journey login_to_dashboard --axis viewport=smartphone_se
+
+# Derive implementation steps from design docs (input to the implementation phase)
+codd implement run --task M1.2 --enable-typecheck-loop
 ```
 
-All other commands (`scan`, `impact`, `generate`, etc.) automatically discover whichever config directory exists — `codd/` first, then `.codd/`. No extra flags needed.
+### 4. Reading the output
 
-## Filesystem Routing Adapter Recipes
+`codd dag verify` runs 9 coherence checks:
 
-CoDD detects URL drift between your design documents and implementation
-using framework conventions declared in `codd.yaml`.
-These recipes cover the five major filesystem-routing frameworks.
+| Check | Role |
+|-------|------|
+| `node_completeness` | Confirms nodes declared in design docs (implementation/test files) exist as physical files |
+| `transitive_closure` | Confirms the dependency chain from requirements -> design -> implementation -> tests is closed |
+| `verification_test_runtime` | Confirms tests for implementations can run and pass |
+| `deployment_completeness` | Confirms the deployment chain (Dockerfile/compose/k8s) is complete |
+| `proof_break_authority` | Confirms critical journeys are not broken |
+| `screen_flow_edges` | Detects isolated nodes in the screen transition graph |
+| `screen_flow_completeness` | Confirms every screen is mapped to requirements |
+| `c8` | Detects uncommitted patches / dirty files |
+| `c9` (`environment_coverage`) | Confirms **target environment coverage** such as viewport, RBAC role, and locale |
 
-| Framework              | Base dir      | Page glob        | API glob                  | Dynamic segment       |
-|------------------------|---------------|------------------|---------------------------|-----------------------|
-| Next.js (App Router)   | `app/`        | `page.{tsx,jsx}` | `route.{ts,js}`           | `[param]` → `:param`  |
-| Next.js (Pages Router) | `pages/`      | `*.{tsx,jsx}`    | `api/**/*.{ts,js}`        | `[param]` → `:param`  |
-| SvelteKit              | `src/routes/` | `+page.svelte`   | `+server.{ts,js}`         | `[param]` → `:param`  |
-| Nuxt 3                 | `pages/`      | `*.vue`          | `server/api/**/*.{ts,js}` | `[param]` → `:param`  |
-| Astro                  | `src/pages/`  | `*.astro`        | `*.{ts,js}` (in pages)    | `[...slug]` → `:slug` |
-| Remix                  | `app/routes/` | `*.{tsx,jsx}`    | `*.{ts,js}`               | `$param` → `:param`   |
+When violations are found, the deploy gate is blocked. With `--auto-repair`, CoDD enters a loop that asks an LLM to generate patches, applies them, and verifies again.
 
-### Next.js (App Router)
+---
+
+## Typical Use Cases
+
+### Use Case 1: Automating requirements -> design -> implementation
+
+Write "functional requirements + constraints" in `docs/requirements/*.md`, then run `codd implement run`:
+
+1. An LLM dynamically derives ImplStep sequences from the requirements (Layer 1)
+2. Best-practice gaps are filled in (Layer 2, such as logout, Remember Me, and session timeout for login)
+3. After user approval through a HITL gate, implementation is generated into `src/**`
+4. If a type checker such as `tsc` fails during generation, CoDD enters the auto-repair loop
+
+The user experience is: **write only functional requirements + constraints, then let the rest run automatically**.
+
+### Use Case 2: Auto-Repair (`codd verify --auto-repair`)
+
+Run `codd dag verify --auto-repair --max-attempts 10` in CI:
+
+1. 9 coherence checks are executed
+2. Violations are classified as **repairable (in-task) / pre-existing (baseline) / unrepairable** by a Hybrid Classifier (git diff + LLM)
+3. Among repairable violations, the most upstream one in the DAG is selected and an LLM generates a patch
+4. The patch goes through dry-run validation, then is applied and verified again
+5. If all violations are resolved within `max_attempts`, the status is `SUCCESS`; if some are repaired, `PARTIAL_SUCCESS`; if only unrepairable items remain, `REPAIR_FAILED`
+
+Even in `PARTIAL_SUCCESS`, repaired patches are kept and remaining violations are listed transparently in the report.
+
+### Use Case 3: User Journey Coherence (`codd dag run-journey`)
+
+Declare a user journey in the frontmatter of `docs/design/auth_design.md`:
 
 ```yaml
-filesystem_routes:
-  - base_dir: app/
-    page_pattern: "page.{tsx,jsx,ts,js}"
-    api_pattern: "route.{ts,js}"
-    url_template: "/{relative_dir}"
-    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
-    ignore_segment: ["\\(.*\\)", "@.*"]
-    base_url: ""
-```
-
-### Next.js (Pages Router)
-
-```yaml
-filesystem_routes:
-  - base_dir: pages/
-    page_pattern: "*.{tsx,jsx,ts,js}"
-    api_pattern: ""
-    url_template: "/{relative_dir}/{stem}"
-    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
-    ignore_segment: ["^_.*"]
-    base_url: ""
-  - base_dir: pages/api/
-    page_pattern: ""
-    api_pattern: "*.{ts,js}"
-    url_template: "/api/{relative_dir}/{stem}"
-    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
-    ignore_segment: []
-    base_url: ""
-```
-
-### SvelteKit
-
-```yaml
-filesystem_routes:
-  - base_dir: src/routes/
-    page_pattern: "+page.svelte"
-    api_pattern: "+server.{ts,js}"
-    url_template: "/{relative_dir}"
-    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
-    ignore_segment: ["\\(.*\\)"]
-    base_url: ""
-```
-
-### Nuxt 3
-
-```yaml
-filesystem_routes:
-  - base_dir: pages/
-    page_pattern: "*.vue"
-    api_pattern: ""
-    url_template: "/{relative_dir}/{stem}"
-    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
-    ignore_segment: []
-    base_url: ""
-  - base_dir: server/api/
-    page_pattern: ""
-    api_pattern: "*.{ts,js}"
-    url_template: "/api/{relative_dir}/{stem}"
-    dynamic_segment: { from: "\\[(.+)\\]", to: ":$1" }
-    ignore_segment: []
-    base_url: ""
-```
-
-### Astro
-
-```yaml
-filesystem_routes:
-  - base_dir: src/pages/
-    page_pattern: "*.astro"
-    api_pattern: "*.{ts,js}"
-    url_template: "/{relative_dir}/{stem}"
-    dynamic_segment: { from: "\\[\\.\\.\\.(\\w+)\\]", to: ":$1" }
-    ignore_segment: []
-    base_url: ""
-```
-
-### Remix
-
-```yaml
-filesystem_routes:
-  - base_dir: app/routes/
-    page_pattern: "*.{tsx,jsx}"
-    api_pattern: "*.{ts,js}"
-    url_template: "/{segments}"
-    dynamic_segment: { from: "\\$(\\w+)", to: ":$1" }
-    ignore_segment: ["^_.*"]
-    base_url: ""
-```
-
-### Enable URL Drift Detection
-
-Add to `codd.yaml` to automatically link design doc URLs to endpoints:
-
-```yaml
-document_url_linking:
-  enabled: true
-  applies_to: [design, requirement]
-  url_pattern: "(?:^|[\\s`(\\[])(/[a-z0-9][a-z0-9/\\-:_\\[\\]]*)"
-  edge_type: references
-```
-
-Then run:
-
-```bash
-codd drift          # detect URL drift between design docs and implementation
-codd drift --format json  # machine-readable output
-codd extract --layer routes --format mermaid  # generate screen-flow diagram
-```
-
-## Brownfield? Start Here
-
-Already have a codebase? CoDD provides a full brownfield workflow — from code extraction to design doc reconstruction.
-
-Full walkthrough: [Harness as Code — A Guide to CoDD #2 Brownfield](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield?locale=en)
-
-### AI-Powered Extraction (--ai)
-
-> **Note on presets**: `codd extract --ai` ships with a **baseline** extraction prompt. The extraction quality in published benchmarks (F1 0.953+) was achieved with a tuned preset and internal evaluation dataset — not the public baseline. The baseline uses the same workflow and output format, but results will vary depending on your codebase and prompt. Use `--prompt-file` to supply your own tuned prompt.
-
-```bash
-codd extract --ai                        # Uses built-in baseline preset
-codd extract --ai --prompt-file my.md    # Uses your custom prompt
-```
-
-### Step 1: Extract structure from code
-
-`codd extract` reverse-engineers design documents from your source code. No AI required — pure static analysis.
-
-```bash
-cd existing-project
-codd extract
-```
-
-```
-Extracted: 13 modules from 45 files (12,340 lines)
-Output: codd/extracted/
-  system-context.md     # Module map + dependency graph
-  modules/auth.md       # Per-module design doc
-  modules/api.md
-  modules/db.md
-  ...
-```
-
-### Step 2: Generate wave_config from extracted docs
-
-`codd plan --init` automatically detects extracted docs and generates a wave_config — no requirement docs needed.
-
-```bash
-codd plan --init    # Detects codd/extracted/, builds brownfield wave_config
-```
-
-Each artifact in the generated wave_config includes a `modules` field linking it to source code modules — enabling reverse traceability from code changes back to design docs.
-
-### Step 3: Restore design documents
-
-`codd restore` reconstructs design documents from extracted facts. Unlike `codd generate` (which creates docs from requirements), `restore` asks *"what IS the current design?"* — reconstructing intent from code structure.
-
-```bash
-codd restore --wave 2   # Reconstruct system design from extracted facts
-codd restore --wave 3   # Reconstruct DB/API design
-```
-
-### Step 4: Build the graph
-
-```bash
-codd scan
-codd impact
-```
-
-**Philosophy**: In V-Model, intent lives only in requirements. Architecture, design, and tests are structural facts — extractable from code. `codd extract` gets the structure; `codd restore` reconstructs the design; you add the "why" later.
-
-### Greenfield vs Brownfield
-
-| | Greenfield | Brownfield |
-|--|-----------|-----------|
-| Starting point | Requirements (human-written) | Existing codebase |
-| Planning | `codd plan --init` (from requirements) | `codd plan --init` (from extracted docs) |
-| Doc generation | `codd generate` (forward: requirements → design) | `codd restore` (backward: code facts → design) |
-| Traceability | `modules` field links docs → code | `modules` field links docs → code |
-| Modification | `codd propagate` (code → affected docs → optional AI update) | Same flow |
-
-## Commands
-
-| Command | Status | Description |
-|---------|--------|-------------|
-| `codd init` | **Stable** | Initialize CoDD in any project (`--config-dir .codd` for projects where `codd/` exists) |
-| `codd scan` | **Stable** | Build dependency graph from frontmatter |
-| `codd impact` | **Stable** | Change impact analysis (Green / Amber / Gray) |
-| `codd validate` | **Alpha** | Frontmatter integrity & graph consistency check |
-| `codd generate` | Experimental | Generate design docs in Wave order (greenfield) |
-| `codd restore` | Experimental | Reconstruct design docs from extracted facts (brownfield) |
-| `codd plan` | Experimental | Wave execution status (`--init` supports brownfield fallback) |
-| `codd verify` | Experimental (Pro) | V-Model verification |
-| `codd implement` | Experimental | Design-to-code generation |
-| `codd propagate` | **Alpha** | Propagate code/doc changes downstream to affected design docs |
-| `codd review` | Experimental (Pro) | AI-powered artifact quality evaluation (LLM-as-Judge) |
-| `codd extract` | **Alpha** | Reverse-engineer design docs from existing code |
-| `codd require` | **Alpha** | Infer requirements from existing codebase (brownfield) |
-| `codd audit` | **Alpha** (Pro) | Consolidated change review pack (validate + impact + policy + review) |
-| `codd policy` | **Alpha** | Enterprise policy checker (forbidden/required patterns in source code) |
-| `codd measure` | **Alpha** | Project health metrics (graph, coverage, quality, health score 0-100) |
-| `codd mcp-server` | **Alpha** | MCP server for AI tool integration (stdio, zero dependencies) |
-| `codd fix` | **Alpha** | Auto-fix test/build failures with diagnostic reasoning and session state |
-
-## SWE-bench Verified
-
-CoDD's `fix` command with diagnostic reasoning achieves **73/73 = 100%** on a curated subset of [SWE-bench Verified](https://www.swebench.com/verified.html). The diagnostic step forces root cause analysis before patching, and session state prevents repeating failed approaches across retries.
-
-| Metric | Result |
-|--------|--------|
-| Instances | 73 (curated from SWE-bench Verified) |
-| Resolved | **73 (100%)** |
-| Key feature | Diagnostic reasoning + session state persistence |
-
-Details: [Zenn: CoDD SWE-bench Guide](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot?locale=en)
-
-## OSS / Pro Split
-
-CoDD v1.6.0 introduced a clean OSS/Pro boundary via a bridge pattern.
-
-**OSS (MIT, free)** — everything you need to keep docs coherent:
-
-`init` · `scan` · `impact` · `generate` · `restore` · `propagate` · `extract` · `require` · `plan` · `validate` · `measure` · `policy` · `fix` · `mcp-server`
-
-**Pro (private, paid)** — enterprise review and verification:
-
-`review` · `verify` · `audit` · `risk`
-
-```bash
-# OSS only
-pip install codd-dev
-
-# Add Pro extensions
-pip install "codd-pro @ git+ssh://git@github.com/yohey-w/codd-pro.git"
-```
-
-When `codd-pro` is installed, Pro implementations automatically override OSS fallbacks via entry-points plugin discovery. When it's not installed, Pro commands show a migration message and exit gracefully. No configuration needed.
-
-## CI Integration (GitHub Action)
-
-Run CoDD audit on every pull request. The action posts a comment with verdict (APPROVE / CONDITIONAL / REJECT), validation results, policy violations, and impact analysis.
-
-### Quick Setup
-
-Add `.github/workflows/codd.yml` to your project:
-
-```yaml
-name: CoDD Audit
-on:
-  pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
-  pull-requests: write
-
-jobs:
-  audit:
-    runs-on: ubuntu-latest
+user_journeys:
+  - name: login_to_dashboard
+    criticality: critical
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: yohey-w/codd-dev@main
-        with:
-          diff-target: origin/${{ github.base_ref }}
-          skip-review: "true"  # Set to "false" to enable AI review
+      - { action: navigate, target: "/login" }
+      - { action: fill, selector: "input[type=email]", value: "user@example.com" }
+      - { action: click, selector: "button[type=submit]" }
+      - { action: expect_url, value: "/dashboard" }
 ```
 
-### Action Inputs
+With `codd dag run-journey login_to_dashboard --axis viewport=smartphone_se`:
 
-| Input | Default | Description |
-|-------|---------|-------------|
-| `diff-target` | `origin/main` | Git ref to diff against |
-| `skip-review` | `true` | Skip AI review phase (faster, no AI cost) |
-| `python-version` | `3.12` | Python version |
-| `codd-version` | latest | Specific version (e.g., `>=1.3.0`) |
-| `post-comment` | `true` | Post results as PR comment |
+- `viewport=smartphone_se` (375x667), declared in `project_lexicon.yaml`, is injected into runtime through CDP
+- The journey runs in a real browser (Edge / Chrome)
+- If it fails, C9 `environment_coverage` in `codd dag verify` blocks the deploy gate
 
-### Action Outputs
+This structurally prevents incidents such as smartphone-only navigation disappearing unnoticed.
 
-| Output | Description |
-|--------|-------------|
-| `verdict` | `APPROVE`, `CONDITIONAL`, or `REJECT` |
-| `risk-level` | `LOW`, `MEDIUM`, or `HIGH` |
-| `report-json` | Path to the JSON audit report |
+---
 
-### Enterprise Policies
+## v1.34.0 Key Features
 
-Define source code policies in your `codd.yaml`:
+| Feature | Role |
+|---------|------|
+| **DAG Completeness** (C1-C8) | 9 coherence checks across requirements, design, implementation, tests, and deployment |
+| **Coverage Axis Layer** (C9) | Verifies **target environment coverage** such as viewport, RBAC role, and locale through a unified abstraction supporting 16+ axes |
+| **LLM Auto-Repair (RepairLoop)** | Violation detection -> LLM patch generation -> apply -> verify again, attempting full resolution within `max_attempts` |
+| **Hybrid Classifier** | Classifies violations as repairable / pre_existing / unrepairable using git diff (Stage 1) + LLM judgment (Stage 2) |
+| **Primary Picker** | Prioritizes the most upstream violation in the DAG as the likely root cause among multiple violations |
+| **PARTIAL_SUCCESS policy** | Returns PARTIAL_SUCCESS when applied_patches, pre_existing, or unrepairable items exist, avoiding release blockage by transparent non-current-task issues |
+| **BestPracticeAugmenter** | Dynamically fills in best practices that are not explicitly written in design docs, such as password reset |
+| **ImplStepDeriver (2-layer)** | Dynamically expands design docs into ImplStep sequences and infers `required_axes` in Layer 2 |
+| **Typecheck Repair Loop** | Runs an auto-repair loop when a type checker such as `tsc --noEmit` fails during implementation |
+| **`codd version --check --strict`** | Detects differences between the project's required CoDD version and the installed version |
 
-```yaml
-policies:
-  - id: SEC-001
-    description: "No hardcoded passwords"
-    severity: CRITICAL
-    kind: forbidden
-    pattern: 'password\s*=\s*[''"]'
-    glob: "*.py"
+See [CHANGELOG.md](CHANGELOG.md) for details.
 
-  - id: LOG-001
-    description: "All modules must import logging"
-    severity: WARNING
-    kind: required
-    pattern: "import logging"
-    glob: "*.py"
+---
+
+## Case Study - osato-lms (LMS Web App)
+
+Result of running `codd verify --auto-repair --max-attempts 10` on the LMS project osato-lms (Next.js + Prisma + PostgreSQL):
+
+```text
+status:                   PARTIAL_SUCCESS
+attempts:                 4
+applied_patches:          4
+pre_existing_violations:  1
+unrepairable_violations:  2
+remaining_violations:     3 (skipped + reported)
+smoke proof:              6 checks PASS
+CoDD core changes:        0 lines
 ```
 
-The policy checker runs as part of `codd audit` and independently via `codd policy`. Critical violations cause REJECT; warnings cause CONDITIONAL.
+Repaired files:
 
-## MCP Server
+- `tests/e2e/environment-coverage.spec.ts`
+- `tests/e2e/login.spec.ts`
 
-CoDD exposes its tools via the [Model Context Protocol](https://modelcontextprotocol.io/) for direct AI tool integration. Zero external dependencies — works with any MCP-compatible client.
+Skipped violations (explicitly reported as outside CoDD's responsibility):
 
-```bash
-codd mcp-server --project /path/to/your/project
-```
+- pre_existing: deployment_completeness chain
+- unrepairable: Dockerfile dry-run patch validation
+- unrepairable: Vitest matcher runtime issue
 
-### Claude Code Configuration
+C9 `environment_coverage` verified all axis x variant coverage for viewport (smartphone_se / desktop_1920) and RBAC role (central_admin / tenant_admin / learner), and reached PASS.
 
-Add to `~/.claude/claude_code_config.json`:
+---
 
-```json
-{
-  "mcpServers": {
-    "codd": {
-      "command": "codd",
-      "args": ["mcp-server", "--project", "/path/to/your/project"]
-    }
-  }
-}
-```
+## Architecture - 4-Release Evolution
 
-### Available MCP Tools
+| Release | Milestone |
+|---------|-----------|
+| v1.31.0 | Inner 100% (internal coherence) - eliminated manual type fixes with the typecheck repair loop |
+| v1.32.0 | Outer 100% (target environment coverage) - absorbed viewport/RBAC/locale and related axes through a unified abstraction |
+| v1.33.0 | Caveat-resolution path proven - real CDP run-journey + LLM auto-repair attempt passed |
+| **v1.34.0** | **Full pipeline proven** - auto-repair reached PARTIAL_SUCCESS on a real project |
 
-| Tool | Description |
-|------|-------------|
-| `codd_validate` | Check frontmatter integrity and graph consistency |
-| `codd_impact` | Analyze change impact for a given node or file |
-| `codd_policy` | Check source code against enterprise policy rules |
-| `codd_audit` | Consolidated change review (validate + impact + policy) |
-| `codd_scan` | Build dependency graph from design documents |
-| `codd_measure` | Project health metrics (graph, coverage, quality, health score) |
+See [CHANGELOG.md](CHANGELOG.md) for each release.
 
-## Claude Code Integration
+---
 
-CoDD ships with slash-command Skills for Claude Code. Instead of running CLI commands yourself, use Skills — Claude reads the project context and runs the right command with the right flags.
+## Generality Gate (Absolute Generality Preservation)
 
-### Skills Demo — Same TaskFlow App, Zero CLI
+The following hardcoding is **forbidden** in CoDD core code:
 
-```
-You:  /codd-init
-      → Claude: codd init --project-name "taskflow" --language "typescript" \
-                  --requirements spec.txt
+- Specific stack names (Next.js / Django / Rails / FastAPI, etc.)
+- Specific framework / library literals
+- Specific domains (Web / Mobile / Desktop / CLI / Backend / Embedded)
+- Specific viewport values (375 / 1920, etc.) or device names (iPhone / Android, etc.)
 
-You:  /codd-generate
-      → Claude: codd generate --wave 2 --path .
-      → Claude reads every generated doc, checks scope, validates frontmatter
-      → "Wave 2の設計書を確認しました。Wave 3に進みますか？"
+All such knowledge is confined to **`project_lexicon.yaml` (project-specific)**. CoDD handles it only as generic violation objects.
 
-You:  yes
+When an LLM proposes a stack-specific optimal patch, that judgment is delegated to **the LLM's knowledge**. CoDD core does not decide it, which prevents overfitting.
 
-You:  /codd-generate
-      → Claude: codd generate --wave 3 --path .
-
-You:  /codd-scan
-      → Claude: codd scan --path .
-      → Reports: "7 documents, 15 edges. No warnings."
-
-You:  (edit requirements — add SSO + audit logging)
-
-You:  /codd-impact
-      → Claude: codd impact --path .
-      → Green Band: auto-updates system-design, api-design, db-design, auth-design
-      → Amber Band: "test-strategy is affected. Update it?"
-
-You:  (modify source code — implement the SSO feature)
-
-You:  /codd-propagate
-      → Claude: codd propagate --path .
-      → "3 files changed in auth module. 2 design docs affected:
-         design:system-design, design:auth-detail"
-      → "Run with --update to update these docs?"
-
-You:  yes
-      → Claude: codd propagate --path . --update
-      → Reviews updated docs, confirms changes are accurate
-```
-
-**Key difference**: Skills add human-in-the-loop gates. `/codd-generate` pauses between waves for approval. `/codd-impact` follows the Green/Amber/Gray protocol — auto-updating safe changes, asking before risky ones.
-
-### Hook Integration — Set It Once, Never Think Again
-
-CoDD ships copyable hook recipes in `codd/hooks/recipes/` so Claude, Codex, and Git can all trigger the same change-driven propagation path:
-`codd propagate-from --files <changed-file>`.
-
-#### Claude PostToolUse
-
-Use `codd/hooks/recipes/claude_settings_example.json` as the starting point for `.claude/settings.json`. It listens for Edit / Write / MultiEdit and extracts changed files from `TOOL_INPUT` before calling `propagate-from`.
-
-```json
-{
-  "hooks": {
-    "PostToolUse": [{
-      "matcher": "Edit|Write|MultiEdit",
-      "hooks": [{
-        "type": "command",
-        "command": "python -m codd propagate-from --files <changed-file> --source editor_hook --editor claude"
-      }]
-    }]
-  }
-}
-```
-
-#### Codex Post-Edit
-
-Use `codd/hooks/recipes/codex_hook.sh` when your Codex wrapper can pass edited files through `CODEX_EDITED_FILES`:
-
-```bash
-export CODEX_EDITED_FILES="src/app.ts,docs/design/api.md"
-bash codd/hooks/recipes/codex_hook.sh
-```
-
-#### Git Hooks
-
-Use the git recipes as a final catch for manual edits and non-editor workflows:
-
-```bash
-cp codd/hooks/recipes/git_pre_commit.sh .git/hooks/pre-commit
-cp codd/hooks/recipes/git_post_commit.sh .git/hooks/post-commit
-chmod +x .git/hooks/pre-commit .git/hooks/post-commit
-```
-
-The pre-commit hook runs `propagate-from` in `--dry-run` mode against staged files. The post-commit hook runs propagation against the committed file set.
-
-With hooks active, your entire workflow becomes: **edit files normally, and CoDD propagates the change from the files that actually changed.** The graph maintenance is invisible.
-
-### Available Skills
-
-| Skill | What it does |
-|-------|-------------|
-| `/codd-init` | Initialize + import requirements |
-| `/codd-generate` | Generate design docs wave-by-wave with HITL gates (greenfield) |
-| `/codd-restore` | Reconstruct design docs from extracted code facts (brownfield) |
-| `/codd-scan` | Rebuild dependency graph |
-| `/codd-impact` | Change impact analysis with Green/Amber/Gray protocol |
-| `/codd-validate` | Frontmatter & dependency consistency check |
-| `/codd-propagate` | Reverse-propagate source code changes to design docs |
-| `/codd-review` | AI quality review with PASS/FAIL verdict and feedback |
-
-See [docs/claude-code-setup.md](docs/claude-code-setup.md) for complete setup.
-
-## Autonomous Quality Loop
-
-`codd review` evaluates artifacts using AI (LLM-as-Judge), and `--feedback` feeds results back into generation. Together they enable a fully autonomous quality loop:
-
-```bash
-# Generate → Review → Regenerate with feedback until PASS
-codd generate --wave 2 --force
-feedback=$(codd review --path . --json | jq -r '.results[0].feedback')
-verdict=$(codd review --path . --json | jq -r '.results[0].verdict')
-
-while [ "$verdict" = "FAIL" ]; do
-  codd generate --wave 2 --force --feedback "$feedback"
-  result=$(codd review --path . --json)
-  verdict=$(echo "$result" | jq -r '.results[0].verdict')
-  feedback=$(echo "$result" | jq -r '.results[0].feedback')
-done
-```
-
-Review criteria are type-specific:
-
-| Doc Type | Criteria |
-|----------|----------|
-| Requirement | Completeness, consistency, testability, ambiguity |
-| Design | Architecture soundness, API quality, security, upstream consistency |
-| Detailed Design | Implementation clarity, data model, error handling, interface contracts |
-| Test | Coverage, edge cases, independence, traceability |
-
-**Scoring**: 80+ = PASS. CRITICAL issues auto-cap at 59. Exit code 1 on FAIL — loop-friendly.
-
-**Model allocation**: Use Opus for review (`ai_commands.review`), Codex for implementation (`ai_commands.implement`). The `ai_commands` config makes this a one-line change.
-
-## How CoDD Differs from Other Spec-Driven Tools
-
-All major spec-driven tools focus on **creating** design documents. None address what happens when those documents **change**. CoDD fills that gap with a dependency graph, impact analysis, and a band-based update protocol.
-
-| | **spec-kit** (GitHub) | **Kiro** (AWS) | **cc-sdd** (gotalab) | **CoDD** |
-|--|---|---|---|---|
-| Focus | Spec creation (req -> design -> tasks -> code) | Agentic IDE with native SDD pipeline | Kiro-style SDD for Claude Code | **Post-creation coherence maintenance** |
-| Stars | 83.7k | N/A (proprietary IDE) | 3k | -- |
-| Change propagation | No | No | No | **`codd impact` + dependency graph** |
-| Impact analysis | No | No | No | **Green / Amber / Gray bands** |
-| Spec notation | Markdown + 40 extensions | EARS notation | Quality gates + git worktree | Frontmatter `depends_on` |
-| Harness lock-in | GitHub Copilot | Kiro IDE | Claude Code | **Any agent / IDE** |
-
-In short: spec-kit, Kiro, and cc-sdd answer *"how do I create specs?"* CoDD answers *"when something changes upstream, how do I automatically update everything downstream?"*
-
-## Comparison
-
-|  | Spec Kit | OpenSpec | **CoDD** |
-|--|----------|---------|----------|
-| Spec-first generation | Yes | Yes | Yes |
-| **Change propagation** | No | No | **Dependency graph + impact analysis** |
-| **Derive test strategy** | No | No | **Automatic from architecture** |
-| **V-Model verification** | No | No | **Unit → Integration → E2E** |
-| **Impact analysis** | No | No | **`codd impact`** |
-| Harness-agnostic | Copilot focused | Multi-agent | **Any harness** |
-
-## Real-World Usage
-
-Battle-tested on a production web app — 18 design docs connected by a dependency graph. All docs, code, and tests generated by AI following CoDD. When requirements changed mid-project, `codd impact` identified affected artifacts and AI fixed them automatically.
-
-```
-docs/
-├── requirements/       # What to build (human input — plain text)
-├── design/             # System design, API, DB, UI (AI-generated)
-├── detailed_design/    # Module-level specs (AI-generated)
-├── governance/         # ADRs (AI-generated)
-├── plan/               # Implementation plan
-├── test/               # Acceptance criteria, test strategy
-├── operations/         # Runbooks
-└── infra/              # Infrastructure design
-```
-
-### CoDD Manages Its Own Development
-
-CoDD dogfoods itself. The `.codd/` directory contains CoDD's own config, and `codd extract` reverse-engineers design docs from its own source code. The full V-Model lifecycle runs on itself:
-
-```bash
-codd init --config-dir .codd --project-name "codd-dev" --language "python"
-codd extract          # 15 modules → design docs with dependency frontmatter
-codd scan             # 49 nodes, 83 edges
-codd verify           # mypy + pytest (434 tests pass)
-```
-
-If CoDD can't manage itself, it shouldn't manage your project.
-
-## Roadmap
-
-- [ ] Semantic dependency types (`requires`, `affects`, `verifies`, `implements`)
-- [x] `codd extract` — reverse-generate design docs from existing codebases (brownfield support)
-- [x] `codd restore` — reconstruct design docs from extracted facts (brownfield doc generation)
-- [x] `codd plan --init` brownfield fallback — generate wave_config from extracted docs
-- [x] `modules` field — design doc ↔ source code traceability
-- [x] Per-command AI model configuration (`ai_commands` in codd.yaml)
-- [x] `codd propagate` — reverse-propagate source code changes to design documents
-- [x] `codd review` — AI-powered quality evaluation with review-driven regeneration loop
-- [x] `--feedback` flag — feed review results back into generate/restore/propagate
-- [x] `codd verify` — language-agnostic verification (Python: mypy + pytest, TypeScript: tsc + jest)
-- [x] `codd require` — infer requirements from existing codebase with confidence tags
-- [x] `codd audit` — consolidated change review pack (validate + impact + policy + review)
-- [x] `codd policy` — enterprise policy checker (forbidden/required patterns)
-- [x] `codd measure` — project health metrics (graph, coverage, quality, score 0-100)
-- [x] GitHub Action — CI integration for PR audit with auto-commenting
-- [x] MCP Server — stdio JSON-RPC server for AI tool integration
-- [x] Plugin system — extensible require prompts (tags, evidence format, output sections)
-- [ ] Multi-harness integration examples (Claude Code, Copilot, Cursor)
-- [ ] VS Code extension for impact visualization
-
-## Articles
-
-- [dev.to: Harness as Code — Treating AI Workflows Like Infrastructure](https://dev.to/yohey-w/harness-as-code-treating-ai-workflows-like-infrastructure-27ni)
-- [dev.to: What Happens After "Spec First"](https://dev.to/yohey-w/codd-coherence-driven-development-what-happens-after-spec-first-514f)
-- [Zenn: Harness as Code — A Guide to CoDD #1 spec → design → code](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide?locale=en)
-- [Zenn: Harness as Code — A Guide to CoDD #2 Brownfield](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield?locale=en)
-- [Zenn: Harness as Code — A Guide to CoDD #3 Bug Fixing with CoDD extract (SWE-bench)](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot?locale=en)
-- [Zenn: CoDD deep-dive](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence?locale=en)
-
-## Sponsors
-
-<a href="https://github.com/sponsors/yohey-w">
-  <img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=for-the-badge&logo=github-sponsors" alt="Sponsor">
-</a>
-
-Your sponsorship keeps CoDD free and funds continued development. See [sponsor tiers](https://github.com/sponsors/yohey-w).
+---
 
 ## License
 
-MIT
+MIT License - see [LICENSE](LICENSE).
+
+## Links
+
+- [CHANGELOG.md](CHANGELOG.md) - full release notes
+- [GitHub Sponsors](https://github.com/sponsors/yohey-w) - support development
+- [Issues](https://github.com/yohey-w/codd-dev/issues) - bug reports / feature requests
+
+---
+
+> When code changes, CoDD traces the impact, detects violations, and produces evidence for merge decisions.
