@@ -1,6 +1,5 @@
 <p align="center">
-  <strong>CoDD — Coherence-Driven Development（一貫性駆動開発）</strong><br>
-  <em>AI支援開発における変更管理のエビデンスエンジン。</em>
+  <strong>CoDD — Coherence-Driven Development（一貫性駆動開発）</strong>
 </p>
 
 <p align="center">
@@ -16,809 +15,220 @@
 
 ---
 
-> *コードが変わったとき、CoDDは影響範囲を追跡し、違反を検出し、マージ判断のためのエビデンスを生成する。*
+## 機能要件と制約だけ書けば、コードは自動で書ける。
 
-```
-pip install codd-dev
-```
+CoDD は **要件 → 設計 → 実装 → テスト** をひとつの DAG として扱い、各ノードの一貫性 (coherence) を機械検証して、不整合があれば LLM が自動で修復する開発エンジンである。
 
-## 🆕 v1.16.0-alpha — Coherence Engine（整合性駆動の中央ハブ）
-
-**drift / validate / propagate / fix を `DriftEvent` 統一フォーマットで結ぶ中央ハブ。**
-
-| コンポーネント | 役割 |
-|----------------|------|
-| `DriftEvent` | source/target/change_type/payload/severity/fix_strategy/kind を持つ統一イベント型 |
-| `EventBus` | in-process pub/sub。Detector が publish、Orchestrator が subscribe |
-| `Orchestrator` | severity ルーティング: `red` → auto-fix / `amber` → pending HITL / `green` → log |
-| `coherence_adapters` | drift / validate / design-token violation 出力 → DriftEvent 変換 |
-| `codd propagate --coherence` | lexicon + DESIGN.md を AI プロンプトに注入（用語ぶれ・色値矛盾の自動防止） |
-| Fixer Coherence-Mode | `run_fix(coherence_event=...)` で設計書修正を許可（test 失敗修正フローは分離維持） |
-
-auto-fix が失敗した場合は自動で amber にダウングレードし、`docs/coherence/pending_hitl.md` に HITL レビュー待ちエントリとして記録。ntfy 通知はレート制限（デフォルト 60 秒）で過剰通知を抑止。**既存CLI (`codd drift` / `validate` / `propagate` / `fix`) は100%後方互換**、`--coherence` を渡さない限り従来挙動を維持。
-
-⚠️ **alpha 版**: Phase 4+（Detector ↔ Applier の直接配管 / `codd fixup-drift` サブコマンド）は次バージョンで実装予定。本リリースは中央ハブのアーキテクチャ確立段階。
-
----
-
-## 🆕 v1.14.0 — `codd implement` の Batch guard
-
-`codd implement` で `--max-tasks N`（デフォルト30）と `--wave WAVE_ID` をサポート。大規模な implementation plan を安全に分割実行するための **preflight task count guard** で AI の暴走 fan-out を防止し、`--wave` / `--max-tasks` / `--task` の代替案を含む actionable error message を返す。
-
-```bash
-codd implement --max-tasks 30           # 30件超なら abort
-codd implement --wave wave_2_1          # wave_2_1 の tasks のみ実行
-```
-
-> v1.13.1 は `DesignTokenDriftLinker` の `project_root` Path 変換バグ修正パッチ。
-
----
-
-## 🆕 v1.13.0 — DESIGN.md統合（Google Stitch OSS, W3C Design Tokens）
-
-**UI設計からコード生成まで完全なトレーサビリティを実現。**
-
-| 機能 | 説明 |
-|------|------|
-| `DesignMdExtractor` | DESIGN.md（W3C Design Tokens spec）を自動パース |
-| `KnowledgeFetcher` UI検出 | React/Vue/Svelte/Flutter 等を自動認識し DESIGN.md 採用を提案 |
-| `codd implement` 注入 | UIファイル生成時に DESIGN.md トークンを AI prompt に自動付与 |
-| `codd validate --design-tokens` | ハードコードされた #hex/px 値を検出し DESIGN.md 参照を推奨 |
-| `codd drift` design_token | UI実装のトークン参照と DESIGN.md 定義集合を比較 |
-| `codd verify --design-md` | `npx @google/design.md lint` を CoDD レポートに統合 |
-
-```yaml
-# DESIGN.md サンプル（プロジェクトルートに配置）
----
-version: "1.0"
-name: "My App"
-colors:
-  Primary: "#1A73E8"
-components:
-  Button.primary:
-    background: "{colors.Primary}"
----
-```
-
-仕様: [google-labs-code/design.md](https://github.com/google-labs-code/design.md)
-
----
-
-## 🆕 v1.12.0 — Meta-Design Context Layer（project_lexicon）
-
-CoDD に **メタ設計コンテキスト層** が追加。プロジェクトの語彙・命名規約・設計原則を `project_lexicon.yaml` に一度宣言すれば、すべてのAIコマンド（require / plan / generate / implement）が自動でそれを使用する。
-
-- 📖 `ProjectLexicon` — ノード語彙、命名規約、設計原則、failure modes を宣言
-- 🌐 `KnowledgeFetcher` — Web Search 優先のナレッジ層、30日キャッシュ。CoDD コアにフレームワーク知識のハードコードゼロ
-- 🔍 `codd validate --lexicon` — lexicon 内の命名規約違反を検出
-- 🔌 Extractor registry — Python module path で extractor クラスを宣言。`FileSystemRouteExtractor` が初の登録例
-- 🧙 Lexicon wizard — `codd plan` が lexicon 不在時に draft `project_lexicon.yaml` を自動生成
-- 📋 `CoverageAuditor` — 要件ギャップ検出、AUTO_ACCEPT / ASK / AUTO_REJECT の3クラスルール
-- 🏷️ Provenance tracking — 各 lexicon エントリは `provenance` / `confidence` / `fetched_at` を保持
-
----
-
-## 🆕 v1.11.0 — Filesystem-Routing Aware Drift Detection
-
-CoDD が filesystem-routing フレームワーク（Next.js, SvelteKit, Nuxt, Astro, Remix）を理解し、設計書と実装間の URL drift を検出可能に。
-
-- 📐 `FileSystemRouteExtractor` — ディレクトリ構造から endpoint ノードを抽出
-- 🔗 `DocumentUrlLinker` — 設計書の URL を endpoint に自動リンク
-- 🔍 `codd drift` — 設計と実装の URL ギャップを検出
-- 🎨 `codd extract --layer routes` — screen-flow ダイアグラムを逆生成
-
-詳細は英語版README の [Filesystem Routing Adapter Recipes](README.md#filesystem-routing-adapter-recipes) を参照。
-
----
-
-**v1.9.0** — `codd implement` が**マルチAIエンジン**（Claude stdout + Codex file-writing）と**フェーズ内自動並列実行**（git worktree分離）に対応。フェーズマイルストーン形式（`#### M1.1`）をサポート。重い推論モデル向けにタイムアウトを1時間に拡大。SWE-bench Verified: **73/73 = 100%** 解決。
-
----
-
-## なぜCoDD？
-
-AIは仕様を書ける。でも**上流が変わったら？**
-
-あらゆるSpec-firstツールは「作る」ところで止まる。CoDDはそこから始まる。要件が変わったとき、コードが更新されたとき、設計の前提が崩れたとき、CoDDが**変更を下流に自動伝搬**する — 影響を受ける設計書を更新し、古くなった成果物をフラグし、エビデンスの証跡を残す。
-
-```
-要件が変わった → codd impact が影響設計書6本を特定
-コードが変わった → codd propagate が下流設計書を更新
-設計が変わった → CEGグラフが全依存先を追跡
-```
-
-他のツールにはこれができない。spec-kit、Kiro、cc-sddは文書を作る。**CoDDは文書の一貫性を維持する。**
-
-## 動作の仕組み
-
-```
-要件定義 (人間)  →  設計書生成 (AI)  →  コード & テスト (AI)
-       ↕                   ↕                    ↕
-   codd impact       codd propagate        codd extract
-  (何が変わった？)    (下流を更新)         (逆生成)
-```
-
-### 3つのレイヤー
-
-```
-ハーネス (CLAUDE.md, Hooks, Skills)   ← ルール、ガードレール、フロー
-  └─ CoDD (方法論)                     ← 変更時の一貫性維持
-       └─ 設計書 (docs/*.md)           ← CoDDが管理する成果物
-```
-
-CoDDは**ハーネス非依存** — Claude Code、Copilot、Cursor、どのエージェントフレームワークでも動きます。
-
-## 基本原則：設定するな、導出せよ
-
-| アーキテクチャ | 導出されるテスト戦略 | 設定は？ |
-|---|---|---|
-| Next.js + Supabase | vitest + Playwright | 不要 |
-| FastAPI + Python | pytest + httpx | 不要 |
-| CLI tool in Go | go test | 不要 |
-
-**上流が下流を決定する。** 要件と制約を定義するだけ。AIがそれ以外を全て導出します。
-
-## クイックスタート
-
-### グリーンフィールド（新規プロジェクト）
+人間が書くのは **「何を」と「どこまで」** だけ。「どう書くか」は CoDD と LLM が引き受ける。
 
 ```bash
 pip install codd-dev
-mkdir my-project && cd my-project && git init
-
-# 初期化 — 要件定義ファイルを渡すだけ（形式自由: txt, md, doc）
-codd init --project-name "my-project" --language "typescript" \
-  --requirements spec.txt
-
-# AIが設計書の依存グラフを設計
-codd plan --init
-
-# 設計書をwave順に生成
-waves=$(codd plan --waves)
-for wave in $(seq 1 $waves); do
-  codd generate --wave $wave
-done
-
-# 品質ゲート — AIの手抜きを検出（TODO、プレースホルダー）
-codd validate
-
-# 設計書からコード生成
-codd implement
-
-# コード断片をビルド可能なプロジェクトに統合
-codd assemble
 ```
 
-### ブラウンフィールド（既存プロジェクト）
-
-```bash
-codd extract              # 既存コードから設計書を逆生成
-codd require              # コードから要件を推論（何が作られ、なぜか）
-codd plan --init          # 抽出結果からwave_config生成
-codd scan                 # 依存グラフ構築
-codd impact               # 変更影響分析
-codd audit --skip-review  # 変更レビュー一括実行: validate + impact + policy
-codd measure              # プロジェクト健全性スコア（0-100）
-```
-
-## デモ
-
-### 再現可能なE2Eデモ — 3つの伝搬パターン
-
-以下のデモはコミット [`d7d9f45`](https://github.com/yohey-w/codd-dev/commit/d7d9f45) に固定されている。ローカルで完全再現可能。
-
-**セットアップ:**
-```bash
-pip install codd-dev>=1.6.0
-mkdir demo && cd demo && git init
-cat > spec.txt << 'EOF'
-TaskFlow — Requirements
-- User authentication (email + Google OAuth)
-- Workspace management (teams, roles, invites)
-- Task CRUD with assignees, labels, due dates
-- Real-time updates (WebSocket)
-- File attachments (S3)
-- Notification system (in-app + email)
-EOF
-codd init --project-name "taskflow" --language "typescript" --requirements spec.txt
-```
-
-**パターン1 — Source → Doc**（仕様 → 設計書）:
-```bash
-codd plan --init
-for wave in $(seq 1 $(codd plan --waves)); do codd generate --wave $wave; done
-codd validate        # 期待値: PASS, エラー0件
-codd scan            # 期待値: 17ノード, 30+エッジ
-```
-
-**パターン2 — Doc → Doc**（要件変更 → 下流更新）:
-```bash
-# 要件を編集: 認証に「SSO (SAML 2.0)」を追加
-codd impact          # 期待値: 7本中6本がGreen/Amberバンド
-
-# 影響を受けたWaveを再生成（propagateはコード→設計書方向のみ）
-codd generate --wave 1 --force   # 更新された要件から受入基準を再導出
-codd generate --wave 2 --force   # 更新されたWave 1からシステム設計を再導出
-# 影響のある各Waveを依存順に繰り返す
-```
-
-**パターン3 — Doc → Doc via CEG**（コード変更 → 設計書更新）:
-```bash
-# authモジュールのソースコードを変更
-codd propagate       # 期待値: auth-design, system-designが影響あり
-codd propagate --update  # コードdiffからAIが影響設計書を更新
-```
-
-**期待出力**: 20行のspec → 17設計成果物（5,100行超） → 変更後もpropagateで全文書の一貫性を維持。パターン3（CEGベースの伝搬）は新規性が高い — コード変更を依存グラフ経由で設計書まで遡って更新するツールは他にない。
-
-### グリーンフィールド — specから動くアプリまで
-
-37行のspec → 設計書6本（1,353行） → コード102ファイル（6,445行） → TypeScript strictビルド成功。AIチャットなし — ワークフロー全体がシェルスクリプト。
-
-詳細: [Harness as Code — CoDD活用ガイド #1](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide)
-
-### ブラウンフィールド — 変更影響分析
-
-要件を2行変えただけで、`codd impact` が7本中6本の設計書に影響ありと判定。Green帯域はAIが自動更新。Amber帯域は人間に提示。変更が怖くなくなる。
-
-詳細: [CoDD 詳細解説](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence)
-
-## Wave順生成
-
-設計書は依存関係の順序で生成されます — 各Waveは前のWaveに依存：
-
-```
-Wave 1  受入基準 + ADR                ← 要件のみ
-Wave 2  システム設計                   ← 要件 + Wave 1
-Wave 3  DB設計 + API設計             ← 要件 + Wave 1-2
-Wave 4  UI/UX設計                    ← 要件 + Wave 1-3
-Wave 5  実装計画                      ← 上記すべて
-```
-
-検証はボトムアップ（V-Model）：
-
-```
-ユニットテスト    ← 詳細設計を検証
-結合テスト       ← システム設計を検証
-E2E/システムテスト ← 要件 + 受入基準を検証
-```
-
-## フロントマター = 唯一の信頼できるソース
-
-依存関係はMarkdownのフロントマターで宣言。別途設定ファイルは不要。
-
-```yaml
 ---
-codd:
-  node_id: "design:api-design"
-  modules: ["api", "auth"]        # ← ソースコードモジュールとの紐付け
-  depends_on:
-    - id: "design:system-design"
-      relation: derives_from
-    - id: "req:my-project-requirements"
-      relation: implements
----
+
+## Quick Start (5 分)
+
+### 1. インストール
+
+```bash
+pip install codd-dev
+codd --version  # 1.34.0 以上
 ```
 
-`modules` フィールドが逆方向トレーサビリティを実現する：ソースコードが変更されたとき、`codd extract` が影響モジュールを特定し、`modules` フィールドでそのモジュールに紐づく設計書を逆引きできる。
-
-`codd/scan/` はキャッシュ — `codd scan` のたびに再生成されます。
-
-## カスタムノードプレフィックス
-
-デフォルトでは `node_id` に使えるプレフィックスは組み込みのもの（`design:`, `req:`, `doc:`, `module:` 等）に限定されています。ソフトウェア設計以外の用途（ナレッジベース、レビュー文書、プロンプト管理など）に使う場合、`codd.yaml` でカスタムプレフィックスを追加できます：
+### 2. プロジェクトに codd.yaml を置く
 
 ```yaml
 # codd.yaml
-prefixes:
-  - knowledge
-  - schema
-  - review
-  - prompt
+codd_required_version: ">=1.34.0"
+
+dag:
+  design_docs:
+    - "docs/design/**/*.md"
+  implementations:
+    - "src/**/*.{ts,tsx,py}"
+  tests:
+    - "tests/**/*.{spec,test}.{ts,tsx,py}"
+
+repair:
+  approval_mode: required   # 自動修復には人の承認を要する
+  max_attempts: 10
+
+llm:
+  ai_command: "claude"      # 任意の LLM CLI を呼び出せる (claude / codex / gemini 等)
 ```
 
-カスタムプレフィックスは組み込みデフォルトに**マージ**されます。`design` や `req` を再指定する必要はありません。プレフィックス名は小文字英字とアンダースコアのみ（`[a-z_]+`）です。
-
-```yaml
-# フロントマターで使用可能に:
-codd:
-  node_id: "knowledge:domain-model"
-```
-
-## AIモデル設定
-
-CoDDは設計書生成に外部AI CLIを呼び出す。デフォルトはClaude Opus：
-
-```yaml
-# codd.yaml
-ai_command: "claude --print --model claude-opus-4-6"
-```
-
-### コマンド別オーバーライド
-
-コマンドごとに異なるモデルを使い分けられる。例えば、設計書生成はOpus、コード実装はCodex：
-
-```yaml
-ai_command: "claude --print --model claude-opus-4-6"   # グローバルデフォルト
-ai_commands:
-  generate: "claude --print --model claude-opus-4-6"    # 設計書生成
-  restore: "claude --print --model claude-opus-4-6"     # ブラウンフィールド復元
-  review: "claude --print --model claude-opus-4-6"      # 品質評価
-  plan_init: "claude --print --model claude-sonnet-4-6" # wave_config計画
-  implement: "codex --print"                             # コード生成
-```
-
-**優先順位**: CLI `--ai-cmd` フラグ > `ai_commands.{コマンド}` > `ai_command` > ビルトインデフォルト（Opus）。
-
-### Claude Codeのコンテキスト干渉
-
-`claude --print` をプロジェクトディレクトリ内で実行すると、`CLAUDE.md` を自動検出してプロジェクトレベルのシステムプロンプトを読み込む。これらの指示がCoDDの生成プロンプトと競合し、フォーマットバリデーション失敗を起こすことがある：
-
-```
-Error: AI command returned unstructured summary for 'ADR: ...'; missing section headings
-```
-
-**対策**: `--system-prompt` でプロジェクトコンテキストを上書きし、文書生成に集中させる：
-
-```yaml
-ai_command: "claude --print --model claude-opus-4-6 --system-prompt 'You are a technical document generator. Output only the requested Markdown document. Follow section heading instructions exactly.'"
-```
-
-> **注意**: `--bare` は全コンテキストを排除するが、OAuth認証まで無効化してしまう。`--system-prompt` を使えば `CLAUDE.md` を上書きしつつ認証は維持できる。
-
-## 設定ディレクトリの自動検出
-
-デフォルトでは `codd init` は `codd/` ディレクトリを作成する。プロジェクトに既に `codd/` が存在する場合（例：ソースコードのパッケージ名）、`--config-dir` で別名を指定できる：
+### 3. 典型コマンド
 
 ```bash
-codd init --config-dir .codd --project-name "my-project" --language "python"
+# 整合性検証 (要件・設計・実装・テストの一貫性チェック)
+codd dag verify
+
+# 自動修復付き検証 (違反を見つけたら LLM が patch を生成・適用)
+codd dag verify --auto-repair --max-attempts 10
+
+# User Journey の実機 PASS 確認 (CDP 経由でブラウザ操作)
+codd dag run-journey login_to_dashboard --axis viewport=smartphone_se
+
+# 設計書から実装手順を導出 (実装段階の入力)
+codd implement run --task M1.2 --enable-typecheck-loop
 ```
 
-`scan`、`impact`、`generate` 等の全コマンドは、`codd/` → `.codd/` の順で設定ディレクトリを自動検出する。追加フラグは不要。
+### 4. 出力の見方
 
-## ブラウンフィールド？ ここから
+`codd dag verify` は 9 種の coherence check を走らせる:
 
-既存コードベースがある場合、CoDDはコード抽出から設計書復元までの完全なブラウンフィールドワークフローを提供する。
-
-ウォークスルー: [Harness as Code — CoDD実践ガイド #2 ブラウンフィールド編](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield)
-
-### AI抽出（--ai）
-
-> **プリセットについて**: `codd extract --ai` には**baseline**プリセット（公開用）が同梱されている。公開ベンチマーク（F1 0.953+）の数値は、チューニング済みプリセットと内部評価セットで測定した結果であり、公開版baselineとは異なる。baselineは同じワークフローと出力形式を使えるが、結果はコードベースやプロンプトにより変動する。`--prompt-file` で独自のプロンプトを渡すことも可能。
-
-```bash
-codd extract --ai                        # 組み込みbaselineプリセットを使用
-codd extract --ai --prompt-file my.md    # カスタムプロンプトを使用
-```
-
-### Step 1: コードから構造を抽出
-
-`codd extract` がソースコードから設計書を逆生成する。AI不要——純粋な静的解析。
-
-```bash
-cd existing-project
-codd extract
-```
-
-```
-Extracted: 13 modules from 45 files (12,340 lines)
-Output: codd/extracted/
-  system-context.md     # モジュールマップ + 依存グラフ
-  modules/auth.md       # モジュール別設計書
-  modules/api.md
-  modules/db.md
-  ...
-```
-
-### Step 2: 抽出結果からwave_configを生成
-
-`codd plan --init` は抽出済み設計書を自動検出し、要件定義なしでwave_configを生成する。
-
-```bash
-codd plan --init    # codd/extracted/ を検出し、ブラウンフィールド用wave_configを生成
-```
-
-生成されたwave_configの各成果物には `modules` フィールドが含まれ、ソースコードモジュールとの逆方向トレーサビリティを実現する。
-
-### Step 3: 設計書を復元
-
-`codd restore` は抽出された事実から設計書を復元する。`codd generate`（要件から設計書を生成）とは根本的に異なり、「現在の設計は何か？」をコード構造から再構築する。
-
-```bash
-codd restore --wave 2   # 抽出事実からシステム設計を復元
-codd restore --wave 3   # DB設計・API設計を復元
-```
-
-### Step 4: 依存グラフを構築
-
-```bash
-codd scan
-codd impact
-```
-
-**設計思想**: V-Modelにおいて、意図は要件定義にのみ存在する。アーキテクチャ・詳細設計・テストは構造事実——コードから抽出可能。`codd extract` は構造を取り、`codd restore` は設計を復元し、「なぜ」は後から人が加える。
-
-### グリーンフィールド vs ブラウンフィールド
-
-| | グリーンフィールド | ブラウンフィールド |
-|--|-----------|-----------|
-| 起点 | 要件定義（人間が記述） | 既存コードベース |
-| 計画 | `codd plan --init`（要件から） | `codd plan --init`（抽出結果から） |
-| 設計書生成 | `codd generate`（順方向: 要件→設計） | `codd restore`（逆方向: コード事実→設計） |
-| トレーサビリティ | `modules` フィールドが設計書→コードを接続 | 同じ |
-| 変更時 | `codd propagate`（コード→影響設計書→AI更新） | 同じ |
-
-## コマンド
-
-| コマンド | ステータス | 説明 |
-|---------|--------|-------------|
-| `codd init` | **安定版** | プロジェクト初期化（`--config-dir .codd` で設定ディレクトリ名を変更可） |
-| `codd scan` | **安定版** | フロントマターから依存グラフ構築 |
-| `codd impact` | **安定版** | 変更影響分析（Green / Amber / Gray バンド） |
-| `codd validate` | **アルファ** | フロントマター整合性 & グラフ一貫性チェック |
-| `codd generate` | 実験的 | Wave順で設計書生成（グリーンフィールド） |
-| `codd restore` | 実験的 | 抽出事実から設計書を復元（ブラウンフィールド） |
-| `codd plan` | 実験的 | Wave実行状況（`--init` はブラウンフィールドにも対応） |
-| `codd verify` | 実験的 (Pro) | V-Model検証 |
-| `codd implement` | 実験的 | 設計書→コード生成 |
-| `codd propagate` | **アルファ** | コード/設計変更を下流の影響設計書に伝搬 |
-| `codd review` | 実験的 (Pro) | AI品質評価（LLM-as-Judge） |
-| `codd extract` | **アルファ** | 既存コードから設計書を逆生成 |
-| `codd require` | **アルファ** | 既存コードベースから要件を推論（ブラウンフィールド） |
-| `codd audit` | **アルファ** (Pro) | 変更レビュー一括パック（validate + impact + policy + review） |
-| `codd policy` | **アルファ** | エンタープライズポリシーチェッカー（ソースコードの禁止/必須パターン） |
-| `codd measure` | **アルファ** | プロジェクト健全性メトリクス（グラフ、カバレッジ、品質、スコア 0-100） |
-| `codd mcp-server` | **アルファ** | AIツール連携用MCPサーバー（stdio、依存ゼロ） |
-| `codd fix` | **アルファ** | テスト/ビルド失敗の自動修正（診断推論 + セッション状態永続化） |
-
-## SWE-bench Verified
-
-CoDDの `fix` コマンドは、診断推論ステップにより [SWE-bench Verified](https://www.swebench.com/verified.html) のキュレーション済みサブセットで **73/73 = 100%** を達成。診断ステップがパッチ前の根本原因分析を強制し、セッション状態が失敗アプローチの繰り返しを防止する。
-
-| 指標 | 結果 |
-|--------|--------|
-| インスタンス数 | 73（SWE-bench Verifiedからキュレーション） |
-| 解決数 | **73（100%）** |
-| 主要機能 | 診断推論 + セッション状態永続化 |
-
-詳細: [Zenn: CoDD SWE-bench Guide](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot?locale=en)
-
-## OSS / Pro 分離
-
-CoDD v1.6.0でOSS/Proの境界をブリッジパターンで明確化。
-
-**OSS（MIT、無料）** — 文書の一貫性維持に必要な全機能:
-
-`init` · `scan` · `impact` · `generate` · `restore` · `propagate` · `extract` · `require` · `plan` · `validate` · `measure` · `policy` · `fix` · `mcp-server`
-
-**Pro（プライベート、有料）** — エンタープライズ向けレビュー・検証:
-
-`review` · `verify` · `audit` · `risk`
-
-```bash
-# OSSのみ
-pip install codd-dev
-
-# Pro拡張を追加
-pip install "codd-pro @ git+ssh://git@github.com/yohey-w/codd-pro.git"
-```
-
-`codd-pro` がインストールされていれば、entry-pointsプラグイン探索でPro実装がOSSフォールバックを自動的にオーバーライドする。未インストール時はマイグレーションメッセージを表示して正常終了。設定変更は不要。
-
-## CI連携（GitHub Action）
-
-プルリクエストごとにCoDD監査を実行。判定結果（APPROVE / CONDITIONAL / REJECT）、バリデーション結果、ポリシー違反、影響分析をコメントとして投稿する。
-
-### クイックセットアップ
-
-プロジェクトに `.github/workflows/codd.yml` を追加:
-
-```yaml
-name: CoDD Audit
-on:
-  pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
-  pull-requests: write
-
-jobs:
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: yohey-w/codd-dev@main
-        with:
-          diff-target: origin/${{ github.base_ref }}
-          skip-review: "true"  # AIレビューを有効にするには "false" に設定
-```
-
-### Action入力
-
-| 入力 | デフォルト | 説明 |
-|------|-----------|------|
-| `diff-target` | `origin/main` | 差分比較対象のGit ref |
-| `skip-review` | `true` | AIレビューフェーズをスキップ（高速、AIコスト不要） |
-| `python-version` | `3.12` | Pythonバージョン |
-| `codd-version` | 最新版 | 特定バージョン（例: `>=1.3.0`） |
-| `post-comment` | `true` | 結果をPRコメントとして投稿 |
-
-### Action出力
-
-| 出力 | 説明 |
-|------|------|
-| `verdict` | `APPROVE`、`CONDITIONAL`、または `REJECT` |
-| `risk-level` | `LOW`、`MEDIUM`、または `HIGH` |
-| `report-json` | JSON監査レポートへのパス |
-
-### エンタープライズポリシー
-
-`codd.yaml` でソースコードポリシーを定義:
-
-```yaml
-policies:
-  - id: SEC-001
-    description: "ハードコードされたパスワードの禁止"
-    severity: CRITICAL
-    kind: forbidden
-    pattern: 'password\s*=\s*[''"]'
-    glob: "*.py"
-
-  - id: LOG-001
-    description: "全モジュールにloggingのimportが必要"
-    severity: WARNING
-    kind: required
-    pattern: "import logging"
-    glob: "*.py"
-```
-
-ポリシーチェッカーは `codd audit` の一部として実行され、`codd policy` で単独実行も可能。CRITICAL違反はREJECT、WARNINGはCONDITIONALを返す。
-
-## MCPサーバー
-
-CoDDは [Model Context Protocol](https://modelcontextprotocol.io/) 経由でツールを公開し、AIツールとの直接連携を実現する。外部依存ゼロ — MCP対応クライアントならどれでも動作。
-
-```bash
-codd mcp-server --project /path/to/your/project
-```
-
-### Claude Code設定
-
-`~/.claude/claude_code_config.json` に追加:
-
-```json
-{
-  "mcpServers": {
-    "codd": {
-      "command": "codd",
-      "args": ["mcp-server", "--project", "/path/to/your/project"]
-    }
-  }
-}
-```
-
-### 利用可能なMCPツール
-
-| ツール | 説明 |
-|--------|------|
-| `codd_validate` | フロントマター整合性とグラフ一貫性チェック |
-| `codd_impact` | 指定ノードまたはファイルの変更影響分析 |
-| `codd_policy` | エンタープライズポリシールールに対するソースコードチェック |
-| `codd_audit` | 変更レビュー一括実行（validate + impact + policy） |
-| `codd_scan` | 設計書から依存グラフ構築 |
-| `codd_measure` | プロジェクト健全性メトリクス（グラフ、カバレッジ、品質、スコア） |
-
-## Claude Code 連携
-
-CoDDはClaude Code用のスラッシュコマンドSkillを同梱。CLIを直接叩く代わりに、Skillを使えばClaudeがプロジェクトの状態を読み取って適切なコマンドを実行する。
-
-### Skills デモ — 同じTaskFlowアプリ、CLIコマンド不要
-
-```
-殿:  /codd-init
-     → Claude: codd init --project-name "taskflow" --language "typescript" \
-                 --requirements spec.txt
-
-殿:  /codd-generate
-     → Claude: codd generate --wave 2 --path .
-     → Claude が生成された設計書を読み、スコープ確認、フロントマター検証
-     → 「Wave 2の設計書を確認しました。Wave 3に進みますか？」
-
-殿:  はい
-
-殿:  /codd-generate
-     → Claude: codd generate --wave 3 --path .
-
-殿:  /codd-scan
-     → Claude: codd scan --path .
-     → 報告: 「7ドキュメント、15エッジ。警告なし。」
-
-殿:  （要件を編集 — SSO対応と監査ログを追加）
-
-殿:  /codd-impact
-     → Claude: codd impact --path .
-     → Green帯域: system-design、api-design、db-design、auth-designを自動更新
-     → Amber帯域: 「test-strategyが影響を受けています。更新しますか？」
-
-殿:  （ソースコードを変更 — SSO機能を実装）
-
-殿:  /codd-propagate
-     → Claude: codd propagate --path .
-     → 「authモジュールで3ファイル変更。影響を受ける設計書2件:
-        design:system-design, design:auth-detail」
-     → 「--updateで設計書を更新しますか？」
-
-殿:  はい
-     → Claude: codd propagate --path . --update
-     → 更新された設計書をレビューし、変更内容が正確か確認
-```
-
-**CLIとの違い**: Skillはhuman-in-the-loopゲートを追加する。`/codd-generate` はWave間で承認を求めて停止。`/codd-impact` はGreen/Amber/Grayプロトコルに従い、安全な変更は自動更新、リスクのある変更は確認してから実行。
-
-### フック連携 — 一度設定したら、もう意識しなくていい
-
-このフックを入れれば、**`codd scan` を手動で叩く必要は二度とない。** ファイル編集のたびに自動実行 — 依存グラフは常に最新、常に正確、意識ゼロ：
-
-```json
-{
-  "hooks": {
-    "PostToolUse": [{
-      "matcher": "Edit|Write",
-      "hooks": [{
-        "type": "command",
-        "command": "codd scan --path ."
-      }]
-    }]
-  }
-}
-```
-
-フックが有効なら、やることは**普通にファイルを編集して、影響を知りたくなったら `/codd-impact` を叩く。それだけ。** グラフのメンテナンスは完全に透明。
-
-### 利用可能なSkill
-
-| Skill | 機能 |
+| Check | 役割 |
 |-------|------|
-| `/codd-init` | 初期化 + 要件インポート |
-| `/codd-generate` | HITLゲート付きWave順設計書生成（グリーンフィールド） |
-| `/codd-restore` | 抽出事実から設計書復元（ブラウンフィールド） |
-| `/codd-scan` | 依存グラフ再構築 |
-| `/codd-impact` | Green/Amber/Grayプロトコルで変更影響分析 |
-| `/codd-validate` | フロントマター & 依存関係の整合性チェック |
-| `/codd-propagate` | ソースコード変更を設計書に逆伝搬 |
-| `/codd-review` | AI品質レビュー（PASS/FAIL判定 + フィードバック） |
+| `node_completeness` | 設計書記載のノード (実装/テスト) が物理ファイルとして存在するか |
+| `transitive_closure` | 要件 → 設計 → 実装 → テストの依存連鎖が閉じているか |
+| `verification_test_runtime` | 実装に対するテストが実行可能で PASS するか |
+| `deployment_completeness` | デプロイチェーン (Dockerfile/compose/k8s) が完備か |
+| `proof_break_authority` | 重要 journey が壊れていないか |
+| `screen_flow_edges` | 画面遷移グラフに孤立ノードがないか |
+| `screen_flow_completeness` | 全画面が要件にマップされているか |
+| `c8` | uncommitted patch / dirty file の検知 |
+| `c9` (`environment_coverage`) | viewport / RBAC role / locale 等の **対象環境網羅性** |
 
-詳細は [docs/claude-code-setup_ja.md](docs/claude-code-setup_ja.md) を参照。
+violation が見つかれば deploy gate を block、`--auto-repair` で LLM patch 生成 → 適用 → 再検証のループに入る。
 
-## 自律品質ループ
+---
 
-`codd review` はAI（LLM-as-Judge）で成果物を評価し、`--feedback` はその結果を再生成に食わせる。組み合わせることで完全自律の品質ループが回る：
+## 典型ユースケース
 
-```bash
-# 生成 → レビュー → フィードバック付き再生成 → PASSするまで繰り返し
-codd generate --wave 2 --force
-feedback=$(codd review --path . --json | jq -r '.results[0].feedback')
-verdict=$(codd review --path . --json | jq -r '.results[0].verdict')
+### ユースケース 1: 要件 → 設計 → 実装の自動化
 
-while [ "$verdict" = "FAIL" ]; do
-  codd generate --wave 2 --force --feedback "$feedback"
-  result=$(codd review --path . --json)
-  verdict=$(echo "$result" | jq -r '.results[0].verdict')
-  feedback=$(echo "$result" | jq -r '.results[0].feedback')
-done
+`docs/requirements/*.md` に「機能要件 + 制約」を書き、`codd implement run` を呼ぶと:
+
+1. 要件から ImplStep 列を LLM が動的導出 (Layer 1)
+2. ベストプラクティス補完 (Layer 2、ログイン → ログアウト/Remember Me/セッションタイムアウト 等)
+3. ユーザー承認 (HITL gate) を経て `src/**` に実装が生成される
+4. 生成中に `tsc` などの type check が落ちれば自動修復ループに入る
+
+人間は「機能要件 + 制約だけ書けば全自動」を体験できる。
+
+### ユースケース 2: Auto-Repair (codd verify --auto-repair)
+
+CI で `codd dag verify --auto-repair --max-attempts 10` を回すと:
+
+1. 9 種の coherence check が実行される
+2. 違反を **修復可能 (in-task) / pre-existing (baseline) / unrepairable** に Hybrid Classifier (git diff + LLM) で分類
+3. 修復可能違反のうち DAG 上最も上流のものを選んで LLM が patch 生成
+4. dry-run validation を経て apply、再検証
+5. max_attempts 内で全解消 → `SUCCESS`、一部修復 → `PARTIAL_SUCCESS`、修復不能ばかり → `REPAIR_FAILED`
+
+`PARTIAL_SUCCESS` でも修復済 patch は反映され、残違反は report に列挙される (透明性)。
+
+### ユースケース 3: User Journey Coherence (codd dag run-journey)
+
+`docs/design/auth_design.md` の frontmatter にユーザージャーニーを書く:
+
+```yaml
+user_journeys:
+  - name: login_to_dashboard
+    criticality: critical
+    steps:
+      - { action: navigate, target: "/login" }
+      - { action: fill, selector: "input[type=email]", value: "user@example.com" }
+      - { action: click, selector: "button[type=submit]" }
+      - { action: expect_url, value: "/dashboard" }
 ```
 
-レビュー基準はドキュメントタイプ別：
+`codd dag run-journey login_to_dashboard --axis viewport=smartphone_se` で:
 
-| タイプ | 評価基準 |
-|--------|----------|
-| 要件定義 | 網羅性、一貫性、テスト可能性、曖昧さ |
-| 設計 | アーキテクチャ妥当性、API品質、セキュリティ、上流整合性 |
-| 詳細設計 | 実装明確性、データモデル、エラー処理、インターフェース契約 |
-| テスト | カバレッジ、エッジケース、独立性、トレーサビリティ |
+- `project_lexicon.yaml` 宣言の `viewport=smartphone_se` (375x667) を CDP に runtime 注入
+- 実機ブラウザ (Edge / Chrome) で journey を実行
+- 失敗時は `codd dag verify` の C9 environment_coverage が deploy gate を block
 
-**スコアリング**: 80点以上 = PASS。CRITICALイシューは自動で59点に上限。FAIL時はexit code 1 — ループ親和。
+スマホ専用 nav が消えてた等の事故を構造的に防ぐ。
 
-**モデル配置**: レビューはOpus（`ai_commands.review`）、実装はCodex（`ai_commands.implement`）。`ai_commands` 設定で1行で切り替え。
+---
 
-## 他のSpec駆動ツールとの違い
+## v1.34.0 主要機能
 
-主要なSpec駆動ツールはすべて設計書の**作成**に焦点を当てている。設計書が**変更された後**に何が起きるかに対処するツールはない。CoDDは依存グラフ、影響分析、バンドベースの更新プロトコルでそのギャップを埋める。
+| 機能 | 役割 |
+|------|------|
+| **DAG 完全性** (C1〜C8) | 要件・設計・実装・テスト・デプロイの 9 種コヒーレンスチェック |
+| **Coverage Axis Layer** (C9) | viewport / RBAC role / locale 等の **対象環境網羅性** を統一抽象 (16+ 軸対応) で検証 |
+| **LLM Auto-Repair (RepairLoop)** | 違反検知 → LLM patch 生成 → apply → 再検証のループ、`max_attempts` 内で全解消を試行 |
+| **Hybrid Classifier** | git diff (Stage 1) + LLM 判断 (Stage 2) で violation を repairable / pre_existing / unrepairable に分類 |
+| **Primary Picker** | 複数違反のうち DAG 上最も上流のもの (root cause 候補) を優先修復 |
+| **PARTIAL_SUCCESS policy** | applied_patches OR pre_existing OR unrepairable があれば PARTIAL_SUCCESS、CI を release blocker から外せる |
+| **BestPracticeAugmenter** | 設計書に明記されないベストプラクティス (パスワードリセット等) を LLM が動的補完 |
+| **ImplStepDeriver (2-layer)** | 設計書 → ImplStep 列の動的展開、Layer 2 で `required_axes` 推論 |
+| **Typecheck Repair Loop** | 実装段階で `tsc --noEmit` などの type check が落ちたら自動修復ループ |
+| **`codd version --check --strict`** | プロジェクト要求 vs インストール済 codd の差分検出 |
 
-| | **spec-kit** (GitHub) | **Kiro** (AWS) | **cc-sdd** (gotalab) | **CoDD** |
-|--|---|---|---|---|
-| 焦点 | Spec作成（要件→設計→タスク→コード） | Agentic IDE + SDD | Kiro式SDDのClaude Code版 | **作成後の一貫性維持** |
-| Stars | 83.7k | N/A（プロプラIDE） | 3k | -- |
-| 変更伝播 | No | No | No | **`codd impact` + 依存グラフ** |
-| 影響分析 | No | No | No | **Green / Amber / Gray バンド** |
-| 仕様記法 | Markdown + 40拡張 | EARS記法 | 品質ゲート + git worktree | フロントマター `depends_on` |
-| ハーネスロックイン | GitHub Copilot | Kiro IDE | Claude Code | **任意のエージェント / IDE** |
+詳細は [CHANGELOG.md](CHANGELOG.md) 参照。
 
-要約: spec-kit、Kiro、cc-sddは「仕様をどう作るか」に答える。CoDDは「上流が変わったとき、下流を自動で更新する」に答える。
+---
 
-## 比較
+## 実証ケーススタディ — 実プロジェクト (LMS Web App)
 
-|  | Spec Kit | OpenSpec | **CoDD** |
-|--|----------|---------|----------|
-| 仕様を先に書く | Yes | Yes | Yes |
-| **変更伝播** | No | No | **依存グラフ + 影響分析** |
-| **テスト戦略の自動導出** | No | No | **アーキテクチャから自動** |
-| **V-Model検証** | No | No | **Unit → Integration → E2E** |
-| **影響分析** | No | No | **`codd impact`** |
-| ハーネス非依存 | Copilot寄り | マルチエージェント | **どのハーネスでも** |
-
-## 実プロジェクト実績
-
-本番Webアプリで実証済み — 18の設計書が依存グラフで接続。設計書・コード・テストの全てをAIがCoDDに従って生成。プロジェクト途中で要件が変更された際、`codd impact` が影響を受ける成果物を特定し、AIが自動で修正。
+実プロジェクト (LMS アプリ、Next.js + Prisma + PostgreSQL) で `codd verify --auto-repair --max-attempts 10` を実行した結果:
 
 ```
-docs/
-├── requirements/       # 何を作るか（人間の入力）
-├── design/             # システム設計、API、DB、UI（6ファイル）
-├── detailed_design/    # モジュールレベルの仕様（4ファイル）
-├── governance/         # ADR（3ファイル）
-├── plan/               # 実装計画
-├── test/               # 受入基準、テスト戦略
-├── operations/         # 運用手順書
-└── infra/              # インフラ設計
+status:                PARTIAL_SUCCESS
+attempts:              4
+applied_patches:       4
+pre_existing_violations:  1
+unrepairable_violations:  2
+remaining_violations:     3 (skip + report 済み)
+smoke proof:           6 checks PASS
+CoDD core 改修:        0 行
 ```
 
-### CoDD自身の開発もCoDDで管理
+修復された file:
+- `tests/e2e/environment-coverage.spec.ts`
+- `tests/e2e/login.spec.ts`
 
-CoDDは自分自身をdogfoodingしている。`.codd/`ディレクトリにCoDD自身の設定があり、`codd extract`で自分のソースコードから設計書を逆生成する。V-Modelライフサイクル全体が自分自身に対して動く：
+スキップされた違反 (CoDD 責任外として report に明示):
+- pre_existing: deployment_completeness chain
+- unrepairable: Dockerfile dry-run patch validation
+- unrepairable: Vitest matcher runtime issue
 
-```bash
-codd init --config-dir .codd --project-name "codd-dev" --language "python"
-codd extract          # 15モジュール → 依存フロントマター付き設計書
-codd scan             # 49ノード、83エッジ
-codd verify           # mypy + pytest（434テスト通過）
-```
+C9 environment_coverage は viewport (smartphone_se / desktop_1920) と RBAC role (central_admin / tenant_admin / learner) の axis × variant 全網羅を検証、PASS 達成。
 
-自分自身を管理できないツールに、あなたのプロジェクトは任せられない。
+---
 
-## ロードマップ
+## アーキテクチャ — 4 release 進化
 
-- [ ] セマンティック依存関係タイプ (`requires`, `affects`, `verifies`, `implements`)
-- [x] `codd extract` — 既存コードベースから設計書を逆生成（ブラウンフィールド対応）
-- [x] `codd restore` — 抽出事実から設計書を復元（ブラウンフィールド設計書生成）
-- [x] `codd plan --init` ブラウンフィールド対応 — 抽出結果からwave_config生成
-- [x] `modules` フィールド — 設計書 ↔ ソースコードのトレーサビリティ
-- [x] コマンド別AIモデル設定（`ai_commands` in codd.yaml）
-- [x] `codd propagate` — ソースコード変更を設計書に逆伝搬
-- [x] `codd review` — AI品質評価 + レビュー駆動の再生成ループ
-- [x] `--feedback` フラグ — レビュー結果をgenerate/restore/propagateに食わせて再生成
-- [x] `codd verify` — 言語非依存の検証（Python: mypy + pytest、TypeScript: tsc + jest）
-- [x] `codd require` — 既存コードベースから要件を推論（確信度タグ付き）
-- [x] `codd audit` — 変更レビュー一括パック（validate + impact + policy + review）
-- [x] `codd policy` — エンタープライズポリシーチェッカー（禁止/必須パターン）
-- [x] `codd measure` — プロジェクト健全性メトリクス（グラフ、カバレッジ、品質、スコア 0-100）
-- [x] GitHub Action — PRの自動監査コメント付きCI連携
-- [x] MCPサーバー — AIツール連携用stdio JSON-RPCサーバー
-- [x] プラグインシステム — 拡張可能なrequireプロンプト（タグ、エビデンス形式、出力セクション）
-- [ ] マルチハーネス連携例（Claude Code, Copilot, Cursor）
-- [ ] VS Code拡張（影響分析の可視化）
+| Release | 到達点 |
+|---------|--------|
+| v1.31.0 | 内側 100% (内部整合性 coherence) — type check repair loop で「手動 type fix」を撲滅 |
+| v1.32.0 | 外側 100% (対象環境網羅性 Coverage Axis) — viewport/RBAC/locale 等を統一抽象で吸収 |
+| v1.33.0 | caveats 解消経路実証 — 実機 CDP run-journey + LLM auto-repair attempt PASS |
+| **v1.34.0** | **full pipeline 完全実証** — 実プロジェクトで auto-repair PARTIAL_SUCCESS 完走 |
 
-## 解説記事
+詳細は [CHANGELOG.md](CHANGELOG.md) で各 release を参照。
 
-- [Zenn: Harness as Code — CoDD活用ガイド #1 spec → 設計書 → コード](https://zenn.dev/shio_shoppaize/articles/codd-greenfield-guide)
-- [Zenn: Harness as Code — CoDD実践ガイド #2 ブラウンフィールド編](https://zenn.dev/shio_shoppaize/articles/shogun-codd-brownfield)
-- [Zenn: Harness as Code — CoDD活用ガイド #3 既存コードのバグ修正（SWE-bench実験）](https://zenn.dev/shio_shoppaize/articles/codd-swebench-pilot)
-- [Zenn: CoDD 詳細解説](https://zenn.dev/shio_shoppaize/articles/shogun-codd-coherence)
-- [dev.to: Harness as Code — Treating AI Workflows Like Infrastructure](https://dev.to/yohey-w/harness-as-code-treating-ai-workflows-like-infrastructure-27ni)
-- [dev.to: What Happens After "Spec First"](https://dev.to/yohey-w/codd-coherence-driven-development-what-happens-after-spec-first-514f)
+---
 
-## スポンサー
+## Generality Gate (汎用性絶対維持)
 
-<a href="https://github.com/sponsors/yohey-w">
-  <img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=for-the-badge&logo=github-sponsors" alt="Sponsor">
-</a>
+CoDD core code には以下の hardcode を **禁止** している:
 
-スポンサーの支援がCoDD開発を継続可能にしています。[スポンサーTier](https://github.com/sponsors/yohey-w)を確認する。
+- 特定 stack 名 (Next.js / Django / Rails / FastAPI 等)
+- 特定 framework / library の literal
+- 特定 domain (Web / Mobile / Desktop / CLI / Backend / Embedded)
+- 特定 viewport 値 (375 / 1920 等) や device 名 (iPhone / Android 等)
+
+これらは全て **`project_lexicon.yaml` (プロジェクト固有)** に閉じる。CoDD は generic な violation object としてのみ処理する。
+
+LLM が「stack 固有の最適 patch」を提案する場合は、その判断は **LLM の知識** に委ね、CoDD core が決めない (= overfitting しない)。
+
+---
 
 ## ライセンス
 
-MIT
+MIT License — [LICENSE](LICENSE) 参照。
+
+## リンク
+
+- [CHANGELOG.md](CHANGELOG.md) — 全 release ノート
+- [GitHub Sponsors](https://github.com/sponsors/yohey-w) — 開発支援
+- [Issues](https://github.com/yohey-w/codd-dev/issues) — バグ報告 / 機能要望
+
+---
+
+> 「コードが変わったとき、CoDD は影響範囲を追跡し、違反を検出し、マージ判断のためのエビデンスを生成する。」
