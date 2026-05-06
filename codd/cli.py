@@ -2,8 +2,10 @@
 
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
+import importlib.metadata
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,145 @@ class _CliVerificationResult:
     passed: bool
     exit_code: int
     failure: Any | None = None
+
+
+@dataclass(frozen=True)
+class _VersionCheckResult:
+    installed_version: str
+    required_spec: str
+    satisfied: bool
+    strict: bool
+    message: str
+
+
+_SPECIFIER_RE = re.compile(r"^\s*(==|!=|<=|>=|<|>|~=)\s*([A-Za-z0-9.!+_-]+)\s*$")
+
+
+def _installed_codd_version() -> str:
+    try:
+        return importlib.metadata.version("codd-dev")
+    except importlib.metadata.PackageNotFoundError:
+        pass
+
+    try:
+        from codd import __version__
+
+        if __version__:
+            return str(__version__)
+    except Exception:  # pragma: no cover - best-effort fallback for source trees.
+        pass
+
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    try:
+        match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject_path.read_text(encoding="utf-8"))
+    except OSError:
+        match = None
+    return match.group(1) if match else "unknown"
+
+
+def _evaluate_version_requirement(project_root: Path, *, strict_override: bool = False) -> _VersionCheckResult | None:
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return None
+
+    required = config.get("codd_required_version")
+    if not isinstance(required, str) or not required.strip():
+        return None
+
+    installed = _installed_codd_version()
+    required_spec = required.strip()
+    satisfied, error = _version_satisfies(installed, required_spec)
+    strict = bool(strict_override or config.get("codd_required_version_strict", False))
+    if error:
+        return _VersionCheckResult(
+            installed_version=installed,
+            required_spec=required_spec,
+            satisfied=False,
+            strict=strict,
+            message=f"WARN: invalid codd_required_version {required_spec!r}: {error}",
+        )
+    return _VersionCheckResult(
+        installed_version=installed,
+        required_spec=required_spec,
+        satisfied=satisfied,
+        strict=strict,
+        message=f"WARN: project requires codd {required_spec}, installed {installed}",
+    )
+
+
+def _warn_if_project_version_mismatch(project_root: Path) -> None:
+    result = _evaluate_version_requirement(project_root)
+    if result is None or result.satisfied:
+        return
+    click.echo(result.message, err=True)
+    if result.strict:
+        raise SystemExit(1)
+
+
+def _version_satisfies(installed: str, specifier: str) -> tuple[bool, str | None]:
+    try:
+        from packaging.specifiers import InvalidSpecifier, SpecifierSet
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            return Version(installed) in SpecifierSet(specifier), None
+        except (InvalidSpecifier, InvalidVersion) as exc:
+            return False, str(exc)
+    except ImportError:
+        return _version_satisfies_fallback(installed, specifier)
+
+
+def _version_satisfies_fallback(installed: str, specifier: str) -> tuple[bool, str | None]:
+    installed_key = _version_key(installed)
+    if installed_key is None:
+        return False, f"unsupported installed version {installed!r}"
+
+    for raw_part in specifier.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        match = _SPECIFIER_RE.match(part)
+        if match is None:
+            return False, f"unsupported version specifier {part!r}; install packaging for full PEP 440 support"
+        op, expected = match.groups()
+        expected_key = _version_key(expected)
+        if expected_key is None:
+            return False, f"unsupported version {expected!r}"
+        if not _compare_version_keys(installed_key, op, expected_key):
+            return False, None
+    return True, None
+
+
+def _version_key(version: str) -> tuple[int, ...] | None:
+    release = version.split("+", 1)[0].split("-", 1)[0]
+    numbers = re.findall(r"\d+", release)
+    if not numbers:
+        return None
+    return tuple(int(item) for item in numbers)
+
+
+def _compare_version_keys(installed: tuple[int, ...], op: str, expected: tuple[int, ...]) -> bool:
+    size = max(len(installed), len(expected))
+    left = installed + (0,) * (size - len(installed))
+    right = expected + (0,) * (size - len(expected))
+    if op == "==":
+        return left == right
+    if op == "!=":
+        return left != right
+    if op == ">=":
+        return left >= right
+    if op == "<=":
+        return left <= right
+    if op == ">":
+        return left > right
+    if op == "<":
+        return left < right
+    if op == "~=":
+        upper = (expected[0] + 1, 0) if len(expected) <= 2 else (expected[0], expected[1] + 1, 0)
+        upper = upper + (0,) * (size - len(upper))
+        return left >= right and left < upper
+    return False
 
 
 def _run_pro_command(name: str, **kwargs):
@@ -198,9 +339,38 @@ def _ensure_bootstrap_codd_yaml(
 
 @click.group()
 @click.version_option(package_name="codd-dev")
-def main():
+@click.pass_context
+def main(ctx: click.Context):
     """CoDD: Coherence-Driven Development."""
-    pass
+    if ctx.resilient_parsing or ctx.invoked_subcommand in {None, "version"}:
+        return
+    _warn_if_project_version_mismatch(Path.cwd())
+
+
+@main.command("version")
+@click.option("--check", "check_project", is_flag=True, help="Check installed CoDD against codd.yaml requirement")
+@click.option("--strict", is_flag=True, help="Exit non-zero when the version requirement is not satisfied")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def version_cmd(check_project: bool, strict: bool, project_path: str) -> None:
+    """Print the installed CoDD version."""
+    installed = _installed_codd_version()
+    click.echo(f"codd {installed}")
+    if not check_project:
+        return
+
+    project_root = Path(project_path).resolve()
+    result = _evaluate_version_requirement(project_root, strict_override=strict)
+    if result is None:
+        click.echo("Version check: no codd_required_version configured")
+        return
+    if result.satisfied:
+        click.echo(f"Version check: PASS (requires {result.required_spec})")
+        return
+
+    click.echo(result.message, err=True)
+    click.echo(f"Version check: FAIL (requires {result.required_spec})")
+    if result.strict:
+        raise SystemExit(1)
 
 
 @main.command("preflight")

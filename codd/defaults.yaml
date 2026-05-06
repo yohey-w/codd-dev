@@ -1,4 +1,6 @@
 version: "0.2.0a1"
+codd_required_version: null
+codd_required_version_strict: false
 project:
   frameworks: []
 ai_command: "claude --print --model claude-opus-4-6 --tools \"\""
