@@ -110,6 +110,7 @@ class ImplStepCacheRecord:
         return self.to_dict() == other.to_dict()
 
     def to_dict(self) -> dict[str, Any]:
+        steps = [step.to_dict() for step in self.steps]
         return {
             "provider_id": self.provider_id,
             "cache_key": self.cache_key,
@@ -118,7 +119,9 @@ class ImplStepCacheRecord:
             "prompt_template_sha": self.prompt_template_sha,
             "generated_at": self.generated_at,
             "design_docs": list(self.design_docs),
-            "steps": [step.to_dict() for step in self.steps],
+            "steps": steps,
+            "layer_1_steps": [step for step in steps if not step.get("inferred")],
+            "layer_2_steps": [step for step in steps if step.get("inferred")],
         }
 
     @classmethod
@@ -131,7 +134,7 @@ class ImplStepCacheRecord:
             prompt_template_sha=str(payload["prompt_template_sha"]),
             generated_at=str(payload["generated_at"]),
             design_docs=_string_list(payload.get("design_docs")),
-            steps=[ImplStep.from_dict(item) for item in _mapping_list(payload.get("steps"))],
+            steps=[ImplStep.from_dict(item) for item in _cache_step_payloads(payload)],
         )
 
 
@@ -512,6 +515,19 @@ def _nested_value(payload: Mapping[str, Any], path: tuple[str, ...]) -> Any:
 
 def _read_yaml(path: Path) -> Any:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _cache_step_payloads(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if payload.get("steps") is not None:
+        return [dict(item) for item in _mapping_list(payload.get("steps"))]
+
+    layer_1 = [dict(item) for item in _mapping_list(payload.get("layer_1_steps"))]
+    layer_2 = [dict(item) for item in _mapping_list(payload.get("layer_2_steps"))]
+    for item in layer_1:
+        item.setdefault("inferred", False)
+    for item in layer_2:
+        item.setdefault("inferred", True)
+    return [*layer_1, *layer_2]
 
 
 def _step_entries(payload: Any) -> list[Any] | None:
