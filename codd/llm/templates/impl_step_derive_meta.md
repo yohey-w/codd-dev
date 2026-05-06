@@ -14,7 +14,8 @@ Return JSON only:
       "rationale": "one or two concise sentences",
       "source_design_section": "section reference",
       "target_path_hint": "artifact path or null",
-      "expected_outputs": ["artifact path or name"]
+      "expected_outputs": ["artifact path or name"],
+      "required_axes": ["axis_type values this step must satisfy"]
     }
   ]
 }
@@ -26,12 +27,18 @@ Rules:
   deliverable in the project described by the documents.
 - Choose `kind` freely. Do not limit it to the catalog.
 - Use dependencies between steps when ordering matters.
+- When a step is tied to declared coverage axes, set `required_axes` to the relevant axis_type values.
 - Do not invent project stack names that are not implied by the documents.
 - Keep every item specific enough for an implementer to act on.
 
 STEP CATALOG HINT:
 ---
 {step_catalog_hint}
+---
+
+COVERAGE AXES:
+---
+{coverage_axes_hint}
 ---
 
 DESIGN DOCUMENTS:
