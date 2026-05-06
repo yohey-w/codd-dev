@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 import codd.cli as cli
+import codd.repair as repair_module
 from codd.cli import main
 
 
@@ -237,6 +238,41 @@ def test_repair_from_report_requires_repair_config(tmp_path: Path):
 
     assert result.exit_code == 1
     assert "WARN: codd.yaml [repair] section is required" in result.output
+
+
+def test_run_repair_loop_configures_hybrid_classifier_context(tmp_path: Path, monkeypatch):
+    project = _write_project(tmp_path, repair={"approval_mode": "required"})
+    captured: dict[str, object] = {}
+
+    class CapturingRepairLoop:
+        def __init__(self, config, project_root):
+            captured["config"] = config
+            captured["project_root"] = project_root
+
+        def run(self, failure, dag, **kwargs):
+            captured["failure"] = failure
+            captured["dag"] = dag
+            captured["kwargs"] = kwargs
+            return _outcome(project, "REPAIR_SUCCESS")
+
+    monkeypatch.setattr(repair_module, "RepairLoop", CapturingRepairLoop)
+
+    outcome = cli._run_repair_loop(
+        project,
+        _failure(),
+        repair_config={"repair": {"approval_mode": "required"}, "ai_command": "mock-ai --json"},
+        max_attempts=None,
+        baseline_ref=None,
+        engine_name=None,
+        verify_callable=lambda: True,
+    )
+
+    config = captured["config"]
+    assert outcome.status == "REPAIR_SUCCESS"
+    assert captured["project_root"] == project
+    assert config.repo_path == project
+    assert config.llm_client.project_root == project
+    assert config.llm_client.config["ai_command"] == "mock-ai --json"
 
 
 def test_repair_history_lists_sessions(tmp_path: Path):

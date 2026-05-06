@@ -103,7 +103,14 @@ class TypecheckRepairLoop:
                 "failure": None if final_run.passed else _typecheck_failure(final_run, scoped_files, dag),
             }
 
-        config = RepairLoopConfig(max_attempts=self.max_attempts, engine_name=self.engine_name)
+        from codd.deployment.providers.ai_command import SubprocessAiCommand
+
+        config = RepairLoopConfig(
+            max_attempts=self.max_attempts,
+            engine_name=self.engine_name,
+            llm_client=SubprocessAiCommand(command=ai_command, project_root=project_root),
+            repo_path=project_root,
+        )
         repair_loop = self.repair_loop_factory(config, project_root)
         outcome = repair_loop.run(failure, dag, verify_callable=verify_callable)
         status: TypecheckLoopStatus = (

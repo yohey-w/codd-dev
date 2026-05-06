@@ -3630,6 +3630,7 @@ def _run_repair_loop(
     verify_callable,
     initial_verify_result: Any | None = None,
 ):
+    from codd.deployment.providers.ai_command import SubprocessAiCommand
     from codd.dag import DAG
     from codd.dag.builder import build_dag
     from codd.repair import RepairLoop, RepairLoopConfig
@@ -3649,6 +3650,8 @@ def _run_repair_loop(
         approval_mode=str(repair.get("approval_mode") or "required"),  # type: ignore[arg-type]
         history_dir=Path(str(repair.get("history_dir") or ".codd/repair_history")),
         engine_name=str(engine_name or repair.get("engine_name") or repair.get("engine") or "llm"),
+        llm_client=SubprocessAiCommand(project_root=project_root, config=repair_config),
+        repo_path=project_root,
     )
     return RepairLoop(config, project_root).run(
         resolved_failure,

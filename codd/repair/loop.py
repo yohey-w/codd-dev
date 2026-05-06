@@ -43,6 +43,8 @@ class RepairLoopConfig:
     history_dir: Path = field(default_factory=lambda: Path(".codd/repair_history"))
     engine_name: str = "llm"
     notify_callable: Callable[[str], None] | None = None
+    llm_client: Any | None = None
+    repo_path: Path | str | None = None
 
 
 @dataclass
@@ -127,7 +129,7 @@ class RepairLoop:
         self.config = config
         self.project_root = Path(project_root)
         self.history = RepairHistory()
-        self.repairability_classifier = repairability_classifier or _default_repairability_classifier()
+        self.repairability_classifier = repairability_classifier or _default_repairability_classifier(config)
         self.primary_picker = primary_picker or _default_primary_picker()
 
     def run(
@@ -478,12 +480,19 @@ def _applied_patch_files(apply_result: ApplyResult, proposal: RepairProposal) ->
     return _proposal_files(proposal)
 
 
-def _default_repairability_classifier() -> Any:
+def _default_repairability_classifier(config: RepairLoopConfig | None = None) -> Any:
     try:
-        from codd.repair.repairability_classifier import NullClassifier
+        from codd.repair.repairability_classifier import NullClassifier, RepairabilityClassifier
     except (ImportError, AttributeError):
         return NullRepairabilityClassifier()
-    return NullClassifier()
+
+    if config is None or config.llm_client is None or config.repo_path is None:
+        return NullClassifier()
+
+    return RepairabilityClassifier(
+        llm_client=config.llm_client,
+        repo_path=config.repo_path,
+    )
 
 
 def _default_primary_picker() -> Any:

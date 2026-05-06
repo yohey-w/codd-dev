@@ -12,6 +12,7 @@ from codd.repair.approval_repair import approve_repair_proposal
 import codd.repair.loop as loop_module
 from codd.repair.engine import RepairEngine, register_repair_engine
 from codd.repair.loop import RepairLoop, RepairLoopConfig
+from codd.repair.repairability_classifier import NullClassifier, RepairabilityClassifier
 from codd.repair.schema import (
     ApplyResult,
     FilePatch,
@@ -143,6 +144,39 @@ def test_repair_loop_config_defaults():
     assert config.approval_mode == "required"
     assert config.history_dir == Path(".codd/repair_history")
     assert config.engine_name == "llm"
+    assert config.llm_client is None
+    assert config.repo_path is None
+
+
+def test_default_repairability_classifier_uses_hybrid_when_configured(tmp_path: Path):
+    llm_client = object()
+
+    classifier = loop_module._default_repairability_classifier(
+        RepairLoopConfig(llm_client=llm_client, repo_path=tmp_path)
+    )
+
+    assert isinstance(classifier, RepairabilityClassifier)
+    assert classifier.llm is llm_client
+    assert classifier.repo_path == tmp_path
+
+
+def test_default_repairability_classifier_falls_back_without_llm_or_repo_path(tmp_path: Path):
+    assert isinstance(
+        loop_module._default_repairability_classifier(RepairLoopConfig(repo_path=tmp_path)),
+        NullClassifier,
+    )
+    assert isinstance(
+        loop_module._default_repairability_classifier(RepairLoopConfig(llm_client=object())),
+        NullClassifier,
+    )
+
+
+def test_repair_loop_uses_default_hybrid_classifier_from_config(tmp_path: Path):
+    config = RepairLoopConfig(llm_client=object(), repo_path=tmp_path)
+
+    repair_loop = RepairLoop(config, tmp_path)
+
+    assert isinstance(repair_loop.repairability_classifier, RepairabilityClassifier)
 
 
 def test_unknown_engine_returns_repair_failed(tmp_path: Path):
