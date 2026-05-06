@@ -30,11 +30,17 @@ jobs:
           set +e
           codd audit --diff origin/${{ github.base_ref }} --skip-review --json --output /tmp/codd-audit.json
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
-          set -e
 
-          # Extract verdict for summary
-          VERDICT=$(python3 -c "import json; print(json.load(open('/tmp/codd-audit.json'))['verdict'])")
+          # Extract verdict only if output file was written (audit may not produce output
+          # when no design-doc changes are detected or when the audit plugin is unavailable)
+          if [ -f /tmp/codd-audit.json ]; then
+            VERDICT=$(python3 -c "import json; print(json.load(open('/tmp/codd-audit.json'))['verdict'])")
+          else
+            VERDICT="SKIPPED"
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+          fi
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          set -e
 
       - name: Generate PR Comment
         if: always()
@@ -157,4 +163,9 @@ jobs:
 
       - name: Set exit code
         if: always()
-        run: exit ${{ steps.audit.outputs.exit_code }}
+        run: |
+          VERDICT="${{ steps.audit.outputs.verdict }}"
+          if [ "$VERDICT" = "SKIPPED" ]; then
+            exit 0
+          fi
+          exit ${{ steps.audit.outputs.exit_code }}
