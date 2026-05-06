@@ -4,6 +4,110 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-05-06
+
+### Added — Last-Mile Completion: Chunked Execution + C8 Path Matcher + Layer 2 Visibility (cmd_413 + cmd_414 + cmd_415 + cmd_404 + cmd_405)
+
+cmd_412 ドッグフードで判明した 3 caveats + cmd_398_g1 M_2 + cmd_399 audit item_5 を **5 cmd
+bundle で全解消**。CoDD は「ノールック自動化」9 割 → **100% に到達**、完全無人実証が完成する。
+
+3 ashigaru 並列実装が設計見積もり 8.5 h を **15 分で達成** = pattern 確立 (cmd_385/393/397/398/410)
++ 共通基盤 (cmd_397_f/g/h) 流用 + cmd_410-412 経験の三重効果。
+
+### cmd_413 — Chunked Execution + Progress Streaming
+
+`codd implement run` の 900s timeout 解消。ImplStep[] を chunk 分割実行 + 進捗 streaming +
+ctrl+C graceful shutdown + USER_INTERRUPTED 後の resume 対応。
+
+- **新 module**: `codd/implementer/chunked_runner.py` (498 LOC、ChunkedRunner +
+  ChunkedRunResult / ChunkedExecution dataclass)
+- **CLI**: `codd implement run --task <id> --chunk-size <N> --timeout-per-chunk <S>` +
+  `codd implement resume --task <id> --history <ISO8601>`
+- **Default**: chunk_size=5, timeout_per_chunk=600 (ASK-1 推奨案)
+- **history persistence**: `.codd/chunked_run_history/{ISO8601}/chunks/chunk_{N}.yaml` +
+  `final_status.yaml` (SUCCESS / PARTIAL / TIMEOUT / USER_INTERRUPTED)
+- **graceful kill**: ctrl+C → child process group SIGTERM → graceful shutdown
+- **既存 implementer 挙動回帰なし**: --chunk-size 不指定で legacy path
+
+### cmd_414 — C8 Path Matcher 4 段階強化 (caveat_2 公式 merge)
+
+cmd_412 で ashigaru2 が当てた uncommitted patch を **公式 merge**。bracket dynamic route
+(`/api/v1/courses/[id]/route.ts`) と src/app prefix の正しい matching を Generality 制約遵守で
+正式化、osato-lms で C8 公式 PASS 確認済。
+
+- **`_matches_any_impl` 4 段階**:
+  1. exact match (既存)
+  2. glob match (既存)
+  3. **bracket route normalization** (新): `\[[^\]]+\]` パターンを `*` に展開
+  4. **src prefix tolerant matching** (新): `src/`, `lib/`, `app/` の prefix tolerance
+- **Generality**: Next.js 固有用語 (page.tsx / route.ts / layout.tsx) を core にハードコード
+  禁止、`[...]` 文字列パターンとして抽象化
+- **codd.yaml [coherence.path_prefix_tolerant]** で project 上書き可
+- **default**: `['src/', 'lib/', 'app/']` (ASK-2 推奨案)
+
+### cmd_415 — Layer 2 BestPracticeAugmenter 貢献ログ可視化 (caveat_3 解消)
+
+`codd implement run` 実行時に Layer 1 (explicit) と Layer 2 (implicit) の各 ImplStep[] を
+分離保存 + CLI で内訳表示。
+
+- **cache 拡張**: `.codd/derived_impl_steps/{task_id}.yaml` に Layer 別 fields 維持
+- **CLI**: `codd implement steps --task <id> --show-layer-breakdown`
+- **出力**: Layer 1 count + Layer 2 count + avg_confidence + 各 step rationale
+
+### cmd_404 — Standalone Auto-Repair CLI (cmd_398_g1 M_2 解消)
+
+`codd verify --auto-repair` が codd-pro 不在環境 (osato-lms 等) で動作するように修正。
+verify_runner (Python import 経路、cmd_398_d) を default に組み込み、codd-pro 利用可能時は
+従来挙動維持。
+
+### cmd_405 — Frontmatter Attribute Alias (cmd_399 audit item_5 解消)
+
+`codd.yaml [extraction.frontmatter_alias]` で alias mapping を宣言可能に。
+`DESIGN_DOC_ATTRIBUTE_KEYS` の lookup を hash map ベースに変更、**全 frontmatter フィールド**
+を alias 対応 (ASK-3 推奨案、generic 設計)。
+
+- **例**: Mobile project が `interaction_flows: user_journeys` と alias 宣言、
+  Embedded project が `sensor_pipelines: user_journeys` と宣言
+- **既存挙動回帰なし**: alias mapping 不在で従来通り
+
+### Generality Gate 各 cmd zero hit (5/5)
+
+- cmd_413: codd/implementer/chunked_runner.py — stack/framework/domain 名 hardcode ゼロ
+- cmd_414: codd/dag/checks/implementation_coverage.py — Next.js 固有用語 hardcode ゼロ
+- cmd_415: codd/llm/impl_step_deriver.py — Layer 2 推論内訳は generic 文字列のみ
+- cmd_404: codd/repair/verify_runner.py — cmd_398 既存抽象流用、新 hardcode ゼロ
+- cmd_405: codd/dag/extractor.py — alias mapping は project declarative、core hash map のみ
+
+### 5 件の caveat/audit 全解消
+
+| 元の問題 | 解消する cmd |
+|---|---|
+| cmd_412 caveat_1 (timeout) | cmd_413 |
+| cmd_412 caveat_2 (C8 patch、最急務) | cmd_414 |
+| cmd_412 caveat_3 (Layer 2 ログ) | cmd_415 |
+| cmd_398_g1 M_2 (codd-pro routing) | cmd_404 |
+| cmd_399 audit item_5 (frontmatter alias) | cmd_405 |
+
+### 1938 tests PASS / SKIP=0
+
+v1.29.0 baseline 1874 → 現状 1938 (+64 tests = 5 cmd 全 PASS)。
+
+### Backwards compatibility
+
+- 5 cmd 関連は完全 opt-in、既存 v1.29.0 ユーザは挙動変化ゼロ
+- cmd_413: --chunk-size 不指定で legacy path
+- cmd_404: codd-pro 利用可能時は従来通り
+- cmd_405: alias mapping 不在で従来通り
+
+### 思想的到達点
+
+cmd_393 declarative + cmd_392/393 検証 + cmd_397 実行 + cmd_398 自己修復 + cmd_406-408
+Coverage Closure + cmd_410 Implementation 2-Layer **+ cmd_413-415/404/405 Last-Mile** で
+coherence 系が **100% 完成形**に到達。
+
+CoDD は「checklist 駆動 → declarative-coverage 駆動 → best-practice-augmented 駆動 →
+**完全無人自動化駆動**」の 4 段階目に到達した。
+
 ## [1.29.0] - 2026-05-06
 
 ### Added — Implementation Step Derivation 2-Layer (cmd_410)
