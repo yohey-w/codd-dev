@@ -18,10 +18,10 @@ from codd.dag import Node
 from codd.deployment.providers.ai_command import SubprocessAiCommand
 
 
-CriteriaSource = Literal["static", "expected_node", "expected_edge", "user_journey", "v_model"]
+CriteriaSource = Literal["static", "expected_node", "expected_edge", "user_journey", "v_model", "coverage_axis"]
 CriteriaSeverity = Literal["critical", "high", "medium", "info"]
 
-ALLOWED_SOURCES: set[str] = {"static", "expected_node", "expected_edge", "user_journey", "v_model"}
+ALLOWED_SOURCES: set[str] = {"static", "expected_node", "expected_edge", "user_journey", "v_model", "coverage_axis"}
 ALLOWED_SEVERITIES: set[str] = {"critical", "high", "medium", "info"}
 DEFAULT_TEMPLATE = Path(__file__).with_name("templates") / "criteria_expand_meta.md"
 
@@ -33,6 +33,8 @@ class CriteriaItem:
     source: CriteriaSource
     source_ref: str
     severity: CriteriaSeverity
+    axis_type: str = ""
+    variant_id: str = ""
 
     def __post_init__(self) -> None:
         _require_text(self.id, "id")
@@ -42,18 +44,29 @@ class CriteriaItem:
             raise ValueError(f"invalid criteria source: {self.source}")
         if self.severity not in ALLOWED_SEVERITIES:
             raise ValueError(f"invalid criteria severity: {self.severity}")
+        if self.source == "coverage_axis":
+            _require_text(self.axis_type, "axis_type")
+            _require_text(self.variant_id, "variant_id")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "CriteriaItem":
+        source = _literal_source(str(payload.get("source") or "").strip())
+        axis_type = str(payload.get("axis_type") or "").strip()
+        variant_id = str(payload.get("variant_id") or payload.get("variant") or "").strip()
+        source_ref = str(payload.get("source_ref") or "").strip()
+        if source == "coverage_axis" and not source_ref and axis_type and variant_id:
+            source_ref = f"{axis_type}:{variant_id}"
         return cls(
             id=str(payload.get("id") or "").strip(),
             text=str(payload.get("text") or payload.get("description") or "").strip(),
-            source=_literal_source(str(payload.get("source") or "").strip()),
-            source_ref=str(payload.get("source_ref") or payload.get("source") or "").strip(),
+            source=source,
+            source_ref=source_ref or str(payload.get("source") or "").strip(),
             severity=_literal_severity(str(payload.get("severity") or "medium").strip()),
+            axis_type=axis_type,
+            variant_id=variant_id,
         )
 
 
@@ -267,6 +280,7 @@ def build_criteria_expand_prompt(
         "{design_doc_bundle}": _stable_json(_design_doc_records(design_docs, context)),
         "{expected_extraction_json}": _stable_json(expected_extractions),
         "{project_context_json}": _stable_json(_prompt_context(context)),
+        "{coverage_axes_hint}": coverage_axes_hint(context, design_docs),
     }
     for token, value in replacements.items():
         template = template.replace(token, value)
@@ -307,6 +321,7 @@ def expansion_input_sha256(
         "task_id": task_id,
         "design_docs": _design_doc_records(design_docs, context),
         "expected_extractions": expected_extractions,
+        "coverage_axes": _coverage_axes_records(context, design_docs),
     }
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
@@ -469,13 +484,27 @@ def evaluate_expanded_criteria(criteria: ExpandedCriteria) -> dict[str, Any]:
 def _criteria_item_failures(item: CriteriaItem) -> list[str]:
     failures: list[str] = []
     for key, value in item.to_dict().items():
+        if key in {"axis_type", "variant_id"} and item.source != "coverage_axis":
+            continue
         if not str(value).strip():
             failures.append(f"{key} is required")
+    if item.source == "coverage_axis":
+        if not item.axis_type.strip():
+            failures.append("axis_type is required")
+        if not item.variant_id.strip():
+            failures.append("variant_id is required")
     if item.source not in ALLOWED_SOURCES:
         failures.append("source is invalid")
     if item.severity not in ALLOWED_SEVERITIES:
         failures.append("severity is invalid")
     return failures
+
+
+def coverage_axes_hint(context: Mapping[str, Any] | None, design_docs: list[Node] | None = None) -> str:
+    axes = _coverage_axes_records(context or {}, design_docs or [])
+    if not axes:
+        return "[]"
+    return yaml.safe_dump(axes, sort_keys=False, allow_unicode=True).strip()
 
 
 def _extract_static_criteria(payload: Mapping[str, Any]) -> list[str]:
@@ -582,6 +611,90 @@ def _node_content(node: Node, project_root: Path) -> str:
 def _prompt_context(context: Mapping[str, Any]) -> dict[str, Any]:
     allowed_keys = ("task_path", "project_name", "language", "model")
     return {key: context[key] for key in allowed_keys if key in context}
+
+
+def _coverage_axes_records(context: Mapping[str, Any], design_docs: list[Node]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    records.extend(_axes_from_context(context))
+    records.extend(_axes_from_project_lexicon(context))
+    records.extend(_axes_from_design_docs(design_docs, _context_root(context, None)))
+    return _dedupe_axis_records(records)
+
+
+def _axes_from_context(context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    direct = context.get("coverage_axes")
+    if direct is None and isinstance(context.get("project_context"), Mapping):
+        direct = context["project_context"].get("coverage_axes")  # type: ignore[index]
+    return [dict(item) for item in _mapping_items(direct)]
+
+
+def _axes_from_project_lexicon(context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    project_root = _context_root(context, None)
+    candidates: list[Path] = []
+    for key in ("project_lexicon_path", "lexicon_path"):
+        value = context.get(key)
+        if isinstance(value, str) and value.strip():
+            path = Path(value)
+            candidates.append(path if path.is_absolute() else project_root / path)
+    candidates.append(project_root / "project_lexicon.yaml")
+
+    for path in _unique_paths(candidates):
+        if not path.is_file():
+            continue
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(payload, Mapping):
+            return [dict(item) for item in _mapping_items(payload.get("coverage_axes"))]
+    return []
+
+
+def _axes_from_design_docs(design_docs: list[Node], project_root: Path) -> list[dict[str, Any]]:
+    axes: list[dict[str, Any]] = []
+    for node in design_docs:
+        axes.extend(dict(item) for item in _mapping_items(node.attributes.get("coverage_axes")))
+        axes.extend(_axes_from_frontmatter(_node_content(node, project_root)))
+    return axes
+
+
+def _axes_from_frontmatter(content: str) -> list[dict[str, Any]]:
+    if not content.startswith("---"):
+        return []
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return []
+    try:
+        payload = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return []
+    if not isinstance(payload, Mapping):
+        return []
+    return [dict(item) for item in _mapping_items(payload.get("coverage_axes"))]
+
+
+def _mapping_items(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _dedupe_axis_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in records:
+        axis_type = str(record.get("axis_type") or "").strip()
+        variants = record.get("variants")
+        variant_ids = ",".join(
+            str(item.get("id") or item.get("variant_id") or "").strip()
+            for item in _mapping_items(variants)
+        )
+        key = (axis_type, variant_ids)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return deduped
 
 
 def _load_config(project_root: Path) -> Mapping[str, Any] | None:
@@ -703,6 +816,7 @@ __all__ = [
     "SubprocessAiCommandCriteriaExpander",
     "TaskCriteriaSource",
     "build_criteria_expand_prompt",
+    "coverage_axes_hint",
     "evaluate_expanded_criteria",
     "expanded_criteria_cache_path",
     "expansion_input_sha256",
