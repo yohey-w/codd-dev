@@ -106,7 +106,12 @@ class TypecheckRepairLoop:
         config = RepairLoopConfig(max_attempts=self.max_attempts, engine_name=self.engine_name)
         repair_loop = self.repair_loop_factory(config, project_root)
         outcome = repair_loop.run(failure, dag, verify_callable=verify_callable)
-        status: TypecheckLoopStatus = "REPAIR_SUCCESS" if outcome.success else "REPAIR_EXHAUSTED"
+        status: TypecheckLoopStatus = (
+            "REPAIR_SUCCESS"
+            if getattr(outcome, "status", None) == "REPAIR_SUCCESS"
+            or (getattr(outcome, "status", None) is None and outcome.success)
+            else "REPAIR_EXHAUSTED"
+        )
         return TypecheckLoopResult(status, _attempts_to_dicts(outcome), final_run.output)
 
     def _run_typecheck(self, project_root: Path) -> _TypecheckRun:

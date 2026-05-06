@@ -53,15 +53,25 @@ class RepairHistory:
         _write_yaml(attempt_dir / "apply_result.yaml", apply_result)
         _write_yaml(attempt_dir / "post_repair_verify.yaml", post_verify)
 
-    def finalize(self, session_dir: Path, outcome: str) -> None:
+    def finalize(self, session_dir: Path, outcome: str, details: dict[str, Any] | None = None) -> None:
         """Write the final repair session outcome."""
 
-        allowed = {"REPAIR_SUCCESS", "REPAIR_EXHAUSTED", "REPAIR_REJECTED_BY_HITL", "REPAIR_FAILED"}
+        allowed = {
+            "REPAIR_SUCCESS",
+            "PARTIAL_SUCCESS",
+            "MAX_ATTEMPTS_REACHED",
+            "REPAIR_EXHAUSTED",
+            "REPAIR_REJECTED_BY_HITL",
+            "REPAIR_FAILED",
+        }
         if outcome not in allowed:
             raise ValueError(f"outcome must be one of {sorted(allowed)}")
+        payload = {"outcome": outcome, "timestamp": _timestamp()}
+        if details:
+            payload.update(details)
         _write_yaml(
             Path(session_dir) / "final_status.yaml",
-            {"outcome": outcome, "timestamp": _timestamp()},
+            payload,
         )
 
     def load_session(self, session_dir: Path) -> dict:
@@ -111,7 +121,15 @@ def _read_yaml(path: Path) -> Any:
 
 def _to_plain_data(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
-        return asdict(value)
+        return _to_plain_data(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _to_plain_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_plain_data(item) for item in value]
+    if isinstance(value, tuple):
+        return [_to_plain_data(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
     return value
 
 
