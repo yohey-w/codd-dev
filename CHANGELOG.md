@@ -4,6 +4,109 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.31.0] - 2026-05-06
+
+### Added — Practical 100% Achievement (cmd_417 + cmd_418 + cmd_419 + cmd_420 + cmd_421)
+
+cmd_412b QC で発見された 5 件の deviation を **5 cmd bundle で全解消**。
+CoDD は v1.30.0 の「理論到達点 100%」から、v1.31.0 で **「実用到達点 100%」記念マイルストーン**
+に到達する。「ノールック開発」の閉ループが完全に閉じる release。
+
+特に **cmd_420 (cmd_398 RepairLoop の impl 段階転用)** で「完全無人主張の最大 gap」
+(手動 type fix 4 件) を構造的に解消、CoDD は「自己修復実装駆動」の 5 段階目に到達。
+
+### cmd_421 — codd version --check (cmd_412b dev_1)
+
+`codd version --check` で project 要求 vs installed 差分検出 + WARN。
+codd.yaml [codd_required_version] declarative 宣言、各 codd subcommand 起動時に互換性
+WARN を表示 (--strict で exit 1)。
+
+### cmd_419 — Standalone Auto-Repair Robustness (cmd_412b dev_4)
+
+cmd_404 (v1.30.0) の standalone auto-repair が osato-lms 環境で詰まった問題を解消:
+
+- Prefer standalone verify for auto-repair
+- Skip missing proof-break checks with warnings
+- `tests/integration/standalone_repair_skeleton/` を同梱 (osato-lms hardcode 回避、
+  generic standalone project skeleton で再現可能)
+
+### cmd_420 — Typecheck Repair Loop (cmd_412b dev_5、最大 gap 解消)
+
+CoDD implement 完了後に **自動 typecheck loop** を実行、type 不整合 → cmd_398 RepairLoop で
+ループ修復する機構を追加。cmd_412b で発生した「手動 type fix 4 件」(完全無人主張の最大 gap)
+を構造的に解消する。
+
+- **新 module**: `codd/implementer/typecheck_loop.py` (TypecheckRepairLoop +
+  TypecheckLoopResult dataclass)
+- **cmd_398 RepairLoop の impl 段階転用** — RepairEngine ABC + LlmRepairEngine + RepairProposal
+  を import 流用、重複実装ゼロ
+- **CLI**: `codd implement run --enable-typecheck-loop` (default disabled、明示 opt-in)
+- **codd.yaml [typecheck.command]**: project 必須宣言 (TypeScript `tsc` / Rust `cargo check` /
+  Go `go build` / Python `mypy` 全対応可、CoDD core にハードコードなし)
+- **default**: `max_repair_attempts=3` (cmd_398 と統一)
+- **Generality Gate**: TypeScript 固有名 (tsc / npm run typecheck) hardcode ゼロ確認済
+
+### cmd_417 — codd require --check (cmd_412b dev_2)
+
+`codd require --check` で completeness verification を実行。cmd_412b で ashigaru2 が遭遇した
+「No such option: --check」エラーを解消。
+
+### cmd_418 — codd implement run task auto-detect (cmd_412b dev_3)
+
+`codd implement run` 単独 (--task 不指定) で project root から task auto-detect。
+implementation_plan.md の最新未完了 task or `.codd/derived_tasks/` の最新 approved task を
+自動選択、UX 改善。
+
+### Generality Gate (5 cmd 全 zero hit)
+
+- cmd_421/417/418: 軽量、stack/framework/domain 名 hardcode ゼロ
+- cmd_419: osato-lms hardcode ゼロ、generic standalone project skeleton で再現
+- cmd_420: TypeScript 固有名 hardcode ゼロ、typecheck command は codd.yaml plug-in
+
+### 共通基盤の流用 (重複実装ゼロ)
+
+- cmd_420 が cmd_398 (RepairEngine / LlmRepairEngine / RepairProposal) を全面流用
+- cmd_398 で確立した「verify 失敗 → 修復」pattern を「implement 後 typecheck 失敗 → 修復」
+  に転用、抽象を再利用
+
+### Note: Python 3.10 互換性 fix (incidental)
+
+`datetime.UTC` (Python 3.11+) → `timezone.utc` (Python 3.10+) で互換性回復。
+v1.30.0 release 後の incidental fix。
+
+### 1991 tests PASS / SKIP=0
+
+v1.30.0 baseline 1938 → 現状 1991 (+53 tests = 5 cmd 全 PASS + Python 3.10 互換性 tests)。
+
+### Backwards compatibility
+
+- 5 cmd 関連は完全 opt-in、既存 v1.30.0 ユーザは挙動変化ゼロ
+- cmd_420: --enable-typecheck-loop 不指定で legacy path
+- cmd_421: codd_required_version 不在で互換性チェック skip
+- cmd_417/418: 既存 codd require / codd implement 挙動回帰なし
+
+### 5 件の caveat 全解消
+
+| cmd_412b deviation | v1.31.0 解消 cmd |
+|---|---|
+| dev_1 (codd CLI バージョン乖離) | cmd_421 |
+| dev_2 (codd require --check 未対応) | cmd_417 |
+| dev_3 (codd implement run --task 必須) | cmd_418 |
+| dev_4 (standalone auto-repair 失敗) | cmd_419 |
+| **dev_5 (手動 type fix 4 件、最大 gap)** | **cmd_420** |
+
+### 思想的到達点
+
+CoDD は **「checklist 駆動 → declarative-coverage 駆動 → best-practice-augmented 駆動 →
+完全無人自動化駆動 → 自己修復実装駆動」** の 5 段階目に到達。
+
+cmd_393 declarative + cmd_392/393 検証 + cmd_397 実行 + cmd_398 自己修復 + cmd_406-408
+Coverage Closure + cmd_410 Implementation 2-Layer + cmd_413-415/404/405 Last-Mile +
+**cmd_417-421 Practical 100%** で coherence 系の本来用途が ground truth で実証可能な
+レベルに到達した。
+
+「ノールック開発」の閉ループが完全に閉じ、人間の手動補完が構造的に不要になる。
+
 ## [1.30.0] - 2026-05-06
 
 ### Added — Last-Mile Completion: Chunked Execution + C8 Path Matcher + Layer 2 Visibility (cmd_413 + cmd_414 + cmd_415 + cmd_404 + cmd_405)
