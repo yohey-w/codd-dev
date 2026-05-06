@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from codd.dag import Node
+from codd.dag import DAG, Node
 from codd.dag.checks import get_registry
 from codd.dag.checks.environment_coverage import EnvironmentCoverageCheck
 from codd.dag.coverage_axes import (
@@ -170,7 +170,7 @@ def test_environment_coverage_skeleton_is_registered():
 
 
 def test_environment_coverage_skeleton_passes():
-    result = EnvironmentCoverageCheck().run()
+    result = EnvironmentCoverageCheck().run(DAG())
 
     assert result.passed is True
     assert result.block_deploy is True

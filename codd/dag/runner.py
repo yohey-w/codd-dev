@@ -19,6 +19,7 @@ CHECK_MODULES = (
     "codd.dag.checks.deployment_completeness",
     "codd.dag.checks.user_journey_coherence",
     "codd.dag.checks.implementation_coverage",
+    "codd.dag.checks.environment_coverage",
 )
 
 

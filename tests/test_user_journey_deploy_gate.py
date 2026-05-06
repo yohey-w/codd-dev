@@ -165,7 +165,7 @@ def test_run_deploy_gates_executes_c7_after_c6(tmp_path, monkeypatch):
     ]
 
 
-def test_c1_to_c5_gate_remains_unchanged_by_c7(monkeypatch, tmp_path):
+def test_dag_gate_includes_c9_without_c6_or_c7(monkeypatch, tmp_path):
     captured: dict[str, list[str] | tuple[str, ...] | None] = {}
 
     def fake_run_all_checks(project_root, settings=None, check_names=None):
@@ -182,6 +182,7 @@ def test_c1_to_c5_gate_remains_unchanged_by_c7(monkeypatch, tmp_path):
         "depends_on_consistency",
         "task_completion",
         "transitive_closure",
+        "environment_coverage",
     ]
 
 
