@@ -238,6 +238,61 @@ def get_valid_task_slugs(project_root: Path) -> set[str]:
     return {PurePosixPath(t.output_dir).name for t in tasks}
 
 
+def auto_detect_task(project_root: Path) -> str:
+    """Detect the only runnable implementation task for ``codd implement run``."""
+    project_root = project_root.resolve()
+    candidates = _auto_detect_plan_task_candidates(project_root)
+    if not candidates:
+        candidates = _auto_detect_approved_derived_task_candidates(project_root)
+
+    candidates = _ordered_unique(candidates)
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise ValueError("could not auto-detect an implementation task; pass --task")
+    raise ValueError(
+        "multiple implementation task candidates found "
+        f"({', '.join(candidates)}); pass --task"
+    )
+
+
+def _auto_detect_plan_task_candidates(project_root: Path) -> list[str]:
+    try:
+        config = _load_project_config(project_root)
+        plan = _load_implementation_plan(project_root, config)
+    except (FileNotFoundError, ValueError):
+        return []
+    return [
+        task.task_id
+        for task in _extract_all_tasks(plan)
+        if not _task_output_has_files(project_root, task)
+    ]
+
+
+def _auto_detect_approved_derived_task_candidates(project_root: Path) -> list[str]:
+    from codd.llm.plan_deriver import iter_derived_task_records
+
+    records = iter_derived_task_records(project_root)
+    records.sort(key=lambda item: _path_mtime(item[0]), reverse=True)
+    for _cache_path, record in records:
+        approved = [task.id for task in record.tasks if task.approved]
+        if approved:
+            return approved
+    return []
+
+
+def _task_output_has_files(project_root: Path, task: ImplementationTask) -> bool:
+    output_dir = project_root / task.output_dir
+    return output_dir.is_dir() and any(path.is_file() for path in output_dir.rglob("*"))
+
+
+def _path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def implement_tasks(
     project_root: Path,
     *,

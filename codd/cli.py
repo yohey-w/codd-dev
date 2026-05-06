@@ -1459,10 +1459,18 @@ def implement_run_cmd(
     enable_typecheck_loop: bool,
 ):
     """Run implementation with optional derived step injection."""
-    from codd.implementer import implement_tasks
+    from codd.implementer import auto_detect_task, implement_tasks
 
     project_root = Path(project_path).resolve()
     _require_codd_dir(project_root)
+    if task_id is None:
+        try:
+            task_id = auto_detect_task(project_root)
+        except ValueError as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+        click.echo(f"Auto-detected task: {task_id}")
+
     if chunk_size is not None:
         try:
             result = _run_chunked_implementation(
