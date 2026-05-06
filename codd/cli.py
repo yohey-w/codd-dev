@@ -1091,6 +1091,7 @@ def implement_plan_cmd(
 @click.option("--step", "step_id", default=None, help="Step id for --approve")
 @click.option("--all", "approve_all", is_flag=True, help="Approve all pending steps")
 @click.option("--show-only", is_flag=True, help="Only show cached steps")
+@click.option("--show-layer-breakdown", is_flag=True, help="Show explicit and inferred step groups")
 @click.option("--path", "project_path", default=".", help="Project root directory")
 def implement_steps_cmd(
     task_id: str,
@@ -1098,6 +1099,7 @@ def implement_steps_cmd(
     step_id: str | None,
     approve_all: bool,
     show_only: bool,
+    show_layer_breakdown: bool,
     project_path: str,
 ):
     """Show or approve derived implementation steps."""
@@ -1122,10 +1124,31 @@ def implement_steps_cmd(
     if record is None:
         click.echo("No derived implementation steps found")
         return
+    if show_layer_breakdown:
+        _echo_impl_step_layer_breakdown(record)
+        return
     for step in record.steps:
         layer = "layer2" if step.inferred else "layer1"
         status = "approved" if step.approved else "pending"
         click.echo(f"{step.id}\t{status}\t{layer}\t{step.kind}\t{step.source_design_section}")
+
+
+def _echo_impl_step_layer_breakdown(record: Any) -> None:
+    layer_1 = [step for step in record.steps if not step.inferred]
+    layer_2 = [step for step in record.steps if step.inferred]
+    click.echo(f"[Layer 1 - Explicit, from design] (count={len(layer_1)})")
+    for step in layer_1:
+        click.echo(f"  - {step.kind}: {step.id} (rationale: {step.rationale})")
+
+    avg_confidence = sum(float(step.confidence) for step in layer_2) / len(layer_2) if layer_2 else 0.0
+    click.echo("")
+    click.echo(f"[Layer 2 - Best Practice Augment] (count={len(layer_2)}, avg_confidence={avg_confidence:.2f})")
+    for step in layer_2:
+        category = step.best_practice_category or "uncategorized"
+        click.echo(
+            f"  - {step.kind}: {step.id} "
+            f"(confidence={step.confidence:.2f}, category={category}, rationale: {step.rationale})"
+        )
 
 
 @implement.command("augment")
