@@ -172,7 +172,7 @@ class RepairLoop:
             pre_existing = _merge_violations(pre_existing, classification.pre_existing)
             unrepairable = _merge_violations(unrepairable, classification.unrepairable)
             if not classification.repairable:
-                status: RepairLoopStatus = "PARTIAL_SUCCESS" if applied_patch_files else "REPAIR_FAILED"
+                status = _classified_work_status(applied_patch_files, pre_existing, unrepairable)
                 return self._finalize(
                     session_dir,
                     status,
@@ -195,7 +195,7 @@ class RepairLoop:
                 unrepairable = _merge_violations(unrepairable, [current_failure])
                 current_violations = _without_violation(classification.repairable, current_failure)
                 if not current_violations:
-                    status = "PARTIAL_SUCCESS" if applied_patch_files else "REPAIR_FAILED"
+                    status = _classified_work_status(applied_patch_files, pre_existing, unrepairable)
                     return self._finalize(
                         session_dir,
                         status,
@@ -296,7 +296,7 @@ class RepairLoop:
                     unrepairable = _merge_violations(unrepairable, [current_failure])
                     current_violations = _without_violation(classification.repairable, current_failure)
                     if not current_violations:
-                        status = "PARTIAL_SUCCESS" if applied_patch_files else "REPAIR_FAILED"
+                        status = _classified_work_status(applied_patch_files, pre_existing, unrepairable)
                         return self._finalize(
                             session_dir,
                             status,
@@ -507,6 +507,14 @@ def _applied_patch_files(apply_result: ApplyResult, proposal: RepairProposal) ->
     if apply_result.applied_patches:
         return list(apply_result.applied_patches)
     return _proposal_files(proposal)
+
+
+def _classified_work_status(
+    applied_patch_files: list[str],
+    pre_existing: list[VerificationFailureReport],
+    unrepairable: list[VerificationFailureReport],
+) -> RepairLoopStatus:
+    return "PARTIAL_SUCCESS" if applied_patch_files or pre_existing or unrepairable else "REPAIR_FAILED"
 
 
 def _default_repairability_classifier(config: RepairLoopConfig | None = None) -> Any:
