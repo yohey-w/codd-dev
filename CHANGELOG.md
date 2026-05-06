@@ -4,6 +4,98 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.33.0] - 2026-05-06
+
+### Resolved — v1.32.0 Caveats Resolution (cmd_423 + cmd_424)
+
+v1.32.0 で transparent disclosure した 3 caveats のうち **2 件を完全解消、1 件を構造実証**。
+osato-lms 統合実証が end-to-end レベルへ進み、CoDD は **内側 (内部整合性) + 外側 (対象環境網羅性)
+の両次元 coherence** を実機で確認。
+
+### cmd_424 — Stripe Webhook Cleanup + cmd_420 Typecheck Loop 実証 (caveat_3 完全解消)
+
+osato-lms 既存 dirty Stripe webhook route の missing module imports (cmd_412b 期間中の
+取りこぼし) を方針 B (route 簡素化) で解消、cmd_420 typecheck loop の実プロジェクト動作を
+実証。
+
+- **osato-lms 28c4144**: Stripe webhook route 簡素化 (`@/lib/api/rate-limiter` /
+  `@/lib/stripe/client` / `@/modules/payments/handlers` / `@/modules/payments/types`
+  欠落 import を削除し Stripe SDK 直使用)
+- `npm run typecheck` PASS
+- `codd implement run --enable-typecheck-loop` PASS — cmd_420 typecheck loop が osato-lms で
+  実機動作確認
+
+### cmd_423 — osato-lms LMS Integration (caveat_2 完全解消 + caveat_1 構造実証)
+
+osato-lms に cdp_browser config + project CDP plugin を統合し、smartphone_se 実機 journey
+PASS と C9 auto-repair 経路の attempt_0 patch apply を実証。
+
+- **osato-lms 3314ae5**:
+  - `codd/codd.yaml` に `verification.templates.cdp_browser` 設定 (engine=edge, port=9222,
+    launcher=shell_script)
+  - `codd_plugins/` (cdp_browser launcher / engine plugin)
+  - `scripts/start-cdp-browser.sh` (Edge launcher)
+  - `docs/design/auth_design.md` login_to_dashboard journey 実機 CDP 化
+
+- **codd-dev 6ecdeaf**:
+  - project CDP plugin loader 対応
+  - RepairLoop file path fallback
+  - standalone verify の C9 inclusion
+
+#### caveat_2 完全解消: 実機 CDP run-journey PASS
+
+```
+codd dag run-journey login_to_dashboard --path /home/tono/osato-lms \
+                                         --axis viewport=smartphone_se
+→ PASS (executed 3 CDP journey step(s))
+```
+
+スマホ事故再発防止の構造的閉ループが完成。viewport=smartphone_se で central_admin の
+login → dashboard 到達を **実機 Edge CDP** で確認。
+
+#### caveat_1 構造実証: C9 auto-repair 経路 attempt_0 PASS
+
+意図的 violation 仕込み (`project_lexicon.yaml` viewport variant id を
+`smartphone_se_missing` に変更) → C9 red 2 件発生 → `codd verify --auto-repair`
+attempt_0 で:
+
+- RCA: `affected_nodes=[project_lexicon.yaml], strategy=full_file_replacement`
+- proposal: `smartphone_se_missing` を `smartphone_se` に戻す full_file_replacement
+- apply: `success=true, applied_patches=[project_lexicon.yaml]`
+- post-check: **C9 environment_coverage PASS**
+
+LLM patch 生成 → apply → post-check PASS の閉ループを **実プロジェクトで実証**。
+
+### Quality Metrics
+
+- **codd-dev pytest** (関連抜粋): repair/verify_runner / cdp_browser_axes / cdp_browser_core
+  / cli_run_journey / verify_auto_repair_standalone — **95 PASS / 0 FAIL / 0 SKIP**
+- **osato-lms vitest**: tests/e2e/environment-coverage.spec.ts **3 PASS**
+- **osato-lms prisma:validate**: PASS
+- **git diff --check**: codd-dev / osato-lms 両者 clean
+- **新 node/edge/enum/drift/SDK 依存**: 全 0 (cmd_422 attribute 拡張パターン継続)
+- **Generality Gate**: zero hit
+
+### Caveats (透明 disclosure)
+
+cmd_423 で C9 auto-repair 経路は実証されたが、**full `codd verify --auto-repair` pipeline
+は最終 `REPAIR_FAILED` 判定で完走できず**:
+
+- C9 修復 (attempt_0 PASS) の後、osato-lms 既存 baseline の `node_completeness` /
+  `deployment_completeness` 失敗および Vitest matcher / no-tests 系 failure が残存し、
+  次 attempt は別 proof-break (auth proof-break) に落ちた
+- これは **C9 修復経路自体の問題ではなく**、osato-lms baseline の他 check 項目の問題
+
+**v1.34.0 候補 (cmd_425 等)**: osato-lms baseline 修復 (node_completeness /
+deployment_completeness / Vitest matcher 整備) で full auto-repair pipeline 完走を達成予定。
+完成すれば「自律自己修復実装駆動」の最終形に到達する。
+
+### Phase 構成と commits
+
+- cmd_424 (osato-lms `28c4144`) — Stripe webhook typecheck debt fix
+- cmd_423 lms (osato-lms `3314ae5`) — CDP browser proof integration
+- cmd_423 codd (codd-dev `6ecdeaf`) — Support project CDP plugins in repair proof
+
 ## [1.32.0] - 2026-05-06
 
 ### Added — Coverage Axis Layer (cmd_422 6 phase bundle)
