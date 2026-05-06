@@ -124,6 +124,7 @@ def load_dag_settings(project_root: Path, settings: dict[str, Any] | None = None
     _apply_scan_patterns(merged, project_config)
     _apply_scan_patterns(merged, requested_settings)
     merged["coherence"] = _coherence_settings(project_config, requested_settings)
+    merged["extraction"] = _extraction_settings(project_config, requested_settings)
     merged.setdefault("design_doc_patterns", [])
     merged.setdefault("impl_file_patterns", [])
     merged.setdefault("test_file_patterns", [])
@@ -210,11 +211,12 @@ def render_mermaid(dag: DAG) -> str:
 def _add_design_docs(dag: DAG, project_root: Path, settings: dict[str, Any]) -> dict[str, dict[str, Any]]:
     design_docs: dict[str, dict[str, Any]] = {}
     aliases: dict[str, str] = {}
+    frontmatter_alias = _frontmatter_alias_settings(settings)
     for md_path in _glob_project_paths(project_root, settings.get("design_doc_patterns", [])):
         if not md_path.is_file():
             continue
         node_id = _relative_id(md_path, project_root)
-        metadata = extract_design_doc_metadata(md_path)
+        metadata = extract_design_doc_metadata(md_path, frontmatter_alias=frontmatter_alias)
         attributes = metadata.get("attributes") or {}
         _validate_design_doc_journey_attributes(node_id, attributes)
         _add_node_once(
@@ -1178,6 +1180,31 @@ def _coherence_settings(*configs: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(coherence.get("capability_patterns"), dict):
         coherence["capability_patterns"] = {}
     return coherence
+
+
+def _extraction_settings(*configs: dict[str, Any]) -> dict[str, Any]:
+    extraction: dict[str, Any] = {"frontmatter_alias": {}}
+    for config in configs:
+        section = config.get("extraction", {})
+        if isinstance(section, dict):
+            extraction = _deep_merge(extraction, section)
+    if not isinstance(extraction.get("frontmatter_alias"), dict):
+        extraction["frontmatter_alias"] = {}
+    return extraction
+
+
+def _frontmatter_alias_settings(settings: dict[str, Any]) -> dict[str, str]:
+    extraction = settings.get("extraction", {})
+    if not isinstance(extraction, dict):
+        return {}
+    aliases = extraction.get("frontmatter_alias", {})
+    if not isinstance(aliases, dict):
+        return {}
+    return {
+        str(alias_key).strip(): str(canonical_key).strip()
+        for alias_key, canonical_key in aliases.items()
+        if str(alias_key).strip() and str(canonical_key).strip()
+    }
 
 
 def _capability_patterns(settings: dict[str, Any]) -> dict[str, Any]:

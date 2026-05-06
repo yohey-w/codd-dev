@@ -24,10 +24,20 @@ _IMPORT_SPECIFIER_RE = re.compile(
     re.VERBOSE,
 )
 
-DESIGN_DOC_ATTRIBUTE_KEYS = ("runtime_constraints", "user_journeys")
 RUNTIME_CONSTRAINT_REQUIRED_FIELDS = ("capability", "required", "rationale")
 USER_JOURNEY_REQUIRED_FIELDS = ("name", "criticality", "steps", "required_capabilities", "expected_outcome_refs")
 USER_JOURNEY_LIST_FIELDS = ("steps", "required_capabilities", "expected_outcome_refs")
+DESIGN_DOC_ATTRIBUTE_SCHEMAS = {
+    "runtime_constraints": {
+        "required_fields": RUNTIME_CONSTRAINT_REQUIRED_FIELDS,
+        "list_fields": (),
+    },
+    "user_journeys": {
+        "required_fields": USER_JOURNEY_REQUIRED_FIELDS,
+        "list_fields": USER_JOURNEY_LIST_FIELDS,
+    },
+}
+DESIGN_DOC_ATTRIBUTE_KEYS = tuple(DESIGN_DOC_ATTRIBUTE_SCHEMAS)
 LANGUAGE_SUFFIXES = {
     ".py": "python",
     ".ts": "typescript",
@@ -78,7 +88,11 @@ def scan_capability_evidence(impl_file_path: Path, capability_patterns: dict) ->
     return evidence
 
 
-def extract_design_doc_metadata(md_path: Path) -> dict[str, Any]:
+def extract_design_doc_metadata(
+    md_path: Path,
+    *,
+    frontmatter_alias: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Return Markdown frontmatter and normalized ``depends_on`` entries."""
 
     content = md_path.read_text(encoding="utf-8", errors="ignore")
@@ -93,6 +107,7 @@ def extract_design_doc_metadata(md_path: Path) -> dict[str, Any]:
                 frontmatter = loaded
             body = parts[2]
 
+    frontmatter = resolve_frontmatter_aliases(frontmatter, frontmatter_alias)
     codd_meta = frontmatter.get("codd", {})
     if not isinstance(codd_meta, dict):
         codd_meta = {}
@@ -137,31 +152,55 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-def extract_design_doc_journey_attrs(frontmatter: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
+def resolve_frontmatter_aliases(
+    frontmatter: dict[str, Any],
+    frontmatter_alias: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return frontmatter with configured alias keys copied to canonical keys."""
+
+    if not isinstance(frontmatter_alias, dict) or not frontmatter_alias:
+        return deepcopy(frontmatter)
+
+    resolved = deepcopy(frontmatter)
+    for alias_key, canonical_key in _frontmatter_alias_map(frontmatter_alias).items():
+        if alias_key in resolved and canonical_key not in resolved:
+            resolved[canonical_key] = deepcopy(resolved[alias_key])
+    return resolved
+
+
+def extract_design_doc_journey_attrs(
+    frontmatter: dict[str, Any],
+    *,
+    strict: bool = False,
+    frontmatter_alias: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Extract declarative journey attributes from design-doc frontmatter.
 
     Invalid entries emit warnings by default so existing design documents stay
     buildable while authors get actionable feedback.
     """
 
-    attributes: dict[str, Any] = {"runtime_constraints": [], "user_journeys": []}
-    if "runtime_constraints" in frontmatter:
-        attributes["runtime_constraints"] = _extract_structured_entries(
-            frontmatter,
-            key="runtime_constraints",
-            required_fields=RUNTIME_CONSTRAINT_REQUIRED_FIELDS,
-            list_fields=(),
-            strict=strict,
-        )
-    if "user_journeys" in frontmatter:
-        attributes["user_journeys"] = _extract_structured_entries(
-            frontmatter,
-            key="user_journeys",
-            required_fields=USER_JOURNEY_REQUIRED_FIELDS,
-            list_fields=USER_JOURNEY_LIST_FIELDS,
+    resolved = resolve_frontmatter_aliases(frontmatter, frontmatter_alias)
+    attributes: dict[str, Any] = {key: [] for key in DESIGN_DOC_ATTRIBUTE_KEYS}
+    for key, schema in DESIGN_DOC_ATTRIBUTE_SCHEMAS.items():
+        if key not in resolved:
+            continue
+        attributes[key] = _extract_structured_entries(
+            resolved,
+            key=key,
+            required_fields=tuple(schema["required_fields"]),
+            list_fields=tuple(schema["list_fields"]),
             strict=strict,
         )
     return attributes
+
+
+def _frontmatter_alias_map(frontmatter_alias: dict[str, str]) -> dict[str, str]:
+    return {
+        str(alias_key).strip(): str(canonical_key).strip()
+        for alias_key, canonical_key in frontmatter_alias.items()
+        if str(alias_key).strip() and str(canonical_key).strip()
+    }
 
 
 def _extract_structured_entries(
