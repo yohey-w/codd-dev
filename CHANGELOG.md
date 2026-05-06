@@ -4,6 +4,123 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.32.0] - 2026-05-06
+
+### Added — Coverage Axis Layer (cmd_422 6 phase bundle)
+
+v1.31.0「実用到達点 100%」で発覚した「内側のみ完成、外側 (対象環境網羅性) 未対応」を構造解消。
+要件で宣言された **axis × variant の網羅** を統一抽象 (CoverageAxis + CoverageVariant) で
+吸収し、viewport / device / locale / network / a11y / security / time / data_state など
+**16+ 軸を統一構造で表現**。stack/framework/domain ごとの個別 detector を作らず、
+**Generality Gate を完全維持**したまま「外側次元」を coherence check の対象に編入する。
+
+LMS デモ中央管理者 navbar 消失事故 (smartphone_se viewport で sidebar lg:block 1024px+
+かつ getBottomNavigation 空) を起点に設計。「内側 + 外側の両次元 coherence」へ進む release。
+
+### cmd_422_pre — Coverage Axis Scaffold
+
+新 module: `codd/dag/coverage_axes.py`
+- `CoverageVariant` dataclass: `id` / `label` / `attributes: dict` / `criticality:
+  Literal["critical","high","medium","info"]`
+- `CoverageAxis` dataclass: `axis_type: str (open enum)` / `rationale` / `variants` /
+  `source: Literal["design_doc","lexicon","llm_derived"]` / `owner_section`
+- `extract_coverage_axes_from_lexicon()` — `project_lexicon.yaml` `[coverage_axes]` 抽出
+- `extract_coverage_axes_from_design_doc()` — design_doc frontmatter 抽出
+- C9 registry skeleton (`codd/dag/checks/environment_coverage.py`)
+- `codd/dag/extractor.py` に `coverage_axes` passthrough
+
+### cmd_422_a — C9 environment_coverage Check (block_deploy=True)
+
+新 check (C9) `environment_coverage` を本実装。3 violation type 全検出:
+
+- `missing_test_for_variant` — variant に対応するテスト不在 (severity: per `variant.criticality`)
+- `journey_not_executed_under_variant` — journey が variant 配下で未実行
+- `variant_criticality_unclear` — criticality 未定義 (amber)
+
+**block_deploy=True 殿 override 反映** (軍師推奨 defer から殿判断で deploy gate 化)。
+`codd/dag/builder.py` で `coverage_axes` を DAG に統合、`codd/dag/runner.py` で C9 認識。
+
+### cmd_422_b — cmd_408 CriteriaExpander coverage_axis Source
+
+cmd_408 CriteriaExpander 拡張:
+- `CriteriaItem.source` に `"coverage_axis"` を追加 (str open enum 維持)
+- `dynamic_items` に `axis × variant` 展開 (variant.criticality を severity に反映)
+- `criteria_expand_meta.md` に `coverage_axes_hint` slot 追加
+
+要件由来 axis が CriteriaExpander の入力として自動的に流れる (動的基準展開と統合)。
+
+### cmd_422_c — cmd_410 ImplStep.required_axes + Layer 2 Axis Inference
+
+cmd_410 ImplStep 拡張:
+- `ImplStep.required_axes: list[CoverageAxisRef]` 追加 (Layer 1)
+- `BestPracticeAugmenter` (Layer 2) で **axis 推論** (HITL gate 必須、double opt-in)
+- `best_practice_augment_meta.md` / `impl_step_derive_meta.md` 拡張
+
+implement 段階で「この step は viewport=smartphone_se 配下でも動作する必要があるか」を
+LLM が推論し、HITL 承認後に required_axes に反映。
+
+### cmd_422_d — cmd_397 CdpBrowser Axis Runtime Override
+
+cmd_397 verification template に axis 別 runtime 切替を追加:
+- `CdpBrowser.execute(axis_overrides: dict[str, str] | None = None)` 拡張
+- `codd dag run-journey --axis viewport=smartphone_se` CLI フラグ追加
+- `cdp_engines.py` に variant.attributes 適用 (setViewport / setLocale 等の **CDP wire 標準**
+  generic dispatch)
+- **axis_type 文字列を core code で dispatch しない** (Generality 維持、variant.attributes
+  → generic CDP command 変換のみ)
+
+### cmd_422_lms — osato-lms Coverage Axes Proof
+
+osato-lms 実証シナリオ:
+- `project_lexicon.yaml` に `coverage_axes` 宣言 (viewport / rbac_role 2 axis)
+- `auth_design.md` frontmatter に局所宣言例
+- 中央管理者 bottom navigation 修復 (smartphone viewport 用 entries 追加)
+- C9 で **16 violations red 検出** → 修復 → C9 pass 構造実証
+- `tests/integration/lms_cmd_422_proof.sh` smoke 6 checks PASS
+- `tests/e2e/environment-coverage.spec.ts` vitest 3 PASS
+
+### Quality Metrics
+
+- **pytest**: 2068 PASS / 0 FAIL / 0 SKIP / 12 warnings (v1.31.0 1991 → +77)
+- **新 node_kind**: 0 / 新 edge_kind: 0 / 新 enum 値: 0 / 新 drift event: 0 / 新 SDK 依存: 0
+- **新 check**: 1 (C9 environment_coverage、block_deploy=True)
+- **Generality Gate**: 二層 (code A / template hint B) 各 cmd zero hit
+- **アーキテクチャ整合性**: 既存 4 node kind (`requirement` / `design` / `implementation` /
+  `test`) + 既存 edge kind のみ。axis × variant は **attribute schema 拡張** で吸収
+
+### Caveats (透明 disclosure)
+
+cmd_422 は **codd-dev 側 core 実装は完了**したが、osato-lms との **end-to-end 統合実証** は
+3 件の caveat が残存:
+
+1. **cmd_398/420 LLM 自動修復は cmd_422_lms シナリオで未走行** —
+   足軽3号が原因箇所 (navigation.ts) を直接修復し、`codd verify --auto-repair` の LLM patch 生成
+   path は走行せず。C9 violation は CSS responsive の問題で typecheck RepairLoop の scope 外、
+   設計書想定内 (家老判断)。
+
+2. **実機 CDP run-journey 未達成** —
+   `codd dag run-journey login_to_dashboard --axis viewport=smartphone_se` は osato-lms
+   `codd/codd.yaml` に `verification.templates.cdp_browser` 設定が未定義のため FAIL。
+   codd-dev 側 cmd_422_d 実装 (CdpBrowser axis runtime override 48 tests PASS) は完了済。
+
+3. **cmd_420 typecheck loop 動作未確認 (osato-lms 側)** —
+   osato-lms の既存 dirty Stripe webhook route が missing module import を持つため
+   `npm run typecheck` 自体が失敗、cmd_420 typecheck loop 動作確認まで到達せず。
+   codd-dev 側 cmd_420 実装 (v1.31.0 で release) は無回帰。
+
+これらは **codd-dev 側 core 実装は完了済**、osato-lms 側 setup の問題。次 release (v1.33.0
+候補 cmd_423 + cmd_424) で osato-lms 側設定追加 + dirty file cleanup 後、auto-repair 統合
+実証 + 実機 CDP run-journey + typecheck loop 連動を確認予定。
+
+### Phase 構成と commits
+
+- cmd_422_pre (`f2f6a16`) — Coverage Axis scaffold
+- cmd_422_a (`72f6f4c`) — C9 environment_coverage check (block_deploy=True)
+- cmd_422_b (`13a33d4`) — cmd_408 CriteriaExpander coverage_axis source
+- cmd_422_c (`89bd187`) — cmd_410 axis inference (Layer 2)
+- cmd_422_d (`b913091`) — cmd_397 CdpBrowser axis runtime override
+- cmd_422_lms (osato-lms `1e8eabf`) — coverage_axes proof + smartphone fix
+
 ## [1.31.0] - 2026-05-06
 
 ### Added — Practical 100% Achievement (cmd_417 + cmd_418 + cmd_419 + cmd_420 + cmd_421)
