@@ -63,3 +63,5 @@ verify:
   e2e_deploy_command: null  # deploy/CDP-only tests (e.g. @cdp-only)
   e2e_ci_command: null      # CI-safe tests (excludes CDP-only)
 conventions: []
+extraction:
+  frontmatter_alias: {}
