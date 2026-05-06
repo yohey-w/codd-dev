@@ -4,6 +4,115 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.28.0] - 2026-05-06
+
+### Added — Coverage Closure Trio (cmd_406 + cmd_407 + cmd_408)
+
+cmd_393 (declarative) → cmd_392/393 (検証) → cmd_397 (実行) → cmd_398 (自己修復) に
+続く第 5 層として、**LLM 動的展開 + 双方向抽出 + 動的フルカバー判定** の 3 cmd を bundle release。
+
+「設計→展開→双方向→動的 QC」の閉ループが完成し、CoDD は **checklist 駆動から
+declarative-coverage 駆動** へ進化する。LMS で発見された「6 画面実装漏れ」「設計→
+implementation_plan task 分解の欠如」「completion_criteria の静的固定」の 3 つの
+構造欠陥を構造的に解消する。
+
+### V-MODEL Plan Deriver (cmd_406)
+
+`design_doc` 群を LLM に読ませ、V-MODEL 階層 (要件↔受入テスト / 基本設計↔結合テスト /
+詳細設計↔単体テスト + impl) に従って実装すべき task を網羅的に動的展開する機構。
+
+- **新 module**: `codd/llm/plan_deriver.py` (PlanDeriver ABC + register decorator + DerivedTask
+  dataclass + SubprocessAiCommandPlanDeriver builtin)
+- **prompt template**: `codd/llm/templates/plan_derive_meta.md` (domain-neutral)
+- **CLI**: `codd plan derive [--design-doc <path>] [--layer requirement|basic|detailed]`
+  / `codd plan show` / `codd plan approve`
+- **HITL gate**: required default、cmd_397_h approval gate を流用
+- **V-MODEL 層判定**: `design_doc.frontmatter.codd.v_model_layer` declarative > LLM 推論
+- **Cache**: `.codd/derived_tasks/{path_safe}.yaml`、SHA-256 invalidation
+
+### Bidirectional Extractor + C8 implementation_coverage (cmd_407)
+
+現状の codd/extractor.py は src/* (実装側) のみ解析する一方向。本 cmd で design_doc 側からも
+expected_nodes / expected_edges を LLM 動的抽出する双方向化を実装し、新 C8 check で
+「設計期待 vs 実装実態」の差分を構造的に検出する。
+
+- **新 module**: `codd/llm/design_doc_extractor.py` (DesignDocExtractor ABC + 3 dataclass +
+  SubprocessAiCommandDesignDocExtractor builtin)
+- **新 check**: C8 `implementation_coverage` (`codd/dag/checks/implementation_coverage.py`)
+  - violation: `missing_implementation` (red) / `additional_implementation` (amber)
+  - severity=red、`block_deploy=False` (v1.28.0 は warning として運用、v1.29.0+ で gate 統合検討)
+- **builder 統合**: `codd dag build` で design_doc から ExpectedExtraction を抽出 →
+  `design_doc.attributes.expected_extraction` に埋め込み
+- **CLI**: `codd extract design --design-doc <path>` / `codd dag verify --check implementation_coverage`
+- **Cache**: `.codd/expected_extractions/{path_safe}.yaml`
+
+### Dynamic Full-Coverage Criteria Expander (cmd_408)
+
+task YAML の `completion_criteria` を design_doc + ExpectedExtraction から **動的に
+拡張**する機構。軍師 (gunshi) QC が拡充された criteria で PASS 判定し、静的 4 項目チェック
+からの脱却を実現する。
+
+- **新 module**: `codd/llm/criteria_expander.py` (CriteriaExpander ABC + 2 dataclass +
+  SubprocessAiCommandCriteriaExpander builtin)
+- **CriteriaItem source**: static / expected_node / expected_edge / user_journey / v_model
+  の 5 種別 dispatch
+- **CLI**: `codd qc expand --task <task_id>` / `codd qc evaluate --task <task_id> [--report-json]`
+- **軍師 QC workflow**: `codd qc evaluate --report-json` 出力を軍師が手動で yaml report に
+  転記する方式 (LLM 拡充項目と軍師判断の境界を明確化)
+- **Cache**: `.codd/expanded_criteria/{task_id}.yaml`、cmd_407 ExpectedExtraction の
+  dict interface 経由で連携
+
+### Generality Gate 二層 (継続、6/6 zero hit)
+
+3 cmd × 2 layer (A code + B template) = 6 件全て zero hit:
+
+- layer A: codd/llm/{plan_deriver,design_doc_extractor,criteria_expander}.py +
+  codd/dag/checks/implementation_coverage.py
+- layer B: codd/llm/templates/{plan_derive,design_doc_extract,criteria_expand}_meta.md
+
+forbidden patterns: `claude/openai/gpt/anthropic/screen/page/route/api endpoint/rbac/oauth/
+web app/mobile/next.js/react/django/rails/lms/osato-lms`。
+
+### 共通基盤の流用 (重複実装ゼロ)
+
+3 cmd 全てが cmd_397 で確立した LLM 抽象を流用:
+- `codd/llm/invoke.py` (cmd_397_f) — subprocess + ai_command 抽象
+- `codd/llm/prompt_builder.py` (cmd_397_g) — META_INSTRUCTION + slot 合成
+- `codd/llm/parser.py` (cmd_397_g) — JSON schema validation
+- `codd/llm/approval.py` (cmd_397_h) — HITL approval gate (cmd_406 が直接利用)
+- `codd/llm/cache.py` (cmd_397_f) — SHA-256 invalidation pattern
+
+新 SDK 依存ゼロ。3 cmd 並列実装 (足軽 3 名) で完成。
+
+### 新 DriftEvent kinds: 3
+
+- `plan_derived` (cmd_406 cache invalidation 通知)
+- `expected_extraction_derived` (cmd_407)
+- `criteria_expanded` (cmd_408)
+
+### Backwards compatibility
+
+- `codd.yaml [ai_commands.plan_derive / design_doc_extract / criteria_expand]` 不在 →
+  各 CLI はエラー (明示宣言必須)、既存 codd verify / dag verify は不変
+- `.codd/derived_tasks` / `expected_extractions` / `expanded_criteria` 不在 → 各 CLI は空表示
+- 既存 v1.27.0 ユーザは挙動変化ゼロ (cmd_406/407/408 関連は完全 opt-in)
+
+### 1846 tests PASS / SKIP=0
+
+v1.27.0 baseline 1763 → 現状 1846 (+83 tests = cmd_406 ~26 + cmd_407 ~28 + cmd_408 ~22 +
+parametrize 増分)。
+
+### 思想的到達点
+
+cmd_393 declarative + cmd_392/393 検証 + cmd_397 実行 + cmd_398 自己修復 に加え、
+本 release で:
+- **cmd_406 動的展開**: LLM が「実装すべき task」を design_doc から自動生成
+- **cmd_407 双方向抽出**: LLM が「期待される impl」を design_doc から導出、C8 で coverage 検証
+- **cmd_408 動的フルカバー**: LLM が「全画面/全遷移/全要件」を criteria に動的拡充
+
+→ 「設計→展開→双方向→動的 QC」の閉ループが完成し、CoDD は **declarative-coverage 駆動**
+の Agent 型 coherence tool に進化した。
+
 ## [1.27.0] - 2026-05-06
 
 ### Added — Auto-Repair Layer + Polyglot Suffix Support (cmd_398 + cmd_402 + cmd_403)
