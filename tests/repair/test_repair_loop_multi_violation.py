@@ -316,7 +316,7 @@ def test_final_status_persists_remaining_violations_and_patches(tmp_path: Path):
     assert final_status["remaining_violations"][0]["check_name"] == "check_b"
 
 
-def test_all_pre_existing_without_patch_returns_repair_failed(tmp_path: Path):
+def test_all_pre_existing_without_patch_returns_partial_success(tmp_path: Path):
     _register_engine("pre-existing-none")
 
     class PreExistingClassifier:
@@ -325,7 +325,7 @@ def test_all_pre_existing_without_patch_returns_repair_failed(tmp_path: Path):
 
     outcome = _run_loop(tmp_path, "pre-existing-none", [], classifier=PreExistingClassifier())
 
-    assert outcome.status == "REPAIR_FAILED"
+    assert outcome.status == "PARTIAL_SUCCESS"
     assert outcome.pre_existing_violations[0].check_name == "check_a"
 
 
@@ -354,7 +354,7 @@ def test_pre_existing_after_patch_returns_partial_success(tmp_path: Path):
     assert outcome.pre_existing_violations == [remaining]
 
 
-def test_all_unrepairable_without_patch_returns_repair_failed(tmp_path: Path):
+def test_all_unrepairable_without_patch_returns_partial_success(tmp_path: Path):
     _register_engine("unrepairable-none")
 
     class UnrepairableClassifier:
@@ -363,8 +363,43 @@ def test_all_unrepairable_without_patch_returns_repair_failed(tmp_path: Path):
 
     outcome = _run_loop(tmp_path, "unrepairable-none", [], classifier=UnrepairableClassifier())
 
-    assert outcome.status == "REPAIR_FAILED"
+    assert outcome.status == "PARTIAL_SUCCESS"
     assert outcome.unrepairable_violations[0].check_name == "check_a"
+
+
+def test_all_pre_existing_and_unrepairable_without_patch_returns_partial_success(tmp_path: Path):
+    _register_engine("classified-none-mixed")
+    first = _failure("check_a", "node:a")
+    second = _failure("check_b", "node:b")
+
+    class MixedClassifier:
+        def classify(self, violations, *, baseline_ref=None):
+            return RepairabilityClassification(pre_existing=[first], unrepairable=[second])
+
+    outcome = _run_loop(
+        tmp_path,
+        "classified-none-mixed",
+        [],
+        initial_verify_result=VerifyResult(False, first, [first, second]),
+        classifier=MixedClassifier(),
+    )
+
+    assert outcome.status == "PARTIAL_SUCCESS"
+    assert outcome.pre_existing_violations == [first]
+    assert outcome.unrepairable_violations == [second]
+
+
+def test_empty_classifier_without_patch_returns_repair_failed(tmp_path: Path):
+    _register_engine("classified-none-empty")
+
+    class EmptyClassifier:
+        def classify(self, violations, *, baseline_ref=None):
+            return RepairabilityClassification()
+
+    outcome = _run_loop(tmp_path, "classified-none-empty", [], classifier=EmptyClassifier())
+
+    assert outcome.status == "REPAIR_FAILED"
+    assert outcome.reason == "ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING"
 
 
 def test_unrepairable_after_patch_returns_partial_success(tmp_path: Path):
@@ -397,7 +432,7 @@ def test_propose_fix_exception_marks_violation_unrepairable_without_patch(tmp_pa
 
     outcome = _run_loop(tmp_path, "propose-exception-none", [], max_attempts=3)
 
-    assert outcome.status == "REPAIR_FAILED"
+    assert outcome.status == "PARTIAL_SUCCESS"
     assert outcome.attempts == []
     assert outcome.error_message == "cannot propose"
     assert outcome.unrepairable_violations[0].check_name == "check_a"
@@ -458,12 +493,12 @@ def test_apply_exception_marks_violation_unrepairable_and_continues(tmp_path: Pa
     assert outcome.partial_success_patches == ["src/1.py"]
 
 
-def test_apply_exception_without_other_violations_returns_repair_failed(tmp_path: Path):
+def test_apply_exception_without_other_violations_returns_partial_success(tmp_path: Path):
     _register_engine("apply-exception-none", apply_errors=[RuntimeError("patch exploded")])
 
     outcome = _run_loop(tmp_path, "apply-exception-none", [], max_attempts=3)
 
-    assert outcome.status == "REPAIR_FAILED"
+    assert outcome.status == "PARTIAL_SUCCESS"
     assert len(outcome.attempts) == 1
     assert outcome.error_message == "patch exploded"
     assert outcome.unrepairable_violations[0].check_name == "check_a"
