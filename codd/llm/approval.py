@@ -27,9 +27,11 @@ class ApprovalState(str, Enum):
 
 ApprovalStateValue = Literal["pending", "approved", "skipped"]
 ApprovalMode = Literal["required", "per_consideration", "auto"]
+Layer2ApprovalMode = Literal["required", "per_consideration", "auto_high_confidence_only"]
 
 APPROVAL_STATES: set[str] = {state.value for state in ApprovalState}
 APPROVAL_MODES: set[str] = {"required", "per_consideration", "auto"}
+LAYER_2_APPROVAL_MODES: set[str] = {"required", "per_consideration", "auto_high_confidence_only"}
 DEFAULT_PENDING_NOTIFICATION_THRESHOLD = 5
 
 
@@ -237,6 +239,38 @@ def approval_mode_from_config(config: Mapping[str, Any] | None = None) -> Approv
     )
 
 
+def layer_2_approval_mode_from_config(config: Mapping[str, Any] | None = None) -> Layer2ApprovalMode:
+    """Return the guarded approval mode for inferred implementation steps."""
+
+    settings = _layer_2_settings(config)
+    requested = str(settings.get("mode") or "required")
+    if requested not in LAYER_2_APPROVAL_MODES:
+        requested = "required"
+    if requested == "auto_high_confidence_only" and not _layer_2_auto_allowed(settings):
+        return "required"
+    return requested  # type: ignore[return-value]
+
+
+def filter_layer_2_impl_steps(steps: list[Any], config: Mapping[str, Any] | None = None) -> list[Any]:
+    """Return inferred implementation steps allowed by the Layer 2 approval policy."""
+
+    settings = _layer_2_settings(config)
+    mode = layer_2_approval_mode_from_config(config)
+    if mode != "auto_high_confidence_only":
+        return [step for step in steps if bool(getattr(step, "approved", False))]
+
+    threshold = _layer_2_confidence_threshold(settings)
+    return [
+        step
+        for step in steps
+        if bool(getattr(step, "approved", False))
+        or (
+            bool(getattr(step, "inferred", False))
+            and float(getattr(step, "confidence", 0.0) or 0.0) >= threshold
+        )
+    ]
+
+
 def _considerations_from_file(path: Path) -> list[Consideration]:
     try:
         if path.suffix == ".json":
@@ -296,6 +330,27 @@ def _nested_value(config: Mapping[str, Any] | None, path: tuple[str, ...]) -> An
     return value
 
 
+def _layer_2_settings(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    raw = _nested_value(config, ("implementer", "layer_2_approval_mode"))
+    if isinstance(raw, str):
+        return {"mode": raw}
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    return {}
+
+
+def _layer_2_auto_allowed(settings: Mapping[str, Any]) -> bool:
+    return bool(settings.get("require_explicit_optin")) and _layer_2_confidence_threshold(settings) >= 0.9
+
+
+def _layer_2_confidence_threshold(settings: Mapping[str, Any]) -> float:
+    try:
+        threshold = float(settings.get("confidence_threshold", 0.9))
+    except (TypeError, ValueError):
+        threshold = 0.9
+    return threshold
+
+
 def _ntfy_command(config: Mapping[str, Any] | None) -> str | None:
     value = os.environ.get("CODD_NTFY_COMMAND") or _nested_value(config, ("notification", "ntfy_command"))
     return str(value).strip() if value else None
@@ -311,11 +366,14 @@ __all__ = [
     "ApprovalCache",
     "ApprovalMode",
     "ApprovalState",
+    "Layer2ApprovalMode",
     "approval_mode_from_config",
     "consideration_status",
     "consideration_to_dict",
     "effective_approval_mode",
+    "filter_layer_2_impl_steps",
     "filter_approved",
+    "layer_2_approval_mode_from_config",
     "load_cached_considerations",
     "notification_threshold",
     "notify_pending_considerations",
