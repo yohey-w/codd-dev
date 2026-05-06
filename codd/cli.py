@@ -942,7 +942,7 @@ def propagate_from(project_path: str, files: tuple[str, ...], source: str, edito
         raise SystemExit(1)
 
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--task", default=None, help="Generate only one task by task ID or title match")
 @click.option("--clean", is_flag=True, default=False, help="Remove existing generated output before re-generating")
@@ -964,15 +964,22 @@ def propagate_from(project_path: str, files: tuple[str, ...], source: str, edito
     default=None,
     help="Override AI CLI command (defaults to codd.yaml ai_command or merged CoDD defaults)",
 )
+@click.option("--use-derived-steps", default=None, help="Inject derived implementation steps: true or false")
+@click.pass_context
 def implement(
+    ctx,
     path: str,
     task: str | None,
     clean: bool,
     max_tasks: int,
     wave: int | None,
     ai_cmd: str | None,
+    use_derived_steps: str | None,
 ):
     """Generate implementation code from the implementation plan."""
+    if ctx.invoked_subcommand is not None:
+        return
+
     from codd.implementer import implement_tasks
 
     project_root = Path(path).resolve()
@@ -982,14 +989,17 @@ def implement(
         click.echo("Cleaning src/generated/ ...")
 
     try:
-        results = implement_tasks(
-            project_root,
-            task=task,
-            ai_command=ai_cmd,
-            clean=clean,
-            max_tasks=max_tasks,
-            wave=wave,
-        )
+        implement_kwargs = {
+            "task": task,
+            "ai_command": ai_cmd,
+            "clean": clean,
+            "max_tasks": max_tasks,
+            "wave": wave,
+        }
+        parsed_use_derived_steps = _optional_bool(use_derived_steps)
+        if parsed_use_derived_steps is not None:
+            implement_kwargs["use_derived_steps"] = parsed_use_derived_steps
+        results = implement_tasks(project_root, **implement_kwargs)
     except (FileNotFoundError, ValueError, CoddCLIError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
@@ -1015,6 +1025,210 @@ def implement(
         ))
         for ft in failed_tasks:
             click.echo(click.style(f"  ✗ {ft.task_id} ({ft.task_title}): {ft.error}", fg="red"))
+        raise SystemExit(1)
+
+
+@implement.command("plan")
+@click.option("--task", "task_id", required=True, help="Implementation task id or title match")
+@click.option("--design-doc", "design_docs", multiple=True, help="Design document path. May be repeated.")
+@click.option("--force", is_flag=True, help="Bypass cached implementation steps")
+@click.option("--dry-run", is_flag=True, help="Print derived steps without writing cache")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--provider", default=None, help="Implementation step deriver provider name")
+@click.option("--ai-cmd", default=None, help="Override AI command")
+def implement_plan_cmd(
+    task_id: str,
+    design_docs: tuple[str, ...],
+    force: bool,
+    dry_run: bool,
+    project_path: str,
+    provider: str | None,
+    ai_cmd: str | None,
+):
+    """Derive implementation steps for one task."""
+    from codd.deployment.providers.ai_command import SubprocessAiCommand
+    from codd.llm.impl_step_deriver import IMPL_STEP_DERIVERS
+
+    project_root = Path(project_path).resolve()
+    _require_codd_dir(project_root)
+    config = _load_optional_project_config(project_root)
+    provider_name = provider or _impl_step_provider(config)
+    deriver_cls = IMPL_STEP_DERIVERS.get(provider_name)
+    if deriver_cls is None:
+        click.echo(f"Error: implementation step deriver provider not found: {provider_name}")
+        raise SystemExit(1)
+
+    try:
+        task_item = _implement_task_for_cli(project_root, config, task_id)
+        nodes = _plan_design_doc_nodes(project_root, design_docs)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    command = ai_cmd or _impl_step_command(config)
+    deriver = deriver_cls(SubprocessAiCommand(command=command, project_root=project_root, config=config))
+    steps = deriver.derive_steps(
+        task_item,
+        nodes,
+        {
+            "project_root": project_root,
+            "force": force,
+            "dry_run": dry_run,
+            "write_cache": not dry_run,
+            "config": config,
+            "project_context": {"project": config.get("project", {})},
+        },
+    )
+    if dry_run:
+        click.echo(yaml.safe_dump([step.to_dict() for step in steps], sort_keys=False, allow_unicode=True), nl=False)
+        return
+    click.echo(f"Derived implementation steps: {len(steps)}")
+
+
+@implement.command("steps")
+@click.option("--task", "task_id", required=True, help="Implementation task id")
+@click.option("--approve", is_flag=True, help="Approve one or more derived steps")
+@click.option("--step", "step_id", default=None, help="Step id for --approve")
+@click.option("--all", "approve_all", is_flag=True, help="Approve all pending steps")
+@click.option("--show-only", is_flag=True, help="Only show cached steps")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def implement_steps_cmd(
+    task_id: str,
+    approve: bool,
+    step_id: str | None,
+    approve_all: bool,
+    show_only: bool,
+    project_path: str,
+):
+    """Show or approve derived implementation steps."""
+    from codd.llm.impl_step_deriver import approve_cached_impl_steps, impl_step_cache_path, read_impl_step_cache
+
+    project_root = Path(project_path).resolve()
+    cache_path = impl_step_cache_path(task_id, {"project_root": project_root})
+    if approve:
+        if not approve_all and not step_id:
+            click.echo("Error: --approve requires --step or --all")
+            raise SystemExit(2)
+        try:
+            changed = approve_cached_impl_steps(cache_path, step_id=step_id, approve_all=approve_all)
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+        click.echo(f"Approved implementation steps: {changed}")
+        if not show_only:
+            return
+
+    record = read_impl_step_cache(cache_path)
+    if record is None:
+        click.echo("No derived implementation steps found")
+        return
+    for step in record.steps:
+        layer = "layer2" if step.inferred else "layer1"
+        status = "approved" if step.approved else "pending"
+        click.echo(f"{step.id}\t{status}\t{layer}\t{step.kind}\t{step.source_design_section}")
+
+
+@implement.command("augment")
+@click.option("--task", "task_id", required=True, help="Implementation task id or title match")
+@click.option("--design-doc", "design_docs", multiple=True, help="Design document path. May be repeated.")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--provider", default=None, help="Best practice augmenter provider name")
+@click.option("--ai-cmd", default=None, help="Override AI command")
+def implement_augment_cmd(
+    task_id: str,
+    design_docs: tuple[str, ...],
+    project_path: str,
+    provider: str | None,
+    ai_cmd: str | None,
+):
+    """Suggest inferred implementation steps and merge them into the task cache."""
+    from codd.deployment.providers.ai_command import SubprocessAiCommand
+    from codd.llm.best_practice_augmenter import BEST_PRACTICE_AUGMENTERS
+    from codd.llm.impl_step_deriver import (
+        ImplStepCacheRecord,
+        impl_step_cache_path,
+        merge_impl_steps,
+        read_impl_step_cache,
+        utc_timestamp,
+        write_impl_step_cache,
+    )
+
+    project_root = Path(project_path).resolve()
+    _require_codd_dir(project_root)
+    config = _load_optional_project_config(project_root)
+    cache_path = impl_step_cache_path(task_id, {"project_root": project_root})
+    record = read_impl_step_cache(cache_path)
+    if record is None:
+        click.echo("Error: derive Layer 1 steps before augmenting")
+        raise SystemExit(1)
+
+    provider_name = provider or _best_practice_provider(config)
+    augmenter_cls = BEST_PRACTICE_AUGMENTERS.get(provider_name)
+    if augmenter_cls is None:
+        click.echo(f"Error: best practice augmenter provider not found: {provider_name}")
+        raise SystemExit(1)
+
+    try:
+        task_item = _implement_task_for_cli(project_root, config, task_id)
+        docs = design_docs or tuple(record.design_docs)
+        nodes = _plan_design_doc_nodes(project_root, docs)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    command = ai_cmd or _best_practice_command(config)
+    augmenter = augmenter_cls(SubprocessAiCommand(command=command, project_root=project_root, config=config))
+    explicit = [step for step in record.steps if not step.inferred]
+    implicit = augmenter.suggest_implicit_steps(
+        task_item,
+        nodes,
+        explicit,
+        {"project_root": project_root, "config": config, "project_context": {"project": config.get("project", {})}},
+    )
+    merged = merge_impl_steps(explicit, implicit)
+    write_impl_step_cache(
+        cache_path,
+        ImplStepCacheRecord(
+            provider_id=record.provider_id,
+            cache_key=f"{record.cache_key}:augmented",
+            task_id=record.task_id,
+            design_doc_sha=record.design_doc_sha,
+            prompt_template_sha=record.prompt_template_sha,
+            generated_at=utc_timestamp(),
+            design_docs=record.design_docs,
+            steps=merged,
+        ),
+    )
+    click.echo(f"Augmented implementation steps: {len(implicit)}")
+
+
+@implement.command("run")
+@click.option("--task", "task_id", default=None, help="Generate only one task by task ID or title match")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--ai-cmd", default=None, help="Override AI CLI command")
+@click.option("--use-derived-steps", default="true", help="Inject derived implementation steps: true or false")
+def implement_run_cmd(task_id: str | None, project_path: str, ai_cmd: str | None, use_derived_steps: str):
+    """Run implementation with optional derived step injection."""
+    from codd.implementer import implement_tasks
+
+    project_root = Path(project_path).resolve()
+    _require_codd_dir(project_root)
+    try:
+        results = implement_tasks(
+            project_root,
+            task=task_id,
+            ai_command=ai_cmd,
+            use_derived_steps=_optional_bool(use_derived_steps),
+        )
+    except (FileNotFoundError, ValueError, CoddCLIError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+    failed = [result for result in results if result.error]
+    for result in results:
+        for generated_file in result.generated_files:
+            click.echo(f"Generated: {generated_file.relative_to(project_root)} ({result.task_id})")
+    click.echo(f"{sum(len(result.generated_files) for result in results)} files generated across {len(results) - len(failed)} task(s)")
+    if failed:
         raise SystemExit(1)
 
 
@@ -2423,6 +2637,63 @@ def _plan_derive_provider(config: dict[str, Any]) -> str:
         return value["provider"]
     value = _nested_config_value(config, ("ai_commands", "plan_derive_provider"))
     return value if isinstance(value, str) and value else "subprocess_ai_command"
+
+
+def _impl_step_command(config: dict[str, Any]) -> str | None:
+    value = _nested_config_value(config, ("ai_commands", "impl_step_derive"))
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        command = value.get("command")
+        return command if isinstance(command, str) else None
+    return None
+
+
+def _impl_step_provider(config: dict[str, Any]) -> str:
+    value = _nested_config_value(config, ("ai_commands", "impl_step_derive"))
+    if isinstance(value, dict) and isinstance(value.get("provider"), str):
+        return value["provider"]
+    value = _nested_config_value(config, ("ai_commands", "impl_step_deriver_provider"))
+    return value if isinstance(value, str) and value else "subprocess_ai_command"
+
+
+def _best_practice_command(config: dict[str, Any]) -> str | None:
+    value = _nested_config_value(config, ("ai_commands", "best_practice_augment"))
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        command = value.get("command")
+        return command if isinstance(command, str) else None
+    return None
+
+
+def _best_practice_provider(config: dict[str, Any]) -> str:
+    value = _nested_config_value(config, ("ai_commands", "best_practice_augment"))
+    if isinstance(value, dict) and isinstance(value.get("provider"), str):
+        return value["provider"]
+    value = _nested_config_value(config, ("ai_commands", "best_practice_augmenter_provider"))
+    return value if isinstance(value, str) and value else "subprocess_ai_command"
+
+
+def _optional_bool(value: str | bool | None) -> bool | None:
+    if value is None or isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise click.BadParameter("expected true or false")
+
+
+def _implement_task_for_cli(project_root: Path, config: dict[str, Any], task_id: str):
+    from codd.implementer import _extract_all_tasks, _filter_tasks, _load_implementation_plan
+
+    plan = _load_implementation_plan(project_root, config)
+    matches = _filter_tasks(_extract_all_tasks(plan), task_id)
+    if not matches:
+        raise ValueError(f"no implementation task matched {task_id!r}")
+    return matches[0]
 
 
 def _nested_config_value(config: dict[str, Any], path: tuple[str, ...]) -> Any:
