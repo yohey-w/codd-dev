@@ -163,9 +163,9 @@ See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ---
 
-## Case Study - osato-lms (LMS Web App)
+## Case Study — A Real-World LMS Project
 
-Result of running `codd verify --auto-repair --max-attempts 10` on the LMS project osato-lms (Next.js + Prisma + PostgreSQL):
+Result of running `codd verify --auto-repair --max-attempts 10` on a real-world LMS project (Next.js + Prisma + PostgreSQL):
 
 ```text
 status:                   PARTIAL_SUCCESS

@@ -163,9 +163,9 @@ user_journeys:
 
 ---
 
-## 实证案例研究 — osato-lms (LMS Web App)
+## 实证案例研究 — 真实 LMS 项目
 
-在内部 LMS 项目 osato-lms (Next.js + Prisma + PostgreSQL) 上执行 `codd verify --auto-repair --max-attempts 10`，结果如下：
+在实际 LMS 项目 (Next.js + Prisma + PostgreSQL) 上执行 `codd verify --auto-repair --max-attempts 10`，结果如下：
 
 ```
 status:                PARTIAL_SUCCESS
