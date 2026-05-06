@@ -194,6 +194,9 @@ def test_repair_config_receives_max_attempts_and_engine(tmp_path: Path):
 
     assert captures["config"].max_attempts == 4
     assert captures["config"].engine_name == "scripted"
+    assert captures["config"].repo_path == tmp_path.resolve()
+    assert captures["config"].llm_client.command == "ai"
+    assert captures["config"].llm_client.project_root == tmp_path.resolve()
 
 
 def test_modified_files_are_passed_as_scope_and_dag_nodes(tmp_path: Path):
