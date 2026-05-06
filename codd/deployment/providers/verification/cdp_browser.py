@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import subprocess
 import time
 from collections.abc import Callable, Mapping
@@ -91,6 +92,7 @@ class CdpBrowser(VerificationTemplate):
 
         try:
             plan = _parse_plan(command)
+            _import_project_cdp_plugins(_optional_project_root(plan))
             config = self._resolve_config(plan)
             timeout_seconds = _float_config(config, "timeout_seconds", 60.0)
             step_timeout = _float_config(config, "step_timeout_seconds", timeout_seconds)
@@ -430,6 +432,23 @@ def _optional_project_root(plan: Mapping[str, Any]) -> Path | None:
     if value is None or value == "":
         return None
     return Path(str(value)).resolve()
+
+
+def _import_project_cdp_plugins(project_root: Path | None) -> None:
+    if project_root is None:
+        return
+    plugin_root = project_root / "codd_plugins" / "cdp_browser"
+    if not plugin_root.is_dir():
+        return
+    for path in sorted(plugin_root.rglob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        module_name = "codd_project_cdp_plugin_" + "_".join(path.relative_to(plugin_root).with_suffix("").parts)
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"cannot load CDP plug-in: {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
 
 
 def _steps(plan: Mapping[str, Any]) -> list[Mapping[str, Any]]:

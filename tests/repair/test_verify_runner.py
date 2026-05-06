@@ -66,15 +66,15 @@ def test_verify_runner_run_resets_dag_cache_before_checks(tmp_path, monkeypatch)
     assert calls == [str(tmp_path.resolve())]
 
 
-def test_verify_runner_runs_c1_to_c7_checks(tmp_path, monkeypatch):
+def test_verify_runner_runs_default_dag_checks(tmp_path, monkeypatch):
     calls: dict = {}
     _patch_verify_pipeline(monkeypatch, _dag(), [], calls)
 
     VerifyRunner(tmp_path, {"project": {"type": "generic"}}).run()
 
     assert calls["checks"][0] == DEFAULT_CHECKS
-    assert len(calls["checks"][0]) == 7
-    assert calls["checks"][0][-1] == "user_journey_coherence"
+    assert len(calls["checks"][0]) == 8
+    assert calls["checks"][0][-2:] == ("user_journey_coherence", "environment_coverage")
 
 
 def test_verify_runner_pass_returns_verification_result(tmp_path, monkeypatch):

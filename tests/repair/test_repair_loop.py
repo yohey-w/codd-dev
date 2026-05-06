@@ -406,6 +406,17 @@ def test_affected_file_contents_are_loaded_from_dag_node_paths(tmp_path: Path):
     assert engine_cls.propose_inputs[0] == {"src/main.py": "existing = True\n"}
 
 
+def test_affected_file_contents_fall_back_to_node_id_when_it_is_a_file_path(tmp_path: Path):
+    (tmp_path / "project_lexicon.yaml").write_text("coverage_axes: []\n", encoding="utf-8")
+    dag = DAG()
+    dag.add_node(Node("project_lexicon.yaml", "lexicon"))
+    loop = RepairLoop(RepairLoopConfig(), tmp_path)
+
+    contents = loop._load_affected_file_contents(_rca(["project_lexicon.yaml"]), dag)
+
+    assert contents == {"project_lexicon.yaml": "coverage_axes: []\n"}
+
+
 def test_auto_approval_max_files_zero_escalates_to_required():
     with pytest.warns(RuntimeWarning, match="max_files_per_proposal"):
         approved = approve_repair_proposal(
