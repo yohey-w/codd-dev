@@ -22,10 +22,13 @@ for _name, _value in vars(_legacy).items():
         globals()[_name] = _value
 
 from .chunked_runner import ChunkedExecution, ChunkedRunner, ChunkedRunResult
+from .typecheck_loop import TypecheckLoopResult, TypecheckRepairLoop
 
 __all__ = [
     *list(getattr(_legacy, "__all__", [])),
     "ChunkedExecution",
     "ChunkedRunner",
     "ChunkedRunResult",
+    "TypecheckLoopResult",
+    "TypecheckRepairLoop",
 ]

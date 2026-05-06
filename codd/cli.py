@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -1408,6 +1409,7 @@ def implement_augment_cmd(
     show_default=True,
     help="Seconds before one chunk is interrupted",
 )
+@click.option("--enable-typecheck-loop", is_flag=True, default=False, help="Run configured typecheck repair loop after implementation")
 def implement_run_cmd(
     task_id: str | None,
     project_path: str,
@@ -1415,6 +1417,7 @@ def implement_run_cmd(
     use_derived_steps: str,
     chunk_size: int | None,
     timeout_per_chunk: int,
+    enable_typecheck_loop: bool,
 ):
     """Run implementation with optional derived step injection."""
     from codd.implementer import implement_tasks
@@ -1437,6 +1440,16 @@ def implement_run_cmd(
         _echo_chunked_result(project_root, result)
         if result.status != "SUCCESS":
             raise SystemExit(1)
+        try:
+            _run_typecheck_loop_after_implement(
+                project_root=project_root,
+                modified_files=None,
+                ai_cmd=ai_cmd,
+                force_enabled=enable_typecheck_loop,
+            )
+        except (FileNotFoundError, ValueError, CoddCLIError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
         return
 
     try:
@@ -1455,6 +1468,16 @@ def implement_run_cmd(
             click.echo(f"Generated: {generated_file.relative_to(project_root)} ({result.task_id})")
     click.echo(f"{sum(len(result.generated_files) for result in results)} files generated across {len(results) - len(failed)} task(s)")
     if failed:
+        raise SystemExit(1)
+    try:
+        _run_typecheck_loop_after_implement(
+            project_root=project_root,
+            modified_files=[generated_file for result in results for generated_file in result.generated_files],
+            ai_cmd=ai_cmd,
+            force_enabled=enable_typecheck_loop,
+        )
+    except (FileNotFoundError, ValueError, CoddCLIError) as exc:
+        click.echo(f"Error: {exc}")
         raise SystemExit(1)
 
 
@@ -1561,6 +1584,68 @@ def _echo_chunked_result(project_root: Path, result) -> None:
         f"Chunked implementation {result.status}: "
         f"{len(result.completed_chunks)}/{result.total_chunks} chunks; history={history}"
     )
+
+
+def _run_typecheck_loop_after_implement(
+    *,
+    project_root: Path,
+    modified_files: list[Path] | None,
+    ai_cmd: str | None,
+    force_enabled: bool,
+):
+    config = _load_optional_project_config(project_root)
+    if not force_enabled and not _typecheck_config_enabled(config):
+        return None
+    from codd.implementer import TypecheckRepairLoop
+
+    loop = TypecheckRepairLoop.from_config(config, force_enabled=force_enabled)
+    if not loop.enabled:
+        return None
+
+    result = loop.run_after_implement(
+        project_root,
+        modified_files if modified_files is not None else _git_modified_files(project_root),
+        ai_cmd or _configured_ai_command(config),
+    )
+    click.echo(f"Typecheck loop {result.status}")
+    if result.status == "REPAIR_EXHAUSTED":
+        raise CoddCLIError("typecheck repair loop exhausted")
+    return result
+
+
+def _configured_ai_command(config: dict[str, Any]) -> str:
+    command = config.get("ai_command")
+    return command if isinstance(command, str) else ""
+
+
+def _typecheck_config_enabled(config: dict[str, Any]) -> bool:
+    typecheck = config.get("typecheck")
+    return bool(typecheck.get("enabled")) if isinstance(typecheck, dict) else False
+
+
+def _git_modified_files(project_root: Path) -> list[Path]:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(project_root), "status", "--porcelain=v1", "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+    except (OSError, ValueError):
+        return []
+    if completed.returncode != 0:
+        return []
+    paths: list[Path] = []
+    for line in completed.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        raw_path = line[3:]
+        if " -> " in raw_path:
+            raw_path = raw_path.rsplit(" -> ", 1)[1]
+        if raw_path:
+            paths.append(project_root / raw_path)
+    return paths
 
 
 @main.command()
