@@ -36,6 +36,10 @@ DESIGN_DOC_ATTRIBUTE_SCHEMAS = {
         "required_fields": USER_JOURNEY_REQUIRED_FIELDS,
         "list_fields": USER_JOURNEY_LIST_FIELDS,
     },
+    "coverage_axes": {
+        "required_fields": (),
+        "list_fields": (),
+    },
 }
 DESIGN_DOC_ATTRIBUTE_KEYS = tuple(DESIGN_DOC_ATTRIBUTE_SCHEMAS)
 LANGUAGE_SUFFIXES = {
