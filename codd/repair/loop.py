@@ -169,8 +169,8 @@ class RepairLoop:
         effective_max_attempts = _positive_attempts(max_attempts if max_attempts is not None else self.config.max_attempts)
         for attempt_n in range(effective_max_attempts):
             classification = self._classify_violations(current_violations, resolved_baseline_ref)
-            pre_existing = classification.pre_existing
-            unrepairable = classification.unrepairable
+            pre_existing = _merge_violations(pre_existing, classification.pre_existing)
+            unrepairable = _merge_violations(unrepairable, classification.unrepairable)
             if not classification.repairable:
                 status: RepairLoopStatus = "PARTIAL_SUCCESS" if applied_patch_files else "REPAIR_FAILED"
                 return self._finalize(
@@ -192,15 +192,23 @@ class RepairLoop:
                 file_contents = self._load_affected_file_contents(rca, dag)
                 proposal = engine.propose_fix(rca, file_contents)
             except Exception as exc:  # noqa: BLE001 - repair engines are plug-ins.
-                return self._finalize(
-                    session_dir,
-                    "REPAIR_FAILED",
-                    attempts,
-                    str(exc),
-                    remaining_violations=current_violations,
-                    baseline_ref=resolved_baseline_ref,
-                    reason=str(exc),
-                )
+                unrepairable = _merge_violations(unrepairable, [current_failure])
+                current_violations = _without_violation(classification.repairable, current_failure)
+                if not current_violations:
+                    status = "PARTIAL_SUCCESS" if applied_patch_files else "REPAIR_FAILED"
+                    return self._finalize(
+                        session_dir,
+                        status,
+                        attempts,
+                        str(exc),
+                        pre_existing_violations=pre_existing,
+                        unrepairable_violations=unrepairable,
+                        remaining_violations=pre_existing + unrepairable,
+                        partial_success_patches=applied_patch_files,
+                        baseline_ref=resolved_baseline_ref,
+                        reason="ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING",
+                    )
+                continue
 
             try:
                 approved = approve_repair_proposal(
@@ -257,9 +265,11 @@ class RepairLoop:
                     reason="REPAIR_REJECTED_BY_HITL",
                 )
 
+            apply_exception = False
             try:
                 apply_result = engine.apply(proposal)
             except Exception as exc:  # noqa: BLE001 - repair engines are plug-ins.
+                apply_exception = True
                 apply_result = ApplyResult(False, [], _proposal_files(proposal), str(exc))
 
             verify_result = None
@@ -282,6 +292,23 @@ class RepairLoop:
             )
 
             if not apply_result.success:
+                if apply_exception:
+                    unrepairable = _merge_violations(unrepairable, [current_failure])
+                    current_violations = _without_violation(classification.repairable, current_failure)
+                    if not current_violations:
+                        status = "PARTIAL_SUCCESS" if applied_patch_files else "REPAIR_FAILED"
+                        return self._finalize(
+                            session_dir,
+                            status,
+                            attempts,
+                            apply_result.error_message,
+                            pre_existing_violations=pre_existing,
+                            unrepairable_violations=unrepairable,
+                            remaining_violations=pre_existing + unrepairable,
+                            partial_success_patches=applied_patch_files,
+                            baseline_ref=resolved_baseline_ref,
+                            reason="ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING",
+                        )
                 continue
             if post_verify_passed:
                 return self._finalize(
@@ -289,6 +316,8 @@ class RepairLoop:
                     "REPAIR_SUCCESS",
                     attempts,
                     None,
+                    pre_existing_violations=pre_existing,
+                    unrepairable_violations=unrepairable,
                     partial_success_patches=applied_patch_files,
                     baseline_ref=resolved_baseline_ref,
                     reason="REPAIR_SUCCESS",
@@ -627,6 +656,37 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _merge_violations(
+    existing: list[VerificationFailureReport],
+    additions: list[VerificationFailureReport],
+) -> list[VerificationFailureReport]:
+    merged = list(existing)
+    seen = {_violation_key(item) for item in merged}
+    for violation in additions:
+        key = _violation_key(violation)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(violation)
+    return merged
+
+
+def _without_violation(
+    violations: list[VerificationFailureReport],
+    removed: VerificationFailureReport,
+) -> list[VerificationFailureReport]:
+    removed_key = _violation_key(removed)
+    return [violation for violation in violations if _violation_key(violation) != removed_key]
+
+
+def _violation_key(violation: VerificationFailureReport) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    return (
+        violation.check_name,
+        tuple(violation.failed_nodes),
+        tuple(violation.error_messages),
+    )
 
 
 def _positive_attempts(value: Any) -> int:
