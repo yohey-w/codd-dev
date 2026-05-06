@@ -279,13 +279,23 @@ def test_run_without_chunk_size_uses_legacy_path(tmp_path: Path, monkeypatch):
     assert captured["use_derived_steps"] is True
 
 
-def test_chunked_run_requires_task(tmp_path: Path):
+def test_chunked_run_without_task_autodetects_single_task(tmp_path: Path, monkeypatch):
     project = _write_cli_project(tmp_path)
+    _write_cli_step_cache(project)
+    captured: dict[str, object] = {}
+
+    def fake_run_steps(self, task, steps, ai_command, project_root):
+        captured.update({"task": task, "steps": steps, "ai_command": ai_command, "project_root": project_root})
+        return ChunkedRunResult([], 1, "SUCCESS", project_root / ".codd" / "chunked_run_history" / "hist")
+
+    monkeypatch.setattr(ChunkedRunner, "run_steps", fake_run_steps)
 
     result = CliRunner().invoke(main, ["implement", "run", "--path", str(project), "--chunk-size", "2"])
 
-    assert result.exit_code == 1
-    assert "--task is required" in result.output
+    assert result.exit_code == 0, result.output
+    assert "Auto-detected task: 1-1" in result.output
+    assert captured["task"].task_id == "1-1"
+    assert len(captured["steps"]) == 1
 
 
 def test_chunked_run_invokes_runner_with_cached_steps(tmp_path: Path, monkeypatch):
