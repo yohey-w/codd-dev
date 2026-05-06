@@ -1627,7 +1627,7 @@ def verify(
         return
 
     project_root = Path(path).resolve()
-    result = _run_verify_once(path=path, sprint=sprint)
+    result = _run_verify_once(path=path, sprint=sprint, prefer_standalone=True)
     if result.passed:
         return
 
@@ -1641,7 +1641,7 @@ def verify(
         repair_config=repair_config,
         max_attempts=max_attempts,
         engine_name=engine_name,
-        verify_callable=lambda: _run_verify_once(path=path, sprint=sprint),
+        verify_callable=lambda: _run_verify_once(path=path, sprint=sprint, prefer_standalone=True),
     )
     click.echo(f"Repair outcome: {outcome.status}")
     click.echo(f"Repair history: {_display_path(outcome.history_session_dir, project_root)}")
@@ -3406,12 +3406,14 @@ def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
         return {}
 
 
-def _run_verify_once(path: str, sprint: int | None = None) -> _CliVerificationResult:
-    if get_command_handler("verify") is None:
-        from codd.repair.verify_runner import run_standalone_verify
-
-        result = run_standalone_verify(Path(path).resolve())
-        return _cli_result_from_standalone_verify(result)
+def _run_verify_once(
+    path: str,
+    sprint: int | None = None,
+    *,
+    prefer_standalone: bool = False,
+) -> _CliVerificationResult:
+    if prefer_standalone or get_command_handler("verify") is None:
+        return _run_standalone_verify_once(path)
 
     try:
         _run_pro_command("verify", path=path, sprint=sprint)
@@ -3428,6 +3430,23 @@ def _run_verify_once(path: str, sprint: int | None = None) -> _CliVerificationRe
             )
         return _CliVerificationResult(passed=passed, exit_code=exit_code, failure=failure)
     return _CliVerificationResult(passed=True, exit_code=0, failure=None)
+
+
+def _run_standalone_verify_once(path: str) -> _CliVerificationResult:
+    from codd.repair.verify_runner import run_standalone_verify
+
+    result = run_standalone_verify(Path(path).resolve())
+    _echo_verification_warnings(result)
+    return _cli_result_from_standalone_verify(result)
+
+
+def _echo_verification_warnings(result: Any) -> None:
+    for warning in getattr(result, "warnings", []) or []:
+        text = str(warning)
+        if not text:
+            continue
+        prefix = "" if text.upper().startswith("WARNING:") else "WARNING: "
+        click.echo(f"{prefix}{text}")
 
 
 def _cli_result_from_standalone_verify(result: Any) -> _CliVerificationResult:

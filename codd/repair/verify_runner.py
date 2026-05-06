@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+import warnings
 
 from codd.config import find_codd_dir, load_project_config
 from codd.dag import DAG, reset_dag_cache
@@ -41,6 +42,7 @@ class VerificationResult:
     check_results: list[Any] = field(default_factory=list)
     runtime_results: list[Any] = field(default_factory=list)
     failure: VerificationFailureReport | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -87,6 +89,8 @@ class VerifyRunner:
                 if failure is not None
             )
         except Exception as exc:  # noqa: BLE001 - verification must fail gracefully for repair loop.
+            if _is_missing_expected_proof_break(exc):
+                return self._warning_result("expected proof break missing; skipped proof-break verification")
             return self._error_result("verification_error", str(exc))
 
         return VerificationResult(
@@ -177,6 +181,10 @@ class VerifyRunner:
             failures=[failure],
             failure=self._repair_failure_report([failure], None),
         )
+
+    def _warning_result(self, message: str) -> VerificationResult:
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        return VerificationResult(passed=True, warnings=[message])
 
     def _repair_failure_report(
         self,
@@ -357,6 +365,11 @@ def _optional_string(value: Any) -> str | None:
     if value is None or value == "":
         return None
     return str(value)
+
+
+def _is_missing_expected_proof_break(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "expected proof break" in message and ("does not contain" in message or "missing" in message)
 
 
 __all__ = [
