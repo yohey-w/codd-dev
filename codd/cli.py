@@ -1230,12 +1230,45 @@ def implement_augment_cmd(
 @click.option("--path", "project_path", default=".", help="Project root directory")
 @click.option("--ai-cmd", default=None, help="Override AI CLI command")
 @click.option("--use-derived-steps", default="true", help="Inject derived implementation steps: true or false")
-def implement_run_cmd(task_id: str | None, project_path: str, ai_cmd: str | None, use_derived_steps: str):
+@click.option("--chunk-size", default=None, type=click.IntRange(min=1), help="Run derived steps in chunks of this size")
+@click.option(
+    "--timeout-per-chunk",
+    default=600,
+    type=click.IntRange(min=1),
+    show_default=True,
+    help="Seconds before one chunk is interrupted",
+)
+def implement_run_cmd(
+    task_id: str | None,
+    project_path: str,
+    ai_cmd: str | None,
+    use_derived_steps: str,
+    chunk_size: int | None,
+    timeout_per_chunk: int,
+):
     """Run implementation with optional derived step injection."""
     from codd.implementer import implement_tasks
 
     project_root = Path(project_path).resolve()
     _require_codd_dir(project_root)
+    if chunk_size is not None:
+        try:
+            result = _run_chunked_implementation(
+                project_root=project_root,
+                task_id=task_id,
+                ai_cmd=ai_cmd,
+                chunk_size=chunk_size,
+                timeout_per_chunk=timeout_per_chunk,
+                history=None,
+            )
+        except (FileNotFoundError, ValueError, CoddCLIError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+        _echo_chunked_result(project_root, result)
+        if result.status != "SUCCESS":
+            raise SystemExit(1)
+        return
+
     try:
         results = implement_tasks(
             project_root,
@@ -1253,6 +1286,111 @@ def implement_run_cmd(task_id: str | None, project_path: str, ai_cmd: str | None
     click.echo(f"{sum(len(result.generated_files) for result in results)} files generated across {len(results) - len(failed)} task(s)")
     if failed:
         raise SystemExit(1)
+
+
+@implement.command("resume")
+@click.option("--task", "task_id", required=True, help="Implementation task id or title match")
+@click.option("--history", required=True, help="History id or path from a previous chunked run")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--ai-cmd", default=None, help="Override AI CLI command")
+@click.option("--chunk-size", default=5, type=click.IntRange(min=1), show_default=True, help="Chunk size")
+@click.option(
+    "--timeout-per-chunk",
+    default=600,
+    type=click.IntRange(min=1),
+    show_default=True,
+    help="Seconds before one chunk is interrupted",
+)
+def implement_resume_cmd(
+    task_id: str,
+    history: str,
+    project_path: str,
+    ai_cmd: str | None,
+    chunk_size: int,
+    timeout_per_chunk: int,
+):
+    """Resume a chunked implementation run."""
+    project_root = Path(project_path).resolve()
+    _require_codd_dir(project_root)
+    try:
+        result = _run_chunked_implementation(
+            project_root=project_root,
+            task_id=task_id,
+            ai_cmd=ai_cmd,
+            chunk_size=chunk_size,
+            timeout_per_chunk=timeout_per_chunk,
+            history=history,
+        )
+    except (FileNotFoundError, ValueError, CoddCLIError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+    _echo_chunked_result(project_root, result)
+    if result.status != "SUCCESS":
+        raise SystemExit(1)
+
+
+def _run_chunked_implementation(
+    *,
+    project_root: Path,
+    task_id: str | None,
+    ai_cmd: str | None,
+    chunk_size: int,
+    timeout_per_chunk: int,
+    history: str | None,
+):
+    if not task_id:
+        raise ValueError("--task is required when chunked execution is enabled")
+
+    import codd.generator as generator_module
+    from codd.implementer.chunked_runner import ChunkedRunner
+
+    config = _load_optional_project_config(project_root)
+    task_item, steps = _chunked_task_and_steps(project_root, config, task_id)
+    resolved_ai_command = generator_module._resolve_ai_command(config, ai_cmd, command_name="implement")
+
+    def progress(current: int, total: int) -> None:
+        click.echo(f"Chunk {current}/{total} complete")
+
+    runner = ChunkedRunner(
+        chunk_size=chunk_size,
+        timeout_per_chunk=timeout_per_chunk,
+        progress_callback=progress,
+    )
+    if history is None:
+        return runner.run_steps(task_item, steps, resolved_ai_command, project_root)
+    return runner.resume_steps(task_item, steps, resolved_ai_command, project_root, history)
+
+
+def _chunked_task_and_steps(project_root: Path, config: dict[str, Any], task_id: str):
+    from codd.implementer import _filter_layer1_impl_steps, _filter_layer2_impl_steps
+    from codd.llm.impl_step_deriver import impl_step_cache_path, read_impl_step_cache
+
+    task_item = _implement_task_for_cli(project_root, config, task_id)
+    context = {"project_root": project_root}
+    cache_path = impl_step_cache_path(task_item, context)
+    record = read_impl_step_cache(cache_path)
+    if record is None:
+        record = read_impl_step_cache(impl_step_cache_path(task_id, context))
+    if record is None or not record.steps:
+        raise ValueError("no derived implementation steps found; run 'codd implement plan' first")
+
+    explicit = _filter_layer1_impl_steps([step for step in record.steps if not step.inferred], config)
+    implicit = _filter_layer2_impl_steps([step for step in record.steps if step.inferred], config)
+    steps = [*explicit, *implicit]
+    if not steps:
+        raise ValueError("no approved implementation steps found for chunked execution")
+    return task_item, steps
+
+
+def _echo_chunked_result(project_root: Path, result) -> None:
+    try:
+        history = result.history_path.relative_to(project_root)
+    except ValueError:
+        history = result.history_path
+    click.echo(
+        f"Chunked implementation {result.status}: "
+        f"{len(result.completed_chunks)}/{result.total_chunks} chunks; history={history}"
+    )
 
 
 @main.command()
