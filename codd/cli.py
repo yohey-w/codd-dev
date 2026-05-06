@@ -711,6 +711,13 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str
     help="Run CoverageAuditor 3-class requirement gap analysis.",
 )
 @click.option(
+    "--check",
+    "check_coverage",
+    is_flag=True,
+    default=False,
+    help="Check requirement-to-implementation coverage without generating requirements.",
+)
+@click.option(
     "--completeness-audit",
     is_flag=True,
     default=False,
@@ -727,6 +734,7 @@ def require(
     base_ref: str | None,
     apply_mode: bool,
     audit: bool,
+    check_coverage: bool,
     completeness_audit: bool,
 ):
     """Infer requirements from extracted codebase facts (brownfield).
@@ -752,6 +760,10 @@ def require(
     from codd.require import run_require
 
     _require_codd_dir(project_root)
+
+    if check_coverage:
+        _run_require_check(project_root)
+        return
 
     if audit:
         from codd.coverage_auditor import CoverageAuditor
@@ -853,6 +865,33 @@ def require(
             skipped += 1
 
     click.echo(f"Requirements: {generated} generated, {skipped} skipped")
+
+
+def _run_require_check(project_root: Path) -> None:
+    from codd.dag import runner as dag_runner
+
+    try:
+        results = dag_runner.run_all_checks(project_root, check_names=["implementation_coverage"])
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    failed = []
+    for result in results:
+        check_name = str(getattr(result, "check_name", "implementation_coverage"))
+        message = str(getattr(result, "message", "") or "")
+        passed = bool(getattr(result, "passed", False))
+        status = "PASS" if passed else "FAIL"
+        suffix = f" - {message}" if message else ""
+        click.echo(f"{status}: {check_name}{suffix}")
+        for violation in getattr(result, "violations", []) or []:
+            click.echo(f"  - {violation}")
+        if not passed:
+            failed.append(result)
+
+    if failed:
+        raise SystemExit(1)
+    click.echo("Requirement check complete: implementation_coverage PASS")
 
 
 @main.command()
