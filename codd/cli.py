@@ -3099,6 +3099,12 @@ def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
 
 
 def _run_verify_once(path: str, sprint: int | None = None) -> _CliVerificationResult:
+    if get_command_handler("verify") is None:
+        from codd.repair.verify_runner import run_standalone_verify
+
+        result = run_standalone_verify(Path(path).resolve())
+        return _cli_result_from_standalone_verify(result)
+
     try:
         _run_pro_command("verify", path=path, sprint=sprint)
     except SystemExit as exc:
@@ -3114,6 +3120,14 @@ def _run_verify_once(path: str, sprint: int | None = None) -> _CliVerificationRe
             )
         return _CliVerificationResult(passed=passed, exit_code=exit_code, failure=failure)
     return _CliVerificationResult(passed=True, exit_code=0, failure=None)
+
+
+def _cli_result_from_standalone_verify(result: Any) -> _CliVerificationResult:
+    return _CliVerificationResult(
+        passed=bool(result.passed),
+        exit_code=0 if result.passed else 1,
+        failure=getattr(result, "failure", None),
+    )
 
 
 def _system_exit_code(exc: SystemExit) -> int:

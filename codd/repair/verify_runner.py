@@ -194,6 +194,18 @@ class VerifyRunner:
         )
 
 
+def run_standalone_verify(project_root: Path, codd_yaml: Mapping[str, Any] | None = None) -> VerificationResult:
+    """Run verification through the in-process runner."""
+
+    root = Path(project_root).resolve()
+    if codd_yaml is None:
+        try:
+            codd_yaml = load_project_config(root)
+        except (FileNotFoundError, ValueError):
+            codd_yaml = {}
+    return VerifyRunner(root, codd_yaml).run()
+
+
 def _new_template(template_cls: type[Any], template_config: dict[str, Any]) -> Any:
     if template_config:
         try:
@@ -352,4 +364,5 @@ __all__ = [
     "VerificationFailure",
     "VerificationResult",
     "VerifyRunner",
+    "run_standalone_verify",
 ]
