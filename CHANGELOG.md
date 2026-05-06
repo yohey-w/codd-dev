@@ -4,6 +4,109 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.29.0] - 2026-05-06
+
+### Added — Implementation Step Derivation 2-Layer (cmd_410)
+
+cmd_393 (declarative) → cmd_392/393 (検証) → cmd_397 (実行) → cmd_398 (自己修復) →
+cmd_406-408 (Coverage Closure) に続く第 6 層として、**implementer の実装手順を LLM で
+動的展開する 2-layer 機構**を追加。
+
+殿哲学「設計書から実装手順は自動導出するべき」を core 実装。
+「interactive 等の特化 layer を予め指定するのは overfitting」を回避し、
+**Layer 1 (明示要件展開) + Layer 2 (業界知識からベストプラクティス推論補完)** で
+LLM がドメイン非依存に展開する。
+
+### Layer 1 — ImplStepDeriver (明示要件展開)
+
+`design_doc` の機能要件動詞 (例: 「追加できる」「ログイン」) → 実装手順 ImplStep[] を
+LLM 動的展開する depth 方向の補完層。cmd_406 PlanDeriver の breadth 展開と直交。
+
+- **新 module**: `codd/llm/impl_step_deriver.py` (ImplStepDeriver ABC + register decorator +
+  ImplStep dataclass + SubprocessAiCommandImplStepDeriver builtin)
+- **prompt template**: `codd/llm/templates/impl_step_derive_meta.md` (domain-neutral)
+- **step catalog hint**: `codd/llm/templates/implementation_step_catalog.yaml`
+  (5 ドメイン default: web_app / mobile_app / cli_tool / backend_api / embedded、project_lexicon.yaml で完全 override 可)
+- **CLI**: `codd implement plan --task <task_id>` / `codd implement steps`
+- **ImplStep.kind は str (open enum)** — Literal 化禁止 (cmd_385 教訓、Web/Mobile/Embedded 多様性吸収)
+- **HITL gate**: `approval_mode_per_step_kind` (kind 不在時 default=required、auto は明示宣言必須)
+
+### Layer 2 — BestPracticeAugmenter (ベストプラクティス推論補完)
+
+設計書に**書かれていない**業界標準の関連事項を LLM 知識から動的推論し補完する層。
+
+- **新 module**: `codd/llm/best_practice_augmenter.py` (BestPracticeAugmenter ABC +
+  register decorator + builtin)
+- **prompt template**: `codd/llm/templates/best_practice_augment_meta.md` (domain-neutral)
+- **動作例**: 設計に「ログイン」記述あり → Layer 2 が「ログアウト」「パスワードリセット」
+  「セッションタイムアウト」「Remember Me」を自動補完。設計に「データ追加」記述あり →
+  「削除」「編集」「検索」「ソート」「ページネーション」を自動補完。
+- **対パターンは LLM 業界知識からのみ動的推論**、CoDD core に enum hardcode ゼロ
+- **ImplStep schema 拡張**: `inferred: bool` / `confidence: float` /
+  `best_practice_category: str (open enum)` を追加
+- **CLI**: `codd implement augment`
+- **HITL gate 強化**: `layer_2_approval_mode` default=required、auto は
+  `require_explicit_optin: true` + `confidence_threshold>=0.9` の **二重 opt-in 必須**
+
+### Implementer Integration
+
+`_execute_task` の prompt 構築段階で Layer 1 (explicit) + Layer 2 (implicit) merged
+ImplStep[] を inject。
+
+- **既存 implementer 挙動回帰なし**: `--use-derived-steps=false` で従来動作維持
+- **prompt inject 方式 (1 回呼び出し)** — step ごとループ実行 (cmd_411 候補) は将来拡張
+- **CLI**: `codd implement run --task <task_id>` (default で derived steps 利用)
+- **codd/cli.py +299 LOC**: codd implement plan/steps/augment/run subcommands
+- **codd/implementer.py +190 LOC**: prompt inject + Layer 別 approval 統合
+
+### Generality Gate 二層 (継続、6/6 zero hit)
+
+3 module + 3 template = 6 件全て zero hit:
+
+- layer A: `codd/llm/impl_step_deriver.py` + `codd/llm/best_practice_augmenter.py`
+- layer B: `codd/llm/templates/{impl_step_derive,best_practice_augment}_meta.md`
+
+forbidden patterns: `button/form/onclick/interaction/interactive/rest/graphql/web app/
+mobile/desktop/cli/backend/embedded/ui_input/client_validation/server_handler/db_persist/
+next.js/react/django/rails/login/logout/crud/password/session/remember.me`。
+
+**重要**: Layer 2 は「login → logout 推論」のような対パターンを LLM 動的推論する想定で、
+これらキーワードを CoDD core code / template text に hardcode したら overfitting 直結。
+zero hit 確認で Generality 担保。
+
+### 共通基盤の流用 (重複実装ゼロ)
+
+- `codd/llm/invoke.py` (cmd_397_f) — subprocess + ai_command 抽象を 2 module で import 利用
+- `codd/llm/prompt_builder.py` (cmd_397_g) — META_INSTRUCTION + slot 合成
+- `codd/llm/approval.py` (cmd_397_h) +58 LOC — Layer 別 approval mode 拡張
+- `codd/llm/cache.py` (cmd_397_f) — SHA-256 invalidation pattern
+
+新 SDK 依存ゼロ。
+
+### 1874 tests PASS / SKIP=0
+
+v1.28.0 baseline 1846 → 現状 1874 (+28 tests = cmd_410 全 phase 全 PASS)。
+
+### Backwards compatibility
+
+- `codd.yaml [ai_commands.impl_step_derive]` 不在 → `codd implement plan` はエラー、
+  既存 `codd implement` の従来挙動は不変
+- `--use-derived-steps=false` で完全に v1.28.0 互換動作
+- 既存 v1.28.0 ユーザは挙動変化ゼロ (cmd_410 関連は完全 opt-in)
+
+### 思想的到達点
+
+cmd_393 declarative + cmd_392/393 検証 + cmd_397 実行 + cmd_398 自己修復 +
+cmd_406-408 Coverage Closure に加え、本 release で:
+
+- **cmd_410 Layer 1**: 設計書の明示要件動詞を実装手順列に動的展開
+- **cmd_410 Layer 2**: 業界知識から暗黙のベストプラクティスを補完
+
+→ 「declarative + LLM 補完 + 実装手順動的導出 + ベストプラクティス推論」で
+implementer は **「設計書を読み、書かれていることも書かれていないことも適切に
+実装する」** Agent として進化。CoDD は「checklist 駆動 → declarative-coverage 駆動 →
+**best-practice-augmented 駆動**」の 3 段階目に到達した。
+
 ## [1.28.0] - 2026-05-06
 
 ### Added — Coverage Closure Trio (cmd_406 + cmd_407 + cmd_408)
