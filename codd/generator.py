@@ -344,7 +344,13 @@ def _resolve_ai_command(
     if override is not None:
         raw_command = override
     elif command_name and isinstance(config.get("ai_commands"), dict):
-        raw_command = config["ai_commands"].get(command_name, config.get("ai_command", DEFAULT_AI_COMMAND))
+        command_value = config["ai_commands"].get(command_name)
+        if isinstance(command_value, dict):
+            raw_command = command_value.get("command") or config.get("ai_command", DEFAULT_AI_COMMAND)
+        elif command_value is None:
+            raw_command = config.get("ai_command", DEFAULT_AI_COMMAND)
+        else:
+            raw_command = command_value
     else:
         raw_command = config.get("ai_command", DEFAULT_AI_COMMAND)
     if not isinstance(raw_command, str) or not raw_command.strip():

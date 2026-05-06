@@ -2054,7 +2054,7 @@ def drift(path: str, output_format: str, e2e: bool, screen_flow: bool):
     raise SystemExit(result.exit_code)
 
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--json", "as_json", is_flag=True, help="Output plan as JSON")
 @click.option("--init", "initialize", is_flag=True, help="Generate wave_config from requirement docs")
@@ -2076,7 +2076,9 @@ def drift(path: str, output_format: str, e2e: bool, screen_flow: bool):
     default=None,
     help="Override AI CLI command for --init/--derive (defaults to codd.yaml ai_command or 'claude --print')",
 )
+@click.pass_context
 def plan(
+    ctx,
     path: str,
     as_json: bool,
     initialize: bool,
@@ -2088,6 +2090,9 @@ def plan(
     ai_cmd: str | None,
 ):
     """Show wave execution status from configured artifacts."""
+    if ctx.invoked_subcommand is not None:
+        return
+
     from codd.planner import (
         backup_codd_yaml,
         build_plan,
@@ -2228,6 +2233,198 @@ def plan(
         return
 
     click.echo(render_plan_text(result))
+
+
+@plan.command("derive")
+@click.option("--design-doc", "design_docs", multiple=True, help="Design document path. May be repeated.")
+@click.option(
+    "--layer",
+    "v_model_layer",
+    default="detailed",
+    type=click.Choice(["requirement", "basic", "detailed"]),
+    show_default=True,
+    help="Fallback V-model layer when the document does not declare one.",
+)
+@click.option("--force", is_flag=True, help="Bypass cached derived tasks")
+@click.option("--dry-run", is_flag=True, help="Print derived tasks without writing cache")
+@click.option("--merge-into-plan", is_flag=True, help="Append approved derived tasks to the implementation plan")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option("--provider", default=None, help="Plan deriver provider name")
+@click.option("--ai-cmd", default=None, help="Override AI command")
+def plan_derive_cmd(
+    design_docs: tuple[str, ...],
+    v_model_layer: str,
+    force: bool,
+    dry_run: bool,
+    merge_into_plan: bool,
+    project_path: str,
+    provider: str | None,
+    ai_cmd: str | None,
+):
+    """Derive implementation tasks from design documents."""
+    from codd.deployment.providers.ai_command import SubprocessAiCommand
+    from codd.llm.plan_deriver import PLAN_DERIVERS, merge_approved_tasks_into_plan
+
+    project_root = Path(project_path).resolve()
+    _require_codd_dir(project_root)
+    config = _load_optional_project_config(project_root)
+    provider_name = provider or _plan_derive_provider(config)
+    deriver_cls = PLAN_DERIVERS.get(provider_name)
+    if deriver_cls is None:
+        click.echo(f"Error: plan deriver provider not found: {provider_name}")
+        raise SystemExit(1)
+
+    try:
+        nodes = _plan_design_doc_nodes(project_root, design_docs)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    command = ai_cmd or _plan_derive_command(config)
+    ai_command = SubprocessAiCommand(command=command, project_root=project_root, config=config)
+    deriver = deriver_cls(ai_command)
+    tasks = deriver.derive_tasks(
+        nodes,
+        v_model_layer,  # type: ignore[arg-type]
+        {
+            "project_root": project_root,
+            "force": force,
+            "dry_run": dry_run,
+            "write_cache": not dry_run,
+            "project_context": {"project": config.get("project", {})},
+        },
+    )
+
+    if dry_run:
+        click.echo(yaml.safe_dump([task.to_dict() for task in tasks], sort_keys=False, allow_unicode=True), nl=False)
+    else:
+        click.echo(f"Derived tasks: {len(tasks)}")
+
+    if merge_into_plan:
+        merged = merge_approved_tasks_into_plan(project_root, tasks)
+        click.echo(f"Merged approved tasks: {merged}")
+
+
+@plan.command("show")
+@click.option("--design-doc", default=None, help="Filter by design document path")
+@click.option(
+    "--status",
+    "status_filter",
+    default="all",
+    type=click.Choice(["approved", "pending", "all"]),
+    show_default=True,
+    help="Approval status filter",
+)
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def plan_show_cmd(design_doc: str | None, status_filter: str, project_path: str):
+    """Show derived implementation tasks."""
+    from codd.llm.plan_deriver import iter_derived_task_records
+
+    project_root = Path(project_path).resolve()
+    rows = []
+    for cache_path, record in iter_derived_task_records(project_root, design_doc):
+        for task in record.tasks:
+            status = "approved" if task.approved else "pending"
+            if status_filter != "all" and status != status_filter:
+                continue
+            rows.append((cache_path, status, task))
+
+    if not rows:
+        click.echo("No derived tasks found")
+        return
+
+    for cache_path, status, task in rows:
+        click.echo(f"{task.id}\t{status}\t{task.v_model_layer}\t{task.source_design_doc}\t{task.title}")
+        click.echo(f"  cache: {_display_path(cache_path, project_root)}")
+
+
+@plan.command("approve")
+@click.argument("design_doc")
+@click.option("--task", "task_id", default=None, help="Approve one derived task id")
+@click.option("--all", "approve_all", is_flag=True, help="Approve all pending tasks for the design document")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def plan_approve_cmd(design_doc: str, task_id: str | None, approve_all: bool, project_path: str):
+    """Approve derived implementation tasks."""
+    from codd.llm.plan_deriver import approve_cached_tasks, find_derived_task_cache
+
+    if not approve_all and not task_id:
+        click.echo("Error: --task or --all is required")
+        raise SystemExit(2)
+
+    project_root = Path(project_path).resolve()
+    cache_path = find_derived_task_cache(project_root, design_doc)
+    try:
+        changed = approve_cached_tasks(cache_path, task_id=task_id, approve_all=approve_all)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+    click.echo(f"Approved derived tasks: {changed}")
+
+
+def _plan_derive_command(config: dict[str, Any]) -> str | None:
+    value = _nested_config_value(config, ("ai_commands", "plan_derive"))
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        command = value.get("command")
+        return command if isinstance(command, str) else None
+    return None
+
+
+def _plan_derive_provider(config: dict[str, Any]) -> str:
+    value = _nested_config_value(config, ("ai_commands", "plan_derive"))
+    if isinstance(value, dict) and isinstance(value.get("provider"), str):
+        return value["provider"]
+    value = _nested_config_value(config, ("ai_commands", "plan_derive_provider"))
+    return value if isinstance(value, str) and value else "subprocess_ai_command"
+
+
+def _nested_config_value(config: dict[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = config
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return None
+        value = value[key]
+    return value
+
+
+def _plan_design_doc_nodes(project_root: Path, design_docs: tuple[str, ...]):
+    from codd.dag import Node
+    from codd.dag.builder import build_dag
+    from codd.dag.extractor import extract_design_doc_metadata
+
+    if not design_docs:
+        built_dag = build_dag(project_root)
+        nodes = [node for node in built_dag.nodes.values() if node.kind == "design_doc"]
+        if not nodes:
+            raise ValueError("no design documents found")
+        return nodes
+
+    nodes = []
+    for design_doc in design_docs:
+        path = Path(design_doc).expanduser()
+        if not path.is_absolute():
+            path = project_root / path
+        if not path.is_file():
+            raise FileNotFoundError(f"design document not found: {design_doc}")
+        rel_path = path.relative_to(project_root).as_posix()
+        metadata = extract_design_doc_metadata(path)
+        attributes = metadata.get("attributes") or {}
+        nodes.append(
+            Node(
+                id=rel_path,
+                kind="design_doc",
+                path=rel_path,
+                attributes={
+                    "frontmatter": metadata["frontmatter"],
+                    "depends_on": metadata["depends_on"],
+                    "node_id": metadata.get("node_id"),
+                    "body": metadata.get("body", ""),
+                    **attributes,
+                },
+            )
+        )
+    return nodes
 
 
 def _load_lexicon_data_for_update(lexicon_path: Path) -> dict[str, Any]:
