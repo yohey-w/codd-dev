@@ -16,6 +16,7 @@ import yaml
 
 from codd.dag import Node
 from codd.deployment.providers.ai_command import AiCommandError, SubprocessAiCommand
+from codd.llm.criteria_expander import coverage_axes_hint
 from codd.llm.plan_deriver import design_doc_bundle, strip_json_fence
 
 
@@ -50,6 +51,7 @@ def _impl_step_from_dict(cls, payload: Mapping[str, Any]) -> Any:
         target_path_hint=_optional_text(payload.get("target_path_hint")),
         **{_LINK_FIELD: _string_list(links)},
         expected_outputs=_string_list(payload.get("expected_outputs")),
+        required_axes=_string_list(payload.get("required_axes")),
         provider_id=str(payload.get("provider_id") or ""),
         generated_at=str(payload.get("generated_at") or ""),
         approved=bool(payload.get("approved", False)),
@@ -69,6 +71,7 @@ ImplStep = make_dataclass(
         ("target_path_hint", str | None, field(default=None)),
         (_LINK_FIELD, list[str], field(default_factory=list)),
         ("expected_outputs", list[str], field(default_factory=list)),
+        ("required_axes", list[str], field(default_factory=list)),
         ("provider_id", str, field(default="")),
         ("generated_at", str, field(default="")),
         ("approved", bool, field(default=False)),
@@ -218,6 +221,7 @@ class SubprocessAiCommandImplStepDeriver(ImplStepDeriver):
         prompt = template_text.replace("{design_doc_bundle}", bundle)
         prompt = prompt.replace("{task_yaml}", task_yaml(task))
         prompt = prompt.replace("{step_catalog_hint}", catalog_hint)
+        prompt = prompt.replace("{coverage_axes_hint}", coverage_axes_hint(project_context, design_docs))
         prompt = prompt.replace(
             "{project_context}",
             json.dumps(project_context.get("project_context", {}), sort_keys=True),

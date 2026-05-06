@@ -10,6 +10,7 @@ from typing import Any, ClassVar, Mapping
 
 from codd.dag import Node
 from codd.deployment.providers.ai_command import AiCommandError, SubprocessAiCommand
+from codd.llm.criteria_expander import coverage_axes_hint
 from codd.llm.impl_step_deriver import (
     ImplStep,
     parse_impl_steps,
@@ -87,6 +88,7 @@ class SubprocessAiCommandBestPracticeAugmenter(BestPracticeAugmenter):
         prompt = template_text.replace("{design_doc_bundle}", design_doc_bundle(design_docs, {"project_root": project_root}))
         prompt = prompt.replace("{task_yaml}", task_yaml(task))
         prompt = prompt.replace("{explicit_steps}", render_impl_steps_for_prompt(explicit_steps))
+        prompt = prompt.replace("{coverage_axes_hint}", coverage_axes_hint(project_context, design_docs))
         prompt = prompt.replace(
             "{project_context}",
             json.dumps(project_context.get("project_context", {}), sort_keys=True),
