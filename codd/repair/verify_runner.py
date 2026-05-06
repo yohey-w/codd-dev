@@ -24,6 +24,7 @@ DEFAULT_CHECKS: tuple[str, ...] = (
     "transitive_closure",
     "deployment_completeness",
     "user_journey_coherence",
+    "environment_coverage",
 )
 
 

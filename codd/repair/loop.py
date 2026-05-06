@@ -233,7 +233,7 @@ class RepairLoop:
                 path = node.path or node.attributes.get("path")
                 if path:
                     paths.append(str(path))
-                continue
+                    continue
             paths.append(item)
         return paths
 
