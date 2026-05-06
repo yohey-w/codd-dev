@@ -79,8 +79,16 @@ def _proposal(name: str = "src/generated.py") -> RepairProposal:
     )
 
 
-def _register_engine(name: str, *, apply_results: list[ApplyResult] | None = None) -> type[RepairEngine]:
+def _register_engine(
+    name: str,
+    *,
+    apply_results: list[ApplyResult] | None = None,
+    propose_errors: list[Exception | None] | None = None,
+    apply_errors: list[Exception | None] | None = None,
+) -> type[RepairEngine]:
     results = list(apply_results or [])
+    proposal_failures = list(propose_errors or [])
+    apply_failures = list(apply_errors or [])
 
     class ScriptedEngine(RepairEngine):
         analyzed: list[VerificationFailureReport] = []
@@ -89,6 +97,8 @@ def _register_engine(name: str, *, apply_results: list[ApplyResult] | None = Non
         def __init__(self, project_root: Path | None = None):
             self.project_root = project_root
             self.apply_results = list(results)
+            self.propose_errors = list(proposal_failures)
+            self.apply_errors = list(apply_failures)
 
         def analyze(self, failure: VerificationFailureReport, dag: DAG) -> RootCauseAnalysis:
             type(self).analyzed.append(failure)
@@ -101,11 +111,19 @@ def _register_engine(name: str, *, apply_results: list[ApplyResult] | None = Non
             )
 
         def propose_fix(self, rca: RootCauseAnalysis, file_contents: dict[str, str]) -> RepairProposal:
+            if self.propose_errors:
+                error = self.propose_errors.pop(0)
+                if error is not None:
+                    raise error
             proposal = _proposal(f"src/{len(type(self).proposals)}.py")
             type(self).proposals.append(proposal)
             return proposal
 
         def apply(self, proposal: RepairProposal, *, dry_run: bool = False) -> ApplyResult:
+            if self.apply_errors:
+                error = self.apply_errors.pop(0)
+                if error is not None:
+                    raise error
             if self.apply_results:
                 return self.apply_results.pop(0)
             return ApplyResult(True, [patch.file_path for patch in proposal.patches], [], None)
@@ -372,6 +390,84 @@ def test_unrepairable_after_patch_returns_partial_success(tmp_path: Path):
 
     assert outcome.status == "PARTIAL_SUCCESS"
     assert outcome.unrepairable_violations == [remaining]
+
+
+def test_propose_fix_exception_marks_violation_unrepairable_without_patch(tmp_path: Path):
+    _register_engine("propose-exception-none", propose_errors=[RuntimeError("cannot propose")])
+
+    outcome = _run_loop(tmp_path, "propose-exception-none", [], max_attempts=3)
+
+    assert outcome.status == "REPAIR_FAILED"
+    assert outcome.attempts == []
+    assert outcome.error_message == "cannot propose"
+    assert outcome.unrepairable_violations[0].check_name == "check_a"
+    assert outcome.remaining_violations == outcome.unrepairable_violations
+    assert outcome.reason == "ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING"
+
+
+def test_propose_fix_exception_continues_to_next_violation(tmp_path: Path):
+    engine_cls = _register_engine("propose-exception-continue", propose_errors=[RuntimeError("first cannot propose")])
+    first = _failure("check_a", "node:a")
+    second = _failure("check_b", "node:b")
+
+    outcome = _run_loop(
+        tmp_path,
+        "propose-exception-continue",
+        [VerifyResult(True)],
+        initial_verify_result=VerifyResult(False, first, [first, second]),
+    )
+
+    assert outcome.status == "REPAIR_SUCCESS"
+    assert [item.check_name for item in engine_cls.analyzed] == ["check_a", "check_b"]
+    assert outcome.unrepairable_violations == [first]
+    assert outcome.partial_success_patches == ["src/0.py"]
+
+
+def test_propose_fix_exception_after_patch_returns_partial_success(tmp_path: Path):
+    _register_engine("propose-exception-after-patch", propose_errors=[None, RuntimeError("second cannot propose")])
+    remaining = _failure("check_b", "node:b")
+
+    outcome = _run_loop(
+        tmp_path,
+        "propose-exception-after-patch",
+        [VerifyResult(False, remaining, [remaining])],
+    )
+
+    assert outcome.status == "PARTIAL_SUCCESS"
+    assert outcome.error_message == "second cannot propose"
+    assert outcome.partial_success_patches == ["src/0.py"]
+    assert outcome.unrepairable_violations == [remaining]
+
+
+def test_apply_exception_marks_violation_unrepairable_and_continues(tmp_path: Path):
+    engine_cls = _register_engine("apply-exception-continue", apply_errors=[RuntimeError("patch exploded")])
+    first = _failure("check_a", "node:a")
+    second = _failure("check_b", "node:b")
+
+    outcome = _run_loop(
+        tmp_path,
+        "apply-exception-continue",
+        [VerifyResult(True)],
+        initial_verify_result=VerifyResult(False, first, [first, second]),
+    )
+
+    assert outcome.status == "REPAIR_SUCCESS"
+    assert [item.check_name for item in engine_cls.analyzed] == ["check_a", "check_b"]
+    assert outcome.attempts[0].apply_result.error_message == "patch exploded"
+    assert outcome.unrepairable_violations == [first]
+    assert outcome.partial_success_patches == ["src/1.py"]
+
+
+def test_apply_exception_without_other_violations_returns_repair_failed(tmp_path: Path):
+    _register_engine("apply-exception-none", apply_errors=[RuntimeError("patch exploded")])
+
+    outcome = _run_loop(tmp_path, "apply-exception-none", [], max_attempts=3)
+
+    assert outcome.status == "REPAIR_FAILED"
+    assert len(outcome.attempts) == 1
+    assert outcome.error_message == "patch exploded"
+    assert outcome.unrepairable_violations[0].check_name == "check_a"
+    assert outcome.partial_success_patches == []
 
 
 def test_null_classifier_marks_all_violations_repairable():
