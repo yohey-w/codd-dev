@@ -15,11 +15,23 @@
 
 ---
 
-## Write requirements + constraints. CoDD does the rest.
+## North Star (Vision)
 
-CoDD is a development engine that treats **requirements -> design -> implementation -> tests** as one DAG, mechanically verifies the coherence of every node, and lets an LLM repair inconsistencies automatically when they appear.
+**"Write only functional requirements and constraints. Code is generated, repaired, and verified automatically."**
 
-Humans write only **what to build** and **where the boundaries are**. CoDD and the LLM take care of **how to build it**.
+CoDD treats **requirements -> design -> implementation -> tests** as one DAG, mechanically verifies the coherence of every node, and lets an LLM repair inconsistencies automatically when they appear. Humans write only **what to build** and **where the boundaries are**.
+
+## Where We Are (v1.34.0)
+
+The North Star is far, but **within bounded conditions, CoDD has reached practical use**:
+
+- ✅ Dogfooded on a real project (Next.js + Prisma + TypeScript Web app)
+- ✅ `codd verify --auto-repair` completes with `PARTIAL_SUCCESS` on a real LMS project (attempts=4 / applied_patches=4 / unrepairable=2)
+- ✅ DAG completeness with 9 coherence checks operational
+- ⚠️ Single viewport / single persona assumed (Coverage Axis Layer C9 introduced in v1.32.0; axis variety is continuing work)
+- ⚠️ Specification completeness Level 1 (finding holes in requirements) is planned for v1.35.0 `codd elicit`
+- ⚠️ Other domains (Mobile / Desktop / CLI / Embedded / ML) are not yet validated
+- ⚠️ Reducing unrepairable items is continuing improvement
 
 ```bash
 pip install codd-dev
@@ -105,8 +117,6 @@ Write "functional requirements + constraints" in `docs/requirements/*.md`, then 
 3. After user approval through a HITL gate, implementation is generated into `src/**`
 4. If a type checker such as `tsc` fails during generation, CoDD enters the auto-repair loop
 
-The user experience is: **write only functional requirements + constraints, then let the rest run automatically**.
-
 ### Use Case 2: Auto-Repair (`codd verify --auto-repair`)
 
 Run `codd dag verify --auto-repair --max-attempts 10` in CI:
@@ -163,9 +173,9 @@ See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ---
 
-## Case Study — A Real-World LMS Project
+## Case Study - A Real-World LMS Web App (Next.js + Prisma + PostgreSQL)
 
-Result of running `codd verify --auto-repair --max-attempts 10` on a real-world LMS project (Next.js + Prisma + PostgreSQL):
+Result of running `codd verify --auto-repair --max-attempts 10` on a real-world LMS project (Web only, primarily single viewport):
 
 ```text
 status:                   PARTIAL_SUCCESS
@@ -191,18 +201,74 @@ Skipped violations (explicitly reported as outside CoDD's responsibility):
 
 C9 `environment_coverage` verified all axis x variant coverage for viewport (smartphone_se / desktop_1920) and RBAC role (central_admin / tenant_admin / learner), and reached PASS.
 
+**Scope of this validation**:
+
+- ✅ Auto-repair completes `PARTIAL_SUCCESS` on a Next.js + Prisma + TS stack
+- ✅ Project-specific requirements are absorbed with **0 lines of CoDD core changes** (Generality preserved)
+- ⚠️ Single project / single stack dogfooding only; other domains (Mobile / Desktop / CLI / Embedded / ML / Game) are not validated
+- ⚠️ 2 unrepairable items remained = semi-automated, not fully automated
+
 ---
 
-## Architecture - 4-Release Evolution
+## Architecture - 4-Release Evolution and Next Plans
+
+### Achieved (v1.31.0 - v1.34.0)
 
 | Release | Milestone |
 |---------|-----------|
 | v1.31.0 | Inner 100% (internal coherence) - eliminated manual type fixes with the typecheck repair loop |
-| v1.32.0 | Outer 100% (target environment coverage) - absorbed viewport/RBAC/locale and related axes through a unified abstraction |
+| v1.32.0 | Outer 100% (target environment coverage Layer C9) - absorbed viewport/RBAC/locale and related axes through a unified abstraction |
 | v1.33.0 | Caveat-resolution path proven - real CDP run-journey + LLM auto-repair attempt passed |
-| **v1.34.0** | **Full pipeline proven** - auto-repair reached PARTIAL_SUCCESS on a real project |
+| **v1.34.0** | **Full pipeline proven** - auto-repair reached PARTIAL_SUCCESS through dogfooding on a single Next.js Web project |
 
-See [CHANGELOG.md](CHANGELOG.md) for each release.
+### Next (v1.35.0 - v2.0.0, Roadmap)
+
+| Release | Plan |
+|---------|------|
+| **v1.35.0** | **`codd elicit`** - Discovery Engine that lets an LLM extract axis candidates and spec holes from requirements |
+| v1.36.0 | BABOK lexicon (`@codd/lexicon/babok`) bundle + multi-formatter (md / json / PR comment) |
+| v1.37.0 | **`codd diff`** - brownfield drift detection between requirements and implementation |
+| v1.38.0 | extract -> diff -> elicit pipeline, complete brownfield flow |
+| v1.39.0 | Reduce unrepairable items (RepairLoop strategy generalization) |
+| v1.40.0 | Multi-domain dogfooding (Mobile / CLI / embedded, etc.) |
+| (v2.0.0) | elicit + verify bidirectional loop, closest approach to the "fully automated" North Star |
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## North Star Connection: `codd elicit` (v1.35.0)
+
+The biggest gap between the North Star ("write only requirements + constraints") and reality has been the assumption that **requirements are complete**. If requirements have holes, so does the implementation, and these surface as pre-demo incidents (e.g., navigation disappearing for central admin on a smartphone viewport).
+
+`codd elicit` structurally addresses this:
+
+```bash
+$ codd elicit
+[INFO] Reading docs/requirements/requirements.md (483 lines)
+[INFO] Loading project_lexicon.yaml + @codd/lexicon/babok ...
+[INFO] Generated 27 findings (axis_candidates: 11, spec_holes: 16)
+[OK]   findings.md created
+```
+
+```markdown
+## f-001 [axis_candidate] locale (severity: high)
+**details**: variants: ja_JP, en_US / source: persona description and Section 3.5
+**approved**: yes
+**note**: en_US is phase 2
+
+## f-002 [spec_hole] If the browser is closed during video playback, is progress lost? (severity: high)
+**approved**: yes
+```
+
+```bash
+$ codd elicit apply findings.md
+[OK] project_lexicon.yaml updated (11 axis sections appended)
+[OK] docs/requirements/requirements.md updated (TODO appended)
+$ git add -A && git commit -m "feat: apply elicit findings"
+```
+
+Humans only **review extracted requirements** and **approve / reject elicit findings (Yes/No)**. The rest is AI dynamically diverging and converging.
 
 ---
 
@@ -214,8 +280,9 @@ The following hardcoding is **forbidden** in CoDD core code:
 - Specific framework / library literals
 - Specific domains (Web / Mobile / Desktop / CLI / Backend / Embedded)
 - Specific viewport values (375 / 1920, etc.) or device names (iPhone / Android, etc.)
+- Specific axis types (viewport / locale / a11y) or finding kinds (axis_candidate / spec_hole) hardcoded in core
 
-All such knowledge is confined to **`project_lexicon.yaml` (project-specific)**. CoDD handles it only as generic violation objects.
+All such knowledge is confined to **`project_lexicon.yaml` (project-specific)** or **lexicon plug-ins (`@codd/lexicon/babok`, etc.)**. CoDD handles them only as generic violation/finding objects.
 
 When an LLM proposes a stack-specific optimal patch, that judgment is delegated to **the LLM's knowledge**. CoDD core does not decide it, which prevents overfitting.
 

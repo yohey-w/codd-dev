@@ -2,9 +2,69 @@
 
 All notable changes to CoDD are documented in this file.
 
-## [Unreleased]
+## [Unreleased] — 北極星接続フェーズ (v1.35.0+)
 
-## [1.34.0] - 2026-05-06 — 実用到達点 100% (真) 記念マイルストーン
+### Roadmap (確定済 design session 2026-05-07)
+
+殿の北極星「機能要件 + 制約だけ書けば全自動」への最大ギャップ = **要件完全性の前提**。
+`codd elicit` で要件側の穴を AI が発見し、Yes/No 承認で要件強化する仕組みを v1.35.0 から段階導入する。
+
+| Release | 機能 | 状態 |
+|---------|------|------|
+| **v1.35.0** | **`codd elicit`** — 要件→axis候補+spec穴の Discovery Engine | cmd_431 軍師発散中 |
+| v1.36.0 | `@codd/lexicon/babok` 同梱 + multi-formatter (md/json/PR comment) | cmd_434 起票予定 |
+| v1.37.0 | **`codd diff`** — brownfield drift 検知 (要件 vs 実装) | cmd_435 起票予定 |
+| v1.38.0 | extract → diff → elicit パイプライン化、brownfield 完全フロー | cmd_436 起票予定 |
+| v1.39.0 | unrepairable 削減 (RepairLoop strategy 汎用化) | cmd_432 軍師発散中 |
+| v1.40.0 | 他ドメイン dogfooding (Mobile/CLI/embedded etc) | 案件選定後 |
+| (v2.0.0) | elicit ↔ verify 双方向 loop (北極星) | future |
+
+#### `codd elicit` 設計確定事項 (v1.35.0)
+
+design session で確定した仕様 (詳細は [README.md](README.md) の North Star 接続セクション参照):
+
+- **Q1 コマンド名**: `codd elicit` (要件工学 requirements elicitation 由来)
+- **Q2 prompt template**: L0 + L2 + L3 (BABOK lexicon optional plug-in、`extends:` 方式)
+- **Q3 brownfield**: 案β (extract→elicit パイプ、`codd diff` 新コマンドで連動)
+- **Q4 出力構造**: 統合 `findings: []` + LLM動的 kind + severity enum固定 (critical/high/medium/info)
+- **Q5 承認 UI**: 多モード対応
+  - default `findings.md` (殿Zenn流儀、git管理)
+  - `--interactive` CLI inline (REPL Y/n)
+  - `--format json` (CI連携)
+  - `--post-pr <N>` GitHub PR comment (plugin)
+  - `codd elicit apply <input>` で書き戻し (project_lexicon.yaml + requirements.md + ignored_findings.yaml)
+- **Q6 verify 統合**: 緩い (verify report に「elicit 推奨」suggestion のみ、自動起動なし)
+- **Q7 ループ性**: ignored_findings.yaml + pending_findings.yaml + elicit_history.yaml で差分質問
+
+#### Generality Gate (v1.35.0+ 厳守)
+
+- `kind` (axis_candidate / spec_hole / regulation_hint 等) を core hardcode 禁止 (LLM動的、lexicon推奨のみ)
+- `severity` のみ enum 固定 (consumer 側 deploy gate 判定の generic 概念)
+- BABOK lexicon は **optional plug-in**、ロードしなければ動作変化なし
+
+### Recent Patches (since v1.34.0 release)
+
+#### 2026-05-06 — cmd_427 README v1.34.0 リライト (3か国語)
+- README_ja.md / README.md / README_zh.md を v1.34.0 に対応
+- Quick Start / Use Cases / 実証ケーススタディ / 4-release 進化を全面更新
+
+#### 2026-05-06 — cmd_428 case study 匿名化 (`df6b450`)
+- README 内の固有プロジェクト名を「実プロジェクト LMS Web App」表記に変更
+- スタック (Next.js + Prisma + PostgreSQL) は明示維持、識別可能情報を削除
+
+#### 2026-05-07 — cmd_429 CI audit workflow fix (`531a66f`)
+- `audit.yml` workflow が `FileNotFoundError: /tmp/codd-audit.json` で exit 1 する bug 修正
+- README-only PR (design書無変更) でも audit が gracefully PASS する挙動に
+- workflow 自体に jq parse fallback 追加 → audit json 生成失敗時も CI green
+
+#### 2026-05-07 — README v1.35.0 ロードマップ追記 (3か国語)
+- 「北極星」「現在地 (v1.34.0)」「Roadmap v1.35.0-v2.0.0」「North Star 接続: codd elicit」セクション追加
+- 「実用到達点 100% (真)」表現を「Web Next.js Prisma+TS 単一viewport で auto-repair PARTIAL_SUCCESS 完走」に正直化
+- 境界条件と未解決ギャップを明示
+
+---
+
+## [1.34.0] - 2026-05-06 — Full pipeline auto-repair 実プロジェクト完走
 
 ### Achievement — 「自律自己修復実装駆動」の最終形 (cmd_425 7 commits bundle)
 

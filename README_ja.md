@@ -15,11 +15,23 @@
 
 ---
 
-## 機能要件と制約だけ書けば、コードは自動で書ける。
+## 北極星 (Vision)
 
-CoDD は **要件 → 設計 → 実装 → テスト** をひとつの DAG として扱い、各ノードの一貫性 (coherence) を機械検証して、不整合があれば LLM が自動で修復する開発エンジンである。
+**「機能要件と制約だけ書けば、コードは全自動で生成・修復・検証される」**
 
-人間が書くのは **「何を」と「どこまで」** だけ。「どう書くか」は CoDD と LLM が引き受ける。
+CoDD は **要件 → 設計 → 実装 → テスト** をひとつの DAG として扱い、各ノードの一貫性 (coherence) を機械検証して、不整合があれば LLM が自動で修復する開発エンジンである。人間が書くのは **「何を」と「どこまで」** だけ。
+
+## 現在地 (v1.34.0)
+
+北極星は遠いが、**境界条件下では実用に到達した**:
+
+- ✅ Next.js + Prisma + TypeScript (Web) で実プロジェクト dogfooding
+- ✅ `codd verify --auto-repair` が `PARTIAL_SUCCESS` 完走 (実プロジェクト LMS で実証、attempts=4 / applied_patches=4 / unrepairable=2)
+- ✅ DAG 完全性 9 種 coherence check 動作
+- ⚠️ 単一 viewport / 単一 persona 前提 (環境網羅性は v1.32.0 で C9 導入したが axis 拡張は continuing)
+- ⚠️ 仕様完全性 Level 1 (要件の穴発見) は v1.35.0 `codd elicit` で導入予定
+- ⚠️ 他ドメイン (Mobile / Desktop / CLI / 組み込み / ML) は未実証
+- ⚠️ unrepairable 削減は continuing improvement
 
 ```bash
 pip install codd-dev
@@ -105,9 +117,7 @@ violation が見つかれば deploy gate を block、`--auto-repair` で LLM pat
 3. ユーザー承認 (HITL gate) を経て `src/**` に実装が生成される
 4. 生成中に `tsc` などの type check が落ちれば自動修復ループに入る
 
-人間は「機能要件 + 制約だけ書けば全自動」を体験できる。
-
-### ユースケース 2: Auto-Repair (codd verify --auto-repair)
+### ユースケース 2: Auto-Repair (`codd verify --auto-repair`)
 
 CI で `codd dag verify --auto-repair --max-attempts 10` を回すと:
 
@@ -119,7 +129,7 @@ CI で `codd dag verify --auto-repair --max-attempts 10` を回すと:
 
 `PARTIAL_SUCCESS` でも修復済 patch は反映され、残違反は report に列挙される (透明性)。
 
-### ユースケース 3: User Journey Coherence (codd dag run-journey)
+### ユースケース 3: User Journey Coherence (`codd dag run-journey`)
 
 `docs/design/auth_design.md` の frontmatter にユーザージャーニーを書く:
 
@@ -163,9 +173,9 @@ user_journeys:
 
 ---
 
-## 実証ケーススタディ — 実プロジェクト (LMS Web App)
+## 実証ケーススタディ — 実プロジェクト LMS Web App (Next.js + Prisma + PostgreSQL)
 
-実プロジェクト (LMS アプリ、Next.js + Prisma + PostgreSQL) で `codd verify --auto-repair --max-attempts 10` を実行した結果:
+実プロジェクト (LMS、Web only、単一 viewport 主体) で `codd verify --auto-repair --max-attempts 10` を実行した結果:
 
 ```
 status:                PARTIAL_SUCCESS
@@ -189,18 +199,73 @@ CoDD core 改修:        0 行
 
 C9 environment_coverage は viewport (smartphone_se / desktop_1920) と RBAC role (central_admin / tenant_admin / learner) の axis × variant 全網羅を検証、PASS 達成。
 
+**この実証の射程**:
+- ✅ Next.js + Prisma + TS スタック で auto-repair が PARTIAL_SUCCESS 完走できる
+- ✅ CoDD core 改修 0 行で project特異要件を吸収できる (Generality維持)
+- ⚠️ 1 プロジェクト 1 スタックの dogfooding、他ドメイン (Mobile / Desktop / CLI / 組み込み / ML / Game) は未実証
+- ⚠️ unrepairable=2 が残った = 全自動ではなく semi-automated
+
 ---
 
-## アーキテクチャ — 4 release 進化
+## アーキテクチャ — 4 release 進化と次期計画
+
+### 達成済 (v1.31.0 〜 v1.34.0)
 
 | Release | 到達点 |
 |---------|--------|
 | v1.31.0 | 内側 100% (内部整合性 coherence) — type check repair loop で「手動 type fix」を撲滅 |
-| v1.32.0 | 外側 100% (対象環境網羅性 Coverage Axis) — viewport/RBAC/locale 等を統一抽象で吸収 |
+| v1.32.0 | 外側 100% (対象環境網羅性 Coverage Axis Layer C9) — viewport/RBAC/locale 等を統一抽象で吸収 |
 | v1.33.0 | caveats 解消経路実証 — 実機 CDP run-journey + LLM auto-repair attempt PASS |
-| **v1.34.0** | **full pipeline 完全実証** — 実プロジェクトで auto-repair PARTIAL_SUCCESS 完走 |
+| **v1.34.0** | **full pipeline 完全実証** — Next.js Web 1プロジェクト dogfooding で auto-repair PARTIAL_SUCCESS 完走 |
 
-詳細は [CHANGELOG.md](CHANGELOG.md) で各 release を参照。
+### 次期 (v1.35.0 〜 v2.0.0、Roadmap)
+
+| Release | 計画 |
+|---------|------|
+| **v1.35.0** | **`codd elicit`** — 要件定義書から AI が axis候補 + spec の穴を引き出す Discovery Engine |
+| v1.36.0 | BABOK lexicon (`@codd/lexicon/babok`) 同梱 + multi-formatter (md/json/PR comment) |
+| v1.37.0 | **`codd diff`** — brownfield 用、要件 vs 実装の drift 検知 |
+| v1.38.0 | extract → diff → elicit パイプライン化、brownfield 完全フロー |
+| v1.39.0 | unrepairable 削減 (RepairLoop の repair strategy 汎用化) |
+| v1.40.0 | 他ドメイン dogfooding (Mobile / CLI / embedded etc) |
+| (v2.0.0) | elicit が verify と双方向 loop、北極星「全自動」最接近 |
+
+詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
+
+---
+
+## North Star 接続: `codd elicit` (v1.35.0)
+
+殿の北極星「機能要件 + 制約だけ書けば全自動」の最大ギャップは **「要件が完全であれば」という前提** だった。要件に穴があれば実装にも穴ができ、demo直前事故 (例: 中央管理者でスマホ表示時にナビが消える) として顕在化する。
+
+これを構造解決するのが `codd elicit`:
+
+```bash
+$ codd elicit
+[INFO] Reading docs/requirements/requirements.md (483 lines)
+[INFO] Loading project_lexicon.yaml + @codd/lexicon/babok ...
+[INFO] Generated 27 findings (axis_candidates: 11, spec_holes: 16)
+[OK]   findings.md created
+```
+
+```markdown
+## f-001 [axis_candidate] locale (severity: high)
+**details**: variants: ja_JP, en_US / source: persona記述および要件3.5
+**approved**: yes        ← 殿が記入
+**note**: en_US はphase2
+
+## f-002 [spec_hole] 視聴中ブラウザ閉じたら進捗ロスト? (severity: high)
+**approved**: yes
+```
+
+```bash
+$ codd elicit apply findings.md
+[OK] project_lexicon.yaml updated (11 axis sections appended)
+[OK] docs/requirements/requirements.md updated (TODO追記)
+$ git add -A && git commit -m "feat: apply elicit findings"
+```
+
+人間は **要件レビュー (extract結果)** と **Yes/No 承認 (elicit findings)** だけ。それ以外は AI が動的に発散・収束する。
 
 ---
 
@@ -212,8 +277,9 @@ CoDD core code には以下の hardcode を **禁止** している:
 - 特定 framework / library の literal
 - 特定 domain (Web / Mobile / Desktop / CLI / Backend / Embedded)
 - 特定 viewport 値 (375 / 1920 等) や device 名 (iPhone / Android 等)
+- 特定 axis 種類 (viewport / locale / a11y) や finding kind (axis_candidate / spec_hole) の core 列挙
 
-これらは全て **`project_lexicon.yaml` (プロジェクト固有)** に閉じる。CoDD は generic な violation object としてのみ処理する。
+これらは全て **`project_lexicon.yaml` (プロジェクト固有)** または **lexicon plug-in (`@codd/lexicon/babok` 等)** に閉じる。CoDD は generic な violation/finding object としてのみ処理する。
 
 LLM が「stack 固有の最適 patch」を提案する場合は、その判断は **LLM の知識** に委ね、CoDD core が決めない (= overfitting しない)。
 
