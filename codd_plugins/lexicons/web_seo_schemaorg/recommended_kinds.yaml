@@ -1,0 +1,9 @@
+recommended_kinds:
+  - schemaorg_organization_gap
+  - schemaorg_person_gap
+  - schemaorg_product_gap
+  - schemaorg_article_gap
+  - schemaorg_breadcrumb_list_gap
+  - schemaorg_faq_page_gap
+  - schemaorg_event_gap
+  - schemaorg_video_object_gap

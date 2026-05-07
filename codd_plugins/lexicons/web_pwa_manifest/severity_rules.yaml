@@ -1,0 +1,28 @@
+rules:
+  - when: "axis=manifest members AND coverage=gap"
+    severity: high
+    rationale: "Missing core metadata can make install and launch surfaces ambiguous."
+  - when: "axis=icons AND coverage=gap"
+    severity: high
+    rationale: "Missing icons can degrade install prompts, launch surfaces, and update safety."
+  - when: "axis=display AND coverage=gap"
+    severity: high
+    rationale: "Missing display mode makes installed app presentation undefined."
+  - when: "axis=start_url AND coverage=gap"
+    severity: critical
+    rationale: "Missing start_url can break the expected launch route."
+  - when: "axis=scope AND coverage=gap"
+    severity: high
+    rationale: "Missing navigation scope can make in-app and out-of-scope navigation unclear."
+  - when: "axis=theme_color AND coverage=gap"
+    severity: medium
+    rationale: "Missing theme colors can make app presentation inconsistent."
+  - when: "axis=shortcuts AND coverage=gap"
+    severity: medium
+    rationale: "Missing shortcuts can leave quick-action behavior unspecified when required."
+  - when: "axis=share_target AND coverage=gap"
+    severity: medium
+    rationale: "Missing share_target details can prevent reliable handling of shared data."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit manifest coverage should be confirmed in the actual webmanifest."

@@ -1,0 +1,21 @@
+name: web_forms_html5
+lexicon_name: web_forms_html5
+version: "1.0.0"
+source_url: "https://html.spec.whatwg.org/multipage/forms.html"
+source_version: "HTML Living Standard, last updated 2026-05-07"
+description: "HTML forms coverage axes for controls, form submission, validation, autofill, labeling, grouping, mobile input modality, and file upload."
+observation_dimensions: 9
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "HTML Living Standard: Forms"
+    url: "https://html.spec.whatwg.org/multipage/forms.html"
+    source_version: "Living Standard, last updated 2026-05-07"
+  - title: "HTML Living Standard: The input element"
+    url: "https://html.spec.whatwg.org/multipage/input.html"
+  - title: "HTML Living Standard: The label element"
+    url: "https://html.spec.whatwg.org/multipage/forms.html#the-label-element"

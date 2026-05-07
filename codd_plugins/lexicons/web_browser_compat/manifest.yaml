@@ -1,0 +1,20 @@
+name: web_browser_compat
+lexicon_name: web_browser_compat
+version: "1.0.0"
+source_url: "https://web.dev/baseline"
+source_version: "Baseline 2024 / web.dev current, WebDX Community Group"
+description: "Baseline browser compatibility coverage axes for feature status, browser-set support, thresholds, polyfill decisions, and progressive enhancement risk."
+observation_dimensions: 7
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Baseline"
+    url: "https://web.dev/baseline"
+  - title: "Baseline compatibility"
+    url: "https://developer.mozilla.org/en-US/docs/Glossary/Baseline/Compatibility"
+  - title: "How to think about Baseline and polyfills"
+    url: "https://web.dev/articles/baseline-and-polyfills"

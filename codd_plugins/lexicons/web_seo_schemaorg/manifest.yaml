@@ -1,0 +1,19 @@
+name: web_seo_schemaorg
+lexicon_name: web_seo_schemaorg
+version: "1.0.0"
+source_url: "https://schema.org/docs/full.html"
+source_version: "Schema.org full hierarchy V30.0 (task requested Schema.org 16.0)"
+description: "Schema.org structured data coverage axes for common SEO entity types and page patterns."
+observation_dimensions: 8
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Schema.org full hierarchy"
+    url: "https://schema.org/docs/full.html"
+    source_version: "V30.0 current full hierarchy"
+  - title: "Schema.org"
+    url: "https://schema.org/"

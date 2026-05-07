@@ -1,0 +1,125 @@
+coverage_axes:
+  - axis_type: "Newly available"
+    rationale: "Baseline defines Newly available as support by all of the core browsers, making the feature interoperable."
+    criticality_default: medium
+    variants:
+      - id: "Newly available"
+        label: "Baseline newly available"
+        attributes: {source_literal: "Newly available", coverage_target: "interoperable feature status"}
+        criticality: medium
+      - id: "supported by all of the core browsers"
+        label: "All core browsers support"
+        attributes: {source_literal: "supported by all of the core browsers", coverage_target: "baseline support threshold"}
+        criticality: high
+      - id: "interoperable"
+        label: "Interoperable status"
+        attributes: {source_literal: "interoperable", coverage_target: "cross-browser implementation"}
+        criticality: high
+  - axis_type: "Widely available"
+    rationale: "Baseline defines Widely available as 30 months after the newly interoperable date, when most sites can use the feature without worrying about support."
+    criticality_default: high
+    variants:
+      - id: "Widely available"
+        label: "Baseline widely available"
+        attributes: {source_literal: "Widely available", coverage_target: "mature support status"}
+        criticality: high
+      - id: "30 months"
+        label: "Thirty-month window"
+        attributes: {source_literal: "30 months", coverage_target: "maturity period"}
+        criticality: medium
+      - id: "without worrying about support"
+        label: "Low support concern"
+        attributes: {source_literal: "without worrying about support", coverage_target: "broad-use confidence"}
+        criticality: medium
+  - axis_type: "Limited availability"
+    rationale: "Baseline says a feature has Limited availability when it is not yet supported across browsers."
+    criticality_default: high
+    variants:
+      - id: "Limited availability"
+        label: "Limited availability status"
+        attributes: {source_literal: "Limited availability", coverage_target: "non-baseline feature status"}
+        criticality: high
+      - id: "not yet supported across browsers"
+        label: "Support gap"
+        attributes: {source_literal: "not yet supported across browsers", coverage_target: "cross-browser unsupported status"}
+        criticality: high
+      - id: "not Baseline"
+        label: "Non-baseline status"
+        attributes: {source_literal: "not Baseline", coverage_target: "outside baseline"}
+        criticality: high
+  - axis_type: "core browser set"
+    rationale: "Baseline identifies a core browser set for judging feature availability."
+    criticality_default: high
+    variants:
+      - id: "core browser set"
+        label: "Core browser set"
+        attributes: {source_literal: "core browser set", coverage_target: "browser population for baseline status"}
+        criticality: high
+      - id: "desktop and Android"
+        label: "Desktop and Android coverage"
+        attributes: {source_literal: "desktop and Android", coverage_target: "desktop/mobile pairing"}
+        criticality: medium
+      - id: "macOS and iOS"
+        label: "Desktop and iOS coverage"
+        attributes: {source_literal: "macOS and iOS", coverage_target: "desktop/mobile pairing"}
+        criticality: medium
+  - axis_type: "Baseline threshold"
+    rationale: "Baseline guidance recommends choosing a Baseline threshold using user support data and yearly Baseline feature sets."
+    criticality_default: medium
+    variants:
+      - id: "Baseline threshold"
+        label: "Baseline target"
+        attributes: {source_literal: "Baseline threshold", coverage_target: "project support target"}
+        criticality: medium
+      - id: "Baseline 2025"
+        label: "Yearly Baseline set"
+        attributes: {source_literal: "Baseline 2025", coverage_target: "yearly feature set"}
+        criticality: info
+      - id: "Baseline 2024"
+        label: "Yearly Baseline set"
+        attributes: {source_literal: "Baseline 2024", coverage_target: "yearly feature set"}
+        criticality: medium
+      - id: "user support data"
+        label: "Audience support data"
+        attributes: {source_literal: "user support data", coverage_target: "audience-specific compatibility evidence"}
+        criticality: high
+  - axis_type: "polyfill"
+    rationale: "Baseline polyfill guidance says polyfills evaluate feature support and attempt to provide missing functionality, but add performance, accessibility, and fidelity costs."
+    criticality_default: medium
+    variants:
+      - id: "polyfill"
+        label: "Polyfill decision"
+        attributes: {source_literal: "polyfill", coverage_target: "compatibility fallback"}
+        criticality: medium
+      - id: "performance"
+        label: "Performance cost"
+        attributes: {source_literal: "performance", coverage_target: "polyfill runtime cost"}
+        criticality: medium
+      - id: "accessibility"
+        label: "Accessibility cost"
+        attributes: {source_literal: "accessibility", coverage_target: "polyfill accessibility risk"}
+        criticality: high
+      - id: "faithfully reproduce"
+        label: "Implementation fidelity"
+        attributes: {source_literal: "faithfully reproduce", coverage_target: "polyfill behavior fidelity"}
+        criticality: high
+  - axis_type: "progressive enhancement"
+    rationale: "Baseline guidance classifies unsupported feature impact as Enhancement, Additive, or Critical to decide whether a polyfill or fallback is needed."
+    criticality_default: high
+    variants:
+      - id: "Enhancement"
+        label: "Enhancement impact"
+        attributes: {source_literal: "Enhancement", coverage_target: "non-breaking progressive layer"}
+        criticality: info
+      - id: "Additive"
+        label: "Additive impact"
+        attributes: {source_literal: "Additive", coverage_target: "minor compatibility impact"}
+        criticality: medium
+      - id: "Critical"
+        label: "Critical impact"
+        attributes: {source_literal: "Critical", coverage_target: "broken experience risk"}
+        criticality: high
+      - id: "unsupported"
+        label: "Unsupported browser behavior"
+        attributes: {source_literal: "unsupported", coverage_target: "fallback requirement"}
+        criticality: high

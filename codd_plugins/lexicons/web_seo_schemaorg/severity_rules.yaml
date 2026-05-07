@@ -1,0 +1,28 @@
+rules:
+  - when: "axis=Organization AND coverage=gap"
+    severity: high
+    rationale: "Organization structured data gaps can make publisher, business, and identity metadata incomplete."
+  - when: "axis=Person AND coverage=gap"
+    severity: medium
+    rationale: "Person structured data gaps can hide author or profile identity."
+  - when: "axis=Product AND coverage=gap"
+    severity: high
+    rationale: "Product structured data gaps can make item identity and commerce metadata incomplete."
+  - when: "axis=Article AND coverage=gap"
+    severity: high
+    rationale: "Article structured data gaps can make editorial content metadata incomplete."
+  - when: "axis=BreadcrumbList AND coverage=gap"
+    severity: medium
+    rationale: "BreadcrumbList gaps can make site hierarchy unavailable to structured-data consumers."
+  - when: "axis=FAQPage AND coverage=gap"
+    severity: medium
+    rationale: "FAQPage gaps can make question and answer content ambiguous."
+  - when: "axis=Event AND coverage=gap"
+    severity: medium
+    rationale: "Event gaps can leave event entities and subtype intent unspecified."
+  - when: "axis=VideoObject AND coverage=gap"
+    severity: medium
+    rationale: "VideoObject gaps can leave video media metadata unspecified."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit Schema.org coverage should be confirmed against the actual structured-data payload."

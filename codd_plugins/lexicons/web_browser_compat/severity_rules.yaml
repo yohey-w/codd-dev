@@ -1,0 +1,25 @@
+rules:
+  - when: "axis=Newly available AND coverage=gap"
+    severity: medium
+    rationale: "Newly available features need explicit audience or support-threshold handling."
+  - when: "axis=Widely available AND coverage=gap"
+    severity: medium
+    rationale: "Widely available status should be stated when compatibility confidence is assumed."
+  - when: "axis=Limited availability AND coverage=gap"
+    severity: high
+    rationale: "Limited availability can produce unsupported browser behavior if not addressed."
+  - when: "axis=core browser set AND coverage=gap"
+    severity: high
+    rationale: "Baseline status cannot be evaluated without the browser set boundary."
+  - when: "axis=Baseline threshold AND coverage=gap"
+    severity: medium
+    rationale: "A project target year or user support threshold is needed for compatibility decisions."
+  - when: "axis=polyfill AND coverage=gap"
+    severity: medium
+    rationale: "Polyfill decisions must account for support, performance, accessibility, and fidelity costs."
+  - when: "axis=progressive enhancement AND coverage=gap"
+    severity: high
+    rationale: "Unsupported feature impact must be classified before using limited availability features."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit compatibility assumptions should be made explicit."

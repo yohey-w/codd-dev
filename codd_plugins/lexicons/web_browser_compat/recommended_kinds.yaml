@@ -1,0 +1,8 @@
+recommended_kinds:
+  - browser_compat_newly_available_gap
+  - browser_compat_widely_available_gap
+  - browser_compat_limited_availability_gap
+  - browser_compat_core_browser_set_gap
+  - browser_compat_baseline_threshold_gap
+  - browser_compat_polyfill_gap
+  - browser_compat_progressive_enhancement_gap

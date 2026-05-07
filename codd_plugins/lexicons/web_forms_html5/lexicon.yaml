@@ -1,0 +1,221 @@
+coverage_axes:
+  - axis_type: "input element"
+    rationale: "HTML Forms defines the input element as a typed data field and lists states for the type attribute such as text, email, checkbox, radio, file, and submit."
+    criticality_default: high
+    variants:
+      - id: "input"
+        label: "Input element"
+        attributes: {source_literal: "input", coverage_target: "form control declaration"}
+        criticality: high
+      - id: "type"
+        label: "Control type attribute"
+        attributes: {source_literal: "type", coverage_target: "typed control behavior"}
+        criticality: high
+      - id: "text"
+        label: "Text state"
+        attributes: {source_literal: "text", coverage_target: "plain text input"}
+        criticality: medium
+      - id: "email"
+        label: "Email state"
+        attributes: {source_literal: "email", coverage_target: "email address input"}
+        criticality: medium
+      - id: "checkbox"
+        label: "Checkbox state"
+        attributes: {source_literal: "checkbox", coverage_target: "multiple boolean selection"}
+        criticality: medium
+      - id: "radio"
+        label: "Radio Button state"
+        attributes: {source_literal: "radio", coverage_target: "exclusive option group"}
+        criticality: medium
+      - id: "textarea"
+        label: "Textarea element"
+        attributes: {source_literal: "textarea", coverage_target: "multiline text control"}
+        criticality: medium
+  - axis_type: "form element"
+    rationale: "HTML Forms describes configuring a form to communicate with a server through form, action, method, and enctype."
+    criticality_default: critical
+    variants:
+      - id: "form"
+        label: "Form element"
+        attributes: {source_literal: "form", coverage_target: "submission owner"}
+        criticality: critical
+      - id: "action"
+        label: "Submission URL"
+        attributes: {source_literal: "action", coverage_target: "server endpoint"}
+        criticality: critical
+      - id: "method"
+        label: "Submission method"
+        attributes: {source_literal: "method", coverage_target: "submission HTTP method"}
+        criticality: high
+      - id: "enctype"
+        label: "Submission encoding"
+        attributes: {source_literal: "enctype", coverage_target: "entry list encoding type"}
+        criticality: high
+      - id: "name"
+        label: "Submission name"
+        attributes: {source_literal: "name", coverage_target: "submitted data key"}
+        criticality: critical
+  - axis_type: "client-side form validation"
+    rationale: "HTML Forms names client-side form validation and defines required, maxlength, minlength, pattern, min, max, step, checkValidity(), reportValidity(), and setCustomValidity()."
+    criticality_default: high
+    variants:
+      - id: "required"
+        label: "Required control"
+        attributes: {source_literal: "required", coverage_target: "missing value prevention"}
+        criticality: high
+      - id: "maxlength"
+        label: "Maximum text length"
+        attributes: {source_literal: "maxlength", coverage_target: "upper bound for text input"}
+        criticality: medium
+      - id: "pattern"
+        label: "Pattern constraint"
+        attributes: {source_literal: "pattern", coverage_target: "regular expression validation"}
+        criticality: medium
+      - id: "min"
+        label: "Minimum value"
+        attributes: {source_literal: "min", coverage_target: "lower bound constraint"}
+        criticality: medium
+      - id: "max"
+        label: "Maximum value"
+        attributes: {source_literal: "max", coverage_target: "upper bound constraint"}
+        criticality: medium
+      - id: "step"
+        label: "Step value"
+        attributes: {source_literal: "step", coverage_target: "granularity constraint"}
+        criticality: medium
+      - id: "checkValidity()"
+        label: "Validity check API"
+        attributes: {source_literal: "checkValidity()", coverage_target: "programmatic validation"}
+        criticality: high
+      - id: "reportValidity()"
+        label: "Validity reporting API"
+        attributes: {source_literal: "reportValidity()", coverage_target: "interactive validation reporting"}
+        criticality: high
+  - axis_type: "autocomplete"
+    rationale: "HTML Forms contains a section for enabling client-side automatic filling of form controls and the input element defines autocomplete as a hint for form autofill."
+    criticality_default: medium
+    variants:
+      - id: "autocomplete"
+        label: "Autocomplete attribute"
+        attributes: {source_literal: "autocomplete", coverage_target: "form autofill hint"}
+        criticality: medium
+      - id: "autofill"
+        label: "Form autofill feature"
+        attributes: {source_literal: "autofill", coverage_target: "automatic filling behavior"}
+        criticality: medium
+      - id: "autofill field name"
+        label: "Autofill field name"
+        attributes: {source_literal: "autofill field name", coverage_target: "field semantic token"}
+        criticality: medium
+      - id: "on"
+        label: "Autocomplete on state"
+        attributes: {source_literal: "on", coverage_target: "autofill allowed"}
+        criticality: info
+      - id: "off"
+        label: "Autocomplete off state"
+        attributes: {source_literal: "off", coverage_target: "autofill disabled"}
+        criticality: info
+  - axis_type: "label element"
+    rationale: "HTML Forms says the label element represents a caption that can be associated with a labeled control using for or by nesting the control."
+    criticality_default: high
+    variants:
+      - id: "label"
+        label: "Label element"
+        attributes: {source_literal: "label", coverage_target: "caption for a control"}
+        criticality: high
+      - id: "for"
+        label: "For attribute"
+        attributes: {source_literal: "for", coverage_target: "explicit labeled control association"}
+        criticality: high
+      - id: "labeled control"
+        label: "Labeled control"
+        attributes: {source_literal: "labeled control", coverage_target: "associated form control"}
+        criticality: high
+      - id: "labelable element"
+        label: "Labelable element"
+        attributes: {source_literal: "labelable element", coverage_target: "valid label target"}
+        criticality: medium
+  - axis_type: "fieldset"
+    rationale: "HTML Forms uses fieldset to group controls and legend as the title of such a group."
+    criticality_default: medium
+    variants:
+      - id: "fieldset"
+        label: "Fieldset element"
+        attributes: {source_literal: "fieldset", coverage_target: "grouped controls"}
+        criticality: medium
+      - id: "legend"
+        label: "Legend element"
+        attributes: {source_literal: "legend", coverage_target: "group title"}
+        criticality: medium
+      - id: "radio"
+        label: "Radio group"
+        attributes: {source_literal: "radio", coverage_target: "exclusive option group"}
+        criticality: medium
+  - axis_type: "inputmode"
+    rationale: "HTML Forms includes improving the user experience on mobile devices and distinguishes input modality from field type and autofill field name."
+    criticality_default: medium
+    variants:
+      - id: "inputmode"
+        label: "Input modality hint"
+        attributes: {source_literal: "inputmode", coverage_target: "virtual keyboard modality"}
+        criticality: medium
+      - id: "input modality"
+        label: "Input modality concept"
+        attributes: {source_literal: "input modality", coverage_target: "device input hint"}
+        criticality: medium
+      - id: "tel"
+        label: "Telephone state"
+        attributes: {source_literal: "tel", coverage_target: "telephone input modality"}
+        criticality: info
+      - id: "email"
+        label: "Email state"
+        attributes: {source_literal: "email", coverage_target: "email input modality"}
+        criticality: info
+  - axis_type: "form submission"
+    rationale: "HTML Forms describes form submission with action, method, enctype, submitted control names, submit buttons, and submitter-specific form attributes."
+    criticality_default: critical
+    variants:
+      - id: "form submission"
+        label: "Submission process"
+        attributes: {source_literal: "form submission", coverage_target: "data transfer to server"}
+        criticality: critical
+      - id: "submit"
+        label: "Submit Button state"
+        attributes: {source_literal: "submit", coverage_target: "submission trigger"}
+        criticality: critical
+      - id: "formaction"
+        label: "Submitter action override"
+        attributes: {source_literal: "formaction", coverage_target: "button-specific URL"}
+        criticality: high
+      - id: "formenctype"
+        label: "Submitter encoding override"
+        attributes: {source_literal: "formenctype", coverage_target: "button-specific encoding"}
+        criticality: high
+      - id: "formmethod"
+        label: "Submitter method override"
+        attributes: {source_literal: "formmethod", coverage_target: "button-specific method"}
+        criticality: high
+      - id: "formnovalidate"
+        label: "Validation bypass"
+        attributes: {source_literal: "formnovalidate", coverage_target: "submission without validation"}
+        criticality: medium
+  - axis_type: "File Upload state"
+    rationale: "The HTML input element lists File Upload state (type=file), accept, multiple, and files for selecting zero or more files."
+    criticality_default: high
+    variants:
+      - id: "file"
+        label: "File Upload state"
+        attributes: {source_literal: "file", coverage_target: "file selection control"}
+        criticality: high
+      - id: "accept"
+        label: "Accepted file type hint"
+        attributes: {source_literal: "accept", coverage_target: "expected file type"}
+        criticality: medium
+      - id: "multiple"
+        label: "Multiple files flag"
+        attributes: {source_literal: "multiple", coverage_target: "multiple file values"}
+        criticality: medium
+      - id: "FileList"
+        label: "Files IDL value"
+        attributes: {source_literal: "FileList", coverage_target: "selected files API"}
+        criticality: high
