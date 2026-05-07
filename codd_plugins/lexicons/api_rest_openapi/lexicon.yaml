@@ -1,0 +1,261 @@
+coverage_axes:
+  - axis_type: "openapi"
+    rationale: "OpenAPI 3.1 requires the root OpenAPI document to contain the openapi version field and at least one of paths, components, or webhooks."
+    criticality_default: high
+    variants:
+      - id: "openapi"
+        label: "OpenAPI version field"
+        attributes: {source: "OAS 3.1.0", coverage_target: "document version"}
+        criticality: high
+      - id: "paths"
+        label: "Paths object"
+        attributes: {source: "OAS 3.1.0", coverage_target: "resource operations"}
+        criticality: high
+      - id: "components"
+        label: "Components object"
+        attributes: {source: "OAS 3.1.0", coverage_target: "reusable definitions"}
+        criticality: medium
+      - id: "webhooks"
+        label: "Webhooks object"
+        attributes: {source: "OAS 3.1.0", coverage_target: "incoming asynchronous calls"}
+        criticality: medium
+  - axis_type: "info.version"
+    rationale: "The Info Object includes version as REQUIRED metadata for the version of the OpenAPI document."
+    criticality_default: medium
+    variants:
+      - id: "info.version"
+        label: "Info Object version"
+        attributes: {source: "OAS 3.1.0", coverage_target: "API contract versioning"}
+        criticality: medium
+  - axis_type: "problem_details"
+    rationale: "RFC 7807 defines problem details and the application/problem+json media type for machine-readable HTTP API error responses."
+    criticality_default: high
+    variants:
+      - id: "application/problem+json"
+        label: "Problem details JSON media type"
+        attributes: {source: "RFC 7807", coverage_target: "error representation"}
+        criticality: high
+      - id: "type"
+        label: "Problem type URI"
+        attributes: {source: "RFC 7807", coverage_target: "error classification"}
+        criticality: medium
+      - id: "status"
+        label: "Problem status member"
+        attributes: {source: "RFC 7807", coverage_target: "HTTP status alignment"}
+        criticality: high
+  - axis_type: "query"
+    rationale: "OpenAPI Parameter Object locations include query parameters, which are commonly used to describe limit, offset, cursor, or page controls for paginated resources."
+    criticality_default: medium
+    variants:
+      - id: "query"
+        label: "Query parameter location"
+        attributes: {source: "OAS 3.1.0", coverage_target: "pagination input"}
+        criticality: medium
+      - id: "limit"
+        label: "Limit query parameter"
+        attributes: {source: "OAS 3.1.0 examples", coverage_target: "page size"}
+        criticality: medium
+      - id: "links"
+        label: "Response links for page traversal"
+        attributes: {source: "OAS 3.1.0", coverage_target: "next-page navigation"}
+        criticality: medium
+  - axis_type: "security"
+    rationale: "OpenAPI Security Requirement Objects and Security Scheme Objects define operation security, including HTTP auth, API keys, mutual TLS, OAuth2, and OpenID Connect."
+    criticality_default: critical
+    variants:
+      - id: "security"
+        label: "Security requirement"
+        attributes: {source: "OAS 3.1.0", coverage_target: "operation auth requirement"}
+        criticality: critical
+      - id: "securitySchemes"
+        label: "Reusable security schemes"
+        attributes: {source: "OAS 3.1.0", coverage_target: "auth scheme definition"}
+        criticality: critical
+      - id: "Authorization"
+        label: "HTTP Authorization header"
+        attributes: {source: "RFC 9110", coverage_target: "credential transport"}
+        criticality: critical
+  - axis_type: "schemas"
+    rationale: "OpenAPI 3.1 Schema Objects are based on JSON Schema 2020-12 and describe request, response, and reusable data contracts."
+    criticality_default: high
+    variants:
+      - id: "schemas"
+        label: "Components schemas"
+        attributes: {source: "OAS 3.1.0", coverage_target: "shared data model"}
+        criticality: high
+      - id: "schema"
+        label: "Schema Object"
+        attributes: {source: "OAS 3.1.0", coverage_target: "payload shape"}
+        criticality: high
+      - id: "jsonSchemaDialect"
+        label: "JSON Schema dialect"
+        attributes: {source: "OAS 3.1.0", coverage_target: "schema semantics"}
+        criticality: medium
+  - axis_type: "content"
+    rationale: "OpenAPI Media Type Objects describe request and response content, while HTTP content negotiation uses fields such as Accept and Content-Type."
+    criticality_default: high
+    variants:
+      - id: "content"
+        label: "Operation content map"
+        attributes: {source: "OAS 3.1.0", coverage_target: "media type contract"}
+        criticality: high
+      - id: "Accept"
+        label: "HTTP Accept field"
+        attributes: {source: "RFC 9110", coverage_target: "response representation selection"}
+        criticality: medium
+      - id: "Content-Type"
+        label: "HTTP Content-Type field"
+        attributes: {source: "RFC 9110", coverage_target: "request representation declaration"}
+        criticality: high
+  - axis_type: "responses"
+    rationale: "OpenAPI Responses Objects map HTTP status codes to Response Objects, including default responses and patterned status code ranges."
+    criticality_default: high
+    variants:
+      - id: "responses"
+        label: "Responses object"
+        attributes: {source: "OAS 3.1.0", coverage_target: "status-code response map"}
+        criticality: high
+      - id: "default"
+        label: "Default response"
+        attributes: {source: "OAS 3.1.0", coverage_target: "fallback response"}
+        criticality: medium
+      - id: "4XX"
+        label: "Client error response range"
+        attributes: {source: "OAS 3.1.0", coverage_target: "client error family"}
+        criticality: high
+      - id: "5XX"
+        label: "Server error response range"
+        attributes: {source: "OAS 3.1.0", coverage_target: "server error family"}
+        criticality: high
+  - axis_type: "links"
+    rationale: "OpenAPI Link Objects define design-time links for responses using operationId, operationRef, parameters, requestBody, and runtime expressions."
+    criticality_default: medium
+    variants:
+      - id: "links"
+        label: "Response links"
+        attributes: {source: "OAS 3.1.0", coverage_target: "hypermedia relationship"}
+        criticality: medium
+      - id: "operationId"
+        label: "Linked operation identifier"
+        attributes: {source: "OAS 3.1.0", coverage_target: "operation target"}
+        criticality: medium
+      - id: "operationRef"
+        label: "Linked operation reference"
+        attributes: {source: "OAS 3.1.0", coverage_target: "external or relative operation target"}
+        criticality: medium
+  - axis_type: "idempotent"
+    rationale: "RFC 9110 defines idempotent methods as requests whose repeated intended effect is the same as a single request, with PUT, DELETE, and safe methods called out."
+    criticality_default: medium
+    variants:
+      - id: "idempotent"
+        label: "Idempotent method semantics"
+        attributes: {source: "RFC 9110", coverage_target: "retry safety"}
+        criticality: medium
+      - id: "PUT"
+        label: "PUT method"
+        attributes: {source: "RFC 9110", coverage_target: "replace semantics"}
+        criticality: medium
+      - id: "DELETE"
+        label: "DELETE method"
+        attributes: {source: "RFC 9110", coverage_target: "delete retry semantics"}
+        criticality: medium
+  - axis_type: "429"
+    rationale: "RFC 6585 defines 429 Too Many Requests for rate limiting and permits Retry-After to tell clients how long to wait."
+    criticality_default: medium
+    variants:
+      - id: "429"
+        label: "429 Too Many Requests"
+        attributes: {source: "RFC 6585", coverage_target: "rate limit status"}
+        criticality: medium
+      - id: "Retry-After"
+        label: "Retry-After field"
+        attributes: {source: "RFC 6585", coverage_target: "retry delay"}
+        criticality: medium
+  - axis_type: "Access-Control-Allow-Origin"
+    rationale: "Fetch defines the CORS protocol as HTTP headers that allow responses to be shared cross-origin, including preflight and credential behavior."
+    criticality_default: high
+    variants:
+      - id: "Origin"
+        label: "Origin request header"
+        attributes: {source: "Fetch CORS", coverage_target: "request origin"}
+        criticality: high
+      - id: "Access-Control-Allow-Origin"
+        label: "Allowed response origin"
+        attributes: {source: "Fetch CORS", coverage_target: "response sharing policy"}
+        criticality: high
+      - id: "Access-Control-Allow-Credentials"
+        label: "Credentialed CORS response"
+        attributes: {source: "Fetch CORS", coverage_target: "credential sharing policy"}
+        criticality: critical
+      - id: "Access-Control-Allow-Methods"
+        label: "Preflight allowed methods"
+        attributes: {source: "Fetch CORS", coverage_target: "method preflight policy"}
+        criticality: medium
+      - id: "Access-Control-Allow-Headers"
+        label: "Preflight allowed headers"
+        attributes: {source: "Fetch CORS", coverage_target: "header preflight policy"}
+        criticality: medium
+  - axis_type: "Cache-Control"
+    rationale: "RFC 9111 defines HTTP cache response directives and validators such as Cache-Control, Expires, ETag, Last-Modified, and 304 handling."
+    criticality_default: medium
+    variants:
+      - id: "Cache-Control"
+        label: "Cache-Control field"
+        attributes: {source: "RFC 9111", coverage_target: "cache directives"}
+        criticality: medium
+      - id: "ETag"
+        label: "Entity tag validator"
+        attributes: {source: "RFC 9111", coverage_target: "validation"}
+        criticality: medium
+      - id: "304"
+        label: "304 Not Modified"
+        attributes: {source: "RFC 9111", coverage_target: "validation response"}
+        criticality: medium
+  - axis_type: "parameters"
+    rationale: "OpenAPI Parameter Objects define path, query, header, or cookie parameters with style, explode, required, schema, examples, and content."
+    criticality_default: high
+    variants:
+      - id: "parameters"
+        label: "Parameter definitions"
+        attributes: {source: "OAS 3.1.0", coverage_target: "input contract"}
+        criticality: high
+      - id: "path"
+        label: "Path parameter location"
+        attributes: {source: "OAS 3.1.0", coverage_target: "resource identifier"}
+        criticality: high
+      - id: "query"
+        label: "Query parameter location"
+        attributes: {source: "OAS 3.1.0", coverage_target: "query input"}
+        criticality: medium
+      - id: "header"
+        label: "Header parameter location"
+        attributes: {source: "OAS 3.1.0", coverage_target: "header input"}
+        criticality: medium
+      - id: "cookie"
+        label: "Cookie parameter location"
+        attributes: {source: "OAS 3.1.0", coverage_target: "cookie input"}
+        criticality: medium
+      - id: "style"
+        label: "Parameter serialization style"
+        attributes: {source: "OAS 3.1.0", coverage_target: "serialization"}
+        criticality: medium
+      - id: "schema"
+        label: "Parameter schema"
+        attributes: {source: "OAS 3.1.0", coverage_target: "validation"}
+        criticality: high
+  - axis_type: "callbacks"
+    rationale: "OpenAPI Callback Objects and the root webhooks field describe asynchronous HTTP operations initiated after an API call or received by the API provider."
+    criticality_default: medium
+    variants:
+      - id: "callbacks"
+        label: "Callback object"
+        attributes: {source: "OAS 3.1.0", coverage_target: "outbound async callback"}
+        criticality: medium
+      - id: "webhooks"
+        label: "Webhooks map"
+        attributes: {source: "OAS 3.1.0", coverage_target: "inbound async request"}
+        criticality: medium
+      - id: "$request.query.queryUrl"
+        label: "Callback runtime expression"
+        attributes: {source: "OAS 3.1.0", coverage_target: "dynamic callback URL"}
+        criticality: high
