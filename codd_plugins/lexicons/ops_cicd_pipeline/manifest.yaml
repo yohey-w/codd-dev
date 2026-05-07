@@ -1,7 +1,7 @@
 name: ops_cicd_pipeline
 lexicon_name: ops_cicd_pipeline
 version: "1.0.0"
-source_url: "https://opengitops.dev/"
+source_url: "https://www.cncf.io/projects/argo/"
 source_version: "OpenGitOps Principles v1.0.0 + CNCF GitOps project context"
 description: "GitOps-oriented CI/CD pipeline coverage axes for declarative state, versioned history, automated pull, reconciliation, drift, rollback, and observation."
 observation_dimensions: 7
@@ -17,4 +17,3 @@ references:
     source_version: "v1.0.0"
   - title: "CNCF Argo project context"
     url: "https://www.cncf.io/projects/argo/"
-
