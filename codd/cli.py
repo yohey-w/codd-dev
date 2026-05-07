@@ -2973,6 +2973,130 @@ def coverage_report_cmd(
     click.echo(f"Report: {_display_path(output_path, project_root)}")
 
 
+@coverage.command("check")
+@click.option(
+    "--lexicons",
+    default="all",
+    show_default=True,
+    help="Lexicons to include: all or a comma-separated id list.",
+)
+@click.option("--path", "project_path", default=".", show_default=True, help="Project root directory")
+@click.option(
+    "--threshold",
+    "global_threshold",
+    type=float,
+    default=None,
+    help="Global covered_text_match_pct threshold override.",
+)
+@click.option(
+    "--threshold-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="External threshold YAML file.",
+)
+@click.option(
+    "--format",
+    "format_name",
+    type=click.Choice(["human", "json", "md"]),
+    default="human",
+    show_default=True,
+    help="Output format.",
+)
+@click.option("--with-ai", is_flag=True, default=False, help="Use AI-backed elicit coverage mode.")
+@click.option("--ai-cmd", default=None, help="Override AI CLI command for --with-ai.")
+@click.option("--exit-zero", is_flag=True, default=False, help="Always exit 0 for threshold violations.")
+def coverage_check_cmd(
+    lexicons: str,
+    project_path: str,
+    global_threshold: float | None,
+    threshold_file: Path | None,
+    format_name: str,
+    with_ai: bool,
+    ai_cmd: str | None,
+    exit_zero: bool,
+) -> None:
+    """Run a lexicon coverage threshold gate."""
+    from dataclasses import asdict
+
+    from codd.lexicon_cli.formatters.json_fmt import to_json
+    from codd.lexicon_cli.reporter import CoverageReporter
+    from codd.lexicon_cli.threshold import ThresholdConfig, evaluate, load_thresholds
+
+    project_root = Path(project_path).resolve()
+    try:
+        report = CoverageReporter(project_root).build(lexicons, with_ai=with_ai, ai_command=ai_cmd)
+        config = load_thresholds(threshold_file or _default_threshold_path(project_root))
+        if global_threshold is not None:
+            config = ThresholdConfig(default_pct=global_threshold)
+        violations = evaluate(report, config)
+    except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(2)
+
+    payload = {
+        "status": "fail" if violations else "pass",
+        "thresholds": asdict(config),
+        "totals": report.totals,
+        "violations": [asdict(violation) for violation in violations],
+    }
+    if format_name == "json":
+        click.echo(to_json(payload), nl=False)
+    elif format_name == "md":
+        click.echo(_format_coverage_check_md(payload), nl=False)
+    else:
+        click.echo(_format_coverage_check_human(payload), nl=False)
+
+    raise SystemExit(0 if exit_zero or not violations else 1)
+
+
+def _default_threshold_path(project_root: Path) -> Path | None:
+    codd_dir = find_codd_dir(project_root)
+    return codd_dir / "codd.yaml" if codd_dir is not None else None
+
+
+def _format_coverage_check_human(payload: dict[str, Any]) -> str:
+    status = str(payload["status"]).upper()
+    totals = payload["totals"]
+    lines = [
+        f"Coverage check {status}",
+        f"Axes: {totals['covered']}/{totals['axes']} covered ({totals['covered_pct']:.2f}%)",
+    ]
+    violations = payload["violations"]
+    if violations:
+        lines.append("Violations:")
+        for violation in violations:
+            axis = violation["axis"] or "<overall>"
+            lines.append(
+                f"  - {violation['lexicon_id']} {axis}: "
+                f"{violation['observed_pct']:.2f}% < {violation['required_pct']:.2f}%"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _format_coverage_check_md(payload: dict[str, Any]) -> str:
+    totals = payload["totals"]
+    lines = [
+        "# Coverage Threshold Check",
+        "",
+        f"Status: **{str(payload['status']).upper()}**",
+        f"Axes: {totals['covered']}/{totals['axes']} covered ({totals['covered_pct']:.2f}%)",
+        "",
+        "| Lexicon | Axis | Observed | Required |",
+        "| --- | --- | ---: | ---: |",
+    ]
+    violations = payload["violations"]
+    if violations:
+        for violation in violations:
+            axis = violation["axis"] or "<overall>"
+            lines.append(
+                f"| {violation['lexicon_id']} | {axis} | "
+                f"{violation['observed_pct']:.2f}% | {violation['required_pct']:.2f}% |"
+            )
+    else:
+        lines.append("| - | - | - | - |")
+    return "\n".join(lines) + "\n"
+
+
 @main.command("deploy")
 @click.option("--target", default=None, help="Deploy target name from deploy.yaml")
 @click.option(

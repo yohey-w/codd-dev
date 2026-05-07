@@ -4,6 +4,20 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-05-08 — Lexicon coverage CI gate (cmd_443)
+
+### Added
+
+- Added `codd coverage check` for threshold-based lexicon coverage gates with human, JSON, and Markdown output.
+- Added configurable `coverage.thresholds` in `codd.yaml` with global, per-lexicon, and per-axis thresholds.
+- Added GitHub Actions workflow for coverage matrix artifacts, PR comments, and threshold-gated CI.
+
+### Quality Metrics
+
+- **pytest**: 2663 PASS / 0 FAIL / 0 SKIP
+- **Generality Gate**: `codd/lexicon_cli/threshold.py`, `codd/cli.py`, and workflow contain zero specific lexicon literals
+- **Compatibility**: default threshold is `0`, so existing projects have no enforcement until they opt in
+
 ## [2.0.0] - 2026-05-08 — Lexicon-Driven Completeness milestone (cmd_441)
 
 CoDD v2.0.0 marks a positioning shift, not just a version bump.

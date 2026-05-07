@@ -41,3 +41,10 @@ verify:
   typecheck_command: ".venv/bin/mypy codd/"
   test_command: ".venv/bin/pytest --tb=short -q"
   report_output: "docs/test/verify_report.md"
+
+coverage:
+  thresholds:
+    default:
+      covered_text_match_pct: 0
+    per_lexicon: {}
+    per_axis: {}
