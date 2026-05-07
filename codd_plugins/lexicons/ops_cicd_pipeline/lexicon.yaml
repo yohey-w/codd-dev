@@ -1,0 +1,114 @@
+coverage_axes:
+  - axis_type: "declarative_config"
+    rationale: "OpenGitOps requires desired state to be expressed declaratively so the managed system can be reproduced and compared."
+    criticality_default: critical
+    variants:
+      - id: "Declarative"
+        label: "Declarative desired state"
+        attributes: {source: "OpenGitOps Principles", source_literal: "Declarative"}
+        criticality: critical
+      - id: "desired state"
+        label: "Desired state"
+        attributes: {source: "OpenGitOps Principles", coverage_target: "system target state"}
+        criticality: critical
+      - id: "configuration as code"
+        label: "Configuration as code"
+        attributes: {source: "OpenGitOps home", coverage_target: "declarative infrastructure expression"}
+        criticality: high
+  - axis_type: "version_control"
+    rationale: "OpenGitOps requires desired state to be stored in a versioned and immutable way with complete version history."
+    criticality_default: critical
+    variants:
+      - id: "Versioned and Immutable"
+        label: "Versioned immutable state"
+        attributes: {source: "OpenGitOps Principles", source_literal: "Versioned and Immutable"}
+        criticality: critical
+      - id: "complete version history"
+        label: "Complete version history"
+        attributes: {source: "OpenGitOps Principles", coverage_target: "audit history"}
+        criticality: high
+      - id: "reviewed change"
+        label: "Reviewed deployment change"
+        attributes: {source: "GitOps practice", coverage_target: "approval and traceability"}
+        criticality: high
+  - axis_type: "automated_apply"
+    rationale: "OpenGitOps requires software agents to automatically pull desired state declarations from the source."
+    criticality_default: high
+    variants:
+      - id: "Pulled Automatically"
+        label: "Pulled automatically"
+        attributes: {source: "OpenGitOps Principles", source_literal: "Pulled Automatically"}
+        criticality: high
+      - id: "software agents"
+        label: "Software agents"
+        attributes: {source: "OpenGitOps Principles", coverage_target: "automated actor"}
+        criticality: high
+      - id: "source"
+        label: "Desired-state source"
+        attributes: {source: "OpenGitOps Principles", coverage_target: "pull source"}
+        criticality: medium
+  - axis_type: "continuous_reconciliation"
+    rationale: "OpenGitOps requires agents to continuously observe actual state and apply desired state."
+    criticality_default: high
+    variants:
+      - id: "Continuously Reconciled"
+        label: "Continuous reconciliation"
+        attributes: {source: "OpenGitOps Principles", source_literal: "Continuously Reconciled"}
+        criticality: high
+      - id: "actual system state"
+        label: "Actual state observation"
+        attributes: {source: "OpenGitOps Principles", coverage_target: "runtime state observation"}
+        criticality: high
+      - id: "apply the desired state"
+        label: "Apply desired state"
+        attributes: {source: "OpenGitOps Principles", coverage_target: "convergence action"}
+        criticality: high
+  - axis_type: "drift_detection"
+    rationale: "GitOps review needs explicit drift detection so actual state differences are visible before they become release or incident risk."
+    criticality_default: high
+    variants:
+      - id: "drift"
+        label: "State drift"
+        attributes: {source: "GitOps practice", coverage_target: "desired-versus-actual delta"}
+        criticality: high
+      - id: "out of sync"
+        label: "Out-of-sync state"
+        attributes: {source: "GitOps practice", coverage_target: "synchronization status"}
+        criticality: high
+      - id: "health status"
+        label: "Health status"
+        attributes: {source: "CNCF GitOps project context", coverage_target: "runtime health signal"}
+        criticality: medium
+  - axis_type: "rollback"
+    rationale: "Versioned desired state and deployment history need a declared rollback path for failed or unsafe changes."
+    criticality_default: high
+    variants:
+      - id: "rollback"
+        label: "Rollback"
+        attributes: {source: "GitOps practice", coverage_target: "return to prior state"}
+        criticality: high
+      - id: "previous revision"
+        label: "Previous revision"
+        attributes: {source: "GitOps practice", coverage_target: "versioned recovery point"}
+        criticality: high
+      - id: "release history"
+        label: "Release history"
+        attributes: {source: "GitOps practice", coverage_target: "recoverable deployment history"}
+        criticality: medium
+  - axis_type: "observability"
+    rationale: "Pipeline operators need observable synchronization, reconciliation, health, and failure states to assess release readiness."
+    criticality_default: medium
+    variants:
+      - id: "sync status"
+        label: "Synchronization status"
+        attributes: {source: "GitOps practice", coverage_target: "desired-state sync signal"}
+        criticality: high
+      - id: "reconciliation status"
+        label: "Reconciliation status"
+        attributes: {source: "GitOps practice", coverage_target: "convergence signal"}
+        criticality: high
+      - id: "audit trail"
+        label: "Audit trail"
+        attributes: {source: "GitOps practice", coverage_target: "operator and pipeline trace"}
+        criticality: medium
+

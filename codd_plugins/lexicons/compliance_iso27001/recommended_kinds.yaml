@@ -1,0 +1,16 @@
+recommended_kinds:
+  - context_organization_gap
+  - leadership_gap
+  - planning_gap
+  - support_gap
+  - operation_gap
+  - performance_evaluation_gap
+  - improvement_gap
+  - risk_treatment_plan_gap
+  - statement_of_applicability_gap
+  - access_control_gap
+  - cryptography_gap
+  - physical_security_gap
+  - supplier_relationships_gap
+  - incident_management_gap
+

@@ -1,0 +1,186 @@
+coverage_axes:
+  - axis_type: "functional_suitability"
+    rationale: "ISO/IEC 25010 functional suitability covers whether functions meet stated and implied needs under specified conditions."
+    criticality_default: critical
+    variants:
+      - id: "Functional Suitability"
+        label: "Functional suitability"
+        attributes: {source: "ISO/IEC 25010", source_literal: "Functional Suitability"}
+        criticality: critical
+      - id: "Functional completeness"
+        label: "Functional completeness"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "task and user objective coverage"}
+        criticality: critical
+      - id: "Functional correctness"
+        label: "Functional correctness"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "accurate results"}
+        criticality: critical
+      - id: "Functional appropriateness"
+        label: "Functional appropriateness"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "task accomplishment"}
+        criticality: high
+  - axis_type: "performance_efficiency"
+    rationale: "ISO/IEC 25010 performance efficiency covers time behavior, resource utilization, and capacity under specified conditions."
+    criticality_default: high
+    variants:
+      - id: "Performance Efficiency"
+        label: "Performance efficiency"
+        attributes: {source: "ISO/IEC 25010", source_literal: "Performance Efficiency"}
+        criticality: high
+      - id: "Time behaviour"
+        label: "Time behaviour"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "response time and throughput"}
+        criticality: high
+      - id: "Resource utilization"
+        label: "Resource utilization"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "resource usage"}
+        criticality: high
+      - id: "Capacity"
+        label: "Capacity"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "maximum limits"}
+        criticality: medium
+  - axis_type: "compatibility"
+    rationale: "ISO/IEC 25010 compatibility covers coexistence and interoperability with other products, systems, or components."
+    criticality_default: high
+    variants:
+      - id: "Compatibility"
+        label: "Compatibility"
+        attributes: {source: "ISO/IEC 25010", source_literal: "Compatibility"}
+        criticality: high
+      - id: "Co-existence"
+        label: "Co-existence"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "shared environment"}
+        criticality: medium
+      - id: "Interoperability"
+        label: "Interoperability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "information exchange"}
+        criticality: high
+  - axis_type: "usability"
+    rationale: "ISO/IEC 25010:2011 usability covers recognizability, learnability, operability, user error protection, interface aesthetics, and accessibility."
+    criticality_default: high
+    variants:
+      - id: "Usability"
+        label: "Usability"
+        attributes: {source: "ISO/IEC 25010:2011", source_literal: "Usability"}
+        criticality: high
+      - id: "Appropriateness recognizability"
+        label: "Appropriateness recognizability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "need recognition"}
+        criticality: medium
+      - id: "Learnability"
+        label: "Learnability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "learning effort"}
+        criticality: medium
+      - id: "Operability"
+        label: "Operability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "operation and control"}
+        criticality: high
+      - id: "User error protection"
+        label: "User error protection"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "operation error prevention"}
+        criticality: high
+      - id: "Accessibility"
+        label: "Accessibility"
+        attributes: {source: "ISO/IEC 25010:2011", coverage_target: "use by people with widest range of characteristics"}
+        criticality: high
+  - axis_type: "reliability"
+    rationale: "ISO/IEC 25010 reliability covers performance of specified functions under specified conditions for a specified period of time."
+    criticality_default: critical
+    variants:
+      - id: "Reliability"
+        label: "Reliability"
+        attributes: {source: "ISO/IEC 25010", source_literal: "Reliability"}
+        criticality: critical
+      - id: "Maturity"
+        label: "Maturity"
+        attributes: {source: "ISO/IEC 25010:2011", coverage_target: "fault frequency"}
+        criticality: high
+      - id: "Availability"
+        label: "Availability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "operational accessibility"}
+        criticality: critical
+      - id: "Fault tolerance"
+        label: "Fault tolerance"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "operation under faults"}
+        criticality: high
+      - id: "Recoverability"
+        label: "Recoverability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "re-establish desired state"}
+        criticality: critical
+  - axis_type: "security"
+    rationale: "ISO/IEC 25010 security covers protection of information and data according to authorization levels and attack resistance."
+    criticality_default: critical
+    variants:
+      - id: "Security"
+        label: "Security"
+        attributes: {source: "ISO/IEC 25010", source_literal: "Security"}
+        criticality: critical
+      - id: "Confidentiality"
+        label: "Confidentiality"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "authorized data access"}
+        criticality: critical
+      - id: "Integrity"
+        label: "Integrity"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "state and data modification protection"}
+        criticality: critical
+      - id: "Non-repudiation"
+        label: "Non-repudiation"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "provable actions"}
+        criticality: high
+      - id: "Accountability"
+        label: "Accountability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "trace actions to entity"}
+        criticality: high
+      - id: "Authenticity"
+        label: "Authenticity"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "prove claimed identity"}
+        criticality: high
+  - axis_type: "maintainability"
+    rationale: "ISO/IEC 25010 maintainability covers effective and efficient modification to improve, correct, or adapt a system."
+    criticality_default: high
+    variants:
+      - id: "Maintainability"
+        label: "Maintainability"
+        attributes: {source: "ISO/IEC 25010", source_literal: "Maintainability"}
+        criticality: high
+      - id: "Modularity"
+        label: "Modularity"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "change isolation"}
+        criticality: high
+      - id: "Reusability"
+        label: "Reusability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "asset reuse"}
+        criticality: medium
+      - id: "Analysability"
+        label: "Analysability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "impact and diagnosis"}
+        criticality: high
+      - id: "Modifiability"
+        label: "Modifiability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "safe modification"}
+        criticality: high
+      - id: "Testability"
+        label: "Testability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "establish and run test criteria"}
+        criticality: high
+  - axis_type: "portability"
+    rationale: "ISO/IEC 25010:2011 portability covers adaptation, installation, and replacement in different environments."
+    criticality_default: medium
+    variants:
+      - id: "Portability"
+        label: "Portability"
+        attributes: {source: "ISO/IEC 25010:2011", source_literal: "Portability"}
+        criticality: medium
+      - id: "Adaptability"
+        label: "Adaptability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "adapt to environments"}
+        criticality: medium
+      - id: "Installability"
+        label: "Installability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "install and uninstall"}
+        criticality: medium
+      - id: "Replaceability"
+        label: "Replaceability"
+        attributes: {source: "ISO/IEC 25010", coverage_target: "replace another product"}
+        criticality: medium
+

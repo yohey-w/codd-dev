@@ -1,0 +1,54 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=context_organization AND coverage=gap"
+    severity: high
+    rationale: "Context gaps can hide organizational scope, interested parties, and ISMS boundaries."
+  - when: "axis=leadership AND coverage=gap"
+    severity: critical
+    rationale: "Leadership gaps can leave information security policy, roles, and accountability undefined."
+  - when: "axis=planning AND coverage=gap"
+    severity: critical
+    rationale: "Planning gaps can leave information security risks, objectives, and change planning unmanaged."
+  - when: "axis=support AND coverage=gap"
+    severity: high
+    rationale: "Support gaps can leave competence, awareness, communication, or documented information uncontrolled."
+  - when: "axis=operation AND coverage=gap"
+    severity: critical
+    rationale: "Operation gaps can leave risk assessment and risk treatment processes unexecuted."
+  - when: "axis=performance_evaluation AND coverage=gap"
+    severity: high
+    rationale: "Performance-evaluation gaps can leave monitoring, measurement, internal audit, and management review absent."
+  - when: "axis=improvement AND coverage=gap"
+    severity: high
+    rationale: "Improvement gaps can leave nonconformities and continual improvement without owner or evidence."
+  - when: "axis=risk_treatment_plan AND coverage=gap"
+    severity: critical
+    rationale: "Risk treatment plan gaps can leave accepted, mitigated, transferred, or retained risks untraceable."
+  - when: "axis=SOA AND coverage=gap"
+    severity: critical
+    rationale: "Statement of Applicability gaps can leave selected and excluded controls unjustified."
+  - when: "axis=access_control AND coverage=gap"
+    severity: critical
+    rationale: "Access-control gaps can permit unauthorized information and system access."
+  - when: "axis=cryptography AND coverage=gap"
+    severity: high
+    rationale: "Cryptography gaps can leave confidentiality, integrity, authenticity, or key-management controls undefined."
+  - when: "axis=physical_security AND coverage=gap"
+    severity: high
+    rationale: "Physical-security gaps can leave facilities, equipment, and restricted areas insufficiently protected."
+  - when: "axis=supplier_relationships AND coverage=gap"
+    severity: high
+    rationale: "Supplier-relationship gaps can leave external dependencies without security requirements or monitoring."
+  - when: "axis=incident_management AND coverage=gap"
+    severity: critical
+    rationale: "Incident-management gaps can leave security events, response, evidence, and lessons learned unmanaged."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit ISO/IEC 27001 coverage needs reviewer confirmation before it can satisfy an ISMS axis."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered axes may still produce informational notes outside release-blocking ISMS gaps."
+

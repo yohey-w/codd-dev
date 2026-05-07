@@ -1,0 +1,8 @@
+recommended_kinds:
+  - test_concepts_definitions_gap
+  - test_processes_gap
+  - test_documentation_gap
+  - test_techniques_gap
+  - keyword_driven_testing_gap
+  - work_aided_software_testing_gap
+

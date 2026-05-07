@@ -1,0 +1,10 @@
+recommended_kinds:
+  - functional_suitability_gap
+  - performance_efficiency_gap
+  - compatibility_gap
+  - usability_gap
+  - reliability_gap
+  - security_quality_gap
+  - maintainability_gap
+  - portability_gap
+

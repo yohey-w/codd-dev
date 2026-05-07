@@ -1,0 +1,114 @@
+coverage_axes:
+  - axis_type: "test_concepts_definitions"
+    rationale: "ISO/IEC/IEEE 29119-1 specifies general concepts and key concepts for the software testing series."
+    criticality_default: high
+    variants:
+      - id: "general concepts"
+        label: "General concepts"
+        attributes: {source: "ISO/IEC/IEEE 29119-1:2022", source_literal: "General concepts"}
+        criticality: high
+      - id: "key concepts"
+        label: "Key concepts"
+        attributes: {source: "ISO/IEC/IEEE 29119-1:2022", coverage_target: "series concepts"}
+        criticality: high
+      - id: "terms and definitions"
+        label: "Terms and definitions"
+        attributes: {source: "ISO/IEC/IEEE 29119 series", coverage_target: "testing vocabulary"}
+        criticality: medium
+  - axis_type: "test_processes"
+    rationale: "ISO/IEC/IEEE 29119-2 defines test processes at organizational, test management, and dynamic test levels."
+    criticality_default: critical
+    variants:
+      - id: "test processes"
+        label: "Test processes"
+        attributes: {source: "ISO/IEC/IEEE 29119-2", source_literal: "test processes"}
+        criticality: critical
+      - id: "organizational level"
+        label: "Organizational test process"
+        attributes: {source: "ISO/IEC/IEEE 29119-2", coverage_target: "organizational level"}
+        criticality: high
+      - id: "test management level"
+        label: "Test management process"
+        attributes: {source: "ISO/IEC/IEEE 29119-2", coverage_target: "management level"}
+        criticality: high
+      - id: "dynamic test levels"
+        label: "Dynamic test levels"
+        attributes: {source: "ISO/IEC/IEEE 29119-2", coverage_target: "dynamic testing"}
+        criticality: high
+      - id: "risk-based approach to testing"
+        label: "Risk-based testing"
+        attributes: {source: "ISO/IEC/IEEE 29119-2", coverage_target: "risk-based prioritization"}
+        criticality: high
+  - axis_type: "test_documentation"
+    rationale: "ISO/IEC/IEEE 29119-3 specifies software test documentation templates and outputs from test processes."
+    criticality_default: high
+    variants:
+      - id: "test documentation"
+        label: "Test documentation"
+        attributes: {source: "ISO/IEC/IEEE 29119-3:2021", source_literal: "Test documentation"}
+        criticality: high
+      - id: "test documentation templates"
+        label: "Test documentation templates"
+        attributes: {source: "ISO/IEC/IEEE 29119-3:2021", coverage_target: "document template"}
+        criticality: high
+      - id: "test process outputs"
+        label: "Test process outputs"
+        attributes: {source: "ISO/IEC/IEEE 29119-3:2021", coverage_target: "process evidence"}
+        criticality: high
+  - axis_type: "test_techniques"
+    rationale: "ISO/IEC/IEEE 29119-4 defines test design techniques used during test design and implementation."
+    criticality_default: high
+    variants:
+      - id: "test techniques"
+        label: "Test techniques"
+        attributes: {source: "ISO/IEC/IEEE 29119-4:2021", source_literal: "Test techniques"}
+        criticality: high
+      - id: "test design techniques"
+        label: "Test design techniques"
+        attributes: {source: "ISO/IEC/IEEE 29119-4:2021", coverage_target: "design method"}
+        criticality: high
+      - id: "test design and implementation process"
+        label: "Test design and implementation process"
+        attributes: {source: "ISO/IEC/IEEE 29119-4:2021", coverage_target: "process linkage"}
+        criticality: high
+  - axis_type: "keyword_driven_testing"
+    rationale: "ISO/IEC/IEEE 29119-5 defines keyword-driven testing, framework requirements, tools, data exchange, and keyword hierarchy."
+    criticality_default: medium
+    variants:
+      - id: "keyword-driven testing"
+        label: "Keyword-driven testing"
+        attributes: {source: "ISO/IEC/IEEE 29119-5:2024", source_literal: "keyword-driven testing"}
+        criticality: medium
+      - id: "keyword-driven test specifications"
+        label: "Keyword-driven test specifications"
+        attributes: {source: "ISO/IEC/IEEE 29119-5:2024", coverage_target: "keyword test specification"}
+        criticality: medium
+      - id: "hierarchical keywords"
+        label: "Hierarchical keywords"
+        attributes: {source: "ISO/IEC/IEEE 29119-5:2024", coverage_target: "keyword levels"}
+        criticality: medium
+      - id: "common data exchange format"
+        label: "Common data exchange format"
+        attributes: {source: "ISO/IEC/IEEE 29119-5:2024", coverage_target: "tool interoperability"}
+        criticality: medium
+  - axis_type: "work_aided_software_testing"
+    rationale: "ISO/IEC/IEEE 29119 process use depends on aided test work products, supporting tools, reviews, automation, and lifecycle guidance."
+    criticality_default: medium
+    variants:
+      - id: "work products"
+        label: "Test work products"
+        attributes: {source: "ISO/IEC/IEEE 29119 series", coverage_target: "test artifacts"}
+        criticality: medium
+      - id: "tools that support the keyword-driven approach"
+        label: "Supporting test tools"
+        attributes: {source: "ISO/IEC/IEEE 29119-5:2024", coverage_target: "tool support"}
+        criticality: medium
+      - id: "work product reviews"
+        label: "Work product reviews"
+        attributes: {source: "ISO/IEC 20246 supporting standard", coverage_target: "static testing support"}
+        criticality: medium
+      - id: "agile life cycles"
+        label: "Agile lifecycle guidance"
+        attributes: {source: "ISO/IEC TR 29119-6:2021", coverage_target: "lifecycle adaptation"}
+        criticality: medium
+

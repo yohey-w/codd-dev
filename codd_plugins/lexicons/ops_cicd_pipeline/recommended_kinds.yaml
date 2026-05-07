@@ -1,0 +1,9 @@
+recommended_kinds:
+  - declarative_config_gap
+  - version_control_gap
+  - automated_apply_gap
+  - continuous_reconciliation_gap
+  - drift_detection_gap
+  - rollback_gap
+  - pipeline_observability_gap
+
