@@ -67,6 +67,6 @@ Constraints:
 ## Prisma Enums
 
 {% for enum in prisma_enums -%}
-- `{{ enum.name }}`: {{ enum.values | join(", ") }}
+- `{{ enum.name }}`: {{ enum["values"] | join(", ") }}
 {% endfor %}
 {% endif %}
