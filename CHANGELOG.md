@@ -4,6 +4,24 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-05-08 — Elicit bug fixes + scope/phase filter (cmd_445)
+
+### Fixed (P0 release blocker — surfaced by osato-lms cmd_442 dogfooding)
+
+- `codd elicit apply` now respects approval checkbox state (`[x]` → applied, `[r]` → ignored, `[ ]` → pending) instead of dumping every finding into `pending_findings.yaml`.
+- `codd extract` / `codd brownfield` no longer crash with `'builtin_function_or_method' object is not iterable` when the schema-design template renders enum values. (`codd/templates/extracted/schema-design.md.j2`)
+
+### Added
+
+- `project_lexicon.yaml` gains optional `scope:` (`system_implementation` / `full` / `business_only`) and `phase:` (`mvp` / `production`) fields. Defaults preserve v2.1.0 behaviour (`full` / `production`).
+- BABOK lexicon (`codd_plugins/lexicons/babok/`) annotates each axis with `concern:` (`system` / `business` / `both`); `codd elicit` filters findings by scope and demotes business-tier `high` findings to `info` under `phase: mvp`.
+
+### Quality Metrics
+
+- **pytest**: 2680 PASS / 0 FAIL / 0 SKIP
+- **Generality Gate**: `codd/elicit/`, `codd/lexicon.py`, scope/phase paths — zero specific lexicon literal hit (Layer A)
+- **Compatibility**: schema additions are additive; existing `project_lexicon.yaml` files load unchanged.
+
 ## [2.1.0] - 2026-05-08 — Lexicon coverage CI gate (cmd_443)
 
 ### Added
