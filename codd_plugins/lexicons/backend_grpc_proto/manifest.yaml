@@ -1,0 +1,25 @@
+name: backend_grpc_proto
+lexicon_name: backend_grpc_proto
+version: "1.0.0"
+source_url: "https://protobuf.dev/programming-guides/proto3/"
+source_version: "proto3 language guide + gRPC core concepts"
+description: "Protocol Buffers proto3 and gRPC coverage axes for backend RPC requirements."
+observation_dimensions: 8
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Protocol Buffers Language Guide (proto3)"
+    url: "https://protobuf.dev/programming-guides/proto3/"
+    source_version: "proto3"
+  - title: "gRPC Core concepts, architecture and lifecycle"
+    url: "https://grpc.io/docs/what-is-grpc/core-concepts/"
+  - title: "gRPC Status Codes"
+    url: "https://grpc.io/docs/guides/status-codes/"
+  - title: "gRPC Deadlines"
+    url: "https://grpc.io/docs/guides/deadlines/"
+  - title: "gRPC Metadata"
+    url: "https://grpc.io/docs/guides/metadata/"

@@ -1,0 +1,12 @@
+recommended_kinds:
+  - graphql_schema_gap
+  - graphql_type_system_gap
+  - graphql_type_extension_gap
+  - graphql_query_gap
+  - graphql_mutation_gap
+  - graphql_subscription_gap
+  - graphql_fragment_gap
+  - graphql_variable_gap
+  - graphql_directive_gap
+  - graphql_introspection_gap
+  - graphql_response_gap

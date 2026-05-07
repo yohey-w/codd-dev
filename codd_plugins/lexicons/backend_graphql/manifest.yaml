@@ -1,0 +1,17 @@
+name: backend_graphql
+lexicon_name: backend_graphql
+version: "1.0.0"
+source_url: "https://spec.graphql.org/October2021/"
+source_version: "GraphQL October 2021"
+description: "GraphQL October 2021 coverage axes for backend API requirements."
+observation_dimensions: 11
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "GraphQL Specification October 2021"
+    url: "https://spec.graphql.org/October2021/"
+    source_version: "October 2021"

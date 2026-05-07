@@ -1,0 +1,185 @@
+coverage_axes:
+  - axis_type: "service"
+    rationale: "The proto3 guide defines RPC service interfaces with the service keyword and rpc methods returning request and response message types."
+    criticality_default: high
+    variants:
+      - id: "service"
+        label: "Service definition"
+        attributes: {source_literal: "service", coverage_target: "RPC interface container"}
+        criticality: high
+      - id: "rpc"
+        label: "RPC method"
+        attributes: {source_literal: "rpc", coverage_target: "callable method contract"}
+        criticality: high
+      - id: "returns"
+        label: "RPC response declaration"
+        attributes: {source_literal: "returns", coverage_target: "response message contract"}
+        criticality: high
+  - axis_type: "message"
+    rationale: "The proto3 guide defines message types as named field collections in .proto files, including field numbers and cardinality."
+    criticality_default: high
+    variants:
+      - id: "syntax"
+        label: "proto3 syntax declaration"
+        attributes: {source_literal: "syntax", coverage_target: "language revision"}
+        criticality: high
+      - id: "message"
+        label: "Message definition"
+        attributes: {source_literal: "message", coverage_target: "request or response shape"}
+        criticality: high
+      - id: "field number"
+        label: "Field number"
+        attributes: {source_literal: "field number", coverage_target: "wire-format identity"}
+        criticality: high
+      - id: "optional"
+        label: "Optional field cardinality"
+        attributes: {source_literal: "optional", coverage_target: "field presence"}
+        criticality: medium
+      - id: "repeated"
+        label: "Repeated field cardinality"
+        attributes: {source_literal: "repeated", coverage_target: "list values"}
+        criticality: medium
+      - id: "oneof"
+        label: "Oneof field set"
+        attributes: {source_literal: "oneof", coverage_target: "mutually exclusive fields"}
+        criticality: medium
+      - id: "map"
+        label: "Map field"
+        attributes: {source_literal: "map", coverage_target: "key/value fields"}
+        criticality: medium
+  - axis_type: "Scalar Value Types"
+    rationale: "The proto3 guide lists scalar value types and their generated-language mappings for message fields."
+    criticality_default: high
+    variants:
+      - id: "double"
+        label: "Double scalar"
+        attributes: {source_literal: "double", coverage_target: "floating point value"}
+        criticality: medium
+      - id: "int32"
+        label: "Int32 scalar"
+        attributes: {source_literal: "int32", coverage_target: "signed integer value"}
+        criticality: high
+      - id: "uint64"
+        label: "Uint64 scalar"
+        attributes: {source_literal: "uint64", coverage_target: "unsigned integer value"}
+        criticality: medium
+      - id: "bool"
+        label: "Boolean scalar"
+        attributes: {source_literal: "bool", coverage_target: "boolean value"}
+        criticality: medium
+      - id: "string"
+        label: "String scalar"
+        attributes: {source_literal: "string", coverage_target: "text value"}
+        criticality: high
+      - id: "bytes"
+        label: "Bytes scalar"
+        attributes: {source_literal: "bytes", coverage_target: "binary value"}
+        criticality: high
+  - axis_type: "Enumerations"
+    rationale: "The proto3 guide defines enumerations, enum default values, aliases, and reserved values for constrained symbolic fields."
+    criticality_default: medium
+    variants:
+      - id: "enum"
+        label: "Enum definition"
+        attributes: {source_literal: "enum", coverage_target: "symbolic value set"}
+        criticality: medium
+      - id: "0"
+        label: "Enum default zero value"
+        attributes: {source_literal: "0", coverage_target: "default enum value"}
+        criticality: medium
+      - id: "allow_alias"
+        label: "Enum value aliases"
+        attributes: {source_literal: "allow_alias", coverage_target: "duplicate enum numeric values"}
+        criticality: info
+      - id: "reserved"
+        label: "Reserved enum values"
+        attributes: {source_literal: "reserved", coverage_target: "deleted value protection"}
+        criticality: high
+  - axis_type: "stream"
+    rationale: "gRPC core concepts define server streaming, client streaming, and bidirectional streaming RPC lifecycles."
+    criticality_default: high
+    variants:
+      - id: "stream"
+        label: "Streaming RPC marker"
+        attributes: {source_literal: "stream", coverage_target: "streaming request or response"}
+        criticality: high
+      - id: "Server streaming RPC"
+        label: "Server streaming RPC"
+        attributes: {source_literal: "Server streaming RPC", coverage_target: "single request, stream response"}
+        criticality: high
+      - id: "Client streaming RPC"
+        label: "Client streaming RPC"
+        attributes: {source_literal: "Client streaming RPC", coverage_target: "stream request, single response"}
+        criticality: high
+      - id: "Bidirectional streaming RPC"
+        label: "Bidirectional streaming RPC"
+        attributes: {source_literal: "Bidirectional streaming RPC", coverage_target: "independent request and response streams"}
+        criticality: high
+  - axis_type: "status code"
+    rationale: "gRPC core concepts describe status details, status code, and optional status message as part of RPC completion."
+    criticality_default: high
+    variants:
+      - id: "status details"
+        label: "Status details"
+        attributes: {source_literal: "status details", coverage_target: "RPC completion outcome"}
+        criticality: high
+      - id: "status code"
+        label: "Status code"
+        attributes: {source_literal: "status code", coverage_target: "machine-readable outcome"}
+        criticality: high
+      - id: "status message"
+        label: "Status message"
+        attributes: {source_literal: "status message", coverage_target: "human-readable outcome"}
+        criticality: medium
+      - id: "OK"
+        label: "OK status"
+        attributes: {source_literal: "OK", coverage_target: "successful completion"}
+        criticality: medium
+      - id: "DEADLINE_EXCEEDED"
+        label: "Deadline exceeded status"
+        attributes: {source_literal: "DEADLINE_EXCEEDED", coverage_target: "deadline failure"}
+        criticality: high
+  - axis_type: "Deadlines/Timeouts"
+    rationale: "gRPC core concepts define deadlines and timeouts for how long a client is willing to wait before an RPC is terminated."
+    criticality_default: high
+    variants:
+      - id: "deadline"
+        label: "Deadline"
+        attributes: {source_literal: "deadline", coverage_target: "fixed wait limit"}
+        criticality: high
+      - id: "timeout"
+        label: "Timeout"
+        attributes: {source_literal: "timeout", coverage_target: "duration wait limit"}
+        criticality: high
+      - id: "DEADLINE_EXCEEDED"
+        label: "Deadline exceeded error"
+        attributes: {source_literal: "DEADLINE_EXCEEDED", coverage_target: "timeout termination status"}
+        criticality: high
+      - id: "cancellation"
+        label: "Cancellation"
+        attributes: {source_literal: "cancellation", coverage_target: "terminated RPC work"}
+        criticality: medium
+  - axis_type: "Metadata"
+    rationale: "gRPC core concepts define metadata as key-value information associated with an RPC call, including authentication details and binary keys."
+    criticality_default: medium
+    variants:
+      - id: "metadata"
+        label: "RPC metadata"
+        attributes: {source_literal: "metadata", coverage_target: "call-scoped key-value data"}
+        criticality: medium
+      - id: "initial metadata"
+        label: "Initial metadata"
+        attributes: {source_literal: "initial metadata", coverage_target: "pre-response metadata"}
+        criticality: medium
+      - id: "trailing metadata"
+        label: "Trailing metadata"
+        attributes: {source_literal: "trailing metadata", coverage_target: "completion metadata"}
+        criticality: medium
+      - id: "-bin"
+        label: "Binary metadata suffix"
+        attributes: {source_literal: "-bin", coverage_target: "binary-valued metadata"}
+        criticality: medium
+      - id: "grpc-"
+        label: "Reserved metadata prefix"
+        attributes: {source_literal: "grpc-", coverage_target: "reserved key namespace"}
+        criticality: high
