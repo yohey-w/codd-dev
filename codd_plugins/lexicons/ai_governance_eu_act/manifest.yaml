@@ -1,0 +1,18 @@
+name: ai_governance_eu_act
+lexicon_name: ai_governance_eu_act
+version: "1.0.0"
+source_url: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689"
+source_version: "Regulation (EU) 2024/1689, Official Journal 2024-07-12"
+description: "EU AI Act governance coverage axes for AI systems, high-risk systems, GPAI, and deployer obligations."
+observation_dimensions: 10
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Regulation (EU) 2024/1689 on artificial intelligence"
+    url: "https://eur-lex.europa.eu/eli/reg/2024/1689/oj"
+  - title: "EUR-Lex CELEX 32024R1689"
+    url: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689"

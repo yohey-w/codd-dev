@@ -1,0 +1,34 @@
+rules:
+  - when: "axis=Classification rules for high-risk AI systems AND coverage=gap"
+    severity: critical
+    rationale: "Risk class omissions can misroute EU AI Act obligations and release gates."
+  - when: "axis=Prohibited AI practices AND coverage=gap"
+    severity: critical
+    rationale: "A prohibited-practice gap can allow categorically banned AI use to proceed."
+  - when: "axis=Requirements for high-risk AI systems AND coverage=gap"
+    severity: high
+    rationale: "High-risk requirements cover risk management, data governance, documentation, logging, and resilience."
+  - when: "axis=Human oversight AND coverage=gap"
+    severity: high
+    rationale: "Human oversight gaps can leave high-risk AI decisions without effective intervention paths."
+  - when: "axis=Transparency obligations for providers and deployers of certain AI systems AND coverage=gap"
+    severity: high
+    rationale: "Transparency gaps can hide AI interaction, synthetic content, or emotion-recognition disclosure duties."
+  - when: "axis=General-purpose AI models AND coverage=gap"
+    severity: high
+    rationale: "GPAI model gaps can omit technical documentation, downstream information, copyright policy, or systemic-risk duties."
+  - when: "axis=Conformity assessment AND coverage=gap"
+    severity: high
+    rationale: "Conformity assessment gaps can block lawful placement on the market or putting into service."
+  - when: "axis=Post-market monitoring by providers and post-market monitoring plan AND coverage=gap"
+    severity: high
+    rationale: "Post-market monitoring gaps can miss lifecycle risk, serious incidents, and corrective actions."
+  - when: "axis=Fundamental rights impact assessment for high-risk AI systems AND coverage=gap"
+    severity: high
+    rationale: "FRIA gaps can miss concrete impacts on affected persons and groups."
+  - when: "axis=Governance at Union and national level AND coverage=gap"
+    severity: medium
+    rationale: "Governance gaps can obscure authority interfaces, AI literacy, and oversight ownership."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be documented but is not a blocking AI-governance gap."

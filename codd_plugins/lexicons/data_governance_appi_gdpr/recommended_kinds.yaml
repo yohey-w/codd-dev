@@ -1,0 +1,13 @@
+recommended_kinds:
+  - lawful_basis_gap
+  - consent_governance_gap
+  - purpose_limitation_gap
+  - retention_erasure_gap
+  - data_subject_rights_gap
+  - controller_accountability_gap
+  - processor_contract_gap
+  - processing_records_gap
+  - dpia_gap
+  - breach_notification_gap
+  - cross_border_transfer_gap
+  - dpo_contact_gap

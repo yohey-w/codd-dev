@@ -1,0 +1,177 @@
+coverage_axes:
+  - axis_type: "Classification rules for high-risk AI systems"
+    rationale: "EU AI Act Article 6 defines classification rules for high-risk AI systems and Annex III categories."
+    criticality_default: critical
+    variants:
+      - id: "high-risk AI system"
+        label: "High-risk AI system classification"
+        attributes: {source: "Article 6", source_literal: "high-risk AI system"}
+        criticality: critical
+      - id: "Annex III"
+        label: "Annex III high-risk area"
+        attributes: {source: "Article 6(2)", source_literal: "Annex III"}
+        criticality: critical
+      - id: "significant risk"
+        label: "Significant-risk assessment"
+        attributes: {source: "Article 6(3)", source_literal: "significant risk"}
+        criticality: high
+  - axis_type: "Prohibited AI practices"
+    rationale: "EU AI Act Chapter II Article 5 lists prohibited AI practices."
+    criticality_default: critical
+    variants:
+      - id: "subliminal techniques"
+        label: "Subliminal, manipulative, or deceptive techniques"
+        attributes: {source: "Article 5(1)(a)", source_literal: "subliminal techniques"}
+        criticality: critical
+      - id: "exploits any of the vulnerabilities"
+        label: "Exploitation of vulnerabilities"
+        attributes: {source: "Article 5(1)(b)", source_literal: "vulnerabilities"}
+        criticality: critical
+      - id: "social score"
+        label: "Social scoring"
+        attributes: {source: "Article 5(1)(c)", source_literal: "social score"}
+        criticality: critical
+      - id: "real-time remote biometric identification"
+        label: "Real-time remote biometric identification"
+        attributes: {source: "Article 5(1)(h)", source_literal: "real-time remote biometric identification"}
+        criticality: critical
+  - axis_type: "Requirements for high-risk AI systems"
+    rationale: "EU AI Act Section 2 Articles 8 to 15 sets requirements for high-risk AI systems."
+    criticality_default: high
+    variants:
+      - id: "risk management system"
+        label: "Risk management system"
+        attributes: {source: "Article 9", source_literal: "risk management system"}
+        criticality: high
+      - id: "data and data governance"
+        label: "Data and data governance"
+        attributes: {source: "Article 10", source_literal: "data governance"}
+        criticality: high
+      - id: "technical documentation"
+        label: "Technical documentation"
+        attributes: {source: "Article 11", source_literal: "technical documentation"}
+        criticality: high
+      - id: "record-keeping"
+        label: "Automatic logging and record-keeping"
+        attributes: {source: "Article 12", source_literal: "record-keeping"}
+        criticality: medium
+      - id: "accuracy, robustness and cybersecurity"
+        label: "Accuracy, robustness, and cybersecurity"
+        attributes: {source: "Article 15", source_literal: "accuracy, robustness and cybersecurity"}
+        criticality: high
+  - axis_type: "Human oversight"
+    rationale: "EU AI Act Article 14 requires high-risk AI systems to be designed for effective oversight by natural persons."
+    criticality_default: high
+    variants:
+      - id: "human oversight"
+        label: "Human oversight"
+        attributes: {source: "Article 14", source_literal: "human oversight"}
+        criticality: high
+      - id: "human-machine interface tools"
+        label: "Human-machine interface support"
+        attributes: {source: "Article 14(1)", source_literal: "human-machine interface tools"}
+        criticality: medium
+      - id: "reasonably foreseeable misuse"
+        label: "Misuse risk oversight"
+        attributes: {source: "Article 14(2)", source_literal: "reasonably foreseeable misuse"}
+        criticality: high
+  - axis_type: "Transparency obligations for providers and deployers of certain AI systems"
+    rationale: "EU AI Act Article 50 defines transparency obligations for specified provider and deployer scenarios."
+    criticality_default: high
+    variants:
+      - id: "transparency obligations"
+        label: "Article 50 transparency obligations"
+        attributes: {source: "Article 50", source_literal: "transparency obligations"}
+        criticality: high
+      - id: "synthetic audio, image, video or text content"
+        label: "Synthetic content disclosure"
+        attributes: {source: "Article 50", source_literal: "synthetic audio, image, video or text content"}
+        criticality: high
+      - id: "emotion recognition system"
+        label: "Emotion recognition transparency"
+        attributes: {source: "Article 50", source_literal: "emotion recognition system"}
+        criticality: medium
+  - axis_type: "General-purpose AI models"
+    rationale: "EU AI Act Chapter V and Articles 53 to 55 define obligations for providers of general-purpose AI models."
+    criticality_default: high
+    variants:
+      - id: "general-purpose AI model"
+        label: "GPAI model scope"
+        attributes: {source: "Chapter V", source_literal: "general-purpose AI model"}
+        criticality: high
+      - id: "technical documentation"
+        label: "GPAI technical documentation"
+        attributes: {source: "Article 53(1)(a)", source_literal: "technical documentation"}
+        criticality: high
+      - id: "systemic risk"
+        label: "Systemic-risk GPAI model"
+        attributes: {source: "Article 55", source_literal: "systemic risk"}
+        criticality: critical
+  - axis_type: "Conformity assessment"
+    rationale: "EU AI Act Article 43 requires conformity assessment before placing certain high-risk AI systems on the market or putting them into service."
+    criticality_default: high
+    variants:
+      - id: "conformity assessment"
+        label: "Conformity assessment procedure"
+        attributes: {source: "Article 43", source_literal: "conformity assessment"}
+        criticality: high
+      - id: "internal control"
+        label: "Internal control route"
+        attributes: {source: "Article 43 / Annex VI", source_literal: "internal control"}
+        criticality: medium
+      - id: "EU declaration of conformity"
+        label: "EU declaration of conformity"
+        attributes: {source: "Article 47", source_literal: "EU declaration of conformity"}
+        criticality: medium
+  - axis_type: "Post-market monitoring by providers and post-market monitoring plan"
+    rationale: "EU AI Act Article 72 requires providers to establish and document post-market monitoring for high-risk AI systems."
+    criticality_default: high
+    variants:
+      - id: "post-market monitoring"
+        label: "Post-market monitoring"
+        attributes: {source: "Article 72", source_literal: "post-market monitoring"}
+        criticality: high
+      - id: "post-market monitoring plan"
+        label: "Post-market monitoring plan"
+        attributes: {source: "Article 72", source_literal: "post-market monitoring plan"}
+        criticality: high
+      - id: "serious incident"
+        label: "Serious incident handling"
+        attributes: {source: "Article 73", source_literal: "serious incident"}
+        criticality: critical
+  - axis_type: "Fundamental rights impact assessment for high-risk AI systems"
+    rationale: "EU AI Act Article 27 requires specified deployers to carry out a fundamental rights impact assessment before using high-risk AI systems."
+    criticality_default: high
+    variants:
+      - id: "fundamental rights impact assessment"
+        label: "FRIA requirement"
+        attributes: {source: "Article 27", acronym: "FRIA"}
+        criticality: high
+      - id: "deployers of high-risk AI systems"
+        label: "Deployer FRIA scope"
+        attributes: {source: "Article 27", source_literal: "deployers of high-risk AI systems"}
+        criticality: high
+      - id: "risks to fundamental rights"
+        label: "Fundamental-rights risk identification"
+        attributes: {source: "Article 27", source_literal: "risks to fundamental rights"}
+        criticality: high
+  - axis_type: "Governance at Union and national level"
+    rationale: "EU AI Act Chapter VII establishes governance bodies, national competent authorities, market surveillance, and AI literacy expectations."
+    criticality_default: medium
+    variants:
+      - id: "AI Office"
+        label: "AI Office governance"
+        attributes: {source: "Chapter VII", source_literal: "AI Office"}
+        criticality: medium
+      - id: "European Artificial Intelligence Board"
+        label: "European AI Board governance"
+        attributes: {source: "Chapter VII", source_literal: "European Artificial Intelligence Board"}
+        criticality: medium
+      - id: "national competent authorities"
+        label: "National competent authority interface"
+        attributes: {source: "Chapter VII", source_literal: "national competent authorities"}
+        criticality: medium
+      - id: "AI literacy"
+        label: "AI literacy measures"
+        attributes: {source: "Article 4", source_literal: "AI literacy"}
+        criticality: medium

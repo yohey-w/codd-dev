@@ -1,0 +1,20 @@
+name: data_governance_appi_gdpr
+lexicon_name: data_governance_appi_gdpr
+version: "1.0.0"
+source_url: "https://gdpr-info.eu/"
+source_version: "GDPR (EU) 2016/679 + APPI PPC tentative English translation, June 2020"
+description: "GDPR and APPI personal data governance coverage axes."
+observation_dimensions: 12
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "General Data Protection Regulation (GDPR)"
+    url: "https://gdpr-info.eu/"
+  - title: "Act on the Protection of Personal Information (PPC tentative translation)"
+    url: "https://www.ppc.go.jp/files/pdf/APPI_english.pdf"
+  - title: "PPC Guidelines for Provision to Third Parties in Foreign Countries"
+    url: "https://www.ppc.go.jp/personalinfo/legal/guidelines_offshore/"
