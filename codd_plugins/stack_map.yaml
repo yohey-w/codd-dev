@@ -1,0 +1,78 @@
+stack_map:
+  - hint_pattern: "react|@react|next|vue|svelte|angular|vite|webpack|tailwind|css|html"
+    suggested_lexicons:
+      - web_responsive
+      - web_a11y_wcag22_aa
+      - web_performance_core_web_vitals
+      - web_browser_compat
+      - web_forms_html5
+      - web_pwa_manifest
+      - web_seo_schemaorg
+  - hint_pattern: "fastapi|flask|django|express|hono|nestjs|spring|rails|sinatra|laravel"
+    suggested_lexicons:
+      - api_rest_openapi
+      - web_security_owasp
+      - process_iso25010
+  - hint_pattern: "prisma|sqlalchemy|typeorm|sequelize|hibernate|active-record|postgres|mysql|mariadb|sqlite"
+    suggested_lexicons:
+      - data_relational_iso_sql
+  - hint_pattern: "mongoose|mongodb|dynamodb|jsonschema|json-schema|zod|ajv"
+    suggested_lexicons:
+      - data_nosql_jsonschema
+  - hint_pattern: "graphql|apollo|gql"
+    suggested_lexicons:
+      - backend_graphql
+  - hint_pattern: "grpc|protobuf|proto3"
+    suggested_lexicons:
+      - backend_grpc_proto
+  - hint_pattern: "cloudevents|kafka|nats|rabbitmq|eventstore|cqrs"
+    suggested_lexicons:
+      - backend_event_cloudevents
+      - data_eventsourcing_es_cqrs
+  - hint_pattern: "kubernetes|kustomize|helm|skaffold"
+    suggested_lexicons:
+      - ops_kubernetes
+      - ops_observability_otel
+  - hint_pattern: "terraform|pulumi|cloudformation|aws-cdk"
+    suggested_lexicons:
+      - ops_iac_terraform
+  - hint_pattern: "github-actions|gitlab-ci|circleci|jenkins|argo"
+    suggested_lexicons:
+      - ops_cicd_pipeline
+  - hint_pattern: "opentelemetry|otel|prometheus|grafana|jaeger|datadog"
+    suggested_lexicons:
+      - ops_observability_otel
+  - hint_pattern: "swiftui|uikit|ios|xcode"
+    suggested_lexicons:
+      - mobile_ios_hig
+      - mobile_a11y_native
+  - hint_pattern: "android|material|jetpack|kotlin"
+    suggested_lexicons:
+      - mobile_android_material3
+      - mobile_a11y_native
+  - hint_pattern: "webauthn|passkey|fido"
+    suggested_lexicons:
+      - web_authn_webauthn
+      - web_security_owasp
+  - hint_pattern: "hipaa|fhir|hl7"
+    suggested_lexicons:
+      - compliance_hipaa
+  - hint_pattern: "pci|payment|stripe|adyen|braintree"
+    suggested_lexicons:
+      - compliance_pci_dss_4
+  - hint_pattern: "iso27001|isms|soc2"
+    suggested_lexicons:
+      - compliance_iso27001
+  - hint_pattern: "gdpr|appi|personal-data|privacy"
+    suggested_lexicons:
+      - data_governance_appi_gdpr
+  - hint_pattern: "openai|langchain|llamaindex|transformers|pytorch|tensorflow"
+    suggested_lexicons:
+      - ai_governance_eu_act
+  - hint_pattern: "pytest|jest|vitest|playwright|cypress|selenium|junit"
+    suggested_lexicons:
+      - process_test_iso29119
+  - hint_pattern: "requirements|stakeholder|elicitation|business-analysis"
+    suggested_lexicons:
+      - babok
+
