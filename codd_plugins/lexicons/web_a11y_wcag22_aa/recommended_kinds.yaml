@@ -1,0 +1,14 @@
+recommended_kinds:
+  - text_alternative_gap
+  - media_alternative_gap
+  - semantic_structure_gap
+  - contrast_reflow_gap
+  - keyboard_access_gap
+  - timing_control_gap
+  - seizure_safety_gap
+  - navigation_focus_gap
+  - input_modality_gap
+  - language_gap
+  - predictable_behavior_gap
+  - input_assistance_gap
+  - assistive_technology_gap

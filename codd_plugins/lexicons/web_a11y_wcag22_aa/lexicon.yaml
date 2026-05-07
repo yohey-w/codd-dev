@@ -1,0 +1,233 @@
+coverage_axes:
+  - axis_type: "1.1 Text Alternatives"
+    rationale: "WCAG 2.2 guideline 1.1 contains Success Criterion 1.1.1 Non-text Content at Level A."
+    criticality_default: high
+    variants:
+      - id: "1.1.1 Non-text Content"
+        label: "Text alternatives for non-text content"
+        attributes: {principle: "Perceivable", level: "A"}
+        criticality: high
+  - axis_type: "1.2 Time-based Media"
+    rationale: "WCAG 2.2 guideline 1.2 covers prerecorded and live audio or video alternatives through Level AA."
+    criticality_default: high
+    variants:
+      - id: "1.2.1 Audio-only and Video-only (Prerecorded)"
+        label: "Prerecorded audio-only and video-only alternatives"
+        attributes: {principle: "Perceivable", level: "A"}
+        criticality: high
+      - id: "1.2.2 Captions (Prerecorded)"
+        label: "Prerecorded captions"
+        attributes: {principle: "Perceivable", level: "A"}
+        criticality: high
+      - id: "1.2.4 Captions (Live)"
+        label: "Live captions"
+        attributes: {principle: "Perceivable", level: "AA"}
+        criticality: high
+      - id: "1.2.5 Audio Description (Prerecorded)"
+        label: "Prerecorded audio description"
+        attributes: {principle: "Perceivable", level: "AA"}
+        criticality: medium
+  - axis_type: "1.3 Adaptable"
+    rationale: "WCAG 2.2 guideline 1.3 requires content to be presentable in different ways without losing information or structure."
+    criticality_default: high
+    variants:
+      - id: "1.3.1 Info and Relationships"
+        label: "Information and relationships"
+        attributes: {principle: "Perceivable", level: "A"}
+        criticality: high
+      - id: "1.3.2 Meaningful Sequence"
+        label: "Meaningful sequence"
+        attributes: {principle: "Perceivable", level: "A"}
+        criticality: high
+      - id: "1.3.4 Orientation"
+        label: "Orientation"
+        attributes: {principle: "Perceivable", level: "AA"}
+        criticality: medium
+      - id: "1.3.5 Identify Input Purpose"
+        label: "Identify input purpose"
+        attributes: {principle: "Perceivable", level: "AA"}
+        criticality: medium
+  - axis_type: "1.4 Distinguishable"
+    rationale: "WCAG 2.2 guideline 1.4 requires foreground and background separation, including color, contrast, resize, reflow, spacing, and hover or focus content."
+    criticality_default: high
+    variants:
+      - id: "1.4.1 Use of Color"
+        label: "Use of color"
+        attributes: {principle: "Perceivable", level: "A"}
+        criticality: high
+      - id: "1.4.3 Contrast (Minimum)"
+        label: "Contrast minimum"
+        attributes: {principle: "Perceivable", level: "AA"}
+        criticality: high
+      - id: "1.4.4 Resize Text"
+        label: "Resize text"
+        attributes: {principle: "Perceivable", level: "AA"}
+        criticality: medium
+      - id: "1.4.10 Reflow"
+        label: "Reflow"
+        attributes: {principle: "Perceivable", level: "AA"}
+        criticality: high
+      - id: "1.4.11 Non-text Contrast"
+        label: "Non-text contrast"
+        attributes: {principle: "Perceivable", level: "AA"}
+        criticality: high
+      - id: "1.4.13 Content on Hover or Focus"
+        label: "Content on hover or focus"
+        attributes: {principle: "Perceivable", level: "AA"}
+        criticality: medium
+  - axis_type: "2.1 Keyboard Accessible"
+    rationale: "WCAG 2.2 guideline 2.1 requires functionality to be available from a keyboard."
+    criticality_default: critical
+    variants:
+      - id: "2.1.1 Keyboard"
+        label: "Keyboard operation"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: critical
+      - id: "2.1.2 No Keyboard Trap"
+        label: "No keyboard trap"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: critical
+      - id: "2.1.4 Character Key Shortcuts"
+        label: "Character key shortcuts"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: medium
+  - axis_type: "2.2 Enough Time"
+    rationale: "WCAG 2.2 guideline 2.2 covers timing adjustments, pause, stop, hide, re-authentication, and timeouts through Level AA."
+    criticality_default: medium
+    variants:
+      - id: "2.2.1 Timing Adjustable"
+        label: "Timing adjustable"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: medium
+      - id: "2.2.2 Pause, Stop, Hide"
+        label: "Pause, stop, hide"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: high
+      - id: "2.2.6 Timeouts"
+        label: "Timeouts"
+        attributes: {principle: "Operable", level: "AAA"}
+        criticality: info
+  - axis_type: "2.3 Seizures and Physical Reactions"
+    rationale: "WCAG 2.2 guideline 2.3 includes Success Criterion 2.3.1 Three Flashes or Below Threshold at Level A."
+    criticality_default: critical
+    variants:
+      - id: "2.3.1 Three Flashes or Below Threshold"
+        label: "Three flashes or below threshold"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: critical
+  - axis_type: "2.4 Navigable"
+    rationale: "WCAG 2.2 guideline 2.4 covers bypass blocks, page titles, focus order, link purpose, headings, labels, focus visibility, and focus not obscured through Level AA."
+    criticality_default: high
+    variants:
+      - id: "2.4.1 Bypass Blocks"
+        label: "Bypass blocks"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: medium
+      - id: "2.4.2 Page Titled"
+        label: "Page titled"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: medium
+      - id: "2.4.3 Focus Order"
+        label: "Focus order"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: high
+      - id: "2.4.7 Focus Visible"
+        label: "Focus visible"
+        attributes: {principle: "Operable", level: "AA"}
+        criticality: high
+      - id: "2.4.11 Focus Not Obscured (Minimum)"
+        label: "Focus not obscured minimum"
+        attributes: {principle: "Operable", level: "AA"}
+        criticality: high
+  - axis_type: "2.5 Input Modalities"
+    rationale: "WCAG 2.2 guideline 2.5 covers pointer gestures, pointer cancellation, label in name, motion actuation, dragging movements, and target size minimum through Level AA."
+    criticality_default: high
+    variants:
+      - id: "2.5.1 Pointer Gestures"
+        label: "Pointer gestures"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: medium
+      - id: "2.5.2 Pointer Cancellation"
+        label: "Pointer cancellation"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: high
+      - id: "2.5.3 Label in Name"
+        label: "Label in name"
+        attributes: {principle: "Operable", level: "A"}
+        criticality: medium
+      - id: "2.5.7 Dragging Movements"
+        label: "Dragging movements"
+        attributes: {principle: "Operable", level: "AA"}
+        criticality: medium
+      - id: "2.5.8 Target Size (Minimum)"
+        label: "Target size minimum"
+        attributes: {principle: "Operable", level: "AA"}
+        criticality: high
+  - axis_type: "3.1 Readable"
+    rationale: "WCAG 2.2 guideline 3.1 covers language of page at Level A and language of parts at Level AA."
+    criticality_default: medium
+    variants:
+      - id: "3.1.1 Language of Page"
+        label: "Language of page"
+        attributes: {principle: "Understandable", level: "A"}
+        criticality: medium
+      - id: "3.1.2 Language of Parts"
+        label: "Language of parts"
+        attributes: {principle: "Understandable", level: "AA"}
+        criticality: medium
+  - axis_type: "3.2 Predictable"
+    rationale: "WCAG 2.2 guideline 3.2 covers predictable focus, input, navigation, identification, and consistent help behavior through Level AA."
+    criticality_default: medium
+    variants:
+      - id: "3.2.1 On Focus"
+        label: "On focus"
+        attributes: {principle: "Understandable", level: "A"}
+        criticality: medium
+      - id: "3.2.2 On Input"
+        label: "On input"
+        attributes: {principle: "Understandable", level: "A"}
+        criticality: medium
+      - id: "3.2.3 Consistent Navigation"
+        label: "Consistent navigation"
+        attributes: {principle: "Understandable", level: "AA"}
+        criticality: medium
+      - id: "3.2.6 Consistent Help"
+        label: "Consistent help"
+        attributes: {principle: "Understandable", level: "A"}
+        criticality: medium
+  - axis_type: "3.3 Input Assistance"
+    rationale: "WCAG 2.2 guideline 3.3 covers error identification, labels or instructions, error prevention, redundant entry, and accessible authentication through Level AA."
+    criticality_default: high
+    variants:
+      - id: "3.3.1 Error Identification"
+        label: "Error identification"
+        attributes: {principle: "Understandable", level: "A"}
+        criticality: high
+      - id: "3.3.2 Labels or Instructions"
+        label: "Labels or instructions"
+        attributes: {principle: "Understandable", level: "A"}
+        criticality: high
+      - id: "3.3.4 Error Prevention (Legal, Financial, Data)"
+        label: "Error prevention for legal, financial, or data submissions"
+        attributes: {principle: "Understandable", level: "AA"}
+        criticality: high
+      - id: "3.3.7 Redundant Entry"
+        label: "Redundant entry"
+        attributes: {principle: "Understandable", level: "A"}
+        criticality: medium
+      - id: "3.3.8 Accessible Authentication (Minimum)"
+        label: "Accessible authentication minimum"
+        attributes: {principle: "Understandable", level: "AA"}
+        criticality: high
+  - axis_type: "4.1 Compatible"
+    rationale: "WCAG 2.2 guideline 4.1 covers compatibility with user agents and assistive technologies through name, role, value and status messages."
+    criticality_default: high
+    variants:
+      - id: "4.1.2 Name, Role, Value"
+        label: "Name, role, value"
+        attributes: {principle: "Robust", level: "A"}
+        criticality: high
+      - id: "4.1.3 Status Messages"
+        label: "Status messages"
+        attributes: {principle: "Robust", level: "AA"}
+        criticality: high

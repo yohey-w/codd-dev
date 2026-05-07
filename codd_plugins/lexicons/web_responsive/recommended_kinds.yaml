@@ -1,0 +1,9 @@
+recommended_kinds:
+  - responsive_width_gap
+  - orientation_gap
+  - color_scheme_gap
+  - reduced_motion_gap
+  - resolution_gap
+  - hover_capability_gap
+  - pointer_accuracy_gap
+  - aspect_ratio_gap

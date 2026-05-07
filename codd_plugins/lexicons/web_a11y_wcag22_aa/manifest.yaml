@@ -1,0 +1,18 @@
+name: web_a11y_wcag22_aa
+lexicon_name: web_a11y_wcag22_aa
+version: "1.0.0"
+source_url: "https://www.w3.org/TR/WCAG22/"
+source_version: "WCAG 2.2, W3C Recommendation 2024-12-12"
+description: "WCAG 2.2 A/AA coverage axes organized by the 13 WCAG guidelines."
+observation_dimensions: 13
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Web Content Accessibility Guidelines (WCAG) 2.2"
+    url: "https://www.w3.org/TR/WCAG22/"
+  - title: "How to Meet WCAG 2.2"
+    url: "https://www.w3.org/WAI/WCAG22/quickref/"
