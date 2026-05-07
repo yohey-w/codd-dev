@@ -1024,6 +1024,75 @@ def elicit_apply_cmd(input_file: Path, format_name: str, project_path: str) -> N
         click.echo(f"Updated: {file_path}")
 
 
+@main.command("brownfield")
+@click.argument("target_path", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--requirements",
+    "requirements_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Requirements file (default: <target>/.codd/requirements.md; skipped if absent).",
+)
+@click.option(
+    "--lexicon",
+    "lexicon_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Lexicon directory or manifest (default: <target>/.codd/lexicon; discovery mode if absent).",
+)
+@click.option(
+    "--format",
+    "format_name",
+    type=click.Choice(["json", "md"]),
+    default="md",
+    show_default=True,
+    help="Integrated report format.",
+)
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Output report file.")
+@click.option(
+    "--ai-cmd",
+    default=None,
+    help="Override AI CLI command for diff and elicit engines.",
+)
+def brownfield_cmd(
+    target_path: Path,
+    requirements_path: Path | None,
+    lexicon_path: Path | None,
+    format_name: str,
+    output: Path | None,
+    ai_cmd: str | None,
+) -> None:
+    """Run brownfield extract, diff, elicit, and merged reporting."""
+    from codd.brownfield.pipeline import BrownfieldPipeline, format_brownfield_result
+
+    project_root = target_path.expanduser().resolve()
+    try:
+        result = BrownfieldPipeline(ai_command=ai_cmd).run(
+            project_root,
+            requirements_path=requirements_path,
+            lexicon_path=lexicon_path,
+        )
+        formatted = format_brownfield_result(result, format_name)
+        output_path = _project_file(
+            project_root,
+            output,
+            f".codd/brownfield_report.{format_name}",
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(formatted, encoding="utf-8")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(
+        "Brownfield pipeline complete: "
+        f"diff_findings={len(result.diff_findings)}, "
+        f"elicit_findings={len(result.elicit_findings)}, "
+        f"merged_findings={len(result.merged_findings)}"
+    )
+    click.echo(f"Output: {_display_path(output_path, project_root)}")
+
+
 @main.group("diff", invoke_without_command=True)
 @click.option("--extract-input", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--requirements", "requirements_path", type=click.Path(dir_okay=False, path_type=Path), default=None)
@@ -1064,7 +1133,7 @@ def diff_cmd(
     from codd.elicit.formatters.md import MdFormatter
 
     project_root = Path(project_path).resolve()
-    extract_path = _project_file(project_root, extract_input, "codd/extracted.md")
+    extract_path = _resolve_diff_extract_input(project_root, extract_input)
     req_path = _project_file(project_root, requirements_path, "docs/requirements/requirements.md")
     output_path = _project_file(project_root, output, "drift_findings.md") if output is not None or format_name == "md" else None
 
@@ -1155,6 +1224,37 @@ def _project_file(project_root: Path, value: Path | None, default: str) -> Path:
     if path.is_absolute():
         return path
     return project_root / path
+
+
+def _resolve_diff_extract_input(project_root: Path, value: Path | None) -> Path:
+    """Locate the extract-input file, preferring isolated `.codd/extract/` output.
+
+    Order of resolution:
+    1. Explicit ``--extract-input`` value (absolute or project-relative).
+    2. ``.codd/extract/extracted.md`` (default Issue #17 isolation target).
+    3. Top-level ``extracted.md`` aggregated output if present.
+    4. First ``.codd/extract/modules/*.md`` module file (deterministic by name).
+    5. Legacy fallback ``codd/extracted.md`` (preserved for older projects).
+    """
+    if value is not None:
+        candidate = value.expanduser()
+        return candidate if candidate.is_absolute() else project_root / candidate
+
+    candidates: list[Path] = [
+        project_root / ".codd" / "extract" / "extracted.md",
+        project_root / "extracted.md",
+    ]
+    modules_dir = project_root / ".codd" / "extract" / "modules"
+    if modules_dir.is_dir():
+        module_files = sorted(modules_dir.glob("*.md"))
+        if module_files:
+            candidates.append(module_files[0])
+    candidates.append(project_root / "codd" / "extracted.md")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
 
 
 def _build_diff_engine(engine_cls: Any, ai_cmd: str | None, project_root: Path) -> Any:

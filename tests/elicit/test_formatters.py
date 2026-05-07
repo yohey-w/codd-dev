@@ -126,6 +126,11 @@ def test_finding_from_dict_defaults_optional_fields() -> None:
     assert finding.source == "greenfield"
 
 
-def test_finding_from_dict_rejects_invalid_severity() -> None:
-    with pytest.raises(ValueError, match="severity"):
-        Finding.from_dict({"id": "F-1", "kind": "gap", "severity": "urgent"})
+def test_finding_from_dict_coerces_severity_aliases() -> None:
+    # v1.37.0: severity aliases ("urgent" -> "critical", unknown -> "info") to
+    # tolerate LLM drift without aborting the pipeline.
+    finding = Finding.from_dict({"id": "F-1", "kind": "gap", "severity": "urgent"})
+    assert finding.severity == "critical"
+
+    fallback = Finding.from_dict({"id": "F-2", "kind": "gap", "severity": "mystery"})
+    assert fallback.severity == "info"
