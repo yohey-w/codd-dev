@@ -1,0 +1,32 @@
+name: web_performance_core_web_vitals
+lexicon_name: web_performance_core_web_vitals
+version: "1.0.0"
+source_url: "https://web.dev/articles/vitals"
+source_version: "Core Web Vitals current, web.dev last updated 2024-10-31 + W3C Web Performance specs current"
+description: "Core Web Vitals and supporting Web Performance coverage axes for user-perceived page performance."
+observation_dimensions: 6
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "web.dev - Web Vitals"
+    url: "https://web.dev/articles/vitals"
+    source_version: "Last updated 2024-10-31 UTC"
+  - title: "web.dev - Largest Contentful Paint"
+    url: "https://web.dev/articles/lcp"
+    source_version: "Last updated 2025-09-04 UTC"
+  - title: "web.dev - First Contentful Paint"
+    url: "https://web.dev/articles/fcp"
+    source_version: "Last updated 2023-12-06 UTC"
+  - title: "web.dev - Time to First Byte"
+    url: "https://web.dev/articles/ttfb"
+    source_version: "Last updated 2025-11-18 UTC"
+  - title: "web.dev - Time to Interactive"
+    url: "https://web.dev/articles/tti"
+    source_version: "Last updated 2023-11-17 UTC"
+  - title: "W3C Web Performance Working Group"
+    url: "https://w3c.github.io/web-performance/"
+

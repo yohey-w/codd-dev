@@ -1,0 +1,30 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=Largest Contentful Paint (LCP) AND coverage=gap"
+    severity: critical
+    rationale: "Missing LCP coverage hides whether the main content appears within the user-perceived loading threshold."
+  - when: "axis=Interaction to Next Paint (INP) AND coverage=gap"
+    severity: critical
+    rationale: "Missing INP coverage hides whether interactions receive a timely next paint."
+  - when: "axis=Cumulative Layout Shift (CLS) AND coverage=gap"
+    severity: critical
+    rationale: "Missing CLS coverage hides visual instability that can disrupt or misdirect users."
+  - when: "axis=Time to First Byte (TTFB) AND coverage=gap"
+    severity: high
+    rationale: "Missing TTFB coverage leaves server and connection response latency unreviewed before rendering metrics."
+  - when: "axis=First Contentful Paint (FCP) AND coverage=gap"
+    severity: high
+    rationale: "Missing FCP coverage hides whether any useful content becomes visible promptly."
+  - when: "axis=Time to Interactive (TTI) AND coverage=gap"
+    severity: medium
+    rationale: "Missing TTI coverage leaves lab load-responsiveness readiness unclear for flows where it is still used."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit performance coverage needs reviewer confirmation before it can be treated as sufficient."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered performance axes may still emit informational tuning notes outside release-blocking gaps."
+

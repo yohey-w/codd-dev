@@ -1,0 +1,170 @@
+coverage_axes:
+  - axis_type: "Largest Contentful Paint (LCP)"
+    rationale: "web.dev defines Largest Contentful Paint (LCP) as a stable Core Web Vital for perceived load speed and gives a 2.5 second good threshold."
+    criticality_default: critical
+    variants:
+      - id: "largest-contentful-paint"
+        label: "Largest Contentful Paint performance entry"
+        attributes: {source_literal: "largest-contentful-paint", coverage_target: "largest content render timestamp"}
+        criticality: critical
+      - id: "<img>"
+        label: "Image candidate element"
+        attributes: {source_literal: "<img>", coverage_target: "largest image render timing"}
+        criticality: high
+      - id: "<video>"
+        label: "Video candidate element"
+        attributes: {source_literal: "<video>", coverage_target: "poster or first-frame render timing"}
+        criticality: high
+      - id: "background image"
+        label: "Background image candidate"
+        attributes: {source_literal: "background image", coverage_target: "CSS image render timing"}
+        criticality: medium
+      - id: "2.5 seconds or less"
+        label: "Good LCP threshold"
+        attributes: {source_literal: "2.5 seconds or less", coverage_target: "good user experience threshold"}
+        criticality: critical
+  - axis_type: "Interaction to Next Paint (INP)"
+    rationale: "web.dev lists Interaction to Next Paint (INP) as the stable Core Web Vital for interactivity, replacing First Input Delay in the current set."
+    criticality_default: critical
+    variants:
+      - id: "Interaction to Next Paint (INP)"
+        label: "Current interactivity metric"
+        attributes: {source_literal: "Interaction to Next Paint (INP)", coverage_target: "field responsiveness"}
+        criticality: critical
+      - id: "interaction"
+        label: "User interaction"
+        attributes: {source_literal: "interaction", coverage_target: "input event coverage"}
+        criticality: high
+      - id: "input delay"
+        label: "Input delay component"
+        attributes: {source_literal: "input delay", coverage_target: "queued interaction time"}
+        criticality: high
+      - id: "processing time"
+        label: "Processing time component"
+        attributes: {source_literal: "processing time", coverage_target: "event handler duration"}
+        criticality: high
+      - id: "presentation delay"
+        label: "Presentation delay component"
+        attributes: {source_literal: "presentation delay", coverage_target: "next-paint latency"}
+        criticality: high
+      - id: "200 milliseconds or less"
+        label: "Good INP threshold"
+        attributes: {source_literal: "200 milliseconds or less", coverage_target: "good user experience threshold"}
+        criticality: critical
+  - axis_type: "Cumulative Layout Shift (CLS)"
+    rationale: "web.dev defines Cumulative Layout Shift (CLS) as the Core Web Vital for visual stability and gives a 0.1 or less good threshold."
+    criticality_default: critical
+    variants:
+      - id: "Cumulative Layout Shift (CLS)"
+        label: "Visual stability metric"
+        attributes: {source_literal: "Cumulative Layout Shift (CLS)", coverage_target: "layout shift score"}
+        criticality: critical
+      - id: "layout shift"
+        label: "Unexpected layout movement"
+        attributes: {source_literal: "layout shift", coverage_target: "visual instability event"}
+        criticality: high
+      - id: "session window"
+        label: "Layout shift session window"
+        attributes: {source_literal: "session window", coverage_target: "shift aggregation interval"}
+        criticality: medium
+      - id: "impact fraction"
+        label: "Impact fraction"
+        attributes: {source_literal: "impact fraction", coverage_target: "viewport area affected"}
+        criticality: medium
+      - id: "distance fraction"
+        label: "Distance fraction"
+        attributes: {source_literal: "distance fraction", coverage_target: "movement distance proportion"}
+        criticality: medium
+      - id: "0.1 or less"
+        label: "Good CLS threshold"
+        attributes: {source_literal: "0.1 or less", coverage_target: "good user experience threshold"}
+        criticality: critical
+  - axis_type: "Time to First Byte (TTFB)"
+    rationale: "web.dev defines Time to First Byte (TTFB) as the time between starting navigation and the first byte beginning to arrive."
+    criticality_default: high
+    variants:
+      - id: "Time to First Byte (TTFB)"
+        label: "First response byte metric"
+        attributes: {source_literal: "Time to First Byte (TTFB)", coverage_target: "server responsiveness"}
+        criticality: high
+      - id: "startTime"
+        label: "Navigation timing start"
+        attributes: {source_literal: "startTime", coverage_target: "request timing start"}
+        criticality: medium
+      - id: "responseStart"
+        label: "Response start timing"
+        attributes: {source_literal: "responseStart", coverage_target: "first byte arrival"}
+        criticality: high
+      - id: "Redirect time"
+        label: "Redirect phase"
+        attributes: {source_literal: "Redirect time", coverage_target: "redirect latency"}
+        criticality: medium
+      - id: "DNS lookup"
+        label: "DNS lookup phase"
+        attributes: {source_literal: "DNS lookup", coverage_target: "name resolution latency"}
+        criticality: medium
+      - id: "Connection and TLS negotiation"
+        label: "Connection setup phase"
+        attributes: {source_literal: "Connection and TLS negotiation", coverage_target: "transport setup latency"}
+        criticality: high
+      - id: "0.8 seconds or less"
+        label: "Good TTFB rough guide"
+        attributes: {source_literal: "0.8 seconds or less", coverage_target: "server-response target"}
+        criticality: high
+  - axis_type: "First Contentful Paint (FCP)"
+    rationale: "web.dev defines First Contentful Paint (FCP) as the time until any part of the page content is rendered on screen."
+    criticality_default: high
+    variants:
+      - id: "first-contentful-paint"
+        label: "Paint Timing entry"
+        attributes: {source_literal: "first-contentful-paint", coverage_target: "first content paint timestamp"}
+        criticality: high
+      - id: "text"
+        label: "Text content"
+        attributes: {source_literal: "text", coverage_target: "text rendering"}
+        criticality: medium
+      - id: "images"
+        label: "Image content"
+        attributes: {source_literal: "images", coverage_target: "image rendering"}
+        criticality: medium
+      - id: "<svg>"
+        label: "SVG content"
+        attributes: {source_literal: "<svg>", coverage_target: "vector content rendering"}
+        criticality: medium
+      - id: "non-white <canvas>"
+        label: "Canvas content"
+        attributes: {source_literal: "non-white <canvas>", coverage_target: "canvas content rendering"}
+        criticality: medium
+      - id: "1.8 seconds or less"
+        label: "Good FCP threshold"
+        attributes: {source_literal: "1.8 seconds or less", coverage_target: "good user experience threshold"}
+        criticality: high
+  - axis_type: "Time to Interactive (TTI)"
+    rationale: "web.dev defines Time to Interactive (TTI) as a lab metric for load responsiveness that starts from First Contentful Paint and searches for a quiet window."
+    criticality_default: medium
+    variants:
+      - id: "Time to Interactive (TTI)"
+        label: "Load responsiveness metric"
+        attributes: {source_literal: "Time to Interactive (TTI)", coverage_target: "lab interactivity readiness"}
+        criticality: medium
+      - id: "First Contentful Paint (FCP)"
+        label: "TTI calculation start"
+        attributes: {source_literal: "First Contentful Paint (FCP)", coverage_target: "TTI lower bound"}
+        criticality: medium
+      - id: "quiet window"
+        label: "Quiet window"
+        attributes: {source_literal: "quiet window", coverage_target: "interactive readiness interval"}
+        criticality: medium
+      - id: "long tasks"
+        label: "Long task constraint"
+        attributes: {source_literal: "long tasks", coverage_target: "main-thread blocking"}
+        criticality: high
+      - id: "network GET requests"
+        label: "Network request constraint"
+        attributes: {source_literal: "network GET requests", coverage_target: "network quiet condition"}
+        criticality: medium
+      - id: "5 seconds"
+        label: "Good TTI target"
+        attributes: {source_literal: "5 seconds", coverage_target: "lab usability threshold"}
+        criticality: medium
+

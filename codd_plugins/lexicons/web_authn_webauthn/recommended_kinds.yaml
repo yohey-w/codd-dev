@@ -1,0 +1,8 @@
+recommended_kinds:
+  - webauthn_registration_ceremony_gap
+  - webauthn_authentication_ceremony_gap
+  - webauthn_attestation_gap
+  - webauthn_user_verification_gap
+  - webauthn_credential_management_gap
+  - webauthn_extension_processing_gap
+
