@@ -1,0 +1,166 @@
+coverage_axes:
+  - axis_type: "registration ceremony"
+    rationale: "WebAuthn Level 3 uses registration ceremony terminology for creating a new public key credential through navigator.credentials.create()."
+    criticality_default: critical
+    variants:
+      - id: "Registration"
+        label: "Registration use case"
+        attributes: {source_literal: "Registration", coverage_target: "credential enrollment flow"}
+        criticality: critical
+      - id: "navigator.credentials.create()"
+        label: "Credential creation API"
+        attributes: {source_literal: "navigator.credentials.create()", coverage_target: "client credential creation call"}
+        criticality: critical
+      - id: "PublicKeyCredentialCreationOptions"
+        label: "Credential creation options"
+        attributes: {source_literal: "PublicKeyCredentialCreationOptions", coverage_target: "creation ceremony inputs"}
+        criticality: high
+      - id: "PublicKeyCredentialRpEntity"
+        label: "Relying party parameters"
+        attributes: {source_literal: "PublicKeyCredentialRpEntity", coverage_target: "relying party identity"}
+        criticality: high
+      - id: "PublicKeyCredentialUserEntity"
+        label: "User account parameters"
+        attributes: {source_literal: "PublicKeyCredentialUserEntity", coverage_target: "user identity in registration"}
+        criticality: high
+      - id: "authenticatorMakeCredential"
+        label: "Authenticator make-credential operation"
+        attributes: {source_literal: "authenticatorMakeCredential", coverage_target: "authenticator-side credential creation"}
+        criticality: critical
+  - axis_type: "authentication ceremony"
+    rationale: "WebAuthn Level 3 uses authentication ceremony terminology for using an existing credential to make an assertion."
+    criticality_default: critical
+    variants:
+      - id: "Authentication"
+        label: "Authentication use case"
+        attributes: {source_literal: "Authentication", coverage_target: "assertion flow"}
+        criticality: critical
+      - id: "navigator.credentials.get()"
+        label: "Credential request API"
+        attributes: {source_literal: "navigator.credentials.get()", coverage_target: "client assertion call"}
+        criticality: critical
+      - id: "PublicKeyCredentialRequestOptions"
+        label: "Credential request options"
+        attributes: {source_literal: "PublicKeyCredentialRequestOptions", coverage_target: "authentication ceremony inputs"}
+        criticality: high
+      - id: "allowCredentials"
+        label: "Allowed credential descriptors"
+        attributes: {source_literal: "allowCredentials", coverage_target: "credential selection"}
+        criticality: high
+      - id: "authenticatorGetAssertion"
+        label: "Authenticator get-assertion operation"
+        attributes: {source_literal: "authenticatorGetAssertion", coverage_target: "authenticator-side assertion"}
+        criticality: critical
+      - id: "AuthenticatorAssertionResponse"
+        label: "Assertion response"
+        attributes: {source_literal: "AuthenticatorAssertionResponse", coverage_target: "assertion verification payload"}
+        criticality: critical
+  - axis_type: "attestation"
+    rationale: "WebAuthn Level 3 describes attestation as cryptographic proof of authenticator properties and defines attestation objects, statements, formats, and conveyance preference."
+    criticality_default: high
+    variants:
+      - id: "attestation"
+        label: "Attestation proof"
+        attributes: {source_literal: "attestation", coverage_target: "authenticator property proof"}
+        criticality: high
+      - id: "attestation object"
+        label: "Attestation object"
+        attributes: {source_literal: "attestation object", coverage_target: "registration attestation payload"}
+        criticality: high
+      - id: "attestation statement"
+        label: "Attestation statement"
+        attributes: {source_literal: "attestation statement", coverage_target: "statement format and signature data"}
+        criticality: high
+      - id: "AttestationConveyancePreference"
+        label: "Attestation conveyance preference"
+        attributes: {source_literal: "AttestationConveyancePreference", coverage_target: "relying party attestation request"}
+        criticality: medium
+      - id: "attested credential data"
+        label: "Attested credential data"
+        attributes: {source_literal: "attested credential data", coverage_target: "credential public key and authenticator data"}
+        criticality: critical
+  - axis_type: "user verification"
+    rationale: "WebAuthn Level 3 defines userVerification requirements for create() and get() operations and a UserVerificationRequirement enumeration."
+    criticality_default: critical
+    variants:
+      - id: "userVerification"
+        label: "User verification option"
+        attributes: {source_literal: "userVerification", coverage_target: "verification requirement"}
+        criticality: critical
+      - id: "UserVerificationRequirement"
+        label: "User verification requirement enum"
+        attributes: {source_literal: "UserVerificationRequirement", coverage_target: "allowed requirement values"}
+        criticality: high
+      - id: "required"
+        label: "Required verification"
+        attributes: {source_literal: "required", coverage_target: "verification must occur"}
+        criticality: critical
+      - id: "preferred"
+        label: "Preferred verification"
+        attributes: {source_literal: "preferred", coverage_target: "verification requested but not mandatory"}
+        criticality: high
+      - id: "discouraged"
+        label: "Discouraged verification"
+        attributes: {source_literal: "discouraged", coverage_target: "verification not requested"}
+        criticality: medium
+      - id: "isUserVerifyingPlatformAuthenticatorAvailable()"
+        label: "User-verifying platform authenticator availability"
+        attributes: {source_literal: "isUserVerifyingPlatformAuthenticatorAvailable()", coverage_target: "platform verification capability"}
+        criticality: medium
+  - axis_type: "credential management"
+    rationale: "WebAuthn Level 3 extends Credential Management flows with PublicKeyCredential creation, request, store, discoverable credentials, and signal methods."
+    criticality_default: high
+    variants:
+      - id: "PublicKeyCredential"
+        label: "Public key credential"
+        attributes: {source_literal: "PublicKeyCredential", coverage_target: "credential representation"}
+        criticality: critical
+      - id: "CredentialCreationOptions"
+        label: "Credential creation options"
+        attributes: {source_literal: "CredentialCreationOptions", coverage_target: "credential creation integration"}
+        criticality: high
+      - id: "CredentialRequestOptions"
+        label: "Credential request options"
+        attributes: {source_literal: "CredentialRequestOptions", coverage_target: "credential request integration"}
+        criticality: high
+      - id: "client-side discoverable credential"
+        label: "Client-side discoverable credential"
+        attributes: {source_literal: "client-side discoverable credential", coverage_target: "discoverable credential storage"}
+        criticality: high
+      - id: "residentKey"
+        label: "Resident key requirement option"
+        attributes: {source_literal: "residentKey", coverage_target: "discoverable credential requirement"}
+        criticality: high
+      - id: "signalAllAcceptedCredentials()"
+        label: "Accepted credential signal"
+        attributes: {source_literal: "signalAllAcceptedCredentials()", coverage_target: "credential lifecycle synchronization"}
+        criticality: medium
+  - axis_type: "extensions"
+    rationale: "WebAuthn Level 3 defines WebAuthn Extensions, extension identifiers, client extension processing, and authenticator extension processing."
+    criticality_default: medium
+    variants:
+      - id: "WebAuthn Extensions"
+        label: "Extension framework"
+        attributes: {source_literal: "WebAuthn Extensions", coverage_target: "extension coverage boundary"}
+        criticality: medium
+      - id: "extension identifier"
+        label: "Extension identifier"
+        attributes: {source_literal: "extension identifier", coverage_target: "extension naming key"}
+        criticality: medium
+      - id: "AuthenticationExtensionsClientInputs"
+        label: "Client extension inputs"
+        attributes: {source_literal: "AuthenticationExtensionsClientInputs", coverage_target: "client-side extension input"}
+        criticality: medium
+      - id: "AuthenticationExtensionsClientOutputs"
+        label: "Client extension outputs"
+        attributes: {source_literal: "AuthenticationExtensionsClientOutputs", coverage_target: "client-side extension output"}
+        criticality: medium
+      - id: "AuthenticationExtensionsAuthenticatorInputs"
+        label: "Authenticator extension inputs"
+        attributes: {source_literal: "AuthenticationExtensionsAuthenticatorInputs", coverage_target: "authenticator-side extension input"}
+        criticality: medium
+      - id: "AuthenticationExtensionsAuthenticatorOutputs"
+        label: "Authenticator extension outputs"
+        attributes: {source_literal: "AuthenticationExtensionsAuthenticatorOutputs", coverage_target: "authenticator-side extension output"}
+        criticality: medium
+

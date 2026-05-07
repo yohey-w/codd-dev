@@ -1,0 +1,30 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=registration ceremony AND coverage=gap"
+    severity: critical
+    rationale: "Missing registration coverage can create unusable or unverifiable public key credentials."
+  - when: "axis=authentication ceremony AND coverage=gap"
+    severity: critical
+    rationale: "Missing authentication coverage can leave assertion behavior and credential selection ambiguous."
+  - when: "axis=attestation AND coverage=gap"
+    severity: high
+    rationale: "Missing attestation coverage leaves authenticator property proof and trust decisions unclear."
+  - when: "axis=user verification AND coverage=gap"
+    severity: critical
+    rationale: "Missing user verification coverage can weaken ceremony assurance or block users unexpectedly."
+  - when: "axis=credential management AND coverage=gap"
+    severity: high
+    rationale: "Missing credential management coverage leaves credential lifecycle, discovery, and synchronization ambiguous."
+  - when: "axis=extensions AND coverage=gap"
+    severity: medium
+    rationale: "Missing extension coverage leaves additional client or authenticator processing requirements undefined."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit WebAuthn coverage needs reviewer confirmation before it can be treated as sufficient."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered WebAuthn axes may still emit informational notes outside release-blocking gaps."
+

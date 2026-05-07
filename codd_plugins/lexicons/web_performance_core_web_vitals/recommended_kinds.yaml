@@ -1,0 +1,8 @@
+recommended_kinds:
+  - web_vitals_lcp_gap
+  - web_vitals_inp_gap
+  - web_vitals_cls_gap
+  - web_vitals_ttfb_gap
+  - web_vitals_fcp_gap
+  - web_vitals_tti_gap
+
