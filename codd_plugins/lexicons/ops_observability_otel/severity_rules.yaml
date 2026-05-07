@@ -1,0 +1,35 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=signals_traces AND coverage=gap"
+    severity: high
+    rationale: "Trace gaps can leave distributed request paths, span relationships, and failure timing unobservable."
+  - when: "axis=signals_metrics AND coverage=gap"
+    severity: high
+    rationale: "Metric gaps can leave service health, saturation, latency, and throughput without measurable indicators."
+  - when: "axis=signals_logs AND coverage=gap"
+    severity: medium
+    rationale: "Log gaps can leave event detail unavailable for diagnosis even when traces or metrics exist."
+  - when: "axis=context_propagation AND coverage=gap"
+    severity: critical
+    rationale: "Propagation gaps can break correlation across process and network boundaries."
+  - when: "axis=resource_attributes AND coverage=gap"
+    severity: high
+    rationale: "Resource identity gaps make telemetry difficult to attribute to services, hosts, workloads, or processes."
+  - when: "axis=instrumentation AND coverage=gap"
+    severity: high
+    rationale: "Instrumentation gaps can leave the API, SDK, and library boundary unclear or unsafe for application code."
+  - when: "axis=collector AND coverage=gap"
+    severity: high
+    rationale: "Collector pipeline gaps can leave telemetry ingestion, processing, or export behavior undefined."
+  - when: "axis=semantic_conventions AND coverage=gap"
+    severity: high
+    rationale: "Semantic convention gaps can make telemetry inconsistent across services and incompatible with downstream tooling."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit observability coverage needs reviewer confirmation before it can be treated as sufficient."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered axes may still produce informational notes outside release-blocking observability gaps."
