@@ -2,7 +2,98 @@
 
 All notable changes to CoDD are documented in this file.
 
-## [Unreleased] — 北極星接続フェーズ (v1.35.0+)
+## [Unreleased]
+
+## [1.35.0] - 2026-05-07 — codd elicit (Coverage/Spec Discovery Engine)
+
+### Added — `codd elicit` 北極星直結機能 (cmd_431)
+
+CoDD の北極星「機能要件 + 制約だけ書けば全自動」への最接近機能 release。
+要件・設計に潜む観点漏れ / axis 候補 / 仕様の穴を LLM 動的判断で発見し、
+人間レビュー → project_lexicon.yaml / requirements.md / pending への書き戻しまで
+一気通貫の **Coverage/Spec Discovery Engine** を導入。
+
+#### 主要機能
+
+- **`codd elicit`** — greenfield discovery (lexicon 不在時 ~10 件 high-signal findings)
+- **`codd elicit --lexicon <path>`** — lexicon-loaded coverage-check mode (gap only)
+- **`codd elicit apply <input>`** — approved findings を `project_lexicon.yaml` /
+  `requirements.md` / `.codd/elicit/ignored_findings.yaml` に書き戻し
+- **multi-formatter** — `--format md` (default、`findings.md`) / `json` (CI) /
+  `--interactive` (CLI REPL Y/n/d)
+- **永続化** — `.codd/elicit/{ignored,pending,history}.yaml` で重複質問回避
+
+#### Coverage-mode (cmd_431_coverage_mode_impl)
+
+lexicon ロード時に「discover」モードから「coverage-check」モードへ自動切替:
+
+- lexicon-defined categories を `covered` / `implicit` / `gap` に分類
+- `findings` は `gap` のみ emit (noise 削減)
+- `lexicon_coverage_report` で全カテゴリの分類結果を可視化
+- `all_covered: true` で全カテゴリ充足を明示
+- legacy array payload (discover mode) は backwards compatible
+
+#### BABOK lexicon plug-in 同梱
+
+`codd_plugins/lexicons/babok/`:
+- BABOK 13 dimensions (stakeholder / goal / flow / issue / data / functional /
+  non-functional / rule / constraint / acceptance / risk / assumption / term)
+- coverage-check classification rules (`elicit_extend.md`)
+- recommended kinds (open list、core hardcode 禁止)
+
+#### 出力スキーマ
+
+`ElicitResult` dataclass:
+
+```python
+{
+  "all_covered": false,
+  "lexicon_coverage_report": {
+    "stakeholder": "covered",
+    "goal": "gap",
+    ...
+  },
+  "findings": [
+    {"id": "...", "kind": "<LLM 動的>", "severity": "critical|high|medium|info", ...}
+  ],
+  "metadata": {}
+}
+```
+
+`kind` は **LLM 動的判断**で生成 (core hardcode 禁止、Generality Gate 維持)。
+`severity` enum 固定 (`critical` / `high` / `medium` / `info`)。
+
+### osato-lms PoC 実証
+
+lexicon=BABOK で本日実証:
+
+```
+13 categories classified:
+  covered:  4 (functional / issue / non-functional / stakeholder)
+  implicit: 3 (assumption / flow / term)
+  gap:      6 (acceptance / constraint / data / goal / risk / rule)
+
+findings: 12 (legacy discover mode) → 6 (gap only、50% noise reduction)
+```
+
+### Quality Metrics
+
+- **pytest**: 2285 PASS / 0 FAIL / 0 SKIP / 12 warnings (v1.34.0 2145 → +140)
+- **新 node/edge/check/SDK 依存**: 全 0
+- **Generality Gate**: Layer A (code) + Layer B (template) zero hit
+  - kind 列挙 hardcode 禁止 (`axis_candidate` / `spec_hole` / `babok` 等は core 不知)
+  - stack/framework/domain 名 hardcode 禁止
+  - lexicon 名は plug-in 配下のみ、core code 0 件
+- **backward compatible**: legacy `list[Finding]` payload は formatters / from_payload で吸収
+
+### Phase 構成と commits
+
+- cmd_431_phase_b core (`3fc2b35`) — Finding dataclass + ElicitEngine + persistence
+- cmd_431_phase_c lexicon (`29bf6fe`) — Lexicon loader + BABOK plug-in
+- cmd_431_phase_d formatters/apply (`67256a3`) — md/json/interactive + ElicitApplyEngine
+- cmd_431 coverage-mode (`8d3f332`) — ElicitResult + coverage-check + 13 dimensions classification
+
+## [Roadmap] — 北極星接続フェーズ (v1.36.0+)
 
 ### Roadmap (確定済 design session 2026-05-07)
 
