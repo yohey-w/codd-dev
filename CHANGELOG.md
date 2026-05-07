@@ -4,6 +4,43 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-05-08 — `extends` namespace + multi-lexicon auto-load (cmd_453)
+
+> v2.5.0 is reserved for the in-flight `verifies_runtime` binding work
+> (cmd_451), which is parked pending a CLI verification cache investigation
+> (tracked separately). v2.6.0 ships the namespace and auto-load fixes
+> independent of that work.
+
+### Changed
+
+- `project_lexicon.yaml` now uses an `extends:` field for declared lexicon
+  plug-ins. The previous `suggested_lexicons:` field still loads — it is
+  merged into `extends:` with a `DeprecationWarning`. Existing projects
+  keep working without edits.
+- `codd init --suggest-lexicons` writes new entries to `extends:` instead
+  of `suggested_lexicons:`.
+- `codd elicit` consumes the same `extends:` list automatically. With no
+  `--lexicon` argument and a non-empty `extends:`, every listed lexicon is
+  loaded; with an empty `extends:` the legacy discovery mode runs.
+- `--lexicon` now accepts a comma-separated list (`babok,web_responsive`).
+  When `--lexicon` is given, it overrides `extends:`.
+
+### Added
+
+- `ElicitEngine.run()` accepts `LexiconConfig | list[LexiconConfig] | None`.
+  Multiple lexicons are applied sequentially; duplicate axes are
+  deduplicated (first lexicon wins) with a `DeprecationWarning`. Each
+  finding now carries a `lexicon_source:` attribute identifying the
+  lexicon that detected the gap.
+- New tests cover migration shim, CLI auto-load, CSV parsing, and engine
+  multi-lexicon paths.
+
+### Quality Metrics
+
+- **pytest**: 2690 PASS / 0 FAIL / 0 SKIP (no regressions vs v2.4.0)
+- **Generality Gate**: Layer A (`codd/init/`, `codd/elicit/`, `codd/cli.py`) ships zero specific lexicon literal hits.
+- **Compatibility**: legacy `suggested_lexicons:` keeps loading; deprecated only with a warning.
+
 ## [2.4.0] - 2026-05-08 — Runtime state auto-binding for deployment chain (cmd_450)
 
 ### Added
