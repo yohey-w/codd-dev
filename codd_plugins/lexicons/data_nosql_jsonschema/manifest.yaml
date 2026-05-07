@@ -1,0 +1,21 @@
+name: data_nosql_jsonschema
+lexicon_name: data_nosql_jsonschema
+version: "1.0.0"
+source_url: "https://json-schema.org/specification"
+source_version: "JSON Schema 2020-12 Core + Validation"
+description: "JSON Schema 2020-12 coverage axes for document data requirements."
+observation_dimensions: 10
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "JSON Schema Specification"
+    url: "https://json-schema.org/specification"
+    source_version: "2020-12"
+  - title: "JSON Schema Core 2020-12"
+    url: "https://json-schema.org/draft/2020-12/json-schema-core"
+  - title: "JSON Schema Validation 2020-12"
+    url: "https://json-schema.org/draft/2020-12/json-schema-validation"

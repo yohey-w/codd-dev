@@ -1,0 +1,41 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=schema definition AND coverage=gap"
+    severity: high
+    rationale: "Missing schema boundaries make object names, ownership, and organization ambiguous."
+  - when: "axis=table definition AND coverage=gap"
+    severity: high
+    rationale: "Missing table definitions leave stored relation shape and lifecycle unreviewable."
+  - when: "axis=data types AND coverage=gap"
+    severity: high
+    rationale: "Missing data type coverage allows incompatible values, precision loss, or invalid temporal behavior."
+  - when: "axis=domain constraints AND coverage=gap"
+    severity: high
+    rationale: "Missing nullability, uniqueness, check, or key constraints weakens data integrity."
+  - when: "axis=referential constraints AND coverage=gap"
+    severity: critical
+    rationale: "Missing referential constraints can orphan related rows or break relational invariants."
+  - when: "axis=query expressions AND coverage=gap"
+    severity: high
+    rationale: "Missing query expression coverage makes projection, filtering, grouping, or ordering behavior ambiguous."
+  - when: "axis=data change statements AND coverage=gap"
+    severity: high
+    rationale: "Missing data-change semantics leaves create, mutate, remove, or merge behavior unclear."
+  - when: "axis=transaction statements AND coverage=gap"
+    severity: critical
+    rationale: "Missing transaction boundary coverage can corrupt unit-of-work and recovery behavior."
+  - when: "axis=isolation levels AND coverage=gap"
+    severity: high
+    rationale: "Missing isolation expectations can produce unsafe concurrent reads or writes."
+  - when: "axis=views AND coverage=gap"
+    severity: medium
+    rationale: "Missing view coverage makes derived table interfaces and update constraints ambiguous."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit SQL coverage needs reviewer confirmation before it can be treated as sufficient."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered SQL axes may still emit informational review notes outside release-blocking gaps."

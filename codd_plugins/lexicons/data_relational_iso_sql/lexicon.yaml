@@ -1,0 +1,185 @@
+coverage_axes:
+  - axis_type: "schema definition"
+    rationale: "ISO/IEC 9075 uses schema and catalog terminology to organize SQL objects and object names."
+    criticality_default: high
+    variants:
+      - id: "CREATE SCHEMA"
+        label: "Schema creation statement"
+        attributes: {source_literal: "CREATE SCHEMA", coverage_target: "namespace and object ownership"}
+        criticality: high
+      - id: "schema"
+        label: "Schema namespace"
+        attributes: {source_literal: "schema", coverage_target: "qualified object grouping"}
+        criticality: high
+      - id: "catalog"
+        label: "Catalog grouping"
+        attributes: {source_literal: "catalog", coverage_target: "schema collection boundary"}
+        criticality: medium
+  - axis_type: "table definition"
+    rationale: "SQL/Foundation centers persistent relational storage around table definition and declared table elements."
+    criticality_default: high
+    variants:
+      - id: "CREATE TABLE"
+        label: "Table creation statement"
+        attributes: {source_literal: "CREATE TABLE", coverage_target: "base relation shape"}
+        criticality: high
+      - id: "base table"
+        label: "Base table"
+        attributes: {source_literal: "base table", coverage_target: "stored relation"}
+        criticality: high
+      - id: "temporary table"
+        label: "Temporary table"
+        attributes: {source_literal: "temporary table", coverage_target: "session-scoped relation"}
+        criticality: medium
+  - axis_type: "data types"
+    rationale: "SQL/Foundation defines predefined data type families for values stored in columns and expressions."
+    criticality_default: high
+    variants:
+      - id: "character string"
+        label: "Character string type"
+        attributes: {source_literal: "character string", coverage_target: "text values"}
+        criticality: medium
+      - id: "numeric"
+        label: "Numeric type"
+        attributes: {source_literal: "numeric", coverage_target: "exact or approximate numbers"}
+        criticality: high
+      - id: "datetime"
+        label: "Datetime type"
+        attributes: {source_literal: "datetime", coverage_target: "date and time values"}
+        criticality: high
+      - id: "boolean"
+        label: "Boolean type"
+        attributes: {source_literal: "boolean", coverage_target: "truth values"}
+        criticality: medium
+  - axis_type: "domain constraints"
+    rationale: "SQL table and domain definitions use constraints to restrict nullability, uniqueness, checks, and keys."
+    criticality_default: high
+    variants:
+      - id: "NOT NULL"
+        label: "Nullability constraint"
+        attributes: {source_literal: "NOT NULL", coverage_target: "required value"}
+        criticality: high
+      - id: "UNIQUE"
+        label: "Uniqueness constraint"
+        attributes: {source_literal: "UNIQUE", coverage_target: "candidate key uniqueness"}
+        criticality: high
+      - id: "CHECK"
+        label: "Check constraint"
+        attributes: {source_literal: "CHECK", coverage_target: "predicate constraint"}
+        criticality: high
+      - id: "PRIMARY KEY"
+        label: "Primary key constraint"
+        attributes: {source_literal: "PRIMARY KEY", coverage_target: "row identity"}
+        criticality: critical
+  - axis_type: "referential constraints"
+    rationale: "SQL/Foundation defines referential constraints using foreign keys, referenced columns, and referential actions."
+    criticality_default: critical
+    variants:
+      - id: "FOREIGN KEY"
+        label: "Foreign key constraint"
+        attributes: {source_literal: "FOREIGN KEY", coverage_target: "referencing relationship"}
+        criticality: critical
+      - id: "REFERENCES"
+        label: "Referenced table or columns"
+        attributes: {source_literal: "REFERENCES", coverage_target: "referential target"}
+        criticality: critical
+      - id: "referential action"
+        label: "Referential action"
+        attributes: {source_literal: "referential action", coverage_target: "update and delete effect"}
+        criticality: high
+  - axis_type: "query expressions"
+    rationale: "SQL query expressions define how rows are projected, filtered, grouped, ordered, and combined."
+    criticality_default: high
+    variants:
+      - id: "SELECT"
+        label: "Select list"
+        attributes: {source_literal: "SELECT", coverage_target: "projection"}
+        criticality: high
+      - id: "FROM"
+        label: "From clause"
+        attributes: {source_literal: "FROM", coverage_target: "row source"}
+        criticality: high
+      - id: "WHERE"
+        label: "Where clause"
+        attributes: {source_literal: "WHERE", coverage_target: "row filtering"}
+        criticality: high
+      - id: "GROUP BY"
+        label: "Grouping clause"
+        attributes: {source_literal: "GROUP BY", coverage_target: "aggregation grouping"}
+        criticality: medium
+      - id: "ORDER BY"
+        label: "Ordering clause"
+        attributes: {source_literal: "ORDER BY", coverage_target: "result ordering"}
+        criticality: medium
+  - axis_type: "data change statements"
+    rationale: "SQL/Foundation defines data change statements for inserting, updating, deleting, and merging table data."
+    criticality_default: high
+    variants:
+      - id: "INSERT"
+        label: "Insert statement"
+        attributes: {source_literal: "INSERT", coverage_target: "row creation"}
+        criticality: high
+      - id: "UPDATE"
+        label: "Update statement"
+        attributes: {source_literal: "UPDATE", coverage_target: "row mutation"}
+        criticality: high
+      - id: "DELETE"
+        label: "Delete statement"
+        attributes: {source_literal: "DELETE", coverage_target: "row removal"}
+        criticality: high
+      - id: "MERGE"
+        label: "Merge statement"
+        attributes: {source_literal: "MERGE", coverage_target: "conditional insert or update"}
+        criticality: medium
+  - axis_type: "transaction statements"
+    rationale: "SQL transaction statements define transaction start, completion, and rollback behavior for units of work."
+    criticality_default: critical
+    variants:
+      - id: "START TRANSACTION"
+        label: "Start transaction"
+        attributes: {source_literal: "START TRANSACTION", coverage_target: "unit-of-work boundary"}
+        criticality: high
+      - id: "COMMIT"
+        label: "Commit statement"
+        attributes: {source_literal: "COMMIT", coverage_target: "durable completion"}
+        criticality: critical
+      - id: "ROLLBACK"
+        label: "Rollback statement"
+        attributes: {source_literal: "ROLLBACK", coverage_target: "abort and recovery"}
+        criticality: critical
+  - axis_type: "isolation levels"
+    rationale: "SQL transaction modes include isolation levels that define allowed concurrency phenomena."
+    criticality_default: high
+    variants:
+      - id: "READ UNCOMMITTED"
+        label: "Read uncommitted isolation"
+        attributes: {source_literal: "READ UNCOMMITTED", coverage_target: "lowest isolation mode"}
+        criticality: medium
+      - id: "READ COMMITTED"
+        label: "Read committed isolation"
+        attributes: {source_literal: "READ COMMITTED", coverage_target: "committed-read behavior"}
+        criticality: high
+      - id: "REPEATABLE READ"
+        label: "Repeatable read isolation"
+        attributes: {source_literal: "REPEATABLE READ", coverage_target: "repeatable read behavior"}
+        criticality: high
+      - id: "SERIALIZABLE"
+        label: "Serializable isolation"
+        attributes: {source_literal: "SERIALIZABLE", coverage_target: "serial execution equivalence"}
+        criticality: critical
+  - axis_type: "views"
+    rationale: "SQL/Foundation defines views and viewed tables as derived table interfaces over query expressions."
+    criticality_default: medium
+    variants:
+      - id: "CREATE VIEW"
+        label: "View creation statement"
+        attributes: {source_literal: "CREATE VIEW", coverage_target: "derived relation interface"}
+        criticality: medium
+      - id: "viewed table"
+        label: "Viewed table"
+        attributes: {source_literal: "viewed table", coverage_target: "view result relation"}
+        criticality: medium
+      - id: "WITH CHECK OPTION"
+        label: "View check option"
+        attributes: {source_literal: "WITH CHECK OPTION", coverage_target: "view update constraint"}
+        criticality: high
