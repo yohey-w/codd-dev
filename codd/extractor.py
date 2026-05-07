@@ -19,7 +19,6 @@ from typing import Any
 import yaml
 
 from codd.bridge import load_bridge_registry
-from codd.dependency_catalog import detect_python_manifest_patterns
 from codd.parsing import (
     BuildDepsExtractor,
     BuildDepsInfo,
@@ -750,14 +749,13 @@ def _detect_patterns(facts: ProjectFacts, project_root: Path):
 
 
 def _detect_python_patterns(facts: ProjectFacts, content: str):
-    frameworks, orm, test_framework = detect_python_manifest_patterns(content)
-    for name in frameworks:
-        if name not in facts.detected_frameworks:
-            facts.detected_frameworks.append(name)
-    if orm and not facts.detected_orm:
-        facts.detected_orm = orm
-    if test_framework and not facts.detected_test_framework:
-        facts.detected_test_framework = test_framework
+    """No-op: framework/ORM/test detection is delegated to LLM (extract --ai).
+
+    Removed in v1.36.0 to honor Generality Gate. Hard-coded framework/ORM/test
+    dictionaries violated the constraint that CoDD core must remain stack-agnostic.
+    The downstream AI extraction path (codd/extract_ai.py) infers these dynamically.
+    """
+    return
 
 
 def _detect_js_patterns(facts: ProjectFacts, content: str):

@@ -220,10 +220,14 @@ class TestExtractFacts:
         assert any("test_db" in t for t in db.test_files)
 
     def test_framework_detection(self, python_project):
+        # v1.36.0: Python framework/test detection delegated to LLM (extract --ai).
+        # Core extractor stays stack-agnostic; manifest-based hard-coded detection
+        # was removed to honor the Generality Gate. The fields remain present but
+        # default to empty when AI extraction is not in use.
         facts = extract_facts(python_project, "python", ["src"])
 
-        assert "FastAPI" in facts.detected_frameworks
-        assert facts.detected_test_framework == "pytest"
+        assert facts.detected_frameworks == []
+        assert facts.detected_test_framework == ""
 
     def test_line_counting(self, python_project):
         facts = extract_facts(python_project, "python", ["src"])
