@@ -221,6 +221,17 @@ When an LLM proposes a stack-specific optimal patch, that judgment is delegated 
 
 ---
 
+## Hook Integration
+
+CoDD ships hook recipes for editor and Git workflows:
+
+- Claude Code `PostToolUse` hook recipe for running CoDD checks after file edits
+- Git `pre-commit` hook recipe for blocking commits when coherence checks fail
+
+Recipes live under `codd/hooks/recipes/`.
+
+---
+
 ## License
 
 MIT License - see [LICENSE](LICENSE).
