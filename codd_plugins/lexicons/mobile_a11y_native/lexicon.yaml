@@ -1,0 +1,149 @@
+coverage_axes:
+  - axis_type: "touchscreens"
+    rationale: "W3C Mobile Accessibility lists touchscreens as a mobile accessibility issue; Android guidance gives touch interfaces a minimum touch target; Apple guidance lists minimum control sizes."
+    criticality_default: critical
+    variants:
+      - id: "touchscreens"
+        label: "Touchscreen interaction"
+        attributes: {source_literal: "touchscreens", coverage_target: "touch interaction accessibility"}
+        criticality: critical
+      - id: "48dp"
+        label: "Android touch target"
+        attributes: {source_literal: "48dp", coverage_target: "minimum focusable area"}
+        criticality: critical
+      - id: "44x44 pt"
+        label: "Apple default control size"
+        attributes: {source_literal: "44x44 pt", coverage_target: "comfortable control size"}
+        criticality: high
+  - axis_type: "small screen sizes"
+    rationale: "W3C Mobile Accessibility lists small screen sizes as a mobile accessibility issue affecting content layout and interaction."
+    criticality_default: high
+    variants:
+      - id: "small screen sizes"
+        label: "Small screen accessibility"
+        attributes: {source_literal: "small screen sizes", coverage_target: "compact viewport usability"}
+        criticality: high
+      - id: "phones and tablets"
+        label: "Phone and tablet form factors"
+        attributes: {source_literal: "phones and tablets", coverage_target: "mobile form-factor coverage"}
+        criticality: medium
+      - id: "wearables"
+        label: "Wearable devices"
+        attributes: {source_literal: "wearables", coverage_target: "very small device coverage"}
+        criticality: medium
+  - axis_type: "different input modalities"
+    rationale: "W3C Mobile Accessibility lists different input modalities, including speech and pressure-enabled touch, as mobile accessibility concerns."
+    criticality_default: high
+    variants:
+      - id: "different input modalities"
+        label: "Multiple input modalities"
+        attributes: {source_literal: "different input modalities", coverage_target: "input method coverage"}
+        criticality: high
+      - id: "speech"
+        label: "Speech input"
+        attributes: {source_literal: "speech", coverage_target: "voice-driven interaction"}
+        criticality: high
+      - id: "3D touch"
+        label: "Pressure-enabled touch"
+        attributes: {source_literal: "3D touch", coverage_target: "pressure-sensitive input"}
+        criticality: medium
+      - id: "Full Keyboard Access"
+        label: "Keyboard-only navigation"
+        attributes: {source_literal: "Full Keyboard Access", coverage_target: "keyboard-only operation"}
+        criticality: high
+      - id: "Switch Control"
+        label: "Switch navigation"
+        attributes: {source_literal: "Switch Control", coverage_target: "assistive switch operation"}
+        criticality: high
+  - axis_type: "color contrast"
+    rationale: "Android guidance sets color contrast thresholds and Apple guidance says sufficient foreground/background contrast is needed for legibility."
+    criticality_default: critical
+    variants:
+      - id: "color contrast"
+        label: "Color contrast"
+        attributes: {source_literal: "color contrast", coverage_target: "text and icon contrast"}
+        criticality: critical
+      - id: "4.5:1"
+        label: "Small text contrast ratio"
+        attributes: {source_literal: "4.5:1", coverage_target: "small text contrast"}
+        criticality: critical
+      - id: "3:1"
+        label: "Large text contrast ratio"
+        attributes: {source_literal: "3:1", coverage_target: "large text contrast"}
+        criticality: high
+      - id: "color alone"
+        label: "Differentiate without color alone"
+        attributes: {source_literal: "color alone", coverage_target: "non-color state indication"}
+        criticality: high
+  - axis_type: "larger text sizes"
+    rationale: "Apple guidance says to support larger text sizes and Dynamic Type so people can adjust text for comfort and legibility."
+    criticality_default: high
+    variants:
+      - id: "larger text sizes"
+        label: "Larger text support"
+        attributes: {source_literal: "larger text sizes", coverage_target: "text scaling coverage"}
+        criticality: high
+      - id: "Dynamic Type"
+        label: "Dynamic Type"
+        attributes: {source_literal: "Dynamic Type", coverage_target: "system text scaling"}
+        criticality: high
+      - id: "200 percent"
+        label: "Large enlargement target"
+        attributes: {source_literal: "200 percent", coverage_target: "text enlargement"}
+        criticality: medium
+  - axis_type: "screen reader"
+    rationale: "Apple describes VoiceOver as a screen reader, and Android describes TalkBack as Android's built-in screen reader."
+    criticality_default: critical
+    variants:
+      - id: "VoiceOver"
+        label: "Apple screen reader"
+        attributes: {source_literal: "VoiceOver", coverage_target: "screen reader labels and navigation"}
+        criticality: critical
+      - id: "TalkBack"
+        label: "Android screen reader"
+        attributes: {source_literal: "TalkBack", coverage_target: "screen reader labels and navigation"}
+        criticality: critical
+      - id: "contentDescription"
+        label: "Android element description"
+        attributes: {source_literal: "contentDescription", coverage_target: "purposeful element labels"}
+        criticality: high
+      - id: "alternative labels"
+        label: "Alternative labels"
+        attributes: {source_literal: "alternative labels", coverage_target: "non-visible element labels"}
+        criticality: high
+      - id: "headings"
+        label: "Accessible headings"
+        attributes: {source_literal: "headings", coverage_target: "navigable information hierarchy"}
+        criticality: medium
+  - axis_type: "haptics"
+    rationale: "Apple guidance says audio cues can be paired with matching haptics for people who cannot perceive audio or have audio off."
+    criticality_default: medium
+    variants:
+      - id: "haptics"
+        label: "Haptic feedback"
+        attributes: {source_literal: "haptics", coverage_target: "tactile feedback"}
+        criticality: medium
+      - id: "audio cues"
+        label: "Audio cue alternatives"
+        attributes: {source_literal: "audio cues", coverage_target: "non-audio feedback path"}
+        criticality: medium
+      - id: "visual cues"
+        label: "Visual cue alternatives"
+        attributes: {source_literal: "visual cues", coverage_target: "non-audio directional feedback"}
+        criticality: medium
+  - axis_type: "Reduce Motion"
+    rationale: "Apple guidance says people can turn on Reduce Motion and apps should reduce automatic and repetitive animations when it is active."
+    criticality_default: high
+    variants:
+      - id: "Reduce Motion"
+        label: "Reduced motion setting"
+        attributes: {source_literal: "Reduce Motion", coverage_target: "motion accommodation"}
+        criticality: high
+      - id: "automatic and repetitive animations"
+        label: "Automatic repetitive animations"
+        attributes: {source_literal: "automatic and repetitive animations", coverage_target: "animation reduction"}
+        criticality: high
+      - id: "fades"
+        label: "Fade replacement"
+        attributes: {source_literal: "fades", coverage_target: "lower-motion transition alternative"}
+        criticality: medium

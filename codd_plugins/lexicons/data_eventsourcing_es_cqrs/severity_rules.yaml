@@ -1,0 +1,28 @@
+rules:
+  - when: "axis=Event Sourcing AND coverage=gap"
+    severity: critical
+    rationale: "Missing Event Sourcing coverage can leave the state-change model undefined."
+  - when: "axis=Event AND coverage=gap"
+    severity: critical
+    rationale: "Missing event design coverage can reduce events to ambiguous state changes without business meaning."
+  - when: "axis=event store AND coverage=gap"
+    severity: critical
+    rationale: "Missing event store coverage can leave persistence, ordering, or source-of-record behavior undefined."
+  - when: "axis=Event Replay AND coverage=gap"
+    severity: high
+    rationale: "Missing replay coverage can block repair, reconstruction, or wrong-sequence handling."
+  - when: "axis=Application State Storage AND coverage=gap"
+    severity: high
+    rationale: "Missing state storage or snapshot coverage can make reconstruction and recovery behavior ambiguous."
+  - when: "axis=Complete Rebuild AND coverage=gap"
+    severity: medium
+    rationale: "Missing rebuild coverage can hide operational recovery or migration limitations."
+  - when: "axis=Temporal Query AND coverage=gap"
+    severity: medium
+    rationale: "Missing temporal query coverage can leave historical inspection requirements unresolved."
+  - when: "axis=CQRS pattern AND coverage=gap"
+    severity: high
+    rationale: "Missing CQRS and projection coverage can leave read/write separation and consistency expectations undefined."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking gap."

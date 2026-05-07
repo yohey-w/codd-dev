@@ -1,0 +1,145 @@
+coverage_axes:
+  - axis_type: "Context Attributes"
+    rationale: "CloudEvents 1.0.2 defines Context Attributes as metadata that identify relationships of events to systems or other events."
+    criticality_default: critical
+    variants:
+      - id: "Context Attributes"
+        label: "Context attribute coverage"
+        attributes: {source_literal: "Context Attributes", coverage_target: "event metadata"}
+        criticality: critical
+      - id: "context attributes"
+        label: "Serialized context metadata"
+        attributes: {source_literal: "context attributes", coverage_target: "metadata independent of event data"}
+        criticality: high
+      - id: "attribute names"
+        label: "Attribute naming"
+        attributes: {source_literal: "attribute names", coverage_target: "lower-case attribute names"}
+        criticality: high
+  - axis_type: "REQUIRED Attributes"
+    rationale: "CloudEvents 1.0.2 states all CloudEvents must include REQUIRED attributes id, source, specversion, and type."
+    criticality_default: critical
+    variants:
+      - id: "id"
+        label: "Event identifier"
+        attributes: {source_literal: "id", coverage_target: "unique event identity"}
+        criticality: critical
+      - id: "source"
+        label: "Event source"
+        attributes: {source_literal: "source", coverage_target: "event origin context"}
+        criticality: critical
+      - id: "specversion"
+        label: "Specification version"
+        attributes: {source_literal: "specversion", coverage_target: "CloudEvents version marker"}
+        criticality: critical
+      - id: "type"
+        label: "Event type"
+        attributes: {source_literal: "type", coverage_target: "occurrence classification"}
+        criticality: critical
+  - axis_type: "OPTIONAL Attributes"
+    rationale: "CloudEvents 1.0.2 defines optional context attributes datacontenttype, dataschema, subject, and time."
+    criticality_default: high
+    variants:
+      - id: "datacontenttype"
+        label: "Data content type"
+        attributes: {source_literal: "datacontenttype", coverage_target: "payload media type"}
+        criticality: high
+      - id: "dataschema"
+        label: "Data schema"
+        attributes: {source_literal: "dataschema", coverage_target: "payload schema URI"}
+        criticality: high
+      - id: "subject"
+        label: "Subject"
+        attributes: {source_literal: "subject", coverage_target: "subject of event in source context"}
+        criticality: medium
+      - id: "time"
+        label: "Occurrence time"
+        attributes: {source_literal: "time", coverage_target: "timestamp of occurrence"}
+        criticality: high
+  - axis_type: "Type System"
+    rationale: "CloudEvents 1.0.2 defines an abstract Type System with Boolean, Integer, String, Binary, URI, URI-reference, and Timestamp values."
+    criticality_default: high
+    variants:
+      - id: "Boolean"
+        label: "Boolean attribute type"
+        attributes: {source_literal: "Boolean", coverage_target: "true or false attribute"}
+        criticality: medium
+      - id: "Integer"
+        label: "Integer attribute type"
+        attributes: {source_literal: "Integer", coverage_target: "whole-number attribute"}
+        criticality: medium
+      - id: "String"
+        label: "String attribute type"
+        attributes: {source_literal: "String", coverage_target: "text attribute"}
+        criticality: high
+      - id: "Binary"
+        label: "Binary attribute type"
+        attributes: {source_literal: "Binary", coverage_target: "byte sequence attribute"}
+        criticality: medium
+      - id: "URI"
+        label: "URI attribute type"
+        attributes: {source_literal: "URI", coverage_target: "absolute URI attribute"}
+        criticality: high
+      - id: "URI-reference"
+        label: "URI-reference attribute type"
+        attributes: {source_literal: "URI-reference", coverage_target: "URI-reference attribute"}
+        criticality: high
+      - id: "Timestamp"
+        label: "Timestamp attribute type"
+        attributes: {source_literal: "Timestamp", coverage_target: "RFC3339 timestamp attribute"}
+        criticality: high
+  - axis_type: "Extension Context Attributes"
+    rationale: "CloudEvents 1.0.2 defines extension attributes as additional context attributes with distinct names that follow the same naming convention and type system."
+    criticality_default: medium
+    variants:
+      - id: "Extension Context Attributes"
+        label: "Extension context attributes"
+        attributes: {source_literal: "Extension Context Attributes", coverage_target: "additional context metadata"}
+        criticality: medium
+      - id: "extension attributes"
+        label: "Extension attributes"
+        attributes: {source_literal: "extension attributes", coverage_target: "custom event metadata"}
+        criticality: medium
+      - id: "distinct names"
+        label: "Distinct extension names"
+        attributes: {source_literal: "distinct names", coverage_target: "extension name collision avoidance"}
+        criticality: medium
+  - axis_type: "Event Data"
+    rationale: "CloudEvents 1.0.2 defines Event Data as optional domain-specific information about the occurrence encapsulated within data."
+    criticality_default: high
+    variants:
+      - id: "Event Data"
+        label: "Event data"
+        attributes: {source_literal: "Event Data", coverage_target: "domain-specific occurrence information"}
+        criticality: high
+      - id: "data"
+        label: "Data payload"
+        attributes: {source_literal: "data", coverage_target: "event payload"}
+        criticality: high
+      - id: "datacontenttype"
+        label: "Data media format"
+        attributes: {source_literal: "datacontenttype", coverage_target: "payload media format"}
+        criticality: high
+      - id: "dataschema"
+        label: "Data schema adherence"
+        attributes: {source_literal: "dataschema", coverage_target: "payload schema contract"}
+        criticality: high
+  - axis_type: "Protocol Binding"
+    rationale: "CloudEvents 1.0.2 defines a Protocol Binding as how events are sent and received over a given protocol, including structured-mode and binary-mode messages."
+    criticality_default: high
+    variants:
+      - id: "Protocol Binding"
+        label: "Protocol binding"
+        attributes: {source_literal: "Protocol Binding", coverage_target: "transport mapping"}
+        criticality: high
+      - id: "structured-mode message"
+        label: "Structured mode"
+        attributes: {source_literal: "structured-mode message", coverage_target: "event fully encoded in body"}
+        criticality: high
+      - id: "binary-mode message"
+        label: "Binary mode"
+        attributes: {source_literal: "binary-mode message", coverage_target: "data in body and attributes in metadata"}
+        criticality: high
+      - id: "Event Format"
+        label: "Event format"
+        attributes: {source_literal: "Event Format", coverage_target: "serialization format"}
+        criticality: medium

@@ -1,0 +1,16 @@
+name: data_eventsourcing_es_cqrs
+lexicon_name: data_eventsourcing_es_cqrs
+version: "1.0.0"
+source_url: "https://martinfowler.com/eaaDev/EventSourcing.html"
+source_version: "Fowler Event Sourcing + Microsoft Learn pattern guidance, current as of 2026-05-08"
+description: "Event Sourcing and CQRS coverage axes for data architecture requirements."
+observation_dimensions: 8
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Martin Fowler: Event Sourcing"
+    url: "https://martinfowler.com/eaaDev/EventSourcing.html"

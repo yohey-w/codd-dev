@@ -1,0 +1,133 @@
+coverage_axes:
+  - axis_type: "Event Sourcing"
+    rationale: "Fowler defines Event Sourcing as capturing all changes to application state as a sequence of events."
+    criticality_default: critical
+    variants:
+      - id: "Event Sourcing"
+        label: "Event Sourcing pattern"
+        attributes: {source_literal: "Event Sourcing", coverage_target: "state changes captured as events"}
+        criticality: critical
+      - id: "sequence of events"
+        label: "Sequence of events"
+        attributes: {source_literal: "sequence of events", coverage_target: "ordered change history"}
+        criticality: critical
+      - id: "application state"
+        label: "Application state"
+        attributes: {source_literal: "application state", coverage_target: "state derived from events"}
+        criticality: high
+  - axis_type: "Event"
+    rationale: "Fowler and Microsoft Learn both emphasize events that represent what happened, including business intent behind each change."
+    criticality_default: critical
+    variants:
+      - id: "Event"
+        label: "Event record"
+        attributes: {source_literal: "Event", coverage_target: "record of a change"}
+        criticality: critical
+      - id: "business intent"
+        label: "Business intent"
+        attributes: {source_literal: "business intent", coverage_target: "meaningful event design"}
+        criticality: high
+      - id: "compensating event"
+        label: "Compensating event"
+        attributes: {source_literal: "compensating event", coverage_target: "undo or correction behavior"}
+        criticality: high
+  - axis_type: "event store"
+    rationale: "Microsoft Learn describes adding events to the event store and treating it as the permanent source of information."
+    criticality_default: critical
+    variants:
+      - id: "event store"
+        label: "Event store"
+        attributes: {source_literal: "event store", coverage_target: "append-only event persistence"}
+        criticality: critical
+      - id: "permanent source of information"
+        label: "Permanent source of information"
+        attributes: {source_literal: "permanent source of information", coverage_target: "system of record"}
+        criticality: critical
+      - id: "append-only"
+        label: "Append-only ingestion"
+        attributes: {source_literal: "append-only", coverage_target: "non-mutating event stream"}
+        criticality: high
+  - axis_type: "Event Replay"
+    rationale: "Fowler defines Event Replay as computing consequences by reversing and replaying events, including wrong-sequence handling."
+    criticality_default: high
+    variants:
+      - id: "Event Replay"
+        label: "Event replay"
+        attributes: {source_literal: "Event Replay", coverage_target: "reconstruct or correct state"}
+        criticality: high
+      - id: "replaying"
+        label: "Replaying events"
+        attributes: {source_literal: "replaying", coverage_target: "state reconstruction"}
+        criticality: high
+      - id: "wrong sequence"
+        label: "Wrong-sequence handling"
+        attributes: {source_literal: "wrong sequence", coverage_target: "out-of-order event correction"}
+        criticality: medium
+  - axis_type: "Application State Storage"
+    rationale: "Fowler describes Application State Storage, snapshots, and current state as derivable from the event log."
+    criticality_default: high
+    variants:
+      - id: "Application State Storage"
+        label: "Application state storage"
+        attributes: {source_literal: "Application State Storage", coverage_target: "current state storage strategy"}
+        criticality: high
+      - id: "snapshot"
+        label: "Snapshot"
+        attributes: {source_literal: "snapshot", coverage_target: "cached state checkpoint"}
+        criticality: high
+      - id: "event log"
+        label: "Event log"
+        attributes: {source_literal: "event log", coverage_target: "derivation source"}
+        criticality: critical
+  - axis_type: "Complete Rebuild"
+    rationale: "Fowler identifies Complete Rebuild as a special capability enabled by reconstructing application state from the event log."
+    criticality_default: medium
+    variants:
+      - id: "Complete Rebuild"
+        label: "Complete rebuild"
+        attributes: {source_literal: "Complete Rebuild", coverage_target: "recreate state from events"}
+        criticality: medium
+      - id: "rebuilds"
+        label: "Rebuild processing"
+        attributes: {source_literal: "rebuilds", coverage_target: "rebuild operation"}
+        criticality: medium
+      - id: "replay mode"
+        label: "Replay mode"
+        attributes: {source_literal: "replay mode", coverage_target: "side-effect control during replay"}
+        criticality: high
+  - axis_type: "Temporal Query"
+    rationale: "Fowler describes Temporal Query as determining application state at a past point in time."
+    criticality_default: medium
+    variants:
+      - id: "Temporal Query"
+        label: "Temporal query"
+        attributes: {source_literal: "Temporal Query", coverage_target: "past state query"}
+        criticality: medium
+      - id: "past event"
+        label: "Past event"
+        attributes: {source_literal: "past event", coverage_target: "historical event handling"}
+        criticality: medium
+      - id: "historical events"
+        label: "Historical events"
+        attributes: {source_literal: "historical events", coverage_target: "history-based read model"}
+        criticality: medium
+  - axis_type: "CQRS pattern"
+    rationale: "Microsoft Learn says Event Sourcing is commonly combined with the CQRS pattern, materialized views, append-only ingestion, and query-optimized projections."
+    criticality_default: high
+    variants:
+      - id: "CQRS pattern"
+        label: "CQRS pattern"
+        attributes: {source_literal: "CQRS pattern", coverage_target: "read/write separation"}
+        criticality: high
+      - id: "materialized views"
+        label: "Materialized views"
+        attributes: {source_literal: "materialized views", coverage_target: "projection output"}
+        criticality: high
+      - id: "query-optimized projections"
+        label: "Query-optimized projections"
+        attributes: {source_literal: "query-optimized projections", coverage_target: "read-side projection"}
+        criticality: high
+      - id: "eventual consistency"
+        label: "Eventual consistency"
+        attributes: {source_literal: "eventual consistency", coverage_target: "read-model lag expectation"}
+        criticality: high

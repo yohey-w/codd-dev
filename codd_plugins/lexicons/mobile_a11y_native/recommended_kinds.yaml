@@ -1,0 +1,9 @@
+recommended_kinds:
+  - mobile_a11y_touchscreen_gap
+  - mobile_a11y_small_screen_gap
+  - mobile_a11y_input_modality_gap
+  - mobile_a11y_color_contrast_gap
+  - mobile_a11y_text_scaling_gap
+  - mobile_a11y_screen_reader_gap
+  - mobile_a11y_haptics_gap
+  - mobile_a11y_reduce_motion_gap
