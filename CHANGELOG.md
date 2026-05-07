@@ -4,6 +4,55 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.39.0] - 2026-05-08 — RepairLoop strategy v2 (cmd_432) + batch1 lexicons (cmd_438)
+
+### Added — RepairLoop strategy v2 (cmd_432, commit 54d3ce5)
+
+LLM patch dry-run validation 失敗を「即 abort」から「error-injected retry +
+unrepairable 分類」に切替えた retry strategy 実装 (推奨案 D)。
+
+- `codd/repair/llm_repair_engine.py` 拡張: validate failure 時に error 文字列を
+  generic に LLM へ再注入、新 patch を提案させる retry path を追加 (~132 insertions)
+- `codd/repair/templates/repair_strategy_meta.md` 新規 (~44 LOC、prompt template)
+- `codd/repair/git_patcher.py` 微調整 (~27 insertions)
+- 失敗時は honest classification (unrepairable に分類) で transparency 確保
+
+osato-lms PoC 結果: unrepairable は 2→8 件と「増加」したが、これは silent
+failure を honest unrepairable に置換した分類精度向上 (transparent 化)。
+追加の root cause (auth_design.md proof break placeholder 不在) は cmd_432_poc
+で identified、別 cmd で対処予定。
+
+### Added — Lexicon batch1 (cmd_438 pilot 3 lexicons)
+
+`codd_plugins/lexicons/` 配下に Web 領域 3 lexicons 追加:
+
+- `web_responsive` (commit ffb4aa0、MDN media queries、8 axes)
+- `web_a11y_wcag22_aa` (commit ffb4aa0、WCAG 2.2 W3C Recommendation、13 axes)
+- `web_security_owasp` (commit 210db5d、OWASP Top 10 2021 + ASVS 4.0、14 axes)
+
+各 lexicon に `manifest.yaml` / `lexicon.yaml` / `severity_rules.yaml` /
+`coverage_matrix.md` / `elicit_extend.md` / `recommended_kinds.yaml` の標準
+パッケージ構造を採用。`codd elicit --lexicon <id>` で coverage-check mode が
+即動作する。
+
+### Quality Metrics
+
+- **pytest**: 2363 PASS / 0 FAIL / 0 SKIP (v1.38.0 2337 → +26)
+- **新 node/edge/check/SDK 依存**: 全 0
+- **Generality Gate**: 三層 (Layer A core / Layer B template / Layer C lexicon)
+  zero hit
+  - core code に lexicon 名 (web_responsive / wcag / owasp / babok) hardcode 0
+  - template に specific lexicon 名 hardcode 0
+  - lexicon plug-in 配下のみ project 固有名 OK
+- **backward compatible**: legacy auto-repair path (validate fail → REPAIR_FAILED)
+  も `RepairStrategy.legacy` で利用可能
+
+### Phase 構成と commits
+
+- cmd_432 retry strategy (`54d3ce5`、v1.38.0 統合済) — repair strategy v2
+- cmd_438 pilot batch1 (`ffb4aa0` + `210db5d`) — Web 領域 3 lexicons
+- release (本 release commit) — v1.39.0 release commit
+
 ## [1.38.0] - 2026-05-08 — Brownfield Pipeline (cmd_437)
 
 ### Added — `codd brownfield` パイプライン (cmd_437_phase_b)
