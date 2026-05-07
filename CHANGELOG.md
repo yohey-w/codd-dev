@@ -4,6 +4,44 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.38.0] - 2026-05-08 — Brownfield Pipeline (cmd_437)
+
+### Added — `codd brownfield` パイプライン (cmd_437_phase_b)
+
+`codd extract` → `codd diff` → `codd elicit` を統合した brownfield 解析
+パイプラインを `codd/brownfield/` 配下に新設。既存実装からの drift 検知 +
+spec discovery を 1 コマンドで通せるようになった。
+
+#### 主要モジュール
+
+- `codd/brownfield/__init__.py` — public API
+- `codd/brownfield/pipeline.py` — extract → diff → elicit を逐次実行する
+  generic オーケストレーター (~307 LOC)
+- `tests/brownfield/test_pipeline.py` — 統合テスト (~359 LOC)
+
+#### 設計方針
+
+- **Generic dispatch**: パイプライン段階は名前 (`extract` / `diff` / `elicit`)
+  で識別、stack/framework/domain literal hardcode なし
+- **既存 module 再利用**: `codd.extract_ai` / `codd.diff` / `codd.elicit` を
+  ライブラリ呼び出し、orchestration ロジックのみ新設
+- **Finding 抽象共有**: diff / elicit は `codd.elicit.finding.Finding`
+  dataclass を共有 (cmd_431 で確立した抽象を活用)
+
+### Quality Metrics
+
+- **pytest**: 2337 PASS / 0 FAIL / 0 SKIP (v1.37.0 2320 → +17)
+- **新 node/edge/check/SDK 依存**: 全 0
+- **Generality Gate**: Layer A zero hit (`codd/brownfield/*.py` に
+  django/flask/fastapi/pydantic/sqlalchemy/next.js/react 等 0 件)
+- **backward compatible**: 既存 `codd extract` / `codd diff` / `codd elicit` は
+  独立実行可能、本パイプラインは合成のみ
+
+### Phase 構成と commits
+
+- cmd_437_phase_b (`78647c2`) — `codd brownfield` パイプライン本体
+- release (`8fae292` v1.37.0 → 本 release) — v1.38.0 release commit
+
 ## [1.37.0] - 2026-05-07 — codd diff Bug Fix (cmd_436_phase_d)
 
 ### Fixed — codd diff PoC blocker 2 件解消
