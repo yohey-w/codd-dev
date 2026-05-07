@@ -1,0 +1,28 @@
+rules:
+  - when: "axis=width AND coverage=gap"
+    severity: high
+    rationale: "Missing width coverage can leave viewport breakpoints unverified."
+  - when: "axis=orientation AND coverage=gap"
+    severity: medium
+    rationale: "Missing orientation coverage can hide portrait or landscape layout failures."
+  - when: "axis=prefers-color-scheme AND coverage=gap"
+    severity: medium
+    rationale: "Missing color-scheme coverage can make theme-specific states unreviewed."
+  - when: "axis=prefers-reduced-motion AND coverage=gap"
+    severity: high
+    rationale: "Missing reduced-motion coverage can create motion-sensitive accessibility risk."
+  - when: "axis=resolution AND coverage=gap"
+    severity: medium
+    rationale: "Missing resolution coverage can hide high-density asset or rendering issues."
+  - when: "axis=hover AND coverage=gap"
+    severity: medium
+    rationale: "Missing hover coverage can hide interaction states unavailable on touch devices."
+  - when: "axis=pointer AND coverage=gap"
+    severity: high
+    rationale: "Missing pointer coverage can hide coarse pointer usability failures."
+  - when: "axis=aspect-ratio AND coverage=gap"
+    severity: medium
+    rationale: "Missing aspect-ratio coverage can hide unusually wide or tall viewport failures."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking gap."

@@ -1,0 +1,113 @@
+coverage_axes:
+  - axis_type: "width"
+    rationale: "MDN lists width as a media feature and shows min-width, max-width, and range syntax for viewport constraints."
+    criticality_default: high
+    variants:
+      - id: "min-width"
+        label: "Minimum viewport width condition"
+        attributes: {feature_type: range, source_literal: "min-width"}
+        criticality: high
+      - id: "max-width"
+        label: "Maximum viewport width condition"
+        attributes: {feature_type: range, source_literal: "max-width"}
+        criticality: high
+      - id: "width"
+        label: "Range comparison syntax"
+        attributes: {feature_type: range, source_literal: "width"}
+        criticality: medium
+  - axis_type: "orientation"
+    rationale: "MDN describes orientation as a discrete media feature with landscape and portrait keyword values."
+    criticality_default: medium
+    variants:
+      - id: "portrait"
+        label: "Portrait orientation"
+        attributes: {feature_type: discrete, source_literal: "portrait"}
+        criticality: medium
+      - id: "landscape"
+        label: "Landscape orientation"
+        attributes: {feature_type: discrete, source_literal: "landscape"}
+        criticality: medium
+  - axis_type: "prefers-color-scheme"
+    rationale: "MDN lists prefers-color-scheme among user preference media features for low-light or theme-sensitive conditions."
+    criticality_default: medium
+    variants:
+      - id: "light"
+        label: "Light color scheme preference"
+        attributes: {feature_type: discrete, source_literal: "light"}
+        criticality: medium
+      - id: "dark"
+        label: "Dark color scheme preference"
+        attributes: {feature_type: discrete, source_literal: "dark"}
+        criticality: medium
+  - axis_type: "prefers-reduced-motion"
+    rationale: "MDN lists prefers-reduced-motion as a user preference media feature for motion-sensitive experiences."
+    criticality_default: high
+    variants:
+      - id: "reduce"
+        label: "Reduced motion preference"
+        attributes: {feature_type: discrete, source_literal: "reduce"}
+        criticality: high
+      - id: "no-preference"
+        label: "No reduced motion preference"
+        attributes: {feature_type: discrete, source_literal: "no-preference"}
+        criticality: medium
+  - axis_type: "resolution"
+    rationale: "MDN lists resolution as a media feature for output pixel density and allows range-style matching."
+    criticality_default: medium
+    variants:
+      - id: "min-resolution"
+        label: "Minimum output resolution condition"
+        attributes: {feature_type: range, source_literal: "min-resolution"}
+        criticality: medium
+      - id: "max-resolution"
+        label: "Maximum output resolution condition"
+        attributes: {feature_type: range, source_literal: "max-resolution"}
+        criticality: info
+      - id: "resolution"
+        label: "Output resolution feature"
+        attributes: {feature_type: range, source_literal: "resolution"}
+        criticality: medium
+  - axis_type: "hover"
+    rationale: "MDN uses hover to test whether the primary input mechanism can hover over elements."
+    criticality_default: medium
+    variants:
+      - id: "hover"
+        label: "Primary input can hover"
+        attributes: {feature_type: discrete, source_literal: "hover"}
+        criticality: medium
+      - id: "none"
+        label: "Primary input cannot hover"
+        attributes: {feature_type: discrete, source_literal: "none"}
+        criticality: high
+  - axis_type: "pointer"
+    rationale: "MDN lists pointer as a media feature for primary pointing-device accuracy."
+    criticality_default: high
+    variants:
+      - id: "none"
+        label: "No primary pointer"
+        attributes: {feature_type: discrete, source_literal: "none"}
+        criticality: high
+      - id: "coarse"
+        label: "Coarse primary pointer"
+        attributes: {feature_type: discrete, source_literal: "coarse"}
+        criticality: high
+      - id: "fine"
+        label: "Fine primary pointer"
+        attributes: {feature_type: discrete, source_literal: "fine"}
+        criticality: medium
+  - axis_type: "aspect-ratio"
+    rationale: "MDN lists aspect-ratio as a media feature for viewport shape constraints."
+    criticality_default: medium
+    variants:
+      - id: "min-aspect-ratio"
+        label: "Minimum aspect ratio condition"
+        attributes: {feature_type: range, source_literal: "min-aspect-ratio"}
+        criticality: medium
+      - id: "max-aspect-ratio"
+        label: "Maximum aspect ratio condition"
+        attributes: {feature_type: range, source_literal: "max-aspect-ratio"}
+        criticality: medium
+      - id: "aspect-ratio"
+        label: "Aspect ratio feature"
+        attributes: {feature_type: range, source_literal: "aspect-ratio"}
+        criticality: medium
