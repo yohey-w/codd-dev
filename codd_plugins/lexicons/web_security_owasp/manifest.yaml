@@ -1,0 +1,22 @@
+lexicon_name: web_security_owasp
+name: web_security_owasp
+version: "1.0.0"
+description: "OWASP Top 10:2021 and ASVS 4.0.3 web application security coverage lexicon"
+source_url: "https://owasp.org/Top10/2021/"
+source_version: "OWASP Top 10:2021 + OWASP ASVS 4.0.3"
+observation_dimensions: 14
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+coverage_axes: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+references:
+  - title: "OWASP Top 10:2021"
+    url: "https://owasp.org/Top10/2021/"
+    source_version: "2021"
+  - title: "OWASP Application Security Verification Standard"
+    url: "https://owasp.org/www-project-application-security-verification-standard/"
+    source_version: "4.0.3"
+  - title: "OWASP ASVS 4.0.3 Markdown"
+    url: "https://github.com/OWASP/ASVS/tree/v4.0.3/4.0/en"
+    source_version: "4.0.3"

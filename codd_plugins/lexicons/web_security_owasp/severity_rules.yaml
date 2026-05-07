@@ -1,0 +1,53 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=broken_access_control AND coverage=gap"
+    severity: critical
+    rationale: "Authorization gaps can expose protected functions or data outside intended permissions."
+  - when: "axis=cryptographic_failures AND coverage=gap"
+    severity: critical
+    rationale: "Missing cryptographic controls can expose sensitive data at rest or in transit."
+  - when: "axis=injection AND coverage=gap"
+    severity: critical
+    rationale: "Interpreter-boundary gaps can permit command, query, document, or expression injection."
+  - when: "axis=identification_and_authentication_failures AND coverage=gap"
+    severity: critical
+    rationale: "Identity and authentication gaps can allow account takeover or impersonation."
+  - when: "axis=authentication AND coverage=gap"
+    severity: critical
+    rationale: "ASVS authentication controls are release-blocking for systems that rely on user or service identity."
+  - when: "axis=session_management AND coverage=gap"
+    severity: critical
+    rationale: "Session gaps can permit fixation, replay, token disclosure, or unauthorized continuation."
+  - when: "axis=output_encoding_and_injection_prevention AND coverage=gap"
+    severity: critical
+    rationale: "Output encoding and injection prevention gaps can expose execution or rendering interpreters."
+  - when: "axis=insecure_design AND coverage=gap"
+    severity: high
+    rationale: "Missing security design decisions create control gaps that cannot be reliably patched later."
+  - when: "axis=security_misconfiguration AND coverage=gap"
+    severity: high
+    rationale: "Configuration gaps can expose insecure defaults, headers, features, or operational controls."
+  - when: "axis=vulnerable_and_outdated_components AND coverage=gap"
+    severity: high
+    rationale: "Component lifecycle gaps can leave known vulnerabilities untracked or unpatched."
+  - when: "axis=software_and_data_integrity_failures AND coverage=gap"
+    severity: high
+    rationale: "Integrity gaps can permit unsafe updates, tampering, or deserialization outcomes."
+  - when: "axis=security_logging_and_monitoring_failures AND coverage=gap"
+    severity: high
+    rationale: "Logging and monitoring gaps reduce detection, auditability, and incident response capability."
+  - when: "axis=server_side_request_forgery_ssrf AND coverage=gap"
+    severity: high
+    rationale: "Outbound request target gaps can expose unintended internal or external resources."
+  - when: "axis=input_validation AND coverage=gap"
+    severity: high
+    rationale: "Input validation gaps can permit unsafe data to cross trust boundaries."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit coverage should be reviewed, but may not block release when compensating controls exist."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered axes may still produce informational notes outside release-blocking gaps."
