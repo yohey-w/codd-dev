@@ -1,0 +1,229 @@
+coverage_axes:
+  - axis_type: "Install and Maintain Network Security Controls"
+    rationale: "PCI DSS v4.0 Requirement 1 covers network security controls and the processes and mechanisms for installing and maintaining them."
+    criticality_default: critical
+    variants:
+      - id: "network security controls"
+        label: "Network security controls"
+        attributes: {source: "PCI DSS v4.0 Requirement 1", source_literal: "network security controls"}
+        criticality: critical
+      - id: "configuration standards"
+        label: "Configuration standards"
+        attributes: {source: "PCI DSS v4.0 Requirement 1", source_literal: "configuration standards"}
+        criticality: high
+      - id: "network connections"
+        label: "Network connections"
+        attributes: {source: "PCI DSS v4.0 Requirement 1", source_literal: "network connections"}
+        criticality: high
+      - id: "cardholder data environment"
+        label: "Cardholder data environment network boundary"
+        attributes: {source: "PCI DSS v4.0 Requirement 1", source_literal: "cardholder data environment"}
+        criticality: critical
+  - axis_type: "Protect Stored Account Data"
+    rationale: "PCI DSS v4.0 Requirement 3 covers protection of stored account data, including storage limits, PAN rendering, and cryptographic keys."
+    criticality_default: critical
+    variants:
+      - id: "stored account data"
+        label: "Stored account data"
+        attributes: {source: "PCI DSS v4.0 Requirement 3", source_literal: "stored account data"}
+        criticality: critical
+      - id: "primary account number"
+        label: "Primary account number"
+        attributes: {source: "PCI DSS v4.0 Requirement 3", source_literal: "primary account number"}
+        criticality: critical
+      - id: "sensitive authentication data"
+        label: "Sensitive authentication data"
+        attributes: {source: "PCI DSS v4.0 Requirement 3", source_literal: "sensitive authentication data"}
+        criticality: critical
+      - id: "cryptographic keys"
+        label: "Cryptographic keys"
+        attributes: {source: "PCI DSS v4.0 Requirement 3", source_literal: "cryptographic keys"}
+        criticality: high
+  - axis_type: "Maintain a Vulnerability Management Program"
+    rationale: "PCI DSS v4.0 groups Requirements 5 and 6 under vulnerability management, covering malicious software protection and secure systems/software."
+    criticality_default: high
+    variants:
+      - id: "malicious software"
+        label: "Malicious software protection"
+        attributes: {source: "PCI DSS v4.0 Requirement 5", source_literal: "malicious software"}
+        criticality: high
+      - id: "anti-malware"
+        label: "Anti-malware mechanisms"
+        attributes: {source: "PCI DSS v4.0 Requirement 5", source_literal: "anti-malware"}
+        criticality: high
+      - id: "security vulnerabilities"
+        label: "Security vulnerabilities"
+        attributes: {source: "PCI DSS v4.0 Requirement 6", source_literal: "security vulnerabilities"}
+        criticality: high
+      - id: "critical vulnerabilities"
+        label: "Critical vulnerabilities"
+        attributes: {source: "PCI DSS v4.0 Requirement 6", source_literal: "critical vulnerabilities"}
+        criticality: critical
+  - axis_type: "Restrict Access to System Components and Cardholder Data by Business Need to Know"
+    rationale: "PCI DSS v4.0 Requirement 7 requires access to system components and cardholder data to be restricted by business need to know."
+    criticality_default: critical
+    variants:
+      - id: "business need to know"
+        label: "Business need to know"
+        attributes: {source: "PCI DSS v4.0 Requirement 7", source_literal: "business need to know"}
+        criticality: critical
+      - id: "least privileges"
+        label: "Least privileges"
+        attributes: {source: "PCI DSS v4.0 Requirement 7", source_literal: "least privileges"}
+        criticality: critical
+      - id: "access roles"
+        label: "Access roles"
+        attributes: {source: "PCI DSS v4.0 Requirement 7", source_literal: "access roles"}
+        criticality: high
+      - id: "access privileges"
+        label: "Access privileges"
+        attributes: {source: "PCI DSS v4.0 Requirement 7", source_literal: "access privileges"}
+        criticality: high
+  - axis_type: "Regularly Monitor and Test Networks"
+    rationale: "PCI DSS v4.0 groups Requirements 10 and 11 under regular monitoring and testing of networks."
+    criticality_default: high
+    variants:
+      - id: "log and monitor all access"
+        label: "Log and monitor all access"
+        attributes: {source: "PCI DSS v4.0 Requirement 10", source_literal: "log and monitor all access"}
+        criticality: high
+      - id: "audit logs"
+        label: "Audit logs"
+        attributes: {source: "PCI DSS v4.0 Requirement 10", source_literal: "audit logs"}
+        criticality: high
+      - id: "security of systems and networks"
+        label: "Systems and networks testing"
+        attributes: {source: "PCI DSS v4.0 Requirement 11", source_literal: "security of systems and networks"}
+        criticality: high
+      - id: "penetration testing"
+        label: "Penetration testing"
+        attributes: {source: "PCI DSS v4.0 Requirement 11", source_literal: "penetration testing"}
+        criticality: high
+  - axis_type: "Support Information Security with Organizational Policies and Programs"
+    rationale: "PCI DSS v4.0 Requirement 12 requires organizational policies and programs that support information security."
+    criticality_default: high
+    variants:
+      - id: "information security policy"
+        label: "Information security policy"
+        attributes: {source: "PCI DSS v4.0 Requirement 12", source_literal: "information security policy"}
+        criticality: high
+      - id: "acceptable use policies"
+        label: "Acceptable use policies"
+        attributes: {source: "PCI DSS v4.0 Requirement 12", source_literal: "acceptable use policies"}
+        criticality: medium
+      - id: "targeted risk analysis"
+        label: "Targeted risk analysis"
+        attributes: {source: "PCI DSS v4.0 Requirement 12", source_literal: "targeted risk analysis"}
+        criticality: high
+      - id: "third-party service providers"
+        label: "Third-party service providers"
+        attributes: {source: "PCI DSS v4.0 Requirement 12", source_literal: "third-party service providers"}
+        criticality: high
+  - axis_type: "Protect Cardholder Data with Strong Cryptography During Transmission Over Open, Public Networks"
+    rationale: "PCI DSS v4.0 Requirement 4 covers strong cryptography for cardholder data transmitted over open, public networks."
+    criticality_default: critical
+    variants:
+      - id: "strong cryptography"
+        label: "Strong cryptography"
+        attributes: {source: "PCI DSS v4.0 Requirement 4", source_literal: "strong cryptography"}
+        criticality: critical
+      - id: "open, public networks"
+        label: "Open, public networks"
+        attributes: {source: "PCI DSS v4.0 Requirement 4", source_literal: "open, public networks"}
+        criticality: critical
+      - id: "trusted keys and certificates"
+        label: "Trusted keys and certificates"
+        attributes: {source: "PCI DSS v4.0 Requirement 4", source_literal: "trusted keys and certificates"}
+        criticality: high
+  - axis_type: "Develop and Maintain Secure Systems and Software"
+    rationale: "PCI DSS v4.0 Requirement 6 covers secure systems and software, including vulnerability remediation, secure development, and payment page script controls."
+    criticality_default: high
+    variants:
+      - id: "secure systems and software"
+        label: "Secure systems and software"
+        attributes: {source: "PCI DSS v4.0 Requirement 6", source_literal: "secure systems and software"}
+        criticality: high
+      - id: "secure software development"
+        label: "Secure software development"
+        attributes: {source: "PCI DSS v4.0 Requirement 6", source_literal: "secure software development"}
+        criticality: high
+      - id: "change management"
+        label: "Change management"
+        attributes: {source: "PCI DSS v4.0 Requirement 6", source_literal: "change management"}
+        criticality: medium
+      - id: "payment page scripts"
+        label: "Payment page scripts"
+        attributes: {source: "PCI DSS v4.0 Requirement 6", source_literal: "payment page scripts"}
+        criticality: high
+  - axis_type: "Personnel screening"
+    rationale: "PCI DSS v4.0 Requirement 12.7 covers screening potential personnel prior to hire to minimize risk from attacks from internal sources."
+    criticality_default: medium
+    variants:
+      - id: "potential personnel are screened prior to hire"
+        label: "Pre-hire personnel screening"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.7", source_literal: "potential personnel are screened prior to hire"}
+        criticality: medium
+      - id: "risk from attacks from internal sources"
+        label: "Internal-source risk"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.7", source_literal: "risk from attacks from internal sources"}
+        criticality: medium
+  - axis_type: "Restrict Physical Access to Cardholder Data"
+    rationale: "PCI DSS v4.0 Requirement 9 covers restricting physical access to cardholder data."
+    criticality_default: high
+    variants:
+      - id: "physical access"
+        label: "Physical access"
+        attributes: {source: "PCI DSS v4.0 Requirement 9", source_literal: "physical access"}
+        criticality: high
+      - id: "cardholder data"
+        label: "Cardholder data"
+        attributes: {source: "PCI DSS v4.0 Requirement 9", source_literal: "cardholder data"}
+        criticality: high
+      - id: "point of interaction devices"
+        label: "Point of interaction devices"
+        attributes: {source: "PCI DSS v4.0 Requirement 9", source_literal: "point of interaction devices"}
+        criticality: medium
+      - id: "media"
+        label: "Media"
+        attributes: {source: "PCI DSS v4.0 Requirement 9", source_literal: "media"}
+        criticality: medium
+  - axis_type: "Security incident response plan"
+    rationale: "PCI DSS v4.0 Requirement 12.10 covers an incident response plan that is ready to respond immediately to suspected or confirmed security incidents."
+    criticality_default: critical
+    variants:
+      - id: "security incident response plan"
+        label: "Security incident response plan"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.10", source_literal: "security incident response plan"}
+        criticality: critical
+      - id: "suspected or confirmed security incidents"
+        label: "Suspected or confirmed security incidents"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.10", source_literal: "suspected or confirmed security incidents"}
+        criticality: critical
+      - id: "incident response responsibilities"
+        label: "Incident response responsibilities"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.10", source_literal: "incident response responsibilities"}
+        criticality: high
+      - id: "lessons learned"
+        label: "Lessons learned"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.10", source_literal: "lessons learned"}
+        criticality: medium
+  - axis_type: "PCI DSS scope"
+    rationale: "PCI DSS v4.0 requires entities to confirm and document PCI DSS scope, including people, processes, technologies, system components, and cardholder data flows."
+    criticality_default: critical
+    variants:
+      - id: "PCI DSS scope"
+        label: "PCI DSS scope"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.5", source_literal: "PCI DSS scope"}
+        criticality: critical
+      - id: "system components"
+        label: "System components"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.5", source_literal: "system components"}
+        criticality: high
+      - id: "cardholder data flows"
+        label: "Cardholder data flows"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.5", source_literal: "cardholder data flows"}
+        criticality: critical
+      - id: "all locations of cardholder data"
+        label: "All locations of cardholder data"
+        attributes: {source: "PCI DSS v4.0 Requirement 12.5", source_literal: "all locations of cardholder data"}
+        criticality: critical

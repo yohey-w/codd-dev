@@ -1,0 +1,11 @@
+recommended_kinds:
+  - administrative_safeguards_gap
+  - physical_safeguards_gap
+  - technical_safeguards_gap
+  - risk_analysis_gap
+  - access_control_gap
+  - audit_controls_gap
+  - integrity_controls_gap
+  - transmission_security_gap
+  - breach_notification_gap
+  - business_associate_contract_gap

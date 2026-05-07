@@ -1,0 +1,40 @@
+rules:
+  - when: "axis=Install and Maintain Network Security Controls AND coverage=gap"
+    severity: critical
+    rationale: "Missing network security controls can leave the cardholder data environment exposed."
+  - when: "axis=Protect Stored Account Data AND coverage=gap"
+    severity: critical
+    rationale: "Stored account data gaps can expose PAN, sensitive authentication data, or cryptographic keys."
+  - when: "axis=Maintain a Vulnerability Management Program AND coverage=gap"
+    severity: high
+    rationale: "Vulnerability management gaps can leave malware, vulnerable components, or critical vulnerabilities untreated."
+  - when: "axis=Restrict Access to System Components and Cardholder Data by Business Need to Know AND coverage=gap"
+    severity: critical
+    rationale: "Access gaps can grant cardholder data or CDE access beyond business need to know."
+  - when: "axis=Regularly Monitor and Test Networks AND coverage=gap"
+    severity: high
+    rationale: "Monitoring and testing gaps reduce detection and validation of CDE security controls."
+  - when: "axis=Support Information Security with Organizational Policies and Programs AND coverage=gap"
+    severity: high
+    rationale: "Policy and program gaps can leave PCI DSS responsibilities, risks, and third-party controls unmanaged."
+  - when: "axis=Protect Cardholder Data with Strong Cryptography During Transmission Over Open, Public Networks AND coverage=gap"
+    severity: critical
+    rationale: "Transmission cryptography gaps can expose cardholder data over open, public networks."
+  - when: "axis=Develop and Maintain Secure Systems and Software AND coverage=gap"
+    severity: high
+    rationale: "Secure software gaps can allow vulnerable applications, unsafe changes, or payment page script exposure."
+  - when: "axis=Personnel screening AND coverage=gap"
+    severity: medium
+    rationale: "Personnel screening gaps can increase risk from internal sources in sensitive payment environments."
+  - when: "axis=Restrict Physical Access to Cardholder Data AND coverage=gap"
+    severity: high
+    rationale: "Physical access gaps can expose cardholder data, POI devices, media, or systems."
+  - when: "axis=Security incident response plan AND coverage=gap"
+    severity: critical
+    rationale: "Incident response gaps can delay response to suspected or confirmed security incidents."
+  - when: "axis=PCI DSS scope AND coverage=gap"
+    severity: critical
+    rationale: "Scoping gaps can exclude systems, data flows, or locations that should be assessed under PCI DSS."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking PCI DSS gap."

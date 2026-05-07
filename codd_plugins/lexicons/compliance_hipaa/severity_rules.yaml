@@ -1,0 +1,34 @@
+rules:
+  - when: "axis=Administrative safeguards AND coverage=gap"
+    severity: critical
+    rationale: "Missing administrative safeguards leaves HIPAA security policies, responsibilities, workforce controls, and contingency planning unenforceable."
+  - when: "axis=Physical safeguards AND coverage=gap"
+    severity: high
+    rationale: "Physical safeguard gaps can expose ePHI systems, workstations, devices, and media to unauthorized access or environmental hazards."
+  - when: "axis=Technical safeguards AND coverage=gap"
+    severity: critical
+    rationale: "Technical safeguard gaps can leave ePHI access, authentication, auditing, integrity, or transmission controls undefined."
+  - when: "axis=Risk analysis AND coverage=gap"
+    severity: critical
+    rationale: "HIPAA risk analysis is foundational to selecting reasonable and appropriate safeguards."
+  - when: "axis=Access control AND coverage=gap"
+    severity: critical
+    rationale: "Access-control gaps can permit ePHI access without authorized user, emergency, session, or encryption controls."
+  - when: "axis=Audit controls AND coverage=gap"
+    severity: high
+    rationale: "Audit-control gaps reduce the ability to record and examine ePHI system activity."
+  - when: "axis=Integrity AND coverage=gap"
+    severity: high
+    rationale: "Integrity gaps can leave improper ePHI alteration or destruction undetected."
+  - when: "axis=Transmission security AND coverage=gap"
+    severity: critical
+    rationale: "Transmission-security gaps can expose ePHI moving over electronic communications networks."
+  - when: "axis=Breach notification AND coverage=gap"
+    severity: critical
+    rationale: "Breach-notification gaps can miss required individual, media, Secretary, or covered-entity notices."
+  - when: "axis=Business associate contracts or other arrangements AND coverage=gap"
+    severity: critical
+    rationale: "Business-associate contract gaps can leave delegated ePHI handling outside HIPAA safeguard and incident-reporting obligations."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking HIPAA compliance gap."

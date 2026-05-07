@@ -1,0 +1,209 @@
+coverage_axes:
+  - axis_type: "Administrative safeguards"
+    rationale: "45 CFR 164.308 defines administrative safeguards, including security management process, assigned security responsibility, workforce security, security awareness and training, security incident procedures, contingency planning, and evaluation."
+    criticality_default: critical
+    variants:
+      - id: "security management process"
+        label: "Security management process"
+        attributes: {source: "45 CFR 164.308(a)(1)", source_literal: "security management process"}
+        criticality: critical
+      - id: "assigned security responsibility"
+        label: "Assigned security responsibility"
+        attributes: {source: "45 CFR 164.308(a)(2)", source_literal: "assigned security responsibility"}
+        criticality: high
+      - id: "workforce security"
+        label: "Workforce security"
+        attributes: {source: "45 CFR 164.308(a)(3)", source_literal: "workforce security"}
+        criticality: high
+      - id: "security awareness and training"
+        label: "Security awareness and training"
+        attributes: {source: "45 CFR 164.308(a)(5)", source_literal: "security awareness and training"}
+        criticality: medium
+      - id: "contingency plan"
+        label: "Contingency plan"
+        attributes: {source: "45 CFR 164.308(a)(7)", source_literal: "contingency plan"}
+        criticality: high
+  - axis_type: "Physical safeguards"
+    rationale: "45 CFR 164.310 defines physical safeguards for electronic information systems and related buildings and equipment."
+    criticality_default: high
+    variants:
+      - id: "facility access controls"
+        label: "Facility access controls"
+        attributes: {source: "45 CFR 164.310(a)", source_literal: "facility access controls"}
+        criticality: high
+      - id: "workstation use"
+        label: "Workstation use"
+        attributes: {source: "45 CFR 164.310(b)", source_literal: "workstation use"}
+        criticality: medium
+      - id: "workstation security"
+        label: "Workstation security"
+        attributes: {source: "45 CFR 164.310(c)", source_literal: "workstation security"}
+        criticality: medium
+      - id: "device and media controls"
+        label: "Device and media controls"
+        attributes: {source: "45 CFR 164.310(d)", source_literal: "device and media controls"}
+        criticality: high
+  - axis_type: "Technical safeguards"
+    rationale: "45 CFR 164.312 defines technical safeguards for technology and policies that protect ePHI and control access."
+    criticality_default: critical
+    variants:
+      - id: "access control"
+        label: "Access control"
+        attributes: {source: "45 CFR 164.312(a)", source_literal: "access control"}
+        criticality: critical
+      - id: "audit controls"
+        label: "Audit controls"
+        attributes: {source: "45 CFR 164.312(b)", source_literal: "audit controls"}
+        criticality: high
+      - id: "integrity"
+        label: "Integrity"
+        attributes: {source: "45 CFR 164.312(c)", source_literal: "integrity"}
+        criticality: high
+      - id: "person or entity authentication"
+        label: "Person or entity authentication"
+        attributes: {source: "45 CFR 164.312(d)", source_literal: "person or entity authentication"}
+        criticality: high
+      - id: "transmission security"
+        label: "Transmission security"
+        attributes: {source: "45 CFR 164.312(e)", source_literal: "transmission security"}
+        criticality: critical
+  - axis_type: "Risk analysis"
+    rationale: "45 CFR 164.308(a)(1)(ii)(A) requires an accurate and thorough assessment of potential risks and vulnerabilities to ePHI confidentiality, integrity, and availability."
+    criticality_default: critical
+    variants:
+      - id: "accurate and thorough assessment"
+        label: "Accurate and thorough risk assessment"
+        attributes: {source: "45 CFR 164.308(a)(1)(ii)(A)", source_literal: "accurate and thorough assessment"}
+        criticality: critical
+      - id: "potential risks and vulnerabilities"
+        label: "Potential risks and vulnerabilities"
+        attributes: {source: "45 CFR 164.308(a)(1)(ii)(A)", source_literal: "potential risks and vulnerabilities"}
+        criticality: critical
+      - id: "confidentiality, integrity, and availability"
+        label: "CIA impact on ePHI"
+        attributes: {source: "45 CFR 164.308(a)(1)(ii)(A)", source_literal: "confidentiality, integrity, and availability"}
+        criticality: critical
+      - id: "risk management"
+        label: "Risk management"
+        attributes: {source: "45 CFR 164.308(a)(1)(ii)(B)", source_literal: "risk management"}
+        criticality: critical
+  - axis_type: "Access control"
+    rationale: "45 CFR 164.312(a) requires technical policies and procedures for access only by persons or software programs granted access rights."
+    criticality_default: critical
+    variants:
+      - id: "unique user identification"
+        label: "Unique user identification"
+        attributes: {source: "45 CFR 164.312(a)(2)(i)", source_literal: "unique user identification"}
+        criticality: critical
+      - id: "emergency access procedure"
+        label: "Emergency access procedure"
+        attributes: {source: "45 CFR 164.312(a)(2)(ii)", source_literal: "emergency access procedure"}
+        criticality: high
+      - id: "automatic logoff"
+        label: "Automatic logoff"
+        attributes: {source: "45 CFR 164.312(a)(2)(iii)", source_literal: "automatic logoff"}
+        criticality: medium
+      - id: "encryption and decryption"
+        label: "Encryption and decryption"
+        attributes: {source: "45 CFR 164.312(a)(2)(iv)", source_literal: "encryption and decryption"}
+        criticality: high
+  - axis_type: "Audit controls"
+    rationale: "45 CFR 164.312(b) requires hardware, software, or procedural mechanisms that record and examine information-system activity containing or using ePHI."
+    criticality_default: high
+    variants:
+      - id: "hardware, software, and/or procedural mechanisms"
+        label: "Audit-control mechanisms"
+        attributes: {source: "45 CFR 164.312(b)", source_literal: "hardware, software, and/or procedural mechanisms"}
+        criticality: high
+      - id: "record and examine activity"
+        label: "Record and examine system activity"
+        attributes: {source: "45 CFR 164.312(b)", source_literal: "record and examine activity"}
+        criticality: high
+      - id: "audit logs"
+        label: "Audit logs"
+        attributes: {source: "45 CFR 164.308(a)(1)(ii)(D)", source_literal: "audit logs"}
+        criticality: medium
+      - id: "access reports"
+        label: "Access reports"
+        attributes: {source: "45 CFR 164.308(a)(1)(ii)(D)", source_literal: "access reports"}
+        criticality: medium
+  - axis_type: "Integrity"
+    rationale: "45 CFR 164.312(c) requires policies, procedures, and mechanisms to protect ePHI from improper alteration or destruction."
+    criticality_default: high
+    variants:
+      - id: "improper alteration or destruction"
+        label: "Improper alteration or destruction protection"
+        attributes: {source: "45 CFR 164.312(c)(1)", source_literal: "improper alteration or destruction"}
+        criticality: high
+      - id: "mechanism to authenticate electronic protected health information"
+        label: "ePHI integrity authentication mechanism"
+        attributes: {source: "45 CFR 164.312(c)(2)", source_literal: "mechanism to authenticate electronic protected health information"}
+        criticality: medium
+      - id: "not been altered or destroyed"
+        label: "Alteration/destruction corroboration"
+        attributes: {source: "45 CFR 164.312(c)(2)", source_literal: "not been altered or destroyed"}
+        criticality: medium
+  - axis_type: "Transmission security"
+    rationale: "45 CFR 164.312(e) requires technical security measures to guard against unauthorized access to ePHI transmitted over electronic communications networks."
+    criticality_default: critical
+    variants:
+      - id: "unauthorized access"
+        label: "Unauthorized transmission access guard"
+        attributes: {source: "45 CFR 164.312(e)(1)", source_literal: "unauthorized access"}
+        criticality: critical
+      - id: "integrity controls"
+        label: "Transmission integrity controls"
+        attributes: {source: "45 CFR 164.312(e)(2)(i)", source_literal: "integrity controls"}
+        criticality: high
+      - id: "improperly modified without detection"
+        label: "Improper modification detection"
+        attributes: {source: "45 CFR 164.312(e)(2)(i)", source_literal: "improperly modified without detection"}
+        criticality: high
+      - id: "encryption"
+        label: "Transmission encryption"
+        attributes: {source: "45 CFR 164.312(e)(2)(ii)", source_literal: "encryption"}
+        criticality: high
+  - axis_type: "Breach notification"
+    rationale: "45 CFR Part 164 Subpart D defines breach notification to individuals, media, the Secretary, and by business associates, including timeliness and content requirements."
+    criticality_default: critical
+    variants:
+      - id: "notification to individuals"
+        label: "Notification to individuals"
+        attributes: {source: "45 CFR 164.404", source_literal: "notification to individuals"}
+        criticality: critical
+      - id: "notification to the media"
+        label: "Notification to the media"
+        attributes: {source: "45 CFR 164.406", source_literal: "notification to the media"}
+        criticality: high
+      - id: "notification to the Secretary"
+        label: "Notification to the Secretary"
+        attributes: {source: "45 CFR 164.408", source_literal: "notification to the Secretary"}
+        criticality: high
+      - id: "notification by a business associate"
+        label: "Notification by a business associate"
+        attributes: {source: "45 CFR 164.410", source_literal: "notification by a business associate"}
+        criticality: critical
+      - id: "without unreasonable delay"
+        label: "Timely notification"
+        attributes: {source: "45 CFR 164.404(b), 164.406(b), 164.410(b)", source_literal: "without unreasonable delay"}
+        criticality: critical
+  - axis_type: "Business associate contracts or other arrangements"
+    rationale: "45 CFR 164.314(a) requires business associate contracts or other arrangements that bind applicable safeguard, subcontractor, and incident-reporting obligations."
+    criticality_default: critical
+    variants:
+      - id: "business associate contracts"
+        label: "Business associate contracts"
+        attributes: {source: "45 CFR 164.314(a)(2)(i)", source_literal: "business associate contracts"}
+        criticality: critical
+      - id: "comply with the applicable requirements"
+        label: "Applicable Security Rule requirements"
+        attributes: {source: "45 CFR 164.314(a)(2)(i)(A)", source_literal: "comply with the applicable requirements"}
+        criticality: critical
+      - id: "subcontractors"
+        label: "Business associate subcontractors"
+        attributes: {source: "45 CFR 164.314(a)(2)(i)(B)", source_literal: "subcontractors"}
+        criticality: high
+      - id: "report to the covered entity any security incident"
+        label: "Security incident reporting to covered entity"
+        attributes: {source: "45 CFR 164.314(a)(2)(i)(C)", source_literal: "report to the covered entity any security incident"}
+        criticality: critical
