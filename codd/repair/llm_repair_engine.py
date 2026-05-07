@@ -25,6 +25,7 @@ from codd.repair.schema import (
 
 LOGGER = logging.getLogger(__name__)
 TEMPLATE_DIR = Path(__file__).with_name("templates")
+DEFAULT_MAX_STRATEGY_ATTEMPTS = 2
 
 
 class RepairFailed(RuntimeError):
@@ -40,6 +41,7 @@ class LlmRepairEngine(RepairEngine):
     config: Mapping[str, Any] | None = None
     ai_command: Any | None = None
     git_patcher: GitPatcher = field(default_factory=GitPatcher)
+    max_strategy_attempts: int | None = None
 
     def __post_init__(self) -> None:
         if self.project_root is not None:
@@ -68,33 +70,36 @@ class LlmRepairEngine(RepairEngine):
             raise RepairFailed("repair analysis output did not match schema") from exc
 
     def propose_fix(self, rca: RootCauseAnalysis, file_contents: dict[str, str]) -> RepairProposal:
-        """Ask the AI command for patches and validate unified diffs when possible."""
+        """Ask the AI command for patches and retry with validation feedback."""
 
-        prompt = _render_template(
-            TEMPLATE_DIR / "propose_meta.md",
-            root_cause_analysis=_json_dumps(_to_plain_data(rca)),
-            file_contents=_json_dumps(file_contents),
-            project_context=self._project_context(),
-        )
-        payload = _parse_json_object(self._invoke("repair_propose", prompt), "RepairProposal")
-        try:
-            proposal = RepairProposal(
-                patches=[_file_patch(item) for item in _patch_entries(payload.get("patches"))],
-                rationale=str(payload.get("rationale") or "").strip(),
-                confidence=float(payload.get("confidence", 0.0)),
-                proposal_timestamp=str(payload.get("proposal_timestamp") or _timestamp()),
-                rca_reference=str(payload.get("rca_reference") or rca.analysis_timestamp),
-            )
-        except (TypeError, ValueError) as exc:
-            LOGGER.warning("Repair proposal output did not match schema: %s", exc)
-            raise RepairFailed("repair proposal output did not match schema") from exc
+        prompt_values = {
+            "root_cause_analysis": _json_dumps(_to_plain_data(rca)),
+            "file_contents": _json_dumps(file_contents),
+            "project_context": self._project_context(),
+        }
+        prompt = _render_template(TEMPLATE_DIR / "propose_meta.md", **prompt_values)
+        last_error: str | None = None
 
-        if self.project_root is not None:
-            for patch in proposal.patches:
-                if patch.patch_mode == "unified_diff" and not self.git_patcher.validate(patch, Path(self.project_root)):
-                    LOGGER.warning("Repair proposal patch failed dry-run validation: %s", patch.file_path)
-                    raise RepairFailed("repair proposal failed patch validation")
-        return proposal
+        for attempt in range(self._max_strategy_attempts()):
+            payload = _parse_json_object(self._invoke("repair_propose", prompt), "RepairProposal")
+            proposal = _repair_proposal(payload, rca)
+            if not proposal.patches:
+                raise RepairFailed("repair proposal selected no-patch")
+
+            last_error = self._proposal_validation_error(proposal)
+            if last_error is None:
+                return proposal
+
+            LOGGER.warning("Repair proposal patch failed dry-run validation: %s", last_error)
+            if attempt + 1 < self._max_strategy_attempts():
+                prompt = _render_template(
+                    TEMPLATE_DIR / "repair_strategy_meta.md",
+                    error_message=last_error,
+                    previous_proposal=_json_dumps(_to_plain_data(proposal)),
+                    **prompt_values,
+                )
+
+        raise RepairFailed(f"repair proposal failed patch validation: {last_error or 'unknown validation error'}")
 
     def apply(self, proposal: RepairProposal, *, dry_run: bool = False) -> ApplyResult:
         """Apply all patches in a proposal and aggregate their results."""
@@ -107,6 +112,9 @@ class LlmRepairEngine(RepairEngine):
                 "project_root is required to apply repairs",
             )
 
+        if not proposal.patches:
+            return ApplyResult(False, [], [], "no patch proposed")
+
         applied: list[str] = []
         failed: list[str] = []
         errors: list[str] = []
@@ -118,6 +126,34 @@ class LlmRepairEngine(RepairEngine):
                 errors.append(result.error_message)
 
         return ApplyResult(not failed, applied, failed, "\n".join(errors) or None)
+
+    def _proposal_validation_error(self, proposal: RepairProposal) -> str | None:
+        if self.project_root is None:
+            return None
+
+        root = Path(self.project_root)
+        errors: list[str] = []
+        for patch in proposal.patches:
+            if patch.patch_mode != "unified_diff":
+                continue
+            result = self.git_patcher.validate_result(patch, root)
+            if result.success:
+                continue
+            message = result.error_message or "unified diff failed validation"
+            errors.append(f"{patch.file_path}: {message}")
+        return "\n".join(errors) or None
+
+    def _max_strategy_attempts(self) -> int:
+        if self.max_strategy_attempts is not None:
+            return _positive_int(self.max_strategy_attempts, DEFAULT_MAX_STRATEGY_ATTEMPTS)
+
+        config = self._effective_config()
+        repair_config = config.get("repair") if isinstance(config, Mapping) else None
+        if isinstance(repair_config, Mapping):
+            for key in ("max_strategy_attempts", "max_repair_strategy_attempts"):
+                if key in repair_config:
+                    return _positive_int(repair_config.get(key), DEFAULT_MAX_STRATEGY_ATTEMPTS)
+        return DEFAULT_MAX_STRATEGY_ATTEMPTS
 
     def _invoke(self, command_name: str, prompt: str) -> str:
         injected = _select_injected_ai_command(self.ai_command, command_name)
@@ -259,6 +295,40 @@ def _file_patch(payload: Any) -> FilePatch:
     )
 
 
+def _repair_proposal(payload: Mapping[str, Any], rca: RootCauseAnalysis) -> RepairProposal:
+    try:
+        patches: list[FilePatch]
+        if _selects_no_patch(payload):
+            patches = []
+        else:
+            patches = [_file_patch(item) for item in _patch_entries(payload.get("patches"))]
+        return RepairProposal(
+            patches=patches,
+            rationale=str(payload.get("rationale") or "").strip(),
+            confidence=float(payload.get("confidence", 0.0)),
+            proposal_timestamp=str(payload.get("proposal_timestamp") or _timestamp()),
+            rca_reference=str(payload.get("rca_reference") or rca.analysis_timestamp),
+        )
+    except (TypeError, ValueError) as exc:
+        LOGGER.warning("Repair proposal output did not match schema: %s", exc)
+        raise RepairFailed("repair proposal output did not match schema") from exc
+
+
+def _selects_no_patch(payload: Mapping[str, Any]) -> bool:
+    for key in ("patch_mode", "repair_strategy", "strategy"):
+        if _is_no_patch(payload.get(key)):
+            return True
+
+    patches = payload.get("patches")
+    if not isinstance(patches, list):
+        return False
+    return any(isinstance(item, Mapping) and _is_no_patch(item.get("patch_mode")) for item in patches)
+
+
+def _is_no_patch(value: Any) -> bool:
+    return str(value or "").strip().lower().replace("_", "-") == "no-patch"
+
+
 def _patch_entries(payload: Any) -> list[Any]:
     if not isinstance(payload, list):
         raise TypeError("patches must be a list")
@@ -292,6 +362,14 @@ def _to_plain_data(value: Any) -> Any:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, parsed)
 
 
 def _timestamp() -> str:
