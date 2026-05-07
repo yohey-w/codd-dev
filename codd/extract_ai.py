@@ -49,6 +49,12 @@ SCHEMA_PATTERNS = [
     "prisma/schema.prisma", "db/schema.rb", "alembic/versions",
 ]
 
+# Generic source extensions included in the AI context scan. The deterministic
+# parser decides language-specific structure later; this layer keeps raw text.
+SOURCE_EXTENSIONS = {
+    ".go", ".java", ".js", ".jsx", ".php", ".py", ".rb", ".ts", ".tsx", ".vue",
+}
+
 # Max file size to include in prompt (bytes)
 MAX_FILE_SIZE = 50_000
 
@@ -171,7 +177,43 @@ def _find_source_files(root: Path) -> list[Path]:
         # Filter out files in skip dirs
         found = [f for f in found if not any(s in f.parts for s in SKIP_DIRS)]
         files.extend(found)
+    files.extend(_find_source_files_by_extension(root))
     return sorted(set(files))
+
+
+def _find_source_files_by_extension(root: Path) -> list[Path]:
+    """Find source files generically by extension, preserving raw text for AI."""
+    files: list[Path] = []
+    for current, dirs, filenames in os.walk(root):
+        dirs[:] = [
+            d for d in dirs
+            if d not in SKIP_DIRS and not d.startswith(".")
+        ]
+        current_path = Path(current)
+        for filename in filenames:
+            path = current_path / filename
+            if path.suffix not in SOURCE_EXTENSIONS:
+                continue
+            try:
+                rel_parts = path.relative_to(root).parts
+            except ValueError:
+                continue
+            if _is_test_path(rel_parts) or any(part in SKIP_DIRS for part in rel_parts):
+                continue
+            files.append(path)
+    return files
+
+
+def _is_test_path(parts: tuple[str, ...]) -> bool:
+    if any(part in {"test", "tests", "spec", "__tests__"} for part in parts[:-1]):
+        return True
+    filename = parts[-1].lower() if parts else ""
+    return (
+        filename.startswith("test_")
+        or filename.endswith(("_test.py", "_spec.rb"))
+        or ".test." in filename
+        or ".spec." in filename
+    )
 
 
 def _find_iac_files(root: Path) -> list[Path]:
@@ -198,6 +240,8 @@ def _find_iac_files(root: Path) -> list[Path]:
 def _find_test_files(root: Path) -> list[Path]:
     """Find test files (paths only, not contents)."""
     patterns = [
+        "tests/test_*.py", "tests/**/test_*.py",
+        "test/test_*.py", "test/**/test_*.py",
         "tests/**/*.test.*", "tests/**/*.spec.*",
         "test/**/*.test.*", "test/**/*.spec.*",
         "src/**/*.test.*", "src/**/*.spec.*",
@@ -206,9 +250,19 @@ def _find_test_files(root: Path) -> list[Path]:
     tests: list[Path] = []
     for pattern in patterns:
         found = list(root.glob(pattern))
-        found = [f for f in found if not any(s in f.parts for s in SKIP_DIRS)]
+        found = [
+            f for f in found
+            if not any(s in _relative_parts(root, f) for s in SKIP_DIRS)
+        ]
         tests.extend(found)
     return sorted(set(tests))
+
+
+def _relative_parts(root: Path, path: Path) -> tuple[str, ...]:
+    try:
+        return path.relative_to(root).parts
+    except ValueError:
+        return path.parts
 
 
 def pre_scan(project_root: Path) -> PreScanResult:
@@ -456,11 +510,11 @@ def run_extract_ai(
     Args:
         project_root: Path to the project to extract from.
         ai_command: AI CLI command (e.g. 'claude --print --model claude-opus-4-6').
-        output_dir: Output directory (default: {project_root}/codd/extracted/).
+        output_dir: Output directory (default: {project_root}/.codd/extract/).
         prompt_file: Path to a custom prompt file. Overrides the built-in baseline preset.
     """
     project_root = project_root.resolve()
-    out = Path(output_dir) if output_dir else project_root / "codd" / "extracted"
+    out = Path(output_dir) if output_dir else project_root / ".codd" / "extract"
     out.mkdir(parents=True, exist_ok=True)
 
     # Phase 1: Pre-scan

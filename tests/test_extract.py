@@ -321,6 +321,7 @@ class TestRunExtract:
         assert result.total_lines > 0
         assert len(result.generated_files) >= 5  # system-context + 4 modules
         assert result.output_dir.exists()
+        assert result.output_dir == python_project / ".codd" / "extract"
 
     def test_works_without_codd_init(self, python_project):
         """Extract should work even without codd init (brownfield bootstrap)."""
@@ -330,6 +331,8 @@ class TestRunExtract:
         result = run_extract(python_project, "python", ["src"])
         assert result.module_count > 0
         assert result.output_dir.exists()
+        assert result.output_dir == python_project / ".codd" / "extract"
+        assert not (python_project / "codd").exists()
 
     def test_custom_output_dir(self, python_project):
         custom_out = python_project / "my-docs"
@@ -364,12 +367,14 @@ class TestCLI:
         assert result.exit_code == 0
         assert "Extracted:" in result.output
         assert "modules" in result.output
-        config = yaml.safe_load((python_project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+        config = yaml.safe_load((python_project / ".codd" / "codd.yaml").read_text(encoding="utf-8"))
         assert config["project"]["name"] == python_project.name
         assert config["project"]["language"] == "python"
         assert config["scan"]["source_dirs"] == ["src"]
-        assert config["graph"]["path"] == "codd/scan"
-        assert "Generated: codd/codd.yaml" in result.output
+        assert config["graph"]["path"] == ".codd/scan"
+        assert (python_project / ".codd" / "extract" / "system-context.md").exists()
+        assert not (python_project / "codd").exists()
+        assert "Generated: .codd/codd.yaml" in result.output
 
     def test_extract_uses_hidden_config_when_codd_dir_is_source_tree(self, tmp_path):
         from codd.cli import main
@@ -393,7 +398,7 @@ class TestCLI:
         assert result.exit_code == 0
         hidden_config = project / ".codd" / "codd.yaml"
         assert hidden_config.exists()
-        assert (project / ".codd" / "extracted" / "system-context.md").exists()
+        assert (project / ".codd" / "extract" / "system-context.md").exists()
         assert not (project / "codd" / "codd.yaml").exists()
 
         config = yaml.safe_load(hidden_config.read_text(encoding="utf-8"))

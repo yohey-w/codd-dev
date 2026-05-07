@@ -1,5 +1,5 @@
 from codd.extractor import ProjectFacts, Symbol
-from codd.parsing import RegexExtractor, TreeSitterExtractor, get_extractor
+from codd.parsing import PythonAstExtractor, RegexExtractor, TreeSitterExtractor, get_extractor
 
 
 def test_symbol_defaults_are_non_breaking():
@@ -32,7 +32,7 @@ def test_get_extractor_returns_regex_for_unsupported_language(monkeypatch):
     assert isinstance(extractor, RegexExtractor)
 
 
-def test_get_extractor_returns_tree_sitter_when_available(monkeypatch):
+def test_get_extractor_returns_python_ast_when_tree_sitter_available(monkeypatch):
     monkeypatch.setattr(
         TreeSitterExtractor,
         "is_available",
@@ -41,10 +41,10 @@ def test_get_extractor_returns_tree_sitter_when_available(monkeypatch):
 
     extractor = get_extractor("python")
 
-    assert isinstance(extractor, TreeSitterExtractor)
+    assert isinstance(extractor, PythonAstExtractor)
 
 
-def test_get_extractor_returns_regex_when_tree_sitter_missing(monkeypatch):
+def test_get_extractor_returns_python_ast_when_tree_sitter_missing(monkeypatch):
     monkeypatch.setattr(
         TreeSitterExtractor,
         "is_available",
@@ -53,4 +53,4 @@ def test_get_extractor_returns_regex_when_tree_sitter_missing(monkeypatch):
 
     extractor = get_extractor("python")
 
-    assert isinstance(extractor, RegexExtractor)
+    assert isinstance(extractor, PythonAstExtractor)

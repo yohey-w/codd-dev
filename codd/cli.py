@@ -288,13 +288,9 @@ def _resolve_bootstrap_codd_dir(project_root: Path) -> Path:
         return existing
 
     hidden_dir = project_root / ".codd"
-    default_dir = project_root / "codd"
     if hidden_dir.exists():
         return hidden_dir
-    if default_dir.exists():
-        # Avoid writing config into projects whose source package is already named codd/.
-        return hidden_dir
-    return default_dir
+    return hidden_dir
 
 
 def _format_yaml_list(items: list[str], *, indent: int = 4) -> str:
@@ -2203,7 +2199,8 @@ def e2e_generate_legacy(path: str, base_url: str, output: str | None, framework:
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--language", default=None, help="Override language detection (python/typescript/javascript/go — full support; java — symbols only)")
 @click.option("--source-dirs", default=None, help="Comma-separated source directories (default: auto-detect)")
-@click.option("--output", default=None, help="Output directory (default: <config-dir>/extracted/)")
+@click.option("--output", default=None, help="Output directory (default: <project-root>/.codd/extract/)")
+@click.option("--init", "initialize", is_flag=True, help="Add brownfield init metadata to generated YAML/Markdown")
 @click.option("--ai", is_flag=True, default=False, help="Use AI-powered extraction (6-layer MECE design docs)")
 @click.option(
     "--ai-cmd",
@@ -2237,6 +2234,7 @@ def extract(
     language: str | None,
     source_dirs: str | None,
     output: str | None,
+    initialize: bool,
     ai: bool,
     ai_cmd: str | None,
     prompt_file: str | None,
@@ -2249,9 +2247,8 @@ def extract(
     Default mode: static analysis (no AI, pure structural facts).
     With --ai: AI-powered 6-layer MECE extraction using claude --print.
 
-    Output goes to the discovered CoDD config dir as draft documents
-    (`codd/extracted/` or `.codd/extracted/`). Review and promote
-    confirmed docs when ready.
+    Output goes to `.codd/extract/` by default. Review and promote confirmed
+    docs when ready.
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -2259,7 +2256,13 @@ def extract(
     project_root = Path(path).resolve()
     bootstrap_codd_dir = _resolve_bootstrap_codd_dir(project_root)
     dirs = [d.strip() for d in source_dirs.split(",") if d.strip()] if source_dirs else None
-    output_path = Path(output) if output else bootstrap_codd_dir / "extracted"
+    output_path = Path(output) if output else project_root / ".codd" / "extract"
+    if output and not output_path.is_absolute():
+        output_path = project_root / output_path
+    init_metadata = None
+    if initialize:
+        from codd.extractor import build_extract_init_metadata
+        init_metadata = build_extract_init_metadata(project_root)
 
     if layer == "routes":
         from codd.config import load_project_config
@@ -2314,6 +2317,9 @@ def extract(
         except Exception as exc:
             click.echo(f"Error: {exc}")
             raise SystemExit(1)
+        if init_metadata is not None:
+            from codd.extractor import add_extract_init_frontmatter
+            add_extract_init_frontmatter(result.generated_files, init_metadata)
 
         facts = extract_facts(project_root, language, dirs)
         config_path, generated_config = _ensure_bootstrap_codd_yaml(
@@ -2340,7 +2346,7 @@ def extract(
         from codd.extractor import run_extract
 
         try:
-            result = run_extract(project_root, language, dirs, str(output_path))
+            result = run_extract(project_root, language, dirs, str(output_path), init_metadata=init_metadata)
         except Exception as exc:
             click.echo(f"Error: {exc}")
             raise SystemExit(1)
