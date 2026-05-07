@@ -1,0 +1,20 @@
+name: ops_cicd_pipeline
+lexicon_name: ops_cicd_pipeline
+version: "1.0.0"
+source_url: "https://opengitops.dev/"
+source_version: "OpenGitOps Principles v1.0.0 + CNCF GitOps project context"
+description: "GitOps-oriented CI/CD pipeline coverage axes for declarative state, versioned history, automated pull, reconciliation, drift, rollback, and observation."
+observation_dimensions: 7
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "OpenGitOps Principles"
+    url: "https://opengitops.dev/"
+    source_version: "v1.0.0"
+  - title: "CNCF Argo project context"
+    url: "https://www.cncf.io/projects/argo/"
+

@@ -1,0 +1,226 @@
+coverage_axes:
+  - axis_type: "context_organization"
+    rationale: "ISO/IEC 27001 clause 4 establishes organizational context, interested parties, ISMS scope, and the management system."
+    criticality_default: high
+    variants:
+      - id: "Context of the organization"
+        label: "Context of the organization"
+        attributes: {source: "ISO/IEC 27001:2022 clause 4", source_literal: "Context of the organization"}
+        criticality: high
+      - id: "interested parties"
+        label: "Interested parties"
+        attributes: {source: "ISO/IEC 27001:2022 clause 4", coverage_target: "needs and expectations"}
+        criticality: medium
+      - id: "ISMS scope"
+        label: "ISMS scope"
+        attributes: {source: "ISO/IEC 27001:2022 clause 4", coverage_target: "management-system boundary"}
+        criticality: high
+  - axis_type: "leadership"
+    rationale: "ISO/IEC 27001 clause 5 requires leadership, policy, organizational roles, responsibilities, and authorities."
+    criticality_default: critical
+    variants:
+      - id: "Leadership"
+        label: "Leadership"
+        attributes: {source: "ISO/IEC 27001:2022 clause 5", source_literal: "Leadership"}
+        criticality: critical
+      - id: "information security policy"
+        label: "Information security policy"
+        attributes: {source: "ISO/IEC 27001:2022 clause 5", coverage_target: "policy commitment"}
+        criticality: critical
+      - id: "organizational roles, responsibilities and authorities"
+        label: "Roles and responsibilities"
+        attributes: {source: "ISO/IEC 27001:2022 clause 5", coverage_target: "accountability"}
+        criticality: high
+  - axis_type: "planning"
+    rationale: "ISO/IEC 27001 clause 6 covers actions to address risks and opportunities, information security objectives, and planning changes."
+    criticality_default: critical
+    variants:
+      - id: "Planning"
+        label: "Planning"
+        attributes: {source: "ISO/IEC 27001:2022 clause 6", source_literal: "Planning"}
+        criticality: critical
+      - id: "information security risk assessment"
+        label: "Information security risk assessment"
+        attributes: {source: "ISO/IEC 27001:2022 clause 6", coverage_target: "risk identification and analysis"}
+        criticality: critical
+      - id: "information security objectives"
+        label: "Information security objectives"
+        attributes: {source: "ISO/IEC 27001:2022 clause 6", coverage_target: "objective planning"}
+        criticality: high
+  - axis_type: "support"
+    rationale: "ISO/IEC 27001 clause 7 covers resources, competence, awareness, communication, and documented information."
+    criticality_default: high
+    variants:
+      - id: "Support"
+        label: "Support"
+        attributes: {source: "ISO/IEC 27001:2022 clause 7", source_literal: "Support"}
+        criticality: high
+      - id: "competence"
+        label: "Competence"
+        attributes: {source: "ISO/IEC 27001:2022 clause 7", coverage_target: "capability evidence"}
+        criticality: high
+      - id: "documented information"
+        label: "Documented information"
+        attributes: {source: "ISO/IEC 27001:2022 clause 7", coverage_target: "controlled documentation"}
+        criticality: high
+  - axis_type: "operation"
+    rationale: "ISO/IEC 27001 clause 8 covers operational planning and control, risk assessment execution, and risk treatment execution."
+    criticality_default: critical
+    variants:
+      - id: "Operation"
+        label: "Operation"
+        attributes: {source: "ISO/IEC 27001:2022 clause 8", source_literal: "Operation"}
+        criticality: critical
+      - id: "operational planning and control"
+        label: "Operational planning and control"
+        attributes: {source: "ISO/IEC 27001:2022 clause 8", coverage_target: "process control"}
+        criticality: high
+      - id: "information security risk treatment"
+        label: "Risk treatment execution"
+        attributes: {source: "ISO/IEC 27001:2022 clause 8", coverage_target: "treatment implementation"}
+        criticality: critical
+  - axis_type: "performance_evaluation"
+    rationale: "ISO/IEC 27001 clause 9 covers monitoring, measurement, analysis, evaluation, internal audit, and management review."
+    criticality_default: high
+    variants:
+      - id: "Performance evaluation"
+        label: "Performance evaluation"
+        attributes: {source: "ISO/IEC 27001:2022 clause 9", source_literal: "Performance evaluation"}
+        criticality: high
+      - id: "internal audit"
+        label: "Internal audit"
+        attributes: {source: "ISO/IEC 27001:2022 clause 9", coverage_target: "audit evidence"}
+        criticality: high
+      - id: "management review"
+        label: "Management review"
+        attributes: {source: "ISO/IEC 27001:2022 clause 9", coverage_target: "leadership review"}
+        criticality: high
+  - axis_type: "improvement"
+    rationale: "ISO/IEC 27001 clause 10 covers nonconformity, corrective action, and continual improvement."
+    criticality_default: high
+    variants:
+      - id: "Improvement"
+        label: "Improvement"
+        attributes: {source: "ISO/IEC 27001:2022 clause 10", source_literal: "Improvement"}
+        criticality: high
+      - id: "nonconformity and corrective action"
+        label: "Nonconformity and corrective action"
+        attributes: {source: "ISO/IEC 27001:2022 clause 10", coverage_target: "correction loop"}
+        criticality: high
+      - id: "continual improvement"
+        label: "Continual improvement"
+        attributes: {source: "ISO/IEC 27001:2022 clause 10", coverage_target: "ongoing improvement"}
+        criticality: medium
+  - axis_type: "risk_treatment_plan"
+    rationale: "ISO/IEC 27001 requires information security risk treatment planning to select treatment options and determine necessary controls."
+    criticality_default: critical
+    variants:
+      - id: "information security risk treatment plan"
+        label: "Risk treatment plan"
+        attributes: {source: "ISO/IEC 27001:2022 clause 6.1.3", source_literal: "information security risk treatment plan"}
+        criticality: critical
+      - id: "risk treatment options"
+        label: "Risk treatment options"
+        attributes: {source: "ISO/IEC 27001:2022 clause 6.1.3", coverage_target: "treatment decision"}
+        criticality: critical
+      - id: "necessary controls"
+        label: "Necessary controls"
+        attributes: {source: "ISO/IEC 27001:2022 clause 6.1.3", coverage_target: "control selection"}
+        criticality: critical
+  - axis_type: "SOA"
+    rationale: "ISO/IEC 27001 requires a Statement of Applicability documenting necessary controls and justification for inclusions and exclusions."
+    criticality_default: critical
+    variants:
+      - id: "Statement of Applicability"
+        label: "Statement of Applicability"
+        attributes: {source: "ISO/IEC 27001:2022 clause 6.1.3", source_literal: "Statement of Applicability"}
+        criticality: critical
+      - id: "control justification"
+        label: "Control inclusion justification"
+        attributes: {source: "ISO/IEC 27001:2022 clause 6.1.3", coverage_target: "selection rationale"}
+        criticality: high
+      - id: "control exclusion"
+        label: "Control exclusion justification"
+        attributes: {source: "ISO/IEC 27001:2022 clause 6.1.3", coverage_target: "exclusion rationale"}
+        criticality: high
+  - axis_type: "access_control"
+    rationale: "ISO/IEC 27001 Annex A control vocabulary includes access control expectations for identities, privileges, and information access."
+    criticality_default: critical
+    variants:
+      - id: "Access control"
+        label: "Access control"
+        attributes: {source: "ISO/IEC 27001 Annex A", source_literal: "Access control"}
+        criticality: critical
+      - id: "user access management"
+        label: "User access management"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "identity lifecycle"}
+        criticality: critical
+      - id: "privileged access rights"
+        label: "Privileged access rights"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "privilege control"}
+        criticality: critical
+  - axis_type: "cryptography"
+    rationale: "ISO/IEC 27001 control vocabulary includes cryptography and cryptographic key management to preserve confidentiality, integrity, and authenticity."
+    criticality_default: high
+    variants:
+      - id: "Cryptography"
+        label: "Cryptography"
+        attributes: {source: "ISO/IEC 27001 Annex A", source_literal: "Cryptography"}
+        criticality: high
+      - id: "cryptographic controls"
+        label: "Cryptographic controls"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "cryptographic protection"}
+        criticality: high
+      - id: "key management"
+        label: "Key management"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "cryptographic key lifecycle"}
+        criticality: high
+  - axis_type: "physical_security"
+    rationale: "ISO/IEC 27001 physical controls protect secure areas, facilities, equipment, and environmental safeguards."
+    criticality_default: high
+    variants:
+      - id: "Physical security"
+        label: "Physical security"
+        attributes: {source: "ISO/IEC 27001 Annex A", source_literal: "Physical security"}
+        criticality: high
+      - id: "secure areas"
+        label: "Secure areas"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "restricted facilities"}
+        criticality: high
+      - id: "equipment security"
+        label: "Equipment security"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "asset protection"}
+        criticality: medium
+  - axis_type: "supplier_relationships"
+    rationale: "ISO/IEC 27001 supplier-relationship controls govern security requirements, monitoring, and service delivery by external parties."
+    criticality_default: high
+    variants:
+      - id: "Supplier relationships"
+        label: "Supplier relationships"
+        attributes: {source: "ISO/IEC 27001 Annex A", source_literal: "Supplier relationships"}
+        criticality: high
+      - id: "supplier service delivery"
+        label: "Supplier service delivery"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "service monitoring"}
+        criticality: high
+      - id: "information security in supplier agreements"
+        label: "Supplier security agreements"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "contractual controls"}
+        criticality: high
+  - axis_type: "incident_management"
+    rationale: "ISO/IEC 27001 incident-management controls cover security event reporting, assessment, response, learning, and evidence."
+    criticality_default: critical
+    variants:
+      - id: "Information security incident management"
+        label: "Information security incident management"
+        attributes: {source: "ISO/IEC 27001 Annex A", source_literal: "Information security incident management"}
+        criticality: critical
+      - id: "reporting information security events"
+        label: "Event reporting"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "event reporting"}
+        criticality: high
+      - id: "learning from information security incidents"
+        label: "Learning from incidents"
+        attributes: {source: "ISO/IEC 27001 Annex A", coverage_target: "post-incident improvement"}
+        criticality: high
+

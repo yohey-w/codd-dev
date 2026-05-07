@@ -1,0 +1,27 @@
+name: process_test_iso29119
+lexicon_name: process_test_iso29119
+version: "1.0.0"
+source_url: "https://www.iso.org/standard/45142.html"
+source_version: "ISO/IEC/IEEE 29119 software testing series"
+description: "ISO/IEC/IEEE 29119 software testing process coverage axes for concepts, processes, documentation, techniques, keyword-driven testing, and work-aided software testing support."
+observation_dimensions: 6
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "ISO/IEC/IEEE 29119 series"
+    url: "https://committee.iso.org/sites/jtc1sc7/home/projects/flagship-standards/isoiecieee-29119-series.html"
+  - title: "ISO/IEC/IEEE 29119-1:2022 General concepts"
+    url: "https://www.iso.org/standard/81291.html"
+  - title: "ISO/IEC/IEEE 29119-2 Test processes"
+    url: "https://www.iso.org/standard/56736.html"
+  - title: "ISO/IEC/IEEE 29119-3:2021 Test documentation"
+    url: "https://www.iso.org/standard/79429.html"
+  - title: "ISO/IEC/IEEE 29119-4:2021 Test techniques"
+    url: "https://www.iso.org/standard/79430.html"
+  - title: "ISO/IEC/IEEE 29119-5:2024 Keyword-driven testing"
+    url: "https://www.iso.org/standard/87233.html"
+

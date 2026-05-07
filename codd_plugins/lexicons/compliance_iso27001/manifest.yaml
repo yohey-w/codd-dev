@@ -1,0 +1,19 @@
+name: compliance_iso27001
+lexicon_name: compliance_iso27001
+version: "1.0.0"
+source_url: "https://www.iso.org/standard/27001"
+source_version: "ISO/IEC 27001:2022"
+description: "ISO/IEC 27001:2022 ISMS compliance coverage axes for clauses, risk treatment, Statement of Applicability, and information security control areas."
+observation_dimensions: 14
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "ISO/IEC 27001:2022"
+    url: "https://www.iso.org/standard/27001"
+  - title: "ISO/IEC 27001:2022 information security management systems overview"
+    url: "https://www.iso.org/cms/%20render/live/en/sites/isoorg/contents/data/standard/08/28/82875.html?browse=ics"
+

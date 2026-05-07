@@ -1,0 +1,36 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=functional_suitability AND coverage=gap"
+    severity: critical
+    rationale: "Functional suitability gaps can leave required tasks, correctness, or appropriateness unverified."
+  - when: "axis=performance_efficiency AND coverage=gap"
+    severity: high
+    rationale: "Performance-efficiency gaps can leave response time, throughput, resources, or capacity undefined."
+  - when: "axis=compatibility AND coverage=gap"
+    severity: high
+    rationale: "Compatibility gaps can leave coexistence or interoperability expectations unclear."
+  - when: "axis=usability AND coverage=gap"
+    severity: high
+    rationale: "Usability gaps can leave learnability, operability, error protection, or accessibility unaddressed."
+  - when: "axis=reliability AND coverage=gap"
+    severity: critical
+    rationale: "Reliability gaps can leave availability, fault tolerance, or recovery behavior undefined."
+  - when: "axis=security AND coverage=gap"
+    severity: critical
+    rationale: "Security gaps can leave confidentiality, integrity, accountability, authenticity, or attack resistance ungoverned."
+  - when: "axis=maintainability AND coverage=gap"
+    severity: high
+    rationale: "Maintainability gaps can leave change impact, modularity, testability, or modifiability unassessed."
+  - when: "axis=portability AND coverage=gap"
+    severity: medium
+    rationale: "Portability gaps can leave adaptation, installation, or replacement expectations unclear."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit ISO/IEC 25010 coverage needs reviewer confirmation before it can satisfy a quality axis."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered axes may still produce informational notes outside release-blocking quality gaps."
+
