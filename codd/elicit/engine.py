@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 from codd.deployment.providers.ai_command import SubprocessAiCommand
-from codd.elicit.finding import Finding
+from codd.elicit.finding import ElicitResult, Finding
 from codd.elicit.persistence import ElicitPersistence
 
 
@@ -33,12 +33,20 @@ class ElicitEngine:
         self.template_path = Path(template_path) if template_path is not None else DEFAULT_TEMPLATE_PATH
         self.max_context_chars = max_context_chars
 
-    def run(self, project_root: Path, lexicon_config: Any | None = None) -> list[Finding]:
+    def run(self, project_root: Path, lexicon_config: Any | None = None) -> ElicitResult:
         root = Path(project_root)
         prompt = self.build_prompt(root, lexicon_config=lexicon_config)
         raw_output = self.invoke(prompt, root)
-        findings = self.deserialize(raw_output)
-        return ElicitPersistence(root).filter_known(findings)
+        result = self.deserialize_result(raw_output)
+        result.findings = ElicitPersistence(root).filter_known(result.findings)
+        if not result.findings and result.lexicon_coverage_report:
+            non_gap = all(
+                str(status).lower() != "gap"
+                for status in result.lexicon_coverage_report.values()
+            )
+            if non_gap:
+                result.all_covered = True
+        return result
 
     def build_prompt(self, project_root: Path, lexicon_config: Any | None = None) -> str:
         root = Path(project_root)
@@ -64,6 +72,11 @@ class ElicitEngine:
         if not isinstance(payload, list):
             raise ValueError("Elicit output must be a JSON array")
         return [Finding.from_dict(item) for item in payload]
+
+    def deserialize_result(self, raw_output: str) -> ElicitResult:
+        payload_text = _extract_json_payload(raw_output)
+        payload = json.loads(payload_text)
+        return ElicitResult.from_payload(payload)
 
     def _template_text(self, lexicon_config: Any | None) -> str:
         extension = _string_attr(lexicon_config, "prompt_extension_content")
@@ -191,6 +204,28 @@ def _extract_json_array(raw_output: str) -> str:
     return text[start : end + 1]
 
 
+def _extract_json_payload(raw_output: str) -> str:
+    text = raw_output.strip()
+    fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fence_match:
+        text = fence_match.group(1).strip()
+    if text.startswith("[") and text.endswith("]"):
+        return text
+    if text.startswith("{") and text.endswith("}"):
+        return text
+    obj_start = text.find("{")
+    arr_start = text.find("[")
+    if obj_start != -1 and (arr_start == -1 or obj_start < arr_start):
+        obj_end = text.rfind("}")
+        if obj_end != -1 and obj_end > obj_start:
+            return text[obj_start : obj_end + 1]
+    if arr_start != -1:
+        arr_end = text.rfind("]")
+        if arr_end != -1 and arr_end > arr_start:
+            return text[arr_start : arr_end + 1]
+    raise ValueError("Elicit output did not contain a JSON array or object")
+
+
 def _string_attr(value: Any, name: str) -> str | None:
     candidate = getattr(value, name, None)
     if isinstance(candidate, str) and candidate.strip():
@@ -221,4 +256,4 @@ def _relative_path(path: Path, project_root: Path) -> str:
         return path.as_posix()
 
 
-__all__ = ["DEFAULT_TEMPLATE_PATH", "ElicitEngine"]
+__all__ = ["DEFAULT_TEMPLATE_PATH", "ElicitEngine", "ElicitResult"]

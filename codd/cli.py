@@ -933,10 +933,12 @@ def elicit(
     project_root = Path(project_path).resolve()
     try:
         lexicon_config = _load_elicit_lexicon(project_root, lexicon_path) if lexicon_path else None
-        findings = ElicitEngine(ai_command=ai_cmd).run(project_root, lexicon_config=lexicon_config)
+        elicit_result = ElicitEngine(ai_command=ai_cmd).run(project_root, lexicon_config=lexicon_config)
     except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
+
+    findings = elicit_result.findings
 
     if interactive:
         formatter = InteractiveFormatter()
@@ -953,12 +955,21 @@ def elicit(
         return
 
     if format_name == "json":
-        click.echo(JsonFormatter().format(findings), nl=False)
+        click.echo(JsonFormatter().format(elicit_result), nl=False)
         return
 
     output_path = project_root / "findings.md"
-    output_path.write_text(MdFormatter().format(findings), encoding="utf-8")
-    click.echo(f"Elicit discovery complete: findings={len(findings)}")
+    output_path.write_text(MdFormatter().format(elicit_result), encoding="utf-8")
+    coverage_summary = ""
+    if elicit_result.lexicon_coverage_report:
+        gap_count = sum(
+            1 for status in elicit_result.lexicon_coverage_report.values() if str(status).lower() == "gap"
+        )
+        coverage_summary = f", coverage_categories={len(elicit_result.lexicon_coverage_report)}, gaps={gap_count}"
+    click.echo(
+        f"Elicit discovery complete: findings={len(findings)}, all_covered={elicit_result.all_covered}"
+        f"{coverage_summary}"
+    )
     click.echo(f"Output: {_display_path(output_path, project_root)}")
 
 

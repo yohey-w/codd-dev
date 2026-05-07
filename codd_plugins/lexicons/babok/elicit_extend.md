@@ -61,3 +61,30 @@ For each added finding, include:
 - The exact source evidence or the missing evidence signal in `details.evidence`.
 - A reviewer-facing question when human confirmation is needed.
 - A rationale that explains the decision impact.
+
+## Coverage-mode classification
+
+When this BABOK lexicon is loaded, switch the L0 prompt into coverage-check
+mode. Walk the 13 dimensions above and classify each one as:
+
+- `covered`: requirements explicitly state expectations for this dimension.
+- `implicit`: requirements imply enough context to proceed without a finding.
+- `gap`: requirements omit this dimension and a clarification is required.
+
+Emit findings ONLY for dimensions classified as `gap`. Populate the JSON object
+output's `lexicon_coverage_report` with the full mapping using each dimension's
+short identifier as the key (e.g. `stakeholder`, `goal`, `flow`, ..., `term`).
+Set `all_covered` to `true` only when every dimension is `covered` or `implicit`
+and `findings` is empty. Otherwise keep `all_covered` set to `false`.
+
+When a finding is emitted because a dimension is a `gap`:
+
+- Set `details.dimension` to that dimension's identifier.
+- Choose a concise dynamic `kind` (recommended kinds in `recommended_kinds.yaml`
+  may be used as guidance but are never required).
+- Severity defaults to `medium`; raise to `high`/`critical` for safety,
+  compliance, data isolation, or release-blocking ambiguity.
+
+Do not invent extra dimensions outside this list. Project-specific findings
+that fall outside the 13 dimensions should set `severity: info` and
+`details.note: "outside_lexicon_scope"`.
