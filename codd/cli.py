@@ -895,6 +895,43 @@ def _run_require_check(project_root: Path) -> None:
     click.echo("Requirement check complete: implementation_coverage PASS")
 
 
+@main.group(invoke_without_command=True)
+@click.pass_context
+def elicit(ctx: click.Context) -> None:
+    """Discover and apply coverage/specification findings."""
+    if ctx.invoked_subcommand is not None:
+        return
+    click.echo("Elicit discovery is not configured yet. Use 'codd elicit apply <input_file>' to apply findings.")
+
+
+@elicit.command("apply")
+@click.argument("input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--format",
+    "format_name",
+    type=click.Choice(["auto", "md", "json"]),
+    default="auto",
+    show_default=True,
+    help="Input format. Auto uses the file extension.",
+)
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def elicit_apply_cmd(input_file: Path, format_name: str, project_path: str) -> None:
+    """Apply approved elicit findings to project state."""
+    from codd.elicit.apply import ElicitApplyEngine, load_findings_from_file
+
+    project_root = Path(project_path).resolve()
+    try:
+        findings = load_findings_from_file(input_file, None if format_name == "auto" else format_name)
+        result = ElicitApplyEngine(project_root).apply(findings)
+    except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(f"Elicit apply complete: applied={result.applied_count}, skipped={result.skipped_count}")
+    for file_path in result.files_updated:
+        click.echo(f"Updated: {file_path}")
+
+
 @main.command()
 @click.option("--diff", default="HEAD", help="Git diff target (default: HEAD, shows uncommitted changes)")
 @click.option("--path", default=".", help="Project root directory")
