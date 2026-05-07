@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import yaml
+
 from codd.elicit.lexicon_loader import load_lexicon
 
 
@@ -58,6 +60,24 @@ def test_babok_extension_contains_all_thirteen_dimensions():
 
     for dimension in DIMENSIONS:
         assert f"`{dimension}`" in content
+
+
+def test_babok_lexicon_declares_concern_for_all_thirteen_dimensions():
+    payload = yaml.safe_load((BABOK_ROOT / "lexicon.yaml").read_text(encoding="utf-8"))
+
+    axes = payload["coverage_axes"]
+    assert [axis["axis_type"] for axis in axes] == DIMENSIONS
+    assert {axis["concern"] for axis in axes} == {"business", "system", "both"}
+
+
+def test_babok_loader_exposes_axes_and_phase_rules():
+    config = load_lexicon(BABOK_ROOT)
+
+    assert len(config.coverage_axes) == 13
+    assert any(
+        rule["when"] == "concern=business AND phase=mvp AND severity=high"
+        for rule in config.severity_rules["rules"]
+    )
 
 
 def test_babok_extension_instructs_explicit_and_omission_checks():

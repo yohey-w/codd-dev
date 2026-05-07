@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,8 @@ class LexiconConfig:
     lexicon_name: str
     prompt_extension_content: str
     recommended_kinds: list[str]
+    coverage_axes: list[dict[str, Any]] = field(default_factory=list)
+    severity_rules: dict[str, Any] = field(default_factory=dict)
 
 
 def load_lexicon(lexicon_path: Path) -> LexiconConfig:
@@ -54,10 +56,18 @@ def load_lexicon(lexicon_path: Path) -> LexiconConfig:
         prompt_content = f"{base_prompt.rstrip()}\n\n{extension_body.lstrip()}"
 
     recommended_kinds = _load_recommended_kinds(recommended_kinds_path)
+    coverage_axes = _load_coverage_axes(manifest_dir, manifest)
+    severity_rules = _load_optional_mapping_file(
+        manifest_dir,
+        _optional_str(manifest.get("severity_rules")) or "severity_rules.yaml",
+        "severity_rules",
+    )
     return LexiconConfig(
         lexicon_name=lexicon_name,
         prompt_extension_content=prompt_content,
         recommended_kinds=recommended_kinds,
+        coverage_axes=coverage_axes,
+        severity_rules=severity_rules,
     )
 
 
@@ -154,3 +164,20 @@ def _load_recommended_kinds(path: Path) -> list[str]:
             raise LexiconLoadError(f"recommended_kinds contains duplicate entry: {kind}")
         kinds.append(kind)
     return kinds
+
+
+def _load_coverage_axes(base_dir: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    lexicon_path_text = _optional_str(manifest.get("lexicon")) or "lexicon.yaml"
+    payload = _load_optional_mapping_file(base_dir, lexicon_path_text, "lexicon")
+    raw_axes = payload.get("coverage_axes", manifest.get("coverage_axes", []))
+    if not isinstance(raw_axes, list):
+        return []
+    return [dict(item) for item in raw_axes if isinstance(item, dict)]
+
+
+def _load_optional_mapping_file(base_dir: Path, declared_path: str, label: str) -> dict[str, Any]:
+    try:
+        path = _resolve_existing_path(base_dir, declared_path, label)
+    except LexiconLoadError:
+        return {}
+    return _load_yaml_mapping(path, label)

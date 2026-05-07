@@ -1,0 +1,53 @@
+defaults:
+  coverage_gap: medium
+  implicit: info
+  covered: info
+rules:
+  - when: "axis=stakeholder AND coverage=gap"
+    severity: medium
+    rationale: "Missing stakeholder coverage usually needs business clarification before implementation proceeds."
+  - when: "axis=goal AND coverage=gap"
+    severity: medium
+    rationale: "Missing goal coverage usually affects prioritization more than implementation mechanics."
+  - when: "axis=flow AND coverage=gap"
+    severity: high
+    rationale: "Missing workflow coverage can block route, state, and handoff implementation."
+  - when: "axis=issue AND coverage=gap"
+    severity: medium
+    rationale: "Missing issue coverage should be clarified when it affects either business priority or implementation scope."
+  - when: "axis=data AND coverage=gap"
+    severity: high
+    rationale: "Missing data coverage can leave entities, states, and persistence contracts ambiguous."
+  - when: "axis=functional AND coverage=gap"
+    severity: high
+    rationale: "Missing functional coverage leaves expected system behavior underspecified."
+  - when: "axis=non-functional AND coverage=gap"
+    severity: high
+    rationale: "Missing quality attribute coverage can hide release-impacting performance, security, or operability gaps."
+  - when: "axis=rule AND coverage=gap"
+    severity: high
+    rationale: "Missing rule coverage can make validations, permissions, calculations, or routing unsafe."
+  - when: "axis=constraint AND coverage=gap"
+    severity: medium
+    rationale: "Missing constraint coverage should be reviewed before implementation choices are fixed."
+  - when: "axis=acceptance AND coverage=gap"
+    severity: medium
+    rationale: "Missing acceptance coverage usually requires business review rather than immediate system implementation."
+  - when: "axis=risk AND coverage=gap"
+    severity: medium
+    rationale: "Missing risk coverage usually belongs in business risk tracking unless it directly blocks implementation."
+  - when: "axis=assumption AND coverage=gap"
+    severity: medium
+    rationale: "Missing assumption coverage should be validated when it affects feasibility or decision quality."
+  - when: "axis=term AND coverage=gap"
+    severity: medium
+    rationale: "Missing terminology coverage can cause implementation contract drift."
+  - when: "concern=business AND phase=mvp AND severity=critical"
+    severity: info
+    rationale: "MVP phase tracks business-layer detail gaps as informational unless they are converted into system implementation scope."
+  - when: "concern=business AND phase=mvp AND severity=high"
+    severity: info
+    rationale: "MVP phase tracks business-layer detail gaps as informational unless they are converted into system implementation scope."
+  - when: "concern=business AND phase=mvp AND severity=medium"
+    severity: info
+    rationale: "MVP phase tracks business-layer detail gaps as informational unless they are converted into system implementation scope."

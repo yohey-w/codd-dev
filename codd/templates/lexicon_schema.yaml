@@ -10,6 +10,8 @@ optional_sections:
   - extractor_registry
   - coverage_decisions
   - required_artifacts
+  - scope
+  - phase
 
 required_artifact_source_values:
   - ai_derived
