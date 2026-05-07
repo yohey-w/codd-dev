@@ -1,0 +1,7 @@
+lexicon_name: babok
+version: "1.0.0"
+description: "BABOK v3 inspired requirements elicitation lexicon"
+observation_dimensions: 13
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"

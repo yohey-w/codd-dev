@@ -1,0 +1,9 @@
+recommended_kinds:
+  - axis_candidate
+  - spec_hole
+  - risk_observation
+  - constraint_implicit
+  - acceptance_unclear
+  - stakeholder_unidentified
+  - kpi_undefined
+  - rule_unclear
