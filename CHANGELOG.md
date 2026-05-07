@@ -4,6 +4,72 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.36.0] - 2026-05-07 — Brownfield Pipeline Pre-fix (cmd_437)
+
+### Issue Fixes (cmd_437_pre_fix bundle)
+
+`cmd_437` brownfield pipeline 着手前の必須 Issue 3 件を解消し、`codd extract` の
+基盤を整備した patch release。
+
+#### Issue #17: extract output 隔離 (cmd_437_pre_fix_a)
+
+`codd extract` が target dir を汚染する不具合を解消。`--output` の default を
+`<config-dir>/extracted/` に正規化し、target tree への直接書き込みを禁止。
+明示的に target 配下を指定された場合のみ許容。
+
+#### Issue #18: Brownfield --init frontmatter (cmd_437_pre_fix_a)
+
+`codd extract --init` 実行時、出力 YAML/MD に `codd:` frontmatter を自動付与。
+
+```yaml
+codd:
+  version: "1.0"
+  extracted_at: "<ISO8601>"
+  source: "<target_path>"
+```
+
+後続の `codd diff` / `codd elicit` apply フローで brownfield 由来であることを
+判定可能になる。
+
+#### Issue #19: extract Python AST 対応 (cmd_437_pre_fix_b)
+
+`codd extract` を Python (`.py`) ファイルに対応。標準 `ast` モジュール経由の
+generic な抽出 (関数定義 / class 定義 / import / module-level docstring) +
+構文エラー時の raw text fallback。`tests/extract/fixtures/sample_python/` を
+同梱して回帰防止。
+
+### Generality Gate Fix (cmd_437_pre_fix_qc)
+
+cmd_437_pre_fix_b の初期実装が `codd/dependency_catalog.py` に Python 専用の
+framework/ORM/test framework 辞書 (django/fastapi/flask/sqlalchemy/prisma/
+pytest 等) を hardcode していた問題を release blocker として解消。
+
+- `codd/dependency_catalog.py` 削除
+- `codd/extractor.py:_detect_python_patterns` を documented no-op に変換、
+  framework/ORM/test 検出は `codd/extract_ai.py` (LLM 動的判断) に委任
+- `tests/test_extract.py:test_framework_detection` を no-op default に追従
+
+Generality Gate Layer A (CoDD core に stack/framework 名 hardcode 禁止) 維持。
+既存 JS / Prisma 系 hardcode (cmd_437 以前から存在) は別 cmd で順次対処予定。
+
+### Quality Metrics
+
+- **pytest**: 2320 PASS / 0 FAIL / 0 SKIP (v1.35.0 2285 → +35)
+- **新 node/edge/check/SDK 依存**: 全 0
+- **Generality Gate Layer A**: `dependency_catalog.py` 削除で CoDD core の
+  Python framework hardcode 0 件
+- **新規 test fixture**: `tests/extract/fixtures/sample_python/` (Python AST 動作確認)
+- **backward compatible**: extract API は維持、`detected_frameworks` 等は
+  AI extraction 経由で同等情報を取得
+
+### Phase 構成と commits
+
+- cmd_432 retry rebase (`54d3ce5`) — RepairLoop strategy retry follow-up
+- cmd_437_pre_fix_a (origin `2ff2ee2`) — Issue #17/#18 (extract output isolation +
+  --init frontmatter) を含む統合 commit (ashigaru3 経由で push)
+- cmd_437_pre_fix_b core — Python AST 抽出本体 (上記同 commit に同梱)
+- cmd_437_pre_fix_qc (`b242b67`) — Generality Gate fix (dependency_catalog 削除)
+
 ## [1.35.0] - 2026-05-07 — codd elicit (Coverage/Spec Discovery Engine)
 
 ### Added — `codd elicit` 北極星直結機能 (cmd_431)
