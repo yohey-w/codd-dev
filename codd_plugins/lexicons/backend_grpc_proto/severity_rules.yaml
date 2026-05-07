@@ -1,0 +1,35 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=service AND coverage=gap"
+    severity: high
+    rationale: "Missing service coverage leaves callable RPC interfaces and method contracts undefined."
+  - when: "axis=message AND coverage=gap"
+    severity: high
+    rationale: "Missing message coverage leaves request, response, field identity, or cardinality ambiguous."
+  - when: "axis=Scalar Value Types AND coverage=gap"
+    severity: high
+    rationale: "Missing scalar type coverage can change encoding, generated bindings, or validation semantics."
+  - when: "axis=Enumerations AND coverage=gap"
+    severity: medium
+    rationale: "Missing enum coverage leaves symbolic value sets, defaults, aliases, or reserved values unclear."
+  - when: "axis=stream AND coverage=gap"
+    severity: high
+    rationale: "Missing stream coverage leaves unary, server-streaming, client-streaming, or bidirectional lifecycle behavior unknown."
+  - when: "axis=status code AND coverage=gap"
+    severity: high
+    rationale: "Missing status code coverage prevents clients from judging RPC success, failure, and retry behavior."
+  - when: "axis=Deadlines/Timeouts AND coverage=gap"
+    severity: high
+    rationale: "Missing deadline or timeout coverage can leave long-running RPC termination behavior undefined."
+  - when: "axis=Metadata AND coverage=gap"
+    severity: medium
+    rationale: "Missing metadata coverage leaves call-scoped headers, authentication details, or trailers ambiguous."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit proto3 or gRPC coverage needs reviewer confirmation before it can be treated as sufficient."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered proto3 or gRPC axes may still emit informational review notes outside release-blocking gaps."

@@ -1,0 +1,245 @@
+coverage_axes:
+  - axis_type: "schema"
+    rationale: "GraphQL October 2021 defines schema and schema definition behavior for root operation types and service capabilities."
+    criticality_default: high
+    variants:
+      - id: "schema"
+        label: "Schema definition"
+        attributes: {source_literal: "schema", coverage_target: "root operation type container"}
+        criticality: high
+      - id: "query"
+        label: "Query root operation type"
+        attributes: {source_literal: "query", coverage_target: "read operation root"}
+        criticality: high
+      - id: "mutation"
+        label: "Mutation root operation type"
+        attributes: {source_literal: "mutation", coverage_target: "write operation root"}
+        criticality: high
+      - id: "subscription"
+        label: "Subscription root operation type"
+        attributes: {source_literal: "subscription", coverage_target: "event operation root"}
+        criticality: medium
+  - axis_type: "Type System"
+    rationale: "GraphQL October 2021 defines a type system containing scalars, objects, interfaces, unions, enums, input objects, lists, and non-null types."
+    criticality_default: high
+    variants:
+      - id: "scalar"
+        label: "Scalar type"
+        attributes: {source_literal: "scalar", coverage_target: "leaf value type"}
+        criticality: high
+      - id: "type"
+        label: "Object type"
+        attributes: {source_literal: "type", coverage_target: "object field container"}
+        criticality: high
+      - id: "interface"
+        label: "Interface type"
+        attributes: {source_literal: "interface", coverage_target: "shared fields contract"}
+        criticality: medium
+      - id: "union"
+        label: "Union type"
+        attributes: {source_literal: "union", coverage_target: "possible object set"}
+        criticality: medium
+      - id: "enum"
+        label: "Enum type"
+        attributes: {source_literal: "enum", coverage_target: "symbolic value set"}
+        criticality: medium
+      - id: "input"
+        label: "Input object type"
+        attributes: {source_literal: "input", coverage_target: "structured argument input"}
+        criticality: high
+      - id: "!"
+        label: "Non-null type marker"
+        attributes: {source_literal: "!", coverage_target: "non-null constraint"}
+        criticality: high
+  - axis_type: "Type System Extensions"
+    rationale: "GraphQL October 2021 defines type system extensions for extending schema, scalar, object, interface, union, enum, and input object definitions."
+    criticality_default: medium
+    variants:
+      - id: "extend schema"
+        label: "Schema extension"
+        attributes: {source_literal: "extend schema", coverage_target: "schema extension"}
+        criticality: medium
+      - id: "extend type"
+        label: "Object type extension"
+        attributes: {source_literal: "extend type", coverage_target: "object field extension"}
+        criticality: medium
+      - id: "extend interface"
+        label: "Interface extension"
+        attributes: {source_literal: "extend interface", coverage_target: "interface field extension"}
+        criticality: medium
+      - id: "extend union"
+        label: "Union extension"
+        attributes: {source_literal: "extend union", coverage_target: "union member extension"}
+        criticality: medium
+      - id: "extend enum"
+        label: "Enum extension"
+        attributes: {source_literal: "extend enum", coverage_target: "enum value extension"}
+        criticality: medium
+      - id: "extend input"
+        label: "Input object extension"
+        attributes: {source_literal: "extend input", coverage_target: "input field extension"}
+        criticality: medium
+  - axis_type: "query"
+    rationale: "GraphQL October 2021 defines query operations and field selection sets for reading data from the query root operation type."
+    criticality_default: high
+    variants:
+      - id: "query"
+        label: "Query operation"
+        attributes: {source_literal: "query", coverage_target: "read operation"}
+        criticality: high
+      - id: "selection set"
+        label: "Selection set"
+        attributes: {source_literal: "selection set", coverage_target: "requested fields"}
+        criticality: high
+      - id: "field"
+        label: "Field selection"
+        attributes: {source_literal: "field", coverage_target: "field result"}
+        criticality: high
+      - id: "argument"
+        label: "Field argument"
+        attributes: {source_literal: "argument", coverage_target: "field parameter"}
+        criticality: medium
+      - id: "alias"
+        label: "Field alias"
+        attributes: {source_literal: "alias", coverage_target: "response key override"}
+        criticality: info
+  - axis_type: "mutation"
+    rationale: "GraphQL October 2021 defines mutation operations for serially executed write operations through the mutation root operation type."
+    criticality_default: high
+    variants:
+      - id: "mutation"
+        label: "Mutation operation"
+        attributes: {source_literal: "mutation", coverage_target: "write operation"}
+        criticality: high
+      - id: "input"
+        label: "Mutation input object"
+        attributes: {source_literal: "input", coverage_target: "write input contract"}
+        criticality: high
+      - id: "serial"
+        label: "Serial mutation execution"
+        attributes: {source_literal: "serial", coverage_target: "mutation execution order"}
+        criticality: medium
+  - axis_type: "subscription"
+    rationale: "GraphQL October 2021 defines subscription operations and a response stream for event-based execution."
+    criticality_default: medium
+    variants:
+      - id: "subscription"
+        label: "Subscription operation"
+        attributes: {source_literal: "subscription", coverage_target: "event operation"}
+        criticality: medium
+      - id: "response stream"
+        label: "Response stream"
+        attributes: {source_literal: "response stream", coverage_target: "event result stream"}
+        criticality: medium
+      - id: "source event stream"
+        label: "Source event stream"
+        attributes: {source_literal: "source event stream", coverage_target: "event source"}
+        criticality: medium
+  - axis_type: "Fragments"
+    rationale: "GraphQL October 2021 defines named and inline fragments, fragment spreads, and validation rules for fragment use."
+    criticality_default: medium
+    variants:
+      - id: "fragment"
+        label: "Named fragment"
+        attributes: {source_literal: "fragment", coverage_target: "reusable selection set"}
+        criticality: medium
+      - id: "fragment spread"
+        label: "Fragment spread"
+        attributes: {source_literal: "fragment spread", coverage_target: "fragment inclusion"}
+        criticality: medium
+      - id: "inline fragment"
+        label: "Inline fragment"
+        attributes: {source_literal: "inline fragment", coverage_target: "conditional selection"}
+        criticality: medium
+      - id: "on"
+        label: "Type condition marker"
+        attributes: {source_literal: "on", coverage_target: "fragment type condition"}
+        criticality: medium
+  - axis_type: "Variables"
+    rationale: "GraphQL October 2021 defines variable definitions, variable use, default values, and operation-scoped validation."
+    criticality_default: high
+    variants:
+      - id: "$"
+        label: "Variable marker"
+        attributes: {source_literal: "$", coverage_target: "variable reference"}
+        criticality: high
+      - id: "variable"
+        label: "Variable definition"
+        attributes: {source_literal: "variable", coverage_target: "operation input"}
+        criticality: high
+      - id: "default value"
+        label: "Variable default value"
+        attributes: {source_literal: "default value", coverage_target: "fallback variable input"}
+        criticality: medium
+      - id: "input type"
+        label: "Variable input type"
+        attributes: {source_literal: "input type", coverage_target: "allowed variable type"}
+        criticality: high
+  - axis_type: "Directives"
+    rationale: "GraphQL October 2021 defines directives as annotations that can affect query execution, validation, or type system behavior."
+    criticality_default: medium
+    variants:
+      - id: "directive"
+        label: "Directive definition"
+        attributes: {source_literal: "directive", coverage_target: "annotation behavior"}
+        criticality: medium
+      - id: "@include"
+        label: "Include directive"
+        attributes: {source_literal: "@include", coverage_target: "conditional field inclusion"}
+        criticality: medium
+      - id: "@skip"
+        label: "Skip directive"
+        attributes: {source_literal: "@skip", coverage_target: "conditional field exclusion"}
+        criticality: medium
+      - id: "@deprecated"
+        label: "Deprecated directive"
+        attributes: {source_literal: "@deprecated", coverage_target: "deprecation metadata"}
+        criticality: info
+      - id: "repeatable"
+        label: "Repeatable directive"
+        attributes: {source_literal: "repeatable", coverage_target: "repeatable annotation"}
+        criticality: info
+  - axis_type: "Introspection"
+    rationale: "GraphQL October 2021 defines introspection fields and types such as __schema, __type, and __typename for querying schema capabilities."
+    criticality_default: medium
+    variants:
+      - id: "__schema"
+        label: "Schema introspection field"
+        attributes: {source_literal: "__schema", coverage_target: "schema introspection"}
+        criticality: medium
+      - id: "__type"
+        label: "Type introspection field"
+        attributes: {source_literal: "__type", coverage_target: "type introspection"}
+        criticality: medium
+      - id: "__typename"
+        label: "Typename meta-field"
+        attributes: {source_literal: "__typename", coverage_target: "runtime object type name"}
+        criticality: medium
+      - id: "__Directive"
+        label: "Directive introspection type"
+        attributes: {source_literal: "__Directive", coverage_target: "directive metadata"}
+        criticality: info
+  - axis_type: "Response"
+    rationale: "GraphQL October 2021 defines response maps with data, errors, and extensions entries, including request errors and field errors."
+    criticality_default: high
+    variants:
+      - id: "data"
+        label: "Response data entry"
+        attributes: {source_literal: "data", coverage_target: "successful execution result"}
+        criticality: high
+      - id: "errors"
+        label: "Response errors entry"
+        attributes: {source_literal: "errors", coverage_target: "request or field errors"}
+        criticality: high
+      - id: "extensions"
+        label: "Response extensions entry"
+        attributes: {source_literal: "extensions", coverage_target: "implementation extension map"}
+        criticality: medium
+      - id: "request errors"
+        label: "Request errors"
+        attributes: {source_literal: "request errors", coverage_target: "pre-execution errors"}
+        criticality: high
+      - id: "field errors"
+        label: "Field errors"
+        attributes: {source_literal: "field errors", coverage_target: "partial response errors"}
+        criticality: high

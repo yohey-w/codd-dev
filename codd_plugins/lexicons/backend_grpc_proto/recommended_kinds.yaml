@@ -1,0 +1,9 @@
+recommended_kinds:
+  - grpc_service_gap
+  - grpc_message_gap
+  - grpc_scalar_type_gap
+  - grpc_enum_gap
+  - grpc_stream_gap
+  - grpc_status_code_gap
+  - grpc_deadline_gap
+  - grpc_metadata_gap

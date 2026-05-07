@@ -1,0 +1,44 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=schema AND coverage=gap"
+    severity: high
+    rationale: "Missing schema coverage leaves root operation types and service capabilities ambiguous."
+  - when: "axis=Type System AND coverage=gap"
+    severity: high
+    rationale: "Missing type system coverage leaves fields, input types, nullability, or possible result shapes undefined."
+  - when: "axis=Type System Extensions AND coverage=gap"
+    severity: medium
+    rationale: "Missing type system extension coverage leaves extension-based schema evolution unclear."
+  - when: "axis=query AND coverage=gap"
+    severity: high
+    rationale: "Missing query coverage leaves read operation fields, arguments, or selection sets ambiguous."
+  - when: "axis=mutation AND coverage=gap"
+    severity: high
+    rationale: "Missing mutation coverage leaves write input, output, or serial execution expectations unclear."
+  - when: "axis=subscription AND coverage=gap"
+    severity: medium
+    rationale: "Missing subscription coverage leaves response stream and event source behavior unclear."
+  - when: "axis=Fragments AND coverage=gap"
+    severity: medium
+    rationale: "Missing fragment coverage weakens reusable selection and type-condition validation."
+  - when: "axis=Variables AND coverage=gap"
+    severity: high
+    rationale: "Missing variable coverage leaves operation inputs, defaults, and input type validation unclear."
+  - when: "axis=Directives AND coverage=gap"
+    severity: medium
+    rationale: "Missing directive coverage leaves conditional inclusion, deprecation, or annotation behavior unclear."
+  - when: "axis=Introspection AND coverage=gap"
+    severity: medium
+    rationale: "Missing introspection coverage leaves schema discoverability and meta-fields unclear."
+  - when: "axis=Response AND coverage=gap"
+    severity: high
+    rationale: "Missing response coverage leaves data, errors, extensions, request errors, or field errors undefined."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit GraphQL coverage needs reviewer confirmation before it can be treated as sufficient."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered GraphQL axes may still emit informational review notes outside release-blocking gaps."
