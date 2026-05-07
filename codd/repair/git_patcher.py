@@ -22,20 +22,27 @@ class GitPatcher:
     def validate(self, patch: FilePatch, project_root: Path) -> bool:
         """Return whether a patch can be applied without changing files."""
 
+        return self.validate_result(patch, project_root).success
+
+    def validate_result(self, patch: FilePatch, project_root: Path) -> ApplyResult:
+        """Return dry-run validation details without changing files."""
+
         try:
             root = Path(project_root).resolve()
             _resolve_target(root, patch.file_path)
-        except ValueError:
-            return False
+        except ValueError as exc:
+            return ApplyResult(False, [], [patch.file_path], str(exc))
 
         if patch.patch_mode == "full_file_replacement":
-            return True
+            return ApplyResult(True, [], [], None)
 
         if not patch.content.strip():
-            return False
+            return ApplyResult(False, [], [patch.file_path], "patch content is empty")
 
         result = self._git_apply(root, patch.content, "--check")
-        return result.returncode == 0
+        if result.returncode == 0:
+            return ApplyResult(True, [], [], None)
+        return ApplyResult(False, [], [patch.file_path], _completed_error(result))
 
     def apply(self, patch: FilePatch, project_root: Path, *, dry_run: bool = False) -> ApplyResult:
         """Apply or preview one repair patch."""
@@ -49,13 +56,9 @@ class GitPatcher:
         if patch.patch_mode == "full_file_replacement":
             return self._apply_full_replacement(patch, target, dry_run=dry_run)
 
-        if not self.validate(patch, root):
-            return ApplyResult(
-                False,
-                [],
-                [patch.file_path],
-                "unified diff failed git apply --check; full_file_replacement fallback required",
-            )
+        validation = self.validate_result(patch, root)
+        if not validation.success:
+            return validation
         if dry_run:
             return ApplyResult(True, [], [], None)
 

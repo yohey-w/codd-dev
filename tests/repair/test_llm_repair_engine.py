@@ -172,7 +172,10 @@ def test_propose_fix_validates_unified_diff_when_project_root_exists(tmp_path):
     )
 
     with pytest.raises(RepairFailed, match="patch validation"):
-        LlmRepairEngine(project_root=root, ai_command=ai).propose_fix(_rca(), {"sample.txt": "one\n"})
+        LlmRepairEngine(project_root=root, ai_command=ai, max_strategy_attempts=1).propose_fix(
+            _rca(),
+            {"sample.txt": "one\n"},
+        )
 
 
 def test_ai_command_resolves_named_repair_command_before_default():
