@@ -896,12 +896,97 @@ def _run_require_check(project_root: Path) -> None:
 
 
 @main.group(invoke_without_command=True)
+@click.option("--interactive", is_flag=True, default=False, help="Review findings inline and save approved items.")
+@click.option(
+    "--format",
+    "format_name",
+    type=click.Choice(["json", "md"]),
+    default="md",
+    show_default=True,
+    help="Discovery output format.",
+)
+@click.option("--lexicon", "lexicon_path", default=None, help="Lexicon directory, manifest path, or plug-in name.")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option(
+    "--ai-cmd",
+    default=None,
+    help="Override AI CLI command (defaults to codd.yaml ai_command or CODD_AI_COMMAND).",
+)
 @click.pass_context
-def elicit(ctx: click.Context) -> None:
+def elicit(
+    ctx: click.Context,
+    interactive: bool,
+    format_name: str,
+    lexicon_path: str | None,
+    project_path: str,
+    ai_cmd: str | None,
+) -> None:
     """Discover and apply coverage/specification findings."""
     if ctx.invoked_subcommand is not None:
         return
-    click.echo("Elicit discovery is not configured yet. Use 'codd elicit apply <input_file>' to apply findings.")
+    from codd.elicit.apply import ElicitApplyEngine
+    from codd.elicit.engine import ElicitEngine
+    from codd.elicit.formatters.interactive import InteractiveFormatter
+    from codd.elicit.formatters.json_fmt import JsonFormatter
+    from codd.elicit.formatters.md import MdFormatter
+
+    project_root = Path(project_path).resolve()
+    try:
+        lexicon_config = _load_elicit_lexicon(project_root, lexicon_path) if lexicon_path else None
+        findings = ElicitEngine(ai_command=ai_cmd).run(project_root, lexicon_config=lexicon_config)
+    except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    if interactive:
+        formatter = InteractiveFormatter()
+        approved_ids = set(formatter.collect_approvals(findings))
+        approved = [finding for finding in findings if finding.id in approved_ids]
+        try:
+            result = ElicitApplyEngine(project_root).apply(approved)
+        except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+        click.echo(f"Elicit interactive complete: approved={len(approved)}, skipped={len(findings) - len(approved)}")
+        for file_path in result.files_updated:
+            click.echo(f"Updated: {file_path}")
+        return
+
+    if format_name == "json":
+        click.echo(JsonFormatter().format(findings), nl=False)
+        return
+
+    output_path = project_root / "findings.md"
+    output_path.write_text(MdFormatter().format(findings), encoding="utf-8")
+    click.echo(f"Elicit discovery complete: findings={len(findings)}")
+    click.echo(f"Output: {_display_path(output_path, project_root)}")
+
+
+def _load_elicit_lexicon(project_root: Path, lexicon_path: str):
+    from codd.elicit.lexicon_loader import load_lexicon
+
+    return load_lexicon(_resolve_elicit_lexicon_path(project_root, lexicon_path))
+
+
+def _resolve_elicit_lexicon_path(project_root: Path, lexicon_path: str) -> Path:
+    raw_path = Path(lexicon_path).expanduser()
+    candidates: list[Path] = []
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        candidates.extend(
+            [
+                project_root / raw_path,
+                Path.cwd() / raw_path,
+                Path(__file__).resolve().parents[1] / "codd_plugins" / "lexicons" / lexicon_path,
+                raw_path,
+            ]
+        )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return raw_path
 
 
 @elicit.command("apply")

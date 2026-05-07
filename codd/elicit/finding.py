@@ -53,11 +53,15 @@ class Finding:
         if source not in _SOURCES:
             raise ValueError(f"Finding source must be one of {sorted(_SOURCES)}")
 
-        details = payload.get("details") or {}
+        details = payload.get("details")
+        if details is None:
+            details = {}
         if not isinstance(details, dict):
             raise ValueError("Finding details must be a mapping")
 
-        related = payload.get("related_requirement_ids") or []
+        related = payload.get("related_requirement_ids")
+        if related is None:
+            related = []
         if not isinstance(related, list):
             raise ValueError("Finding related_requirement_ids must be a list")
 
