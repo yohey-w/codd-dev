@@ -1,0 +1,229 @@
+coverage_axes:
+  - axis_type: "Lawfulness of processing"
+    rationale: "GDPR Article 6 defines lawful bases for processing; APPI requires proper acquisition and use within the Act's handling rules."
+    criticality_default: critical
+    variants:
+      - id: "consent"
+        label: "Consent legal basis"
+        attributes: {source: "GDPR Article 6(1)(a)", source_literal: "consent"}
+        criticality: high
+      - id: "performance of a contract"
+        label: "Contract necessity legal basis"
+        attributes: {source: "GDPR Article 6(1)(b)", source_literal: "performance of a contract"}
+        criticality: high
+      - id: "compliance with a legal obligation"
+        label: "Legal obligation basis"
+        attributes: {source: "GDPR Article 6(1)(c)", source_literal: "legal obligation"}
+        criticality: high
+      - id: "legitimate interests"
+        label: "Legitimate interests basis"
+        attributes: {source: "GDPR Article 6(1)(f)", source_literal: "legitimate interests"}
+        criticality: high
+  - axis_type: "Consent"
+    rationale: "GDPR treats consent as a lawful basis and APPI uses principal consent for third-party and foreign-country provision cases."
+    criticality_default: high
+    variants:
+      - id: "data subject has given consent"
+        label: "GDPR data subject consent"
+        attributes: {source: "GDPR Article 6(1)(a)", actor: "data subject"}
+        criticality: high
+      - id: "principal's consent"
+        label: "APPI principal consent"
+        attributes: {source: "APPI Articles 23 and 24", actor: "principal"}
+        criticality: high
+      - id: "foreign-country third-party provision consent"
+        label: "APPI foreign-country consent"
+        attributes: {source: "PPC Guidelines offshore 2-1", actor: "principal"}
+        criticality: critical
+  - axis_type: "Purpose limitation"
+    rationale: "GDPR Article 5 names purpose limitation; APPI requires specifying and not exceeding the utilization purpose."
+    criticality_default: high
+    variants:
+      - id: "specified, explicit and legitimate purposes"
+        label: "GDPR specified purposes"
+        attributes: {source: "GDPR Article 5(1)(b)", source_literal: "purpose limitation"}
+        criticality: high
+      - id: "utilization purpose"
+        label: "APPI utilization purpose"
+        attributes: {source: "APPI Articles 15 and 16", source_literal: "utilization purpose"}
+        criticality: high
+      - id: "further processing"
+        label: "Further processing compatibility"
+        attributes: {source: "GDPR Article 6(4)", source_literal: "further processing"}
+        criticality: medium
+  - axis_type: "Storage limitation"
+    rationale: "GDPR Article 5 names storage limitation; APPI retained personal data rules define data subject control surfaces after retention."
+    criticality_default: medium
+    variants:
+      - id: "storage limitation"
+        label: "GDPR storage limitation"
+        attributes: {source: "GDPR Article 5(1)(e)", source_literal: "storage limitation"}
+        criticality: high
+      - id: "retained personal data"
+        label: "APPI retained personal data"
+        attributes: {source: "APPI Article 2(7)", source_literal: "retained personal data"}
+        criticality: medium
+      - id: "erase"
+        label: "Erasure after retention or invalid handling"
+        attributes: {source: "GDPR Article 17 / APPI Article 30", source_literal: "erase"}
+        criticality: high
+  - axis_type: "Data subject rights"
+    rationale: "GDPR Chapter III and APPI retained personal data provisions require access, correction, erasure, restriction, objection, and cessation paths."
+    criticality_default: high
+    variants:
+      - id: "right of access"
+        label: "GDPR access right"
+        attributes: {source: "GDPR Article 15", actor: "data subject"}
+        criticality: high
+      - id: "right to rectification"
+        label: "GDPR rectification right"
+        attributes: {source: "GDPR Article 16", actor: "data subject"}
+        criticality: medium
+      - id: "right to erasure"
+        label: "GDPR erasure right"
+        attributes: {source: "GDPR Article 17", actor: "data subject"}
+        criticality: high
+      - id: "disclosure"
+        label: "APPI disclosure demand"
+        attributes: {source: "APPI Article 28", actor: "principal"}
+        criticality: high
+      - id: "correction etc."
+        label: "APPI correction, addition, or deletion"
+        attributes: {source: "APPI Article 29", actor: "principal"}
+        criticality: medium
+      - id: "utilization cease etc."
+        label: "APPI utilization cease or deletion"
+        attributes: {source: "APPI Article 30", actor: "principal"}
+        criticality: high
+  - axis_type: "Responsibility of the controller"
+    rationale: "GDPR Article 24 requires controller measures and demonstrable compliance; APPI imposes duties on personal information handling business operators."
+    criticality_default: critical
+    variants:
+      - id: "responsibility of the controller"
+        label: "GDPR controller responsibility"
+        attributes: {source: "GDPR Article 24", actor: "controller"}
+        criticality: critical
+      - id: "technical and organisational measures"
+        label: "GDPR technical and organisational measures"
+        attributes: {source: "GDPR Article 24", source_literal: "technical and organisational measures"}
+        criticality: high
+      - id: "personal information handling business operator"
+        label: "APPI business operator responsibility"
+        attributes: {source: "APPI Article 2(5)", actor: "personal information handling business operator"}
+        criticality: high
+      - id: "security control action"
+        label: "APPI security control action"
+        attributes: {source: "APPI Article 20", source_literal: "security control action"}
+        criticality: critical
+  - axis_type: "Processor"
+    rationale: "GDPR Article 28 defines processor guarantees, contracts, sub-processors, assistance, deletion or return, and audit support."
+    criticality_default: high
+    variants:
+      - id: "processor"
+        label: "Processor guarantee and role"
+        attributes: {source: "GDPR Article 28", actor: "processor"}
+        criticality: high
+      - id: "documented instructions"
+        label: "Processing on documented instructions"
+        attributes: {source: "GDPR Article 28(3)(a)", source_literal: "documented instructions"}
+        criticality: high
+      - id: "another processor"
+        label: "Sub-processor authorization"
+        attributes: {source: "GDPR Article 28(2)", source_literal: "another processor"}
+        criticality: medium
+      - id: "audits, including inspections"
+        label: "Audit and inspection support"
+        attributes: {source: "GDPR Article 28(3)(h)", source_literal: "audits, including inspections"}
+        criticality: medium
+  - axis_type: "Records of processing activities"
+    rationale: "GDPR Article 30 requires controller and processor records; APPI requires records around provision to and receipt from third parties."
+    criticality_default: medium
+    variants:
+      - id: "records of processing activities"
+        label: "GDPR processing records"
+        attributes: {source: "GDPR Article 30", source_literal: "records of processing activities"}
+        criticality: medium
+      - id: "third-party provision record"
+        label: "APPI third-party provision records"
+        attributes: {source: "APPI Articles 25 and 26", source_literal: "Third party provision record"}
+        criticality: medium
+      - id: "technical and organisational security measures"
+        label: "Record of security measures"
+        attributes: {source: "GDPR Article 30(1)(g)", source_literal: "security measures"}
+        criticality: medium
+  - axis_type: "Data protection impact assessment"
+    rationale: "GDPR Article 35 requires a DPIA before high-risk processing and defines assessment content."
+    criticality_default: high
+    variants:
+      - id: "data protection impact assessment"
+        label: "DPIA requirement"
+        attributes: {source: "GDPR Article 35", acronym: "DPIA"}
+        criticality: high
+      - id: "high risk to the rights and freedoms"
+        label: "High-risk processing trigger"
+        attributes: {source: "GDPR Article 35(1)", source_literal: "high risk"}
+        criticality: high
+      - id: "systematic description"
+        label: "DPIA processing description"
+        attributes: {source: "GDPR Article 35(7)(a)", source_literal: "systematic description"}
+        criticality: medium
+      - id: "necessity and proportionality"
+        label: "DPIA necessity and proportionality assessment"
+        attributes: {source: "GDPR Article 35(7)(b)", source_literal: "necessity and proportionality"}
+        criticality: medium
+  - axis_type: "Notification of a personal data breach"
+    rationale: "GDPR Article 33 requires supervisory-authority breach notification; APPI requires reporting leakage and notifying the principal where prescribed."
+    criticality_default: critical
+    variants:
+      - id: "personal data breach"
+        label: "GDPR personal data breach"
+        attributes: {source: "GDPR Article 33", source_literal: "personal data breach"}
+        criticality: critical
+      - id: "not later than 72 hours"
+        label: "GDPR 72-hour notification window"
+        attributes: {source: "GDPR Article 33(1)", source_literal: "72 hours"}
+        criticality: critical
+      - id: "leakage, loss or damage"
+        label: "APPI leakage, loss, or damage report"
+        attributes: {source: "APPI Article 22-2", source_literal: "leakage, loss or damage"}
+        criticality: critical
+  - axis_type: "Transfers of personal data to third countries or international organisations"
+    rationale: "GDPR Chapter V Article 44 governs third-country and international-organisation transfers; APPI governs provision to third parties in foreign countries."
+    criticality_default: critical
+    variants:
+      - id: "third country"
+        label: "GDPR third-country transfer"
+        attributes: {source: "GDPR Article 44", source_literal: "third country"}
+        criticality: critical
+      - id: "international organisation"
+        label: "GDPR international organisation transfer"
+        attributes: {source: "GDPR Article 44", source_literal: "international organisation"}
+        criticality: high
+      - id: "foreign country"
+        label: "APPI foreign-country provision"
+        attributes: {source: "APPI Article 24 / PPC offshore guidelines", source_literal: "foreign country"}
+        criticality: critical
+      - id: "suitable safeguards"
+        label: "Transfer safeguards"
+        attributes: {source: "GDPR Articles 44-49", source_literal: "suitable safeguards"}
+        criticality: high
+  - axis_type: "Data protection officer"
+    rationale: "GDPR Articles 37 to 39 define DPO designation, position, and tasks; APPI policies often need a responsible contact for retained personal data and inquiries."
+    criticality_default: medium
+    variants:
+      - id: "data protection officer"
+        label: "GDPR DPO designation"
+        attributes: {source: "GDPR Article 37", acronym: "DPO"}
+        criticality: medium
+      - id: "position of the data protection officer"
+        label: "DPO independence and resources"
+        attributes: {source: "GDPR Article 38", acronym: "DPO"}
+        criticality: medium
+      - id: "tasks of the data protection officer"
+        label: "DPO tasks"
+        attributes: {source: "GDPR Article 39", acronym: "DPO"}
+        criticality: medium
+      - id: "inquiries"
+        label: "APPI inquiry handling contact"
+        attributes: {source: "APPI Article 35", source_literal: "inquiries"}
+        criticality: info

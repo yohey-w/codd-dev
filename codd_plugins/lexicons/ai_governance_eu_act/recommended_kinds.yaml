@@ -1,0 +1,11 @@
+recommended_kinds:
+  - ai_risk_classification_gap
+  - prohibited_ai_practice_gap
+  - high_risk_requirement_gap
+  - human_oversight_gap
+  - ai_transparency_gap
+  - gpai_obligation_gap
+  - conformity_assessment_gap
+  - post_market_monitoring_gap
+  - fundamental_rights_impact_gap
+  - ai_governance_authority_gap

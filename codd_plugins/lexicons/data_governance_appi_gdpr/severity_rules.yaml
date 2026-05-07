@@ -1,0 +1,40 @@
+rules:
+  - when: "axis=Lawfulness of processing AND coverage=gap"
+    severity: critical
+    rationale: "Processing without a documented lawful basis can invalidate the data flow."
+  - when: "axis=Consent AND coverage=gap"
+    severity: high
+    rationale: "Missing consent coverage can break GDPR consent use or APPI third-party and foreign-country provision requirements."
+  - when: "axis=Purpose limitation AND coverage=gap"
+    severity: high
+    rationale: "Undefined purposes make later use, disclosure, and compatibility review unreliable."
+  - when: "axis=Storage limitation AND coverage=gap"
+    severity: medium
+    rationale: "Retention and erasure omissions can leave data stored longer than permitted or useful."
+  - when: "axis=Data subject rights AND coverage=gap"
+    severity: high
+    rationale: "Access, correction, erasure, disclosure, and cease-use gaps can block statutory requester workflows."
+  - when: "axis=Responsibility of the controller AND coverage=gap"
+    severity: critical
+    rationale: "Missing accountable ownership and security controls can leave the processing governance unenforceable."
+  - when: "axis=Processor AND coverage=gap"
+    severity: high
+    rationale: "Processor contract and instruction gaps can create uncontrolled outsourced processing."
+  - when: "axis=Records of processing activities AND coverage=gap"
+    severity: medium
+    rationale: "Missing records reduce auditability and supervisory response readiness."
+  - when: "axis=Data protection impact assessment AND coverage=gap"
+    severity: high
+    rationale: "High-risk processing without DPIA coverage can miss rights and freedom risk controls."
+  - when: "axis=Notification of a personal data breach AND coverage=gap"
+    severity: critical
+    rationale: "Breach notification gaps can miss mandatory reporting and notification timelines."
+  - when: "axis=Transfers of personal data to third countries or international organisations AND coverage=gap"
+    severity: critical
+    rationale: "Cross-border transfer gaps can undermine required protection levels and consent or safeguard checks."
+  - when: "axis=Data protection officer AND coverage=gap"
+    severity: medium
+    rationale: "Missing DPO or inquiry-contact coverage can leave compliance oversight and escalation unclear."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking data-governance gap."
