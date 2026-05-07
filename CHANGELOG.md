@@ -4,6 +4,20 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.42.0] - 2026-05-08 — Lexicon CLI + coverage matrix report (cmd_440)
+
+### Added
+
+- Added `codd lexicon list/install/diff` for bundled lexicon plug-in management.
+- Added `codd coverage report` for JSON, Markdown, and self-contained HTML lexicon coverage matrices.
+- Added lightweight text-grep inspection mode with optional `--with-ai` elicit integration.
+
+### Quality Metrics
+
+- **pytest**: 2651 PASS / 0 FAIL / 0 SKIP
+- **Generality Gate**: `codd/lexicon_cli/` + `codd/cli.py` specific lexicon literal zero hit
+- **Compatibility**: existing `codd coverage` merge gate remains available without the `report` subcommand
+
 ## [1.41.0] - 2026-05-08 — codd init lexicon auto-suggest (cmd_439)
 
 ### Added
