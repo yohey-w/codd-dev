@@ -4,6 +4,21 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.41.0] - 2026-05-08 — codd init lexicon auto-suggest (cmd_439)
+
+### Added
+
+- `codd init --suggest-lexicons/--no-suggest-lexicons` now detects common project
+  manifests and offers lexicon plug-in suggestions.
+- Added generic `codd.init.StackDetector` plus `codd_plugins/stack_map.yaml`; stack
+  and lexicon knowledge stays in plug-in data, not core code.
+- Suggested lexicons are appended to `project_lexicon.yaml` after user confirmation.
+
+### Quality Metrics
+
+- **pytest**: 2615 PASS / 0 FAIL / 0 SKIP
+- **Generality Gate**: `codd/init/` + `codd/cli.py` stack product literal zero hit
+
 ## [1.40.0] - 2026-05-08 — Lexicon 30本 完全整備 マイルストーン (cmd_438)
 
 ### Added — 31 lexicons (cmd_438 batch1〜5 完走)

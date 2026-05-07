@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "react": "latest"
+  },
+  "devDependencies": {
+    "prisma": "latest"
+  }
+}
+

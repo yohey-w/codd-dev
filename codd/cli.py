@@ -458,7 +458,19 @@ def _format_preflight_ntfy(result: Any) -> str:
     default="codd",
     help="Name of the CoDD config directory (default: codd). Use .codd when codd/ is your source directory.",
 )
-def init(project_name: str, language: str, dest: str, requirements: str | None, config_dir: str):
+@click.option(
+    "--suggest-lexicons/--no-suggest-lexicons",
+    default=True,
+    help="Detect project manifests and offer lexicon plug-in suggestions.",
+)
+def init(
+    project_name: str,
+    language: str,
+    dest: str,
+    requirements: str | None,
+    config_dir: str,
+    suggest_lexicons: bool,
+):
     """Initialize CoDD in a project directory."""
     dest_path = Path(dest).resolve()
     codd_dir = dest_path / config_dir
@@ -507,6 +519,44 @@ def init(project_name: str, language: str, dest: str, requirements: str | None, 
         click.echo(f"Next: Write your requirements, then run:")
         click.echo(f"  codd init --requirements your-spec.md --dest .")
         click.echo(f"  or: codd generate --wave 2  (auto-generates everything)")
+
+    if suggest_lexicons:
+        _offer_lexicon_suggestions(dest_path)
+
+
+def _offer_lexicon_suggestions(project_root: Path) -> None:
+    from codd.init.lexicon_suggest import (
+        append_suggested_lexicons,
+        describe_lexicons,
+        load_stack_map,
+        suggest_lexicons,
+    )
+    from codd.init.stack_detector import StackDetector
+
+    detection = StackDetector().detect(project_root)
+    if not detection.stack_hints:
+        return
+
+    suggestions = suggest_lexicons(detection.stack_hints, load_stack_map())
+    if not suggestions:
+        return
+
+    descriptions = describe_lexicons(suggestions)
+    click.echo("")
+    click.echo(f"Detected signals: {', '.join(detection.detected_signals)}")
+    click.echo(f"Detected hints: {', '.join(detection.stack_hints)}")
+    click.echo("Suggested lexicons:")
+    for lexicon_id in suggestions:
+        description = descriptions.get(lexicon_id, "")
+        suffix = f" ({description})" if description else ""
+        click.echo(f"  - {lexicon_id}{suffix}")
+
+    if not click.confirm(f"Add to {LEXICON_FILENAME}?", default=True):
+        click.echo("Suggested lexicons not added.")
+        return
+    path = append_suggested_lexicons(project_root, suggestions)
+    rel_path = path.relative_to(project_root).as_posix()
+    click.echo(f"{rel_path} updated ({len(suggestions)} suggested lexicons)")
 
 
 @main.command()
