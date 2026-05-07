@@ -83,3 +83,71 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+@dataclass
+class ElicitResult:
+    findings: list[Finding] = field(default_factory=list)
+    all_covered: bool = False
+    lexicon_coverage_report: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __iter__(self):
+        return iter(self.findings)
+
+    def __len__(self) -> int:
+        return len(self.findings)
+
+    def __getitem__(self, index: int) -> Finding:
+        return self.findings[index]
+
+    def __bool__(self) -> bool:
+        return bool(self.findings)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, list):
+            return self.findings == other
+        if not isinstance(other, ElicitResult):
+            return NotImplemented
+        return (
+            self.findings == other.findings
+            and self.all_covered == other.all_covered
+            and self.lexicon_coverage_report == other.lexicon_coverage_report
+            and self.metadata == other.metadata
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "all_covered": self.all_covered,
+            "lexicon_coverage_report": self.lexicon_coverage_report,
+            "findings": [f.to_dict() for f in self.findings],
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> "ElicitResult":
+        if isinstance(payload, list):
+            findings = [Finding.from_dict(item) for item in payload]
+            return cls(findings=findings)
+        if not isinstance(payload, dict):
+            raise ValueError("Elicit output must be a JSON array or object")
+        raw_findings = payload.get("findings", [])
+        if not isinstance(raw_findings, list):
+            raise ValueError("Elicit output 'findings' must be a list")
+        findings = [Finding.from_dict(item) for item in raw_findings]
+        coverage_raw = payload.get("lexicon_coverage_report", {})
+        coverage: dict[str, str] = {}
+        if isinstance(coverage_raw, dict):
+            coverage = {str(k): str(v) for k, v in coverage_raw.items()}
+        all_covered_raw = payload.get("all_covered", False)
+        all_covered = bool(all_covered_raw) if not findings else (
+            bool(all_covered_raw) and not findings
+        )
+        metadata_raw = payload.get("metadata", {})
+        metadata = metadata_raw if isinstance(metadata_raw, dict) else {}
+        return cls(
+            findings=findings,
+            all_covered=all_covered,
+            lexicon_coverage_report=coverage,
+            metadata=metadata,
+        )

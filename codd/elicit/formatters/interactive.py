@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import re
 
-from codd.elicit.finding import Finding
+from codd.elicit.finding import ElicitResult, Finding
 
 
 _APPROVE = {"a", "approve", "approved", "y", "yes"}
@@ -19,7 +19,9 @@ class InteractiveFormatter:
     def __init__(self) -> None:
         self._last_ids: list[str] = []
 
-    def format(self, findings: list[Finding]) -> str:
+    def format(self, findings: list[Finding] | ElicitResult) -> str:
+        if isinstance(findings, ElicitResult):
+            findings = findings.findings
         self._last_ids = [finding.id for finding in findings]
         if not findings:
             return "No findings.\n"

@@ -7,7 +7,7 @@ import re
 
 import yaml
 
-from codd.elicit.finding import Finding
+from codd.elicit.finding import ElicitResult, Finding
 
 
 _CHECKED_APPROVAL_RE = re.compile(r"^\s*-\s*approval:\s*\[[xX]\]\s*`?([^`\s]+)`?", re.MULTILINE)
@@ -16,12 +16,21 @@ _CHECKED_APPROVAL_RE = re.compile(r"^\s*-\s*approval:\s*\[[xX]\]\s*`?([^`\s]+)`?
 class MdFormatter:
     name = "md"
 
-    def format(self, findings: list[Finding]) -> str:
-        if not findings:
-            return "# Findings\n\nNo findings.\n"
+    def format(self, findings: list[Finding] | ElicitResult) -> str:
+        result = _coerce_result(findings)
+        coverage_section = _coverage_section(result)
+        if not result.findings:
+            if result.all_covered:
+                body = "✅ All lexicon categories covered. No action required.\n"
+            else:
+                body = "No findings.\n"
+            return f"# Findings\n\n{coverage_section}{body}"
 
         lines = ["# Findings", ""]
-        for finding in findings:
+        if coverage_section:
+            lines.extend(coverage_section.rstrip("\n").split("\n"))
+            lines.append("")
+        for finding in result.findings:
             lines.extend(_format_finding(finding))
         return "\n".join(lines).rstrip() + "\n"
 
@@ -76,3 +85,19 @@ def _display_value(value: str | None) -> str:
     if value is None or value == "":
         return "N/A"
     return str(value)
+
+
+def _coerce_result(value: list[Finding] | ElicitResult) -> ElicitResult:
+    if isinstance(value, ElicitResult):
+        return value
+    return ElicitResult(findings=list(value))
+
+
+def _coverage_section(result: ElicitResult) -> str:
+    if not result.lexicon_coverage_report:
+        return ""
+    lines = ["## Lexicon coverage", ""]
+    for category, status in result.lexicon_coverage_report.items():
+        lines.append(f"- `{category}`: **{status}**")
+    lines.append("")
+    return "\n".join(lines) + "\n"
