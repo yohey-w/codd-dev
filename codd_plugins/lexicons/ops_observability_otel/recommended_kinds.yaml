@@ -1,0 +1,9 @@
+recommended_kinds:
+  - trace_coverage_gap
+  - metric_coverage_gap
+  - log_coverage_gap
+  - propagation_context_gap
+  - resource_identity_gap
+  - instrumentation_api_gap
+  - collector_pipeline_gap
+  - semantic_convention_gap

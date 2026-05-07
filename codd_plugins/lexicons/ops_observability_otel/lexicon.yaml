@@ -1,0 +1,169 @@
+coverage_axes:
+  - axis_type: "signals_traces"
+    rationale: "OpenTelemetry defines tracing as a signal made of Traces, Spans, SpanContext, Links, Events, and identifying trace state."
+    criticality_default: high
+    variants:
+      - id: "Traces"
+        label: "Trace signal"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "distributed operation graph"}
+        criticality: high
+      - id: "Spans"
+        label: "Span operations"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "operation timing and attributes"}
+        criticality: high
+      - id: "SpanContext"
+        label: "Span context"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "trace identity propagation"}
+        criticality: high
+      - id: "Links"
+        label: "Links between spans"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "causal relationship"}
+        criticality: medium
+  - axis_type: "signals_metrics"
+    rationale: "OpenTelemetry defines metrics as a signal with MeterProvider, Meter, Instruments, Measurements, MetricReader, Views, and a Metrics data model."
+    criticality_default: high
+    variants:
+      - id: "Metrics"
+        label: "Metric signal"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "measurement stream"}
+        criticality: high
+      - id: "MeterProvider"
+        label: "Meter provider"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "meter creation"}
+        criticality: medium
+      - id: "Meter"
+        label: "Meter"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "instrument namespace"}
+        criticality: medium
+      - id: "Instrument"
+        label: "Metric instrument"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "measurement capture"}
+        criticality: high
+      - id: "Views"
+        label: "Metric views"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "aggregation and export shaping"}
+        criticality: medium
+  - axis_type: "signals_logs"
+    rationale: "OpenTelemetry defines logs as a telemetry signal with Log Data Model, API, SDK, exporters, and no-op behavior."
+    criticality_default: medium
+    variants:
+      - id: "Logs"
+        label: "Log signal"
+        attributes: {source: "OpenTelemetry Specification", coverage_target: "log telemetry signal"}
+        criticality: medium
+      - id: "Log Data Model"
+        label: "Log data model"
+        attributes: {source: "OpenTelemetry Specification", coverage_target: "log record shape"}
+        criticality: high
+      - id: "LogRecord"
+        label: "Log record"
+        attributes: {source: "OpenTelemetry Logs Data Model", coverage_target: "event payload"}
+        criticality: medium
+      - id: "LoggerProvider"
+        label: "Logger provider"
+        attributes: {source: "OpenTelemetry Logs API", coverage_target: "logger creation"}
+        criticality: medium
+  - axis_type: "context_propagation"
+    rationale: "OpenTelemetry uses Context and Propagators to carry cross-cutting concern values such as SpanContext and Baggage across process boundaries."
+    criticality_default: critical
+    variants:
+      - id: "Context"
+        label: "Context mechanism"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "distributed transaction state"}
+        criticality: critical
+      - id: "Propagators"
+        label: "Propagators"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "inject and extract carrier values"}
+        criticality: critical
+      - id: "TextMapPropagator"
+        label: "Text map propagator"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "text carrier propagation"}
+        criticality: high
+      - id: "Baggage"
+        label: "Baggage signal"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "name/value propagation"}
+        criticality: medium
+  - axis_type: "resource_attributes"
+    rationale: "OpenTelemetry Resource captures information about the entity for which telemetry is recorded and semantic conventions define standard resource attributes."
+    criticality_default: high
+    variants:
+      - id: "Resource"
+        label: "Resource"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "telemetry-producing entity"}
+        criticality: high
+      - id: "Attributes"
+        label: "Resource attributes"
+        attributes: {source: "OpenTelemetry Resource", coverage_target: "entity key-value identity"}
+        criticality: high
+      - id: "service.name"
+        label: "Service name attribute"
+        attributes: {source: "OpenTelemetry Semantic Conventions", coverage_target: "service identity"}
+        criticality: high
+      - id: "OTEL_RESOURCE_ATTRIBUTES"
+        label: "Resource attributes environment variable"
+        attributes: {source: "OpenTelemetry Resource SDK", coverage_target: "resource configuration"}
+        criticality: medium
+  - axis_type: "instrumentation"
+    rationale: "OpenTelemetry client architecture separates API, SDK, Semantic Conventions, and Contrib packages, and instrumentation libraries add observability to application and library code."
+    criticality_default: high
+    variants:
+      - id: "API"
+        label: "API package"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "cross-cutting public interface"}
+        criticality: high
+      - id: "SDK"
+        label: "SDK package"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "managed implementation"}
+        criticality: high
+      - id: "Instrumentation Scope"
+        label: "Instrumentation scope"
+        attributes: {source: "OpenTelemetry Common Concepts", coverage_target: "instrumentation identity"}
+        criticality: medium
+      - id: "Instrumentation Library"
+        label: "Instrumentation library"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "library observability integration"}
+        criticality: medium
+  - axis_type: "collector"
+    rationale: "OpenTelemetry Collector architecture defines pipelines that receive, process, and export traces, metrics, and logs through receivers, processors, exporters, and service pipeline configuration."
+    criticality_default: high
+    variants:
+      - id: "Collector"
+        label: "OpenTelemetry Collector"
+        attributes: {source: "OpenTelemetry Collector Architecture", coverage_target: "telemetry processing executable"}
+        criticality: high
+      - id: "pipelines"
+        label: "Collector pipelines"
+        attributes: {source: "OpenTelemetry Collector Architecture", coverage_target: "receive-process-export path"}
+        criticality: high
+      - id: "receivers"
+        label: "Receivers"
+        attributes: {source: "OpenTelemetry Collector Architecture", coverage_target: "telemetry ingestion"}
+        criticality: high
+      - id: "processors"
+        label: "Processors"
+        attributes: {source: "OpenTelemetry Collector Architecture", coverage_target: "telemetry processing"}
+        criticality: medium
+      - id: "exporters"
+        label: "Exporters"
+        attributes: {source: "OpenTelemetry Collector Architecture", coverage_target: "telemetry delivery"}
+        criticality: high
+  - axis_type: "semantic_conventions"
+    rationale: "OpenTelemetry Semantic Conventions define standard keys and values for commonly observed concepts, protocols, operations, resources, spans, metrics, logs, and events."
+    criticality_default: high
+    variants:
+      - id: "Semantic Conventions"
+        label: "Semantic conventions"
+        attributes: {source: "OpenTelemetry Overview", coverage_target: "standard telemetry vocabulary"}
+        criticality: high
+      - id: "Attribute Naming"
+        label: "Attribute naming"
+        attributes: {source: "OpenTelemetry Specification", coverage_target: "attribute key consistency"}
+        criticality: high
+      - id: "Attribute Requirement Levels"
+        label: "Attribute requirement levels"
+        attributes: {source: "OpenTelemetry Specification", coverage_target: "required and optional attribute policy"}
+        criticality: medium
+      - id: "Semantic convention groups"
+        label: "Semantic convention groups"
+        attributes: {source: "OpenTelemetry Semantic Conventions", coverage_target: "domain-specific convention grouping"}
+        criticality: medium
