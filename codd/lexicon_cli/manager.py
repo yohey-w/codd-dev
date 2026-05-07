@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 
 from codd.init.lexicon_suggest import append_suggested_lexicons, default_lexicon_root
-from codd.lexicon import LEXICON_FILENAME, load_lexicon as load_project_lexicon
+from codd.lexicon import LEXICON_FILENAME, load_project_extends
 
 
 @dataclass(frozen=True)
@@ -44,21 +44,14 @@ class LexiconManager:
         if not path.is_file():
             return []
 
-        data: dict[str, Any] | None = None
         try:
-            loaded = load_project_lexicon(self.project_root)
-            data = loaded.as_dict() if loaded is not None else None
+            return load_project_extends(self.project_root)
         except Exception:
             payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            if isinstance(payload, dict):
-                data = payload
-        if not data:
+        if not isinstance(payload, dict):
             return []
-
-        raw = data.get("suggested_lexicons", [])
-        if not isinstance(raw, list):
-            return []
-        return _dedupe(_lexicon_id(item) for item in raw)
+        raw = payload.get("extends", payload.get("suggested_lexicons", []))
+        return _dedupe(_lexicon_id(item) for item in raw) if isinstance(raw, list) else []
 
     def available(self) -> list[LexiconRecord]:
         installed = set(self.installed_ids())

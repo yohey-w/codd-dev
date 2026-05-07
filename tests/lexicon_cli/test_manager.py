@@ -27,7 +27,7 @@ def test_available_lists_bundled_manifest_directories(tmp_path: Path) -> None:
     assert all(record.lexicon_name for record in records)
 
 
-def test_available_marks_installed_suggested_lexicons(tmp_path: Path) -> None:
+def test_available_marks_installed_extends_lexicons(tmp_path: Path) -> None:
     first = _first_record(LexiconManager(tmp_path, LEXICON_ROOT))
     (tmp_path / "project_lexicon.yaml").write_text(
         yaml.safe_dump(
@@ -35,7 +35,7 @@ def test_available_marks_installed_suggested_lexicons(tmp_path: Path) -> None:
                 "node_vocabulary": [],
                 "naming_conventions": [],
                 "design_principles": [],
-                "suggested_lexicons": [first.id],
+                "extends": [first.id],
             },
             sort_keys=False,
         ),
@@ -54,7 +54,7 @@ def test_installed_ids_support_mapping_entries(tmp_path: Path) -> None:
                 "node_vocabulary": [],
                 "naming_conventions": [],
                 "design_principles": [],
-                "suggested_lexicons": [{"id": "one"}, {"lexicon_name": "two"}, "one"],
+                "extends": [{"id": "one"}, {"lexicon_name": "two"}, "one"],
             },
             sort_keys=False,
         ),
@@ -85,7 +85,7 @@ def test_install_creates_valid_project_lexicon(tmp_path: Path) -> None:
     data = yaml.safe_load(result.project_lexicon_path.read_text(encoding="utf-8"))
     validate_lexicon(data)
     assert result.installed == (first.id,)
-    assert data["suggested_lexicons"] == [first.id]
+    assert data["extends"] == [first.id]
 
 
 def test_install_skips_existing_lexicon(tmp_path: Path) -> None:

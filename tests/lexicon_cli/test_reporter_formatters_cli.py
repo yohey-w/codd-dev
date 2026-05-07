@@ -32,7 +32,7 @@ def _project(tmp_path: Path, lexicon_id: str | None = None) -> Path:
                     "node_vocabulary": [],
                     "naming_conventions": [],
                     "design_principles": [],
-                    "suggested_lexicons": [lexicon_id],
+                    "extends": [lexicon_id],
                 },
                 sort_keys=False,
             ),
@@ -148,7 +148,7 @@ def test_cli_lexicon_install_updates_project_lexicon(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     data = yaml.safe_load((project / "project_lexicon.yaml").read_text(encoding="utf-8"))
-    assert lexicon_id in data["suggested_lexicons"]
+    assert lexicon_id in data["extends"]
 
 
 def test_cli_lexicon_diff_markdown(tmp_path: Path) -> None:

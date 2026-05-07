@@ -54,7 +54,7 @@ def _project(tmp_path: Path, lexicon_id: str) -> Path:
             "node_vocabulary": [],
             "naming_conventions": [],
             "design_principles": [],
-            "suggested_lexicons": [lexicon_id],
+            "extends": [lexicon_id],
         },
     )
     (project / "requirements.md").write_text("no matching coverage terms", encoding="utf-8")

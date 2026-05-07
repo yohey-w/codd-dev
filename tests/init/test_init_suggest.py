@@ -62,12 +62,13 @@ def test_describe_lexicons_reads_manifest_descriptions() -> None:
     assert "REST" in descriptions["api_rest_openapi"]
 
 
-def test_append_suggested_lexicons_creates_valid_project_lexicon(tmp_path: Path) -> None:
+def test_append_extends_writes_to_extends_field(tmp_path: Path) -> None:
     path = append_suggested_lexicons(tmp_path, ["web_responsive", "api_rest_openapi"])
 
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     validate_lexicon(data)
-    assert data["suggested_lexicons"] == ["web_responsive", "api_rest_openapi"]
+    assert data["extends"] == ["web_responsive", "api_rest_openapi"]
+    assert "suggested_lexicons" not in data
 
 
 def test_append_suggested_lexicons_deduplicates_existing_file(tmp_path: Path) -> None:
@@ -77,7 +78,7 @@ def test_append_suggested_lexicons_deduplicates_existing_file(tmp_path: Path) ->
                 "node_vocabulary": [],
                 "naming_conventions": [],
                 "design_principles": [],
-                "suggested_lexicons": ["web_responsive"],
+                "extends": ["web_responsive"],
             },
             sort_keys=False,
         ),
@@ -87,7 +88,7 @@ def test_append_suggested_lexicons_deduplicates_existing_file(tmp_path: Path) ->
     append_suggested_lexicons(tmp_path, ["web_responsive", "api_rest_openapi"])
     data = yaml.safe_load((tmp_path / "project_lexicon.yaml").read_text(encoding="utf-8"))
 
-    assert data["suggested_lexicons"] == ["web_responsive", "api_rest_openapi"]
+    assert data["extends"] == ["web_responsive", "api_rest_openapi"]
 
 
 def test_codd_init_suggest_lexicons_updates_project_lexicon(tmp_path: Path) -> None:
@@ -117,7 +118,7 @@ def test_codd_init_suggest_lexicons_updates_project_lexicon(tmp_path: Path) -> N
         "web_responsive",
         "api_rest_openapi",
         "data_relational_iso_sql",
-    }.issubset(set(data["suggested_lexicons"]))
+    }.issubset(set(data["extends"]))
 
 
 def test_codd_init_no_suggest_lexicons_preserves_existing_flow(tmp_path: Path) -> None:
@@ -141,4 +142,3 @@ def test_codd_init_no_suggest_lexicons_preserves_existing_flow(tmp_path: Path) -
     assert result.exit_code == 0, result.output
     assert "Suggested lexicons:" not in result.output
     assert not (project / "project_lexicon.yaml").exists()
-
