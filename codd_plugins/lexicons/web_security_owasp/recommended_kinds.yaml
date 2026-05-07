@@ -1,0 +1,16 @@
+recommended_kinds:
+  - missing_auth_check
+  - missing_access_control
+  - weak_credential_recovery
+  - session_token_exposure
+  - missing_input_validation
+  - missing_output_encoding
+  - unsafe_deserialization
+  - ssrf_allowlist_gap
+  - security_logging_gap
+  - insecure_default_configuration
+  - dependency_update_gap
+  - integrity_verification_gap
+  - sensitive_data_exposure
+  - crypto_key_management_gap
+  - business_logic_abuse
