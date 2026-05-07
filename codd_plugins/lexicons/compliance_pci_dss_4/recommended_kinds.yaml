@@ -1,0 +1,13 @@
+recommended_kinds:
+  - network_security_controls_gap
+  - stored_account_data_gap
+  - vulnerability_management_gap
+  - business_need_access_gap
+  - monitoring_testing_gap
+  - information_security_policy_gap
+  - transmission_cryptography_gap
+  - secure_software_gap
+  - personnel_screening_gap
+  - physical_access_gap
+  - incident_response_plan_gap
+  - pci_dss_scope_gap

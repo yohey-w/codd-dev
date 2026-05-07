@@ -1,0 +1,22 @@
+name: compliance_hipaa
+lexicon_name: compliance_hipaa
+version: "1.0.0"
+source_url: "https://www.hhs.gov/hipaa/for-professionals/security/index.html"
+source_version: "HIPAA Security Rule (45 CFR Part 160 and Part 164 Subparts C and D)"
+description: "HIPAA Security Rule and breach-notification compliance coverage axes."
+observation_dimensions: 10
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "HHS - The Security Rule"
+    url: "https://www.hhs.gov/hipaa/for-professionals/security/index.html"
+  - title: "HHS - Summary of the HIPAA Security Rule"
+    url: "https://www.hhs.gov/hipaa/for-professionals/security/laws-regulations/index.html"
+  - title: "eCFR 45 CFR Part 164 Subpart C - Security Standards for ePHI"
+    url: "https://www.ecfr.gov/current/title-45/part-164/subpart-C"
+  - title: "eCFR 45 CFR Part 164 Subpart D - Breach Notification"
+    url: "https://www.ecfr.gov/current/title-45/part-164/subpart-D"

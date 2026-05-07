@@ -1,0 +1,20 @@
+name: compliance_pci_dss_4
+lexicon_name: compliance_pci_dss_4
+version: "1.0.0"
+source_url: "https://www.pcisecuritystandards.org/document_library/"
+source_version: "PCI DSS v4.0 (Requirements and Testing Procedures, March 2022)"
+description: "PCI DSS v4.0 payment account data security coverage axes."
+observation_dimensions: 12
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "PCI SSC Document Library"
+    url: "https://www.pcisecuritystandards.org/document_library/"
+  - title: "PCI DSS v4.0 SAQ D for Merchants"
+    url: "https://www.pcisecuritystandards.org/documents/PCI-DSS-v4-0-SAQ-D-Merchant.pdf"
+  - title: "PCI Data Security Standard (PCI DSS)"
+    url: "https://www.pcisecuritystandards.org/standards/pci-dss/"
