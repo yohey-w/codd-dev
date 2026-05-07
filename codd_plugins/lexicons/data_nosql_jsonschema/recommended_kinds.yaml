@@ -1,0 +1,11 @@
+recommended_kinds:
+  - jsonschema_document_gap
+  - jsonschema_vocabulary_gap
+  - jsonschema_meta_schema_gap
+  - jsonschema_identifier_gap
+  - jsonschema_reference_gap
+  - jsonschema_applicator_gap
+  - jsonschema_assertion_gap
+  - jsonschema_annotation_gap
+  - jsonschema_validation_keyword_gap
+  - jsonschema_format_gap

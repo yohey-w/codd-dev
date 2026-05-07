@@ -1,0 +1,11 @@
+recommended_kinds:
+  - sql_schema_definition_gap
+  - sql_table_definition_gap
+  - sql_data_type_gap
+  - sql_domain_constraint_gap
+  - sql_referential_constraint_gap
+  - sql_query_expression_gap
+  - sql_data_change_statement_gap
+  - sql_transaction_statement_gap
+  - sql_isolation_level_gap
+  - sql_view_contract_gap

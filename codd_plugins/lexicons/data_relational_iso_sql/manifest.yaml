@@ -1,0 +1,20 @@
+name: data_relational_iso_sql
+lexicon_name: data_relational_iso_sql
+version: "1.0.0"
+source_url: "https://www.iso.org/standard/76583.html"
+source_version: "ISO/IEC 9075-1:2023 SQL/Framework + ISO/IEC 9075-2:2023 SQL/Foundation"
+description: "ISO/IEC 9075 SQL coverage axes for relational data requirements."
+observation_dimensions: 10
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "ISO/IEC 9075-1:2023 - SQL/Framework"
+    url: "https://www.iso.org/standard/76583.html"
+    source_version: "Edition 6, 2023-06"
+  - title: "ISO/IEC 9075-2:2023 - SQL/Foundation"
+    url: "https://www.iso.org/standard/76584.html"
+    source_version: "Edition 6, 2023-06"

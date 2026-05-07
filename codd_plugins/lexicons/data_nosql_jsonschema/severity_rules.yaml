@@ -1,0 +1,41 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=JSON Schema Documents AND coverage=gap"
+    severity: high
+    rationale: "Missing schema document coverage leaves the schema container and media type ambiguous."
+  - when: "axis=Schema Vocabularies AND coverage=gap"
+    severity: high
+    rationale: "Missing vocabulary coverage makes keyword semantics and required support unclear."
+  - when: "axis=Meta-Schemas AND coverage=gap"
+    severity: high
+    rationale: "Missing meta-schema coverage prevents reliable dialect and schema validation."
+  - when: "axis=Identifiers AND coverage=gap"
+    severity: high
+    rationale: "Missing identifier coverage can break base URI, resource identity, and anchor resolution."
+  - when: "axis=References AND coverage=gap"
+    severity: high
+    rationale: "Missing reference coverage can break schema reuse, dereferencing, and dynamic scope."
+  - when: "axis=Applicators AND coverage=gap"
+    severity: high
+    rationale: "Missing applicator coverage leaves composition, conditionals, and child instance validation ambiguous."
+  - when: "axis=Assertions AND coverage=gap"
+    severity: high
+    rationale: "Missing assertion coverage leaves boolean validation results and primitive constraints unclear."
+  - when: "axis=Annotations AND coverage=gap"
+    severity: medium
+    rationale: "Missing annotation coverage weakens human-readable and application metadata."
+  - when: "axis=Validation Keywords AND coverage=gap"
+    severity: high
+    rationale: "Missing structural validation keywords leaves object, array, string, or numeric constraints incomplete."
+  - when: "axis=Format AND coverage=gap"
+    severity: medium
+    rationale: "Missing format coverage leaves semantic string handling or assertion behavior unclear."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit JSON Schema coverage needs reviewer confirmation before it can be treated as sufficient."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered JSON Schema axes may still emit informational review notes outside release-blocking gaps."

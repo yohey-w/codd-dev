@@ -1,0 +1,201 @@
+coverage_axes:
+  - axis_type: "JSON Schema Documents"
+    rationale: "JSON Schema Core defines schema documents, schema objects, boolean schemas, and the application/schema+json media type."
+    criticality_default: high
+    variants:
+      - id: "application/schema+json"
+        label: "JSON Schema media type"
+        attributes: {source_literal: "application/schema+json", coverage_target: "schema document media type"}
+        criticality: high
+      - id: "schema object"
+        label: "Schema object"
+        attributes: {source_literal: "schema object", coverage_target: "keyword container"}
+        criticality: high
+      - id: "boolean JSON Schemas"
+        label: "Boolean JSON Schemas"
+        attributes: {source_literal: "boolean JSON Schemas", coverage_target: "true or false schema"}
+        criticality: medium
+  - axis_type: "Schema Vocabularies"
+    rationale: "JSON Schema Core organizes keyword sets into vocabularies and dialects declared by meta-schemas."
+    criticality_default: high
+    variants:
+      - id: "$vocabulary"
+        label: "Vocabulary declaration keyword"
+        attributes: {source_literal: "$vocabulary", coverage_target: "required or optional vocabulary support"}
+        criticality: high
+      - id: "vocabulary"
+        label: "Schema vocabulary"
+        attributes: {source_literal: "vocabulary", coverage_target: "keyword set"}
+        criticality: high
+      - id: "dialect"
+        label: "Schema dialect"
+        attributes: {source_literal: "dialect", coverage_target: "vocabulary collection"}
+        criticality: medium
+  - axis_type: "Meta-Schemas"
+    rationale: "JSON Schema Core defines meta-schemas as schemas that describe schemas and specify vocabularies."
+    criticality_default: high
+    variants:
+      - id: "$schema"
+        label: "Meta-schema declaration keyword"
+        attributes: {source_literal: "$schema", coverage_target: "dialect and meta-schema selection"}
+        criticality: high
+      - id: "meta-schema"
+        label: "Meta-schema"
+        attributes: {source_literal: "meta-schema", coverage_target: "schema validation contract"}
+        criticality: high
+      - id: "Core/Validation Dialect meta-schema"
+        label: "Core/Validation Dialect meta-schema"
+        attributes: {source_literal: "Core/Validation Dialect meta-schema", coverage_target: "pure validation schema dialect"}
+        criticality: medium
+  - axis_type: "Identifiers"
+    rationale: "JSON Schema Core defines identifier behavior through base URIs, anchors, and location-independent identifiers."
+    criticality_default: high
+    variants:
+      - id: "$id"
+        label: "Schema identifier keyword"
+        attributes: {source_literal: "$id", coverage_target: "base URI and resource identity"}
+        criticality: high
+      - id: "$anchor"
+        label: "Plain-name anchor keyword"
+        attributes: {source_literal: "$anchor", coverage_target: "location-independent identifier"}
+        criticality: medium
+      - id: "$dynamicAnchor"
+        label: "Dynamic anchor keyword"
+        attributes: {source_literal: "$dynamicAnchor", coverage_target: "dynamic scope anchor"}
+        criticality: medium
+  - axis_type: "References"
+    rationale: "JSON Schema Core defines reference keywords for dereferencing, reuse, and dynamic scope."
+    criticality_default: high
+    variants:
+      - id: "$ref"
+        label: "Schema reference keyword"
+        attributes: {source_literal: "$ref", coverage_target: "referenced schema"}
+        criticality: high
+      - id: "$dynamicRef"
+        label: "Dynamic reference keyword"
+        attributes: {source_literal: "$dynamicRef", coverage_target: "dynamic referenced schema"}
+        criticality: medium
+      - id: "$defs"
+        label: "Schema re-use location"
+        attributes: {source_literal: "$defs", coverage_target: "reusable subschemas"}
+        criticality: high
+  - axis_type: "Applicators"
+    rationale: "JSON Schema Core defines applicator keywords that apply subschemas in place, conditionally, and to child instances."
+    criticality_default: high
+    variants:
+      - id: "allOf"
+        label: "All subschemas applicator"
+        attributes: {source_literal: "allOf", coverage_target: "combined required subschemas"}
+        criticality: high
+      - id: "anyOf"
+        label: "Any subschema applicator"
+        attributes: {source_literal: "anyOf", coverage_target: "alternative subschemas"}
+        criticality: high
+      - id: "oneOf"
+        label: "Exactly one subschema applicator"
+        attributes: {source_literal: "oneOf", coverage_target: "exclusive alternative"}
+        criticality: high
+      - id: "if"
+        label: "Conditional if applicator"
+        attributes: {source_literal: "if", coverage_target: "conditional selection"}
+        criticality: medium
+      - id: "then"
+        label: "Conditional then applicator"
+        attributes: {source_literal: "then", coverage_target: "conditional consequence"}
+        criticality: medium
+      - id: "else"
+        label: "Conditional else applicator"
+        attributes: {source_literal: "else", coverage_target: "conditional alternative"}
+        criticality: medium
+  - axis_type: "Assertions"
+    rationale: "JSON Schema Core describes assertions as keywords that produce boolean validation results."
+    criticality_default: high
+    variants:
+      - id: "assertions"
+        label: "Assertion behavior"
+        attributes: {source_literal: "assertions", coverage_target: "boolean validation result"}
+        criticality: high
+      - id: "type"
+        label: "Type assertion keyword"
+        attributes: {source_literal: "type", coverage_target: "instance primitive type"}
+        criticality: high
+      - id: "const"
+        label: "Constant value assertion keyword"
+        attributes: {source_literal: "const", coverage_target: "single allowed value"}
+        criticality: medium
+      - id: "enum"
+        label: "Enumeration assertion keyword"
+        attributes: {source_literal: "enum", coverage_target: "allowed values"}
+        criticality: medium
+  - axis_type: "Annotations"
+    rationale: "JSON Schema Core describes annotations as information attached to instances for application use."
+    criticality_default: medium
+    variants:
+      - id: "annotations"
+        label: "Annotation behavior"
+        attributes: {source_literal: "annotations", coverage_target: "application metadata"}
+        criticality: medium
+      - id: "title"
+        label: "Title annotation keyword"
+        attributes: {source_literal: "title", coverage_target: "human-readable name"}
+        criticality: info
+      - id: "description"
+        label: "Description annotation keyword"
+        attributes: {source_literal: "description", coverage_target: "human-readable explanation"}
+        criticality: info
+      - id: "examples"
+        label: "Examples annotation keyword"
+        attributes: {source_literal: "examples", coverage_target: "sample instances"}
+        criticality: info
+  - axis_type: "Validation Keywords"
+    rationale: "JSON Schema Validation defines structural validation keywords for numeric, string, array, and object instances."
+    criticality_default: high
+    variants:
+      - id: "required"
+        label: "Required object properties"
+        attributes: {source_literal: "required", coverage_target: "object required properties"}
+        criticality: high
+      - id: "properties"
+        label: "Object properties applicator"
+        attributes: {source_literal: "properties", coverage_target: "named child schemas"}
+        criticality: high
+      - id: "patternProperties"
+        label: "Patterned object properties"
+        attributes: {source_literal: "patternProperties", coverage_target: "regex-keyed child schemas"}
+        criticality: medium
+      - id: "additionalProperties"
+        label: "Additional object properties"
+        attributes: {source_literal: "additionalProperties", coverage_target: "unknown property behavior"}
+        criticality: high
+      - id: "items"
+        label: "Array items schema"
+        attributes: {source_literal: "items", coverage_target: "array element schema"}
+        criticality: high
+      - id: "prefixItems"
+        label: "Tuple item schemas"
+        attributes: {source_literal: "prefixItems", coverage_target: "positioned array schemas"}
+        criticality: medium
+      - id: "contains"
+        label: "Array contains applicator"
+        attributes: {source_literal: "contains", coverage_target: "required matching element"}
+        criticality: medium
+      - id: "dependentRequired"
+        label: "Dependent required properties"
+        attributes: {source_literal: "dependentRequired", coverage_target: "property dependency"}
+        criticality: medium
+  - axis_type: "Format"
+    rationale: "JSON Schema Validation defines Format-Annotation and Format-Assertion vocabularies for semantic string formats."
+    criticality_default: medium
+    variants:
+      - id: "format"
+        label: "Format keyword"
+        attributes: {source_literal: "format", coverage_target: "semantic string format"}
+        criticality: medium
+      - id: "Format-Annotation Vocabulary"
+        label: "Format annotation vocabulary"
+        attributes: {source_literal: "Format-Annotation Vocabulary", coverage_target: "annotation-only format behavior"}
+        criticality: medium
+      - id: "Format-Assertion Vocabulary"
+        label: "Format assertion vocabulary"
+        attributes: {source_literal: "Format-Assertion Vocabulary", coverage_target: "assertive format validation"}
+        criticality: high
