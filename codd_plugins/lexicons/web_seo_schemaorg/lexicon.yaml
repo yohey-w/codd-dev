@@ -1,0 +1,193 @@
+coverage_axes:
+  - axis_type: "Organization"
+    rationale: "Schema.org full hierarchy lists Organization and common subtypes such as LocalBusiness, EducationalOrganization, and GovernmentOrganization."
+    criticality_default: high
+    variants:
+      - id: "Organization"
+        label: "Organization entity"
+        attributes: {source_literal: "Organization", coverage_target: "organization structured data"}
+        criticality: high
+      - id: "LocalBusiness"
+        label: "Local business entity"
+        attributes: {source_literal: "LocalBusiness", coverage_target: "local organization subtype"}
+        criticality: high
+      - id: "EducationalOrganization"
+        label: "Educational organization"
+        attributes: {source_literal: "EducationalOrganization", coverage_target: "education organization subtype"}
+        criticality: medium
+      - id: "GovernmentOrganization"
+        label: "Government organization"
+        attributes: {source_literal: "GovernmentOrganization", coverage_target: "public organization subtype"}
+        criticality: medium
+      - id: "NewsMediaOrganization"
+        label: "News media organization"
+        attributes: {source_literal: "NewsMediaOrganization", coverage_target: "publisher subtype"}
+        criticality: medium
+  - axis_type: "Person"
+    rationale: "Schema.org full hierarchy lists Person as a Thing subtype for people represented in structured data."
+    criticality_default: medium
+    variants:
+      - id: "Person"
+        label: "Person entity"
+        attributes: {source_literal: "Person", coverage_target: "person structured data"}
+        criticality: medium
+      - id: "Patient"
+        label: "Patient entity"
+        attributes: {source_literal: "Patient", coverage_target: "person subtype"}
+        criticality: info
+  - axis_type: "Product"
+    rationale: "Schema.org full hierarchy lists Product and product variants including ProductGroup, ProductModel, IndividualProduct, and Vehicle."
+    criticality_default: high
+    variants:
+      - id: "Product"
+        label: "Product entity"
+        attributes: {source_literal: "Product", coverage_target: "product structured data"}
+        criticality: high
+      - id: "IndividualProduct"
+        label: "Individual product"
+        attributes: {source_literal: "IndividualProduct", coverage_target: "specific item"}
+        criticality: medium
+      - id: "ProductCollection"
+        label: "Product collection"
+        attributes: {source_literal: "ProductCollection", coverage_target: "collection of products"}
+        criticality: medium
+      - id: "ProductGroup"
+        label: "Product group"
+        attributes: {source_literal: "ProductGroup", coverage_target: "variant family"}
+        criticality: medium
+      - id: "ProductModel"
+        label: "Product model"
+        attributes: {source_literal: "ProductModel", coverage_target: "model-level product"}
+        criticality: medium
+      - id: "Vehicle"
+        label: "Vehicle subtype"
+        attributes: {source_literal: "Vehicle", coverage_target: "vehicle product subtype"}
+        criticality: info
+  - axis_type: "Article"
+    rationale: "Schema.org full hierarchy lists Article and subtypes including BlogPosting, NewsArticle, ScholarlyArticle, Report, and TechArticle."
+    criticality_default: high
+    variants:
+      - id: "Article"
+        label: "Article entity"
+        attributes: {source_literal: "Article", coverage_target: "article structured data"}
+        criticality: high
+      - id: "BlogPosting"
+        label: "Blog posting"
+        attributes: {source_literal: "BlogPosting", coverage_target: "blog article subtype"}
+        criticality: medium
+      - id: "NewsArticle"
+        label: "News article"
+        attributes: {source_literal: "NewsArticle", coverage_target: "news subtype"}
+        criticality: medium
+      - id: "ScholarlyArticle"
+        label: "Scholarly article"
+        attributes: {source_literal: "ScholarlyArticle", coverage_target: "research subtype"}
+        criticality: medium
+      - id: "Report"
+        label: "Report"
+        attributes: {source_literal: "Report", coverage_target: "report subtype"}
+        criticality: info
+      - id: "TechArticle"
+        label: "Technical article"
+        attributes: {source_literal: "TechArticle", coverage_target: "technical article subtype"}
+        criticality: info
+  - axis_type: "BreadcrumbList"
+    rationale: "Schema.org full hierarchy lists BreadcrumbList under ItemList, with ListItem available for ordered list entries."
+    criticality_default: medium
+    variants:
+      - id: "BreadcrumbList"
+        label: "Breadcrumb list"
+        attributes: {source_literal: "BreadcrumbList", coverage_target: "breadcrumb structured data"}
+        criticality: medium
+      - id: "ItemList"
+        label: "Item list"
+        attributes: {source_literal: "ItemList", coverage_target: "list container"}
+        criticality: medium
+      - id: "ListItem"
+        label: "List item"
+        attributes: {source_literal: "ListItem", coverage_target: "breadcrumb entry"}
+        criticality: medium
+  - axis_type: "FAQPage"
+    rationale: "Schema.org full hierarchy lists FAQPage as a WebPage subtype and Question and Answer as related CreativeWork types."
+    criticality_default: medium
+    variants:
+      - id: "FAQPage"
+        label: "FAQ page"
+        attributes: {source_literal: "FAQPage", coverage_target: "FAQ structured data page"}
+        criticality: medium
+      - id: "WebPage"
+        label: "Web page"
+        attributes: {source_literal: "WebPage", coverage_target: "page container"}
+        criticality: medium
+      - id: "Question"
+        label: "Question entity"
+        attributes: {source_literal: "Question", coverage_target: "FAQ question"}
+        criticality: high
+      - id: "Answer"
+        label: "Answer entity"
+        attributes: {source_literal: "Answer", coverage_target: "FAQ answer"}
+        criticality: high
+  - axis_type: "Event"
+    rationale: "Schema.org full hierarchy lists Event and common subtypes including BusinessEvent, ChildrensEvent, ConferenceEvent, CourseInstance, EventSeries, PublicationEvent, SaleEvent, and SportsEvent."
+    criticality_default: medium
+    variants:
+      - id: "Event"
+        label: "Event entity"
+        attributes: {source_literal: "Event", coverage_target: "event structured data"}
+        criticality: medium
+      - id: "BusinessEvent"
+        label: "Business event"
+        attributes: {source_literal: "BusinessEvent", coverage_target: "business event subtype"}
+        criticality: info
+      - id: "ConferenceEvent"
+        label: "Conference event"
+        attributes: {source_literal: "ConferenceEvent", coverage_target: "conference subtype"}
+        criticality: info
+      - id: "CourseInstance"
+        label: "Course instance"
+        attributes: {source_literal: "CourseInstance", coverage_target: "education event subtype"}
+        criticality: info
+      - id: "EventSeries"
+        label: "Event series"
+        attributes: {source_literal: "EventSeries", coverage_target: "series of events"}
+        criticality: info
+      - id: "PublicationEvent"
+        label: "Publication event"
+        attributes: {source_literal: "PublicationEvent", coverage_target: "publication event subtype"}
+        criticality: info
+      - id: "SaleEvent"
+        label: "Sale event"
+        attributes: {source_literal: "SaleEvent", coverage_target: "commercial event subtype"}
+        criticality: info
+      - id: "SportsEvent"
+        label: "Sports event"
+        attributes: {source_literal: "SportsEvent", coverage_target: "sports event subtype"}
+        criticality: info
+  - axis_type: "VideoObject"
+    rationale: "Schema.org full hierarchy lists MediaObject and VideoObject, with VideoObjectSnapshot and related video media subtypes."
+    criticality_default: medium
+    variants:
+      - id: "VideoObject"
+        label: "Video object"
+        attributes: {source_literal: "VideoObject", coverage_target: "video structured data"}
+        criticality: medium
+      - id: "MediaObject"
+        label: "Media object"
+        attributes: {source_literal: "MediaObject", coverage_target: "media container"}
+        criticality: medium
+      - id: "VideoObjectSnapshot"
+        label: "Video object snapshot"
+        attributes: {source_literal: "VideoObjectSnapshot", coverage_target: "video snapshot subtype"}
+        criticality: info
+      - id: "Clip"
+        label: "Clip"
+        attributes: {source_literal: "Clip", coverage_target: "video clip entity"}
+        criticality: info
+      - id: "MovieClip"
+        label: "Movie clip"
+        attributes: {source_literal: "MovieClip", coverage_target: "movie clip subtype"}
+        criticality: info
+      - id: "TVClip"
+        label: "TV clip"
+        attributes: {source_literal: "TVClip", coverage_target: "television clip subtype"}
+        criticality: info

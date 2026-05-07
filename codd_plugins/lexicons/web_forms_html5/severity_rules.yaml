@@ -1,0 +1,31 @@
+rules:
+  - when: "axis=input element AND coverage=gap"
+    severity: high
+    rationale: "Missing input element coverage can leave typed control behavior unspecified."
+  - when: "axis=form element AND coverage=gap"
+    severity: critical
+    rationale: "Form action, method, encoding, and name omissions can make submitted data unverifiable."
+  - when: "axis=client-side form validation AND coverage=gap"
+    severity: high
+    rationale: "Validation gaps can permit invalid or unrecoverable user input before submission."
+  - when: "axis=autocomplete AND coverage=gap"
+    severity: medium
+    rationale: "Autofill omissions can reduce input correctness and repeat-use efficiency."
+  - when: "axis=label element AND coverage=gap"
+    severity: high
+    rationale: "Missing labels can block accessible form control identification."
+  - when: "axis=fieldset AND coverage=gap"
+    severity: medium
+    rationale: "Missing grouping can make related choices ambiguous."
+  - when: "axis=inputmode AND coverage=gap"
+    severity: medium
+    rationale: "Missing input modality hints can harm mobile data entry."
+  - when: "axis=form submission AND coverage=gap"
+    severity: critical
+    rationale: "Submission gaps can prevent reliable server communication."
+  - when: "axis=File Upload state AND coverage=gap"
+    severity: high
+    rationale: "File upload gaps can make accepted files, multiplicity, or selected-file handling unclear."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit form coverage should be documented before implementation."

@@ -1,0 +1,165 @@
+coverage_axes:
+  - axis_type: "manifest members"
+    rationale: "The Web App Manifest defines JSON-based metadata including name, short_name, description, language, direction, categories, and related manifest members."
+    criticality_default: high
+    variants:
+      - id: "name"
+        label: "Application name"
+        attributes: {source_literal: "name", coverage_target: "launch surface name"}
+        criticality: high
+      - id: "short_name"
+        label: "Short application name"
+        attributes: {source_literal: "short_name", coverage_target: "compact launch surface name"}
+        criticality: medium
+      - id: "description"
+        label: "Application description"
+        attributes: {source_literal: "description", coverage_target: "application summary"}
+        criticality: info
+      - id: "lang"
+        label: "Language"
+        attributes: {source_literal: "lang", coverage_target: "metadata language"}
+        criticality: info
+      - id: "dir"
+        label: "Text direction"
+        attributes: {source_literal: "dir", coverage_target: "bidirectional metadata handling"}
+        criticality: medium
+  - axis_type: "icons"
+    rationale: "The Web App Manifest defines icons as manifest image resources with src, sizes, type, and purpose."
+    criticality_default: high
+    variants:
+      - id: "icons"
+        label: "Icons member"
+        attributes: {source_literal: "icons", coverage_target: "application icon set"}
+        criticality: high
+      - id: "src"
+        label: "Icon source"
+        attributes: {source_literal: "src", coverage_target: "image URL"}
+        criticality: high
+      - id: "sizes"
+        label: "Icon sizes"
+        attributes: {source_literal: "sizes", coverage_target: "image dimensions"}
+        criticality: medium
+      - id: "type"
+        label: "Icon media type"
+        attributes: {source_literal: "type", coverage_target: "image MIME type"}
+        criticality: medium
+      - id: "purpose"
+        label: "Icon purpose"
+        attributes: {source_literal: "purpose", coverage_target: "maskable or monochrome usage"}
+        criticality: medium
+  - axis_type: "display"
+    rationale: "The Web App Manifest defines display modes including fullscreen, standalone, minimal-ui, and browser."
+    criticality_default: high
+    variants:
+      - id: "display"
+        label: "Display member"
+        attributes: {source_literal: "display", coverage_target: "preferred display mode"}
+        criticality: high
+      - id: "fullscreen"
+        label: "Fullscreen mode"
+        attributes: {source_literal: "fullscreen", coverage_target: "no browser UI launch"}
+        criticality: medium
+      - id: "standalone"
+        label: "Standalone mode"
+        attributes: {source_literal: "standalone", coverage_target: "standalone application launch"}
+        criticality: high
+      - id: "minimal-ui"
+        label: "Minimal UI mode"
+        attributes: {source_literal: "minimal-ui", coverage_target: "limited browser UI launch"}
+        criticality: medium
+      - id: "browser"
+        label: "Browser mode"
+        attributes: {source_literal: "browser", coverage_target: "browser launch fallback"}
+        criticality: info
+  - axis_type: "start_url"
+    rationale: "The Web App Manifest defines start_url as the preferred URL loaded when the user launches the web application."
+    criticality_default: critical
+    variants:
+      - id: "start_url"
+        label: "Start URL"
+        attributes: {source_literal: "start_url", coverage_target: "launch URL"}
+        criticality: critical
+      - id: "id"
+        label: "Application identity"
+        attributes: {source_literal: "id", coverage_target: "manifest application identity"}
+        criticality: high
+      - id: "launch"
+        label: "Launch behavior"
+        attributes: {source_literal: "launch", coverage_target: "opened URL behavior"}
+        criticality: high
+  - axis_type: "scope"
+    rationale: "The Web App Manifest defines navigation scope and says target URL matching is prefix-based, with deep links within scope."
+    criticality_default: high
+    variants:
+      - id: "scope"
+        label: "Navigation scope"
+        attributes: {source_literal: "scope", coverage_target: "in-app URL boundary"}
+        criticality: high
+      - id: "within scope"
+        label: "Within scope"
+        attributes: {source_literal: "within scope", coverage_target: "valid application URL"}
+        criticality: high
+      - id: "deep link"
+        label: "Deep link"
+        attributes: {source_literal: "deep link", coverage_target: "launchable in-scope URL"}
+        criticality: medium
+  - axis_type: "theme_color"
+    rationale: "The Web App Manifest defines theme_color and background_color as color metadata for application presentation."
+    criticality_default: medium
+    variants:
+      - id: "theme_color"
+        label: "Theme color"
+        attributes: {source_literal: "theme_color", coverage_target: "application UI theme color"}
+        criticality: medium
+      - id: "background_color"
+        label: "Background color"
+        attributes: {source_literal: "background_color", coverage_target: "loading background color"}
+        criticality: medium
+      - id: "meta"
+        label: "Meta theme color relationship"
+        attributes: {source_literal: "meta", coverage_target: "document metadata relationship"}
+        criticality: info
+  - axis_type: "shortcuts"
+    rationale: "The Web App Manifest defines shortcuts as app-icon context menu entries with names, URLs, and icons."
+    criticality_default: medium
+    variants:
+      - id: "shortcuts"
+        label: "Shortcuts member"
+        attributes: {source_literal: "shortcuts", coverage_target: "quick actions"}
+        criticality: medium
+      - id: "shortcut item"
+        label: "Shortcut item"
+        attributes: {source_literal: "shortcut item", coverage_target: "one quick action"}
+        criticality: medium
+      - id: "url"
+        label: "Shortcut URL"
+        attributes: {source_literal: "url", coverage_target: "shortcut destination"}
+        criticality: medium
+      - id: "icons"
+        label: "Shortcut icons"
+        attributes: {source_literal: "icons", coverage_target: "shortcut icon set"}
+        criticality: info
+  - axis_type: "share_target"
+    rationale: "The Web Share Target API extends the Web App Manifest with share_target, action, method, enctype, and params for receiving shared data."
+    criticality_default: medium
+    variants:
+      - id: "share_target"
+        label: "Share target member"
+        attributes: {source_literal: "share_target", coverage_target: "received shared data declaration"}
+        criticality: medium
+      - id: "action"
+        label: "Share target action"
+        attributes: {source_literal: "action", coverage_target: "share target URL"}
+        criticality: high
+      - id: "method"
+        label: "Share target method"
+        attributes: {source_literal: "method", coverage_target: "GET or POST handling"}
+        criticality: medium
+      - id: "enctype"
+        label: "Share target encoding"
+        attributes: {source_literal: "enctype", coverage_target: "share payload encoding"}
+        criticality: medium
+      - id: "params"
+        label: "Share target params"
+        attributes: {source_literal: "params", coverage_target: "share payload field mapping"}
+        criticality: high

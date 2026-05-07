@@ -1,0 +1,9 @@
+recommended_kinds:
+  - pwa_manifest_members_gap
+  - pwa_manifest_icons_gap
+  - pwa_manifest_display_gap
+  - pwa_manifest_start_url_gap
+  - pwa_manifest_scope_gap
+  - pwa_manifest_theme_color_gap
+  - pwa_manifest_shortcuts_gap
+  - pwa_manifest_share_target_gap

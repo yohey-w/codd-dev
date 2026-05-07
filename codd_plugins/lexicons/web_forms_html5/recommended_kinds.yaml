@@ -1,0 +1,10 @@
+recommended_kinds:
+  - html_forms_input_element_gap
+  - html_forms_form_element_gap
+  - html_forms_validation_gap
+  - html_forms_autocomplete_gap
+  - html_forms_label_gap
+  - html_forms_fieldset_gap
+  - html_forms_inputmode_gap
+  - html_forms_submission_gap
+  - html_forms_file_upload_gap

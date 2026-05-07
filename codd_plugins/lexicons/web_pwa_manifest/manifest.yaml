@@ -1,0 +1,19 @@
+name: web_pwa_manifest
+lexicon_name: web_pwa_manifest
+version: "1.0.0"
+source_url: "https://www.w3.org/TR/appmanifest/"
+source_version: "W3C Web Application Manifest Working Draft 2026-04-09"
+description: "Web app manifest coverage axes for metadata, icons, display modes, launch URLs, colors, shortcuts, scope, and share target extension."
+observation_dimensions: 8
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Web Application Manifest"
+    url: "https://www.w3.org/TR/appmanifest/"
+    source_version: "W3C Working Draft 09 April 2026"
+  - title: "Web Share Target API"
+    url: "https://w3c.github.io/web-share-target/"
