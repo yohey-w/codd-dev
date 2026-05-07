@@ -21,17 +21,18 @@
 
 CoDD 将 **需求 → 设计 → 实现 → 测试** 视为一个 DAG，机器化验证每个节点的一致性 (coherence)，发现不一致时由 LLM 自动修复。人类只需写 **「做什么」和「边界在哪里」**。
 
-## 当前状态 (v1.34.0)
+## 当前状态 (v2.0.0 — Lexicon-Driven Completeness)
 
-距离北极星仍远，但 **在限定条件下已达到实用阶段**:
+v2.0.0 不仅仅是版本号升级，而是 **定位的转变**。v1.x 完成了 *extract → diagnose → repair* 流水线；v2.0 把 **约束侧 (constraint side)** 作为 plug-in 一等公民引入。
 
 - ✅ 在真实项目 (Next.js + Prisma + TypeScript Web 应用) 上 dogfooding
-- ✅ `codd verify --auto-repair` 在真实 LMS 项目上以 `PARTIAL_SUCCESS` 完成 (attempts=4 / applied_patches=4 / unrepairable=2)
+- ✅ `codd verify --auto-repair` 在真实 LMS 项目上以 `PARTIAL_SUCCESS` 完成 (attempts=4 / applied_patches=4)
 - ✅ DAG 完整性的 9 种 coherence check 已运作
-- ⚠️ 假设单一 viewport / 单一 persona (v1.32.0 引入 C9 Coverage Axis Layer，axis 多样性持续扩展中)
-- ⚠️ 规格完整性 Level 1 (发现需求中的漏洞) 计划在 v1.35.0 `codd elicit` 引入
-- ⚠️ 其他领域 (Mobile / Desktop / CLI / 嵌入式 / ML) 尚未验证
-- ⚠️ unrepairable 削减为持续改进项
+- ✅ **31 个 lexicon plug-in** 覆盖 7 个领域 (Methodology / Web / Mobile / Backend-API / Data / Ops / Compliance / Process)
+- ✅ **`codd elicit` / `codd diff` / `codd brownfield`** — 同时支持 greenfield 与 brownfield 的覆盖度 / drift 发现
+- ✅ **`codd init --suggest-lexicons`** — 自动检测 manifest file → 推荐 lexicon 写入 `project_lexicon.yaml`
+- ✅ **`codd lexicon list/install/diff` + `codd coverage report`** — plug-in 管理 CLI + matrix 报告 (JSON / Markdown / HTML)
+- ✅ Generality Gate 三层架构 (Layer A core / Layer B templates / Layer C plug-ins) — core code 中零 specific framework / domain literal hardcode
 
 ```bash
 pip install codd-dev
@@ -45,14 +46,14 @@ pip install codd-dev
 
 ```bash
 pip install codd-dev
-codd --version  # 1.34.0 或更高
+codd --version  # 2.0.0 或更高
 ```
 
 ### 2. 在项目中放置 codd.yaml
 
 ```yaml
 # codd.yaml
-codd_required_version: ">=1.34.0"
+codd_required_version: ">=2.0.0"
 
 dag:
   design_docs:
@@ -282,6 +283,19 @@ CoDD core code 中以下 hardcode 是 **禁止** 的:
 这些都封闭在 **`project_lexicon.yaml` (项目特定)** 或 **lexicon plug-in (`@codd/lexicon/babok` 等)** 中。CoDD 仅作为通用的 violation/finding object 处理。
 
 LLM 提案「stack 特定的最优 patch」时，该判断委托给 **LLM 的知识**，CoDD core 不决定 (= 不 overfitting)。
+
+---
+
+## 贡献者
+
+CoDD 由以下成员塑造:
+
+- **[@yohey-w](https://github.com/yohey-w)** — Maintainer / Architect
+- **[@Seika86](https://github.com/Seika86)** — Sprint regex 见解 (PR #11)
+- **[@v-kato](https://github.com/v-kato)** — brownfield 复现报告 (Issues #17 / #18 / #19)
+- **[@dev-komenzar](https://github.com/dev-komenzar)** — `source_dirs` bug 复现 (Issue #13)
+
+欢迎来自外部的 issue / PR / lexicon 提议 — 详见 [Issues](https://github.com/yohey-w/codd-dev/issues)。
 
 ---
 

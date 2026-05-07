@@ -21,17 +21,18 @@
 
 CoDD treats **requirements -> design -> implementation -> tests** as one DAG, mechanically verifies the coherence of every node, and lets an LLM repair inconsistencies automatically when they appear. Humans write only **what to build** and **where the boundaries are**.
 
-## Where We Are (v1.34.0)
+## Where We Are (v2.0.0 — Lexicon-Driven Completeness)
 
-The North Star is far, but **within bounded conditions, CoDD has reached practical use**:
+v2.0.0 is a **positioning shift, not just a version bump**. v1.x delivered the *extract → diagnose → repair* pipeline; v2.0 adds the **constraint side** as a first-class plug-in surface.
 
 - ✅ Dogfooded on a real project (Next.js + Prisma + TypeScript Web app)
-- ✅ `codd verify --auto-repair` completes with `PARTIAL_SUCCESS` on a real LMS project (attempts=4 / applied_patches=4 / unrepairable=2)
+- ✅ `codd verify --auto-repair` reaches `PARTIAL_SUCCESS` on a real LMS project (attempts=4 / applied_patches=4)
 - ✅ DAG completeness with 9 coherence checks operational
-- ⚠️ Single viewport / single persona assumed (Coverage Axis Layer C9 introduced in v1.32.0; axis variety is continuing work)
-- ⚠️ Specification completeness Level 1 (finding holes in requirements) is planned for v1.35.0 `codd elicit`
-- ⚠️ Other domains (Mobile / Desktop / CLI / Embedded / ML) are not yet validated
-- ⚠️ Reducing unrepairable items is continuing improvement
+- ✅ **31 lexicon plug-ins** across 7 domains (Methodology / Web / Mobile / Backend-API / Data / Ops / Compliance / Process)
+- ✅ **`codd elicit` / `codd diff` / `codd brownfield`** — coverage and drift discovery for greenfield + brownfield projects
+- ✅ **`codd init --suggest-lexicons`** — auto-detect stack from manifest files, suggest lexicons to install
+- ✅ **`codd lexicon list/install/diff` + `codd coverage report`** — plug-in management CLI + matrix reports (JSON / Markdown / HTML)
+- ✅ Generality Gate three-layer architecture (Layer A core / Layer B templates / Layer C plug-ins) — zero specific framework / domain literals in core code
 
 ```bash
 pip install codd-dev
@@ -45,14 +46,14 @@ pip install codd-dev
 
 ```bash
 pip install codd-dev
-codd --version  # 1.34.0 or later
+codd --version  # 2.0.0 or later
 ```
 
 ### 2. Add codd.yaml to your project
 
 ```yaml
 # codd.yaml
-codd_required_version: ">=1.34.0"
+codd_required_version: ">=2.0.0"
 
 dag:
   design_docs:
@@ -154,7 +155,36 @@ This structurally prevents incidents such as smartphone-only navigation disappea
 
 ---
 
-## v1.34.0 Key Features
+## What's New in v2.0
+
+### Lexicon-driven completeness — the missing constraint side
+
+The North Star says "write only requirements + constraints." v1.x mostly handled the requirements side. v2.0 makes the **constraint side** mechanical and reusable.
+
+A *lexicon* is a plug-in describing the coverage axes of an industry standard:
+
+```
+codd_plugins/lexicons/
+├── babok/                          # BABOK v3 elicitation lexicon
+├── web_a11y_wcag22_aa/             # WCAG 2.2 A/AA
+├── api_rest_openapi/               # REST + OpenAPI 3.1
+├── web_security_owasp/             # OWASP Top 10 + ASVS
+├── compliance_iso27001/            # ISO/IEC 27001:2022
+├── data_governance_appi_gdpr/      # GDPR + APPI
+├── ops_kubernetes/                 # Kubernetes contracts
+└── ... 24 more
+```
+
+Each lexicon ships a manifest, axes, severity rules, coverage matrix, and prompt extension — `codd elicit` and `codd coverage report` consume them dynamically.
+
+```bash
+codd init --suggest-lexicons       # detect stack → suggest lexicons
+codd lexicon install web_responsive web_a11y_wcag22_aa
+codd lexicon diff web_responsive   # text-grep coverage hint
+codd coverage report --format html # matrix across all installed lexicons
+```
+
+### v2.0.0 Key Features
 
 | Feature | Role |
 |---------|------|
@@ -212,26 +242,28 @@ C9 `environment_coverage` verified all axis x variant coverage for viewport (sma
 
 ## Architecture - 4-Release Evolution and Next Plans
 
-### Achieved (v1.31.0 - v1.34.0)
+### Achieved (v1.31.0 - v2.0.0)
 
 | Release | Milestone |
 |---------|-----------|
-| v1.31.0 | Inner 100% (internal coherence) - eliminated manual type fixes with the typecheck repair loop |
-| v1.32.0 | Outer 100% (target environment coverage Layer C9) - absorbed viewport/RBAC/locale and related axes through a unified abstraction |
-| v1.33.0 | Caveat-resolution path proven - real CDP run-journey + LLM auto-repair attempt passed |
-| **v1.34.0** | **Full pipeline proven** - auto-repair reached PARTIAL_SUCCESS through dogfooding on a single Next.js Web project |
+| v1.31.0 | Inner 100% (internal coherence) — eliminated manual type fixes with the typecheck repair loop |
+| v1.32.0 | Outer 100% (target environment coverage Layer C9) — absorbed viewport / RBAC / locale axes through a unified abstraction |
+| v1.33.0 | Caveat-resolution path proven — real CDP run-journey + LLM auto-repair attempt passed |
+| v1.34.0 | Full pipeline proven — auto-repair reached PARTIAL_SUCCESS through dogfooding on a single Next.js Web project |
+| v1.35.0 | `codd elicit` — Discovery Engine with lexicon-aware coverage-mode |
+| v1.36.0 | RepairLoop strategy v2 — generic fallback chain replaces stack-specific hardcoding |
+| v1.37.0 | `codd diff` — brownfield drift detection (implementation_only / requirement_only / drift) |
+| v1.38.0 | `codd brownfield` pipeline — extract → diff → elicit orchestration |
+| v1.39.0 / v1.40.0 | Lexicon plug-ins 30 across 7 domains (Web / Mobile / Backend-API / Data / Ops / Compliance / Process) |
+| v1.41.0 | `codd init --suggest-lexicons` — manifest-file scan → suggested lexicons appended |
+| v1.42.0 | `codd lexicon list/install/diff` + `codd coverage report` — plug-in management CLI + matrix reports |
+| **v2.0.0** | **Lexicon-Driven Completeness milestone** — 31 lexicons (~280 axes), constraint side now mechanical |
 
-### Next (v1.35.0 - v2.0.0, Roadmap)
+### Next (v2.x roadmap, in flux)
 
-| Release | Plan |
-|---------|------|
-| **v1.35.0** | **`codd elicit`** - Discovery Engine that lets an LLM extract axis candidates and spec holes from requirements |
-| v1.36.0 | BABOK lexicon (`@codd/lexicon/babok`) bundle + multi-formatter (md / json / PR comment) |
-| v1.37.0 | **`codd diff`** - brownfield drift detection between requirements and implementation |
-| v1.38.0 | extract -> diff -> elicit pipeline, complete brownfield flow |
-| v1.39.0 | Reduce unrepairable items (RepairLoop strategy generalization) |
-| v1.40.0 | Multi-domain dogfooding (Mobile / CLI / embedded, etc.) |
-| (v2.0.0) | elicit + verify bidirectional loop, closest approach to the "fully automated" North Star |
+- Multi-domain dogfooding beyond Web (Mobile / CLI / embedded)
+- elicit + verify bidirectional loop — proposed-finding apply → re-verify cycle
+- AI-default coverage classification (`covered` / `implicit` / `gap`) replacing text-grep hints
 
 See [CHANGELOG.md](CHANGELOG.md).
 
@@ -296,6 +328,19 @@ CoDD ships hook recipes for editor and Git workflows:
 - Git `pre-commit` hook recipe for blocking commits when coherence checks fail
 
 Recipes live under `codd/hooks/recipes/`.
+
+---
+
+## Contributors
+
+CoDD is shaped by the following people:
+
+- **[@yohey-w](https://github.com/yohey-w)** — Maintainer / Architect
+- **[@Seika86](https://github.com/Seika86)** — Sprint regex insight (PR #11)
+- **[@v-kato](https://github.com/v-kato)** — Brownfield reproduction reports (Issues #17 / #18 / #19)
+- **[@dev-komenzar](https://github.com/dev-komenzar)** — `source_dirs` bug reproduction (Issue #13)
+
+External signals (issues / PRs / lexicon suggestions) are welcome — see [Issues](https://github.com/yohey-w/codd-dev/issues).
 
 ---
 
