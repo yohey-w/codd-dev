@@ -1,0 +1,105 @@
+coverage_axes:
+  - axis_type: "stakeholder"
+    concern: business
+    rationale: "Stakeholder identification is primarily a business ownership and decision-rights concern."
+    criticality_default: medium
+    variants:
+      - id: "stakeholder"
+        label: "Stakeholder roles"
+        criticality: medium
+  - axis_type: "goal"
+    concern: business
+    rationale: "Business goals, KGI, KPI, and decision criteria sit at the management decision layer."
+    criticality_default: medium
+    variants:
+      - id: "goal"
+        label: "Business goal and success measure"
+        criticality: medium
+  - axis_type: "flow"
+    concern: system
+    rationale: "Workflow, handoffs, triggers, and exceptions directly shape system behavior."
+    criticality_default: high
+    variants:
+      - id: "flow"
+        label: "Workflow and handoff"
+        criticality: high
+  - axis_type: "issue"
+    concern: both
+    rationale: "Pain points may require both business prioritization and implementation response."
+    criticality_default: medium
+    variants:
+      - id: "issue"
+        label: "Problem statement"
+        criticality: medium
+  - axis_type: "data"
+    concern: system
+    rationale: "Entities, attributes, lifecycle states, and ownership drive implementation contracts."
+    criticality_default: high
+    variants:
+      - id: "data"
+        label: "Data definition"
+        criticality: high
+  - axis_type: "functional"
+    concern: system
+    rationale: "Functions, actions, integrations, and automations are implementation scope."
+    criticality_default: high
+    variants:
+      - id: "functional"
+        label: "System behavior"
+        criticality: high
+  - axis_type: "non-functional"
+    concern: system
+    rationale: "Quality attributes are system implementation constraints and verification targets."
+    criticality_default: high
+    variants:
+      - id: "non-functional"
+        label: "Quality attribute"
+        criticality: high
+  - axis_type: "rule"
+    concern: system
+    rationale: "Business rules become permissions, calculations, validations, and routing logic."
+    criticality_default: high
+    variants:
+      - id: "rule"
+        label: "Rule or validation"
+        criticality: high
+  - axis_type: "constraint"
+    concern: system
+    rationale: "Technology, migration, compliance, and operational constraints bound implementation choices."
+    criticality_default: medium
+    variants:
+      - id: "constraint"
+        label: "Implementation constraint"
+        criticality: medium
+  - axis_type: "acceptance"
+    concern: business
+    rationale: "Detailed UAT and acceptance gates are business review concerns unless promoted into system tests."
+    criticality_default: medium
+    variants:
+      - id: "acceptance"
+        label: "Acceptance and UAT detail"
+        criticality: medium
+  - axis_type: "risk"
+    concern: business
+    rationale: "Risk register ownership and mitigation priority are management concerns."
+    criticality_default: medium
+    variants:
+      - id: "risk"
+        label: "Risk and mitigation"
+        criticality: medium
+  - axis_type: "assumption"
+    concern: both
+    rationale: "Assumptions can block either business decisions or implementation feasibility."
+    criticality_default: medium
+    variants:
+      - id: "assumption"
+        label: "Assumption to validate"
+        criticality: medium
+  - axis_type: "term"
+    concern: system
+    rationale: "Domain terminology and naming conventions affect shared implementation contracts."
+    criticality_default: medium
+    variants:
+      - id: "term"
+        label: "Domain term"
+        criticality: medium

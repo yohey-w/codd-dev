@@ -13,6 +13,8 @@ import yaml
 SCHEMA_PATH = Path(__file__).parent / "templates" / "lexicon_schema.yaml"
 LEXICON_FILENAME = "project_lexicon.yaml"
 REQUIRED_ARTIFACT_SOURCES = {"ai_derived", "user_override", "default_template"}
+DEFAULT_SCOPE = "full"
+DEFAULT_PHASE = "production"
 
 
 @dataclass
@@ -91,6 +93,14 @@ class ProjectLexicon:
     @property
     def required_artifacts(self) -> list[dict[str, Any]]:
         return deepcopy(self._data.get("required_artifacts", []))
+
+    @property
+    def scope(self) -> str:
+        return str(self._data.get("scope") or DEFAULT_SCOPE)
+
+    @property
+    def phase(self) -> str:
+        return str(self._data.get("phase") or DEFAULT_PHASE)
 
     def set_coverage_decisions(self, decisions: list[AskItem]) -> None:
         self._data["coverage_decisions"] = [
@@ -292,6 +302,10 @@ def validate_lexicon(data: dict[str, Any]) -> None:
         derived_from = artifact.get("derived_from", [])
         if derived_from is not None and not isinstance(derived_from, list):
             raise LexiconError(f"required_artifacts derived_from must be a list: {artifact}")
+
+    for field_name in ("scope", "phase"):
+        if field_name in data and not isinstance(data[field_name], str):
+            raise LexiconError(f"{field_name} must be a string")
 
 
 def _load_schema() -> dict[str, Any]:
