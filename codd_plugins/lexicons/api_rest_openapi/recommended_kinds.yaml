@@ -1,0 +1,16 @@
+recommended_kinds:
+  - openapi_document_gap
+  - api_version_gap
+  - problem_details_gap
+  - pagination_contract_gap
+  - authentication_scheme_gap
+  - schema_contract_gap
+  - content_negotiation_gap
+  - status_code_contract_gap
+  - hypermedia_link_gap
+  - idempotency_contract_gap
+  - rate_limit_contract_gap
+  - cors_policy_gap
+  - cache_header_gap
+  - parameter_validation_gap
+  - async_operation_gap

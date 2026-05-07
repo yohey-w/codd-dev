@@ -1,0 +1,56 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=openapi AND coverage=gap"
+    severity: high
+    rationale: "Missing OpenAPI document structure prevents reliable API discovery, review, and tool execution."
+  - when: "axis=info.version AND coverage=gap"
+    severity: medium
+    rationale: "Missing version metadata makes contract changes hard to identify or govern."
+  - when: "axis=problem_details AND coverage=gap"
+    severity: high
+    rationale: "Error responses without a machine-readable problem contract force clients to parse ad hoc failures."
+  - when: "axis=query AND coverage=gap"
+    severity: medium
+    rationale: "Pagination gaps can make collection traversal, limits, and next-page behavior ambiguous."
+  - when: "axis=security AND coverage=gap"
+    severity: critical
+    rationale: "Authentication or authorization gaps can expose protected operations or data."
+  - when: "axis=schemas AND coverage=gap"
+    severity: high
+    rationale: "Missing schema contracts leave request and response payload shapes unverified."
+  - when: "axis=content AND coverage=gap"
+    severity: high
+    rationale: "Missing content negotiation or media type coverage can break interoperable clients."
+  - when: "axis=responses AND coverage=gap"
+    severity: high
+    rationale: "Missing status-code response contracts make success, client error, and server error behavior ambiguous."
+  - when: "axis=links AND coverage=gap"
+    severity: medium
+    rationale: "Hypermedia relationship gaps reduce client discoverability for related operations."
+  - when: "axis=idempotent AND coverage=gap"
+    severity: medium
+    rationale: "Idempotency gaps can make retry behavior unsafe for clients and workers."
+  - when: "axis=429 AND coverage=gap"
+    severity: medium
+    rationale: "Rate limit gaps can leave clients without a predictable throttling and retry contract."
+  - when: "axis=Access-Control-Allow-Origin AND coverage=gap"
+    severity: high
+    rationale: "CORS gaps can leak cross-origin responses or block legitimate browser clients."
+  - when: "axis=Cache-Control AND coverage=gap"
+    severity: medium
+    rationale: "Cache header gaps can create stale, over-shared, or unvalidated API responses."
+  - when: "axis=parameters AND coverage=gap"
+    severity: high
+    rationale: "Parameter validation gaps can accept malformed resource identifiers, filters, or headers."
+  - when: "axis=callbacks AND coverage=gap"
+    severity: medium
+    rationale: "Async operation gaps can leave callback or webhook ownership, payloads, and retry behavior unclear."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit coverage needs reviewer confirmation before it can be treated as sufficient."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered axes may still emit informational review notes outside release-blocking gaps."
