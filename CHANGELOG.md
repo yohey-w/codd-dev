@@ -4,6 +4,24 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-05-08 — Deployment chain auto-discovery (cmd_448)
+
+### Fixed (surfaced by osato-lms cmd_446 dogfooding)
+
+- `deployment_completeness` no longer emits `missing_impl_for_step` for projects whose deployment artifacts (e.g. `Dockerfile`) live at the standard location but were not enumerated by `dag.impl_file_patterns`. The deployment plug-in now auto-discovers existing impl artifacts that match the deployment doc's section keywords (`migrate` / `seed` / `build` / `start`).
+
+### Added
+
+- `codd.deployment.extractor.discover_deployment_impl_candidates(project_root, deployment_docs)` — generic, plug-in-owned mapping from section keyword to standard filenames; only paths that exist are returned. CoDD core stays free of stack-specific filenames; the mapping lives next to the deployment plug-in.
+- DAG builder registers each discovered impl as `kind="impl_file"` with `auto_registered_for_deployment: true`.
+
+### Quality Metrics
+
+- **pytest**: 2680 PASS / 0 FAIL / 0 SKIP (no regressions vs v2.2.0)
+- **Generality Gate**: `codd/dag/builder.py` reuses generic glob + existence check; the section→filename mapping lives inside `codd/deployment/extractor.py` (plug-in surface) — Layer A core stays clean.
+- **Compatibility**: opt-in via existing impl_file_patterns still works unchanged; auto-discovery only triggers when deployment docs have matching section keywords and the standard files exist.
+- **osato-lms dogfooding**: `unrepairable` 16 → 5 (deployment_completeness 2 → 1, verification_test_runtime 14 → 4). Remaining items target the `produces_state` chain and the Vitest matcher, tracked separately.
+
 ## [2.2.0] - 2026-05-08 — Elicit bug fixes + scope/phase filter (cmd_445)
 
 ### Fixed (P0 release blocker — surfaced by osato-lms cmd_442 dogfooding)
