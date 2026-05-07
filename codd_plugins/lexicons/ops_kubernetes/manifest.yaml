@@ -1,0 +1,25 @@
+name: ops_kubernetes
+lexicon_name: ops_kubernetes
+version: "1.0.0"
+source_url: "https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.30/"
+source_version: "Kubernetes API Reference v1.30.0 + Kubernetes Concepts"
+description: "Kubernetes operations coverage axes for workload, service, storage, access-control, scheduling, resource, probe, autoscaling, observability, upgrade, and namespace contracts."
+observation_dimensions: 12
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Kubernetes API Reference v1.30"
+    url: "https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.30/"
+    source_version: "v1.30.0"
+  - title: "Kubernetes Concepts"
+    url: "https://kubernetes.io/docs/concepts/"
+  - title: "Services, Load Balancing, and Networking"
+    url: "https://kubernetes.io/docs/concepts/services-networking/"
+  - title: "Managing Resources for Containers"
+    url: "https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/"
+  - title: "Upgrade A Cluster"
+    url: "https://kubernetes.io/docs/tasks/administer-cluster/cluster-upgrade/"

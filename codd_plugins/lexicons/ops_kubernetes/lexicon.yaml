@@ -1,0 +1,297 @@
+coverage_axes:
+  - axis_type: "Workloads"
+    rationale: "Kubernetes API Reference v1.30 defines Workloads resources as the objects used to manage and run containers on the cluster."
+    criticality_default: high
+    variants:
+      - id: "Pod"
+        label: "Pod"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "container execution unit"}
+        criticality: critical
+      - id: "Deployment"
+        label: "Deployment"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "stateless controller"}
+        criticality: high
+      - id: "StatefulSet"
+        label: "StatefulSet"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "stateful controller"}
+        criticality: high
+      - id: "DaemonSet"
+        label: "DaemonSet"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "node-local controller"}
+        criticality: medium
+      - id: "Job"
+        label: "Job"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "run-to-completion controller"}
+        criticality: medium
+      - id: "CronJob"
+        label: "CronJob"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "scheduled run-to-completion controller"}
+        criticality: medium
+  - axis_type: "Service"
+    rationale: "Kubernetes API Reference v1.30 defines Service resources for stitching workloads into accessible, load-balanced endpoints."
+    criticality_default: high
+    variants:
+      - id: "Service"
+        label: "Service"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "stable endpoint"}
+        criticality: high
+      - id: "Endpoints"
+        label: "Endpoints"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "endpoint address set"}
+        criticality: medium
+      - id: "EndpointSlice"
+        label: "EndpointSlice"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "scalable endpoint set"}
+        criticality: medium
+      - id: "Ingress"
+        label: "Ingress"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "HTTP routing"}
+        criticality: high
+      - id: "NetworkPolicy"
+        label: "NetworkPolicy"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "pod network access control"}
+        criticality: high
+  - axis_type: "ConfigMap"
+    rationale: "Kubernetes concepts define ConfigMaps and Secrets as mechanisms to inject configuration data and sensitive data into applications."
+    criticality_default: high
+    variants:
+      - id: "ConfigMap"
+        label: "ConfigMap"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "non-confidential configuration data"}
+        criticality: high
+      - id: "Secret"
+        label: "Secret"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "sensitive configuration data"}
+        criticality: critical
+      - id: "env"
+        label: "Environment variable"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "environment injection"}
+        criticality: medium
+      - id: "volumeMounts"
+        label: "Volume mounts"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "file-based injection"}
+        criticality: medium
+      - id: "projected"
+        label: "Projected volume"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "combined volume projection"}
+        criticality: medium
+  - axis_type: "PersistentVolume"
+    rationale: "Kubernetes storage concepts define PersistentVolumes and PersistentVolumeClaims for cluster storage and application claims."
+    criticality_default: high
+    variants:
+      - id: "PersistentVolume"
+        label: "PersistentVolume"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "cluster storage resource"}
+        criticality: high
+      - id: "PersistentVolumeClaim"
+        label: "PersistentVolumeClaim"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "namespaced storage claim"}
+        criticality: high
+      - id: "StorageClass"
+        label: "StorageClass"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "storage class"}
+        criticality: medium
+      - id: "Volume"
+        label: "Volume"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "pod storage attachment"}
+        criticality: high
+      - id: "volumeClaimTemplates"
+        label: "Volume claim templates"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "stateful workload storage template"}
+        criticality: medium
+  - axis_type: "RBAC"
+    rationale: "Kubernetes API access control documents Role Based Access Control with Roles, ClusterRoles, RoleBindings, and ClusterRoleBindings."
+    criticality_default: critical
+    variants:
+      - id: "ServiceAccount"
+        label: "ServiceAccount"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "pod identity"}
+        criticality: high
+      - id: "Role"
+        label: "Role"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "namespaced permissions"}
+        criticality: critical
+      - id: "ClusterRole"
+        label: "ClusterRole"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "cluster permissions"}
+        criticality: critical
+      - id: "RoleBinding"
+        label: "RoleBinding"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "namespaced permission binding"}
+        criticality: critical
+      - id: "ClusterRoleBinding"
+        label: "ClusterRoleBinding"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "cluster permission binding"}
+        criticality: critical
+  - axis_type: "Scheduling"
+    rationale: "Kubernetes scheduling concepts define node assignment, affinity, taints, tolerations, topology spread, and scheduler selection."
+    criticality_default: high
+    variants:
+      - id: "nodeSelector"
+        label: "Node selector"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "label-based node selection"}
+        criticality: medium
+      - id: "affinity"
+        label: "Affinity"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "affinity and anti-affinity"}
+        criticality: medium
+      - id: "taints"
+        label: "Taints"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "node repulsion"}
+        criticality: medium
+      - id: "tolerations"
+        label: "Tolerations"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "taint tolerance"}
+        criticality: medium
+      - id: "topologySpreadConstraints"
+        label: "Topology spread constraints"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "topology distribution"}
+        criticality: medium
+      - id: "schedulerName"
+        label: "Scheduler name"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "scheduler selection"}
+        criticality: info
+  - axis_type: "ResourceQuota"
+    rationale: "Kubernetes resource management concepts define requests, limits, ResourceQuota, LimitRange, and Quality of Service for workload capacity governance."
+    criticality_default: high
+    variants:
+      - id: "requests"
+        label: "Resource requests"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "minimum capacity request"}
+        criticality: high
+      - id: "limits"
+        label: "Resource limits"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "maximum capacity limit"}
+        criticality: high
+      - id: "ResourceQuota"
+        label: "ResourceQuota"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "namespace aggregate quota"}
+        criticality: high
+      - id: "LimitRange"
+        label: "LimitRange"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "per-object resource defaults and bounds"}
+        criticality: medium
+      - id: "QoS"
+        label: "Quality of Service"
+        attributes: {source: "Kubernetes Concepts", coverage_target: "pod resource class"}
+        criticality: medium
+  - axis_type: "Probe"
+    rationale: "Kubernetes container configuration defines liveness, readiness, and startup probes for workload health evaluation."
+    criticality_default: high
+    variants:
+      - id: "livenessProbe"
+        label: "Liveness probe"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "restart health check"}
+        criticality: high
+      - id: "readinessProbe"
+        label: "Readiness probe"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "service endpoint readiness"}
+        criticality: high
+      - id: "startupProbe"
+        label: "Startup probe"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "slow-start protection"}
+        criticality: medium
+      - id: "Probe"
+        label: "Probe"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "probe configuration object"}
+        criticality: medium
+  - axis_type: "HorizontalPodAutoscaler"
+    rationale: "Kubernetes autoscaling API resources define HorizontalPodAutoscaler behavior for scaling workloads from observed metrics."
+    criticality_default: high
+    variants:
+      - id: "HorizontalPodAutoscaler"
+        label: "HorizontalPodAutoscaler"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "workload scaling object"}
+        criticality: high
+      - id: "scaleTargetRef"
+        label: "Scale target reference"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "scaling target"}
+        criticality: high
+      - id: "metrics"
+        label: "Metrics"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "scaling signal"}
+        criticality: high
+      - id: "minReplicas"
+        label: "Minimum replicas"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "lower replica bound"}
+        criticality: medium
+      - id: "maxReplicas"
+        label: "Maximum replicas"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "upper replica bound"}
+        criticality: medium
+      - id: "behavior"
+        label: "Scaling behavior"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "scale policy behavior"}
+        criticality: medium
+  - axis_type: "Events"
+    rationale: "Kubernetes observability reference includes Events, component metrics APIs, logs, traces, and audit configuration for operational visibility."
+    criticality_default: high
+    variants:
+      - id: "Event"
+        label: "Event"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "object event stream"}
+        criticality: medium
+      - id: "metrics.k8s.io"
+        label: "Metrics API"
+        attributes: {source: "Kubernetes Reference", coverage_target: "resource metrics API"}
+        criticality: high
+      - id: "custom.metrics.k8s.io"
+        label: "Custom Metrics API"
+        attributes: {source: "Kubernetes Reference", coverage_target: "custom metric scaling data"}
+        criticality: medium
+      - id: "external.metrics.k8s.io"
+        label: "External Metrics API"
+        attributes: {source: "Kubernetes Reference", coverage_target: "external metric scaling data"}
+        criticality: medium
+      - id: "audit.k8s.io"
+        label: "Audit API"
+        attributes: {source: "Kubernetes Reference", coverage_target: "audit trail configuration"}
+        criticality: high
+  - axis_type: "Upgrade A Cluster"
+    rationale: "Kubernetes cluster administration tasks define cluster upgrade planning, draining, disruption budgets, and API deprecation checks."
+    criticality_default: medium
+    variants:
+      - id: "Upgrade A Cluster"
+        label: "Upgrade a cluster"
+        attributes: {source: "Kubernetes Tasks", coverage_target: "cluster upgrade task"}
+        criticality: medium
+      - id: "kubectl drain"
+        label: "kubectl drain"
+        attributes: {source: "Kubernetes Tasks", coverage_target: "node evacuation"}
+        criticality: medium
+      - id: "cordon"
+        label: "Cordon"
+        attributes: {source: "Kubernetes Tasks", coverage_target: "node scheduling stop"}
+        criticality: medium
+      - id: "PodDisruptionBudget"
+        label: "PodDisruptionBudget"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "voluntary disruption budget"}
+        criticality: high
+      - id: "API deprecation"
+        label: "API deprecation"
+        attributes: {source: "Kubernetes Reference", coverage_target: "version compatibility"}
+        criticality: high
+  - axis_type: "Namespace"
+    rationale: "Kubernetes concepts define Namespaces as a mechanism for sharing a cluster across multiple users and scopes."
+    criticality_default: high
+    variants:
+      - id: "Namespace"
+        label: "Namespace"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "cluster scope partition"}
+        criticality: high
+      - id: "ResourceQuota"
+        label: "Namespace ResourceQuota"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "tenant capacity guardrail"}
+        criticality: high
+      - id: "LimitRange"
+        label: "Namespace LimitRange"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "tenant default resource bounds"}
+        criticality: medium
+      - id: "RoleBinding"
+        label: "Namespace RoleBinding"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "tenant access binding"}
+        criticality: high
+      - id: "NetworkPolicy"
+        label: "Namespace NetworkPolicy"
+        attributes: {source: "Kubernetes API Reference v1.30", coverage_target: "tenant traffic isolation"}
+        criticality: high
