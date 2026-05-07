@@ -192,6 +192,98 @@ def extract_verification_tests(
     return [tests[key] for key in sorted(tests)]
 
 
+_DEPLOYMENT_BINDINGS_CACHE: list[dict[str, Any]] | None = None
+
+
+def load_deployment_bindings() -> list[dict[str, Any]]:
+    """Load impl_pattern → runtime_state bindings from codd_plugins/stack_map.yaml.
+
+    Returns a list of dicts with normalized keys (compiled `impl_re`,
+    `runtime_state_kind`, `runtime_state_target`). The mapping itself lives
+    in the plug-in YAML so CoDD core stays free of stack-specific filenames.
+    """
+    global _DEPLOYMENT_BINDINGS_CACHE
+    if _DEPLOYMENT_BINDINGS_CACHE is not None:
+        return _DEPLOYMENT_BINDINGS_CACHE
+
+    candidates = [
+        Path(__file__).resolve().parents[2] / "codd_plugins" / "stack_map.yaml",
+        Path.cwd() / "codd_plugins" / "stack_map.yaml",
+    ]
+    payload: dict[str, Any] | None = None
+    for candidate in candidates:
+        if candidate.is_file():
+            payload = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
+            break
+
+    bindings: list[dict[str, Any]] = []
+    raw_bindings = (payload or {}).get("deployment_bindings", [])
+    if isinstance(raw_bindings, list):
+        for entry in raw_bindings:
+            if not isinstance(entry, dict):
+                continue
+            pattern = str(entry.get("impl_pattern", "")).strip()
+            kind_str = str(entry.get("runtime_state_kind", "")).strip()
+            target = str(entry.get("runtime_state_target", "")).strip()
+            if not pattern or not kind_str or not target:
+                continue
+            try:
+                kind = RuntimeStateKind(kind_str)
+            except ValueError:
+                continue
+            try:
+                impl_re = re.compile(pattern)
+            except re.error:
+                continue
+            bindings.append({
+                "impl_re": impl_re,
+                "runtime_state_kind": kind,
+                "runtime_state_target": target,
+            })
+    _DEPLOYMENT_BINDINGS_CACHE = bindings
+    return bindings
+
+
+def reset_deployment_bindings_cache() -> None:
+    """Clear the cached bindings (used by tests)."""
+    global _DEPLOYMENT_BINDINGS_CACHE
+    _DEPLOYMENT_BINDINGS_CACHE = None
+
+
+def auto_runtime_states_for_impl(impl_paths: list[Path], project_root: Path) -> list[RuntimeStateNode]:
+    """Generate runtime_state nodes for auto-discovered impl artifacts.
+
+    For each impl path, the first matching deployment binding produces one
+    RuntimeStateNode keyed `runtime:<kind>:<target>`. Duplicates (same
+    identifier) are coalesced.
+    """
+    bindings = load_deployment_bindings()
+    if not bindings:
+        return []
+    seen: dict[str, RuntimeStateNode] = {}
+    root = Path(project_root)
+    for path in impl_paths:
+        rel = path.relative_to(root).as_posix() if path.is_absolute() else str(path)
+        for binding in bindings:
+            if not binding["impl_re"].search(rel):
+                continue
+            target = binding["runtime_state_target"]
+            kind = binding["runtime_state_kind"]
+            identifier = f"runtime:{kind.value}:{target}"
+            if identifier in seen:
+                break
+            seen[identifier] = RuntimeStateNode(
+                identifier=identifier,
+                kind=kind,
+                target=target,
+                expected_value=None,
+                actual_check_command=None,
+                capabilities_provided=[],
+            )
+            break
+    return list(seen.values())
+
+
 def discover_deployment_impl_candidates(
     project_root: Path,
     deployment_docs: list[DeploymentDocNode],
@@ -569,6 +661,10 @@ def _runtime_kind_for_impl(impl_id: str) -> RuntimeStateKind | None:
         return RuntimeStateKind.DB_SEED
     if name in {"main.ts", "main.js", "server.ts", "server.js", "app.ts", "app.js", "index.ts", "index.js"}:
         return RuntimeStateKind.SERVER_RUNNING
+
+    for binding in load_deployment_bindings():
+        if binding["impl_re"].search(impl_id):
+            return binding["runtime_state_kind"]
     return None
 
 
@@ -586,6 +682,13 @@ def _verification_matches_runtime(
         return _mentions_any(target, ("schema", "migration", "migrate", "database", "db"))
     if runtime_state.kind is RuntimeStateKind.SERVER_RUNNING:
         return _mentions_any(target, ("health", "server", "start", "running", "home"))
+    if runtime_state.kind is RuntimeStateKind.FILE_PRESENT:
+        return _mentions_any(
+            target,
+            ("build", "image", "container", "deploy", "compose", "smoke", "artifact"),
+        )
+    if runtime_state.kind is RuntimeStateKind.ENV_VAR_SET:
+        return _mentions_any(target, ("env", "config", "secret"))
     return False
 
 

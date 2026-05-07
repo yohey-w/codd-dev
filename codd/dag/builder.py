@@ -610,9 +610,13 @@ def _add_deployment_graph(
     )
     verification_tests = extract_verification_tests(project_root, project_config, design_docs)
 
-    from codd.deployment.extractor import discover_deployment_impl_candidates
+    from codd.deployment.extractor import (
+        auto_runtime_states_for_impl,
+        discover_deployment_impl_candidates,
+    )
 
     capability_patterns = _capability_patterns(project_config)
+    auto_impl_paths: list[Path] = []
     for impl_path in discover_deployment_impl_candidates(project_root, deployment_docs):
         rel_id = impl_path.relative_to(project_root).as_posix()
         if rel_id in dag.nodes:
@@ -632,6 +636,15 @@ def _add_deployment_graph(
             ),
         )
         impl_nodes[rel_id] = impl_path.resolve()
+        auto_impl_paths.append(impl_path)
+
+    if auto_impl_paths:
+        existing_state_ids = {state.identifier for state in runtime_states}
+        for runtime_state in auto_runtime_states_for_impl(auto_impl_paths, project_root):
+            if runtime_state.identifier in existing_state_ids:
+                continue
+            runtime_states.append(runtime_state)
+            existing_state_ids.add(runtime_state.identifier)
 
     for deployment_doc in deployment_docs:
         _add_node_once(

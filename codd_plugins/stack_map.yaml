@@ -76,3 +76,21 @@ stack_map:
     suggested_lexicons:
       - babok
 
+# Deployment artifact bindings — used by the deployment plug-in to wire
+# auto-discovered impl_file nodes (cmd_448) to runtime_state nodes
+# (cmd_450). Keys: impl_pattern (regex against impl_id), runtime_state_kind
+# (one of RuntimeStateKind values), runtime_state_target (string label used
+# to form `runtime:<kind>:<target>` and to match verification tests).
+# Adding entries does not require core code changes; CoDD core loads this
+# block as data.
+deployment_bindings:
+  - impl_pattern: "(^|/)Dockerfile$|(^|/)Containerfile$"
+    runtime_state_kind: file_present
+    runtime_state_target: build_artifact
+  - impl_pattern: "(^|/)docker-compose(\\.production|\\.staging)?\\.ya?ml$|(^|/)compose\\.ya?ml$"
+    runtime_state_kind: file_present
+    runtime_state_target: container_compose
+  - impl_pattern: "(^|/)package\\.json$"
+    runtime_state_kind: file_present
+    runtime_state_target: build_artifact
+

@@ -4,6 +4,32 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-05-08 — Runtime state auto-binding for deployment chain (cmd_450)
+
+### Added
+
+- `codd_plugins/stack_map.yaml` gains a `deployment_bindings:` block (impl_pattern → runtime_state_kind / runtime_state_target). The mapping itself stays in the plug-in; CoDD core loads it as data.
+- `codd.deployment.extractor.load_deployment_bindings()` and `auto_runtime_states_for_impl()` translate auto-discovered impl artifacts (cmd_448) into the runtime_state nodes the deployment chain expects.
+- DAG builder now appends those runtime_state nodes alongside the implicit `produces_state` edges so chains like `Dockerfile → runtime:file_present:build_artifact` close themselves without a `codd.yaml` change.
+- `_runtime_kind_for_impl` falls back to `deployment_bindings` for anything outside the legacy seed/migration/server set.
+- `_verification_matches_runtime` recognises `RuntimeStateKind.FILE_PRESENT` and `ENV_VAR_SET` via keyword targets so smoke checks can match build artifacts/env capabilities.
+
+### osato-lms dogfooding effect
+
+| Stage | unrepairable | broken_at |
+| --- | --- | --- |
+| v2.2.0 | 16 | `missing_impl_for_step` (Dockerfile) |
+| v2.3.0 (cmd_448) | 5 | `state_not_produced` |
+| **v2.4.0 (cmd_450)** | **1** | `no_verification_test` (next chain step) |
+
+Chain progression so far: `missing_impl_for_step` → `state_not_produced` → `no_verification_test`. Closing the final step (binding `runtime:file_present:build_artifact` to a smoke verification when the verification target is a URL/path with no shared keyword) is tracked in a follow-up.
+
+### Quality Metrics
+
+- **pytest**: 2680 PASS / 0 FAIL / 0 SKIP (no regressions vs v2.3.0)
+- **Generality Gate**: Layer A (`codd/dag/builder.py`) loads bindings as data; the impl_pattern → runtime_state_kind table lives in `codd_plugins/stack_map.yaml`.
+- **Compatibility**: legacy projects without `deployment_bindings` continue to work — bindings are optional and additive.
+
 ## [2.3.0] - 2026-05-08 — Deployment chain auto-discovery (cmd_448)
 
 ### Fixed (surfaced by osato-lms cmd_446 dogfooding)
