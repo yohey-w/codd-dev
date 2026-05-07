@@ -4,6 +4,83 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.40.0] - 2026-05-08 — Lexicon 30本 完全整備 マイルストーン (cmd_438)
+
+### Added — 31 lexicons (cmd_438 batch1〜5 完走)
+
+cmd_438 lexicon 30本 Sub-Agent 並列整備が完走。`codd elicit --lexicon <id>` で
+公式 spec 由来の coverage-check が **7 領域 30 lexicons / ~280+ axes** で動作する。
+BABOK 含めて計 31 lexicons を `codd_plugins/lexicons/` に同梱。
+
+#### 領域別 lexicon 一覧
+
+| 領域 | Lexicons (axis 数概算) |
+|------|------------------------|
+| Methodology base | babok (13) |
+| Web | web_responsive (8) / web_a11y_wcag22_aa (13) / web_security_owasp (14) /
+        web_performance_core_web_vitals (6) / web_authn_webauthn (6) /
+        web_forms_html5 (8) / web_browser_compat (5) / web_seo_schemaorg (8) /
+        web_pwa_manifest (7) |
+| Mobile | mobile_ios_hig (12) / mobile_android_material3 (12) / mobile_a11y_native (8) |
+| Backend / API | api_rest_openapi (15) / backend_grpc_proto (8) /
+                  backend_graphql (10) / backend_event_cloudevents (6) |
+| Data | data_relational_iso_sql (10) / data_nosql_jsonschema (10) /
+         data_eventsourcing_es_cqrs (6) |
+| Ops / Cloud | ops_observability_otel (8) / ops_kubernetes (12) /
+                ops_iac_terraform (10) / ops_cicd_pipeline (7) |
+| Compliance / Governance | data_governance_appi_gdpr (12) / ai_governance_eu_act (10) /
+                            compliance_hipaa (10) / compliance_pci_dss_4 (12) /
+                            compliance_iso27001 (14) |
+| Methodology / Test | process_iso25010 (8) / process_test_iso29119 (6) |
+
+#### Lexicon パッケージ標準構造
+
+各 lexicon は `codd_plugins/lexicons/<id>/` 配下に共通レイアウトで提供:
+
+- `manifest.yaml` — name / version / source_url / source_version / observation_dimensions / references
+- `lexicon.yaml` — coverage_axes (axis_type / variants / criticality / rationale)
+- `severity_rules.yaml` — axis × coverage 状態 → severity (critical/high/medium/info) 振り分け
+- `coverage_matrix.md` — axis のカバー条件説明 (人間レビュー用)
+- `elicit_extend.md` — `extends:` で `codd/elicit/templates/elicit_prompt_L0.md` を継承し、
+  axis 別 covered/implicit/gap 判定例を記述
+- `recommended_kinds.yaml` — 推奨 finding kind (open list、core hardcode 禁止)
+
+### batch 完走履歴 (cmd_438)
+
+| Batch | 領域 | Lexicons | Commits |
+|-------|------|----------|---------|
+| batch1 | Web 基盤 | web_responsive / web_a11y_wcag22_aa / web_security_owasp | `ffb4aa0` / `210db5d` |
+| batch2 | Compliance + Mobile + API | APPI/GDPR / EU AI Act / iOS HIG / Material 3 / OpenAPI | `20fb2fd` / `032cd0e` / `94cf190` |
+| batch3 | Compliance + Data + Ops | HIPAA / PCI DSS / ISO SQL / JSON Schema / OTel | `ff13def` / `4189f2a` / `fd1a675` |
+| batch4 | Web 拡張 + Backend + Ops | Core Web Vitals / WebAuthn / proto3 / GraphQL / Kubernetes / Terraform | `3938524` / `608e18a` / `37a0b6e` |
+| batch5 | Web 残 + Misc + Process | HTML5 forms / Baseline / Schema.org / PWA / Mobile A11y / CloudEvents / EventSourcing / GitOps / ISO 27001 / 25010 / 29119 | `5108ed7` / `73b97a0` / `a0864f2` / `e9aed62` |
+
+### Quality Metrics
+
+- **pytest**: 2600 PASS / 0 FAIL / 0 SKIP (v1.39.0 2363 → +237)
+- **新 node/edge/check/SDK 依存**: 全 0
+- **Generality Gate 三層 (Layer A core / Layer B template / Layer C lexicon)**: zero hit
+  - core code に lexicon 名 hardcode 0
+  - template に specific lexicon 名 hardcode 0
+  - lexicon plug-in 配下のみ project 固有名 OK
+- **backward compatible**: 既存 elicit / diff / brownfield API 互換維持
+
+### Generality Gate 維持の証
+
+`cmd_438` は **15 commits / 31 lexicons / ~280+ axes** を追加したが、CoDD core
+(`codd/elicit/*.py` / `codd/diff/*.py` / `codd/brownfield/*.py`) には specific
+lexicon 名 / stack 名 / framework 名 / vendor 名の hardcode を **1 件も入れずに**
+完走した。axis 値はすべて公式 spec literal (W3C / OWASP / OpenAPI / ISO / HHS /
+PCI SSC / OpenTelemetry / Schema.org / Apple HIG / Material 3 / GDPR / EU AI Act)
+を出典として採用。
+
+### 殿哲学への接続
+
+「機能要件 + 制約だけ書けば全自動」北極星に対し、この 31 lexicons は **「制約」を
+公式 spec に置いた lookup table** として機能する。`codd elicit --lexicon
+<id>` で domain ごとの coverage-check が即座に走り、要件に潜む observation
+dimension の gap を発見する。
+
 ## [1.39.0] - 2026-05-08 — RepairLoop strategy v2 (cmd_432) + batch1 lexicons (cmd_438)
 
 ### Added — RepairLoop strategy v2 (cmd_432, commit 54d3ce5)
