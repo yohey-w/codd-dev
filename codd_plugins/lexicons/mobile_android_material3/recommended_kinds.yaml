@@ -1,0 +1,13 @@
+recommended_kinds:
+  - material3_color_gap
+  - material3_typography_gap
+  - material3_shape_gap
+  - material3_elevation_gap
+  - material3_motion_gap
+  - material3_component_gap
+  - material3_iconography_gap
+  - material3_accessibility_gap
+  - material3_adaptive_design_gap
+  - material3_interaction_state_gap
+  - material3_content_design_gap
+  - material3_dynamic_color_gap

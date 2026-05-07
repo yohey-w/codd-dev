@@ -1,0 +1,13 @@
+recommended_kinds:
+  - mobile_navigation_search_gap
+  - mobile_typography_gap
+  - mobile_color_gap
+  - mobile_accessibility_gap
+  - mobile_haptics_gap
+  - mobile_motion_gap
+  - mobile_input_gap
+  - mobile_layout_gap
+  - mobile_iconography_gap
+  - mobile_audio_gap
+  - mobile_privacy_gap
+  - mobile_feedback_gap

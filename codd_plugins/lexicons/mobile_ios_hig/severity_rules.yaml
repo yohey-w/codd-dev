@@ -1,0 +1,40 @@
+rules:
+  - when: "axis=Navigation and search AND coverage=gap"
+    severity: high
+    rationale: "Missing navigation or search coverage can prevent people from finding core content or actions."
+  - when: "axis=Typography AND coverage=gap"
+    severity: high
+    rationale: "Missing typography coverage can leave legibility and hierarchy undefined."
+  - when: "axis=Color AND coverage=gap"
+    severity: high
+    rationale: "Missing color coverage can hide semantic, contrast, or appearance adaptation failures."
+  - when: "axis=Accessibility AND coverage=gap"
+    severity: critical
+    rationale: "Missing accessibility coverage can block assistive technology and accommodation support."
+  - when: "axis=Playing haptics AND coverage=gap"
+    severity: medium
+    rationale: "Missing haptics coverage can make feedback inconsistent or disruptive."
+  - when: "axis=Motion AND coverage=gap"
+    severity: high
+    rationale: "Missing motion coverage can create disorientation or reduced-motion failures."
+  - when: "axis=Inputs AND coverage=gap"
+    severity: high
+    rationale: "Missing input coverage can block touch, keyboard, pointer, or gesture alternatives."
+  - when: "axis=Layout AND coverage=gap"
+    severity: high
+    rationale: "Missing layout coverage can hide safe-area, orientation, and adaptive layout failures."
+  - when: "axis=Icons AND coverage=gap"
+    severity: medium
+    rationale: "Missing icon coverage can make controls ambiguous or inconsistent."
+  - when: "axis=Playing audio AND coverage=gap"
+    severity: medium
+    rationale: "Missing audio coverage can leave playback, interruption, or user control behavior undefined."
+  - when: "axis=Privacy AND coverage=gap"
+    severity: critical
+    rationale: "Missing privacy coverage can leave data collection, disclosure, or permission behavior unsafe."
+  - when: "axis=Feedback AND coverage=gap"
+    severity: high
+    rationale: "Missing feedback coverage can hide confirmation, error, or alert behavior."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking gap."

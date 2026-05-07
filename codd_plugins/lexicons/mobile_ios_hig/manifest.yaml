@@ -1,0 +1,22 @@
+name: mobile_ios_hig
+lexicon_name: mobile_ios_hig
+version: "1.0.0"
+source_url: "https://developer.apple.com/design/human-interface-guidelines/"
+source_version: "Apple Human Interface Guidelines, current as of 2026-05-08"
+description: "Apple Human Interface Guidelines coverage axes for mobile product elicitation."
+observation_dimensions: 12
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Apple Human Interface Guidelines"
+    url: "https://developer.apple.com/design/human-interface-guidelines/"
+  - title: "Navigation and search"
+    url: "https://developer.apple.com/design/human-interface-guidelines/navigation-and-search"
+  - title: "Accessibility"
+    url: "https://developer.apple.com/design/human-interface-guidelines/accessibility"
+  - title: "Privacy"
+    url: "https://developer.apple.com/design/human-interface-guidelines/privacy"

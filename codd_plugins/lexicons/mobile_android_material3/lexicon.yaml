@@ -1,0 +1,145 @@
+coverage_axes:
+  - axis_type: "Color"
+    rationale: "Material Design 3 publishes Color guidance for schemes, hierarchy, state, and brand communication."
+    criticality_default: high
+    variants:
+      - id: "Color"
+        label: "Color system coverage"
+        attributes: {source_literal: "Color", source_url: "https://m3.material.io/styles/color/system"}
+        criticality: high
+      - id: "Color roles"
+        label: "Color role mapping"
+        attributes: {source_literal: "Color roles", source_url: "https://m3.material.io/styles/color/roles"}
+        criticality: high
+  - axis_type: "Typography"
+    rationale: "Material Design 3 publishes Typography guidance with fonts, type scale, tokens, and applying type."
+    criticality_default: high
+    variants:
+      - id: "Typography"
+        label: "Type hierarchy and scale"
+        attributes: {source_literal: "Typography", source_url: "https://m3.material.io/styles/typography"}
+        criticality: high
+      - id: "Type scale & tokens"
+        label: "Type scale and token coverage"
+        attributes: {source_literal: "Type scale & tokens", source_url: "https://m3.material.io/styles/typography"}
+        criticality: medium
+  - axis_type: "Shape"
+    rationale: "Material Design 3 publishes Shape guidance for principles, corner radius scale, and shape morph."
+    criticality_default: medium
+    variants:
+      - id: "Shape"
+        label: "Shape system coverage"
+        attributes: {source_literal: "Shape", source_url: "https://m3.material.io/styles/shape"}
+        criticality: medium
+      - id: "Corner radius scale"
+        label: "Corner radius scale"
+        attributes: {source_literal: "Corner radius scale", source_url: "https://m3.material.io/styles/shape"}
+        criticality: medium
+  - axis_type: "Elevation"
+    rationale: "Material Design 3 publishes Elevation guidance for hierarchy and tokens."
+    criticality_default: medium
+    variants:
+      - id: "Elevation"
+        label: "Elevation hierarchy"
+        attributes: {source_literal: "Elevation", source_url: "https://m3.material.io/styles/elevation"}
+        criticality: medium
+      - id: "Tokens"
+        label: "Elevation token coverage"
+        attributes: {source_literal: "Tokens", source_url: "https://m3.material.io/styles/elevation"}
+        criticality: info
+  - axis_type: "Motion"
+    rationale: "Material Design 3 publishes Motion guidance with overview, easing, duration, and transitions."
+    criticality_default: high
+    variants:
+      - id: "Motion"
+        label: "Motion behavior"
+        attributes: {source_literal: "Motion", source_url: "https://m3.material.io/styles/motion/overview"}
+        criticality: high
+      - id: "Easing and duration"
+        label: "Easing and duration"
+        attributes: {source_literal: "Easing and duration", source_url: "https://m3.material.io/styles/motion/easing-and-duration"}
+        criticality: medium
+      - id: "Transitions"
+        label: "Transition patterns"
+        attributes: {source_literal: "Transitions", source_url: "https://m3.material.io/styles/motion/transitions"}
+        criticality: high
+  - axis_type: "Components"
+    rationale: "Material Design 3 publishes Components guidance for reusable interactive UI building blocks."
+    criticality_default: high
+    variants:
+      - id: "Components"
+        label: "Component selection and usage"
+        attributes: {source_literal: "Components", source_url: "https://m3.material.io/components"}
+        criticality: high
+      - id: "Accessibility"
+        label: "Component accessibility tab coverage"
+        attributes: {source_literal: "Accessibility", source_url: "https://m3.material.io/components/buttons"}
+        criticality: high
+  - axis_type: "Icons"
+    rationale: "Material Design 3 publishes Icons guidance for designing and applying icons."
+    criticality_default: medium
+    variants:
+      - id: "Icons"
+        label: "Icon design and application"
+        attributes: {source_literal: "Icons", source_url: "https://m3.material.io/styles/icons"}
+        criticality: medium
+      - id: "Applying icons"
+        label: "Icon application guidance"
+        attributes: {source_literal: "Applying icons", source_url: "https://m3.material.io/styles/icons"}
+        criticality: medium
+  - axis_type: "Accessibility"
+    rationale: "Material guidance includes accessibility guidelines for helping people of diverse abilities use UI."
+    criticality_default: critical
+    variants:
+      - id: "Accessibility guidelines"
+        label: "Accessibility guideline coverage"
+        attributes: {source_literal: "Accessibility guidelines", source_url: "https://material.io/design/usability/accessibility.html"}
+        criticality: critical
+      - id: "Touch target"
+        label: "Touch target coverage"
+        attributes: {source_literal: "Touch target", source_url: "https://m3.material.io/develop/web/supporting/touch-target"}
+        criticality: high
+  - axis_type: "Adaptive design"
+    rationale: "Material Design 3 publishes Adaptive design guidance for screen sizes, panes, and responsive behavior."
+    criticality_default: high
+    variants:
+      - id: "Adaptive design"
+        label: "Adaptive design behavior"
+        attributes: {source_literal: "Adaptive design", source_url: "https://m3.material.io/foundations/adaptive-design"}
+        criticality: high
+      - id: "Layout"
+        label: "Layout behavior"
+        attributes: {source_literal: "Layout", source_url: "https://m3.material.io/foundations/layout"}
+        criticality: high
+  - axis_type: "Interaction"
+    rationale: "Material Design 3 publishes Interaction foundations including gestures, selection, and states."
+    criticality_default: high
+    variants:
+      - id: "Interaction"
+        label: "Interaction behavior"
+        attributes: {source_literal: "Interaction", source_url: "https://m3.material.io/foundations/interaction"}
+        criticality: high
+      - id: "Interaction states"
+        label: "State layer and interaction state coverage"
+        attributes: {source_literal: "Interaction states", source_url: "https://m3.material.io/foundations/interaction/states"}
+        criticality: high
+  - axis_type: "Content design"
+    rationale: "Material Design 3 publishes Content design guidance for UX writing and user-facing language."
+    criticality_default: medium
+    variants:
+      - id: "Content design"
+        label: "Content design coverage"
+        attributes: {source_literal: "Content design", source_url: "https://m3.material.io/foundations/content-design"}
+        criticality: medium
+  - axis_type: "Dynamic color"
+    rationale: "Material Design 3 publishes Dynamic color guidance under the color system."
+    criticality_default: medium
+    variants:
+      - id: "Dynamic color"
+        label: "Dynamic color source and application"
+        attributes: {source_literal: "Dynamic color", source_url: "https://m3.material.io/styles/color/dynamic"}
+        criticality: medium
+      - id: "Choosing a scheme"
+        label: "Color scheme choice"
+        attributes: {source_literal: "Choosing a scheme", source_url: "https://m3.material.io/styles/color/choosing-a-scheme"}
+        criticality: medium
