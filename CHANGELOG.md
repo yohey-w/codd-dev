@@ -4,6 +4,45 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-05-08 — Lexicon-Driven Completeness milestone (cmd_441)
+
+CoDD v2.0.0 marks a positioning shift, not just a version bump.
+
+### North Star Restated
+
+> "Write only functional requirements and constraints. Code is generated, repaired, and verified automatically."
+
+v1.x delivered the **extract → diagnose → repair** pipeline. v2.0 adds the **constraint side** as a first-class plug-in surface — industry standards (BABOK / WCAG / OpenAPI / OWASP / ISO 27001 / GDPR / Kubernetes / OpenTelemetry / etc.) are now mechanically reusable as coverage axes, not lore living in someone's head.
+
+### Cumulative Changes Since v1.34.0
+
+- **31 lexicon plug-ins across 7 domains** (cmd_438): Methodology / Web / Mobile / Backend-API / Data / Ops / Compliance / Process. Each lexicon ships a manifest, axes, severity rules, coverage matrix, and prompt extension.
+- **`codd elicit` (Coverage / Spec Discovery Engine)** (cmd_431, v1.35.0): lexicon-loaded coverage-mode emits gap-only findings; lexicon-less mode keeps backward-compatible discovery.
+- **`codd diff` (brownfield drift)** (cmd_436, v1.37.0): three-category classification (implementation_only / requirement_only / drift) with severity coercion.
+- **`codd brownfield` pipeline** (cmd_437, v1.38.0): extract → diff → elicit orchestration for existing codebases.
+- **`codd init --suggest-lexicons`** (cmd_439, v1.41.0): manifest-file scan → `codd_plugins/stack_map.yaml` regex match → suggested lexicons appended to `project_lexicon.yaml`.
+- **`codd lexicon list/install/diff` + `codd coverage report`** (cmd_440, v1.42.0): plug-in management CLI plus JSON / Markdown / self-contained HTML coverage matrices.
+- **RepairLoop strategy v2** (cmd_432, v1.35.0): generic fallback chain replaces stack-specific hardcoding.
+- **Generality Gate three-layer architecture**: Layer A core ships zero specific framework / domain literals; Layer B templates expose generic placeholders; Layer C plug-ins carry all domain knowledge.
+
+### Quality Metrics
+
+- **pytest**: 2651 PASS / 0 FAIL / 0 SKIP
+- **Generality Gate**: zero hit across `codd/elicit/`, `codd/diff/`, `codd/brownfield/`, `codd/init/`, `codd/lexicon_cli/`, `codd/cli.py`
+- **Lexicon plug-ins**: 31 (BABOK + 30 across 7 domains), ~280 axes total
+
+### Contributors
+
+- **@yohey-w** — Maintainer / Architect
+- **@Seika86** — Sprint regex insight (PR #11)
+- **@v-kato** — Brownfield reproduction reports (Issues #17 / #18 / #19)
+- **@dev-komenzar** — `source_dirs` bug reproduction (Issue #13)
+
+### Compatibility
+
+- All v1.x CLI commands and config keys remain functional. v2.0.0 adds new subcommands; it removes nothing.
+- `project_lexicon.yaml` v1.0 schema is forward-compatible — v1.41.0+ optionally appends `suggested_lexicons:` and existing fields are untouched.
+
 ## [1.42.0] - 2026-05-08 — Lexicon CLI + coverage matrix report (cmd_440)
 
 ### Added

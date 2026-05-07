@@ -21,17 +21,18 @@
 
 CoDD は **要件 → 設計 → 実装 → テスト** をひとつの DAG として扱い、各ノードの一貫性 (coherence) を機械検証して、不整合があれば LLM が自動で修復する開発エンジンである。人間が書くのは **「何を」と「どこまで」** だけ。
 
-## 現在地 (v1.34.0)
+## 現在地 (v2.0.0 — Lexicon-Driven Completeness)
 
-北極星は遠いが、**境界条件下では実用に到達した**:
+v2.0.0 は **単なる version bump ではなく、思想転換のマイルストーン**。v1.x が *extract → diagnose → repair* パイプラインを完成させ、v2.0 で **制約側 (constraint side)** を plug-in 化した。
 
 - ✅ Next.js + Prisma + TypeScript (Web) で実プロジェクト dogfooding
-- ✅ `codd verify --auto-repair` が `PARTIAL_SUCCESS` 完走 (実プロジェクト LMS で実証、attempts=4 / applied_patches=4 / unrepairable=2)
+- ✅ `codd verify --auto-repair` が `PARTIAL_SUCCESS` 完走 (LMS 実プロジェクト、attempts=4 / applied_patches=4)
 - ✅ DAG 完全性 9 種 coherence check 動作
-- ⚠️ 単一 viewport / 単一 persona 前提 (環境網羅性は v1.32.0 で C9 導入したが axis 拡張は continuing)
-- ⚠️ 仕様完全性 Level 1 (要件の穴発見) は v1.35.0 `codd elicit` で導入予定
-- ⚠️ 他ドメイン (Mobile / Desktop / CLI / 組み込み / ML) は未実証
-- ⚠️ unrepairable 削減は continuing improvement
+- ✅ **Lexicon plug-in 31本** を 7 領域 (Methodology / Web / Mobile / Backend-API / Data / Ops / Compliance / Process) で同梱
+- ✅ **`codd elicit` / `codd diff` / `codd brownfield`** — greenfield + brownfield 両対応の coverage / drift discovery
+- ✅ **`codd init --suggest-lexicons`** — manifest file 自動検出 → 推奨 lexicon を `project_lexicon.yaml` に追記
+- ✅ **`codd lexicon list/install/diff` + `codd coverage report`** — plug-in 管理 CLI + matrix レポート (JSON / Markdown / HTML)
+- ✅ Generality Gate 三層 (Layer A core / Layer B templates / Layer C plug-ins) — core code に specific framework / domain 名 0 hardcode
 
 ```bash
 pip install codd-dev
@@ -45,14 +46,14 @@ pip install codd-dev
 
 ```bash
 pip install codd-dev
-codd --version  # 1.34.0 以上
+codd --version  # 2.0.0 以上
 ```
 
 ### 2. プロジェクトに codd.yaml を置く
 
 ```yaml
 # codd.yaml
-codd_required_version: ">=1.34.0"
+codd_required_version: ">=2.0.0"
 
 dag:
   design_docs:
@@ -282,6 +283,19 @@ CoDD core code には以下の hardcode を **禁止** している:
 これらは全て **`project_lexicon.yaml` (プロジェクト固有)** または **lexicon plug-in (`@codd/lexicon/babok` 等)** に閉じる。CoDD は generic な violation/finding object としてのみ処理する。
 
 LLM が「stack 固有の最適 patch」を提案する場合は、その判断は **LLM の知識** に委ね、CoDD core が決めない (= overfitting しない)。
+
+---
+
+## 貢献者
+
+CoDD は以下の方々によって形作られている:
+
+- **[@yohey-w](https://github.com/yohey-w)** — Maintainer / Architect
+- **[@Seika86](https://github.com/Seika86)** — Sprint regex 知見 (PR #11)
+- **[@v-kato](https://github.com/v-kato)** — brownfield 再現報告 (Issue #17 / #18 / #19)
+- **[@dev-komenzar](https://github.com/dev-komenzar)** — `source_dirs` バグ再現 (Issue #13)
+
+外部からの issue / PR / lexicon 提案を歓迎する — [Issues](https://github.com/yohey-w/codd-dev/issues) 参照。
 
 ---
 
