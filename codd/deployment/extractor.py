@@ -31,6 +31,17 @@ SMOKE_TEST_PATTERNS = ("tests/smoke/*.test.ts", "tests/smoke/*.spec.ts", "tests/
 E2E_TEST_PATTERNS = ("tests/e2e/*.spec.ts", "tests/e2e/*.test.ts")
 RUNTIME_CAPABILITY_INFERENCE_DEFAULTS = Path(__file__).parent / "defaults" / "runtime_capability_inference.yaml"
 
+DEPLOYMENT_SECTION_IMPL_PATTERNS: dict[str, tuple[str, ...]] = {
+    "migrate": ("prisma/migrations/**/*", "schema.prisma", "**/migrations/**/*.sql"),
+    "seed": ("prisma/seed.ts", "prisma/seed.js", "scripts/seed.ts", "scripts/seed.js"),
+    "build": ("Dockerfile", "Containerfile", "package.json"),
+    "start": (
+        "main.ts", "main.js", "server.ts", "server.js",
+        "app.ts", "app.js", "index.ts", "index.js",
+        "src/main.ts", "src/main.js", "src/server.ts", "src/server.js",
+    ),
+}
+
 
 def extract_deployment_nodes(project_root: Path, codd_config: dict[str, Any] | None = None) -> dict[str, list]:
     """Extract deployment document, runtime state, and verification test nodes."""
@@ -179,6 +190,37 @@ def extract_verification_tests(
         _add_cdp_browser_journey_tests(tests, records)
 
     return [tests[key] for key in sorted(tests)]
+
+
+def discover_deployment_impl_candidates(
+    project_root: Path,
+    deployment_docs: list[DeploymentDocNode],
+) -> list[Path]:
+    """Return existing standard impl artifacts referenced by deployment doc sections.
+
+    Walks each deployment document's sections and matches keywords against
+    DEPLOYMENT_SECTION_IMPL_PATTERNS, then keeps the patterns that resolve to a
+    real file under ``project_root``. The mapping itself stays inside the
+    deployment plug-in so DAG core code can remain free of stack-specific
+    filenames; this helper just runs an existence check.
+    """
+
+    root = Path(project_root)
+    seen: dict[str, Path] = {}
+    for doc in deployment_docs:
+        for section in doc.sections or []:
+            normalized = str(section).lower()
+            for keyword, patterns in DEPLOYMENT_SECTION_IMPL_PATTERNS.items():
+                if keyword not in normalized:
+                    continue
+                for pattern in patterns:
+                    for path in root.glob(pattern):
+                        if not path.is_file():
+                            continue
+                        rel = path.relative_to(root).as_posix()
+                        if rel not in seen:
+                            seen[rel] = path
+    return list(seen.values())
 
 
 def infer_deployment_edges(

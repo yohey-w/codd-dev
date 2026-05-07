@@ -610,6 +610,29 @@ def _add_deployment_graph(
     )
     verification_tests = extract_verification_tests(project_root, project_config, design_docs)
 
+    from codd.deployment.extractor import discover_deployment_impl_candidates
+
+    capability_patterns = _capability_patterns(project_config)
+    for impl_path in discover_deployment_impl_candidates(project_root, deployment_docs):
+        rel_id = impl_path.relative_to(project_root).as_posix()
+        if rel_id in dag.nodes:
+            continue
+        _add_node_once(
+            dag,
+            Node(
+                id=rel_id,
+                kind="impl_file",
+                path=rel_id,
+                attributes={
+                    "language": _language_for_path(impl_path),
+                    "imports": [],
+                    "runtime_evidence": _runtime_evidence_for_file(impl_path, rel_id, capability_patterns),
+                    "auto_registered_for_deployment": True,
+                },
+            ),
+        )
+        impl_nodes[rel_id] = impl_path.resolve()
+
     for deployment_doc in deployment_docs:
         _add_node_once(
             dag,
