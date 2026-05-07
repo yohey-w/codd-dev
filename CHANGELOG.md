@@ -4,6 +4,58 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [1.37.0] - 2026-05-07 — codd diff Bug Fix (cmd_436_phase_d)
+
+### Fixed — codd diff PoC blocker 2 件解消
+
+cmd_436 brownfield drift 検知 PoC で発見された 2 bugs を修正、`codd diff` を実用
+レベルへ。
+
+#### Bug 1: severity Literal バリデーション abort
+
+LLM が `Finding.severity` に Literal 外の値 (`low` / `warning` / `urgent` /
+`blocker` 等) を返すと `Finding.from_dict` が `ValueError` で停止し、pipeline 全体が
+abort する不具合を解消。
+
+- `_coerce_severity` helper を `codd/elicit/finding.py` に追加
+- alias 辞書で `blocker/fatal/severe/urgent → critical`、`error/major/important
+  → high`、`warn/warning/moderate → medium`、`minor/low/informational/note/trivial
+  → info` に正規化
+- 不明値は `info` に fallback (LLM drift 耐性)
+- canonical 4 値 (`critical/high/medium/info`) はそのまま採用
+
+Generality Gate: alias 辞書は generic な severity synonym のみ、stack /
+framework / domain literal なし。
+
+#### Bug 2: codd diff default extract-input パス問題
+
+cmd_437 (v1.36.0) Issue #17 で `codd extract` の output を `.codd/extract/`
+配下に隔離した一方、`codd diff` のデフォルト extract-input は legacy の
+`codd/extracted.md` を期待し続けていたため、`No such file or directory` で abort。
+
+- `_resolve_diff_extract_input(project_root, value)` helper を追加
+- 解決優先順:
+  1. 明示 `--extract-input` 指定
+  2. `.codd/extract/extracted.md` (Issue #17 isolation target)
+  3. `<project_root>/extracted.md` (top-level aggregated output)
+  4. `.codd/extract/modules/*.md` の最初のファイル (deterministic by name)
+  5. legacy `codd/extracted.md` (互換性維持)
+- `codd diff apply` も同 helper を経由して整合
+
+### Quality Metrics
+
+- **pytest**: 2320 PASS / 0 FAIL / 0 SKIP (v1.36.0 と同水準を維持)
+- **Generality Gate**: severity alias 辞書は generic synonym のみ、stack /
+  framework / domain literal hardcode 0
+- **既存 test の追従**: 旧 `test_finding_from_dict_rejects_invalid_severity`
+  を `test_finding_from_dict_coerces_severity_aliases` に変更、coerce 動作を
+  正本テストとして昇格
+
+### Phase 構成と commits
+
+- cmd_436_phase_d_poc (`origin/main` 経由) — ashigaru1 PoC report で 2 bugs 検出
+- cmd_436_phase_d fix (`e969f58`) — 軍師直接実装の bug fix bundle
+
 ## [1.36.0] - 2026-05-07 — Brownfield Pipeline Pre-fix (cmd_437)
 
 ### Issue Fixes (cmd_437_pre_fix bundle)
