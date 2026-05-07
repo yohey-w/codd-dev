@@ -97,10 +97,13 @@ def test_engine_deserialize_object_payload():
 
 
 def test_engine_deserialize_legacy_array_payload():
+    # v1.37.0: unknown severities are coerced to 'info' rather than raising,
+    # so LLM drift never aborts the pipeline. (Aliases like 'low' map to 'info'.)
     engine = ElicitEngine(ai_command="noop")
     raw = json.dumps([{"id": "F-1", "kind": "spec_hole", "severity": "low"}])
-    with pytest.raises(ValueError):
-        engine.deserialize_result(raw)
+    result = engine.deserialize_result(raw)
+    assert len(result.findings) == 1
+    assert result.findings[0].severity == "info"
 
 
 def test_engine_deserialize_legacy_array_payload_valid():

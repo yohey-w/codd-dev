@@ -41,13 +41,12 @@ class Finding:
 
         finding_id = str(payload.get("id", "")).strip()
         kind = str(payload.get("kind", "")).strip()
-        severity = str(payload.get("severity", "")).strip()
+        raw_severity = str(payload.get("severity", "")).strip()
         if not finding_id:
             raise ValueError("Finding id is required")
         if not kind:
             raise ValueError("Finding kind is required")
-        if severity not in _SEVERITIES:
-            raise ValueError(f"Finding severity must be one of {sorted(_SEVERITIES)}")
+        severity = _coerce_severity(raw_severity)
 
         source = str(payload.get("source", "greenfield")).strip() or "greenfield"
         if source not in _SOURCES:
@@ -83,6 +82,41 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+_SEVERITY_ALIASES = {
+    "blocker": "critical",
+    "fatal": "critical",
+    "severe": "critical",
+    "urgent": "critical",
+    "error": "high",
+    "major": "high",
+    "important": "high",
+    "warn": "medium",
+    "warning": "medium",
+    "moderate": "medium",
+    "minor": "info",
+    "low": "info",
+    "informational": "info",
+    "note": "info",
+    "trivial": "info",
+}
+
+
+def _coerce_severity(raw: str) -> str:
+    """Map a raw severity string into the canonical Literal set, with a safe fallback.
+
+    Strict membership is preserved for canonical values; common synonyms are mapped
+    deterministically; anything unknown defaults to ``info`` so downstream tools stay
+    operational rather than aborting on LLM drift. Generic mapping only — no stack /
+    framework / domain literals.
+    """
+    cleaned = raw.lower().strip()
+    if cleaned in _SEVERITIES:
+        return cleaned
+    if cleaned in _SEVERITY_ALIASES:
+        return _SEVERITY_ALIASES[cleaned]
+    return "info"
 
 
 @dataclass
