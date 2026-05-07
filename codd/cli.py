@@ -16,7 +16,7 @@ import yaml
 
 from codd.bridge import PRO_COMMAND_INSTALL_MESSAGE, get_command_handler
 from codd.config import find_codd_dir, load_project_config
-from codd.lexicon import LEXICON_FILENAME, load_lexicon
+from codd.lexicon import LEXICON_FILENAME, load_lexicon, load_project_extends
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -1087,7 +1087,7 @@ def elicit(
 
     project_root = Path(project_path).resolve()
     try:
-        lexicon_config = _load_elicit_lexicon(project_root, lexicon_path) if lexicon_path else None
+        lexicon_config = _load_elicit_lexicon_configs(project_root, lexicon_path)
         elicit_result = ElicitEngine(ai_command=ai_cmd).run(project_root, lexicon_config=lexicon_config)
     except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         click.echo(f"Error: {exc}")
@@ -1126,6 +1126,18 @@ def elicit(
         f"{coverage_summary}"
     )
     click.echo(f"Output: {_display_path(output_path, project_root)}")
+
+
+def _load_elicit_lexicon_configs(project_root: Path, lexicon_path: str | None):
+    selectors = _split_elicit_lexicon_selectors(lexicon_path) if lexicon_path else load_project_extends(project_root)
+    if not selectors:
+        return None
+    configs = [_load_elicit_lexicon(project_root, selector) for selector in selectors]
+    return configs[0] if len(configs) == 1 else configs
+
+
+def _split_elicit_lexicon_selectors(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _load_elicit_lexicon(project_root: Path, lexicon_path: str):

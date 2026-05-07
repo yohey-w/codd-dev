@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 import json
-from pathlib import Path
 import re
+import warnings
+from collections.abc import Callable, Mapping
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -36,15 +38,30 @@ class ElicitEngine:
     def run(self, project_root: Path, lexicon_config: Any | None = None) -> ElicitResult:
         root = Path(project_root)
         project_scope, project_phase = _project_scope_phase(root)
+        lexicon_configs = _as_lexicon_configs(lexicon_config)
+        if len(lexicon_configs) > 1:
+            return self._run_many(root, lexicon_configs, scope=project_scope, phase=project_phase)
+        config = lexicon_configs[0] if lexicon_configs else None
+        return self._run_one(root, config, scope=project_scope, phase=project_phase)
+
+    def _run_one(
+        self,
+        root: Path,
+        lexicon_config: Any | None,
+        *,
+        scope: str,
+        phase: str,
+    ) -> ElicitResult:
         prompt = self.build_prompt(root, lexicon_config=lexicon_config)
         raw_output = self.invoke(prompt, root)
         result = self.deserialize_result(raw_output)
         result.findings = _apply_scope_phase(
             result.findings,
             lexicon_config=lexicon_config,
-            scope=project_scope,
-            phase=project_phase,
+            scope=scope,
+            phase=phase,
         )
+        _attach_lexicon_source(result.findings, _string_attr(lexicon_config, "lexicon_name"))
         result.findings = ElicitPersistence(root).filter_known(result.findings)
         if not result.findings and result.lexicon_coverage_report:
             non_gap = all(
@@ -54,6 +71,42 @@ class ElicitEngine:
             if non_gap:
                 result.all_covered = True
         return result
+
+    def _run_many(
+        self,
+        root: Path,
+        lexicon_configs: list[Any],
+        *,
+        scope: str,
+        phase: str,
+    ) -> ElicitResult:
+        prepared = _prepare_lexicon_configs(lexicon_configs)
+        combined = ElicitResult()
+        for config, duplicate_axes in prepared:
+            result = self._run_one(root, config, scope=scope, phase=phase)
+            if duplicate_axes:
+                result.findings = [
+                    finding
+                    for finding in result.findings
+                    if _finding_axis(finding) not in duplicate_axes
+                ]
+            combined.findings.extend(result.findings)
+            for axis, status in result.lexicon_coverage_report.items():
+                if axis in combined.lexicon_coverage_report:
+                    warnings.warn(
+                        f"duplicate lexicon dimension '{axis}' ignored; first lexicon wins",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    continue
+                combined.lexicon_coverage_report[axis] = status
+
+        if combined.lexicon_coverage_report and not combined.findings:
+            combined.all_covered = all(
+                str(status).lower() != "gap"
+                for status in combined.lexicon_coverage_report.values()
+            )
+        return combined
 
     def build_prompt(self, project_root: Path, lexicon_config: Any | None = None) -> str:
         root = Path(project_root)
@@ -86,6 +139,9 @@ class ElicitEngine:
         return ElicitResult.from_payload(payload)
 
     def _template_text(self, lexicon_config: Any | None) -> str:
+        configs = _as_lexicon_configs(lexicon_config)
+        if configs:
+            lexicon_config = configs[0]
         extension = _string_attr(lexicon_config, "prompt_extension_content")
         if extension:
             return extension
@@ -147,6 +203,60 @@ def _read_documents(paths: list[Path], project_root: Path, max_chars: int) -> st
     return "\n".join(chunks) if chunks else "(none provided)"
 
 
+def _as_lexicon_configs(lexicon_config: Any | None) -> list[Any]:
+    if lexicon_config is None:
+        return []
+    if isinstance(lexicon_config, (list, tuple)):
+        return [item for item in lexicon_config if item is not None]
+    return [lexicon_config]
+
+
+def _prepare_lexicon_configs(lexicon_configs: list[Any]) -> list[tuple[Any, set[str]]]:
+    prepared: list[tuple[Any, set[str]]] = []
+    seen_axes: set[str] = set()
+    for config in lexicon_configs:
+        kept_axes: list[dict[str, Any]] = []
+        duplicate_axes: set[str] = set()
+        for axis in _list_attr(config, "coverage_axes"):
+            if not isinstance(axis, Mapping):
+                continue
+            axis_type = axis.get("axis_type")
+            if not isinstance(axis_type, str) or not axis_type.strip():
+                kept_axes.append(dict(axis))
+                continue
+            normalized_axis = axis_type.strip()
+            if normalized_axis in seen_axes:
+                duplicate_axes.add(normalized_axis)
+                warnings.warn(
+                    f"duplicate lexicon dimension '{normalized_axis}' ignored; first lexicon wins",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+            seen_axes.add(normalized_axis)
+            kept_axes.append(dict(axis))
+        prepared.append((_with_coverage_axes(config, kept_axes), duplicate_axes))
+    return prepared
+
+
+def _with_coverage_axes(config: Any, coverage_axes: list[dict[str, Any]]) -> Any:
+    if isinstance(config, Mapping):
+        updated = dict(config)
+        updated["coverage_axes"] = coverage_axes
+        return updated
+    try:
+        return replace(config, coverage_axes=coverage_axes)
+    except TypeError:
+        return config
+
+
+def _attach_lexicon_source(findings: list[Finding], lexicon_name: str | None) -> None:
+    if not lexicon_name:
+        return
+    for finding in findings:
+        finding.details["lexicon_source"] = lexicon_name
+
+
 def _project_lexicon_text(project_root: Path, lexicon_config: Any | None, max_chars: int) -> str:
     chunks: list[str] = []
     for name in ("project_lexicon.yaml", "project_lexicon.yml"):
@@ -154,12 +264,13 @@ def _project_lexicon_text(project_root: Path, lexicon_config: Any | None, max_ch
         if path.is_file():
             chunks.append(path.read_text(encoding="utf-8", errors="replace").strip())
             break
-    lexicon_name = _string_attr(lexicon_config, "lexicon_name")
-    recommended = getattr(lexicon_config, "recommended_kinds", None)
-    if lexicon_name:
-        chunks.append(f"loaded_lexicon: {lexicon_name}")
-    if isinstance(recommended, list) and recommended:
-        chunks.append(yaml.safe_dump({"recommended_kinds": recommended}, sort_keys=False).strip())
+    for config in _as_lexicon_configs(lexicon_config):
+        lexicon_name = _string_attr(config, "lexicon_name")
+        recommended = getattr(config, "recommended_kinds", None)
+        if lexicon_name:
+            chunks.append(f"loaded_lexicon: {lexicon_name}")
+        if isinstance(recommended, list) and recommended:
+            chunks.append(yaml.safe_dump({"recommended_kinds": recommended}, sort_keys=False).strip())
     text = "\n\n".join(chunk for chunk in chunks if chunk)
     return text[:max_chars] if text else "(none provided)"
 

@@ -3,7 +3,14 @@
 import pytest
 import yaml
 
-from codd.lexicon import LexiconError, ProjectLexicon, load_lexicon, validate_lexicon
+from codd.lexicon import (
+    LEGACY_SUGGESTED_LEXICONS_WARNING,
+    LexiconError,
+    ProjectLexicon,
+    load_lexicon,
+    load_project_extends,
+    validate_lexicon,
+)
 
 
 def _write_lexicon(tmp_path, data):
@@ -69,6 +76,41 @@ def test_load_project_lexicon_and_access_fields(tmp_path):
     )
     assert lexicon.provenance == "human"
     assert lexicon.confidence == 1.0
+
+
+def test_load_legacy_suggested_lexicons_emits_deprecation_warning(tmp_path):
+    data = _valid_lexicon()
+    data["suggested_lexicons"] = ["legacy_one"]
+    _write_lexicon(tmp_path, data)
+
+    with pytest.warns(DeprecationWarning, match=LEGACY_SUGGESTED_LEXICONS_WARNING):
+        lexicon = load_lexicon(tmp_path)
+
+    assert lexicon is not None
+    assert lexicon.extends == ["legacy_one"]
+
+
+def test_load_legacy_field_merges_into_extends(tmp_path):
+    data = _valid_lexicon()
+    data["suggested_lexicons"] = ["legacy_one", "legacy_two"]
+    _write_lexicon(tmp_path, data)
+
+    with pytest.warns(DeprecationWarning):
+        assert load_project_extends(tmp_path) == ["legacy_one", "legacy_two"]
+
+
+def test_load_both_fields_merges_correctly(tmp_path):
+    data = _valid_lexicon()
+    data["extends"] = ["new_one", "shared"]
+    data["suggested_lexicons"] = ["legacy_one", "shared"]
+    _write_lexicon(tmp_path, data)
+
+    with pytest.warns(DeprecationWarning):
+        lexicon = load_lexicon(tmp_path)
+
+    assert lexicon is not None
+    assert lexicon.extends == ["new_one", "shared", "legacy_one"]
+    assert lexicon.as_dict()["suggested_lexicons"] == ["legacy_one", "shared"]
 
 
 def test_load_project_lexicon_with_provenance_fields(tmp_path):

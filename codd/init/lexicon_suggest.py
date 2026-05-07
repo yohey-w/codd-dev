@@ -5,12 +5,15 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 import re
 
 import yaml
 
-from codd.lexicon import LEXICON_FILENAME
+from codd.lexicon import (
+    LEXICON_FILENAME,
+    merge_lexicon_entries,
+    normalize_project_lexicon_data,
+)
 
 
 @dataclass(frozen=True)
@@ -77,17 +80,10 @@ def describe_lexicons(lexicon_ids: Iterable[str], lexicon_root: Path | None = No
 def append_suggested_lexicons(project_root: Path, lexicon_ids: Sequence[str]) -> Path:
     path = Path(project_root) / LEXICON_FILENAME
     data = _load_project_lexicon(path)
-    current = data.get("suggested_lexicons", [])
+    current = data.get("extends", [])
     if not isinstance(current, list):
-        raise ValueError("project_lexicon.yaml suggested_lexicons must be a list")
-    known = {_lexicon_id(item) for item in current}
-    merged = list(current)
-    for lexicon_id in lexicon_ids:
-        if lexicon_id in known:
-            continue
-        merged.append(lexicon_id)
-        known.add(lexicon_id)
-    data["suggested_lexicons"] = merged
+        raise ValueError("project_lexicon.yaml extends must be a list")
+    data["extends"] = merge_lexicon_entries(current, list(lexicon_ids))
     path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return path
 
@@ -97,7 +93,7 @@ def _load_project_lexicon(path: Path) -> dict[str, Any]:
         payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         if not isinstance(payload, dict):
             raise ValueError("project_lexicon.yaml must contain a YAML mapping")
-        return payload
+        return normalize_project_lexicon_data(payload)
     return {
         "version": "1.0",
         "node_vocabulary": [],
@@ -106,12 +102,3 @@ def _load_project_lexicon(path: Path) -> dict[str, Any]:
             "Review suggested lexicons before treating project conventions as approved.",
         ],
     }
-
-
-def _lexicon_id(item: Any) -> str:
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        return str(item.get("id", item.get("name", item.get("lexicon_name", ""))))
-    return str(item)
-

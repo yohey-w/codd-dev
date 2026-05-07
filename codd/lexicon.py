@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -15,6 +16,9 @@ LEXICON_FILENAME = "project_lexicon.yaml"
 REQUIRED_ARTIFACT_SOURCES = {"ai_derived", "user_override", "default_template"}
 DEFAULT_SCOPE = "full"
 DEFAULT_PHASE = "production"
+LEGACY_SUGGESTED_LEXICONS_WARNING = (
+    "suggested_lexicons is deprecated, renamed to extends; auto-merged"
+)
 
 
 @dataclass
@@ -45,7 +49,7 @@ class AskItem:
     answered_at: str = ""
 
 
-class LexiconError(Exception):
+class LexiconError(ValueError):
     """Raised when a project lexicon is malformed."""
 
 
@@ -89,6 +93,10 @@ class ProjectLexicon:
             ask_item_from_dict(item)
             for item in self._data.get("coverage_decisions", [])
         ]
+
+    @property
+    def extends(self) -> list[str]:
+        return lexicon_ids_from_entries(self._data.get("extends", []))
 
     @property
     def required_artifacts(self) -> list[dict[str, Any]]:
@@ -152,8 +160,81 @@ def load_lexicon(project_root: str | Path) -> ProjectLexicon | None:
     if not path.exists():
         return None
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise LexiconError("project_lexicon.yaml must contain a YAML mapping")
+    data = normalize_project_lexicon_data(data)
     validate_lexicon(data)
     return ProjectLexicon(data)
+
+
+def load_project_extends(project_root: str | Path) -> list[str]:
+    """Load project-level lexicon IDs from extends, with legacy shim support."""
+    path = Path(project_root) / LEXICON_FILENAME
+    if not path.exists():
+        return []
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise LexiconError("project_lexicon.yaml must contain a YAML mapping")
+    normalized = normalize_project_lexicon_data(data)
+    return lexicon_ids_from_entries(normalized.get("extends", []))
+
+
+def normalize_project_lexicon_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Return lexicon data with legacy suggested_lexicons merged into extends.
+
+    The legacy field remains in the returned mapping for backward compatibility;
+    only the canonical runtime list is merged into ``extends``.
+    """
+    normalized = deepcopy(data)
+    current = _optional_lexicon_entries(normalized, "extends")
+    if "suggested_lexicons" not in normalized:
+        return normalized
+
+    legacy = _optional_lexicon_entries(normalized, "suggested_lexicons")
+    warnings.warn(
+        LEGACY_SUGGESTED_LEXICONS_WARNING,
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    normalized["extends"] = merge_lexicon_entries(current, legacy)
+    return normalized
+
+
+def merge_lexicon_entries(primary: list[Any], secondary: list[Any]) -> list[Any]:
+    merged = list(primary)
+    known = set(lexicon_ids_from_entries(merged))
+    for item in secondary:
+        lexicon_id = lexicon_id_from_entry(item)
+        if not lexicon_id or lexicon_id in known:
+            continue
+        merged.append(item)
+        known.add(lexicon_id)
+    return merged
+
+
+def lexicon_ids_from_entries(entries: Any) -> list[str]:
+    if not isinstance(entries, list):
+        return []
+    seen: set[str] = set()
+    ids: list[str] = []
+    for item in entries:
+        lexicon_id = lexicon_id_from_entry(item)
+        if not lexicon_id or lexicon_id in seen:
+            continue
+        seen.add(lexicon_id)
+        ids.append(lexicon_id)
+    return ids
+
+
+def lexicon_id_from_entry(item: Any) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        for key in ("id", "name", "lexicon_name"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return str(item).strip()
 
 
 def ask_option_from_dict(data: dict[str, Any]) -> AskOption:
@@ -258,6 +339,10 @@ def validate_lexicon(data: dict[str, Any]) -> None:
     if not isinstance(design_principles, list):
         raise LexiconError("design_principles must be a list")
 
+    for field_name in ("extends", "suggested_lexicons"):
+        if field_name in data and not isinstance(data[field_name], list):
+            raise LexiconError(f"{field_name} must be a list")
+
     failure_modes = data.get("failure_modes", [])
     _validate_list_of_mappings(failure_modes, "failure_modes")
 
@@ -321,6 +406,15 @@ def _validate_list_of_mappings(value: Any, name: str) -> None:
     for item in value:
         if not isinstance(item, dict):
             raise LexiconError(f"{name} items must be mappings: {item}")
+
+
+def _optional_lexicon_entries(data: dict[str, Any], field_name: str) -> list[Any]:
+    value = data.get(field_name, [])
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise LexiconError(f"{field_name} must be a list")
+    return list(value)
 
 
 def _optional_str(value: Any) -> str | None:
