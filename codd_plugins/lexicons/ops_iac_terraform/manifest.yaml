@@ -1,0 +1,25 @@
+name: ops_iac_terraform
+lexicon_name: ops_iac_terraform
+version: "1.0.0"
+source_url: "https://developer.hashicorp.com/terraform/language/v1.7.x"
+source_version: "Terraform Language v1.7.x + HCP Terraform Sentinel policy enforcement"
+description: "Terraform infrastructure-as-code coverage axes for language blocks, providers, resources, data sources, variables, outputs, state, modules, workspaces, backends, and Sentinel policies."
+observation_dimensions: 10
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Terraform Language Documentation v1.7.x"
+    url: "https://developer.hashicorp.com/terraform/language/v1.7.x"
+    source_version: "v1.7.x"
+  - title: "Data Sources"
+    url: "https://developer.hashicorp.com/terraform/language/v1.7.x/data-sources"
+  - title: "State: Workspaces"
+    url: "https://developer.hashicorp.com/terraform/language/state/workspaces"
+  - title: "HCP Terraform policy enforcement overview"
+    url: "https://developer.hashicorp.com/terraform/enterprise/policy-enforcement"
+  - title: "Define Sentinel policies in HCP Terraform"
+    url: "https://developer.hashicorp.com/terraform/enterprise/policy-enforcement/define-policies/custom-sentinel"

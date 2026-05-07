@@ -1,0 +1,13 @@
+recommended_kinds:
+  - kubernetes_workload_gap
+  - kubernetes_service_networking_gap
+  - kubernetes_config_secret_gap
+  - kubernetes_storage_gap
+  - kubernetes_rbac_gap
+  - kubernetes_scheduling_gap
+  - kubernetes_resource_quota_gap
+  - kubernetes_probe_gap
+  - kubernetes_autoscaling_gap
+  - kubernetes_observability_gap
+  - kubernetes_upgrade_gap
+  - kubernetes_namespace_gap

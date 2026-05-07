@@ -1,0 +1,249 @@
+coverage_axes:
+  - axis_type: "terraform"
+    rationale: "Terraform language v1.7.x defines the terraform settings block for required versions, required providers, and backend configuration."
+    criticality_default: high
+    variants:
+      - id: "terraform"
+        label: "Terraform settings block"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "configuration settings"}
+        criticality: high
+      - id: "required_version"
+        label: "Required Terraform version"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "CLI compatibility"}
+        criticality: high
+      - id: "required_providers"
+        label: "Required providers"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "provider dependency declarations"}
+        criticality: high
+      - id: "backend"
+        label: "Backend block"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "state storage declaration"}
+        criticality: high
+      - id: "provider_meta"
+        label: "Provider metadata"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "provider-specific module metadata"}
+        criticality: info
+  - axis_type: "provider"
+    rationale: "Terraform language v1.7.x defines providers as plugins that expose resource types and data sources."
+    criticality_default: high
+    variants:
+      - id: "provider"
+        label: "Provider configuration block"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "plugin configuration"}
+        criticality: high
+      - id: "alias"
+        label: "Provider alias"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "non-default provider instance"}
+        criticality: medium
+      - id: "source"
+        label: "Provider source"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "provider registry address"}
+        criticality: high
+      - id: "version"
+        label: "Provider version"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "provider version constraint"}
+        criticality: high
+      - id: "configuration_aliases"
+        label: "Configuration aliases"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "module provider alias contract"}
+        criticality: medium
+  - axis_type: "resource"
+    rationale: "Terraform language v1.7.x states that the main purpose of the language is declaring resources that represent infrastructure objects."
+    criticality_default: critical
+    variants:
+      - id: "resource"
+        label: "Managed resource"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "managed infrastructure object"}
+        criticality: critical
+      - id: "count"
+        label: "count meta-argument"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "multiple resource instances"}
+        criticality: medium
+      - id: "for_each"
+        label: "for_each meta-argument"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "keyed resource instances"}
+        criticality: medium
+      - id: "depends_on"
+        label: "Explicit dependency"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "operation ordering"}
+        criticality: medium
+      - id: "lifecycle"
+        label: "Lifecycle block"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "resource lifecycle customization"}
+        criticality: high
+  - axis_type: "data"
+    rationale: "Terraform language v1.7.x defines data sources as data resources declared using the data block to read external information."
+    criticality_default: medium
+    variants:
+      - id: "data"
+        label: "Data block"
+        attributes: {source: "Terraform Language v1.7.x Data Sources", coverage_target: "external information query"}
+        criticality: medium
+      - id: "data resource"
+        label: "Data resource"
+        attributes: {source: "Terraform Language v1.7.x Data Sources", coverage_target: "read-only resource object"}
+        criticality: medium
+      - id: "Data Resource Dependencies"
+        label: "Data resource dependencies"
+        attributes: {source: "Terraform Language v1.7.x Data Sources", coverage_target: "deferred read behavior"}
+        criticality: medium
+      - id: "precondition"
+        label: "Data precondition"
+        attributes: {source: "Terraform Language v1.7.x Data Sources", coverage_target: "data assumption check"}
+        criticality: info
+      - id: "postcondition"
+        label: "Data postcondition"
+        attributes: {source: "Terraform Language v1.7.x Data Sources", coverage_target: "data guarantee check"}
+        criticality: info
+  - axis_type: "variable"
+    rationale: "Terraform language v1.7.x groups input variables and output values as the module boundary for configurable inputs and exposed results."
+    criticality_default: high
+    variants:
+      - id: "variable"
+        label: "Input variable"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "module input"}
+        criticality: high
+      - id: "output"
+        label: "Output value"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "module output"}
+        criticality: high
+      - id: "type"
+        label: "Type constraint"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "input type contract"}
+        criticality: medium
+      - id: "default"
+        label: "Default value"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "input default"}
+        criticality: medium
+      - id: "sensitive"
+        label: "Sensitive value"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "sensitive data handling"}
+        criticality: high
+      - id: "validation"
+        label: "Variable validation"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "input validation"}
+        criticality: medium
+  - axis_type: "state"
+    rationale: "Terraform language v1.7.x defines state as the persistent mapping between real infrastructure and configuration, with import and moved blocks for address management."
+    criticality_default: high
+    variants:
+      - id: "state"
+        label: "State"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "resource mapping"}
+        criticality: high
+      - id: "terraform.tfstate"
+        label: "State file"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "state storage artifact"}
+        criticality: high
+      - id: "moved"
+        label: "Moved block"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "resource address refactor"}
+        criticality: medium
+      - id: "import"
+        label: "Import block"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "existing object import"}
+        criticality: medium
+      - id: "terraform state"
+        label: "terraform state command"
+        attributes: {source: "Terraform CLI", coverage_target: "state inspection and manipulation"}
+        criticality: medium
+  - axis_type: "module"
+    rationale: "Terraform language v1.7.x defines modules as containers for Terraform configurations and reusable module calls."
+    criticality_default: high
+    variants:
+      - id: "module"
+        label: "Module block"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "reusable configuration call"}
+        criticality: high
+      - id: "source"
+        label: "Module source"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "module package source"}
+        criticality: high
+      - id: "version"
+        label: "Module version"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "module version constraint"}
+        criticality: medium
+      - id: "providers"
+        label: "Module providers map"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "provider passing"}
+        criticality: medium
+      - id: "outputs"
+        label: "Module outputs"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "module result contract"}
+        criticality: medium
+  - axis_type: "workspace"
+    rationale: "Terraform state workspace documentation defines workspaces as separate state instances associated with the same backend and configuration."
+    criticality_default: medium
+    variants:
+      - id: "workspace"
+        label: "Workspace"
+        attributes: {source: "Terraform State Workspaces", coverage_target: "state instance selection"}
+        criticality: medium
+      - id: "terraform.workspace"
+        label: "terraform.workspace expression"
+        attributes: {source: "Terraform State Workspaces", coverage_target: "current workspace value"}
+        criticality: medium
+      - id: "default"
+        label: "Default workspace"
+        attributes: {source: "Terraform State Workspaces", coverage_target: "initial workspace"}
+        criticality: info
+      - id: "workspace state"
+        label: "Workspace state"
+        attributes: {source: "Terraform State Workspaces", coverage_target: "per-workspace state"}
+        criticality: medium
+  - axis_type: "backend"
+    rationale: "Terraform state workspace documentation defines backend configuration as the place Terraform stores persistent state and executes operations."
+    criticality_default: high
+    variants:
+      - id: "backend"
+        label: "Backend"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "state storage backend"}
+        criticality: high
+      - id: "local"
+        label: "Local backend"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "local state storage"}
+        criticality: medium
+      - id: "remote"
+        label: "Remote backend"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "remote state operations"}
+        criticality: high
+      - id: "partial configuration"
+        label: "Partial backend configuration"
+        attributes: {source: "Terraform Language v1.7.x", coverage_target: "backend initialization input"}
+        criticality: medium
+      - id: "terraform init"
+        label: "terraform init"
+        attributes: {source: "Terraform CLI", coverage_target: "backend initialization"}
+        criticality: high
+  - axis_type: "Sentinel"
+    rationale: "HCP Terraform policy enforcement documents Sentinel policies, policy sets, enforcement levels, and tfplan/tfconfig/tfstate/tfrun imports."
+    criticality_default: medium
+    variants:
+      - id: "Sentinel"
+        label: "Sentinel policy language"
+        attributes: {source: "HCP Terraform policy enforcement", coverage_target: "policy-as-code framework"}
+        criticality: medium
+      - id: "policy set"
+        label: "Policy set"
+        attributes: {source: "HCP Terraform policy enforcement", coverage_target: "policy grouping"}
+        criticality: medium
+      - id: "enforcement level"
+        label: "Enforcement level"
+        attributes: {source: "HCP Terraform policy enforcement", coverage_target: "policy failure behavior"}
+        criticality: high
+      - id: "tfplan"
+        label: "tfplan import"
+        attributes: {source: "Define Sentinel policies in HCP Terraform", coverage_target: "planned change data"}
+        criticality: medium
+      - id: "tfconfig"
+        label: "tfconfig import"
+        attributes: {source: "Define Sentinel policies in HCP Terraform", coverage_target: "configuration data"}
+        criticality: medium
+      - id: "tfstate"
+        label: "tfstate import"
+        attributes: {source: "Define Sentinel policies in HCP Terraform", coverage_target: "state data"}
+        criticality: medium
+      - id: "tfrun"
+        label: "tfrun import"
+        attributes: {source: "Define Sentinel policies in HCP Terraform", coverage_target: "run data"}
+        criticality: medium

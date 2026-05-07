@@ -1,0 +1,11 @@
+recommended_kinds:
+  - terraform_settings_gap
+  - terraform_provider_gap
+  - terraform_resource_gap
+  - terraform_data_source_gap
+  - terraform_variable_output_gap
+  - terraform_state_gap
+  - terraform_module_gap
+  - terraform_workspace_gap
+  - terraform_backend_gap
+  - terraform_sentinel_policy_gap
