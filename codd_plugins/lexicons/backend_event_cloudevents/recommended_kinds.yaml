@@ -1,0 +1,8 @@
+recommended_kinds:
+  - cloudevents_context_attributes_gap
+  - cloudevents_required_attributes_gap
+  - cloudevents_optional_attributes_gap
+  - cloudevents_type_system_gap
+  - cloudevents_extension_attributes_gap
+  - cloudevents_event_data_gap
+  - cloudevents_protocol_binding_gap

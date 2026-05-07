@@ -1,0 +1,28 @@
+rules:
+  - when: "axis=touchscreens AND coverage=gap"
+    severity: critical
+    rationale: "Missing touchscreen and touch target coverage can block users with limited dexterity."
+  - when: "axis=small screen sizes AND coverage=gap"
+    severity: high
+    rationale: "Missing small-screen coverage can hide layout, reachability, or information-density failures."
+  - when: "axis=different input modalities AND coverage=gap"
+    severity: high
+    rationale: "Missing input modality coverage can block speech, keyboard, switch, or alternate input use."
+  - when: "axis=color contrast AND coverage=gap"
+    severity: critical
+    rationale: "Missing contrast coverage can make text, icons, or states unreadable."
+  - when: "axis=larger text sizes AND coverage=gap"
+    severity: high
+    rationale: "Missing text scaling coverage can prevent users from reading content comfortably."
+  - when: "axis=screen reader AND coverage=gap"
+    severity: critical
+    rationale: "Missing screen reader coverage can make visible content or controls unavailable to assistive technology."
+  - when: "axis=haptics AND coverage=gap"
+    severity: medium
+    rationale: "Missing haptic or visual alternatives can leave audio-only feedback inaccessible."
+  - when: "axis=Reduce Motion AND coverage=gap"
+    severity: high
+    rationale: "Missing reduced-motion behavior can cause dizziness, discomfort, or distraction."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking gap."

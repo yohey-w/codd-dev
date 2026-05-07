@@ -1,0 +1,25 @@
+rules:
+  - when: "axis=Context Attributes AND coverage=gap"
+    severity: critical
+    rationale: "Missing context attribute coverage can make event routing, correlation, or inspection ambiguous."
+  - when: "axis=REQUIRED Attributes AND coverage=gap"
+    severity: critical
+    rationale: "Missing required CloudEvents attributes can make an event non-conformant."
+  - when: "axis=OPTIONAL Attributes AND coverage=gap"
+    severity: high
+    rationale: "Missing optional attribute decisions can hide payload type, schema, subject, or timing ambiguity."
+  - when: "axis=Type System AND coverage=gap"
+    severity: high
+    rationale: "Missing attribute type coverage can break serialization or canonical string conversion."
+  - when: "axis=Extension Context Attributes AND coverage=gap"
+    severity: medium
+    rationale: "Missing extension coverage can cause correlation metadata or extension naming ambiguity."
+  - when: "axis=Event Data AND coverage=gap"
+    severity: high
+    rationale: "Missing event data coverage can leave payload encoding, schema, or domain information undefined."
+  - when: "axis=Protocol Binding AND coverage=gap"
+    severity: high
+    rationale: "Missing protocol binding coverage can make event transport and message mode ambiguous."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking gap."

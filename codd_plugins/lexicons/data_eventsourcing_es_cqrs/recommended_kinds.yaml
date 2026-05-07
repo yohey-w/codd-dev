@@ -1,0 +1,9 @@
+recommended_kinds:
+  - eventsourcing_pattern_gap
+  - eventsourcing_event_design_gap
+  - eventsourcing_event_store_gap
+  - eventsourcing_replay_gap
+  - eventsourcing_state_storage_gap
+  - eventsourcing_rebuild_gap
+  - eventsourcing_temporal_query_gap
+  - eventsourcing_cqrs_projection_gap

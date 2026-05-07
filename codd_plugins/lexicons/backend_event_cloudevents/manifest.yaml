@@ -1,0 +1,20 @@
+name: backend_event_cloudevents
+lexicon_name: backend_event_cloudevents
+version: "1.0.0"
+source_url: "https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md"
+source_version: "CloudEvents 1.0.2"
+description: "CloudEvents 1.0.2 coverage axes for backend event requirements."
+observation_dimensions: 7
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "CloudEvents Specification 1.0.2"
+    url: "https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md"
+  - title: "CloudEvents JSON Event Format"
+    url: "https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/formats/json-format.md"
+  - title: "CloudEvents HTTP Protocol Binding"
+    url: "https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/bindings/http-protocol-binding.md"

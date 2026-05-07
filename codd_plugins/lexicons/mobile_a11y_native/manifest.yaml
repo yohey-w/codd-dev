@@ -1,0 +1,24 @@
+name: mobile_a11y_native
+lexicon_name: mobile_a11y_native
+version: "1.0.0"
+source_url: "https://www.w3.org/WAI/standards-guidelines/mobile/"
+source_version: "W3C Mobile Accessibility, current as of 2026-05-08"
+description: "Native mobile accessibility coverage axes for mobile app requirements."
+observation_dimensions: 8
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Mobile Accessibility at W3C"
+    url: "https://www.w3.org/WAI/standards-guidelines/mobile/"
+  - title: "Apple Human Interface Guidelines: Accessibility"
+    url: "https://developer.apple.com/design/human-interface-guidelines/accessibility"
+  - title: "Apple Human Interface Guidelines: VoiceOver"
+    url: "https://developer.apple.com/design/human-interface-guidelines/voiceover"
+  - title: "Android Developers: Make apps more accessible"
+    url: "https://developer.android.com/guide/topics/ui/accessibility/apps"
+  - title: "Android Developers: Test your app's accessibility"
+    url: "https://developer.android.com/guide/topics/ui/accessibility/testing"
