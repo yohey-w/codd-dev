@@ -3,7 +3,7 @@
 import textwrap
 
 from codd.extractor import extract_facts
-from codd.parsing import RegexExtractor, TreeSitterExtractor, get_extractor
+from codd.parsing import PythonAstExtractor, TreeSitterExtractor, get_extractor
 
 
 def test_python_tree_sitter_extracts_multiline_signature_and_decorators(tmp_path):
@@ -183,7 +183,7 @@ def test_typescript_tree_sitter_extracts_const_objects(tmp_path):
     assert "TIMEOUT_MS" not in symbols
 
 
-def test_extract_facts_falls_back_to_regex_when_tree_sitter_is_unavailable(tmp_path, monkeypatch):
+def test_extract_facts_uses_stdlib_ast_when_tree_sitter_is_unavailable(tmp_path, monkeypatch):
     src = tmp_path / "src"
     src.mkdir()
     (src / "simple.py").write_text(
@@ -207,5 +207,5 @@ def test_extract_facts_falls_back_to_regex_when_tree_sitter_is_unavailable(tmp_p
     facts = extract_facts(tmp_path, "python", ["src"])
     module = facts.modules["simple"]
 
-    assert isinstance(get_extractor("python"), RegexExtractor)
+    assert isinstance(get_extractor("python"), PythonAstExtractor)
     assert {symbol.name for symbol in module.symbols} == {"SimpleService", "work"}

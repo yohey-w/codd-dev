@@ -12,12 +12,14 @@ Two-phase architecture:
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from codd.bridge import load_bridge_registry
+from codd.dependency_catalog import detect_python_manifest_patterns
 from codd.parsing import (
     BuildDepsExtractor,
     BuildDepsInfo,
@@ -123,6 +125,59 @@ class ExtractResult:
     total_lines: int
     language: str
     source_dirs: list[str]
+
+
+def build_extract_init_metadata(project_root: Path, extracted_at: str | None = None) -> dict[str, str]:
+    """Build generic brownfield extraction metadata for generated YAML/Markdown."""
+    timestamp = extracted_at or datetime.now().astimezone().replace(microsecond=0).isoformat()
+    return {
+        "version": "1.0",
+        "extracted_at": timestamp,
+        "source": project_root.resolve().as_posix(),
+    }
+
+
+def add_extract_init_frontmatter(paths: list[Path], metadata: dict[str, str]) -> None:
+    """Add codd init metadata to generated Markdown frontmatter or YAML payloads."""
+    for path in paths:
+        suffix = path.suffix.lower()
+        if suffix in {".md", ".markdown"}:
+            _upsert_markdown_codd_metadata(path, metadata)
+        elif suffix in {".yaml", ".yml"}:
+            _upsert_yaml_codd_metadata(path, metadata)
+
+
+def _merge_codd_metadata(payload: Any, metadata: dict[str, str]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+    codd = payload.get("codd")
+    if not isinstance(codd, dict):
+        codd = {}
+    codd.update(metadata)
+    payload["codd"] = codd
+    return payload
+
+
+def _upsert_markdown_codd_metadata(path: Path, metadata: dict[str, str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    match = re.match(r"\A---\s*\n(.*?)\n---\s*\n?", text, re.DOTALL)
+    if match:
+        frontmatter = yaml.safe_load(match.group(1)) or {}
+        body = text[match.end():]
+    else:
+        frontmatter = {}
+        body = text
+
+    payload = _merge_codd_metadata(frontmatter, metadata)
+    rendered = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+    separator = "" if body.startswith("\n") else "\n"
+    path.write_text(f"---\n{rendered}---\n{separator}{body}", encoding="utf-8")
+
+
+def _upsert_yaml_codd_metadata(path: Path, metadata: dict[str, str]) -> None:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    merged = _merge_codd_metadata(payload, metadata)
+    path.write_text(yaml.safe_dump(merged, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -695,28 +750,14 @@ def _detect_patterns(facts: ProjectFacts, project_root: Path):
 
 
 def _detect_python_patterns(facts: ProjectFacts, content: str):
-    frameworks = {
-        "fastapi": "FastAPI", "flask": "Flask", "django": "Django",
-        "starlette": "Starlette", "tornado": "Tornado", "aiohttp": "aiohttp",
-    }
-    orms = {
-        "sqlalchemy": "SQLAlchemy", "django": "Django ORM",
-        "tortoise-orm": "Tortoise ORM", "peewee": "Peewee",
-        "sqlmodel": "SQLModel", "prisma": "Prisma",
-    }
-    test_fw = {
-        "pytest": "pytest", "unittest": "unittest", "nose": "nose2",
-    }
-
-    for key, name in frameworks.items():
-        if key in content.lower():
+    frameworks, orm, test_framework = detect_python_manifest_patterns(content)
+    for name in frameworks:
+        if name not in facts.detected_frameworks:
             facts.detected_frameworks.append(name)
-    for key, name in orms.items():
-        if key in content.lower() and not facts.detected_orm:
-            facts.detected_orm = name
-    for key, name in test_fw.items():
-        if key in content.lower() and not facts.detected_test_framework:
-            facts.detected_test_framework = name
+    if orm and not facts.detected_orm:
+        facts.detected_orm = orm
+    if test_framework and not facts.detected_test_framework:
+        facts.detected_test_framework = test_framework
 
 
 def _detect_js_patterns(facts: ProjectFacts, content: str):
@@ -973,7 +1014,8 @@ def synth_architecture(facts: ProjectFacts, output_dir: Path) -> Path:
 
 def run_extract(project_root: Path, language: str | None = None,
                 source_dirs: list[str] | None = None,
-                output: str | None = None) -> ExtractResult:
+                output: str | None = None,
+                init_metadata: dict[str, str] | None = None) -> ExtractResult:
     """Run full extract pipeline: facts → docs."""
 
     # Try to load config if it exists
@@ -994,11 +1036,11 @@ def run_extract(project_root: Path, language: str | None = None,
     # Phase 2: Generate docs
     if output:
         output_dir = Path(output)
-    elif codd_dir is not None:
-        output_dir = codd_dir / "extracted"
     else:
-        output_dir = project_root / "codd" / "extracted"
+        output_dir = project_root / ".codd" / "extract"
     generated = synth_docs(facts, output_dir)
+    if init_metadata is not None:
+        add_extract_init_frontmatter(generated, init_metadata)
 
     return ExtractResult(
         output_dir=output_dir,
