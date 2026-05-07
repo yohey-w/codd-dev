@@ -1017,6 +1017,177 @@ def elicit_apply_cmd(input_file: Path, format_name: str, project_path: str) -> N
         click.echo(f"Updated: {file_path}")
 
 
+@main.group("diff", invoke_without_command=True)
+@click.option("--extract-input", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--requirements", "requirements_path", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option(
+    "--format",
+    "format_name",
+    type=click.Choice(["json", "md"]),
+    default="md",
+    show_default=True,
+    help="Discovery output format.",
+)
+@click.option("--interactive", is_flag=True, default=False, help="Review findings inline and apply approved items.")
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option(
+    "--ai-cmd",
+    default=None,
+    help="Override AI CLI command (defaults to codd.yaml ai_command or CODD_AI_COMMAND).",
+)
+@click.pass_context
+def diff_cmd(
+    ctx: click.Context,
+    extract_input: Path | None,
+    requirements_path: Path | None,
+    format_name: str,
+    interactive: bool,
+    output: Path | None,
+    project_path: str,
+    ai_cmd: str | None,
+) -> None:
+    """Compare extracted implementation facts with requirements."""
+    if ctx.invoked_subcommand is not None:
+        return
+    from codd.diff.apply import DiffApplyEngine
+    from codd.diff.persistence import append_history, load_ignored
+    from codd.elicit.formatters.interactive import InteractiveFormatter
+    from codd.elicit.formatters.json_fmt import JsonFormatter
+    from codd.elicit.formatters.md import MdFormatter
+
+    project_root = Path(project_path).resolve()
+    extract_path = _project_file(project_root, extract_input, "codd/extracted.md")
+    req_path = _project_file(project_root, requirements_path, "docs/requirements/requirements.md")
+    output_path = _project_file(project_root, output, "drift_findings.md") if output is not None or format_name == "md" else None
+
+    try:
+        from codd.diff.engine import DiffEngine
+
+        engine = _build_diff_engine(DiffEngine, ai_cmd, project_root)
+        findings = _run_diff_engine(
+            engine,
+            extract_input=extract_path,
+            requirements_path=req_path,
+            ignored_findings=load_ignored(project_root),
+        )
+    except (ImportError, OSError, TypeError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    if interactive:
+        formatter = InteractiveFormatter()
+        approved_ids = set(formatter.collect_approvals(findings))
+        approved = [finding for finding in findings if finding.id in approved_ids]
+        try:
+            result = DiffApplyEngine(project_root).apply(approved)
+        except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+        click.echo(f"Diff interactive complete: approved={len(approved)}, skipped={len(findings) - len(approved)}")
+        for file_path in result.files_updated:
+            click.echo(f"Updated: {file_path}")
+        return
+
+    formatted = JsonFormatter().format(findings) if format_name == "json" else MdFormatter().format(findings)
+    if output_path is None:
+        click.echo(formatted, nl=False)
+        return
+
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(formatted, encoding="utf-8")
+        append_history(
+            project_root,
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "extract_input": _display_path(extract_path, project_root),
+                "requirements_path": _display_path(req_path, project_root),
+                "findings_total": len(findings),
+                "output_path": _display_path(output_path, project_root),
+            },
+        )
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(f"Diff discovery complete: findings={len(findings)}")
+    click.echo(f"Output: {_display_path(output_path, project_root)}")
+
+
+@diff_cmd.command("apply")
+@click.argument("input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--format",
+    "format_name",
+    type=click.Choice(["auto", "md", "json"]),
+    default="auto",
+    show_default=True,
+    help="Input format. Auto uses the file extension.",
+)
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def diff_apply_cmd(input_file: Path, format_name: str, project_path: str) -> None:
+    """Apply approved comparison findings to project artifacts."""
+    from codd.diff.apply import DiffApplyEngine, load_findings_from_file
+
+    project_root = Path(project_path).resolve()
+    try:
+        findings = load_findings_from_file(input_file, None if format_name == "auto" else format_name)
+        result = DiffApplyEngine(project_root).apply(findings)
+    except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(f"Diff apply complete: applied={result.applied_count}, skipped={result.skipped_count}")
+    for file_path in result.files_updated:
+        click.echo(f"Updated: {file_path}")
+
+
+def _project_file(project_root: Path, value: Path | None, default: str) -> Path:
+    path = Path(default) if value is None else value.expanduser()
+    if path.is_absolute():
+        return path
+    return project_root / path
+
+
+def _build_diff_engine(engine_cls: Any, ai_cmd: str | None, project_root: Path) -> Any:
+    attempts = (
+        lambda: engine_cls(llm_client=ai_cmd, project_root=project_root),
+        lambda: engine_cls(ai_command=ai_cmd, project_root=project_root),
+        lambda: engine_cls(ai_cmd, project_root),
+        lambda: engine_cls(project_root=project_root),
+        lambda: engine_cls(),
+    )
+    last_error: TypeError | None = None
+    for attempt in attempts:
+        try:
+            return attempt()
+        except TypeError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise TypeError("Could not initialize comparison engine")
+
+
+def _run_diff_engine(
+    engine: Any,
+    *,
+    extract_input: Path,
+    requirements_path: Path,
+    ignored_findings: set[str],
+) -> list[Any]:
+    try:
+        return list(
+            engine.run_diff(
+                extract_input=extract_input,
+                requirements_path=requirements_path,
+                ignored_findings=ignored_findings,
+            )
+        )
+    except TypeError:
+        return list(engine.run_diff(extract_input, requirements_path, ignored_findings))
+
+
 @main.command()
 @click.option("--diff", default="HEAD", help="Git diff target (default: HEAD, shows uncommitted changes)")
 @click.option("--path", default=".", help="Project root directory")
