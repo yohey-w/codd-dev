@@ -1,0 +1,40 @@
+rules:
+  - when: "axis=Color AND coverage=gap"
+    severity: high
+    rationale: "Missing color coverage can hide hierarchy, state, brand, or contrast failures."
+  - when: "axis=Typography AND coverage=gap"
+    severity: high
+    rationale: "Missing typography coverage can leave scale, hierarchy, and legibility undefined."
+  - when: "axis=Shape AND coverage=gap"
+    severity: medium
+    rationale: "Missing shape coverage can create inconsistent component affordance and brand expression."
+  - when: "axis=Elevation AND coverage=gap"
+    severity: medium
+    rationale: "Missing elevation coverage can obscure hierarchy and surface relationships."
+  - when: "axis=Motion AND coverage=gap"
+    severity: high
+    rationale: "Missing motion coverage can hide transition, easing, or duration failures."
+  - when: "axis=Components AND coverage=gap"
+    severity: high
+    rationale: "Missing component coverage can leave core interaction building blocks ambiguous."
+  - when: "axis=Icons AND coverage=gap"
+    severity: medium
+    rationale: "Missing icon coverage can make controls ambiguous or visually inconsistent."
+  - when: "axis=Accessibility AND coverage=gap"
+    severity: critical
+    rationale: "Missing accessibility coverage can block people who rely on accommodations."
+  - when: "axis=Adaptive design AND coverage=gap"
+    severity: high
+    rationale: "Missing adaptive design coverage can hide screen-size and layout failures."
+  - when: "axis=Interaction AND coverage=gap"
+    severity: high
+    rationale: "Missing interaction coverage can leave state, gesture, or selection behavior undefined."
+  - when: "axis=Content design AND coverage=gap"
+    severity: medium
+    rationale: "Missing content design coverage can make labels, messages, or guidance unclear."
+  - when: "axis=Dynamic color AND coverage=gap"
+    severity: medium
+    rationale: "Missing dynamic color coverage can leave personalization and scheme behavior undefined."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking gap."

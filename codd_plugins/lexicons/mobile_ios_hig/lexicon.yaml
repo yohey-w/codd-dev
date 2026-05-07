@@ -1,0 +1,133 @@
+coverage_axes:
+  - axis_type: "Navigation and search"
+    rationale: "Apple HIG publishes a Navigation and search page for how people move through and locate content."
+    criticality_default: high
+    variants:
+      - id: "Navigation and search"
+        label: "Navigation structure and search affordance"
+        attributes: {source_literal: "Navigation and search", source_url: "https://developer.apple.com/design/human-interface-guidelines/navigation-and-search"}
+        criticality: high
+      - id: "Search fields"
+        label: "Search field behavior and placement"
+        attributes: {source_literal: "Search fields", source_url: "https://developer.apple.com/design/human-interface-guidelines/search-fields"}
+        criticality: medium
+  - axis_type: "Typography"
+    rationale: "Apple HIG has a Typography page for legibility, hierarchy, important content, and brand or style."
+    criticality_default: high
+    variants:
+      - id: "Typography"
+        label: "Text hierarchy and legibility"
+        attributes: {source_literal: "Typography", source_url: "https://developer.apple.com/design/human-interface-guidelines/typography"}
+        criticality: high
+      - id: "Fonts"
+        label: "Font use and scaling"
+        attributes: {source_literal: "Fonts", source_url: "https://developer.apple.com/design/human-interface-guidelines/typography#Fonts"}
+        criticality: medium
+  - axis_type: "Color"
+    rationale: "Apple HIG publishes a Color page for communication, hierarchy, and system appearance adaptation."
+    criticality_default: high
+    variants:
+      - id: "Color"
+        label: "Color roles and semantic meaning"
+        attributes: {source_literal: "Color", source_url: "https://developer.apple.com/design/human-interface-guidelines/color"}
+        criticality: high
+      - id: "Dark Mode"
+        label: "Dark appearance support"
+        attributes: {source_literal: "Dark Mode", source_url: "https://developer.apple.com/design/human-interface-guidelines/dark-mode"}
+        criticality: medium
+  - axis_type: "Accessibility"
+    rationale: "Apple HIG publishes Accessibility guidance for people with diverse abilities and assistive technologies."
+    criticality_default: critical
+    variants:
+      - id: "Accessibility"
+        label: "Accessibility coverage"
+        attributes: {source_literal: "Accessibility", source_url: "https://developer.apple.com/design/human-interface-guidelines/accessibility"}
+        criticality: critical
+      - id: "VoiceOver"
+        label: "Screen reader support"
+        attributes: {source_literal: "VoiceOver", source_url: "https://developer.apple.com/design/human-interface-guidelines/accessibility#VoiceOver"}
+        criticality: critical
+  - axis_type: "Playing haptics"
+    rationale: "Apple HIG includes Playing haptics guidance for tactile feedback and overuse avoidance."
+    criticality_default: medium
+    variants:
+      - id: "Playing haptics"
+        label: "Tactile feedback behavior"
+        attributes: {source_literal: "Playing haptics", source_url: "https://developer.apple.com/design/human-interface-guidelines/playing-haptics"}
+        criticality: medium
+  - axis_type: "Motion"
+    rationale: "Apple HIG publishes a Motion page for animation, continuity, and reduced-motion sensitivity."
+    criticality_default: high
+    variants:
+      - id: "Motion"
+        label: "Animation and transition behavior"
+        attributes: {source_literal: "Motion", source_url: "https://developer.apple.com/design/human-interface-guidelines/motion"}
+        criticality: high
+      - id: "Reduce Motion"
+        label: "Reduced motion accommodation"
+        attributes: {source_literal: "Reduce Motion", source_url: "https://developer.apple.com/design/human-interface-guidelines/motion#Reduce-Motion"}
+        criticality: high
+  - axis_type: "Inputs"
+    rationale: "Apple HIG publishes Inputs guidance for touch, keyboards, pointers, and other input methods."
+    criticality_default: high
+    variants:
+      - id: "Inputs"
+        label: "Input method coverage"
+        attributes: {source_literal: "Inputs", source_url: "https://developer.apple.com/design/human-interface-guidelines/inputs"}
+        criticality: high
+      - id: "Gestures"
+        label: "Gesture behavior and alternatives"
+        attributes: {source_literal: "Gestures", source_url: "https://developer.apple.com/design/human-interface-guidelines/gestures"}
+        criticality: high
+  - axis_type: "Layout"
+    rationale: "Apple HIG publishes Layout guidance for adaptable, consistent layouts across contexts and devices."
+    criticality_default: high
+    variants:
+      - id: "Layout"
+        label: "Adaptive layout behavior"
+        attributes: {source_literal: "Layout", source_url: "https://developer.apple.com/design/human-interface-guidelines/layout"}
+        criticality: high
+      - id: "Safe areas"
+        label: "Content placement within safe areas"
+        attributes: {source_literal: "Safe areas", source_url: "https://developer.apple.com/design/human-interface-guidelines/layout#Safe-areas"}
+        criticality: high
+  - axis_type: "Icons"
+    rationale: "Apple HIG publishes Icons guidance for recognizable, consistent iconography."
+    criticality_default: medium
+    variants:
+      - id: "Icons"
+        label: "Icon recognition and consistency"
+        attributes: {source_literal: "Icons", source_url: "https://developer.apple.com/design/human-interface-guidelines/icons"}
+        criticality: medium
+  - axis_type: "Playing audio"
+    rationale: "Apple HIG publishes Playing audio guidance for audio behavior, interruption, and user control."
+    criticality_default: medium
+    variants:
+      - id: "Playing audio"
+        label: "Audio playback behavior"
+        attributes: {source_literal: "Playing audio", source_url: "https://developer.apple.com/design/human-interface-guidelines/playing-audio"}
+        criticality: medium
+  - axis_type: "Privacy"
+    rationale: "Apple HIG publishes Privacy guidance for trust, data collection, and permission requests."
+    criticality_default: critical
+    variants:
+      - id: "Privacy"
+        label: "Privacy disclosure and permission coverage"
+        attributes: {source_literal: "Privacy", source_url: "https://developer.apple.com/design/human-interface-guidelines/privacy"}
+        criticality: critical
+      - id: "Permission requests"
+        label: "Permission request timing and copy"
+        attributes: {source_literal: "Permission requests", source_url: "https://developer.apple.com/design/human-interface-guidelines/privacy#Permission-requests"}
+        criticality: high
+  - axis_type: "Feedback"
+    rationale: "Apple HIG publishes Feedback guidance for status, confirmation, alerts, and error communication."
+    criticality_default: high
+    variants:
+      - id: "Feedback"
+        label: "Status and response communication"
+        attributes: {source_literal: "Feedback", source_url: "https://developer.apple.com/design/human-interface-guidelines/feedback"}
+        criticality: high
+      - id: "Alerts"
+        label: "Alert and destructive action confirmation"
+        attributes: {source_literal: "Alerts", source_url: "https://developer.apple.com/design/human-interface-guidelines/alerts"}
+        criticality: high
