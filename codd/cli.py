@@ -559,6 +559,115 @@ def _offer_lexicon_suggestions(project_root: Path) -> None:
     click.echo(f"{rel_path} updated ({len(suggestions)} suggested lexicons)")
 
 
+@main.group("lexicon")
+def lexicon_cmd() -> None:
+    """Manage bundled lexicon plug-ins."""
+
+
+@lexicon_cmd.command("list")
+@click.option("--installed", "installed_only", is_flag=True, help="Show installed lexicons only.")
+@click.option("--available", "available_only", is_flag=True, help="Show available, uninstalled lexicons only.")
+@click.option("--all", "show_all", is_flag=True, help="Show installed and available lexicons.")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def lexicon_list_cmd(installed_only: bool, available_only: bool, show_all: bool, project_path: str) -> None:
+    """List installed and bundled lexicons."""
+    from codd.lexicon_cli.manager import LexiconManager
+
+    if sum(bool(value) for value in (installed_only, available_only, show_all)) > 1:
+        click.echo("Error: choose only one of --installed, --available, or --all.")
+        raise SystemExit(1)
+
+    manager = LexiconManager(Path(project_path).resolve())
+    installed = manager.installed()
+    available = manager.uninstalled()
+    if installed_only:
+        _echo_lexicon_records("Installed", installed)
+        return
+    if available_only:
+        _echo_lexicon_records("Available", available)
+        return
+
+    _echo_lexicon_records("Installed", installed)
+    if show_all or not installed_only:
+        click.echo("")
+        _echo_lexicon_records("Available", available)
+
+
+@lexicon_cmd.command("install")
+@click.argument("lexicon_ids", nargs=-1, required=True)
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def lexicon_install_cmd(lexicon_ids: tuple[str, ...], project_path: str) -> None:
+    """Install bundled lexicons into project_lexicon.yaml."""
+    from codd.lexicon_cli.manager import LexiconManager
+
+    manager = LexiconManager(Path(project_path).resolve())
+    try:
+        result = manager.install(lexicon_ids)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    for lexicon_id in result.installed:
+        click.echo(f"Installed: {lexicon_id}")
+    for lexicon_id in result.skipped:
+        click.echo(f"Skipped: {lexicon_id} already installed")
+    rel_path = _display_path(result.project_lexicon_path, manager.project_root)
+    click.echo(f"Updated: {rel_path}")
+    for record in result.records:
+        if record.recommended_kinds:
+            preview = ", ".join(record.recommended_kinds[:5])
+            suffix = "" if len(record.recommended_kinds) <= 5 else ", ..."
+            click.echo(f"{record.id} recommended kinds: {preview}{suffix}")
+        severity_rules = record.path / "severity_rules.yaml"
+        if severity_rules.is_file():
+            click.echo(f"{record.id} severity rules: {_display_path(severity_rules, manager.project_root)}")
+
+
+@lexicon_cmd.command("diff")
+@click.argument("lexicon_id")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+@click.option(
+    "--format",
+    "format_name",
+    type=click.Choice(["json", "md"]),
+    default="md",
+    show_default=True,
+    help="Output format.",
+)
+@click.option("--with-ai", is_flag=True, default=False, help="Use AI-backed elicit coverage mode.")
+@click.option("--ai-cmd", default=None, help="Override AI CLI command for --with-ai.")
+def lexicon_diff_cmd(
+    lexicon_id: str,
+    project_path: str,
+    format_name: str,
+    with_ai: bool,
+    ai_cmd: str | None,
+) -> None:
+    """Inspect one lexicon against project requirements and design text."""
+    from codd.lexicon_cli.formatters.json_fmt import to_json
+    from codd.lexicon_cli.formatters.md import format_diff_md
+    from codd.lexicon_cli.inspector import LexiconInspector
+
+    try:
+        result = LexiconInspector(Path(project_path).resolve()).inspect(
+            lexicon_id,
+            with_ai=with_ai,
+            ai_command=ai_cmd,
+        )
+    except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(to_json(result) if format_name == "json" else format_diff_md(result), nl=False)
+
+
+def _echo_lexicon_records(label: str, records: list[Any]) -> None:
+    click.echo(f"{label} ({len(records)}):")
+    for record in records:
+        description = f"  {record.description}" if record.description else ""
+        click.echo(f"  {record.id:<32} ({record.observation_dimensions} axes){description}")
+
+
 @main.command()
 @click.option("--path", default=".", help="Project root directory")
 def scan(path: str):
@@ -2721,7 +2830,7 @@ def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, edges: bool,
     raise SystemExit(run_validate(project_root, codd_dir))
 
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option("--path", default=".", show_default=True, help="Project root directory")
 @click.option(
     "--e2e-threshold",
@@ -2745,7 +2854,9 @@ def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, edges: bool,
     help="Screen-flow coverage threshold percentage.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
+@click.pass_context
 def coverage(
+    ctx: click.Context,
     path: str,
     e2e_threshold: float,
     lexicon_threshold: float,
@@ -2753,6 +2864,9 @@ def coverage(
     as_json: bool,
 ):
     """Coverage metrics merge gate: E2E, design tokens, and lexicon."""
+    if ctx.invoked_subcommand is not None:
+        return
+
     from codd.coverage_metrics import run_coverage
 
     project_root = Path(path).resolve()
@@ -2798,6 +2912,65 @@ def coverage(
         click.echo("Coverage gate PASSED" if report.all_passed else "Coverage gate FAILED")
 
     raise SystemExit(0 if report.all_passed else 1)
+
+
+@coverage.command("report")
+@click.option(
+    "--lexicons",
+    default="all",
+    show_default=True,
+    help="Lexicons to include: all or a comma-separated id list.",
+)
+@click.option("--path", "project_path", default=".", show_default=True, help="Project root directory")
+@click.option(
+    "--format",
+    "format_name",
+    type=click.Choice(["json", "md", "html"]),
+    default="md",
+    show_default=True,
+    help="Report output format.",
+)
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write report to file.")
+@click.option("--with-ai", is_flag=True, default=False, help="Use AI-backed elicit coverage mode.")
+@click.option("--ai-cmd", default=None, help="Override AI CLI command for --with-ai.")
+def coverage_report_cmd(
+    lexicons: str,
+    project_path: str,
+    format_name: str,
+    output: Path | None,
+    with_ai: bool,
+    ai_cmd: str | None,
+) -> None:
+    """Generate a lexicon coverage matrix report."""
+    from codd.lexicon_cli.formatters.html import format_coverage_report_html
+    from codd.lexicon_cli.formatters.json_fmt import to_json
+    from codd.lexicon_cli.formatters.md import format_coverage_report_md
+    from codd.lexicon_cli.reporter import CoverageReporter
+
+    project_root = Path(project_path).resolve()
+    try:
+        report = CoverageReporter(project_root).build(lexicons, with_ai=with_ai, ai_command=ai_cmd)
+    except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    if format_name == "json":
+        rendered = to_json(report)
+    elif format_name == "html":
+        rendered = format_coverage_report_html(report)
+    else:
+        rendered = format_coverage_report_md(report)
+
+    if output is None:
+        click.echo(rendered, nl=False)
+        return
+
+    output_path = output.expanduser()
+    if not output_path.is_absolute():
+        output_path = project_root / output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(rendered, encoding="utf-8")
+    click.echo(f"Report: {_display_path(output_path, project_root)}")
 
 
 @main.command("deploy")
