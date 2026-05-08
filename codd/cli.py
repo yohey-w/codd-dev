@@ -463,6 +463,18 @@ def _format_preflight_ntfy(result: Any) -> str:
     default=True,
     help="Detect project manifests and offer lexicon plug-in suggestions.",
 )
+@click.option(
+    "--llm-enhanced",
+    is_flag=True,
+    default=False,
+    help="Use AI to recommend lexicons from requirements and design context.",
+)
+@click.option(
+    "--auto-approve",
+    is_flag=True,
+    default=False,
+    help="Apply high and medium confidence AI lexicon recommendations without prompting.",
+)
 def init(
     project_name: str,
     language: str,
@@ -470,6 +482,8 @@ def init(
     requirements: str | None,
     config_dir: str,
     suggest_lexicons: bool,
+    llm_enhanced: bool,
+    auto_approve: bool,
 ):
     """Initialize CoDD in a project directory."""
     dest_path = Path(dest).resolve()
@@ -521,10 +535,15 @@ def init(
         click.echo(f"  or: codd generate --wave 2  (auto-generates everything)")
 
     if suggest_lexicons:
-        _offer_lexicon_suggestions(dest_path)
+        _offer_lexicon_suggestions(dest_path, llm_enhanced=llm_enhanced, auto_approve=auto_approve)
 
 
-def _offer_lexicon_suggestions(project_root: Path) -> None:
+def _offer_lexicon_suggestions(
+    project_root: Path,
+    *,
+    llm_enhanced: bool = False,
+    auto_approve: bool = False,
+) -> None:
     from codd.init.lexicon_suggest import (
         append_suggested_lexicons,
         describe_lexicons,
@@ -532,6 +551,42 @@ def _offer_lexicon_suggestions(project_root: Path) -> None:
         suggest_lexicons,
     )
     from codd.init.stack_detector import StackDetector
+
+    if llm_enhanced:
+        from codd.init.llm_lexicon_suggester import llm_recommend_lexicons
+
+        llm_result = llm_recommend_lexicons(project_root)
+        if llm_result.recommendations:
+            descriptions = describe_lexicons(rec.lexicon_id for rec in llm_result.recommendations)
+            click.echo("")
+            click.echo("[LLM-enhanced] Analyzing project ...")
+            click.echo("[LLM-enhanced] Detected:")
+            click.echo(f"  - Domain: {llm_result.detected_domain or 'unknown'}")
+            click.echo(f"  - Compliance: {_format_detected_items(llm_result.detected_compliance)}")
+            click.echo(f"  - Tech stack: {_format_detected_items(llm_result.detected_tech_stack)}")
+            click.echo(f"  - Integrations: {_format_detected_items(llm_result.detected_integrations)}")
+            click.echo("")
+            click.echo("[LLM-enhanced] Recommended lexicons:")
+            for index, recommendation in enumerate(llm_result.recommendations, start=1):
+                description = descriptions.get(recommendation.lexicon_id, "")
+                suffix = f" ({description})" if description else ""
+                click.echo(
+                    f"  {index}. {_confidence_icon(recommendation.confidence)} "
+                    f"{recommendation.lexicon_id}{suffix} [{recommendation.confidence}]"
+                )
+                if recommendation.reason:
+                    click.echo(f"     {recommendation.reason}")
+
+            selected = _select_llm_recommendations(llm_result, auto_approve=auto_approve)
+            if not selected:
+                click.echo("LLM-enhanced lexicons not added.")
+                return
+            path = append_suggested_lexicons(project_root, selected)
+            rel_path = path.relative_to(project_root).as_posix()
+            click.echo(f"{rel_path} updated ({len(selected)} suggested lexicons)")
+            return
+        click.echo("")
+        click.echo("[LLM-enhanced] No usable recommendation; falling back to stack-based suggestions.")
 
     detection = StackDetector().detect(project_root)
     if not detection.stack_hints:
@@ -557,6 +612,51 @@ def _offer_lexicon_suggestions(project_root: Path) -> None:
     path = append_suggested_lexicons(project_root, suggestions)
     rel_path = path.relative_to(project_root).as_posix()
     click.echo(f"{rel_path} updated ({len(suggestions)} suggested lexicons)")
+
+
+def _format_detected_items(items: list[str]) -> str:
+    return ", ".join(items) if items else "none"
+
+
+def _confidence_icon(confidence: str) -> str:
+    return {"high": "✅", "medium": "⚠️", "low": "△"}.get(confidence, "△")
+
+
+def _select_llm_recommendations(llm_result: Any, *, auto_approve: bool) -> list[str]:
+    if auto_approve:
+        return [
+            recommendation.lexicon_id
+            for recommendation in llm_result.recommendations
+            if recommendation.confidence in {"high", "medium"}
+        ]
+
+    choice = click.prompt("Apply all recommended? [Y/n/select]", default="Y", show_default=False).strip().lower()
+    if choice in {"y", "yes", ""}:
+        return [
+            recommendation.lexicon_id
+            for recommendation in llm_result.recommendations
+            if recommendation.confidence in {"high", "medium"}
+        ]
+    if choice in {"n", "no"}:
+        return []
+    if choice != "select":
+        click.echo("Invalid selection; suggested lexicons not added.")
+        return []
+
+    raw_numbers = click.prompt("Select recommendation numbers", default="", show_default=False).strip()
+    selected: list[str] = []
+    for token in re.split(r"[\s,]+", raw_numbers):
+        if not token:
+            continue
+        try:
+            index = int(token)
+        except ValueError:
+            continue
+        if 1 <= index <= len(llm_result.recommendations):
+            lexicon_id = llm_result.recommendations[index - 1].lexicon_id
+            if lexicon_id not in selected:
+                selected.append(lexicon_id)
+    return selected
 
 
 @main.group("lexicon")
