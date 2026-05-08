@@ -4,6 +4,29 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-05-08 — Default scope = system_implementation (cmd_455)
+
+### Changed (default behaviour)
+
+- **`DEFAULT_SCOPE` is now `system_implementation` (was `full`).** When a project's `project_lexicon.yaml` does not declare `scope:`, CoDD now suppresses business-concern dimensions (goal/KPI, acceptance/UAT detail, risk register, glossary terms) from `codd elicit` findings. This matches CoDD's design philosophy: it is a coherence verifier for system implementation, not a project-management tool.
+- The CoDD core, every example, and the lexicon loader all read `DEFAULT_SCOPE` — no other change was needed.
+
+### Migration
+
+| Project state | New behaviour | Action |
+| --- | --- | --- |
+| No `scope:` declared | `system_implementation` (filters business dimensions) | none — recommended default |
+| Wants legacy "everything" mode | declare `scope: full` in `project_lexicon.yaml` | one-line opt-in |
+| PMO / requirements-only review | `scope: business_only` | already supported |
+
+`cmd_445` (scope/phase filter) shipped this filtering machinery in v2.2.0; v2.7.0 only changes which mode is the unspecified default.
+
+### Quality Metrics
+
+- **pytest**: 2697 PASS / 0 FAIL / 0 SKIP (no regressions vs v2.6.1)
+- **Generality Gate**: zero specific lexicon literal hits.
+- **Compatibility**: explicit `scope: full` keeps the v2.6.x behaviour.
+
 ## [2.6.1] - 2026-05-08 — AI command timeout default 30 min (cmd_454)
 
 ### Changed
