@@ -4,6 +4,18 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-05-08 — AI command timeout default 30 min (cmd_454)
+
+### Changed
+
+- `DEFAULT_TIMEOUT_SECONDS` (and therefore `resolve_timeout()` when nothing else is set) now defaults to **1800.0 s** (30 minutes) instead of 120 s. Multi-lexicon `codd elicit` pipelines (10+ lexicons at ~30 s each) consistently exceeded the legacy 120 s ceiling. Override paths are unchanged: explicit argument > `CODD_AI_TIMEOUT_SECONDS` env var > `llm.timeout_seconds` in `codd.yaml` > default.
+
+### Quality Metrics
+
+- **pytest**: 2696 PASS / 0 FAIL / 0 SKIP (no regressions vs v2.6.0)
+- **Generality Gate**: zero specific lexicon literal hits.
+- **Compatibility**: every existing override path keeps its precedence; only the absent-value fallback changes.
+
 ## [2.6.0] - 2026-05-08 — `extends` namespace + multi-lexicon auto-load (cmd_453)
 
 > v2.5.0 is reserved for the in-flight `verifies_runtime` binding work

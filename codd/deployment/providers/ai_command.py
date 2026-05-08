@@ -14,7 +14,10 @@ from codd.config import load_project_config
 
 
 DEFAULT_AI_COMMAND = "ai"
-DEFAULT_TIMEOUT_SECONDS = 120.0
+# Default 1800s (30 min): multi-lexicon elicit can chain 10+ lexicons at ~30s
+# each, so the legacy 120s default truncated long pipelines. Override via the
+# CODD_AI_COMMAND_TIMEOUT env var or `llm.timeout_seconds` in codd.yaml.
+DEFAULT_TIMEOUT_SECONDS = 1800.0
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
 
