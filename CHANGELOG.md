@@ -4,6 +4,37 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-05-08 — LLM-enhanced `codd init --suggest-lexicons` (cmd_456)
+
+### Added
+
+- `codd init --suggest-lexicons --llm-enhanced` invokes the configured AI
+  command, passing project requirements / design docs / manifest hints, and
+  asks the LLM to recommend lexicons. Each recommendation includes a
+  `confidence` (`high` / `medium` / `low`) and a one-line `reason`.
+- New `--auto-approve` flag skips the interactive HITL prompt and writes the
+  high+medium recommendations directly into `extends:` (CI-friendly).
+- `codd/init/llm_lexicon_suggester.py` houses the new dataclasses
+  (`LlmLexiconRecommendation`, `LlmLexiconResult`) and the prompt builder.
+  `codd_plugins/lexicons/` is enumerated dynamically; the prompt template
+  carries no specific lexicon, domain, or compliance literals.
+
+### Behaviour
+
+- Without `--llm-enhanced` the existing regex / `stack_map.yaml` based
+  suggestion path stays unchanged (cmd_439, v1.41.0).
+- With `--llm-enhanced` and no requirements/design docs to read, or when the
+  AI command fails / returns invalid JSON, CoDD falls back gracefully to the
+  regex-based suggester instead of erroring.
+
+### Quality Metrics
+
+- **pytest**: 2701 PASS / 0 FAIL / 0 SKIP (no regressions vs v2.7.0)
+- **Generality Gate**: zero specific lexicon literal hits in
+  `codd/init/llm_lexicon_suggester.py` and the prompt template.
+- **Compatibility**: legacy `codd init --suggest-lexicons` (regex mode) still
+  works; the new path is opt-in.
+
 ## [2.7.0] - 2026-05-08 — Default scope = system_implementation (cmd_455)
 
 ### Changed (default behaviour)
