@@ -124,10 +124,28 @@ def test_phase_production_no_severity_change(tmp_path: Path) -> None:
     }
 
 
-def test_default_scope_full_phase_production_backward_compat(tmp_path: Path) -> None:
+def test_default_scope_system_implementation_filters_business_dimensions(
+    tmp_path: Path,
+) -> None:
+    """cmd_455: omitting `scope:` defaults to system_implementation.
+
+    Business-concern dimensions (goal) drop out of findings unless the
+    project explicitly opts into `scope: full` or `scope: business_only`.
+    """
+
     _write_project_lexicon(tmp_path)
 
     result = _run(tmp_path, [_finding("F-goal", "goal"), _finding("F-flow", "flow")])
 
-    assert [finding.id for finding in result.findings] == ["F-goal", "F-flow"]
+    assert [finding.id for finding in result.findings] == ["F-flow"]
     assert {finding.severity for finding in result.findings} == {"high"}
+
+
+def test_explicit_scope_full_overrides_new_default(tmp_path: Path) -> None:
+    """cmd_455 backward compat: `scope: full` keeps the legacy behaviour."""
+
+    _write_project_lexicon(tmp_path, scope="full")
+
+    result = _run(tmp_path, [_finding("F-goal", "goal"), _finding("F-flow", "flow")])
+
+    assert [finding.id for finding in result.findings] == ["F-goal", "F-flow"]

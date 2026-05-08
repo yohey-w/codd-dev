@@ -292,18 +292,23 @@ def _existing_axes_text(project_root: Path) -> str:
 
 
 def _project_scope_phase(project_root: Path) -> tuple[str, str]:
+    # cmd_455: default scope = system_implementation matches CoDD's design
+    # focus. Projects that want every dimension (including business goals,
+    # UAT detail, risk register) opt in via `scope: full` in project_lexicon.yaml.
+    from codd.lexicon import DEFAULT_PHASE, DEFAULT_SCOPE
+
     for name in ("project_lexicon.yaml", "project_lexicon.yml"):
         path = project_root / name
         if not path.is_file():
             continue
         payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         if not isinstance(payload, Mapping):
-            return "full", "production"
+            return DEFAULT_SCOPE, DEFAULT_PHASE
         return (
-            str(payload.get("scope") or "full"),
-            str(payload.get("phase") or "production"),
+            str(payload.get("scope") or DEFAULT_SCOPE),
+            str(payload.get("phase") or DEFAULT_PHASE),
         )
-    return "full", "production"
+    return DEFAULT_SCOPE, DEFAULT_PHASE
 
 
 def _apply_scope_phase(

@@ -37,13 +37,22 @@ def test_load_lexicon_reads_scope_and_phase(tmp_path: Path) -> None:
     assert lexicon.phase == "mvp"
 
 
-def test_load_lexicon_defaults_scope_full_phase_production(tmp_path: Path) -> None:
+def test_load_lexicon_defaults_scope_system_implementation_phase_production(
+    tmp_path: Path,
+) -> None:
+    """cmd_455: undeclared scope defaults to system_implementation.
+
+    Business-tier dimensions (goal/KPI, acceptance/UAT, risk register) are
+    suppressed unless the project opts in with `scope: full` or
+    `scope: business_only`.
+    """
+
     _write(tmp_path, _payload())
 
     lexicon = load_lexicon(tmp_path)
 
     assert lexicon is not None
-    assert lexicon.scope == "full"
+    assert lexicon.scope == "system_implementation"
     assert lexicon.phase == "production"
 
 

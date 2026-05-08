@@ -14,7 +14,11 @@ import yaml
 SCHEMA_PATH = Path(__file__).parent / "templates" / "lexicon_schema.yaml"
 LEXICON_FILENAME = "project_lexicon.yaml"
 REQUIRED_ARTIFACT_SOURCES = {"ai_derived", "user_override", "default_template"}
-DEFAULT_SCOPE = "full"
+# cmd_455: CoDD's responsibility is system-implementation coherence. Business
+# concerns (goal/KPI, acceptance/UAT detail, risk register) belong upstream of
+# the DAG and should not surface as findings unless the project opts in
+# explicitly with `scope: full` or `scope: business_only`.
+DEFAULT_SCOPE = "system_implementation"
 DEFAULT_PHASE = "production"
 LEGACY_SUGGESTED_LEXICONS_WARNING = (
     "suggested_lexicons is deprecated, renamed to extends; auto-merged"
