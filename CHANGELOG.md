@@ -4,6 +4,26 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-05-10 — Cross-industry lexicon expansion (cmd_458)
+
+### Added — 7 cross-industry lexicons (60 axes total)
+
+- `i18n_unicode_cldr` (9 axes) — Unicode / CLDR / BCP-47 / RTL / collation / pluralisation
+- `twelve_factor_app` (12 axes) — Codebase / dependencies / config / backing services / build/release/run / processes / port binding / concurrency / disposability / dev-prod parity / logs / admin processes
+- `mobile_security_masvs` (7 axes) — OWASP MASVS storage / crypto / authentication / network / platform / code / resilience
+- `ddd_domain_driven_design` (9 axes) — Bounded context / aggregate / entity / value object / domain event / repository / ubiquitous language / context map / anticorruption layer
+- `dora_sre_metrics` (8 axes) — Deployment frequency / lead time / change-failure rate / MTTR / SLO / SLI / error budget / toil
+- `ml_model_cards` (8 axes) — Model details / intended use / metrics / training data / evaluation data / quantitative analysis / ethical considerations / caveats
+- `api_rate_limiting_caching` (7 axes) — Rate limit policy / quota window / cache-control / ETag / idempotency / 429 handling / backpressure
+
+`codd_plugins/stack_map.yaml` adds hint patterns so `codd init --suggest-lexicons` recommends these lexicons automatically.
+
+### Quality Metrics
+
+- **pytest**: 2759 PASS / 0 FAIL / 0 SKIP (no regressions vs v2.9.0)
+- **Generality Gate**: zero project-specific literals (`osato` / `lms` / `caregiver` / `介護` / `リハトレ`) across the seven new lexicon directories.
+- **Lexicon coverage**: 31 (v2.9.0) → 38 lexicons total.
+
 ## [2.9.0] - 2026-05-09 — LLM lexicon suggestion: data/function traits (cmd_456b)
 
 ### Changed (LLM suggestion semantics)
