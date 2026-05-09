@@ -11,41 +11,22 @@ import yaml
 
 import codd.implementer as implementer_module
 from codd.cli import CoddCLIError
-from codd.implementer import implement_tasks
+from codd.implementer import DesignContext, ImplementSpec, implement_tasks
 
 
-def _write_doc(
-    project: Path,
-    relative_path: str,
-    *,
-    node_id: str,
-    doc_type: str,
-    body: str,
-    depends_on: list[dict] | None = None,
-) -> None:
-    codd = {"node_id": node_id, "type": doc_type}
-    if depends_on is not None:
-        codd["depends_on"] = depends_on
-
+def _write_doc(project: Path, relative_path: str, *, node_id: str, body: str) -> None:
     path = project / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "---\n"
-        f"{yaml.safe_dump({'codd': codd}, sort_keys=False, allow_unicode=True)}"
+        f"{yaml.safe_dump({'codd': {'node_id': node_id, 'type': 'design'}}, sort_keys=False)}"
         "---\n\n"
         f"{body.rstrip()}\n",
         encoding="utf-8",
     )
 
 
-def _setup_project(
-    tmp_path: Path,
-    *,
-    task_title: str,
-    module_hint: str = "app/login/page.tsx",
-    deliverable: str = "UI route",
-    extra_task_context: str = "",
-) -> Path:
+def _setup_project(tmp_path: Path, *, body: str) -> Path:
     project = tmp_path / "project"
     project.mkdir()
     (project / "codd").mkdir()
@@ -54,45 +35,15 @@ def _setup_project(
             {
                 "project": {"name": "demo", "language": "typescript"},
                 "ai_command": "mock-ai --print",
-                "scan": {
-                    "source_dirs": ["src/"],
-                    "doc_dirs": ["docs/plan/"],
-                    "config_files": [],
-                    "exclude": [],
-                },
+                "scan": {"source_dirs": ["src/"], "doc_dirs": ["docs/design/"], "config_files": [], "exclude": []},
             },
             sort_keys=False,
             allow_unicode=True,
         ),
         encoding="utf-8",
     )
-    (project / "DESIGN.md").write_text(
-        """---
-colors:
-  primary: "#0f62fe"
----
-
-# Demo Design
-""",
-        encoding="utf-8",
-    )
-    _write_doc(
-        project,
-        "docs/plan/implementation_plan.md",
-        node_id="plan:implementation-plan",
-        doc_type="plan",
-        depends_on=[],
-        body=f"""# Implementation Plan
-
-#### Sprint 1: Demo
-
-| # | 作業項目 | 対応モジュール | 成果物 |
-|---|---|---|---|
-| 1-1 | {task_title} | {module_hint} | {deliverable} |
-
-{extra_task_context}
-""",
-    )
+    (project / "DESIGN.md").write_text("---\ncolors:\n  primary: '#0f62fe'\n---\n", encoding="utf-8")
+    _write_doc(project, "docs/design/login.md", node_id="design:login", body=body)
     return project
 
 
@@ -107,8 +58,8 @@ def _mock_ai(monkeypatch: pytest.MonkeyPatch, stdout: str | None = None) -> list
 
     def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(input)
-        match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
-        output_dir = match.group("output") if match else "src/generated/fallback"
+        match = re.search(r"Output paths: (?P<output>[^\n,]+)", input)
+        output_dir = match.group("output") if match else "src/login"
         generated = stdout
         if generated is None:
             generated = (
@@ -123,25 +74,12 @@ def _mock_ai(monkeypatch: pytest.MonkeyPatch, stdout: str | None = None) -> list
     return calls
 
 
-def _plan_and_task():
-    plan = implementer_module.ImplementationPlan(
-        node_id="plan:test",
-        path=Path("docs/plan/implementation_plan.md"),
-        content="# Plan",
-        depends_on=[],
-        conventions=[],
+def _design_context() -> DesignContext:
+    return DesignContext(
+        node_id="design:login",
+        path=Path("docs/design/login.md"),
+        content="# Login\nImplement /login page.\n",
     )
-    task = implementer_module.ImplementationTask(
-        task_id="1-1",
-        title="Build login page",
-        summary="Login screen",
-        module_hint="app/login/page.tsx",
-        deliverable="Route UI",
-        output_dir="src/generated/login",
-        dependency_node_ids=[],
-        task_context="Implement /login",
-    )
-    return plan, task
 
 
 def test_load_screen_flow_found(tmp_path: Path):
@@ -161,12 +99,10 @@ def test_load_screen_flow_not_found(tmp_path: Path):
 
 
 def test_build_prompt_includes_screen_flow():
-    plan, task = _plan_and_task()
-
     prompt = implementer_module._build_implementation_prompt(
         config={"project": {"name": "demo", "language": "typescript"}},
-        plan=plan,
-        task=task,
+        design_context=_design_context(),
+        spec=ImplementSpec("docs/design/login.md", ["src/login"]),
         dependency_documents=[],
         conventions=[],
         coding_principles=None,
@@ -175,18 +111,16 @@ def test_build_prompt_includes_screen_flow():
     )
 
     assert "--- SCREEN-FLOW (UI ROUTE DEFINITIONS) ---" in prompt
-    assert "This UI task must implement the relevant route(s):" in prompt
+    assert "This UI work must implement the relevant route(s):" in prompt
     assert "- /login" in prompt
     assert "--- END SCREEN-FLOW ---" in prompt
 
 
 def test_build_prompt_no_screen_flow():
-    plan, task = _plan_and_task()
-
     prompt = implementer_module._build_implementation_prompt(
         config={"project": {"name": "demo", "language": "typescript"}},
-        plan=plan,
-        task=task,
+        design_context=_design_context(),
+        spec=ImplementSpec("docs/design/login.md", ["src/login"]),
         dependency_documents=[],
         conventions=[],
         coding_principles=None,
@@ -208,29 +142,18 @@ def test_is_ui_task_non_ui():
 
 
 def test_zero_files_raises_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    project = _setup_project(
-        tmp_path,
-        task_title="Build billing service",
-        module_hint="lib/billing/service.ts",
-        deliverable="Domain service",
-    )
+    project = _setup_project(tmp_path, body="# Billing\nBuild billing service.\n")
     _mock_ai(monkeypatch, stdout="")
 
     with pytest.raises(CoddCLIError, match="produced 0 generated files"):
-        implement_tasks(project, task="1-1")
+        implement_tasks(project, design="docs/design/login.md", output_paths=["src/billing"])
 
 
 def test_zero_files_with_skip_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    project = _setup_project(
-        tmp_path,
-        task_title="Document manual migration",
-        module_hint="docs/migration.md",
-        deliverable="No generated files",
-        extra_task_context="skip_generation: true",
-    )
+    project = _setup_project(tmp_path, body="skip_generation: true\n")
     _mock_ai(monkeypatch, stdout="")
 
-    results = implement_tasks(project, task="1-1")
+    results = implement_tasks(project, design="docs/design/login.md", output_paths=["src/login"])
 
     assert len(results) == 1
     assert results[0].generated_files == []
@@ -238,25 +161,24 @@ def test_zero_files_with_skip_generation(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_ui_task_includes_route_in_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    project = _setup_project(tmp_path, task_title="Build login page")
+    project = _setup_project(tmp_path, body="# Login\nBuild login page at /login.\n")
     _write_screen_flow(project, "# Routes\n- /\n- /login\n- /dashboard\n")
     calls = _mock_ai(monkeypatch)
 
-    implement_tasks(project, task="1-1")
+    implement_tasks(project, design="docs/design/login.md", output_paths=["src/login"])
 
     assert "--- SCREEN-FLOW (UI ROUTE DEFINITIONS) ---" in calls[0]
-    assert "This UI task must implement the relevant route(s):" in calls[0]
+    assert "This UI work must implement the relevant route(s):" in calls[0]
     assert "- /login" in calls[0]
 
 
 def test_screen_flow_truncated_at_8000_chars():
-    plan, task = _plan_and_task()
     screen_flow = "A" * 8000 + "TAIL"
 
     prompt = implementer_module._build_implementation_prompt(
         config={"project": {"name": "demo", "language": "typescript"}},
-        plan=plan,
-        task=task,
+        design_context=_design_context(),
+        spec=ImplementSpec("docs/design/login.md", ["src/login"]),
         dependency_documents=[],
         conventions=[],
         coding_principles=None,

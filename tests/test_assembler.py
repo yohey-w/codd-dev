@@ -10,8 +10,8 @@ from codd.assembler import _collect_generated_fragments
 from codd.generator import _load_project_config
 
 
-def _create_project_with_plan(tmp_path: Path, *, task_slugs: list[str]) -> Path:
-    """Create a minimal project with an implementation plan and generated fragments."""
+def _create_project_with_outputs(tmp_path: Path, *, output_slugs: list[str]) -> Path:
+    """Create a minimal project with configured implement output paths."""
     project = tmp_path / "project"
     project.mkdir()
 
@@ -22,43 +22,25 @@ def _create_project_with_plan(tmp_path: Path, *, task_slugs: list[str]) -> Path:
         "project": {"name": "demo", "language": "typescript"},
         "scan": {
             "source_dirs": ["src/"],
-            "doc_dirs": ["docs/plan/"],
+            "doc_dirs": ["docs/design/"],
+        },
+        "implement": {
+            "default_output_paths": {
+                f"docs/design/{slug}.md": [f"src/generated/{slug}"]
+                for slug in output_slugs
+            }
         },
     }
     (codd_dir / "codd.yaml").write_text(
         yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
     )
 
-    # Implementation plan with tasks
-    plan_dir = project / "docs" / "plan"
-    plan_dir.mkdir(parents=True)
-    rows = "\n".join(
-        f"| 1-{i+1} | Task {slug} | {slug} | Build {slug} |"
-        for i, slug in enumerate(task_slugs)
-    )
-    plan_content = f"""---
-codd:
-  node_id: "plan:implementation-plan"
-  type: plan
-  depends_on: []
----
-
-# Implementation Plan
-
-#### Sprint 1: Foundation
-
-| # | Title | Module | Deliverable |
-|---|-------|--------|-------------|
-{rows}
-"""
-    (plan_dir / "implementation_plan.md").write_text(plan_content, encoding="utf-8")
-
     return project
 
 
 def test_collect_fragments_excludes_orphans(tmp_path):
-    """Orphan task directories not in the plan should be excluded with a warning."""
-    project = _create_project_with_plan(tmp_path, task_slugs=["auth", "database"])
+    """Orphan output directories not in configured outputs should be excluded with a warning."""
+    project = _create_project_with_outputs(tmp_path, output_slugs=["authentication", "database_foundation"])
     config = _load_project_config(project)
 
     # Create valid fragment directories (flat layout)

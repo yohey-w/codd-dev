@@ -1825,21 +1825,10 @@ def propagate_from(project_path: str, files: tuple[str, ...], source: str, edito
 
 @main.group(invoke_without_command=True)
 @click.option("--path", default=".", help="Project root directory")
-@click.option("--task", default=None, help="Generate only one task by task ID or title match")
+@click.option("--design", default=None, help="Design document path or design node id to implement")
+@click.option("--output", "outputs", multiple=True, help="Output path. May be repeated.")
+@click.option("--depends-on", "depends_on", multiple=True, help="Dependency design document path or node id. May be repeated.")
 @click.option("--clean", is_flag=True, default=False, help="Remove existing generated output before re-generating")
-@click.option(
-    "--max-tasks",
-    default=30,
-    type=click.IntRange(min=1),
-    show_default=True,
-    help="Maximum number of tasks to process per session. Abort if plan exceeds this limit.",
-)
-@click.option(
-    "--wave",
-    default=None,
-    type=click.IntRange(min=1),
-    help="Execute only tasks belonging to this wave number.",
-)
 @click.option(
     "--ai-cmd",
     default=None,
@@ -1850,32 +1839,32 @@ def propagate_from(project_path: str, files: tuple[str, ...], source: str, edito
 def implement(
     ctx,
     path: str,
-    task: str | None,
+    design: str | None,
+    outputs: tuple[str, ...],
+    depends_on: tuple[str, ...],
     clean: bool,
-    max_tasks: int,
-    wave: int | None,
     ai_cmd: str | None,
     use_derived_steps: str | None,
 ):
-    """Generate implementation code from the implementation plan."""
+    """Generate implementation code from one design document."""
     if ctx.invoked_subcommand is not None:
         return
 
     from codd.implementer import implement_tasks
 
     project_root = Path(path).resolve()
-    codd_dir = _require_codd_dir(project_root)
+    _require_codd_dir(project_root)
 
     if clean:
-        click.echo("Cleaning src/generated/ ...")
+        click.echo("Cleaning requested output paths ...")
 
     try:
         implement_kwargs = {
-            "task": task,
+            "design": design,
+            "output_paths": list(outputs),
+            "dependency_design_nodes": list(depends_on),
             "ai_command": ai_cmd,
             "clean": clean,
-            "max_tasks": max_tasks,
-            "wave": wave,
         }
         parsed_use_derived_steps = _optional_bool(use_derived_steps)
         if parsed_use_derived_steps is not None:
@@ -4023,13 +4012,27 @@ def _optional_bool(value: str | bool | None) -> bool | None:
 
 
 def _implement_task_for_cli(project_root: Path, config: dict[str, Any], task_id: str):
-    from codd.implementer import _extract_all_tasks, _filter_tasks, _load_implementation_plan
+    from codd.implementer import ImplementSpec
 
-    plan = _load_implementation_plan(project_root, config)
-    matches = _filter_tasks(_extract_all_tasks(plan), task_id)
-    if not matches:
-        raise ValueError(f"no implementation task matched {task_id!r}")
-    return matches[0]
+    output_paths = _implement_output_paths_for_cli(config, task_id)
+    return ImplementSpec(design_node=task_id, output_paths=output_paths)
+
+
+def _implement_output_paths_for_cli(config: dict[str, Any], design_node: str) -> list[str]:
+    implement = config.get("implement") if isinstance(config.get("implement"), dict) else {}
+    for key in ("default_output_paths", "implement_targets"):
+        mapping = implement.get(key) if isinstance(implement, dict) else None
+        if not isinstance(mapping, dict) or design_node not in mapping:
+            continue
+        value = mapping[design_node]
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            paths = [str(item) for item in value if str(item).strip()]
+            if paths:
+                return paths
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", design_node).strip("_").lower() or "implement"
+    return [f"src/{slug}"]
 
 
 def _nested_config_value(config: dict[str, Any], path: tuple[str, ...]) -> Any:

@@ -13,19 +13,8 @@ import codd.implementer as implementer_module
 from codd.implementer import implement_tasks
 
 
-def _write_doc(
-    project: Path,
-    relative_path: str,
-    *,
-    node_id: str,
-    doc_type: str,
-    body: str,
-    depends_on: list[dict] | None = None,
-) -> None:
-    payload = {"codd": {"node_id": node_id, "type": doc_type}}
-    if depends_on is not None:
-        payload["codd"]["depends_on"] = depends_on
-
+def _write_doc(project: Path, relative_path: str, *, node_id: str, body: str) -> None:
+    payload = {"codd": {"node_id": node_id, "type": "design"}}
     path = project / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -34,42 +23,22 @@ def _write_doc(
     )
 
 
-def _setup_project(
-    tmp_path: Path,
-    *,
-    task_title: str,
-    module_hint: str,
-    deliverable: str,
-) -> Path:
+def _setup_project(tmp_path: Path, *, body: str) -> Path:
     project = tmp_path / "project"
     project.mkdir()
-    codd_dir = project / "codd"
-    codd_dir.mkdir()
-    (codd_dir / "codd.yaml").write_text(
+    (project / "codd").mkdir()
+    (project / "codd" / "codd.yaml").write_text(
         yaml.safe_dump(
             {
                 "project": {"name": "demo", "language": "typescript"},
                 "ai_command": "mock-ai --print",
+                "scan": {"source_dirs": ["src/"], "doc_dirs": ["docs/design/"], "config_files": [], "exclude": []},
             },
             sort_keys=False,
         ),
         encoding="utf-8",
     )
-    _write_doc(
-        project,
-        "docs/plan/implementation_plan.md",
-        node_id="plan:implementation-plan",
-        doc_type="plan",
-        depends_on=[],
-        body=f"""# Implementation Plan
-
-#### Sprint 1: Demo
-
-| # | 作業項目 | 対応モジュール | 成果物 |
-|---|---|---|---|
-| 1-1 | {task_title} | {module_hint} | {deliverable} |
-""",
-    )
+    _write_doc(project, "docs/design/task.md", node_id="design:task", body=body)
     return project
 
 
@@ -93,7 +62,7 @@ def _mock_ai(monkeypatch: pytest.MonkeyPatch, extension: str) -> list[str]:
     calls: list[str] = []
 
     def fake_run(command, *, input, capture_output, text, check, **kwargs):
-        match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
+        match = re.search(r"Output paths: (?P<output>[^\n,]+)", input)
         assert match is not None
         output_dir = match.group("output")
         calls.append(input)
@@ -115,16 +84,11 @@ def _mock_ai(monkeypatch: pytest.MonkeyPatch, extension: str) -> list[str]:
 
 
 def test_ui_file_triggers_design_md_injection(tmp_path, monkeypatch):
-    project = _setup_project(
-        tmp_path,
-        task_title="Build dashboard component",
-        module_hint="components/Dashboard.tsx",
-        deliverable="Dashboard UI component",
-    )
+    project = _setup_project(tmp_path, body="# Dashboard\nBuild dashboard component Dashboard.tsx.\n")
     _write_design_md(project)
     calls = _mock_ai(monkeypatch, ".tsx")
 
-    implement_tasks(project, task="1-1")
+    implement_tasks(project, design="docs/design/task.md", output_paths=["src/dashboard"])
 
     assert "# DESIGN.md tokens (W3C Design Tokens spec)" in calls[0]
     assert "- colors.primary (color): #0f62fe" in calls[0]
@@ -132,43 +96,28 @@ def test_ui_file_triggers_design_md_injection(tmp_path, monkeypatch):
 
 
 def test_non_ui_file_no_injection(tmp_path, monkeypatch):
-    project = _setup_project(
-        tmp_path,
-        task_title="Build domain service",
-        module_hint="lib/domain/service.ts",
-        deliverable="Domain service",
-    )
+    project = _setup_project(tmp_path, body="# Domain\nBuild domain service.\n")
     _write_design_md(project)
     calls = _mock_ai(monkeypatch, ".ts")
 
-    implement_tasks(project, task="1-1")
+    implement_tasks(project, design="docs/design/task.md", output_paths=["src/domain"])
 
     assert "DESIGN.md tokens" not in calls[0]
     assert "colors.primary" not in calls[0]
 
 
 def test_missing_design_md_warns(tmp_path, monkeypatch):
-    project = _setup_project(
-        tmp_path,
-        task_title="Build dashboard component",
-        module_hint="components/Dashboard.tsx",
-        deliverable="Dashboard UI component",
-    )
+    project = _setup_project(tmp_path, body="# Dashboard\nBuild dashboard component Dashboard.tsx.\n")
     _mock_ai(monkeypatch, ".tsx")
 
     with pytest.warns(UserWarning, match="DESIGN.md not found"):
-        implement_tasks(project, task="1-1")
+        implement_tasks(project, design="docs/design/task.md", output_paths=["src/dashboard"])
 
 
 def test_design_md_parse_error_warns(tmp_path, monkeypatch):
-    project = _setup_project(
-        tmp_path,
-        task_title="Build dashboard component",
-        module_hint="components/Dashboard.tsx",
-        deliverable="Dashboard UI component",
-    )
+    project = _setup_project(tmp_path, body="# Dashboard\nBuild dashboard component Dashboard.tsx.\n")
     _write_design_md(project, "---\ncolors: [\n---\n# Broken\n")
     _mock_ai(monkeypatch, ".tsx")
 
     with pytest.warns(UserWarning, match="DESIGN.md parse error"):
-        implement_tasks(project, task="1-1")
+        implement_tasks(project, design="docs/design/task.md", output_paths=["src/dashboard"])

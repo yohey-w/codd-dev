@@ -219,24 +219,17 @@ def test_implement_ai_prompt_includes_project_lexicon(tmp_path, monkeypatch):
     )
     _write_doc(
         project,
-        "docs/plan/implementation_plan.md",
-        node_id="plan:implementation-plan",
-        doc_type="plan",
-        body="""# Implementation Plan
-
-#### Sprint 1: Routes
-
-| # | 作業項目 | 対応モジュール | 成果物 |
-|---|---|---|---|
-| 1-1 | Route helpers | lib/routes | Route helper module |
-""",
+        "docs/design/routes.md",
+        node_id="design:routes",
+        doc_type="design",
+        body="# Routes Design\n\nRoute helper module.\n",
         depends_on=[],
     )
     calls: list[str] = []
 
     def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(input)
-        match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
+        match = re.search(r"Output paths: (?P<output>[^\n,]+)", input)
         assert match is not None
         output_dir = match.group("output")
         return subprocess.CompletedProcess(
@@ -253,7 +246,7 @@ def test_implement_ai_prompt_includes_project_lexicon(tmp_path, monkeypatch):
 
     monkeypatch.setattr(implementer_module.generator_module.subprocess, "run", fake_run)
 
-    implement_tasks(project, task="1-1")
+    implement_tasks(project, design="docs/design/routes.md", output_paths=["src/routes"])
 
     assert calls[0].startswith("## Project Lexicon")
     assert "**route_node**" in calls[0]

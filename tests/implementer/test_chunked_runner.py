@@ -350,26 +350,24 @@ def _write_cli_project(tmp_path: Path) -> Path:
             {
                 "project": {"name": "demo", "language": "python"},
                 "ai_command": "config-ai --run",
-                "scan": {"doc_dirs": ["docs/plan/"], "source_dirs": ["src/"], "config_files": [], "exclude": []},
+                "scan": {"doc_dirs": ["docs/design/"], "source_dirs": ["src/"], "config_files": [], "exclude": []},
+                "implement": {"default_output_paths": {"1-1": ["src/service"]}},
                 "implementer": {"approval_mode_per_step_kind": {"edit": "auto"}},
             },
             sort_keys=False,
         ),
         encoding="utf-8",
     )
-    plan_path = project / "docs" / "plan" / "implementation_plan.md"
-    plan_path.parent.mkdir(parents=True)
-    plan_path.write_text(
+    design_path = project / "docs" / "design" / "service.md"
+    design_path.parent.mkdir(parents=True)
+    design_path.write_text(
         "---\n"
         "codd:\n"
-        '  node_id: "plan:implementation-plan"\n'
-        '  type: "plan"\n'
+        '  node_id: "design:service"\n'
+        '  type: "design"\n'
         "---\n\n"
-        "# Implementation Plan\n\n"
-        "#### Sprint 1: Service\n\n"
-        "| # | Task | Module | Deliverable |\n"
-        "|---|---|---|---|\n"
-        "| 1-1 | Build service | src/service.py | service |\n",
+        "# Service Design\n\n"
+        "Build service.\n",
         encoding="utf-8",
     )
     return project
