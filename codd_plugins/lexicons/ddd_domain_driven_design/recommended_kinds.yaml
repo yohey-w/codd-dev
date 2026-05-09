@@ -1,0 +1,10 @@
+recommended_kinds:
+  - ddd_ubiquitous_language_gap
+  - ddd_bounded_context_gap
+  - ddd_aggregate_design_gap
+  - ddd_entity_value_object_gap
+  - ddd_domain_events_gap
+  - ddd_repository_pattern_gap
+  - ddd_application_service_gap
+  - ddd_context_mapping_gap
+  - ddd_anti_corruption_layer_gap

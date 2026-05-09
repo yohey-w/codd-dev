@@ -1,0 +1,45 @@
+defaults:
+  coverage_gap: medium
+  not_found: medium
+  implicit: info
+  covered: info
+rules:
+  - when: "axis=bounded_context AND coverage=not_found"
+    severity: high
+    rationale: "Missing bounded contexts can create model confusion across teams, features, and integrations."
+  - when: "axis=ubiquitous_language AND coverage=not_found"
+    severity: medium
+    rationale: "Missing shared language increases ambiguity between business intent, model names, and code."
+  - when: "axis=aggregate_design AND coverage=not_found"
+    severity: high
+    rationale: "Missing aggregate design can leave invariants and transaction boundaries unenforced."
+  - when: "axis=ubiquitous_language AND coverage=gap"
+    severity: medium
+    rationale: "Shared vocabulary gaps make requirements harder to validate with domain experts."
+  - when: "axis=bounded_context AND coverage=gap"
+    severity: high
+    rationale: "Bounded context gaps can stretch one model across incompatible meanings."
+  - when: "axis=aggregate_design AND coverage=gap"
+    severity: high
+    rationale: "Aggregate gaps can permit invariant violations and oversized transactions."
+  - when: "axis=entity_value_object AND coverage=gap"
+    severity: high
+    rationale: "Entity/value object gaps obscure identity, equality, mutation, and lifecycle semantics."
+  - when: "axis=domain_events AND coverage=gap"
+    severity: medium
+    rationale: "Domain event gaps can hide important state changes and downstream reactions."
+  - when: "axis=repository_pattern AND coverage=gap"
+    severity: medium
+    rationale: "Repository gaps can leak persistence details into the domain model or use cases."
+  - when: "axis=application_service AND coverage=gap"
+    severity: medium
+    rationale: "Application service gaps can mix orchestration, transactions, and domain rules ambiguously."
+  - when: "axis=context_mapping AND coverage=gap"
+    severity: high
+    rationale: "Context mapping gaps can hide ownership, dependency direction, and integration contracts."
+  - when: "axis=anti_corruption_layer AND coverage=gap"
+    severity: high
+    rationale: "Anti-corruption layer gaps can let external or legacy models contaminate the core model."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit coverage should be reviewed before accepting a DDD axis as not applicable."

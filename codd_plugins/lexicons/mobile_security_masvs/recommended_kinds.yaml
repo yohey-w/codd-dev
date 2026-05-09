@@ -1,0 +1,8 @@
+recommended_kinds:
+  - mobile_storage_security_gap
+  - mobile_crypto_best_practices_gap
+  - mobile_auth_session_management_gap
+  - mobile_network_communication_gap
+  - mobile_platform_interaction_gap
+  - mobile_code_quality_gap
+  - mobile_resilience_gap

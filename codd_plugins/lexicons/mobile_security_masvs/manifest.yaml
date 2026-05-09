@@ -1,0 +1,25 @@
+id: mobile_security_masvs
+name: "Mobile Security (OWASP MASVS v2)"
+lexicon_name: mobile_security_masvs
+version: "1.0.0"
+standard: "OWASP MASVS v2.x"
+domain: cross_industry
+source_url: "https://mas.owasp.org/MASVS/"
+source_version: "OWASP MASVS v2.x"
+description: "Mobile application security verification coverage per OWASP MASVS v2"
+observation_dimensions: 7
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "OWASP Mobile Application Security Verification Standard"
+    url: "https://mas.owasp.org/MASVS/"
+    source_version: "v2.x"
+  - title: "OWASP MASVS - About the Standard"
+    url: "https://mas.owasp.org/MASVS/02-Frontispiece/"
+    source_version: "v2.x"
+  - title: "OWASP Mobile Application Security Project"
+    url: "https://owasp.org/www-project-mobile-app-security/"
