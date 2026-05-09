@@ -43,7 +43,20 @@ def project(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def isolated_repair_registry(monkeypatch):
-    monkeypatch.setattr(engine_registry, "_REPAIR_ENGINES", dict(engine_registry._REPAIR_ENGINES))
+    """Snapshot + restore the repair engine registry around each test.
+
+    cmd_460: in CI (Python 3.11) the previous shallow `monkeypatch.setattr`
+    sometimes left a registered scripted engine visible to a later test, which
+    routed the repair loop down the unrepairable path before it could try
+    `--max-attempts`. The explicit teardown that follows guarantees a fresh
+    registry for every test regardless of pytest's reuse heuristics.
+    """
+
+    snapshot = dict(engine_registry._REPAIR_ENGINES)
+    monkeypatch.setattr(engine_registry, "_REPAIR_ENGINES", dict(snapshot))
+    yield
+    engine_registry._REPAIR_ENGINES.clear()
+    engine_registry._REPAIR_ENGINES.update(snapshot)
 
 
 def _status_patch() -> FilePatch:
