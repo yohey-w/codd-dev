@@ -1,0 +1,24 @@
+name: api_rate_limiting_caching
+lexicon_name: api_rate_limiting_caching
+version: "1.0.0"
+source_url: "https://www.rfc-editor.org/rfc/rfc6585"
+source_version: "RFC 6585 / RFC 7234 / IETF"
+standard: "RFC 6585 / RFC 7234 / IETF"
+domain: cross_industry
+description: "API rate limiting, quota management, throttling response, idempotency, and HTTP caching coverage axes."
+observation_dimensions: 7
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "RFC 6585 - Additional HTTP Status Codes"
+    url: "https://www.rfc-editor.org/rfc/rfc6585"
+  - title: "RFC 7234 - HTTP/1.1 Caching"
+    url: "https://www.rfc-editor.org/rfc/rfc7234"
+  - title: "RFC 9111 - HTTP Caching"
+    url: "https://www.rfc-editor.org/rfc/rfc9111"
+  - title: "RFC 9110 - HTTP Semantics"
+    url: "https://www.rfc-editor.org/rfc/rfc9110"

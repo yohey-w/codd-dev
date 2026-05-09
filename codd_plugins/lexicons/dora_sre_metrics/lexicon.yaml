@@ -1,0 +1,129 @@
+coverage_axes:
+  - axis_type: "deployment_frequency"
+    rationale: "DORA deployment frequency measures how often changes reach production or users, which indicates delivery cadence."
+    criticality_default: medium
+    variants:
+      - id: "deployment frequency"
+        label: "Deployment frequency"
+        attributes: {source: "DORA Accelerate", coverage_target: "production deployment cadence"}
+        criticality: medium
+      - id: "deploys to production"
+        label: "Production deploy cadence"
+        attributes: {source: "DORA research", coverage_target: "release frequency"}
+        criticality: medium
+      - id: "release cadence"
+        label: "Release cadence"
+        attributes: {source: "DevOps practice", coverage_target: "user-facing delivery rate"}
+        criticality: medium
+  - axis_type: "lead_time_for_changes"
+    rationale: "DORA lead time for changes measures elapsed time from code commit or change start to production availability."
+    criticality_default: medium
+    variants:
+      - id: "lead time for changes"
+        label: "Lead time for changes"
+        attributes: {source: "DORA Accelerate", coverage_target: "commit-to-production time"}
+        criticality: medium
+      - id: "commit to production"
+        label: "Commit-to-production elapsed time"
+        attributes: {source: "DORA research", coverage_target: "delivery latency"}
+        criticality: medium
+      - id: "change lead time"
+        label: "Change lead time"
+        attributes: {source: "DevOps practice", coverage_target: "cycle time"}
+        criticality: medium
+  - axis_type: "change_failure_rate"
+    rationale: "DORA change failure rate measures the percentage of deployments that cause incidents, degraded service, rollback, or hotfix."
+    criticality_default: high
+    variants:
+      - id: "change failure rate"
+        label: "Change failure rate"
+        attributes: {source: "DORA Accelerate", coverage_target: "deployment-caused failure percentage"}
+        criticality: high
+      - id: "failed deployment percentage"
+        label: "Failed deployment percentage"
+        attributes: {source: "DORA research", coverage_target: "release stability"}
+        criticality: high
+      - id: "rollback or hotfix"
+        label: "Rollback or hotfix trigger"
+        attributes: {source: "DevOps practice", coverage_target: "remediation-triggering change"}
+        criticality: high
+  - axis_type: "mean_time_to_restore"
+    rationale: "DORA mean time to restore measures how quickly service is restored after a production failure."
+    criticality_default: high
+    variants:
+      - id: "time to restore service"
+        label: "Time to restore service"
+        attributes: {source: "DORA Accelerate", coverage_target: "incident recovery duration"}
+        criticality: high
+      - id: "MTTR"
+        label: "Mean time to restore"
+        attributes: {source: "DORA research", coverage_target: "recovery speed"}
+        criticality: high
+      - id: "restore after failure"
+        label: "Restore after failure"
+        attributes: {source: "DevOps practice", coverage_target: "service restoration"}
+        criticality: high
+  - axis_type: "slo_sli_definition"
+    rationale: "SRE practice requires service level indicators and objectives that define what user-visible reliability means and how it is measured."
+    criticality_default: high
+    variants:
+      - id: "service level indicator"
+        label: "Service level indicator"
+        attributes: {source: "Google SRE Book", coverage_target: "reliability measurement"}
+        criticality: high
+      - id: "service level objective"
+        label: "Service level objective"
+        attributes: {source: "Google SRE Book", coverage_target: "target reliability threshold"}
+        criticality: high
+      - id: "SLI/SLO"
+        label: "SLI and SLO definition"
+        attributes: {source: "SRE practice", coverage_target: "measured reliability contract"}
+        criticality: high
+  - axis_type: "error_budget_policy"
+    rationale: "SRE error budgets translate reliability targets into an explicit budget for risk, alerts, and release decisions."
+    criticality_default: high
+    variants:
+      - id: "error budget"
+        label: "Error budget"
+        attributes: {source: "Google SRE Book", coverage_target: "allowed unreliability"}
+        criticality: high
+      - id: "burn rate"
+        label: "Error budget burn rate"
+        attributes: {source: "SRE practice", coverage_target: "budget consumption alerting"}
+        criticality: high
+      - id: "release freeze"
+        label: "Release policy on budget exhaustion"
+        attributes: {source: "SRE practice", coverage_target: "risk-governed change policy"}
+        criticality: high
+  - axis_type: "toil_reduction"
+    rationale: "SRE practice identifies and reduces repetitive manual operational work that scales with service growth."
+    criticality_default: medium
+    variants:
+      - id: "toil"
+        label: "Operational toil"
+        attributes: {source: "Google SRE Book", coverage_target: "manual repetitive work"}
+        criticality: medium
+      - id: "toil reduction"
+        label: "Toil reduction"
+        attributes: {source: "SRE practice", coverage_target: "automation or elimination plan"}
+        criticality: medium
+      - id: "manual operational work"
+        label: "Manual operational work"
+        attributes: {source: "SRE practice", coverage_target: "repetitive operations burden"}
+        criticality: medium
+  - axis_type: "incident_management"
+    rationale: "SRE operations need incident roles, runbooks, escalation, restoration steps, and learning through postmortems."
+    criticality_default: high
+    variants:
+      - id: "incident management"
+        label: "Incident management"
+        attributes: {source: "Google SRE Book", coverage_target: "incident response process"}
+        criticality: high
+      - id: "runbook"
+        label: "Operational runbook"
+        attributes: {source: "SRE practice", coverage_target: "response procedure"}
+        criticality: high
+      - id: "postmortem"
+        label: "Postmortem process"
+        attributes: {source: "SRE practice", coverage_target: "incident learning loop"}
+        criticality: high

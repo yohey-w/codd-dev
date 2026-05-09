@@ -1,0 +1,9 @@
+recommended_kinds:
+  - model_details_gap
+  - intended_use_gap
+  - evaluation_factors_gap
+  - performance_metrics_gap
+  - training_data_gap
+  - ethical_considerations_gap
+  - caveats_recommendations_gap
+  - model_versioning_gap

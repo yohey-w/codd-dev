@@ -1,0 +1,121 @@
+coverage_axes:
+  - axis_type: "rate_limit_strategy"
+    rationale: "Public APIs need a rate limit strategy that states the subject, window, scope, and enforcement model."
+    criticality_default: high
+    variants:
+      - id: "rate limit"
+        label: "Rate limit"
+        attributes: {source: "RFC 6585", coverage_target: "request rate control"}
+        criticality: high
+      - id: "per-user"
+        label: "Per-user limit"
+        attributes: {source: "API platform practice", coverage_target: "authenticated caller scope"}
+        criticality: high
+      - id: "per-IP"
+        label: "Per-IP limit"
+        attributes: {source: "API platform practice", coverage_target: "network caller scope"}
+        criticality: medium
+      - id: "per-tenant"
+        label: "Per-tenant limit"
+        attributes: {source: "API platform practice", coverage_target: "customer isolation"}
+        criticality: high
+  - axis_type: "quota_management"
+    rationale: "API products need quota limits and overage policy so consumers know daily, monthly, or plan-based usage boundaries."
+    criticality_default: medium
+    variants:
+      - id: "quota"
+        label: "Usage quota"
+        attributes: {source: "API platform practice", coverage_target: "consumption limit"}
+        criticality: medium
+      - id: "daily limit"
+        label: "Daily quota"
+        attributes: {source: "API platform practice", coverage_target: "daily consumption window"}
+        criticality: medium
+      - id: "monthly limit"
+        label: "Monthly quota"
+        attributes: {source: "API platform practice", coverage_target: "billing-period consumption window"}
+        criticality: medium
+      - id: "overage policy"
+        label: "Overage policy"
+        attributes: {source: "API platform practice", coverage_target: "behavior after quota exhaustion"}
+        criticality: medium
+  - axis_type: "throttling_response"
+    rationale: "RFC 6585 defines 429 Too Many Requests for rate limiting, and retry guidance helps clients recover predictably."
+    criticality_default: medium
+    variants:
+      - id: "429"
+        label: "429 Too Many Requests"
+        attributes: {source: "RFC 6585", source_literal: "429 Too Many Requests"}
+        criticality: medium
+      - id: "Retry-After"
+        label: "Retry-After"
+        attributes: {source: "RFC 6585", coverage_target: "client retry delay"}
+        criticality: medium
+      - id: "Too Many Requests"
+        label: "Too Many Requests response"
+        attributes: {source: "RFC 6585", coverage_target: "throttling status"}
+        criticality: medium
+  - axis_type: "cache_control_headers"
+    rationale: "HTTP caching relies on explicit Cache-Control directives for freshness, privacy, and revalidation behavior."
+    criticality_default: medium
+    variants:
+      - id: "Cache-Control"
+        label: "Cache-Control header"
+        attributes: {source: "RFC 7234", source_literal: "Cache-Control"}
+        criticality: medium
+      - id: "max-age"
+        label: "max-age directive"
+        attributes: {source: "RFC 7234", coverage_target: "freshness lifetime"}
+        criticality: medium
+      - id: "no-store"
+        label: "no-store directive"
+        attributes: {source: "RFC 7234", coverage_target: "sensitive response storage"}
+        criticality: high
+  - axis_type: "etag_conditional_requests"
+    rationale: "ETags and conditional requests let clients validate cached representations and reduce unnecessary transfers."
+    criticality_default: medium
+    variants:
+      - id: "ETag"
+        label: "ETag"
+        attributes: {source: "RFC 7232 / RFC 9110", coverage_target: "entity validator"}
+        criticality: medium
+      - id: "If-None-Match"
+        label: "If-None-Match"
+        attributes: {source: "RFC 7232 / RFC 9110", coverage_target: "conditional validation"}
+        criticality: medium
+      - id: "304 Not Modified"
+        label: "304 Not Modified"
+        attributes: {source: "HTTP semantics", coverage_target: "not-modified response"}
+        criticality: medium
+  - axis_type: "cdn_edge_caching"
+    rationale: "Edge caching needs declared cacheability, surrogate behavior, and invalidation so API freshness and distribution are governed."
+    criticality_default: medium
+    variants:
+      - id: "CDN"
+        label: "CDN caching"
+        attributes: {source: "HTTP caching practice", coverage_target: "edge cache layer"}
+        criticality: medium
+      - id: "cache invalidation"
+        label: "Cache invalidation"
+        attributes: {source: "HTTP caching practice", coverage_target: "stale edge object removal"}
+        criticality: medium
+      - id: "surrogate control"
+        label: "Surrogate cache control"
+        attributes: {source: "HTTP caching practice", coverage_target: "shared cache policy"}
+        criticality: medium
+  - axis_type: "idempotency_keys"
+    rationale: "Idempotency keys prevent duplicate side effects when clients retry payment, order, or mutation requests."
+    criticality_default: high
+    variants:
+      - id: "Idempotency-Key"
+        label: "Idempotency key"
+        attributes: {source: "API reliability practice", coverage_target: "retry-safe mutation identifier"}
+        criticality: high
+      - id: "idempotency"
+        label: "Idempotency contract"
+        attributes: {source: "HTTP semantics", coverage_target: "safe retry behavior"}
+        criticality: high
+      - id: "duplicate request"
+        label: "Duplicate request protection"
+        attributes: {source: "API reliability practice", coverage_target: "side-effect de-duplication"}
+        criticality: high

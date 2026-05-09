@@ -1,0 +1,129 @@
+coverage_axes:
+  - axis_type: "model_details"
+    rationale: "Model cards identify the model, owners, version, architecture or type, and release context so downstream users can trace provenance."
+    criticality_default: medium
+    variants:
+      - id: "Model Details"
+        label: "Model details"
+        attributes: {source: "Model Cards for Model Reporting", source_literal: "Model Details"}
+        criticality: medium
+      - id: "model architecture"
+        label: "Model architecture or type"
+        attributes: {source: "Model Cards", coverage_target: "model structure"}
+        criticality: medium
+      - id: "model version"
+        label: "Model version"
+        attributes: {source: "Model Cards", coverage_target: "model provenance"}
+        criticality: medium
+  - axis_type: "intended_use"
+    rationale: "Model cards clarify primary intended uses, users, and out-of-scope uses to reduce misuse risk."
+    criticality_default: high
+    variants:
+      - id: "Intended Use"
+        label: "Intended use"
+        attributes: {source: "Model Cards for Model Reporting", source_literal: "Intended Use"}
+        criticality: high
+      - id: "primary intended uses"
+        label: "Primary intended uses"
+        attributes: {source: "Model Cards", coverage_target: "approved use cases"}
+        criticality: high
+      - id: "out-of-scope use"
+        label: "Out-of-scope use"
+        attributes: {source: "Model Cards", coverage_target: "misuse boundary"}
+        criticality: high
+  - axis_type: "evaluation_factors"
+    rationale: "Model cards identify relevant factors such as demographic groups, tasks, domains, or conditions used to analyze performance."
+    criticality_default: high
+    variants:
+      - id: "Factors"
+        label: "Evaluation factors"
+        attributes: {source: "Model Cards for Model Reporting", source_literal: "Factors"}
+        criticality: high
+      - id: "relevant factors"
+        label: "Relevant factors"
+        attributes: {source: "Model Cards", coverage_target: "group or scenario factors"}
+        criticality: high
+      - id: "evaluation data"
+        label: "Evaluation data"
+        attributes: {source: "Model Cards", coverage_target: "test data context"}
+        criticality: high
+  - axis_type: "performance_metrics"
+    rationale: "Model cards report metrics and thresholds appropriate to the model task and foreseeable context of use."
+    criticality_default: high
+    variants:
+      - id: "Metrics"
+        label: "Performance metrics"
+        attributes: {source: "Model Cards for Model Reporting", source_literal: "Metrics"}
+        criticality: high
+      - id: "decision thresholds"
+        label: "Decision thresholds"
+        attributes: {source: "Model Cards", coverage_target: "classification or scoring threshold"}
+        criticality: high
+      - id: "quantitative analyses"
+        label: "Quantitative analyses"
+        attributes: {source: "Model Cards", coverage_target: "reported measurement"}
+        criticality: high
+  - axis_type: "training_data"
+    rationale: "Model cards disclose training data characteristics and preprocessing so users can judge provenance and distribution fit."
+    criticality_default: high
+    variants:
+      - id: "Training Data"
+        label: "Training data"
+        attributes: {source: "Model Cards for Model Reporting", source_literal: "Training Data"}
+        criticality: high
+      - id: "preprocessing"
+        label: "Preprocessing"
+        attributes: {source: "Model Cards", coverage_target: "data transformation"}
+        criticality: medium
+      - id: "data description"
+        label: "Data description"
+        attributes: {source: "Model Cards", coverage_target: "dataset provenance and composition"}
+        criticality: high
+  - axis_type: "ethical_considerations"
+    rationale: "Model cards surface risks, harms, mitigations, fairness concerns, and sensitive use constraints."
+    criticality_default: high
+    variants:
+      - id: "Ethical Considerations"
+        label: "Ethical considerations"
+        attributes: {source: "Model Cards for Model Reporting", source_literal: "Ethical Considerations"}
+        criticality: high
+      - id: "bias analysis"
+        label: "Bias analysis"
+        attributes: {source: "Model Cards", coverage_target: "fairness and subgroup harm analysis"}
+        criticality: high
+      - id: "risks and harms"
+        label: "Risks and harms"
+        attributes: {source: "Model Card Toolkit", coverage_target: "qualitative risk disclosure"}
+        criticality: high
+  - axis_type: "caveats_recommendations"
+    rationale: "Model cards describe limitations, recommendations, and conditions under which users should avoid or qualify deployment."
+    criticality_default: medium
+    variants:
+      - id: "Caveats and Recommendations"
+        label: "Caveats and recommendations"
+        attributes: {source: "Model Cards for Model Reporting", source_literal: "Caveats and Recommendations"}
+        criticality: medium
+      - id: "limitations"
+        label: "Limitations"
+        attributes: {source: "Model Cards", coverage_target: "known limitations"}
+        criticality: medium
+      - id: "recommendations"
+        label: "Recommendations"
+        attributes: {source: "Model Cards", coverage_target: "deployment guidance"}
+        criticality: medium
+  - axis_type: "model_versioning"
+    rationale: "Model cards for deployed systems should identify registry, version history, rollback, and update ownership for model lifecycle governance."
+    criticality_default: medium
+    variants:
+      - id: "model registry"
+        label: "Model registry"
+        attributes: {source: "ML lifecycle practice", coverage_target: "registered model lineage"}
+        criticality: medium
+      - id: "rollback strategy"
+        label: "Rollback strategy"
+        attributes: {source: "ML lifecycle practice", coverage_target: "safe model reversion"}
+        criticality: medium
+      - id: "version history"
+        label: "Version history"
+        attributes: {source: "ML lifecycle practice", coverage_target: "model change traceability"}
+        criticality: medium

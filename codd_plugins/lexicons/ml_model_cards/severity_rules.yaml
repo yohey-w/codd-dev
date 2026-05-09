@@ -1,0 +1,35 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=model_details AND coverage=gap"
+    severity: medium
+    rationale: "Missing model details prevent reviewers from tracing ownership, version, architecture, or release provenance."
+  - when: "axis=intended_use AND coverage=gap"
+    severity: high
+    rationale: "Missing intended-use boundaries increase the chance that the model is used in inappropriate contexts."
+  - when: "axis=evaluation_factors AND coverage=gap"
+    severity: high
+    rationale: "Missing evaluation factors hide which groups, tasks, domains, or conditions were tested."
+  - when: "axis=performance_metrics AND coverage=gap"
+    severity: high
+    rationale: "Missing metrics or thresholds prevent reviewers from judging model behavior for the stated use."
+  - when: "axis=training_data AND coverage=gap"
+    severity: high
+    rationale: "Missing training data coverage obscures provenance, preprocessing, and distribution fit."
+  - when: "axis=ethical_considerations AND coverage=gap"
+    severity: high
+    rationale: "Missing ethical considerations leave fairness, bias, misuse, and harm analysis undocumented."
+  - when: "axis=caveats_recommendations AND coverage=gap"
+    severity: medium
+    rationale: "Missing caveats and recommendations leave limitations and deployment guidance unclear."
+  - when: "axis=model_versioning AND coverage=gap"
+    severity: medium
+    rationale: "Missing model versioning makes rollback, registry lineage, and update governance hard to verify."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit model-card coverage needs reviewer confirmation before it can satisfy the axis."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered axes may still emit informational notes outside release-blocking model documentation gaps."

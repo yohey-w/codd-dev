@@ -1,0 +1,27 @@
+name: dora_sre_metrics
+lexicon_name: dora_sre_metrics
+version: "1.0.0"
+source_url: "https://dora.dev/research/"
+source_version: "DORA Accelerate 2018 + Google SRE Book 2016"
+standard: "DORA Accelerate 2018 / Google SRE 2016"
+domain: cross_industry
+description: "DevOps and SRE operational coverage axes for DORA four key metrics, service-level objectives, error budgets, toil, and incident management."
+observation_dimensions: 8
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "DORA research program"
+    url: "https://dora.dev/research/"
+  - title: "Google SRE Book - Service Level Objectives"
+    url: "https://sre.google/sre-book/service-level-objectives/"
+    source_version: "Site Reliability Engineering, 2016"
+  - title: "Google SRE Book - Embracing Risk"
+    url: "https://sre.google/sre-book/embracing-risk/"
+  - title: "Google SRE Book - Eliminating Toil"
+    url: "https://sre.google/sre-book/eliminating-toil/"
+  - title: "Google SRE Book - Managing Incidents"
+    url: "https://sre.google/sre-book/managing-incidents/"

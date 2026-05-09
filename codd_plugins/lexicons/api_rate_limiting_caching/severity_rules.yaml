@@ -1,0 +1,32 @@
+defaults:
+  coverage_gap: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=rate_limit_strategy AND coverage=gap"
+    severity: high
+    rationale: "Missing rate limit strategy can leave a public API vulnerable to abuse, noisy neighbors, or denial of service."
+  - when: "axis=quota_management AND coverage=gap"
+    severity: medium
+    rationale: "Missing quota management leaves consumers without clear usage boundaries or overage behavior."
+  - when: "axis=throttling_response AND coverage=gap"
+    severity: medium
+    rationale: "Missing 429 and Retry-After behavior leaves clients without a predictable throttling response."
+  - when: "axis=cache_control_headers AND coverage=gap"
+    severity: medium
+    rationale: "Missing Cache-Control coverage can create stale, over-shared, or under-cached API responses."
+  - when: "axis=etag_conditional_requests AND coverage=gap"
+    severity: medium
+    rationale: "Missing ETag or conditional request coverage can increase load and make cache validation ambiguous."
+  - when: "axis=cdn_edge_caching AND coverage=gap"
+    severity: medium
+    rationale: "Missing edge cache and invalidation coverage leaves distributed cache freshness and purge behavior unclear."
+  - when: "axis=idempotency_keys AND coverage=gap"
+    severity: high
+    rationale: "Missing idempotency keys can duplicate side effects for payment, order, or mutation retries."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit API platform coverage needs reviewer confirmation before it can satisfy rate limit or cache axes."
+  - when: "coverage=covered AND finding=residual_observation"
+    severity: info
+    rationale: "Covered axes may still emit informational review notes outside release-blocking API platform gaps."

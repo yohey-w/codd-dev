@@ -1,0 +1,8 @@
+recommended_kinds:
+  - rate_limit_strategy_gap
+  - quota_management_gap
+  - throttling_response_gap
+  - cache_control_headers_gap
+  - etag_conditional_requests_gap
+  - cdn_edge_caching_gap
+  - idempotency_keys_gap

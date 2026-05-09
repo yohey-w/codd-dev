@@ -1,0 +1,9 @@
+recommended_kinds:
+  - deployment_frequency_gap
+  - lead_time_for_changes_gap
+  - change_failure_rate_gap
+  - mean_time_to_restore_gap
+  - slo_sli_definition_gap
+  - error_budget_policy_gap
+  - toil_reduction_gap
+  - incident_management_gap
