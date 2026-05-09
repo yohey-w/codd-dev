@@ -4,6 +4,28 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-05-09 — LLM lexicon suggestion: data/function traits (cmd_456b)
+
+### Changed (LLM suggestion semantics)
+
+- v2.8.0 asked the LLM to "identify the business domain" and inferred lexicons from there. The lord pointed out that domain alone does not determine compliance (an LMS that processes only anonymized aggregates does not require the personal-data governance lexicon, for example). v2.9.0 replaces the domain-based heuristic with **data-type and function-trait detection**.
+- `LlmLexiconResult` fields:
+  - **Removed**: `detected_domain`, `detected_compliance`
+  - **Added**: `detected_data_types` (e.g. `personal information`, `credit card data`, `medical records`, `video content`), `detected_function_traits` (e.g. `authentication flow`, `payment processing`, `public REST API`, `video streaming`)
+  - Kept: `detected_tech_stack`
+- The prompt now asks the LLM to apply **dynamic reasoning rules** ("personal information present → recommend personal-data governance lexicon"; "credit card data → PCI DSS"; "authentication flow → consider WebAuthn lexicon"; etc.). The example rules in the prompt name lexicon ids only as illustrative anchors — the rule set itself is data-driven and the LLM is free to adapt.
+- Tests updated to feed/assert the new fields; CLI presentation now lists data types + function traits + tech stack instead of "domain / compliance".
+
+### Why this matters
+
+The previous shape leaked an unjustified inference: "LMS → likely PII → likely needs APPI". The new shape forces the LLM to anchor recommendations on **what the codebase actually does**, which is the only honest basis for compliance suggestions.
+
+### Quality Metrics
+
+- **pytest**: 2703 PASS / 0 FAIL / 0 SKIP (no regressions vs v2.8.0)
+- **Generality Gate**: core code (`codd/init/llm_lexicon_suggester.py` outside the prompt template) carries no specific lexicon literal. The prompt template references a few lexicon ids as example reasoning anchors — these are intentional teaching hints to the LLM, not Layer A hardcode.
+- **Compatibility**: `--llm-enhanced` continues to opt in; the regex / `stack_map.yaml` path (cmd_439, default) is unchanged.
+
 ## [2.8.0] - 2026-05-08 — LLM-enhanced `codd init --suggest-lexicons` (cmd_456)
 
 ### Added
