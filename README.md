@@ -139,7 +139,7 @@ External issues, PRs, and lexicon proposals are welcome — see [Issues](https:/
 
 ---
 
-## 📦 Hook integration
+## 📦 Hook Integration
 
 CoDD ships hook recipes for editor and Git workflows:
 

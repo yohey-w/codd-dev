@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import warnings
 
 import pytest
@@ -18,32 +19,26 @@ def _plan_and_task(
     deliverable: str = "UI route wrapper",
     task_context: str = "Wrap SignInForm for /login.",
 ):
-    plan = implementer_module.ImplementationPlan(
-        node_id="plan:test",
-        path=Path("docs/plan/implementation_plan.md"),
-        content="# Plan",
-        depends_on=[],
-        conventions=[],
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", title).strip("_").lower()
+    design_path = Path(f"docs/design/{slug}.md")
+    design_context = implementer_module.DesignContext(
+        node_id="design:test",
+        path=design_path,
+        content="\n".join([f"# {title}", summary, module_hint, deliverable, task_context]),
     )
-    task = implementer_module.ImplementationTask(
-        task_id="1-1",
-        title=title,
-        summary=summary,
-        module_hint=module_hint,
-        deliverable=deliverable,
-        output_dir="src/generated/login",
-        dependency_node_ids=[],
-        task_context=task_context,
+    spec = implementer_module.ImplementSpec(
+        design_node=design_path.as_posix(),
+        output_paths=[f"src/generated/{slug}"],
     )
-    return plan, task
+    return design_context, spec
 
 
 def _build_prompt_for_task(**task_kwargs: str) -> str:
-    plan, task = _plan_and_task(**task_kwargs)
+    design_context, spec = _plan_and_task(**task_kwargs)
     return implementer_module._build_implementation_prompt(
         config={"project": {"name": "demo", "language": "typescript"}},
-        plan=plan,
-        task=task,
+        design_context=design_context,
+        spec=spec,
         dependency_documents=[],
         conventions=[],
         coding_principles=None,

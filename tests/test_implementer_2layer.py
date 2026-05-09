@@ -11,14 +11,14 @@ from codd.implementer import implement_tasks
 from codd.llm.impl_step_deriver import ImplStep, ImplStepCacheRecord, impl_step_cache_path, write_impl_step_cache
 
 
-def _write_doc(project: Path, relative_path: str, *, node_id: str, doc_type: str, body: str, depends_on: list[dict] | None = None):
-    doc_path = project / relative_path
-    doc_path.parent.mkdir(parents=True, exist_ok=True)
-    codd = {"node_id": node_id, "type": doc_type}
-    if depends_on is not None:
-        codd["depends_on"] = depends_on
-    doc_path.write_text(
-        f"---\n{yaml.safe_dump({'codd': codd}, sort_keys=False)}---\n\n{body.rstrip()}\n",
+DESIGN_NODE = "docs/design/contract.md"
+
+
+def _write_doc(project: Path, relative_path: str, *, node_id: str, body: str) -> None:
+    path = project / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ncodd:\n  node_id: {node_id}\n  type: design\n---\n\n{body.rstrip()}\n",
         encoding="utf-8",
     )
 
@@ -26,44 +26,16 @@ def _write_doc(project: Path, relative_path: str, *, node_id: str, doc_type: str
 def _setup_project(tmp_path: Path, *, config_extra: dict | None = None) -> Path:
     project = tmp_path / "project"
     project.mkdir()
-    codd_dir = project / "codd"
-    codd_dir.mkdir()
+    (project / "codd").mkdir()
     config = {
         "project": {"name": "demo", "language": "python"},
         "ai_command": "mock-ai --print",
-        "scan": {
-            "source_dirs": ["src/"],
-            "doc_dirs": ["docs/design/", "docs/plan/"],
-            "test_dirs": ["tests/"],
-            "config_files": [],
-            "exclude": [],
-        },
+        "scan": {"source_dirs": ["src/"], "doc_dirs": ["docs/design/"], "config_files": [], "exclude": []},
     }
     if config_extra:
         config.update(config_extra)
-    (codd_dir / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-    _write_doc(
-        project,
-        "docs/design/contract.md",
-        node_id="design:contract",
-        doc_type="design",
-        body="# Contract\n\nDeclared behavior.\n",
-    )
-    _write_doc(
-        project,
-        "docs/plan/implementation_plan.md",
-        node_id="plan:implementation-plan",
-        doc_type="plan",
-        depends_on=[{"id": "design:contract", "relation": "depends_on"}],
-        body="""# Implementation Plan
-
-#### Sprint 1: Contract
-
-| # | 作業項目 | 対応モジュール | 成果物 |
-|---|---|---|---|
-| 1-1 | Build contract | src/contract.py | Contract |
-""",
-    )
+    (project / "codd" / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    _write_doc(project, DESIGN_NODE, node_id="design:contract", body="# Contract\n\nDeclared behavior.\n")
     return project
 
 
@@ -92,8 +64,8 @@ def _write_step_cache(project: Path, *, implicit_approved: bool = False) -> None
         }
     )
     write_impl_step_cache(
-        impl_step_cache_path("1-1", {"project_root": project}),
-        ImplStepCacheRecord("fake", "key", "1-1", "doc", "template", "now", ["docs/design/contract.md"], [explicit, implicit]),
+        impl_step_cache_path(DESIGN_NODE, {"project_root": project}),
+        ImplStepCacheRecord("fake", "key", DESIGN_NODE, "doc", "template", "now", [DESIGN_NODE], [explicit, implicit]),
     )
 
 
@@ -102,7 +74,7 @@ def _patch_ai(monkeypatch):
 
     def fake_run(command, *, input, capture_output, text, check, **kwargs):
         calls.append(input)
-        match = re.search(r"Output directory: (?P<output>src/generated/[^\n]+)", input)
+        match = re.search(r"Output paths: (?P<output>[^\n,]+)", input)
         assert match is not None
         output_dir = match.group("output")
         return subprocess.CompletedProcess(
@@ -140,7 +112,7 @@ def test_implementer_injects_approved_layer1_and_auto_high_confidence_layer2(tmp
     _write_step_cache(project)
     calls = _patch_ai(monkeypatch)
 
-    results = implement_tasks(project, task="1-1")
+    results = implement_tasks(project, design=DESIGN_NODE, output_paths=["src/contract"])
 
     assert results[0].error is None
     prompt = calls[0]
@@ -151,12 +123,12 @@ def test_implementer_injects_approved_layer1_and_auto_high_confidence_layer2(tmp
     assert "complete_related_concern" in prompt
 
 
-def test_implementer_no_use_derived_steps_preserves_legacy_prompt(tmp_path: Path, monkeypatch):
+def test_implementer_no_use_derived_steps_preserves_plain_prompt(tmp_path: Path, monkeypatch):
     project = _setup_project(tmp_path, config_extra={"implementer": {"use_derived_steps": True}})
     _write_step_cache(project, implicit_approved=True)
     calls = _patch_ai(monkeypatch)
 
-    results = implement_tasks(project, task="1-1", use_derived_steps=False)
+    results = implement_tasks(project, design=DESIGN_NODE, output_paths=["src/contract"], use_derived_steps=False)
 
     assert results[0].error is None
     assert "Implementation steps to follow" not in calls[0]
@@ -167,7 +139,7 @@ def test_layer2_default_required_excludes_unapproved_inferred_steps(tmp_path: Pa
     _write_step_cache(project)
     calls = _patch_ai(monkeypatch)
 
-    results = implement_tasks(project, task="1-1")
+    results = implement_tasks(project, design=DESIGN_NODE, output_paths=["src/contract"])
 
     assert results[0].error is None
     prompt = calls[0]
