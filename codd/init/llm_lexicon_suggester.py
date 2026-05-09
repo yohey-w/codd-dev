@@ -34,10 +34,9 @@ class LlmLexiconRecommendation:
 
 @dataclass(frozen=True)
 class LlmLexiconResult:
-    detected_domain: str
-    detected_compliance: list[str]
+    detected_data_types: list[str]
+    detected_function_traits: list[str]
     detected_tech_stack: list[str]
-    detected_integrations: list[str]
     recommendations: list[LlmLexiconRecommendation]
 
 
@@ -138,24 +137,35 @@ def _build_prompt(context: dict[str, Any], available_lexicons: dict[str, str]) -
         "available_lexicons": available_lexicons,
         "project_context": context,
         "required_output_schema": {
-            "detected_domain": "string",
-            "detected_compliance": ["string"],
+            "detected_data_types": ["string"],
+            "detected_function_traits": ["string"],
             "detected_tech_stack": ["string"],
-            "detected_integrations": ["string"],
             "recommendations": [
                 {
                     "lexicon_id": "string from available_lexicons keys",
                     "confidence": "high | medium | low",
-                    "reason": "short explanation",
+                    "reason": "short explanation referencing a data type or function trait",
                 }
             ],
         },
     }
     return (
-        "You are a requirements engineer. Analyze the project's documentation and "
-        "technology signals. Identify the business domain, compliance obligations, "
-        "technology stack, and external integrations using only the supplied project "
-        "context. From the available lexicons, recommend the most relevant entries. "
+        "You are a requirements engineer. Analyze this project's documentation and tech stack.\n"
+        "Identify:\n"
+        "- Data types handled (personal information / credit card data / medical records / "
+        "video content / etc.)\n"
+        "- Function traits present (authentication flow / payment processing / public API / "
+        "video streaming / etc.)\n"
+        "- Tech stack (frameworks, databases, cloud platforms)\n\n"
+        "Reasoning rules (apply dynamically):\n"
+        "- personal information present -> recommend data_governance_appi_gdpr (or GDPR equivalent)\n"
+        "- credit card data present -> recommend compliance_pci_dss_4\n"
+        "- medical data present -> recommend compliance_hipaa\n"
+        "- authentication flow present -> consider web_authn_webauthn\n"
+        "- public REST API present -> recommend api_rest_openapi\n"
+        "- etc.\n\n"
+        "From the available lexicons, recommend the most relevant ones with lexicon_id, "
+        "confidence (high/medium/low), and reason referencing the data type or function trait. "
         "Return JSON only. Do not include Markdown fences or prose.\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
@@ -202,10 +212,9 @@ def _result_from_payload(payload: Any, available_ids: set[str]) -> LlmLexiconRes
             )
 
     return LlmLexiconResult(
-        detected_domain=str(payload.get("detected_domain") or "").strip(),
-        detected_compliance=_string_list(payload.get("detected_compliance")),
+        detected_data_types=_string_list(payload.get("detected_data_types")),
+        detected_function_traits=_string_list(payload.get("detected_function_traits")),
         detected_tech_stack=_string_list(payload.get("detected_tech_stack")),
-        detected_integrations=_string_list(payload.get("detected_integrations")),
         recommendations=recommendations,
     )
 
@@ -218,10 +227,9 @@ def _string_list(value: Any) -> list[str]:
 
 def _empty_result() -> LlmLexiconResult:
     return LlmLexiconResult(
-        detected_domain="",
-        detected_compliance=[],
+        detected_data_types=[],
+        detected_function_traits=[],
         detected_tech_stack=[],
-        detected_integrations=[],
         recommendations=[],
     )
 

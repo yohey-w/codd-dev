@@ -36,15 +36,14 @@ def test_llm_enhanced_returns_recommendations_with_confidence(tmp_path: Path) ->
     fake = FakeAiCommand(
         json.dumps(
             {
-                "detected_domain": "managed workflow",
-                "detected_compliance": ["policy review"],
+                "detected_data_types": ["personal information"],
+                "detected_function_traits": ["external sign-in"],
                 "detected_tech_stack": ["python"],
-                "detected_integrations": ["external identity"],
                 "recommendations": [
                     {
                         "lexicon_id": lexicon_id,
                         "confidence": "high",
-                        "reason": "Project context matches the listed coverage scope.",
+                        "reason": "Personal information requires the listed coverage scope.",
                     }
                 ],
             }
@@ -53,19 +52,20 @@ def test_llm_enhanced_returns_recommendations_with_confidence(tmp_path: Path) ->
 
     result = llm_recommend_lexicons(tmp_path, ai_command=fake)
 
-    assert result.detected_domain == "managed workflow"
-    assert result.detected_compliance == ["policy review"]
+    assert result.detected_data_types == ["personal information"]
+    assert result.detected_function_traits == ["external sign-in"]
     assert result.detected_tech_stack == ["python"]
-    assert result.detected_integrations == ["external identity"]
     assert result.recommendations == [
         LlmLexiconRecommendation(
             lexicon_id=lexicon_id,
             confidence="high",
-            reason="Project context matches the listed coverage scope.",
+            reason="Personal information requires the listed coverage scope.",
         )
     ]
     assert "available_lexicons" in fake.calls[0]
     assert "project_context" in fake.calls[0]
+    assert "Data types handled" in fake.calls[0]
+    assert "business domain" not in fake.calls[0]
 
 
 def test_auto_approve_skips_hitl(monkeypatch, tmp_path: Path) -> None:
@@ -75,10 +75,9 @@ def test_auto_approve_skips_hitl(monkeypatch, tmp_path: Path) -> None:
 
     def fake_recommend(project_root: Path):
         return LlmLexiconResult(
-            detected_domain="managed workflow",
-            detected_compliance=[],
+            detected_data_types=["work item metadata"],
+            detected_function_traits=["review workflow"],
             detected_tech_stack=["python"],
-            detected_integrations=[],
             recommendations=[
                 LlmLexiconRecommendation(ids[0], "high", "primary match"),
                 LlmLexiconRecommendation(ids[1], "medium", "secondary match"),
@@ -105,6 +104,9 @@ def test_auto_approve_skips_hitl(monkeypatch, tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Apply all recommended?" not in result.output
+    assert "  - Data types: work item metadata" in result.output
+    assert "  - Function traits: review workflow" in result.output
+    assert "  - Domain:" not in result.output
     data = yaml.safe_load((project / "project_lexicon.yaml").read_text(encoding="utf-8"))
     assert ids[0] in data["extends"]
     assert ids[1] in data["extends"]
@@ -143,12 +145,75 @@ def test_llm_output_json_parse_error_falls_back_gracefully(tmp_path: Path) -> No
     result = llm_recommend_lexicons(tmp_path, ai_command=FakeAiCommand("not json"))
 
     assert result == LlmLexiconResult(
-        detected_domain="",
-        detected_compliance=[],
+        detected_data_types=[],
+        detected_function_traits=[],
         detected_tech_stack=[],
-        detected_integrations=[],
         recommendations=[],
     )
+
+
+def test_personal_info_triggers_governance_lexicon(tmp_path: Path) -> None:
+    _write_requirements_project(tmp_path)
+    fake = FakeAiCommand(
+        json.dumps(
+            {
+                "detected_data_types": ["personal information"],
+                "detected_function_traits": ["account registration"],
+                "detected_tech_stack": ["postgresql"],
+                "recommendations": [
+                    {
+                        "lexicon_id": "data_governance_appi_gdpr",
+                        "confidence": "high",
+                        "reason": "Personal information is handled by account registration.",
+                    }
+                ],
+            }
+        )
+    )
+
+    result = llm_recommend_lexicons(tmp_path, ai_command=fake)
+
+    assert result.detected_data_types == ["personal information"]
+    assert result.detected_function_traits == ["account registration"]
+    assert result.recommendations == [
+        LlmLexiconRecommendation(
+            lexicon_id="data_governance_appi_gdpr",
+            confidence="high",
+            reason="Personal information is handled by account registration.",
+        )
+    ]
+
+
+def test_payment_data_triggers_pci_lexicon(tmp_path: Path) -> None:
+    _write_requirements_project(tmp_path)
+    fake = FakeAiCommand(
+        json.dumps(
+            {
+                "detected_data_types": ["credit card data"],
+                "detected_function_traits": ["payment processing"],
+                "detected_tech_stack": ["stripe"],
+                "recommendations": [
+                    {
+                        "lexicon_id": "compliance_pci_dss_4",
+                        "confidence": "high",
+                        "reason": "Credit card data appears in payment processing scope.",
+                    }
+                ],
+            }
+        )
+    )
+
+    result = llm_recommend_lexicons(tmp_path, ai_command=fake)
+
+    assert result.detected_data_types == ["credit card data"]
+    assert result.detected_function_traits == ["payment processing"]
+    assert result.recommendations == [
+        LlmLexiconRecommendation(
+            lexicon_id="compliance_pci_dss_4",
+            confidence="high",
+            reason="Credit card data appears in payment processing scope.",
+        )
+    ]
 
 
 def _write_requirements_project(project: Path) -> None:
