@@ -13,6 +13,7 @@ stack_map:
       - api_rest_openapi
       - web_security_owasp
       - process_iso25010
+      - api_rate_limiting_caching
   - hint_pattern: "prisma|sqlalchemy|typeorm|sequelize|hibernate|active-record|postgres|mysql|mariadb|sqlite"
     suggested_lexicons:
       - data_relational_iso_sql
@@ -39,12 +40,20 @@ stack_map:
   - hint_pattern: "github-actions|gitlab-ci|circleci|jenkins|argo"
     suggested_lexicons:
       - ops_cicd_pipeline
+      - dora_sre_metrics
   - hint_pattern: "opentelemetry|otel|prometheus|grafana|jaeger|datadog"
     suggested_lexicons:
       - ops_observability_otel
+      - dora_sre_metrics
+  - hint_pattern: "sre|dora|slo|sli|error-budget|toil|incident|mttr"
+    suggested_lexicons:
+      - dora_sre_metrics
   - hint_pattern: "twelve-factor|12factor|procfile|dotenv|cloud-native|heroku"
     suggested_lexicons:
       - twelve_factor_app
+  - hint_pattern: "rate-limit|rate limiting|quota|throttle|cache-control|etag|idempotency"
+    suggested_lexicons:
+      - api_rate_limiting_caching
   - hint_pattern: "i18n|l10n|locale|unicode|cldr|icu|bcp47|rtl|bidi"
     suggested_lexicons:
       - i18n_unicode_cldr
@@ -75,6 +84,10 @@ stack_map:
   - hint_pattern: "openai|langchain|llamaindex|transformers|pytorch|tensorflow"
     suggested_lexicons:
       - ai_governance_eu_act
+      - ml_model_cards
+  - hint_pattern: "model-card|model card|mlflow|sklearn|scikit-learn|xgboost|fairness"
+    suggested_lexicons:
+      - ml_model_cards
   - hint_pattern: "pytest|jest|vitest|playwright|cypress|selenium|junit"
     suggested_lexicons:
       - process_test_iso29119

@@ -1,0 +1,23 @@
+name: ml_model_cards
+lexicon_name: ml_model_cards
+version: "1.0.0"
+source_url: "https://arxiv.org/abs/1810.03993"
+source_version: "Mitchell et al. 2019 / Google Model Card Toolkit"
+standard: "Mitchell et al. 2019 / Google Model Card Toolkit"
+domain: cross_industry
+description: "Machine learning model documentation and fairness coverage axes based on the Model Cards reporting framework."
+observation_dimensions: 8
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Model Cards for Model Reporting"
+    url: "https://arxiv.org/abs/1810.03993"
+    source_version: "Mitchell et al. 2019"
+  - title: "Model Card Toolkit - Considerations"
+    url: "https://www.tensorflow.org/responsible_ai/model_card_toolkit/api_docs/python/model_card_toolkit/Considerations"
+  - title: "Responsible AI Toolkit - Model Card Toolkit"
+    url: "https://www.tensorflow.org/responsible_ai/model_card_toolkit"
