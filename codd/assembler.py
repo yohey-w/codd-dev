@@ -85,8 +85,10 @@ def _collect_design_documents(project_root: Path, config: dict[str, Any]) -> lis
 def _collect_generated_fragments(project_root: Path, config: dict[str, Any]) -> list[dict[str, str]]:
     """Collect all generated code fragments from src/generated/.
 
-    Supports both flat layout (src/generated/<task>/) and legacy sprint layout
-    (src/generated/sprint_N/<task>/). Orphan directories are excluded with a warning.
+    Uses a flat layout (`src/generated/<task>/`). Orphan directories — those
+    whose name does not match a known design-node slug — are excluded with a
+    warning. The legacy `sprint_N/` layout shipped before v2.11.0 is no
+    longer supported (cmd_444).
     """
     source_dirs = config.get("scan", {}).get("source_dirs", ["src/"])
     generated_base = None
@@ -110,11 +112,11 @@ def _collect_generated_fragments(project_root: Path, config: dict[str, Any]) -> 
     orphan_dirs: set[str] = set()
     if valid_slugs:
         for child in generated_base.iterdir():
-            if child.is_dir() and not child.name.startswith("sprint_") and child.name not in valid_slugs:
+            if child.is_dir() and child.name not in valid_slugs:
                 orphan_dirs.add(child.name)
                 warnings.warn(
                     f"Orphan fragment directory 'generated/{child.name}' "
-                    f"does not match any task in the implementation plan. Skipping.",
+                    f"does not match any known design node. Skipping.",
                     stacklevel=2,
                 )
 

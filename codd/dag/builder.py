@@ -130,7 +130,9 @@ def load_dag_settings(project_root: Path, settings: dict[str, Any] | None = None
     merged.setdefault("design_doc_patterns", [])
     merged.setdefault("impl_file_patterns", [])
     merged.setdefault("test_file_patterns", [])
-    merged.setdefault("plan_task_file", "docs/design/implementation_plan.md")
+    # cmd_444 v2.11.0: implementation_plan.md is no longer the entry point.
+    # `codd implement` now takes design_node + output_paths directly. Any
+    # `plan_task_file` value present in legacy codd.yaml is silently ignored.
     merged.setdefault("lexicon_file", "project_lexicon.yaml")
     return merged
 

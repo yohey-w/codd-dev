@@ -91,15 +91,15 @@ def _requirements_path(project_root: Path) -> Path:
 
 
 def _plan_path(project_root: Path) -> Path:
-    candidates = [
-        project_root / "docs" / "plan" / "implementation_plan.md",
-        project_root / "docs" / "design" / "implementation_plan.md",
-        project_root / "impl_plan.md",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[-1]
+    """Return the destination for plan-style entries (TODO checklist).
+
+    cmd_444 v2.11.0: implementation_plan.md is no longer the entry point.
+    Plan entries (`requirement_only` findings that need a TODO row) are
+    appended to the project's requirements.md alongside requirement-side
+    findings; the heading distinguishes them.
+    """
+
+    return _requirements_path(project_root)
 
 
 def _requirements_entry(finding: Finding) -> str:
@@ -158,8 +158,6 @@ def _append_raw_findings(path: Path, entries: list[str]) -> None:
 def _heading_for_path(path: Path) -> str:
     if path.name == "requirements.md":
         return "## 暗黙要件確認 (codd comparison proposal)"
-    if path.name == "impl_plan.md" or path.name == "implementation_plan.md":
-        return "## Gap Resolution Candidates (codd comparison)"
     return "# Resolution Candidates"
 
 
