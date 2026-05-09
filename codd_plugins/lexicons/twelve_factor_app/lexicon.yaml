@@ -1,0 +1,193 @@
+coverage_axes:
+  - axis_type: "codebase"
+    rationale: "The twelve-factor method requires one codebase tracked in revision control with many deploys."
+    criticality_default: high
+    variants:
+      - id: "one_codebase"
+        label: "One codebase"
+        attributes: {source: "12factor.net I", source_literal: "one codebase"}
+        criticality: high
+      - id: "revision_control"
+        label: "Revision control"
+        attributes: {source: "12factor.net I", source_literal: "tracked in revision control"}
+        criticality: high
+      - id: "many_deploys"
+        label: "Many deploys"
+        attributes: {source: "12factor.net I", source_literal: "many deploys"}
+        criticality: medium
+  - axis_type: "dependencies"
+    rationale: "Dependencies should be explicitly declared and isolated from implicit system packages."
+    criticality_default: high
+    variants:
+      - id: "explicit_dependency_declaration"
+        label: "Explicit dependency declaration"
+        attributes: {source: "12factor.net II", source_literal: "explicitly declare dependencies"}
+        criticality: high
+      - id: "dependency_isolation"
+        label: "Dependency isolation"
+        attributes: {source: "12factor.net II", source_literal: "isolate dependencies"}
+        criticality: high
+      - id: "no_implicit_system_packages"
+        label: "No implicit system packages"
+        attributes: {source: "12factor.net II", source_literal: "never relies on implicit existence"}
+        criticality: medium
+  - axis_type: "config"
+    rationale: "Config that varies between deploys should be separated from code and stored in environment variables."
+    criticality_default: critical
+    variants:
+      - id: "env_var_config"
+        label: "Environment variable configuration"
+        attributes: {source: "12factor.net III", source_literal: "stores config in environment variables"}
+        criticality: critical
+      - id: "config_separate_from_code"
+        label: "Config separate from code"
+        attributes: {source: "12factor.net III", source_literal: "strict separation of config from code"}
+        criticality: critical
+      - id: "secrets_not_committed"
+        label: "Secrets not committed to source"
+        attributes: {source: "12factor.net III", source_literal: "credentials to external services"}
+        criticality: critical
+  - axis_type: "backing_services"
+    rationale: "Backing services are treated as attached resources that can be swapped without code changes."
+    criticality_default: high
+    variants:
+      - id: "attached_resources"
+        label: "Attached backing resources"
+        attributes: {source: "12factor.net IV", source_literal: "attached resources"}
+        criticality: high
+      - id: "resource_locator_in_config"
+        label: "Resource locators in config"
+        attributes: {source: "12factor.net IV", source_literal: "URL or other locator"}
+        criticality: high
+      - id: "resource_swappability"
+        label: "Resource swappability"
+        attributes: {source: "12factor.net IV", source_literal: "swap out a local MySQL database"}
+        criticality: medium
+  - axis_type: "build_release_run"
+    rationale: "Build, release, and run stages should be strictly separated so deploy artifacts and config changes are auditable."
+    criticality_default: high
+    variants:
+      - id: "build_stage"
+        label: "Build stage"
+        attributes: {source: "12factor.net V", source_literal: "build stage"}
+        criticality: high
+      - id: "release_stage"
+        label: "Release stage"
+        attributes: {source: "12factor.net V", source_literal: "release"}
+        criticality: high
+      - id: "run_stage"
+        label: "Run stage"
+        attributes: {source: "12factor.net V", source_literal: "run"}
+        criticality: high
+  - axis_type: "processes"
+    rationale: "The app should execute as stateless, share-nothing processes with persistent state stored in backing services."
+    criticality_default: high
+    variants:
+      - id: "stateless_processes"
+        label: "Stateless processes"
+        attributes: {source: "12factor.net VI", source_literal: "stateless processes"}
+        criticality: high
+      - id: "share_nothing"
+        label: "Share-nothing process model"
+        attributes: {source: "12factor.net VI", source_literal: "share-nothing"}
+        criticality: high
+      - id: "state_in_backing_service"
+        label: "Persistent state in backing service"
+        attributes: {source: "12factor.net VI", source_literal: "backing service"}
+        criticality: high
+  - axis_type: "port_binding"
+    rationale: "A twelve-factor service exports HTTP or another service protocol via port binding."
+    criticality_default: medium
+    variants:
+      - id: "export_via_port"
+        label: "Export service via port"
+        attributes: {source: "12factor.net VII", source_literal: "export services via port binding"}
+        criticality: medium
+      - id: "self_contained_service"
+        label: "Self-contained service process"
+        attributes: {source: "12factor.net VII", source_literal: "self-contained"}
+        criticality: medium
+      - id: "service_as_backing_resource"
+        label: "Service can be backing resource"
+        attributes: {source: "12factor.net VII", source_literal: "backing service"}
+        criticality: info
+  - axis_type: "concurrency"
+    rationale: "The process model should allow horizontal scale-out by process type rather than ad hoc daemonization."
+    criticality_default: medium
+    variants:
+      - id: "process_model_scale_out"
+        label: "Scale out via process model"
+        attributes: {source: "12factor.net VIII", source_literal: "scale out via the process model"}
+        criticality: medium
+      - id: "process_types"
+        label: "Distinct process types"
+        attributes: {source: "12factor.net VIII", source_literal: "process types"}
+        criticality: medium
+      - id: "no_daemonize_pidfiles"
+        label: "No daemonizing or PID files"
+        attributes: {source: "12factor.net VIII", source_literal: "should never daemonize"}
+        criticality: info
+  - axis_type: "disposability"
+    rationale: "Fast startup and graceful shutdown maximize robustness under deploys, crashes, and scaling events."
+    criticality_default: high
+    variants:
+      - id: "fast_startup"
+        label: "Fast startup"
+        attributes: {source: "12factor.net IX", source_literal: "fast startup"}
+        criticality: medium
+      - id: "graceful_shutdown"
+        label: "Graceful shutdown"
+        attributes: {source: "12factor.net IX", source_literal: "graceful shutdown"}
+        criticality: high
+      - id: "robust_against_crash"
+        label: "Robust against sudden death"
+        attributes: {source: "12factor.net IX", source_literal: "sudden death"}
+        criticality: high
+  - axis_type: "dev_prod_parity"
+    rationale: "Development, staging, and production should stay similar across time, personnel, and tooling gaps."
+    criticality_default: medium
+    variants:
+      - id: "time_gap"
+        label: "Small time gap"
+        attributes: {source: "12factor.net X", source_literal: "time gap"}
+        criticality: medium
+      - id: "personnel_gap"
+        label: "Small personnel gap"
+        attributes: {source: "12factor.net X", source_literal: "personnel gap"}
+        criticality: medium
+      - id: "tools_gap"
+        label: "Small tools gap"
+        attributes: {source: "12factor.net X", source_literal: "tools gap"}
+        criticality: medium
+  - axis_type: "logs"
+    rationale: "Logs should be treated as event streams emitted to stdout or stderr, with routing and storage handled by the execution environment."
+    criticality_default: high
+    variants:
+      - id: "event_stream"
+        label: "Logs as event streams"
+        attributes: {source: "12factor.net XI", source_literal: "event streams"}
+        criticality: high
+      - id: "stdout_stderr"
+        label: "Output stream logging"
+        attributes: {source: "12factor.net XI", source_literal: "output stream"}
+        criticality: high
+      - id: "external_log_routing"
+        label: "External log routing and storage"
+        attributes: {source: "12factor.net XI", source_literal: "never concerns itself with routing or storage"}
+        criticality: medium
+  - axis_type: "admin_processes"
+    rationale: "Administrative tasks should run as one-off processes using the same release, codebase, and config as regular processes."
+    criticality_default: medium
+    variants:
+      - id: "one_off_admin_process"
+        label: "One-off admin process"
+        attributes: {source: "12factor.net XII", source_literal: "one-off processes"}
+        criticality: medium
+      - id: "same_release_admin"
+        label: "Admin process uses same release"
+        attributes: {source: "12factor.net XII", source_literal: "same release"}
+        criticality: medium
+      - id: "admin_process_isolation"
+        label: "Admin process isolation"
+        attributes: {source: "12factor.net XII", source_literal: "admin/management tasks"}
+        criticality: info

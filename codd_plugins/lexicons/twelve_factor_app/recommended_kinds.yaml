@@ -1,0 +1,13 @@
+recommended_kinds:
+  - codebase_gap
+  - dependencies_gap
+  - config_gap
+  - backing_services_gap
+  - build_release_run_gap
+  - processes_gap
+  - port_binding_gap
+  - concurrency_gap
+  - disposability_gap
+  - dev_prod_parity_gap
+  - logs_gap
+  - admin_processes_gap

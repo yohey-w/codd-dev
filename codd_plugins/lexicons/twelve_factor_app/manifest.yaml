@@ -1,0 +1,29 @@
+id: twelve_factor_app
+name: "Twelve-Factor App Methodology"
+lexicon_name: twelve_factor_app
+version: "1.0.0"
+standard: "12factor.net"
+domain: cross_industry
+source_url: "https://12factor.net/"
+source_version: "12factor.net, last updated 2017"
+description: "Twelve-factor methodology coverage for cloud-native SaaS applications."
+observation_dimensions: 12
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "The Twelve-Factor App"
+    url: "https://12factor.net/"
+    source_version: "2017"
+  - title: "III. Config"
+    url: "https://12factor.net/config"
+    source_version: "2017"
+  - title: "VI. Processes"
+    url: "https://12factor.net/processes"
+    source_version: "2017"
+  - title: "XI. Logs"
+    url: "https://12factor.net/logs"
+    source_version: "2017"
