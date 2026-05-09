@@ -1,0 +1,145 @@
+coverage_axes:
+  - axis_type: "locale_tagging"
+    rationale: "BCP 47 language tags and Unicode locale extensions identify the language, script, region, and locale options needed for localized behavior."
+    criticality_default: high
+    variants:
+      - id: "bcp47_language_tag"
+        label: "BCP 47 language tag declaration"
+        attributes: {source: "IETF BCP 47", source_literal: "language tag"}
+        criticality: high
+      - id: "unicode_locale_extension"
+        label: "Unicode locale extension keys"
+        attributes: {source: "Unicode CLDR", source_literal: "u extension"}
+        criticality: medium
+      - id: "locale_fallback"
+        label: "Locale fallback behavior"
+        attributes: {source: "Unicode CLDR", source_literal: "locale identifier"}
+        criticality: medium
+  - axis_type: "character_encoding"
+    rationale: "Unicode text handling requires a declared encoding and normalization behavior so stored and displayed text remains interoperable."
+    criticality_default: critical
+    variants:
+      - id: "utf_8_encoding"
+        label: "UTF-8 encoding"
+        attributes: {source: "Unicode", source_literal: "UTF-8"}
+        criticality: critical
+      - id: "unicode_normalization"
+        label: "Unicode normalization"
+        attributes: {source: "Unicode", source_literal: "normalization"}
+        criticality: high
+      - id: "grapheme_cluster_handling"
+        label: "Grapheme cluster safe text handling"
+        attributes: {source: "Unicode", source_literal: "grapheme cluster"}
+        criticality: medium
+  - axis_type: "time_zone_handling"
+    rationale: "Localized date and time behavior depends on IANA time zone identifiers, daylight saving transitions, and user or system zone selection."
+    criticality_default: high
+    variants:
+      - id: "iana_time_zone"
+        label: "IANA time zone identifier"
+        attributes: {source: "IANA tz database", source_literal: "time zone"}
+        criticality: high
+      - id: "daylight_saving_time"
+        label: "Daylight saving time transition handling"
+        attributes: {source: "IANA tz database", source_literal: "DST"}
+        criticality: high
+      - id: "user_time_zone_preference"
+        label: "User or tenant time zone preference"
+        attributes: {source: "ICU", source_literal: "timezone"}
+        criticality: medium
+  - axis_type: "number_currency_format"
+    rationale: "ICU and CLDR number patterns, numbering systems, currency codes, and precision rules control locale-aware numeric and monetary presentation."
+    criticality_default: high
+    variants:
+      - id: "locale_number_format"
+        label: "Locale-aware number formatting"
+        attributes: {source: "Unicode CLDR", source_literal: "number format"}
+        criticality: high
+      - id: "iso_4217_currency_code"
+        label: "ISO 4217 currency code"
+        attributes: {source: "Unicode CLDR", source_literal: "currency code"}
+        criticality: high
+      - id: "currency_precision_rounding"
+        label: "Currency precision and rounding"
+        attributes: {source: "Unicode CLDR", source_literal: "currency digits"}
+        criticality: medium
+  - axis_type: "date_time_calendar"
+    rationale: "CLDR date, time, calendar, week, and day-period data drive locale-aware display and parsing beyond a single Gregorian default."
+    criticality_default: high
+    variants:
+      - id: "locale_date_time_pattern"
+        label: "Locale-aware date and time patterns"
+        attributes: {source: "Unicode CLDR", source_literal: "date format"}
+        criticality: high
+      - id: "calendar_system"
+        label: "Calendar system selection"
+        attributes: {source: "Unicode CLDR", source_literal: "calendar"}
+        criticality: medium
+      - id: "week_day_period_rules"
+        label: "Week and day-period rules"
+        attributes: {source: "Unicode CLDR", source_literal: "week data"}
+        criticality: medium
+  - axis_type: "text_collation"
+    rationale: "CLDR collation data defines locale-aware ordering, searching, and comparison behavior that differs across languages and scripts."
+    criticality_default: medium
+    variants:
+      - id: "locale_sort_order"
+        label: "Locale-aware sort order"
+        attributes: {source: "Unicode CLDR", source_literal: "collation"}
+        criticality: medium
+      - id: "case_accent_sensitivity"
+        label: "Case and accent comparison sensitivity"
+        attributes: {source: "Unicode CLDR", source_literal: "collation strength"}
+        criticality: medium
+      - id: "numeric_collation"
+        label: "Numeric collation option"
+        attributes: {source: "Unicode CLDR", source_literal: "numeric collation"}
+        criticality: info
+  - axis_type: "rtl_bidi_support"
+    rationale: "Right-to-left scripts and bidirectional text require direction metadata, isolation, and mirrored layout expectations."
+    criticality_default: medium
+    variants:
+      - id: "right_to_left_direction"
+        label: "Right-to-left text direction"
+        attributes: {source: "Unicode Bidirectional Algorithm", source_literal: "right-to-left"}
+        criticality: high
+      - id: "bidi_isolation"
+        label: "Bidirectional text isolation"
+        attributes: {source: "Unicode Bidirectional Algorithm", source_literal: "bidi"}
+        criticality: high
+      - id: "mirrored_layout"
+        label: "Mirrored layout and icon behavior"
+        attributes: {source: "ICU", source_literal: "BiDi"}
+        criticality: medium
+  - axis_type: "pluralization_rules"
+    rationale: "CLDR plural categories define how counts map to localized grammatical forms for cardinal and ordinal messages."
+    criticality_default: high
+    variants:
+      - id: "cardinal_plural_categories"
+        label: "Cardinal plural categories"
+        attributes: {source: "Unicode CLDR", source_literal: "zero, one, two, few, many, other"}
+        criticality: high
+      - id: "ordinal_plural_categories"
+        label: "Ordinal plural categories"
+        attributes: {source: "Unicode CLDR", source_literal: "ordinal"}
+        criticality: medium
+      - id: "plural_fallback"
+        label: "Plural fallback category"
+        attributes: {source: "Unicode CLDR", source_literal: "other"}
+        criticality: high
+  - axis_type: "translation_string_management"
+    rationale: "Message catalogs, interpolation, ICU MessageFormat, and fallback policies keep translated strings complete, safe, and maintainable."
+    criticality_default: high
+    variants:
+      - id: "message_catalog"
+        label: "Message catalog management"
+        attributes: {source: "ICU", source_literal: "message"}
+        criticality: high
+      - id: "icu_message_format"
+        label: "ICU MessageFormat support"
+        attributes: {source: "ICU", source_literal: "MessageFormat"}
+        criticality: high
+      - id: "translation_fallback"
+        label: "Missing translation fallback"
+        attributes: {source: "ICU", source_literal: "fallback"}
+        criticality: medium

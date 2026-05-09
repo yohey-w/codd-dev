@@ -1,0 +1,34 @@
+rules:
+  - when: "axis=locale_tagging AND coverage=gap"
+    severity: high
+    rationale: "Missing BCP 47 locale tagging makes language, script, region, and Unicode extension behavior ambiguous."
+  - when: "axis=character_encoding AND coverage=gap"
+    severity: critical
+    rationale: "Missing Unicode or UTF-8 handling can corrupt stored or displayed text across locales."
+  - when: "axis=time_zone_handling AND coverage=gap"
+    severity: high
+    rationale: "Missing IANA time zone and DST behavior can produce incorrect user-visible times."
+  - when: "axis=number_currency_format AND coverage=gap"
+    severity: high
+    rationale: "Missing number or currency formatting can misrepresent quantities, amounts, precision, or currency."
+  - when: "axis=date_time_calendar AND coverage=gap"
+    severity: high
+    rationale: "Missing locale-aware date, time, or calendar behavior can make schedules and records incorrect for target locales."
+  - when: "axis=text_collation AND coverage=gap"
+    severity: medium
+    rationale: "Missing collation behavior can make sorting, searching, or grouping incorrect in localized lists."
+  - when: "axis=rtl_bidi_support AND coverage=gap"
+    severity: medium
+    rationale: "Missing RTL and BiDi expectations can leave localized text and layout behavior unreviewed."
+  - when: "axis=rtl_bidi_support AND coverage=gap AND locale_direction=rtl"
+    severity: high
+    rationale: "RTL target locales raise BiDi omissions from a review gap to a release-quality risk."
+  - when: "axis=pluralization_rules AND coverage=gap"
+    severity: high
+    rationale: "Missing CLDR plural categories can make translated messages grammatically wrong or incomplete."
+  - when: "axis=translation_string_management AND coverage=gap"
+    severity: high
+    rationale: "Missing translation string management can lead to untranslated, unsafe, or unmaintainable messages."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking gap."

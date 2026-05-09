@@ -1,0 +1,10 @@
+recommended_kinds:
+  - locale_tagging_gap
+  - character_encoding_gap
+  - time_zone_handling_gap
+  - number_currency_format_gap
+  - date_time_calendar_gap
+  - text_collation_gap
+  - rtl_bidi_support_gap
+  - pluralization_rules_gap
+  - translation_string_management_gap

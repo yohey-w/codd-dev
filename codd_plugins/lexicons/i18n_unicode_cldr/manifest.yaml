@@ -1,0 +1,26 @@
+id: i18n_unicode_cldr
+name: "Internationalization (Unicode CLDR / BCP 47)"
+lexicon_name: i18n_unicode_cldr
+version: "1.0.0"
+standard: "Unicode CLDR 44 / IETF BCP 47 / ICU"
+domain: cross_industry
+source_url: "https://cldr.unicode.org/index/cldr-spec"
+source_version: "Unicode CLDR 44 / IETF BCP 47 / ICU"
+description: "Internationalization and localization coverage based on Unicode CLDR standards."
+observation_dimensions: 9
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "CLDR Specifications"
+    url: "https://cldr.unicode.org/index/cldr-spec"
+    source_version: "Unicode CLDR 44 / UTS #35"
+  - title: "Unicode Extensions for BCP 47"
+    url: "https://cldr.unicode.org/index/bcp47-extension"
+    source_version: "Unicode CLDR"
+  - title: "IETF BCP 47 Tags for Identifying Languages"
+    url: "https://www.rfc-editor.org/rfc/rfc5646"
+    source_version: "BCP 47"

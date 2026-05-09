@@ -42,6 +42,12 @@ stack_map:
   - hint_pattern: "opentelemetry|otel|prometheus|grafana|jaeger|datadog"
     suggested_lexicons:
       - ops_observability_otel
+  - hint_pattern: "twelve-factor|12factor|procfile|dotenv|cloud-native|heroku"
+    suggested_lexicons:
+      - twelve_factor_app
+  - hint_pattern: "i18n|l10n|locale|unicode|cldr|icu|bcp47|rtl|bidi"
+    suggested_lexicons:
+      - i18n_unicode_cldr
   - hint_pattern: "swiftui|uikit|ios|xcode"
     suggested_lexicons:
       - mobile_ios_hig

@@ -1,0 +1,40 @@
+rules:
+  - when: "axis=codebase AND coverage=gap"
+    severity: high
+    rationale: "Missing codebase boundaries can obscure deploy ownership and release provenance."
+  - when: "axis=dependencies AND coverage=gap"
+    severity: high
+    rationale: "Missing explicit dependency declaration or isolation can make builds non-reproducible."
+  - when: "axis=config AND coverage=gap"
+    severity: critical
+    rationale: "Missing config separation can commit deploy config or secrets into code."
+  - when: "axis=backing_services AND coverage=gap"
+    severity: high
+    rationale: "Missing attached-resource treatment can hardwire infrastructure and credentials into the app."
+  - when: "axis=build_release_run AND coverage=gap"
+    severity: high
+    rationale: "Missing build, release, and run separation can make deploys non-auditable or non-repeatable."
+  - when: "axis=processes AND coverage=gap"
+    severity: high
+    rationale: "Missing stateless process expectations can break horizontal scaling and restart safety."
+  - when: "axis=port_binding AND coverage=gap"
+    severity: medium
+    rationale: "Missing port binding can hide runtime assumptions about service exposure."
+  - when: "axis=concurrency AND coverage=gap"
+    severity: medium
+    rationale: "Missing process-model concurrency can limit scale-out or make workers hard to operate."
+  - when: "axis=disposability AND coverage=gap"
+    severity: high
+    rationale: "Missing startup and shutdown behavior can create deploy, crash-recovery, or scaling failures."
+  - when: "axis=dev_prod_parity AND coverage=gap"
+    severity: medium
+    rationale: "Missing dev/prod parity can hide environment-specific failures until release."
+  - when: "axis=logs AND coverage=gap"
+    severity: high
+    rationale: "Missing event-stream logging can make production behavior hard to diagnose."
+  - when: "axis=admin_processes AND coverage=gap"
+    severity: medium
+    rationale: "Missing one-off admin process guidance can create unmanaged operational scripts."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit coverage should be reviewed but is not a blocking gap."
