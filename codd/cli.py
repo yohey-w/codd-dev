@@ -561,10 +561,9 @@ def _offer_lexicon_suggestions(
             click.echo("")
             click.echo("[LLM-enhanced] Analyzing project ...")
             click.echo("[LLM-enhanced] Detected:")
-            click.echo(f"  - Domain: {llm_result.detected_domain or 'unknown'}")
-            click.echo(f"  - Compliance: {_format_detected_items(llm_result.detected_compliance)}")
+            click.echo(f"  - Data types: {_format_detected_items(llm_result.detected_data_types)}")
+            click.echo(f"  - Function traits: {_format_detected_items(llm_result.detected_function_traits)}")
             click.echo(f"  - Tech stack: {_format_detected_items(llm_result.detected_tech_stack)}")
-            click.echo(f"  - Integrations: {_format_detected_items(llm_result.detected_integrations)}")
             click.echo("")
             click.echo("[LLM-enhanced] Recommended lexicons:")
             for index, recommendation in enumerate(llm_result.recommendations, start=1):

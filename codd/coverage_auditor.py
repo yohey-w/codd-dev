@@ -109,7 +109,7 @@ class CoverageAuditor:
             lowered = text.lower()
             text_terms = _terms(lowered)
             if (
-                {"lms", "e-learning", "elearning"} & text_terms
+                {"e-learning", "elearning"} & text_terms
                 or "learning management" in lowered
                 or len(
                     {
@@ -244,7 +244,7 @@ class CoverageAuditor:
             },
         ]
 
-        lms = [
+        learning_platform = [
             *base_web,
             *self._build_auth_ui_surface_checklist(),
             {
@@ -362,7 +362,7 @@ class CoverageAuditor:
         ]
 
         checklists = {
-            "LMS/EdTech": lms,
+            "LMS/EdTech": learning_platform,
             "FinTech": [
                 *base_web,
                 {
