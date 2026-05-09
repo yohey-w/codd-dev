@@ -43,17 +43,28 @@ def project(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def isolated_repair_registry(monkeypatch):
-    """Snapshot + restore the repair engine registry around each test.
+    """Snapshot + restore the repair engine registry around each test, and
+    pin the repairability classifier to the null variant.
 
-    cmd_460: in CI (Python 3.11) the previous shallow `monkeypatch.setattr`
-    sometimes left a registered scripted engine visible to a later test, which
-    routed the repair loop down the unrepairable path before it could try
-    `--max-attempts`. The explicit teardown that follows guarantees a fresh
-    registry for every test regardless of pytest's reuse heuristics.
+    cmd_460: in CI (Python 3.11) the loop occasionally selected the LLM-aware
+    `RepairabilityClassifier`, which classifies violations whose affected
+    files do not appear in `git diff baseline..HEAD` as **unrepairable** when
+    no LLM client is wired up. That short-circuited the scripted-engine
+    scenarios to `PARTIAL_SUCCESS` before `--max-attempts` could fire.
+    Pinning to `NullRepairabilityClassifier` keeps the loop on the
+    deterministic path the scenarios assume, regardless of host environment.
     """
 
     snapshot = dict(engine_registry._REPAIR_ENGINES)
     monkeypatch.setattr(engine_registry, "_REPAIR_ENGINES", dict(snapshot))
+
+    from codd.repair.loop import NullRepairabilityClassifier
+
+    monkeypatch.setattr(
+        "codd.repair.loop._default_repairability_classifier",
+        lambda config=None: NullRepairabilityClassifier(),
+    )
+
     yield
     engine_registry._REPAIR_ENGINES.clear()
     engine_registry._REPAIR_ENGINES.update(snapshot)
