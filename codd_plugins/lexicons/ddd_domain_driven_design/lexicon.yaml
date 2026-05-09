@@ -1,0 +1,121 @@
+coverage_axes:
+  - axis_type: ubiquitous_language
+    rationale: "DDD uses a shared language between domain experts and delivery teams to keep the model, code, and conversations aligned."
+    criticality_default: medium
+    variants:
+      - id: "ubiquitous language"
+        label: "Shared domain vocabulary"
+        attributes: {source_literal: "ubiquitous language", coverage_target: "terms used consistently in model, code, and discussion"}
+        criticality: medium
+      - id: "domain expert language"
+        label: "Domain expert language"
+        attributes: {source_literal: "domain expert", coverage_target: "business terminology and definitions"}
+        criticality: medium
+  - axis_type: bounded_context
+    rationale: "DDD strategic design uses bounded contexts to make model boundaries explicit and prevent one model from being stretched across incompatible meanings."
+    criticality_default: high
+    variants:
+      - id: "bounded context"
+        label: "Explicit model boundary"
+        attributes: {source_literal: "bounded context", coverage_target: "scope of a domain model and language"}
+        criticality: high
+      - id: "context boundary"
+        label: "Context boundary"
+        attributes: {source_literal: "context boundary", coverage_target: "ownership and integration edge"}
+        criticality: high
+  - axis_type: aggregate_design
+    rationale: "DDD tactical design uses aggregates and aggregate roots to enforce invariants and transaction boundaries."
+    criticality_default: high
+    variants:
+      - id: "aggregate root"
+        label: "Aggregate root"
+        attributes: {source_literal: "aggregate root", coverage_target: "entry point for consistency boundary"}
+        criticality: high
+      - id: "invariant boundary"
+        label: "Invariant boundary"
+        attributes: {source_literal: "invariant", coverage_target: "rules protected inside the aggregate"}
+        criticality: high
+      - id: "transaction boundary"
+        label: "Transaction boundary"
+        attributes: {source_literal: "transaction boundary", coverage_target: "consistency and concurrency scope"}
+        criticality: high
+  - axis_type: entity_value_object
+    rationale: "DDD distinguishes entities with identity from value objects with equality-by-value to clarify lifecycle, mutation, and comparison semantics."
+    criticality_default: high
+    variants:
+      - id: "entity"
+        label: "Entity identity"
+        attributes: {source_literal: "entity", coverage_target: "identity and lifecycle"}
+        criticality: high
+      - id: "value object"
+        label: "Value object equality"
+        attributes: {source_literal: "value object", coverage_target: "immutable descriptive value"}
+        criticality: high
+      - id: "identity"
+        label: "Identity semantics"
+        attributes: {source_literal: "identity", coverage_target: "stable object identity across state changes"}
+        criticality: high
+  - axis_type: domain_events
+    rationale: "DDD domain events represent significant state changes and decouple follow-up behavior from the command that caused the change."
+    criticality_default: medium
+    variants:
+      - id: "domain event"
+        label: "Domain event"
+        attributes: {source_literal: "domain event", coverage_target: "significant business occurrence"}
+        criticality: medium
+      - id: "event publication"
+        label: "Event publication"
+        attributes: {source_literal: "event publication", coverage_target: "notification and downstream reaction"}
+        criticality: medium
+  - axis_type: repository_pattern
+    rationale: "DDD repositories provide collection-like persistence access for aggregate roots without exposing storage details to the domain model."
+    criticality_default: medium
+    variants:
+      - id: "repository"
+        label: "Repository abstraction"
+        attributes: {source_literal: "repository", coverage_target: "aggregate persistence abstraction"}
+        criticality: medium
+      - id: "aggregate persistence"
+        label: "Aggregate persistence"
+        attributes: {source_literal: "aggregate persistence", coverage_target: "load and save aggregate roots"}
+        criticality: medium
+  - axis_type: application_service
+    rationale: "DDD application services orchestrate use cases, transactions, authorization, and coordination while keeping domain rules in the model."
+    criticality_default: medium
+    variants:
+      - id: "application service"
+        label: "Use case orchestration"
+        attributes: {source_literal: "application service", coverage_target: "workflow coordination around domain model"}
+        criticality: medium
+      - id: "use case"
+        label: "Use case boundary"
+        attributes: {source_literal: "use case", coverage_target: "input, transaction, and response boundary"}
+        criticality: medium
+  - axis_type: context_mapping
+    rationale: "DDD context mapping records upstream/downstream relationships and integration patterns between bounded contexts."
+    criticality_default: high
+    variants:
+      - id: "context map"
+        label: "Context map"
+        attributes: {source_literal: "context map", coverage_target: "relationships between bounded contexts"}
+        criticality: high
+      - id: "upstream downstream"
+        label: "Upstream/downstream relationship"
+        attributes: {source_literal: "upstream/downstream", coverage_target: "dependency direction and influence"}
+        criticality: high
+      - id: "shared kernel"
+        label: "Shared kernel"
+        attributes: {source_literal: "shared kernel", coverage_target: "jointly owned model subset"}
+        criticality: medium
+  - axis_type: anti_corruption_layer
+    rationale: "DDD uses an anti-corruption layer to isolate a domain model from legacy, external, or differently modeled systems."
+    criticality_default: high
+    variants:
+      - id: "anti-corruption layer"
+        label: "Anti-corruption layer"
+        attributes: {source_literal: "anti-corruption layer", coverage_target: "translation and isolation boundary"}
+        criticality: high
+      - id: "legacy isolation"
+        label: "Legacy or external model isolation"
+        attributes: {source_literal: "legacy system", coverage_target: "protecting the domain model from external concepts"}
+        criticality: high

@@ -1,0 +1,39 @@
+defaults:
+  coverage_gap: high
+  not_found: high
+  implicit: medium
+  covered: info
+rules:
+  - when: "axis=storage_security AND coverage=not_found"
+    severity: high
+    rationale: "Missing sensitive data storage coverage can expose local secrets, cached data, or logs."
+  - when: "axis=network_communication AND coverage=not_found"
+    severity: critical
+    rationale: "Missing network security coverage can allow cleartext traffic or invalid server trust."
+  - when: "axis=auth_session_management AND coverage=not_found"
+    severity: high
+    rationale: "Missing authentication or session coverage can permit unauthorized access or token abuse."
+  - when: "axis=storage_security AND coverage=gap"
+    severity: high
+    rationale: "Sensitive mobile data needs explicit storage, retention, and exposure controls."
+  - when: "axis=crypto_best_practices AND coverage=gap"
+    severity: high
+    rationale: "Cryptography gaps can lead to weak algorithms, poor key handling, or ineffective protection."
+  - when: "axis=auth_session_management AND coverage=gap"
+    severity: high
+    rationale: "Authentication and session gaps can allow account takeover, replay, or stale access."
+  - when: "axis=network_communication AND coverage=gap"
+    severity: critical
+    rationale: "Network gaps can expose mobile traffic through cleartext or broken certificate validation."
+  - when: "axis=platform_interaction AND coverage=gap"
+    severity: high
+    rationale: "Platform interaction gaps can overgrant permissions or expose unsafe OS API and IPC behavior."
+  - when: "axis=code_quality AND coverage=gap"
+    severity: high
+    rationale: "Code quality gaps can leave insecure dependencies, build settings, or unsafe APIs unreviewed."
+  - when: "axis=resilience AND coverage=gap"
+    severity: medium
+    rationale: "Resilience gaps can increase reverse-engineering or tampering risk for sensitive apps."
+  - when: "coverage=implicit AND evidence=weak"
+    severity: medium
+    rationale: "Weak implicit coverage should be reviewed before accepting that a MASVS axis is not applicable."

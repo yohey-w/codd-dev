@@ -34,6 +34,7 @@ stack_map:
     suggested_lexicons:
       - ops_kubernetes
       - ops_observability_otel
+      - twelve_factor_app
   - hint_pattern: "terraform|pulumi|cloudformation|aws-cdk"
     suggested_lexicons:
       - ops_iac_terraform
@@ -61,10 +62,15 @@ stack_map:
     suggested_lexicons:
       - mobile_ios_hig
       - mobile_a11y_native
+      - mobile_security_masvs
   - hint_pattern: "android|material|jetpack|kotlin"
     suggested_lexicons:
       - mobile_android_material3
       - mobile_a11y_native
+      - mobile_security_masvs
+  - hint_pattern: "ddd|domain-driven|domain model|bounded-context|aggregate|clean-architecture|hexagonal"
+    suggested_lexicons:
+      - ddd_domain_driven_design
   - hint_pattern: "webauthn|passkey|fido"
     suggested_lexicons:
       - web_authn_webauthn
@@ -112,4 +118,3 @@ deployment_bindings:
   - impl_pattern: "(^|/)package\\.json$"
     runtime_state_kind: file_present
     runtime_state_target: build_artifact
-

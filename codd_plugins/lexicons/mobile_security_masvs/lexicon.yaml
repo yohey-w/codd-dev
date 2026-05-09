@@ -1,0 +1,117 @@
+coverage_axes:
+  - axis_type: storage_security
+    rationale: "MASVS-STORAGE covers sensitive data storage, persistence, logs, backups, and local caches on mobile devices."
+    criticality_default: high
+    variants:
+      - id: MASVS-STORAGE
+        label: "Sensitive data storage"
+        attributes: {source_literal: "MASVS-STORAGE", coverage_target: "data-at-rest handling"}
+        criticality: high
+      - id: "local data persistence"
+        label: "Local persistence boundary"
+        attributes: {source_literal: "local storage", coverage_target: "files, preferences, databases, caches, and logs"}
+        criticality: high
+      - id: "sensitive data minimization"
+        label: "Sensitive data minimization"
+        attributes: {source_literal: "sensitive data", coverage_target: "retention and exposure reduction"}
+        criticality: high
+  - axis_type: crypto_best_practices
+    rationale: "MASVS-CRYPTO covers strong cryptography, appropriate key handling, and avoiding custom or obsolete algorithms."
+    criticality_default: high
+    variants:
+      - id: MASVS-CRYPTO
+        label: "Cryptography best practices"
+        attributes: {source_literal: "MASVS-CRYPTO", coverage_target: "cryptographic design and usage"}
+        criticality: high
+      - id: "key management"
+        label: "Key management"
+        attributes: {source_literal: "key management", coverage_target: "generation, storage, rotation, and destruction"}
+        criticality: high
+      - id: "algorithm selection"
+        label: "Algorithm selection"
+        attributes: {source_literal: "cryptographic algorithm", coverage_target: "modern and approved algorithms"}
+        criticality: high
+  - axis_type: auth_session_management
+    rationale: "MASVS-AUTH covers authentication, authorization, session handling, credential lifecycle, and re-authentication expectations."
+    criticality_default: high
+    variants:
+      - id: MASVS-AUTH
+        label: "Authentication and authorization"
+        attributes: {source_literal: "MASVS-AUTH", coverage_target: "identity and access boundary"}
+        criticality: high
+      - id: "session lifecycle"
+        label: "Session lifecycle"
+        attributes: {source_literal: "session", coverage_target: "token creation, refresh, revocation, and expiry"}
+        criticality: high
+      - id: "credential handling"
+        label: "Credential handling"
+        attributes: {source_literal: "credentials", coverage_target: "storage, transmission, recovery, and replay prevention"}
+        criticality: high
+  - axis_type: network_communication
+    rationale: "MASVS-NETWORK covers secure data-in-transit, TLS configuration, endpoint trust, and certificate validation."
+    criticality_default: critical
+    variants:
+      - id: MASVS-NETWORK
+        label: "Network communication"
+        attributes: {source_literal: "MASVS-NETWORK", coverage_target: "data-in-transit protection"}
+        criticality: critical
+      - id: "TLS"
+        label: "TLS usage"
+        attributes: {source_literal: "TLS", coverage_target: "transport confidentiality and integrity"}
+        criticality: critical
+      - id: "certificate validation"
+        label: "Certificate validation"
+        attributes: {source_literal: "certificate validation", coverage_target: "server trust verification"}
+        criticality: critical
+      - id: "cleartext traffic"
+        label: "Cleartext traffic prevention"
+        attributes: {source_literal: "cleartext", coverage_target: "unencrypted network paths"}
+        criticality: critical
+  - axis_type: platform_interaction
+    rationale: "MASVS-PLATFORM covers interaction with mobile OS APIs, permissions, intents, IPC, WebViews, and platform-provided security controls."
+    criticality_default: high
+    variants:
+      - id: MASVS-PLATFORM
+        label: "Platform interaction"
+        attributes: {source_literal: "MASVS-PLATFORM", coverage_target: "OS API and permission boundary"}
+        criticality: high
+      - id: "permissions"
+        label: "Runtime permissions"
+        attributes: {source_literal: "permissions", coverage_target: "least-privilege access to sensors, files, and services"}
+        criticality: high
+      - id: "inter-process communication"
+        label: "Inter-process communication"
+        attributes: {source_literal: "IPC", coverage_target: "intents, URL schemes, pasteboard, and app-to-app channels"}
+        criticality: high
+  - axis_type: code_quality
+    rationale: "MASVS-CODE covers secure coding quality, build configuration, dependency hygiene, and avoiding unsafe implementation defects."
+    criticality_default: high
+    variants:
+      - id: MASVS-CODE
+        label: "Code quality"
+        attributes: {source_literal: "MASVS-CODE", coverage_target: "secure implementation baseline"}
+        criticality: high
+      - id: "dependency hygiene"
+        label: "Dependency hygiene"
+        attributes: {source_literal: "dependencies", coverage_target: "known vulnerability and update policy"}
+        criticality: high
+      - id: "unsafe APIs"
+        label: "Unsafe API avoidance"
+        attributes: {source_literal: "unsafe APIs", coverage_target: "debug, reflection, dynamic loading, and insecure parsing"}
+        criticality: high
+  - axis_type: resilience
+    rationale: "MASVS-RESILIENCE covers resistance to reverse engineering, tampering, repackaging, runtime instrumentation, and abuse of app integrity assumptions."
+    criticality_default: medium
+    variants:
+      - id: MASVS-RESILIENCE
+        label: "Resilience against reverse engineering and tampering"
+        attributes: {source_literal: "MASVS-RESILIENCE", coverage_target: "anti-tampering and runtime integrity"}
+        criticality: medium
+      - id: "reverse engineering resistance"
+        label: "Reverse engineering resistance"
+        attributes: {source_literal: "reverse engineering", coverage_target: "static and dynamic analysis friction"}
+        criticality: medium
+      - id: "tamper detection"
+        label: "Tamper detection"
+        attributes: {source_literal: "tampering", coverage_target: "repackaging, hooking, and instrumentation response"}
+        criticality: high

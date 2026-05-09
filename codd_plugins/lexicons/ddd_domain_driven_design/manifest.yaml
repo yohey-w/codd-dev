@@ -1,0 +1,23 @@
+id: ddd_domain_driven_design
+name: "Domain-Driven Design (DDD)"
+lexicon_name: ddd_domain_driven_design
+version: "1.0.0"
+standard: "Evans 2003 / Vernon 2013"
+domain: cross_industry
+source_url: "https://www.domainlanguage.com/ddd/"
+source_version: "Eric Evans Domain-Driven Design 2003 + Vaughn Vernon Implementing Domain-Driven Design 2013"
+description: "Domain-Driven Design tactical and strategic patterns coverage"
+observation_dimensions: 9
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "Domain-Driven Design: Tackling Complexity in the Heart of Software"
+    url: "https://www.domainlanguage.com/ddd/"
+    source_version: "Evans 2003"
+  - title: "Implementing Domain-Driven Design"
+    url: "https://www.pearson.com/en-us/subject-catalog/p/implementing-domain-driven-design/P200000009616/9780321834577"
+    source_version: "Vernon 2013"
