@@ -48,28 +48,31 @@ def test_apply_routes_implementation_only_category_to_requirements(tmp_path: Pat
     assert "Question: Should this be recorded?" in text
 
 
-def test_apply_routes_requirement_only_category_to_plan(tmp_path: Path) -> None:
+def test_apply_routes_requirement_only_category_to_requirements(tmp_path: Path) -> None:
+    """cmd_444 v2.11.0: requirement_only findings now land in requirements.md."""
+
     finding = _finding("DIFF-REQ-1", details={"category": "requirement_only"})
 
     result = DiffApplyEngine(tmp_path).apply([finding])
 
-    plan = tmp_path / "impl_plan.md"
-    text = plan.read_text(encoding="utf-8")
-    assert result.files_updated == ["impl_plan.md"]
-    assert "Gap Resolution Candidates" in text
+    requirements = tmp_path / "docs" / "requirements" / "requirements.md"
+    text = requirements.read_text(encoding="utf-8")
+    assert "docs/requirements/requirements.md" in result.files_updated
     assert "- [ ] [DIFF-REQ-1] Review this behavior" in text
 
 
-def test_apply_uses_existing_implementation_plan_when_present(tmp_path: Path) -> None:
-    plan = tmp_path / "docs" / "plan" / "implementation_plan.md"
-    plan.parent.mkdir(parents=True)
-    plan.write_text("# Plan\n", encoding="utf-8")
+def test_apply_appends_plan_entries_to_existing_requirements(tmp_path: Path) -> None:
+    """cmd_444 v2.11.0: legacy implementation_plan.md is no longer used."""
+
+    requirements = tmp_path / "docs" / "requirements" / "requirements.md"
+    requirements.parent.mkdir(parents=True)
+    requirements.write_text("# Requirements\n", encoding="utf-8")
     finding = _finding("DIFF-REQ-2", details={"category": "requirement_only"})
 
     result = DiffApplyEngine(tmp_path).apply([finding])
 
-    assert "docs/plan/implementation_plan.md" in result.files_updated
-    assert "[DIFF-REQ-2]" in plan.read_text(encoding="utf-8")
+    assert "docs/requirements/requirements.md" in result.files_updated
+    assert "[DIFF-REQ-2]" in requirements.read_text(encoding="utf-8")
 
 
 def test_apply_routes_drift_category_to_resolution_file(tmp_path: Path) -> None:
@@ -128,7 +131,7 @@ def test_cli_diff_apply_json_input(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Diff apply complete: applied=1, skipped=0" in result.output
-    assert (tmp_path / "impl_plan.md").exists()
+    assert (tmp_path / "docs" / "requirements" / "requirements.md").exists()
 
 
 def test_cli_diff_apply_invalid_input_exits_nonzero(tmp_path: Path) -> None:

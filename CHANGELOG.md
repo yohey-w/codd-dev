@@ -4,6 +4,60 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-05-10 — Sprint-less `codd implement` (cmd_444)
+
+### Breaking — `codd implement`
+
+- **`codd implement` now takes a design node and output paths directly.**
+  `--wave` and the `implementation_plan.md` auto-detection are removed
+  with no compatibility shim. Use:
+
+  ```bash
+  codd implement --design docs/design/auth.md --output src/auth/ --output tests/auth/
+  ```
+
+  See [docs/migrations/v2.11.0-sprintless.md](docs/migrations/v2.11.0-sprintless.md)
+  for the cookbook.
+
+### Changed
+
+- `codd/implementer.py` shrinks from ≈1,500 LOC to ≈400 LOC; the
+  `ImplementationPlan` / `ImplementationTask` / `_load_implementation_plan` /
+  `_extract_all_tasks` / `_filter_tasks` / `_task_wave` machinery is gone.
+  The new `ImplementSpec(design_node, output_paths, dependency_design_nodes)`
+  is the single input shape.
+- `codd/cli.py` rewires `codd implement` to the new flags
+  (`--design` / `--output` / `--depends-on`).
+- `codd/assembler.py` keeps the flat `src/generated/<task>/` layout and drops
+  the legacy `sprint_N/` branch from the orphan-fragment scan.
+- `codd/dag/builder.py` no longer seeds `plan_task_file`; legacy values in
+  `codd.yaml` are silently ignored.
+- `codd/diff/apply.py` routes `requirement_only` findings to
+  `docs/requirements/requirements.md` (alongside the rest of the
+  requirements). The previous `impl_plan.md` / `implementation_plan.md`
+  destination is gone.
+- `codd/llm/plan_deriver.merge_approved_tasks_into_plan` writes derived
+  tasks into `docs/requirements/requirements.md` under
+  `## Derived Tasks` instead of `docs/design/implementation_plan.md`.
+
+### Migration
+
+- Run `codd implement --design <design_doc> --output <dir>` directly.
+- Existing `codd.yaml` files are still readable: `coherence.implement` and
+  `dag.plan_task_file` are silently ignored.
+- Diff/elicit findings that previously appeared in `impl_plan.md` now show
+  up in `requirements.md` under the same headings — keep the approval
+  workflow, just one less file to track.
+
+### Quality Metrics
+
+- **pytest**: 2754 PASS / 0 FAIL / 0 SKIP (no regressions vs v2.10.0)
+- **Generality Gate**: zero project-specific literals.
+- **SWE-bench**: external 73-question harness re-run is the release
+  blocker; `codd-dev` itself does not bundle the harness, so the run is
+  performed against the published wheel and the result is tracked
+  separately.
+
 ## [2.10.0] - 2026-05-10 — Cross-industry lexicon expansion (cmd_458)
 
 ### Added — 7 cross-industry lexicons (60 axes total)

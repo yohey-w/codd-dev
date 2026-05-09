@@ -111,10 +111,10 @@ This is what lets CoDD ship one core that works for Next.js, Django, FastAPI, Ra
 
 ---
 
-## 🧭 Roadmap (v2.x → v3.0)
+## 🧭 Roadmap
 
-- **v2.x (current)** — Lexicon-driven completeness, 38 plug-ins, LLM-enhanced init, scope/phase filter, auto-repair across the full DAG.
-- **v3.0 (planned)** — Sprint-less implement pipeline (design → ImplStep → code, no human-project-management layer in the AI flow).
+- **v2.10.0 (current)** — Lexicon-driven completeness, 38 plug-ins, LLM-enhanced init, scope/phase filter, auto-repair across the full DAG.
+- **v2.11.0 (next)** — Sprint-less `codd implement` (`--design <path> --output <dir>` directly; `implementation_plan.md` parser removed). See [migration guide](docs/migrations/v2.11.0-sprintless.md).
 
 ---
 

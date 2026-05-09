@@ -444,12 +444,21 @@ def approved_tasks_markdown(tasks: list[DerivedTask]) -> str:
 
 
 def merge_approved_tasks_into_plan(project_root: Path, tasks: list[DerivedTask]) -> int:
+    """Append approved derived tasks to the project's requirements file.
+
+    cmd_444 v2.11.0: ``codd implement`` no longer reads
+    ``implementation_plan.md``. Derived tasks now live alongside the
+    requirements they enrich, under the same ``## Derived Tasks`` heading,
+    so a future ``codd implement --design <path>`` can pick the design
+    node directly from the surrounding section.
+    """
+
     markdown = approved_tasks_markdown(tasks)
     if not markdown:
         return 0
-    plan_path = project_root / "docs" / "design" / "implementation_plan.md"
+    plan_path = project_root / "docs" / "requirements" / "requirements.md"
     plan_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = plan_path.read_text(encoding="utf-8") if plan_path.exists() else "# Implementation Plan\n"
+    existing = plan_path.read_text(encoding="utf-8") if plan_path.exists() else "# Requirements\n"
     marker = "\n\n## Derived Tasks\n\n"
     if marker.strip() not in existing:
         existing = existing.rstrip() + marker
