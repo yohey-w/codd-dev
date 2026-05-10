@@ -5,7 +5,7 @@ from typing import get_args
 
 import pytest
 
-from codd.elicit import Finding, Severity
+from codd.elicit import Finding, FindingDimension, FindingType, Severity
 
 
 def test_finding_is_dataclass() -> None:
@@ -27,7 +27,12 @@ def test_finding_declares_expected_fields() -> None:
 
 
 def test_severity_literal_values_are_fixed() -> None:
-    assert set(get_args(Severity)) == {"critical", "high", "medium", "info"}
+    assert set(get_args(Severity)) == {"critical", "high", "medium", "amber", "info"}
+
+
+def test_process_user_journey_finding_type_is_declared() -> None:
+    assert FindingType.MISSING_JOURNEY_FOR_ACTOR.value == "missing_journey_for_actor"
+    assert FindingDimension.PROCESS_USER_JOURNEY.value == "process_user_journey"
 
 
 def test_defaults_are_empty_and_greenfield() -> None:
@@ -81,6 +86,21 @@ def test_from_dict_accepts_minimal_payload() -> None:
     finding = Finding.from_dict({"id": "F-1", "kind": "gap", "severity": "high"})
 
     assert finding == Finding(id="F-1", kind="gap", severity="high")
+
+
+def test_from_dict_accepts_amber_severity_and_actor_dimension() -> None:
+    finding = Finding.from_dict(
+        {
+            "id": "F-1",
+            "kind": "missing_journey_for_actor",
+            "severity": "amber",
+            "details": {"actor": "Operator", "dimension": "process_user_journey"},
+        }
+    )
+
+    assert finding.severity == "amber"
+    assert finding.actor == "Operator"
+    assert finding.dimension == "process_user_journey"
 
 
 def test_from_dict_trims_required_text() -> None:

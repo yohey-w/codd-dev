@@ -2,7 +2,7 @@
 
 from codd.elicit.apply import ApplyResult, ElicitApplyEngine
 from codd.elicit.engine import ElicitEngine
-from codd.elicit.finding import Finding, Severity
+from codd.elicit.finding import Finding, FindingDimension, FindingType, Severity
 from codd.elicit.persistence import ElicitPersistence
 
 __all__ = [
@@ -11,5 +11,7 @@ __all__ = [
     "ElicitEngine",
     "ElicitPersistence",
     "Finding",
+    "FindingDimension",
+    "FindingType",
     "Severity",
 ]

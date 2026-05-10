@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from codd.deployment.providers.ai_command import SubprocessAiCommand
-from codd.elicit.finding import ElicitResult, Finding
+from codd.elicit.finding import ElicitResult, Finding, FindingDimension, FindingType
 from codd.elicit.persistence import ElicitPersistence
 
 
@@ -61,6 +61,15 @@ class ElicitEngine:
             scope=scope,
             phase=phase,
         )
+        if _lexicon_has_actor_axis(lexicon_config):
+            actors = _actor_names_from_result(result)
+            actors.extend(_design_doc_actor_names(root))
+            result.findings.extend(
+                self._check_journey_coverage(
+                    _dedupe_strings(actors),
+                    _design_doc_journey_map(root),
+                )
+            )
         _attach_lexicon_source(result.findings, _string_attr(lexicon_config, "lexicon_name"))
         result.findings = ElicitPersistence(root).filter_known(result.findings)
         if not result.findings and result.lexicon_coverage_report:
@@ -147,6 +156,34 @@ class ElicitEngine:
             return extension
         return self.template_path.read_text(encoding="utf-8")
 
+    def _check_journey_coverage(
+        self,
+        actors: list[str],
+        journey_map: Mapping[str, Any],
+    ) -> list[Finding]:
+        findings: list[Finding] = []
+        journeys = list(_iter_journey_values(journey_map))
+        for actor in actors:
+            if any(_journey_references_actor(journey, actor) for journey in journeys):
+                continue
+            message = f"Actor '{actor}' identified in requirements but no user_journey declared for this actor."
+            findings.append(
+                Finding(
+                    id=f"{FindingType.MISSING_JOURNEY_FOR_ACTOR.value}:{_slug(actor)}",
+                    kind=FindingType.MISSING_JOURNEY_FOR_ACTOR.value,
+                    severity="amber",
+                    name="Missing user journey for actor",
+                    question=f"What user_journey should cover actor '{actor}'?",
+                    details={
+                        "dimension": FindingDimension.PROCESS_USER_JOURNEY.value,
+                        "actor": actor,
+                        "message": message,
+                    },
+                    rationale=message,
+                )
+            )
+        return findings
+
 
 def _collect_requirements(project_root: Path, max_chars: int) -> str:
     paths = _document_paths(
@@ -164,6 +201,50 @@ def _collect_design_docs(project_root: Path, max_chars: int) -> str:
         directory_names=("design", "architecture"),
     )
     return _read_documents(paths, project_root, max_chars)
+
+
+def _iter_design_doc_frontmatters(project_root: Path) -> list[dict[str, Any]]:
+    frontmatters: list[dict[str, Any]] = []
+    for path in _document_paths(
+        project_root,
+        explicit_names=("design.md", "DESIGN.md"),
+        directory_names=("design", "architecture"),
+    ):
+        frontmatter = _markdown_frontmatter(path)
+        if frontmatter:
+            frontmatters.append(frontmatter)
+    return frontmatters
+
+
+def _markdown_frontmatter(path: Path) -> dict[str, Any]:
+    content = path.read_text(encoding="utf-8", errors="replace")
+    if not content.startswith("---"):
+        return {}
+    parts = content.split("---", 2)
+    if len(parts) != 3:
+        return {}
+    payload = yaml.safe_load(parts[1]) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _design_doc_actor_names(project_root: Path) -> list[str]:
+    actors: list[str] = []
+    for frontmatter in _iter_design_doc_frontmatters(project_root):
+        actors.extend(_actor_names_from_mapping(frontmatter))
+    return _dedupe_strings(actors)
+
+
+def _design_doc_journey_map(project_root: Path) -> dict[str, dict[str, Any]]:
+    journeys: dict[str, dict[str, Any]] = {}
+    for doc_index, frontmatter in enumerate(_iter_design_doc_frontmatters(project_root)):
+        entries = frontmatter.get("user_journeys", [])
+        if not isinstance(entries, list):
+            continue
+        for journey_index, entry in enumerate(entries):
+            if isinstance(entry, dict):
+                key = str(entry.get("name") or f"doc_{doc_index}_journey_{journey_index}")
+                journeys[key] = entry
+    return journeys
 
 
 def _document_paths(
@@ -209,6 +290,152 @@ def _as_lexicon_configs(lexicon_config: Any | None) -> list[Any]:
     if isinstance(lexicon_config, (list, tuple)):
         return [item for item in lexicon_config if item is not None]
     return [lexicon_config]
+
+
+def _lexicon_has_actor_axis(lexicon_config: Any | None) -> bool:
+    for axis in _list_attr(lexicon_config, "coverage_axes"):
+        if not isinstance(axis, Mapping):
+            continue
+        text = " ".join(_nested_strings(axis)).lower()
+        if any(token in text for token in ("actor", "stakeholder", "role")):
+            return True
+    extension = _string_attr(lexicon_config, "prompt_extension_content") or ""
+    return any(token in extension.lower() for token in ("actor", "stakeholder", "role"))
+
+
+def _actor_names_from_result(result: ElicitResult) -> list[str]:
+    actors: list[str] = []
+    actors.extend(_actor_names_from_mapping(result.metadata, actor_dimension=True))
+    for finding in result.findings:
+        details = finding.details if isinstance(finding.details, dict) else {}
+        actor_dimension = _is_actor_dimension(details)
+        actors.extend(_actor_names_from_mapping(details, actor_dimension=actor_dimension))
+    return _dedupe_strings(actors)
+
+
+def _actor_names_from_mapping(mapping: Mapping[str, Any], *, actor_dimension: bool = False) -> list[str]:
+    keys = {
+        "actor",
+        "actors",
+        "role",
+        "roles",
+        "stakeholder",
+        "stakeholders",
+        "stakeholder_roles",
+    }
+    if actor_dimension:
+        keys.update({"value", "values", "item", "items", "candidate", "candidates", "name", "names"})
+
+    actors: list[str] = []
+    for key, value in mapping.items():
+        if str(key).strip().lower() in keys:
+            actors.extend(_actor_names_from_value(value))
+    return _dedupe_strings(actors)
+
+
+def _actor_names_from_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [actor for item in re.split(r"[,;\n]+", value) if (actor := _clean_actor_name(item))]
+    if isinstance(value, Mapping):
+        for key in ("name", "id", "label", "role", "actor", "stakeholder"):
+            if key in value:
+                return _actor_names_from_value(value[key])
+        return []
+    if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+        actors: list[str] = []
+        for item in value:
+            actors.extend(_actor_names_from_value(item))
+        return _dedupe_strings(actors)
+    actor = _clean_actor_name(str(value))
+    return [actor] if actor else []
+
+
+def _clean_actor_name(value: str) -> str | None:
+    text = value.strip().strip("'\"`")
+    if not text or len(text) > 80:
+        return None
+    lowered = text.lower()
+    if lowered in {
+        "actor",
+        "actors",
+        "role",
+        "roles",
+        "stakeholder",
+        "stakeholders",
+        "covered",
+        "implicit",
+        "gap",
+    }:
+        return None
+    return text
+
+
+def _is_actor_dimension(details: Mapping[str, Any]) -> bool:
+    for key in ("dimension", "axis", "axis_type"):
+        value = details.get(key)
+        if isinstance(value, str) and any(token in value.lower() for token in ("actor", "stakeholder", "role")):
+            return True
+    return False
+
+
+def _iter_journey_values(journey_map: Mapping[str, Any]) -> Iterable[dict[str, Any]]:
+    for value in journey_map.values():
+        if isinstance(value, dict):
+            yield value
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    yield item
+
+
+def _journey_references_actor(journey: Mapping[str, Any], actor: str) -> bool:
+    actor_key = _normalize_actor(actor)
+    if not actor_key:
+        return False
+    journey_actors = _actor_names_from_mapping(journey)
+    return actor_key in {_normalize_actor(item) for item in journey_actors}
+
+
+def _normalize_actor(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().casefold())
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return slug or "actor"
+
+
+def _dedupe_strings(values: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _nested_strings(value: Any) -> set[str]:
+    strings: set[str] = set()
+    if value is None:
+        return strings
+    if isinstance(value, str):
+        strings.add(value)
+        return strings
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            strings.update(_nested_strings(key))
+            strings.update(_nested_strings(item))
+        return strings
+    if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+        for item in value:
+            strings.update(_nested_strings(item))
+        return strings
+    strings.add(str(value))
+    return strings
 
 
 def _prepare_lexicon_configs(lexicon_configs: list[Any]) -> list[tuple[Any, set[str]]]:
@@ -437,7 +664,7 @@ def _condition_matches(condition: str, context: Mapping[str, str]) -> bool:
 
 def _set_severity(finding: Finding, severity: str) -> None:
     cleaned = severity.strip().lower()
-    if cleaned in {"critical", "high", "medium", "info"}:
+    if cleaned in {"critical", "high", "medium", "amber", "info"}:
         finding.severity = cleaned  # type: ignore[assignment]
 
 

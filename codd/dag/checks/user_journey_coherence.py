@@ -30,6 +30,7 @@ class UserJourneyCoherenceResult:
     check_name: str = "user_journey_coherence"
     severity: str = "red"
     status: str = "pass"
+    violation_type: str | None = None
     message: str = ""
     block_deploy: bool = True
     violations: list[dict[str, Any]] = field(default_factory=list)
@@ -68,10 +69,41 @@ class UserJourneyCoherenceCheck(DagCheck):
             if node.kind == "design_doc" and self._journey_entries(node)
         ]
         if not journey_docs:
+            actors = self._extract_actors(target_dag)
+            if actors:
+                message = (
+                    f"Actors identified ({', '.join(actors)}) but no user_journeys declared. "
+                    "Consider declaring journeys for each actor."
+                )
+                violation = {
+                    "type": "actors_without_journeys",
+                    "severity": "amber",
+                    "actors": actors,
+                    "message": message,
+                    "block_deploy": False,
+                    "human_review_required": self._human_review_required(actors),
+                }
+                return UserJourneyCoherenceResult(
+                    severity="amber",
+                    status="warn",
+                    violation_type="actors_without_journeys",
+                    message=message,
+                    block_deploy=False,
+                    violations=[violation],
+                    journey_reports=[
+                        {
+                            "user_journey": "(none declared)",
+                            "design_doc": "(none)",
+                            "violations": [violation],
+                            "remediation_hints": ["Declare user_journeys for the identified actors."],
+                        }
+                    ],
+                    passed=True,
+                )
             return UserJourneyCoherenceResult(
                 severity="info",
                 status="pass",
-                message="No user_journeys declared, C7 SKIP",
+                message="No actors and no user_journeys declared, C7 SKIP",
                 block_deploy=self.block_deploy,
             )
 
@@ -194,6 +226,22 @@ class UserJourneyCoherenceCheck(DagCheck):
 
         report["remediation_hints"] = self._remediation_hints(report["violations"], design_doc)
         return report
+
+    def _extract_actors(self, dag: DAG) -> list[str]:
+        actors: list[str] = []
+        for node in sorted(dag.nodes.values(), key=lambda item: item.id):
+            actors.extend(self._actor_names_from_mapping(node.attributes))
+            details = node.attributes.get("details")
+            if isinstance(details, dict):
+                actors.extend(
+                    self._actor_names_from_mapping(
+                        details,
+                        actor_dimension=self._is_actor_dimension(details),
+                    )
+                )
+            if self._is_actor_dimension(node.attributes):
+                actors.extend(self._actor_names_from_mapping(node.attributes, actor_dimension=True))
+        return self._dedupe_strings(actors)
 
     def _runtime_constraint_violations(
         self,
@@ -656,6 +704,70 @@ class UserJourneyCoherenceCheck(DagCheck):
                 "予算",
             )
         )
+
+    def _actor_names_from_mapping(self, mapping: dict[str, Any], *, actor_dimension: bool = False) -> list[str]:
+        keys = {
+            "actor",
+            "actors",
+            "role",
+            "roles",
+            "stakeholder",
+            "stakeholders",
+            "stakeholder_roles",
+        }
+        if actor_dimension:
+            keys.update({"value", "values", "item", "items", "candidate", "candidates", "name", "names"})
+
+        actors: list[str] = []
+        for key, value in mapping.items():
+            if str(key).strip().lower() in keys:
+                actors.extend(self._actor_names_from_value(value))
+        return self._dedupe_strings(actors)
+
+    def _actor_names_from_value(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [actor for item in re.split(r"[,;\n]+", value) if (actor := self._clean_actor_name(item))]
+        if isinstance(value, dict):
+            for key in ("name", "id", "label", "role", "actor", "stakeholder"):
+                if key in value:
+                    return self._actor_names_from_value(value[key])
+            return []
+        if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+            actors: list[str] = []
+            for item in value:
+                actors.extend(self._actor_names_from_value(item))
+            return self._dedupe_strings(actors)
+        actor = self._clean_actor_name(str(value))
+        return [actor] if actor else []
+
+    @staticmethod
+    def _clean_actor_name(value: str) -> str | None:
+        text = value.strip().strip("'\"`")
+        if not text or len(text) > 80:
+            return None
+        if text.lower() in {
+            "actor",
+            "actors",
+            "role",
+            "roles",
+            "stakeholder",
+            "stakeholders",
+            "covered",
+            "implicit",
+            "gap",
+        }:
+            return None
+        return text
+
+    @staticmethod
+    def _is_actor_dimension(attributes: dict[str, Any]) -> bool:
+        for key in ("dimension", "axis", "axis_type"):
+            value = attributes.get(key)
+            if isinstance(value, str) and any(token in value.lower() for token in ("actor", "stakeholder", "role")):
+                return True
+        return False
 
     def _runtime_state_summary(self, actual_caps: set[str]) -> str:
         return f"capabilities_provided=[{', '.join(sorted(actual_caps))}]"

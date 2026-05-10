@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Any, Literal, get_args
 
 
-Severity = Literal["critical", "high", "medium", "info"]
+class FindingType(str, Enum):
+    MISSING_JOURNEY_FOR_ACTOR = "missing_journey_for_actor"
+
+
+class FindingDimension(str, Enum):
+    PROCESS_USER_JOURNEY = "process_user_journey"
+
+
+Severity = Literal["critical", "high", "medium", "amber", "info"]
 Source = Literal["greenfield", "extract_brownfield"]
 
 _SEVERITIES = set(get_args(Severity))
@@ -33,6 +42,16 @@ class Finding:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @property
+    def actor(self) -> str | None:
+        value = self.details.get("actor")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def dimension(self) -> str | None:
+        value = self.details.get("dimension")
+        return value if isinstance(value, str) and value else None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "Finding":
@@ -92,8 +111,8 @@ _SEVERITY_ALIASES = {
     "error": "high",
     "major": "high",
     "important": "high",
-    "warn": "medium",
-    "warning": "medium",
+    "warn": "amber",
+    "warning": "amber",
     "moderate": "medium",
     "minor": "info",
     "low": "info",

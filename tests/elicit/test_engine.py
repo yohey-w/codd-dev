@@ -19,6 +19,7 @@ class LexiconStub:
     lexicon_name: str = "sample"
     prompt_extension_content: str = "BASE {{requirements_content}}\nEXT {{project_lexicon}}\n{{existing_axes}}"
     recommended_kinds: list[str] | None = None
+    coverage_axes: list[dict] | None = None
 
 
 class FakeAiCommand:
@@ -183,6 +184,59 @@ def test_run_filters_ignored_findings(tmp_path: Path) -> None:
     findings = ElicitEngine(ai_command=ai).run(tmp_path)
 
     assert [finding.id for finding in findings] == ["F-2"]
+
+
+def test_run_emits_missing_journey_for_actor_from_actor_axis_metadata(tmp_path: Path) -> None:
+    (tmp_path / "requirements.md").write_text("# Requirements\nOperators manage jobs.\n", encoding="utf-8")
+    (tmp_path / "docs" / "design").mkdir(parents=True)
+    (tmp_path / "docs" / "design" / "jobs.md").write_text(
+        "---\nuser_journeys: []\n---\n# Jobs\n",
+        encoding="utf-8",
+    )
+    payload = {
+        "metadata": {"stakeholder_roles": ["Operator"]},
+        "lexicon_coverage_report": {"stakeholder": "covered"},
+        "findings": [],
+    }
+    ai = FakeAiCommand(json.dumps(payload))
+
+    result = ElicitEngine(ai_command=ai).run(
+        tmp_path,
+        lexicon_config=LexiconStub(
+            coverage_axes=[{"axis_type": "stakeholder", "variants": [{"label": "Stakeholder roles"}]}]
+        ),
+    )
+
+    assert [finding.kind for finding in result.findings] == ["missing_journey_for_actor"]
+    assert result.findings[0].severity == "amber"
+    assert result.findings[0].actor == "Operator"
+    assert result.findings[0].dimension == "process_user_journey"
+    assert result.all_covered is False
+
+
+def test_run_suppresses_missing_journey_when_actor_is_declared_on_journey(tmp_path: Path) -> None:
+    (tmp_path / "requirements.md").write_text("# Requirements\nOperators manage jobs.\n", encoding="utf-8")
+    (tmp_path / "docs" / "design").mkdir(parents=True)
+    (tmp_path / "docs" / "design" / "jobs.md").write_text(
+        "---\nuser_journeys:\n  - name: manage_jobs\n    actors: [Operator]\n---\n# Jobs\n",
+        encoding="utf-8",
+    )
+    payload = {
+        "metadata": {"stakeholder_roles": ["Operator"]},
+        "lexicon_coverage_report": {"stakeholder": "covered"},
+        "findings": [],
+    }
+    ai = FakeAiCommand(json.dumps(payload))
+
+    result = ElicitEngine(ai_command=ai).run(
+        tmp_path,
+        lexicon_config=LexiconStub(
+            coverage_axes=[{"axis_type": "stakeholder", "variants": [{"label": "Stakeholder roles"}]}]
+        ),
+    )
+
+    assert result.findings == []
+    assert result.all_covered is True
 
 
 def test_context_size_is_limited(tmp_path: Path) -> None:
