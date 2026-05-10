@@ -44,6 +44,16 @@ typecheck:
   command: null
   max_repair_attempts: 3
 
+ci:
+  provider: github_actions   # github_actions | gitlab_ci | none
+  workflow_glob: .github/workflows/*.yml
+  required_triggers:
+    - push
+    - pull_request
+  runtime_check: false       # opt-in (v2.13.0)
+  staleness_days: 14
+  default_branch: main
+
 context_acquisition:
   enabled: true
   strategy: web_search_first   # web_search_first | offline | human_only

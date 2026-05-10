@@ -101,6 +101,14 @@ stack_map:
     suggested_lexicons:
       - babok
 
+ci_provider_hints:
+  github_actions:
+    workflow_glob: ".github/workflows/*.yml"
+    trigger_key: "on"
+  gitlab_ci:
+    workflow_glob: ".gitlab-ci.yml"
+    trigger_key: "workflow"
+
 # Deployment artifact bindings — used by the deployment plug-in to wire
 # auto-discovered impl_file nodes (cmd_448) to runtime_state nodes
 # (cmd_450). Keys: impl_pattern (regex against impl_id), runtime_state_kind

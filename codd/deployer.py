@@ -217,7 +217,7 @@ def run_deploy(
 
 
 def _run_deploy_gates(project_root: Path) -> DeployGateResult:
-    """Run validate, drift, coverage, DAG, C6, and C7 gates before apply deploy."""
+    """Run validate, drift, coverage, DAG, C6, C7, and C8 gates before apply deploy."""
     project_root = Path(project_root).resolve()
     settings = _load_gate_settings(project_root)
     codd_dir = _find_gate_codd_dir(project_root)
@@ -231,6 +231,7 @@ def _run_deploy_gates(project_root: Path) -> DeployGateResult:
     _collect_dag_completeness_gate(project_root, settings, result)
     _collect_deployment_completeness_gate_result(project_root, settings, result)
     _collect_user_journey_coherence_gate_result(project_root, settings, result)
+    _collect_ci_health_gate_result(project_root, settings, result)
     return result
 
 
@@ -523,6 +524,63 @@ def _collect_user_journey_coherence_gate_result(
     )
     _publish_user_journey_coherence_events(red_violations)
     _ntfy_user_journey_coherence_fail(red_violations, settings)
+
+
+def _collect_ci_health_gate(
+    project_root: Path,
+    codd_config: dict[str, Any],
+) -> Any:
+    """Run the C8 ci_health check and return its result."""
+
+    from codd.dag.checks.ci_health import CiConfig, CiHealthCheck
+
+    return CiHealthCheck().check(
+        Path(project_root).resolve(),
+        CiConfig.from_mapping(codd_config.get("ci")),
+    )
+
+
+def _collect_ci_health_gate_result(
+    project_root: Path,
+    settings: dict[str, Any],
+    result: DeployGateResult,
+) -> None:
+    if "ci" not in settings:
+        return
+
+    try:
+        check_result = _collect_ci_health_gate(project_root, settings)
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        result.add_failure("ci_health", str(exc))
+        return
+
+    if str(_result_value(check_result, "status") or "").lower() == "skip":
+        return
+
+    findings = list(_result_value(check_result, "findings") or [])
+    if not findings:
+        return
+
+    from codd.dag.checks.ci_health import CiHealthCheck
+
+    report = CiHealthCheck().format_report(check_result)
+    result.add_report("ci_health_report", _parse_ci_health_report(report))
+
+    red_findings = [finding for finding in findings if _ci_finding_blocks_deploy(finding)]
+    amber_findings = [
+        finding
+        for finding in findings
+        if not _ci_finding_blocks_deploy(finding) and _ci_finding_severity(finding) == "amber"
+    ]
+    if amber_findings:
+        result.add_warning(f"ci_health: {len(amber_findings)} amber finding(s)")
+
+    if red_findings:
+        result.add_failure(
+            "ci_health",
+            f"C8 ci_health: {len(red_findings)} red finding(s)",
+            [report],
+        )
 
 
 def _screen_flow_strict_edges(settings: dict[str, Any]) -> bool:
@@ -821,6 +879,15 @@ def _parse_user_journey_coherence_report(report: str) -> list[dict[str, Any]]:
     return value if isinstance(value, list) else []
 
 
+def _parse_ci_health_report(report: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(report)
+    except json.JSONDecodeError:
+        return {}
+    value = payload.get("ci_health_report")
+    return value if isinstance(value, dict) else {}
+
+
 def _red_user_journey_violations(violations: list[Any]) -> list[Any]:
     return [violation for violation in violations if _user_journey_violation_severity(violation) == "red"]
 
@@ -831,6 +898,14 @@ def _amber_user_journey_violations(violations: list[Any]) -> list[Any]:
 
 def _user_journey_violation_severity(violation: Any) -> str:
     return str(_violation_attr(violation, "severity") or "red")
+
+
+def _ci_finding_blocks_deploy(finding: Any) -> bool:
+    return bool(_violation_attr(finding, "block_deploy"))
+
+
+def _ci_finding_severity(finding: Any) -> str:
+    return str(_violation_attr(finding, "severity") or "red")
 
 
 def _violation_attr(violation: Any, key: str) -> Any:
