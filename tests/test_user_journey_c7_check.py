@@ -155,6 +155,44 @@ def test_user_journeys_undeclared_design_doc_skips_gracefully(tmp_path):
     assert "SKIP" in result.message
 
 
+def test_actor_without_any_user_journey_is_amber_warning(tmp_path):
+    dag = DAG()
+    dag.add_node(Node(id="docs/design/auth.md", kind="design_doc", attributes={"actors": ["Operator"]}))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is True
+    assert result.severity == "amber"
+    assert result.status == "warn"
+    assert result.block_deploy is False
+    assert result.violation_type == "actors_without_journeys"
+    assert result.violations[0]["type"] == "actors_without_journeys"
+    assert result.violations[0]["actors"] == ["Operator"]
+
+
+def test_babok_stakeholder_role_without_any_user_journey_is_amber_warning(tmp_path):
+    dag = DAG()
+    dag.add_node(
+        Node(
+            id="finding:stakeholder_roles",
+            kind="finding",
+            attributes={
+                "details": {
+                    "dimension": "stakeholder",
+                    "roles": [{"name": "Auditor"}],
+                }
+            },
+        )
+    )
+    dag.add_node(Node(id="docs/design/auth.md", kind="design_doc", attributes={}))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is True
+    assert result.severity == "amber"
+    assert result.violations[0]["actors"] == ["Auditor"]
+
+
 def test_runtime_constraints_undeclared_does_not_emit_unsatisfied_runtime_capability(tmp_path):
     result = _run(_dag(plan_outputs=["lexicon:e2e_login_journey"], runtime_caps=[]), tmp_path)
 
