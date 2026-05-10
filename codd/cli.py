@@ -4901,10 +4901,13 @@ def dag_verify(project_path: str, check_names: tuple[str, ...], output_format: s
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
 
+    opt_out_results = [result for result in results if _dag_result_status(result) == "opt_out"]
     failed_red = [
         result
         for result in results
-        if not _dag_result_passed(result) and _dag_result_severity(result) == "red"
+        if not _dag_result_passed(result)
+        and _dag_result_severity(result) == "red"
+        and _dag_result_status(result) != "opt_out"
     ]
     amber_findings = [
         result
@@ -4917,7 +4920,10 @@ def dag_verify(project_path: str, check_names: tuple[str, ...], output_format: s
     else:
         for result in results:
             severity = _dag_result_severity(result)
-            if _dag_result_passed(result):
+            status_value = _dag_result_status(result)
+            if status_value == "opt_out":
+                status = "OPT_OUT"
+            elif _dag_result_passed(result):
                 status = "PASS"
             else:
                 status = "WARN" if severity == "amber" else "FAIL"
@@ -4929,6 +4935,10 @@ def dag_verify(project_path: str, check_names: tuple[str, ...], output_format: s
             click.echo(f"\n{len(failed_red)} check(s) FAILED (severity=red)")
         elif amber_findings:
             click.echo(f"\n{len(amber_findings)} check(s) WARN (severity=amber, deploy allowed)")
+        if opt_out_results:
+            click.echo(f"\n{len(opt_out_results)} active opt-out(s) (deploy allowed):")
+            for result in opt_out_results:
+                click.echo(f"  - {_dag_result_name(result)}: {_dag_result_message(result)}")
 
     raise SystemExit(1 if failed_red else 0)
 
@@ -5183,6 +5193,14 @@ def _dag_result_severity(result: Any) -> str:
 
 def _dag_result_passed(result: Any) -> bool:
     return _dag_result_value(result, "passed") is not False
+
+
+def _dag_result_status(result: Any) -> str:
+    return str(_dag_result_value(result, "status") or "")
+
+
+def _dag_result_message(result: Any) -> str:
+    return str(_dag_result_value(result, "message") or "")
 
 
 def _dag_result_has_findings(result: Any) -> bool:

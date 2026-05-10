@@ -241,6 +241,34 @@ def validate_design_tokens(project_root: str | Path) -> list[DesignTokenViolatio
     return violations
 
 
+def _validate_opt_outs(
+    project_root: Path,
+    config_path: Path,
+    config: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Reject opt-out entries that lack justification, expiry, or refer to unknown checks."""
+
+    from datetime import date
+
+    from codd.dag.checks import get_registry
+    from codd.dag.checks.opt_out import OptOutPolicy
+    from codd.dag.runner import _ensure_checks_registered
+
+    _ensure_checks_registered()
+    registered_check_names = set(get_registry().keys())
+    policy = OptOutPolicy.from_config(config)
+    location = config_path.relative_to(project_root).as_posix()
+
+    for error in policy.validate(date.today(), registered_check_names):
+        result.add(
+            LEVEL_ERROR,
+            f"opt_out_{error.code}",
+            location,
+            error.message,
+        )
+
+
 def _build_allowed_prefixes(config: dict[str, Any]) -> set[str]:
     """Build the set of allowed node_id prefixes from config + defaults."""
     custom = config.get("prefixes")
@@ -269,6 +297,8 @@ def _validate_project_oss(project_root: Path, codd_dir: Path | None = None) -> V
     scanned_node_ids = _load_scanned_node_ids(project_root, config)
     service_boundary_modules = _extract_service_boundary_modules(config)
     allowed_prefixes = _build_allowed_prefixes(config)
+
+    _validate_opt_outs(project_root, config_path, config, result)
 
     for doc_path in _iter_doc_files(project_root, config):
         result.documents_checked += 1

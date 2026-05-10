@@ -533,8 +533,11 @@ def _collect_ci_health_gate(
     """Run the C8 ci_health check and return its result."""
 
     from codd.dag.checks.ci_health import CiConfig, CiHealthCheck
+    from codd.dag.checks.opt_out import OptOutPolicy
 
-    return CiHealthCheck().check(
+    opt_out_policy = OptOutPolicy.from_config(codd_config)
+    check = CiHealthCheck(opt_out_policy=opt_out_policy)
+    return check.check(
         Path(project_root).resolve(),
         CiConfig.from_mapping(codd_config.get("ci")),
     )
@@ -554,14 +557,32 @@ def _collect_ci_health_gate_result(
         result.add_failure("ci_health", str(exc))
         return
 
-    if str(_result_value(check_result, "status") or "").lower() == "skip":
-        return
-
-    findings = list(_result_value(check_result, "findings") or [])
-    if not findings:
+    status = str(_result_value(check_result, "status") or "").lower()
+    if status == "skip":
         return
 
     from codd.dag.checks.ci_health import CiHealthCheck
+
+    if status == "opt_out":
+        message = str(_result_value(check_result, "message") or "ci_health opt-out active")
+        result.add_warning(message)
+        return
+
+    findings = list(_result_value(check_result, "findings") or [])
+    block_deploy = bool(_result_value(check_result, "block_deploy"))
+
+    if not findings and status == "fail" and block_deploy:
+        # Opt-out signal without a valid declaration (or expired) — the check
+        # has no findings to enumerate, so surface the message directly.
+        message = str(
+            _result_value(check_result, "message")
+            or "C8 ci_health: opt-out unjustified or expired"
+        )
+        result.add_failure("ci_health", message)
+        return
+
+    if not findings:
+        return
 
     report = CiHealthCheck().format_report(check_result)
     result.add_report("ci_health_report", _parse_ci_health_report(report))

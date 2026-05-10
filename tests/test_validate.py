@@ -562,3 +562,99 @@ codd:
 
     result = validate_project(project, codd_dir)
     assert result.status() == "OK"
+
+
+def _setup_project_with_opt_outs(tmp_path, opt_outs):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "docs").mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+    config = dict(BASE_CONFIG)
+    config["opt_outs"] = opt_outs
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    )
+    return project, codd_dir
+
+
+def test_validate_opt_outs_accepts_valid_entry(tmp_path):
+    project, codd_dir = _setup_project_with_opt_outs(
+        tmp_path,
+        [
+            {
+                "check": "ci_health",
+                "reason": "vendor migration in progress",
+                "expires_at": "2099-12-31",
+            }
+        ],
+    )
+
+    result = validate_project(project, codd_dir)
+    assert result.status() == "OK"
+
+
+def test_validate_opt_outs_rejects_unknown_check(tmp_path):
+    project, codd_dir = _setup_project_with_opt_outs(
+        tmp_path,
+        [
+            {
+                "check": "not_a_real_check",
+                "reason": "x",
+                "expires_at": "2099-12-31",
+            }
+        ],
+    )
+
+    result = validate_project(project, codd_dir)
+    assert result.error_count >= 1
+    assert any(issue.code == "opt_out_unknown_check" for issue in result.issues)
+
+
+def test_validate_opt_outs_rejects_missing_reason(tmp_path):
+    project, codd_dir = _setup_project_with_opt_outs(
+        tmp_path,
+        [{"check": "ci_health", "reason": "", "expires_at": "2099-12-31"}],
+    )
+
+    result = validate_project(project, codd_dir)
+    assert any(issue.code == "opt_out_missing_reason" for issue in result.issues)
+
+
+def test_validate_opt_outs_rejects_missing_expires_at(tmp_path):
+    project, codd_dir = _setup_project_with_opt_outs(
+        tmp_path,
+        [{"check": "ci_health", "reason": "x"}],
+    )
+
+    result = validate_project(project, codd_dir)
+    assert any(issue.code == "opt_out_missing_expires_at" for issue in result.issues)
+
+
+def test_validate_opt_outs_rejects_expired(tmp_path):
+    project, codd_dir = _setup_project_with_opt_outs(
+        tmp_path,
+        [
+            {
+                "check": "ci_health",
+                "reason": "kept too long",
+                "expires_at": "2020-01-01",
+            }
+        ],
+    )
+
+    result = validate_project(project, codd_dir)
+    assert any(issue.code == "opt_out_expired" for issue in result.issues)
+
+
+def test_validate_opt_outs_rejects_duplicate(tmp_path):
+    project, codd_dir = _setup_project_with_opt_outs(
+        tmp_path,
+        [
+            {"check": "ci_health", "reason": "x", "expires_at": "2099-12-31"},
+            {"check": "ci_health", "reason": "y", "expires_at": "2099-12-31"},
+        ],
+    )
+
+    result = validate_project(project, codd_dir)
+    assert any(issue.code == "opt_out_duplicate" for issue in result.issues)
