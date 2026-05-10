@@ -113,8 +113,10 @@ This is what lets CoDD ship one core that works for Next.js, Django, FastAPI, Ra
 
 ## 🧭 Roadmap
 
-- **v2.10.0 (current)** — Lexicon-driven completeness, 38 plug-ins, LLM-enhanced init, scope/phase filter, auto-repair across the full DAG.
-- **v2.11.0 (next)** — Sprint-less `codd implement` (`--design <path> --output <dir>` directly; `implementation_plan.md` parser removed). See [migration guide](docs/migrations/v2.11.0-sprintless.md).
+- **v2.12.0 (current)** — Test-completeness gates: C7 `actors_without_journeys` amber promotion + new C8 `ci_health` static check (workflow presence, trigger coverage, verification-in-workflow). Defaults to opt-in for legacy projects; new `codd init` projects get `ci:` defaults from the template. See [post-mortem](docs/post-mortems/test_completeness_gap.md).
+- **v2.11.0** — Sprint-less `codd implement` (`--design <path> --output <dir>` directly; `implementation_plan.md` parser removed). See [migration guide](docs/migrations/v2.11.0-sprintless.md).
+- **v2.10.0** — Lexicon-driven completeness, 38 plug-ins, LLM-enhanced init, scope/phase filter, auto-repair across the full DAG.
+- **v2.13.0 (next)** — C8 `ci_health` runtime mode (opt-in `ci.runtime_check: true`) polling the CI provider for latest-run-on-default-branch success.
 
 ---
 
