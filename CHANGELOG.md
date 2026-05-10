@@ -4,6 +4,37 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-05-10 — Opt-out protection: justification + severity preservation (cmd_464)
+
+### New — OptOutPolicy: structured opt-out contract
+
+- **`codd/dag/checks/opt_out.py` — generic `OptOutPolicy`.** Any DAG
+  check that exposes a config-level opt-out flag (e.g. `ci.provider=none`)
+  now participates in a shared justification/expiry/severity-preservation
+  contract via `DagCheck.detect_opt_out`. Silent SKIP is abolished;
+  every opt-out must carry a non-empty `reason` and a future-dated
+  `expires_at` in `codd.yaml` `opt_outs:` or the gate fails red.
+
+- **`codd validate` policy errors.** Six new error codes are reported as
+  configuration errors: `unknown_check`, `missing_reason`,
+  `missing_expires_at`, `expired`, `duplicate`, `implicit_opt_out`.
+  Implicit opt-outs (a CI provider is `none` but no matching
+  `opt_outs` entry exists) are now flagged automatically.
+
+- **`codd verify` opt-out section.** Active opt-outs are shown as a
+  separate category in verify output. Coverage metrics no longer count
+  opt-outs as red failures — they are surfaced as advisory warnings only.
+
+- **C8 `ci_health` severity preserved.** A project with `ci.provider=none`
+  and no `opt_outs` entry now receives a red `ci_health` result instead
+  of being silently skipped.
+
+### Tests
+
+- `tests/dag/test_opt_out.py` — 18 new tests covering all policy error
+  codes, Generality (non-LMS projects), and severity-preservation.
+- Full suite: 2806 passed, 0 skipped.
+
 ## [2.12.0] - 2026-05-10 — Test-completeness gates (C7 amber + C8 `ci_health`, cmd_462)
 
 ### New — Defect 1: actor → user-journey coverage
