@@ -4,6 +4,83 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-05-10 — Test-completeness gates (C7 amber + C8 `ci_health`, cmd_462)
+
+### New — Defect 1: actor → user-journey coverage
+
+- **`codd elicit` `missing_journey_for_actor` finding.** When the
+  requirements identify an actor or stakeholder role (BABOK
+  `stakeholder_roles` axis, lexicon actor-axis metadata, or
+  `design_doc.actors[]` frontmatter) but no `user_journeys:` entry
+  references that actor, the elicit engine emits an amber finding under
+  the new `process_user_journey` dimension.
+  Files: `codd/elicit/engine.py`, `codd/elicit/finding.py`,
+  `codd/elicit/__init__.py`.
+- **C7 `actors_without_journeys` amber promotion.** When the DAG carries
+  an actor/role signal but every `design_doc` has zero `user_journeys:`
+  entries, `user_journey_coherence` returns an amber `warn` violation.
+  Severity is advisory (`block_deploy=False`); actor-free projects keep
+  the existing `info` SKIP behaviour. Files:
+  `codd/dag/checks/user_journey_coherence.py`.
+
+### New — Defect 2: CI execution health (static gate)
+
+- **C8 `ci_health` static check.** New DAG check verifies that a CI
+  workflow file exists, declares the required triggers, and references
+  every `verification_test` listed in `deploy.yaml.post_deploy`. Three
+  violation types:
+
+  | Violation | Severity | Blocks deploy |
+  | --- | --- | --- |
+  | `ci_workflow_missing` | red | yes |
+  | `ci_trigger_incomplete` | amber | no |
+  | `ci_verification_not_in_workflow` | amber | no |
+
+  Files: `codd/dag/checks/ci_health.py` (new),
+  `codd/dag/runner.py` (registration).
+- **Deploy gate wiring.** `deployer.py` collects C8 alongside C6
+  (`deployment_completeness`) and C7 (`user_journey_coherence`) via
+  `_collect_ci_health_gate`.
+- **`codd.yaml` `ci:` section.** New configuration block in
+  `codd/templates/codd.yaml.tmpl`: `provider`, `workflow_glob`,
+  `required_triggers`, `runtime_check` (off; opt-in for v2.13.0),
+  `staleness_days`, `default_branch`. Existing projects without a `ci:`
+  block fall back to `provider="none"` → SKIP, so the gate is
+  opt-in for legacy installations.
+- **Provider hints.** `codd_plugins/stack_map.yaml` adds
+  `gitlab_ci.workflow_glob` so the static check abstracts over GitHub
+  Actions and GitLab CI without core changes.
+
+### Quality
+
+- **+27 tests, all green.** New cases land in
+  `tests/elicit/test_finding.py`, `tests/elicit/test_engine.py`,
+  `tests/test_user_journey_c7_check.py`,
+  `tests/dag/test_ci_health.py`,
+  `tests/dag/test_user_journey_coherence.py`,
+  `tests/integration/test_completeness_skeleton.py`,
+  `tests/test_elicit_journey_coverage.py`,
+  `tests/test_cmd462_generality.py`. Full suite **2774 passed / 0
+  skipped** at release time (up from 2747 in v2.11.0).
+- **Generality Gate enforced as a test.**
+  `tests/test_cmd462_generality.py` scans the changed core files for
+  project-specific literals so the same overfit regression cannot land
+  silently in a future change.
+
+### Background
+
+- Post-mortem: [`docs/post-mortems/test_completeness_gap.md`](docs/post-mortems/test_completeness_gap.md).
+- Root cause: C7 verified declared journeys without ever requiring the
+  declaration; C6 verified static post-deploy reachability without ever
+  consulting CI execution health. Both fixes are surface-agnostic
+  (web / CLI / mobile / API / ML model card / batch pipeline).
+
+### Roadmap
+
+- **v2.13.0 (next)** — C8 runtime mode (opt-in
+  `ci.runtime_check: true`) that polls the CI provider for
+  latest-run-on-default-branch success.
+
 ## [2.11.0] - 2026-05-10 — Sprint-less `codd implement` (cmd_444)
 
 ### Breaking — `codd implement`
