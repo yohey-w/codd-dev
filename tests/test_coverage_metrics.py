@@ -162,16 +162,41 @@ def test_screen_flow_coverage_coddclierror(tmp_path, monkeypatch):
     assert result.details == ["error: bad filesystem_routes.base_dir"]
 
 
+_CI_HEALTH_OPT_OUT_CONFIG = {
+    "ci": {"provider": "none"},
+    "opt_outs": [
+        {
+            "check": "ci_health",
+            "reason": "no CI provider configured for this empty fixture",
+            "expires_at": "2099-12-31",
+        }
+    ]
+}
+
+
 def test_dag_completeness_empty_project_passes(tmp_path):
-    result = compute_dag_completeness(tmp_path)
+    # An empty project must opt out of C8 ci_health explicitly; otherwise the
+    # check correctly red-fails on the missing workflow. The gate-level
+    # invariant verified here is "empty edge case does not crash and the
+    # opt-out path passes coverage".
+    result = compute_dag_completeness(tmp_path, config=_CI_HEALTH_OPT_OUT_CONFIG)
 
     assert result.metric == "dag_completeness"
     assert result.passed is True
     assert result.uncovered == 0
 
 
+def test_dag_completeness_empty_project_without_opt_out_fails_ci_health(tmp_path):
+    result = compute_dag_completeness(tmp_path)
+
+    assert result.metric == "dag_completeness"
+    assert result.passed is False
+    assert result.uncovered == 1
+    assert any("ci_health" in detail for detail in result.details)
+
+
 def test_run_coverage_all_pass(tmp_path):
-    report = run_coverage(tmp_path)
+    report = run_coverage(tmp_path, config=_CI_HEALTH_OPT_OUT_CONFIG)
 
     assert report.all_passed is True
     assert [result.metric for result in report.results] == [

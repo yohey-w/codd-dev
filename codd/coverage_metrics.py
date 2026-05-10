@@ -183,12 +183,17 @@ def compute_dag_completeness(
         return _exception_result("dag_completeness", threshold, exc)
 
     red_results = [result for result in results if _dag_result_severity(result) == "red"]
-    failed_red = [result for result in red_results if _dag_result_passed(result) is False]
+    failed_red = [
+        result
+        for result in red_results
+        if _dag_result_passed(result) is False and _dag_result_status(result) != "opt_out"
+    ]
     amber_findings = [
         result
         for result in results
         if _dag_result_severity(result) == "amber" and _dag_result_has_findings(result)
     ]
+    opt_outs = [result for result in results if _dag_result_status(result) == "opt_out"]
 
     total = len(red_results)
     uncovered = len(failed_red)
@@ -197,6 +202,7 @@ def compute_dag_completeness(
     details = [f"checks: {len(results)}", f"red_failures: {uncovered}"]
     details.extend(_format_dag_result(result) for result in failed_red[:5])
     details.extend(f"warning: {_format_dag_result(result)}" for result in amber_findings[:5])
+    details.extend(f"opt_out: {_format_dag_result(result)}" for result in opt_outs[:5])
 
     return CoverageResult(
         metric="dag_completeness",
@@ -359,6 +365,10 @@ def _dag_result_severity(result: Any) -> str:
 
 def _dag_result_passed(result: Any) -> bool:
     return _dag_result_value(result, "passed") is not False
+
+
+def _dag_result_status(result: Any) -> str:
+    return str(_dag_result_value(result, "status") or "")
 
 
 def _dag_result_name(result: Any) -> str:

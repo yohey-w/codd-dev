@@ -12,9 +12,15 @@ from typing import Any, Mapping
 import yaml
 
 from codd.dag.checks import DagCheck, register_dag_check
+from codd.dag.checks.opt_out import (
+    OPT_OUT_STATUS,
+    OptOutDeclaration,
+    OptOutSignal,
+)
 
 
 _DEFAULT_PROVIDER = "github" + "_actions"
+_OPT_OUT_PROVIDER = "none"
 
 
 @dataclass
@@ -30,7 +36,11 @@ class CiConfig:
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> "CiConfig":
         if not isinstance(value, Mapping):
-            return cls(provider="none")
+            # Missing ``ci:`` section is no longer treated as a silent opt-out.
+            # The default provider applies; if no workflow files exist this
+            # surfaces as a normal red ``ci_workflow_missing`` finding rather
+            # than a free PASS.
+            return cls()
 
         config = cls()
         return cls(
@@ -87,17 +97,67 @@ class CiHealthCheck(DagCheck):
         del dag
         root = Path(project_root or self.project_root or ".").resolve()
         active_settings = codd_config or settings or self.settings
-        return self.check(root, CiConfig.from_mapping(_mapping_value(active_settings, "ci")))
+        config = CiConfig.from_mapping(_mapping_value(active_settings, "ci"))
+        return self.check(root, config)
+
+    def detect_opt_out(self, codd_config: dict[str, Any]) -> OptOutSignal | None:
+        config = CiConfig.from_mapping(_mapping_value(codd_config, "ci"))
+        if self._is_opt_out_provider(config):
+            return OptOutSignal(
+                check_name=self.check_name,
+                source="ci.provider=none",
+            )
+        return None
+
+    @staticmethod
+    def _is_opt_out_provider(config: CiConfig) -> bool:
+        return config.provider.strip().lower() == _OPT_OUT_PROVIDER
+
+    def _make_opt_out_result(self, declaration: OptOutDeclaration | None) -> CiHealthResult:
+        today = self.today
+        if declaration is None:
+            return CiHealthResult(
+                status="fail",
+                severity="red",
+                block_deploy=True,
+                message=(
+                    "C8 ci_health: ci.provider=none requires an opt_outs declaration "
+                    "in codd.yaml (check: ci_health, reason: ..., expires_at: "
+                    "YYYY-MM-DD)."
+                ),
+                passed=False,
+            )
+        if declaration.is_expired(today):
+            return CiHealthResult(
+                status="fail",
+                severity="red",
+                block_deploy=True,
+                message=(
+                    f"C8 ci_health: opt-out expired on "
+                    f"{declaration.expires_at.isoformat()} "
+                    f"(reason: {declaration.reason}); renew the entry or remove it."
+                ),
+                passed=False,
+            )
+        return CiHealthResult(
+            status=OPT_OUT_STATUS,
+            severity=self.severity,
+            block_deploy=False,
+            message=(
+                f"C8 ci_health opt-out active "
+                f"(reason: {declaration.reason}, "
+                f"expires: {declaration.expires_at.isoformat()})"
+            ),
+            passed=False,
+        )
 
     def check(self, project_root: Path, config: CiConfig) -> CiHealthResult:
         project_root = Path(project_root).resolve()
-        if config.provider.strip().lower() == "none":
-            return CiHealthResult(
-                status="skip",
-                message="ci.provider=none, C8 SKIP",
-                passed=True,
+        if self._is_opt_out_provider(config):
+            declaration = (
+                self.opt_out_policy.lookup(self.check_name) if self.opt_out_policy else None
             )
-
+            return self._make_opt_out_result(declaration)
         workflow_files = self._locate_workflows(project_root, config.workflow_glob)
         if not workflow_files:
             finding = CiHealthFinding(
