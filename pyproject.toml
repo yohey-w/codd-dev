@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codd-dev"
-version = "2.17.0"
+version = "2.17.1"
 description = "CoDD: Coherence-Driven Development — cross-artifact change impact analysis"
 readme = "README.md"
 license = "MIT"
@@ -63,6 +63,7 @@ include = [
     "codd/**/*.py",
     "codd/**/*.md",
     "codd/**/*.yaml",
+    "codd/**/*.txt",
     "codd/hooks/recipes/*.json",
     "codd/hooks/recipes/*.sh",
     "codd/templates/**/*.j2",

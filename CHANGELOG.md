@@ -4,6 +4,93 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.17.1] - 2026-05-11 — emergency patch for `codd fix [PHENOMENON]` (cmd_471, Issues #23 + #24)
+
+### Fixed — `codd/fix/templates/*.txt` now ship inside the wheel (Issue #23)
+
+`codd fix [PHENOMENON]` introduced in v2.16.0 loads four prompt templates
+from `codd/fix/templates/` at runtime. The hatch `include` list in
+`pyproject.toml` only covered `*.py` / `*.md` / `*.yaml` under `codd/`, so
+the `.txt` template files were silently dropped from every published wheel.
+After `pip install codd-dev`, any user invoking `codd fix "..."` got:
+
+```
+FileNotFoundError: codd.fix template not found: design_update.txt
+```
+
+Add `codd/**/*.txt` to the hatch include list. The fix/templates directory
+is the only place `.txt` files live under `codd/`, so the broader glob is
+safe and future-proof — new prompt files will be packaged automatically.
+
+### Fixed — prompt-template `---` wrapper collided with markdown frontmatter (Issue #24)
+
+`design_update.txt` and `risk_assessment.txt` wrapped their substitution
+slots (`{current_content}` / `{diff_text}`) between two `---` lines. When
+the wrapped content was a markdown design_doc its own frontmatter delimiter
+is also `---`, producing prompts with four-or-more consecutive `---`
+separators in a row:
+
+```
+CURRENT_DOCUMENT_CONTENT:
+---                  ← template wrapper open
+---                  ← frontmatter open (from content)
+title: ...
+---                  ← frontmatter close (from content)
+# body
+---                  ← template wrapper close
+```
+
+LLM responses occasionally echoed the extra `---` separators back into the
+returned document body and broke downstream frontmatter parsing. The same
+trap exists in `risk_assessment.txt` where unified diffs naturally include
+`--- a/path` lines.
+
+Replace both wrappers with unambiguous XML-style tags:
+
+| Template | Before | After |
+|----------|--------|-------|
+| `design_update.txt` | `---` / `---` around `{current_content}` | `<document>` / `</document>` |
+| `risk_assessment.txt` | `---` / `---` around `{diff_text}` | `<diff>` / `</diff>` |
+
+The `Return ONLY ...` instruction was also tightened to say "no `<document>`
+tags" so the LLM cannot legitimately echo the wrapper back.
+
+### Generality
+
+- Pure bug fix to packaging metadata + two prompt-text files; no behaviour
+  change for projects that don't invoke `codd fix [PHENOMENON]`.
+- No project-specific terms anywhere in the diff.
+
+### Test results
+
+| Metric | Value |
+|--------|-------|
+| New tests (`tests/fix/test_templates_packaging.py` + `tests/fix/test_template_delimiters.py`) | **11 cases** |
+| Full suite | **2925 PASS** |
+| SKIP | **0** |
+| Duration | ~38 s |
+
+Plus wheel build verification: `uv build` → `unzip -l dist/codd_dev-2.17.1-py3-none-any.whl` now shows all four `codd/fix/templates/*.txt` entries.
+
+### Files
+
+- `pyproject.toml` — add `"codd/**/*.txt"` to hatch include
+- `codd/fix/templates/design_update.txt` — `---` → `<document>` wrapper
+- `codd/fix/templates/risk_assessment.txt` — `---` → `<diff>` wrapper
+- `tests/fix/test_templates_packaging.py` (new) — 7 cases
+- `tests/fix/test_template_delimiters.py` (new) — 4 cases
+
+### Upgrade
+
+```bash
+pip install --upgrade codd-dev
+```
+
+Users on v2.16.0 / v2.17.0 who hit `FileNotFoundError` from `codd fix
+[PHENOMENON]` should upgrade immediately.
+
+---
+
 ## [2.17.0] - 2026-05-11 — node_completeness `kind: common` fix (cmd_470)
 
 ### Fixed — `node_completeness` no longer flags `kind: common` nodes as missing
