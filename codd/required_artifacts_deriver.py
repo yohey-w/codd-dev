@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from codd.config import load_project_config
+from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.knowledge_fetcher import KnowledgeFetcher
 from codd.lexicon import AskItem
 
@@ -20,7 +21,8 @@ from codd.lexicon import AskItem
 DEFAULTS_DIR = Path(__file__).parent / "required_artifacts" / "defaults"
 SUPPORTED_PROJECT_TYPES = ("web", "cli", "mobile", "iot")
 VALID_ARTIFACT_SOURCES = {"ai_derived", "user_override", "default_template"}
-AI_TIMEOUT_SECONDS = 300
+# Sourced from codd.defaults; see feedback_codd_default_values_policy.
+AI_TIMEOUT_SECONDS = int(_DEFAULT_AI_TIMEOUT_SECONDS)
 
 
 class RequiredArtifactsDeriver:

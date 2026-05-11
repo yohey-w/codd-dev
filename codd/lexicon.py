@@ -374,23 +374,35 @@ def validate_lexicon(data: dict[str, Any]) -> None:
 
     required_artifacts = data.get("required_artifacts", [])
     _validate_list_of_mappings(required_artifacts, "required_artifacts")
-    for artifact in required_artifacts:
+    artifact_errors: list[str] = []
+    for index, artifact in enumerate(required_artifacts):
+        artifact_id = artifact.get("id") if isinstance(artifact, dict) else None
+        label = f"required_artifacts[{index}]" + (
+            f" (id={artifact_id!r})" if artifact_id else ""
+        )
         for field_name in ("id", "title", "scope", "source"):
             if field_name not in artifact:
-                raise LexiconError(
-                    f"required_artifacts item missing required field '{field_name}': {artifact}"
+                artifact_errors.append(
+                    f"{label} missing required field '{field_name}'"
                 )
-        if artifact["source"] not in REQUIRED_ARTIFACT_SOURCES:
-            raise LexiconError(
-                "required_artifacts source must be one of "
-                f"{sorted(REQUIRED_ARTIFACT_SOURCES)}, got '{artifact['source']}'"
+        if "source" in artifact and artifact["source"] not in REQUIRED_ARTIFACT_SOURCES:
+            artifact_errors.append(
+                f"{label} source must be one of "
+                f"{sorted(REQUIRED_ARTIFACT_SOURCES)}, got {artifact['source']!r}"
             )
         depends_on = artifact.get("depends_on", [])
         if not isinstance(depends_on, list):
-            raise LexiconError(f"required_artifacts depends_on must be a list: {artifact}")
+            artifact_errors.append(f"{label} depends_on must be a list")
         derived_from = artifact.get("derived_from", [])
         if derived_from is not None and not isinstance(derived_from, list):
-            raise LexiconError(f"required_artifacts derived_from must be a list: {artifact}")
+            artifact_errors.append(f"{label} derived_from must be a list")
+    if artifact_errors:
+        if len(artifact_errors) == 1:
+            raise LexiconError(artifact_errors[0])
+        joined = "\n  - ".join(artifact_errors)
+        raise LexiconError(
+            f"required_artifacts has {len(artifact_errors)} validation issue(s):\n  - {joined}"
+        )
 
     for field_name in ("scope", "phase"):
         if field_name in data and not isinstance(data[field_name], str):

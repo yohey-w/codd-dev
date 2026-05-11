@@ -13,6 +13,7 @@ import yaml
 
 from codd.ask_user_question_adapter import send_ask_items
 from codd.config import load_project_config
+from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.hitl_session import HitlSession
 from codd.knowledge_fetcher import KnowledgeFetcher
 from codd.lexicon import AskItem, AskOption, LEXICON_FILENAME
@@ -20,7 +21,8 @@ from codd.lexicon import AskItem, AskOption, LEXICON_FILENAME
 
 DEFAULTS_DIR = Path(__file__).parent / "requirement_completeness" / "defaults"
 SUPPORTED_PROJECT_TYPES = ("web", "cli", "mobile", "iot")
-AI_TIMEOUT_SECONDS = 300
+# Sourced from codd.defaults; see feedback_codd_default_values_policy.
+AI_TIMEOUT_SECONDS = int(_DEFAULT_AI_TIMEOUT_SECONDS)
 
 
 class RequirementCompletenessAuditor:

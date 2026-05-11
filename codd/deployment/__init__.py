@@ -47,6 +47,15 @@ class VerificationTestNode:
     target: str
     verification_template_ref: str
     expected_outcome: Any = None
+    # Explicit "this test verifies these runtime_state identifiers" declarations
+    # parsed from sidecar YAML (``<test_path>.codd.yaml``). Used by
+    # ``infer_deployment_edges`` to add EDGE_VERIFIED_BY edges without relying
+    # on the legacy keyword-matching heuristic.
+    verified_by: list[str] = field(default_factory=list)
+    # Explicit (journey, axis_type, variant_id) coverage matrix parsed from
+    # the same sidecar. Consumed by C9 ``environment_coverage`` so a test
+    # asserts coverage without inlining the matrix in its source code.
+    axis_matrix: list[dict[str, Any]] = field(default_factory=list)
 
 
 EDGE_REQUIRES_DEPLOYMENT_STEP = "requires_deployment_step"

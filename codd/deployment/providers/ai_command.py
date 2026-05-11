@@ -11,13 +11,14 @@ import subprocess
 from typing import Any, Callable, Mapping
 
 from codd.config import load_project_config
+from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 
 
 DEFAULT_AI_COMMAND = "ai"
-# Default 1800s (30 min): multi-lexicon elicit can chain 10+ lexicons at ~30s
-# each, so the legacy 120s default truncated long pipelines. Override via the
-# CODD_AI_COMMAND_TIMEOUT env var or `llm.timeout_seconds` in codd.yaml.
-DEFAULT_TIMEOUT_SECONDS = 1800.0
+# Default sourced from codd.defaults so every AI call site shares one SSoT
+# (see feedback_codd_default_values_policy). Override via the
+# CODD_AI_TIMEOUT_SECONDS env var or `llm.timeout_seconds` in codd.yaml.
+DEFAULT_TIMEOUT_SECONDS = _DEFAULT_AI_TIMEOUT_SECONDS
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
 

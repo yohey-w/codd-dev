@@ -162,11 +162,9 @@ class UserJourneyCoherenceCheck(DagCheck):
                         design_doc.id,
                         lexicon_id=ref.removeprefix("lexicon:"),
                         required_by=f"design_doc.user_journeys[{journey_index}].expected_outcome_refs",
-                        suggested_lexicon_entry={
-                            "id": ref.removeprefix("lexicon:"),
-                            "journey": journey_name,
-                            "path": f"tests/e2e/{self._slug(journey_name)}.spec.ts",
-                        },
+                        suggested_lexicon_entry=self._build_suggested_lexicon_entry(
+                            ref, journey_name
+                        ),
                         human_review_required=self._human_review_required(design_doc, journey),
                     )
                 )
@@ -834,6 +832,39 @@ class UserJourneyCoherenceCheck(DagCheck):
     def _slug(value: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
         return slug or "journey"
+
+    def _build_suggested_lexicon_entry(self, ref: str, journey_name: str) -> dict[str, Any]:
+        """Return a complete-shape lexicon entry suggestion.
+
+        Includes every field that ``codd require --completeness-audit``
+        validates so the suggestion can be appended to project_lexicon.yaml
+        in a single mechanical step (no audit ping-pong).
+        """
+
+        lexicon_id = ref.removeprefix("lexicon:")
+        scope = self._suggested_scope()
+        return {
+            "id": lexicon_id,
+            "title": self._suggested_title(journey_name),
+            "scope": scope,
+            "source": "default_template",
+            "journey": journey_name,
+            "path": f"tests/e2e/{self._slug(journey_name)}.spec.ts",
+        }
+
+    def _suggested_scope(self) -> str:
+        if isinstance(self.settings, dict):
+            scope = self.settings.get("scope")
+            if isinstance(scope, str) and scope.strip():
+                return scope.strip()
+        return "web_app"
+
+    @staticmethod
+    def _suggested_title(journey_name: str) -> str:
+        humanised = journey_name.replace("_", " ").strip()
+        if not humanised:
+            return "Journey E2E"
+        return f"{humanised.capitalize()} E2E"
 
 
 def result_to_dict(result: UserJourneyCoherenceResult) -> dict[str, Any]:

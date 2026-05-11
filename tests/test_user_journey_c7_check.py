@@ -307,6 +307,9 @@ def test_missing_journey_lexicon_outputs_suggested_entry(tmp_path):
     violation = _violation(result, "missing_journey_lexicon")
     assert violation["suggested_lexicon_entry"] == {
         "id": "e2e_login_journey",
+        "title": "Login to dashboard E2E",
+        "scope": "web_app",
+        "source": "default_template",
         "journey": "login_to_dashboard",
         "path": "tests/e2e/login_to_dashboard.spec.ts",
     }
