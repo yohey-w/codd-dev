@@ -4,6 +4,149 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-05-11 — common node kind; amber 125 → 26 on dogfood LMS (cmd_467)
+
+### New — `kind: common` for shared infrastructure
+
+Introduces a third DAG node kind (`common`) alongside the existing
+`design_doc` and `impl_file`. Shared infrastructure files — database
+clients, auth middleware, framework config, shared utilities — can now
+be classified as `common` instead of being orphaned amber nodes or
+excluded from the DAG entirely.
+
+**Two opt-in routes:**
+
+- **`codd.node_type: common` frontmatter** — for markdown design docs
+  that describe cross-cutting infrastructure.
+- **`common_node_patterns:` in `codd.yaml`** — glob list for
+  non-markdown source files (`.ts`, `.py`, etc.).
+
+```yaml
+# codd.yaml
+common_node_patterns:
+  - "lib/prisma.ts"
+  - "middleware.ts"
+  - "utils/**"
+  - "next.config.*"
+```
+
+**Behaviour:**
+
+- `common` nodes are excluded from C5 `transitive_closure` amber
+  (no parent required).
+- `common` nodes are included in `codd impact` / `codd propagate-from`
+  impact analysis — change a common file and CoDD reports which design
+  docs depend on it.
+- `common` ↔ `common` dependencies are allowed.
+- Files not declared as `common` continue to behave exactly as before
+  (full backward compatibility).
+
+### Fix — glob translator `**` recursive expansion
+
+The internal `_path_matches_any_pattern` helper now correctly expands
+`**` globs recursively. This benefits both `common_node_patterns` and
+`scan.exclude` pattern matching.
+
+### Dogfood results (osato-lms, cmd_467)
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Amber (C5 transitive closure) | 125 | **26** |
+| Reduction | — | **−79.2%** |
+| common nodes classified | 0 | 185 |
+| pytest | 2831 PASS | 2842 PASS |
+| SKIP | 0 | 0 |
+
+Remaining 26 amber items are legitimate DAG coherence gaps
+(`test_file` / `verification_test` / `plan_task` nodes with no
+`design_doc` parent) — intentionally left for resolution via sidecar
+`verified_by:` (cmd_466 mechanism).
+
+### Generality check
+
+7/7 checks passed — synthetic project, codd-dev self, brace expansion,
+nested config, frontmatter, glob translator, backward compatibility.
+
+## [2.14.0] - 2026-05-11 — 8 structural gaps closed; red 22 → 0 on dogfood LMS (cmd_466)
+
+### New — sidecar `<test>.codd.yaml` contract (C6 + C9)
+
+- **`verified_by:` sidecar field (C6 `deployment_completeness`).** Place a
+  `<test-file>.codd.yaml` alongside any test file to declare which
+  `runtime_state` targets it verifies. The DAG extractor reads these
+  sidecars and generates `VerificationTestNode → runtime_state` edges,
+  resolving `no_verification_test` violations without keyword matching.
+  Files: `codd/deployment/__init__.py`, `codd/deployment/extractor.py`.
+
+- **`axis_matrix:` sidecar field (C9 `environment_coverage`).** Declare
+  which journey × axis_variant combinations a test covers. C9 uses the
+  declared matrix to satisfy `journey_not_executed_under_variant` checks.
+  Files: `codd/deployment/__init__.py`, `codd/deployment/extractor.py`.
+
+Both fields are **opt-in**: existing tests without sidecars continue to
+use keyword matching as before (full backward compatibility).
+
+### New — lexicon entry schema SSoT (C7)
+
+- **`suggested_lexicon_entry` now outputs the complete schema** including
+  `title`, `scope`, and `source` fields in a single round, eliminating the
+  multi-round `completeness_audit` friction discovered in cmd_465.
+  File: `codd/dag/checks/user_journey_coherence.py`.
+
+### New — completeness_audit batch reporting
+
+- **All missing fields are now reported in a single `codd require
+  --completeness-audit` run** instead of one field per run.
+  File: `codd/lexicon.py`.
+
+### Fix — DAG builder `scan.exclude` honoring (#5)
+
+- **`node_modules`, `dist`, `__pycache__` and other patterns in
+  `scan.exclude` are now correctly applied** during DAG graph construction.
+  Previously the exclusion list was respected only during file scanning but
+  ignored during node population, causing up to ~130 spurious
+  `unreachable_nodes` amber violations on JavaScript projects.
+  File: `codd/dag/builder.py`.
+
+### New — `codd dag verify --auto-repair` / `--apply` flags (#6)
+
+- **`--auto-repair` flag**: identifies DAG violations that have a
+  `suggested_*` or `remediation` field and applies them mechanically
+  without invoking an AI model. Currently covers `missing_journey_lexicon`
+  violations. Files: `codd/cli.py`, `codd/dag/auto_repair.py` (new).
+
+### New — `codd elicit` mock AI sentinel (#7)
+
+- **`--ai-cmd true` / `--ai-cmd mock` / `--ai-cmd none`**: run the elicit
+  engine in structural-only mode (no AI call). Returns all
+  deterministically detectable findings instantly. Useful for CI pre-flight
+  and offline development. File: `codd/elicit/engine.py`.
+
+### Change (BREAKING) — `AI_TIMEOUT_SECONDS` SSoT + new default 3600s (#8)
+
+- **`codd/defaults.py`** is the single source of truth for the AI call
+  timeout. All consumers (`ai_command.py`, `required_artifacts_deriver.py`,
+  `requirement_completeness_auditor.py`) import from this module.
+- **Default raised from 300 s → 3600 s** (殿 principle: a value that
+  causes frequent timeouts is not a valid default).
+- User override: `CODD_AI_TIMEOUT_SECONDS` env var or
+  `codd.yaml llm.timeout_seconds`.
+
+### Tests
+
+- 25 new test cases across 8 new test files. Full suite: 2831 passed,
+  0 skipped.
+
+### Dogfood — osato-lms self-improvement re-run
+
+| Metric | cmd_465 baseline | v2.14.0 (sidecar) |
+| --- | --- | --- |
+| red | 22 | **0** (−100%) |
+| amber (C5 transitive_closure) | 261 | **125** (−52%, scan.exclude fix) |
+
+AI invocations: 0. North Star 階梯 3 (mechanical auto-apply) reached for
+lexicon-driven repairs.
+
 ## [2.13.0] - 2026-05-10 — Opt-out protection: justification + severity preservation (cmd_464)
 
 ### New — OptOutPolicy: structured opt-out contract
