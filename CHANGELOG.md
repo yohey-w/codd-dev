@@ -4,6 +4,89 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-05-11 — codd fix [PHENOMENON]: phenomenon-driven design update (cmd_468)
+
+### New — `codd fix [PHENOMENON]` phenomenon mode (North Star entry-point 2)
+
+Completes the second half of CoDD's North Star: **"tell CoDD what you want
+fixed; CoDD updates the design doc, implementation, and tests — you touch
+nothing."**
+
+Pass a natural-language phenomenon as a positional argument to `codd fix`:
+
+```bash
+codd fix "login errors are hard to understand"
+codd fix "dashboard layout breaks on mobile" --dry-run
+codd fix "API latency regression on /api/orders" --non-interactive
+```
+
+**Processing pipeline:**
+
+1. `PhenomenonParser` — LLM extracts intent, subject terms, lexicon hits,
+   ambiguity score, and acceptance signal from the phenomenon text.
+2. `CandidateSelector` — Tier-1 (lexicon-exact) + Tier-2 (LLM semantic)
+   scoring identifies relevant design docs from the DAG (up to
+   `max_candidates`, default 5).
+3. **Interactive HITL gate** (when needed):
+   - Multiple candidates with close scores → user selects by number / "all" / "abort"
+   - High ambiguity → LLM-generated clarification choices (+ free-text option)
+   - Risky operations (schema migration, dependency add, large deletions) → yes/no/abort
+   - All question text / choices are LLM- or lexicon-generated (no hard-coded strings).
+4. `DesignDocUpdater` — LLM rewrites the target design doc (append/amend only
+   by default; `--allow-delete` for deletion). Existing `codd.*` frontmatter
+   is byte-for-byte protected. Shrinkage guard detects unintended mass deletions.
+5. DAG verify + pytest gate (same retry loop as existing `codd fix`).
+
+**New flags on `codd fix`:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `phenomenon` (positional) | _(none)_ | Phenomenon text; omit for legacy test-failure mode |
+| `--non-interactive` | False | Auto-select top-1 / abort on ambiguity (for CI) |
+| `--on-ambiguity` | `abort` | `abort` / `default` / `top1` in non-interactive mode |
+| `--dry-run` | False | Show diff only, no writes |
+| `--allow-delete` | False | Permit deletion in design doc rewrites |
+
+**Backward compatibility:** `codd fix` (no argument) is **100% unchanged** —
+`run_fix()` is not touched; all new logic lives in the new `codd/fix/` package.
+
+**Operational notes:**
+
+- PHENOMENON mode currently recommends `--ai-cmd 'claude --print'`.
+  Codex (file-writing-agent path) cannot capture stdout for this mode; a
+  dedicated wrapper is planned (cmd_469 candidate).
+- When running without `--dry-run`, review `git diff` before committing —
+  rare LLM responses may prepend a duplicate frontmatter delimiter.
+
+### New modules
+
+- `codd/fix/__init__.py`
+- `codd/fix/phenomenon_fixer.py` — pipeline entry point
+- `codd/fix/phenomenon_parser.py` — LLM analysis + fallback
+- `codd/fix/candidate_selector.py` — Tier-1/Tier-2 scoring
+- `codd/fix/interactive_prompt.py` — stdin/stdout I/O abstraction
+- `codd/fix/design_updater.py` — design doc rewrite + protection
+- `codd/fix/risk_classifier.py` — heuristic + LLM risk judge
+- `codd/fix/templates_loader.py`
+- `codd/fix/templates/` (4 prompt templates)
+
+### Test results
+
+| Metric | Value |
+|--------|-------|
+| New tests (`tests/fix/`) | **66 cases** |
+| Full suite | **2908 PASS** |
+| SKIP | **0** |
+| Duration | 37.39 s |
+| LMS overfit grep | **0 hits** |
+
+### Known partial — AC #8 (impl/test auto-propagation)
+
+Design-doc update and diff generation work end-to-end. Automatic
+propagation to implementation + test files (calling the existing
+`propagate` / `implementer` pipeline) is prototyped but not yet wired in
+the released flow. Tracked as cmd_469 follow-up.
+
 ## [2.15.0] - 2026-05-11 — common node kind; amber 125 → 26 on dogfood LMS (cmd_467)
 
 ### New — `kind: common` for shared infrastructure
