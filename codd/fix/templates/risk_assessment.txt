@@ -23,9 +23,9 @@ Detection guidance:
 - config_change: CI workflow, deploy config, security policy, env vars.
 
 DIFF:
----
+<diff>
 {diff_text}
----
+</diff>
 
 HEURISTIC_FLAGS (already detected): {heuristic_flags}
 

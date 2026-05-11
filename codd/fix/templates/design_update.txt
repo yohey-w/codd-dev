@@ -25,9 +25,9 @@ ALLOW_DELETE: {allow_delete}
 CURRENT_DOCUMENT_PATH: {target_path}
 
 CURRENT_DOCUMENT_CONTENT:
----
+<document>
 {current_content}
----
+</document>
 
 Return ONLY the full updated document body (including frontmatter).
-No commentary, no code fences, no diff markers.
+No commentary, no code fences, no <document> tags, no diff markers.
