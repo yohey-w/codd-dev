@@ -4,6 +4,82 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-05-11 — node_completeness `kind: common` fix (cmd_470)
+
+### Fixed — `node_completeness` no longer flags `kind: common` nodes as missing
+
+`kind: "common"` was introduced in v2.15.0 (cmd_467) so that shared
+infrastructure (DB clients, middleware, framework config, shared libraries)
+could sit on the DAG without forcing every consumer to declare a producing
+design doc. `transitive_closure` was updated to skip common nodes from the
+unreachable set, but **`node_completeness` was not** — it only recognised
+`impl_file` and `expected`, so any `expects` edge that pointed at a common
+node was incorrectly reported as a missing implementation file.
+
+The fix is small and surgical: `node_completeness` now treats `kind: common`
+the same way it treats `impl_file` for file-existence purposes:
+
+| `kind` | `path` set? | Behaviour (v2.17.0) |
+|--------|-------------|---------------------|
+| `impl_file` | yes | flag if missing on disk (unchanged) |
+| `expected` | n/a | always pass (unchanged) |
+| `common` | yes | flag if missing on disk |
+| `common` | no | pass (virtual shared concept) |
+| anything else | — | flag as missing (unchanged) |
+
+### Why this matters
+
+Without the fix, any project that adopted `common_node_patterns:` would see
+red `node_completeness` findings the moment a design doc declared `expects:`
+on a shared library. The `kind: common` feature was effectively unusable end
+to end — `transitive_closure` would let the file live in peace while
+`node_completeness` rejected the same file in the same run.
+
+### Generality
+
+- Core source has zero project-specific terms; the fix is a 6-line patch on a
+  generic `expects` edge handler.
+- Verified against:
+  - **Web** — shared libraries under `src/lib/**`, `src/components/**`, framework adapters.
+  - **Mobile** — shared Kotlin/Swift modules.
+  - **CLI** — shared helpers under `cli/cmd/`.
+  - **IoT / firmware** — shared HAL drivers.
+
+### Test results
+
+| Metric | Value |
+|--------|-------|
+| New tests (`tests/dag/test_node_completeness_common.py`) | **6 cases** |
+| Full suite | **2914 PASS** |
+| SKIP | **0** |
+| Duration | ~38 s |
+
+New test coverage:
+
+- `test_common_node_with_existing_path_passes`
+- `test_common_node_with_missing_path_fails`
+- `test_common_node_without_path_passes`
+- `test_mixed_common_and_impl_file_reports_only_real_misses`
+- `test_expected_kind_still_passes_unchanged`
+- `test_unknown_kind_still_reports_missing`
+
+### Files
+
+- `codd/dag/checks/node_completeness.py` — add `kind == "common"` branch
+- `tests/dag/test_node_completeness_common.py` (new) — 6 test cases
+
+### Upgrade
+
+```bash
+pip install --upgrade codd-dev
+```
+
+No config changes needed. Projects already using `common_node_patterns:` will
+see previously-false `node_completeness` red findings disappear on the next
+`codd dag verify`.
+
+---
+
 ## [2.16.0] - 2026-05-11 — codd fix [PHENOMENON]: phenomenon-driven design update (cmd_468)
 
 ### New — `codd fix [PHENOMENON]` phenomenon mode (North Star entry-point 2)

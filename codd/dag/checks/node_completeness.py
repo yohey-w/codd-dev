@@ -46,6 +46,10 @@ class NodeCompletenessCheck:
             if node is None or node.kind != "impl_file":
                 if node is not None and node.kind == "expected":
                     continue
+                if node is not None and node.kind == "common":
+                    if node.path and not (root / node.path).exists():
+                        _append_once(missing, seen, edge.to_id)
+                    continue
                 _append_once(missing, seen, edge.to_id)
                 continue
 
