@@ -307,6 +307,8 @@ def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
 def _add_test_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> dict[str, Path]:
     test_nodes: dict[str, Path] = {}
     test_suffixes = _suffix_tuple(settings.get("test_suffixes")) or LEGACY_TEST_SUFFIXES
+    common_patterns = _common_node_patterns(settings)
+    project_root_resolved = Path(project_root).resolve()
     for file_path in _glob_project_paths(
         project_root,
         settings.get("test_file_patterns", []),
@@ -316,11 +318,16 @@ def _add_test_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
             continue
         node_id = _relative_id(file_path, project_root)
         test_nodes[node_id] = file_path.resolve()
+        kind = "test_file"
+        if common_patterns and _path_matches_any_pattern(
+            file_path, project_root_resolved, common_patterns
+        ):
+            kind = "common"
         _add_node_once(
             dag,
             Node(
                 id=node_id,
-                kind="test_file",
+                kind=kind,
                 path=node_id,
                 attributes={
                     "language": _language_for_path(file_path),
