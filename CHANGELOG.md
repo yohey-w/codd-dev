@@ -4,6 +4,103 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-05-12 — Greenfield triage from v-kato: Issues #20, #21, #22 (cmd_473)
+
+### Background
+
+[@v-kato](https://github.com/v-kato) (Vthink, Inc.) re-verified the v1.34
+Greenfield PoC findings against v2.14.0 / v2.17.x and re-filed three
+Issues with full root-cause analysis. v2.18.0 closes all three.
+
+### Fixed — `codd implement run --language` overrides project.language per invocation (Issue #20)
+
+`codd init --language js` baked `project.language: javascript` into
+`codd.yaml`. If a downstream spec / design_doc later required TypeScript,
+the only workaround was a full project re-init (whole-Wave regeneration,
+~1 hour). v2.18.0 adds a `--language` flag to `codd implement run`:
+
+```bash
+codd implement run --task 1-1 --language typescript
+```
+
+The flag overrides `project.language` for that invocation only —
+`codd.yaml` on disk is **not** modified. The chunked execution path
+(`--chunk-size`) honours the flag too.
+
+**Why this shape:** Option B from the issue. Option A (parse natural-language
+language hints out of spec prose) is brittle and slow; Option C
+(documentation only) doesn't help users already stuck. A surgical CLI flag
+gives spec authors an escape hatch without forcing AI / parsing complexity
+on every invocation.
+
+### Fixed — `validator.DEFAULT_NODE_PREFIXES` now includes `detailed_design` (Issue #21)
+
+`codd plan --init` could emit node ids like `detailed_design:shared-domain-model`
+when an AI-driven planner saw an artifact under `docs/detailed_design/`.
+`DEFAULT_NODE_PREFIXES` listed `detail` and `detailed` but **not**
+`detailed_design`, so a node CoDD itself just produced was immediately
+rejected by `codd validate` — a self-inconsistency that hit every
+Greenfield Wave-5 run.
+
+Adding `detailed_design` to the default prefix set is a one-line
+backward-compatible fix.
+
+### Fixed — `implementer._strip_code_fence` no longer leaks trailing markdown into generated code (Issue #22)
+
+The regex anchored the closing fence to end-of-string:
+
+```python
+re.match(r"^```(?:[a-zA-Z0-9_+-]+)?\s*\n(?P<body>.*)\n```$", ...)
+```
+
+When an LLM ignored the "no prose after code" instruction and appended
+explanatory markdown after the closing fence, the match failed and
+`_strip_code_fence` returned the **whole** block — fence markers and
+trailing prose included — which got written verbatim to the generated
+`.ts` / `.js` / `.py` file. TypeScript would then emit cascades of
+TS1127 ("Invalid character") errors on the markdown rot.
+
+The fix drops the `$` anchor and makes the body capture non-greedy
+(`.*?`), so the regex wins on the FIRST closing fence and discards
+anything after it.
+
+### Test results
+
+| Metric | Value |
+|--------|-------|
+| New tests (`tests/test_issue_20_*` + `test_issue_21_*` + `test_issue_22_*`) | **12 cases** |
+| Updated tests (`tests/implementer/test_chunked_runner.py`) | 1 fake-helper signature widened with `**kwargs` |
+| Full suite | **2937 PASS** |
+| SKIP | **0** |
+| Duration | ~38 s |
+
+### Files
+
+- `codd/validator.py` — add `detailed_design` to `DEFAULT_NODE_PREFIXES`
+- `codd/implementer.py` — non-greedy `_strip_code_fence`; new `language=` kwarg on `implement_tasks`
+- `codd/cli.py` — new `--language` flag on `codd implement run` (chunked + legacy paths)
+- `tests/test_issue_20_language_override.py` (new) — 4 cases
+- `tests/test_issue_21_detailed_design_prefix.py` (new) — 3 cases
+- `tests/test_issue_22_strip_code_fence_trailing_prose.py` (new) — 5 cases
+- `tests/implementer/test_chunked_runner.py` — `**kwargs` on fake helper
+
+### Generality
+
+All three fixes are project-agnostic: zero LMS / Stripe / Next.js terms in
+the diff. The new `--language` flag is opt-in; absent the flag the legacy
+behaviour is preserved byte-for-byte.
+
+### Upgrade
+
+```bash
+pip install --upgrade codd-dev
+```
+
+No config changes required. Greenfield users on v2.14.x – v2.17.x who hit
+any of Issues #20 / #21 / #22 should upgrade.
+
+---
+
 ## [2.17.1] - 2026-05-11 — emergency patch for `codd fix [PHENOMENON]` (cmd_471, Issues #23 + #24)
 
 ### Fixed — `codd/fix/templates/*.txt` now ship inside the wheel (Issue #23)

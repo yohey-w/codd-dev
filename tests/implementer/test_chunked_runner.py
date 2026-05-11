@@ -266,8 +266,8 @@ def test_run_without_chunk_size_uses_legacy_path(tmp_path: Path, monkeypatch):
     project = _write_cli_project(tmp_path)
     captured: dict[str, object] = {}
 
-    def fake_implement_tasks(project_root, *, task, ai_command, use_derived_steps):
-        captured.update({"project_root": project_root, "task": task, "ai_command": ai_command, "use_derived_steps": use_derived_steps})
+    def fake_implement_tasks(project_root, *, task, ai_command, use_derived_steps, **kwargs):
+        captured.update({"project_root": project_root, "task": task, "ai_command": ai_command, "use_derived_steps": use_derived_steps, **kwargs})
         return []
 
     monkeypatch.setattr(implementer_module, "implement_tasks", fake_implement_tasks)

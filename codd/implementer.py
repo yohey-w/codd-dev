@@ -382,10 +382,19 @@ def implement_tasks(
     clean: bool = False,
     use_derived_steps: bool | None = None,
     task: str | None = None,
+    language: str | None = None,
     **_ignored: Any,
 ) -> list[ImplementationResult]:
     project_root = Path(project_root).resolve()
     config = _load_project_config(project_root)
+    if language:
+        # Per-invocation language override (Issue #20, v-kato): mismatched
+        # codd init --language doesn't force a full re-init; spec authors can
+        # ship an implement run with --language typescript and the project's
+        # codd.yaml stays untouched.
+        project_cfg = dict(config.get("project") or {})
+        project_cfg["language"] = language
+        config = {**config, "project": project_cfg}
     design_node = design or task
     if not design_node:
         raise ValueError("--design is required")
@@ -1382,7 +1391,11 @@ def _prepend_traceability_comment(relative_path: str, comment_block: str, conten
 
 def _strip_code_fence(block: str) -> str:
     stripped = block.strip()
-    fenced = re.match(r"^```(?:[a-zA-Z0-9_+-]+)?\s*\n(?P<body>.*)\n```$", stripped, re.DOTALL)
+    # Non-greedy `.*?` captures up to the FIRST closing fence; any trailing
+    # prose/markdown after the fence is discarded (Issue #22, v-kato).
+    # Drop the `$` end-of-string anchor so the match still wins when the
+    # LLM ignored the "no commentary" instruction and appended explanations.
+    fenced = re.match(r"^```(?:[a-zA-Z0-9_+-]+)?\s*\n(?P<body>.*?)\n```", stripped, re.DOTALL)
     if fenced:
         return fenced.group("body")
     return stripped

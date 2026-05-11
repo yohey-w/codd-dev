@@ -122,7 +122,8 @@ This is what lets CoDD ship one core that works for Next.js, Django, FastAPI, Ra
 
 ## 🧭 Roadmap
 
-- **v2.17.1 (current)** — emergency patch for `codd fix [PHENOMENON]` (cmd_471). Issue #23: `codd/fix/templates/*.txt` are now shipped inside the wheel (a hatch `include` regression caused `FileNotFoundError` after `pip install`). Issue #24: replaced `---` wrappers in `design_update.txt` / `risk_assessment.txt` with `<document>` / `<diff>` XML-style tags so the rendered prompt no longer collides with markdown frontmatter or unified-diff `--- a/path` lines. 11 new tests, 2925 total PASS, SKIP=0.
+- **v2.18.0 (current)** — Greenfield triage from [@v-kato](https://github.com/v-kato) (cmd_473). Issue #20: `codd implement run --language` now overrides `project.language` per invocation (no more re-init when `codd init --language` was the wrong choice). Issue #21: `detailed_design` added to `DEFAULT_NODE_PREFIXES` so `codd plan --init` no longer emits node ids its own `codd validate` rejects. Issue #22: `_strip_code_fence` is non-greedy + non-anchored, dropping trailing markdown prose that LLMs occasionally appended after the closing fence. 12 new tests, 2937 total PASS, SKIP=0.
+- **v2.17.1** — emergency patch for `codd fix [PHENOMENON]` (cmd_471). Issue #23: `codd/fix/templates/*.txt` are now shipped inside the wheel (a hatch `include` regression caused `FileNotFoundError` after `pip install`). Issue #24: replaced `---` wrappers in `design_update.txt` / `risk_assessment.txt` with `<document>` / `<diff>` XML-style tags so the rendered prompt no longer collides with markdown frontmatter or unified-diff `--- a/path` lines. 11 new tests, 2925 total PASS, SKIP=0.
 - **v2.17.0** — `node_completeness` honours `kind: common` (cmd_470). Fixes a v2.15.0 oversight: `expects` edges pointing at common (shared infrastructure) nodes were misreported as missing impl files even when the file existed. 6 new tests, 2914 total PASS, SKIP=0.
 - **v2.16.0** — `codd fix [PHENOMENON]` — North Star entry-point 2 (cmd_468). Express a desired change in natural language; CoDD identifies affected design docs via Tier-1 lexicon + Tier-2 semantic scoring, updates them with LLM, runs the DAG verify gate. Full interactive HITL (candidate selection, ambiguity clarification, risk confirmation) with `--non-interactive` for CI. 66 new tests, 2908 total PASS, SKIP=0.
 - **v2.15.0** — `kind: common` for shared infrastructure (cmd_467). C5 amber −79.2% on dogfood project (125 → 26). `**` glob translator fix.
@@ -130,7 +131,7 @@ This is what lets CoDD ship one core that works for Next.js, Django, FastAPI, Ra
 - **v2.13.0** — Opt-out protection: `OptOutPolicy` requires `justification` + `expires_at`. Silent SKIP abolished; severity preserved.
 - **v2.12.0** — Test-completeness gates: C7 amber promotion + C8 `ci_health` static check.
 - **v2.11.0** — Sprint-less `codd implement` (`--design <path> --output <dir>` directly).
-- **v2.18.0 (next)** — impl/test auto-propagation from PHENOMENON (AC #8 completion); Codex wrapper for PHENOMENON mode.
+- **v2.19.0 (next)** — impl/test auto-propagation from PHENOMENON (AC #8 completion); Codex wrapper for PHENOMENON mode.
 
 ---
 
