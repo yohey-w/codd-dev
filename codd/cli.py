@@ -3333,6 +3333,7 @@ def risk(path: str):
 
 
 @main.command()
+@click.argument("phenomenon", nargs=-1)
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--max-attempts", default=3, type=click.IntRange(min=1, max=10),
               help="Maximum fix attempts (default: 3)")
@@ -3345,31 +3346,72 @@ def risk(path: str):
 @click.option("--no-push", is_flag=True, help="Don't push fixes after successful fix")
 @click.option("--dry-run", is_flag=True, help="Show what would be fixed without making changes")
 @click.option("--ai-cmd", default=None, help="Override AI CLI command")
-def fix(path: str, max_attempts: int, test_results: str | None, ci_log: str | None,
-        ci_only: bool, local_only: bool, no_push: bool, dry_run: bool, ai_cmd: str | None):
-    """Fix test/build failures using AI guided by design documents.
+@click.option("--non-interactive", is_flag=True,
+              help="PHENOMENON mode: disable interactive prompts (use defaults)")
+@click.option("--on-ambiguity",
+              type=click.Choice(["abort", "default", "top1"]),
+              default="abort",
+              show_default=True,
+              help="PHENOMENON mode: behavior when candidates are ambiguous in --non-interactive")
+@click.option("--allow-delete", is_flag=True,
+              help="PHENOMENON mode: allow design_doc to lose existing acceptance criteria / user journeys")
+def fix(phenomenon: tuple[str, ...], path: str, max_attempts: int,
+        test_results: str | None, ci_log: str | None,
+        ci_only: bool, local_only: bool, no_push: bool, dry_run: bool,
+        ai_cmd: str | None, non_interactive: bool, on_ambiguity: str,
+        allow_delete: bool):
+    """Fix test/build failures or a user-described PHENOMENON.
 
     \b
-    Auto-detects failure source (in order):
+    Two modes:
+      codd fix                              # legacy: auto-detect failures
+      codd fix "ログインがわかりにくい"     # PHENOMENON mode
+
+    \b
+    Legacy mode (no positional argument) auto-detects failure source:
       1. Explicit --test-results / --ci-log files
       2. CI failures via `gh run view`
       3. Local test execution
-
-    Maps failures to relevant design documents via the dependency graph,
+    Maps failures to relevant design docs via the dependency graph,
     then invokes Claude Code to fix implementation code.
 
     \b
-    Examples:
-      codd fix                     # auto-detect and fix
-      codd fix --ci                # fix latest CI failure
-      codd fix --local             # run tests locally and fix
-      codd fix --dry-run           # show plan without fixing
-      codd fix --no-push           # fix but don't push
-    """
-    from codd.fixer import run_fix
+    PHENOMENON mode (with positional argument) drives the second entry
+    point of CoDD's north star: starting from a phenomenon the user wants
+    fixed, CoDD updates the design doc, propagates the change, and
+    verifies — the user touches nothing. Argument-less invocation
+    remains completely unchanged.
 
+    \b
+    Examples:
+      codd fix                                          # auto-detect and fix
+      codd fix --ci                                     # fix latest CI failure
+      codd fix --local                                  # run tests locally and fix
+      codd fix --dry-run                                # show plan without fixing
+      codd fix --no-push                                # fix but don't push
+      codd fix "ログインエラーをわかりやすくしたい"     # PHENOMENON mode
+      codd fix "Button needs aria-label" --non-interactive
+    """
     project_root = Path(path).resolve()
     _require_codd_dir(project_root)
+
+    phenomenon_text = " ".join(phenomenon).strip()
+
+    if phenomenon_text:
+        _run_phenomenon_fix_cli(
+            project_root,
+            phenomenon_text,
+            ai_cmd=ai_cmd,
+            max_attempts=max_attempts,
+            non_interactive=non_interactive,
+            on_ambiguity=on_ambiguity,
+            allow_delete=allow_delete,
+            dry_run=dry_run,
+            push=not no_push,
+        )
+        return
+
+    from codd.fixer import run_fix
 
     if ci_only and local_only:
         click.echo("Error: --ci and --local are mutually exclusive.")
@@ -3424,6 +3466,87 @@ def fix(path: str, max_attempts: int, test_results: str | None, ci_log: str | No
     else:
         click.echo(f"\n❌ Could not fix all failures after {max_attempts} attempts.")
         click.echo("Review the errors above and fix manually.")
+        raise SystemExit(1)
+
+
+def _run_phenomenon_fix_cli(
+    project_root: Path,
+    phenomenon_text: str,
+    *,
+    ai_cmd: str | None,
+    max_attempts: int,
+    non_interactive: bool,
+    on_ambiguity: str,
+    allow_delete: bool,
+    dry_run: bool,
+    push: bool,
+) -> None:
+    """CLI adapter for the PHENOMENON-mode fix pipeline."""
+    from codd.fix import run_phenomenon_fix
+
+    if dry_run:
+        click.echo("🔍 Dry run — analyzing phenomenon without applying changes...")
+    click.echo(f"🩺 Phenomenon: {phenomenon_text}")
+
+    result = run_phenomenon_fix(
+        project_root,
+        phenomenon_text,
+        ai_command=ai_cmd,
+        non_interactive=non_interactive,
+        on_ambiguity=on_ambiguity,
+        max_attempts=max_attempts,
+        dry_run=dry_run,
+        push=push,
+        allow_delete=allow_delete,
+    )
+
+    if result.analysis is not None:
+        a = result.analysis
+        click.echo(
+            f"   intent={a.intent}, ambiguity={a.ambiguity_score:.2f}, "
+            f"subject_terms={a.subject_terms[:4]}"
+        )
+
+    if result.aborted:
+        click.echo(f"❌ Aborted: {result.abort_reason}")
+        raise SystemExit(1)
+
+    if result.selection is not None:
+        cands = result.selection.candidates
+        click.echo(f"   {len(cands)} candidate design doc(s) considered.")
+
+    if not result.attempts:
+        click.echo("ℹ️  No candidate produced a usable update.")
+        raise SystemExit(1)
+
+    applied_any = False
+    for att in result.attempts:
+        status = "✅" if att.applied else ("🔸" if att.aborted_reason == "dry_run: not applying" else "❌")
+        target_id = att.target.node_id if att.target else "(no target)"
+        click.echo(f"{status} Attempt {att.attempt} on {target_id}")
+        if att.update is not None and att.update.diff:
+            for line in att.update.diff.splitlines()[:40]:
+                click.echo(f"  {line}")
+            extra = len(att.update.diff.splitlines()) - 40
+            if extra > 0:
+                click.echo(f"  ... (+{extra} more diff lines)")
+        if att.risk is not None and att.risk.risky:
+            click.echo(f"  ⚠️ risk: {', '.join(att.risk.categories) or 'unspecified'} — {att.risk.summary}")
+        if att.aborted_reason:
+            click.echo(f"  reason: {att.aborted_reason}")
+        if att.applied:
+            applied_any = True
+
+    if dry_run:
+        click.echo("\n🔎 Dry run complete — no files were modified.")
+        return
+
+    if applied_any:
+        click.echo(f"\n✅ Updated {len(result.applied_paths)} design doc(s): "
+                   f"{', '.join(result.applied_paths)}")
+        click.echo("   Review the diff above and commit when satisfied.")
+    else:
+        click.echo("\n❌ No design doc was updated.")
         raise SystemExit(1)
 
 
