@@ -2109,6 +2109,15 @@ def implement_augment_cmd(
     help="Seconds before one chunk is interrupted",
 )
 @click.option("--enable-typecheck-loop", is_flag=True, default=False, help="Run configured typecheck repair loop after implementation")
+@click.option(
+    "--language",
+    default=None,
+    help=(
+        "Override project.language for this invocation only. Useful when "
+        "`codd init --language js` was chosen but a downstream spec/design "
+        "doc requires TypeScript (Issue #20). codd.yaml is not modified."
+    ),
+)
 def implement_run_cmd(
     task_id: str | None,
     project_path: str,
@@ -2117,6 +2126,7 @@ def implement_run_cmd(
     chunk_size: int | None,
     timeout_per_chunk: int,
     enable_typecheck_loop: bool,
+    language: str | None,
 ):
     """Run implementation with optional derived step injection."""
     from codd.implementer import auto_detect_task, implement_tasks
@@ -2140,6 +2150,7 @@ def implement_run_cmd(
                 chunk_size=chunk_size,
                 timeout_per_chunk=timeout_per_chunk,
                 history=None,
+                language=language,
             )
         except (FileNotFoundError, ValueError, CoddCLIError) as exc:
             click.echo(f"Error: {exc}")
@@ -2165,6 +2176,7 @@ def implement_run_cmd(
             task=task_id,
             ai_command=ai_cmd,
             use_derived_steps=_optional_bool(use_derived_steps),
+            language=language,
         )
     except (FileNotFoundError, ValueError, CoddCLIError) as exc:
         click.echo(f"Error: {exc}")
@@ -2237,6 +2249,7 @@ def _run_chunked_implementation(
     chunk_size: int,
     timeout_per_chunk: int,
     history: str | None,
+    language: str | None = None,
 ):
     if not task_id:
         raise ValueError("--task is required when chunked execution is enabled")
@@ -2245,6 +2258,13 @@ def _run_chunked_implementation(
     from codd.implementer.chunked_runner import ChunkedRunner
 
     config = _load_optional_project_config(project_root)
+    if language:
+        # Per-invocation language override (Issue #20, v-kato): align with
+        # implement_tasks() so both code paths honour the CLI flag without
+        # mutating codd.yaml on disk.
+        project_cfg = dict(config.get("project") or {})
+        project_cfg["language"] = language
+        config = {**config, "project": project_cfg}
     task_item, steps = _chunked_task_and_steps(project_root, config, task_id)
     resolved_ai_command = generator_module._resolve_ai_command(config, ai_cmd, command_name="implement")
 

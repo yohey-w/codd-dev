@@ -24,6 +24,7 @@ DEFAULT_NODE_PREFIXES = {
     "design",
     "detail",
     "detailed",
+    "detailed_design",
     "doc",
     "endpoint",
     "file",
