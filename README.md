@@ -113,11 +113,12 @@ This is what lets CoDD ship one core that works for Next.js, Django, FastAPI, Ra
 
 ## 🧭 Roadmap
 
-- **v2.13.0 (current)** — Opt-out protection: `OptOutPolicy` requires a `justification` + `expires_at` for every config-level opt-out (`ci.provider=none`, etc.). Silent SKIP abolished; severity preserved. `codd validate` reports policy violations. See [post-mortem](docs/post-mortems/optout_loophole.md).
-- **v2.12.0** — Test-completeness gates: C7 `actors_without_journeys` amber promotion + new C8 `ci_health` static check (workflow presence, trigger coverage, verification-in-workflow). See [post-mortem](docs/post-mortems/test_completeness_gap.md).
-- **v2.11.0** — Sprint-less `codd implement` (`--design <path> --output <dir>` directly; `implementation_plan.md` parser removed). See [migration guide](docs/migrations/v2.11.0-sprintless.md).
-- **v2.10.0** — Lexicon-driven completeness, 38 plug-ins, LLM-enhanced init, scope/phase filter, auto-repair across the full DAG.
-- **v2.14.0 (next)** — C8 `ci_health` runtime mode (opt-in `ci.runtime_check: true`) polling the CI provider for latest-run-on-default-branch success.
+- **v2.15.0 (current)** — `kind: common` for shared infrastructure (cmd_467). Classify cross-cutting files (DB client, middleware, config) as `common` via `common_node_patterns:` glob or frontmatter. C5 amber −79.2% on dogfood LMS (125 → 26). `**` glob translator fix. See [CHANGELOG](CHANGELOG.md).
+- **v2.14.0** — 8 structural gaps closed (cmd_466 dogfood). Sidecar `<test>.codd.yaml` with `verified_by:` (C6) / `axis_matrix:` (C9); lexicon schema SSoT; completeness_audit batch; `scan.exclude` bug fix (−52%); `codd dag verify --auto-repair`; elicit mock-AI sentinel; AI timeout 3600 s SSoT. Red 22 → 0.
+- **v2.13.0** — Opt-out protection: `OptOutPolicy` requires `justification` + `expires_at`. Silent SKIP abolished; severity preserved.
+- **v2.12.0** — Test-completeness gates: C7 amber promotion + C8 `ci_health` static check.
+- **v2.11.0** — Sprint-less `codd implement` (`--design <path> --output <dir>` directly).
+- **v2.16.0 (next)** — `codd fix [PHENOMENON]` — express a desired change in natural language; CoDD identifies affected design docs, updates them, updates implementation and tests, then verifies the DAG. Interactive mode included.
 
 ---
 
