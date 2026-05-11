@@ -125,11 +125,14 @@ def load_dag_settings(project_root: Path, settings: dict[str, Any] | None = None
     merged["test_suffixes"] = test_suffixes
     _apply_scan_patterns(merged, project_config)
     _apply_scan_patterns(merged, requested_settings)
+    _apply_common_node_patterns(merged, project_config)
+    _apply_common_node_patterns(merged, requested_settings)
     merged["coherence"] = _coherence_settings(project_config, requested_settings)
     merged["extraction"] = _extraction_settings(project_config, requested_settings)
     merged.setdefault("design_doc_patterns", [])
     merged.setdefault("impl_file_patterns", [])
     merged.setdefault("test_file_patterns", [])
+    merged.setdefault("common_node_patterns", [])
     # cmd_444 v2.11.0: implementation_plan.md is no longer the entry point.
     # `codd implement` now takes design_node + output_paths directly. Any
     # `plan_task_file` value present in legacy codd.yaml is silently ignored.
@@ -233,11 +236,16 @@ def _add_design_docs(dag: DAG, project_root: Path, settings: dict[str, Any]) -> 
         metadata = extract_design_doc_metadata(md_path, frontmatter_alias=frontmatter_alias)
         attributes = metadata.get("attributes") or {}
         _validate_design_doc_journey_attributes(node_id, attributes)
+        node_kind = (
+            "common"
+            if _design_doc_declares_common(metadata.get("frontmatter"), attributes)
+            else "design_doc"
+        )
         _add_node_once(
             dag,
             Node(
                 id=node_id,
-                kind="design_doc",
+                kind=node_kind,
                 path=node_id,
                 attributes={
                     "frontmatter": metadata["frontmatter"],
@@ -260,6 +268,8 @@ def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
     impl_nodes: dict[str, Path] = {}
     capability_patterns = _capability_patterns(settings)
     implementation_suffixes = _suffix_tuple(settings.get("implementation_suffixes")) or LEGACY_IMPLEMENTATION_SUFFIXES
+    common_patterns = _common_node_patterns(settings)
+    project_root_resolved = Path(project_root).resolve()
     for file_path in _glob_project_paths(
         project_root,
         settings.get("impl_file_patterns", []),
@@ -273,11 +283,16 @@ def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
             continue
         node_id = _relative_id(file_path, project_root)
         impl_nodes[node_id] = file_path.resolve()
+        kind = "impl_file"
+        if common_patterns and _path_matches_any_pattern(
+            file_path, project_root_resolved, common_patterns
+        ):
+            kind = "common"
         _add_node_once(
             dag,
             Node(
                 id=node_id,
-                kind="impl_file",
+                kind=kind,
                 path=node_id,
                 attributes={
                     "language": _language_for_path(file_path),
@@ -1118,42 +1133,58 @@ def _path_matches_any_pattern(
     except ValueError:
         return False
     rel_text = relative.as_posix()
-    parts = relative.parts
 
     for pattern in patterns:
-        if fnmatch.fnmatch(rel_text, pattern):
+        if _glob_pattern_to_regex(pattern).match(rel_text):
             return True
-        # Honour shell-style "any depth" wildcards by stripping the outer
-        # ``**/`` and ``/**`` decorations and looking for the inner pattern
-        # against any path slice. Examples:
-        #   **/node_modules/**  -> "node_modules"  must appear as a path component
-        #   **/dist/**          -> "dist"          must appear as a path component
-        #   src/**/*.py         -> not stripped here; falls back to fnmatch above
-        inner = pattern
-        stripped = True
-        while stripped:
-            stripped = False
-            if inner.startswith("**/"):
-                inner = inner[3:]
-                stripped = True
-            if inner.endswith("/**"):
-                inner = inner[:-3]
-                stripped = True
-        if not inner or inner == pattern:
-            continue
-        if "/" not in inner and "*" not in inner:
-            if inner in parts:
-                return True
-            continue
-        # Inner still contains glob syntax: check every contiguous slice of
-        # the relative path against ``inner`` so e.g. ``a/b/c/d`` matches
-        # ``a/b`` or ``c/d`` etc.
-        for start in range(len(parts)):
-            for end in range(start + 1, len(parts) + 1):
-                candidate = "/".join(parts[start:end])
-                if fnmatch.fnmatch(candidate, inner):
-                    return True
     return False
+
+
+_GLOB_REGEX_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _glob_pattern_to_regex(pattern: str) -> "re.Pattern[str]":
+    """Translate a glob pattern (with ``**`` recursion) into a regex.
+
+    Recognised tokens:
+
+    * ``**/`` — zero or more path segments (greedy across separators).
+    * ``**`` — anything (including ``/``); used at end of a pattern.
+    * ``*`` — any chars except ``/``.
+    * ``?`` — single char except ``/``.
+    * Anything else — literal.
+
+    Patterns such as ``**/dist/**`` match a path containing ``dist`` at any
+    depth, ``src/lib/**/*.ts`` matches both ``src/lib/x.ts`` and
+    ``src/lib/sub/x.ts``.
+    """
+
+    cached = _GLOB_REGEX_CACHE.get(pattern)
+    if cached is not None:
+        return cached
+
+    parts: list[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        if pattern[i : i + 3] == "**/":
+            parts.append("(?:[^/]+/)*")
+            i += 3
+        elif pattern[i : i + 2] == "**":
+            parts.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            parts.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            parts.append("[^/]")
+            i += 1
+        else:
+            parts.append(re.escape(pattern[i]))
+            i += 1
+    compiled = re.compile("^" + "".join(parts) + "$")
+    _GLOB_REGEX_CACHE[pattern] = compiled
+    return compiled
 
 
 def _expand_braces(pattern: str) -> list[str]:
@@ -1363,6 +1394,80 @@ def _capability_patterns(settings: dict[str, Any]) -> dict[str, Any]:
         return {}
     patterns = coherence.get("capability_patterns", {})
     return patterns if isinstance(patterns, dict) else {}
+
+
+def _apply_common_node_patterns(settings: dict[str, Any], config: dict[str, Any]) -> None:
+    """Capture ``common_node_patterns`` from project / requested config.
+
+    Recognises both ``common_node_patterns:`` at the top level (preferred,
+    sibling of ``scan:``) and ``scan.common_node_patterns:`` (nested under
+    scan for users who prefer to colocate scan-related knobs). Both feed
+    the same ``settings['common_node_patterns']`` list.
+    """
+
+    if not isinstance(config, dict):
+        return
+    patterns: list[str] = []
+    top = config.get("common_node_patterns")
+    if isinstance(top, list):
+        patterns.extend(
+            str(item) for item in top if isinstance(item, str) and item.strip()
+        )
+    scan = config.get("scan")
+    if isinstance(scan, dict):
+        nested = scan.get("common_node_patterns")
+        if isinstance(nested, list):
+            patterns.extend(
+                str(item) for item in nested if isinstance(item, str) and item.strip()
+            )
+    if patterns:
+        _extend_unique(settings, "common_node_patterns", patterns)
+
+
+def _design_doc_declares_common(
+    frontmatter: Any, attributes: Any
+) -> bool:
+    """Return True when a design doc opts into ``kind="common"`` via frontmatter.
+
+    Recognised keys (any one wins):
+    * ``codd.node_type`` (preferred, lives under the ``codd:`` block)
+    * top-level ``node_type`` (legacy / convenience)
+    """
+
+    for source in (frontmatter, attributes):
+        if not isinstance(source, dict):
+            continue
+        node_type = source.get("node_type")
+        if isinstance(node_type, str) and node_type.strip().lower() == "common":
+            return True
+        codd_block = source.get("codd")
+        if isinstance(codd_block, dict):
+            value = codd_block.get("node_type")
+            if isinstance(value, str) and value.strip().lower() == "common":
+                return True
+    return False
+
+
+def _common_node_patterns(settings: dict[str, Any]) -> list[str]:
+    """Return glob patterns that should be classified as ``kind='common'``.
+
+    Common nodes represent shared infrastructure (DB clients, middleware,
+    framework config, generated artifacts) that exist outside any single
+    design document's scope. They participate in the DAG so that change
+    impact can be traced, but they are exempt from C5 transitive_closure
+    unreachable_nodes since requiring every common file to have a parent
+    design_doc would force the entire codebase to be re-modelled as a tree.
+    """
+
+    raw = settings.get("common_node_patterns")
+    if not isinstance(raw, list):
+        return []
+    expanded: list[str] = []
+    for pattern in raw:
+        if not isinstance(pattern, str) or not pattern.strip():
+            continue
+        expanded.extend(_expand_braces(pattern.strip()))
+    return expanded
 
 
 def _runtime_evidence_for_file(file_path: Path, node_id: str, capability_patterns: dict[str, Any]) -> list[dict]:

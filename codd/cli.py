@@ -5275,6 +5275,9 @@ def _dag_result_details(result: Any) -> list[str]:
             details.append(f"{key}: {rendered}")
         else:
             details.append(f"{key}: {value}")
+    common_count = _dag_result_value(result, "common_node_count")
+    if isinstance(common_count, int) and common_count > 0:
+        details.append(f"common_node_count: {common_count}")
     return details
 
 
