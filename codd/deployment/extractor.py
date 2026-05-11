@@ -387,6 +387,19 @@ def infer_deployment_edges(
                     )
                 )
 
+    runtime_state_ids = {rs.identifier for rs in runtime_states}
+    for verification_test in verification_tests:
+        for state_id in verification_test.verified_by:
+            if state_id in runtime_state_ids:
+                edges.append(
+                    (
+                        state_id,
+                        verification_test.identifier,
+                        EDGE_VERIFIED_BY,
+                        {"source": "sidecar_declaration"},
+                    )
+                )
+
     for runtime_state in runtime_states:
         for verification_test in verification_tests:
             if _verification_matches_runtime(runtime_state, verification_test):
@@ -507,6 +520,10 @@ def verification_test_attributes(node: VerificationTestNode) -> dict[str, Any]:
         journey_name = node.expected_outcome.get("journey_name")
         if isinstance(journey_name, str) and journey_name:
             payload["journey_name"] = journey_name
+    # Pass sidecar declarations through unchanged so checks (C9 environment
+    # coverage, etc.) can inspect them via the node's attributes mapping.
+    payload["verified_by"] = list(node.verified_by)
+    payload["axis_matrix"] = list(node.axis_matrix)
     return payload
 
 
@@ -524,13 +541,52 @@ def _add_verification_test(
         return
     rel_path = _relative_id(path, project_root)
     identifier = f"verification:{kind.value}:{rel_path}"
+    sidecar = _load_verification_sidecar(path)
     tests[identifier] = VerificationTestNode(
         identifier=identifier,
         kind=kind,
         target=_verification_target(path),
         verification_template_ref=_verification_template_ref(path),
         expected_outcome={"source": rel_path},
+        verified_by=sidecar.get("verified_by", []),
+        axis_matrix=sidecar.get("axis_matrix", []),
     )
+
+
+def _load_verification_sidecar(test_path: Path) -> dict[str, Any]:
+    """Load opt-in YAML sidecar for a verification test.
+
+    The sidecar lives next to the test file as ``<test_path>.codd.yaml`` and
+    declares CoDD metadata that cannot be expressed inside the test file's
+    own source language (e.g. TypeScript .spec.ts files). Recognised keys:
+
+    * ``verified_by`` — list of runtime_state identifiers this test verifies
+    * ``axis_matrix`` — list of {journey, axis_type, variant_id} declarations
+    """
+
+    sidecar_path = test_path.with_suffix(test_path.suffix + ".codd.yaml")
+    if not sidecar_path.is_file():
+        return {}
+    try:
+        payload = yaml.safe_load(sidecar_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    result: dict[str, Any] = {}
+    raw_verified_by = payload.get("verified_by")
+    if isinstance(raw_verified_by, list):
+        result["verified_by"] = [
+            str(item).strip()
+            for item in raw_verified_by
+            if isinstance(item, str) and item.strip()
+        ]
+    raw_axis_matrix = payload.get("axis_matrix")
+    if isinstance(raw_axis_matrix, list):
+        result["axis_matrix"] = [
+            entry for entry in raw_axis_matrix if isinstance(entry, dict)
+        ]
+    return result
 
 
 def _add_cdp_browser_journey_tests(

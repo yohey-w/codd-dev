@@ -222,7 +222,11 @@ def _add_design_docs(dag: DAG, project_root: Path, settings: dict[str, Any]) -> 
     design_docs: dict[str, dict[str, Any]] = {}
     aliases: dict[str, str] = {}
     frontmatter_alias = _frontmatter_alias_settings(settings)
-    for md_path in _glob_project_paths(project_root, settings.get("design_doc_patterns", [])):
+    for md_path in _glob_project_paths(
+        project_root,
+        settings.get("design_doc_patterns", []),
+        exclude_patterns=settings.get("scan_exclude_patterns"),
+    ):
         if not md_path.is_file():
             continue
         node_id = _relative_id(md_path, project_root)
@@ -256,7 +260,11 @@ def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
     impl_nodes: dict[str, Path] = {}
     capability_patterns = _capability_patterns(settings)
     implementation_suffixes = _suffix_tuple(settings.get("implementation_suffixes")) or LEGACY_IMPLEMENTATION_SUFFIXES
-    for file_path in _glob_project_paths(project_root, settings.get("impl_file_patterns", [])):
+    for file_path in _glob_project_paths(
+        project_root,
+        settings.get("impl_file_patterns", []),
+        exclude_patterns=settings.get("scan_exclude_patterns"),
+    ):
         if (
             not file_path.is_file()
             or file_path.suffix not in implementation_suffixes
@@ -284,7 +292,11 @@ def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
 def _add_test_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> dict[str, Path]:
     test_nodes: dict[str, Path] = {}
     test_suffixes = _suffix_tuple(settings.get("test_suffixes")) or LEGACY_TEST_SUFFIXES
-    for file_path in _glob_project_paths(project_root, settings.get("test_file_patterns", [])):
+    for file_path in _glob_project_paths(
+        project_root,
+        settings.get("test_file_patterns", []),
+        exclude_patterns=settings.get("scan_exclude_patterns"),
+    ):
         if not file_path.is_file() or file_path.suffix not in test_suffixes or not _is_test_file(file_path, project_root):
             continue
         node_id = _relative_id(file_path, project_root)
@@ -1067,7 +1079,11 @@ def _alias_candidates(import_ref: str, project_root: Path, aliases: dict[str, li
     return candidates
 
 
-def _glob_project_paths(project_root: Path, patterns: Any) -> list[Path]:
+def _glob_project_paths(
+    project_root: Path,
+    patterns: Any,
+    exclude_patterns: Any = None,
+) -> list[Path]:
     paths: dict[str, Path] = {}
     for pattern in _as_list(patterns):
         if not isinstance(pattern, str) or not pattern:
@@ -1075,7 +1091,69 @@ def _glob_project_paths(project_root: Path, patterns: Any) -> list[Path]:
         for expanded in _expand_braces(pattern):
             for path in project_root.glob(expanded):
                 paths[str(path.resolve())] = path.resolve()
-    return [paths[key] for key in sorted(paths)]
+    excludes = [
+        str(pattern)
+        for pattern in _as_list(exclude_patterns)
+        if isinstance(pattern, str) and pattern.strip()
+    ]
+    if not excludes:
+        return [paths[key] for key in sorted(paths)]
+    project_root_resolved = project_root.resolve()
+    filtered: list[Path] = []
+    for key in sorted(paths):
+        path = paths[key]
+        if _path_matches_any_pattern(path, project_root_resolved, excludes):
+            continue
+        filtered.append(path)
+    return filtered
+
+
+def _path_matches_any_pattern(
+    path: Path,
+    project_root: Path,
+    patterns: list[str],
+) -> bool:
+    try:
+        relative = path.resolve().relative_to(project_root)
+    except ValueError:
+        return False
+    rel_text = relative.as_posix()
+    parts = relative.parts
+
+    for pattern in patterns:
+        if fnmatch.fnmatch(rel_text, pattern):
+            return True
+        # Honour shell-style "any depth" wildcards by stripping the outer
+        # ``**/`` and ``/**`` decorations and looking for the inner pattern
+        # against any path slice. Examples:
+        #   **/node_modules/**  -> "node_modules"  must appear as a path component
+        #   **/dist/**          -> "dist"          must appear as a path component
+        #   src/**/*.py         -> not stripped here; falls back to fnmatch above
+        inner = pattern
+        stripped = True
+        while stripped:
+            stripped = False
+            if inner.startswith("**/"):
+                inner = inner[3:]
+                stripped = True
+            if inner.endswith("/**"):
+                inner = inner[:-3]
+                stripped = True
+        if not inner or inner == pattern:
+            continue
+        if "/" not in inner and "*" not in inner:
+            if inner in parts:
+                return True
+            continue
+        # Inner still contains glob syntax: check every contiguous slice of
+        # the relative path against ``inner`` so e.g. ``a/b/c/d`` matches
+        # ``a/b`` or ``c/d`` etc.
+        for start in range(len(parts)):
+            for end in range(start + 1, len(parts) + 1):
+                candidate = "/".join(parts[start:end])
+                if fnmatch.fnmatch(candidate, inner):
+                    return True
+    return False
 
 
 def _expand_braces(pattern: str) -> list[str]:
@@ -1306,6 +1384,11 @@ def _apply_scan_patterns(settings: dict[str, Any], config: dict[str, Any]) -> No
     source_dirs = _as_list(scan.get("source_dirs"))
     test_dirs = _as_list(scan.get("test_dirs"))
     doc_dirs = _as_list(scan.get("doc_dirs"))
+    exclude_patterns = [
+        str(pattern)
+        for pattern in _as_list(scan.get("exclude"))
+        if isinstance(pattern, str) and pattern.strip()
+    ]
 
     if source_dirs:
         _extend_unique(
@@ -1324,6 +1407,8 @@ def _apply_scan_patterns(settings: dict[str, Any], config: dict[str, Any]) -> No
         )
     if doc_dirs:
         _extend_unique(settings, "design_doc_patterns", _file_patterns_for_dirs(doc_dirs, (".md",)))
+    if exclude_patterns:
+        _extend_unique(settings, "scan_exclude_patterns", exclude_patterns)
 
 
 def _normalize_dag_section(section: dict[str, Any]) -> dict[str, Any]:

@@ -20,6 +20,19 @@ from codd.elicit.persistence import ElicitPersistence
 DEFAULT_TEMPLATE_PATH = Path(__file__).parent / "templates" / "elicit_prompt_L0.md"
 DEFAULT_MAX_CONTEXT_CHARS = 24000
 
+# Sentinel commands that bypass AI invocation and return an empty,
+# well-formed elicit payload. Useful for AI-free integration tests and for
+# structural-findings-only runs in CI where AI cost matters.
+_MOCK_AI_COMMAND_SENTINELS = frozenset({"true", ":", "none", "mock"})
+_MOCK_AI_OUTPUT = '{"findings": [], "lexicon_coverage_report": {}}'
+
+
+def _is_mock_ai_command(ai_command: Any) -> bool:
+    if not isinstance(ai_command, str):
+        return False
+    stripped = ai_command.strip().lower()
+    return stripped in _MOCK_AI_COMMAND_SENTINELS
+
 
 class ElicitEngine:
     """Build an elicitation prompt, invoke an AI command, and parse findings."""
@@ -129,6 +142,8 @@ class ElicitEngine:
         return _replace_placeholders(template, replacements)
 
     def invoke(self, prompt: str, project_root: Path) -> str:
+        if _is_mock_ai_command(self.ai_command):
+            return _MOCK_AI_OUTPUT
         if callable(self.ai_command) and not hasattr(self.ai_command, "invoke"):
             return str(self.ai_command(prompt))
         if hasattr(self.ai_command, "invoke"):

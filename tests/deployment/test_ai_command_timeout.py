@@ -1,18 +1,25 @@
-"""Regression tests for cmd_454: ensure DEFAULT_TIMEOUT_SECONDS = 1800."""
+"""Regression tests for AI command default timeout.
+
+cmd_466 raised the default to 3600s via the ``codd.defaults`` SSoT; see
+``feedback_codd_default_values_policy``. The override paths
+(``CODD_AI_TIMEOUT_SECONDS`` env, ``llm.timeout_seconds`` config) remain
+unchanged.
+"""
 
 from __future__ import annotations
 
 import pytest
 
+from codd.defaults import AI_TIMEOUT_SECONDS
 from codd.deployment.providers.ai_command import (
     DEFAULT_TIMEOUT_SECONDS,
     resolve_timeout,
 )
 
 
-def test_default_timeout_seconds_is_1800() -> None:
-    """cmd_454 default: 30 minutes accommodates multi-lexicon elicit pipelines."""
-    assert DEFAULT_TIMEOUT_SECONDS == 1800.0
+def test_default_timeout_seconds_matches_ssot() -> None:
+    """cmd_466: ai_command default is sourced from codd.defaults."""
+    assert DEFAULT_TIMEOUT_SECONDS == AI_TIMEOUT_SECONDS == 3600.0
 
 
 def test_resolve_timeout_uses_default_when_no_input() -> None:

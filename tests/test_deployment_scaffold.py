@@ -75,6 +75,8 @@ def test_verification_test_node_serializes_expected_outcome():
         "target": "/api/auth/login",
         "verification_template_ref": "curl",
         "expected_outcome": {"status": 200},
+        "verified_by": [],
+        "axis_matrix": [],
     }
 
 

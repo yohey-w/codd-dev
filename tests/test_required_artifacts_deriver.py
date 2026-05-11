@@ -290,7 +290,7 @@ def test_project_lexicon_rejects_required_artifact_without_valid_source():
         }
     ]
 
-    with pytest.raises(LexiconError, match="required_artifacts source"):
+    with pytest.raises(LexiconError, match=r"source must be one of"):
         validate_lexicon(data)
 
 

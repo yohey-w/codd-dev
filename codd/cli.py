@@ -4890,7 +4890,28 @@ def dag_build(project_path: str, output_format: str, cache: bool, output: str | 
     type=click.Choice(["text", "json"]),
     help="Output format",
 )
-def dag_verify(project_path: str, check_names: tuple[str, ...], output_format: str):
+@click.option(
+    "--auto-repair",
+    is_flag=True,
+    default=False,
+    help="Apply violation-output suggestions mechanically (e.g. append "
+    "suggested_lexicon_entry to project_lexicon.yaml). Implies a dry-run "
+    "preview unless --apply is also supplied.",
+)
+@click.option(
+    "--apply",
+    "apply_changes",
+    is_flag=True,
+    default=False,
+    help="Write changes to disk when --auto-repair is set. Default: dry run.",
+)
+def dag_verify(
+    project_path: str,
+    check_names: tuple[str, ...],
+    output_format: str,
+    auto_repair: bool,
+    apply_changes: bool,
+):
     """Run DAG completeness checks."""
     from codd.dag.runner import run_all_checks
 
@@ -4939,6 +4960,20 @@ def dag_verify(project_path: str, check_names: tuple[str, ...], output_format: s
             click.echo(f"\n{len(opt_out_results)} active opt-out(s) (deploy allowed):")
             for result in opt_out_results:
                 click.echo(f"  - {_dag_result_name(result)}: {_dag_result_message(result)}")
+
+    if auto_repair:
+        from codd.dag.auto_repair import apply_auto_repair
+
+        outcome = apply_auto_repair(project_root, results, dry_run=not apply_changes)
+        click.echo("")
+        verb = "Would apply" if not apply_changes else "Applied"
+        click.echo(f"{verb} {len(outcome.applied)} repair(s):")
+        for action in outcome.applied:
+            click.echo(f"  - {action.description}")
+        if outcome.skipped:
+            click.echo(f"\nSkipped {len(outcome.skipped)} non-repairable violation(s):")
+            for action in outcome.skipped:
+                click.echo(f"  - {action.description}")
 
     raise SystemExit(1 if failed_red else 0)
 
