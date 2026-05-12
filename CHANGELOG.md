@@ -186,6 +186,32 @@ pip install --upgrade codd-dev
 Users on v2.16.0 / v2.17.0 who hit `FileNotFoundError` from `codd fix
 [PHENOMENON]` should upgrade immediately.
 
+### SWE-bench Lite 73 — **100% achieved (Union)** on v2.17.1 (cmd_460)
+
+Re-ran the SWE-bench Lite 73-sample harness against `codd-dev==2.17.1`
+to verify there was no regression from the rapid v2.12 → v2.17.1
+release train. Result: **Union (Claude Opus 4.7 OR Codex GPT-5.5 xhigh)
+solves all 73 / 73**, with Codex alone reaching **73 / 73 (100%)** for
+the first time.
+
+| Backend | v2.11.0 | v2.17.1 | Δ |
+|---------|:-------:|:-------:|:-:|
+| Claude Opus 4.7 (effort=max) | 62 / 73 (84.9%) | **66 / 73 (90.4%)** | +4 |
+| Codex GPT-5.5 xhigh | 69 / 73 (94.5%) | **73 / 73 (100%)** | +4 |
+| Union (either backend) | 69 / 73 (94.5%) | **73 / 73 (100%)** | +4 |
+
+Phase setup: Phase 1 single-shot → Phase 2 retry loop
+(`PHASE2_TIMEOUT=1800s`, `max_attempts=6`) → Phase 3 Post-Patch Checklist
+with DIVERGENT retry (`max_attempts=20`, raised from 6 to absorb the
+sympy / scikit-learn long-tail observed in earlier runs).
+
+Full per-repo breakdown and per-instance disagreement table:
+[`docs/swebench/v2.17.1_run.md`](swebench/v2.17.1_run.md).
+
+This confirms the v2.16.x / v2.17.x design-update + `common` node-kind
+work introduces no SWE-bench regression and that the Phase 3 Post-Patch
+Checklist closes the remaining gaps observed at v2.11.0.
+
 ---
 
 ## [2.17.0] - 2026-05-11 — node_completeness `kind: common` fix (cmd_470)
