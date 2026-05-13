@@ -62,8 +62,8 @@ codd fix "登录错误信息不够清晰"   # 自然语言 现象起点模式
 flowchart LR
     R["需求 (.md)"] --> E["codd elicit"]
     E -->|gap findings| H{HITL: approve / reject}
-    H -->|[x]| L["project_lexicon.yaml + 需求 TODO"]
-    H -->|[r]| I["ignored_findings.yaml"]
+    H -->|approve| L["project_lexicon.yaml + 需求 TODO"]
+    H -->|reject| I["ignored_findings.yaml"]
     L --> V["codd dag verify --auto-repair"]
     V -->|违规| AR["LLM 提交 patch → 应用"]
     AR --> V

@@ -62,8 +62,8 @@ codd fix "ログインエラーメッセージをわかりやすくしたい"   
 flowchart LR
     R["要件 (.md)"] --> E["codd elicit"]
     E -->|gap findings| H{HITL: approve / reject}
-    H -->|[x]| L["project_lexicon.yaml + 要件 TODO"]
-    H -->|[r]| I["ignored_findings.yaml"]
+    H -->|approve| L["project_lexicon.yaml + 要件 TODO"]
+    H -->|reject| I["ignored_findings.yaml"]
     L --> V["codd dag verify --auto-repair"]
     V -->|違反| AR["LLM patch 提案 → 適用"]
     AR --> V

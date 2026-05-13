@@ -62,8 +62,8 @@ codd fix "login error messages are hard to understand"   # natural-language phen
 flowchart LR
     R["Requirements (.md)"] --> E["codd elicit"]
     E -->|gap findings| H{HITL: approve / reject}
-    H -->|[x]| L["project_lexicon.yaml + requirements TODOs"]
-    H -->|[r]| I["ignored_findings.yaml"]
+    H -->|approve| L["project_lexicon.yaml + requirements TODOs"]
+    H -->|reject| I["ignored_findings.yaml"]
     L --> V["codd dag verify --auto-repair"]
     V -->|violation| AR["LLM patch propose → apply"]
     AR --> V
