@@ -4,6 +4,22 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.19.0] - 2026-05-17
+
+### Changed
+- **Pro Gate 撤廃**: `codd verify` が `propagator.run_verify` を直接呼び出すようになりました（`codd-pro` 不要）
+- `codd-pro` は破損状態（v1.6.0 は codd-dev>=1.6,<1.7 制約で v2.x と非互換）のため archive 予定
+- `bridge.py` の `get_command_handler()` は将来の verify プラグイン解決用に残しつつ、Pro Gate の旧コマンド registry 依存を削除
+
+### Removed
+- `codd review`, `codd audit`, `codd risk` コマンドを削除（実装本体が存在しなかったコマンド、影響ユーザー: 0件）
+- `bridge.py` から legacy Pro install message および Pro Gate 用旧コマンド registry を削除
+- `cli.py` から legacy Pro dispatcher 関数を削除
+
+### Notes
+- BREAKING CHANGE: `codd review` / `codd audit` / `codd risk` は削除されました（影響ユーザー: 0件確認済み）
+- `bridge.py` の plugin system 自体は将来のサードパーティプラグイン用に維持
+
 ## [2.18.0] - 2026-05-12 — Greenfield triage from v-kato: Issues #20, #21, #22 (cmd_473)
 
 ### Background

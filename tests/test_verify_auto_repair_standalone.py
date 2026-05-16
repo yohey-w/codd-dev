@@ -38,7 +38,6 @@ def test_auto_repair_uses_standalone_verify_when_pro_missing(tmp_path: Path, mon
     project = _write_project(tmp_path)
     monkeypatch.setattr(cli, "get_command_handler", lambda name: None)
     monkeypatch.setattr("codd.repair.verify_runner.run_standalone_verify", lambda project_root: VerificationResult(True))
-    monkeypatch.setattr(cli, "_run_pro_command", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pro called")))
 
     result = CliRunner().invoke(main, ["verify", "--path", str(project), "--auto-repair"])
 
@@ -94,32 +93,25 @@ def test_auto_repair_prefers_standalone_when_pro_handler_exists(tmp_path: Path, 
         lambda project_root: calls.append(project_root) or VerificationResult(True),
     )
 
-    def run_pro(name, **kwargs):
-        raise AssertionError("pro called")
-
-    monkeypatch.setattr(cli, "_run_pro_command", run_pro)
-
     result = CliRunner().invoke(main, ["verify", "--path", str(project), "--auto-repair"])
 
     assert result.exit_code == 0
     assert calls == [project.resolve()]
 
 
-def test_verify_without_auto_repair_keeps_pro_verify_when_handler_exists(tmp_path: Path, monkeypatch):
+def test_verify_without_auto_repair_uses_standalone_verify_even_when_handler_exists(tmp_path: Path, monkeypatch):
     project = _write_project(tmp_path)
-    captured = {}
-    monkeypatch.setattr("codd.repair.verify_runner.run_standalone_verify", lambda project_root: (_ for _ in ()).throw(AssertionError("standalone called")))
-
-    def run_pro(name, **kwargs):
-        captured["name"] = name
-        captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(cli, "_run_pro_command", run_pro)
+    calls = []
+    monkeypatch.setattr(cli, "get_command_handler", lambda name: object())
+    monkeypatch.setattr(
+        "codd.repair.verify_runner.run_standalone_verify",
+        lambda project_root: calls.append(project_root) or VerificationResult(True),
+    )
 
     result = CliRunner().invoke(main, ["verify", "--path", str(project)])
 
     assert result.exit_code == 0
-    assert captured == {"name": "verify", "kwargs": {"path": str(project), "sprint": None}}
+    assert calls == [project.resolve()]
 
 
 def test_standalone_verify_reports_missing_codd_yaml(tmp_path: Path):

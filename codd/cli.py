@@ -14,7 +14,7 @@ from typing import Any
 import click
 import yaml
 
-from codd.bridge import PRO_COMMAND_INSTALL_MESSAGE, get_command_handler
+from codd.bridge import get_command_handler
 from codd.config import find_codd_dir, load_project_config
 from codd.lexicon import LEXICON_FILENAME, load_lexicon, load_project_extends
 
@@ -170,18 +170,6 @@ def _compare_version_keys(installed: tuple[int, ...], op: str, expected: tuple[i
         upper = upper + (0,) * (size - len(upper))
         return left >= right and left < upper
     return False
-
-
-def _run_pro_command(name: str, **kwargs):
-    """Dispatch a Pro-only command when the bridge plugin is installed."""
-    handler = get_command_handler(name)
-    if handler is None:
-        click.echo(PRO_COMMAND_INSTALL_MESSAGE)
-        raise SystemExit(1)
-
-    result = handler(**kwargs)
-    if type(result) is int:
-        raise SystemExit(result)
 
 
 def _require_codd_dir(project_root: Path) -> Path:
@@ -2433,11 +2421,12 @@ def verify(
         return
     if e2e or deploy:
         from codd.e2e_runner import run_e2e
+
         run_e2e(path=path, deploy=deploy, base_url=base_url)
         return
 
     if not auto_repair:
-        _run_pro_command("verify", path=path, sprint=sprint)
+        _run_verify_once(path=path, sprint=sprint, prefer_standalone=True)
         return
 
     project_root = Path(path).resolve()
@@ -2823,28 +2812,6 @@ def repair_slice_cmd(path, files, issue, issue_file, language, source_dirs, top_
         top_n=top_n,
     )
     click.echo(result)
-
-
-@main.command()
-@click.option("--path", default=".", help="Project root directory")
-@click.option("--scope", default=None, help="Review a single document by node_id")
-@click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
-@click.option(
-    "--ai-cmd",
-    default=None,
-    help="Override AI CLI command (defaults to codd.yaml ai_command)",
-)
-def review(path: str, scope: str | None, as_json: bool, ai_cmd: str | None):
-    """Review design documents for content quality using AI.
-
-    Evaluates artifacts against type-specific criteria (architecture soundness,
-    completeness, consistency with upstream docs, etc.) and returns PASS/FAIL
-    with a score and detailed feedback.
-
-    Without --scope: reviews all documents.
-    With --scope: reviews a single document by node_id.
-    """
-    _run_pro_command("review", path=path, scope=scope, as_json=as_json, ai_cmd=ai_cmd)
 
 
 @main.command()
@@ -3315,41 +3282,6 @@ def fixup_drift(path: str, dry_run: bool, severity: str, kind: str):
     )
     for error in result.get("errors", []):
         click.echo(f"Error: {error}")
-
-
-@main.command()
-@click.option("--diff", default="HEAD", help="Git diff target (default: HEAD)")
-@click.option("--path", default=".", help="Project root directory")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-@click.option("--skip-review", is_flag=True, help="Skip AI review (faster, no AI cost)")
-@click.option("--output", default=None, help="Output file (default: stdout)")
-@click.option("--ai-cmd", default=None, help="Override AI command for review phase")
-def audit(diff: str, path: str, as_json: bool, skip_review: bool, output: str | None, ai_cmd: str | None):
-    """Change review pack — validate + impact + policy + review in one report.
-
-    Produces a consolidated audit report for PM/QA to make merge/release
-    decisions. Runs four phases: structural validation, impact analysis,
-    policy check (enterprise rules from codd.yaml), and (optionally) AI
-    quality review.
-
-    Exit code: 0 = APPROVE, 1 = CONDITIONAL or REJECT.
-    """
-    _run_pro_command(
-        "audit",
-        diff=diff,
-        path=path,
-        as_json=as_json,
-        skip_review=skip_review,
-        output=output,
-        ai_cmd=ai_cmd,
-    )
-
-
-@main.command()
-@click.option("--path", default=".", help="Project root directory")
-def risk(path: str):
-    """Analyze change risk using the codd-pro extension pack."""
-    _run_pro_command("risk", path=path)
 
 
 @main.command()
@@ -4563,11 +4495,12 @@ def _run_verify_once(
     *,
     prefer_standalone: bool = False,
 ) -> _CliVerificationResult:
-    if prefer_standalone or get_command_handler("verify") is None:
+    handler = None if prefer_standalone else get_command_handler("verify")
+    if handler is None:
         return _run_standalone_verify_once(path)
 
     try:
-        _run_pro_command("verify", path=path, sprint=sprint)
+        result = handler(path=path, sprint=sprint)
     except SystemExit as exc:
         exit_code = _system_exit_code(exc)
         passed = exit_code == 0
@@ -4580,6 +4513,19 @@ def _run_verify_once(
                 {},
             )
         return _CliVerificationResult(passed=passed, exit_code=exit_code, failure=failure)
+    if isinstance(result, _CliVerificationResult):
+        return result
+    if type(result) is int:
+        passed = result == 0
+        failure = None
+        if not passed:
+            failure = _verification_failure_report(
+                "verify",
+                [],
+                [f"codd verify exited with code {result}"],
+                {},
+            )
+        return _CliVerificationResult(passed=passed, exit_code=result, failure=failure)
     return _CliVerificationResult(passed=True, exit_code=0, failure=None)
 
 
