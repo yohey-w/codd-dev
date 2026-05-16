@@ -1,4 +1,4 @@
-"""Bridge helpers for optional codd-pro extensions and plugin registration."""
+"""Bridge helpers for optional plugin registration."""
 
 from __future__ import annotations
 
@@ -8,10 +8,6 @@ from typing import Any, Callable
 
 
 PLUGIN_GROUP = "codd.plugins"
-PRO_COMMAND_INSTALL_MESSAGE = (
-    "このコマンドは codd-pro に移動しました。"
-    "pip install codd-pro でインストールできます。"
-)
 
 
 @dataclass
@@ -22,7 +18,6 @@ class BridgeRegistry:
     validator_handler: Callable[..., Any] | None = None
     policy_handler: Callable[..., Any] | None = None
     risk_builder: Callable[..., Any] | None = None
-    command_handlers: dict[str, Callable[..., Any]] = field(default_factory=dict)
     mcp_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     mcp_handlers: dict[str, Callable[..., Any]] = field(default_factory=dict)
 
@@ -37,9 +32,6 @@ class BridgeRegistry:
 
     def register_risk_builder(self, handler: Callable[..., Any]) -> None:
         self.risk_builder = handler
-
-    def register_command(self, name: str, handler: Callable[..., Any]) -> None:
-        self.command_handlers[name] = handler
 
     def register_mcp_tool(self, tool: dict[str, Any], handler: Callable[..., Any]) -> None:
         name = str(tool.get("name") or "")
@@ -79,5 +71,12 @@ def load_bridge_registry() -> BridgeRegistry:
 
 
 def get_command_handler(name: str) -> Callable[..., Any] | None:
-    """Return the registered handler for a Pro-only CLI command."""
-    return load_bridge_registry().command_handlers.get(name)
+    """Return an optional plugin-provided command handler."""
+    registry = load_bridge_registry()
+    resolver = getattr(registry, "resolve_command_handler", None)
+    if callable(resolver):
+        handler = resolver(name)
+        return handler if callable(handler) else None
+
+    handler = getattr(registry, f"{name}_handler", None)
+    return handler if callable(handler) else None

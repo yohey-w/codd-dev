@@ -175,19 +175,19 @@ def test_verify_auto_repair_passes_max_attempts_and_engine(tmp_path: Path, monke
     assert captured["engine_name"] == "scripted"
 
 
-def test_verify_without_auto_repair_keeps_existing_pro_command_behavior(monkeypatch):
+def test_verify_without_auto_repair_uses_standalone_path(monkeypatch):
     captured = {}
 
-    def run_pro(name, **kwargs):
-        captured["name"] = name
-        captured["kwargs"] = kwargs
+    def run_verify_once(**kwargs):
+        captured.update(kwargs)
+        return cli._CliVerificationResult(True, 0)
 
-    monkeypatch.setattr(cli, "_run_pro_command", run_pro)
+    monkeypatch.setattr(cli, "_run_verify_once", run_verify_once)
 
     result = CliRunner().invoke(main, ["verify", "--path", "/tmp/demo"])
 
     assert result.exit_code == 0
-    assert captured == {"name": "verify", "kwargs": {"path": "/tmp/demo", "sprint": None}}
+    assert captured == {"path": "/tmp/demo", "sprint": None, "prefer_standalone": True}
 
 
 def test_repair_from_report_runs_repair_loop(tmp_path: Path, monkeypatch):

@@ -163,7 +163,6 @@ def test_auto_repair_uses_standalone_path_even_when_pro_handler_exists(project: 
         "codd.repair.verify_runner.run_standalone_verify",
         lambda project_root: calls.append(project_root) or VerificationResult(True),
     )
-    monkeypatch.setattr(cli, "_run_pro_command", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pro called")))
 
     result = CliRunner().invoke(main, ["verify", "--path", str(project), "--auto-repair"])
 
@@ -171,19 +170,18 @@ def test_auto_repair_uses_standalone_path_even_when_pro_handler_exists(project: 
     assert calls == [project.resolve()]
 
 
-def test_verify_without_auto_repair_preserves_pro_command_behavior(project: Path, monkeypatch):
-    captured = {}
-
-    def run_pro(name, **kwargs):
-        captured["name"] = name
-        captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(cli, "_run_pro_command", run_pro)
+def test_verify_without_auto_repair_uses_standalone_verify(project: Path, monkeypatch):
+    calls: list[Path] = []
+    monkeypatch.setattr(cli, "get_command_handler", lambda name: object())
+    monkeypatch.setattr(
+        "codd.repair.verify_runner.run_standalone_verify",
+        lambda project_root: calls.append(project_root) or VerificationResult(True),
+    )
 
     result = CliRunner().invoke(main, ["verify", "--path", str(project)])
 
     assert result.exit_code == 0
-    assert captured == {"name": "verify", "kwargs": {"path": str(project), "sprint": None}}
+    assert calls == [project.resolve()]
 
 
 def test_missing_expected_proof_break_warns_and_skips(project: Path, monkeypatch):

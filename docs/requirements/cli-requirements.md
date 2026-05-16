@@ -77,12 +77,8 @@ Evidence: `codd/cli.py` (705 lines, 18 public symbols), registered as entry poin
 - The CLI **shall** support `--language` override, `--source-dirs` as comma-separated list, and `--output` directory (default: `codd/extracted/`). (Evidence: `cli.py:427-430`)
 - The CLI **shall** report module count, file count, line count, and list generated files. (Evidence: `cli.py:451-454`)
 
-### FR-CLI-13: AI-Powered Document Review (`codd review`) [observed]
-- The CLI **shall** evaluate design documents against type-specific quality criteria (architecture soundness, completeness, consistency). (Evidence: docstring at `cli.py:472-479`)
-- The CLI **shall** support `--scope` to review a single document by node_id. (Evidence: `cli.py:464`)
-- The CLI **shall** output results as human-readable text or JSON (via `--json`). (Evidence: `cli.py:496-527`)
-- JSON output **shall** include `pass_count`, `fail_count`, `avg_score`, and per-document `verdict`, `score`, `issues` (with severity and message), and `feedback`. (Evidence: `cli.py:497-513`)
-- The CLI **shall** exit with code 0 if all documents pass, 1 if any fail. (Evidence: `cli.py:529-530`)
+### FR-CLI-13: Reserved
+- The legacy AI-powered document review command was removed in v2.19.0 because no implementation body existed in the OSS package.
 
 ### FR-CLI-14: Frontmatter Validation (`codd validate`) [observed]
 - The CLI **shall** validate CoDD frontmatter and dependency references across all documents. (Evidence: `cli.py:536`)
@@ -102,7 +98,7 @@ Evidence: `codd/cli.py` (705 lines, 18 public symbols), registered as entry poin
 - `hooks run-pre-commit` **shall** be a hidden command that runs CoDD pre-commit checks. (Evidence: `cli.py:649`, `hidden=True`)
 
 ### FR-CLI-17: AI Command Resolution [observed]
-- All AI-dependent commands **shall** accept `--ai-cmd` to override the configured AI CLI command. (Evidence: consistent `--ai-cmd` option across `generate`, `restore`, `require`, `propagate`, `implement`, `assemble`, `review`, `plan`)
+- All AI-dependent commands **shall** accept `--ai-cmd` to override the configured AI CLI command. (Evidence: consistent `--ai-cmd` option across `generate`, `restore`, `require`, `propagate`, `implement`, `assemble`, `plan`)
 - [inferred] Resolution priority: CLI `--ai-cmd` > per-command `ai_commands` in `codd.yaml` > global `ai_command` in `codd.yaml` > default `'claude --print'`. (Evidence: test names `test_resolve_ai_command_*` in `test_generate.py`)
 
 ### FR-CLI-18: Feedback Loop Integration [observed]
@@ -120,10 +116,10 @@ Evidence: `codd/cli.py` (705 lines, 18 public symbols), registered as entry poin
 - All commands **shall** catch `FileNotFoundError` and `ValueError` from delegated modules and print user-friendly error messages before exiting with code 1. (Evidence: try/except pattern repeated in every command)
 
 ### NFR-CLI-03: Exit Code Discipline [observed]
-- Commands **shall** exit with code 0 on success and code 1 on failure. Verification and review commands **shall** use `SystemExit` to propagate the exit code. (Evidence: `cli.py:423, 529-530, 542, 656`)
+- Commands **shall** exit with code 0 on success and code 1 on failure. Verification commands **shall** use `SystemExit` to propagate the exit code. (Evidence: `cli.py:423, 542, 656`)
 
 ### NFR-CLI-04: Test Coverage [observed]
-- 12 of 18 CLI symbols (67%) have test coverage. Uncovered symbols: `assemble`, `hooks`, `hooks_install`, `hooks_run_pre_commit`, `impact`, `review`. (Evidence: extracted test coverage data)
+- 12 of 17 CLI symbols (71%) have test coverage. Uncovered symbols: `assemble`, `hooks`, `hooks_install`, `hooks_run_pre_commit`, `impact`. (Evidence: extracted test coverage data)
 
 ### NFR-CLI-05: Output Sanitization [observed]
 - Generated document bodies **shall** be sanitized to remove meta-preamble, code fences, duplicate titles, and unstructured content. (Evidence: extensive `test_sanitize_generated_body_*` tests in `test_generate.py`)
@@ -164,6 +160,4 @@ Evidence: `codd/cli.py` (705 lines, 18 public symbols), registered as entry poin
 
 4. **Is the `.codd_version` value (`0.2.0`) intended to track the CoDD schema version or the tool version?** It is hardcoded rather than derived from `package_name="codd-dev"`. [speculative]
 
-5. **What are the quality criteria used by `codd review`?** The CLI references "type-specific criteria" in its docstring, but the actual rubric is defined in the `reviewer` module, not visible from the CLI layer alone. [observed — details require `reviewer` module analysis]
-
-6. **Six CLI commands lack test coverage** (`assemble`, `hooks`, `hooks_install`, `hooks_run_pre_commit`, `impact`, `review`). Is this a known gap or are these commands considered stable? [needs review]
+5. **Five CLI commands lack test coverage** (`assemble`, `hooks`, `hooks_install`, `hooks_run_pre_commit`, `impact`). Is this a known gap or are these commands considered stable? [needs review]

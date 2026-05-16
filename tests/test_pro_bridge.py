@@ -1,11 +1,11 @@
-"""Tests for codd-pro bridge integration points."""
+"""Tests for bridge integration points."""
 
 from __future__ import annotations
 
 from click.testing import CliRunner
 import yaml
 
-from codd.bridge import PRO_COMMAND_INSTALL_MESSAGE
+from codd.bridge import get_command_handler
 from codd.cli import main
 from codd.policy import PolicyResult, run_policy
 from codd.validator import ValidationResult, validate_project
@@ -80,40 +80,25 @@ def test_run_policy_uses_registered_bridge_handler(tmp_path, monkeypatch):
     assert run_policy(project, changed_files=["src/demo.py"]) is expected
 
 
-def test_review_command_dispatches_to_registered_handler(monkeypatch):
-    captured = {}
+def test_get_command_handler_uses_plugin_resolver(monkeypatch):
+    def sentinel():
+        return None
 
     def register(registry):
-        def handler(**kwargs):
-            captured.update(kwargs)
-            return 7
-
-        registry.register_command("review", handler)
+        registry.resolve_command_handler = lambda name: sentinel if name == "verify" else None
 
     monkeypatch.setattr(
         "codd.bridge.entry_points",
         lambda *, group=None: (_FakeEntryPoint(register),),
     )
 
-    runner = CliRunner()
-    result = runner.invoke(
-        main,
-        ["review", "--path", "/tmp/demo", "--scope", "design:system", "--json", "--ai-cmd", "mock-ai"],
-    )
-
-    assert result.exit_code == 7
-    assert captured == {
-        "path": "/tmp/demo",
-        "scope": "design:system",
-        "as_json": True,
-        "ai_cmd": "mock-ai",
-    }
+    assert get_command_handler("verify") is sentinel
+    assert get_command_handler("review") is None
 
 
-def test_pro_commands_show_install_message_without_bridge():
+def test_removed_legacy_commands_are_unknown():
     runner = CliRunner()
 
-    for args in (["review"], ["verify"], ["audit"], ["risk"]):
+    for args in (["review"], ["audit"], ["risk"]):
         result = runner.invoke(main, args)
-        assert result.exit_code == 1
-        assert PRO_COMMAND_INSTALL_MESSAGE in result.output
+        assert result.exit_code != 0
