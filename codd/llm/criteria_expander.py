@@ -16,6 +16,7 @@ import yaml
 from codd.config import load_project_config
 from codd.dag import Node
 from codd.deployment.providers.ai_command import SubprocessAiCommand
+from codd.requirements_meta import normalize_operation_flow, operation_flow_operations
 
 
 CriteriaSource = Literal["static", "expected_node", "expected_edge", "user_journey", "v_model", "coverage_axis"]
@@ -281,6 +282,7 @@ def build_criteria_expand_prompt(
         "{expected_extraction_json}": _stable_json(expected_extractions),
         "{project_context_json}": _stable_json(_prompt_context(context)),
         "{coverage_axes_hint}": coverage_axes_hint(context, design_docs),
+        "{operation_flow_hint}": operation_flow_hint(context, design_docs),
     }
     for token, value in replacements.items():
         template = template.replace(token, value)
@@ -322,6 +324,7 @@ def expansion_input_sha256(
         "design_docs": _design_doc_records(design_docs, context),
         "expected_extractions": expected_extractions,
         "coverage_axes": _coverage_axes_records(context, design_docs),
+        "operation_flow": _operation_flow_records(context, design_docs),
     }
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
@@ -507,6 +510,24 @@ def coverage_axes_hint(context: Mapping[str, Any] | None, design_docs: list[Node
     return yaml.safe_dump(axes, sort_keys=False, allow_unicode=True).strip()
 
 
+def operation_flow_hint(context: Mapping[str, Any] | None, design_docs: list[Node] | None = None) -> str:
+    operations = _operation_flow_records(context or {}, design_docs or [])
+    if not operations:
+        return ""
+
+    lines = ["## Declared operations (operation_flow)"]
+    for operation in operations:
+        lines.append(f"- {_format_operation_flow_item(operation)}")
+    lines.extend(
+        [
+            "",
+            "Use these operations as a hard guide to decide UI page structure.",
+            "Each operation with ui_pattern in {master_detail, drilldown} typically needs a dedicated route/page.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _extract_static_criteria(payload: Mapping[str, Any]) -> list[str]:
     for key in ("completion_criteria", "acceptance_criteria", "criteria"):
         if key in payload:
@@ -621,6 +642,61 @@ def _coverage_axes_records(context: Mapping[str, Any], design_docs: list[Node]) 
     return _dedupe_axis_records(records)
 
 
+def _operation_flow_records(context: Mapping[str, Any], design_docs: list[Node]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    records.extend(_operations_from_context(context))
+    records.extend(_operations_from_project_config(context))
+    records.extend(_operations_from_design_docs(design_docs, _context_root(context, None)))
+    return _dedupe_operation_records(records)
+
+
+def _operations_from_context(context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    values: list[Any] = [context.get("operation_flow")]
+    nested = context.get("project_context")
+    if isinstance(nested, Mapping):
+        values.append(nested.get("operation_flow"))
+    return [operation for value in values for operation in operation_flow_operations(value)]
+
+
+def _operations_from_project_config(context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    project_root = _context_root(context, None)
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return []
+    return operation_flow_operations(config.get("operation_flow"))
+
+
+def _operations_from_design_docs(design_docs: list[Node], project_root: Path) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    for node in design_docs:
+        operations.extend(operation_flow_operations(node.attributes.get("operation_flow")))
+        operations.extend(_operations_from_frontmatter(_node_content(node, project_root)))
+    return operations
+
+
+def _operations_from_frontmatter(content: str) -> list[dict[str, Any]]:
+    if not content.startswith("---"):
+        return []
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return []
+    try:
+        payload = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return []
+    if not isinstance(payload, Mapping):
+        return []
+    codd_meta = payload.get("codd")
+    if not isinstance(codd_meta, Mapping):
+        codd_meta = {}
+    operation_flow = normalize_operation_flow(
+        payload.get("operation_flow", codd_meta.get("operation_flow")),
+        source="design_doc.operation_flow",
+    )
+    return operation_flow_operations(operation_flow)
+
+
 def _axes_from_context(context: Mapping[str, Any]) -> list[dict[str, Any]]:
     direct = context.get("coverage_axes")
     if direct is None and isinstance(context.get("project_context"), Mapping):
@@ -695,6 +771,43 @@ def _dedupe_axis_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         deduped.append(record)
     return deduped
+
+
+def _dedupe_operation_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for record in records:
+        key = tuple(
+            str(record.get(field) or "").strip()
+            for field in ("id", "actor", "verb", "target", "parent", "ui_pattern")
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return deduped
+
+
+def _format_operation_flow_item(operation: Mapping[str, Any]) -> str:
+    operation_id = str(operation.get("id") or operation.get("target") or "operation").strip()
+    core = [
+        str(operation.get("actor") or "").strip(),
+        str(operation.get("verb") or "").strip(),
+        str(operation.get("target") or "").strip(),
+    ]
+    core_text = " / ".join(item for item in core if item)
+    qualifiers: list[str] = []
+    parent = str(operation.get("parent") or "").strip()
+    if parent:
+        qualifiers.append(f"parent={parent}")
+    scope_chain = operation.get("scope_chain")
+    if isinstance(scope_chain, list) and scope_chain:
+        qualifiers.append("chain=[" + ", ".join(str(item) for item in scope_chain) + "]")
+    if qualifiers:
+        core_text = f"{core_text}, {', '.join(qualifiers)}" if core_text else ", ".join(qualifiers)
+    ui_pattern = str(operation.get("ui_pattern") or "").strip()
+    suffix = f" - {ui_pattern}" if ui_pattern else ""
+    return f"{operation_id} ({core_text}){suffix}" if core_text else f"{operation_id}{suffix}"
 
 
 def _load_config(project_root: Path) -> Mapping[str, Any] | None:
@@ -817,6 +930,7 @@ __all__ = [
     "TaskCriteriaSource",
     "build_criteria_expand_prompt",
     "coverage_axes_hint",
+    "operation_flow_hint",
     "evaluate_expanded_criteria",
     "expanded_criteria_cache_path",
     "expansion_input_sha256",

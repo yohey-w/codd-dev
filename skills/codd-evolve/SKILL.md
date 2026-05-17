@@ -99,6 +99,7 @@ Stop and ask the user **only** when one of these triggers fires:
 3. **Coherence is structurally impossible.** Requirements would contradict an existing invariant. Surface the contradiction; do not proceed silently.
 4. **Cross-cutting scope explosion.** The change touches more design docs than the user likely realized (rule of thumb: >4 docs). Confirm scope before charging ahead.
 5. **Ambiguous role/scope.** "Add logout" — for which role? Or all roles? Ask once.
+6. **1:N/N:N data model change -> UI page topology.** When `Step 2 classification == change_data_model` and the change introduces a 1:N or N:N relation that does not yet have an `operation_flow.ui_pattern` declared for the parent/child pair, ask which UI topology should be used: (a) single screen with everything inline, (b) master-detail on the parent's detail page, (c) drilldown to a dedicated child page, or (d) defer to LLM auto-decision, which is discouraged and may trigger a `ui_coherence` warning. Record the answer to `requirements/*.md` operation_flow as a new Operation entry.
 
 #### Pre-approved branch
 
@@ -107,6 +108,7 @@ If the orchestrator (multi-agent system, task YAML, prior conversation, etc.) **
 - A task YAML that states "lexicon `delivery_target` is pre-approved" → skip gate 1 prompt for that term.
 - A task YAML that states "breaking change accepted by stakeholder" → skip gate 2 prompt.
 - A handoff that names the role explicitly ("update only the central_admin nav") → skip gate 5 prompt; if drift detection (Step 2) finds the design covers more roles, surface the drift in the report instead of blocking.
+- A task YAML that states "ui_pattern for `<child>` is master_detail" → skip gate 6 prompt and record the pre-approved topology source in the report.
 
 Always record in the report which gates were short-circuited and the source of the prior approval. Pre-approval never applies to gate 3 (structural impossibility) — that always halts.
 

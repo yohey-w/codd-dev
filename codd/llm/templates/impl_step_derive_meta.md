@@ -41,6 +41,11 @@ COVERAGE AXES:
 {coverage_axes_hint}
 ---
 
+DECLARED OPERATIONS:
+---
+{operation_flow_hint}
+---
+
 DESIGN DOCUMENTS:
 ---
 {design_doc_bundle}

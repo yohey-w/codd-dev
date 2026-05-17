@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from codd.requirements_meta import normalize_operation_flow
+
 
 _IMPORT_SPECIFIER_RE = re.compile(
     r"""
@@ -121,6 +123,12 @@ def extract_design_doc_metadata(
     )
 
     attributes = extract_design_doc_journey_attrs(frontmatter)
+    operation_flow = normalize_operation_flow(
+        frontmatter.get("operation_flow", codd_meta.get("operation_flow")),
+        source=f"{md_path}.operation_flow",
+    )
+    if operation_flow is not None:
+        attributes["operation_flow"] = operation_flow
     expected_extraction = codd_meta.get("expected_extraction", frontmatter.get("expected_extraction"))
     if isinstance(expected_extraction, dict):
         attributes["expected_extraction"] = deepcopy(expected_extraction)
