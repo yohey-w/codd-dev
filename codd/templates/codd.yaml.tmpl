@@ -84,3 +84,17 @@ context_acquisition:
     enabled: true
     min_sources: 2
     min_confidence: 0.6
+
+# runtime_smoke:
+#   enabled: false
+#   db_check:
+#     command: "nc -zv localhost 5432"
+#   dev_server:
+#     url: "http://localhost:3000"
+#     expected_status: 200
+#     timeout: 30
+#   smoke_connectivity:
+#     - url: "/api/health"
+#       expected_status: 200
+#   e2e:
+#     command: "npx playwright test tests/smoke/"

@@ -2431,6 +2431,14 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 @click.option("--e2e", is_flag=True, default=False, help="Run E2E tests (CI-safe, excludes @cdp-only)")
 @click.option("--deploy", is_flag=True, default=False, help="Run deploy/CDP-only E2E tests against deployed URL")
 @click.option("--base-url", default=None, help="Override BASE_URL for E2E tests")
+@click.option("--runtime", is_flag=True, default=False, help="Run Step 8 runtime smoke as the final verification gate")
+@click.option("--runtime-base-url", default=None, help="Override dev server base URL for runtime smoke")
+@click.option(
+    "--runtime-skip",
+    multiple=True,
+    type=click.Choice(["db", "dev-server", "connectivity", "e2e"]),
+    help="Skip a runtime smoke check and record it as skipped in the report",
+)
 @click.option(
     "--design-md",
     is_flag=True,
@@ -2447,6 +2455,9 @@ def verify(
     e2e: bool,
     deploy: bool,
     base_url: str | None,
+    runtime: bool,
+    runtime_base_url: str | None,
+    runtime_skip: tuple[str, ...],
     design_md: bool,
     auto_repair: bool,
     max_attempts: int | None,
@@ -2460,16 +2471,25 @@ def verify(
     if e2e or deploy:
         from codd.e2e_runner import run_e2e
 
-        run_e2e(path=path, deploy=deploy, base_url=base_url)
-        return
+        e2e_exit_code = run_e2e(path=path, deploy=deploy, base_url=base_url)
+        if e2e_exit_code != 0:
+            raise SystemExit(e2e_exit_code)
+        if not runtime:
+            return
 
     if not auto_repair:
-        _run_verify_once(path=path, sprint=sprint, prefer_standalone=True)
+        result = _run_verify_once(path=path, sprint=sprint, prefer_standalone=True)
+        if runtime:
+            if not result.passed:
+                raise SystemExit(result.exit_code)
+            _run_runtime_smoke_gate(path=path, runtime_base_url=runtime_base_url, runtime_skip=runtime_skip)
         return
 
     project_root = Path(path).resolve()
     result = _run_verify_once(path=path, sprint=sprint, prefer_standalone=True)
     if result.passed:
+        if runtime:
+            _run_runtime_smoke_gate(path=path, runtime_base_url=runtime_base_url, runtime_skip=runtime_skip)
         return
 
     repair_config = _load_required_repair_config(project_root)
@@ -2489,6 +2509,23 @@ def verify(
     click.echo(f"Repair outcome: {outcome.status}")
     click.echo(f"Repair history: {_display_path(outcome.history_session_dir, project_root)}")
     raise SystemExit(_repair_exit_code(outcome.status))
+
+
+def _run_runtime_smoke_gate(path: str, runtime_base_url: str | None, runtime_skip: tuple[str, ...]) -> None:
+    from codd.runtime_smoke.runner import run_runtime_smoke
+
+    try:
+        smoke_result = run_runtime_smoke(Path(path).resolve(), skip_checks=runtime_skip, base_url_override=runtime_base_url)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"[FAIL] Step 8 runtime smoke configuration error: {exc}", err=True)
+        raise SystemExit(3)
+
+    click.echo(smoke_result.markdown_section.rstrip())
+    if smoke_result.report_path is not None:
+        click.echo(f"[codd verify] Runtime smoke report: {_display_path(smoke_result.report_path, Path(path).resolve())}")
+    if not smoke_result.overall_passed:
+        click.echo("[FAIL] Step 8 runtime smoke failed", err=True)
+        raise SystemExit(1)
 
 
 def _run_e2e_generate(path: str, base_url: str, output: str | None, framework: str, mode: str = "scenarios") -> None:
