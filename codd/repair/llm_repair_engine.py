@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from codd.config import load_project_config
-from codd.deployment.providers.ai_command import AiCommandError, SubprocessAiCommand
+from codd.deployment.providers.ai_command import AiCommandError
+from codd.deployment.providers.ai_command_factory import get_ai_command
 from codd.repair.engine import RepairEngine, register_repair_engine
 from codd.repair.git_patcher import GitPatcher
 from codd.repair.schema import (
@@ -163,11 +164,8 @@ class LlmRepairEngine(RepairEngine):
         config = self._effective_config()
         try:
             command = resolve_repair_ai_command(config, command_name)
-            return SubprocessAiCommand(
-                command=command,
-                project_root=self.project_root,
-                config=config,
-            ).invoke(prompt)
+            adapter = get_ai_command(config, self.project_root, command_override=command)
+            return adapter.invoke(prompt)
         except (AiCommandError, OSError, ValueError, RepairFailed) as exc:
             LOGGER.warning("Repair AI command failed for %s: %s", command_name, exc)
             raise RepairFailed(f"repair AI command failed for {command_name}") from exc
@@ -274,7 +272,7 @@ def _invoke_ai_like(
 ) -> str:
     try:
         if isinstance(ai_command, str):
-            return SubprocessAiCommand(command=ai_command, project_root=project_root, config=config).invoke(prompt)
+            return get_ai_command(config, project_root, command_override=ai_command).invoke(prompt)
         if hasattr(ai_command, "invoke"):
             return str(ai_command.invoke(prompt))
         if callable(ai_command):
