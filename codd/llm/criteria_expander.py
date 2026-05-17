@@ -16,6 +16,7 @@ import yaml
 from codd.config import load_project_config
 from codd.dag import Node
 from codd.deployment.providers.ai_command import SubprocessAiCommand
+from codd.deployment.providers.ai_command_factory import get_ai_command
 from codd.requirements_meta import normalize_operation_flow, operation_flow_operations
 
 
@@ -215,11 +216,7 @@ class SubprocessAiCommandCriteriaExpander(CriteriaExpander):
 
     def _adapter(self, project_root: Path, config: Mapping[str, Any] | None) -> Any:
         if self.ai_command is None:
-            return SubprocessAiCommand(
-                command=_criteria_expand_command(config),
-                project_root=project_root,
-                config=config,
-            )
+            return get_ai_command(config, project_root, command_override=_criteria_expand_command(config))
         if isinstance(self.ai_command, str):
             return SubprocessAiCommand(
                 command=self.ai_command,

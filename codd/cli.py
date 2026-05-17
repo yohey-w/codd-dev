@@ -1944,7 +1944,7 @@ def implement_plan_cmd(
     ai_cmd: str | None,
 ):
     """Derive implementation steps for one task."""
-    from codd.deployment.providers.ai_command import SubprocessAiCommand
+    from codd.deployment.providers.ai_command_factory import get_ai_command
     from codd.llm.impl_step_deriver import IMPL_STEP_DERIVERS
 
     project_root = Path(project_path).resolve()
@@ -1964,7 +1964,7 @@ def implement_plan_cmd(
         raise SystemExit(1)
 
     command = ai_cmd or _impl_step_command(config)
-    deriver = deriver_cls(SubprocessAiCommand(command=command, project_root=project_root, config=config))
+    deriver = deriver_cls(get_ai_command(config, project_root, command_override=command))
     steps = deriver.derive_steps(
         task_item,
         nodes,
@@ -2063,7 +2063,7 @@ def implement_augment_cmd(
     ai_cmd: str | None,
 ):
     """Suggest inferred implementation steps and merge them into the task cache."""
-    from codd.deployment.providers.ai_command import SubprocessAiCommand
+    from codd.deployment.providers.ai_command_factory import get_ai_command
     from codd.llm.best_practice_augmenter import BEST_PRACTICE_AUGMENTERS
     from codd.llm.impl_step_deriver import (
         ImplStepCacheRecord,
@@ -2098,7 +2098,7 @@ def implement_augment_cmd(
         raise SystemExit(1)
 
     command = ai_cmd or _best_practice_command(config)
-    augmenter = augmenter_cls(SubprocessAiCommand(command=command, project_root=project_root, config=config))
+    augmenter = augmenter_cls(get_ai_command(config, project_root, command_override=command))
     explicit = [step for step in record.steps if not step.inferred]
     implicit = augmenter.suggest_implicit_steps(
         task_item,
@@ -4017,7 +4017,7 @@ def plan_derive_cmd(
     ai_cmd: str | None,
 ):
     """Derive implementation tasks from design documents."""
-    from codd.deployment.providers.ai_command import SubprocessAiCommand
+    from codd.deployment.providers.ai_command_factory import get_ai_command
     from codd.llm.plan_deriver import PLAN_DERIVERS, merge_approved_tasks_into_plan
 
     project_root = Path(project_path).resolve()
@@ -4036,7 +4036,7 @@ def plan_derive_cmd(
         raise SystemExit(1)
 
     command = ai_cmd or _plan_derive_command(config)
-    ai_command = SubprocessAiCommand(command=command, project_root=project_root, config=config)
+    ai_command = get_ai_command(config, project_root, command_override=command)
     deriver = deriver_cls(ai_command)
     tasks = deriver.derive_tasks(
         nodes,

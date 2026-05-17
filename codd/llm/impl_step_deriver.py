@@ -15,7 +15,8 @@ from typing import Any, ClassVar, Mapping
 import yaml
 
 from codd.dag import Node
-from codd.deployment.providers.ai_command import AiCommandError, SubprocessAiCommand
+from codd.deployment.providers.ai_command import AiCommandError
+from codd.deployment.providers.ai_command_factory import get_ai_command
 from codd.llm.criteria_expander import coverage_axes_hint, operation_flow_hint
 from codd.llm.plan_deriver import design_doc_bundle, strip_json_fence
 
@@ -229,7 +230,7 @@ class SubprocessAiCommandImplStepDeriver(ImplStepDeriver):
         )
 
         try:
-            raw_output = self._invoke(prompt)
+            raw_output = self._invoke(prompt, project_root=project_root, config=_context_config(project_context))
         except AiCommandError as exc:
             LOGGER.warning("Implementation step derivation command failed: %s", exc)
             return []
@@ -257,8 +258,14 @@ class SubprocessAiCommandImplStepDeriver(ImplStepDeriver):
             )
         return steps
 
-    def _invoke(self, prompt: str) -> str:
-        command = self.ai_command or SubprocessAiCommand()
+    def _invoke(
+        self,
+        prompt: str,
+        *,
+        project_root: Path | None = None,
+        config: Mapping[str, Any] | None = None,
+    ) -> str:
+        command = self.ai_command or get_ai_command(config, project_root)
         if hasattr(command, "invoke"):
             try:
                 return str(command.invoke(prompt, model=self.model))
@@ -472,6 +479,11 @@ def utc_timestamp() -> str:
 
 def _context_root(project_context: Mapping[str, Any]) -> Path:
     return Path(str(project_context.get("project_root") or Path.cwd())).resolve()
+
+
+def _context_config(project_context: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    config = project_context.get("config")
+    return config if isinstance(config, Mapping) else None
 
 
 def _catalog_from_project_lexicon(project_context: Mapping[str, Any], project_root: Path) -> Any | None:
