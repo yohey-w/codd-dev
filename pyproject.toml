@@ -77,3 +77,6 @@ include = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["codd"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "codd/_skills"

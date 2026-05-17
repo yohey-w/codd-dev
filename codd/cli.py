@@ -17,6 +17,7 @@ import yaml
 from codd.bridge import get_command_handler
 from codd.config import find_codd_dir, load_project_config
 from codd.lexicon import LEXICON_FILENAME, load_lexicon, load_project_extends
+from codd.skills_cli import manager as skills_manager
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -753,6 +754,43 @@ def _echo_lexicon_records(label: str, records: list[Any]) -> None:
     for record in records:
         description = f"  {record.description}" if record.description else ""
         click.echo(f"  {record.id:<32} ({record.observation_dimensions} axes){description}")
+
+
+@main.group("skills")
+@click.pass_context
+def skills(ctx: click.Context) -> None:
+    """Manage CoDD skills for Claude Code and Codex CLI."""
+
+
+@skills.command("install")
+@click.argument("skill_name")
+@click.option("--target", type=click.Choice(["claude", "codex", "both"]), default="both")
+@click.option("--scope", type=click.Choice(["user", "repo"]), default="user")
+@click.option("--mode", type=click.Choice(["symlink", "copy"]), default="symlink")
+@click.option("--force", is_flag=True)
+@click.option("--dir", "skill_dir", type=click.Path(exists=True))
+def skills_install(skill_name: str, target: str, scope: str, mode: str, force: bool, skill_dir: str | None) -> None:
+    """Install a CoDD skill for Claude Code, Codex CLI, or both."""
+    skills_manager.install(skill_name, target, scope, mode, force, skill_dir)
+
+
+@skills.command("list")
+@click.option("--target", type=click.Choice(["claude", "codex", "both"]), default="both")
+@click.option("--scope", type=click.Choice(["user", "repo", "all"]), default="all")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+def skills_list(target: str, scope: str, fmt: str) -> None:
+    """List installed CoDD skills."""
+    skills_manager.list_skills(target, scope, fmt)
+
+
+@skills.command("remove")
+@click.argument("skill_name")
+@click.option("--target", type=click.Choice(["claude", "codex", "both"]), default="both")
+@click.option("--scope", type=click.Choice(["user", "repo"]), default="user")
+@click.option("--keep-backup", is_flag=True)
+def skills_remove(skill_name: str, target: str, scope: str, keep_backup: bool) -> None:
+    """Remove an installed CoDD skill."""
+    skills_manager.remove(skill_name, target, scope, keep_backup)
 
 
 @main.command()
