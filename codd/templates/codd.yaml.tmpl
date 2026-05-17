@@ -11,6 +11,20 @@ project:
 ai_command: "claude --print --model claude-opus-4-6 --tools \"\""
 coding_principles: null
 
+# operation_flow (optional - declare UI topology per operation):
+# operation_flow:
+#   operations:
+#     - id: "example_action"
+#       actor: "role_name"
+#       verb: "manage_collection"
+#       target: "child_entity"
+#       parent: "parent_entity"
+#       ui_pattern: "master_detail"
+#
+# ui_coherence:
+#   ignore_relations:
+#     - {parent: "foo", child: "bar"}  # intentional single-screen design
+
 scan:
   source_dirs:
 {{source_dirs}}

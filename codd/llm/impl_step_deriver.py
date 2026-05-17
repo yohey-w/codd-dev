@@ -16,7 +16,7 @@ import yaml
 
 from codd.dag import Node
 from codd.deployment.providers.ai_command import AiCommandError, SubprocessAiCommand
-from codd.llm.criteria_expander import coverage_axes_hint
+from codd.llm.criteria_expander import coverage_axes_hint, operation_flow_hint
 from codd.llm.plan_deriver import design_doc_bundle, strip_json_fence
 
 
@@ -222,6 +222,7 @@ class SubprocessAiCommandImplStepDeriver(ImplStepDeriver):
         prompt = prompt.replace("{task_yaml}", task_yaml(task))
         prompt = prompt.replace("{step_catalog_hint}", catalog_hint)
         prompt = prompt.replace("{coverage_axes_hint}", coverage_axes_hint(project_context, design_docs))
+        prompt = prompt.replace("{operation_flow_hint}", operation_flow_hint(project_context, design_docs))
         prompt = prompt.replace(
             "{project_context}",
             json.dumps(project_context.get("project_context", {}), sort_keys=True),

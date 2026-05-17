@@ -46,5 +46,8 @@ EXPECTED EXTRACTIONS:
 COVERAGE AXES:
 {coverage_axes_hint}
 
+DECLARED OPERATIONS:
+{operation_flow_hint}
+
 PROJECT CONTEXT:
 {project_context_json}
