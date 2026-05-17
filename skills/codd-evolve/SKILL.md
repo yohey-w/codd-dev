@@ -142,6 +142,7 @@ Once intent is confirmed, execute in this order (each step's output feeds the ne
    - For incremental change, codd implement updates only affected modules
    - For pure data model changes, also generate migration files if applicable
    - **Generated-code impact check**: if the project keeps codd-generated output under `src/generated/**` (or equivalent), classify whether the change requires regenerating those modules or whether it stays in the hand-edited area (handlers, UI, tests). Record the decision in the report so future evolutions know whether `src/generated/**` was intentionally untouched.
+   - **Prerequisite (cmd_345 K-3)**: if any design doc declares `operation_flow`, ensure `codd.yaml` has `ai_commands.impl_step_derive` set. Without it, `operation_flow_hint()` is silently skipped and declared UI patterns will not influence generation. Verify with `grep impl_step_derive codd/codd.yaml`; CoDD also emits a `WARNING` on stderr when this gap is detected.
 
 5. Update tests
    - Tests for new requirements MUST be added (no silent skip)
