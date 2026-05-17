@@ -56,6 +56,7 @@ Before starting, verify:
 1. Current directory is a CoDD-initialized project (`codd/codd.yaml` exists)
 2. Working tree is clean OR uncommitted changes are intentional (warn the user otherwise)
 3. `codd verify` currently passes (red 0) — if not, the user should fix existing red first, per `codd fix [PHENOMENON]` prerequisite
+4. If `codd verify` returns exit 0 with **silent stdout** (a known mode where build/test phases run but emit no text), fall back to `codd dag verify` for an explicit red-count readout. Use both signals when the baseline is uncertain.
 
 If red exists, STOP and surface it. Do not attempt to layer new changes on a red baseline.
 
@@ -74,6 +75,21 @@ Classify the user's request into one of:
 
 If classification is ambiguous, ask one clarifying question (see Step 3).
 
+#### Drift detection against existing design
+
+After classification, scan the affected design docs for **pre-existing references to the proposed change**. Examples:
+
+- The intent says "add logout button to admin nav," but `ux_design.md` already documents a logout entry in the tenant_admin / learner sidebars (impl never caught up).
+- The intent says "add delivery_target table," but `database_design.md` has an Open Question (OQ-DB-NN) that proposes the same structure under a different name.
+
+When such drift is found, classify it:
+
+- **Drift A — broader-than-intent**: design covers more roles/cases than the intent. Either (a) flag to the user and ask whether to keep the narrower intent or align to the design, or (b) treat as a Step 3 gate-5 "ambiguous scope" trigger.
+- **Drift B — design proposed, impl absent**: an Open Question or TODO matches the new intent. Reuse the existing terminology and mark the OQ as resolved.
+- **Drift C — contradiction**: design says X, intent says not-X. Halt as a Step 3 gate-3 "structural impossibility."
+
+Recording drift in the report prevents silent vocabulary divergence on subsequent evolutions.
+
 ### Step 3 — Stop-and-ask gates
 
 Stop and ask the user **only** when one of these triggers fires:
@@ -83,6 +99,16 @@ Stop and ask the user **only** when one of these triggers fires:
 3. **Coherence is structurally impossible.** Requirements would contradict an existing invariant. Surface the contradiction; do not proceed silently.
 4. **Cross-cutting scope explosion.** The change touches more design docs than the user likely realized (rule of thumb: >4 docs). Confirm scope before charging ahead.
 5. **Ambiguous role/scope.** "Add logout" — for which role? Or all roles? Ask once.
+
+#### Pre-approved branch
+
+If the orchestrator (multi-agent system, task YAML, prior conversation, etc.) **already records explicit approval** for one or more of these gates, treat them as immediately confirmed without re-asking. Examples:
+
+- A task YAML that states "lexicon `delivery_target` is pre-approved" → skip gate 1 prompt for that term.
+- A task YAML that states "breaking change accepted by stakeholder" → skip gate 2 prompt.
+- A handoff that names the role explicitly ("update only the central_admin nav") → skip gate 5 prompt; if drift detection (Step 2) finds the design covers more roles, surface the drift in the report instead of blocking.
+
+Always record in the report which gates were short-circuited and the source of the prior approval. Pre-approval never applies to gate 3 (structural impossibility) — that always halts.
 
 **Do not** ask the user:
 - Which file to touch
@@ -112,6 +138,7 @@ Once intent is confirmed, execute in this order (each step's output feeds the ne
 4. Run codd implement to (re)generate source from updated design
    - For incremental change, codd implement updates only affected modules
    - For pure data model changes, also generate migration files if applicable
+   - **Generated-code impact check**: if the project keeps codd-generated output under `src/generated/**` (or equivalent), classify whether the change requires regenerating those modules or whether it stays in the hand-edited area (handlers, UI, tests). Record the decision in the report so future evolutions know whether `src/generated/**` was intentionally untouched.
 
 5. Update tests
    - Tests for new requirements MUST be added (no silent skip)
@@ -139,6 +166,16 @@ If `codd verify` red persists after Step 4:
    - Design contradicts requirement → ask user
    - Implementation cannot match design → ask user whether design is wrong or impl approach is wrong
 3. Do not loop more than 3 times. After 3 failed attempts, STOP and report to user with concrete diagnostics
+
+#### Local database unavailable
+
+`change_data_model` work often needs a migration command (e.g. `prisma migrate dev`) that requires a running local database. If the DB cannot be reached:
+
+1. Do **not** apply the migration to any non-local target (e.g. staging, production VPS).
+2. Author the migration **by hand** under the project's migrations directory (Prisma example: `prisma/migrations/<timestamp>_<slug>/migration.sql`). Mirror the conventions of existing files in that directory (column order, index naming, foreign-key style).
+3. Validate the schema declaration alone — `prisma validate` (or the framework's equivalent) — to confirm the model file parses and matches expectations.
+4. Note in the report that the migration is **generated but unapplied**, and call out what the user must run locally once the DB is back (`prisma migrate deploy` for hand-authored migrations).
+5. Treat this as an acceptable verification path only when `codd dag verify` and `codd propagate` also pass; it is **not** a substitute for full `codd verify` when build/test phases are reachable.
 
 ### Step 6 — Report
 
@@ -254,6 +291,7 @@ When reporting back to the user, always include:
 4. **Verify status** — red 0 ✅ or red >0 with concrete failures
 5. **Suggested commit message** — single line, conventional commits format
 6. **Next action** — what you recommend the user do (review, commit, request more changes)
+7. **Scope decisions** — sub-scopes you intentionally excluded and the reason (e.g. "did not touch `Module.tenant_id` because it would require redesigning RLS isolation policies, out of scope for this evolution"). Required for `change_data_model` and `cross_cutting` types; optional but recommended for others. Pre-approval short-circuits from Step 3 should be listed here as well.
 
 ## Why This Skill Exists
 
