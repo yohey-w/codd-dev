@@ -58,6 +58,11 @@ typecheck:
   command: null
   max_repair_attempts: 3
 
+# verify:
+#   verification_timeout:
+#     per_node_seconds: 60    # optional: hard cap for each verification_test node
+#     total_seconds: 300      # optional: total budget for all verification_test nodes
+
 ci:
   provider: github_actions   # github_actions | gitlab_ci | none
   workflow_glob: .github/workflows/*.yml

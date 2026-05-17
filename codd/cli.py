@@ -32,6 +32,8 @@ class _CliVerificationResult:
     exit_code: int
     failure: Any | None = None
     failures: list[Any] | None = None
+    check_results: list[Any] | None = None
+    runtime_results: list[Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -2436,7 +2438,7 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 @click.option(
     "--runtime-skip",
     multiple=True,
-    type=click.Choice(["db", "dev-server", "connectivity", "e2e"]),
+    type=click.Choice(["db", "dev-server", "connectivity", "e2e", "verification-test"]),
     help="Skip a runtime smoke check and record it as skipped in the report",
 )
 @click.option(
@@ -2477,19 +2479,33 @@ def verify(
         if not runtime:
             return
 
+    verify_kwargs: dict[str, Any] = {"path": path, "sprint": sprint, "prefer_standalone": True}
+    if runtime_skip:
+        verify_kwargs["runtime_skip"] = runtime_skip
+
     if not auto_repair:
-        result = _run_verify_once(path=path, sprint=sprint, prefer_standalone=True)
+        result = _run_verify_once(**verify_kwargs)
+        _emit_verify_summary(result)
         if runtime:
             if not result.passed:
                 raise SystemExit(result.exit_code)
-            _run_runtime_smoke_gate(path=path, runtime_base_url=runtime_base_url, runtime_skip=runtime_skip)
+            _run_runtime_smoke_gate(
+                path=path,
+                runtime_base_url=runtime_base_url,
+                runtime_skip=_runtime_smoke_skip(runtime_skip),
+            )
         return
 
     project_root = Path(path).resolve()
-    result = _run_verify_once(path=path, sprint=sprint, prefer_standalone=True)
+    result = _run_verify_once(**verify_kwargs)
+    _emit_verify_summary(result)
     if result.passed:
         if runtime:
-            _run_runtime_smoke_gate(path=path, runtime_base_url=runtime_base_url, runtime_skip=runtime_skip)
+            _run_runtime_smoke_gate(
+                path=path,
+                runtime_base_url=runtime_base_url,
+                runtime_skip=_runtime_smoke_skip(runtime_skip),
+            )
         return
 
     repair_config = _load_required_repair_config(project_root)
@@ -2503,7 +2519,7 @@ def verify(
         max_attempts=max_attempts,
         baseline_ref=baseline_ref,
         engine_name=engine_name,
-        verify_callable=lambda: _run_verify_once(path=path, sprint=sprint, prefer_standalone=True),
+        verify_callable=lambda: _run_verify_once(**verify_kwargs),
         initial_verify_result=result,
     )
     click.echo(f"Repair outcome: {outcome.status}")
@@ -2526,6 +2542,10 @@ def _run_runtime_smoke_gate(path: str, runtime_base_url: str | None, runtime_ski
     if not smoke_result.overall_passed:
         click.echo("[FAIL] Step 8 runtime smoke failed", err=True)
         raise SystemExit(1)
+
+
+def _runtime_smoke_skip(runtime_skip: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(item for item in runtime_skip if item != "verification-test")
 
 
 def _run_e2e_generate(path: str, base_url: str, output: str | None, framework: str, mode: str = "scenarios") -> None:
@@ -4569,10 +4589,11 @@ def _run_verify_once(
     sprint: int | None = None,
     *,
     prefer_standalone: bool = False,
+    runtime_skip: tuple[str, ...] = (),
 ) -> _CliVerificationResult:
     handler = None if prefer_standalone else get_command_handler("verify")
     if handler is None:
-        return _run_standalone_verify_once(path)
+        return _run_standalone_verify_once(path, runtime_skip=runtime_skip)
 
     try:
         result = handler(path=path, sprint=sprint)
@@ -4604,10 +4625,13 @@ def _run_verify_once(
     return _CliVerificationResult(passed=True, exit_code=0, failure=None)
 
 
-def _run_standalone_verify_once(path: str) -> _CliVerificationResult:
+def _run_standalone_verify_once(path: str, *, runtime_skip: tuple[str, ...] = ()) -> _CliVerificationResult:
     from codd.repair.verify_runner import run_standalone_verify
 
-    result = run_standalone_verify(Path(path).resolve())
+    if runtime_skip:
+        result = run_standalone_verify(Path(path).resolve(), runtime_skip=runtime_skip)
+    else:
+        result = run_standalone_verify(Path(path).resolve())
     _echo_verification_warnings(result)
     return _cli_result_from_standalone_verify(result)
 
@@ -4621,12 +4645,105 @@ def _echo_verification_warnings(result: Any) -> None:
         click.echo(f"{prefix}{text}")
 
 
+def _emit_verify_summary(result: _CliVerificationResult) -> None:
+    check_results = list(result.check_results or [])
+    runtime_results = list(result.runtime_results or [])
+
+    dag_pass = sum(1 for item in check_results if _summary_passed(item))
+    dag_fail = sum(1 for item in check_results if not _summary_passed(item) and _summary_severity(item) == "red")
+    dag_warn = sum(1 for item in check_results if not _summary_passed(item) and _summary_severity(item) != "red")
+
+    runtime_pass = sum(1 for item in runtime_results if _summary_passed(item) and not _summary_skipped(item))
+    runtime_fail = sum(1 for item in runtime_results if _summary_value(item, "passed") is False and not _summary_skipped(item))
+    runtime_skip = sum(1 for item in runtime_results if _summary_skipped(item))
+    runtime_total = len(runtime_results)
+
+    click.echo("[VERIFY SUMMARY]")
+    click.echo(f"  DAG checks: {dag_pass} PASS / {dag_fail} FAIL (red) / {dag_warn} WARN (amber)")
+    click.echo(
+        "  Verification tests: "
+        f"{runtime_pass} PASS / {runtime_fail} FAIL / {runtime_skip} SKIP"
+        f"{_summary_skip_suffix(runtime_results)} / {runtime_total} total"
+    )
+
+    failed_items = [item for item in runtime_results if _summary_value(item, "passed") is False]
+    if failed_items:
+        click.echo("  Failed nodes:")
+        for item in failed_items[:10]:
+            click.echo(f"    - {_summary_node_id(item)} -> {_summary_output(item)}")
+
+    skipped_items = [item for item in runtime_results if _summary_skipped(item)]
+    if skipped_items:
+        for line in _summary_skip_lines(runtime_results):
+            click.echo(f"  {line}")
+        click.echo("  Skipped nodes:")
+        for item in skipped_items[:10]:
+            click.echo(f"    - {_summary_node_id(item)} -> {_summary_output(item)}")
+
+
+def _summary_value(item: Any, key: str) -> Any:
+    if isinstance(item, dict):
+        return item.get(key)
+    return getattr(item, key, None)
+
+
+def _summary_passed(item: Any) -> bool:
+    return _summary_value(item, "passed") is not False
+
+
+def _summary_severity(item: Any) -> str:
+    return str(_summary_value(item, "severity") or "red")
+
+
+def _summary_skipped(item: Any) -> bool:
+    return bool(_summary_value(item, "skipped"))
+
+
+def _summary_node_id(item: Any) -> str:
+    return str(_summary_value(item, "node_id") or _summary_value(item, "node") or "unknown")
+
+
+def _summary_output(item: Any) -> str:
+    output = str(_summary_value(item, "output") or _summary_value(item, "message") or "").strip()
+    return output if len(output) <= 180 else f"{output[:177]}..."
+
+
+def _summary_skip_suffix(runtime_results: list[Any]) -> str:
+    reasons = _summary_skip_counts(runtime_results)
+    if not reasons:
+        return ""
+    text = ", ".join(f"{reason}={count}" for reason, count in sorted(reasons.items()))
+    return f" ({text})"
+
+
+def _summary_skip_lines(runtime_results: list[Any]) -> list[str]:
+    lines: list[str] = []
+    for reason, count in sorted(_summary_skip_counts(runtime_results).items()):
+        if reason == "verification-test":
+            lines.append(f"Skipped: verification-test ({count} nodes by user request)")
+        else:
+            lines.append(f"Skipped: {reason} ({count} nodes)")
+    return lines
+
+
+def _summary_skip_counts(runtime_results: list[Any]) -> dict[str, int]:
+    reasons: dict[str, int] = {}
+    for item in runtime_results:
+        if not _summary_skipped(item):
+            continue
+        reason = str(_summary_value(item, "skip_reason") or "skipped")
+        reasons[reason] = reasons.get(reason, 0) + 1
+    return reasons
+
+
 def _cli_result_from_standalone_verify(result: Any) -> _CliVerificationResult:
     return _CliVerificationResult(
         passed=bool(result.passed),
         exit_code=0 if result.passed else 1,
         failure=getattr(result, "failure", None),
         failures=list(getattr(result, "failures", []) or []),
+        check_results=list(getattr(result, "check_results", []) or []),
+        runtime_results=list(getattr(result, "runtime_results", []) or []),
     )
 
 

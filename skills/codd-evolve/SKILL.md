@@ -57,6 +57,7 @@ Before starting, verify:
 2. Working tree is clean OR uncommitted changes are intentional (warn the user otherwise)
 3. `codd verify` currently passes (red 0) — if not, the user should fix existing red first, per `codd fix [PHENOMENON]` prerequisite
 4. If `codd verify` returns exit 0 with **silent stdout** (a known mode where build/test phases run but emit no text), fall back to `codd dag verify` for an explicit red-count readout. Use both signals when the baseline is uncertain.
+5. If runtime verification_test nodes are unsuitable for the local environment, prefer an explicit config or skip over silent omission: set `verify.verification_timeout.total_seconds` / `per_node_seconds`, or run `codd verify --runtime --runtime-skip verification-test` and preserve the reported SKIP evidence.
 
 If red exists, STOP and surface it. Do not attempt to layer new changes on a red baseline.
 
@@ -163,7 +164,7 @@ Once intent is confirmed, execute in this order (each step's output feeds the ne
      c. Smoke connectivity via `runtime_smoke.smoke_connectivity[]`
      d. Real-browser E2E via `runtime_smoke.e2e.command`
    - All results are written with raw logs to `reports/runtime_smoke_{{timestamp}}.md` unless the project config overrides the path.
-   - Self-reported runtime smoke is not acceptable evidence. If `--runtime-skip <category>` is used, the report must show the skipped category explicitly and it must never be described as passed.
+   - Self-reported runtime smoke is not acceptable evidence. If `--runtime-skip <category>` is used, including `--runtime-skip verification-test`, the report must show the skipped category explicitly and it must never be described as passed.
    - If `codd verify --runtime` fails: the change is NOT done. Either fix forward or revert. Reporting done with the server down is a critical violation of CoDD coherence.
 ```
 

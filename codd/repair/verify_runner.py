@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+import subprocess
+import time
 import warnings
 
 from codd.config import find_codd_dir, load_project_config
@@ -60,9 +62,15 @@ class _RuntimeVerificationState:
 class VerifyRunner:
     """Run CoDD verification inside the current Python process."""
 
-    def __init__(self, project_root: Path, codd_yaml: Mapping[str, Any] | None):
+    def __init__(
+        self,
+        project_root: Path,
+        codd_yaml: Mapping[str, Any] | None,
+        runtime_skip: tuple[str, ...] | list[str] | set[str] | None = None,
+    ):
         self.project_root = Path(project_root).resolve()
         self.codd_yaml = dict(codd_yaml or {})
+        self.runtime_skip = frozenset(str(item) for item in (runtime_skip or ()))
 
     def run(self) -> VerificationResult:
         """Reset DAG state, run C1-C7 checks, then run executable verification tests."""
@@ -120,8 +128,17 @@ class VerifyRunner:
 
         results: list[dict[str, Any]] = []
         template_settings = _verification_template_settings(settings)
+        per_node_seconds = _verification_per_node_seconds(settings)
+        total_seconds = _verification_total_seconds(settings)
+        start = time.monotonic()
         for node in sorted(dag.nodes.values(), key=lambda item: item.id):
             if node.kind != "verification_test":
+                continue
+            if "verification-test" in self.runtime_skip:
+                results.append(_skipped_result(node.id, "verification-test"))
+                continue
+            if total_seconds is not None and time.monotonic() - start > total_seconds:
+                results.append(_skipped_result(node.id, "total_timeout_exceeded"))
                 continue
             template_ref = str(node.attributes.get("template_ref") or "").strip()
             if not template_ref:
@@ -134,24 +151,29 @@ class VerifyRunner:
 
             template_config = template_settings.get(template_ref, {})
             try:
-                template = _new_template(template_cls, template_config)
+                template = _new_template(template_cls, template_config, per_node_seconds=per_node_seconds)
                 state = _runtime_state(node, self.project_root, template_config)
                 test_kind = str(node.attributes.get("kind") or "")
                 command = template.generate_test_command(state, test_kind)
                 result = template.execute(command)
+                passed = bool(getattr(result, "passed", False))
+                output = _runtime_output(node.id, passed, getattr(result, "output", "") or "")
                 results.append(
                     {
                         "check_name": "verification_test_runtime",
                         "node_id": node.id,
                         "template_ref": template_ref,
                         "command": command,
-                        "passed": bool(getattr(result, "passed", False)),
-                        "output": str(getattr(result, "output", "") or ""),
+                        "passed": passed,
+                        "skipped": False,
+                        "output": output,
                         "duration": getattr(result, "duration", 0.0),
                     }
                 )
+            except subprocess.TimeoutExpired as exc:
+                results.append(_runtime_result(node.id, template_ref, False, _timeout_output(node.id, exc)))
             except Exception as exc:  # noqa: BLE001 - one runtime test failure should not abort all checks.
-                results.append(_runtime_result(node.id, template_ref, False, str(exc)))
+                results.append(_runtime_result(node.id, template_ref, False, _failure_output(node.id, str(exc))))
         return results
 
     def _failure_from_check_result(self, result: Any) -> VerificationFailure | None:
@@ -203,7 +225,11 @@ class VerifyRunner:
         )
 
 
-def run_standalone_verify(project_root: Path, codd_yaml: Mapping[str, Any] | None = None) -> VerificationResult:
+def run_standalone_verify(
+    project_root: Path,
+    codd_yaml: Mapping[str, Any] | None = None,
+    runtime_skip: tuple[str, ...] | list[str] | set[str] | None = None,
+) -> VerificationResult:
     """Run verification through the in-process runner."""
 
     root = Path(project_root).resolve()
@@ -212,15 +238,31 @@ def run_standalone_verify(project_root: Path, codd_yaml: Mapping[str, Any] | Non
             codd_yaml = load_project_config(root)
         except (FileNotFoundError, ValueError):
             codd_yaml = {}
-    return VerifyRunner(root, codd_yaml).run()
+    return VerifyRunner(root, codd_yaml, runtime_skip=runtime_skip).run()
 
 
-def _new_template(template_cls: type[Any], template_config: dict[str, Any]) -> Any:
-    if template_config:
+def _new_template(
+    template_cls: type[Any],
+    template_config: dict[str, Any],
+    *,
+    per_node_seconds: float | None = None,
+) -> Any:
+    effective_config = _template_config_with_timeout_cap(template_config, per_node_seconds)
+    if effective_config:
         try:
-            return template_cls(config=template_config)
+            return template_cls(config=effective_config)
         except TypeError:
             pass
+        if per_node_seconds is not None:
+            try:
+                return template_cls(**effective_config)
+            except TypeError:
+                pass
+            if "timeout" in effective_config:
+                try:
+                    return template_cls(timeout=effective_config["timeout"])
+                except TypeError:
+                    pass
     return template_cls()
 
 
@@ -263,15 +305,97 @@ def _verification_template_settings(settings: dict[str, Any]) -> dict[str, dict[
     return {str(key): dict(value) for key, value in templates.items() if isinstance(value, Mapping)}
 
 
+def _verification_per_node_seconds(settings: dict[str, Any]) -> float | None:
+    return _verification_timeout_seconds(settings, "per_node_seconds")
+
+
+def _verification_total_seconds(settings: dict[str, Any]) -> float | None:
+    return _verification_timeout_seconds(settings, "total_seconds")
+
+
+def _verification_timeout_seconds(settings: dict[str, Any], key: str) -> float | None:
+    verify = settings.get("verify")
+    timeout_config = verify.get("verification_timeout") if isinstance(verify, dict) else None
+    if not isinstance(timeout_config, Mapping):
+        return None
+    return _positive_seconds(timeout_config.get(key))
+
+
+def _template_config_with_timeout_cap(template_config: dict[str, Any], per_node_seconds: float | None) -> dict[str, Any]:
+    config = dict(template_config)
+    if per_node_seconds is None:
+        return config
+
+    timeout = _positive_seconds(config.get("timeout"), milliseconds_allowed=True)
+    config["timeout"] = min(timeout, per_node_seconds) if timeout is not None else per_node_seconds
+
+    timeout_seconds = _positive_seconds(config.get("timeout_seconds"))
+    config["timeout_seconds"] = min(timeout_seconds, per_node_seconds) if timeout_seconds is not None else per_node_seconds
+
+    step_timeout_seconds = _positive_seconds(config.get("step_timeout_seconds"))
+    config["step_timeout_seconds"] = (
+        min(step_timeout_seconds, per_node_seconds) if step_timeout_seconds is not None else per_node_seconds
+    )
+    return config
+
+
+def _positive_seconds(value: Any, *, milliseconds_allowed: bool = False) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    if milliseconds_allowed and seconds > 1000:
+        seconds = seconds / 1000
+    return seconds
+
+
 def _runtime_result(node_id: str, template_ref: str, passed: bool, output: str) -> dict[str, Any]:
     return {
         "check_name": "verification_test_runtime",
         "node_id": node_id,
         "template_ref": template_ref,
         "passed": passed,
+        "skipped": False,
         "output": output,
         "duration": 0.0,
     }
+
+
+def _skipped_result(node_id: str, reason: str) -> dict[str, Any]:
+    if reason == "verification-test":
+        output = "Skipped: verification-test by user request"
+    else:
+        output = f"Skipped: {reason}"
+    return {
+        "check_name": "verification_test_runtime",
+        "node_id": node_id,
+        "template_ref": "",
+        "passed": None,
+        "skipped": True,
+        "skip_reason": reason,
+        "output": output,
+        "duration": 0.0,
+    }
+
+
+def _runtime_output(node_id: str, passed: bool, output: Any) -> str:
+    text = str(output or "")
+    if passed:
+        return text
+    return text or _failure_output(node_id, "verification test failed")
+
+
+def _failure_output(node_id: str, message: str) -> str:
+    return f"[FAIL] verification_test: {node_id}: {message}"
+
+
+def _timeout_output(node_id: str, exc: subprocess.TimeoutExpired) -> str:
+    timeout = getattr(exc, "timeout", None)
+    if timeout is None:
+        return f"[TIMEOUT] verification_test: {node_id} exceeded timeout"
+    return f"[TIMEOUT] verification_test: {node_id} exceeded {timeout:g}s"
 
 
 def _result_passed(result: Any) -> bool:
