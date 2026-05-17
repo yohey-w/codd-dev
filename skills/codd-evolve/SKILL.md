@@ -152,9 +152,20 @@ Once intent is confirmed, execute in this order (each step's output feeds the ne
 7. Run codd propagate
    - Final cross-doc consistency pass
    - Catches any drift between source-as-implemented and design-as-written
+
+8. Runtime smoke verification (MANDATORY — not optional)
+   - Build + unit + E2E (`codd verify`) being green is NECESSARY but NOT SUFFICIENT
+   - The user must be able to actually open the running app and touch the changed feature
+   - Required checks (all must pass):
+     a. Local DB up (e.g. `docker ps | grep <db-container>` or framework-specific health check)
+     b. Dev server up (e.g. `curl -sf http://127.0.0.1:<port>/<entry-route> | grep -q <expected>` returns 0)
+     c. Smoke connectivity (login flow, primary protected route) reaches HTTP 200
+     d. Real-browser E2E against the **already-running** server, not a fresh playwright-managed instance — exercises the actual change (e.g. logout button click → session destroyed → redirect to login)
+   - If DB or dev server is down: bring it up as part of this step. Do NOT skip and report green.
+   - If runtime smoke fails: the change is NOT done. Either fix forward or revert. Reporting done with the server down is a critical violation of CoDD coherence.
 ```
 
-Never reorder these steps. Doc updates always precede source updates — that is the CoDD coherence invariant.
+Never reorder these steps. Doc updates always precede source updates — that is the CoDD coherence invariant. **Step 8 is the actual completion gate** — Steps 1-7 produce coherent artifacts, Step 8 proves the user can actually use them.
 
 ### Step 5 — Failure handling
 
@@ -193,7 +204,15 @@ Updated:
 Lexicon: no changes
 Verify: red 0 ✅
 Propagate: 0 drift ✅
+Runtime smoke (Step 8):
+  - DB up: ✅ (postgres container running)
+  - Dev server: ✅ (http://127.0.0.1:3000/login → 200)
+  - Smoke connectivity: ✅ (login → /admin/dashboard 200)
+  - Real-browser E2E: ✅ (logout button click → /login redirect)
+Done: ✅ (user can open the app and use the new feature)
 ```
+
+If any Step 8 check is ❌, the change is NOT done. Either fix forward or revert; never report done with the runtime broken.
 
 Suggest a commit message and offer to commit. Do not auto-commit unless the user confirms.
 
@@ -254,10 +273,11 @@ These are non-negotiable. Violating any of them defeats the purpose of CoDD:
 1. **Never edit source without a corresponding design doc update.** If the change requires source modification, requirements and design must already reflect it.
 2. **Never silently introduce a new lexicon term.** Always ask the user first.
 3. **Never proceed past a red `codd verify`.** Either retry (max 3) or stop and ask.
-4. **Never reorder the chain.** Requirements → design → lexicon → source → tests → verify → propagate. No shortcuts.
+4. **Never reorder the chain.** Requirements → design → lexicon → source → tests → verify → propagate → runtime smoke. No shortcuts.
 5. **Never bypass user approval for breaking changes.** "Breaking" means: existing API contract changes, existing data semantics change, existing user-visible behavior changes.
 6. **Never skip tests for new requirements.** A new functional requirement without a corresponding new test is incoherent.
 7. **Never commit without user approval.** Stage and propose, but do not commit autonomously.
+8. **Never declare done without runtime smoke verification (Step 8).** `codd verify` green is necessary but not sufficient. The user must be able to open the running app and exercise the change. Reporting done while DB/dev server is down — or while a regression like migration conflict blocks startup — is a critical violation. Either bring the runtime up and prove it, or do not declare done.
 
 ## Guardrails
 
