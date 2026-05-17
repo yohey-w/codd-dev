@@ -664,6 +664,11 @@ def _load_or_derive_implementation_steps(
         explicit = deriver.derive_steps(spec, nodes, context)
         record = read_impl_step_cache(cache_path)
         steps = list(record.steps) if record is not None else explicit
+    elif not explicit and not derive_command and nodes:
+        # K-2 cmd_345: detect silent fail of operation_flow_hint injection
+        from codd.llm.criteria_expander import warn_if_operation_flow_unused
+
+        warn_if_operation_flow_unused(config, nodes)
 
     augment_command = _ai_command_from_config(config, "best_practice_augment")
     if explicit and not implicit and augment_command and _best_practice_augment_enabled(config):

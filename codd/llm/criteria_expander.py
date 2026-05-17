@@ -510,6 +510,54 @@ def coverage_axes_hint(context: Mapping[str, Any] | None, design_docs: list[Node
     return yaml.safe_dump(axes, sort_keys=False, allow_unicode=True).strip()
 
 
+def warn_if_operation_flow_unused(
+    config: Mapping[str, Any] | None,
+    design_docs: list[Node] | None = None,
+    stream=None,
+) -> bool:
+    """Emit a WARNING when operation_flow is declared in design docs but
+    ``ai_commands.impl_step_derive`` is unset.
+
+    Returns True when a warning was emitted, False otherwise. The warning text
+    is generic — it does not name any project-specific entity or page — so it
+    is safe to call from any CoDD code path.
+
+    Triggered when:
+        - One or more provided ``design_docs`` declare ``operation_flow``
+          (via Node.attributes or via the context's ``operation_flow`` key), AND
+        - ``config['ai_commands']['impl_step_derive']`` is missing/empty.
+
+    The warning is written to ``stream`` (default: ``sys.stderr``).
+    """
+
+    import sys as _sys
+
+    cfg = config or {}
+    operations = _operation_flow_records(cfg, design_docs or [])
+    if not operations:
+        return False
+
+    ai_commands = cfg.get("ai_commands") if isinstance(cfg, Mapping) else None
+    impl_step_derive = None
+    if isinstance(ai_commands, Mapping):
+        candidate = ai_commands.get("impl_step_derive")
+        if isinstance(candidate, str) and candidate.strip():
+            impl_step_derive = candidate.strip()
+    if impl_step_derive:
+        return False
+
+    out = stream if stream is not None else _sys.stderr
+    print(
+        "WARNING: operation_flow is declared in design docs, but "
+        "ai_commands.impl_step_derive is not set in codd.yaml. "
+        "operation_flow_hint will not be injected into LLM prompts and the "
+        "declared UI patterns may not influence generation. Set "
+        "ai_commands.impl_step_derive to enable the injection path.",
+        file=out,
+    )
+    return True
+
+
 def operation_flow_hint(context: Mapping[str, Any] | None, design_docs: list[Node] | None = None) -> str:
     operations = _operation_flow_records(context or {}, design_docs or [])
     if not operations:
@@ -931,6 +979,7 @@ __all__ = [
     "build_criteria_expand_prompt",
     "coverage_axes_hint",
     "operation_flow_hint",
+    "warn_if_operation_flow_unused",
     "evaluate_expanded_criteria",
     "expanded_criteria_cache_path",
     "expansion_input_sha256",
