@@ -4,6 +4,30 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+## [2.20.0] - 2026-05-18 — Codex App Server JSON-RPC integration (cmd_357)
+
+### Added
+- **Codex App Server JSON-RPC AiCommand factory** (cmd_357 Phase 1-3)
+  - `codd/deployment/providers/codex_app_server.py`: stdio/unix/ws transport client + Initialize→ThreadStart→TurnStart オーケストレーション、TurnFailed/Timeout 検出
+  - `codd/deployment/providers/ai_command_factory.py`: `get_ai_command()` で codd.yaml `codex_app_server` セクション評価 + 自動 fallback
+  - `codd/deployment/providers/ai_command.py`: `AiCommand` Protocol (invoke + close) + `CodexAppServerAiCommand` 実装、`SubprocessAiCommand` 既存互換維持
+  - `codd implement-step` / `codd verify --auto-repair` / `codd fix [PHENOMENON]` を factory 経由に統合
+    (impl_step_deriver / llm_repair_engine / phenomenon_fixer)
+  - `codd.yaml` `codex_app_server` セクションで opt-in (`enabled: false` default)
+    - フィールド: `transport / url / command / thread_strategy (per_cmd|per_session) / effort / model / timeout_seconds / fallback (subprocess|error|silent)`
+  - `codd/templates/codd.yaml.tmpl` に opt-in 例 (コメントアウト) を追加
+  - tests: 12 ケース新規 (factory 6 + client 2 + repair engine 4 + phenomenon fixer 4)
+
+### Compatibility
+- 既存 `SubprocessAiCommand` 経路の挙動完全維持 (default `enabled: false` で従来通り)
+- `codex_app_server` セクションなしの codd.yaml は noop で従来挙動
+- `phenomenon_fixer` の特殊条件 (`project_root=None` 維持 + Claude `--print` 強制) は factory 化後も `command_override` 経由で保持
+
+### Notes
+- 設計書: `/home/tono/multi-agent-shogun/queue/reports/gunshi_357_arch_design.yaml`
+- 性能ベンチマーク (subprocess vs app_server P95) は Phase 4 続編で実施予定
+- Phase 1 commit `5366ede`, Phase 2 `9f72b27`, Phase 3 `d476ad6`
+
 ## [2.19.0] - 2026-05-17
 
 ### Changed
