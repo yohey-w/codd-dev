@@ -13,6 +13,16 @@
   <a href="README_ja.md">日本語</a> | English | <a href="README_zh.md">中文</a>
 </p>
 
+> Write only functional requirements and constraints. CoDD generates the code, repairs the coherence, and verifies the result.
+
+---
+
+## 🌟 Why CoDD
+
+> **"Write only functional requirements and constraints. Code is generated, repaired, and verified automatically."**
+
+Most "AI-assisted dev" tools focus on the **generation** side. CoDD focuses on the **constraint** side: the LLM is most useful when it has a precise picture of what *must* be true. CoDD ties every artifact (requirements → design → lexicon → source → tests → runtime) into a single DAG, drives an LLM repair loop against it, and surfaces what is structurally unrepairable — honestly.
+
 ---
 
 ## 🚀 Get started in 60 seconds
@@ -21,42 +31,18 @@
 pip install codd-dev
 
 # Inside your project root
-codd init --suggest-lexicons --llm-enhanced   # AI picks the lexicons that fit
+codd init --suggest-lexicons --llm-enhanced    # AI picks the lexicons that fit
 codd elicit                                    # AI finds gaps in your requirements
 codd dag verify --auto-repair --max-attempts 10  # AI fixes coherence violations
 ```
 
-That's it. Three commands, three feedback loops, one coherent project.
-
-### 💡 Already shipping? Describe what you want fixed.
+Already shipping? Describe what you want fixed:
 
 ```bash
 codd fix "login error messages are hard to understand"   # natural-language phenomenon mode
 ```
 
-`codd fix [PHENOMENON]` (v2.16.0+) is the **second entry-point** of CoDD's North Star: tell CoDD a desired change in plain words, it identifies the affected design docs via lexicon + semantic scoring, updates them with an LLM, and runs the DAG verify gate before any code is touched. Add `--dry-run` to preview, `--non-interactive` for CI.
-
-> Real-world: dogfooded against a Next.js + Prisma + PostgreSQL LMS. See [Case study](#-case-study-real-world-lms).
-
----
-
-## ✨ What it does
-
-| Command | One-line summary |
-| --- | --- |
-| 🔍 **`codd elicit`** | LLM finds **specification holes** in your requirements, scoped against industry-standard lexicons (BABOK, OWASP, WCAG, PCI DSS, ISO 25010, …). |
-| 🔄 **`codd diff`** | Detects **drift** between requirements and the actual implementation (brownfield-friendly). |
-| 🛠️ **`codd dag verify --auto-repair`** | Validates the requirements → design → implementation → tests DAG; an LLM proposes patches when violations appear and the loop retries until SUCCESS or MAX_ATTEMPTS. |
-| 🎯 **`codd fix`** / **`codd fix [PHENOMENON]`** | Two modes. *Legacy*: auto-detects test/CI failures, maps them to the DAG, asks an LLM to patch implementation, re-runs the verify gate. *PHENOMENON* (v2.16.0+, North Star entry-point 2): take a natural-language phenomenon (e.g. `"dashboard layout breaks on mobile"`), identify candidate design docs via Tier-1 lexicon + Tier-2 semantic scoring, update them with the LLM, then propagate. Full interactive HITL + `--non-interactive` + `--dry-run`. |
-| 📦 **38 lexicon plug-ins** | Industry standards bundled as opt-in coverage axes — Web (WCAG / OWASP / Web Vitals / WebAuthn / forms / SEO / PWA / browser-compat / responsive), Mobile (HIG / Material 3 / a11y / MASVS), Backend (REST / GraphQL / gRPC / events), Data (SQL / JSON Schema / event sourcing / governance), Ops (CI/CD / Kubernetes / Terraform / observability / DORA), Compliance (ISO 27001 / HIPAA / PCI DSS / GDPR / EU AI Act), Process (ISO 25010 / 29119 / DDD / 12-factor / i18n / model cards / API rate-limit), and Methodology (BABOK). |
-| 🌐 **`codd brownfield`** | Extract → diff → elicit pipeline: point CoDD at an existing codebase and it reverse-engineers requirements, finds drift, and surfaces gaps in one shot. |
-| 🎯 **`codd init --suggest-lexicons --llm-enhanced`** | LLM reads your code/docs, identifies data types and function traits, and recommends which lexicons to install (with confidence + reasoning). |
-| 📊 **`codd lexicon list/install/diff` + `codd coverage report`** | Manage plug-ins and produce JSON / Markdown / self-contained HTML coverage matrices. |
-| 🛡️ CI gate | `.github/workflows/codd_coverage.yml` template + `codd coverage check` exit code make coverage regressions block merges. |
-| 🧪 **`codd verify --runtime`** | Step 8 runtime smoke gate (v2.19.0+). DB up + dev server reachable + smoke HTTP connectivity + real-browser E2E against the already-running server. `--runtime-skip {db,dev-server,connectivity,e2e,verification-test}` skips per-category and records the reason. |
-| 🔁 **`codd skills {install,list,remove}`** | Distribute bundled skills (e.g. `codd-evolve`) to `~/.claude/skills/` / `~/.agents/skills/`. `--target {claude,codex,both}`, `--mode {symlink,copy}`, idempotent + `--force` for backup-and-replace. |
-| 🪡 **codd-evolve skill** | Brownfield conversational evolution. Walks requirements → design → lexicon → source → tests → verify → propagate → Step 8 runtime smoke from a single natural-language intent. Stop-and-ask gates for new lexicon terms / breaking changes / 1:N UI topology. |
-| ⚡ **Codex App Server backend** (v2.20.0) | `codex_app_server.enabled: true` in `codd.yaml` routes AI calls through a persistent JSON-RPC thread instead of subprocess. `thread_strategy: per_session` amortises codex cold-start across `codd implement` / `codd verify --auto-repair` / `codd fix`. Automatic `subprocess` fallback when binary or socket is missing. |
+`codd fix [PHENOMENON]` is CoDD's second entry-point: state the desired change in plain words, CoDD locates the affected design docs via lexicon + semantic scoring, updates them with an LLM, and runs the DAG verify gate before any code is touched. `--dry-run` previews, `--non-interactive` runs in CI.
 
 ---
 
@@ -89,30 +75,50 @@ flowchart LR
 
 ---
 
-## 📊 Case study: real-world LMS
+## ✨ What it does
 
-A Next.js + Prisma + PostgreSQL multi-tenant LMS (≈30 design docs, 12 DB tables, RLS-enforced isolation):
+CoDD is one CLI organised in four layers. Pick what you need; the rest stays out of your way.
 
-| Stage | Result |
+### Core commands
+
+| Command | One-line summary |
 | --- | --- |
-| `codd init --suggest-lexicons --llm-enhanced` | LLM detected **data types** (PII / payment / video) and **function traits** (auth / payment / public REST), recommended 15 lexicons, 9 of which the human had already chosen — confirming the heuristic. |
-| `codd elicit` (10 lexicons loaded, scope=`system_implementation`, phase=`mvp`) | **70 findings** across web a11y / data governance / SQL / security / Web Vitals / WebAuthn / API / process. Business-tier dimensions (KPI, UAT detail, risk register) auto-filtered out. |
-| `codd dag verify --auto-repair` | Started with 16 unrepairable violations; through targeted core fixes (deployment chain auto-discovery, runtime-state auto-binding, mock harness no-op, scope/phase filter) the same project now reaches **PASS or amber-WARN** with deploy allowed. |
-| VPS smoke (`/`, `/login`, `/api/health`) | All 3 endpoints **200 OK**. |
+| 🎯 **`codd init --suggest-lexicons --llm-enhanced`** | LLM scans code/docs, picks the right lexicon plug-ins. |
+| 🔍 **`codd elicit`** | Finds *specification holes* against industry-standard lexicons. |
+| 🔄 **`codd diff`** | Detects drift between requirements and actual implementation. |
+| 🛠️ **`codd dag verify --auto-repair`** | Validates the full DAG; LLM proposes patches; loop until SUCCESS or MAX_ATTEMPTS. |
+| 🎯 **`codd fix`** / **`codd fix [PHENOMENON]`** | Two modes — auto-detect CI failures, or describe a desired change in natural language. |
+| 🌐 **`codd brownfield`** | Extract → diff → elicit pipeline for existing codebases. |
 
-The full pipeline change is **zero lines of CoDD core changes per project** — every project-specific concern lives in `project_lexicon.yaml` or in `codd_plugins/` (Generality Gate, Layer A / B / C).
+### Quality gates
+
+| Gate | Purpose |
+| --- | --- |
+| 🧪 **`codd verify --runtime`** | Step 8 runtime smoke (DB up + dev server reachable + smoke HTTP + real-browser E2E). `--runtime-skip` opts out per category and records the reason. |
+| 📊 **`codd lexicon list/install/diff` + `codd coverage report`** | Plug-in management + JSON / Markdown / self-contained HTML coverage matrices. |
+| 🛡️ **CI gate** | `.github/workflows/codd_coverage.yml` template + `codd coverage check` exit code blocks coverage regressions on merge. |
+
+### Skills & backends
+
+| Capability | What it gives you |
+| --- | --- |
+| 🔁 **`codd skills {install,list,remove}`** | Distributes bundled skills (e.g. `codd-evolve`) to `~/.claude/skills/` and `~/.agents/skills/`. `--target {claude,codex,both}`, `--mode {symlink,copy}`, idempotent + `--force`. |
+| 🪡 **codd-evolve skill** | Brownfield conversational evolution. Walks requirements → design → lexicon → source → tests → verify → propagate → Step 8 runtime smoke from a single natural-language intent. Stop-and-ask gates for new lexicon terms, breaking changes, and 1:N UI topology. |
+| ⚡ **Codex App Server backend** (v2.20.0) | Set `codex_app_server.enabled: true` in `codd.yaml` to route AI calls through a persistent JSON-RPC thread instead of subprocess. `thread_strategy: per_session` amortises codex cold-start across `codd implement` / `codd verify --auto-repair` / `codd fix`. Automatic `subprocess` fallback when the binary or socket is missing. |
+
+### Lexicon plug-ins
+
+38 industry-standard lexicons ship as opt-in coverage axes — Web (WCAG / OWASP / Web Vitals / WebAuthn / forms / SEO / PWA), Mobile (HIG / Material 3 / a11y / MASVS), Backend (REST / GraphQL / gRPC / events), Data (SQL / JSON Schema / event sourcing / governance), Ops (CI/CD / Kubernetes / Terraform / observability / DORA), Compliance (ISO 27001 / HIPAA / PCI DSS / GDPR / EU AI Act), Process (ISO 25010 / 29119 / DDD / 12-factor / i18n / model cards / API rate-limit), and Methodology (BABOK).
 
 ---
 
-## 🌟 Why CoDD exists
+## 📊 Case study
 
-> **"Write only functional requirements and constraints. Code is generated, repaired, and verified automatically."**
+Dogfooded against a Next.js + Prisma + PostgreSQL multi-tenant LMS (~30 design docs, 12 DB tables, RLS-enforced isolation): `codd init --suggest-lexicons` matched 9 of 10 manually-chosen lexicons, `codd elicit` surfaced 70 spec holes, `codd dag verify --auto-repair` drove 16 unrepairable violations down to **PASS or amber-WARN with deploy allowed** — without a single line of CoDD core change per project. Project-specific concerns live entirely in `project_lexicon.yaml` and `codd_plugins/`.
 
-Most "AI-assisted dev" tools focus on the **generation** side. CoDD focuses on the **constraint** side: the LLM is most useful when it has a precise picture of what *must* be true. CoDD provides that picture as a DAG that links every artifact, plus a plug-in surface that lets industry standards (BABOK / WCAG / OWASP / PCI / ISO …) supply the constraints mechanically.
+---
 
-When something breaks the DAG, an LLM proposes a patch, the loop re-verifies, and either reaches SUCCESS or surfaces what is structurally unrepairable — honestly.
-
-### Generality Gate (three-layer architecture)
+## 🧱 Generality Gate (three-layer architecture)
 
 | Layer | Where stack-specific names live | Examples |
 | --- | --- | --- |
@@ -120,44 +126,32 @@ When something breaks the DAG, an LLM proposes a patch, the loop re-verifies, an
 | **B — Templates** | Generic placeholders only. | `codd/templates/*.j2`, `codd/templates/lexicon_schema.yaml` |
 | **C — Plug-ins** | Free to name anything. | `codd_plugins/lexicons/*/`, `codd_plugins/stack_map.yaml` |
 
-This is what lets CoDD ship one core that works for Next.js, Django, FastAPI, Rails, Go services, mobile apps, ML model cards — and that lets contributors add a lexicon without touching the core.
+This is what lets one core work for Next.js, Django, FastAPI, Rails, Go services, mobile apps, ML model cards — and lets contributors add a lexicon without touching the core.
 
 ---
 
 ## 🧭 Roadmap
 
-- **v2.20.0 (current)** — **Codex App Server JSON-RPC integration** (cmd_357). `AiCommand` Protocol + `CodexAppServerAiCommand` + `ai_command_factory.get_ai_command()` route `codd implement` / `codd verify --auto-repair` / `codd fix` through a long-lived JSON-RPC session when `codex_app_server.enabled=true`. Default stays `subprocess` for full backward compat; fallback is automatic with WARNING log when the codex binary is missing, the unix socket is unreachable, or `thread.start` errors. `thread_strategy: per_session` reuses one thread across turns to avoid cold-start cost. 3013 total PASS, SKIP=0.
-- **v2.19.0** — **Full OSS-ization** (cmd_333). The legacy `codd-pro` Pro Gate is removed; `codd verify` now calls `propagator.run_verify` directly. `codd review` / `codd audit` / `codd risk` are deleted (implementation-less commands, zero affected users). `bridge.py` retains the plug-in surface for future verify-plug-ins. Plus four cross-cutting features:
-  - `codd verify --runtime` (cmd_338) — Step 8 *runtime smoke gate* (DB up + dev server up + smoke HTTP + real-browser E2E) becomes the final completion check; `--runtime-skip {db,dev-server,connectivity,e2e,verification-test}` (cmd_342) skips per-category and records the reason in the report.
-  - `verify.verification_timeout.{per_node_seconds,total_seconds}` (cmd_342) caps individual verification_test runs and the total verify budget; remaining nodes are recorded as `skipped: total_timeout_exceeded`, not red.
-  - `ai_commands.impl_step_derive` config + `warn_if_operation_flow_unused()` (cmd_345) — emits a WARNING when a project declares `operation_flow` in requirements but has no AI command wired up to consume it, so `operation_flow_hint` silent-skip is no longer silent.
-  - `operation_flow:` YAML frontmatter (cmd_340) — declare actor / verb / target / parent / ui_pattern per operation in requirements; `operation_flow_hint()` injects the declared topology into LLM prompts via `criteria_expander.py` / `impl_step_deriver.py`.
-  - `codd dag verify` adds `ui_coherence_for_one_to_many` (cmd_340 B) — amber warning when a 1:N relation lacks declared master-detail / drilldown UI evidence.
-- **codd skills CLI** (cmd_336) — `codd skills {install,list,remove}` distributes bundled skills (e.g. `codd-evolve`) to `~/.claude/skills/` and `~/.agents/skills/` with `--target {claude,codex,both}` and `--mode {symlink,copy}`. Idempotent install, `--force` triggers backup-and-replace.
-- **codd-evolve skill** (skills/codd-evolve/) — conversational Brownfield evolution. Express functional changes in natural language; the skill walks requirements → design → lexicon → source → tests → verify → propagate → Step 8 runtime smoke in a single chain. Built-in stop-and-ask gates (new lexicon term / breaking change / coherence violation / scope explosion / ambiguous role / 1:N data-model UI topology) with pre-approval branches for orchestrator-driven runs.
-- **v2.18.0** — Greenfield triage from [@v-kato](https://github.com/v-kato) (cmd_473). Issue #20: `codd implement run --language` now overrides `project.language` per invocation (no more re-init when `codd init --language` was the wrong choice). Issue #21: `detailed_design` added to `DEFAULT_NODE_PREFIXES` so `codd plan --init` no longer emits node ids its own `codd validate` rejects. Issue #22: `_strip_code_fence` is non-greedy + non-anchored, dropping trailing markdown prose that LLMs occasionally appended after the closing fence. 12 new tests, 2937 total PASS, SKIP=0.
-- **v2.17.1** — emergency patch for `codd fix [PHENOMENON]` (cmd_471). Issue #23: `codd/fix/templates/*.txt` are now shipped inside the wheel (a hatch `include` regression caused `FileNotFoundError` after `pip install`). Issue #24: replaced `---` wrappers in `design_update.txt` / `risk_assessment.txt` with `<document>` / `<diff>` XML-style tags so the rendered prompt no longer collides with markdown frontmatter or unified-diff `--- a/path` lines. 11 new tests, 2925 total PASS, SKIP=0.
-- **v2.17.0** — `node_completeness` honours `kind: common` (cmd_470). Fixes a v2.15.0 oversight: `expects` edges pointing at common (shared infrastructure) nodes were misreported as missing impl files even when the file existed. 6 new tests, 2914 total PASS, SKIP=0.
-- **v2.16.0** — `codd fix [PHENOMENON]` — North Star entry-point 2 (cmd_468). Express a desired change in natural language; CoDD identifies affected design docs via Tier-1 lexicon + Tier-2 semantic scoring, updates them with LLM, runs the DAG verify gate. Full interactive HITL (candidate selection, ambiguity clarification, risk confirmation) with `--non-interactive` for CI. 66 new tests, 2908 total PASS, SKIP=0.
-- **v2.15.0** — `kind: common` for shared infrastructure (cmd_467). C5 amber −79.2% on dogfood project (125 → 26). `**` glob translator fix.
-- **v2.14.0** — 8 structural gaps closed (cmd_466 dogfood). Sidecar `<test>.codd.yaml` with `verified_by:` (C6) / `axis_matrix:` (C9); lexicon schema SSoT; completeness_audit batch; `scan.exclude` bug fix (−52%); `codd dag verify --auto-repair`; elicit mock-AI sentinel; AI timeout 3600 s SSoT. Red 22 → 0.
-- **v2.13.0** — Opt-out protection: `OptOutPolicy` requires `justification` + `expires_at`. Silent SKIP abolished; severity preserved.
-- **v2.12.0** — Test-completeness gates: C7 amber promotion + C8 `ci_health` static check.
-- **v2.11.0** — Sprint-less `codd implement` (`--design <path> --output <dir>` directly).
-- **next** — implement/test auto-propagation from PHENOMENON (AC #8 completion); App-Server-driven benchmark publication; lexicon plug-in marketplace.
+Up next:
+
+- Auto-propagation of impl/test changes from `codd fix [PHENOMENON]` (AC #8 completion)
+- App-Server-driven benchmark publication (P50 / P95 / P99 for subprocess vs JSON-RPC)
+- Lexicon plug-in marketplace
+
+Past releases (v2.11.0 → v2.20.0) live in [CHANGELOG.md](CHANGELOG.md) with quality metrics.
 
 ---
 
 ## 🤝 Contributing
 
-CoDD is shaped by the following people:
+CoDD is shaped by:
 
 - **[@yohey-w](https://github.com/yohey-w)** — Maintainer / Architect
 - **[@Seika86](https://github.com/Seika86)** — Sprint regex insight (PR #11)
-- **[@v-kato](https://github.com/v-kato)** — Brownfield reproduction reports (Issues #17 / #18 / #19)
+- **[@v-kato](https://github.com/v-kato)** — Brownfield reproduction reports (Issues #17 / #18 / #19 / #20 / #21 / #22)
 - **[@dev-komenzar](https://github.com/dev-komenzar)** — `source_dirs` bug reproduction (Issue #13)
 
-External issues, PRs, and lexicon proposals are welcome — see [Issues](https://github.com/yohey-w/codd-dev/issues).
+Issues, PRs, and lexicon proposals are welcome — see [Issues](https://github.com/yohey-w/codd-dev/issues).
 
 ---
 
@@ -169,7 +163,7 @@ External issues, PRs, and lexicon proposals are welcome — see [Issues](https:/
 
 ---
 
-## 📦 Hook Integration
+## 📦 Hook integration
 
 CoDD ships hook recipes for editor and Git workflows:
 
