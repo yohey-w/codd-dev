@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from codd.config import load_project_config
 from codd.dag.builder import build_dag
+from codd.deployment.providers.ai_command_factory import get_ai_command
 from codd.fix.candidate_selector import (
     Candidate,
     CandidateSelection,
@@ -36,7 +37,7 @@ from codd.fix.phenomenon_parser import (
     parse_phenomenon,
 )
 from codd.fix.risk_classifier import RiskAssessment, classify_risk
-from codd.generator import _invoke_ai_command, _resolve_ai_command
+from codd.generator import _resolve_ai_command
 
 logger = logging.getLogger("codd.fix.phenomenon_fixer")
 
@@ -530,8 +531,8 @@ def _build_default_ai_invoke(
     PHENOMENON mode needs plain text-in / text-out: structured JSON for
     the parser, an updated document body for the design updater. So we
     force --print / -p on Claude (otherwise it runs interactively and
-    writes files), and never pass project_root into _invoke_ai_command,
-    which would route the call into the file-writing-agent path.
+    writes files), and never pass project_root into the AI command
+    adapter, which would route the call into the file-writing-agent path.
     """
     import shlex
 
@@ -544,7 +545,9 @@ def _build_default_ai_invoke(
             parts.append("--print")
             resolved = shlex.join(parts)
 
+    adapter = get_ai_command(config, project_root=None, command_override=resolved)
+
     def invoke(prompt: str) -> str:
-        return _invoke_ai_command(resolved, prompt)
+        return adapter.invoke(prompt)
 
     return invoke
