@@ -164,8 +164,13 @@ Once intent is confirmed, execute in this order (each step's output feeds the ne
      b. Dev server up via `runtime_smoke.dev_server.url`
      c. Smoke connectivity via `runtime_smoke.smoke_connectivity[]`
      d. Real-browser E2E via `runtime_smoke.e2e.command`
+     e. Opt-in CRUD flow reflection via `runtime.crud_flow_targets[]`
+   - When the change adds or modifies POST/PUT/PATCH/DELETE behavior, add or reuse
+     a CRUD flow target or an equivalent E2E proving: mutate request → persistence
+     or server acceptance → re-fetch → visible list/detail reflection. A green GET
+     smoke alone is not enough for mutating flows.
    - All results are written with raw logs to `reports/runtime_smoke_{{timestamp}}.md` unless the project config overrides the path.
-   - Self-reported runtime smoke is not acceptable evidence. If `--runtime-skip <category>` is used, including `--runtime-skip verification-test`, the report must show the skipped category explicitly and it must never be described as passed.
+   - Self-reported runtime smoke is not acceptable evidence. If `--runtime-skip <category>` is used, including `--runtime-skip verification-test` or `--runtime-skip crud-flow`, the report must show the skipped category explicitly and it must never be described as passed.
    - If `codd verify --runtime` fails: the change is NOT done. Either fix forward or revert. Reporting done with the server down is a critical violation of CoDD coherence.
 ```
 

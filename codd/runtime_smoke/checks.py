@@ -6,13 +6,20 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from time import perf_counter
+import time
 from typing import Any
 from urllib.parse import urljoin
 import subprocess
 
 import httpx
 
-from codd.runtime_smoke.config import ConnectivityConfig, DbCheckConfig, DevServerConfig, E2eConfig
+from codd.runtime_smoke.config import (
+    ConnectivityConfig,
+    CrudFlowTargetConfig,
+    DbCheckConfig,
+    DevServerConfig,
+    E2eConfig,
+)
 
 
 @dataclass
@@ -258,6 +265,143 @@ class E2eChecker:
         return env
 
 
+class CrudFlowChecker:
+    def __init__(self, targets: list[CrudFlowTargetConfig], project_root: Path, dev_server_url: str | None):
+        self.targets = targets
+        self.project_root = project_root
+        self.dev_server_url = dev_server_url
+
+    def run(self) -> list[CheckResult]:
+        results: list[CheckResult] = []
+        with httpx.Client(follow_redirects=False) as client:
+            for target in self.targets:
+                if target.command:
+                    results.append(self._run_command(target))
+                else:
+                    results.append(self._run_http_flow(client, target))
+        return results
+
+    def _run_command(self, target: CrudFlowTargetConfig) -> CheckResult:
+        started = perf_counter()
+        try:
+            completed = subprocess.run(
+                target.command,
+                shell=True,
+                cwd=_working_dir(self.project_root, target.working_dir),
+                env=_env(target.env, self.dev_server_url),
+                capture_output=True,
+                text=True,
+                timeout=target.timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            elapsed = perf_counter() - started
+            return CheckResult(
+                passed=False,
+                name=f"CRUD flow: {target.name}",
+                category="crud-flow",
+                output=_join_output(str(exc.stdout or ""), str(exc.stderr or ""), f"timeout after {target.timeout}s"),
+                elapsed_sec=elapsed,
+                details={"command": target.command, "timeout": target.timeout},
+            )
+
+        elapsed = perf_counter() - started
+        return CheckResult(
+            passed=completed.returncode == 0,
+            name=f"CRUD flow: {target.name}",
+            category="crud-flow",
+            output=_join_output(completed.stdout, completed.stderr, f"exit_code={completed.returncode}"),
+            elapsed_sec=elapsed,
+            details={"command": target.command, "exit_code": completed.returncode},
+        )
+
+    def _run_http_flow(self, client: httpx.Client, target: CrudFlowTargetConfig) -> CheckResult:
+        started = perf_counter()
+        create = target.create
+        reflect = target.reflect
+        if create is None or reflect is None:
+            return _missing_config("crud-flow", "runtime.crud_flow_targets requires command or create+reflect")
+
+        create_url = _resolve_url(create.url, self.dev_server_url)
+        try:
+            create_response = client.request(
+                create.method,
+                create_url,
+                headers=create.headers or None,
+                data=create.body if create.body is not None else None,
+                json=create.json if create.json is not None else None,
+                timeout=create.timeout,
+            )
+        except (httpx.TimeoutException, httpx.RequestError) as exc:
+            elapsed = perf_counter() - started
+            return CheckResult(
+                passed=False,
+                name=f"CRUD flow: {target.name}",
+                category="crud-flow",
+                output=f"create request failed for {create_url}: {exc}",
+                elapsed_sec=elapsed,
+                details={"create_url": create_url},
+            )
+
+        if create_response.status_code != create.expected_status:
+            elapsed = perf_counter() - started
+            return CheckResult(
+                passed=False,
+                name=f"CRUD flow: {target.name}",
+                category="crud-flow",
+                output=f"{create.method} {create_url} -> HTTP {create_response.status_code}, expected {create.expected_status}",
+                elapsed_sec=elapsed,
+                details={"create_url": create_url, "status_code": create_response.status_code},
+            )
+
+        reflect_url = _resolve_url(reflect.url, self.dev_server_url)
+        attempts = 0
+        last_output = ""
+        deadline = perf_counter() + target.max_wait_seconds
+        while True:
+            attempts += 1
+            try:
+                response = client.request(
+                    reflect.method,
+                    reflect_url,
+                    headers=reflect.headers or None,
+                    data=reflect.body if reflect.body is not None else None,
+                    json=reflect.json if reflect.json is not None else None,
+                    timeout=reflect.timeout,
+                )
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                last_output = f"reflect request failed for {reflect_url}: {exc}"
+            else:
+                body = str(getattr(response, "text", "") or "")
+                status_ok = response.status_code == reflect.expected_status
+                text_ok = target.expect_text is None or target.expect_text in body
+                last_output = (
+                    f"{reflect.method} {reflect_url} -> HTTP {response.status_code}, "
+                    f"expected {reflect.expected_status}, expect_text={target.expect_text!r}, attempt={attempts}"
+                )
+                if status_ok and text_ok:
+                    elapsed = perf_counter() - started
+                    return CheckResult(
+                        passed=True,
+                        name=f"CRUD flow: {target.name}",
+                        category="crud-flow",
+                        output=f"create OK; reflection OK after {attempts} attempt(s): {last_output}",
+                        elapsed_sec=elapsed,
+                        details={"create_url": create_url, "reflect_url": reflect_url, "attempts": attempts},
+                    )
+
+            if perf_counter() >= deadline:
+                elapsed = perf_counter() - started
+                return CheckResult(
+                    passed=False,
+                    name=f"CRUD flow: {target.name}",
+                    category="crud-flow",
+                    output=f"create OK; reflection not observed within {target.max_wait_seconds:.3f}s: {last_output}",
+                    elapsed_sec=elapsed,
+                    details={"create_url": create_url, "reflect_url": reflect_url, "attempts": attempts},
+                )
+            time.sleep(max(0.0, min(target.poll_interval, deadline - perf_counter())))
+
+
 def skipped_result(category: str, name: str, reason: str) -> CheckResult:
     return CheckResult(
         passed=False,
@@ -275,6 +419,7 @@ def _missing_config(category: str, message: str) -> CheckResult:
         "dev-server": "Dev server up",
         "connectivity": "Smoke connectivity",
         "e2e": "Real-browser E2E",
+        "crud-flow": "CRUD flow",
     }
     return CheckResult(
         passed=False,
@@ -306,6 +451,22 @@ def _resolve_url(url: str, base_url: str | None) -> str:
 
 def _render_token(value: str, dev_server_url: str | None) -> str:
     return value.replace("{{dev_server_url}}", dev_server_url or "")
+
+
+def _working_dir(project_root: Path, working_dir: str | None) -> Path:
+    if not working_dir:
+        return project_root
+    path = Path(working_dir).expanduser()
+    if path.is_absolute():
+        return path
+    return project_root / path
+
+
+def _env(env_config: dict[str, str], dev_server_url: str | None) -> dict[str, str]:
+    env = os.environ.copy()
+    for key, value in env_config.items():
+        env[key] = _render_token(value, dev_server_url)
+    return env
 
 
 def _response_elapsed_seconds(response: httpx.Response) -> float | None:

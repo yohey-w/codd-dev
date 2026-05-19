@@ -4,6 +4,17 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Runtime CRUD flow verification** (cmd_368)
+  - `codd verify --runtime` now supports an opt-in `crud-flow` category through `runtime.crud_flow_targets`.
+  - Targets can be project-owned commands or declarative HTTP create+reflect checks.
+  - `--runtime-skip crud-flow` records an explicit skipped category in the runtime report.
+  - `codd doctor` warns when POST-like handlers exist without configured CRUD reflection checks or reflection-oriented E2E tests.
+  - `codd-evolve` Step 8 now requires mutate → re-fetch → visible reflection evidence for POST/PUT/PATCH/DELETE changes.
+
+### Compatibility
+- Existing runtime smoke behavior is unchanged unless `runtime.crud_flow_targets` is configured.
+
 ## [2.20.0] - 2026-05-18 — Codex App Server JSON-RPC integration (cmd_357)
 
 ### Added

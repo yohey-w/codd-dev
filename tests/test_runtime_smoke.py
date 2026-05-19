@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from codd.cli import _CliVerificationResult, main
 from codd.runtime_smoke.checks import (
     CheckResult,
+    CrudFlowChecker,
     DbChecker,
     DevServerChecker,
     E2eChecker,
@@ -18,6 +19,7 @@ from codd.runtime_smoke.checks import (
 )
 from codd.runtime_smoke.config import (
     ConnectivityConfig,
+    CrudFlowTargetConfig,
     DbCheckConfig,
     DevServerConfig,
     E2eConfig,
@@ -321,3 +323,257 @@ runtime_smoke:
     skipped = [check for check in result.checks if check.skipped]
     assert [check.category for check in skipped] == ["connectivity", "e2e"]
     assert result.overall_passed is True
+
+
+def test_t15_config_loads_runtime_crud_flow_targets(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+runtime:
+  crud_flow_targets:
+    - name: add item
+      create:
+        method: POST
+        url: /items
+        expected_status: 201
+        json:
+          name: alpha
+      reflect:
+        url: /items
+        expected_status: 200
+        expect_text: alpha
+      max_wait_seconds: 2
+      poll_interval: 0.1
+""",
+    )
+
+    config = load_runtime_smoke_config(project)
+
+    assert len(config.crud_flow_targets) == 1
+    target = config.crud_flow_targets[0]
+    assert target.name == "add item"
+    assert target.create is not None
+    assert target.create.method == "POST"
+    assert target.reflect is not None
+    assert target.expect_text == "alpha"
+    assert target.max_wait_seconds == 2
+
+
+def test_t16_crud_flow_http_passes_after_reflection_delay(tmp_path, monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, method, url, **kwargs):
+            calls.append((method, url))
+            if method == "POST":
+                return SimpleNamespace(status_code=201, text="")
+            if len(calls) == 2:
+                return SimpleNamespace(status_code=200, text="not yet")
+            return SimpleNamespace(status_code=200, text="alpha is visible")
+
+    monkeypatch.setattr("codd.runtime_smoke.checks.httpx.Client", FakeClient)
+    monkeypatch.setattr("codd.runtime_smoke.checks.time.sleep", lambda *_args, **_kwargs: None)
+
+    target = CrudFlowTargetConfig(
+        name="add item",
+        create=ConnectivityConfig(name="create", method="POST", url="/items", expected_status=201),
+        reflect=ConnectivityConfig(name="reflect", url="/items", expected_status=200),
+        expect_text="alpha",
+        max_wait_seconds=1,
+        poll_interval=0,
+    )
+
+    result = CrudFlowChecker([target], tmp_path, "http://example.test").run()[0]
+
+    assert result.passed is True
+    assert result.category == "crud-flow"
+    assert calls == [
+        ("POST", "http://example.test/items"),
+        ("GET", "http://example.test/items"),
+        ("GET", "http://example.test/items"),
+    ]
+
+
+def test_t17_crud_flow_create_failure_fails(tmp_path, monkeypatch):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, method, url, **kwargs):
+            return SimpleNamespace(status_code=500, text="")
+
+    monkeypatch.setattr("codd.runtime_smoke.checks.httpx.Client", FakeClient)
+    target = CrudFlowTargetConfig(
+        name="add item",
+        create=ConnectivityConfig(name="create", method="POST", url="/items", expected_status=201),
+        reflect=ConnectivityConfig(name="reflect", url="/items", expected_status=200),
+        expect_text="alpha",
+    )
+
+    result = CrudFlowChecker([target], tmp_path, "http://example.test").run()[0]
+
+    assert result.passed is False
+    assert "HTTP 500" in result.output
+
+
+def test_t18_missing_crud_flow_config_is_opt_in_no_check(tmp_path, monkeypatch):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  report:
+    log_to_file: false
+""",
+    )
+
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.httpx.get",
+        lambda *args, **kwargs: SimpleNamespace(status_code=200),
+    )
+
+    result = run_runtime_smoke(project)
+
+    assert "crud-flow" not in [check.category for check in result.checks]
+    assert result.overall_passed is False  # connectivity/e2e still require their existing config.
+
+
+def test_t19_runtime_skip_crud_flow_records_skipped_check(tmp_path, monkeypatch):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  e2e:
+    command: "npx playwright test"
+  report:
+    log_to_file: false
+runtime:
+  crud_flow_targets:
+    - name: add item
+      command: "npm run test:crud"
+""",
+    )
+
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.httpx.get",
+        lambda *args, **kwargs: SimpleNamespace(status_code=200),
+    )
+
+    result = run_runtime_smoke(project, skip_checks=["connectivity", "crud-flow"])
+
+    skipped = [check for check in result.checks if check.skipped]
+    assert [check.category for check in skipped] == ["connectivity", "crud-flow"]
+    assert result.overall_passed is True
+
+
+def test_t20_doctor_warns_on_post_without_reflection_e2e(tmp_path):
+    project = _project(tmp_path)
+    source_dir = project / "src"
+    source_dir.mkdir()
+    (source_dir / "routes.ts").write_text("export async function POST() { return Response.json({ok:true}) }\n")
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "runtime.crud_flow_targets" in result.output
+
+
+def test_t21_doctor_suppressed_by_crud_flow_target(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime:
+  crud_flow_targets:
+    - name: add item
+      command: "npm run test:crud"
+""",
+    )
+    source_dir = project / "src"
+    source_dir.mkdir()
+    (source_dir / "routes.ts").write_text("export async function POST() { return Response.json({ok:true}) }\n")
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: PASS" in result.output
+
+
+def test_t22_doctor_warns_when_post_test_only_asserts_status(tmp_path):
+    project = _project(tmp_path)
+    source_dir = project / "src"
+    tests_dir = project / "tests"
+    source_dir.mkdir()
+    tests_dir.mkdir()
+    (source_dir / "routes.ts").write_text("export async function POST() { return Response.json({ok:true}, {status:201}) }\n")
+    (tests_dir / "create.spec.ts").write_text(
+        """
+test("create returns 201", async ({ request }) => {
+  const response = await request.post("/api/items", { data: { name: "x" } });
+  expect(response.status()).toBe(201);
+});
+"""
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "visible list/detail reflection" in result.output
+
+
+def test_t23_doctor_accepts_post_with_visible_reflection_e2e(tmp_path):
+    project = _project(tmp_path)
+    source_dir = project / "src"
+    tests_dir = project / "tests"
+    source_dir.mkdir()
+    tests_dir.mkdir()
+    (source_dir / "routes.ts").write_text("export async function POST() { return Response.json({ok:true}, {status:201}) }\n")
+    (tests_dir / "create.spec.ts").write_text(
+        """
+test("created item appears in list", async ({ page, request }) => {
+  await request.post("/api/items", { data: { name: "codd-runtime-smoke" } });
+  await page.goto("/items");
+  await expect(page.getByText("codd-runtime-smoke")).toBeVisible();
+});
+"""
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: PASS" in result.output

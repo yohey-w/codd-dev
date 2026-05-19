@@ -112,3 +112,21 @@ context_acquisition:
 #       expected_status: 200
 #   e2e:
 #     command: "npx playwright test tests/smoke/"
+
+# Optional: POST/PUT/PATCH/DELETE -> re-fetch -> visible reflection checks.
+# runtime:
+#   crud_flow_targets:
+#     - name: "create item appears in list"
+#       command: "npx playwright test tests/smoke/create-item.spec.ts"
+#     - name: "api create then list reflects"
+#       create:
+#         method: POST
+#         url: "/api/items"
+#         expected_status: 201
+#         json: {name: "codd-runtime-smoke"}
+#       reflect:
+#         url: "/items"
+#         expected_status: 200
+#         expect_text: "codd-runtime-smoke"
+#       max_wait_seconds: 10
+#       poll_interval: 0.5
