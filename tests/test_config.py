@@ -5,6 +5,7 @@ from pathlib import Path
 import yaml
 
 import codd.config as config_module
+from codd.propagator import _map_files_to_modules
 
 
 def test_load_project_config_merges_defaults_and_project_overrides(tmp_path, monkeypatch):
@@ -74,3 +75,92 @@ def test_load_project_config_merges_defaults_and_project_overrides(tmp_path, mon
             "reason": "Project auth rule.",
         },
     ]
+
+
+def test_load_project_config_source_dirs_override_defaults_for_nested_framework_layout(
+    tmp_path,
+    monkeypatch,
+):
+    defaults_path = tmp_path / "defaults.yaml"
+    defaults_path.write_text(
+        yaml.safe_dump(
+            {
+                "scan": {
+                    "source_dirs": ["src/"],
+                    "doc_dirs": ["docs/"],
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "DEFAULTS_PATH", defaults_path)
+
+    project = tmp_path / "project"
+    codd_dir = project / "codd"
+    codd_dir.mkdir(parents=True)
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "scan": {
+                    "source_dirs": ["src/lib/"],
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = config_module.load_project_config(project)
+
+    assert loaded["scan"]["source_dirs"] == ["src/lib/"]
+    assert _map_files_to_modules(
+        [
+            "src/lib/editor/NoteEditor.svelte",
+            "src/lib/feed/Feed.svelte",
+        ],
+        loaded["scan"]["source_dirs"],
+    ) == {
+        "src/lib/editor/NoteEditor.svelte": "editor",
+        "src/lib/feed/Feed.svelte": "feed",
+    }
+
+
+def test_load_project_config_uses_default_source_dirs_when_project_omits_them(
+    tmp_path,
+    monkeypatch,
+):
+    defaults_path = tmp_path / "defaults.yaml"
+    defaults_path.write_text(
+        yaml.safe_dump(
+            {
+                "scan": {
+                    "source_dirs": ["src/"],
+                    "doc_dirs": ["docs/"],
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "DEFAULTS_PATH", defaults_path)
+
+    project = tmp_path / "project"
+    codd_dir = project / "codd"
+    codd_dir.mkdir(parents=True)
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "scan": {
+                    "doc_dirs": ["docs/design/"],
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = config_module.load_project_config(project)
+
+    assert loaded["scan"]["source_dirs"] == ["src/"]
+    assert loaded["scan"]["doc_dirs"] == ["docs/", "docs/design/"]
