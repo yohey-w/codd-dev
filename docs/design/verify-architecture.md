@@ -75,6 +75,53 @@ verify:
 
 Defaults per language loaded from `DEFAULT_VERIFY_CONFIGS[language]`.
 
+### Runtime Smoke CRUD Flow Category
+
+`codd verify --runtime` extends Step 8 with an opt-in `crud-flow` category. The
+existing DB, dev-server, smoke connectivity, and real-browser E2E checks remain
+unchanged. A project enables CRUD reflection checks only by declaring
+`runtime.crud_flow_targets`:
+
+```yaml
+runtime:
+  crud_flow_targets:
+    - name: "create item appears in list"
+      command: "npx playwright test tests/smoke/create-item.spec.ts"
+    - name: "api create then list reflects"
+      create:
+        method: POST
+        url: "/api/items"
+        expected_status: 201
+        json: {name: "codd-runtime-smoke"}
+      reflect:
+        url: "/items"
+        expected_status: 200
+        expect_text: "codd-runtime-smoke"
+      max_wait_seconds: 10
+      poll_interval: 0.5
+```
+
+Execution rules:
+- Command targets run as project-owned tests and pass on exit code 0.
+- Declarative targets issue the mutating request, then poll the reflection URL
+  until the expected status and optional text are observed.
+- Missing `runtime.crud_flow_targets` is a no-op for backward compatibility.
+- `--runtime-skip crud-flow` records the category as skipped in the runtime report.
+
+### Doctor Warning
+
+`codd doctor` performs a lightweight static diagnostic:
+
+1. Scan configured source directories for POST-like handlers.
+2. If found, check for `runtime.crud_flow_targets`.
+3. If absent, scan configured test directories for POST tests with reflection
+   markers such as list, reload, visible, locator, or expectation assertions.
+4. Emit a warning when mutating endpoints exist without a reflection-oriented
+   runtime check.
+
+This is a warning only. It is intentionally heuristic and framework-agnostic; it
+does not block existing projects.
+
 ### Strategy Selection
 
 ```python

@@ -68,6 +68,26 @@ The verifier must support multiple languages, not just TypeScript/Node.js.
 - Includes: typecheck results, test results, design refs, propagation targets
 - Works regardless of language
 
+### R2.5: Runtime CRUD Flow Verification (Opt-In)
+
+`codd verify --runtime` must support an opt-in CRUD flow category for user-visible
+state reflection checks. This category verifies that a mutating operation is not
+only accepted by the server, but is also observable after re-fetch in a list or
+detail view.
+
+**Requirements:**
+- Projects can declare `runtime.crud_flow_targets` in `codd.yaml`.
+- Each target is either:
+  - a project-owned command, such as a Playwright smoke spec, or
+  - a declarative HTTP `create` request plus `reflect` request with optional `expect_text`.
+- The category remains opt-in. Projects without `runtime.crud_flow_targets` keep
+  current `codd verify --runtime` behavior.
+- `--runtime-skip crud-flow` records an explicit skipped runtime category.
+- `codd doctor` warns when POST-like endpoints exist but no CRUD reflection check
+  is configured or discoverable in E2E tests.
+- The implementation must stay framework-agnostic and must not hardcode project
+  routes, entity names, development server commands, or domain vocabulary.
+
 ## R3: Dogfooding — CoDD Manages Itself
 
 - codd-dev uses `.codd/` as config directory (since `codd/` is source code)

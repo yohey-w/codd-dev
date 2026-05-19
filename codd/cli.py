@@ -377,6 +377,25 @@ def preflight(task_yaml: Path, project_path: str, strict: bool, ntfy_topic: str,
     _run_preflight_command(task_yaml, project_path, strict, ntfy_topic, ntfy_severity_threshold)
 
 
+@main.command("doctor")
+@click.option("--path", "project_path", default=".", help="Project root directory")
+def doctor(project_path: str) -> None:
+    """Run project-level configuration diagnostics."""
+    project_root = Path(project_path).resolve()
+    try:
+        warnings = _doctor_warnings(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"CoDD doctor: FAIL ({exc})")
+        raise SystemExit(2)
+
+    if not warnings:
+        click.echo("CoDD doctor: PASS")
+        return
+    click.echo("CoDD doctor: WARN")
+    for warning in warnings:
+        click.echo(f"WARNING: {warning}")
+
+
 @main.command("gungi")
 @click.argument("task_yaml", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--path", "project_path", default=".", help="Project root directory")
@@ -426,6 +445,89 @@ def _run_preflight_command(
         reason = "strict high severity" if strict_halt else "critical issue found"
         click.echo(f"HALT recommended: {reason}")
         raise SystemExit(1)
+
+
+_POST_ENDPOINT_RE = re.compile(
+    r"(?i)(export\s+async\s+function\s+POST\b|@[\w.]+\.post\(|\b[\w.]+\.post\(|"
+    r"\b(?:app|router)\.post\(|"
+    r"\bdo_POST\b|method\s*[:=]\s*['\"]POST['\"]|['\"]POST['\"])",
+)
+_REFLECTION_E2E_RE = re.compile(
+    r"(?i)(reflect|reflection|refetch|re-fetch|reload|list|detail|visible|getByText|findByText|"
+    r"toBeVisible|toContainText|toHaveText|toHaveCount|toContain\()",
+)
+_TEXT_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".feature"}
+
+
+def _doctor_warnings(project_root: Path) -> list[str]:
+    config = load_project_config(project_root)
+    warnings: list[str] = []
+    if (
+        _has_post_like_source(project_root, config)
+        and not _has_crud_flow_targets(config)
+        and not _has_reflection_e2e(project_root, config)
+    ):
+        warnings.append(
+            "POST-like endpoint or handler detected, but no `runtime.crud_flow_targets` and no "
+            "reflection-oriented E2E test were found. Add an opt-in CRUD flow target or an E2E that "
+            "proves create/update/delete -> re-fetch -> visible list/detail reflection."
+        )
+    return warnings
+
+
+def _has_crud_flow_targets(config: dict[str, Any]) -> bool:
+    runtime = config.get("runtime", {})
+    runtime_smoke = config.get("runtime_smoke", {})
+    runtime_targets = runtime.get("crud_flow_targets") if isinstance(runtime, dict) else None
+    smoke_targets = runtime_smoke.get("crud_flow_targets") if isinstance(runtime_smoke, dict) else None
+    return bool(runtime_targets or smoke_targets)
+
+
+def _has_post_like_source(project_root: Path, config: dict[str, Any]) -> bool:
+    for path in _configured_text_files(project_root, config, "source_dirs", ["src/"]):
+        if _POST_ENDPOINT_RE.search(_read_text_best_effort(path)):
+            return True
+    return False
+
+
+def _has_reflection_e2e(project_root: Path, config: dict[str, Any]) -> bool:
+    for path in _configured_text_files(project_root, config, "test_dirs", ["tests/"]):
+        text = _read_text_best_effort(path)
+        if _POST_ENDPOINT_RE.search(text) and _REFLECTION_E2E_RE.search(text):
+            return True
+    return False
+
+
+def _configured_text_files(project_root: Path, config: dict[str, Any], key: str, default: list[str]) -> list[Path]:
+    scan = config.get("scan", {})
+    raw_dirs = scan.get(key, default) if isinstance(scan, dict) else default
+    dirs = raw_dirs if isinstance(raw_dirs, list) else default
+    files: list[Path] = []
+    for raw_dir in dirs:
+        if not isinstance(raw_dir, str) or not raw_dir.strip():
+            continue
+        root = Path(raw_dir).expanduser()
+        if not root.is_absolute():
+            root = project_root / root
+        if not root.exists():
+            continue
+        if root.is_file():
+            if root.suffix in _TEXT_SUFFIXES:
+                files.append(root)
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix in _TEXT_SUFFIXES:
+                files.append(path)
+    return files
+
+
+def _read_text_best_effort(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
 
 
 def _format_preflight_ntfy(result: Any) -> str:
@@ -2438,7 +2540,7 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 @click.option(
     "--runtime-skip",
     multiple=True,
-    type=click.Choice(["db", "dev-server", "connectivity", "e2e", "verification-test"]),
+    type=click.Choice(["db", "dev-server", "connectivity", "e2e", "crud-flow", "verification-test"]),
     help="Skip a runtime smoke check and record it as skipped in the report",
 )
 @click.option(

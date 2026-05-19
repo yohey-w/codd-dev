@@ -8,6 +8,7 @@ from pathlib import Path
 
 from codd.runtime_smoke.checks import (
     CheckResult,
+    CrudFlowChecker,
     DbChecker,
     DevServerChecker,
     E2eChecker,
@@ -81,6 +82,20 @@ def run_runtime_smoke(
         skip_set,
         lambda: [E2eChecker(runtime_config.e2e, runtime_config.project_root, runtime_config.dev_server.url).run()],
     )
+    if _should_stop(runtime_config, checks):
+        return _finish(runtime_config, checks)
+
+    if runtime_config.crud_flow_targets or "crud-flow" in skip_set:
+        _run_category(
+            "crud-flow",
+            checks,
+            skip_set,
+            lambda: CrudFlowChecker(
+                runtime_config.crud_flow_targets,
+                runtime_config.project_root,
+                runtime_config.dev_server.url,
+            ).run(),
+        )
     return _finish(runtime_config, checks)
 
 
@@ -90,6 +105,7 @@ def _run_category(category: str, checks: list[CheckResult], skip_set: set[str], 
         "dev-server": "Dev server up",
         "connectivity": "Smoke connectivity",
         "e2e": "Real-browser E2E",
+        "crud-flow": "CRUD flow",
     }
     if category in skip_set:
         checks.append(skipped_result(category, names[category], f"--runtime-skip {category}"))

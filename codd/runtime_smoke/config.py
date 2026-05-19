@@ -46,6 +46,20 @@ class E2eConfig:
 
 
 @dataclass(frozen=True)
+class CrudFlowTargetConfig:
+    name: str
+    command: str | None = None
+    working_dir: str | None = None
+    env: dict[str, str] = field(default_factory=dict)
+    timeout: float | None = None
+    create: ConnectivityConfig | None = None
+    reflect: ConnectivityConfig | None = None
+    expect_text: str | None = None
+    poll_interval: float = 0.5
+    max_wait_seconds: float = 10.0
+
+
+@dataclass(frozen=True)
 class ReportConfig:
     log_to_file: bool = True
     file_path: str = "reports/runtime_smoke_{{timestamp}}.md"
@@ -60,6 +74,7 @@ class RuntimeSmokeConfig:
     dev_server: DevServerConfig = field(default_factory=DevServerConfig)
     smoke_connectivity: list[ConnectivityConfig] = field(default_factory=list)
     e2e: E2eConfig = field(default_factory=E2eConfig)
+    crud_flow_targets: list[CrudFlowTargetConfig] = field(default_factory=list)
     report: ReportConfig = field(default_factory=ReportConfig)
 
 
@@ -72,6 +87,11 @@ def load_runtime_smoke_config(project_root: Path | str, base_url_override: str |
         raw = {}
     if not isinstance(raw, dict):
         raise ValueError("runtime_smoke must be a YAML mapping")
+    runtime_raw = raw_project_config.get("runtime", {})
+    if runtime_raw is None:
+        runtime_raw = {}
+    if not isinstance(runtime_raw, dict):
+        raise ValueError("runtime must be a YAML mapping")
 
     dev_server = _dev_server_config(_mapping(raw.get("dev_server"), "runtime_smoke.dev_server"), base_url_override)
     return RuntimeSmokeConfig(
@@ -81,6 +101,7 @@ def load_runtime_smoke_config(project_root: Path | str, base_url_override: str |
         dev_server=dev_server,
         smoke_connectivity=_connectivity_configs(raw.get("smoke_connectivity")),
         e2e=_e2e_config(_mapping(raw.get("e2e"), "runtime_smoke.e2e")),
+        crud_flow_targets=_crud_flow_targets(runtime_raw.get("crud_flow_targets", raw.get("crud_flow_targets"))),
         report=_report_config(_mapping(raw.get("report"), "runtime_smoke.report")),
     )
 
@@ -111,31 +132,27 @@ def _connectivity_configs(raw: Any) -> list[ConnectivityConfig]:
 
     configs: list[ConnectivityConfig] = []
     for index, item in enumerate(raw, start=1):
-        if not isinstance(item, dict):
-            raise ValueError(f"runtime_smoke.smoke_connectivity[{index}] must be a mapping")
-        url = _string(item.get("url"), f"runtime_smoke.smoke_connectivity[{index}].url")
-        timeout_value = item.get("timeout", item.get("max_time_seconds", 5))
-        configs.append(
-            ConnectivityConfig(
-                name=str(item.get("name") or f"connectivity {index}"),
-                method=str(item.get("method") or "GET").upper(),
-                url=url,
-                expected_status=_int(
-                    item.get("expected_status", 200),
-                    f"runtime_smoke.smoke_connectivity[{index}].expected_status",
-                ),
-                timeout=_float(timeout_value, f"runtime_smoke.smoke_connectivity[{index}].timeout"),
-                cookie_jar=_optional_string(item.get("cookie_jar"), f"runtime_smoke.smoke_connectivity[{index}].cookie_jar"),
-                save_cookie_jar=_optional_string(
-                    item.get("save_cookie_jar"),
-                    f"runtime_smoke.smoke_connectivity[{index}].save_cookie_jar",
-                ),
-                headers=_string_mapping(item.get("headers"), f"runtime_smoke.smoke_connectivity[{index}].headers"),
-                body=item.get("body"),
-                json=item.get("json"),
-            )
-        )
+        configs.append(_connectivity_config(item, f"runtime_smoke.smoke_connectivity[{index}]", f"connectivity {index}"))
     return configs
+
+
+def _connectivity_config(raw: Any, field_name: str, default_name: str) -> ConnectivityConfig:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{field_name} must be a mapping")
+    url = _string(raw.get("url"), f"{field_name}.url")
+    timeout_value = raw.get("timeout", raw.get("max_time_seconds", 5))
+    return ConnectivityConfig(
+        name=str(raw.get("name") or default_name),
+        method=str(raw.get("method") or "GET").upper(),
+        url=url,
+        expected_status=_int(raw.get("expected_status", 200), f"{field_name}.expected_status"),
+        timeout=_float(timeout_value, f"{field_name}.timeout"),
+        cookie_jar=_optional_string(raw.get("cookie_jar"), f"{field_name}.cookie_jar"),
+        save_cookie_jar=_optional_string(raw.get("save_cookie_jar"), f"{field_name}.save_cookie_jar"),
+        headers=_string_mapping(raw.get("headers"), f"{field_name}.headers"),
+        body=raw.get("body"),
+        json=raw.get("json"),
+    )
 
 
 def _e2e_config(raw: dict[str, Any]) -> E2eConfig:
@@ -145,6 +162,48 @@ def _e2e_config(raw: dict[str, Any]) -> E2eConfig:
         env=_string_mapping(raw.get("env"), "runtime_smoke.e2e.env"),
         timeout=_optional_float(raw.get("timeout"), "runtime_smoke.e2e.timeout"),
     )
+
+
+def _crud_flow_targets(raw: Any) -> list[CrudFlowTargetConfig]:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("runtime.crud_flow_targets must be a list")
+
+    targets: list[CrudFlowTargetConfig] = []
+    for index, item in enumerate(raw, start=1):
+        field_name = f"runtime.crud_flow_targets[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{field_name} must be a mapping")
+        command = _optional_string(item.get("command"), f"{field_name}.command")
+        create_raw = item.get("create")
+        reflect_raw = item.get("reflect")
+        create = _connectivity_config(create_raw, f"{field_name}.create", f"CRUD create {index}") if create_raw else None
+        reflect = _connectivity_config(reflect_raw, f"{field_name}.reflect", f"CRUD reflect {index}") if reflect_raw else None
+        if not command and (create is None or reflect is None):
+            raise ValueError(f"{field_name} requires either command or create+reflect")
+        reflect_mapping = reflect_raw if isinstance(reflect_raw, dict) else {}
+        targets.append(
+            CrudFlowTargetConfig(
+                name=str(item.get("name") or f"CRUD flow {index}"),
+                command=command,
+                working_dir=_optional_string(item.get("working_dir"), f"{field_name}.working_dir"),
+                env=_string_mapping(item.get("env"), f"{field_name}.env"),
+                timeout=_optional_float(item.get("timeout"), f"{field_name}.timeout"),
+                create=create,
+                reflect=reflect,
+                expect_text=_optional_string(
+                    item.get("expect_text", reflect_mapping.get("expect_text")),
+                    f"{field_name}.expect_text",
+                ),
+                poll_interval=_float(item.get("poll_interval", 0.5), f"{field_name}.poll_interval"),
+                max_wait_seconds=_float(
+                    item.get("max_wait_seconds", item.get("timeout_seconds", 10)),
+                    f"{field_name}.max_wait_seconds",
+                ),
+            )
+        )
+    return targets
 
 
 def _report_config(raw: dict[str, Any]) -> ReportConfig:

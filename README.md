@@ -94,7 +94,7 @@ CoDD is one CLI organised in four layers. Pick what you need; the rest stays out
 
 | Gate | Purpose |
 | --- | --- |
-| 🧪 **`codd verify --runtime`** | Step 8 runtime smoke (DB up + dev server reachable + smoke HTTP + real-browser E2E). `--runtime-skip` opts out per category and records the reason. |
+| 🧪 **`codd verify --runtime`** | Step 8 runtime smoke (DB up + dev server reachable + smoke HTTP + real-browser E2E + opt-in CRUD reflection via `runtime.crud_flow_targets`). `--runtime-skip` opts out per category and records the reason. |
 | 📊 **`codd lexicon list/install/diff` + `codd coverage report`** | Plug-in management + JSON / Markdown / self-contained HTML coverage matrices. |
 | 🛡️ **CI gate** | `.github/workflows/codd_coverage.yml` template + `codd coverage check` exit code blocks coverage regressions on merge. |
 
