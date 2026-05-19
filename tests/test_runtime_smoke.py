@@ -787,3 +787,209 @@ runtime:
 
     assert result.exit_code == 0
     assert "CoDD doctor: PASS" in result.output
+
+
+def test_t30_config_loads_connectivity_body_and_header_assertions(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  smoke_connectivity:
+    - name: read page
+      url: /records
+      expect_text: Records
+      forbid_text: fixture
+      expect_headers:
+        X-Frame-Options: DENY
+      forbid_headers:
+        Location: localhost
+""",
+    )
+
+    config = load_runtime_smoke_config(project)
+    check = config.smoke_connectivity[0]
+
+    assert check.expect_text == "Records"
+    assert check.forbid_text == "fixture"
+    assert check.expect_headers == {"X-Frame-Options": "DENY"}
+    assert check.forbid_headers == {"Location": "localhost"}
+
+
+def test_t31_connectivity_forbid_text_marks_page_fail(monkeypatch):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.cookies = httpx.Cookies()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, *args, **kwargs):
+            return SimpleNamespace(
+                status_code=200,
+                text="normal page with fixture marker",
+                headers={},
+                elapsed=SimpleNamespace(total_seconds=lambda: 0.02),
+            )
+
+    monkeypatch.setattr("codd.runtime_smoke.checks.httpx.Client", FakeClient)
+
+    result = SmokeConnectivityChecker(
+        [ConnectivityConfig(name="read page", url="/records", forbid_text="fixture")],
+        "http://example.test",
+    ).run()[0]
+
+    assert result.passed is False
+    assert "forbid_text='fixture'" in result.output
+
+
+def test_t32_connectivity_forbid_header_marks_redirect_fail(monkeypatch):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.cookies = httpx.Cookies()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, *args, **kwargs):
+            return SimpleNamespace(
+                status_code=302,
+                text="",
+                headers={"Location": "http://localhost:3000/login"},
+                elapsed=SimpleNamespace(total_seconds=lambda: 0.02),
+            )
+
+    monkeypatch.setattr("codd.runtime_smoke.checks.httpx.Client", FakeClient)
+
+    result = SmokeConnectivityChecker(
+        [
+            ConnectivityConfig(
+                name="login redirect",
+                url="/login",
+                expected_status=302,
+                forbid_headers={"Location": "localhost"},
+            )
+        ],
+        "http://example.test",
+    ).run()[0]
+
+    assert result.passed is False
+    assert "forbid_headers" in result.output
+    assert "Location does not contain 'localhost': False" in result.output
+
+
+def test_t33_doctor_warns_on_synthetic_mutation_without_persistence(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime:
+  action_outcome_targets:
+    - name: record create
+      action:
+        id: record.create
+        verb: create
+        target: record
+        outcomes: [visible_reflection]
+      command: "npm run test:create-record"
+""",
+    )
+    source_dir = project / "src"
+    source_dir.mkdir()
+    (source_dir / "routes.ts").write_text(
+        "export async function POST() { return Response.json({ id: crypto.randomUUID(), ok: true }) }\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "synthetic success" in result.output
+
+
+def test_t34_doctor_accepts_mutation_with_persistence_evidence(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime:
+  action_outcome_targets:
+    - name: record create
+      action:
+        id: record.create
+        verb: create
+        target: record
+        outcomes: [visible_reflection]
+      command: "npm run test:create-record"
+""",
+    )
+    source_dir = project / "src"
+    source_dir.mkdir()
+    (source_dir / "routes.ts").write_text(
+        "export async function POST() { const record = await db.record.create({ data: {} }); return Response.json(record) }\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: PASS" in result.output
+
+
+def test_t35_doctor_warns_on_unconnected_mutating_button(tmp_path):
+    project = _project(tmp_path)
+    source_dir = project / "src"
+    source_dir.mkdir()
+    (source_dir / "RecordActions.tsx").write_text(
+        "export function RecordActions() { return <button type=\"button\">Delete record</button>; }\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "Interactive control `Delete record`" in result.output
+
+
+def test_t36_doctor_accepts_connected_mutating_button(tmp_path):
+    project = _project(tmp_path)
+    source_dir = project / "src"
+    source_dir.mkdir()
+    (source_dir / "RecordActions.tsx").write_text(
+        "export function RecordActions() { return <button type=\"button\" onClick={deleteRecord}>Delete record</button>; }\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: PASS" in result.output
+
+
+def test_t37_doctor_warns_on_weak_action_outcome_metadata(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime:
+  action_outcome_targets:
+    - name: record update
+      action:
+        id: record.update
+        verb: update
+        target: record
+        outcomes: [server_acceptance]
+      command: "npm run test:update-record"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "only weak outcome metadata" in result.output

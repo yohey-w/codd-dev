@@ -63,6 +63,7 @@ class ActionTargetSpec:
     verb: str | None = None
     target: str | None = None
     outcomes: tuple[str, ...] = ()
+    actors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -177,18 +178,21 @@ def action_target_specs_from_config(config: Mapping[str, Any]) -> tuple[ActionTa
         if not isinstance(actions, list):
             continue
         default_target = _optional_text(raw_target.get("target"))
+        default_outcomes = raw_target.get("outcomes", raw_target.get("outcome"))
         for action_index, raw_action in enumerate(actions, start=1):
             if not isinstance(raw_action, Mapping):
                 continue
             action_id = str(raw_action.get("id") or raw_action.get("name") or f"action[{action_index}]")
             verb = canonical_action_verb(raw_action.get("verb")) or canonical_action_verb(action_id)
+            actors = _actor_values(raw_action, raw_target)
             specs.append(
                 ActionTargetSpec(
                     target_name=target_name,
                     action_id=action_id,
                     verb=verb,
                     target=_optional_text(raw_action.get("target")) or default_target,
-                    outcomes=_outcome_names(raw_action.get("outcomes", raw_action.get("outcome"))),
+                    outcomes=_outcome_names(raw_action.get("outcomes", raw_action.get("outcome", default_outcomes))),
+                    actors=actors,
                 )
             )
     return tuple(specs)
@@ -227,12 +231,19 @@ def _is_covered(
 ) -> bool:
     for target_action in target_actions:
         if _same_token(target_action.action_id, requirement.operation_id):
-            return True
+            return _actor_matches(requirement, target_action)
         if target_action.verb != expected_verb:
             continue
-        if _target_matches(requirement.target, target_action):
+        if _target_matches(requirement.target, target_action) and _actor_matches(requirement, target_action):
             return True
     return False
+
+
+def _actor_matches(requirement: ActionRequirement, target_action: ActionTargetSpec) -> bool:
+    if not requirement.actor:
+        return True
+    required = _normalize_token(requirement.actor)
+    return bool(required and required in {_normalize_token(actor) for actor in target_action.actors})
 
 
 def _target_matches(required_target: str, target_action: ActionTargetSpec) -> bool:
@@ -275,6 +286,28 @@ def _outcome_names(value: Any) -> tuple[str, ...]:
             return (_normalize_outcome_name(raw_name),)
         return tuple(_normalize_outcome_name(key) for key, enabled in value.items() if bool(enabled))
     return ()
+
+
+def _actor_values(*items: Mapping[str, Any]) -> tuple[str, ...]:
+    values: list[str] = []
+    for item in items:
+        for key in ("actor", "actors"):
+            raw = item.get(key)
+            if raw in (None, ""):
+                continue
+            if isinstance(raw, str):
+                values.append(raw)
+            elif isinstance(raw, list):
+                values.extend(str(value) for value in raw if value not in (None, ""))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = _normalize_token(value)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(str(value).strip())
+    return tuple(normalized)
 
 
 def _same_token(left: str | None, right: str | None) -> bool:

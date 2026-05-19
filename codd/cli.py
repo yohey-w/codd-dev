@@ -16,8 +16,10 @@ import yaml
 
 from codd.action_outcome import (
     CoverageResult,
+    ActionTargetSpec,
     action_target_specs_from_config,
     compare_action_outcome_coverage,
+    canonical_action_verb,
     extract_action_requirements_from_flows,
 )
 from codd.bridge import get_command_handler
@@ -453,17 +455,59 @@ def _run_preflight_command(
         raise SystemExit(1)
 
 
-_POST_ENDPOINT_RE = re.compile(
-    r"(?i)(export\s+async\s+function\s+POST\b|@[\w.]+\.post\(|\b[\w.]+\.post\(|"
-    r"\b(?:app|router)\.post\(|"
-    r"\bdo_POST\b|method\s*[:=]\s*['\"]POST['\"]|['\"]POST['\"])",
+_MUTATING_ENDPOINT_RE = re.compile(
+    r"(?i)(export\s+async\s+function\s+(?:POST|PUT|PATCH|DELETE)\b|"
+    r"@[\w.]+\.(?:post|put|patch|delete)\(|\b[\w.]+\.(?:post|put|patch|delete)\(|"
+    r"\b(?:app|router)\.(?:post|put|patch|delete)\(|"
+    r"\bdo_(?:POST|PUT|PATCH|DELETE)\b|method\s*[:=]\s*['\"](?:POST|PUT|PATCH|DELETE)['\"]|"
+    r"['\"](?:POST|PUT|PATCH|DELETE)['\"])",
 )
 _REFLECTION_E2E_RE = re.compile(
     r"(?i)(reflect|reflection|refetch|re-fetch|reload|list|detail|visible|getByText|findByText|"
     r"toBeVisible|toContainText|toHaveText|toHaveCount|toContain\()",
 )
+_SYNTHETIC_MUTATION_RE = re.compile(
+    r"(?is)(crypto\.randomUUID\s*\(|randomUUID\s*\(|uuidv4\s*\(|\buuid\s*\(|Math\.random\s*\(|"
+    r"\bfaker\.|\bfake\b|\bdummy\b|\bstub\b|\bmock\b)"
+)
+_PERSISTENCE_EVIDENCE_RE = re.compile(
+    r"(?i)(\bprisma\b|\btypeorm\b|\bsequelize\b|\bknex\b|\bsql\b|\bquery\b|\bexecute\b|"
+    r"\brepository\b|\btransaction\b|\bcommit\b|\brollback\b|\bcollection\b|\bdocument\b|"
+    r"\bmodel\b|\bdb\.|\bstore\.|\bdao\.|\bmapper\.|"
+    r"\.(?:create|insert|update|delete|save|upsert|patch)\s*\()"
+)
+_BUTTON_RE = re.compile(r"(?is)<button\b(?P<attrs>[^>]*)>(?P<label>.*?)</button>")
+_CONNECTED_CONTROL_RE = re.compile(
+    r"(?i)(onClick\s*=|onclick\s*=|@click\s*=|\(click\)\s*=|x-on:click\s*=|wire:click\s*=|"
+    r"on:click\s*=|formAction\s*=|formaction\s*=|href\s*=|data-action\s*=|"
+    r"hx-(?:post|put|patch|delete)\s*=|type\s*=\s*['\"]submit['\"]|"
+    r"type\s*=\s*\{['\"]submit['\"]\})"
+)
+_DISABLED_CONTROL_RE = re.compile(r"(?i)(\bdisabled\b|aria-disabled\s*=\s*['\"]true['\"])")
+_TAG_RE = re.compile(r"(?is)<[^>]+>")
+_STRONG_OUTCOME_NAMES = {
+    "visible_reflection",
+    "reload_persistence",
+    "persisted_change",
+    "persisted_absence",
+    "expected_absence",
+    "absence",
+    "readback",
+    "db_readback",
+    "state_change",
+    "state_reflection",
+    "emitted_event",
+    "event",
+    "notification",
+    "file_written",
+    "side_effect",
+    "persisted",
+    "persistence",
+    "stored",
+    "audit_log",
+}
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*", re.DOTALL)
-_TEXT_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".feature"}
+_TEXT_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".feature", ".html", ".vue", ".svelte"}
 _DOC_SUFFIXES = {".md", ".yaml", ".yml"}
 
 
@@ -473,19 +517,22 @@ def _doctor_warnings(project_root: Path) -> list[str]:
     has_crud_flow_targets = _has_crud_flow_targets(config)
     has_action_outcome_targets = _has_action_outcome_targets(config)
     if (
-        _has_post_like_source(project_root, config)
+        _has_mutating_source(project_root, config)
         and not has_crud_flow_targets
         and not has_action_outcome_targets
         and not _has_reflection_e2e(project_root, config)
     ):
         warnings.append(
-            "POST-like endpoint or handler detected, but no `runtime.crud_flow_targets`, no "
+            "Mutating endpoint or handler detected, but no `runtime.crud_flow_targets`, no "
             "`runtime.action_outcome_targets`, and no reflection-oriented E2E test were found. Add "
             "an opt-in CRUD/action outcome target or an E2E that proves trigger -> outcome reflection, "
             "including visible list/detail reflection when the action changes user-visible state."
         )
+    warnings.extend(_synthetic_mutation_warnings(project_root, config))
+    warnings.extend(_interactive_control_warnings(project_root, config))
     coverage = _action_outcome_coverage(project_root, config)
     warnings.extend(_action_outcome_warning_messages(coverage, legacy_crud_configured=has_crud_flow_targets))
+    warnings.extend(_weak_action_outcome_warning_messages(action_target_specs_from_config(config)))
     return warnings
 
 
@@ -595,9 +642,119 @@ def _action_outcome_warning_messages(
     return warnings
 
 
-def _has_post_like_source(project_root: Path, config: dict[str, Any]) -> bool:
+def _synthetic_mutation_warnings(project_root: Path, config: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
     for path in _configured_text_files(project_root, config, "source_dirs", ["src/"]):
-        if _POST_ENDPOINT_RE.search(_read_text_best_effort(path)):
+        text = _read_text_best_effort(path)
+        if not _MUTATING_ENDPOINT_RE.search(text):
+            continue
+        if not _SYNTHETIC_MUTATION_RE.search(text):
+            continue
+        if _PERSISTENCE_EVIDENCE_RE.search(text):
+            continue
+        warnings.append(
+            f"Mutating handler `{_display_path(path, project_root)}` appears to return synthetic success "
+            "without persistence evidence. Add a real write/readback path or runtime action outcome proof "
+            "that observes persisted state."
+        )
+    return warnings
+
+
+def _interactive_control_warnings(project_root: Path, config: dict[str, Any]) -> list[str]:
+    target_actions = action_target_specs_from_config(config)
+    warnings: list[str] = []
+    for path in _configured_text_files(project_root, config, "source_dirs", ["src/"]):
+        if path.suffix not in {".tsx", ".jsx", ".html", ".vue", ".svelte"}:
+            continue
+        text = _read_text_best_effort(path)
+        for match in _BUTTON_RE.finditer(text):
+            attrs = match.group("attrs") or ""
+            label = _control_label(match.group("label") or "")
+            verb = canonical_action_verb(label)
+            if verb is None:
+                continue
+            if _DISABLED_CONTROL_RE.search(attrs):
+                continue
+            if _control_has_static_connection(text, match.start(), attrs):
+                continue
+            if _control_has_runtime_evidence(label, verb, target_actions):
+                continue
+            warnings.append(
+                f"Interactive control `{label}` in `{_display_path(path, project_root)}` looks like a "
+                f"mutating `{verb}` action but has no static handler/form/navigation evidence and no matching "
+                "`runtime.action_outcome_targets` action."
+            )
+    return warnings
+
+
+def _weak_action_outcome_warning_messages(target_actions: tuple[ActionTargetSpec, ...]) -> list[str]:
+    warnings: list[str] = []
+    for action in target_actions:
+        if action.verb is None:
+            continue
+        outcomes = {_normalize_runtime_token(outcome) for outcome in action.outcomes}
+        if outcomes and outcomes.intersection(_STRONG_OUTCOME_NAMES):
+            continue
+        actor_note = f", actor={','.join(action.actors)}" if action.actors else ""
+        warnings.append(
+            f"`runtime.action_outcome_targets` action `{action.action_id}` in `{action.target_name}` "
+            f"declares mutating verb `{action.verb}`{actor_note} but only weak outcome metadata "
+            f"{sorted(outcomes) or '[]'}. Add visible reflection, reload persistence, persisted readback, "
+            "expected absence, or another durable observable outcome."
+        )
+    return warnings
+
+
+def _control_label(raw_html: str) -> str:
+    return " ".join(_TAG_RE.sub(" ", raw_html).split())
+
+
+def _control_has_static_connection(text: str, start: int, attrs: str) -> bool:
+    if _CONNECTED_CONTROL_RE.search(attrs):
+        return True
+    if re.search(r"(?i)type\s*=\s*['\"]button['\"]", attrs):
+        return False
+    return _inside_form(text, start)
+
+
+def _inside_form(text: str, start: int) -> bool:
+    before = text[:start]
+    return before.lower().rfind("<form") > before.lower().rfind("</form")
+
+
+def _control_has_runtime_evidence(
+    label: str,
+    verb: str,
+    target_actions: tuple[ActionTargetSpec, ...],
+) -> bool:
+    label_token = _normalize_runtime_token(label)
+    label_parts = {part for part in label_token.split("_") if part}
+    for action in target_actions:
+        if action.verb != verb:
+            continue
+        evidence = "_".join(
+            part
+            for part in (
+                _normalize_runtime_token(action.action_id),
+                _normalize_runtime_token(action.target),
+                _normalize_runtime_token(action.target_name),
+            )
+            if part
+        )
+        if not label_parts or label_parts.intersection({part for part in evidence.split("_") if part}):
+            return True
+    return False
+
+
+def _normalize_runtime_token(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+
+
+def _has_mutating_source(project_root: Path, config: dict[str, Any]) -> bool:
+    for path in _configured_text_files(project_root, config, "source_dirs", ["src/"]):
+        if _MUTATING_ENDPOINT_RE.search(_read_text_best_effort(path)):
             return True
     return False
 
@@ -605,7 +762,7 @@ def _has_post_like_source(project_root: Path, config: dict[str, Any]) -> bool:
 def _has_reflection_e2e(project_root: Path, config: dict[str, Any]) -> bool:
     for path in _configured_text_files(project_root, config, "test_dirs", ["tests/"]):
         text = _read_text_best_effort(path)
-        if _POST_ENDPOINT_RE.search(text) and _REFLECTION_E2E_RE.search(text):
+        if _MUTATING_ENDPOINT_RE.search(text) and _REFLECTION_E2E_RE.search(text):
             return True
     return False
 

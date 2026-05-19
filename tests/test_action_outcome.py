@@ -92,3 +92,38 @@ def test_manage_collection_is_ambiguous_until_create_update_delete_are_declared(
 
     assert requirements[0].ambiguous is True
     assert result.gaps[0].missing_verbs == ("update", "delete")
+
+
+def test_actor_requirement_requires_matching_action_actor() -> None:
+    requirements = extract_action_requirements(
+        {"operations": [{"id": "record_update", "verb": "edit", "target": "record", "actor": "operator"}]}
+    )
+
+    result = compare_action_outcome_coverage(
+        requirements,
+        [ActionTargetSpec(target_name="update", action_id="record.update", verb="update", target="record")],
+    )
+
+    assert result.covered is False
+    assert result.gaps[0].missing_verbs == ("update",)
+
+
+def test_actor_requirement_is_covered_by_matching_action_actor() -> None:
+    requirements = extract_action_requirements(
+        {"operations": [{"id": "record_update", "verb": "edit", "target": "record", "actor": "operator"}]}
+    )
+
+    result = compare_action_outcome_coverage(
+        requirements,
+        [
+            ActionTargetSpec(
+                target_name="update",
+                action_id="record.update",
+                verb="update",
+                target="record",
+                actors=("operator",),
+            )
+        ],
+    )
+
+    assert result.covered is True
