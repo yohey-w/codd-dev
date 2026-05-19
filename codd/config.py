@@ -70,6 +70,10 @@ def _deep_merge(defaults: Any, project: Any, path: tuple[str, ...] = ()) -> Any:
     if path == ("coherence", "path_prefix_tolerant"):
         return deepcopy(project)
 
+    if path == ("scan", "source_dirs") and isinstance(project, list):
+        # Explicit source roots define module boundaries; merging defaults changes semantics.
+        return deepcopy(project)
+
     if isinstance(defaults, list) and isinstance(project, list):
         return _merge_lists(defaults, project)
 
