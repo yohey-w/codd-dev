@@ -14,6 +14,7 @@ import subprocess
 import httpx
 
 from codd.runtime_smoke.config import (
+    ActionOutcomeTargetConfig,
     ConnectivityConfig,
     CrudFlowTargetConfig,
     DbCheckConfig,
@@ -402,6 +403,159 @@ class CrudFlowChecker:
             time.sleep(max(0.0, min(target.poll_interval, deadline - perf_counter())))
 
 
+class ActionOutcomeChecker:
+    def __init__(self, targets: list[ActionOutcomeTargetConfig], project_root: Path, dev_server_url: str | None):
+        self.targets = targets
+        self.project_root = project_root
+        self.dev_server_url = dev_server_url
+
+    def run(self) -> list[CheckResult]:
+        results: list[CheckResult] = []
+        with httpx.Client(follow_redirects=False) as client:
+            for target in self.targets:
+                if target.command:
+                    results.append(self._run_command(target))
+                else:
+                    results.append(self._run_http_flow(client, target))
+        return results
+
+    def _run_command(self, target: ActionOutcomeTargetConfig) -> CheckResult:
+        started = perf_counter()
+        try:
+            completed = subprocess.run(
+                target.command,
+                shell=True,
+                cwd=_working_dir(self.project_root, target.working_dir),
+                env=_env(target.env, self.dev_server_url),
+                capture_output=True,
+                text=True,
+                timeout=target.timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            elapsed = perf_counter() - started
+            return CheckResult(
+                passed=False,
+                name=f"Action outcome: {target.name}",
+                category="action-outcome",
+                output=_join_output(str(exc.stdout or ""), str(exc.stderr or ""), f"timeout after {target.timeout}s"),
+                elapsed_sec=elapsed,
+                details={"command": target.command, "timeout": target.timeout, "actions": _action_matrix(target)},
+            )
+
+        elapsed = perf_counter() - started
+        return CheckResult(
+            passed=completed.returncode == 0,
+            name=f"Action outcome: {target.name}",
+            category="action-outcome",
+            output=_join_output(completed.stdout, completed.stderr, f"exit_code={completed.returncode}"),
+            elapsed_sec=elapsed,
+            details={"command": target.command, "exit_code": completed.returncode, "actions": _action_matrix(target)},
+        )
+
+    def _run_http_flow(self, client: httpx.Client, target: ActionOutcomeTargetConfig) -> CheckResult:
+        started = perf_counter()
+        invoke = target.invoke
+        observe = target.observe
+        if invoke is None or observe is None:
+            return _missing_config("action-outcome", "runtime.action_outcome_targets requires command or invoke+observe")
+
+        invoke_url = _resolve_url(invoke.url, self.dev_server_url)
+        try:
+            invoke_response = client.request(
+                invoke.method,
+                invoke_url,
+                headers=invoke.headers or None,
+                data=invoke.body if invoke.body is not None else None,
+                json=invoke.json if invoke.json is not None else None,
+                timeout=invoke.timeout,
+            )
+        except (httpx.TimeoutException, httpx.RequestError) as exc:
+            elapsed = perf_counter() - started
+            return CheckResult(
+                passed=False,
+                name=f"Action outcome: {target.name}",
+                category="action-outcome",
+                output=f"invoke request failed for {invoke_url}: {exc}",
+                elapsed_sec=elapsed,
+                details={"invoke_url": invoke_url, "actions": _action_matrix(target)},
+            )
+
+        if invoke_response.status_code != invoke.expected_status:
+            elapsed = perf_counter() - started
+            return CheckResult(
+                passed=False,
+                name=f"Action outcome: {target.name}",
+                category="action-outcome",
+                output=f"{invoke.method} {invoke_url} -> HTTP {invoke_response.status_code}, expected {invoke.expected_status}",
+                elapsed_sec=elapsed,
+                details={
+                    "invoke_url": invoke_url,
+                    "status_code": invoke_response.status_code,
+                    "actions": _action_matrix(target),
+                },
+            )
+
+        observe_url = _resolve_url(observe.url, self.dev_server_url)
+        attempts = 0
+        last_output = ""
+        deadline = perf_counter() + target.max_wait_seconds
+        while True:
+            attempts += 1
+            try:
+                response = client.request(
+                    observe.method,
+                    observe_url,
+                    headers=observe.headers or None,
+                    data=observe.body if observe.body is not None else None,
+                    json=observe.json if observe.json is not None else None,
+                    timeout=observe.timeout,
+                )
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                last_output = f"observe request failed for {observe_url}: {exc}"
+            else:
+                body = str(getattr(response, "text", "") or "")
+                status_ok = response.status_code == observe.expected_status
+                expect_ok = target.expect_text is None or target.expect_text in body
+                forbid_ok = target.forbid_text is None or target.forbid_text not in body
+                last_output = (
+                    f"{observe.method} {observe_url} -> HTTP {response.status_code}, "
+                    f"expected {observe.expected_status}, expect_text={target.expect_text!r}, "
+                    f"forbid_text={target.forbid_text!r}, attempt={attempts}"
+                )
+                if status_ok and expect_ok and forbid_ok:
+                    elapsed = perf_counter() - started
+                    return CheckResult(
+                        passed=True,
+                        name=f"Action outcome: {target.name}",
+                        category="action-outcome",
+                        output=f"invoke OK; outcome observed after {attempts} attempt(s): {last_output}",
+                        elapsed_sec=elapsed,
+                        details={
+                            "invoke_url": invoke_url,
+                            "observe_url": observe_url,
+                            "attempts": attempts,
+                            "actions": _action_matrix(target),
+                        },
+                    )
+
+            if perf_counter() >= deadline:
+                elapsed = perf_counter() - started
+                return CheckResult(
+                    passed=False,
+                    name=f"Action outcome: {target.name}",
+                    category="action-outcome",
+                    output=f"invoke OK; outcome not observed within {target.max_wait_seconds:.3f}s: {last_output}",
+                    elapsed_sec=elapsed,
+                    details={
+                        "invoke_url": invoke_url,
+                        "observe_url": observe_url,
+                        "attempts": attempts,
+                        "actions": _action_matrix(target),
+                    },
+                )
+            time.sleep(max(0.0, min(target.poll_interval, deadline - perf_counter())))
+
+
 def skipped_result(category: str, name: str, reason: str) -> CheckResult:
     return CheckResult(
         passed=False,
@@ -420,6 +574,7 @@ def _missing_config(category: str, message: str) -> CheckResult:
         "connectivity": "Smoke connectivity",
         "e2e": "Real-browser E2E",
         "crud-flow": "CRUD flow",
+        "action-outcome": "Action outcome",
     }
     return CheckResult(
         passed=False,
@@ -477,3 +632,16 @@ def _response_elapsed_seconds(response: httpx.Response) -> float | None:
     if callable(total_seconds):
         return float(total_seconds())
     return None
+
+
+def _action_matrix(target: ActionOutcomeTargetConfig) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": action.id,
+            "verb": action.verb or "",
+            "target": action.target or "",
+            "trigger": action.trigger or "",
+            "outcomes": [outcome.name for outcome in action.outcomes if outcome.required],
+        }
+        for action in target.actions
+    ]

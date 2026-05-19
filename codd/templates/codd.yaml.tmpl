@@ -130,3 +130,38 @@ context_acquisition:
 #         expect_text: "codd-runtime-smoke"
 #       max_wait_seconds: 10
 #       poll_interval: 0.5
+
+# Optional: action/command/control -> observable outcome checks.
+# Use this when operation_flow declares mutating commands such as update,
+# delete, approve, publish, send, import, or a broad manage_collection action.
+# runtime:
+#   action_outcome_targets:
+#     - name: "record update reflects after reload"
+#       actions:
+#         - id: "record.update"
+#           verb: "update"
+#           target: "record"
+#           trigger: "browser submit or API request"
+#           outcomes:
+#             - server_acceptance
+#             - persisted_change
+#             - visible_reflection
+#             - reload_persistence
+#       command: "npx playwright test tests/smoke/record-update.spec.ts"
+#     - name: "record publish emits event"
+#       action:
+#         id: "record.publish"
+#         verb: "publish"
+#         target: "record"
+#         outcomes:
+#           - server_acceptance
+#           - emitted_event
+#       invoke:
+#         method: POST
+#         url: "/api/records/publish"
+#         expected_status: 202
+#       observe:
+#         url: "/api/events"
+#         expected_status: 200
+#         expect_text: "record.publish"
+#       max_wait_seconds: 10

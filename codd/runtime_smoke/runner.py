@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from codd.runtime_smoke.checks import (
+    ActionOutcomeChecker,
     CheckResult,
     CrudFlowChecker,
     DbChecker,
@@ -96,6 +97,17 @@ def run_runtime_smoke(
                 runtime_config.dev_server.url,
             ).run(),
         )
+    if runtime_config.action_outcome_targets or "action-outcome" in skip_set:
+        _run_category(
+            "action-outcome",
+            checks,
+            skip_set,
+            lambda: ActionOutcomeChecker(
+                runtime_config.action_outcome_targets,
+                runtime_config.project_root,
+                runtime_config.dev_server.url,
+            ).run(),
+        )
     return _finish(runtime_config, checks)
 
 
@@ -106,6 +118,7 @@ def _run_category(category: str, checks: list[CheckResult], skip_set: set[str], 
         "connectivity": "Smoke connectivity",
         "e2e": "Real-browser E2E",
         "crud-flow": "CRUD flow",
+        "action-outcome": "Action outcome",
     }
     if category in skip_set:
         checks.append(skipped_result(category, names[category], f"--runtime-skip {category}"))

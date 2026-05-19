@@ -88,6 +88,35 @@ detail view.
 - The implementation must stay framework-agnostic and must not hardcode project
   routes, entity names, development server commands, or domain vocabulary.
 
+### R2.6: Runtime Action Outcome Coverage (Opt-In)
+
+`codd verify --runtime` must support a generic action outcome category for
+operation, command, control, API, CLI, or job actions that must produce an
+observable result. This category is broader than CRUD and verifies that declared
+mutating actions have runtime evidence for trigger -> outcome.
+
+**Requirements:**
+- Projects can declare `runtime.action_outcome_targets` in `codd.yaml`.
+- Each target must include action metadata:
+  - `actions[]` or `action` with `id`, optional `verb`, optional `target`, and `outcomes`.
+  - `outcomes` can describe server acceptance, persisted state, visible reflection,
+    reload persistence, emitted event, output text, log record, absence, or any
+    project-specific observable result.
+- Each target is either:
+  - a project-owned command, such as a Playwright, pytest, CLI, or job smoke test, or
+  - declarative HTTP `invoke` plus `observe` checks with expected status and optional
+    `expect_text` / `forbid_text`.
+- Command targets must render their action/outcome metadata in the runtime report;
+  exit code alone is not enough context for action coverage.
+- `--runtime-skip action-outcome` records an explicit skipped runtime category.
+- `codd doctor` warns when `operation_flow` declares mutating actions that are not
+  covered by `runtime.action_outcome_targets`.
+- Existing `runtime.crud_flow_targets` do not satisfy operation_flow update/delete
+  or non-CRUD command coverage by themselves.
+- The implementation must stay framework-agnostic and must not hardcode routes,
+  entity names, UI labels, development URLs, or domain vocabulary from a single
+  dogfood project.
+
 ## R3: Dogfooding — CoDD Manages Itself
 
 - codd-dev uses `.codd/` as config directory (since `codd/` is source code)
