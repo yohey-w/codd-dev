@@ -185,7 +185,29 @@ class SmokeConnectivityChecker:
 
         response_elapsed = _response_elapsed_seconds(response)
         elapsed_for_gate = response_elapsed if response_elapsed is not None else elapsed
-        passed = response.status_code == check.expected_status and elapsed_for_gate <= check.timeout
+        body = str(getattr(response, "text", "") or "")
+        status_ok = response.status_code == check.expected_status
+        elapsed_ok = elapsed_for_gate <= check.timeout
+        expect_text_ok = check.expect_text is None or check.expect_text in body
+        forbid_text_ok = check.forbid_text is None or check.forbid_text not in body
+        expect_headers_ok, expect_header_output = _header_assertions(
+            response,
+            check.expect_headers,
+            should_contain=True,
+        )
+        forbid_headers_ok, forbid_header_output = _header_assertions(
+            response,
+            check.forbid_headers,
+            should_contain=False,
+        )
+        passed = (
+            status_ok
+            and elapsed_ok
+            and expect_text_ok
+            and forbid_text_ok
+            and expect_headers_ok
+            and forbid_headers_ok
+        )
         if check.save_cookie_jar:
             cookie_jars[check.save_cookie_jar] = httpx.Cookies(client.cookies)
 
@@ -195,7 +217,9 @@ class SmokeConnectivityChecker:
             category="connectivity",
             output=(
                 f"{check.method} {url} -> HTTP {response.status_code}, "
-                f"expected {check.expected_status}, elapsed {elapsed_for_gate:.3f}s <= {check.timeout:.3f}s"
+                f"expected {check.expected_status}, elapsed {elapsed_for_gate:.3f}s <= {check.timeout:.3f}s, "
+                f"expect_text={check.expect_text!r}, forbid_text={check.forbid_text!r}"
+                f"{expect_header_output}{forbid_header_output}"
             ),
             elapsed_sec=elapsed,
             details={
@@ -204,6 +228,10 @@ class SmokeConnectivityChecker:
                 "url": url,
                 "status_code": response.status_code,
                 "response_elapsed_sec": elapsed_for_gate,
+                "expect_text": check.expect_text,
+                "forbid_text": check.forbid_text,
+                "expect_headers": check.expect_headers,
+                "forbid_headers": check.forbid_headers,
             },
         )
 
@@ -634,6 +662,45 @@ def _response_elapsed_seconds(response: httpx.Response) -> float | None:
     return None
 
 
+def _header_assertions(
+    response: httpx.Response,
+    expected: dict[str, str],
+    *,
+    should_contain: bool,
+) -> tuple[bool, str]:
+    if not expected:
+        return True, ""
+
+    failures: list[str] = []
+    fragments: list[str] = []
+    for name, needle in expected.items():
+        value = _response_header(response, name)
+        contains = needle in value
+        ok = contains if should_contain else not contains
+        relation = "contains" if should_contain else "does not contain"
+        fragments.append(f"{name} {relation} {needle!r}: {ok}")
+        if not ok:
+            failures.append(name)
+    label = "expect_headers" if should_contain else "forbid_headers"
+    return not failures, f", {label}=[{'; '.join(fragments)}]"
+
+
+def _response_header(response: httpx.Response, name: str) -> str:
+    headers = getattr(response, "headers", {}) or {}
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        direct = getter(name)
+        if direct is not None:
+            return str(direct)
+        lower = getter(name.lower())
+        if lower is not None:
+            return str(lower)
+    for key, value in getattr(headers, "items", lambda: [])():
+        if str(key).lower() == name.lower():
+            return str(value)
+    return ""
+
+
 def _action_matrix(target: ActionOutcomeTargetConfig) -> list[dict[str, Any]]:
     return [
         {
@@ -642,6 +709,8 @@ def _action_matrix(target: ActionOutcomeTargetConfig) -> list[dict[str, Any]]:
             "target": action.target or "",
             "trigger": action.trigger or "",
             "outcomes": [outcome.name for outcome in action.outcomes if outcome.required],
+            "actor": action.actor or "",
+            "actors": action.actors,
         }
         for action in target.actions
     ]

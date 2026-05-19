@@ -35,6 +35,10 @@ class ConnectivityConfig:
     headers: dict[str, str] = field(default_factory=dict)
     body: Any | None = None
     json: Any | None = None
+    expect_text: str | None = None
+    forbid_text: str | None = None
+    expect_headers: dict[str, str] = field(default_factory=dict)
+    forbid_headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,8 @@ class ActionSpecConfig:
     target: str | None = None
     trigger: str | None = None
     outcomes: list[OutcomeExpectationConfig] = field(default_factory=list)
+    actor: str | None = None
+    actors: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,16 @@ def _connectivity_config(raw: Any, field_name: str, default_name: str) -> Connec
         headers=_string_mapping(raw.get("headers"), f"{field_name}.headers"),
         body=raw.get("body"),
         json=raw.get("json"),
+        expect_text=_optional_string(raw.get("expect_text"), f"{field_name}.expect_text"),
+        forbid_text=_optional_string(raw.get("forbid_text"), f"{field_name}.forbid_text"),
+        expect_headers=_string_mapping(
+            raw.get("expect_headers", raw.get("expect_header_contains")),
+            f"{field_name}.expect_headers",
+        ),
+        forbid_headers=_string_mapping(
+            raw.get("forbid_headers", raw.get("forbid_header_contains")),
+            f"{field_name}.forbid_headers",
+        ),
     )
 
 
@@ -263,6 +279,8 @@ def _action_outcome_targets(raw: Any) -> list[ActionOutcomeTargetConfig]:
             item.get("actions", item.get("action")),
             field_name,
             item.get("outcomes", item.get("outcome")),
+            default_actor=item.get("actor"),
+            default_actors=item.get("actors"),
         )
         observe_mapping = observe_raw if isinstance(observe_raw, dict) else {}
         targets.append(
@@ -293,7 +311,14 @@ def _action_outcome_targets(raw: Any) -> list[ActionOutcomeTargetConfig]:
     return targets
 
 
-def _action_specs(raw: Any, field_name: str, default_outcomes: Any = None) -> list[ActionSpecConfig]:
+def _action_specs(
+    raw: Any,
+    field_name: str,
+    default_outcomes: Any = None,
+    *,
+    default_actor: Any = None,
+    default_actors: Any = None,
+) -> list[ActionSpecConfig]:
     if isinstance(raw, dict):
         raw_actions = [raw]
     elif isinstance(raw, list):
@@ -317,6 +342,8 @@ def _action_specs(raw: Any, field_name: str, default_outcomes: Any = None) -> li
                 target=_optional_string(item.get("target"), f"{action_field}.target"),
                 trigger=_optional_string(item.get("trigger"), f"{action_field}.trigger"),
                 outcomes=outcomes,
+                actor=_optional_string(item.get("actor", default_actor), f"{action_field}.actor"),
+                actors=_string_list(item.get("actors", default_actors), f"{action_field}.actors"),
             )
         )
     return actions
@@ -393,6 +420,16 @@ def _string_mapping(value: Any, field_name: str) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a mapping")
     return {str(key): str(raw_value) for key, raw_value in value.items()}
+
+
+def _string_list(value: Any, field_name: str) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a string or list")
+    return [str(item) for item in value if item not in (None, "")]
 
 
 def _bool(value: Any, field_name: str) -> bool:
