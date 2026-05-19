@@ -45,6 +45,11 @@ Issue #25 says 8 of 9 bundled skills lacked YAML frontmatter, which meant host C
 
 This audit does not reverse that fix. Making descriptions readable was necessary for any bundled skill to be a correct host skill. The separate question is whether each skill should continue to be a first-class host-invoked skill.
 
+Follow-up comment posted to the closed issue after this audit:
+
+- `https://github.com/yohey-w/codd-dev/issues/25#issuecomment-4487776585`
+- Content covered: quality-report interpretation, keep/demote/remove classification, commit hashes, validation results, and compatibility/migration impact.
+
 ## Judgment Table
 
 | Skill | Primary journey | CLI overlap | Value beyond CLI | Current install signal | Recommendation |
