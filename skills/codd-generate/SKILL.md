@@ -1,3 +1,9 @@
+---
+name: codd-generate
+description: |
+  Generate CoDD design documents for a greenfield project one wave at a time. Use after `codd init` and prepared requirements when the user needs requirement-driven design docs, frontmatter validation, graph refresh, and human approval gates between waves.
+---
+
 # CoDD Generate
 
 Generate CoDD design documents one wave at a time, validate their frontmatter, refresh the dependency graph, and stop for human approval before advancing to the next wave.

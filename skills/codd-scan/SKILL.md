@@ -1,3 +1,9 @@
+---
+name: codd-scan
+description: |
+  Refresh a CoDD project's dependency graph from document frontmatter and source code. Use after changes to requirements, design docs, implementation, or tests when the user needs current graph data, frontmatter coverage, node and edge counts, or warnings before validation or impact analysis.
+---
+
 # CoDD Scan
 
 Refresh the CoDD dependency graph from document frontmatter and source code so later commands (`codd validate`, `codd impact`, `codd generate`, `codd verify`) operate on current project state. Use this after requirements, design docs, implementation, or tests change.

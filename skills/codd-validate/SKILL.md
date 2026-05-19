@@ -1,3 +1,9 @@
+---
+name: codd-validate
+description: |
+  Validate CoDD frontmatter and dependency references before scan, impact, generation, or propagation work continues. Use when the user needs to confirm YAML frontmatter, required metadata, dependency references, and graph inputs are parseable and internally consistent.
+---
+
 # CoDD Validate
 
 Validate CoDD frontmatter and dependency references before impact analysis so broken metadata does not poison the graph or downstream change-propagation work.

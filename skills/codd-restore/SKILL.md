@@ -1,3 +1,9 @@
+---
+name: codd-restore
+description: |
+  Reconstruct CoDD design documents from extracted code facts for a brownfield project. Use after `codd extract` and wave planning when the user needs to infer requirements or restore system and detailed design from existing source code rather than greenfield requirements.
+---
+
 # CoDD Restore
 
 Reconstruct design documents from extracted code facts for brownfield projects. Unlike `/codd-generate` (which creates docs from requirements), `/codd-restore` asks "what IS the current design?" — reconstructing intent from code structure.
