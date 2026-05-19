@@ -60,6 +60,37 @@ class CrudFlowTargetConfig:
 
 
 @dataclass(frozen=True)
+class OutcomeExpectationConfig:
+    name: str
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class ActionSpecConfig:
+    id: str
+    verb: str | None = None
+    target: str | None = None
+    trigger: str | None = None
+    outcomes: list[OutcomeExpectationConfig] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ActionOutcomeTargetConfig:
+    name: str
+    actions: list[ActionSpecConfig]
+    command: str | None = None
+    working_dir: str | None = None
+    env: dict[str, str] = field(default_factory=dict)
+    timeout: float | None = None
+    invoke: ConnectivityConfig | None = None
+    observe: ConnectivityConfig | None = None
+    expect_text: str | None = None
+    forbid_text: str | None = None
+    poll_interval: float = 0.5
+    max_wait_seconds: float = 10.0
+
+
+@dataclass(frozen=True)
 class ReportConfig:
     log_to_file: bool = True
     file_path: str = "reports/runtime_smoke_{{timestamp}}.md"
@@ -75,6 +106,7 @@ class RuntimeSmokeConfig:
     smoke_connectivity: list[ConnectivityConfig] = field(default_factory=list)
     e2e: E2eConfig = field(default_factory=E2eConfig)
     crud_flow_targets: list[CrudFlowTargetConfig] = field(default_factory=list)
+    action_outcome_targets: list[ActionOutcomeTargetConfig] = field(default_factory=list)
     report: ReportConfig = field(default_factory=ReportConfig)
 
 
@@ -102,6 +134,7 @@ def load_runtime_smoke_config(project_root: Path | str, base_url_override: str |
         smoke_connectivity=_connectivity_configs(raw.get("smoke_connectivity")),
         e2e=_e2e_config(_mapping(raw.get("e2e"), "runtime_smoke.e2e")),
         crud_flow_targets=_crud_flow_targets(runtime_raw.get("crud_flow_targets", raw.get("crud_flow_targets"))),
+        action_outcome_targets=_action_outcome_targets(runtime_raw.get("action_outcome_targets")),
         report=_report_config(_mapping(raw.get("report"), "runtime_smoke.report")),
     )
 
@@ -204,6 +237,125 @@ def _crud_flow_targets(raw: Any) -> list[CrudFlowTargetConfig]:
             )
         )
     return targets
+
+
+def _action_outcome_targets(raw: Any) -> list[ActionOutcomeTargetConfig]:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("runtime.action_outcome_targets must be a list")
+
+    targets: list[ActionOutcomeTargetConfig] = []
+    for index, item in enumerate(raw, start=1):
+        field_name = f"runtime.action_outcome_targets[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{field_name} must be a mapping")
+        command = _optional_string(item.get("command"), f"{field_name}.command")
+        invoke_raw = item.get("invoke")
+        observe_raw = item.get("observe")
+        invoke = _connectivity_config(invoke_raw, f"{field_name}.invoke", f"action invoke {index}") if invoke_raw else None
+        observe = (
+            _connectivity_config(observe_raw, f"{field_name}.observe", f"action observe {index}") if observe_raw else None
+        )
+        if not command and (invoke is None or observe is None):
+            raise ValueError(f"{field_name} requires either command or invoke+observe")
+        actions = _action_specs(
+            item.get("actions", item.get("action")),
+            field_name,
+            item.get("outcomes", item.get("outcome")),
+        )
+        observe_mapping = observe_raw if isinstance(observe_raw, dict) else {}
+        targets.append(
+            ActionOutcomeTargetConfig(
+                name=str(item.get("name") or f"Action outcome {index}"),
+                actions=actions,
+                command=command,
+                working_dir=_optional_string(item.get("working_dir"), f"{field_name}.working_dir"),
+                env=_string_mapping(item.get("env"), f"{field_name}.env"),
+                timeout=_optional_float(item.get("timeout"), f"{field_name}.timeout"),
+                invoke=invoke,
+                observe=observe,
+                expect_text=_optional_string(
+                    item.get("expect_text", observe_mapping.get("expect_text")),
+                    f"{field_name}.expect_text",
+                ),
+                forbid_text=_optional_string(
+                    item.get("forbid_text", observe_mapping.get("forbid_text")),
+                    f"{field_name}.forbid_text",
+                ),
+                poll_interval=_float(item.get("poll_interval", 0.5), f"{field_name}.poll_interval"),
+                max_wait_seconds=_float(
+                    item.get("max_wait_seconds", item.get("timeout_seconds", 10)),
+                    f"{field_name}.max_wait_seconds",
+                ),
+            )
+        )
+    return targets
+
+
+def _action_specs(raw: Any, field_name: str, default_outcomes: Any = None) -> list[ActionSpecConfig]:
+    if isinstance(raw, dict):
+        raw_actions = [raw]
+    elif isinstance(raw, list):
+        raw_actions = raw
+    else:
+        raise ValueError(f"{field_name} requires actions or action metadata")
+
+    actions: list[ActionSpecConfig] = []
+    for index, item in enumerate(raw_actions, start=1):
+        action_field = f"{field_name}.actions[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{action_field} must be a mapping")
+        action_id = _string(item.get("id", item.get("name")), f"{action_field}.id")
+        outcomes = _outcome_expectations(item.get("outcomes", item.get("outcome", default_outcomes)), action_field)
+        if not outcomes:
+            raise ValueError(f"{action_field} requires outcome metadata")
+        actions.append(
+            ActionSpecConfig(
+                id=action_id,
+                verb=_optional_string(item.get("verb"), f"{action_field}.verb"),
+                target=_optional_string(item.get("target"), f"{action_field}.target"),
+                trigger=_optional_string(item.get("trigger"), f"{action_field}.trigger"),
+                outcomes=outcomes,
+            )
+        )
+    return actions
+
+
+def _outcome_expectations(raw: Any, field_name: str) -> list[OutcomeExpectationConfig]:
+    if raw in (None, ""):
+        return []
+    if isinstance(raw, str):
+        return [OutcomeExpectationConfig(name=raw)]
+    if isinstance(raw, list):
+        outcomes: list[OutcomeExpectationConfig] = []
+        for index, item in enumerate(raw, start=1):
+            outcomes.extend(_outcome_expectations(item, f"{field_name}.outcomes[{index}]"))
+        return outcomes
+    if isinstance(raw, dict):
+        name = raw.get("name") or raw.get("id") or raw.get("type")
+        if name:
+            return [
+                OutcomeExpectationConfig(
+                    name=_string(name, f"{field_name}.outcome.name"),
+                    required=_outcome_required(raw.get("required", True)),
+                )
+            ]
+        return [
+            OutcomeExpectationConfig(name=str(key), required=_outcome_required(value))
+            for key, value in raw.items()
+            if _outcome_required(value)
+        ]
+    raise ValueError(f"{field_name}.outcomes must be a string, mapping, or list")
+
+
+def _outcome_required(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return True
+    text = str(value).strip().lower()
+    return text not in {"false", "no", "optional", "skip", "skipped"}
 
 
 def _report_config(raw: dict[str, Any]) -> ReportConfig:

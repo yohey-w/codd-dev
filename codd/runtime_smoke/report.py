@@ -34,6 +34,12 @@ def generate_markdown_section(checks: list[CheckResult], overall_passed: bool) -
                 f"- status: `{_status(result)}`",
                 f"- elapsed: `{result.elapsed_sec:.3f}s`",
                 "",
+            ]
+        )
+        if result.details.get("actions"):
+            lines.extend(_action_outcome_matrix(result.details["actions"]))
+        lines.extend(
+            [
                 "```text",
                 result.output.rstrip() or "(no output)",
                 "```",
@@ -49,7 +55,42 @@ def write_markdown_report(result: "SmokeResult", report_path: Path) -> Path:
     return report_path
 
 
+def _action_outcome_matrix(actions: object) -> list[str]:
+    if not isinstance(actions, list):
+        return []
+    lines = [
+        "##### Action Outcome Matrix",
+        "",
+        "| Action | Verb | Target | Trigger | Outcomes |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        outcomes = action.get("outcomes")
+        outcome_text = ", ".join(str(item) for item in outcomes) if isinstance(outcomes, list) else ""
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _table_cell(action.get("id")),
+                    _table_cell(action.get("verb")),
+                    _table_cell(action.get("target")),
+                    _table_cell(action.get("trigger")),
+                    _table_cell(outcome_text),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
+
+
 def _status(result: CheckResult) -> str:
     if result.skipped:
         return "SKIPPED"
     return "PASS" if result.passed else "FAIL"
+
+
+def _table_cell(value: object) -> str:
+    return str(value or "").replace("|", "\\|")

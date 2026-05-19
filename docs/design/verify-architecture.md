@@ -122,6 +122,78 @@ Execution rules:
 This is a warning only. It is intentionally heuristic and framework-agnostic; it
 does not block existing projects.
 
+### Runtime Smoke Action Outcome Category
+
+`codd verify --runtime` also supports an opt-in `action-outcome` category. This
+category treats actions as executable operations from any channel: browser
+control, form submit, API request, CLI command, scheduled job, approval command,
+import/export command, or event dispatch. Outcomes are observable effects such as
+server acceptance, persisted state, visible reflection, reload persistence,
+emitted events, logs, command output, or expected absence.
+
+Projects enable the category by declaring `runtime.action_outcome_targets`:
+
+```yaml
+runtime:
+  action_outcome_targets:
+    - name: "record update reflects after reload"
+      actions:
+        - id: "record.update"
+          verb: "update"
+          target: "record"
+          trigger: "browser submit or API request"
+          outcomes:
+            - server_acceptance
+            - persisted_change
+            - visible_reflection
+            - reload_persistence
+      command: "npx playwright test tests/smoke/record-update.spec.ts"
+    - name: "record publish emits event"
+      action:
+        id: "record.publish"
+        verb: "publish"
+        target: "record"
+        outcomes:
+          - server_acceptance
+          - emitted_event
+      invoke:
+        method: POST
+        url: "/api/records/publish"
+        expected_status: 202
+      observe:
+        url: "/api/events"
+        expected_status: 200
+        expect_text: "record.publish"
+      max_wait_seconds: 10
+```
+
+Execution rules:
+- Command targets run as project-owned tests and pass on exit code 0, while the
+  report renders the declared action/outcome matrix.
+- Declarative targets issue the `invoke` request, then poll `observe` until the
+  expected status and optional text assertions are satisfied.
+- Missing `runtime.action_outcome_targets` is a no-op for backward compatibility.
+- `--runtime-skip action-outcome` records the category as skipped in the runtime
+  report.
+
+### Action Outcome Doctor Warning
+
+`codd doctor` compares declared `operation_flow` actions against
+`runtime.action_outcome_targets`:
+
+1. Extract mutating operation verbs such as create/add, update/edit,
+   delete/remove, submit, approve, assign, publish, revoke, import, export, and
+   send from `operation_flow`.
+2. Treat broad verbs such as `manage_collection` as ambiguous create/update/delete
+   obligations unless action outcome targets declare the specific verbs.
+3. Compare each required verb/target pair with `action_outcome_targets[].actions`.
+4. Emit warnings for uncovered action outcomes.
+5. Keep `runtime.crud_flow_targets` as legacy CRUD reflection evidence; an add-only
+   CRUD target does not cover update/delete or non-CRUD command actions.
+
+This warning is framework-agnostic. It does not inspect dogfood routes, labels, or
+domain entities.
+
 ### Strategy Selection
 
 ```python

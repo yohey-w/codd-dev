@@ -5,6 +5,12 @@ All notable changes to CoDD are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Runtime action outcome coverage** (cmd_479)
+  - `codd verify --runtime` now supports an opt-in `action-outcome` category through `runtime.action_outcome_targets`.
+  - Targets can be project-owned commands with action/outcome metadata or declarative HTTP invoke+observe checks.
+  - Runtime reports render an action/outcome matrix so command targets are not documented by exit code alone.
+  - `--runtime-skip action-outcome` records an explicit skipped category in the runtime report.
+  - `codd doctor` warns when `operation_flow` mutating actions lack matching action outcome targets; legacy `crud-flow` targets alone do not cover update/delete or non-CRUD command actions.
 - **Runtime CRUD flow verification** (cmd_368)
   - `codd verify --runtime` now supports an opt-in `crud-flow` category through `runtime.crud_flow_targets`.
   - Targets can be project-owned commands or declarative HTTP create+reflect checks.

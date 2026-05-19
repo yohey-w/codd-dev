@@ -14,6 +14,12 @@ from typing import Any
 import click
 import yaml
 
+from codd.action_outcome import (
+    CoverageResult,
+    action_target_specs_from_config,
+    compare_action_outcome_coverage,
+    extract_action_requirements_from_flows,
+)
 from codd.bridge import get_command_handler
 from codd.config import find_codd_dir, load_project_config
 from codd.lexicon import LEXICON_FILENAME, load_lexicon, load_project_extends
@@ -456,22 +462,30 @@ _REFLECTION_E2E_RE = re.compile(
     r"(?i)(reflect|reflection|refetch|re-fetch|reload|list|detail|visible|getByText|findByText|"
     r"toBeVisible|toContainText|toHaveText|toHaveCount|toContain\()",
 )
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*", re.DOTALL)
 _TEXT_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".feature"}
+_DOC_SUFFIXES = {".md", ".yaml", ".yml"}
 
 
 def _doctor_warnings(project_root: Path) -> list[str]:
     config = load_project_config(project_root)
     warnings: list[str] = []
+    has_crud_flow_targets = _has_crud_flow_targets(config)
+    has_action_outcome_targets = _has_action_outcome_targets(config)
     if (
         _has_post_like_source(project_root, config)
-        and not _has_crud_flow_targets(config)
+        and not has_crud_flow_targets
+        and not has_action_outcome_targets
         and not _has_reflection_e2e(project_root, config)
     ):
         warnings.append(
-            "POST-like endpoint or handler detected, but no `runtime.crud_flow_targets` and no "
-            "reflection-oriented E2E test were found. Add an opt-in CRUD flow target or an E2E that "
-            "proves create/update/delete -> re-fetch -> visible list/detail reflection."
+            "POST-like endpoint or handler detected, but no `runtime.crud_flow_targets`, no "
+            "`runtime.action_outcome_targets`, and no reflection-oriented E2E test were found. Add "
+            "an opt-in CRUD/action outcome target or an E2E that proves trigger -> outcome reflection, "
+            "including visible list/detail reflection when the action changes user-visible state."
         )
+    coverage = _action_outcome_coverage(project_root, config)
+    warnings.extend(_action_outcome_warning_messages(coverage, legacy_crud_configured=has_crud_flow_targets))
     return warnings
 
 
@@ -481,6 +495,104 @@ def _has_crud_flow_targets(config: dict[str, Any]) -> bool:
     runtime_targets = runtime.get("crud_flow_targets") if isinstance(runtime, dict) else None
     smoke_targets = runtime_smoke.get("crud_flow_targets") if isinstance(runtime_smoke, dict) else None
     return bool(runtime_targets or smoke_targets)
+
+
+def _has_action_outcome_targets(config: dict[str, Any]) -> bool:
+    runtime = config.get("runtime", {})
+    runtime_targets = runtime.get("action_outcome_targets") if isinstance(runtime, dict) else None
+    return bool(runtime_targets)
+
+
+def _action_outcome_coverage(project_root: Path, config: dict[str, Any]) -> CoverageResult:
+    requirements = extract_action_requirements_from_flows(_operation_flows_from_project(project_root, config))
+    target_actions = action_target_specs_from_config(config)
+    return compare_action_outcome_coverage(requirements, target_actions)
+
+
+def _operation_flows_from_project(project_root: Path, config: dict[str, Any]) -> list[tuple[str, Any]]:
+    flows: list[tuple[str, Any]] = []
+    if isinstance(config.get("operation_flow"), dict):
+        flows.append(("codd.yaml.operation_flow", config["operation_flow"]))
+    for path in _configured_doc_files(project_root, config):
+        payload = _frontmatter_or_yaml_payload(path)
+        if not isinstance(payload, dict):
+            continue
+        source = _display_path(path, project_root)
+        if isinstance(payload.get("operation_flow"), dict):
+            flows.append((f"{source}.operation_flow", payload["operation_flow"]))
+        codd_meta = payload.get("codd")
+        if isinstance(codd_meta, dict) and isinstance(codd_meta.get("operation_flow"), dict):
+            flows.append((f"{source}.codd.operation_flow", codd_meta["operation_flow"]))
+    return flows
+
+
+def _configured_doc_files(project_root: Path, config: dict[str, Any]) -> list[Path]:
+    scan = config.get("scan", {})
+    raw_dirs = scan.get("doc_dirs", ["docs/"]) if isinstance(scan, dict) else ["docs/"]
+    dirs = raw_dirs if isinstance(raw_dirs, list) else ["docs/"]
+    files: list[Path] = []
+    for raw_dir in dirs:
+        if not isinstance(raw_dir, str) or not raw_dir.strip():
+            continue
+        root = Path(raw_dir).expanduser()
+        if not root.is_absolute():
+            root = project_root / root
+        if not root.exists():
+            continue
+        if root.is_file():
+            if root.suffix in _DOC_SUFFIXES:
+                files.append(root)
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix in _DOC_SUFFIXES:
+                files.append(path)
+    return files
+
+
+def _frontmatter_or_yaml_payload(path: Path) -> dict[str, Any] | None:
+    text = _read_text_best_effort(path)
+    if path.suffix == ".md":
+        match = _FRONTMATTER_RE.search(text)
+        if not match:
+            return None
+        raw = match.group(1)
+    else:
+        raw = text
+    try:
+        payload = yaml.safe_load(raw) or {}
+    except yaml.YAMLError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _action_outcome_warning_messages(
+    coverage: CoverageResult,
+    *,
+    legacy_crud_configured: bool,
+) -> list[str]:
+    warnings: list[str] = []
+    for gap in coverage.gaps:
+        requirement = gap.requirement
+        missing = ", ".join(gap.missing_verbs)
+        legacy_note = (
+            " Existing `runtime.crud_flow_targets` are legacy reflection evidence and do not cover "
+            "operation_flow update/delete/command action coverage."
+            if legacy_crud_configured
+            else ""
+        )
+        if requirement.ambiguous:
+            warnings.append(
+                f"`operation_flow` action `{requirement.display_name}` in {requirement.source} uses broad verb "
+                f"`{requirement.verb}`; declare `runtime.action_outcome_targets` for {missing} observable outcomes."
+                f"{legacy_note}"
+            )
+            continue
+        warnings.append(
+            f"`operation_flow` action `{requirement.display_name}` in {requirement.source} requires {missing} "
+            f"observable outcome coverage, but no matching `runtime.action_outcome_targets` action was found."
+            f"{legacy_note}"
+        )
+    return warnings
 
 
 def _has_post_like_source(project_root: Path, config: dict[str, Any]) -> bool:
@@ -2540,7 +2652,7 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 @click.option(
     "--runtime-skip",
     multiple=True,
-    type=click.Choice(["db", "dev-server", "connectivity", "e2e", "crud-flow", "verification-test"]),
+    type=click.Choice(["db", "dev-server", "connectivity", "e2e", "crud-flow", "action-outcome", "verification-test"]),
     help="Skip a runtime smoke check and record it as skipped in the report",
 )
 @click.option(

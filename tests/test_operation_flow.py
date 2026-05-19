@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from codd.action_outcome import compare_action_outcome_coverage, extract_action_requirements
 from codd.dag import Node
 from codd.dag.builder import build_dag
 from codd.llm.criteria_expander import build_criteria_expand_prompt, operation_flow_hint
@@ -105,3 +106,24 @@ def test_operation_flow_hint_is_empty_without_operations():
     node = Node("docs/requirements/course.md", "design_doc", "docs/requirements/course.md", {})
 
     assert operation_flow_hint({}, [node]) == ""
+
+
+def test_manage_collection_operation_flow_requires_explicit_action_outcome_coverage():
+    flow = {
+        "operations": [
+            {
+                "id": "manage_records",
+                "actor": "operator",
+                "verb": "manage_collection",
+                "target": "record",
+                "parent": "workspace",
+                "ui_pattern": "master_detail",
+            }
+        ]
+    }
+    requirements = extract_action_requirements(flow, source="docs/requirements/record.md")
+    coverage = compare_action_outcome_coverage(requirements, [])
+
+    assert requirements[0].verb == "manage_collection"
+    assert requirements[0].expected_verbs == ("create", "update", "delete")
+    assert coverage.gaps[0].missing_verbs == ("create", "update", "delete")

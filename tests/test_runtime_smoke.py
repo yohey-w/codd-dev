@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from codd.cli import _CliVerificationResult, main
 from codd.runtime_smoke.checks import (
+    ActionOutcomeChecker,
     CheckResult,
     CrudFlowChecker,
     DbChecker,
@@ -18,11 +19,14 @@ from codd.runtime_smoke.checks import (
     SmokeConnectivityChecker,
 )
 from codd.runtime_smoke.config import (
+    ActionOutcomeTargetConfig,
+    ActionSpecConfig,
     ConnectivityConfig,
     CrudFlowTargetConfig,
     DbCheckConfig,
     DevServerConfig,
     E2eConfig,
+    OutcomeExpectationConfig,
     load_runtime_smoke_config,
 )
 from codd.runtime_smoke.report import generate_markdown_section
@@ -500,7 +504,159 @@ runtime:
     assert result.overall_passed is True
 
 
-def test_t20_doctor_warns_on_post_without_reflection_e2e(tmp_path):
+def test_t20_config_loads_runtime_action_outcome_targets(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+runtime:
+  action_outcome_targets:
+    - name: update item reflects
+      action:
+        id: item.update
+        verb: update
+        target: item
+        trigger: cli command
+        outcomes:
+          - server_acceptance
+          - visible_reflection
+      command: "pytest tests/e2e/test_item_update.py"
+""",
+    )
+
+    config = load_runtime_smoke_config(project)
+
+    assert len(config.action_outcome_targets) == 1
+    target = config.action_outcome_targets[0]
+    assert target.name == "update item reflects"
+    assert target.command == "pytest tests/e2e/test_item_update.py"
+    assert target.actions[0].id == "item.update"
+    assert [outcome.name for outcome in target.actions[0].outcomes] == ["server_acceptance", "visible_reflection"]
+
+
+def test_t21_action_outcome_command_records_action_matrix(tmp_path, monkeypatch):
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="action ok", stderr="")
+
+    monkeypatch.setattr("codd.runtime_smoke.checks.subprocess.run", fake_run)
+    target = ActionOutcomeTargetConfig(
+        name="publish emits event",
+        command="pytest tests/e2e/test_publish.py",
+        actions=[
+            ActionSpecConfig(
+                id="record.publish",
+                verb="publish",
+                target="record",
+                trigger="CLI",
+                outcomes=[OutcomeExpectationConfig("server_acceptance"), OutcomeExpectationConfig("emitted_event")],
+            )
+        ],
+    )
+
+    result = ActionOutcomeChecker([target], tmp_path, None).run()[0]
+    markdown = generate_markdown_section([result], overall_passed=True)
+
+    assert result.passed is True
+    assert result.category == "action-outcome"
+    assert result.details["actions"][0]["id"] == "record.publish"
+    assert "Action Outcome Matrix" in markdown
+    assert "emitted_event" in markdown
+
+
+def test_t22_action_outcome_http_passes_after_observed_outcome(tmp_path, monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, method, url, **kwargs):
+            calls.append((method, url))
+            if method == "POST":
+                return SimpleNamespace(status_code=202, text="")
+            if len(calls) == 2:
+                return SimpleNamespace(status_code=200, text="not yet")
+            return SimpleNamespace(status_code=200, text="record.publish event")
+
+    monkeypatch.setattr("codd.runtime_smoke.checks.httpx.Client", FakeClient)
+    monkeypatch.setattr("codd.runtime_smoke.checks.time.sleep", lambda *_args, **_kwargs: None)
+    target = ActionOutcomeTargetConfig(
+        name="publish event",
+        invoke=ConnectivityConfig(name="invoke", method="POST", url="/api/publish", expected_status=202),
+        observe=ConnectivityConfig(name="observe", method="GET", url="/api/events", expected_status=200),
+        expect_text="record.publish",
+        forbid_text="error",
+        max_wait_seconds=1,
+        poll_interval=0,
+        actions=[
+            ActionSpecConfig(
+                id="record.publish",
+                verb="publish",
+                target="record",
+                outcomes=[OutcomeExpectationConfig("emitted_event")],
+            )
+        ],
+    )
+
+    result = ActionOutcomeChecker([target], tmp_path, "http://example.test").run()[0]
+
+    assert result.passed is True
+    assert calls == [
+        ("POST", "http://example.test/api/publish"),
+        ("GET", "http://example.test/api/events"),
+        ("GET", "http://example.test/api/events"),
+    ]
+
+
+def test_t23_runtime_skip_action_outcome_records_skipped_check(tmp_path, monkeypatch):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  e2e:
+    command: "npx playwright test"
+  report:
+    log_to_file: false
+runtime:
+  action_outcome_targets:
+    - name: update item reflects
+      action:
+        id: item.update
+        verb: update
+        outcomes: [visible_reflection]
+      command: "pytest tests/e2e/test_item_update.py"
+""",
+    )
+
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.httpx.get",
+        lambda *args, **kwargs: SimpleNamespace(status_code=200),
+    )
+
+    result = run_runtime_smoke(project, skip_checks=["connectivity", "e2e", "action-outcome"])
+
+    skipped = [check for check in result.checks if check.skipped]
+    assert [check.category for check in skipped] == ["connectivity", "e2e", "action-outcome"]
+    assert "| Action outcome | SKIPPED |" in result.markdown_section
+
+
+def test_t24_doctor_warns_on_post_without_reflection_e2e(tmp_path):
     project = _project(tmp_path)
     source_dir = project / "src"
     source_dir.mkdir()
@@ -513,7 +669,7 @@ def test_t20_doctor_warns_on_post_without_reflection_e2e(tmp_path):
     assert "runtime.crud_flow_targets" in result.output
 
 
-def test_t21_doctor_suppressed_by_crud_flow_target(tmp_path):
+def test_t25_doctor_suppressed_by_crud_flow_target(tmp_path):
     project = _project(
         tmp_path,
         """
@@ -533,7 +689,7 @@ runtime:
     assert "CoDD doctor: PASS" in result.output
 
 
-def test_t22_doctor_warns_when_post_test_only_asserts_status(tmp_path):
+def test_t26_doctor_warns_when_post_test_only_asserts_status(tmp_path):
     project = _project(tmp_path)
     source_dir = project / "src"
     tests_dir = project / "tests"
@@ -556,7 +712,7 @@ test("create returns 201", async ({ request }) => {
     assert "visible list/detail reflection" in result.output
 
 
-def test_t23_doctor_accepts_post_with_visible_reflection_e2e(tmp_path):
+def test_t27_doctor_accepts_post_with_visible_reflection_e2e(tmp_path):
     project = _project(tmp_path)
     source_dir = project / "src"
     tests_dir = project / "tests"
@@ -571,6 +727,60 @@ test("created item appears in list", async ({ page, request }) => {
   await expect(page.getByText("codd-runtime-smoke")).toBeVisible();
 });
 """
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: PASS" in result.output
+
+
+def test_t28_doctor_crud_flow_only_does_not_cover_operation_flow_update_delete(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+operation_flow:
+  operations:
+    - id: item_update
+      verb: edit
+      target: item
+    - id: item_delete
+      verb: remove
+      target: item
+runtime:
+  crud_flow_targets:
+    - name: add item
+      command: "npm run test:create"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "runtime.crud_flow_targets" in result.output
+    assert "operation_flow update/delete/command action coverage" in result.output
+
+
+def test_t29_doctor_action_outcome_target_covers_operation_flow_action(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+operation_flow:
+  operations:
+    - id: item_update
+      verb: edit
+      target: item
+runtime:
+  action_outcome_targets:
+    - name: item update
+      action:
+        id: item.update
+        verb: update
+        target: item
+        outcomes: [visible_reflection]
+      command: "npm run test:update"
+""",
     )
 
     result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
