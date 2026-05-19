@@ -1,3 +1,9 @@
+---
+name: codd-assemble
+description: |
+  Assemble generated CoDD sprint fragments into a complete, buildable project. Use after all `codd implement` sprints have produced `src/generated/sprint_N/` fragments and the design documents are ready to be integrated into final project files, entry points, source code, and configuration.
+---
+
 # CoDD Assemble
 
 Assemble generated sprint fragments into a complete, buildable project. This is the final step in the greenfield pipeline after `codd implement`.

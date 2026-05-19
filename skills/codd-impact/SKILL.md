@@ -1,3 +1,9 @@
+---
+name: codd-impact
+description: |
+  Analyze the downstream impact of changed requirements, design docs, code, or tests in a CoDD project. Use when the user needs to decide which CoDD artifacts should be updated next, whether autonomous propagation is allowed, or whether a human approval gate is required.
+---
+
 # CoDD Impact Analysis
 
 Use this skill after a requirements, design, code, or test change to determine what CoDD artifacts must be updated next. The goal is not only to read the impact report, but to decide whether the AI should update design documents immediately, ask a human for approval, or only report informational findings. Treat the impact report as an action queue for keeping requirements, design, implementation, and tests coherent.

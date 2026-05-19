@@ -1,3 +1,9 @@
+---
+name: codd-init
+description: |
+  Initialize CoDD in a project and establish the first scan and validation baseline. Use when a repository does not yet have a `codd/` directory, when importing initial requirements, or when bootstrapping greenfield or brownfield CoDD project structure.
+---
+
 # CoDD Init
 
 Initialize CoDD in the current project, then move immediately into the first scan and validation cycle so the dependency graph starts from a clean baseline.

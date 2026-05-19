@@ -1,3 +1,9 @@
+---
+name: codd-propagate
+description: |
+  Reverse-propagate source code changes back to affected CoDD design documents. Use after code changes when the user needs to map changed source files to modules, identify impacted design docs, and optionally update those docs while preserving CoDD coherence.
+---
+
 # CoDD Propagate
 
 Reverse-propagate source code changes to design documents. When source code changes, `codd propagate` identifies which design docs are affected via the `modules` field and optionally updates them using AI.
