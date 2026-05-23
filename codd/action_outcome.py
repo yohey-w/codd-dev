@@ -21,6 +21,7 @@ _VERB_ALIASES: dict[str, set[str]] = {
     "send": {"send", "notify"},
     "enable": {"enable"},
     "disable": {"disable"},
+    "complete": {"complete", "finish", "mark_complete", "markcompleted"},
     "archive": {"archive"},
     "restore": {"restore"},
 }

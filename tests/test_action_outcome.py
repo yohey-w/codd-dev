@@ -28,6 +28,37 @@ def test_extracts_generic_mutating_actions_from_operation_flow() -> None:
     assert requirements[0].actor == "operator"
 
 
+def test_complete_is_terminal_mutating_action() -> None:
+    flow = {
+        "operations": [
+            {"id": "record_complete", "verb": "complete", "target": "record"},
+        ]
+    }
+
+    requirements = extract_action_requirements(flow)
+    specs = action_target_specs_from_config(
+        {
+            "runtime": {
+                "action_outcome_targets": [
+                    {
+                        "name": "record terminal outcome",
+                        "action": {
+                            "id": "record.complete",
+                            "target": "record",
+                            "outcomes": ["visible_reflection", "disabled_state"],
+                        },
+                        "command": "pytest tests/e2e/test_record.py",
+                    }
+                ]
+            }
+        }
+    )
+
+    assert requirements[0].verb == "complete"
+    assert specs[0].verb == "complete"
+    assert compare_action_outcome_coverage(requirements, specs).covered is True
+
+
 def test_compare_reports_update_delete_missing_when_targets_are_add_only() -> None:
     flow = {
         "operations": [
