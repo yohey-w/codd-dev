@@ -113,6 +113,7 @@ class RuntimeSmokeConfig:
     e2e: E2eConfig = field(default_factory=E2eConfig)
     crud_flow_targets: list[CrudFlowTargetConfig] = field(default_factory=list)
     action_outcome_targets: list[ActionOutcomeTargetConfig] = field(default_factory=list)
+    global_action_targets: list[ActionOutcomeTargetConfig] = field(default_factory=list)
     report: ReportConfig = field(default_factory=ReportConfig)
 
 
@@ -140,7 +141,16 @@ def load_runtime_smoke_config(project_root: Path | str, base_url_override: str |
         smoke_connectivity=_connectivity_configs(raw.get("smoke_connectivity")),
         e2e=_e2e_config(_mapping(raw.get("e2e"), "runtime_smoke.e2e")),
         crud_flow_targets=_crud_flow_targets(runtime_raw.get("crud_flow_targets", raw.get("crud_flow_targets"))),
-        action_outcome_targets=_action_outcome_targets(runtime_raw.get("action_outcome_targets")),
+        action_outcome_targets=_action_outcome_targets(
+            runtime_raw.get("action_outcome_targets"),
+            field_prefix="runtime.action_outcome_targets",
+            default_name="Action outcome",
+        ),
+        global_action_targets=_action_outcome_targets(
+            runtime_raw.get("global_action_targets"),
+            field_prefix="runtime.global_action_targets",
+            default_name="Global action",
+        ),
         report=_report_config(_mapping(raw.get("report"), "runtime_smoke.report")),
     )
 
@@ -255,15 +265,20 @@ def _crud_flow_targets(raw: Any) -> list[CrudFlowTargetConfig]:
     return targets
 
 
-def _action_outcome_targets(raw: Any) -> list[ActionOutcomeTargetConfig]:
+def _action_outcome_targets(
+    raw: Any,
+    *,
+    field_prefix: str,
+    default_name: str,
+) -> list[ActionOutcomeTargetConfig]:
     if raw in (None, ""):
         return []
     if not isinstance(raw, list):
-        raise ValueError("runtime.action_outcome_targets must be a list")
+        raise ValueError(f"{field_prefix} must be a list")
 
     targets: list[ActionOutcomeTargetConfig] = []
     for index, item in enumerate(raw, start=1):
-        field_name = f"runtime.action_outcome_targets[{index}]"
+        field_name = f"{field_prefix}[{index}]"
         if not isinstance(item, dict):
             raise ValueError(f"{field_name} must be a mapping")
         command = _optional_string(item.get("command"), f"{field_name}.command")
@@ -285,7 +300,7 @@ def _action_outcome_targets(raw: Any) -> list[ActionOutcomeTargetConfig]:
         observe_mapping = observe_raw if isinstance(observe_raw, dict) else {}
         targets.append(
             ActionOutcomeTargetConfig(
-                name=str(item.get("name") or f"Action outcome {index}"),
+                name=str(item.get("name") or f"{default_name} {index}"),
                 actions=actions,
                 command=command,
                 working_dir=_optional_string(item.get("working_dir"), f"{field_name}.working_dir"),

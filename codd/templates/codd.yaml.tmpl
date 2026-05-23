@@ -33,6 +33,15 @@ coding_principles: null
 # ui_coherence:
 #   ignore_relations:
 #     - {parent: "foo", child: "bar"}  # intentional single-screen design
+#
+# runtime:
+#   global_action_targets:
+#     - name: "compact session action coverage"
+#       action:
+#         id: "session.sign_out"
+#         target: "session_action"
+#         outcomes: [breakpoint_available, session_absence_after_action]
+#       command: "npm run test:mobile-session-action"
 
 scan:
   source_dirs:

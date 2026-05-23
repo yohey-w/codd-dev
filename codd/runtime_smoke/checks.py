@@ -432,10 +432,22 @@ class CrudFlowChecker:
 
 
 class ActionOutcomeChecker:
-    def __init__(self, targets: list[ActionOutcomeTargetConfig], project_root: Path, dev_server_url: str | None):
+    def __init__(
+        self,
+        targets: list[ActionOutcomeTargetConfig],
+        project_root: Path,
+        dev_server_url: str | None,
+        *,
+        category: str = "action-outcome",
+        label: str = "Action outcome",
+        missing_config_message: str = "runtime.action_outcome_targets requires command or invoke+observe",
+    ):
         self.targets = targets
         self.project_root = project_root
         self.dev_server_url = dev_server_url
+        self.category = category
+        self.label = label
+        self.missing_config_message = missing_config_message
 
     def run(self) -> list[CheckResult]:
         results: list[CheckResult] = []
@@ -463,8 +475,8 @@ class ActionOutcomeChecker:
             elapsed = perf_counter() - started
             return CheckResult(
                 passed=False,
-                name=f"Action outcome: {target.name}",
-                category="action-outcome",
+                name=f"{self.label}: {target.name}",
+                category=self.category,
                 output=_join_output(str(exc.stdout or ""), str(exc.stderr or ""), f"timeout after {target.timeout}s"),
                 elapsed_sec=elapsed,
                 details={"command": target.command, "timeout": target.timeout, "actions": _action_matrix(target)},
@@ -473,8 +485,8 @@ class ActionOutcomeChecker:
         elapsed = perf_counter() - started
         return CheckResult(
             passed=completed.returncode == 0,
-            name=f"Action outcome: {target.name}",
-            category="action-outcome",
+            name=f"{self.label}: {target.name}",
+            category=self.category,
             output=_join_output(completed.stdout, completed.stderr, f"exit_code={completed.returncode}"),
             elapsed_sec=elapsed,
             details={"command": target.command, "exit_code": completed.returncode, "actions": _action_matrix(target)},
@@ -485,7 +497,7 @@ class ActionOutcomeChecker:
         invoke = target.invoke
         observe = target.observe
         if invoke is None or observe is None:
-            return _missing_config("action-outcome", "runtime.action_outcome_targets requires command or invoke+observe")
+            return _missing_config(self.category, self.missing_config_message)
 
         invoke_url = _resolve_url(invoke.url, self.dev_server_url)
         try:
@@ -501,8 +513,8 @@ class ActionOutcomeChecker:
             elapsed = perf_counter() - started
             return CheckResult(
                 passed=False,
-                name=f"Action outcome: {target.name}",
-                category="action-outcome",
+                name=f"{self.label}: {target.name}",
+                category=self.category,
                 output=f"invoke request failed for {invoke_url}: {exc}",
                 elapsed_sec=elapsed,
                 details={"invoke_url": invoke_url, "actions": _action_matrix(target)},
@@ -512,8 +524,8 @@ class ActionOutcomeChecker:
             elapsed = perf_counter() - started
             return CheckResult(
                 passed=False,
-                name=f"Action outcome: {target.name}",
-                category="action-outcome",
+                name=f"{self.label}: {target.name}",
+                category=self.category,
                 output=f"{invoke.method} {invoke_url} -> HTTP {invoke_response.status_code}, expected {invoke.expected_status}",
                 elapsed_sec=elapsed,
                 details={
@@ -554,8 +566,8 @@ class ActionOutcomeChecker:
                     elapsed = perf_counter() - started
                     return CheckResult(
                         passed=True,
-                        name=f"Action outcome: {target.name}",
-                        category="action-outcome",
+                        name=f"{self.label}: {target.name}",
+                        category=self.category,
                         output=f"invoke OK; outcome observed after {attempts} attempt(s): {last_output}",
                         elapsed_sec=elapsed,
                         details={
@@ -570,8 +582,8 @@ class ActionOutcomeChecker:
                 elapsed = perf_counter() - started
                 return CheckResult(
                     passed=False,
-                    name=f"Action outcome: {target.name}",
-                    category="action-outcome",
+                    name=f"{self.label}: {target.name}",
+                    category=self.category,
                     output=f"invoke OK; outcome not observed within {target.max_wait_seconds:.3f}s: {last_output}",
                     elapsed_sec=elapsed,
                     details={
@@ -603,6 +615,7 @@ def _missing_config(category: str, message: str) -> CheckResult:
         "e2e": "Real-browser E2E",
         "crud-flow": "CRUD flow",
         "action-outcome": "Action outcome",
+        "global-action": "Global action",
     }
     return CheckResult(
         passed=False,

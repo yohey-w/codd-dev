@@ -197,6 +197,10 @@ Execution rules:
 6. Emit warnings when page/screen source files contain visible business content
    but neither the page nor an ancestor layout has static escape-route evidence
    such as persistent navigation, a home/dashboard/back link, or breadcrumbs.
+7. Emit warnings when authenticated responsive UI is detected but no
+   `runtime.global_action_targets` declare breakpoint-specific evidence for
+   required global actions such as sign-out, account access, home, or primary
+   navigation.
 
 This warning is framework-agnostic. It does not inspect dogfood routes, labels, or
 domain entities.
