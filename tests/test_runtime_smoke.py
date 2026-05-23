@@ -282,6 +282,8 @@ def test_t13_cli_runtime_flag_invokes_smoke_runner(tmp_path, monkeypatch):
             "http://127.0.0.1:3001",
             "--runtime-skip",
             "e2e",
+            "--runtime-skip",
+            "global-action",
         ],
     )
 
@@ -289,7 +291,7 @@ def test_t13_cli_runtime_flag_invokes_smoke_runner(tmp_path, monkeypatch):
     assert calls == [
         {
             "path": project.resolve(),
-            "skip_checks": ("e2e",),
+            "skip_checks": ("e2e", "global-action"),
             "base_url_override": "http://127.0.0.1:3001",
         }
     ]
@@ -654,6 +656,165 @@ runtime:
     skipped = [check for check in result.checks if check.skipped]
     assert [check.category for check in skipped] == ["connectivity", "e2e", "action-outcome"]
     assert "| Action outcome | SKIPPED |" in result.markdown_section
+
+
+def test_t43_config_loads_runtime_global_action_targets(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+runtime:
+  global_action_targets:
+    - name: mobile sign-out remains available
+      action:
+        id: session.sign_out
+        verb: read
+        target: session_action
+        trigger: authenticated user opens compact viewport
+        outcomes:
+          - breakpoint_available
+          - session_absence_after_action
+      command: "pytest tests/e2e/test_mobile_session_action.py"
+""",
+    )
+
+    config = load_runtime_smoke_config(project)
+
+    assert len(config.global_action_targets) == 1
+    target = config.global_action_targets[0]
+    assert target.name == "mobile sign-out remains available"
+    assert target.command == "pytest tests/e2e/test_mobile_session_action.py"
+    assert target.actions[0].id == "session.sign_out"
+    assert [outcome.name for outcome in target.actions[0].outcomes] == [
+        "breakpoint_available",
+        "session_absence_after_action",
+    ]
+
+
+def test_t44_global_action_command_records_runtime_category(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="global action ok", stderr=""),
+    )
+    target = ActionOutcomeTargetConfig(
+        name="compact sign-out",
+        command="pytest tests/e2e/test_compact_signout.py",
+        actions=[
+            ActionSpecConfig(
+                id="session.sign_out",
+                verb="read",
+                target="session_action",
+                trigger="compact viewport",
+                outcomes=[
+                    OutcomeExpectationConfig("breakpoint_available"),
+                    OutcomeExpectationConfig("session_absence_after_action"),
+                ],
+            )
+        ],
+    )
+
+    result = ActionOutcomeChecker(
+        [target],
+        tmp_path,
+        None,
+        category="global-action",
+        label="Global action",
+        missing_config_message="runtime.global_action_targets requires command or invoke+observe",
+    ).run()[0]
+    markdown = generate_markdown_section([result], overall_passed=True)
+
+    assert result.passed is True
+    assert result.category == "global-action"
+    assert "Global action: compact sign-out" in markdown
+    assert "session_absence_after_action" in markdown
+
+
+def test_t45_runtime_skip_global_action_records_skipped_check(tmp_path, monkeypatch):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  e2e:
+    command: "npx playwright test"
+  report:
+    log_to_file: false
+runtime:
+  global_action_targets:
+    - name: compact sign-out
+      action:
+        id: session.sign_out
+        outcomes: [breakpoint_available, session_absence_after_action]
+      command: "pytest tests/e2e/test_compact_signout.py"
+""",
+    )
+
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.httpx.get",
+        lambda *args, **kwargs: SimpleNamespace(status_code=200),
+    )
+
+    result = run_runtime_smoke(project, skip_checks=["connectivity", "e2e", "global-action"])
+
+    skipped = [check for check in result.checks if check.skipped]
+    assert [check.category for check in skipped] == ["connectivity", "e2e", "global-action"]
+    assert "| Global action | SKIPPED |" in result.markdown_section
+
+
+def test_t46_doctor_warns_when_authenticated_responsive_ui_lacks_global_action_target(tmp_path):
+    project = _project(tmp_path)
+    app = project / "src" / "app"
+    app.mkdir(parents=True)
+    (app / "layout.tsx").write_text(
+        "export default async function Layout({ children }) { "
+        "const session = await getServerSession(); "
+        "return <div><aside className=\"hidden lg:block\"><nav>Menu</nav></aside>{children}</div>; }\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "runtime.global_action_targets" in result.output
+    assert "desktop-visible session controls are not accepted as mobile coverage" in result.output
+
+
+def test_t47_doctor_accepts_authenticated_responsive_ui_with_global_action_target(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime:
+  global_action_targets:
+    - name: compact sign-out
+      action:
+        id: session.sign_out
+        outcomes: [breakpoint_available, session_absence_after_action]
+      command: "pytest tests/e2e/test_compact_signout.py"
+""",
+    )
+    app = project / "src" / "app"
+    app.mkdir(parents=True)
+    (app / "layout.tsx").write_text(
+        "export default async function Layout({ children }) { "
+        "const session = await getServerSession(); "
+        "return <div><aside className=\"hidden lg:block\"><nav>Menu</nav></aside>{children}</div>; }\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "runtime.global_action_targets" not in result.output
 
 
 def test_t24_doctor_warns_on_post_without_reflection_e2e(tmp_path):

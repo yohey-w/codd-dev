@@ -118,6 +118,9 @@ mutating actions have runtime evidence for trigger -> outcome.
 - `codd doctor` warns when a business screen/page has visible content but neither
   the page nor an ancestor layout exposes static escape-route evidence such as
   persistent navigation, a home/dashboard/back link, or breadcrumbs.
+- `codd doctor` warns when authenticated responsive UI is present but no
+  `runtime.global_action_targets` are declared for breakpoint-specific global
+  actions such as sign-out, account access, home, or primary navigation.
 - Existing `runtime.crud_flow_targets` do not satisfy operation_flow update/delete
   or non-CRUD command coverage by themselves.
 - The implementation must stay framework-agnostic and must not hardcode routes,

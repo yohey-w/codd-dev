@@ -108,6 +108,20 @@ def run_runtime_smoke(
                 runtime_config.dev_server.url,
             ).run(),
         )
+    if runtime_config.global_action_targets or "global-action" in skip_set:
+        _run_category(
+            "global-action",
+            checks,
+            skip_set,
+            lambda: ActionOutcomeChecker(
+                runtime_config.global_action_targets,
+                runtime_config.project_root,
+                runtime_config.dev_server.url,
+                category="global-action",
+                label="Global action",
+                missing_config_message="runtime.global_action_targets requires command or invoke+observe",
+            ).run(),
+        )
     return _finish(runtime_config, checks)
 
 
@@ -119,6 +133,7 @@ def _run_category(category: str, checks: list[CheckResult], skip_set: set[str], 
         "e2e": "Real-browser E2E",
         "crud-flow": "CRUD flow",
         "action-outcome": "Action outcome",
+        "global-action": "Global action",
     }
     if category in skip_set:
         checks.append(skipped_result(category, names[category], f"--runtime-skip {category}"))

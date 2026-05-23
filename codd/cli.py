@@ -483,6 +483,16 @@ _ESCAPE_ROUTE_RE = re.compile(
     r"(?is)(<nav\b|role\s*=\s*['\"]navigation['\"]|breadcrumb|<Link\b|href\s*=|router\.push\s*\(|"
     r"\bnavigate\s*\(|\bredirect\s*\(|to\s*=|aria-label\s*=\s*['\"][^'\"]*(?:nav|menu|breadcrumb|home|dashboard))"
 )
+_AUTHENTICATED_UI_RE = re.compile(
+    r"(?i)(requireAuthenticatedSession|getGuardContext|getServerSession|useSession|authOptions|session\.user|authenticated)"
+)
+_RESPONSIVE_BREAKPOINT_RE = re.compile(
+    r"(?is)(className\s*=\s*['\"][^'\"]*(?:(?:hidden[^'\"]*(?:sm:|md:|lg:|xl:|2xl:))|"
+    r"(?:(?:sm|md|lg|xl|2xl):hidden))[^'\"]*|@media\s*\(|viewport|breakpoint|responsive)"
+)
+_SESSION_ACTION_TOKEN_RE = re.compile(
+    r"(?i)(sign\s*out|signout|log\s*out|logout|account|profile|session|user\s*menu|settings)"
+)
 _CONNECTED_CONTROL_RE = re.compile(
     r"(?i)(onClick\s*=|onclick\s*=|@click\s*=|\(click\)\s*=|x-on:click\s*=|wire:click\s*=|"
     r"on:click\s*=|formAction\s*=|formaction\s*=|href\s*=|data-action\s*=|"
@@ -555,6 +565,7 @@ def _doctor_warnings(project_root: Path) -> list[str]:
     warnings.extend(_synthetic_mutation_warnings(project_root, config))
     warnings.extend(_interactive_control_warnings(project_root, config))
     warnings.extend(_screen_escape_route_warnings(project_root, config))
+    warnings.extend(_authenticated_global_action_warnings(project_root, config))
     coverage = _action_outcome_coverage(project_root, config)
     warnings.extend(_action_outcome_warning_messages(coverage, legacy_crud_configured=has_crud_flow_targets))
     target_actions = action_target_specs_from_config(config)
@@ -574,6 +585,12 @@ def _has_crud_flow_targets(config: dict[str, Any]) -> bool:
 def _has_action_outcome_targets(config: dict[str, Any]) -> bool:
     runtime = config.get("runtime", {})
     runtime_targets = runtime.get("action_outcome_targets") if isinstance(runtime, dict) else None
+    return bool(runtime_targets)
+
+
+def _has_global_action_targets(config: dict[str, Any]) -> bool:
+    runtime = config.get("runtime", {})
+    runtime_targets = runtime.get("global_action_targets") if isinstance(runtime, dict) else None
     return bool(runtime_targets)
 
 
@@ -778,6 +795,35 @@ def _screen_escape_route_warnings(project_root: Path, config: dict[str, Any]) ->
             "a home/dashboard/back link, breadcrumb, or a runtime navigation coverage target."
         )
     return warnings
+
+
+def _authenticated_global_action_warnings(project_root: Path, config: dict[str, Any]) -> list[str]:
+    if _has_global_action_targets(config):
+        return []
+    has_authenticated_ui = False
+    has_responsive_breakpoint = False
+    has_static_session_action = False
+    for path in _configured_text_files(project_root, config, "source_dirs", ["src/"]):
+        if path.suffix not in {".tsx", ".jsx", ".html", ".vue", ".svelte"}:
+            continue
+        text = _read_text_best_effort(path)
+        has_authenticated_ui = has_authenticated_ui or bool(_AUTHENTICATED_UI_RE.search(text))
+        has_responsive_breakpoint = has_responsive_breakpoint or bool(_RESPONSIVE_BREAKPOINT_RE.search(text))
+        has_static_session_action = has_static_session_action or bool(_SESSION_ACTION_TOKEN_RE.search(text))
+    if not has_authenticated_ui or not has_responsive_breakpoint:
+        return []
+    action_note = (
+        " Only static session/account action text was found; declare breakpoint runtime evidence "
+        "so desktop-only controls do not mask mobile gaps."
+        if has_static_session_action
+        else ""
+    )
+    return [
+        "Authenticated responsive UI detected, but no `runtime.global_action_targets` are declared. "
+        "Add breakpoint-specific runtime evidence for required global actions such as sign-out, "
+        "account access, home, or primary navigation so desktop-visible session controls are not "
+        f"accepted as mobile coverage.{action_note}"
+    ]
 
 
 def _looks_like_screen_file(path: Path) -> bool:
@@ -2903,7 +2949,9 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 @click.option(
     "--runtime-skip",
     multiple=True,
-    type=click.Choice(["db", "dev-server", "connectivity", "e2e", "crud-flow", "action-outcome", "verification-test"]),
+    type=click.Choice(
+        ["db", "dev-server", "connectivity", "e2e", "crud-flow", "action-outcome", "global-action", "verification-test"]
+    ),
     help="Skip a runtime smoke check and record it as skipped in the report",
 )
 @click.option(
