@@ -108,9 +108,16 @@ mutating actions have runtime evidence for trigger -> outcome.
     `expect_text` / `forbid_text`.
 - Command targets must render their action/outcome metadata in the runtime report;
   exit code alone is not enough context for action coverage.
+- Terminal or non-repeatable actions such as complete, delete, disable, archive, or
+  revoke must include post-action control-state evidence, for example
+  `disabled_state`, `control_absence`, `expected_absence`, or
+  `terminal_state_guard`, so a stale enabled control is not accepted as complete.
 - `--runtime-skip action-outcome` records an explicit skipped runtime category.
 - `codd doctor` warns when `operation_flow` declares mutating actions that are not
   covered by `runtime.action_outcome_targets`.
+- `codd doctor` warns when a business screen/page has visible content but neither
+  the page nor an ancestor layout exposes static escape-route evidence such as
+  persistent navigation, a home/dashboard/back link, or breadcrumbs.
 - Existing `runtime.crud_flow_targets` do not satisfy operation_flow update/delete
   or non-CRUD command coverage by themselves.
 - The implementation must stay framework-agnostic and must not hardcode routes,

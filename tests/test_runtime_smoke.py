@@ -993,3 +993,107 @@ runtime:
     assert result.exit_code == 0
     assert "CoDD doctor: WARN" in result.output
     assert "only weak outcome metadata" in result.output
+
+
+def test_t38_doctor_warns_when_terminal_action_lacks_control_state_outcome(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime:
+  action_outcome_targets:
+    - name: record complete
+      action:
+        id: record.complete
+        verb: complete
+        target: record
+        outcomes: [visible_reflection, reload_persistence]
+      command: "npm run test:complete-record"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "terminal/non-repeatable verb `complete`" in result.output
+
+
+def test_t39_doctor_warns_when_update_action_id_names_terminal_outcome(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime:
+  action_outcome_targets:
+    - name: record completion
+      action:
+        id: record_complete
+        verb: update
+        target: record
+        outcomes: [visible_reflection, reload_persistence]
+      command: "npm run test:complete-record"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "terminal/non-repeatable verb `complete`" in result.output
+
+
+def test_t40_doctor_accepts_terminal_action_with_disabled_state_outcome(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime:
+  action_outcome_targets:
+    - name: record complete
+      action:
+        id: record.complete
+        verb: complete
+        target: record
+        outcomes: [visible_reflection, disabled_state]
+      command: "npm run test:complete-record"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "terminal/non-repeatable verb" not in result.output
+
+
+def test_t41_doctor_warns_when_business_screen_lacks_escape_route(tmp_path):
+    project = _project(tmp_path)
+    screen = project / "src" / "app" / "notifications"
+    screen.mkdir(parents=True)
+    (screen / "page.tsx").write_text(
+        'export default function Page() { return <main><h1>Messages</h1><p>Updates</p></main>; }\n',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "escape route/navigation evidence" in result.output
+
+
+def test_t42_doctor_accepts_business_screen_with_ancestor_navigation(tmp_path):
+    project = _project(tmp_path)
+    app = project / "src" / "app"
+    screen = app / "notifications"
+    screen.mkdir(parents=True)
+    (app / "layout.tsx").write_text(
+        'import Link from "next/link"; export default function Layout({ children }) { return <><nav><Link href="/dashboard">Dashboard</Link></nav>{children}</>; }\n',
+        encoding="utf-8",
+    )
+    (screen / "page.tsx").write_text(
+        'export default function Page() { return <main><h1>Messages</h1><p>Updates</p></main>; }\n',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "escape route/navigation evidence" not in result.output

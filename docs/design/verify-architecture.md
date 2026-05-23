@@ -175,6 +175,10 @@ Execution rules:
 - Missing `runtime.action_outcome_targets` is a no-op for backward compatibility.
 - `--runtime-skip action-outcome` records the category as skipped in the runtime
   report.
+- Terminal actions (`complete`, `delete`, `disable`, `archive`, `revoke`) are
+  treated as non-repeatable operations. `codd doctor` warns unless their action
+  metadata includes post-action control-state evidence such as `disabled_state`,
+  `control_absence`, `expected_absence`, or `terminal_state_guard`.
 
 ### Action Outcome Doctor Warning
 
@@ -190,6 +194,9 @@ Execution rules:
 4. Emit warnings for uncovered action outcomes.
 5. Keep `runtime.crud_flow_targets` as legacy CRUD reflection evidence; an add-only
    CRUD target does not cover update/delete or non-CRUD command actions.
+6. Emit warnings when page/screen source files contain visible business content
+   but neither the page nor an ancestor layout has static escape-route evidence
+   such as persistent navigation, a home/dashboard/back link, or breadcrumbs.
 
 This warning is framework-agnostic. It does not inspect dogfood routes, labels, or
 domain entities.

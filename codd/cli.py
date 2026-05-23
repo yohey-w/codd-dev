@@ -477,6 +477,12 @@ _PERSISTENCE_EVIDENCE_RE = re.compile(
     r"\.(?:create|insert|update|delete|save|upsert|patch)\s*\()"
 )
 _BUTTON_RE = re.compile(r"(?is)<button\b(?P<attrs>[^>]*)>(?P<label>.*?)</button>")
+_SCREEN_FILE_RE = re.compile(r"(?i)(^|[/\\])(page|screen|view|route)\.(tsx|jsx|html|vue|svelte)$")
+_SCREEN_CONTENT_RE = re.compile(r"(?is)(<h1\b|<main\b|<section\b|<article\b|<Card\b|role\s*=\s*['\"]main['\"])")
+_ESCAPE_ROUTE_RE = re.compile(
+    r"(?is)(<nav\b|role\s*=\s*['\"]navigation['\"]|breadcrumb|<Link\b|href\s*=|router\.push\s*\(|"
+    r"\bnavigate\s*\(|\bredirect\s*\(|to\s*=|aria-label\s*=\s*['\"][^'\"]*(?:nav|menu|breadcrumb|home|dashboard))"
+)
 _CONNECTED_CONTROL_RE = re.compile(
     r"(?i)(onClick\s*=|onclick\s*=|@click\s*=|\(click\)\s*=|x-on:click\s*=|wire:click\s*=|"
     r"on:click\s*=|formAction\s*=|formaction\s*=|href\s*=|data-action\s*=|"
@@ -505,6 +511,24 @@ _STRONG_OUTCOME_NAMES = {
     "persistence",
     "stored",
     "audit_log",
+    "disabled_state",
+    "control_disabled",
+    "control_absence",
+    "terminal_state",
+    "terminal_state_guard",
+    "non_repeatable_guard",
+}
+_TERMINAL_ACTION_VERBS = {"complete", "delete", "disable", "archive", "revoke"}
+_TERMINAL_OUTCOME_NAMES = {
+    "disabled_state",
+    "control_disabled",
+    "control_absence",
+    "expected_absence",
+    "persisted_absence",
+    "absence",
+    "terminal_state",
+    "terminal_state_guard",
+    "non_repeatable_guard",
 }
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*", re.DOTALL)
 _TEXT_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".feature", ".html", ".vue", ".svelte"}
@@ -530,9 +554,12 @@ def _doctor_warnings(project_root: Path) -> list[str]:
         )
     warnings.extend(_synthetic_mutation_warnings(project_root, config))
     warnings.extend(_interactive_control_warnings(project_root, config))
+    warnings.extend(_screen_escape_route_warnings(project_root, config))
     coverage = _action_outcome_coverage(project_root, config)
     warnings.extend(_action_outcome_warning_messages(coverage, legacy_crud_configured=has_crud_flow_targets))
-    warnings.extend(_weak_action_outcome_warning_messages(action_target_specs_from_config(config)))
+    target_actions = action_target_specs_from_config(config)
+    warnings.extend(_weak_action_outcome_warning_messages(target_actions))
+    warnings.extend(_terminal_action_outcome_warning_messages(target_actions))
     return warnings
 
 
@@ -703,6 +730,73 @@ def _weak_action_outcome_warning_messages(target_actions: tuple[ActionTargetSpec
             "expected absence, or another durable observable outcome."
         )
     return warnings
+
+
+def _terminal_action_outcome_warning_messages(target_actions: tuple[ActionTargetSpec, ...]) -> list[str]:
+    warnings: list[str] = []
+    for action in target_actions:
+        terminal_verb = _terminal_action_verb(action)
+        if terminal_verb is None:
+            continue
+        outcomes = {_normalize_runtime_token(outcome) for outcome in action.outcomes}
+        if outcomes.intersection(_TERMINAL_OUTCOME_NAMES):
+            continue
+        warnings.append(
+            f"`runtime.action_outcome_targets` action `{action.action_id}` in `{action.target_name}` "
+            f"declares terminal/non-repeatable verb `{terminal_verb}` but does not assert the post-action "
+            "control state. Add disabled_state, control_absence, expected_absence, terminal_state_guard, "
+            "or an equivalent outcome so users are not left with a stale clickable control."
+        )
+    return warnings
+
+
+def _terminal_action_verb(action: ActionTargetSpec) -> str | None:
+    candidates = (
+        action.verb,
+        canonical_action_verb(action.action_id),
+        canonical_action_verb(action.target),
+    )
+    for candidate in candidates:
+        if candidate in _TERMINAL_ACTION_VERBS:
+            return candidate
+    return None
+
+
+def _screen_escape_route_warnings(project_root: Path, config: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    for path in _configured_text_files(project_root, config, "source_dirs", ["src/"]):
+        if not _looks_like_screen_file(path):
+            continue
+        text = _read_text_best_effort(path)
+        if not _SCREEN_CONTENT_RE.search(text):
+            continue
+        if _ESCAPE_ROUTE_RE.search(text) or _ancestor_layout_has_escape_route(path, project_root):
+            continue
+        warnings.append(
+            f"Business screen `{_display_path(path, project_root)}` has visible page content but no static "
+            "escape route/navigation evidence in the screen or ancestor layout. Add persistent navigation, "
+            "a home/dashboard/back link, breadcrumb, or a runtime navigation coverage target."
+        )
+    return warnings
+
+
+def _looks_like_screen_file(path: Path) -> bool:
+    return bool(_SCREEN_FILE_RE.search(path.as_posix()))
+
+
+def _ancestor_layout_has_escape_route(path: Path, project_root: Path) -> bool:
+    try:
+        current = path.parent
+        root = project_root.resolve()
+        while current.resolve() != root and root in current.resolve().parents:
+            for name in ("layout.tsx", "layout.jsx", "Layout.tsx", "layout.html", "layout.vue", "layout.svelte"):
+                candidate = current / name
+                if candidate.exists() and _ESCAPE_ROUTE_RE.search(_read_text_best_effort(candidate)):
+                    return True
+            current = current.parent
+    except OSError:
+        return False
+    return False
 
 
 def _control_label(raw_html: str) -> str:

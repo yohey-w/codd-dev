@@ -133,7 +133,9 @@ context_acquisition:
 
 # Optional: action/command/control -> observable outcome checks.
 # Use this when operation_flow declares mutating commands such as update,
-# delete, approve, publish, send, import, or a broad manage_collection action.
+# delete, complete, approve, publish, send, import, or a broad manage_collection action.
+# Terminal actions such as complete/delete/disable should also assert disabled_state,
+# control_absence, expected_absence, or terminal_state_guard.
 # runtime:
 #   action_outcome_targets:
 #     - name: "record update reflects after reload"
