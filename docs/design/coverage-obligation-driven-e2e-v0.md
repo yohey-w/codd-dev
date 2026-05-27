@@ -25,9 +25,16 @@ Review owner: Shogun / Lord.
 
 cmd_494 first slice has implementation scaffolding for the obligation schema,
 existing-declaration extractor, and `codd coverage-obligations` trace report CLI.
-This is not a complete implementation of Coverage-Obligation Driven E2E.
-`generated_e2e_candidates` and `selected_e2e_suite` remain future TODO items and
-must not be counted as green coverage in this slice.
+cmd_495 adds the first deterministic `generated_e2e_candidates` and
+`selected_e2e_suite` payloads, wired into `codd coverage-obligations` JSON and
+Markdown output. `codd doctor` and `codd verify` also emit a concise
+planning-summary line so the candidate/selection state is visible from the
+standard diagnostic and verification entry points.
+
+This is still not a complete implementation of Coverage-Obligation Driven E2E.
+Generated and selected E2E records are planning artifacts only. They must not
+change `coverage_status`, populate `covered_by`, or be counted as green coverage
+until executed evidence exists and reports zero skips.
 
 ## Summary
 

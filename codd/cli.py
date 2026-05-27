@@ -398,10 +398,12 @@ def doctor(project_path: str) -> None:
 
     if not warnings:
         click.echo("CoDD doctor: PASS")
+        _emit_coverage_obligation_planning_summary(project_root)
         return
     click.echo("CoDD doctor: WARN")
     for warning in warnings:
         click.echo(f"WARNING: {warning}")
+    _emit_coverage_obligation_planning_summary(project_root)
 
 
 @main.command("gungi")
@@ -2999,6 +3001,7 @@ def verify(
     if not auto_repair:
         result = _run_verify_once(**verify_kwargs)
         _emit_verify_summary(result)
+        _emit_coverage_obligation_planning_summary(Path(path).resolve())
         if runtime:
             if not result.passed:
                 raise SystemExit(result.exit_code)
@@ -3012,6 +3015,7 @@ def verify(
     project_root = Path(path).resolve()
     result = _run_verify_once(**verify_kwargs)
     _emit_verify_summary(result)
+    _emit_coverage_obligation_planning_summary(project_root)
     if result.passed:
         if runtime:
             _run_runtime_smoke_gate(
@@ -3559,31 +3563,118 @@ def _coverage_obligations_payload(extraction: Any) -> dict[str, Any]:
     obligations = raw.get("obligations", [])
     evidence_candidates = raw.get("evidence_candidates", [])
     unsupported_items = raw.get("unsupported_items", [])
-    trace_matrix = [_coverage_obligation_trace_row(obligation) for obligation in obligations]
-    future_todos = {
-        "generated_e2e_candidates": _coverage_future_todo(),
-        "selected_e2e_suite": _coverage_future_todo(),
+    candidate_selection = _coverage_e2e_candidate_selection_payload(obligations)
+    selection_trace_by_id = {
+        str(row.get("obligation_id")): row
+        for row in candidate_selection.get("trace_matrix", [])
+        if row.get("obligation_id")
     }
+    trace_matrix = [
+        _coverage_obligation_trace_row(
+            obligation,
+            selection_trace_by_id.get(str(obligation.get("obligation_id") or "")),
+        )
+        for obligation in obligations
+    ]
 
     return {
         "summary": _coverage_obligation_summary(
             trace_matrix,
             evidence_candidates=evidence_candidates,
             unsupported_items=unsupported_items,
-            future_todos=future_todos,
+            candidate_selection=candidate_selection,
         ),
         "trace_matrix": trace_matrix,
         "obligations": obligations,
         "evidence_candidates": evidence_candidates,
         "unsupported_items": unsupported_items,
-        **future_todos,
+        "generated_e2e_candidates": candidate_selection.get("generated_e2e_candidates", []),
+        "selected_e2e_suite": candidate_selection.get("selected_e2e_suite", []),
+        "unselected_e2e_candidates": candidate_selection.get("unselected_e2e_candidates", []),
+        "excluded_obligations": candidate_selection.get("excluded_obligations", []),
+        "required_obligation_ids": candidate_selection.get("required_obligation_ids", []),
+        "required_without_selected_candidate_ids": candidate_selection.get(
+            "uncovered_required_obligation_ids",
+            [],
+        ),
     }
 
 
-def _coverage_obligation_trace_row(obligation: dict[str, Any]) -> dict[str, Any]:
+def _coverage_e2e_candidate_selection_payload(obligations: list[dict[str, Any]]) -> dict[str, Any]:
+    from codd.coverage_e2e_selection import candidate_selection_payload
+
+    return candidate_selection_payload(
+        [_coverage_obligation_selection_input(obligation) for obligation in obligations]
+    )
+
+
+def _coverage_obligation_selection_input(obligation: dict[str, Any]) -> dict[str, Any]:
+    source = obligation.get("source")
+    if not isinstance(source, dict):
+        source = {"type": "manual", "ref": str(obligation.get("obligation_id") or "unknown")}
+
+    payload = {
+        "obligation_id": str(obligation.get("obligation_id") or ""),
+        "source": source,
+        "kind": str(obligation.get("kind") or "role_sequence"),
+        "actor": str(obligation.get("actor") or "system"),
+        "goal": str(obligation.get("goal") or obligation.get("obligation_id") or "Unspecified obligation."),
+        "preconditions": obligation.get("preconditions", []),
+        "expected_outcomes": obligation.get("expected_outcomes", []),
+        "side_effects": obligation.get("side_effects", []),
+        "risk_level": str(obligation.get("risk_level") or "P3"),
+        "coverage_status": str(obligation.get("coverage_status") or "uncovered"),
+        "covered_by": obligation.get("covered_by", []),
+        "waiver_reason": obligation.get("waiver_reason"),
+        "waiver_expiry": obligation.get("waiver_expiry"),
+    }
+    metadata = obligation.get("metadata")
+    if isinstance(metadata, dict):
+        payload["metadata"] = metadata
+    return payload
+
+
+def _emit_coverage_obligation_planning_summary(project_root: Path) -> None:
+    for line in _coverage_obligation_planning_summary_lines(project_root):
+        click.echo(line)
+
+
+def _coverage_obligation_planning_summary_lines(project_root: Path) -> list[str]:
+    from codd.coverage_obligation_extractor import extract_coverage_obligations
+
+    try:
+        payload = _coverage_obligations_payload(extract_coverage_obligations(project_root))
+    except (FileNotFoundError, TypeError, ValueError):
+        return []
+
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        return []
+
+    total = int(summary.get("total_obligations") or 0)
+    generated = int(summary.get("generated_e2e_candidate_count") or 0)
+    selected = int(summary.get("selected_e2e_suite_count") or 0)
+    excluded = int(summary.get("excluded_obligation_count") or 0)
+    required_without_selected = int(summary.get("required_without_selected_candidate_count") or 0)
+    return [
+        "Coverage obligations: "
+        f"{total} obligations / {generated} generated E2E candidates / "
+        f"{selected} selected planning entries / {excluded} exclusions / "
+        f"{required_without_selected} required without selected candidate",
+        "Coverage obligations: selected E2E suite is planning-only; "
+        "coverage_status and covered_by require executed zero-skip evidence.",
+    ]
+
+
+def _coverage_obligation_trace_row(
+    obligation: dict[str, Any],
+    candidate_trace_row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     metadata = obligation.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
+    if candidate_trace_row is None:
+        candidate_trace_row = {}
     return {
         "obligation_id": str(obligation.get("obligation_id") or ""),
         "kind": str(obligation.get("kind") or ""),
@@ -3591,7 +3682,13 @@ def _coverage_obligation_trace_row(obligation: dict[str, Any]) -> dict[str, Any]
         "coverage_status": str(obligation.get("coverage_status") or "uncovered"),
         "source": _coverage_source_label(obligation.get("source")),
         "covered_by": obligation.get("covered_by", []),
+        "waiver_reason": obligation.get("waiver_reason"),
+        "waiver_expiry": obligation.get("waiver_expiry"),
         "evidence_candidates": metadata.get("evidence_candidates", []),
+        "generated_candidate_ids": candidate_trace_row.get("generated_candidate_ids", []),
+        "selected_candidate_ids": candidate_trace_row.get("selected_candidate_ids", []),
+        "excluded_reason": candidate_trace_row.get("excluded_reason"),
+        "exclusion_reason": candidate_trace_row.get("exclusion_reason"),
     }
 
 
@@ -3600,7 +3697,7 @@ def _coverage_obligation_summary(
     *,
     evidence_candidates: list[dict[str, Any]],
     unsupported_items: list[dict[str, Any]],
-    future_todos: dict[str, Any],
+    candidate_selection: dict[str, Any],
 ) -> dict[str, Any]:
     status_counts: dict[str, int] = {}
     kind_counts: dict[str, int] = {}
@@ -3616,15 +3713,18 @@ def _coverage_obligation_summary(
         "kind_counts": kind_counts,
         "evidence_candidate_count": len(evidence_candidates),
         "unsupported_item_count": len(unsupported_items),
-        "future_todo": sorted(future_todos),
-    }
-
-
-def _coverage_future_todo() -> dict[str, Any]:
-    return {
-        "status": "future_todo",
-        "reason": "not_implemented_in_cmd_494",
-        "items": [],
+        "generated_e2e_candidate_count": len(
+            candidate_selection.get("generated_e2e_candidates", [])
+        ),
+        "selected_e2e_suite_count": len(candidate_selection.get("selected_e2e_suite", [])),
+        "unselected_e2e_candidate_count": len(
+            candidate_selection.get("unselected_e2e_candidates", [])
+        ),
+        "excluded_obligation_count": len(candidate_selection.get("excluded_obligations", [])),
+        "required_obligation_count": len(candidate_selection.get("required_obligation_ids", [])),
+        "required_without_selected_candidate_count": len(
+            candidate_selection.get("uncovered_required_obligation_ids", [])
+        ),
     }
 
 
@@ -3642,15 +3742,24 @@ def _format_coverage_obligations_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Coverage Obligations",
         "",
-        "| obligation_id | kind | actor | coverage_status | source |",
-        "| --- | --- | --- | --- | --- |",
+        "| obligation_id | kind | actor | coverage_status | source | generated_candidate_ids | selected_candidate_ids | excluded_reason |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in payload.get("trace_matrix", []):
         lines.append(
             "| "
             + " | ".join(
                 _markdown_cell(row.get(key, ""))
-                for key in ("obligation_id", "kind", "actor", "coverage_status", "source")
+                for key in (
+                    "obligation_id",
+                    "kind",
+                    "actor",
+                    "coverage_status",
+                    "source",
+                    "generated_candidate_ids",
+                    "selected_candidate_ids",
+                    "excluded_reason",
+                )
             )
             + " |"
         )
@@ -3664,9 +3773,44 @@ def _format_coverage_obligations_markdown(payload: dict[str, Any]) -> str:
             f"- total_obligations: {summary.get('total_obligations', 0)}",
             f"- evidence_candidate_count: {summary.get('evidence_candidate_count', 0)}",
             f"- unsupported_item_count: {summary.get('unsupported_item_count', 0)}",
-            "- generated_e2e_candidates: future_todo (not_implemented_in_cmd_494)",
-            "- selected_e2e_suite: future_todo (not_implemented_in_cmd_494)",
+            f"- generated_e2e_candidate_count: {summary.get('generated_e2e_candidate_count', 0)}",
+            f"- selected_e2e_suite_count: {summary.get('selected_e2e_suite_count', 0)}",
+            f"- unselected_e2e_candidate_count: {summary.get('unselected_e2e_candidate_count', 0)}",
+            f"- excluded_obligation_count: {summary.get('excluded_obligation_count', 0)}",
+            f"- required_without_selected_candidate_count: {summary.get('required_without_selected_candidate_count', 0)}",
+            "- selected_e2e_suite_is_planning_only: true",
         ]
+    )
+
+    lines.extend(
+        [
+            "",
+            "Selected E2E suite entries are planning artifacts only; they do not change coverage_status or covered_by.",
+        ]
+    )
+    _append_coverage_markdown_table(
+        lines,
+        "Generated E2E Candidates",
+        ("candidate_id", "obligation_ids", "actor", "journey_or_flow", "risk_level", "status", "reason"),
+        payload.get("generated_e2e_candidates", []),
+    )
+    _append_coverage_markdown_table(
+        lines,
+        "Selected E2E Suite",
+        ("selection_order", "candidate_id", "obligation_ids", "risk_level", "selected_reason"),
+        payload.get("selected_e2e_suite", []),
+    )
+    _append_coverage_markdown_table(
+        lines,
+        "Excluded Obligations",
+        ("obligation_id", "actor", "coverage_status", "reason_code", "reason"),
+        payload.get("excluded_obligations", []),
+    )
+    _append_coverage_markdown_table(
+        lines,
+        "Unselected E2E Candidates",
+        ("candidate_id", "obligation_ids", "unselected_reason_code", "unselected_reason"),
+        payload.get("unselected_e2e_candidates", []),
     )
 
     unsupported_items = payload.get("unsupported_items", [])
@@ -3676,6 +3820,25 @@ def _format_coverage_obligations_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- {_markdown_cell(item)}")
 
     return "\n".join(lines) + "\n"
+
+
+def _append_coverage_markdown_table(
+    lines: list[str],
+    title: str,
+    columns: tuple[str, ...],
+    rows: Any,
+) -> None:
+    lines.extend(["", f"## {title}", ""])
+    if not isinstance(rows, list) or not rows:
+        lines.append("_None_")
+        return
+
+    lines.append("| " + " | ".join(columns) + " |")
+    lines.append("| " + " | ".join("---" for _ in columns) + " |")
+    for row in rows:
+        if not isinstance(row, dict):
+            row = {"value": row}
+        lines.append("| " + " | ".join(_markdown_cell(row.get(column, "")) for column in columns) + " |")
 
 
 def _markdown_cell(value: Any) -> str:
