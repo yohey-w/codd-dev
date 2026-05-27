@@ -3525,6 +3525,167 @@ def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, edges: bool,
     raise SystemExit(run_validate(project_root, codd_dir))
 
 
+@main.command("coverage-obligations")
+@click.option("--path", "project_path", default=".", show_default=True, help="Project root directory")
+@click.option(
+    "--format",
+    "output_format",
+    default="json",
+    show_default=True,
+    type=click.Choice(["json", "markdown"]),
+    help="Output format.",
+)
+def coverage_obligations_cmd(project_path: str, output_format: str) -> None:
+    """Extract coverage obligations and print a trace matrix."""
+    from codd.coverage_obligation_extractor import extract_coverage_obligations
+
+    project_root = Path(project_path).resolve()
+    try:
+        extraction = extract_coverage_obligations(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    payload = _coverage_obligations_payload(extraction)
+    if output_format == "json":
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return
+
+    click.echo(_format_coverage_obligations_markdown(payload), nl=False)
+
+
+def _coverage_obligations_payload(extraction: Any) -> dict[str, Any]:
+    raw = extraction.to_dict()
+    obligations = raw.get("obligations", [])
+    evidence_candidates = raw.get("evidence_candidates", [])
+    unsupported_items = raw.get("unsupported_items", [])
+    trace_matrix = [_coverage_obligation_trace_row(obligation) for obligation in obligations]
+    future_todos = {
+        "generated_e2e_candidates": _coverage_future_todo(),
+        "selected_e2e_suite": _coverage_future_todo(),
+    }
+
+    return {
+        "summary": _coverage_obligation_summary(
+            trace_matrix,
+            evidence_candidates=evidence_candidates,
+            unsupported_items=unsupported_items,
+            future_todos=future_todos,
+        ),
+        "trace_matrix": trace_matrix,
+        "obligations": obligations,
+        "evidence_candidates": evidence_candidates,
+        "unsupported_items": unsupported_items,
+        **future_todos,
+    }
+
+
+def _coverage_obligation_trace_row(obligation: dict[str, Any]) -> dict[str, Any]:
+    metadata = obligation.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return {
+        "obligation_id": str(obligation.get("obligation_id") or ""),
+        "kind": str(obligation.get("kind") or ""),
+        "actor": str(obligation.get("actor") or ""),
+        "coverage_status": str(obligation.get("coverage_status") or "uncovered"),
+        "source": _coverage_source_label(obligation.get("source")),
+        "covered_by": obligation.get("covered_by", []),
+        "evidence_candidates": metadata.get("evidence_candidates", []),
+    }
+
+
+def _coverage_obligation_summary(
+    trace_matrix: list[dict[str, Any]],
+    *,
+    evidence_candidates: list[dict[str, Any]],
+    unsupported_items: list[dict[str, Any]],
+    future_todos: dict[str, Any],
+) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    kind_counts: dict[str, int] = {}
+    for row in trace_matrix:
+        status = str(row.get("coverage_status") or "uncovered")
+        kind = str(row.get("kind") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+
+    return {
+        "total_obligations": len(trace_matrix),
+        "coverage_status_counts": status_counts,
+        "kind_counts": kind_counts,
+        "evidence_candidate_count": len(evidence_candidates),
+        "unsupported_item_count": len(unsupported_items),
+        "future_todo": sorted(future_todos),
+    }
+
+
+def _coverage_future_todo() -> dict[str, Any]:
+    return {
+        "status": "future_todo",
+        "reason": "not_implemented_in_cmd_494",
+        "items": [],
+    }
+
+
+def _coverage_source_label(source: Any) -> str:
+    if isinstance(source, dict):
+        source_type = str(source.get("type") or "").strip()
+        source_ref = str(source.get("ref") or "").strip()
+        return ":".join(part for part in (source_type, source_ref) if part)
+    if source is None:
+        return ""
+    return str(source)
+
+
+def _format_coverage_obligations_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Coverage Obligations",
+        "",
+        "| obligation_id | kind | actor | coverage_status | source |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in payload.get("trace_matrix", []):
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(row.get(key, ""))
+                for key in ("obligation_id", "kind", "actor", "coverage_status", "source")
+            )
+            + " |"
+        )
+
+    summary = payload.get("summary", {})
+    lines.extend(
+        [
+            "",
+            "## Summary",
+            "",
+            f"- total_obligations: {summary.get('total_obligations', 0)}",
+            f"- evidence_candidate_count: {summary.get('evidence_candidate_count', 0)}",
+            f"- unsupported_item_count: {summary.get('unsupported_item_count', 0)}",
+            "- generated_e2e_candidates: future_todo (not_implemented_in_cmd_494)",
+            "- selected_e2e_suite: future_todo (not_implemented_in_cmd_494)",
+        ]
+    )
+
+    unsupported_items = payload.get("unsupported_items", [])
+    if unsupported_items:
+        lines.extend(["", "## Unsupported Items", ""])
+        for item in unsupported_items:
+            lines.append(f"- {_markdown_cell(item)}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _markdown_cell(value: Any) -> str:
+    if isinstance(value, (dict, list, tuple)):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    else:
+        text = str(value)
+    return text.replace("\n", "<br>").replace("|", "\\|")
+
+
 @main.group(invoke_without_command=True)
 @click.option("--path", default=".", show_default=True, help="Project root directory")
 @click.option(
