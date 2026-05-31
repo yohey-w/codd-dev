@@ -249,7 +249,10 @@ def test_design_prompt_requires_design_time_operational_behavior_model(tmp_path,
     assert "Operational Behavior Model (DESIGN-TIME, CRITICAL)" in prompt
     assert "Do not postpone operational workflow discovery to E2E generation" in prompt
     assert "operation_flow.operations" in prompt
-    assert "happy path, persistence/readback, permission boundary, terminal-state guard, and cross-actor reflection" in prompt
+    assert "measured/observed events" in prompt
+    assert "derived or aggregate read models" in prompt
+    assert "measurement_source" in prompt
+    assert "threshold/boundary behavior" in prompt
     assert "This is not an E2E scenario list" in prompt
 
 
@@ -672,6 +675,8 @@ def test_generate_test_document_includes_design_to_test_traceability(tmp_path, m
     assert "verifiable behaviors" in prompt
     assert "traceability section" in prompt
     assert "design-time `operation_flow` records as the authoritative source" in prompt
+    assert "derived-state/read-model chain" in prompt
+    assert "below/at/above-boundary assertions" in prompt
     assert "Run the whole selected suite, collect every failure" in prompt
 
 

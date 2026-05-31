@@ -201,6 +201,52 @@ operation_flow:
     assert "workspace exists" in readback.preconditions
 
 
+def test_extract_operational_scenarios_cover_derived_state_and_thresholds(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: record_activity_progress
+      actor: operator
+      verb: update
+      target: work_item_progress
+      route: /work-items/:id
+      trigger: automatic activity event emitted by the work surface
+      measurement_source: active_seconds emitted by the work surface
+      durable_state: progress_events.active_seconds
+      readback: latest active_seconds is restored when the work item is reopened
+      consumer_surfaces:
+        - reviewer progress dashboard
+      threshold: 90% of required duration
+      boundary_cases: [89%, 90%, missing duration]
+      expected_outcomes:
+        - progress percentage is derived from active_seconds / required_duration
+        - reviewer dashboard reflects the derived progress percentage
+""",
+        encoding="utf-8",
+    )
+
+    collection = ScenarioExtractor(tmp_path).extract_operational()
+    axes = {scenario.coverage_axis for scenario in collection.scenarios}
+
+    assert {"derived_state_chain", "threshold_boundary"}.issubset(axes)
+    derived = next(
+        scenario
+        for scenario in collection.scenarios
+        if scenario.coverage_axis == "derived_state_chain"
+    )
+    threshold = next(
+        scenario
+        for scenario in collection.scenarios
+        if scenario.coverage_axis == "threshold_boundary"
+    )
+    assert "active_seconds emitted by the work surface" in derived.observable_outcomes
+    assert any("measured or observed input -> durable state/event" in item for item in derived.acceptance_criteria)
+    assert any("below, at, and above" in item for item in threshold.acceptance_criteria)
+    assert "90% of required duration" in threshold.observable_outcomes
+
+
 def test_extract_operational_preserves_commas_inside_yaml_list_items(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
