@@ -112,6 +112,44 @@ _OUTCOME_KEYS = (
 )
 _ROUTE_KEYS = ("routes", "route", "screens", "screen", "paths", "path", "urls", "url")
 _TRIGGER_KEYS = ("trigger", "control", "button", "command", "action")
+_DERIVED_STATE_KEYS = (
+    "measurement_source",
+    "measurement",
+    "observed_event",
+    "observed_events",
+    "durable_state",
+    "durable_event",
+    "durable_events",
+    "readback",
+    "read_model",
+    "read_models",
+    "derived_state",
+    "derived_value",
+    "derived_values",
+    "aggregation",
+    "aggregate",
+    "consumer_surface",
+    "consumer_surfaces",
+    "consumers",
+)
+_THRESHOLD_KEYS = (
+    "threshold",
+    "thresholds",
+    "boundary_case",
+    "boundary_cases",
+    "boundary",
+    "boundaries",
+    "timer",
+    "timers",
+    "duration",
+    "durations",
+    "score",
+    "scores",
+    "percentage",
+    "percent",
+    "completion_rule",
+    "completion_rules",
+)
 _PUBLIC_BOUNDARY_ACCEPTANCE = (
     "Evidence exercises the actor-facing public trigger; direct storage writes, "
     "seed-only setup, or lower-layer helper/API shortcuts alone do not satisfy "
@@ -120,6 +158,14 @@ _PUBLIC_BOUNDARY_ACCEPTANCE = (
 _CHAIN_READBACK_ACCEPTANCE = (
     "Evidence verifies producer -> durable state/event -> readback/consumer reflection, "
     "not only immediate request success."
+)
+_DERIVED_STATE_ACCEPTANCE = (
+    "Evidence verifies measured or observed input -> durable state/event -> derived value/read model "
+    "-> consumer surface, including latest/last readback when declared."
+)
+_THRESHOLD_BOUNDARY_ACCEPTANCE = (
+    "Evidence covers behavior below, at, and above the declared threshold/timer/duration boundary "
+    "where feasible, or records an explicit public-surface simulation rationale."
 )
 
 
@@ -341,6 +387,65 @@ class ScenarioExtractor:
                                     "The completed terminal state cannot be repeated inconsistently.",
                                     _PUBLIC_BOUNDARY_ACCEPTANCE,
                                     "The UI or API exposes a clear blocked/disabled/no-op outcome.",
+                                ],
+                            )
+                        )
+
+                    if _has_derived_state_contract(operation, outcomes):
+                        derived_contract = _derived_state_contract_values(operation)
+                        derived_outcomes = _dedupe_strings([*outcomes, *derived_contract])
+                        scenarios.append(
+                            _operational_scenario(
+                                name=f"{actor} {operation_id} derived state chain",
+                                actor=actor,
+                                axis="derived_state_chain",
+                                operation=operation,
+                                source=source,
+                                operation_id=operation_id,
+                                routes=routes,
+                                trigger=trigger,
+                                preconditions=preconditions,
+                                outcomes=derived_outcomes,
+                                priority=priority,
+                                extra_steps=[
+                                    "Exercise the declared measurement or observation through the public trigger.",
+                                    "Reload or reopen the declared read model or consumer surface.",
+                                ],
+                                acceptance=[
+                                    f"{operation_id} derives the declared state from the measured or observed source.",
+                                    _PUBLIC_BOUNDARY_ACCEPTANCE,
+                                    _DERIVED_STATE_ACCEPTANCE,
+                                    *_visible_outcome_acceptance(derived_outcomes),
+                                ],
+                            )
+                        )
+
+                    if _has_threshold_contract(operation, outcomes):
+                        threshold_contract = _threshold_contract_values(operation)
+                        threshold_outcomes = _dedupe_strings([*outcomes, *threshold_contract])
+                        scenarios.append(
+                            _operational_scenario(
+                                name=f"{actor} {operation_id} threshold boundary",
+                                actor=actor,
+                                axis="threshold_boundary",
+                                operation=operation,
+                                source=source,
+                                operation_id=operation_id,
+                                routes=routes,
+                                trigger=trigger,
+                                preconditions=preconditions,
+                                outcomes=threshold_outcomes,
+                                priority="high",
+                                extra_steps=[
+                                    "Exercise a value below the declared threshold or boundary.",
+                                    "Exercise a value at the declared threshold or boundary.",
+                                    "Exercise a value above the declared threshold or boundary.",
+                                ],
+                                acceptance=[
+                                    f"{operation_id} changes behavior only at the declared threshold or boundary.",
+                                    _PUBLIC_BOUNDARY_ACCEPTANCE,
+                                    _THRESHOLD_BOUNDARY_ACCEPTANCE,
+                                    *_visible_outcome_acceptance(threshold_outcomes),
                                 ],
                             )
                         )
@@ -886,6 +991,88 @@ def _visible_outcome_acceptance(outcomes: list[str]) -> list[str]:
     return ["The result is observable without inspecting implementation internals."]
 
 
+def _derived_state_contract_values(operation: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in _DERIVED_STATE_KEYS:
+        values.extend(_coerce_text_list(operation.get(key)))
+    return _dedupe_strings(values)
+
+
+def _threshold_contract_values(operation: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in _THRESHOLD_KEYS:
+        values.extend(_coerce_text_list(operation.get(key)))
+    return _dedupe_strings(values)
+
+
+def _has_derived_state_contract(operation: Mapping[str, Any], outcomes: list[str]) -> bool:
+    if _derived_state_contract_values(operation):
+        return True
+    text = _operation_contract_text(operation, outcomes)
+    return any(
+        token in text
+        for token in (
+            "measure",
+            "measured",
+            "measurement",
+            "observed",
+            "telemetry",
+            "derive",
+            "derived",
+            "aggregate",
+            "aggregation",
+            "read model",
+            "read_model",
+            "consumer",
+            "percentage",
+            "percent",
+            "duration",
+            "score",
+            "latest",
+            "last",
+            "resume",
+            "restore",
+        )
+    )
+
+
+def _has_threshold_contract(operation: Mapping[str, Any], outcomes: list[str]) -> bool:
+    if _threshold_contract_values(operation):
+        return True
+    text = _operation_contract_text(operation, outcomes)
+    return any(
+        token in text
+        for token in (
+            "threshold",
+            "boundary",
+            "timer",
+            "duration",
+            "score",
+            "percentage",
+            "percent",
+        )
+    )
+
+
+def _operation_contract_text(operation: Mapping[str, Any], outcomes: list[str]) -> str:
+    values: list[str] = []
+    for key in (
+        "id",
+        "name",
+        "verb",
+        "target",
+        "trigger",
+        "preconditions",
+        "expected_outcomes",
+        "outcomes",
+        *_DERIVED_STATE_KEYS,
+        *_THRESHOLD_KEYS,
+    ):
+        values.extend(_coerce_text_list(operation.get(key)))
+    values.extend(outcomes)
+    return " ".join(values).lower().replace("-", "_")
+
+
 def _operational_scenario(
     *,
     name: str,
@@ -952,6 +1139,8 @@ def _render_operational_scenarios_markdown(collection: ScenarioCollection) -> st
         "- permission_boundary: denied actors cannot complete the operation or persist state.",
         "- terminal_state_guard: terminal actions cannot be repeated into inconsistent state.",
         "- cross_actor_reflection: observers see the result of another actor's operation.",
+        "- derived_state_chain: measured or observed input flows through durable state/event into a derived read model or consumer surface.",
+        "- threshold_boundary: thresholds, timers, durations, scores, percentages, or latest/last rules behave correctly around their boundary values.",
         "",
     ]
     if collection.source_operation_flows:

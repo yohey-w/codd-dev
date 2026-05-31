@@ -312,6 +312,38 @@ def test_operational_scenarios_require_public_trigger_and_chain_readback(tmp_pat
     assert "reviewer observes the result" in content
 
 
+def test_operational_scenarios_render_derived_state_axes(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: track_completion_metric
+      actor: operator
+      verb: update
+      target: process_progress
+      route: /processes/:id
+      trigger: timer event from the public work surface
+      measurement_source: elapsed_seconds
+      durable_state: progress_events.elapsed_seconds
+      consumer_surfaces: [manager dashboard]
+      threshold: 80% of required duration
+      expected_outcomes:
+        - dashboard shows derived completion percentage
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["e2e", "extract", "--path", str(tmp_path), "--mode", "operational"])
+
+    assert result.exit_code == 0
+    content = (tmp_path / "docs" / "e2e" / "operational-scenarios.md").read_text(encoding="utf-8")
+    assert "derived_state_chain" in content
+    assert "threshold_boundary" in content
+    assert "Evidence verifies measured or observed input -> durable state/event" in content
+    assert "Evidence covers behavior below, at, and above" in content
+
+
 def test_cli_extracts_operational_catalog(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
