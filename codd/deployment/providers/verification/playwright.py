@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import subprocess
+import shlex
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -41,20 +43,29 @@ def _project_root(runtime_state: Any) -> Path:
 class PlaywrightTemplate(VerificationTemplate):
     """Generate and execute Playwright verification commands."""
 
-    def __init__(self, timeout: float | None = None) -> None:
-        self.timeout = timeout if timeout is not None else _load_timeout_seconds()
+    def __init__(self, timeout: float | None = None, config: Mapping[str, Any] | None = None) -> None:
+        config_map = dict(config) if isinstance(config, Mapping) else {}
+        configured_timeout = _positive_float(config_map.get("timeout"))
+        self.timeout = timeout if timeout is not None else configured_timeout or _load_timeout_seconds()
+        self.project = _optional_string(config_map.get("project"))
 
     def generate_test_command(self, runtime_state, test_kind: str) -> str:
         kind = test_kind.lower()
-        test_dir = "tests/e2e/" if kind == "e2e" else "tests/smoke/"
-        parts = ["npx", "playwright", "test", test_dir, "--reporter=line"]
+        project_root = _project_root(runtime_state)
+        test_target = _specific_test_target(runtime_state, kind, project_root)
+        specific_target = test_target is not None
+        if test_target is None:
+            test_target = "tests/e2e/" if kind == "e2e" else "tests/smoke/"
+        parts = ["npx", "playwright", "test", shlex.quote(test_target), "--reporter=line"]
 
-        config_path = _project_root(runtime_state) / "playwright.config.ts"
+        config_path = project_root / "playwright.config.ts"
         if config_path.exists():
-            parts.extend(["--config", str(config_path)])
+            parts.extend(["--config", shlex.quote(str(config_path))])
+        if self.project:
+            parts.extend(["--project", shlex.quote(self.project)])
 
         target = str(getattr(runtime_state, "target", "") or "")
-        if kind == "smoke" and "login" in target.lower():
+        if not specific_target and kind == "smoke" and "login" in target.lower():
             parts.extend(["--grep", "login"])
 
         return " ".join(parts)
@@ -89,3 +100,40 @@ class PlaywrightTemplate(VerificationTemplate):
         else:
             pattern = "tests/smoke/**/*.test.ts"
         return sorted(project_root.glob(pattern))
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _specific_test_target(runtime_state: Any, test_kind: str, project_root: Path) -> str | None:
+    source = getattr(runtime_state, "source", None)
+    if not source:
+        return None
+    source_text = str(source).strip()
+    if not source_text:
+        return None
+    expected_prefix = "tests/e2e/" if test_kind == "e2e" else "tests/smoke/"
+    normalized = source_text.replace("\\", "/")
+    if not normalized.startswith(expected_prefix):
+        return None
+
+    path = Path(source_text)
+    candidate = path if path.is_absolute() else project_root / path
+    if not candidate.is_file():
+        return None
+    try:
+        return candidate.relative_to(project_root).as_posix()
+    except ValueError:
+        return str(candidate)

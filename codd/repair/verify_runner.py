@@ -53,6 +53,7 @@ class _RuntimeVerificationState:
     identifier: str
     target: str
     project_root: Path
+    source: str | None = None
     actual_check_command: str | None = None
     journey: dict[str, Any] | None = None
     steps: list[Any] = field(default_factory=list)
@@ -270,12 +271,13 @@ def _runtime_state(node: Any, project_root: Path, template_config: dict[str, Any
     attributes = dict(getattr(node, "attributes", {}) or {})
     expected = attributes.get("expected_outcome") if isinstance(attributes.get("expected_outcome"), dict) else {}
     journey = expected.get("journey") if isinstance(expected.get("journey"), dict) else None
-    steps = journey.get("steps") if isinstance(journey, dict) and isinstance(journey.get("steps"), list) else []
+    steps = _journey_steps(journey)
     target = attributes.get("target") or expected.get("target") or _journey_target(journey)
     return _RuntimeVerificationState(
         identifier=str(attributes.get("identifier") or getattr(node, "id", "")),
         target=str(target or ""),
         project_root=project_root,
+        source=_optional_string(attributes.get("source") or expected.get("source")),
         actual_check_command=_optional_string(attributes.get("actual_check_command") or expected.get("actual_check_command")),
         journey=journey,
         steps=steps,
@@ -283,17 +285,25 @@ def _runtime_state(node: Any, project_root: Path, template_config: dict[str, Any
     )
 
 
+def _journey_steps(journey: dict[str, Any] | None) -> list[Any]:
+    if not isinstance(journey, dict):
+        return []
+    cdp_steps = journey.get("cdp_steps")
+    if isinstance(cdp_steps, list):
+        return cdp_steps
+    steps = journey.get("steps")
+    return steps if isinstance(steps, list) else []
+
+
 def _journey_target(journey: dict[str, Any] | None) -> str:
     if not isinstance(journey, dict):
         return ""
-    steps = journey.get("steps")
-    if isinstance(steps, list):
-        for step in steps:
-            if not isinstance(step, dict) or step.get("action") != "navigate":
-                continue
-            target = step.get("target") or step.get("url")
-            if target:
-                return str(target)
+    for step in _journey_steps(journey):
+        if not isinstance(step, dict) or step.get("action") != "navigate":
+            continue
+        target = step.get("target") or step.get("url")
+        if target:
+            return str(target)
     return str(journey.get("target") or journey.get("url") or "")
 
 

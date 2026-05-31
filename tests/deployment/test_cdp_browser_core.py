@@ -312,6 +312,35 @@ def test_cdp_browser_execute_dispatches_full_journey():
     assert wire.closed is True
 
 
+def test_cdp_browser_resolves_relative_navigation_with_base_url():
+    _register_mock_plugins(launch_command=[], teardown_command=[])
+    wire = RecordingWire()
+    config = _config()
+    config["base_url"] = "https://example.test"
+
+    result = CdpBrowser(config=config, wire_factory=lambda: wire, sleep=lambda _: None).execute(
+        json.dumps({"steps": [{"action": "navigate", "target": "/login"}]})
+    )
+
+    assert result.passed is True
+    assert wire.commands == [("Page.navigate", {"url": "https://example.test/login"}, 0.5)]
+
+
+def test_cdp_browser_base_url_env_overrides_config(monkeypatch):
+    _register_mock_plugins(launch_command=[], teardown_command=[])
+    wire = RecordingWire()
+    config = _config()
+    config["base_url"] = "https://config.example.test"
+    monkeypatch.setenv("CODD_CDP_BASE_URL", "https://env.example.test")
+
+    result = CdpBrowser(config=config, wire_factory=lambda: wire, sleep=lambda _: None).execute(
+        json.dumps({"steps": [{"action": "navigate", "target": "/login"}]})
+    )
+
+    assert result.passed is True
+    assert wire.commands == [("Page.navigate", {"url": "https://env.example.test/login"}, 0.5)]
+
+
 def test_cdp_browser_loads_project_config_from_codd_yaml(tmp_path: Path):
     _register_mock_plugins(launch_command=[], teardown_command=[])
     wire = RecordingWire()
