@@ -225,6 +225,47 @@ def test_verify_runner_executes_cdp_browser_template_by_python_import(tmp_path, 
     assert calls[1]["command"] == "journey-command"
 
 
+def test_verify_runner_prefers_cdp_steps_over_conceptual_journey_steps(tmp_path, monkeypatch):
+    class FakeCdpBrowser:
+        def __init__(self, config=None):
+            self.config = config
+
+        def generate_test_command(self, runtime_state, test_kind: str) -> str:
+            assert runtime_state.source == "tests/e2e/login.spec.ts"
+            assert runtime_state.steps == [{"action": "navigate", "target": "/login"}]
+            return "journey-command"
+
+        def execute(self, command: str) -> ProviderVerificationResult:
+            return ProviderVerificationResult(True, "journey ok")
+
+    dag = _dag(
+        Node(
+            "verification:cdp_browser:login",
+            "verification_test",
+            attributes={
+                "kind": "e2e",
+                "template_ref": "cdp_browser",
+                "expected_outcome": {
+                    "source": "tests/e2e/login.spec.ts",
+                    "journey": {
+                        "steps": [{"action": "login", "role": "admin"}],
+                        "cdp_steps": [{"action": "navigate", "target": "/login"}],
+                    },
+                },
+            },
+        )
+    )
+    _patch_verify_pipeline(monkeypatch, dag, [])
+    monkeypatch.setitem(verify_runner_module.VERIFICATION_TEMPLATES, "cdp_browser", FakeCdpBrowser)
+
+    result = VerifyRunner(
+        tmp_path,
+        {"verification": {"templates": {"cdp_browser": {"browser": {"engine": "fake"}}}}},
+    ).run()
+
+    assert result.passed is True
+
+
 def test_verify_runner_runtime_failure_becomes_verification_failure(tmp_path, monkeypatch):
     class FailingTemplate:
         def generate_test_command(self, runtime_state, test_kind: str) -> str:

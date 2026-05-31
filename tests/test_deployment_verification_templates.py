@@ -44,6 +44,51 @@ def test_playwright_generate_test_command_e2e(tmp_path, monkeypatch):
     assert command == "npx playwright test tests/e2e/ --reporter=line"
 
 
+def test_playwright_generate_test_command_prefers_verification_source_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    spec_path = tmp_path / "tests" / "e2e" / "login.spec.ts"
+    spec_path.parent.mkdir(parents=True)
+    spec_path.write_text("test('login', () => {})", encoding="utf-8")
+
+    class RuntimeState:
+        project_root = tmp_path
+        source = "tests/e2e/login.spec.ts"
+        target = "/login"
+
+    command = PlaywrightTemplate().generate_test_command(RuntimeState(), "e2e")
+
+    assert command == "npx playwright test tests/e2e/login.spec.ts --reporter=line"
+
+
+def test_playwright_source_file_does_not_add_login_grep(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    spec_path = tmp_path / "tests" / "smoke" / "stripe_billing.spec.ts"
+    spec_path.parent.mkdir(parents=True)
+    spec_path.write_text("test('stripe', () => {})", encoding="utf-8")
+
+    class RuntimeState:
+        project_root = tmp_path
+        source = "tests/smoke/stripe_billing.spec.ts"
+        target = "/api/auth/login"
+
+    command = PlaywrightTemplate().generate_test_command(RuntimeState(), "smoke")
+
+    assert command == "npx playwright test tests/smoke/stripe_billing.spec.ts --reporter=line"
+
+
+def test_playwright_generate_test_command_accepts_configured_project(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runtime_state = RuntimeStateNode(
+        identifier="runtime:server:app",
+        kind=RuntimeStateKind.SERVER_RUNNING,
+        target="http://localhost:3000",
+    )
+
+    command = PlaywrightTemplate(config={"project": "desktop-1920"}).generate_test_command(runtime_state, "e2e")
+
+    assert command == "npx playwright test tests/e2e/ --reporter=line --project desktop-1920"
+
+
 def test_playwright_generate_test_command_smoke_login_has_grep(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runtime_state = RuntimeStateNode(
