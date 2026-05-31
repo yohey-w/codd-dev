@@ -150,6 +150,41 @@ def test_load_operational_scenarios_from_markdown_reads_metadata(tmp_path):
     assert scenario.observable_outcomes == ["assignment persists"]
 
 
+def test_load_operational_scenarios_ignores_intro_sections(tmp_path):
+    scenarios = tmp_path / "docs" / "e2e" / "operational-scenarios.md"
+    scenarios.parent.mkdir(parents=True)
+    scenarios.write_text(
+        """# Operational E2E Scenarios
+
+## MECE Coverage Axes
+- happy_path
+
+## Sources
+- codd.yaml.operation_flow
+
+## 1. operator assign_item success
+- Kind: operational
+- Priority: medium
+- Actor: operator
+- Coverage Axis: happy_path
+- Source Operation: codd.yaml.operation_flow#assign_item
+- Trigger: assign work_item.
+- Routes: `/work-items`
+
+### Steps
+1. Act as operator.
+
+### Acceptance Criteria
+- operator can complete assign_item.
+""",
+        encoding="utf-8",
+    )
+
+    collection = load_scenarios_from_markdown(scenarios)
+
+    assert [scenario.name for scenario in collection.scenarios] == ["operator assign_item success"]
+
+
 def test_cli_e2e_generate_help():
     result = CliRunner().invoke(main, ["e2e-generate", "--help"])
 

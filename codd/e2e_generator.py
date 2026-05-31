@@ -209,7 +209,11 @@ def load_scenarios_from_markdown(path: Path) -> ScenarioCollection:
     text = path.read_text(encoding="utf-8")
     collection.source_screen_flow = _extract_source_line(text, "Source screen flow")
     collection.source_requirements = _extract_source_line(text, "Source requirements")
-    collection.scenarios = [_scenario_from_block(name, block) for name, block in _iter_scenario_blocks(text)]
+    collection.scenarios = [
+        _scenario_from_block(name, block)
+        for name, block in _iter_scenario_blocks(text)
+        if _is_scenario_block(block)
+    ]
     return collection
 
 
@@ -264,6 +268,14 @@ def _iter_scenario_blocks(text: str):
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         yield match.group("name").strip(), text[start:end]
+
+
+def _is_scenario_block(block: str) -> bool:
+    return bool(
+        _extract_field(block, "Priority")
+        or _extract_field(block, "Kind")
+        or re.search(r"^###\s+Steps\s*$", block, flags=re.MULTILINE)
+    )
 
 
 def _extract_source_line(text: str, label: str) -> str | None:

@@ -795,6 +795,11 @@ def _coerce_text_list(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         items: list[str] = []
         for item in value:
+            if isinstance(item, str):
+                cleaned = item.strip()
+                if cleaned:
+                    items.append(cleaned)
+                continue
             items.extend(_coerce_text_list(item))
         return items
     return [str(value).strip()] if str(value).strip() else []
