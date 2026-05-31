@@ -117,6 +117,8 @@ def test_implementer_injects_approved_layer1_and_auto_high_confidence_layer2(tmp
     assert results[0].error is None
     prompt = calls[0]
     assert "Implementation steps to follow" in prompt
+    assert "produces, stores, emits, returns, restores, consumes, reflects, or derives" in prompt
+    assert "Preserve trigger fidelity" in prompt
     assert "[Layer 1 - Explicit, from design]" in prompt
     assert "[Layer 2 - Inferred, best-practice augment]" in prompt
     assert "build_declared_contract" in prompt

@@ -206,6 +206,8 @@ def test_deriver_invokes_command_and_writes_cache(tmp_path):
     assert steps[0].id == "build_contract"
     assert impl_step_cache_path("build_contract", {"project_root": project}).exists()
     assert "STEP CATALOG HINT" in fake.calls[0]
+    assert "durable state/event" in fake.calls[0]
+    assert "automatic trigger" in fake.calls[0]
 
 
 def test_deriver_reads_cache_without_invoking_again(tmp_path):

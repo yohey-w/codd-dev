@@ -277,10 +277,39 @@ def test_cli_generates_operational_scenarios_from_operation_flow(tmp_path):
     content = (tmp_path / "generated" / "test_operator_assign_item_readback.spec.ts").read_text(encoding="utf-8")
     assert "// Kind: operational" in content
     assert "// Coverage axis: persistence_readback" in content
+    assert "// Evidence policy: exercise the actor-facing public trigger" in content
     assert "collect all failures" in content
     assert 'await page.goto("http://app.test/work-items");' in content
     assert ASSERTION_GUARD_MESSAGE in content
     assert "TODO: Add assertions" not in content
+
+
+def test_operational_scenarios_require_public_trigger_and_chain_readback(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: save_resume_state
+      actor: operator
+      verb: update
+      target: work_item_state
+      route: /work-items/:id
+      expected_outcomes:
+        - latest state is restored after reopen
+      visible_to:
+        - reviewer
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["e2e", "extract", "--path", str(tmp_path), "--mode", "operational"])
+
+    assert result.exit_code == 0
+    content = (tmp_path / "docs" / "e2e" / "operational-scenarios.md").read_text(encoding="utf-8")
+    assert "Evidence exercises the actor-facing public trigger" in content
+    assert "Evidence verifies producer -> durable state/event -> readback/consumer reflection" in content
+    assert "reviewer observes the result" in content
 
 
 def test_cli_extracts_operational_catalog(tmp_path):
