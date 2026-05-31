@@ -1,0 +1,117 @@
+coverage_axes:
+  - axis_type: "collection_cardinality"
+    rationale: "A displayed value can represent zero, one, or many source records, and the expected behavior changes for each case."
+    criticality_default: high
+    variants:
+      - id: "zero"
+        label: "Zero source records"
+        attributes: {source_literal: "0", coverage_target: "empty display behavior"}
+        criticality: medium
+      - id: "one"
+        label: "One source record"
+        attributes: {source_literal: "1", coverage_target: "direct display behavior"}
+        criticality: medium
+      - id: "many"
+        label: "Many source records"
+        attributes: {source_literal: "N", coverage_target: "aggregation or expansion behavior"}
+        criticality: high
+  - axis_type: "test_data_variation"
+    rationale: "A declared cardinality policy is not executable unless seed, fixture, or generated data covers the zero, one, and many-record variants."
+    criticality_default: high
+    variants:
+      - id: "seed_zero_records"
+        label: "Seed covers zero records"
+        attributes: {source_literal: "seed 0", coverage_target: "empty test data variant"}
+        criticality: medium
+      - id: "seed_one_record"
+        label: "Seed covers one record"
+        attributes: {source_literal: "seed 1", coverage_target: "single-record test data variant"}
+        criticality: medium
+      - id: "seed_many_records"
+        label: "Seed covers many records"
+        attributes: {source_literal: "seed N", coverage_target: "many-record test data variant"}
+        criticality: high
+  - axis_type: "aggregation_function"
+    rationale: "When many records map to one display slot, the policy must state whether the value is summarized, selected, grouped, or expanded."
+    criticality_default: high
+    variants:
+      - id: "average"
+        label: "Average or mean"
+        attributes: {source_literal: "average", coverage_target: "numeric summary policy"}
+        criticality: high
+      - id: "maximum"
+        label: "Maximum value"
+        attributes: {source_literal: "max", coverage_target: "extreme-value selection policy"}
+        criticality: medium
+      - id: "latest"
+        label: "Latest value"
+        attributes: {source_literal: "latest", coverage_target: "recency-based selection policy"}
+        criticality: high
+      - id: "expanded_list"
+        label: "Expanded list"
+        attributes: {source_literal: "list", coverage_target: "show each member instead of collapsing"}
+        criticality: high
+  - axis_type: "empty_partial_state"
+    rationale: "Empty and partial data states need explicit placeholder, fallback, and confidence behavior so display meaning stays unambiguous."
+    criticality_default: medium
+    variants:
+      - id: "empty_placeholder"
+        label: "Empty placeholder"
+        attributes: {source_literal: "empty", coverage_target: "zero-record display"}
+        criticality: medium
+      - id: "partial_indicator"
+        label: "Partial indicator"
+        attributes: {source_literal: "partial", coverage_target: "incomplete-source display"}
+        criticality: medium
+      - id: "unknown_marker"
+        label: "Unknown marker"
+        attributes: {source_literal: "unknown", coverage_target: "unavailable-value display"}
+        criticality: medium
+  - axis_type: "grouping_dimension"
+    rationale: "Grouped displays need the dimension, ordering, and label policy declared so readers can tell what each group means."
+    criticality_default: medium
+    variants:
+      - id: "group_by_category"
+        label: "Group by category"
+        attributes: {source_literal: "group by", coverage_target: "category grouping"}
+        criticality: medium
+      - id: "group_sort_order"
+        label: "Group sort order"
+        attributes: {source_literal: "sort", coverage_target: "group ordering"}
+        criticality: medium
+      - id: "group_label"
+        label: "Group label"
+        attributes: {source_literal: "label", coverage_target: "group label semantics"}
+        criticality: medium
+  - axis_type: "recency_selection"
+    rationale: "Latest or time-windowed displays need the timestamp source, tie-breaking, and window boundary policy declared."
+    criticality_default: high
+    variants:
+      - id: "timestamp_source"
+        label: "Timestamp source"
+        attributes: {source_literal: "timestamp", coverage_target: "recency input"}
+        criticality: high
+      - id: "tie_breaker"
+        label: "Tie breaker"
+        attributes: {source_literal: "tie", coverage_target: "same-time selection behavior"}
+        criticality: medium
+      - id: "window_boundary"
+        label: "Window boundary"
+        attributes: {source_literal: "window", coverage_target: "time-window inclusion behavior"}
+        criticality: medium
+  - axis_type: "source_traceability"
+    rationale: "A summarized value should expose or document enough source context for users and tests to verify what records contributed to it."
+    criticality_default: medium
+    variants:
+      - id: "source_count"
+        label: "Source count"
+        attributes: {source_literal: "count", coverage_target: "number of contributing records"}
+        criticality: medium
+      - id: "source_link"
+        label: "Source drilldown link"
+        attributes: {source_literal: "source", coverage_target: "inspect contributing records"}
+        criticality: medium
+      - id: "calculation_label"
+        label: "Calculation label"
+        attributes: {source_literal: "calculation", coverage_target: "visible or documented summary method"}
+        criticality: medium

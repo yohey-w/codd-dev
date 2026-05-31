@@ -1,0 +1,8 @@
+recommended_kinds:
+  - cardinality_display_gap
+  - test_data_variation_gap
+  - aggregation_policy_gap
+  - empty_partial_state_gap
+  - grouping_dimension_gap
+  - recency_selection_gap
+  - source_traceability_gap

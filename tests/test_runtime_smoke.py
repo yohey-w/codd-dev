@@ -817,6 +817,97 @@ runtime:
     assert "runtime.global_action_targets" not in result.output
 
 
+def test_t48_doctor_warns_on_missing_presentation_obligation(tmp_path):
+    project = _project(tmp_path)
+    docs = project / "docs" / "design"
+    docs.mkdir(parents=True)
+    (docs / "presentation.md").write_text(
+        """
+---
+display_fields:
+  - field_id: record.published_at
+    data_type: datetime
+    lexicon_refs: ["i18n_unicode_cldr#time_zone_handling"]
+    presentation_required: true
+---
+# Presentation
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "W-PRES-001" in result.output
+    assert "W-PRES-002" in result.output
+    assert "displayed field `record.published_at`" in result.output
+
+
+def test_t49_doctor_warns_on_missing_aggregation_policy(tmp_path):
+    project = _project(tmp_path)
+    docs = project / "docs" / "design"
+    docs.mkdir(parents=True)
+    (docs / "presentation.md").write_text(
+        """
+---
+display_fields:
+  - field_id: record.summary_value
+    cardinality: "0..N"
+    aggregation_required: true
+---
+# Presentation
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "W-AGG-001" in result.output
+    assert "collection/cardinality display field `record.summary_value`" in result.output
+
+
+def test_t50_doctor_accepts_declared_presentation_and_aggregation_obligations(tmp_path):
+    project = _project(tmp_path)
+    docs = project / "docs" / "design"
+    docs.mkdir(parents=True)
+    (docs / "presentation.md").write_text(
+        """
+---
+display_fields:
+  - field_id: record.published_at
+    data_type: datetime
+    lexicon_refs: ["i18n_unicode_cldr#time_zone_handling"]
+    presentation_required: true
+  - field_id: record.summary_value
+    cardinality: "0..N"
+    aggregation_required: true
+presentation_specs:
+  - field_id: record.published_at
+    format: "YYYY-MM-DD HH:mm"
+    timezone: "Etc/UTC"
+    locale: "en-US"
+aggregation_policies:
+  - field_id: record.summary_value
+    cardinality_when_many:
+      policy: average
+    test_data_variants:
+      required_cardinality: ["0", "1", "N"]
+---
+# Presentation
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "W-PRES" not in result.output
+    assert "W-AGG" not in result.output
+
+
 def test_t24_doctor_warns_on_post_without_reflection_e2e(tmp_path):
     project = _project(tmp_path)
     source_dir = project / "src"

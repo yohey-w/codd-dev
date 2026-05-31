@@ -566,6 +566,7 @@ def _doctor_warnings(project_root: Path) -> list[str]:
     warnings.extend(_interactive_control_warnings(project_root, config))
     warnings.extend(_screen_escape_route_warnings(project_root, config))
     warnings.extend(_authenticated_global_action_warnings(project_root, config))
+    warnings.extend(_presentation_obligation_warnings(project_root, config))
     coverage = _action_outcome_coverage(project_root, config)
     warnings.extend(_action_outcome_warning_messages(coverage, legacy_crud_configured=has_crud_flow_targets))
     target_actions = action_target_specs_from_config(config)
@@ -824,6 +825,223 @@ def _authenticated_global_action_warnings(project_root: Path, config: dict[str, 
         "account access, home, or primary navigation so desktop-visible session controls are not "
         f"accepted as mobile coverage.{action_note}"
     ]
+
+
+def _presentation_obligation_warnings(project_root: Path, config: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    for path in _configured_doc_files(project_root, config):
+        payload = _frontmatter_or_yaml_payload(path)
+        if not isinstance(payload, dict):
+            continue
+        source = _display_path(path, project_root)
+        display_fields = _presentation_entries(payload, ("display_fields", "displayed_fields", "presentation_fields"))
+        presentation_specs = _entries_by_field_id(_presentation_entries(payload, ("presentation_specs",)))
+        aggregation_policies = _entries_by_field_id(_presentation_entries(payload, ("aggregation_policies",)))
+        for field in display_fields:
+            field_id = _field_id(field)
+            if not field_id:
+                continue
+            presentation = _merge_obligation(field, presentation_specs.get(field_id), "presentation")
+            if _requires_presentation_spec(field, presentation) and not _has_any_presentation_declaration(presentation):
+                warnings.append(
+                    f"W-PRES-001: displayed field `{field_id}` in `{source}` has no presentation spec."
+                )
+            missing = _missing_i18n_presentation_attributes(field, presentation)
+            if missing:
+                warnings.append(
+                    f"W-PRES-002: locale/timezone lexicon obligation for displayed field `{field_id}` "
+                    f"in `{source}` lacks field-level {', '.join(missing)} declaration."
+                )
+
+            aggregation = _merge_obligation(field, aggregation_policies.get(field_id), "aggregation")
+            if _requires_aggregation_policy(field, aggregation) and not _has_aggregation_policy(aggregation):
+                warnings.append(
+                    f"W-AGG-001: collection/cardinality display field `{field_id}` in `{source}` "
+                    "lacks aggregation policy."
+                )
+    return warnings
+
+
+def _presentation_entries(payload: dict[str, Any], keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            entries.extend(item for item in value if isinstance(item, dict))
+    for journey in payload.get("user_journeys", []) if isinstance(payload.get("user_journeys"), list) else []:
+        if not isinstance(journey, dict):
+            continue
+        for key in keys:
+            value = journey.get(key)
+            if isinstance(value, list):
+                entries.extend(item for item in value if isinstance(item, dict))
+    return entries
+
+
+def _entries_by_field_id(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_field: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        field_id = _field_id(entry)
+        if field_id:
+            by_field[field_id] = entry
+    return by_field
+
+
+def _field_id(entry: dict[str, Any]) -> str:
+    for key in ("field_id", "field", "id", "name"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _merge_obligation(field: dict[str, Any], explicit: dict[str, Any] | None, nested_key: str) -> dict[str, Any]:
+    merged: dict[str, Any] = {key: value for key, value in field.items() if not key.startswith("_")}
+    nested = field.get(nested_key)
+    if isinstance(nested, dict):
+        merged.update(nested)
+    alias = field.get(f"{nested_key}_spec")
+    if isinstance(alias, dict):
+        merged.update(alias)
+    alias = field.get(f"{nested_key}_policy")
+    if isinstance(alias, dict):
+        merged.update(alias)
+    if explicit:
+        merged.update(explicit)
+    return merged
+
+
+def _requires_presentation_spec(field: dict[str, Any], presentation: dict[str, Any]) -> bool:
+    text = _obligation_text(field, presentation)
+    return _truthy(field.get("presentation_required")) or any(
+        token in text
+        for token in (
+            "datetime",
+            "date_time",
+            "timestamp",
+            "locale",
+            "localized",
+            "timezone",
+            "time_zone",
+            "number",
+            "currency",
+            "amount",
+            "percent",
+            "i18n_unicode_cldr",
+        )
+    )
+
+
+def _missing_i18n_presentation_attributes(field: dict[str, Any], presentation: dict[str, Any]) -> list[str]:
+    text = _obligation_text(field, presentation)
+    if not any(token in text for token in ("i18n_unicode_cldr", "locale", "timezone", "time_zone")):
+        return []
+    required: list[str] = []
+    if any(token in text for token in ("time_zone", "timezone", "datetime", "date_time", "timestamp")):
+        required.extend(["format", "timezone"])
+    if any(token in text for token in ("locale", "localized", "i18n_unicode_cldr")):
+        required.append("locale")
+    return [attribute for attribute in _dedupe(required) if not _has_presentation_attribute(presentation, attribute)]
+
+
+def _has_any_presentation_declaration(presentation: dict[str, Any]) -> bool:
+    return any(
+        _has_presentation_attribute(presentation, attribute)
+        for attribute in ("format", "locale", "timezone", "unit", "precision", "calendar")
+    )
+
+
+def _has_presentation_attribute(presentation: dict[str, Any], attribute: str) -> bool:
+    aliases = {
+        "format": ("format", "pattern", "display_format", "number_format", "date_format", "time_format"),
+        "locale": ("locale", "language", "language_tag", "bcp47", "locale_tag"),
+        "timezone": ("timezone", "time_zone", "timezone_id", "iana_timezone", "iana_time_zone"),
+        "unit": ("unit", "display_unit"),
+        "precision": ("precision", "rounding", "scale"),
+        "calendar": ("calendar", "calendar_system"),
+    }
+    for key in aliases.get(attribute, (attribute,)):
+        if presentation.get(key) not in (None, "", []):
+            return True
+    return False
+
+
+def _requires_aggregation_policy(field: dict[str, Any], aggregation: dict[str, Any]) -> bool:
+    if _truthy(field.get("aggregation_required")) or _truthy(aggregation.get("required")):
+        return True
+    text = _obligation_text(field, aggregation)
+    return any(
+        token in text
+        for token in ("0..n", "1..n", "n:m", "many", "multiple", "collection", "list", "array", "repeated")
+    )
+
+
+def _has_aggregation_policy(aggregation: dict[str, Any]) -> bool:
+    if aggregation.get("policy") not in (None, "", []):
+        return True
+    if aggregation.get("aggregation_policy") not in (None, "", []):
+        return True
+    cardinality_when_many = aggregation.get("cardinality_when_many")
+    return isinstance(cardinality_when_many, dict) and cardinality_when_many.get("policy") not in (None, "", [])
+
+
+def _obligation_text(field: dict[str, Any], obligation: dict[str, Any]) -> str:
+    values: list[Any] = []
+    for source in (field, obligation):
+        for key in (
+            "field_id",
+            "field",
+            "type",
+            "kind",
+            "data_type",
+            "value_kind",
+            "lexicon_ref",
+            "lexicon_refs",
+            "axis",
+            "axis_type",
+            "cardinality",
+            "display_cardinality",
+            "collection_context",
+        ):
+            values.append(source.get(key))
+    return " ".join(_nested_strings(values)).lower()
+
+
+def _nested_strings(value: Any) -> set[str]:
+    strings: set[str] = set()
+    if value is None:
+        return strings
+    if isinstance(value, str):
+        strings.add(value)
+        return strings
+    if isinstance(value, dict):
+        for key, item in value.items():
+            strings.update(_nested_strings(key))
+            strings.update(_nested_strings(item))
+        return strings
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            strings.update(_nested_strings(item))
+        return strings
+    strings.add(str(value))
+    return strings
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "required", "must"}
+    return bool(value)
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value in result:
+            continue
+        result.append(value)
+    return result
 
 
 def _looks_like_screen_file(path: Path) -> bool:

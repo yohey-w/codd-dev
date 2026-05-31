@@ -33,6 +33,9 @@ def _dag(
     *,
     journey: dict | None = None,
     constraints: list[dict] | None = None,
+    display_fields: list[dict] | None = None,
+    presentation_specs: list[dict] | None = None,
+    aggregation_policies: list[dict] | None = None,
     expected: bool = True,
     expected_attrs: dict | None = None,
     plan_outputs: list[str] | None = None,
@@ -51,6 +54,9 @@ def _dag(
             attributes={
                 "runtime_constraints": constraints or [],
                 "user_journeys": [journey or _journey()],
+                "display_fields": display_fields or [],
+                "presentation_specs": presentation_specs or [],
+                "aggregation_policies": aggregation_policies or [],
             },
         )
     )
@@ -408,6 +414,159 @@ def test_browser_expected_asserted_by_e2e_attributes_passes(tmp_path):
     )
 
     assert "browser_expected_not_asserted" not in _types(result)
+
+
+def test_presentation_locale_unspecified_is_red_for_display_field_without_spec(tmp_path):
+    result = _run(
+        _dag(
+            plan_outputs=["lexicon:e2e_login_journey"],
+            display_fields=[
+                {
+                    "field_id": "record.published_at",
+                    "data_type": "datetime",
+                    "lexicon_refs": ["i18n_unicode_cldr#time_zone_handling"],
+                    "presentation_required": True,
+                }
+            ],
+        ),
+        tmp_path,
+    )
+
+    violation = _violation(result, "presentation_locale_unspecified")
+    assert result.passed is False
+    assert violation["field_id"] == "record.published_at"
+    assert violation["missing_attributes"] == ["presentation_spec"]
+
+
+def test_presentation_locale_violated_is_red_when_evidence_signal_is_unasserted(tmp_path):
+    result = _run(
+        _dag(
+            plan_outputs=["lexicon:e2e_login_journey"],
+            display_fields=[
+                {
+                    "field_id": "record.published_at",
+                    "data_type": "datetime",
+                    "expected_presentation_signals": ["record_published_at_locale_display"],
+                }
+            ],
+            presentation_specs=[
+                {
+                    "field_id": "record.published_at",
+                    "format": "YYYY-MM-DD HH:mm",
+                    "timezone": "Etc/UTC",
+                    "locale": "en-US",
+                }
+            ],
+        ),
+        tmp_path,
+    )
+
+    violation = _violation(result, "presentation_locale_violated")
+    assert result.passed is False
+    assert violation["missing_evidence_signals"] == ["record_published_at_locale_display"]
+
+
+def test_presentation_locale_signal_assertion_passes(tmp_path):
+    result = _run(
+        _dag(
+            plan_outputs=["lexicon:e2e_login_journey"],
+            display_fields=[
+                {
+                    "field_id": "record.published_at",
+                    "data_type": "datetime",
+                    "expected_presentation_signals": ["record_published_at_locale_display"],
+                }
+            ],
+            presentation_specs=[
+                {
+                    "field_id": "record.published_at",
+                    "format": "YYYY-MM-DD HH:mm",
+                    "timezone": "Etc/UTC",
+                    "locale": "en-US",
+                }
+            ],
+            e2e_attrs={"assertions": ["record_published_at_locale_display"]},
+        ),
+        tmp_path,
+    )
+
+    assert "presentation_locale_unspecified" not in _types(result)
+    assert "presentation_locale_violated" not in _types(result)
+
+
+def test_aggregation_policy_unspecified_is_red_for_many_source_display(tmp_path):
+    result = _run(
+        _dag(
+            plan_outputs=["lexicon:e2e_login_journey"],
+            display_fields=[
+                {
+                    "field_id": "record.summary_value",
+                    "cardinality": "0..N",
+                    "aggregation_required": True,
+                }
+            ],
+        ),
+        tmp_path,
+    )
+
+    violation = _violation(result, "aggregation_policy_unspecified")
+    assert result.passed is False
+    assert violation["field_id"] == "record.summary_value"
+    assert violation["cardinality"] == "0..N"
+
+
+def test_aggregation_policy_violated_is_red_when_evidence_signal_is_unasserted(tmp_path):
+    result = _run(
+        _dag(
+            plan_outputs=["lexicon:e2e_login_journey"],
+            display_fields=[
+                {
+                    "field_id": "record.summary_value",
+                    "cardinality": "0..N",
+                    "expected_aggregation_signals": ["record_summary_many_source_display"],
+                }
+            ],
+            aggregation_policies=[
+                {
+                    "field_id": "record.summary_value",
+                    "cardinality_when_many": {"policy": "average"},
+                    "test_data_variants": {"required_cardinality": ["0", "1", "N"]},
+                }
+            ],
+        ),
+        tmp_path,
+    )
+
+    violation = _violation(result, "aggregation_policy_violated")
+    assert result.passed is False
+    assert violation["missing_evidence_signals"] == ["record_summary_many_source_display"]
+
+
+def test_aggregation_policy_signal_assertion_passes(tmp_path):
+    result = _run(
+        _dag(
+            plan_outputs=["lexicon:e2e_login_journey"],
+            display_fields=[
+                {
+                    "field_id": "record.summary_value",
+                    "cardinality": "0..N",
+                    "expected_aggregation_signals": ["record_summary_many_source_display"],
+                }
+            ],
+            aggregation_policies=[
+                {
+                    "field_id": "record.summary_value",
+                    "cardinality_when_many": {"policy": "average"},
+                    "test_data_variants": {"required_cardinality": ["0", "1", "N"]},
+                }
+            ],
+            e2e_attrs={"assertions": ["record_summary_many_source_display"]},
+        ),
+        tmp_path,
+    )
+
+    assert "aggregation_policy_unspecified" not in _types(result)
+    assert "aggregation_policy_violated" not in _types(result)
 
 
 def test_journey_step_no_assertion_is_amber_and_does_not_fail(tmp_path):
