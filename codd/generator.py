@@ -516,6 +516,7 @@ def _build_generation_prompt(
                 "- Quality gate: Define pass criteria — all PASS, zero SKIP, acceptance criteria coverage, and any release-blocking constraints from conventions.",
                 "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`.",
                 "- Shared helpers: Mandate a `tests/e2e/helpers/` directory for auth flows, test data setup, and common assertions to avoid duplication across spec files.",
+                "- Mutating test data: Any E2E scenario that creates or updates records MUST use per-run unique identifiers and explicit cleanup/idempotent teardown so repeated runs cannot fail from stale data or uniqueness constraints.",
                 "- Generation markers: All generated files must include `// @generated-from:` and `// @generated-by: codd propagate` headers. Manual tests marked with `// @manual` must be preserved on regeneration.",
                 "",
                 "E2E Test Level Separation (CRITICAL):",
