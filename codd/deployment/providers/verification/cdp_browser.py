@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import subprocess
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import yaml
 
@@ -96,6 +98,7 @@ class CdpBrowser(VerificationTemplate):
             config = self._resolve_config(plan)
             timeout_seconds = _float_config(config, "timeout_seconds", 60.0)
             step_timeout = _float_config(config, "step_timeout_seconds", timeout_seconds)
+            base_url = _base_url(plan, config)
 
             browser_config = _mapping(config.get("browser"))
             launcher_config = _mapping(config.get("launcher"))
@@ -135,7 +138,7 @@ class CdpBrowser(VerificationTemplate):
 
             steps = _steps(plan)
             for index, step in enumerate(steps, start=1):
-                step_result = self._dispatch_step(wire, form_strategy, index, step, step_timeout)
+                step_result = self._dispatch_step(wire, form_strategy, index, step, step_timeout, base_url)
                 if step_result is not None:
                     result = step_result
                     return result
@@ -205,6 +208,7 @@ class CdpBrowser(VerificationTemplate):
         index: int,
         step: Mapping[str, Any],
         timeout: float,
+        base_url: str | None,
     ) -> VerificationResult | None:
         action = str(step.get("action", "")).strip()
         if not action:
@@ -217,6 +221,7 @@ class CdpBrowser(VerificationTemplate):
                 target = str(step.get("target") or step.get("url") or "")
                 if not target:
                     return VerificationResult(False, f"step {index} failed: navigate target is required")
+                target = _resolve_navigation_target(target, base_url)
                 wire.send_command("Page.navigate", {"url": target}, timeout=timeout)
                 return None
             if action == _POINTER_ACTIVATE_ACTION:
@@ -461,6 +466,27 @@ def _steps(plan: Mapping[str, Any]) -> list[Mapping[str, Any]]:
             raise ValueError("journey step must be an object")
         normalized.append(step)
     return normalized
+
+
+def _base_url(plan: Mapping[str, Any], config: Mapping[str, Any]) -> str | None:
+    env_name = str(config.get("base_url_env") or "CODD_CDP_BASE_URL")
+    value = os.environ.get(env_name) or config.get("base_url") or config.get("origin") or plan.get("base_url")
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _resolve_navigation_target(target: str, base_url: str | None) -> str:
+    text = target.strip()
+    parsed = urlparse(text)
+    if parsed.scheme:
+        return text
+    if not text.startswith("/"):
+        return text
+    if not base_url:
+        raise ValueError("relative navigate target requires cdp_browser.base_url")
+    return urljoin(base_url.rstrip("/") + "/", text.lstrip("/"))
 
 
 def _mapping(value: Any) -> dict[str, Any]:

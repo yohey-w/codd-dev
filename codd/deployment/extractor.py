@@ -859,7 +859,8 @@ def _journey_name(journey: dict[str, Any]) -> str | None:
 
 
 def _verification_target_for_journey(journey: dict[str, Any], fallback: str) -> str:
-    for step in _as_list(journey.get("steps")):
+    steps = journey.get("cdp_steps") if isinstance(journey.get("cdp_steps"), list) else journey.get("steps")
+    for step in _as_list(steps):
         if not isinstance(step, dict):
             continue
         target = step.get("target") or step.get("url") or step.get("path")
