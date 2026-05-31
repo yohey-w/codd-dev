@@ -112,6 +112,15 @@ _OUTCOME_KEYS = (
 )
 _ROUTE_KEYS = ("routes", "route", "screens", "screen", "paths", "path", "urls", "url")
 _TRIGGER_KEYS = ("trigger", "control", "button", "command", "action")
+_PUBLIC_BOUNDARY_ACCEPTANCE = (
+    "Evidence exercises the actor-facing public trigger; direct storage writes, "
+    "seed-only setup, or lower-layer helper/API shortcuts alone do not satisfy "
+    "this scenario unless that lower layer is the declared public surface."
+)
+_CHAIN_READBACK_ACCEPTANCE = (
+    "Evidence verifies producer -> durable state/event -> readback/consumer reflection, "
+    "not only immediate request success."
+)
 
 
 class ScenarioExtractor:
@@ -283,6 +292,7 @@ class ScenarioExtractor:
                             priority=priority,
                             acceptance=[
                                 f"{actor} can complete {operation_id}.",
+                                _PUBLIC_BOUNDARY_ACCEPTANCE,
                                 *_visible_outcome_acceptance(outcomes),
                             ],
                         )
@@ -305,6 +315,8 @@ class ScenarioExtractor:
                                 extra_steps=["Reload or reopen the relevant user surface.", "Verify the outcome is still visible."],
                                 acceptance=[
                                     f"{operation_id} state change is still observable after readback.",
+                                    _PUBLIC_BOUNDARY_ACCEPTANCE,
+                                    _CHAIN_READBACK_ACCEPTANCE,
                                     *_visible_outcome_acceptance(outcomes),
                                 ],
                             )
@@ -327,6 +339,7 @@ class ScenarioExtractor:
                                 extra_steps=["Attempt the same terminal operation again."],
                                 acceptance=[
                                     "The completed terminal state cannot be repeated inconsistently.",
+                                    _PUBLIC_BOUNDARY_ACCEPTANCE,
                                     "The UI or API exposes a clear blocked/disabled/no-op outcome.",
                                 ],
                             )
@@ -348,6 +361,7 @@ class ScenarioExtractor:
                             priority="high",
                             acceptance=[
                                 f"{denied_actor} cannot complete {operation_id}.",
+                                _PUBLIC_BOUNDARY_ACCEPTANCE,
                                 "The forbidden action produces no persisted state change.",
                             ],
                         )
@@ -370,6 +384,8 @@ class ScenarioExtractor:
                                 priority=priority,
                                 acceptance=[
                                     f"{observer} observes the result of {actor} completing {operation_id}.",
+                                    _PUBLIC_BOUNDARY_ACCEPTANCE,
+                                    _CHAIN_READBACK_ACCEPTANCE,
                                     *_visible_outcome_acceptance(outcomes),
                                 ],
                             )

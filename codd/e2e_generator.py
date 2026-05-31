@@ -342,6 +342,7 @@ def _render_header_comments(scenario: UserScenario, context: GenerationContext, 
         lines.extend(
             [
                 "// Operational E2E policy: run the whole generated suite, collect all failures, then repair after the full campaign finishes.",
+                "// Evidence policy: exercise the actor-facing public trigger and verify durable readback or downstream reflection; API/helper shortcuts alone are not passing evidence unless they are the declared public surface.",
                 f"// Actor: {_clean_comment(scenario.actor or 'unspecified')}",
                 f"// Coverage axis: {_clean_comment(scenario.coverage_axis or 'unspecified')}",
                 f"// Source operation: {_clean_comment(_source_operation_label(scenario))}",

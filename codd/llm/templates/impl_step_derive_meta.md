@@ -25,6 +25,19 @@ Rules:
 - Read the declared verbs, constraints, and outcomes in the task and documents.
 - Expand each declared outcome into every concrete step needed for a working
   deliverable in the project described by the documents.
+- Preserve behavioral wiring: when the design says one artifact produces,
+  stores, emits, returns, restores, consumes, reflects, or derives a value or
+  state, split that contract into producer, durable state/event, consumer, and
+  verification steps. Do not collapse it into an endpoint, UI label, fixture, or
+  placeholder.
+- Preserve trigger fidelity: if the design describes an automatic trigger,
+  threshold, timer, stream event, callback, retry, or cross-actor reflection,
+  include the actual trigger mechanism and boundary cases as implementation
+  steps. A manual shortcut or direct lower-layer call is not equivalent unless
+  the design explicitly declares that lower layer as the user-facing surface.
+- For any percentage, count, duration, score, threshold, or "latest/last"
+  requirement, include a step that defines the source measurement, persistence
+  rule, readback rule, and edge behavior at the boundary.
 - Choose `kind` freely. Do not limit it to the catalog.
 - Use dependencies between steps when ordering matters.
 - When a step is tied to declared coverage axes, set `required_axes` to the relevant axis_type values.
