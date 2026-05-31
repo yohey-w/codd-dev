@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import warnings
 
 import pytest
 import yaml
@@ -9,6 +10,7 @@ from codd.action_outcome import compare_action_outcome_coverage, extract_action_
 from codd.dag import Node
 from codd.dag.builder import build_dag
 from codd.llm.criteria_expander import build_criteria_expand_prompt, operation_flow_hint
+from codd.requirements_meta import normalize_operation_flow
 
 
 def _write(path: Path, content: str) -> Path:
@@ -100,6 +102,23 @@ def test_t10_unknown_ui_pattern_warns_but_is_preserved(tmp_path: Path):
 
     operation = dag.nodes["docs/requirements/course.md"].attributes["operation_flow"]["operations"][0]
     assert operation["ui_pattern"] == "dense_matrix"
+
+
+def test_operation_flow_common_ui_patterns_do_not_warn():
+    flow = {
+        "operations": [
+            {"id": "submit_record", "ui_pattern": "form_submit"},
+            {"id": "view_summary", "ui_pattern": "dashboard_view"},
+            {"id": "run_command", "ui_pattern": "command_button"},
+            {"id": "download_file", "ui_pattern": "download_link"},
+        ]
+    }
+
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        normalize_operation_flow(flow)
+
+    assert not emitted
 
 
 def test_operation_flow_hint_is_empty_without_operations():
