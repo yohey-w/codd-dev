@@ -107,6 +107,49 @@ def test_load_scenarios_from_markdown_reads_extractor_output(tmp_path):
     assert collection.scenarios[0].steps == ["Open /login.", "Submit credentials."]
 
 
+def test_load_operational_scenarios_from_markdown_reads_metadata(tmp_path):
+    scenarios = tmp_path / "docs" / "e2e" / "operational-scenarios.md"
+    scenarios.parent.mkdir(parents=True)
+    scenarios.write_text(
+        """# Operational E2E Scenarios
+
+## 1. operator assign_item readback
+- Kind: operational
+- Priority: medium
+- Actor: operator
+- Coverage Axis: persistence_readback
+- Source Operation: codd.yaml.operation_flow#assign_item
+- Trigger: assign work_item.
+- Routes: `/work-items`
+
+### Preconditions
+- workspace exists
+
+### Steps
+1. Act as operator.
+2. Trigger assign work_item.
+
+### Observable Outcomes
+- assignment persists
+
+### Acceptance Criteria
+- assign_item state change is still observable after readback.
+""",
+        encoding="utf-8",
+    )
+
+    collection = load_scenarios_from_markdown(scenarios)
+    scenario = collection.scenarios[0]
+
+    assert scenario.kind == "operational"
+    assert scenario.actor == "operator"
+    assert scenario.coverage_axis == "persistence_readback"
+    assert scenario.source == "codd.yaml.operation_flow"
+    assert scenario.operation_id == "assign_item"
+    assert scenario.preconditions == ["workspace exists"]
+    assert scenario.observable_outcomes == ["assignment persists"]
+
+
 def test_cli_e2e_generate_help():
     result = CliRunner().invoke(main, ["e2e-generate", "--help"])
 
@@ -119,6 +162,14 @@ def test_cli_e2e_generate_group_help():
 
     assert result.exit_code == 0
     assert "--framework" in result.output
+    assert "operational" in result.output
+
+
+def test_cli_e2e_extract_group_help():
+    result = CliRunner().invoke(main, ["e2e", "extract", "--help"])
+
+    assert result.exit_code == 0
+    assert "Scenario catalog to extract" in result.output
 
 
 def test_cli_generates_from_scenarios_markdown(tmp_path):
@@ -149,6 +200,70 @@ def test_cli_generates_from_scenarios_markdown(tmp_path):
     assert "Generated 1 test file(s):" in result.output
     content = (tmp_path / "generated" / "test_learner_login_via_login.spec.ts").read_text(encoding="utf-8")
     assert 'await page.goto("http://app.test/login");' in content
+
+
+def test_cli_generates_operational_scenarios_from_operation_flow(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: assign_item
+      actor: operator
+      verb: assign
+      target: work_item
+      route: /work-items
+      expected_outcomes: [assignment persists]
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "e2e",
+            "generate",
+            "--path",
+            str(tmp_path),
+            "--mode",
+            "operational",
+            "--output",
+            "generated",
+            "--base-url",
+            "http://app.test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Generated 2 test file(s):" in result.output
+    content = (tmp_path / "generated" / "test_operator_assign_item_readback.spec.ts").read_text(encoding="utf-8")
+    assert "// Kind: operational" in content
+    assert "// Coverage axis: persistence_readback" in content
+    assert "collect all failures" in content
+    assert 'await page.goto("http://app.test/work-items");' in content
+
+
+def test_cli_extracts_operational_catalog(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: submit_request
+      actor: operator
+      verb: submit
+      target: request
+      route: /requests
+      expected_outcomes: [request is submitted]
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["e2e", "extract", "--path", str(tmp_path), "--mode", "operational"])
+
+    assert result.exit_code == 0
+    assert "Extracted 2 operational scenario(s)" in result.output
+    assert (tmp_path / "docs" / "e2e" / "operational-scenarios.md").exists()
 
 
 def test_design_and_lexicon_hints_are_included(tmp_path):
@@ -183,3 +298,12 @@ extractor_registry: {}
     assert "colors.Primary = #1A73E8" in content
     assert "// Project lexicon hints:" in content
     assert "Stable E2E test user naming." in content
+
+
+def test_invalid_project_lexicon_does_not_block_e2e_generation(tmp_path):
+    (tmp_path / "project_lexicon.yaml").write_text("required_artifacts: bad\n", encoding="utf-8")
+
+    content = TestGenerator(tmp_path)._render_playwright_test(_scenario())
+
+    assert 'test("Login & Complete!", async ({ page }) => {' in content
+    assert "// Project lexicon hints:" not in content

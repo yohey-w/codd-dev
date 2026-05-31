@@ -150,3 +150,79 @@ def test_generate_scenarios_skips_api_routes(tmp_path):
     scenarios = ScenarioExtractor(tmp_path)._generate_scenarios(routes, [])
 
     assert [scenario.routes[0] for scenario in scenarios] == ["/login"]
+
+
+def test_extract_operational_scenarios_from_operation_flow(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """scan:
+  doc_dirs:
+    - docs/
+operation_flow:
+  actors: [operator, reviewer]
+  preconditions: [workspace exists]
+  operations:
+    - id: assign_item
+      actor: operator
+      verb: assign
+      target: work_item
+      route: /work-items
+      expected_outcomes:
+        - assignee sees the item
+        - assignment persists
+      visible_to: reviewer
+    - id: close_item
+      actor: operator
+      verb: complete
+      target: work_item
+      route: /work-items/:id
+      expected_outcomes: [item is closed]
+      forbidden_actors: [reviewer]
+""",
+        encoding="utf-8",
+    )
+
+    collection = ScenarioExtractor(tmp_path).extract_operational()
+    axes = {scenario.coverage_axis for scenario in collection.scenarios}
+
+    assert "codd.yaml.operation_flow" in collection.source_operation_flows
+    assert {
+        "happy_path",
+        "persistence_readback",
+        "cross_actor_reflection",
+        "permission_boundary",
+        "terminal_state_guard",
+    }.issubset(axes)
+    readback = next(scenario for scenario in collection.scenarios if scenario.name == "operator assign_item readback")
+    assert readback.actor == "operator"
+    assert readback.routes == ["/work-items"]
+    assert "assignment persists" in readback.observable_outcomes
+    assert "workspace exists" in readback.preconditions
+
+
+def test_save_operational_scenarios_md(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: approve_request
+      actor: operator
+      verb: approve
+      target: request
+      route: /requests
+      expected_outcomes: [request is approved]
+""",
+        encoding="utf-8",
+    )
+
+    extractor = ScenarioExtractor(tmp_path)
+    output_path = extractor.save_operational_scenarios(extractor.extract_operational())
+    content = output_path.read_text(encoding="utf-8")
+
+    assert output_path == tmp_path / "docs" / "e2e" / "operational-scenarios.md"
+    assert content.startswith("# Operational E2E Scenarios")
+    assert "## MECE Coverage Axes" in content
+    assert "- Coverage Axis: happy_path" in content
+    assert "Run the whole suite, collect all failures" in content

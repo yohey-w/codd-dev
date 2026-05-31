@@ -3300,14 +3300,20 @@ def _run_e2e_generate(path: str, base_url: str, output: str | None, framework: s
     from codd.e2e_extractor import ScenarioExtractor
     from codd.e2e_generator import TestGenerator, load_scenarios_from_markdown
 
-    scenarios_path = project_root / "docs" / "e2e" / "scenarios.md"
+    scenarios_path = (
+        project_root / "docs" / "e2e" / "operational-scenarios.md"
+        if mode == "operational"
+        else project_root / "docs" / "e2e" / "scenarios.md"
+    )
     if scenarios_path.exists():
         collection = load_scenarios_from_markdown(scenarios_path)
+    elif mode == "operational":
+        collection = ScenarioExtractor(project_root).extract_operational()
     else:
         collection = ScenarioExtractor(project_root).extract()
 
     if not collection.scenarios:
-        click.echo("No scenarios found. Run `codd e2e extract` first or check docs/e2e/scenarios.md.")
+        click.echo(f"No scenarios found. Run `codd e2e extract --mode {mode}` first or check {_display_path(scenarios_path, project_root)}.")
         return
 
     output_dir = None
@@ -3325,6 +3331,28 @@ def _run_e2e_generate(path: str, base_url: str, output: str | None, framework: s
         if len(test_file.routes) > 3:
             routes += "..."
         click.echo(f"  {test_file.file_name} ({test_file.steps_count} steps, routes: {routes})")
+
+
+def _run_e2e_extract(path: str, output: str | None, mode: str = "scenarios") -> None:
+    """Extract E2E scenario catalogs from project documents."""
+    project_root = Path(path).resolve()
+    from codd.e2e_extractor import ScenarioExtractor
+
+    output_path = None
+    if output:
+        output_path = Path(output).expanduser()
+        if not output_path.is_absolute():
+            output_path = project_root / output_path
+
+    extractor = ScenarioExtractor(project_root)
+    if mode == "operational":
+        collection = extractor.extract_operational()
+        written_path = extractor.save_operational_scenarios(collection, output_path=output_path)
+    else:
+        collection = extractor.extract()
+        written_path = extractor.save_scenarios(collection, output_path=output_path)
+
+    click.echo(f"Extracted {len(collection.scenarios)} {mode} scenario(s): {_display_path(written_path, project_root)}")
 
 
 @main.group()
@@ -3353,12 +3381,27 @@ def e2e():
     "--mode",
     default="scenarios",
     show_default=True,
-    type=click.Choice(["scenarios", "transitions"]),
+    type=click.Choice(["scenarios", "transitions", "operational"]),
     help="Input source for generated E2E tests",
 )
 def e2e_generate(path: str, base_url: str, output: str | None, framework: str, mode: str) -> None:
     """Generate Playwright or Cypress test files from scenarios or screen transitions."""
     _run_e2e_generate(path=path, base_url=base_url, output=output, framework=framework, mode=mode)
+
+
+@e2e.command("extract")
+@click.option("--path", default=".", show_default=True, help="Project root")
+@click.option("--output", default=None, help="Output scenario catalog path")
+@click.option(
+    "--mode",
+    default="scenarios",
+    show_default=True,
+    type=click.Choice(["scenarios", "operational"]),
+    help="Scenario catalog to extract",
+)
+def e2e_extract(path: str, output: str | None, mode: str) -> None:
+    """Extract E2E scenario catalogs without generating test files."""
+    _run_e2e_extract(path=path, output=output, mode=mode)
 
 
 @main.command("e2e-generate")
@@ -3381,7 +3424,7 @@ def e2e_generate(path: str, base_url: str, output: str | None, framework: str, m
     "--mode",
     default="scenarios",
     show_default=True,
-    type=click.Choice(["scenarios", "transitions"]),
+    type=click.Choice(["scenarios", "transitions", "operational"]),
     help="Input source for generated E2E tests",
 )
 def e2e_generate_legacy(path: str, base_url: str, output: str | None, framework: str, mode: str) -> None:

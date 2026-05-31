@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from codd.config import load_project_config
+from codd.requirements_meta import normalize_operation_flow
 
 
 DEFAULT_AI_COMMAND = 'claude --print --model claude-opus-4-6 --tools ""'
@@ -321,12 +322,34 @@ def _render_document(
     }
     if artifact.modules:
         codd_block["modules"] = list(artifact.modules)
+    operation_flow = _extract_operation_flow_contract(body)
+    if operation_flow is not None:
+        codd_block["operation_flow"] = operation_flow
     frontmatter = yaml.safe_dump(
         {"codd": codd_block},
         allow_unicode=True,
         sort_keys=False,
     )
     return f"---\n{frontmatter}---\n\n{body.rstrip()}\n"
+
+
+def _extract_operation_flow_contract(body: str) -> dict[str, Any] | None:
+    """Find a design-time operation_flow YAML block in a generated document body."""
+    for match in re.finditer(r"```(?:yaml|yml)\s*\n(?P<body>.*?)\n```", body, flags=re.IGNORECASE | re.DOTALL):
+        try:
+            payload = yaml.safe_load(match.group("body")) or {}
+        except yaml.YAMLError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        flow = payload.get("operation_flow")
+        codd_meta = payload.get("codd")
+        if flow is None and isinstance(codd_meta, dict):
+            flow = codd_meta.get("operation_flow")
+        normalized = normalize_operation_flow(flow, source="generated_document.operation_flow")
+        if normalized is not None:
+            return normalized
+    return None
 
 
 def _infer_doc_type(output_path: str) -> str:
@@ -481,6 +504,20 @@ def _build_generation_prompt(
             ]
         )
 
+    if doc_type == "design":
+        lines.extend(
+            [
+                "",
+                "Operational Behavior Model (DESIGN-TIME, CRITICAL):",
+                "- Do not postpone operational workflow discovery to E2E generation. The design document must define the actor/action/state/outcome model before implementation planning.",
+                "- If dependency documents describe actors, permissions, mutable commands, state transitions, cross-actor visibility, lifecycle states, or external side effects, include a `### Operational Behavior Model` subsection in the appropriate required section.",
+                "- In that subsection, include one fenced YAML block with top-level `operation_flow:`. CoDD will lift this block into document metadata so downstream implementation and E2E generation share the same source of truth.",
+                "- The `operation_flow.operations` entries must be generic and implementation-ready: `id`, `actor`, `verb`, `target`, `preconditions`, `expected_outcomes`, and, when applicable, `forbidden_actors`, `visible_to`, `route`/`path`, `ui_pattern`, and lifecycle `from_state`/`to_state`.",
+                "- Enumerate operational obligations across these MECE axes before coding: happy path, persistence/readback, permission boundary, terminal-state guard, and cross-actor reflection.",
+                "- This is not an E2E scenario list. E2E tests are only evidence generated later from the design-time operation model.",
+            ]
+        )
+
     lines.extend(
         [
             "",
@@ -507,13 +544,15 @@ def _build_generation_prompt(
                 "- Before defining test scenarios, enumerate ALL verifiable behaviors from the dependency design documents. A verifiable behavior is any system action, state transition, or output that the design specifies and that can be asserted in a test.",
                 "- Every verifiable behavior must map to at least one test scenario — if a design document specifies a transition chain (e.g. action → intermediate state → final state), each link in the chain requires a separate assertion.",
                 "- Include a traceability section in the test document that lists each verifiable behavior and its corresponding test scenario(s). Flag any behavior that lacks coverage.",
+                "- Treat design-time `operation_flow` records as the authoritative source for operational test obligations. Do not invent E2E-only behavior that is absent from requirements or design; instead flag missing design obligations.",
                 "",
                 "E2E Test Generation Meta-Prompt section rules:",
                 "- The final section '## E2E Test Generation Meta-Prompt' serves as a machine-readable instruction for `codd propagate` to auto-generate E2E tests.",
-                "- MECE domain decomposition: Split E2E tests into non-overlapping domain files (e.g. auth, rbac, tenant-isolation, core-features, integrations). Each file owns exactly one domain.",
-                "- Scenario derivation: For each domain, derive test scenarios from acceptance criteria (positive + negative) and failure criteria (inverted to assertions).",
+                "- MECE domain decomposition: Split E2E tests into non-overlapping behavioral domains. Each file owns exactly one domain.",
+                "- Scenario derivation: First derive test obligations from design-time `operation_flow` and verifiable behaviors, then derive concrete E2E evidence candidates. Cover positive, negative, persistence/readback, permission-boundary, terminal-state, and cross-actor-reflection cases when the design declares those axes.",
                 "- Architecture adaptation: Include a rule that test generation must scan the actual route/endpoint structure and mark unimplemented endpoints with `test.fixme()` instead of skipping.",
-                "- Quality gate: Define pass criteria — all PASS, zero SKIP, acceptance criteria coverage, and any release-blocking constraints from conventions.",
+                "- Quality gate: Define pass criteria — all PASS, zero SKIP, operation_flow/verifiable-behavior coverage, and any release-blocking constraints from conventions.",
+                "- Execution policy: Run the whole selected suite, collect every failure, and only then start repair so related failures can be fixed coherently.",
                 "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`.",
                 "- Shared helpers: Mandate a `tests/e2e/helpers/` directory for auth flows, test data setup, and common assertions to avoid duplication across spec files.",
                 "- Mutating test data: Any E2E scenario that creates or updates records MUST use per-run unique identifiers and explicit cleanup/idempotent teardown so repeated runs cannot fail from stale data or uniqueness constraints.",

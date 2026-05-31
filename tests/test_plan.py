@@ -215,6 +215,8 @@ def test_plan_init_prompt_mentions_detailed_design_wave(tmp_path, mock_plan_init
     assert "Insert a dedicated detailed design wave" in prompt
     assert "Markdown + Mermaid" in prompt
     assert "shared domain ownership" in prompt
+    assert "Operational Behavior Model before implementation planning" in prompt
+    assert "not an E2E test artifact" in prompt
 
 
 def test_plan_init_accepts_detailed_design_artifacts_from_ai(tmp_path, monkeypatch):
@@ -622,6 +624,17 @@ def test_plan_init_prompt_includes_modules_field(tmp_path, mock_plan_init_ai):
     prompt = mock_plan_init_ai[0]["input"]
     assert "modules" in prompt
     assert "source modules" in prompt.lower()
+
+
+def test_plan_init_brownfield_prompt_keeps_operational_model_in_design(tmp_path, mock_brownfield_ai):
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_extracted_docs(project)
+
+    planner_module.plan_init(project)
+
+    prompt = mock_brownfield_ai[0]["input"]
+    assert "Operational Behavior Model before implementation planning" in prompt
+    assert "not an E2E test artifact" in prompt
 
 
 # ---------------------------------------------------------------------------
