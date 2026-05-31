@@ -16,6 +16,10 @@ ALLOWED_UI_PATTERNS = {
     "wizard",
     "modal",
     "inline_edit",
+    "form_submit",
+    "dashboard_view",
+    "command_button",
+    "download_link",
 }
 
 
