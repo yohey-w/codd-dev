@@ -6,6 +6,7 @@ stack_map:
       - web_performance_core_web_vitals
       - web_browser_compat
       - web_forms_html5
+      - data_aggregation_policies
       - web_pwa_manifest
       - web_seo_schemaorg
   - hint_pattern: "fastapi|flask|django|express|hono|nestjs|spring|rails|sinatra|laravel"

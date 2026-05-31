@@ -116,6 +116,48 @@ user_journeys:
 
 `steps[].action` の語彙 (`navigate` / `form_submit` / `expect_url` / `expect_browser_state` 等) も project 自身の語彙で、CoDD core は意味解釈しない。
 
+### `design_doc.attributes.display_fields` / `presentation_specs` / `aggregation_policies`
+
+表示値の format / locale / timezone / aggregation 方針も、既存 `design_doc`
+属性として宣言する。新 node kind は追加しない。C7 は宣言がある場合だけ
+field 単位の obligation と E2E evidence signal を照合する。
+
+```yaml
+display_fields:
+  - field_id: "record.published_at"
+    data_type: "datetime"
+    lexicon_refs: ["i18n_unicode_cldr#time_zone_handling"]
+    presentation_required: true
+    expected_presentation_signals: ["record_published_at_locale_display"]
+  - field_id: "record.summary_value"
+    data_type: "number"
+    cardinality: "0..N"
+    aggregation_required: true
+    expected_aggregation_signals: ["record_summary_many_source_display"]
+
+presentation_specs:
+  - field_id: "record.published_at"
+    format: "YYYY-MM-DD HH:mm"
+    timezone: "Etc/UTC"
+    locale: "en-US"
+
+aggregation_policies:
+  - field_id: "record.summary_value"
+    cardinality_when_zero: { display: "empty_state" }
+    cardinality_when_one: { display: "raw" }
+    cardinality_when_many:
+      policy: "average"
+      source_traceability: "source_count"
+    test_data_variants:
+      required_cardinality: ["0", "1", "N"]
+```
+
+この形は variation coverage を三層に分ける。
+
+1. 要件 obligation: field が必要とする presentation / aggregation 方針を宣言する。
+2. test variant: E2E が expected signal を assert する。
+3. test data variation: seed / fixture / generated data が 0 / 1 / N などの cardinality case を持つ。
+
 ### `impl_file.attributes.runtime_evidence`
 
 `codd.yaml [coherence.capability_patterns]` で project が宣言した正規表現で impl_file をスキャンし、何の capability を「証跡として実装している」かを記録する。
@@ -260,6 +302,10 @@ for design_doc in dag.nodes(kind="design_doc"):
 | `unsatisfied_runtime_capability` | red | design_doc.runtime_constraints が要求する capability を runtime_state が提供しない (今夜事故の主検出器) |
 | `impl_evidence_runtime_mismatch` | red | impl_file の runtime_evidence (例: `__Secure-` cookie 発行) が runtime capability (例: `tls_termination=false`) と矛盾 (今夜事故の補強検出器) |
 | `browser_expected_not_asserted` | red | lexicon の `browser_requirements` が E2E test で assert されない |
+| `presentation_locale_unspecified` | red | displayed field に locale / timezone / format obligation があるが、field-level presentation spec が不足 |
+| `presentation_locale_violated` | red | presentation spec はあるが、対応する E2E evidence signal が assert されない |
+| `aggregation_policy_unspecified` | red | collection / cardinality display に aggregation policy が不足 |
+| `aggregation_policy_violated` | red | aggregation policy はあるが、対応する E2E evidence signal が assert されない |
 | `journey_step_no_assertion` | amber | journey.steps に検証 step (`expect_*`) が 1 件も含まれない |
 
 ### 出力例 (osato-lms HTTP × `__Secure-` 事故)
