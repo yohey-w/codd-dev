@@ -2,7 +2,7 @@ from click.testing import CliRunner
 
 from codd.cli import main
 from codd.e2e_extractor import ScenarioCollection, UserScenario
-from codd.e2e_generator import TestGenerator, load_scenarios_from_markdown
+from codd.e2e_generator import ASSERTION_GUARD_MESSAGE, TestGenerator, load_scenarios_from_markdown
 
 
 def _scenario() -> UserScenario:
@@ -60,7 +60,10 @@ def test_generate_writes_files(tmp_path):
     assert generated[0].file_name == "test_login_complete.spec.ts"
     output = tmp_path / "e2e" / generated[0].file_name
     assert output.exists()
-    assert "Login & Complete!" in output.read_text(encoding="utf-8")
+    content = output.read_text(encoding="utf-8")
+    assert "Login & Complete!" in content
+    assert ASSERTION_GUARD_MESSAGE in content
+    assert "TODO: Add assertions" not in content
 
 
 def test_generate_dedupes_duplicate_file_names(tmp_path):
@@ -276,6 +279,8 @@ def test_cli_generates_operational_scenarios_from_operation_flow(tmp_path):
     assert "// Coverage axis: persistence_readback" in content
     assert "collect all failures" in content
     assert 'await page.goto("http://app.test/work-items");' in content
+    assert ASSERTION_GUARD_MESSAGE in content
+    assert "TODO: Add assertions" not in content
 
 
 def test_cli_extracts_operational_catalog(tmp_path):

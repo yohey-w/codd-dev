@@ -42,6 +42,7 @@ class ActionRequirement:
     verb: str
     target: str
     actor: str | None = None
+    expected_outcomes: tuple[str, ...] = ()
     expected_verbs: tuple[str, ...] = ()
     ambiguous: bool = False
 
@@ -121,6 +122,9 @@ def extract_action_requirements(operation_flow: Any, *, source: str = "operation
         target = str(raw_operation.get("target") or "").strip()
         actor = raw_operation.get("actor")
         actor_value = str(actor).strip() if actor not in (None, "") else None
+        expected_outcomes = _string_values(
+            raw_operation.get("expected_outcomes", raw_operation.get("outcomes"))
+        )
         if verb in _AMBIGUOUS_VERBS:
             requirements.append(
                 ActionRequirement(
@@ -129,6 +133,7 @@ def extract_action_requirements(operation_flow: Any, *, source: str = "operation
                     verb=verb,
                     target=target,
                     actor=actor_value,
+                    expected_outcomes=expected_outcomes,
                     expected_verbs=_AMBIGUOUS_VERBS[verb],
                     ambiguous=True,
                 )
@@ -141,6 +146,7 @@ def extract_action_requirements(operation_flow: Any, *, source: str = "operation
                 verb=verb,
                 target=target,
                 actor=actor_value,
+                expected_outcomes=expected_outcomes,
                 expected_verbs=(verb,),
             )
         )
@@ -286,6 +292,29 @@ def _outcome_names(value: Any) -> tuple[str, ...]:
         if raw_name:
             return (_normalize_outcome_name(raw_name),)
         return tuple(_normalize_outcome_name(key) for key, enabled in value.items() if bool(enabled))
+    return ()
+
+
+def _string_values(value: Any) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, str):
+        return (value.strip(),) if value.strip() else ()
+    if isinstance(value, list):
+        values: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                values.append(item.strip())
+            elif isinstance(item, Mapping):
+                raw = item.get("name") or item.get("id") or item.get("description")
+                if raw not in (None, ""):
+                    values.append(str(raw).strip())
+        return tuple(value for value in values if value)
+    if isinstance(value, Mapping):
+        raw = value.get("name") or value.get("id") or value.get("description")
+        if raw not in (None, ""):
+            return (str(raw).strip(),)
+        return tuple(str(key).strip() for key, enabled in value.items() if bool(enabled) and str(key).strip())
     return ()
 
 
