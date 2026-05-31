@@ -15,6 +15,7 @@ import click
 import yaml
 
 from codd.action_outcome import (
+    ActionRequirement,
     CoverageResult,
     ActionTargetSpec,
     action_target_specs_from_config,
@@ -51,6 +52,18 @@ class _VersionCheckResult:
     satisfied: bool
     strict: bool
     message: str
+
+
+@dataclass(frozen=True)
+class _RuntimeOutcomeEntry:
+    section: str
+    name: str
+    action_id: str | None
+    verb: str | None
+    target: str | None
+    actors: tuple[str, ...]
+    text: str
+    covered_by_refs: tuple[str, ...]
 
 
 _SPECIFIER_RE = re.compile(r"^\s*(==|!=|<=|>=|<|>|~=)\s*([A-Za-z0-9.!+_-]+)\s*$")
@@ -541,6 +554,35 @@ _TERMINAL_OUTCOME_NAMES = {
     "non_repeatable_guard",
 }
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*", re.DOTALL)
+_GENERATED_E2E_PLACEHOLDER_RE = re.compile(
+    r"TODO:\s*Add assertions based on acceptance criteria|Generated CoDD E2E requires concrete assertions",
+    re.IGNORECASE,
+)
+_OUTCOME_TOKEN_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "at",
+    "be",
+    "by",
+    "can",
+    "for",
+    "from",
+    "has",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "only",
+    "or",
+    "selected",
+    "shows",
+    "the",
+    "to",
+    "with",
+}
 _TEXT_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".feature", ".html", ".vue", ".svelte"}
 _DOC_SUFFIXES = {".md", ".yaml", ".yml"}
 
@@ -569,6 +611,8 @@ def _doctor_warnings(project_root: Path) -> list[str]:
     warnings.extend(_presentation_obligation_warnings(project_root, config))
     coverage = _action_outcome_coverage(project_root, config)
     warnings.extend(_action_outcome_warning_messages(coverage, legacy_crud_configured=has_crud_flow_targets))
+    warnings.extend(_operation_outcome_projection_warnings(project_root, config, coverage.requirements))
+    warnings.extend(_runtime_evidence_placeholder_warnings(project_root, config))
     target_actions = action_target_specs_from_config(config)
     warnings.extend(_weak_action_outcome_warning_messages(target_actions))
     warnings.extend(_terminal_action_outcome_warning_messages(target_actions))
@@ -685,6 +729,253 @@ def _action_outcome_warning_messages(
             f"{legacy_note}"
         )
     return warnings
+
+
+def _operation_outcome_projection_warnings(
+    project_root: Path,
+    config: dict[str, Any],
+    requirements: tuple[ActionRequirement, ...],
+) -> list[str]:
+    entries = _runtime_outcome_entries(config)
+    warnings: list[str] = []
+    emitted: set[tuple[str, str, str]] = set()
+    for requirement in requirements:
+        if not requirement.expected_outcomes:
+            continue
+        matching_entries = [
+            entry for entry in entries if _runtime_entry_matches_requirement(entry, requirement)
+        ]
+        if not matching_entries:
+            continue
+        for outcome in requirement.expected_outcomes:
+            signature = _outcome_signature(outcome)
+            if not signature:
+                continue
+            if any(_runtime_entry_represents_outcome(entry, outcome, signature) for entry in matching_entries):
+                continue
+            key = (requirement.source, requirement.operation_id, outcome)
+            if key in emitted:
+                continue
+            emitted.add(key)
+            warnings.append(
+                f"`operation_flow` action `{requirement.display_name}` in {requirement.source} "
+                f"declares expected outcome `{outcome}`, but matching runtime evidence metadata does "
+                "not name that observable outcome. Add explicit `assertions`/`outcomes` metadata or a "
+                "`covered_by` ref that names the design outcome being asserted."
+            )
+    return warnings
+
+
+def _runtime_evidence_placeholder_warnings(project_root: Path, config: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    emitted: set[tuple[str, str]] = set()
+    for entry in _runtime_outcome_entries(config):
+        for ref in entry.covered_by_refs:
+            path = _evidence_ref_path(project_root, ref)
+            if path is None:
+                continue
+            text = _read_text_best_effort(path)
+            if not text or not _GENERATED_E2E_PLACEHOLDER_RE.search(text):
+                continue
+            key = (entry.name, ref)
+            if key in emitted:
+                continue
+            emitted.add(key)
+            warnings.append(
+                f"`{entry.section}` runtime evidence `{ref}` for `{entry.name}` still contains a "
+                "generated assertion placeholder. Replace it with concrete acceptance assertions before "
+                "using it as coverage evidence."
+            )
+    return warnings
+
+
+def _runtime_outcome_entries(config: dict[str, Any]) -> list[_RuntimeOutcomeEntry]:
+    runtime = config.get("runtime")
+    if not isinstance(runtime, dict):
+        return []
+
+    entries: list[_RuntimeOutcomeEntry] = []
+    for section in (
+        "role_sequence_targets",
+        "action_outcome_targets",
+        "global_action_targets",
+        "crud_flow_targets",
+    ):
+        raw_targets = runtime.get(section)
+        if not isinstance(raw_targets, list):
+            continue
+        for target_index, raw_target in enumerate(raw_targets, start=1):
+            if not isinstance(raw_target, dict):
+                continue
+            name = str(raw_target.get("name") or f"{section}[{target_index}]")
+            covered_by_refs = _covered_by_refs(raw_target)
+            raw_actions = raw_target.get("actions")
+            if raw_actions is None and raw_target.get("action") is not None:
+                raw_actions = [raw_target.get("action")]
+            if isinstance(raw_actions, list):
+                for action_index, raw_action in enumerate(raw_actions, start=1):
+                    if not isinstance(raw_action, dict):
+                        continue
+                    action_id = str(raw_action.get("id") or raw_action.get("name") or f"action[{action_index}]")
+                    entries.append(
+                        _RuntimeOutcomeEntry(
+                            section=section,
+                            name=name,
+                            action_id=action_id,
+                            verb=canonical_action_verb(raw_action.get("verb"))
+                            or canonical_action_verb(action_id),
+                            target=_optional_runtime_text(raw_action.get("target"))
+                            or _optional_runtime_text(raw_target.get("target")),
+                            actors=_runtime_actor_values(raw_action, raw_target),
+                            text=" ".join(
+                                _nested_strings(
+                                    {
+                                        "target": raw_target,
+                                        "action": raw_action,
+                                    }
+                                )
+                            ),
+                            covered_by_refs=covered_by_refs,
+                        )
+                    )
+                continue
+            entries.append(
+                _RuntimeOutcomeEntry(
+                    section=section,
+                    name=name,
+                    action_id=None,
+                    verb=canonical_action_verb(raw_target.get("verb")) or canonical_action_verb(name),
+                    target=_optional_runtime_text(raw_target.get("target")),
+                    actors=_runtime_actor_values(raw_target),
+                    text=" ".join(_nested_strings(raw_target)),
+                    covered_by_refs=covered_by_refs,
+                )
+            )
+    return entries
+
+
+def _covered_by_refs(raw_target: dict[str, Any]) -> tuple[str, ...]:
+    refs: list[str] = []
+    covered_by = raw_target.get("covered_by")
+    if isinstance(covered_by, list):
+        for item in covered_by:
+            if isinstance(item, dict):
+                ref = item.get("ref")
+            else:
+                ref = item
+            if ref not in (None, ""):
+                refs.append(str(ref))
+    elif covered_by not in (None, ""):
+        refs.append(str(covered_by))
+    return tuple(refs)
+
+
+def _runtime_entry_matches_requirement(
+    entry: _RuntimeOutcomeEntry,
+    requirement: ActionRequirement,
+) -> bool:
+    if not _runtime_entry_actor_matches(entry, requirement):
+        return False
+
+    operation_id = _normalize_runtime_token(requirement.operation_id)
+    entry_text = _normalize_runtime_token(entry.text)
+    if operation_id and operation_id in entry_text:
+        return True
+
+    expected_verbs = set(requirement.expected_verbs or (requirement.verb,))
+    if entry.verb and entry.verb not in expected_verbs:
+        return False
+
+    required_target = _normalize_runtime_token(requirement.target)
+    if not required_target:
+        return bool(entry.verb)
+    declared_target = _normalize_runtime_token(entry.target)
+    action_id = _normalize_runtime_token(entry.action_id)
+    return bool(
+        declared_target == required_target
+        or action_id == required_target
+        or action_id.startswith(f"{required_target}_")
+        or action_id.endswith(f"_{required_target}")
+        or f"_{required_target}_" in action_id
+        or required_target in entry_text
+    )
+
+
+def _runtime_entry_actor_matches(
+    entry: _RuntimeOutcomeEntry,
+    requirement: ActionRequirement,
+) -> bool:
+    if not requirement.actor or not entry.actors:
+        return True
+    required = _normalize_runtime_token(requirement.actor)
+    return required in {_normalize_runtime_token(actor) for actor in entry.actors}
+
+
+def _runtime_entry_represents_outcome(
+    entry: _RuntimeOutcomeEntry,
+    outcome: str,
+    signature: set[str],
+) -> bool:
+    normalized_outcome = _normalize_runtime_token(outcome)
+    normalized_text = _normalize_runtime_token(entry.text)
+    if normalized_outcome and normalized_outcome in normalized_text:
+        return True
+    entry_tokens = {token for token in normalized_text.split("_") if token}
+    hits = len(signature.intersection(entry_tokens))
+    required_hits = max(2, (len(signature) + 1) // 2)
+    return hits >= required_hits
+
+
+def _outcome_signature(outcome: str) -> set[str]:
+    tokens = {
+        token
+        for token in _normalize_runtime_token(outcome).split("_")
+        if len(token) > 1 and token not in _OUTCOME_TOKEN_STOPWORDS
+    }
+    return tokens
+
+
+def _runtime_actor_values(*items: dict[str, Any]) -> tuple[str, ...]:
+    values: list[str] = []
+    for item in items:
+        for key in ("actor", "actors"):
+            raw = item.get(key)
+            if raw in (None, ""):
+                continue
+            if isinstance(raw, str):
+                values.append(raw)
+            elif isinstance(raw, list):
+                values.extend(str(value) for value in raw if value not in (None, ""))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = _normalize_runtime_token(value)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(str(value).strip())
+    return tuple(normalized)
+
+
+def _optional_runtime_text(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value).strip()
+
+
+def _evidence_ref_path(project_root: Path, ref: str) -> Path | None:
+    file_ref = str(ref).split("::", 1)[0].strip()
+    if not file_ref:
+        return None
+    path = Path(file_ref)
+    if not path.is_absolute():
+        path = project_root / path
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(project_root.resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved if resolved.exists() and resolved.is_file() else None
 
 
 def _synthetic_mutation_warnings(project_root: Path, config: dict[str, Any]) -> list[str]:

@@ -1315,6 +1315,111 @@ runtime:
     assert "terminal/non-repeatable verb" not in result.output
 
 
+def test_t50_doctor_warns_when_operation_outcome_is_not_projected_to_runtime_evidence(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+operation_flow:
+  operations:
+    - id: create_record
+      actor: operator
+      verb: create
+      target: record
+      expected_outcomes:
+        - operator can see the created record in /records
+runtime:
+  action_outcome_targets:
+    - name: record create smoke
+      covered_by:
+        - type: e2e_test
+          ref: tests/e2e/record.spec.ts::record create smoke
+          skipped: false
+      action:
+        id: record.create
+        actor: operator
+        verb: create
+        target: record
+        outcomes: [server_acceptance, persisted_change]
+      command: "npm run test:record-create"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "operator can see the created record in /records" in result.output
+    assert "does not name that observable outcome" in result.output
+
+
+def test_t51_doctor_accepts_operation_outcome_named_by_runtime_assertions(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+operation_flow:
+  operations:
+    - id: create_record
+      actor: operator
+      verb: create
+      target: record
+      expected_outcomes:
+        - operator can see the created record in /records
+runtime:
+  action_outcome_targets:
+    - name: record create smoke
+      assertions:
+        - operator can see the created record in /records
+      action:
+        id: record.create
+        actor: operator
+        verb: create
+        target: record
+        outcomes: [server_acceptance, persisted_change, visible_reflection]
+      command: "npm run test:record-create"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "operator can see the created record in /records" not in result.output
+
+
+def test_t52_doctor_warns_when_runtime_evidence_still_has_generated_assertion_placeholder(tmp_path):
+    project = _project(
+        tmp_path,
+        """
+runtime:
+  role_sequence_targets:
+    - name: generated journey
+      covered_by:
+        - type: e2e_test
+          ref: tests/e2e/generated.spec.ts::generated journey
+          skipped: false
+      journey:
+        id: generated_journey
+        actor: operator
+        outcomes: [record_visible]
+      command: "npm run test:generated"
+""",
+    )
+    test_file = project / "tests" / "e2e" / "generated.spec.ts"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        'test("generated journey", async ({ page }) => {\n'
+        '  await page.goto("/");\n'
+        "  // TODO: Add assertions based on acceptance criteria.\n"
+        "});\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "generated assertion placeholder" in result.output
+
+
 def test_t41_doctor_warns_when_business_screen_lacks_escape_route(tmp_path):
     project = _project(tmp_path)
     screen = project / "src" / "app" / "notifications"

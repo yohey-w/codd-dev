@@ -16,6 +16,10 @@ from codd.e2e_extractor import ScenarioCollection, UserScenario
 
 _DEFAULT_E2E_RUNNER = "playwright"
 SUPPORTED_FRAMEWORKS = {"playwright", "cypress"}
+ASSERTION_GUARD_MESSAGE = (
+    "Generated CoDD E2E requires concrete assertions for acceptance criteria "
+    "before it can be used as passing evidence."
+)
 
 
 @dataclass
@@ -115,7 +119,7 @@ class TestGenerator:
             '  await expect(page).not.toHaveURL("about:blank");\n'
             f"{steps_code}"
             "\n"
-            "  // TODO: Add assertions based on acceptance criteria.\n"
+            f"  throw new Error({_ts_string(ASSERTION_GUARD_MESSAGE)});\n"
             "});\n"
         )
 
@@ -134,7 +138,7 @@ class TestGenerator:
             '    cy.location("href").should("not.eq", "about:blank");\n'
             f"{steps_code}"
             "\n"
-            "    // TODO: Add assertions based on acceptance criteria.\n"
+            f"    throw new Error({_ts_string(ASSERTION_GUARD_MESSAGE)});\n"
             "  });\n"
             "});\n"
         )
