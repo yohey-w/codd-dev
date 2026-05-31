@@ -558,6 +558,7 @@ def _build_generation_prompt(
                 "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`.",
                 "- Shared helpers: Mandate a `tests/e2e/helpers/` directory for auth flows, test data setup, and common assertions to avoid duplication across spec files.",
                 "- Mutating test data: Any E2E scenario that creates or updates records MUST use per-run unique identifiers and explicit cleanup/idempotent teardown so repeated runs cannot fail from stale data or uniqueness constraints.",
+                "- Scenario fixtures: Any E2E scenario that depends on pre-existing records MUST establish or idempotently reset those preconditions inside the scenario/helper before assertions; do not trust mutable shared seed state unless the test recreates it or proves it unchanged.",
                 "- Generation markers: All generated files must include `// @generated-from:` and `// @generated-by: codd propagate` headers. Manual tests marked with `// @manual` must be preserved on regeneration.",
                 "",
                 "E2E Test Level Separation (CRITICAL):",

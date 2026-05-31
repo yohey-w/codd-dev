@@ -167,6 +167,11 @@ _THRESHOLD_BOUNDARY_ACCEPTANCE = (
     "Evidence covers behavior below, at, and above the declared threshold/timer/duration boundary "
     "where feasible, or records an explicit public-surface simulation rationale."
 )
+_SCENARIO_STATE_ISOLATION_ACCEPTANCE = (
+    "Evidence establishes scenario-owned or idempotently reset preconditions before assertions; "
+    "mutable shared seed state is not trusted unless it is recreated or proven unchanged, and "
+    "test-created state is cleaned up."
+)
 
 
 class ScenarioExtractor:
@@ -1090,6 +1095,7 @@ def _operational_scenario(
     extra_steps: list[str] | None = None,
 ) -> UserScenario:
     steps = [f"Act as {actor}."]
+    steps.append("Establish scenario-owned or idempotently reset test state before assertions.")
     steps.extend(f"Establish precondition: {item}" for item in preconditions)
     if routes:
         steps.append(f"Open {routes[0]}.")
@@ -1102,7 +1108,7 @@ def _operational_scenario(
         name=name,
         steps=_dedupe_strings(steps),
         routes=routes,
-        acceptance_criteria=_dedupe_strings(acceptance),
+        acceptance_criteria=_dedupe_strings([_SCENARIO_STATE_ISOLATION_ACCEPTANCE, *acceptance]),
         priority=priority,
         kind="operational",
         actor=actor,
@@ -1132,6 +1138,7 @@ def _render_operational_scenarios_markdown(collection: ScenarioCollection) -> st
         "# Operational E2E Scenarios",
         "",
         "These scenarios are generated from generic operation metadata. Run the whole suite, collect all failures, then repair after the full campaign finishes.",
+        "Each scenario must establish scenario-owned or idempotently reset state before assertions so prior test runs cannot pollute the result.",
         "",
         "## MECE Coverage Axes",
         "- happy_path: the declared actor can complete the operation.",
