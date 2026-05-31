@@ -201,6 +201,30 @@ operation_flow:
     assert "workspace exists" in readback.preconditions
 
 
+def test_extract_operational_preserves_commas_inside_yaml_list_items(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: review_items
+      actor: operator
+      verb: read
+      target: assigned_items
+      route: /items
+      expected_outcomes:
+        - operator cannot create, edit, or delete records from this screen
+""",
+        encoding="utf-8",
+    )
+
+    collection = ScenarioExtractor(tmp_path).extract_operational()
+
+    assert collection.scenarios[0].observable_outcomes == [
+        "operator cannot create, edit, or delete records from this screen"
+    ]
+
+
 def test_save_operational_scenarios_md(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
