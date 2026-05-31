@@ -29,6 +29,12 @@ _IMPORT_SPECIFIER_RE = re.compile(
 RUNTIME_CONSTRAINT_REQUIRED_FIELDS = ("capability", "required", "rationale")
 USER_JOURNEY_REQUIRED_FIELDS = ("name", "criticality", "steps", "required_capabilities", "expected_outcome_refs")
 USER_JOURNEY_LIST_FIELDS = ("steps", "required_capabilities", "expected_outcome_refs")
+DISPLAY_FIELD_REQUIRED_FIELDS = ("field_id",)
+DISPLAY_FIELD_LIST_FIELDS = ("lexicon_refs", "evidence_signals")
+PRESENTATION_SPEC_REQUIRED_FIELDS = ("field_id",)
+PRESENTATION_SPEC_LIST_FIELDS = ("lexicon_refs", "evidence_signals", "expected_presentation_signals")
+AGGREGATION_POLICY_REQUIRED_FIELDS = ("field_id",)
+AGGREGATION_POLICY_LIST_FIELDS = ("evidence_signals", "expected_aggregation_signals", "allowed_policies")
 DESIGN_DOC_ATTRIBUTE_SCHEMAS = {
     "runtime_constraints": {
         "required_fields": RUNTIME_CONSTRAINT_REQUIRED_FIELDS,
@@ -41,6 +47,18 @@ DESIGN_DOC_ATTRIBUTE_SCHEMAS = {
     "coverage_axes": {
         "required_fields": (),
         "list_fields": (),
+    },
+    "display_fields": {
+        "required_fields": DISPLAY_FIELD_REQUIRED_FIELDS,
+        "list_fields": DISPLAY_FIELD_LIST_FIELDS,
+    },
+    "presentation_specs": {
+        "required_fields": PRESENTATION_SPEC_REQUIRED_FIELDS,
+        "list_fields": PRESENTATION_SPEC_LIST_FIELDS,
+    },
+    "aggregation_policies": {
+        "required_fields": AGGREGATION_POLICY_REQUIRED_FIELDS,
+        "list_fields": AGGREGATION_POLICY_LIST_FIELDS,
     },
 }
 DESIGN_DOC_ATTRIBUTE_KEYS = tuple(DESIGN_DOC_ATTRIBUTE_SCHEMAS)

@@ -194,6 +194,47 @@ def test_required_capabilities_are_preserved_on_design_doc_attributes(tmp_path):
     assert attributes["user_journeys"][0]["required_capabilities"] == ["tls_termination", "cookie_store"]
 
 
+def test_display_presentation_and_aggregation_attrs_are_preserved(tmp_path):
+    frontmatter = {
+        "user_journeys": [_journey(expected_outcome_refs=[])],
+        "display_fields": [
+            {
+                "field_id": "record.summary_value",
+                "cardinality": "0..N",
+                "expected_aggregation_signals": ["record_summary_many_source_display"],
+            }
+        ],
+        "presentation_specs": [
+            {
+                "field_id": "record.published_at",
+                "format": "YYYY-MM-DD HH:mm",
+                "timezone": "Etc/UTC",
+                "locale": "en-US",
+            }
+        ],
+        "aggregation_policies": [
+            {
+                "field_id": "record.summary_value",
+                "cardinality_when_many": {"policy": "average"},
+                "test_data_variants": {"required_cardinality": ["0", "1", "N"]},
+            }
+        ],
+    }
+    _write(tmp_path / "docs" / "design" / "auth.md", _doc_with_frontmatter(frontmatter))
+    dag = build_dag(tmp_path, _settings())
+
+    attributes = dag.nodes["docs/design/auth.md"].attributes
+
+    assert attributes["display_fields"][0]["field_id"] == "record.summary_value"
+    assert attributes["display_fields"][0]["expected_aggregation_signals"] == ["record_summary_many_source_display"]
+    assert attributes["display_fields"][0]["lexicon_refs"] == []
+    assert attributes["display_fields"][0]["evidence_signals"] == []
+    assert attributes["presentation_specs"][0]["format"] == "YYYY-MM-DD HH:mm"
+    assert attributes["presentation_specs"][0]["expected_presentation_signals"] == []
+    assert attributes["aggregation_policies"][0]["cardinality_when_many"] == {"policy": "average"}
+    assert attributes["aggregation_policies"][0]["test_data_variants"] == {"required_cardinality": ["0", "1", "N"]}
+
+
 def test_existing_design_doc_frontmatter_free_regression(tmp_path):
     _write(tmp_path / "docs" / "design" / "api.md", "# API\nBody\n")
 

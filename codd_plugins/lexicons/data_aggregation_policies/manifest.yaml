@@ -1,0 +1,20 @@
+id: data_aggregation_policies
+name: "Data Aggregation Policies"
+lexicon_name: data_aggregation_policies
+version: "1.0.0"
+standard: "CoDD data presentation policy"
+domain: cross_industry
+source_url: "https://github.com/yohey-w/codd-dev"
+source_version: "CoDD generic presentation policy"
+description: "Coverage axes for declaring how one display slot represents zero, one, or many source records."
+observation_dimensions: 7
+extends: "codd/elicit/templates/elicit_prompt_L0.md"
+prompt_extension: "elicit_extend.md"
+recommended_kinds: "recommended_kinds.yaml"
+lexicon: "lexicon.yaml"
+severity_rules: "severity_rules.yaml"
+coverage_matrix: "coverage_matrix.md"
+references:
+  - title: "CoDD User Journey Coherence Layer"
+    url: "docs/design/user-journey-coherence.md"
+    source_version: "presentation-aggregation-obligations"

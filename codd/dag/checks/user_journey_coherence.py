@@ -210,6 +210,9 @@ class UserJourneyCoherenceCheck(DagCheck):
         report["violations"].extend(
             self._browser_requirement_violations(dag, design_doc.id, journey_name, expected_nodes.values(), e2e_tests)
         )
+        report["violations"].extend(
+            self._presentation_obligation_violations(dag, design_doc, journey_name, journey, e2e_tests)
+        )
         if not self._has_assertion_step(journey):
             report["violations"].append(
                 self._violation(
@@ -340,6 +343,329 @@ class UserJourneyCoherenceCheck(DagCheck):
                     )
                 )
         return violations
+
+    def _presentation_obligation_violations(
+        self,
+        dag: DAG,
+        design_doc: Node,
+        journey_name: str,
+        journey: dict[str, Any],
+        e2e_tests: list[Node],
+    ) -> list[dict[str, Any]]:
+        del dag
+        display_fields = self._display_field_entries(design_doc, journey)
+        if not display_fields:
+            return []
+
+        presentation_specs = self._entries_by_field_id(
+            self._structured_entries(design_doc.attributes, "presentation_specs")
+            + self._structured_entries(journey, "presentation_specs")
+        )
+        aggregation_policies = self._entries_by_field_id(
+            self._structured_entries(design_doc.attributes, "aggregation_policies")
+            + self._structured_entries(journey, "aggregation_policies")
+        )
+
+        violations: list[dict[str, Any]] = []
+        for index, field in enumerate(display_fields):
+            field_id = self._field_id(field)
+            if not field_id:
+                continue
+            required_by = self._display_field_required_by(field, index)
+            presentation = self._merged_obligation(field, presentation_specs.get(field_id), "presentation")
+            missing_presentation = self._missing_presentation_attributes(field, presentation)
+            if missing_presentation:
+                violations.append(
+                    self._violation(
+                        "presentation_locale_unspecified",
+                        journey_name,
+                        design_doc.id,
+                        field_id=field_id,
+                        required_by=required_by,
+                        missing_attributes=missing_presentation,
+                        lexicon_refs=self._lexicon_refs_from_obligation(field, presentation),
+                    )
+                )
+            else:
+                missing_signals = self._missing_asserted_signals(
+                    e2e_tests,
+                    self._expected_presentation_signals(field, presentation),
+                )
+                if missing_signals:
+                    violations.append(
+                        self._violation(
+                            "presentation_locale_violated",
+                            journey_name,
+                            design_doc.id,
+                            field_id=field_id,
+                            required_by=required_by,
+                            missing_evidence_signals=missing_signals,
+                        )
+                    )
+
+            aggregation = self._merged_obligation(field, aggregation_policies.get(field_id), "aggregation")
+            if self._requires_aggregation_policy(field, aggregation) and not self._has_aggregation_policy(aggregation):
+                violations.append(
+                    self._violation(
+                        "aggregation_policy_unspecified",
+                        journey_name,
+                        design_doc.id,
+                        field_id=field_id,
+                        required_by=required_by,
+                        cardinality=self._first_present(field, aggregation, keys=("cardinality", "display_cardinality")),
+                    )
+                )
+                continue
+
+            missing_aggregation_signals = self._missing_asserted_signals(
+                e2e_tests,
+                self._expected_aggregation_signals(field, aggregation),
+            )
+            if missing_aggregation_signals:
+                violations.append(
+                    self._violation(
+                        "aggregation_policy_violated",
+                        journey_name,
+                        design_doc.id,
+                        field_id=field_id,
+                        required_by=required_by,
+                        missing_evidence_signals=missing_aggregation_signals,
+                    )
+                )
+        return violations
+
+    def _display_field_entries(self, design_doc: Node, journey: dict[str, Any]) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for source_name, source in (("design_doc", design_doc.attributes), ("journey", journey)):
+            for key in ("display_fields", "displayed_fields", "presentation_fields"):
+                for index, entry in enumerate(self._structured_entries(source, key)):
+                    annotated = dict(entry)
+                    annotated.setdefault("_source", source_name)
+                    annotated.setdefault("_source_key", key)
+                    annotated.setdefault("_source_index", index)
+                    entries.append(annotated)
+        return entries
+
+    def _structured_entries(self, mapping: dict[str, Any], key: str) -> list[dict[str, Any]]:
+        entries = mapping.get(key, [])
+        return [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+
+    def _entries_by_field_id(self, entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        by_field: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            field_id = self._field_id(entry)
+            if field_id:
+                by_field[field_id] = entry
+        return by_field
+
+    def _field_id(self, entry: dict[str, Any]) -> str:
+        for key in ("field_id", "field", "id", "name"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _display_field_required_by(self, field: dict[str, Any], fallback_index: int) -> str:
+        source = str(field.get("_source") or "design_doc")
+        key = str(field.get("_source_key") or "display_fields")
+        index = field.get("_source_index")
+        if not isinstance(index, int):
+            index = fallback_index
+        if source == "journey":
+            return f"design_doc.user_journeys[].{key}[{index}]"
+        return f"design_doc.{key}[{index}]"
+
+    def _merged_obligation(
+        self,
+        field: dict[str, Any],
+        explicit: dict[str, Any] | None,
+        nested_key: str,
+    ) -> dict[str, Any]:
+        merged: dict[str, Any] = {key: value for key, value in field.items() if not key.startswith("_")}
+        nested = field.get(nested_key)
+        if isinstance(nested, dict):
+            merged.update(nested)
+        alias = field.get(f"{nested_key}_spec")
+        if isinstance(alias, dict):
+            merged.update(alias)
+        alias = field.get(f"{nested_key}_policy")
+        if isinstance(alias, dict):
+            merged.update(alias)
+        if explicit:
+            merged.update(explicit)
+        return merged
+
+    def _missing_presentation_attributes(self, field: dict[str, Any], presentation: dict[str, Any]) -> list[str]:
+        required = self._required_presentation_attributes(field, presentation)
+        if not required:
+            return []
+        if not self._has_any_presentation_declaration(presentation):
+            return ["presentation_spec"]
+        missing = [attribute for attribute in required if not self._has_presentation_attribute(presentation, attribute)]
+        return self._dedupe_strings(missing)
+
+    def _required_presentation_attributes(
+        self,
+        field: dict[str, Any],
+        presentation: dict[str, Any],
+    ) -> list[str]:
+        text = self._obligation_text(field, presentation)
+        required: list[str] = []
+        if self._truthy(field.get("presentation_required")) or self._truthy(presentation.get("required")):
+            required.append("format")
+        if any(token in text for token in ("datetime", "date_time", "timestamp", "time_zone", "timezone")):
+            required.extend(["format", "timezone"])
+        if any(token in text for token in ("locale", "localized", "i18n_unicode_cldr", "date_time_calendar")):
+            required.append("locale")
+        if any(token in text for token in ("number", "currency", "amount", "percentage", "percent")):
+            required.append("format")
+        return self._dedupe_strings(required)
+
+    def _has_any_presentation_declaration(self, presentation: dict[str, Any]) -> bool:
+        return any(
+            self._has_presentation_attribute(presentation, attribute)
+            for attribute in ("format", "locale", "timezone", "unit", "precision", "calendar")
+        )
+
+    def _has_presentation_attribute(self, presentation: dict[str, Any], attribute: str) -> bool:
+        aliases = {
+            "format": ("format", "pattern", "display_format", "number_format", "date_format", "time_format"),
+            "locale": ("locale", "language", "language_tag", "bcp47", "locale_tag"),
+            "timezone": ("timezone", "time_zone", "timezone_id", "iana_timezone", "iana_time_zone"),
+            "unit": ("unit", "display_unit"),
+            "precision": ("precision", "rounding", "scale"),
+            "calendar": ("calendar", "calendar_system"),
+        }
+        for key in aliases.get(attribute, (attribute,)):
+            value = presentation.get(key)
+            if value not in (None, "", []):
+                return True
+        return False
+
+    def _expected_presentation_signals(
+        self,
+        field: dict[str, Any],
+        presentation: dict[str, Any],
+    ) -> list[str]:
+        return self._expected_obligation_signals(
+            field,
+            presentation,
+            keys=(
+                "expected_presentation_signals",
+                "presentation_expected_signals",
+                "presentation_assertions",
+                "evidence_signals",
+            ),
+        )
+
+    def _requires_aggregation_policy(self, field: dict[str, Any], aggregation: dict[str, Any]) -> bool:
+        if self._truthy(field.get("aggregation_required")) or self._truthy(aggregation.get("required")):
+            return True
+        text = self._obligation_text(field, aggregation)
+        return any(
+            token in text
+            for token in (
+                "0..n",
+                "1..n",
+                "n:m",
+                "many",
+                "multiple",
+                "collection",
+                "list",
+                "array",
+                "repeated",
+            )
+        )
+
+    def _has_aggregation_policy(self, aggregation: dict[str, Any]) -> bool:
+        if aggregation.get("policy") not in (None, "", []):
+            return True
+        if aggregation.get("aggregation_policy") not in (None, "", []):
+            return True
+        cardinality_when_many = aggregation.get("cardinality_when_many")
+        return isinstance(cardinality_when_many, dict) and cardinality_when_many.get("policy") not in (None, "", [])
+
+    def _expected_aggregation_signals(
+        self,
+        field: dict[str, Any],
+        aggregation: dict[str, Any],
+    ) -> list[str]:
+        return self._expected_obligation_signals(
+            field,
+            aggregation,
+            keys=(
+                "expected_aggregation_signals",
+                "aggregation_expected_signals",
+                "aggregation_assertions",
+                "evidence_signals",
+            ),
+        )
+
+    def _expected_obligation_signals(
+        self,
+        field: dict[str, Any],
+        obligation: dict[str, Any],
+        *,
+        keys: tuple[str, ...],
+    ) -> list[str]:
+        signals: list[str] = []
+        for source in (field, obligation):
+            for key in keys:
+                signals.extend(str(item) for item in self._as_list(source.get(key)) if item)
+        return self._dedupe_strings(signals)
+
+    def _missing_asserted_signals(self, tests: list[Node], signals: list[str]) -> list[str]:
+        if not tests or not signals:
+            return []
+        return [signal for signal in signals if not self._any_test_asserts(tests, signal)]
+
+    def _lexicon_refs_from_obligation(self, field: dict[str, Any], obligation: dict[str, Any]) -> list[str]:
+        refs: list[str] = []
+        for source in (field, obligation):
+            for key in ("lexicon_ref", "lexicon_refs", "lexicon"):
+                refs.extend(str(item) for item in self._as_list(source.get(key)) if item)
+        return self._dedupe_strings(refs)
+
+    def _obligation_text(self, field: dict[str, Any], obligation: dict[str, Any]) -> str:
+        values: list[Any] = []
+        for source in (field, obligation):
+            for key in (
+                "field_id",
+                "field",
+                "type",
+                "kind",
+                "data_type",
+                "value_kind",
+                "lexicon_ref",
+                "lexicon_refs",
+                "axis",
+                "axis_type",
+                "cardinality",
+                "display_cardinality",
+                "collection_context",
+            ):
+                values.append(source.get(key))
+        return " ".join(self._nested_strings(values)).lower()
+
+    def _first_present(
+        self,
+        *mappings: dict[str, Any],
+        keys: tuple[str, ...],
+    ) -> Any:
+        for mapping in mappings:
+            for key in keys:
+                value = mapping.get(key)
+                if value not in (None, "", []):
+                    return value
+        return None
+
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "required", "must"}
+        return bool(value)
 
     def _plan_tasks_for_journey(self, dag: DAG, journey_name: str, lex_refs: list[str]) -> list[Node]:
         matches: list[Node] = []

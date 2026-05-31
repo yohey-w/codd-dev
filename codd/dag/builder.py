@@ -809,6 +809,9 @@ def _validate_design_doc_journey_attributes(node_id: str, attributes: dict[str, 
     required_fields = {
         "runtime_constraints": ("capability", "required", "rationale"),
         "user_journeys": ("name", "criticality", "steps", "required_capabilities", "expected_outcome_refs"),
+        "display_fields": ("field_id",),
+        "presentation_specs": ("field_id",),
+        "aggregation_policies": ("field_id",),
     }
     for key, required in required_fields.items():
         entries = attributes.get(key, [])

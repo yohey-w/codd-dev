@@ -1,0 +1,25 @@
+rules:
+  - when: "axis=collection_cardinality AND coverage=gap"
+    severity: high
+    rationale: "Missing cardinality expectations can make a one-value display ambiguous when many records exist."
+  - when: "axis=test_data_variation AND coverage=gap"
+    severity: high
+    rationale: "Missing zero, one, or many-record test data can leave declared aggregation behavior unexercised."
+  - when: "axis=aggregation_function AND coverage=gap"
+    severity: high
+    rationale: "Missing aggregation policy can hide whether a displayed value is selected, summarized, grouped, or expanded."
+  - when: "axis=empty_partial_state AND coverage=gap"
+    severity: medium
+    rationale: "Missing empty or partial behavior can make absent data look like a valid value."
+  - when: "axis=grouping_dimension AND coverage=gap"
+    severity: medium
+    rationale: "Missing grouping policy can make grouped output hard to interpret or test."
+  - when: "axis=recency_selection AND coverage=gap"
+    severity: high
+    rationale: "Missing recency policy can select the wrong source record or make time-window behavior ambiguous."
+  - when: "axis=source_traceability AND coverage=gap"
+    severity: medium
+    rationale: "Missing source traceability can make summaries difficult to explain or verify."
+  - when: "coverage=implicit"
+    severity: info
+    rationale: "Implicit aggregation coverage should be reviewed but is not a blocking gap by default."
