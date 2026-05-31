@@ -238,6 +238,21 @@ def test_generate_uses_dependency_documents_as_ai_context(tmp_path, mock_ai_cli)
     assert "explicit cleanup/idempotent teardown" in prompt
 
 
+def test_design_prompt_requires_design_time_operational_behavior_model(tmp_path, mock_ai_cli):
+    project = _setup_project(tmp_path)
+
+    generate_wave(project, 1)
+    mock_ai_cli.clear()
+    generate_wave(project, 2)
+
+    prompt = mock_ai_cli[0]["input"]
+    assert "Operational Behavior Model (DESIGN-TIME, CRITICAL)" in prompt
+    assert "Do not postpone operational workflow discovery to E2E generation" in prompt
+    assert "operation_flow.operations" in prompt
+    assert "happy path, persistence/readback, permission boundary, terminal-state guard, and cross-actor reflection" in prompt
+    assert "This is not an E2E scenario list" in prompt
+
+
 def test_generate_supports_detailed_design_documents_with_mermaid_guidance(tmp_path, mock_ai_cli):
     project = _setup_project(tmp_path)
     config_path = project / "codd" / "codd.yaml"
@@ -656,6 +671,8 @@ def test_generate_test_document_includes_design_to_test_traceability(tmp_path, m
     assert "Design-to-test traceability" in prompt
     assert "verifiable behaviors" in prompt
     assert "traceability section" in prompt
+    assert "design-time `operation_flow` records as the authoritative source" in prompt
+    assert "Run the whole selected suite, collect every failure" in prompt
 
 
 def test_render_document_strips_markdown_fences_from_test_code():
@@ -672,3 +689,40 @@ def test_render_document_strips_markdown_fences_from_test_code():
     result = generator_module._render_document(artifact, [], [], body)
     assert "```" not in result
     assert "import" in result
+
+
+def test_render_document_lifts_operation_flow_yaml_block_into_frontmatter():
+    artifact = generator_module.WaveArtifact(
+        wave=2,
+        node_id="design:operations",
+        output="docs/design/operations.md",
+        title="Operations",
+        depends_on=[{"id": "req:system", "relation": "derives_from"}],
+        conventions=[],
+    )
+    body = """# Operations
+
+## 1. Overview
+
+### Operational Behavior Model
+
+```yaml
+operation_flow:
+  operations:
+    - id: assign_item
+      actor: operator
+      verb: assign
+      target: work_item
+      preconditions: [workspace exists]
+      expected_outcomes: [assignment persists]
+      forbidden_actors: [viewer]
+```
+"""
+
+    result = generator_module._render_document(artifact, [], [], body)
+    frontmatter = yaml.safe_load(result.split("---", 2)[1])
+
+    operation = frontmatter["codd"]["operation_flow"]["operations"][0]
+    assert operation["id"] == "assign_item"
+    assert operation["actor"] == "operator"
+    assert operation["expected_outcomes"] == ["assignment persists"]

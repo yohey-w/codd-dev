@@ -5,7 +5,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
+
+import yaml
+
+from codd.action_outcome import canonical_action_verb
+from codd.requirements_meta import normalize_operation_flow, operation_flow_operations
 
 
 @dataclass
@@ -17,6 +22,14 @@ class UserScenario:
     routes: list[str]
     acceptance_criteria: list[str]
     priority: str = "medium"
+    kind: str = "user_journey"
+    actor: str | None = None
+    coverage_axis: str | None = None
+    preconditions: list[str] = field(default_factory=list)
+    trigger: str | None = None
+    observable_outcomes: list[str] = field(default_factory=list)
+    source: str | None = None
+    operation_id: str | None = None
 
 
 @dataclass
@@ -24,6 +37,7 @@ class ScenarioCollection:
     scenarios: list[UserScenario] = field(default_factory=list)
     source_screen_flow: Optional[str] = None
     source_requirements: Optional[str] = None
+    source_operation_flows: list[str] = field(default_factory=list)
 
 
 _HEADING_RE = re.compile(r"^(?P<marks>#{1,6})\s+(?P<title>.+?)\s*$")
@@ -45,6 +59,59 @@ _ACTION_KEYS = {"action", "actions", "useraction", "useractions", "operation", "
 _TRANSITION_KEYS = {"transition", "transitions", "next", "nextroute", "遷移", "遷移先"}
 _LOW_VALUE_WORDS = {"none", "n/a", "na", "-"}
 _HIGH_KEYWORDS = {"auth", "login", "signup", "checkout", "payment", "admin", "security"}
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*", re.DOTALL)
+_DOC_SUFFIXES = {".md", ".yaml", ".yml"}
+_MUTATING_VERBS = {
+    "create",
+    "update",
+    "delete",
+    "submit",
+    "approve",
+    "assign",
+    "publish",
+    "revoke",
+    "import",
+    "send",
+    "enable",
+    "disable",
+    "complete",
+    "archive",
+    "restore",
+}
+_TERMINAL_VERBS = {"complete", "delete", "disable", "archive", "revoke"}
+_ACTOR_KEYS = ("actor", "actors", "role", "roles", "user", "users", "persona", "personas")
+_DENIED_ACTOR_KEYS = (
+    "denied_actors",
+    "forbidden_actors",
+    "unauthorized_actors",
+    "not_allowed_actors",
+    "not_allowed",
+)
+_OBSERVER_KEYS = (
+    "observer",
+    "observers",
+    "visible_to",
+    "visible_for",
+    "affected_actor",
+    "affected_actors",
+    "handoff_to",
+    "handoff",
+)
+_PRECONDITION_KEYS = ("preconditions", "precondition", "requires", "given", "setup", "state", "from_state")
+_OUTCOME_KEYS = (
+    "observable_outcomes",
+    "expected_outcomes",
+    "expected_outcome",
+    "outcomes",
+    "outcome",
+    "postconditions",
+    "postcondition",
+    "result",
+    "results",
+    "to_state",
+)
+_ROUTE_KEYS = ("routes", "route", "screens", "screen", "paths", "path", "urls", "url")
+_TRIGGER_KEYS = ("trigger", "control", "button", "command", "action")
 
 
 class ScenarioExtractor:
@@ -72,6 +139,13 @@ class ScenarioExtractor:
         routes = self._parse_screen_flow(sf_path) if sf_path.exists() else []
         requirements = self._parse_requirements(req_path) if req_path.exists() else []
         collection.scenarios = self._generate_scenarios(routes, requirements)
+        return collection
+
+    def extract_operational(self) -> ScenarioCollection:
+        """Extract MECE operational E2E scenarios from generic operation metadata."""
+        flows = _operation_flows_from_project(self.project_root)
+        collection = ScenarioCollection(source_operation_flows=[source for source, _flow in flows])
+        collection.scenarios = self._generate_operational_scenarios(flows)
         return collection
 
     def _parse_screen_flow(self, path: Path) -> list[dict]:
@@ -174,6 +248,135 @@ class ScenarioExtractor:
 
         return scenarios
 
+    def _generate_operational_scenarios(self, flows: list[tuple[str, Any]]) -> list[UserScenario]:
+        """Generate scenario candidates across operational coverage axes."""
+        scenarios: list[UserScenario] = []
+        for source, raw_flow in flows:
+            flow = normalize_operation_flow(raw_flow, source=source) or {}
+            flow_actors = _actor_values(flow)
+            for index, operation in enumerate(operation_flow_operations(flow)):
+                operation_id = str(operation.get("id") or operation.get("name") or f"operation[{index}]")
+                primary_actors = _actor_values(operation) or flow_actors or ["primary actor"]
+                denied_actors = _values_from_keys(operation, _DENIED_ACTOR_KEYS)
+                observers = _values_from_keys(operation, _OBSERVER_KEYS)
+                verb = canonical_action_verb(operation.get("verb")) or canonical_action_verb(operation_id)
+                target = _operation_target(operation)
+                routes = _routes_from_operation(operation)
+                trigger = _trigger_from_operation(operation, verb=verb, target=target)
+                preconditions = _operation_preconditions(flow, operation)
+                outcomes = _operation_outcomes(operation)
+                priority = _operation_priority(operation, verb)
+
+                for actor in primary_actors:
+                    scenarios.append(
+                        _operational_scenario(
+                            name=f"{actor} {operation_id} success",
+                            actor=actor,
+                            axis="happy_path",
+                            operation=operation,
+                            source=source,
+                            operation_id=operation_id,
+                            routes=routes,
+                            trigger=trigger,
+                            preconditions=preconditions,
+                            outcomes=outcomes,
+                            priority=priority,
+                            acceptance=[
+                                f"{actor} can complete {operation_id}.",
+                                *_visible_outcome_acceptance(outcomes),
+                            ],
+                        )
+                    )
+
+                    if verb in _MUTATING_VERBS:
+                        scenarios.append(
+                            _operational_scenario(
+                                name=f"{actor} {operation_id} readback",
+                                actor=actor,
+                                axis="persistence_readback",
+                                operation=operation,
+                                source=source,
+                                operation_id=operation_id,
+                                routes=routes,
+                                trigger=trigger,
+                                preconditions=preconditions,
+                                outcomes=outcomes,
+                                priority=priority,
+                                extra_steps=["Reload or reopen the relevant user surface.", "Verify the outcome is still visible."],
+                                acceptance=[
+                                    f"{operation_id} state change is still observable after readback.",
+                                    *_visible_outcome_acceptance(outcomes),
+                                ],
+                            )
+                        )
+
+                    if verb in _TERMINAL_VERBS:
+                        scenarios.append(
+                            _operational_scenario(
+                                name=f"{actor} {operation_id} terminal guard",
+                                actor=actor,
+                                axis="terminal_state_guard",
+                                operation=operation,
+                                source=source,
+                                operation_id=operation_id,
+                                routes=routes,
+                                trigger=trigger,
+                                preconditions=preconditions,
+                                outcomes=outcomes,
+                                priority=priority,
+                                extra_steps=["Attempt the same terminal operation again."],
+                                acceptance=[
+                                    "The completed terminal state cannot be repeated inconsistently.",
+                                    "The UI or API exposes a clear blocked/disabled/no-op outcome.",
+                                ],
+                            )
+                        )
+
+                for denied_actor in denied_actors:
+                    scenarios.append(
+                        _operational_scenario(
+                            name=f"{denied_actor} cannot {operation_id}",
+                            actor=denied_actor,
+                            axis="permission_boundary",
+                            operation=operation,
+                            source=source,
+                            operation_id=operation_id,
+                            routes=routes,
+                            trigger=trigger,
+                            preconditions=preconditions,
+                            outcomes=[],
+                            priority="high",
+                            acceptance=[
+                                f"{denied_actor} cannot complete {operation_id}.",
+                                "The forbidden action produces no persisted state change.",
+                            ],
+                        )
+                    )
+
+                for observer in observers:
+                    for actor in primary_actors[:1]:
+                        scenarios.append(
+                            _operational_scenario(
+                                name=f"{operation_id} reflected for {observer}",
+                                actor=observer,
+                                axis="cross_actor_reflection",
+                                operation=operation,
+                                source=source,
+                                operation_id=operation_id,
+                                routes=routes,
+                                trigger=trigger,
+                                preconditions=[*preconditions, f"{actor} has completed {operation_id}."],
+                                outcomes=outcomes,
+                                priority=priority,
+                                acceptance=[
+                                    f"{observer} observes the result of {actor} completing {operation_id}.",
+                                    *_visible_outcome_acceptance(outcomes),
+                                ],
+                            )
+                        )
+
+        return _dedupe_operational_scenarios(scenarios)
+
     def save_scenarios(
         self,
         collection: ScenarioCollection,
@@ -183,6 +386,17 @@ class ScenarioExtractor:
         out_path = output_path or self.project_root / "docs" / "e2e" / "scenarios.md"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(_render_scenarios_markdown(collection), encoding="utf-8")
+        return out_path
+
+    def save_operational_scenarios(
+        self,
+        collection: ScenarioCollection,
+        output_path: Optional[Path] = None,
+    ) -> Path:
+        """Write extracted operational scenarios to docs/e2e/operational-scenarios.md."""
+        out_path = output_path or self.project_root / "docs" / "e2e" / "operational-scenarios.md"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(_render_operational_scenarios_markdown(collection), encoding="utf-8")
         return out_path
 
 
@@ -492,3 +706,274 @@ def _render_scenarios_markdown(collection: ScenarioCollection) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _operation_flows_from_project(project_root: Path) -> list[tuple[str, Any]]:
+    try:
+        from codd.config import load_project_config
+
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        config = {}
+
+    flows: list[tuple[str, Any]] = []
+    if isinstance(config.get("operation_flow"), Mapping):
+        flows.append(("codd.yaml.operation_flow", config["operation_flow"]))
+
+    for path in _configured_doc_files(project_root, config):
+        payload = _frontmatter_or_yaml_payload(path)
+        if not isinstance(payload, Mapping):
+            continue
+        source = _display_path(path, project_root)
+        if isinstance(payload.get("operation_flow"), Mapping):
+            flows.append((f"{source}.operation_flow", payload["operation_flow"]))
+        codd_meta = payload.get("codd")
+        if isinstance(codd_meta, Mapping) and isinstance(codd_meta.get("operation_flow"), Mapping):
+            flows.append((f"{source}.codd.operation_flow", codd_meta["operation_flow"]))
+    return flows
+
+
+def _configured_doc_files(project_root: Path, config: Mapping[str, Any]) -> list[Path]:
+    scan = config.get("scan", {})
+    raw_dirs = scan.get("doc_dirs", ["docs/"]) if isinstance(scan, Mapping) else ["docs/"]
+    dirs = raw_dirs if isinstance(raw_dirs, list) else ["docs/"]
+    files: list[Path] = []
+    for raw_dir in dirs:
+        if not isinstance(raw_dir, str) or not raw_dir.strip():
+            continue
+        root = Path(raw_dir).expanduser()
+        if not root.is_absolute():
+            root = project_root / root
+        if not root.exists():
+            continue
+        if root.is_file():
+            if root.suffix in _DOC_SUFFIXES:
+                files.append(root)
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix in _DOC_SUFFIXES:
+                files.append(path)
+    return files
+
+
+def _frontmatter_or_yaml_payload(path: Path) -> dict[str, Any] | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if path.suffix == ".md":
+        match = _FRONTMATTER_RE.search(text)
+        if not match:
+            return None
+        raw = match.group(1)
+    else:
+        raw = text
+    try:
+        payload = yaml.safe_load(raw) or {}
+    except yaml.YAMLError:
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _actor_values(mapping: Mapping[str, Any]) -> list[str]:
+    return _values_from_keys(mapping, _ACTOR_KEYS)
+
+
+def _values_from_keys(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        if key in mapping:
+            values.extend(_coerce_text_list(mapping.get(key)))
+    return _dedupe_strings(values)
+
+
+def _coerce_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _split_phrase_values(value)
+    if isinstance(value, (list, tuple, set)):
+        items: list[str] = []
+        for item in value:
+            items.extend(_coerce_text_list(item))
+        return items
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _operation_target(operation: Mapping[str, Any]) -> str:
+    for key in ("target", "resource", "entity", "object", "subject", "item"):
+        value = operation.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _routes_from_operation(operation: Mapping[str, Any]) -> list[str]:
+    routes: list[str] = []
+    for key in _ROUTE_KEYS:
+        for value in _coerce_text_list(operation.get(key)):
+            normalized = _normalize_route(value)
+            if normalized:
+                routes.append(normalized)
+    return _ordered_routes(routes)
+
+
+def _trigger_from_operation(operation: Mapping[str, Any], *, verb: str | None, target: str) -> str:
+    for key in _TRIGGER_KEYS:
+        value = operation.get(key)
+        if value not in (None, ""):
+            return _sentence(str(value))
+    bits = [part for part in (verb, target) if part]
+    return _sentence(" ".join(bits) if bits else "perform the declared operation")
+
+
+def _operation_preconditions(flow: Mapping[str, Any], operation: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in _PRECONDITION_KEYS:
+        values.extend(_coerce_text_list(flow.get(key)))
+        values.extend(_coerce_text_list(operation.get(key)))
+    return _dedupe_strings(values)
+
+
+def _operation_outcomes(operation: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in _OUTCOME_KEYS:
+        values.extend(_coerce_text_list(operation.get(key)))
+    return _dedupe_strings(values)
+
+
+def _operation_priority(operation: Mapping[str, Any], verb: str | None) -> str:
+    raw = str(operation.get("priority") or "").strip().lower()
+    if raw in {"high", "medium", "low"}:
+        return raw
+    if verb in {"delete", "disable", "revoke", "approve", "publish"}:
+        return "high"
+    return "medium"
+
+
+def _visible_outcome_acceptance(outcomes: list[str]) -> list[str]:
+    if outcomes:
+        return [f"Visible outcome: {outcome}" for outcome in outcomes]
+    return ["The result is observable without inspecting implementation internals."]
+
+
+def _operational_scenario(
+    *,
+    name: str,
+    actor: str,
+    axis: str,
+    operation: Mapping[str, Any],
+    source: str,
+    operation_id: str,
+    routes: list[str],
+    trigger: str,
+    preconditions: list[str],
+    outcomes: list[str],
+    priority: str,
+    acceptance: list[str],
+    extra_steps: list[str] | None = None,
+) -> UserScenario:
+    steps = [f"Act as {actor}."]
+    steps.extend(f"Establish precondition: {item}" for item in preconditions)
+    if routes:
+        steps.append(f"Open {routes[0]}.")
+    steps.append(f"Trigger {trigger}")
+    steps.extend(f"Verify: {item}" for item in outcomes)
+    if extra_steps:
+        steps.extend(extra_steps)
+
+    return UserScenario(
+        name=name,
+        steps=_dedupe_strings(steps),
+        routes=routes,
+        acceptance_criteria=_dedupe_strings(acceptance),
+        priority=priority,
+        kind="operational",
+        actor=actor,
+        coverage_axis=axis,
+        preconditions=preconditions,
+        trigger=trigger,
+        observable_outcomes=outcomes,
+        source=source,
+        operation_id=operation_id,
+    )
+
+
+def _dedupe_operational_scenarios(scenarios: list[UserScenario]) -> list[UserScenario]:
+    seen: set[tuple[str | None, str | None, str | None, str]] = set()
+    deduped: list[UserScenario] = []
+    for scenario in scenarios:
+        key = (scenario.operation_id, scenario.actor, scenario.coverage_axis, "|".join(scenario.routes))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(scenario)
+    return deduped
+
+
+def _render_operational_scenarios_markdown(collection: ScenarioCollection) -> str:
+    lines = [
+        "# Operational E2E Scenarios",
+        "",
+        "These scenarios are generated from generic operation metadata. Run the whole suite, collect all failures, then repair after the full campaign finishes.",
+        "",
+        "## MECE Coverage Axes",
+        "- happy_path: the declared actor can complete the operation.",
+        "- persistence_readback: mutating outcomes remain visible after reload or readback.",
+        "- permission_boundary: denied actors cannot complete the operation or persist state.",
+        "- terminal_state_guard: terminal actions cannot be repeated into inconsistent state.",
+        "- cross_actor_reflection: observers see the result of another actor's operation.",
+        "",
+    ]
+    if collection.source_operation_flows:
+        lines.append("## Sources")
+        for source in collection.source_operation_flows:
+            lines.append(f"- {source}")
+        lines.append("")
+
+    if not collection.scenarios:
+        lines.append("_No operational scenarios extracted._")
+        lines.append("")
+        return "\n".join(lines)
+
+    for index, scenario in enumerate(collection.scenarios, start=1):
+        lines.append(f"## {index}. {scenario.name}")
+        lines.append(f"- Kind: {scenario.kind}")
+        lines.append(f"- Priority: {scenario.priority}")
+        lines.append(f"- Actor: {scenario.actor or 'unspecified'}")
+        lines.append(f"- Coverage Axis: {scenario.coverage_axis or 'unspecified'}")
+        lines.append(f"- Source Operation: {scenario.source or 'unknown'}#{scenario.operation_id or 'unknown'}")
+        lines.append(f"- Trigger: {scenario.trigger or 'unspecified'}")
+        lines.append(f"- Routes: {' -> '.join(f'`{route}`' for route in scenario.routes) or 'none'}")
+        lines.append("")
+        lines.append("### Preconditions")
+        if scenario.preconditions:
+            lines.extend(f"- {item}" for item in scenario.preconditions)
+        else:
+            lines.append("- No explicit preconditions declared.")
+        lines.append("")
+        lines.append("### Steps")
+        for step_index, step in enumerate(scenario.steps, start=1):
+            lines.append(f"{step_index}. {step}")
+        lines.append("")
+        lines.append("### Observable Outcomes")
+        if scenario.observable_outcomes:
+            lines.extend(f"- {item}" for item in scenario.observable_outcomes)
+        else:
+            lines.append("- No explicit observable outcomes declared.")
+        lines.append("")
+        lines.append("### Acceptance Criteria")
+        if scenario.acceptance_criteria:
+            lines.extend(f"- {criterion}" for criterion in scenario.acceptance_criteria)
+        else:
+            lines.append("- No matching requirement criteria found.")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _display_path(path: Path, project_root: Path) -> str:
+    try:
+        return str(path.relative_to(project_root))
+    except ValueError:
+        return str(path)

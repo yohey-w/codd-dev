@@ -783,6 +783,8 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         "- Insert a dedicated detailed design wave between overview design and implementation planning when the project has multiple modules, integrations, workflows, or shared domain concepts.",
         "- Detailed design artifacts must live under docs/detailed_design/ and stay Markdown + Mermaid (text-first, no binary diagrams).",
         "- Decide which detailed design artifacts are necessary from the project context; do not hardcode a fixed set. Good candidates include shared domain ownership, component dependency maps, ER/CRUD views, key sequence diagrams, and state machines.",
+        "- If requirements describe actors, permissions, mutable commands, lifecycle states, cross-actor visibility, or external side effects, assign a design artifact responsibility for an Operational Behavior Model before implementation planning. This may be a standalone docs/design/ artifact or an explicit section in a relevant design/detailed design artifact.",
+        "- The Operational Behavior Model is design-time source of truth, not an E2E test artifact. It must define actor/action/state/outcome obligations so implementation cannot omit them and tests can be generated from them later.",
         "- conventions are release-blocking constraints. If a convention is violated, the project is not releasable.",
         "- Extract conventions from the requirement documents for these categories:",
         "  security constraints (tenant isolation, authentication, authorization, auditability),",
@@ -856,6 +858,7 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         "以下の要件定義書を読み、このプロジェクトに必要な設計成果物・依存順序・artifactごとのconventionsを判断し、wave_config形式のYAMLを出力せよ。",
         "conventionsは『違反したらリリース不可の制約』として抽出し、各artifactへ必ず割り当てること。",
         "詳細設計waveが必要な場合は docs/detailed_design/ 配下に Mermaid 図を含む artifact を提案せよ。",
+        "業務上のactor/action/state/outcomeがある場合は、実装前の設計artifactとしてOperational Behavior Modelを必ず担当させ、E2Eテスト側へ先送りしないこと。",
         "",
         "Requirement documents:",
     ]
@@ -939,6 +942,8 @@ def _build_brownfield_plan_init_prompt(
         "- Map extracted modules to design documents. Group related modules into the same design doc where appropriate.",
         "- Use the extracted document node_ids in depends_on to trace back to the source analysis.",
         "- Insert detailed design documents for complex modules or module groups.",
+        "- If the extracted documents imply actors, permissions, mutable commands, lifecycle states, cross-actor visibility, or external side effects, assign a design artifact responsibility for an Operational Behavior Model before implementation planning.",
+        "- The Operational Behavior Model is design-time source of truth, not an E2E test artifact. It must define actor/action/state/outcome obligations so future changes and tests can trace back to design.",
         "- conventions are release-blocking constraints. Extract them from the patterns detected in the extracted documents (e.g., authentication, database models, API routes).",
         "- When frameworks are detected, also extract framework implicit conventions (routing patterns, directory-to-URL mapping rules, middleware semantics, ORM conventions, build-tool behaviors — any framework-specific rule that the framework enforces silently and that generated code must respect).",
         "- Do not add extracted documents themselves to wave_config — they are inputs, not outputs.",
@@ -967,6 +972,7 @@ def _build_brownfield_plan_init_prompt(
         "このプロジェクトの既存構造を網羅する設計成果物・依存順序・artifactごとのconventionsとmodulesを判断し、",
         "wave_config形式のYAMLを出力せよ。",
         "各artifactにはmodulesフィールドで対応するソースモジュール名のリストを必ず含めること。",
+        "既存コードに業務上のactor/action/state/outcomeがある場合はOperational Behavior Modelを設計artifactとして担当させ、E2Eテスト側へ先送りしないこと。",
         "",
         "Extracted documents:",
     ]
