@@ -284,3 +284,23 @@ def test_error_summaries_excluded_from_prompt():
     assert "Successful Task" in prompt
     assert "Failed Task" not in prompt
     assert "empty implementation output" not in prompt
+
+
+def test_implementation_prompt_forbids_meta_copy_in_user_facing_ui():
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "typescript", "frameworks": ["next.js"]}},
+        design_context=DesignContext(
+            node_id="design:login",
+            path=Path("docs/design/login.md"),
+            content="# Login design\n",
+        ),
+        spec=ImplementSpec("docs/design/login.md", ["src/app/login/page.tsx"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert "production user copy only" in prompt
+    assert "never surface design rationale" in prompt
+    assert "implementation assumptions" in prompt
+    assert "environment notes as visible text" in prompt

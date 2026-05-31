@@ -1095,6 +1095,7 @@ def _build_implementation_prompt(
         f"- Generate concrete production-oriented {language_name} source files.",
         framework_guidance,
         "- Reflect security, data boundaries, authentication, authorization, and auditability explicitly where the design requires them.",
+        "- For UI files or user-facing strings, write production user copy only; never surface design rationale, test/demo/sample labels, implementation assumptions, TODOs, internal process, or environment notes as visible text.",
         "- The tool will prepend traceability comments to each generated file; do not emit separate metadata files.",
         "- Do not emit prose, explanations, Markdown headings, YAML, TODOs, placeholders, or file descriptions outside the required FILE blocks.",
         "- Every generated file path must stay under one of the output paths shown above.",
