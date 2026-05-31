@@ -225,6 +225,40 @@ def test_extract_operational_preserves_commas_inside_yaml_list_items(tmp_path):
     ]
 
 
+def test_extract_operational_dedupes_overlapping_doc_dirs(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """scan:
+  doc_dirs:
+    - docs/
+    - docs/requirements/
+""",
+        encoding="utf-8",
+    )
+    req = tmp_path / "docs" / "requirements" / "ops.md"
+    req.parent.mkdir(parents=True)
+    req.write_text(
+        """---
+codd:
+  operation_flow:
+    operations:
+      - id: assign_item
+        actor: operator
+        verb: assign
+        target: work_item
+        route: /work-items
+---
+# Ops
+""",
+        encoding="utf-8",
+    )
+
+    collection = ScenarioExtractor(tmp_path).extract_operational()
+
+    assert collection.source_operation_flows == ["docs/requirements/ops.md.codd.operation_flow"]
+
+
 def test_save_operational_scenarios_md(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()

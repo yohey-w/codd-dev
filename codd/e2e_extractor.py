@@ -753,7 +753,15 @@ def _configured_doc_files(project_root: Path, config: Mapping[str, Any]) -> list
         for path in root.rglob("*"):
             if path.is_file() and path.suffix in _DOC_SUFFIXES:
                 files.append(path)
-    return files
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for path in files:
+        key = path.resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
 
 
 def _frontmatter_or_yaml_payload(path: Path) -> dict[str, Any] | None:
