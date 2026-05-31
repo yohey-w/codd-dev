@@ -199,6 +199,7 @@ operation_flow:
     assert readback.routes == ["/work-items"]
     assert "assignment persists" in readback.observable_outcomes
     assert "workspace exists" in readback.preconditions
+    assert any("mutable shared seed state is not trusted" in item for item in readback.acceptance_criteria)
 
 
 def test_extract_operational_scenarios_cover_derived_state_and_thresholds(tmp_path):
@@ -242,6 +243,7 @@ def test_extract_operational_scenarios_cover_derived_state_and_thresholds(tmp_pa
         if scenario.coverage_axis == "threshold_boundary"
     )
     assert "active_seconds emitted by the work surface" in derived.observable_outcomes
+    assert any("scenario-owned or idempotently reset" in step for step in derived.steps)
     assert any("measured or observed input -> durable state/event" in item for item in derived.acceptance_criteria)
     assert any("below, at, and above" in item for item in threshold.acceptance_criteria)
     assert "90% of required duration" in threshold.observable_outcomes

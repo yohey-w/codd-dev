@@ -236,6 +236,8 @@ def test_generate_uses_dependency_documents_as_ai_context(tmp_path, mock_ai_cli)
     assert "Mutating test data:" in prompt
     assert "per-run unique identifiers" in prompt
     assert "explicit cleanup/idempotent teardown" in prompt
+    assert "Scenario fixtures:" in prompt
+    assert "do not trust mutable shared seed state" in prompt
 
 
 def test_design_prompt_requires_design_time_operational_behavior_model(tmp_path, mock_ai_cli):
@@ -677,6 +679,7 @@ def test_generate_test_document_includes_design_to_test_traceability(tmp_path, m
     assert "design-time `operation_flow` records as the authoritative source" in prompt
     assert "derived-state/read-model chain" in prompt
     assert "below/at/above-boundary assertions" in prompt
+    assert "idempotently reset those preconditions" in prompt
     assert "Run the whole selected suite, collect every failure" in prompt
 
 

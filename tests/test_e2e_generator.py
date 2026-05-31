@@ -308,6 +308,7 @@ def test_operational_scenarios_require_public_trigger_and_chain_readback(tmp_pat
     assert result.exit_code == 0
     content = (tmp_path / "docs" / "e2e" / "operational-scenarios.md").read_text(encoding="utf-8")
     assert "Evidence exercises the actor-facing public trigger" in content
+    assert "mutable shared seed state is not trusted" in content
     assert "Evidence verifies producer -> durable state/event -> readback/consumer reflection" in content
     assert "reviewer observes the result" in content
 
@@ -340,6 +341,7 @@ def test_operational_scenarios_render_derived_state_axes(tmp_path):
     content = (tmp_path / "docs" / "e2e" / "operational-scenarios.md").read_text(encoding="utf-8")
     assert "derived_state_chain" in content
     assert "threshold_boundary" in content
+    assert "scenario-owned or idempotently reset state" in content
     assert "Evidence verifies measured or observed input -> durable state/event" in content
     assert "Evidence covers behavior below, at, and above" in content
 
