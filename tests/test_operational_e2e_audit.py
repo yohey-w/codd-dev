@@ -72,6 +72,50 @@ test('assign item persists', async () => {});
     assert report.summary["uncovered"] == 1
 
 
+def test_operational_audit_does_not_treat_integration_marker_as_e2e(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: process_webhook
+      actor: system
+      verb: process
+      target: external_webhook
+      route: /webhooks/provider
+      trigger: provider webhook callback
+      expected_outcomes: [webhook updates persisted state]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "integration"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "provider-webhook.test.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#process_webhook axis=happy_path
+test('webhook handler persists state with mocked provider', async () => {});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    success = next(row for row in report.rows if row.coverage_axis == "happy_path")
+    assert success.coverage_status == "covered_by_lower_test"
+    assert success.matched_tests == ["tests/integration/provider-webhook.test.ts"]
+    assert report.summary["covered_by_e2e"] == 0
+    assert report.summary["covered_by_lower_test"] == 1
+    assert report.summary["not_covered_by_e2e"] == 1
+    assert report.summary["uncovered"] == 0
+
+    plan = build_agent_workflow_plan(tmp_path, max_scenarios_per_shard=5)
+    candidate_names = [
+        scenario["name"]
+        for shard in plan.shards
+        for scenario in shard.scenarios
+    ]
+    assert "system process_webhook success" in candidate_names
+
+
 def test_operational_audit_rejects_api_shortcut_for_eventful_trigger(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
@@ -108,7 +152,45 @@ test('position persists through API shortcut', async () => {
     assert "trigger-source evidence terms" in readback.required_evidence[-1]
     assert "direct API/storage shortcuts are not enough" in readback.suggested_next_action
     assert report.summary["covered_by_e2e"] == 0
-    assert report.summary["uncovered"] == 3
+    assert report.summary["needs_trigger_evidence"] == 1
+    assert report.summary["not_covered_by_e2e"] == 3
+    assert report.summary["uncovered"] == 2
+
+
+def test_operational_audit_requires_source_term_for_external_stream_trigger(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: complete_media
+      actor: learner
+      verb: complete
+      target: media_lesson
+      route: /lessons/:lessonId
+      trigger: external media stream watched-duration event reaches completion threshold
+      expected_outcomes: [completion persists]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "complete_media.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#complete_media axis=happy_path
+test('completion threshold persists through direct API shortcut', async () => {
+  await request.put('/api/media/lesson-1/position', { data: { position: 90 } });
+});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    success = next(row for row in report.rows if row.coverage_axis == "happy_path")
+    assert success.coverage_status == "needs_trigger_evidence"
+    assert "external" in success.required_evidence[-1]
+    assert "stream" in success.required_evidence[-1]
+    assert report.summary["covered_by_e2e"] == 0
 
 
 def test_operational_audit_accepts_event_source_evidence(tmp_path):
