@@ -50,7 +50,10 @@ def test_phenomenon_fixer_disabled_app_server_invokes_subprocess(
     invoker = phenomenon_fixer._build_default_ai_invoke(tmp_path, None)
 
     assert invoker("phenomenon prompt") == "subprocess-output"
-    assert calls == [("mock-fix-ai", None, config, "phenomenon prompt")]
+    assert calls[0][0] == "mock-fix-ai"
+    assert isinstance(calls[0][1], Path)
+    assert calls[0][1].name.startswith("codd-fix-ai-")
+    assert calls[0][2:] == (config, "phenomenon prompt")
 
 
 def test_phenomenon_fixer_enabled_app_server_invokes_codex_app_server_ai_command(
@@ -82,7 +85,9 @@ def test_phenomenon_fixer_enabled_app_server_invokes_codex_app_server_ai_command
     invoker = phenomenon_fixer._build_default_ai_invoke(tmp_path, None)
 
     assert invoker("phenomenon prompt") == "app-server-output"
-    assert project_roots == [None]
+    assert len(project_roots) == 1
+    assert isinstance(project_roots[0], Path)
+    assert project_roots[0].name.startswith("codd-fix-ai-")
     assert client.start_calls == 1
     assert client.send_calls[0][0] == "thread-1"
     assert client.send_calls[0][1] == "phenomenon prompt"
@@ -119,7 +124,10 @@ def test_phenomenon_fixer_app_server_init_failure_falls_back_to_subprocess(
         invoker = phenomenon_fixer._build_default_ai_invoke(tmp_path, None)
 
     assert invoker("phenomenon prompt") == "fallback-output"
-    assert calls == [("mock-fix-ai", None, config, "phenomenon prompt")]
+    assert calls[0][0] == "mock-fix-ai"
+    assert isinstance(calls[0][1], Path)
+    assert calls[0][1].name.startswith("codd-fix-ai-")
+    assert calls[0][2:] == (config, "phenomenon prompt")
     assert "Codex App Server fallback" in caplog.text
     assert "app server unavailable" in caplog.text
 
@@ -149,6 +157,7 @@ def test_phenomenon_fixer_claude_print_flag_is_passed_as_factory_command_overrid
 
     assert invoker("phenomenon prompt") == "adapter-output"
     assert captured["config"] == config
-    assert captured["project_root"] is None
+    assert isinstance(captured["project_root"], Path)
+    assert captured["project_root"].name.startswith("codd-fix-ai-")
     assert captured["command_override"] == "claude --model opus --print"
     assert captured["prompt"] == "phenomenon prompt"

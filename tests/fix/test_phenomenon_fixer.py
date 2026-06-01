@@ -10,7 +10,7 @@ from typing import Callable
 import pytest
 
 from codd.fix.interactive_prompt import InteractivePrompt
-from codd.fix.phenomenon_fixer import run_phenomenon_fix
+from codd.fix.phenomenon_fixer import _prepare_plain_text_ai_command, run_phenomenon_fix
 
 
 def _write_project(tmp_path: Path, design_docs: dict[str, str]) -> Path:
@@ -71,6 +71,31 @@ def _scripted_ai(responses: list[str]) -> Callable[[str], str]:
             return "{}"
 
     return invoke
+
+
+def test_plain_text_ai_command_hardens_codex_exec(tmp_path):
+    command = (
+        "codex exec --full-auto --model gpt-5.5 "
+        "-c 'reasoning_effort=\"medium\"' "
+        "--dangerously-bypass-approvals-and-sandbox "
+        "--cd /project -"
+    )
+
+    resolved = _prepare_plain_text_ai_command(command, tmp_path)
+
+    assert "--full-auto" not in resolved
+    assert "--dangerously-bypass-approvals-and-sandbox" not in resolved
+    assert "--cd /project" not in resolved
+    assert "--sandbox read-only" in resolved
+    assert tmp_path.as_posix() in resolved
+    assert "--skip-git-repo-check" in resolved
+    assert resolved.endswith(" -")
+
+
+def test_plain_text_ai_command_leaves_non_codex_command_unchanged(tmp_path):
+    command = "claude --print"
+
+    assert _prepare_plain_text_ai_command(command, tmp_path) == command
 
 
 def test_empty_phenomenon_aborts(tmp_path):

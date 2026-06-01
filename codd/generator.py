@@ -516,6 +516,13 @@ def _build_generation_prompt(
                 "- For passive or automatic behavior, name the actor-facing public trigger (for example a user action, stream event, timer, callback, or system observation). A manual admin shortcut or direct storage write is not the same operation unless the requirements declare it as the public surface.",
                 "- Enumerate operational obligations across these MECE axes before coding: happy path, persistence/readback, permission boundary, terminal-state guard, cross-actor reflection, derived-state/read-model chain, and threshold/boundary behavior.",
                 "- This is not an E2E scenario list. E2E tests are only evidence generated later from the design-time operation model.",
+                "",
+                "Actor-Facing Surface/Copy Obligations (DESIGN-TIME, CRITICAL):",
+                "- If dependency documents describe user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, define the actor-facing surface/copy obligations before implementation planning.",
+                "- For each relevant surface, state its purpose, primary audience/actor, allowed actions/navigation, forbidden actions/navigation, required visible copy intent, and forbidden copy patterns.",
+                "- User-visible copy must use the audience's job-to-be-done language. Do not expose implementation rationale, internal process notes, demo/test/sample labels, environment assumptions, or hidden authority-boundary explanations unless the audience's explicit task is to administer those boundaries.",
+                "- Entry or pre-authentication surfaces must not expose ambiguous role-resolved or protected navigation; navigation must match the surface purpose and current access state.",
+                "- When requirements use internal role identifiers and business/user-facing role names, prefer the business/user-facing labels in visible copy and document the mapping.",
             ]
         )
 
@@ -551,6 +558,7 @@ def _build_generation_prompt(
                 "- The final section '## E2E Test Generation Meta-Prompt' serves as a machine-readable instruction for `codd propagate` to auto-generate E2E tests.",
                 "- MECE domain decomposition: Split E2E tests into non-overlapping behavioral domains. Each file owns exactly one domain.",
                 "- Scenario derivation: First derive test obligations from design-time `operation_flow` and verifiable behaviors, then derive concrete E2E evidence candidates. Cover positive, negative, persistence/readback, permission-boundary, terminal-state, cross-actor-reflection, derived-state/read-model chain, and threshold/boundary cases when the design declares those axes.",
+                "- Actor-facing surface/copy coverage: Derive browser E2E obligations from design-time surface/copy obligations. Assert required visible labels/copy, assert forbidden actions/links/copy patterns are absent, and cover actor-specific wording where the design declares different audiences.",
                 "- For measured or observed behavior, test the producer -> durable state/event -> derived value/read model -> consumer surface chain. If a value has a threshold, percentage, count, duration, score, or latest/last/resume rule, include below/at/above-boundary assertions where feasible.",
                 "- Architecture adaptation: Include a rule that test generation must scan the actual route/endpoint structure and mark unimplemented endpoints with `test.fixme()` instead of skipping.",
                 "- Quality gate: Define pass criteria — all PASS, zero SKIP, operation_flow/verifiable-behavior coverage, and any release-blocking constraints from conventions.",
@@ -722,6 +730,11 @@ def _build_test_code_prompt(
         "- Without this assertion, a DB connection failure silently passes when the test only checks for specific success codes like [200, 302].",
         "- For browser tests after page.goto() or form submission, check response?.status() < 500 before asserting page content.",
         "- For API tests, assert < 500 first, then assert the specific expected status code.",
+        "",
+        "Actor-facing surface/copy coverage (CRITICAL):",
+        "- If dependency documents declare actor-facing surface/copy obligations, browser tests MUST assert the required visible labels/copy and MUST assert forbidden actions, links, or copy patterns are absent.",
+        "- For role-specific surfaces, test the audience-specific wording and available navigation for that actor instead of only checking that the route returns 200.",
+        "- Do not accept generic smoke assertions when the design declares concrete visible copy, role labels, or forbidden navigation.",
         "",
     ]
 

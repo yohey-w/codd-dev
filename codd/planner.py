@@ -785,6 +785,8 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         "- Decide which detailed design artifacts are necessary from the project context; do not hardcode a fixed set. Good candidates include shared domain ownership, component dependency maps, ER/CRUD views, key sequence diagrams, and state machines.",
         "- If requirements describe actors, permissions, mutable commands, lifecycle states, cross-actor visibility, or external side effects, assign a design artifact responsibility for an Operational Behavior Model before implementation planning. This may be a standalone docs/design/ artifact or an explicit section in a relevant design/detailed design artifact.",
         "- The Operational Behavior Model is design-time source of truth, not an E2E test artifact. It must define actor/action/state/outcome obligations so implementation cannot omit them and tests can be generated from them later.",
+        "- If requirements describe user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, assign a design artifact responsibility for actor-facing surface/copy obligations before implementation planning.",
+        "- Actor-facing surface/copy obligations must define each surface's purpose, primary audience, allowed and forbidden actions/navigation, required user-visible copy intent, and forbidden copy patterns. The copy must use the audience's job-to-be-done language, not implementation rationale, internal process notes, demo/test labels, or hidden authority-boundary explanations.",
         "- conventions are release-blocking constraints. If a convention is violated, the project is not releasable.",
         "- Extract conventions from the requirement documents for these categories:",
         "  security constraints (tenant isolation, authentication, authorization, auditability),",
@@ -859,6 +861,7 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         "conventionsは『違反したらリリース不可の制約』として抽出し、各artifactへ必ず割り当てること。",
         "詳細設計waveが必要な場合は docs/detailed_design/ 配下に Mermaid 図を含む artifact を提案せよ。",
         "業務上のactor/action/state/outcomeがある場合は、実装前の設計artifactとしてOperational Behavior Modelを必ず担当させ、E2Eテスト側へ先送りしないこと。",
+        "利用者に見える画面・導線・文言・ロール説明がある場合は、各surfaceの目的・対象actor・許可/禁止される導線・必要文言・禁止文言を設計artifactで必ず担当させること。",
         "",
         "Requirement documents:",
     ]
@@ -944,6 +947,8 @@ def _build_brownfield_plan_init_prompt(
         "- Insert detailed design documents for complex modules or module groups.",
         "- If the extracted documents imply actors, permissions, mutable commands, lifecycle states, cross-actor visibility, or external side effects, assign a design artifact responsibility for an Operational Behavior Model before implementation planning.",
         "- The Operational Behavior Model is design-time source of truth, not an E2E test artifact. It must define actor/action/state/outcome obligations so future changes and tests can trace back to design.",
+        "- If the extracted documents imply user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, assign a design artifact responsibility for actor-facing surface/copy obligations before implementation planning.",
+        "- Actor-facing surface/copy obligations must define each surface's purpose, primary audience, allowed and forbidden actions/navigation, required user-visible copy intent, and forbidden copy patterns. The copy must use the audience's job-to-be-done language, not implementation rationale, internal process notes, demo/test labels, or hidden authority-boundary explanations.",
         "- conventions are release-blocking constraints. Extract them from the patterns detected in the extracted documents (e.g., authentication, database models, API routes).",
         "- When frameworks are detected, also extract framework implicit conventions (routing patterns, directory-to-URL mapping rules, middleware semantics, ORM conventions, build-tool behaviors — any framework-specific rule that the framework enforces silently and that generated code must respect).",
         "- Do not add extracted documents themselves to wave_config — they are inputs, not outputs.",
@@ -973,6 +978,7 @@ def _build_brownfield_plan_init_prompt(
         "wave_config形式のYAMLを出力せよ。",
         "各artifactにはmodulesフィールドで対応するソースモジュール名のリストを必ず含めること。",
         "既存コードに業務上のactor/action/state/outcomeがある場合はOperational Behavior Modelを設計artifactとして担当させ、E2Eテスト側へ先送りしないこと。",
+        "既存コードに利用者に見える画面・導線・文言・ロール説明がある場合は、各surfaceの目的・対象actor・許可/禁止される導線・必要文言・禁止文言を設計artifactで担当させること。",
         "",
         "Extracted documents:",
     ]

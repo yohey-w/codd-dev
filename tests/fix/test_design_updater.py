@@ -53,6 +53,33 @@ def test_update_writes_diff_and_changed_flag(tmp_path):
     assert update.diff
 
 
+def test_update_prompt_requires_targeted_surface_copy_guardrails(tmp_path):
+    target = tmp_path / "auth_login.md"
+    target.write_text(_doc_with_journeys(), encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    def fake_ai(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return _doc_with_journeys("Additional note about login copy.\n")
+
+    update_design_doc(
+        target,
+        phenomenon_text="login surface has an unrelated home link and role copy is internal",
+        analysis=PhenomenonAnalysis(
+            intent="improvement",
+            subject_terms=["login surface", "home link", "role copy"],
+        ),
+        ai_invoke=fake_ai,
+    )
+
+    prompt = captured["prompt"]
+    assert "Every changed line must be causally tied to PHENOMENON_TEXT" in prompt
+    assert "Do NOT make unrelated formatting" in prompt
+    assert "actor-facing surface/copy obligations" in prompt
+    assert "required visible copy is present" in prompt
+    assert "forbidden links/actions/copy are absent" in prompt
+
+
 def test_no_op_when_llm_returns_unchanged_content(tmp_path):
     target = tmp_path / "auth_login.md"
     original = _doc_with_journeys()
