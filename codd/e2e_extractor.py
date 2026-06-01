@@ -199,7 +199,6 @@ _EVENTFUL_SOURCE_WORDS = {
     "notification",
     "pause",
     "player",
-    "provider",
     "queue",
     "scheduler",
     "seeked",
@@ -1161,8 +1160,12 @@ def _has_threshold_contract(operation: Mapping[str, Any], outcomes: list[str]) -
 def _has_source_signal_contract(operation: Mapping[str, Any], trigger: str, outcomes: list[str]) -> bool:
     if _source_signal_contract_values(operation):
         return True
-    text = f"{trigger} {_operation_contract_text(operation, outcomes)}".lower().replace("-", "_")
-    return any(token in text for token in _EVENTFUL_SOURCE_WORDS)
+    return _has_eventful_source_terms(trigger)
+
+
+def _has_eventful_source_terms(value: str) -> bool:
+    tokens = set(re.findall(r"[a-z0-9_]+", value.lower().replace("-", "_")))
+    return bool(tokens & _EVENTFUL_SOURCE_WORDS)
 
 
 def _operation_contract_text(operation: Mapping[str, Any], outcomes: list[str]) -> str:

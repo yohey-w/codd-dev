@@ -358,6 +358,32 @@ def test_operational_scenarios_render_derived_state_axes(tmp_path):
     assert "all-fields-present ideal stub" in content
 
 
+def test_operational_scenarios_do_not_treat_provider_word_as_partial_signal(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: password_login
+      actor: operator
+      verb: login
+      target: dashboard
+      route: /login
+      trigger: submit credentials through an authentication provider
+      expected_outcomes: [operator reaches dashboard]
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(main, ["e2e", "extract", "--path", str(tmp_path), "--mode", "operational"])
+
+    assert result.exit_code == 0
+    content = (tmp_path / "docs" / "e2e" / "operational-scenarios.md").read_text(encoding="utf-8")
+    assert "Extracted 1 operational scenario(s)" in result.output
+    assert "partial_signal_contract" in content
+    assert "password_login partial source signal" not in content
+
+
 def test_cli_extracts_operational_catalog(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
