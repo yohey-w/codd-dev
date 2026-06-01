@@ -32,7 +32,8 @@ FAILURE_TAXONOMY = [
 _COVER_MARKER_RE = re.compile(
     r"codd:\s*covers\s+"
     r"(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
-    r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)",
+    r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)"
+    r"(?:[ \t]+(?P<details>[^\r\n]*))?",
     re.IGNORECASE,
 )
 _BLOCKER_MARKER_RE = re.compile(
@@ -74,6 +75,7 @@ class TestEvidence:
     operation: str
     axis: str
     test_level: str
+    actor: str = ""
     evidence_text: str = ""
 
 
@@ -85,6 +87,7 @@ class BlockerEvidence:
     operation: str
     axis: str
     reason: str
+    actor: str = ""
     details: str = ""
 
 
@@ -97,6 +100,7 @@ class DodEvidence:
     axis: str
     obligation: str
     test_level: str
+    actor: str = ""
     evidence_text: str = ""
     details: str = ""
 
@@ -178,8 +182,16 @@ def build_operational_e2e_audit(
     dod_evidence = _scan_dod_evidence(project_root, test_dirs=test_dirs)
     blockers = _scan_blocker_evidence(project_root, test_dirs=test_dirs)
     heuristic_index = _scan_heuristic_text_matches(project_root, collection.scenarios, test_dirs=test_dirs)
+    actor_specific_keys = _actor_specific_operation_axes(collection.scenarios)
     rows = [
-        _audit_scenario(scenario, evidence, dod_evidence, blockers, heuristic_index)
+        _audit_scenario(
+            scenario,
+            evidence,
+            dod_evidence,
+            blockers,
+            heuristic_index,
+            actor_specific_keys,
+        )
         for scenario in collection.scenarios
     ]
     summary = _summarize(rows, runner_backend=backend)
@@ -450,6 +462,7 @@ def _scan_test_evidence(
                     operation=match.group("operation").strip(),
                     axis=match.group("axis").strip(),
                     test_level=_classify_test_level(rel_path),
+                    actor=_marker_actor(match.group("details")),
                     evidence_text=_strip_comment_only_lines(text).lower(),
                 )
             )
@@ -477,6 +490,7 @@ def _scan_dod_evidence(
                     axis=match.group("axis").strip(),
                     obligation=_normalize_obligation_id(match.group("obligation")),
                     test_level=_classify_test_level(rel_path),
+                    actor=_marker_actor(match.group("details")),
                     evidence_text=body_text,
                     details=(match.group("details") or "").strip(),
                 )
@@ -503,6 +517,7 @@ def _scan_blocker_evidence(
                     operation=match.group("operation").strip(),
                     axis=match.group("axis").strip(),
                     reason=match.group("reason").strip(),
+                    actor=_marker_actor(match.group("details")),
                     details=(match.group("details") or "").strip(),
                 )
             )
@@ -543,23 +558,28 @@ def _audit_scenario(
     dod_evidence: list[DodEvidence],
     blockers: list[BlockerEvidence],
     heuristic_index: dict[tuple[str, str], list[str]],
+    actor_specific_keys: set[tuple[str, str]],
 ) -> ScenarioAuditRow:
     operation_key = _operation_key(scenario)
     axis = scenario.coverage_axis or "unspecified"
+    requires_actor_marker = (operation_key, axis) in actor_specific_keys
     matching_evidence = [
         item
         for item in evidence
         if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
+        and _actor_marker_matches(item.actor, scenario.actor, requires_actor_marker)
     ]
     matching_dod_evidence = [
         item
         for item in dod_evidence
         if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
+        and _actor_marker_matches(item.actor, scenario.actor, requires_actor_marker)
     ]
     matching_blockers = [
         item
         for item in blockers
         if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
+        and _actor_marker_matches(item.actor, scenario.actor, requires_actor_marker)
     ]
     e2e_evidence = [item for item in matching_evidence if item.test_level == "e2e"]
     lower_evidence = [item for item in matching_evidence if item.test_level != "e2e"]
@@ -775,6 +795,41 @@ def _operation_key(scenario: UserScenario) -> str:
 
 def _operation_matches(marker_operation: str, operation_key: str, operation_id: str | None) -> bool:
     return marker_operation == operation_key or bool(operation_id and marker_operation == operation_id)
+
+
+def _marker_actor(details: str | None) -> str:
+    if not details:
+        return ""
+    match = re.search(r"(?:^|\s)actor\s*=\s*(?P<actor>[A-Za-z0-9_.:-]+)", details, re.IGNORECASE)
+    return _normalize_actor(match.group("actor")) if match else ""
+
+
+def _normalize_actor(actor: str | None) -> str:
+    return (actor or "").strip().lower()
+
+
+def _actor_specific_operation_axes(scenarios: Iterable[UserScenario]) -> set[tuple[str, str]]:
+    actors_by_axis: dict[tuple[str, str], set[str]] = {}
+    for scenario in scenarios:
+        operation_key = _operation_key(scenario)
+        axis = scenario.coverage_axis or "unspecified"
+        actor = _normalize_actor(scenario.actor)
+        if not actor:
+            continue
+        actors_by_axis.setdefault((operation_key, axis), set()).add(actor)
+    return {key for key, actors in actors_by_axis.items() if len(actors) > 1}
+
+
+def _actor_marker_matches(
+    marker_actor: str,
+    scenario_actor: str | None,
+    requires_actor_marker: bool,
+) -> bool:
+    normalized_marker_actor = _normalize_actor(marker_actor)
+    normalized_scenario_actor = _normalize_actor(scenario_actor)
+    if normalized_marker_actor:
+        return normalized_marker_actor == normalized_scenario_actor
+    return not requires_actor_marker
 
 
 def _risk_level(priority: str) -> str:
