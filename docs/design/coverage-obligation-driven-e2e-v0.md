@@ -53,6 +53,30 @@ sequence of obligations under an actor, not because "journey" is separate from c
 Adoption boundary: external methods are adopted as design inputs, not as wholesale
 framework dependencies. CoDD should express them in its own coverage vocabulary.
 
+## Runner And Agent Boundary
+
+CoDD core owns the contract, not the worker implementation. The core artifacts are the
+obligation/scenario matrix, explicit `codd: covers ...` markers, selected-suite policy,
+failure taxonomy, trace matrix, and repair policy. These artifacts must work when the
+runner is a plain local Playwright command, a CI shard, a generic agent workflow, or an
+optional Claude Dynamic Workflows adapter.
+
+Claude Dynamic Workflows, or any similar multi-agent product, is therefore an adapter.
+It may parallelize exploration, execution, screenshots, and triage, but it must emit the
+same contract-shaped result as other adapters. CoDD must not require Claude-specific
+features to extract obligations, decide coverage status, or mark evidence as complete.
+
+Operational E2E evidence is complete only when the test declares the source operation
+and coverage axis with a machine-readable marker such as:
+
+```ts
+// codd: covers operation=codd.yaml.operation_flow#assign_item axis=persistence_readback
+```
+
+Heuristic text matches may help migration, but they are review candidates, not green
+coverage. This prevents route-name or comment-only coincidences from masking a missing
+assertion path.
+
 ## Existing CoDD Alignment
 
 | Existing concept | Current role | Coverage-obligation role |

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import find_codd_dir, load_project_config
 from codd.generator import _invoke_ai_command, _resolve_ai_command
 from codd.scanner import _extract_frontmatter
@@ -314,7 +315,7 @@ def _prepare_fix_ai_command(ai_command: str) -> str:
     If the command contains a --system-prompt intended for document generation,
     replace it with the fix-optimized system prompt.
     """
-    parts = shlex.split(ai_command)
+    parts = with_default_claude_permission_bypass(shlex.split(ai_command))
     cleaned: list[str] = []
     skip_next = False
     has_system_prompt = False

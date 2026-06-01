@@ -10,6 +10,7 @@ import shlex
 import subprocess
 from typing import Any, Callable, Mapping, Protocol
 
+from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import load_project_config
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 
@@ -295,11 +296,11 @@ def resolve_timeout(config: Mapping[str, Any] | None = None, timeout: float | No
 
 def _prepare_command(command: list[str], model: str | None) -> list[str]:
     if model is None:
-        return command
+        return with_default_claude_permission_bypass(command)
     prepared = [part.replace("{model}", model) for part in command]
     if prepared != command or _has_model_arg(prepared):
-        return prepared
-    return [*prepared, "--model", model]
+        return with_default_claude_permission_bypass(prepared)
+    return with_default_claude_permission_bypass([*prepared, "--model", model])
 
 
 def _has_model_arg(command: list[str]) -> bool:

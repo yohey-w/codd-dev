@@ -277,6 +277,7 @@ def test_cli_generates_operational_scenarios_from_operation_flow(tmp_path):
     content = (tmp_path / "generated" / "test_operator_assign_item_readback.spec.ts").read_text(encoding="utf-8")
     assert "// Kind: operational" in content
     assert "// Coverage axis: persistence_readback" in content
+    assert "// codd: covers operation=codd.yaml.operation_flow#assign_item axis=persistence_readback" in content
     assert "// Evidence policy: exercise the actor-facing public trigger" in content
     assert "collect all failures" in content
     assert 'await page.goto("http://app.test/work-items");' in content

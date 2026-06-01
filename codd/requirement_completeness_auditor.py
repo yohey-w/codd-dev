@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from codd.ask_user_question_adapter import send_ask_items
+from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import load_project_config
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.hitl_session import HitlSession
@@ -207,7 +208,7 @@ class RequirementCompletenessAuditor:
             return None
         try:
             result = subprocess.run(
-                shlex.split(command),
+                with_default_claude_permission_bypass(shlex.split(command)),
                 input=prompt,
                 capture_output=True,
                 text=True,
