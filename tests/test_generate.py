@@ -255,6 +255,8 @@ def test_design_prompt_requires_design_time_operational_behavior_model(tmp_path,
     assert "derived or aggregate read models" in prompt
     assert "measurement_source" in prompt
     assert "threshold/boundary behavior" in prompt
+    assert "dod_obligations" in prompt
+    assert "machine-checkable" in prompt
     assert "This is not an E2E scenario list" in prompt
     assert "Actor-Facing Surface/Copy Obligations (DESIGN-TIME, CRITICAL)" in prompt
     assert "allowed actions/navigation" in prompt

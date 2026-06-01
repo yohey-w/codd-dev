@@ -137,6 +137,10 @@ def test_load_operational_scenarios_from_markdown_reads_metadata(tmp_path):
 
 ### Acceptance Criteria
 - assign_item state change is still observable after readback.
+
+### DoD Obligations
+- scenario_state: scenario state is reset
+- durable_readback: persisted state is visible after reload
 """,
         encoding="utf-8",
     )
@@ -151,6 +155,7 @@ def test_load_operational_scenarios_from_markdown_reads_metadata(tmp_path):
     assert scenario.operation_id == "assign_item"
     assert scenario.preconditions == ["workspace exists"]
     assert scenario.observable_outcomes == ["assignment persists"]
+    assert [item.id for item in scenario.dod_obligations] == ["scenario_state", "durable_readback"]
 
 
 def test_load_operational_scenarios_ignores_intro_sections(tmp_path):
@@ -279,6 +284,8 @@ def test_cli_generates_operational_scenarios_from_operation_flow(tmp_path):
     assert "// Coverage axis: persistence_readback" in content
     assert "// codd: covers operation=codd.yaml.operation_flow#assign_item axis=persistence_readback" in content
     assert "// Evidence policy: exercise the actor-facing public trigger" in content
+    assert "// DoD obligations:" in content
+    assert "// DoD marker format: codd: dod operation=<source_operation> axis=<coverage_axis> obligation=<obligation_id>" in content
     assert "collect all failures" in content
     assert 'await page.goto("http://app.test/work-items");' in content
     assert ASSERTION_GUARD_MESSAGE in content
@@ -311,6 +318,8 @@ def test_operational_scenarios_require_public_trigger_and_chain_readback(tmp_pat
     assert "Evidence exercises the actor-facing public trigger" in content
     assert "mutable shared seed state is not trusted" in content
     assert "Evidence verifies producer -> durable state/event -> readback/consumer reflection" in content
+    assert "### DoD Obligations" in content
+    assert "durable_readback" in content
     assert "reviewer observes the result" in content
 
 
@@ -342,9 +351,11 @@ def test_operational_scenarios_render_derived_state_axes(tmp_path):
     content = (tmp_path / "docs" / "e2e" / "operational-scenarios.md").read_text(encoding="utf-8")
     assert "derived_state_chain" in content
     assert "threshold_boundary" in content
+    assert "partial_signal_contract" in content
     assert "scenario-owned or idempotently reset state" in content
     assert "Evidence verifies measured or observed input -> durable state/event" in content
     assert "Evidence covers behavior below, at, and above" in content
+    assert "all-fields-present ideal stub" in content
 
 
 def test_cli_extracts_operational_catalog(tmp_path):

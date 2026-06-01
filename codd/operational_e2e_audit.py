@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from codd.claude_cli import DEFAULT_CLAUDE_EFFORT, DEFAULT_CLAUDE_MODEL
-from codd.e2e_extractor import ScenarioCollection, ScenarioExtractor, UserScenario
+from codd.e2e_extractor import DodObligation, ScenarioCollection, ScenarioExtractor, UserScenario
 from codd.e2e_generator import load_scenarios_from_markdown
 
 
@@ -41,6 +41,14 @@ _BLOCKER_MARKER_RE = re.compile(
     r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)\s+"
     r"(?:reason|blocker_reason)\s*=\s*(?P<reason>[A-Za-z0-9_.:-]+)"
     r"(?:\s+(?P<details>.*))?",
+    re.IGNORECASE,
+)
+_DOD_MARKER_RE = re.compile(
+    r"codd:\s*dod\s+"
+    r"(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
+    r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)\s+"
+    r"(?:obligation|dod)\s*=\s*(?P<obligation>[A-Za-z0-9_.:-]+)"
+    r"(?:[ \t]+(?P<details>[^\r\n]*))?",
     re.IGNORECASE,
 )
 _TEST_SUFFIXES = (
@@ -80,6 +88,19 @@ class BlockerEvidence:
     details: str = ""
 
 
+@dataclass(frozen=True)
+class DodEvidence:
+    """A test file claim that one machine-checkable DoD obligation is proven."""
+
+    path: str
+    operation: str
+    axis: str
+    obligation: str
+    test_level: str
+    evidence_text: str = ""
+    details: str = ""
+
+
 @dataclass
 class ScenarioAuditRow:
     """Audit row for one operational scenario."""
@@ -97,6 +118,7 @@ class ScenarioAuditRow:
     blocker_details: str = ""
     blocker_evidence: list[str] = field(default_factory=list)
     required_evidence: list[str] = field(default_factory=list)
+    missing_dod_obligations: list[str] = field(default_factory=list)
     suggested_next_action: str = ""
 
 
@@ -153,9 +175,13 @@ def build_operational_e2e_audit(
     backend = _normalize_runner_backend(runner_backend)
     collection = _load_or_extract_operational_scenarios(project_root, scenarios_path=scenarios_path)
     evidence = _scan_test_evidence(project_root, test_dirs=test_dirs)
+    dod_evidence = _scan_dod_evidence(project_root, test_dirs=test_dirs)
     blockers = _scan_blocker_evidence(project_root, test_dirs=test_dirs)
     heuristic_index = _scan_heuristic_text_matches(project_root, collection.scenarios, test_dirs=test_dirs)
-    rows = [_audit_scenario(scenario, evidence, blockers, heuristic_index) for scenario in collection.scenarios]
+    rows = [
+        _audit_scenario(scenario, evidence, dod_evidence, blockers, heuristic_index)
+        for scenario in collection.scenarios
+    ]
     summary = _summarize(rows, runner_backend=backend)
 
     return OperationalE2EAuditReport(
@@ -210,7 +236,7 @@ def build_agent_workflow_plan(
                     source_operations=sorted({row.source_operation for row in chunk}),
                     scenarios=[_scenario_payload(row) for row in chunk],
                     acceptance_criteria=[
-                        "All listed scenarios are either covered by an explicit codd covers marker or classified with a concrete blocker.",
+                        "All listed scenarios are either covered by explicit codd covers plus required codd dod markers, or classified with a concrete blocker.",
                         "Any implemented repair is verified with the smallest relevant test command before broader suite rerun.",
                         "Failure artifacts, commands, and root-cause classification use the audit failure taxonomy.",
                         "Unrelated source changes are left untouched.",
@@ -237,7 +263,7 @@ def build_agent_workflow_plan(
         shard_policy={
             "grouping": "operation_id",
             "max_scenarios_per_shard": max_scenarios_per_shard,
-            "coverage_gate": "explicit_codd_covers_marker_or_blocker_classification",
+            "coverage_gate": "explicit_codd_covers_marker_plus_required_codd_dod_markers_or_blocker_classification",
         },
         runner_invocation=_runner_invocation(
             report.runner_backend,
@@ -297,6 +323,8 @@ def render_operational_e2e_audit_markdown(report: OperationalE2EAuditReport) -> 
         f"- Blocked by explicit blocker marker: {report.summary.get('blocked', 0)}",
         f"- Heuristic matches needing marker review: {report.summary['heuristic_matches']}",
         f"- Needs trigger evidence: {report.summary.get('needs_trigger_evidence', 0)}",
+        f"- Needs DoD evidence: {report.summary.get('needs_dod_evidence', 0)}",
+        f"- Needs source-signal variance evidence: {report.summary.get('needs_source_signal_variance', 0)}",
         f"- Not covered by E2E: {report.summary.get('not_covered_by_e2e', report.summary['uncovered'])}",
         f"- Strictly uncovered: {report.summary['uncovered']}",
         "",
@@ -326,6 +354,9 @@ def render_operational_e2e_audit_markdown(report: OperationalE2EAuditReport) -> 
             if len(row.heuristic_matches) > 3:
                 heuristic += ", ..."
             evidence = f"heuristic: {heuristic}" if not evidence else f"{evidence}; heuristic: {heuristic}"
+        if row.missing_dod_obligations:
+            missing = ", ".join(row.missing_dod_obligations)
+            evidence = f"missing DoD: {missing}" if not evidence else f"{evidence}; missing DoD: {missing}"
         lines.append(
             "| "
             + " | ".join(
@@ -425,6 +456,34 @@ def _scan_test_evidence(
     return evidence
 
 
+def _scan_dod_evidence(
+    project_root: Path,
+    *,
+    test_dirs: Iterable[Path | str] | None,
+) -> list[DodEvidence]:
+    evidence: list[DodEvidence] = []
+    for path in _iter_test_files(project_root, test_dirs=test_dirs):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        rel_path = _rel_path(path, project_root)
+        body_text = _strip_comment_only_lines(text).lower()
+        for match in _DOD_MARKER_RE.finditer(text):
+            evidence.append(
+                DodEvidence(
+                    path=rel_path,
+                    operation=match.group("operation").strip(),
+                    axis=match.group("axis").strip(),
+                    obligation=_normalize_obligation_id(match.group("obligation")),
+                    test_level=_classify_test_level(rel_path),
+                    evidence_text=body_text,
+                    details=(match.group("details") or "").strip(),
+                )
+            )
+    return evidence
+
+
 def _scan_blocker_evidence(
     project_root: Path,
     *,
@@ -481,6 +540,7 @@ def _scan_heuristic_text_matches(
 def _audit_scenario(
     scenario: UserScenario,
     evidence: list[TestEvidence],
+    dod_evidence: list[DodEvidence],
     blockers: list[BlockerEvidence],
     heuristic_index: dict[tuple[str, str], list[str]],
 ) -> ScenarioAuditRow:
@@ -491,6 +551,11 @@ def _audit_scenario(
         for item in evidence
         if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
     ]
+    matching_dod_evidence = [
+        item
+        for item in dod_evidence
+        if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
+    ]
     matching_blockers = [
         item
         for item in blockers
@@ -498,6 +563,7 @@ def _audit_scenario(
     ]
     e2e_evidence = [item for item in matching_evidence if item.test_level == "e2e"]
     lower_evidence = [item for item in matching_evidence if item.test_level != "e2e"]
+    e2e_dod_evidence = [item for item in matching_dod_evidence if item.test_level == "e2e"]
     matched = sorted({item.path for item in matching_evidence})
     blocker_paths = sorted({item.path for item in matching_blockers})
     heuristic = sorted(set(heuristic_index.get((operation_key, axis), [])) - set(matched))
@@ -505,14 +571,21 @@ def _audit_scenario(
     has_trigger_evidence = not trigger_terms or any(
         _has_trigger_evidence(item.evidence_text, trigger_terms) for item in e2e_evidence
     )
+    required_dod = _scenario_dod_obligations(scenario)
+    missing_dod = _missing_dod_obligations(required_dod, e2e_dod_evidence)
+    has_source_signal_variance = _has_source_signal_variance(axis, e2e_dod_evidence, e2e_evidence)
     primary_blocker = matching_blockers[0] if matching_blockers else None
-    covered = bool(e2e_evidence) and has_trigger_evidence
+    covered = bool(e2e_evidence) and has_trigger_evidence and not missing_dod and has_source_signal_variance
     if primary_blocker:
         status = "blocked"
     elif covered:
         status = "covered_by_e2e"
     elif e2e_evidence and not has_trigger_evidence:
         status = "needs_trigger_evidence"
+    elif e2e_evidence and missing_dod:
+        status = "needs_dod_evidence"
+    elif e2e_evidence and not has_source_signal_variance:
+        status = "needs_source_signal_variance"
     elif lower_evidence:
         status = "covered_by_lower_test"
     else:
@@ -526,6 +599,9 @@ def _audit_scenario(
     ]
     if trigger_terms:
         required_evidence.append(f"trigger-source evidence terms: {', '.join(trigger_terms)}")
+    required_evidence.extend(
+        f"DoD obligation {obligation.id}: {obligation.text}" for obligation in required_dod
+    )
     return ScenarioAuditRow(
         scenario_name=scenario.name,
         kind=scenario.kind,
@@ -540,8 +616,125 @@ def _audit_scenario(
         blocker_details=primary_blocker.details if primary_blocker else "",
         blocker_evidence=blocker_paths,
         required_evidence=required_evidence,
+        missing_dod_obligations=missing_dod,
         suggested_next_action=next_action,
     )
+
+
+def _scenario_dod_obligations(scenario: UserScenario) -> list[DodObligation]:
+    if scenario.dod_obligations:
+        return [_normalize_dod_obligation(item) for item in scenario.dod_obligations]
+
+    obligations = [
+        DodObligation(
+            id="scenario_state",
+            text="Scenario-owned or idempotently reset preconditions are established before assertions.",
+        ),
+        DodObligation(
+            id="public_trigger",
+            text="The declared actor-facing trigger is exercised; direct lower-layer shortcuts alone are insufficient.",
+        ),
+    ]
+    if scenario.observable_outcomes:
+        obligations.append(
+            DodObligation(
+                id="observable_outcome",
+                text="Declared observable outcomes are asserted from a user or consumer surface.",
+            )
+        )
+    if scenario.coverage_axis in {"persistence_readback", "cross_actor_reflection", "derived_state_chain"}:
+        obligations.append(
+            DodObligation(
+                id="durable_readback",
+                text="Durable readback, reload, or downstream reflection is verified.",
+            )
+        )
+    if scenario.coverage_axis == "permission_boundary":
+        obligations.append(
+            DodObligation(
+                id="no_forbidden_mutation",
+                text="Denied actors cannot persist the forbidden state mutation.",
+            )
+        )
+    if scenario.coverage_axis == "terminal_state_guard":
+        obligations.append(
+            DodObligation(
+                id="terminal_guard",
+                text="Repeated terminal operations cannot produce inconsistent state.",
+            )
+        )
+    if scenario.coverage_axis == "threshold_boundary":
+        obligations.append(
+            DodObligation(
+                id="boundary_values",
+                text="Below, at, and above boundary values are exercised or explicitly delegated.",
+            )
+        )
+    if scenario.coverage_axis == "partial_signal_contract":
+        obligations.append(
+            DodObligation(
+                id="partial_source_signal",
+                text="Minimal, missing, null, omitted, timeout, fallback, or provider-degraded source signals are exercised.",
+            )
+        )
+    return _dedupe_dod_obligations(obligations)
+
+
+def _normalize_dod_obligation(obligation: DodObligation) -> DodObligation:
+    return DodObligation(id=_normalize_obligation_id(obligation.id), text=obligation.text.strip())
+
+
+def _missing_dod_obligations(
+    required: list[DodObligation],
+    evidence: list[DodEvidence],
+) -> list[str]:
+    proven = {_normalize_obligation_id(item.obligation) for item in evidence}
+    return [item.id for item in required if item.id not in proven]
+
+
+def _has_source_signal_variance(
+    axis: str,
+    dod_evidence: list[DodEvidence],
+    e2e_evidence: list[TestEvidence],
+) -> bool:
+    if axis != "partial_signal_contract":
+        return True
+    text = "\n".join([item.evidence_text for item in dod_evidence] + [item.evidence_text for item in e2e_evidence])
+    return any(
+        token in text
+        for token in (
+            "missing",
+            "null",
+            "undefined",
+            "omitted",
+            "minimal",
+            "partial",
+            "timeout",
+            "fallback",
+            "degraded",
+            "unavailable",
+            "absent",
+            "empty",
+        )
+    )
+
+
+def _normalize_obligation_id(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_.:-]+", "_", str(value).strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized
+
+
+def _dedupe_dod_obligations(obligations: list[DodObligation]) -> list[DodObligation]:
+    seen: set[str] = set()
+    deduped: list[DodObligation] = []
+    for obligation in obligations:
+        normalized = _normalize_dod_obligation(obligation)
+        if not normalized.id or not normalized.text or normalized.id in seen:
+            continue
+        seen.add(normalized.id)
+        deduped.append(normalized)
+    return deduped
 
 
 def _iter_test_files(project_root: Path, *, test_dirs: Iterable[Path | str] | None) -> Iterable[Path]:
@@ -594,6 +787,10 @@ def _next_action(*, status: str, heuristic_matches: list[str]) -> str:
         return "Run selected suite and attach the latest artifact."
     if status == "needs_trigger_evidence":
         return "Add browser/event-source assertions for the declared trigger; direct API/storage shortcuts are not enough."
+    if status == "needs_dod_evidence":
+        return "Add machine-checkable codd dod markers only after assertions prove every required DoD obligation."
+    if status == "needs_source_signal_variance":
+        return "Exercise minimal, missing, null, omitted, timeout, fallback, or degraded source-signal variants; ideal full-payload stubs are not enough."
     if status == "covered_by_lower_test":
         return "Promote this lower-level contract into operational E2E evidence or record an explicit lower-test delegation."
     if status == "blocked":
@@ -607,6 +804,8 @@ def _summarize(rows: list[ScenarioAuditRow], *, runner_backend: str) -> dict[str
     covered = sum(1 for row in rows if row.coverage_status == "covered_by_e2e")
     lower = sum(1 for row in rows if row.coverage_status == "covered_by_lower_test")
     needs_trigger = sum(1 for row in rows if row.coverage_status == "needs_trigger_evidence")
+    needs_dod = sum(1 for row in rows if row.coverage_status == "needs_dod_evidence")
+    needs_source_signal = sum(1 for row in rows if row.coverage_status == "needs_source_signal_variance")
     blocked = sum(1 for row in rows if row.coverage_status == "blocked")
     heuristic = sum(1 for row in rows if row.heuristic_matches)
     not_covered_by_e2e = sum(1 for row in rows if row.coverage_status != "covered_by_e2e")
@@ -617,6 +816,8 @@ def _summarize(rows: list[ScenarioAuditRow], *, runner_backend: str) -> dict[str
         "covered_by_e2e": covered,
         "covered_by_lower_test": lower,
         "needs_trigger_evidence": needs_trigger,
+        "needs_dod_evidence": needs_dod,
+        "needs_source_signal_variance": needs_source_signal,
         "blocked": blocked,
         "heuristic_matches": heuristic,
         "not_covered_by_e2e": not_covered_by_e2e,
@@ -816,6 +1017,7 @@ def _scenario_payload(row: ScenarioAuditRow) -> dict[str, str]:
         "heuristic_matches": ", ".join(row.heuristic_matches),
         "blocker_reason": row.blocker_reason,
         "blocker_details": row.blocker_details,
+        "missing_dod_obligations": ", ".join(row.missing_dod_obligations),
         "next_action": row.suggested_next_action,
     }
 
@@ -831,7 +1033,9 @@ def _recommended_agent_prompt(rows: list[ScenarioAuditRow]) -> str:
         "Work only on the scenarios listed below. Do not touch unrelated files.\n"
         "Run the selected scenario set to completion before repairing individual failures.\n"
         "For every scenario, either add/verify an explicit marker in the form "
-        "`codd: covers operation=<source_operation> axis=<coverage_axis>` or classify the blocker.\n"
+        "`codd: covers operation=<source_operation> axis=<coverage_axis>` plus every required "
+        "`codd: dod operation=<source_operation> axis=<coverage_axis> obligation=<obligation_id>` marker, "
+        "or classify the blocker.\n"
         "Use this failure taxonomy: spec_gap, implementation_defect, test_data_or_seed_defect, "
         "test_automation_defect, environment_or_external_service, flaky_or_timing.\n"
         "After any repair, run the smallest relevant test command and report commands, results, "

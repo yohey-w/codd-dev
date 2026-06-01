@@ -14,6 +14,14 @@ from codd.requirements_meta import normalize_operation_flow, operation_flow_oper
 
 
 @dataclass
+class DodObligation:
+    """One machine-checkable Definition of Done obligation for E2E evidence."""
+
+    id: str
+    text: str
+
+
+@dataclass
 class UserScenario:
     """A user-facing scenario that can become one E2E test case."""
 
@@ -28,6 +36,7 @@ class UserScenario:
     preconditions: list[str] = field(default_factory=list)
     trigger: str | None = None
     observable_outcomes: list[str] = field(default_factory=list)
+    dod_obligations: list[DodObligation] = field(default_factory=list)
     source: str | None = None
     operation_id: str | None = None
 
@@ -167,10 +176,62 @@ _THRESHOLD_BOUNDARY_ACCEPTANCE = (
     "Evidence covers behavior below, at, and above the declared threshold/timer/duration boundary "
     "where feasible, or records an explicit public-surface simulation rationale."
 )
+_PARTIAL_SIGNAL_ACCEPTANCE = (
+    "Evidence exercises a minimal or partially unavailable source signal (for example missing, null, "
+    "omitted, timeout, fallback, or provider-degraded values) instead of only an all-fields-present ideal "
+    "stub; then verifies durable readback, downstream reflection, or an explicit failure outcome."
+)
 _SCENARIO_STATE_ISOLATION_ACCEPTANCE = (
     "Evidence establishes scenario-owned or idempotently reset preconditions before assertions; "
     "mutable shared seed state is not trusted unless it is recreated or proven unchanged, and "
     "test-created state is cleaned up."
+)
+_EVENTFUL_SOURCE_WORDS = {
+    "adapter",
+    "callback",
+    "cron",
+    "ended",
+    "event",
+    "external",
+    "fallback",
+    "iframe",
+    "message",
+    "notification",
+    "pause",
+    "player",
+    "provider",
+    "queue",
+    "scheduler",
+    "seeked",
+    "sensor",
+    "stream",
+    "timeupdate",
+    "timeout",
+    "unload",
+    "visibilitychange",
+    "webhook",
+    "worker",
+}
+_SOURCE_SIGNAL_KEYS = (
+    "callback_payload",
+    "degraded_inputs",
+    "edge_cases",
+    "event_payload",
+    "fallback",
+    "input_variants",
+    "message_payload",
+    "message_schema",
+    "nullable_fields",
+    "optional_fields",
+    "payload",
+    "source_signal",
+    "source_signals",
+)
+_DOD_OBLIGATION_KEYS = (
+    "dod_obligations",
+    "definition_of_done",
+    "e2e_dod",
+    "machine_dod",
 )
 
 
@@ -451,6 +512,37 @@ class ScenarioExtractor:
                                     _PUBLIC_BOUNDARY_ACCEPTANCE,
                                     _THRESHOLD_BOUNDARY_ACCEPTANCE,
                                     *_visible_outcome_acceptance(threshold_outcomes),
+                                ],
+                            )
+                        )
+
+                    if _has_source_signal_contract(operation, trigger, outcomes):
+                        signal_contract = _source_signal_contract_values(operation)
+                        signal_outcomes = _dedupe_strings([*outcomes, *signal_contract])
+                        scenarios.append(
+                            _operational_scenario(
+                                name=f"{actor} {operation_id} partial source signal",
+                                actor=actor,
+                                axis="partial_signal_contract",
+                                operation=operation,
+                                source=source,
+                                operation_id=operation_id,
+                                routes=routes,
+                                trigger=trigger,
+                                preconditions=preconditions,
+                                outcomes=signal_outcomes,
+                                priority="high",
+                                extra_steps=[
+                                    "Exercise the declared trigger with a minimal, missing, null, omitted, timeout, fallback, or provider-degraded source signal.",
+                                    "Verify the operation does not silently pass with an all-fields-present ideal stub only.",
+                                    "Reload or reopen the durable read model or consumer surface.",
+                                ],
+                                acceptance=[
+                                    f"{operation_id} handles partial or unavailable source signals from the declared trigger.",
+                                    _PUBLIC_BOUNDARY_ACCEPTANCE,
+                                    _PARTIAL_SIGNAL_ACCEPTANCE,
+                                    _CHAIN_READBACK_ACCEPTANCE,
+                                    *_visible_outcome_acceptance(signal_outcomes),
                                 ],
                             )
                         )
@@ -1010,6 +1102,13 @@ def _threshold_contract_values(operation: Mapping[str, Any]) -> list[str]:
     return _dedupe_strings(values)
 
 
+def _source_signal_contract_values(operation: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in _SOURCE_SIGNAL_KEYS:
+        values.extend(_coerce_text_list(operation.get(key)))
+    return _dedupe_strings(values)
+
+
 def _has_derived_state_contract(operation: Mapping[str, Any], outcomes: list[str]) -> bool:
     if _derived_state_contract_values(operation):
         return True
@@ -1059,6 +1158,13 @@ def _has_threshold_contract(operation: Mapping[str, Any], outcomes: list[str]) -
     )
 
 
+def _has_source_signal_contract(operation: Mapping[str, Any], trigger: str, outcomes: list[str]) -> bool:
+    if _source_signal_contract_values(operation):
+        return True
+    text = f"{trigger} {_operation_contract_text(operation, outcomes)}".lower().replace("-", "_")
+    return any(token in text for token in _EVENTFUL_SOURCE_WORDS)
+
+
 def _operation_contract_text(operation: Mapping[str, Any], outcomes: list[str]) -> str:
     values: list[str] = []
     for key in (
@@ -1070,12 +1176,176 @@ def _operation_contract_text(operation: Mapping[str, Any], outcomes: list[str]) 
         "preconditions",
         "expected_outcomes",
         "outcomes",
+        *_SOURCE_SIGNAL_KEYS,
         *_DERIVED_STATE_KEYS,
         *_THRESHOLD_KEYS,
+        *_DOD_OBLIGATION_KEYS,
     ):
         values.extend(_coerce_text_list(operation.get(key)))
     values.extend(outcomes)
     return " ".join(values).lower().replace("-", "_")
+
+
+def _default_dod_obligations(
+    *,
+    axis: str,
+    operation: Mapping[str, Any],
+    trigger: str,
+    outcomes: list[str],
+) -> list[DodObligation]:
+    obligations = [
+        DodObligation(
+            id="scenario_state",
+            text=(
+                "The test establishes scenario-owned or idempotently reset preconditions before assertions; "
+                "mutable shared seed state alone is not accepted."
+            ),
+        ),
+        DodObligation(
+            id="public_trigger",
+            text=(
+                f"The test exercises the declared actor-facing trigger ({trigger}); direct storage writes or "
+                "helper/API shortcuts alone are accepted only when that lower layer is the declared public surface."
+            ),
+        ),
+    ]
+
+    if outcomes:
+        obligations.append(
+            DodObligation(
+                id="observable_outcome",
+                text="The test asserts the declared observable outcome from a user or consumer surface.",
+            )
+        )
+
+    if axis in {"persistence_readback", "cross_actor_reflection", "derived_state_chain"}:
+        obligations.append(
+            DodObligation(
+                id="durable_readback",
+                text=(
+                    "The test proves producer -> durable state/event -> readback, reload, or downstream "
+                    "consumer reflection, not only immediate request success."
+                ),
+            )
+        )
+
+    if axis == "permission_boundary":
+        obligations.append(
+            DodObligation(
+                id="no_forbidden_mutation",
+                text="The denied actor cannot complete the operation and no forbidden state mutation is persisted.",
+            )
+        )
+
+    if axis == "terminal_state_guard":
+        obligations.append(
+            DodObligation(
+                id="terminal_guard",
+                text="Repeating the terminal operation is blocked, disabled, or no-op without creating inconsistent state.",
+            )
+        )
+
+    if axis == "threshold_boundary":
+        obligations.append(
+            DodObligation(
+                id="boundary_values",
+                text="The test covers below, at, and above the declared threshold or records an explicit public-surface simulation rationale.",
+            )
+        )
+
+    if axis == "partial_signal_contract":
+        obligations.append(
+            DodObligation(
+                id="partial_source_signal",
+                text=(
+                    "The test exercises a minimal, missing, null, omitted, timeout, fallback, or provider-degraded "
+                    "source signal; an all-fields-present ideal stub is insufficient."
+                ),
+            )
+        )
+
+    return _dedupe_dod_obligations([*obligations, *_operation_dod_obligations(operation)])
+
+
+def _operation_dod_obligations(operation: Mapping[str, Any]) -> list[DodObligation]:
+    obligations: list[DodObligation] = []
+    for key in _DOD_OBLIGATION_KEYS:
+        obligations.extend(_coerce_dod_obligations(operation.get(key)))
+    return _dedupe_dod_obligations(obligations)
+
+
+def _coerce_dod_obligations(value: Any) -> list[DodObligation]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _parse_dod_obligations(_split_phrase_values(value))
+    if isinstance(value, Mapping):
+        obligations: list[DodObligation] = []
+        for raw_id, raw_text in value.items():
+            obligation_id = _normalize_obligation_id(str(raw_id))
+            text = str(raw_text).strip()
+            if obligation_id and text:
+                obligations.append(DodObligation(id=obligation_id, text=text))
+        return obligations
+    if isinstance(value, (list, tuple, set)):
+        obligations: list[DodObligation] = []
+        for item in value:
+            if isinstance(item, Mapping):
+                raw_id = item.get("id") or item.get("name") or item.get("key")
+                raw_text = item.get("text") or item.get("description") or item.get("criteria") or item.get("criterion")
+                if raw_text is None:
+                    raw_text = " ".join(_coerce_text_list(item))
+                text = str(raw_text).strip()
+                obligation_id = _normalize_obligation_id(str(raw_id or _slug_fragment(text)))
+                if obligation_id and text:
+                    obligations.append(DodObligation(id=obligation_id, text=text))
+            else:
+                obligations.extend(_parse_dod_obligations(_coerce_text_list(item)))
+        return obligations
+    return _parse_dod_obligations([str(value)])
+
+
+def _parse_dod_obligations(items: list[str]) -> list[DodObligation]:
+    obligations: list[DodObligation] = []
+    for item in items:
+        cleaned = item.strip()
+        if not cleaned or cleaned == "No explicit DoD obligations declared.":
+            continue
+        if ":" in cleaned:
+            raw_id, text = cleaned.split(":", 1)
+        elif " - " in cleaned:
+            raw_id, text = cleaned.split(" - ", 1)
+        else:
+            raw_id, text = _slug_fragment(cleaned), cleaned
+        obligation_id = _normalize_obligation_id(raw_id)
+        text = text.strip()
+        if obligation_id and text:
+            obligations.append(DodObligation(id=obligation_id, text=text))
+    return _dedupe_dod_obligations(obligations)
+
+
+def _normalize_obligation_id(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_.:-]+", "_", value.strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized
+
+
+def _slug_fragment(value: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", value.lower())
+    return "_".join(tokens[:5]) or "obligation"
+
+
+def _dedupe_dod_obligations(obligations: list[DodObligation]) -> list[DodObligation]:
+    seen: set[str] = set()
+    deduped: list[DodObligation] = []
+    for obligation in obligations:
+        obligation_id = _normalize_obligation_id(obligation.id)
+        text = obligation.text.strip()
+        if not obligation_id or not text or obligation_id in seen:
+            continue
+        deduped.append(DodObligation(id=obligation_id, text=text))
+        seen.add(obligation_id)
+    return deduped
 
 
 def _operational_scenario(
@@ -1116,6 +1386,12 @@ def _operational_scenario(
         preconditions=preconditions,
         trigger=trigger,
         observable_outcomes=outcomes,
+        dod_obligations=_default_dod_obligations(
+            axis=axis,
+            operation=operation,
+            trigger=trigger,
+            outcomes=outcomes,
+        ),
         source=source,
         operation_id=operation_id,
     )
@@ -1148,6 +1424,7 @@ def _render_operational_scenarios_markdown(collection: ScenarioCollection) -> st
         "- cross_actor_reflection: observers see the result of another actor's operation.",
         "- derived_state_chain: measured or observed input flows through durable state/event into a derived read model or consumer surface.",
         "- threshold_boundary: thresholds, timers, durations, scores, percentages, or latest/last rules behave correctly around their boundary values.",
+        "- partial_signal_contract: event, callback, queue, webhook, scheduler, adapter, provider, or external-source triggers handle minimal or partially unavailable source signals instead of only ideal full-payload stubs.",
         "",
     ]
     if collection.source_operation_flows:
@@ -1192,6 +1469,12 @@ def _render_operational_scenarios_markdown(collection: ScenarioCollection) -> st
             lines.extend(f"- {criterion}" for criterion in scenario.acceptance_criteria)
         else:
             lines.append("- No matching requirement criteria found.")
+        lines.append("")
+        lines.append("### DoD Obligations")
+        if scenario.dod_obligations:
+            lines.extend(f"- {obligation.id}: {obligation.text}" for obligation in scenario.dod_obligations)
+        else:
+            lines.append("- No explicit DoD obligations declared.")
         lines.append("")
 
     return "\n".join(lines)
