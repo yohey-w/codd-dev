@@ -3677,9 +3677,12 @@ def _run_e2e_audit(
     click.echo(
         "Operational E2E audit: "
         f"{summary['scenario_count']} scenario(s), "
-        f"{summary['covered_by_e2e']} covered, "
+        f"{summary['covered_by_e2e']} covered by E2E, "
+        f"{summary.get('covered_by_lower_test', 0)} lower-test only, "
+        f"{summary.get('needs_trigger_evidence', 0)} need trigger evidence, "
         f"{summary['heuristic_matches']} heuristic, "
-        f"{summary['uncovered']} uncovered: "
+        f"{summary.get('not_covered_by_e2e', summary['uncovered'])} E2E gap(s), "
+        f"{summary['uncovered']} strictly uncovered: "
         f"{_display_path(written_path, project_root)}"
     )
 

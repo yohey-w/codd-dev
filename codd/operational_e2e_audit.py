@@ -49,6 +49,7 @@ class TestEvidence:
     path: str
     operation: str
     axis: str
+    test_level: str
     evidence_text: str = ""
 
 
@@ -266,8 +267,11 @@ def render_operational_e2e_audit_markdown(report: OperationalE2EAuditReport) -> 
         f"- Runner backend: {report.runner_backend}",
         f"- Scenarios: {report.summary['scenario_count']}",
         f"- Covered by E2E marker: {report.summary['covered_by_e2e']}",
+        f"- Covered by lower-level marker only: {report.summary.get('covered_by_lower_test', 0)}",
         f"- Heuristic matches needing marker review: {report.summary['heuristic_matches']}",
-        f"- Uncovered: {report.summary['uncovered']}",
+        f"- Needs trigger evidence: {report.summary.get('needs_trigger_evidence', 0)}",
+        f"- Not covered by E2E: {report.summary.get('not_covered_by_e2e', report.summary['uncovered'])}",
+        f"- Strictly uncovered: {report.summary['uncovered']}",
         "",
         "## Runner Contract",
     ]
@@ -381,6 +385,7 @@ def _scan_test_evidence(
                     path=rel_path,
                     operation=match.group("operation").strip(),
                     axis=match.group("axis").strip(),
+                    test_level=_classify_test_level(rel_path),
                     evidence_text=_strip_comment_only_lines(text).lower(),
                 )
             )
@@ -427,21 +432,29 @@ def _audit_scenario(
         for item in evidence
         if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
     ]
+    e2e_evidence = [item for item in matching_evidence if item.test_level == "e2e"]
+    lower_evidence = [item for item in matching_evidence if item.test_level != "e2e"]
     matched = sorted({item.path for item in matching_evidence})
     heuristic = sorted(set(heuristic_index.get((operation_key, axis), [])) - set(matched))
     trigger_terms = _trigger_evidence_terms(scenario)
     has_trigger_evidence = not trigger_terms or any(
-        _has_trigger_evidence(item.evidence_text, trigger_terms) for item in matching_evidence
+        _has_trigger_evidence(item.evidence_text, trigger_terms) for item in e2e_evidence
     )
-    covered = bool(matched) and has_trigger_evidence
-    status = "covered_by_e2e" if covered else "uncovered"
-    if matched and not has_trigger_evidence:
+    covered = bool(e2e_evidence) and has_trigger_evidence
+    if covered:
+        status = "covered_by_e2e"
+    elif e2e_evidence and not has_trigger_evidence:
         status = "needs_trigger_evidence"
+    elif lower_evidence:
+        status = "covered_by_lower_test"
+    else:
+        status = "uncovered"
     next_action = _next_action(status=status, heuristic_matches=heuristic)
     required_evidence = [
         "actor-facing public trigger",
         "durable readback or downstream reflection",
         "scenario-owned or idempotently reset state",
+        "E2E evidence must be collected at browser/smoke/e2e level, not only unit/integration level",
     ]
     if trigger_terms:
         required_evidence.append(f"trigger-source evidence terms: {', '.join(trigger_terms)}")
@@ -479,6 +492,17 @@ def _is_test_file(path: Path) -> bool:
     return any(name.endswith(suffix) for suffix in _TEST_SUFFIXES)
 
 
+def _classify_test_level(rel_path: str) -> str:
+    normalized = "/" + rel_path.replace("\\", "/").lower()
+    if "/tests/unit/" in normalized or "/tests/integration/" in normalized:
+        return "lower_test"
+    if "/tests/e2e/" in normalized or "/tests/smoke/" in normalized:
+        return "e2e"
+    if ".cy." in normalized or "/e2e/" in normalized or "/smoke/" in normalized:
+        return "e2e"
+    return "lower_test"
+
+
 def _operation_key(scenario: UserScenario) -> str:
     source = scenario.source or "unknown"
     operation_id = scenario.operation_id or "unknown"
@@ -499,6 +523,8 @@ def _next_action(*, status: str, heuristic_matches: list[str]) -> str:
         return "Run selected suite and attach the latest artifact."
     if status == "needs_trigger_evidence":
         return "Add browser/event-source assertions for the declared trigger; direct API/storage shortcuts are not enough."
+    if status == "covered_by_lower_test":
+        return "Promote this lower-level contract into operational E2E evidence or record an explicit lower-test delegation."
     if heuristic_matches:
         return "Review assertions, then add an explicit codd covers marker or split the test."
     return "Create or extend an E2E candidate with a codd covers marker."
@@ -506,13 +532,19 @@ def _next_action(*, status: str, heuristic_matches: list[str]) -> str:
 
 def _summarize(rows: list[ScenarioAuditRow], *, runner_backend: str) -> dict[str, int | str]:
     covered = sum(1 for row in rows if row.coverage_status == "covered_by_e2e")
+    lower = sum(1 for row in rows if row.coverage_status == "covered_by_lower_test")
+    needs_trigger = sum(1 for row in rows if row.coverage_status == "needs_trigger_evidence")
     heuristic = sum(1 for row in rows if row.heuristic_matches)
-    uncovered = sum(1 for row in rows if row.coverage_status != "covered_by_e2e")
+    not_covered_by_e2e = sum(1 for row in rows if row.coverage_status != "covered_by_e2e")
+    uncovered = sum(1 for row in rows if row.coverage_status == "uncovered")
     return {
         "runner_backend": runner_backend,
         "scenario_count": len(rows),
         "covered_by_e2e": covered,
+        "covered_by_lower_test": lower,
+        "needs_trigger_evidence": needs_trigger,
         "heuristic_matches": heuristic,
+        "not_covered_by_e2e": not_covered_by_e2e,
         "uncovered": uncovered,
     }
 
@@ -557,7 +589,6 @@ _TRIGGER_EVIDENCE_STOPWORDS = {
     "video",
     "current",
     "time",
-    "bunny",
     "progress",
 }
 
@@ -576,7 +607,7 @@ def _trigger_evidence_terms(scenario: UserScenario) -> list[str]:
     event_source_terms = [
         token
         for token in terms
-        if token in _EVENTFUL_TRIGGER_WORDS and token not in {"playback", "stream"}
+        if token in _EVENTFUL_TRIGGER_WORDS and token != "playback"
     ]
     strong_terms = [
         token
