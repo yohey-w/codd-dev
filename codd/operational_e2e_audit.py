@@ -697,6 +697,16 @@ def _scenario_dod_obligations(scenario: UserScenario) -> list[DodObligation]:
                 text="Minimal, missing, null, omitted, timeout, fallback, or provider-degraded source signals are exercised.",
             )
         )
+    if scenario.coverage_axis == "navigation_prerequisite":
+        obligations.append(
+            DodObligation(
+                id="navigation_reachability",
+                text=(
+                    "The operation surface is reached through actor-facing navigation from an entry/list/parent "
+                    "surface; direct deep-link navigation alone is insufficient."
+                ),
+            )
+        )
     return _dedupe_dod_obligations(obligations)
 
 

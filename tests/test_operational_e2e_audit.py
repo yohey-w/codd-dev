@@ -278,8 +278,8 @@ test('position persists through API shortcut', async () => {
     assert "direct API/storage shortcuts are not enough" in readback.suggested_next_action
     assert report.summary["covered_by_e2e"] == 0
     assert report.summary["needs_trigger_evidence"] == 1
-    assert report.summary["not_covered_by_e2e"] == 4
-    assert report.summary["uncovered"] == 3
+    assert report.summary["not_covered_by_e2e"] == 5
+    assert report.summary["uncovered"] == 4
 
 
 def test_operational_audit_requires_source_term_for_external_stream_trigger(tmp_path):
@@ -317,6 +317,86 @@ test('completion threshold persists through direct API shortcut', async () => {
     assert "external" in trigger_evidence
     assert "stream" in trigger_evidence
     assert report.summary["covered_by_e2e"] == 0
+
+
+def test_operational_audit_requires_navigation_reachability_dod_for_parameterized_route(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: edit_record
+      actor: operator
+      verb: update
+      target: record
+      route: /records/:recordId/edit
+      navigation_from: /records
+      expected_outcomes: [record edit form is visible]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "edit_record.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#edit_record axis=navigation_prerequisite
+// codd: dod operation=codd.yaml.operation_flow#edit_record axis=navigation_prerequisite obligation=scenario_state
+// codd: dod operation=codd.yaml.operation_flow#edit_record axis=navigation_prerequisite obligation=public_trigger
+// codd: dod operation=codd.yaml.operation_flow#edit_record axis=navigation_prerequisite obligation=observable_outcome
+test('operator reaches edit form', async ({ page }) => {
+  await page.goto('/records');
+  await page.getByRole('link', { name: 'Edit record' }).click();
+  await expect(page).toHaveURL('/records/rec-1/edit');
+});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    navigation = next(row for row in report.rows if row.coverage_axis == "navigation_prerequisite")
+    assert navigation.coverage_status == "needs_dod_evidence"
+    assert navigation.missing_dod_obligations == ["navigation_reachability"]
+    assert any("navigation_reachability" in item for item in navigation.required_evidence)
+
+
+def test_operational_audit_accepts_navigation_reachability_marker(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: edit_record
+      actor: operator
+      verb: update
+      target: record
+      route: /records/:recordId/edit
+      navigation_from: /records
+      expected_outcomes: [record edit form is visible]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "edit_record.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#edit_record axis=navigation_prerequisite
+// codd: dod operation=codd.yaml.operation_flow#edit_record axis=navigation_prerequisite obligation=scenario_state
+// codd: dod operation=codd.yaml.operation_flow#edit_record axis=navigation_prerequisite obligation=public_trigger
+// codd: dod operation=codd.yaml.operation_flow#edit_record axis=navigation_prerequisite obligation=observable_outcome
+// codd: dod operation=codd.yaml.operation_flow#edit_record axis=navigation_prerequisite obligation=navigation_reachability
+test('operator reaches edit form through list navigation', async ({ page }) => {
+  await page.goto('/records');
+  await page.getByRole('link', { name: 'Edit record' }).click();
+  await expect(page).toHaveURL('/records/rec-1/edit');
+  await expect(page.getByText('record edit form is visible')).toBeVisible();
+});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    navigation = next(row for row in report.rows if row.coverage_axis == "navigation_prerequisite")
+    assert navigation.coverage_status == "covered_by_e2e"
 
 
 def test_operational_audit_accepts_event_source_evidence(tmp_path):

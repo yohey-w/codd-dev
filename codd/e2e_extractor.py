@@ -120,6 +120,20 @@ _OUTCOME_KEYS = (
     "to_state",
 )
 _ROUTE_KEYS = ("routes", "route", "screens", "screen", "paths", "path", "urls", "url")
+_NAVIGATION_KEYS = (
+    "navigation_from",
+    "navigation",
+    "entry_surface",
+    "entry_surfaces",
+    "entry_route",
+    "entry_routes",
+    "parent_surface",
+    "parent_route",
+    "source_surface",
+    "reachable_from",
+    "opens_from",
+    "listed_on",
+)
 _TRIGGER_KEYS = ("trigger", "control", "button", "command", "action")
 _DERIVED_STATE_KEYS = (
     "measurement_source",
@@ -180,6 +194,11 @@ _PARTIAL_SIGNAL_ACCEPTANCE = (
     "Evidence exercises a minimal or partially unavailable source signal (for example missing, null, "
     "omitted, timeout, fallback, or provider-degraded values) instead of only an all-fields-present ideal "
     "stub; then verifies durable readback, downstream reflection, or an explicit failure outcome."
+)
+_NAVIGATION_PREREQUISITE_ACCEPTANCE = (
+    "Evidence proves the actor reaches the operation surface through an actor-facing entry/list/parent "
+    "surface and visible navigation affordance; direct deep-link navigation, direct storage writes, or "
+    "lower-layer API shortcuts alone do not satisfy this scenario."
 )
 _SCENARIO_STATE_ISOLATION_ACCEPTANCE = (
     "Evidence establishes scenario-owned or idempotently reset preconditions before assertions; "
@@ -408,6 +427,47 @@ class ScenarioExtractor:
                             ],
                         )
                     )
+
+                    if _needs_navigation_prerequisite(operation, routes, actor):
+                        navigation_contract = _navigation_contract_values(operation)
+                        navigation_outcomes = _dedupe_strings(
+                            [
+                                f"{actor} reaches {routes[0]} through an actor-facing navigation surface",
+                                *navigation_contract,
+                                *outcomes,
+                            ]
+                        )
+                        scenarios.append(
+                            _operational_scenario(
+                                name=f"{actor} {operation_id} navigation prerequisite",
+                                actor=actor,
+                                axis="navigation_prerequisite",
+                                operation=operation,
+                                source=source,
+                                operation_id=operation_id,
+                                routes=_navigation_routes(operation, routes),
+                                trigger=_navigation_trigger(operation, routes),
+                                preconditions=_dedupe_strings(
+                                    [
+                                        *preconditions,
+                                        *_navigation_preconditions(operation, routes),
+                                    ]
+                                ),
+                                outcomes=navigation_outcomes,
+                                priority="high",
+                                extra_steps=[
+                                    "Start from the declared actor-facing entry, list, or parent surface.",
+                                    "Use a visible navigation affordance to select the target object or operation.",
+                                    "Verify the operation route and content are reached without direct deep-link setup.",
+                                ],
+                                acceptance=[
+                                    f"{actor} can reach the {operation_id} operation surface through product navigation.",
+                                    _PUBLIC_BOUNDARY_ACCEPTANCE,
+                                    _NAVIGATION_PREREQUISITE_ACCEPTANCE,
+                                    *_visible_outcome_acceptance(navigation_outcomes),
+                                ],
+                            )
+                        )
 
                     if verb in _MUTATING_VERBS:
                         scenarios.append(
@@ -1048,6 +1108,56 @@ def _routes_from_operation(operation: Mapping[str, Any]) -> list[str]:
     return _ordered_routes(routes)
 
 
+def _navigation_contract_values(operation: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in _NAVIGATION_KEYS:
+        values.extend(_coerce_text_list(operation.get(key)))
+    return _dedupe_strings(values)
+
+
+def _navigation_routes(operation: Mapping[str, Any], routes: list[str]) -> list[str]:
+    navigation_routes = _ordered_routes(_navigation_contract_values(operation))
+    return _ordered_routes([*navigation_routes, *routes])
+
+
+def _navigation_preconditions(operation: Mapping[str, Any], routes: list[str]) -> list[str]:
+    contract = _navigation_contract_values(operation)
+    if contract:
+        return [f"actor-facing navigation is declared: {item}" for item in contract]
+    if routes:
+        return [f"design declares an actor-facing entry/list/parent surface for {routes[0]}"]
+    return ["design declares an actor-facing entry/list/parent surface for the operation"]
+
+
+def _navigation_trigger(operation: Mapping[str, Any], routes: list[str]) -> str:
+    contract = _navigation_contract_values(operation)
+    destination = routes[0] if routes else "the operation surface"
+    if contract:
+        return _sentence(f"navigate from {contract[0]} to {destination} using visible actor-facing controls")
+    return _sentence(f"navigate from a declared actor-facing entry surface to {destination} using visible controls")
+
+
+def _needs_navigation_prerequisite(operation: Mapping[str, Any], routes: list[str], actor: str) -> bool:
+    if _normalize_actor_name(actor) in {"system", "batch", "scheduler", "worker", "job", "cron"}:
+        return False
+    actor_routes = [route for route in routes if _is_actor_facing_route(route)]
+    if not actor_routes:
+        return False
+    return any(_is_parameterized_route(route) for route in actor_routes)
+
+
+def _is_actor_facing_route(route: str) -> bool:
+    return bool(route) and not route.startswith("/api/")
+
+
+def _is_parameterized_route(route: str) -> bool:
+    return bool(re.search(r"(?::[A-Za-z_][A-Za-z0-9_]*|\[[^\]]+\]|\{[^}]+\})", route))
+
+
+def _normalize_actor_name(actor: str | None) -> str:
+    return (actor or "").strip().lower()
+
+
 def _trigger_from_operation(operation: Mapping[str, Any], *, verb: str | None, target: str) -> str:
     for key in _TRIGGER_KEYS:
         value = operation.get(key)
@@ -1182,6 +1292,7 @@ def _operation_contract_text(operation: Mapping[str, Any], outcomes: list[str]) 
         *_SOURCE_SIGNAL_KEYS,
         *_DERIVED_STATE_KEYS,
         *_THRESHOLD_KEYS,
+        *_NAVIGATION_KEYS,
         *_DOD_OBLIGATION_KEYS,
     ):
         values.extend(_coerce_text_list(operation.get(key)))
@@ -1263,6 +1374,17 @@ def _default_dod_obligations(
                 text=(
                     "The test exercises a minimal, missing, null, omitted, timeout, fallback, or provider-degraded "
                     "source signal; an all-fields-present ideal stub is insufficient."
+                ),
+            )
+        )
+
+    if axis == "navigation_prerequisite":
+        obligations.append(
+            DodObligation(
+                id="navigation_reachability",
+                text=(
+                    "The test reaches the operation surface through an actor-facing entry/list/parent "
+                    "surface and visible navigation affordance; direct deep-link navigation alone is insufficient."
                 ),
             )
         )
@@ -1428,6 +1550,7 @@ def _render_operational_scenarios_markdown(collection: ScenarioCollection) -> st
         "- derived_state_chain: measured or observed input flows through durable state/event into a derived read model or consumer surface.",
         "- threshold_boundary: thresholds, timers, durations, scores, percentages, or latest/last rules behave correctly around their boundary values.",
         "- partial_signal_contract: event, callback, queue, webhook, scheduler, adapter, provider, or external-source triggers handle minimal or partially unavailable source signals instead of only ideal full-payload stubs.",
+        "- navigation_prerequisite: parameterized actor-facing operation routes are reachable through product navigation, not only direct deep links or lower-layer shortcuts.",
         "",
     ]
     if collection.source_operation_flows:

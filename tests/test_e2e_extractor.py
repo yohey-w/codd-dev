@@ -249,6 +249,87 @@ def test_extract_operational_scenarios_cover_derived_state_and_thresholds(tmp_pa
     assert "90% of required duration" in threshold.observable_outcomes
 
 
+def test_extract_operational_adds_navigation_prerequisite_for_parameterized_actor_route(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: edit_record
+      actor: operator
+      verb: update
+      target: record
+      route: /records/:recordId/edit
+      navigation_from: /records
+      expected_outcomes: [record edit form is visible]
+""",
+        encoding="utf-8",
+    )
+
+    collection = ScenarioExtractor(tmp_path).extract_operational()
+    navigation = next(
+        scenario
+        for scenario in collection.scenarios
+        if scenario.coverage_axis == "navigation_prerequisite"
+    )
+
+    assert navigation.name == "operator edit_record navigation prerequisite"
+    assert navigation.routes == ["/records", "/records/:recordId/edit"]
+    assert "actor-facing navigation is declared: /records" in navigation.preconditions
+    assert any("direct deep-link navigation" in item for item in navigation.acceptance_criteria)
+    assert "navigation_reachability" in [item.id for item in navigation.dod_obligations]
+
+
+def test_extract_operational_navigation_prerequisite_demands_design_entry_when_missing(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: view_record
+      actor: operator
+      verb: read
+      target: record
+      route: /records/:recordId
+      expected_outcomes: [record detail is visible]
+""",
+        encoding="utf-8",
+    )
+
+    collection = ScenarioExtractor(tmp_path).extract_operational()
+    navigation = next(
+        scenario
+        for scenario in collection.scenarios
+        if scenario.coverage_axis == "navigation_prerequisite"
+    )
+
+    assert navigation.preconditions == [
+        "design declares an actor-facing entry/list/parent surface for /records/:recordId"
+    ]
+    assert navigation.routes == ["/records/:recordId"]
+
+
+def test_extract_operational_does_not_add_navigation_prerequisite_for_static_route(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: list_records
+      actor: operator
+      verb: read
+      target: records
+      route: /records
+      expected_outcomes: [records are visible]
+""",
+        encoding="utf-8",
+    )
+
+    collection = ScenarioExtractor(tmp_path).extract_operational()
+
+    assert "navigation_prerequisite" not in {scenario.coverage_axis for scenario in collection.scenarios}
+
+
 def test_extract_operational_preserves_commas_inside_yaml_list_items(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
