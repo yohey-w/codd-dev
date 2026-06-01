@@ -231,6 +231,49 @@ test('position persists from player pause', async ({ page }) => {
     assert report.summary["covered_by_e2e"] == 1
 
 
+def test_operational_audit_accepts_explicit_blocker_marker(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: send_provider_email
+      actor: system
+      verb: send
+      target: transactional_email
+      route: /notifications
+      expected_outcomes: [provider accepts the message]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "smoke"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "send_provider_email.spec.ts").write_text(
+        """// codd: blocked operation=codd.yaml.operation_flow#send_provider_email axis=happy_path reason=environment_or_external_service missing test API key
+test('provider accepts the message once credentials exist', async () => {});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    success = next(row for row in report.rows if row.coverage_axis == "happy_path")
+    assert success.coverage_status == "blocked"
+    assert success.blocker_reason == "environment_or_external_service"
+    assert success.blocker_details == "missing test API key"
+    assert success.blocker_evidence == ["tests/smoke/send_provider_email.spec.ts"]
+    assert report.summary["blocked"] == 1
+    assert report.summary["covered_by_e2e"] == 0
+
+    plan = build_agent_workflow_plan(tmp_path, max_scenarios_per_shard=5)
+    candidate_names = [
+        scenario["name"]
+        for shard in plan.shards
+        for scenario in shard.scenarios
+    ]
+    assert "system send_provider_email success" not in candidate_names
+
+
 def test_cli_e2e_audit_writes_markdown(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()

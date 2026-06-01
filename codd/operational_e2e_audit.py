@@ -20,11 +20,27 @@ SUPPORTED_RUNNER_BACKENDS = (
     "claude-dynamic-workflow",
 )
 AUDIT_CONTRACT_VERSION = "operational-e2e-audit/v1"
+FAILURE_TAXONOMY = [
+    "spec_gap",
+    "implementation_defect",
+    "test_data_or_seed_defect",
+    "test_automation_defect",
+    "environment_or_external_service",
+    "flaky_or_timing",
+]
 
 _COVER_MARKER_RE = re.compile(
     r"codd:\s*covers\s+"
     r"(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
     r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)",
+    re.IGNORECASE,
+)
+_BLOCKER_MARKER_RE = re.compile(
+    r"codd:\s*(?:blocked|blocks)\s+"
+    r"(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
+    r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)\s+"
+    r"(?:reason|blocker_reason)\s*=\s*(?P<reason>[A-Za-z0-9_.:-]+)"
+    r"(?:\s+(?P<details>.*))?",
     re.IGNORECASE,
 )
 _TEST_SUFFIXES = (
@@ -53,6 +69,17 @@ class TestEvidence:
     evidence_text: str = ""
 
 
+@dataclass(frozen=True)
+class BlockerEvidence:
+    """A concrete reason an operational E2E scenario cannot yet be proven."""
+
+    path: str
+    operation: str
+    axis: str
+    reason: str
+    details: str = ""
+
+
 @dataclass
 class ScenarioAuditRow:
     """Audit row for one operational scenario."""
@@ -66,6 +93,9 @@ class ScenarioAuditRow:
     coverage_status: str
     matched_tests: list[str] = field(default_factory=list)
     heuristic_matches: list[str] = field(default_factory=list)
+    blocker_reason: str = ""
+    blocker_details: str = ""
+    blocker_evidence: list[str] = field(default_factory=list)
     required_evidence: list[str] = field(default_factory=list)
     suggested_next_action: str = ""
 
@@ -123,8 +153,9 @@ def build_operational_e2e_audit(
     backend = _normalize_runner_backend(runner_backend)
     collection = _load_or_extract_operational_scenarios(project_root, scenarios_path=scenarios_path)
     evidence = _scan_test_evidence(project_root, test_dirs=test_dirs)
+    blockers = _scan_blocker_evidence(project_root, test_dirs=test_dirs)
     heuristic_index = _scan_heuristic_text_matches(project_root, collection.scenarios, test_dirs=test_dirs)
-    rows = [_audit_scenario(scenario, evidence, heuristic_index) for scenario in collection.scenarios]
+    rows = [_audit_scenario(scenario, evidence, blockers, heuristic_index) for scenario in collection.scenarios]
     summary = _summarize(rows, runner_backend=backend)
 
     return OperationalE2EAuditReport(
@@ -132,14 +163,7 @@ def build_operational_e2e_audit(
         runner_backend=backend,
         summary=summary,
         runner_contract=_runner_contract(backend),
-        failure_taxonomy=[
-            "spec_gap",
-            "implementation_defect",
-            "test_data_or_seed_defect",
-            "test_automation_defect",
-            "environment_or_external_service",
-            "flaky_or_timing",
-        ],
+        failure_taxonomy=FAILURE_TAXONOMY,
         repair_policy=[
             "Run the selected E2E campaign to completion before repairing individual failures.",
             "Group failures by shared root cause before editing source code.",
@@ -169,7 +193,9 @@ def build_agent_workflow_plan(
         test_dirs=test_dirs,
         runner_backend=runner_backend,
     )
-    candidate_rows = [row for row in report.rows if row.coverage_status != "covered_by_e2e"]
+    candidate_rows = [
+        row for row in report.rows if row.coverage_status not in {"covered_by_e2e", "blocked"}
+    ]
     grouped = _group_rows_by_operation(candidate_rows)
     shards: list[AgentWorkflowShard] = []
     for operation_id, rows in grouped.items():
@@ -268,6 +294,7 @@ def render_operational_e2e_audit_markdown(report: OperationalE2EAuditReport) -> 
         f"- Scenarios: {report.summary['scenario_count']}",
         f"- Covered by E2E marker: {report.summary['covered_by_e2e']}",
         f"- Covered by lower-level marker only: {report.summary.get('covered_by_lower_test', 0)}",
+        f"- Blocked by explicit blocker marker: {report.summary.get('blocked', 0)}",
         f"- Heuristic matches needing marker review: {report.summary['heuristic_matches']}",
         f"- Needs trigger evidence: {report.summary.get('needs_trigger_evidence', 0)}",
         f"- Not covered by E2E: {report.summary.get('not_covered_by_e2e', report.summary['uncovered'])}",
@@ -288,6 +315,12 @@ def render_operational_e2e_audit_markdown(report: OperationalE2EAuditReport) -> 
     lines.append("| --- | --- | --- | --- | --- | --- | --- |")
     for row in report.rows:
         evidence = ", ".join(row.matched_tests) if row.matched_tests else ""
+        if row.blocker_evidence:
+            blocker = ", ".join(row.blocker_evidence)
+            blocker_text = f"blocker: {row.blocker_reason}"
+            if row.blocker_details:
+                blocker_text += f" ({row.blocker_details})"
+            evidence = f"{evidence}; {blocker_text}: {blocker}" if evidence else f"{blocker_text}: {blocker}"
         if row.heuristic_matches:
             heuristic = ", ".join(row.heuristic_matches[:3])
             if len(row.heuristic_matches) > 3:
@@ -392,6 +425,31 @@ def _scan_test_evidence(
     return evidence
 
 
+def _scan_blocker_evidence(
+    project_root: Path,
+    *,
+    test_dirs: Iterable[Path | str] | None,
+) -> list[BlockerEvidence]:
+    blockers: list[BlockerEvidence] = []
+    for path in _iter_test_files(project_root, test_dirs=test_dirs):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        rel_path = _rel_path(path, project_root)
+        for match in _BLOCKER_MARKER_RE.finditer(text):
+            blockers.append(
+                BlockerEvidence(
+                    path=rel_path,
+                    operation=match.group("operation").strip(),
+                    axis=match.group("axis").strip(),
+                    reason=match.group("reason").strip(),
+                    details=(match.group("details") or "").strip(),
+                )
+            )
+    return blockers
+
+
 def _scan_heuristic_text_matches(
     project_root: Path,
     scenarios: list[UserScenario],
@@ -423,6 +481,7 @@ def _scan_heuristic_text_matches(
 def _audit_scenario(
     scenario: UserScenario,
     evidence: list[TestEvidence],
+    blockers: list[BlockerEvidence],
     heuristic_index: dict[tuple[str, str], list[str]],
 ) -> ScenarioAuditRow:
     operation_key = _operation_key(scenario)
@@ -432,16 +491,25 @@ def _audit_scenario(
         for item in evidence
         if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
     ]
+    matching_blockers = [
+        item
+        for item in blockers
+        if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
+    ]
     e2e_evidence = [item for item in matching_evidence if item.test_level == "e2e"]
     lower_evidence = [item for item in matching_evidence if item.test_level != "e2e"]
     matched = sorted({item.path for item in matching_evidence})
+    blocker_paths = sorted({item.path for item in matching_blockers})
     heuristic = sorted(set(heuristic_index.get((operation_key, axis), [])) - set(matched))
     trigger_terms = _trigger_evidence_terms(scenario)
     has_trigger_evidence = not trigger_terms or any(
         _has_trigger_evidence(item.evidence_text, trigger_terms) for item in e2e_evidence
     )
+    primary_blocker = matching_blockers[0] if matching_blockers else None
     covered = bool(e2e_evidence) and has_trigger_evidence
-    if covered:
+    if primary_blocker:
+        status = "blocked"
+    elif covered:
         status = "covered_by_e2e"
     elif e2e_evidence and not has_trigger_evidence:
         status = "needs_trigger_evidence"
@@ -468,6 +536,9 @@ def _audit_scenario(
         coverage_status=status,
         matched_tests=matched,
         heuristic_matches=heuristic,
+        blocker_reason=primary_blocker.reason if primary_blocker else "",
+        blocker_details=primary_blocker.details if primary_blocker else "",
+        blocker_evidence=blocker_paths,
         required_evidence=required_evidence,
         suggested_next_action=next_action,
     )
@@ -525,6 +596,8 @@ def _next_action(*, status: str, heuristic_matches: list[str]) -> str:
         return "Add browser/event-source assertions for the declared trigger; direct API/storage shortcuts are not enough."
     if status == "covered_by_lower_test":
         return "Promote this lower-level contract into operational E2E evidence or record an explicit lower-test delegation."
+    if status == "blocked":
+        return "Resolve the explicit blocker, then run the real-service E2E smoke and replace the blocker marker with a covers marker."
     if heuristic_matches:
         return "Review assertions, then add an explicit codd covers marker or split the test."
     return "Create or extend an E2E candidate with a codd covers marker."
@@ -534,6 +607,7 @@ def _summarize(rows: list[ScenarioAuditRow], *, runner_backend: str) -> dict[str
     covered = sum(1 for row in rows if row.coverage_status == "covered_by_e2e")
     lower = sum(1 for row in rows if row.coverage_status == "covered_by_lower_test")
     needs_trigger = sum(1 for row in rows if row.coverage_status == "needs_trigger_evidence")
+    blocked = sum(1 for row in rows if row.coverage_status == "blocked")
     heuristic = sum(1 for row in rows if row.heuristic_matches)
     not_covered_by_e2e = sum(1 for row in rows if row.coverage_status != "covered_by_e2e")
     uncovered = sum(1 for row in rows if row.coverage_status == "uncovered")
@@ -543,6 +617,7 @@ def _summarize(rows: list[ScenarioAuditRow], *, runner_backend: str) -> dict[str
         "covered_by_e2e": covered,
         "covered_by_lower_test": lower,
         "needs_trigger_evidence": needs_trigger,
+        "blocked": blocked,
         "heuristic_matches": heuristic,
         "not_covered_by_e2e": not_covered_by_e2e,
         "uncovered": uncovered,
@@ -739,6 +814,8 @@ def _scenario_payload(row: ScenarioAuditRow) -> dict[str, str]:
         "risk_level": row.risk_level,
         "status": row.coverage_status,
         "heuristic_matches": ", ".join(row.heuristic_matches),
+        "blocker_reason": row.blocker_reason,
+        "blocker_details": row.blocker_details,
         "next_action": row.suggested_next_action,
     }
 
