@@ -11,7 +11,7 @@ from urllib.parse import urljoin
 
 import yaml
 
-from codd.e2e_extractor import ScenarioCollection, UserScenario
+from codd.e2e_extractor import DodObligation, ScenarioCollection, UserScenario
 
 
 _DEFAULT_E2E_RUNNER = "playwright"
@@ -246,6 +246,7 @@ def _scenario_from_block(name: str, block: str) -> UserScenario:
         for item in _extract_markdown_list_section(block, "Acceptance Criteria")
         if item != "No matching requirement criteria found."
     ]
+    dod_obligations = _parse_dod_obligations(_extract_markdown_list_section(block, "DoD Obligations"))
     if not steps and routes:
         steps = [f"Open {routes[0]}."]
 
@@ -261,6 +262,7 @@ def _scenario_from_block(name: str, block: str) -> UserScenario:
         preconditions=preconditions,
         trigger=trigger if trigger and trigger != "unspecified" else None,
         observable_outcomes=observable_outcomes,
+        dod_obligations=dod_obligations,
         source=source,
         operation_id=operation_id,
     )
@@ -311,6 +313,38 @@ def _parse_source_operation(value: str | None) -> tuple[str | None, str | None]:
     return source or None, operation_id or None
 
 
+def _parse_dod_obligations(items: list[str]) -> list[DodObligation]:
+    obligations: list[DodObligation] = []
+    seen: set[str] = set()
+    for item in items:
+        cleaned = item.strip()
+        if not cleaned or cleaned == "No explicit DoD obligations declared.":
+            continue
+        if ":" in cleaned:
+            raw_id, text = cleaned.split(":", 1)
+        elif " - " in cleaned:
+            raw_id, text = cleaned.split(" - ", 1)
+        else:
+            raw_id, text = _slug_fragment(cleaned), cleaned
+        obligation_id = _normalize_obligation_id(raw_id)
+        text = text.strip()
+        if obligation_id and text and obligation_id not in seen:
+            obligations.append(DodObligation(id=obligation_id, text=text))
+            seen.add(obligation_id)
+    return obligations
+
+
+def _normalize_obligation_id(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_.:-]+", "_", value.strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized
+
+
+def _slug_fragment(value: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", value.lower())
+    return "_".join(tokens[:5]) or "obligation"
+
+
 def _extract_markdown_list_section(block: str, heading: str) -> list[str]:
     heading_match = re.search(rf"^###\s+{re.escape(heading)}\s*$", block, flags=re.MULTILINE)
     if not heading_match:
@@ -352,12 +386,28 @@ def _render_header_comments(scenario: UserScenario, context: GenerationContext, 
                 f"// Trigger: {_clean_comment(scenario.trigger or 'unspecified')}",
             ]
         )
+        if coverage_axis == "partial_signal_contract":
+            lines.append(
+                "// Source-signal variance policy: this marker is not satisfied by an all-fields-present ideal stub; the test body must exercise a minimal, missing, null, omitted, timeout, fallback, or provider-degraded signal."
+            )
         if scenario.preconditions:
             lines.append("// Preconditions:")
             lines.extend(f"// - {_clean_comment(item)}" for item in scenario.preconditions)
         if scenario.observable_outcomes:
             lines.append("// Observable outcomes:")
             lines.extend(f"// - {_clean_comment(item)}" for item in scenario.observable_outcomes)
+        if scenario.dod_obligations:
+            lines.append("// DoD obligations:")
+            lines.extend(
+                f"// - {_clean_comment(obligation.id)}: {_clean_comment(obligation.text)}"
+                for obligation in scenario.dod_obligations
+            )
+            lines.append(
+                "// Add codd dod evidence markers only after implemented assertions prove each obligation."
+            )
+            lines.append(
+                "// DoD marker format: codd: dod operation=<source_operation> axis=<coverage_axis> obligation=<obligation_id>"
+            )
 
     lines.append("// Acceptance:")
     if scenario.acceptance_criteria:

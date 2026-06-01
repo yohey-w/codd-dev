@@ -3680,6 +3680,8 @@ def _run_e2e_audit(
         f"{summary['covered_by_e2e']} covered by E2E, "
         f"{summary.get('covered_by_lower_test', 0)} lower-test only, "
         f"{summary.get('needs_trigger_evidence', 0)} need trigger evidence, "
+        f"{summary.get('needs_dod_evidence', 0)} need DoD evidence, "
+        f"{summary.get('needs_source_signal_variance', 0)} need source-signal variance, "
         f"{summary.get('blocked', 0)} blocked, "
         f"{summary['heuristic_matches']} heuristic, "
         f"{summary.get('not_covered_by_e2e', summary['uncovered'])} E2E gap(s), "

@@ -58,6 +58,10 @@ def test_operational_audit_marks_marker_covered(tmp_path):
     tests_dir.mkdir(parents=True)
     (tests_dir / "assign_item.spec.ts").write_text(
         """// codd: covers operation=codd.yaml.operation_flow#assign_item axis=persistence_readback
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=persistence_readback obligation=scenario_state
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=persistence_readback obligation=public_trigger
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=persistence_readback obligation=observable_outcome
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=persistence_readback obligation=durable_readback
 test('assign item persists', async () => {});
 """,
         encoding="utf-8",
@@ -70,6 +74,46 @@ test('assign item persists', async () => {});
     assert readback.matched_tests == ["tests/e2e/assign_item.spec.ts"]
     assert report.summary["covered_by_e2e"] == 1
     assert report.summary["uncovered"] == 1
+
+
+def test_operational_audit_requires_dod_markers_after_covers_marker(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: assign_item
+      actor: operator
+      verb: assign
+      target: work_item
+      route: /work-items
+      expected_outcomes: [assignment persists]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "assign_item.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#assign_item axis=persistence_readback
+test('assign item persists', async () => {
+  await page.getByRole('button', { name: 'Assign' }).click();
+  await expect(page.getByText('assignment persists')).toBeVisible();
+});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    readback = next(row for row in report.rows if row.coverage_axis == "persistence_readback")
+    assert readback.coverage_status == "needs_dod_evidence"
+    assert readback.missing_dod_obligations == [
+        "scenario_state",
+        "public_trigger",
+        "observable_outcome",
+        "durable_readback",
+    ]
+    assert report.summary["needs_dod_evidence"] == 1
 
 
 def test_operational_audit_does_not_treat_integration_marker_as_e2e(tmp_path):
@@ -104,8 +148,8 @@ test('webhook handler persists state with mocked provider', async () => {});
     assert success.matched_tests == ["tests/integration/provider-webhook.test.ts"]
     assert report.summary["covered_by_e2e"] == 0
     assert report.summary["covered_by_lower_test"] == 1
-    assert report.summary["not_covered_by_e2e"] == 1
-    assert report.summary["uncovered"] == 0
+    assert report.summary["not_covered_by_e2e"] == 2
+    assert report.summary["uncovered"] == 1
 
     plan = build_agent_workflow_plan(tmp_path, max_scenarios_per_shard=5)
     candidate_names = [
@@ -149,12 +193,12 @@ test('position persists through API shortcut', async () => {
 
     readback = next(row for row in report.rows if row.coverage_axis == "persistence_readback")
     assert readback.coverage_status == "needs_trigger_evidence"
-    assert "trigger-source evidence terms" in readback.required_evidence[-1]
+    assert any("trigger-source evidence terms" in item for item in readback.required_evidence)
     assert "direct API/storage shortcuts are not enough" in readback.suggested_next_action
     assert report.summary["covered_by_e2e"] == 0
     assert report.summary["needs_trigger_evidence"] == 1
-    assert report.summary["not_covered_by_e2e"] == 3
-    assert report.summary["uncovered"] == 2
+    assert report.summary["not_covered_by_e2e"] == 4
+    assert report.summary["uncovered"] == 3
 
 
 def test_operational_audit_requires_source_term_for_external_stream_trigger(tmp_path):
@@ -188,8 +232,9 @@ test('completion threshold persists through direct API shortcut', async () => {
 
     success = next(row for row in report.rows if row.coverage_axis == "happy_path")
     assert success.coverage_status == "needs_trigger_evidence"
-    assert "external" in success.required_evidence[-1]
-    assert "stream" in success.required_evidence[-1]
+    trigger_evidence = next(item for item in success.required_evidence if item.startswith("trigger-source evidence terms"))
+    assert "external" in trigger_evidence
+    assert "stream" in trigger_evidence
     assert report.summary["covered_by_e2e"] == 0
 
 
@@ -214,6 +259,10 @@ def test_operational_audit_accepts_event_source_evidence(tmp_path):
     tests_dir.mkdir(parents=True)
     (tests_dir / "resume_position.spec.ts").write_text(
         """// codd: covers operation=codd.yaml.operation_flow#save_resume_position axis=persistence_readback
+// codd: dod operation=codd.yaml.operation_flow#save_resume_position axis=persistence_readback obligation=scenario_state
+// codd: dod operation=codd.yaml.operation_flow#save_resume_position axis=persistence_readback obligation=public_trigger
+// codd: dod operation=codd.yaml.operation_flow#save_resume_position axis=persistence_readback obligation=observable_outcome
+// codd: dod operation=codd.yaml.operation_flow#save_resume_position axis=persistence_readback obligation=durable_readback
 test('position persists from player pause', async ({ page }) => {
   await page.evaluate(() => {
     window.playerjs.Player.pause();
@@ -229,6 +278,48 @@ test('position persists from player pause', async ({ page }) => {
     readback = next(row for row in report.rows if row.coverage_axis == "persistence_readback")
     assert readback.coverage_status == "covered_by_e2e"
     assert report.summary["covered_by_e2e"] == 1
+
+
+def test_operational_audit_rejects_ideal_stub_for_partial_source_signal(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: ingest_external_event
+      actor: system
+      verb: update
+      target: external_state
+      route: /events
+      trigger: provider callback event
+      source_signal: provider callback payload with optional fields
+      expected_outcomes: [external state persists]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "ingest_external_event.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#ingest_external_event axis=partial_signal_contract
+// codd: dod operation=codd.yaml.operation_flow#ingest_external_event axis=partial_signal_contract obligation=scenario_state
+// codd: dod operation=codd.yaml.operation_flow#ingest_external_event axis=partial_signal_contract obligation=public_trigger
+// codd: dod operation=codd.yaml.operation_flow#ingest_external_event axis=partial_signal_contract obligation=observable_outcome
+// codd: dod operation=codd.yaml.operation_flow#ingest_external_event axis=partial_signal_contract obligation=partial_source_signal
+test('ingests provider callback', async ({ page }) => {
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('provider-callback', {
+    detail: { id: 'evt-1', state: 'ready', receivedAt: 123, checksum: 'ok' },
+  })));
+  await expect(page.getByText('external state persists')).toBeVisible();
+});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    partial = next(row for row in report.rows if row.coverage_axis == "partial_signal_contract")
+    assert partial.coverage_status == "needs_source_signal_variance"
+    assert report.summary["needs_source_signal_variance"] == 1
 
 
 def test_operational_audit_accepts_explicit_blocker_marker(tmp_path):
@@ -326,6 +417,9 @@ def test_agent_workflow_plan_shards_uncovered_rows_by_operation(tmp_path):
     tests_dir.mkdir(parents=True)
     (tests_dir / "assign_item.spec.ts").write_text(
         """// codd: covers operation=codd.yaml.operation_flow#assign_item axis=happy_path
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=happy_path obligation=scenario_state
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=happy_path obligation=public_trigger
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=happy_path obligation=observable_outcome
 test('assign item starts', async () => {});
 """,
         encoding="utf-8",
