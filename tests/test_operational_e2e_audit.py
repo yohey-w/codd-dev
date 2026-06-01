@@ -278,8 +278,10 @@ test('position persists through API shortcut', async () => {
     assert "direct API/storage shortcuts are not enough" in readback.suggested_next_action
     assert report.summary["covered_by_e2e"] == 0
     assert report.summary["needs_trigger_evidence"] == 1
-    assert report.summary["not_covered_by_e2e"] == 5
-    assert report.summary["uncovered"] == 4
+    # save_resume_position now also yields a cross_route_state_restore scenario (uncovered):
+    # "resume" in the operation id triggers the cross-route state contract gate.
+    assert report.summary["not_covered_by_e2e"] == 6
+    assert report.summary["uncovered"] == 5
 
 
 def test_operational_audit_requires_source_term_for_external_stream_trigger(tmp_path):
