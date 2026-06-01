@@ -24,6 +24,7 @@ from codd.action_outcome import (
     extract_action_requirements_from_flows,
 )
 from codd.bridge import get_command_handler
+from codd.capability_completeness import capability_completeness_warnings
 from codd.config import find_codd_dir, load_project_config
 from codd.lexicon import LEXICON_FILENAME, load_lexicon, load_project_extends
 from codd.skills_cli import manager as skills_manager
@@ -612,6 +613,9 @@ def _doctor_warnings(project_root: Path) -> list[str]:
     coverage = _action_outcome_coverage(project_root, config)
     warnings.extend(_action_outcome_warning_messages(coverage, legacy_crud_configured=has_crud_flow_targets))
     warnings.extend(_operation_outcome_projection_warnings(project_root, config, coverage.requirements))
+    warnings.extend(
+        capability_completeness_warnings(_operation_flows_from_project(project_root, config), config)
+    )
     warnings.extend(_runtime_evidence_placeholder_warnings(project_root, config))
     target_actions = action_target_specs_from_config(config)
     warnings.extend(_weak_action_outcome_warning_messages(target_actions))
