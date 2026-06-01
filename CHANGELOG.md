@@ -17,9 +17,14 @@ All notable changes to CoDD are documented in this file.
   - `--runtime-skip crud-flow` records an explicit skipped category in the runtime report.
   - `codd doctor` warns when POST-like handlers exist without configured CRUD reflection checks or reflection-oriented E2E tests.
   - `codd-evolve` Step 8 now requires mutate → re-fetch → visible reflection evidence for POST/PUT/PATCH/DELETE changes.
+- **Operational E2E `cross_route_state_restore` axis** (cmd_507)
+  - The operational E2E audit now derives a `cross_route_state_restore` scenario when a human-facing operation on a client-side route declares that state survives navigation. It is gated on a non-system actor, an actor-facing route, and either a navigation-persistence contract key (`survives_navigation`, `persist_across_navigation`, `restore_on_return`, `retained_on_navigation`, `client_retained_state`, `resume_state`, `restore_scope`) or a generic restore token (`resume`, `restore`, `draft`, `unsaved`, `in_progress`, `scroll position`, `last position`, `remember position`, `continue where`, `return to`).
+  - The axis adds a `cross_route_readback` DoD obligation: proof must leave the operation surface for a different in-app route and return through client-side navigation (no full page reload) and show the state re-hydrated on re-entry. This is orthogonal to `durable_readback` — a reload-only proof is explicitly insufficient.
+  - Closes a false-green class where SPA route re-entry state loss (draft forms, carts, list filters/scroll position, multi-step wizard state, resume position) passed a reload-only readback test.
 
 ### Compatibility
 - Existing runtime smoke behavior is unchanged unless `runtime.crud_flow_targets` is configured.
+- **Behavior change**: the new `cross_route_state_restore` axis can introduce new uncovered rows in the operational E2E audit for projects that were previously "all covered". Operations that declare a navigation-persistence contract (or restore-style tokens) on a human-facing client route now require a `cross_route_state_restore` scenario with a `cross_route_readback` proof. System/batch/scheduler/worker/job/cron actors, API-only routes, and plain CRUD readbacks without a navigation-persistence contract are unaffected. No CoDD-side config opt-in is required; close the new rows by adding the round-trip proof or an explicit blocker marker.
 
 ## [2.20.0] - 2026-05-18 — Codex App Server JSON-RPC integration (cmd_357)
 

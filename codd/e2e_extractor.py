@@ -134,6 +134,27 @@ _NAVIGATION_KEYS = (
     "opens_from",
     "listed_on",
 )
+_NAVIGATION_PERSISTENCE_KEYS = (
+    "survives_navigation",
+    "persist_across_navigation",
+    "restore_on_return",
+    "retained_on_navigation",
+    "client_retained_state",
+    "resume_state",
+    "restore_scope",
+)
+_CROSS_ROUTE_STATE_TOKENS = (
+    "resume",
+    "restore",
+    "draft",
+    "unsaved",
+    "in_progress",
+    "scroll position",
+    "last position",
+    "remember position",
+    "continue where",
+    "return to",
+)
 _TRIGGER_KEYS = ("trigger", "control", "button", "command", "action")
 _DERIVED_STATE_KEYS = (
     "measurement_source",
@@ -199,6 +220,11 @@ _NAVIGATION_PREREQUISITE_ACCEPTANCE = (
     "Evidence proves the actor reaches the operation surface through an actor-facing entry/list/parent "
     "surface and visible navigation affordance; direct deep-link navigation, direct storage writes, or "
     "lower-layer API shortcuts alone do not satisfy this scenario."
+)
+_CROSS_ROUTE_STATE_RESTORE_ACCEPTANCE = (
+    "Evidence proves the declared state survives a client-side navigation round-trip: the "
+    "actor leaves the operation surface for a different in-app route and returns, and the "
+    "state is restored on re-entry without relying on a full page reload."
 )
 _SCENARIO_STATE_ISOLATION_ACCEPTANCE = (
     "Evidence establishes scenario-owned or idempotently reset preconditions before assertions; "
@@ -541,6 +567,37 @@ class ScenarioExtractor:
                                     _PUBLIC_BOUNDARY_ACCEPTANCE,
                                     _DERIVED_STATE_ACCEPTANCE,
                                     *_visible_outcome_acceptance(derived_outcomes),
+                                ],
+                            )
+                        )
+
+                    if _has_cross_route_state_contract(operation, outcomes, routes, actor):
+                        restore_contract = _navigation_persistence_contract_values(operation)
+                        restore_outcomes = _dedupe_strings([*outcomes, *restore_contract])
+                        scenarios.append(
+                            _operational_scenario(
+                                name=f"{actor} {operation_id} cross route state restore",
+                                actor=actor,
+                                axis="cross_route_state_restore",
+                                operation=operation,
+                                source=source,
+                                operation_id=operation_id,
+                                routes=routes,
+                                trigger=trigger,
+                                preconditions=preconditions,
+                                outcomes=restore_outcomes,
+                                priority=priority,
+                                extra_steps=[
+                                    "Exercise the declared state-producing trigger through the public surface.",
+                                    "Navigate away to a different in-app route via visible client-side navigation (no full reload).",
+                                    "Navigate back to the operation surface via client-side navigation.",
+                                    "Verify the declared state is restored on re-entry.",
+                                ],
+                                acceptance=[
+                                    f"{operation_id} restores the declared state after a client-side navigation round-trip.",
+                                    _PUBLIC_BOUNDARY_ACCEPTANCE,
+                                    _CROSS_ROUTE_STATE_RESTORE_ACCEPTANCE,
+                                    *_visible_outcome_acceptance(restore_outcomes),
                                 ],
                             )
                         )
@@ -1115,6 +1172,13 @@ def _navigation_contract_values(operation: Mapping[str, Any]) -> list[str]:
     return _dedupe_strings(values)
 
 
+def _navigation_persistence_contract_values(operation: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in _NAVIGATION_PERSISTENCE_KEYS:
+        values.extend(_coerce_text_list(operation.get(key)))
+    return _dedupe_strings(values)
+
+
 def _navigation_routes(operation: Mapping[str, Any], routes: list[str]) -> list[str]:
     navigation_routes = _ordered_routes(_navigation_contract_values(operation))
     return _ordered_routes([*navigation_routes, *routes])
@@ -1247,6 +1311,22 @@ def _has_derived_state_contract(operation: Mapping[str, Any], outcomes: list[str
             "restore",
         )
     )
+
+
+def _has_cross_route_state_contract(
+    operation: Mapping[str, Any],
+    outcomes: list[str],
+    routes: list[str],
+    actor: str,
+) -> bool:
+    if _normalize_actor_name(actor) in {"system", "batch", "scheduler", "worker", "job", "cron"}:
+        return False
+    if not any(_is_actor_facing_route(route) for route in routes):
+        return False
+    if _navigation_persistence_contract_values(operation):
+        return True
+    text = _operation_contract_text(operation, outcomes)
+    return any(token in text for token in _CROSS_ROUTE_STATE_TOKENS)
 
 
 def _has_threshold_contract(operation: Mapping[str, Any], outcomes: list[str]) -> bool:
@@ -1385,6 +1465,19 @@ def _default_dod_obligations(
                 text=(
                     "The test reaches the operation surface through an actor-facing entry/list/parent "
                     "surface and visible navigation affordance; direct deep-link navigation alone is insufficient."
+                ),
+            )
+        )
+
+    if axis == "cross_route_state_restore":
+        obligations.append(
+            DodObligation(
+                id="cross_route_readback",
+                text=(
+                    "After the durable readback, the actor navigates to a DIFFERENT in-app route and "
+                    "returns to the operation surface through client-side navigation (NOT a full page "
+                    "reload); the declared state is re-hydrated on route re-entry. A reload-only proof "
+                    "is insufficient."
                 ),
             )
         )
@@ -1551,6 +1644,7 @@ def _render_operational_scenarios_markdown(collection: ScenarioCollection) -> st
         "- threshold_boundary: thresholds, timers, durations, scores, percentages, or latest/last rules behave correctly around their boundary values.",
         "- partial_signal_contract: event, callback, queue, webhook, scheduler, adapter, provider, or external-source triggers handle minimal or partially unavailable source signals instead of only ideal full-payload stubs.",
         "- navigation_prerequisite: parameterized actor-facing operation routes are reachable through product navigation, not only direct deep links or lower-layer shortcuts.",
+        "- cross_route_state_restore: declared client-side UI state survives a same-app navigation round-trip (leave to a different in-app route and return) and is re-hydrated on re-entry, not only after a full page reload.",
         "",
     ]
     if collection.source_operation_flows:

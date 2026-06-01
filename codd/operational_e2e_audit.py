@@ -707,6 +707,18 @@ def _scenario_dod_obligations(scenario: UserScenario) -> list[DodObligation]:
                 ),
             )
         )
+    if scenario.coverage_axis == "cross_route_state_restore":
+        obligations.append(
+            DodObligation(
+                id="cross_route_readback",
+                text=(
+                    "After the durable readback, the actor navigates to a DIFFERENT in-app route and "
+                    "returns to the operation surface through client-side navigation (NOT a full page "
+                    "reload); the declared state is re-hydrated on route re-entry. A reload-only proof "
+                    "is insufficient."
+                ),
+            )
+        )
     return _dedupe_dod_obligations(obligations)
 
 
