@@ -116,6 +116,87 @@ test('assign item persists', async () => {
     assert report.summary["needs_dod_evidence"] == 1
 
 
+def test_operational_audit_requires_actor_specific_markers_for_multi_actor_axis(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: assign_item
+      actor: operator
+      observers: [manager, auditor]
+      verb: assign
+      target: work_item
+      route: /work-items
+      expected_outcomes: [assignment persists]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "assign_item.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection obligation=scenario_state
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection obligation=public_trigger
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection obligation=observable_outcome
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection obligation=durable_readback
+test('manager sees assignment', async () => {});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    reflected_rows = [row for row in report.rows if row.coverage_axis == "cross_actor_reflection"]
+    assert {row.actor for row in reflected_rows} == {"manager", "auditor"}
+    assert {row.coverage_status for row in reflected_rows} == {"uncovered"}
+
+
+def test_operational_audit_accepts_matching_actor_marker_for_multi_actor_axis(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: assign_item
+      actor: operator
+      observers: [manager, auditor]
+      verb: assign
+      target: work_item
+      route: /work-items
+      expected_outcomes: [assignment persists]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "assign_item.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection actor=manager
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection obligation=scenario_state actor=manager
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection obligation=public_trigger actor=manager
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection obligation=observable_outcome actor=manager
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=cross_actor_reflection obligation=durable_readback actor=manager
+test('manager sees assignment', async () => {});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    manager = next(
+        row
+        for row in report.rows
+        if row.coverage_axis == "cross_actor_reflection" and row.actor == "manager"
+    )
+    auditor = next(
+        row
+        for row in report.rows
+        if row.coverage_axis == "cross_actor_reflection" and row.actor == "auditor"
+    )
+    assert manager.coverage_status == "covered_by_e2e"
+    assert auditor.coverage_status == "uncovered"
+
+
 def test_operational_audit_does_not_treat_integration_marker_as_e2e(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
