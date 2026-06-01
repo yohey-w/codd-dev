@@ -256,6 +256,11 @@ def test_design_prompt_requires_design_time_operational_behavior_model(tmp_path,
     assert "measurement_source" in prompt
     assert "threshold/boundary behavior" in prompt
     assert "This is not an E2E scenario list" in prompt
+    assert "Actor-Facing Surface/Copy Obligations (DESIGN-TIME, CRITICAL)" in prompt
+    assert "allowed actions/navigation" in prompt
+    assert "forbidden actions/navigation" in prompt
+    assert "job-to-be-done language" in prompt
+    assert "pre-authentication surfaces must not expose ambiguous role-resolved or protected navigation" in prompt
 
 
 def test_generate_supports_detailed_design_documents_with_mermaid_guidance(tmp_path, mock_ai_cli):
@@ -679,8 +684,39 @@ def test_generate_test_document_includes_design_to_test_traceability(tmp_path, m
     assert "design-time `operation_flow` records as the authoritative source" in prompt
     assert "derived-state/read-model chain" in prompt
     assert "below/at/above-boundary assertions" in prompt
+    assert "Actor-facing surface/copy coverage" in prompt
+    assert "required visible labels/copy" in prompt
+    assert "forbidden actions/links/copy patterns are absent" in prompt
     assert "idempotently reset those preconditions" in prompt
     assert "Run the whole selected suite, collect every failure" in prompt
+
+
+def test_generated_browser_test_prompt_requires_surface_copy_assertions():
+    artifact = generator_module.WaveArtifact(
+        wave=9,
+        node_id="test:browser-surface",
+        output="tests/e2e/surface.browser.spec.ts",
+        title="Browser Surface Tests",
+        depends_on=[{"id": "design:ux", "relation": "validates"}],
+        conventions=[],
+    )
+    dependency = generator_module.DependencyDocument(
+        node_id="design:ux",
+        path=Path("docs/design/ux.md"),
+        content=(
+            "## Actor-Facing Surface/Copy Obligations\n"
+            "- Surface: sign-in\n"
+            "- Required visible copy: operator console\n"
+            "- Forbidden navigation: home link before authentication\n"
+        ),
+    )
+
+    prompt = generator_module._build_generation_prompt(artifact, [dependency], [])
+
+    assert "Actor-facing surface/copy coverage (CRITICAL)" in prompt
+    assert "required visible labels/copy" in prompt
+    assert "forbidden actions, links, or copy patterns are absent" in prompt
+    assert "Do not accept generic smoke assertions" in prompt
 
 
 def test_render_document_strips_markdown_fences_from_test_code():

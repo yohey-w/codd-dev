@@ -217,6 +217,9 @@ def test_plan_init_prompt_mentions_detailed_design_wave(tmp_path, mock_plan_init
     assert "shared domain ownership" in prompt
     assert "Operational Behavior Model before implementation planning" in prompt
     assert "not an E2E test artifact" in prompt
+    assert "actor-facing surface/copy obligations before implementation planning" in prompt
+    assert "allowed and forbidden actions/navigation" in prompt
+    assert "job-to-be-done language" in prompt
 
 
 def test_plan_init_accepts_detailed_design_artifacts_from_ai(tmp_path, monkeypatch):
@@ -635,6 +638,8 @@ def test_plan_init_brownfield_prompt_keeps_operational_model_in_design(tmp_path,
     prompt = mock_brownfield_ai[0]["input"]
     assert "Operational Behavior Model before implementation planning" in prompt
     assert "not an E2E test artifact" in prompt
+    assert "actor-facing surface/copy obligations before implementation planning" in prompt
+    assert "forbidden copy patterns" in prompt
 
 
 # ---------------------------------------------------------------------------

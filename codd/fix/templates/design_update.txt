@@ -13,6 +13,22 @@ STRICT RULES:
 5. If the phenomenon does not actually require any design change,
    return the document UNCHANGED (exact byte-for-byte).
 6. Do not delete content unless ALLOW_DELETE is "true".
+7. Every changed line must be causally tied to PHENOMENON_TEXT or
+   PHENOMENON_ANALYSIS.subject_terms. Do NOT make unrelated formatting,
+   table, configuration, diagram, style-token, dependency, or grammar edits.
+8. Before editing, locate the smallest existing section that matches the
+   phenomenon's subject terms. If no section matches, append one localized
+   subsection near the relevant design area; do not touch unrelated sections.
+9. If the phenomenon concerns a user-facing surface, visible copy, role
+   label, onboarding/authentication, or navigation:
+   - update actor-facing surface/copy obligations;
+   - state the surface purpose, primary audience/actor, required visible
+     copy intent, forbidden visible copy patterns, and forbidden actions or
+     navigation;
+   - use the audience's job-to-be-done language, not implementation
+     rationale, internal process notes, demo/test labels, or hidden
+     authority-boundary explanations;
+   - add or refine acceptance criteria/E2E obligations that assert required visible copy is present and forbidden links/actions/copy are absent.
 
 PHENOMENON_TEXT:
 {phenomenon_text}
