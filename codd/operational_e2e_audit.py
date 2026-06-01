@@ -49,6 +49,7 @@ class TestEvidence:
     path: str
     operation: str
     axis: str
+    evidence_text: str = ""
 
 
 @dataclass
@@ -380,6 +381,7 @@ def _scan_test_evidence(
                     path=rel_path,
                     operation=match.group("operation").strip(),
                     axis=match.group("axis").strip(),
+                    evidence_text=_strip_comment_only_lines(text).lower(),
                 )
             )
     return evidence
@@ -420,17 +422,29 @@ def _audit_scenario(
 ) -> ScenarioAuditRow:
     operation_key = _operation_key(scenario)
     axis = scenario.coverage_axis or "unspecified"
-    matched = sorted(
-        {
-            item.path
-            for item in evidence
-            if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
-        }
-    )
+    matching_evidence = [
+        item
+        for item in evidence
+        if item.axis == axis and _operation_matches(item.operation, operation_key, scenario.operation_id)
+    ]
+    matched = sorted({item.path for item in matching_evidence})
     heuristic = sorted(set(heuristic_index.get((operation_key, axis), [])) - set(matched))
-    covered = bool(matched)
+    trigger_terms = _trigger_evidence_terms(scenario)
+    has_trigger_evidence = not trigger_terms or any(
+        _has_trigger_evidence(item.evidence_text, trigger_terms) for item in matching_evidence
+    )
+    covered = bool(matched) and has_trigger_evidence
     status = "covered_by_e2e" if covered else "uncovered"
+    if matched and not has_trigger_evidence:
+        status = "needs_trigger_evidence"
     next_action = _next_action(status=status, heuristic_matches=heuristic)
+    required_evidence = [
+        "actor-facing public trigger",
+        "durable readback or downstream reflection",
+        "scenario-owned or idempotently reset state",
+    ]
+    if trigger_terms:
+        required_evidence.append(f"trigger-source evidence terms: {', '.join(trigger_terms)}")
     return ScenarioAuditRow(
         scenario_name=scenario.name,
         kind=scenario.kind,
@@ -441,11 +455,7 @@ def _audit_scenario(
         coverage_status=status,
         matched_tests=matched,
         heuristic_matches=heuristic,
-        required_evidence=[
-            "actor-facing public trigger",
-            "durable readback or downstream reflection",
-            "scenario-owned or idempotently reset state",
-        ],
+        required_evidence=required_evidence,
         suggested_next_action=next_action,
     )
 
@@ -487,6 +497,8 @@ def _risk_level(priority: str) -> str:
 def _next_action(*, status: str, heuristic_matches: list[str]) -> str:
     if status == "covered_by_e2e":
         return "Run selected suite and attach the latest artifact."
+    if status == "needs_trigger_evidence":
+        return "Add browser/event-source assertions for the declared trigger; direct API/storage shortcuts are not enough."
     if heuristic_matches:
         return "Review assertions, then add an explicit codd covers marker or split the test."
     return "Create or extend an E2E candidate with a codd covers marker."
@@ -495,7 +507,7 @@ def _next_action(*, status: str, heuristic_matches: list[str]) -> str:
 def _summarize(rows: list[ScenarioAuditRow], *, runner_backend: str) -> dict[str, int | str]:
     covered = sum(1 for row in rows if row.coverage_status == "covered_by_e2e")
     heuristic = sum(1 for row in rows if row.heuristic_matches)
-    uncovered = sum(1 for row in rows if row.coverage_status == "uncovered")
+    uncovered = sum(1 for row in rows if row.coverage_status != "covered_by_e2e")
     return {
         "runner_backend": runner_backend,
         "scenario_count": len(rows),
@@ -503,6 +515,91 @@ def _summarize(rows: list[ScenarioAuditRow], *, runner_backend: str) -> dict[str
         "heuristic_matches": heuristic,
         "uncovered": uncovered,
     }
+
+
+_EVENTFUL_TRIGGER_WORDS = {
+    "callback",
+    "cron",
+    "ended",
+    "event",
+    "external",
+    "iframe",
+    "pause",
+    "player",
+    "playback",
+    "queue",
+    "scheduler",
+    "seeked",
+    "sensor",
+    "stream",
+    "timeupdate",
+    "unload",
+    "visibilitychange",
+    "webhook",
+    "worker",
+}
+_TRIGGER_EVIDENCE_STOPWORDS = {
+    "action",
+    "actor",
+    "button",
+    "click",
+    "command",
+    "declared",
+    "event",
+    "from",
+    "lesson",
+    "page",
+    "public",
+    "route",
+    "screen",
+    "trigger",
+    "user",
+    "video",
+    "current",
+    "time",
+    "bunny",
+    "progress",
+}
+
+
+def _trigger_evidence_terms(scenario: UserScenario) -> list[str]:
+    trigger_text = (scenario.trigger or "").lower()
+    if not any(word in trigger_text for word in _EVENTFUL_TRIGGER_WORDS):
+        return []
+
+    tokens = [token for token in re.findall(r"[a-z][a-z0-9_:-]{2,}", trigger_text)]
+    terms = [
+        token
+        for token in tokens
+        if len(token) >= 4 and token not in _TRIGGER_EVIDENCE_STOPWORDS
+    ]
+    event_source_terms = [
+        token
+        for token in terms
+        if token in _EVENTFUL_TRIGGER_WORDS and token not in {"playback", "stream"}
+    ]
+    strong_terms = [
+        token
+        for token in terms
+        if token not in {"playback", "source", "state", "stream", "visible"}
+    ]
+    return list(dict.fromkeys(event_source_terms or strong_terms or terms))[:6]
+
+
+def _has_trigger_evidence(evidence_text: str, trigger_terms: list[str]) -> bool:
+    if not trigger_terms:
+        return True
+    return any(term in evidence_text for term in trigger_terms)
+
+
+def _strip_comment_only_lines(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("//", "#", "*", "/*", "*/")):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _runner_contract(runner_backend: str) -> dict[str, object]:

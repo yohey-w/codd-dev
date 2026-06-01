@@ -72,6 +72,83 @@ test('assign item persists', async () => {});
     assert report.summary["uncovered"] == 1
 
 
+def test_operational_audit_rejects_api_shortcut_for_eventful_trigger(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: save_resume_position
+      actor: learner
+      verb: update
+      target: video_resume_position
+      route: /lessons/:lessonId
+      trigger: external video player pause event
+      measurement_source: video player current time
+      expected_outcomes: [position persists]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "resume_position.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#save_resume_position axis=persistence_readback
+test('position persists through API shortcut', async () => {
+  await request.put('/api/video/lesson-1/position', { data: { position: 50 } });
+  await expect(request.get('/api/video/lesson-1/position')).resolves.toBeTruthy();
+});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    readback = next(row for row in report.rows if row.coverage_axis == "persistence_readback")
+    assert readback.coverage_status == "needs_trigger_evidence"
+    assert "trigger-source evidence terms" in readback.required_evidence[-1]
+    assert "direct API/storage shortcuts are not enough" in readback.suggested_next_action
+    assert report.summary["covered_by_e2e"] == 0
+    assert report.summary["uncovered"] == 3
+
+
+def test_operational_audit_accepts_event_source_evidence(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: save_resume_position
+      actor: learner
+      verb: update
+      target: video_resume_position
+      route: /lessons/:lessonId
+      trigger: external video player pause event
+      measurement_source: video player current time
+      expected_outcomes: [position persists]
+""",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "resume_position.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#save_resume_position axis=persistence_readback
+test('position persists from player pause', async ({ page }) => {
+  await page.evaluate(() => {
+    window.playerjs.Player.pause();
+  });
+  await expect(page.getByText('position persists')).toBeVisible();
+});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    readback = next(row for row in report.rows if row.coverage_axis == "persistence_readback")
+    assert readback.coverage_status == "covered_by_e2e"
+    assert report.summary["covered_by_e2e"] == 1
+
+
 def test_cli_e2e_audit_writes_markdown(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
