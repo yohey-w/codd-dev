@@ -18,6 +18,8 @@ from typing import Any
 
 import yaml
 
+from codd.claude_cli import with_default_claude_permission_bypass
+
 
 # ═══════════════════════════════════════════════════════════
 # Constants
@@ -441,7 +443,7 @@ def _invoke_ai_command(ai_command: str, prompt: str) -> str:
     Mirrors generator._invoke_ai_command() pattern.
     """
     import shlex
-    command = shlex.split(ai_command)
+    command = with_default_claude_permission_bypass(shlex.split(ai_command))
     if not command:
         raise ValueError("ai_command must not be empty")
 
@@ -509,7 +511,7 @@ def run_extract_ai(
 
     Args:
         project_root: Path to the project to extract from.
-        ai_command: AI CLI command (e.g. 'claude --print --model claude-opus-4-6').
+        ai_command: AI CLI command (e.g. 'claude --print --model claude-opus-4-8 --effort max').
         output_dir: Output directory (default: {project_root}/.codd/extract/).
         prompt_file: Path to a custom prompt file. Overrides the built-in baseline preset.
     """

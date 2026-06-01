@@ -3646,6 +3646,83 @@ def _run_e2e_extract(path: str, output: str | None, mode: str = "scenarios") -> 
     click.echo(f"Extracted {len(collection.scenarios)} {mode} scenario(s): {_display_path(written_path, project_root)}")
 
 
+def _run_e2e_audit(
+    path: str,
+    output: str | None,
+    output_format: str,
+    scenarios: str | None,
+    test_dirs: tuple[str, ...],
+    runner_backend: str,
+) -> None:
+    """Audit operational E2E coverage using adapter-neutral markers."""
+    project_root = Path(path).resolve()
+    from codd.operational_e2e_audit import build_operational_e2e_audit, write_operational_e2e_audit
+
+    output_path = Path(output or f"docs/e2e/operational-audit.{output_format}").expanduser()
+    if not output_path.is_absolute():
+        output_path = project_root / output_path
+
+    scenarios_path = Path(scenarios).expanduser() if scenarios else None
+    if scenarios_path is not None and not scenarios_path.is_absolute():
+        scenarios_path = project_root / scenarios_path
+
+    report = build_operational_e2e_audit(
+        project_root,
+        scenarios_path=scenarios_path,
+        test_dirs=test_dirs or None,
+        runner_backend=runner_backend,
+    )
+    written_path = write_operational_e2e_audit(report, output_path, output_format=output_format)
+    summary = report.summary
+    click.echo(
+        "Operational E2E audit: "
+        f"{summary['scenario_count']} scenario(s), "
+        f"{summary['covered_by_e2e']} covered, "
+        f"{summary['heuristic_matches']} heuristic, "
+        f"{summary['uncovered']} uncovered: "
+        f"{_display_path(written_path, project_root)}"
+    )
+
+
+def _run_e2e_workflow_plan(
+    path: str,
+    output: str | None,
+    output_format: str,
+    scenarios: str | None,
+    test_dirs: tuple[str, ...],
+    runner_backend: str,
+    max_scenarios_per_shard: int,
+    claude_dangerously_skip_permissions: bool,
+) -> None:
+    """Create an adapter-neutral parallel E2E agent workflow plan."""
+    project_root = Path(path).resolve()
+    from codd.operational_e2e_audit import build_agent_workflow_plan, write_agent_workflow_plan
+
+    output_path = Path(output or f"docs/e2e/agent-workflow-plan.{output_format}").expanduser()
+    if not output_path.is_absolute():
+        output_path = project_root / output_path
+
+    scenarios_path = Path(scenarios).expanduser() if scenarios else None
+    if scenarios_path is not None and not scenarios_path.is_absolute():
+        scenarios_path = project_root / scenarios_path
+
+    plan = build_agent_workflow_plan(
+        project_root,
+        scenarios_path=scenarios_path,
+        test_dirs=test_dirs or None,
+        runner_backend=runner_backend,
+        max_scenarios_per_shard=max_scenarios_per_shard,
+        claude_dangerously_skip_permissions=claude_dangerously_skip_permissions,
+    )
+    written_path = write_agent_workflow_plan(plan, output_path, output_format=output_format)
+    click.echo(
+        "Agent workflow E2E plan: "
+        f"{plan.summary['workflow_candidate_scenarios']} candidate scenario(s), "
+        f"{plan.summary['workflow_shards']} shard(s): "
+        f"{_display_path(written_path, project_root)}"
+    )
+
+
 @main.group()
 def e2e():
     """Generate and manage E2E test artifacts."""
@@ -3693,6 +3770,104 @@ def e2e_generate(path: str, base_url: str, output: str | None, framework: str, m
 def e2e_extract(path: str, output: str | None, mode: str) -> None:
     """Extract E2E scenario catalogs without generating test files."""
     _run_e2e_extract(path=path, output=output, mode=mode)
+
+
+@e2e.command("audit")
+@click.option("--path", default=".", show_default=True, help="Project root")
+@click.option("--output", default=None, help="Output report path")
+@click.option(
+    "--format",
+    "output_format",
+    default="md",
+    show_default=True,
+    type=click.Choice(["md", "json"]),
+    help="Output report format",
+)
+@click.option("--scenarios", default=None, help="Operational scenario catalog path")
+@click.option("--test-dir", "test_dirs", multiple=True, help="Test directory or file to scan")
+@click.option(
+    "--runner-backend",
+    default="local-playwright",
+    show_default=True,
+    type=click.Choice(["local-playwright", "ci-shard", "agent-workflow", "claude-dynamic-workflow"]),
+    help="Runner backend contract to report against",
+)
+def e2e_audit(
+    path: str,
+    output: str | None,
+    output_format: str,
+    scenarios: str | None,
+    test_dirs: tuple[str, ...],
+    runner_backend: str,
+) -> None:
+    """Audit operational E2E coverage without requiring a specific agent backend."""
+    _run_e2e_audit(
+        path=path,
+        output=output,
+        output_format=output_format,
+        scenarios=scenarios,
+        test_dirs=test_dirs,
+        runner_backend=runner_backend,
+    )
+
+
+@e2e.command("workflow-plan")
+@click.option("--path", default=".", show_default=True, help="Project root")
+@click.option("--output", default=None, help="Output workflow plan path")
+@click.option(
+    "--format",
+    "output_format",
+    default="json",
+    show_default=True,
+    type=click.Choice(["json", "md"]),
+    help="Output workflow plan format",
+)
+@click.option("--scenarios", default=None, help="Operational scenario catalog path")
+@click.option("--test-dir", "test_dirs", multiple=True, help="Test directory or file to scan")
+@click.option(
+    "--runner-backend",
+    default="agent-workflow",
+    show_default=True,
+    type=click.Choice(["agent-workflow", "claude-dynamic-workflow"]),
+    help="Agent runner backend contract to report against",
+)
+@click.option(
+    "--max-scenarios-per-shard",
+    default=6,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Maximum uncovered scenarios assigned to one worker shard",
+)
+@click.option(
+    "--claude-dangerously-skip-permissions/--claude-safe-permissions",
+    default=True,
+    show_default=True,
+    help=(
+        "For --runner-backend claude-dynamic-workflow, include or suppress Claude CLI "
+        "permission bypass flags in generated runner invocation metadata."
+    ),
+)
+def e2e_workflow_plan(
+    path: str,
+    output: str | None,
+    output_format: str,
+    scenarios: str | None,
+    test_dirs: tuple[str, ...],
+    runner_backend: str,
+    max_scenarios_per_shard: int,
+    claude_dangerously_skip_permissions: bool,
+) -> None:
+    """Create parallel agent workflow shards from operational E2E gaps."""
+    _run_e2e_workflow_plan(
+        path=path,
+        output=output,
+        output_format=output_format,
+        scenarios=scenarios,
+        test_dirs=test_dirs,
+        runner_backend=runner_backend,
+        max_scenarios_per_shard=max_scenarios_per_shard,
+        claude_dangerously_skip_permissions=claude_dangerously_skip_permissions,
+    )
 
 
 @main.command("e2e-generate")
@@ -3829,9 +4004,15 @@ def extract(
         if ai_cmd is None:
             try:
                 cfg = load_project_config(project_root)
-                ai_cmd = cfg.get("ai_command", 'claude --print --model claude-opus-4-6 --tools ""')
+                ai_cmd = cfg.get(
+                    "ai_command",
+                    'claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools ""',
+                )
             except FileNotFoundError:
-                ai_cmd = 'claude --print --model claude-opus-4-6 --tools ""'
+                ai_cmd = (
+                    'claude --print --permission-mode bypassPermissions '
+                    '--dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools ""'
+                )
 
         preset_name = "custom" if prompt_file else "baseline"
         click.echo(f"CoDD AI Extract v3")

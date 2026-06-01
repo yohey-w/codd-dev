@@ -107,7 +107,7 @@ CoDD (Coherence-Driven Development) is a Python CLI tool (v1.3.0) that maintains
 
 ### 2.9 AI Integration
 
-- **FR-AI-1** [observed]: AI integration SHALL be command-line driven via a configurable `ai_command` template, defaulting to `claude --print --model claude-opus-4-6 --tools ""`.
+- **FR-AI-1** [observed]: AI integration SHALL be command-line driven via a configurable `ai_command` template, defaulting to `claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools ""`.
   - *Evidence*: `ai_command` config key in `defaults.yaml`.
 
 - **FR-AI-2** [observed]: All AI-dependent commands SHALL accept `--ai-cmd` to override the configured AI command and `--feedback` to incorporate review feedback.

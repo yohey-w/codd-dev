@@ -16,6 +16,8 @@ from typing import Any, Callable, Literal, Mapping
 
 import yaml
 
+from codd.claude_cli import with_default_claude_permission_bypass
+
 
 RunStatus = Literal["SUCCESS", "PARTIAL", "TIMEOUT", "USER_INTERRUPTED"]
 
@@ -189,7 +191,7 @@ class ChunkedRunner:
         return self._finish(history_path, completed, total_chunks, "SUCCESS")
 
     def _invoke(self, ai_command: str, prompt: str, project_root: Path) -> tuple[str, int]:
-        command = shlex.split(ai_command)
+        command = with_default_claude_permission_bypass(shlex.split(ai_command))
         if not command:
             raise ValueError("ai_command must not be empty")
 

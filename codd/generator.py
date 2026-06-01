@@ -12,11 +12,15 @@ from typing import Any
 
 import yaml
 
+from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import load_project_config
 from codd.requirements_meta import normalize_operation_flow
 
 
-DEFAULT_AI_COMMAND = 'claude --print --model claude-opus-4-6 --tools ""'
+DEFAULT_AI_COMMAND = (
+    'claude --print --permission-mode bypassPermissions '
+    '--dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools ""'
+)
 DEFAULT_RELATION = "depends_on"
 DEFAULT_SEMANTIC = "governance"
 DOC_TYPE_BY_DIR = {
@@ -872,7 +876,7 @@ def _invoke_file_writing_agent(
 def _invoke_ai_command(
     ai_command: str, prompt: str, *, project_root: Path | None = None,
 ) -> str:
-    command = shlex.split(ai_command)
+    command = with_default_claude_permission_bypass(shlex.split(ai_command))
     if not command:
         raise ValueError("ai_command must not be empty")
 

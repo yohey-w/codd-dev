@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import load_project_config
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.knowledge_fetcher import KnowledgeFetcher
@@ -105,7 +106,7 @@ class RequiredArtifactsDeriver:
 
     def _call_ai(self, prompt: str) -> str:
         """Invoke the configured AI command with the prompt on stdin."""
-        command = shlex.split(self.ai_command.strip())
+        command = with_default_claude_permission_bypass(shlex.split(self.ai_command.strip()))
         if not command:
             raise ValueError("ai_command must not be empty")
 

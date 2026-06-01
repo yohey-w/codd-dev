@@ -16,6 +16,7 @@ from typing import Any, ClassVar, Literal, Mapping
 
 import yaml
 
+from codd.claude_cli import with_default_claude_permission_bypass
 from codd.dag import Node
 from codd.dag.extractor import extract_design_doc_metadata
 
@@ -175,7 +176,7 @@ class SubprocessAiCommandDesignDocExtractor(DesignDocExtractor):
 
         try:
             completed = self.runner(
-                shlex.split(command),
+                with_default_claude_permission_bypass(shlex.split(command)),
                 input=prompt,
                 capture_output=True,
                 text=True,
