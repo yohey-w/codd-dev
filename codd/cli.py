@@ -26,6 +26,10 @@ from codd.action_outcome import (
 from codd.bridge import get_command_handler
 from codd.capability_completeness import capability_completeness_warnings
 from codd.config import find_codd_dir, load_project_config
+from codd.surface_reconciliation import (
+    iter_markup_source_texts,
+    surface_reconciliation_warnings,
+)
 from codd.lexicon import LEXICON_FILENAME, load_lexicon, load_project_extends
 from codd.skills_cli import manager as skills_manager
 
@@ -607,6 +611,7 @@ def _doctor_warnings(project_root: Path) -> list[str]:
         )
     warnings.extend(_synthetic_mutation_warnings(project_root, config))
     warnings.extend(_interactive_control_warnings(project_root, config))
+    warnings.extend(_undeclared_surface_warnings(project_root, config))
     warnings.extend(_screen_escape_route_warnings(project_root, config))
     warnings.extend(_authenticated_global_action_warnings(project_root, config))
     warnings.extend(_presentation_obligation_warnings(project_root, config))
@@ -616,6 +621,7 @@ def _doctor_warnings(project_root: Path) -> list[str]:
     warnings.extend(
         capability_completeness_warnings(_operation_flows_from_project(project_root, config), config)
     )
+    warnings.extend(_orphan_cover_marker_warnings(project_root, config))
     warnings.extend(_runtime_evidence_placeholder_warnings(project_root, config))
     target_actions = action_target_specs_from_config(config)
     warnings.extend(_weak_action_outcome_warning_messages(target_actions))
@@ -1025,6 +1031,73 @@ def _interactive_control_warnings(project_root: Path, config: dict[str, Any]) ->
                 "`runtime.action_outcome_targets` action."
             )
     return warnings
+
+
+def _undeclared_surface_warnings(project_root: Path, config: dict[str, Any]) -> list[str]:
+    """Flag actor-facing interactive surfaces absent from the declared universe.
+
+    Orthogonal to ``_interactive_control_warnings``: that asks "is this control
+    wired?", this asks "is this wired/authoring surface DECLARED in
+    operation_flow?". A fully wired authoring control still warns when no declared
+    operation names its capability, because every per-operation coverage axis is
+    structurally blind to capabilities that were never lifted into operation_flow.
+    """
+
+    source_files = _configured_text_files(project_root, config, "source_dirs", ["src/"])
+    source_texts = iter_markup_source_texts(
+        source_files,
+        display=lambda path: _display_path(path, project_root),
+        read_text=_read_text_best_effort,
+    )
+    flows = _operation_flows_from_project(project_root, config)
+    runtime_tokens = _runtime_action_tokens_from_config(config)
+    return surface_reconciliation_warnings(
+        source_texts, flows, config, runtime_tokens=runtime_tokens
+    )
+
+
+def _runtime_action_tokens_from_config(config: dict[str, Any]) -> frozenset[str]:
+    """Capability tokens already declared via ``runtime.action_outcome_targets``.
+
+    Reuses the existing action-target parser so a capability that already has a
+    runtime outcome target is treated as declared and does not warn.
+    """
+
+    tokens: set[str] = set()
+    for action in action_target_specs_from_config(config):
+        for value in (action.verb, action.action_id, action.target, action.target_name):
+            token = _normalize_runtime_token(value)
+            if token:
+                tokens.add(token)
+                tokens.update(part for part in token.split("_") if part)
+            canonical = canonical_action_verb(value)
+            if canonical:
+                tokens.add(canonical)
+    return frozenset(tokens)
+
+
+def _orphan_cover_marker_warnings(project_root: Path, config: dict[str, Any]) -> list[str]:
+    """Flag ``codd: covers`` markers for operations absent from operation_flow.
+
+    Defense-in-depth reverse reconciliation for the audit path: the normal
+    scenario->test matcher silently drops a marker whose operation is in no
+    declared flow. Opt-out via ``orphan_cover_markers.enabled: false`` in
+    codd.yaml. Best-effort: if the scenario collection cannot be built (no
+    operation_flow / parse error), stay silent rather than fail doctor.
+    """
+
+    settings = config.get("orphan_cover_markers")
+    if isinstance(settings, dict) and not bool(settings.get("enabled", True)):
+        return []
+    try:
+        from codd.operational_e2e_audit import detect_orphan_cover_markers
+    except ImportError:
+        return []
+    try:
+        orphans = detect_orphan_cover_markers(project_root)
+    except (FileNotFoundError, ValueError):
+        return []
+    return [orphan.message for orphan in orphans]
 
 
 def _weak_action_outcome_warning_messages(target_actions: tuple[ActionTargetSpec, ...]) -> list[str]:

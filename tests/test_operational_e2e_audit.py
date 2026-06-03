@@ -716,3 +716,111 @@ def test_claude_dynamic_workflow_cli_can_disable_permission_bypass(tmp_path):
     assert "--model claude-opus-4-8" in payload["runner_invocation"]["command_prefix"]
     assert "--effort max" in payload["runner_invocation"]["command_prefix"]
     assert "--dangerously-skip-permissions" not in payload["runner_invocation"]["command_prefix"]
+
+
+# --- Check B: orphan covers-marker reverse reconciliation --------------------
+
+
+def _orphan_project(tmp_path, marker_operation: str, *, extra_codd: str = "") -> None:
+    """A project with one declared operation and one spec covers-marker."""
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """operation_flow:
+  operations:
+    - id: assign_item
+      actor: operator
+      verb: assign
+      target: work_item
+      route: /work-items
+      expected_outcomes: [assignment persists]
+"""
+        + extra_codd,
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "e2e"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "spec.spec.ts").write_text(
+        f"// codd: covers operation={marker_operation} axis=persistence_readback\n"
+        "test('x', async () => {});\n",
+        encoding="utf-8",
+    )
+
+
+def test_orphan_marker_detected_for_undeclared_operation(tmp_path):
+    # The spec claims to cover an operation that exists in NO operation_flow.
+    _orphan_project(tmp_path, "ghost_operation")
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    assert len(report.orphan_cover_markers) == 1
+    orphan = report.orphan_cover_markers[0]
+    assert orphan.operation == "ghost_operation"
+    assert orphan.path == "tests/e2e/spec.spec.ts"
+    assert report.summary["orphan_cover_markers"] == 1
+    assert "orphan_cover_marker" in orphan.message
+    assert "ghost_operation" in orphan.message
+
+
+def test_no_orphan_when_marker_matches_bare_operation_id(tmp_path):
+    _orphan_project(tmp_path, "assign_item")
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    assert report.orphan_cover_markers == []
+    assert report.summary["orphan_cover_markers"] == 0
+
+
+def test_no_orphan_when_marker_matches_full_source_key(tmp_path):
+    _orphan_project(tmp_path, "codd.yaml.operation_flow#assign_item")
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    assert report.orphan_cover_markers == []
+
+
+def test_orphan_markers_rendered_in_markdown(tmp_path):
+    _orphan_project(tmp_path, "ghost_operation")
+
+    result = CliRunner().invoke(
+        main, ["e2e", "audit", "--path", str(tmp_path), "--format", "md"]
+    )
+
+    assert result.exit_code == 0
+    md = (tmp_path / "docs" / "e2e" / "operational-audit.md").read_text(encoding="utf-8")
+    assert "Orphan Covers Markers" in md
+    assert "ghost_operation" in md
+    assert "Orphan covers markers: 1" in md
+
+
+def test_doctor_warns_on_orphan_cover_marker(tmp_path):
+    _orphan_project(tmp_path, "ghost_operation")
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "CoDD doctor: WARN" in result.output
+    assert "orphan_cover_marker" in result.output
+    assert "ghost_operation" in result.output
+
+
+def test_doctor_silent_on_declared_cover_marker(tmp_path):
+    _orphan_project(tmp_path, "assign_item")
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "orphan_cover_marker" not in result.output
+
+
+def test_doctor_opt_out_suppresses_orphan_warning(tmp_path):
+    _orphan_project(
+        tmp_path,
+        "ghost_operation",
+        extra_codd="\norphan_cover_markers:\n  enabled: false\n",
+    )
+
+    result = CliRunner().invoke(main, ["doctor", "--path", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "orphan_cover_marker" not in result.output
