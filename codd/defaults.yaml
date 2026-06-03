@@ -74,3 +74,16 @@ typecheck:
 conventions: []
 extraction:
   frontmatter_alias: {}
+# Advisory doctor checks (non-fatal). Both default-enabled; opt out per project.
+surface_reconciliation:
+  # Flag actor-facing interactive/authoring surfaces in source (literal <button>
+  # mutating controls + generic contenteditable/role=textbox editors) whose
+  # capability is not declared in any operation_flow and not covered by a runtime
+  # action outcome target. Set enabled:false to silence; extend authoring_verbs
+  # with non-English/custom control labels.
+  enabled: true
+  authoring_verbs: []
+orphan_cover_markers:
+  # Flag `codd: covers operation=X` test markers whose operation X is not declared
+  # in any operation_flow (reverse reconciliation of the audit covers path).
+  enabled: true

@@ -80,6 +80,32 @@ class TestEvidence:
 
 
 @dataclass(frozen=True)
+class OrphanCoverMarker:
+    """A ``codd: covers`` marker whose operation is not in any declared flow.
+
+    The scenario->test matching path silently drops such markers: a spec can
+    claim to cover ``operation=X`` while ``X`` exists in no ``operation_flow``,
+    so the claim is never reconciled. This is the reverse of the normal
+    direction and a defense-in-depth signal that either the marker is stale or
+    the operation was never declared.
+    """
+
+    path: str
+    operation: str
+    axis: str
+
+    @property
+    def message(self) -> str:
+        return (
+            f"[orphan_cover_marker] Test `{self.path}` claims `codd: covers "
+            f"operation={self.operation} axis={self.axis}`, but no `operation_flow` "
+            f"declares operation `{self.operation}`. Declare the operation in "
+            f"operation_flow so its coverage is reconciled, or fix the marker if the "
+            f"operation id is wrong/renamed."
+        )
+
+
+@dataclass(frozen=True)
 class BlockerEvidence:
     """A concrete reason an operational E2E scenario cannot yet be proven."""
 
@@ -137,6 +163,7 @@ class OperationalE2EAuditReport:
     failure_taxonomy: list[str]
     repair_policy: list[str]
     rows: list[ScenarioAuditRow]
+    orphan_cover_markers: list[OrphanCoverMarker] = field(default_factory=list)
 
 
 @dataclass
@@ -194,7 +221,8 @@ def build_operational_e2e_audit(
         )
         for scenario in collection.scenarios
     ]
-    summary = _summarize(rows, runner_backend=backend)
+    orphan_markers = _detect_orphan_cover_markers(evidence, collection.scenarios)
+    summary = _summarize(rows, runner_backend=backend, orphan_marker_count=len(orphan_markers))
 
     return OperationalE2EAuditReport(
         version=AUDIT_CONTRACT_VERSION,
@@ -209,6 +237,7 @@ def build_operational_e2e_audit(
             "Verify each repaired group with the smallest relevant test first, then rerun the selected suite.",
         ],
         rows=rows,
+        orphan_cover_markers=orphan_markers,
     )
 
 
@@ -339,6 +368,7 @@ def render_operational_e2e_audit_markdown(report: OperationalE2EAuditReport) -> 
         f"- Needs source-signal variance evidence: {report.summary.get('needs_source_signal_variance', 0)}",
         f"- Not covered by E2E: {report.summary.get('not_covered_by_e2e', report.summary['uncovered'])}",
         f"- Strictly uncovered: {report.summary['uncovered']}",
+        f"- Orphan covers markers: {report.summary.get('orphan_cover_markers', 0)}",
         "",
         "## Runner Contract",
     ]
@@ -384,6 +414,23 @@ def render_operational_e2e_audit_markdown(report: OperationalE2EAuditReport) -> 
             )
             + " |"
         )
+    if report.orphan_cover_markers:
+        lines.extend(["", "## Orphan Covers Markers"])
+        lines.append(
+            "These `codd: covers` markers reference an operation that is not declared in "
+            "any `operation_flow`; declare the operation or fix the marker."
+        )
+        lines.append("")
+        lines.append("| Test | Operation | Axis |")
+        lines.append("| --- | --- | --- |")
+        for orphan in report.orphan_cover_markers:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [_md_cell(orphan.path), _md_cell(orphan.operation), _md_cell(orphan.axis)]
+                )
+                + " |"
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -467,6 +514,60 @@ def _scan_test_evidence(
                 )
             )
     return evidence
+
+
+def detect_orphan_cover_markers(
+    project_root: Path | str,
+    *,
+    scenarios_path: Path | str | None = None,
+    test_dirs: Iterable[Path | str] | None = None,
+) -> list[OrphanCoverMarker]:
+    """Public, lightweight orphan-marker scan for ``codd doctor``.
+
+    Reuses the existing scenario collection (declared universe) and test-evidence
+    scan without building the full audit/runner machinery, so it is cheap enough
+    to run on every ``doctor`` invocation.
+    """
+
+    project_root = Path(project_root).resolve()
+    collection = _load_or_extract_operational_scenarios(project_root, scenarios_path=scenarios_path)
+    evidence = _scan_test_evidence(project_root, test_dirs=test_dirs)
+    return _detect_orphan_cover_markers(evidence, collection.scenarios)
+
+
+def _detect_orphan_cover_markers(
+    evidence: list[TestEvidence],
+    scenarios: list[UserScenario],
+) -> list[OrphanCoverMarker]:
+    """Return covers-markers whose operation is in no declared operation_flow.
+
+    The declared universe is taken from the same scenario collection used to
+    build the audit rows (every declared operation yields at least one scenario),
+    so this needs no extra source parsing and stays adapter-neutral. A marker is
+    an orphan when neither its full ``source#operation`` key nor a bare
+    ``operation`` id matches any declared scenario -- i.e. the reverse path the
+    scenario->test matcher never checks.
+    """
+
+    declared_keys: set[str] = set()
+    declared_ids: set[str] = set()
+    for scenario in scenarios:
+        declared_keys.add(_operation_key(scenario))
+        if scenario.operation_id:
+            declared_ids.add(scenario.operation_id)
+
+    orphans: list[OrphanCoverMarker] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in evidence:
+        operation = item.operation
+        if operation in declared_keys or operation in declared_ids:
+            continue
+        key = (item.path, operation, item.axis)
+        if key in seen:
+            continue
+        seen.add(key)
+        orphans.append(OrphanCoverMarker(path=item.path, operation=operation, axis=item.axis))
+    return orphans
 
 
 def _scan_dod_evidence(
@@ -877,7 +978,12 @@ def _next_action(*, status: str, heuristic_matches: list[str]) -> str:
     return "Create or extend an E2E candidate with a codd covers marker."
 
 
-def _summarize(rows: list[ScenarioAuditRow], *, runner_backend: str) -> dict[str, int | str]:
+def _summarize(
+    rows: list[ScenarioAuditRow],
+    *,
+    runner_backend: str,
+    orphan_marker_count: int = 0,
+) -> dict[str, int | str]:
     covered = sum(1 for row in rows if row.coverage_status == "covered_by_e2e")
     lower = sum(1 for row in rows if row.coverage_status == "covered_by_lower_test")
     needs_trigger = sum(1 for row in rows if row.coverage_status == "needs_trigger_evidence")
@@ -899,6 +1005,7 @@ def _summarize(rows: list[ScenarioAuditRow], *, runner_backend: str) -> dict[str
         "heuristic_matches": heuristic,
         "not_covered_by_e2e": not_covered_by_e2e,
         "uncovered": uncovered,
+        "orphan_cover_markers": orphan_marker_count,
     }
 
 
