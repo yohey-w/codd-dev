@@ -6,7 +6,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -20,6 +20,20 @@ from codd.generator import (
     MARKDOWN_FENCE_RE,
 )
 from codd.scanner import _extract_frontmatter
+
+
+def _json_default(obj: Any) -> str:
+    """Fallback serializer for json.dumps in the propagation path.
+
+    YAML frontmatter and config values can carry types that are not
+    JSON-native (e.g. an unquoted ``date: 2026-05-29`` parses to a
+    ``datetime.date``). Coerce date/datetime to ISO 8601 and any other
+    non-serializable value to its string form so serialization never
+    raises. Generic by design: not tied to any field name or project.
+    """
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    return str(obj)
 
 
 @dataclass
@@ -917,7 +931,10 @@ def _save_verify_state(
     }
 
     state_path = codd_dir / VERIFY_STATE_FILE
-    state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    state_path.write_text(
+        json.dumps(state, indent=2, ensure_ascii=False, default=_json_default),
+        encoding="utf-8",
+    )
 
 
 def _load_verify_state(project_root: Path) -> dict | None:
@@ -1357,7 +1374,7 @@ def _format_coherence_text(value: Any) -> str:
         return str(value.as_context_string()).strip()
     if isinstance(value, str):
         return value.strip()
-    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=_json_default)
 
 
 def _sanitize_update_body(body: str) -> str:

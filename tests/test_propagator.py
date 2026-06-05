@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from codd.propagator import (
     VerifyResult,
     CommitResult,
     _build_update_prompt,
+    _format_coherence_text,
     _classify_docs_by_band,
     _find_design_docs_by_modules,
     _get_doc_confidence,
@@ -291,6 +293,65 @@ def test_build_update_prompt_doc_to_doc():
     assert "UNCHANGED" in prompt
     assert "docs/design/system_design.md" in prompt
     assert "Old content" in prompt
+
+
+# -- Regression: date/datetime in coherence context (issue #28) ---------------
+
+
+def test_format_coherence_text_serializes_date_values():
+    """Unquoted YAML dates parse to datetime.date; serialization must not raise.
+
+    Reproduces issue #28: ``Object of type date is not JSON serializable``.
+    The date must render as an ISO 8601 string, generically (not by field name).
+    """
+    # Simulates frontmatter / config parsed from YAML where `date: 2026-05-29`
+    # (unquoted) becomes a datetime.date and a datetime carries time too.
+    coherence_value = {
+        "version": "1.0.0",
+        "date": date(2026, 5, 29),
+        "updated": datetime(2026, 5, 29, 13, 45, 0),
+        "tokens": {"primary": "#ffffff"},
+    }
+
+    rendered = _format_coherence_text(coherence_value)
+
+    parsed = json.loads(rendered)
+    assert parsed["date"] == "2026-05-29"
+    assert parsed["updated"].startswith("2026-05-29T13:45")
+    assert parsed["tokens"]["primary"] == "#ffffff"
+
+
+def test_build_update_prompt_with_date_in_coherence_context():
+    """End-to-end prompt build must tolerate a date in the coherence context.
+
+    propagate-from → run_propagate → _build_update_prompt feeds the coherence
+    context through json.dumps; a date in design tokens / lexicon previously
+    raised TypeError and aborted propagation.
+    """
+    doc = AffectedDoc(
+        node_id="design:auth",
+        path="docs/design/auth_design.md",
+        title="Auth Design",
+        modules=["auth"],
+        matched_modules=["auth"],
+        changed_files=["src/auth/service.py"],
+    )
+    current = "---\ncodd:\n  node_id: design:auth\n---\n\n# Auth Design\n\nOld content.\n"
+    diff = "diff --git a/src/auth/service.py\n+    def new_method(self):\n"
+    coherence_context = {
+        "design_md": {"version": "1.0.0", "date": date(2026, 5, 29)},
+    }
+
+    # Must not raise "Object of type date is not JSON serializable".
+    prompt = _build_update_prompt(
+        doc,
+        current,
+        diff,
+        coherence_context=coherence_context,
+    )
+
+    assert "2026-05-29" in prompt  # date rendered as ISO string
+    assert "Design Tokens" in prompt
 
 
 # -- Unit tests: _find_changed_docs -------------------------------------------

@@ -4,6 +4,14 @@ All notable changes to CoDD are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **`codd init` works in non-TTY environments** (GitHub #29)
+  - `codd init <name>` now accepts the project name as a positional argument and no longer aborts with an opaque `Project name: Aborted!` under CI / agent shells / `stdin=/dev/null`. `--project-name` remains supported as a back-compatible alias; interactive prompting is preserved on a real TTY, and non-interactive runs succeed when a value is supplied (a missing value fails with a clear, actionable error naming the flag). The same non-TTY abort on `--language` was fixed.
+- **`codd propagate-from` no longer aborts on `date` frontmatter** (GitHub #28)
+  - Date/datetime values (e.g. an unquoted YAML `date: 2026-05-29` that PyYAML parses into `datetime.date`) are now serialized as ISO 8601 strings when building the propagation context, with a safe string fallback for any other non-JSON-native value. Fixes `Object of type date is not JSON serializable`.
+- **`codd generate` / `plan --init` tolerate noisy AI output for wave_config** (GitHub #27)
+  - `_parse_wave_config_output` now recovers valid YAML from common LLM-output noise (a fenced block surrounded by prose, a bare fence with trailing prose, or a tool-call JSON envelope) in a fully backend-agnostic way, accepting the first candidate that validates. Clean responses still parse verbatim; genuinely malformed/empty input still raises a clear error.
+
 ### Added
 - **Runtime action outcome coverage** (cmd_479)
   - `codd verify --runtime` now supports an opt-in `action-outcome` category through `runtime.action_outcome_targets`.

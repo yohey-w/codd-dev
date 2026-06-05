@@ -999,48 +999,93 @@ def _build_brownfield_plan_init_prompt(
 
 
 def _parse_wave_config_output(raw_output: str) -> dict[str, list[dict[str, Any]]]:
-    cleaned_output = _clean_wave_config_output(raw_output)
-    if not cleaned_output:
+    """Parse an AI command's stdout into a validated wave_config mapping.
+
+    AI backends frequently wrap structured output in noise: markdown code
+    fences (```yaml ... ```), conversational prose before/after the payload,
+    or a tool-call JSON envelope. To stay backend-agnostic (no model- or
+    tool-specific handling), we derive an ordered set of candidate
+    sanitizations of ``raw_output`` and accept the first one that yields a
+    structurally valid wave_config. Candidates are generic textual transforms,
+    not per-vendor special cases.
+    """
+    if not _clean_wave_config_output(raw_output):
         raise ValueError("AI command returned empty wave_config output")
 
-    try:
-        payload = yaml.safe_load(cleaned_output)
-    except yaml.YAMLError as exc:
-        trimmed_output = _clean_wave_config_output(_trim_to_wave_config_mapping(cleaned_output))
-        if trimmed_output == cleaned_output:
-            raise ValueError(f"AI command returned invalid wave_config YAML: {exc}") from exc
+    last_error: Exception | None = None
+    for candidate in _iter_wave_config_candidates(raw_output):
+        try:
+            payload = yaml.safe_load(candidate)
+        except yaml.YAMLError as exc:
+            last_error = exc
+            continue
+
+        if isinstance(payload, dict) and isinstance(payload.get("wave_config"), dict):
+            payload = payload["wave_config"]
+
+        if not isinstance(payload, dict):
+            last_error = ValueError(
+                "AI command must return a YAML mapping of wave numbers to artifact lists"
+            )
+            continue
 
         try:
-            payload = yaml.safe_load(trimmed_output)
-        except yaml.YAMLError as trimmed_exc:
-            raise ValueError(f"AI command returned invalid wave_config YAML: {trimmed_exc}") from trimmed_exc
+            artifacts = _load_wave_artifacts({"wave_config": payload})
+        except ValueError as exc:
+            last_error = exc
+            continue
 
-    if isinstance(payload, dict) and isinstance(payload.get("wave_config"), dict):
-        payload = payload["wave_config"]
+        return _serialize_wave_config(artifacts)
 
-    if not isinstance(payload, dict):
-        raise ValueError("AI command must return a YAML mapping of wave numbers to artifact lists")
+    if isinstance(last_error, yaml.YAMLError):
+        raise ValueError(f"AI command returned invalid wave_config YAML: {last_error}") from last_error
+    if last_error is not None:
+        raise last_error
+    raise ValueError("AI command must return a YAML mapping of wave numbers to artifact lists")
 
-    try:
-        artifacts = _load_wave_artifacts({"wave_config": payload})
-    except ValueError as exc:
-        trimmed_output = _clean_wave_config_output(_trim_to_wave_config_mapping(cleaned_output))
-        if trimmed_output == cleaned_output:
-            raise
 
-        try:
-            trimmed_payload = yaml.safe_load(trimmed_output)
-        except yaml.YAMLError as trimmed_exc:
-            raise ValueError(f"AI command returned invalid wave_config YAML: {trimmed_exc}") from trimmed_exc
+def _iter_wave_config_candidates(raw_output: str) -> list[str]:
+    """Yield candidate YAML strings extracted from a noisy AI response.
 
-        if isinstance(trimmed_payload, dict) and isinstance(trimmed_payload.get("wave_config"), dict):
-            trimmed_payload = trimmed_payload["wave_config"]
-        if not isinstance(trimmed_payload, dict):
-            raise ValueError("AI command must return a YAML mapping of wave numbers to artifact lists") from exc
+    Each candidate is a progressively more aggressive attempt to isolate the
+    YAML body from surrounding LLM noise. Ordering goes from least to most
+    transformation so a clean response is parsed verbatim, while noisy ones
+    still recover. Duplicates and empties are dropped.
+    """
+    candidates: list[str] = []
 
-        artifacts = _load_wave_artifacts({"wave_config": trimmed_payload})
+    def _add(text: str | None) -> None:
+        if not text:
+            return
+        normalized = text.strip()
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
 
-    return _serialize_wave_config(artifacts)
+    def _clean(text: str | None) -> str | None:
+        return _clean_wave_config_output(text) if text else None
+
+    cleaned = _clean_wave_config_output(raw_output)
+    _add(cleaned)
+    # Prose may appear before AND after a fenced block; pull just the fenced
+    # body (preferring a yaml/yml-tagged fence) from anywhere in the text.
+    _add(_clean(_extract_fenced_block(raw_output)))
+    # Leading prose with no fence: skip to the first mapping-looking line.
+    _add(_clean(_trim_to_wave_config_mapping(cleaned)))
+    # Some backends emit a JSON envelope whose value is the YAML/text payload.
+    _add(_clean(_unwrap_json_envelope(raw_output)))
+
+    return candidates
+
+
+# Matches a markdown fenced block anywhere in the text. The optional info
+# string (language tag) is captured so we can prefer a yaml/yml fence, and the
+# body is non-greedy so we stop at the FIRST closing fence rather than swallow
+# trailing prose. Anchored to a line start to avoid matching inline backticks.
+_FENCED_BLOCK_RE = re.compile(
+    r"(?m)^[ \t]*```[ \t]*(?P<lang>[A-Za-z0-9_+-]*)[ \t]*\r?\n"
+    r"(?P<body>.*?)\r?\n[ \t]*```",
+    re.DOTALL,
+)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -1051,9 +1096,31 @@ def _strip_code_fences(text: str) -> str:
     return stripped
 
 
+def _extract_fenced_block(text: str) -> str:
+    """Return the body of a fenced code block found anywhere in ``text``.
+
+    Tolerates conversational prose before and after the fence and a closing
+    fence followed by more prose. When several blocks are present, a
+    yaml/yml-tagged block wins; otherwise the first block is used. Returns the
+    original text unchanged when no fenced block is present so callers can fall
+    back to other strategies. Language-agnostic: no model/tool names involved.
+    """
+    if not text:
+        return text
+
+    blocks = list(_FENCED_BLOCK_RE.finditer(text))
+    if not blocks:
+        return text
+
+    for match in blocks:
+        if match.group("lang").strip().lower() in {"yaml", "yml"}:
+            return match.group("body")
+    return blocks[0].group("body")
+
+
 def _clean_wave_config_output(text: str) -> str:
     stripped = _strip_code_fences(text).strip()
-    lines = [line for line in stripped.splitlines() if not re.match(r"^\s*```(?:yaml|yml)?\s*$", line)]
+    lines = [line for line in stripped.splitlines() if not re.match(r"^\s*```[A-Za-z0-9_+-]*\s*$", line)]
     return "\n".join(lines).strip()
 
 
@@ -1063,6 +1130,58 @@ def _trim_to_wave_config_mapping(text: str) -> str:
         if re.match(r'^\s*(?:wave_config|["\']?\d+["\']?)\s*:\s*(?:#.*)?$', line):
             return "\n".join(lines[index:]).strip()
     return text
+
+
+def _unwrap_json_envelope(text: str) -> str | None:
+    """Recover a YAML/text payload nested inside a JSON envelope, if present.
+
+    Some AI backends return their answer wrapped in a JSON object (e.g. a
+    tool-call result) rather than as raw stdout. We parse the text as JSON and
+    walk it for the longest string value that, once de-fenced, looks like a
+    wave_config mapping. This is structural — it keys on JSON shape and YAML
+    content, never on a specific provider or field name. Returns ``None`` when
+    the text is not JSON or holds no usable string payload.
+    """
+    stripped = (text or "").strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+
+    import json
+
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    best: str | None = None
+    stack = [parsed]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            body = _clean_wave_config_output(_extract_fenced_block(current))
+            if _looks_like_wave_config_yaml(body) and (best is None or len(body) > len(best)):
+                best = body
+        elif isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+
+    return best
+
+
+def _looks_like_wave_config_yaml(text: str) -> bool:
+    """Heuristic: does ``text`` parse as a mapping with wave-number-ish keys?"""
+    if not text:
+        return False
+    try:
+        payload = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    if isinstance(payload, dict) and isinstance(payload.get("wave_config"), dict):
+        payload = payload["wave_config"]
+    if not isinstance(payload, dict) or not payload:
+        return False
+    return all(str(key).strip().lstrip("-").isdigit() for key in payload)
 
 
 def _serialize_wave_config(artifacts: list[WaveArtifact]) -> dict[str, list[dict[str, Any]]]:

@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -1531,9 +1532,43 @@ def _format_preflight_ntfy(result: Any) -> str:
     return f"CoDD preflight: {result.task_id} severity={result.severity}{suffix}"
 
 
+def _stdin_is_tty() -> bool:
+    """Return True only when stdin is an interactive terminal.
+
+    Guards interactive ``click`` prompts so CoDD never blocks (and then aborts
+    with an opaque ``Aborted!``) when run non-interactively — e.g. CI, an agent
+    shell, or any pipeline where stdin is ``/dev/null``.
+    """
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except (ValueError, AttributeError, OSError):
+        return False
+
+
+def _resolve_required_value(
+    *,
+    value: str | None,
+    prompt: str,
+    missing_hint: str,
+) -> str:
+    """Resolve a required string, prompting interactively only on a real TTY.
+
+    Order of precedence: an already-supplied ``value`` wins. Otherwise, on an
+    interactive terminal the user is prompted. When there is no TTY we raise a
+    clear, actionable error naming the flag to pass, instead of letting
+    ``click`` emit a bare ``Aborted!``.
+    """
+    if value is not None and str(value).strip():
+        return str(value)
+    if _stdin_is_tty():
+        return str(click.prompt(prompt))
+    raise click.UsageError(missing_hint)
+
+
 @main.command()
-@click.option("--project-name", prompt="Project name", help="Name of the project")
-@click.option("--language", prompt="Primary language", help="Primary language (python/typescript/javascript/go — full support; java — symbols only)")
+@click.argument("name", required=False)
+@click.option("--project-name", default=None, help="Name of the project (alias for the positional NAME argument)")
+@click.option("--language", default=None, help="Primary language (python/typescript/javascript/go — full support; java — symbols only)")
 @click.option("--dest", default=".", help="Destination directory (default: current dir)")
 @click.option(
     "--requirements",
@@ -1564,8 +1599,9 @@ def _format_preflight_ntfy(result: Any) -> str:
     help="Apply high and medium confidence AI lexicon recommendations without prompting.",
 )
 def init(
-    project_name: str,
-    language: str,
+    name: str | None,
+    project_name: str | None,
+    language: str | None,
     dest: str,
     requirements: str | None,
     config_dir: str,
@@ -1573,7 +1609,38 @@ def init(
     llm_enhanced: bool,
     auto_approve: bool,
 ):
-    """Initialize CoDD in a project directory."""
+    """Initialize CoDD in a project directory.
+
+    The project name is taken from the positional NAME argument
+    (``codd init my-project``). ``--project-name`` is kept as a back-compatible
+    alias. When neither is supplied, CoDD prompts interactively on a TTY and
+    fails with a clear message otherwise, so non-interactive runs (CI, agents,
+    stdin from /dev/null) never hang or abort opaquely.
+    """
+    positional = name.strip() if isinstance(name, str) and name.strip() else None
+    option = project_name.strip() if isinstance(project_name, str) and project_name.strip() else None
+    if positional and option and positional != option:
+        raise click.UsageError(
+            "Conflicting project names: positional NAME "
+            f"'{positional}' != --project-name '{option}'. Pass only one."
+        )
+    project_name = _resolve_required_value(
+        value=positional or option,
+        prompt="Project name",
+        missing_hint=(
+            "Project name is required. Pass it as a positional argument "
+            "(codd init <name>) or via --project-name <name>."
+        ),
+    )
+    language = _resolve_required_value(
+        value=language,
+        prompt="Primary language",
+        missing_hint=(
+            "Primary language is required. Pass it via "
+            "--language <python|typescript|javascript|go|java>."
+        ),
+    )
+
     dest_path = Path(dest).resolve()
     codd_dir = dest_path / config_dir
 

@@ -522,6 +522,88 @@ def test_parse_wave_config_output_ignores_summary_and_trailing_code_fence():
     assert payload["1"][0]["conventions"][0]["targets"] == ["db:rls_policies"]
 
 
+# --- Issue #27: AI-output stabilization for noisy wave_config responses ----
+# AI backends wrap structured output in markdown fences, conversational prose,
+# or a tool-call JSON envelope. The parser must recover the YAML body from this
+# noise in a backend-agnostic way (no model/tool-specific handling).
+
+_NOISY_WAVE_CONFIG_BODY = """\
+"1":
+  - node_id: "design:acceptance-criteria"
+    output: "docs/test/acceptance_criteria.md"
+    title: "Acceptance Criteria"
+"""
+
+
+def _assert_recovered(payload):
+    assert payload["1"][0]["node_id"] == "design:acceptance-criteria"
+    assert payload["1"][0]["output"] == "docs/test/acceptance_criteria.md"
+
+
+def test_parse_wave_config_output_recovers_fence_with_leading_and_trailing_prose():
+    raw_output = (
+        "Sure! Here is the wave_config you asked for:\n\n"
+        "```yaml\n"
+        f"{_NOISY_WAVE_CONFIG_BODY}"
+        "```\n\n"
+        "Let me know if you need anything else!\n"
+    )
+
+    # Sanity: the pre-fix narrow path (whole-string fence strip + fence-line
+    # removal) leaves trailing prose in place and cannot parse this output.
+    pre_fix_cleaned = planner_module._clean_wave_config_output(raw_output)
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(pre_fix_cleaned)
+
+    _assert_recovered(planner_module._parse_wave_config_output(raw_output))
+
+
+def test_parse_wave_config_output_recovers_bare_fence_with_trailing_prose():
+    raw_output = (
+        "Here you go:\n\n"
+        "```\n"
+        f"{_NOISY_WAVE_CONFIG_BODY}"
+        "```\n"
+        "trailing note\n"
+    )
+
+    pre_fix_cleaned = planner_module._clean_wave_config_output(raw_output)
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(pre_fix_cleaned)
+
+    _assert_recovered(planner_module._parse_wave_config_output(raw_output))
+
+
+def test_parse_wave_config_output_recovers_yaml_from_tool_call_json_envelope():
+    fenced_payload = "```yaml\n" + _NOISY_WAVE_CONFIG_BODY + "```"
+    raw_output = json.dumps({"type": "tool_result", "content": fenced_payload})
+
+    # Sanity: parsing the JSON envelope text directly as YAML yields a mapping
+    # whose keys are not wave numbers, so the pre-fix path rejected it.
+    envelope_payload = yaml.safe_load(planner_module._clean_wave_config_output(raw_output))
+    assert isinstance(envelope_payload, dict)
+    assert "1" not in envelope_payload
+
+    _assert_recovered(planner_module._parse_wave_config_output(raw_output))
+
+
+def test_parse_wave_config_output_prefers_yaml_tagged_fence_over_other_blocks():
+    # A prose block fenced as text precedes the real yaml block. The yaml-tagged
+    # fence must win regardless of position.
+    raw_output = (
+        "Reasoning:\n\n"
+        "```text\n"
+        "I considered the dependency order and grouping.\n"
+        "```\n\n"
+        "Result:\n\n"
+        "```yaml\n"
+        f"{_NOISY_WAVE_CONFIG_BODY}"
+        "```\n"
+    )
+
+    _assert_recovered(planner_module._parse_wave_config_output(raw_output))
+
+
 def test_plan_command_init_prompts_before_overwriting_existing_wave_config(tmp_path, mock_plan_init_ai):
     project = _setup_project(tmp_path)
     _write_requirement(project)
