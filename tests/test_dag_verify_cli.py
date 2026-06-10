@@ -4,10 +4,25 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import click
 from click.testing import CliRunner
 
 from codd.cli import main
 from codd.dag import runner as dag_runner
+
+_CLICK_VERSION = tuple(int(part) for part in click.__version__.split(".")[:2])
+
+
+def _split_stream_runner() -> CliRunner:
+    """CliRunner that keeps stdout/stderr separate across the supported click range.
+
+    The project supports ``click>=8.0``. click 8.2 always separates the
+    streams; on 8.0/8.1 we must opt in via ``mix_stderr=False`` (a kwarg that
+    8.2 removed). This keeps the stderr-routed notice out of the stdout JSON.
+    """
+    if _CLICK_VERSION < (8, 2):
+        return CliRunner(mix_stderr=False)
+    return CliRunner()
 
 
 @dataclass
@@ -224,14 +239,14 @@ def test_verify_json_stdout_stays_parseable_with_notice(tmp_path, monkeypatch):
     _write_pinned_project(tmp_path)
     _patch_results(monkeypatch, [_CheckResult("node_completeness")])
 
-    runner = CliRunner()
+    runner = _split_stream_runner()
     result = runner.invoke(
         main,
         ["dag", "verify", "--project-path", str(tmp_path), "--format", "json"],
     )
 
     assert result.exit_code == 0
-    # click >= 8.2 separates stderr; the stdout JSON array must stay parseable.
+    # The notice is routed to stderr; the stdout JSON array must stay parseable.
     assert json.loads(result.stdout)[0]["check_name"] == "node_completeness"
     assert "not selected by enabled_checks" in result.stderr
 

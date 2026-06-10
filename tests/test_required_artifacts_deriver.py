@@ -20,6 +20,7 @@ from codd.lexicon import (
     validate_lexicon,
 )
 import codd.required_artifacts_deriver as deriver_module
+from codd.project_types import supported_project_types
 from codd.required_artifacts_deriver import DEFAULTS_DIR, RequiredArtifactsDeriver
 
 
@@ -169,6 +170,43 @@ def test_load_defaults_reads_cli_yaml(tmp_path):
     assert any(item["id"] == "design:command_interface_design" for item in defaults)
 
 
+def test_unknown_configured_type_falls_back_to_generic_not_web(tmp_path, capsys):
+    # 'library' has no profile. It must resolve to the generic baseline (with a
+    # warning), NOT silently to web (the old, wrong behavior).
+    _write_config(tmp_path, "project:\n  type: library\n")
+
+    deriver = RequiredArtifactsDeriver(tmp_path)
+
+    assert deriver.project_type == "generic"
+    warning = capsys.readouterr().out
+    assert "library" in warning
+    assert "generic" in warning
+
+
+def test_load_defaults_unknown_type_uses_generic_not_web(tmp_path):
+    _write_config(tmp_path)
+
+    defaults = RequiredArtifactsDeriver(tmp_path)._load_defaults("library")
+
+    ids = {item["id"] for item in defaults}
+    # Universal artifacts present...
+    assert "design:requirements" in ids
+    assert "design:system_design" in ids
+    # ...but NO web-only artifacts (proves it is generic, not the old web fallback).
+    assert "design:screen_flow_design" not in ids
+    assert "design:ux_design" not in ids
+
+
+def test_load_defaults_reads_generic_yaml(tmp_path):
+    _write_config(tmp_path)
+
+    defaults = RequiredArtifactsDeriver(tmp_path)._load_defaults("generic")
+
+    ids = {item["id"] for item in defaults}
+    assert {"design:requirements", "design:system_design"} <= ids
+    assert "design:screen_flow_design" not in ids
+
+
 def test_codd_yaml_project_type_override_wins(tmp_path):
     _write_config(tmp_path, "project:\n  type: iot\n")
     (tmp_path / "package.json").write_text("{}", encoding="utf-8")
@@ -316,12 +354,13 @@ def test_generality_gate_keeps_artifact_names_out_of_core_python():
 
 
 def test_project_type_defaults_exist_for_all_required_artifact_types():
-    assert sorted(path.stem for path in DEFAULTS_DIR.glob("*.yaml")) == [
-        "cli",
-        "iot",
-        "mobile",
-        "web",
-    ]
+    # Discovery-based: every shipped <type>.yaml registers a type. The four
+    # historical types plus the universal generic baseline must all be present.
+    discovered = sorted(path.stem for path in DEFAULTS_DIR.glob("*.yaml"))
+    for expected in ("cli", "generic", "iot", "mobile", "web"):
+        assert expected in discovered, f"missing shipped profile: {expected}.yaml"
+    # The registry must surface exactly the discovered set (generic always included).
+    assert sorted(supported_project_types()) == discovered
 
 
 def test_osato_lms_sample_can_require_screen_flow(monkeypatch, tmp_path):

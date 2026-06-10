@@ -26,6 +26,7 @@ CHECK_MODULES = (
     "codd.dag.checks.ci_health",
     "codd.dag.checks.implementation_coverage",
     "codd.dag.checks.environment_coverage",
+    "codd.dag.checks.artifact_contract_check",
 )
 
 

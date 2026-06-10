@@ -9,6 +9,7 @@ from codd.config import load_project_config
 from codd.generator import (
     DOC_TYPE_BY_DIR,
     DETAILED_DESIGN_SECTIONS,
+    OPERATIONAL_BEHAVIOR_MODEL_BLOCK,
     TYPE_SECTIONS,
     GenerationResult,
     WaveArtifact,
@@ -172,6 +173,11 @@ def _build_restoration_prompt(
             "Include Mermaid diagrams to visualize ownership, dependencies, sequences, or state machines based on the extracted facts.",
             "Add prose after each diagram explaining what the code does and why.",
         ])
+
+    # Design docs (restored) must carry the same operation_flow / operational-behavior
+    # structure as greenfield-generated design docs — shared single source of truth.
+    if doc_type == "design":
+        lines.extend(OPERATIONAL_BEHAVIOR_MODEL_BLOCK)
 
     if artifact.conventions:
         lines.extend([

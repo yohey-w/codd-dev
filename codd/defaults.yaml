@@ -56,6 +56,29 @@ requirement_completeness:
 fix:
   test_command: null  # auto-detected from package.json / pyproject.toml
   max_attempts: 3
+  phenomenon:
+    # `codd fix [PHENOMENON]` Stage 4: after the design doc is updated, propagate
+    # the change into the affected implementation + test files (resolved
+    # deterministically from the DAG), wrapped by the verify gate (no new red
+    # DAG check + local tests) with targeted rollback on failure. Set false to
+    # stop at the design-doc update. Override per-invocation with
+    # `--no-propagate-impl`.
+    propagate_impl: true
+generate:
+  body_retry:
+    # `codd generate` re-asks the AI when a produced design-doc body fails
+    # structural validation (missing required sections, malformed frontmatter).
+    # Bounded to avoid burning tokens on a model that cannot converge. 0
+    # disables the retry loop (single attempt).
+    max_retries: 2
+test_coverage:
+  # Verifiable-Behavior (VB) coverage audit: every VB id declared in a test
+  # document's VB table must be claimed by a `codd: covers vb=<id>` marker in a
+  # test file. `codd test audit` reports gaps; `codd implement` enforces the
+  # same gate (projects with no VB table pass with a one-line notice).
+  gate: true       # set false to turn the implement-time gate into advisory-only
+  max_retries: 2   # bounded re-implementation attempts before the gate fails
+  docs: []         # explicit VB-table documents (empty = auto-discovery)
 verify:
   typecheck_command: null
   test_command: null
@@ -87,6 +110,44 @@ orphan_cover_markers:
   # Flag `codd: covers operation=X` test markers whose operation X is not declared
   # in any operation_flow (reverse reconciliation of the audit covers path).
   enabled: true
+requirement_reconciliation:
+  # Reconcile requirement documents against the declared operation_flow universe
+  # ("required but undeclared" — the third edge next to surface_reconciliation
+  # and orphan_cover_markers). Two advisory checks:
+  # (A) `operation_flow.<id>` references in requirement docs must resolve to a
+  #     declared operation (deterministic, zero false-positive surface).
+  # (B) Markdown table rows are requirement units; a unit with no anchor into
+  #     the declared universe (resolving reference, out-of-scope marker,
+  #     declared route in the text, or term overlap with operation
+  #     id/verb/target or runtime action targets) is reported. To prevent
+  #     false-positive floods, only tables that already contain an
+  #     `operation_flow.<id>` reference are audited by default; list heading
+  #     substrings under `sections` to widen the scope deliberately.
+  enabled: true
+  # Requirement docs to scan (files or directories). Empty = auto-discovery:
+  # docs/requirements/**/*.md plus conventional top-level requirements files.
+  docs: []
+  # Heading substrings whose tables are audited even without a marker, e.g.
+  # ["functional requirements", "screen", "機能要件", "画面一覧"].
+  sections: []
+  # Phrases that mark a unit as deliberately out of scope. A non-empty list
+  # REPLACES the built-in markers (out of scope / out-of-scope / スコープ外 /
+  # 将来対応 / 対象外).
+  out_of_scope_markers: []
+  # Individual unit warnings shown before aggregation into a single overflow line.
+  max_unit_warnings: 30
+operations_derive:
+  # Generative complement to requirement_reconciliation (the `codd operations`
+  # command group). `derive` takes requirement units that anchor to NO declared
+  # operation (the same deterministic detection requirement_reconciliation uses)
+  # and asks the project's resolved AI command to propose operation_flow entries
+  # (id/actor/verb/target/expected_outcomes). Proposals are written to
+  # <codd-dir>/operations_proposal.yaml for human review; nothing is written to
+  # codd.yaml until `codd operations approve` + `codd operations merge`. This
+  # section is reserved for future tuning; all commands work with it absent, and
+  # uncovered-unit detection reuses the requirement_reconciliation settings
+  # above (docs / sections / out_of_scope_markers).
+  enabled: false
 dependency_freshness:
   # Doc-to-doc depends_on freshness backed by the reconciliation ledger
   # (<codd-dir>/reconciliation_ledger.json, written by `codd propagate --commit`).
@@ -102,6 +163,20 @@ dependency_freshness:
   # listing registered-but-unselected checks).
   enabled: true
   severity: amber
+artifact_contract:
+  # Per-project, OPT-IN contract mapping pipeline stages to the catalog
+  # artifact ids each stage MUST produce. Each stage declares its required
+  # artifacts from the shipped core artifact catalog (codd/artifacts/catalog.yaml);
+  # `codd contract verify` (and the `artifact_contract` dag check) then check
+  # they exist and pass their validator. Absent/`enabled: false` = no behavior
+  # change; existing projects are unaffected. The dag check is dormant unless
+  # enabled, and defaults to an amber advisory (set severity: red to hard-gate).
+  # NOTE: projects whose codd.yaml pins dag.enabled_checks must add
+  # `artifact_contract` to that list (codd dag verify prints a notice listing
+  # registered-but-unselected checks).
+  enabled: false
+  severity: amber
+  stages: {}
 enables_nudge:
   # Doctor advisory: an operation whose visible_to/expected_outcomes mention
   # another declared actor but that declares no `enables` relationship gets a

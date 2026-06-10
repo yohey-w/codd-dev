@@ -29,25 +29,34 @@ FAILURE_TAXONOMY = [
     "flaky_or_timing",
 ]
 
+# Marker subject is an alternation: an operational subject (operation= + axis=)
+# or a verifiable-behavior subject (vb=). Exactly one branch matches per marker.
+# The operational audit in this module only consumes operation-subject markers;
+# vb-subject markers are owned by codd.verifiable_behavior_audit, which reuses
+# these regexes so both subjects share one marker grammar (orphan detection,
+# blocked, and dod semantics carry over to the vb subject).
 _COVER_MARKER_RE = re.compile(
     r"codd:\s*covers\s+"
-    r"(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
+    r"(?:(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
     r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)"
+    r"|vb\s*=\s*(?P<vb>[A-Za-z0-9_.:-]+))"
     r"(?:[ \t]+(?P<details>[^\r\n]*))?",
     re.IGNORECASE,
 )
 _BLOCKER_MARKER_RE = re.compile(
     r"codd:\s*(?:blocked|blocks)\s+"
-    r"(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
-    r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)\s+"
+    r"(?:(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
+    r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)"
+    r"|vb\s*=\s*(?P<vb>[A-Za-z0-9_.:-]+))\s+"
     r"(?:reason|blocker_reason)\s*=\s*(?P<reason>[A-Za-z0-9_.:-]+)"
     r"(?:\s+(?P<details>.*))?",
     re.IGNORECASE,
 )
 _DOD_MARKER_RE = re.compile(
     r"codd:\s*dod\s+"
-    r"(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
-    r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)\s+"
+    r"(?:(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
+    r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)"
+    r"|vb\s*=\s*(?P<vb>[A-Za-z0-9_.:-]+))\s+"
     r"(?:obligation|dod)\s*=\s*(?P<obligation>[A-Za-z0-9_.:-]+)"
     r"(?:[ \t]+(?P<details>[^\r\n]*))?",
     re.IGNORECASE,
@@ -503,6 +512,8 @@ def _scan_test_evidence(
             continue
         rel_path = _rel_path(path, project_root)
         for match in _COVER_MARKER_RE.finditer(text):
+            if match.group("operation") is None:
+                continue  # vb-subject marker; owned by the verifiable-behavior audit
             evidence.append(
                 TestEvidence(
                     path=rel_path,
@@ -584,6 +595,8 @@ def _scan_dod_evidence(
         rel_path = _rel_path(path, project_root)
         body_text = _strip_comment_only_lines(text).lower()
         for match in _DOD_MARKER_RE.finditer(text):
+            if match.group("operation") is None:
+                continue  # vb-subject marker; owned by the verifiable-behavior audit
             evidence.append(
                 DodEvidence(
                     path=rel_path,
@@ -612,6 +625,8 @@ def _scan_blocker_evidence(
             continue
         rel_path = _rel_path(path, project_root)
         for match in _BLOCKER_MARKER_RE.finditer(text):
+            if match.group("operation") is None:
+                continue  # vb-subject marker; owned by the verifiable-behavior audit
             blockers.append(
                 BlockerEvidence(
                     path=rel_path,

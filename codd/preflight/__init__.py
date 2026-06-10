@@ -10,13 +10,13 @@ from typing import Any, Literal
 import yaml
 
 from codd.config import load_project_config
+from codd.project_types import GENERIC_PROJECT_TYPE, supported_project_types
 
 
 PreflightSeverity = Literal["critical", "high", "medium", "low"]
 CheckStatus = Literal["PASS", "WARN", "FAIL"]
 
 SEVERITY_ORDER: tuple[PreflightSeverity, ...] = ("critical", "high", "medium", "low")
-SUPPORTED_PROJECT_TYPES = {"web", "cli", "mobile", "iot"}
 DEFAULTS_DIR = Path(__file__).parent / "defaults"
 
 
@@ -270,7 +270,8 @@ class PreflightAuditor:
             or _nested_get(self.codd_yaml, ("project", "type"))
             or ""
         ).lower()
-        if configured in SUPPORTED_PROJECT_TYPES:
+        known = set(supported_project_types(self.project_root))
+        if configured in known:
             return configured
         if _looks_like_mobile_project(self.project_root):
             return "mobile"
@@ -280,7 +281,8 @@ class PreflightAuditor:
             return "web"
         if _looks_like_cli_project(self.project_root):
             return "cli"
-        return "web"
+        # No silent web fallback for an unknown configured type: use generic.
+        return GENERIC_PROJECT_TYPE
 
     def _load_project_config(self) -> dict[str, Any]:
         try:

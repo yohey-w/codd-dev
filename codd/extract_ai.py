@@ -468,20 +468,48 @@ def _invoke_ai_command(ai_command: str, prompt: str) -> str:
     return result.stdout
 
 
+def _safe_output_path(output_dir: Path, name: str) -> Path:
+    """Resolve an AI-supplied filename to a path INSIDE *output_dir* (fail-closed).
+
+    Brownfield extract must NEVER write outside its isolated output directory.
+    AI output controls the ``--- FILE: <name> ---`` names, so an absolute path or
+    a ``../`` traversal would otherwise let extraction overwrite existing source
+    or user files. Reject any name that escapes the output dir.
+    """
+    base = output_dir.resolve()
+    candidate = (output_dir / name).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(
+            f"refusing to write extracted file outside output dir: {name!r} "
+            f"resolves to {candidate} (extraction never overwrites source/user files)"
+        ) from exc
+    return candidate
+
+
 def _parse_ai_output(raw: str, output_dir: Path) -> list[Path]:
-    """Parse AI output separated by `--- FILE: <name> ---` markers."""
+    """Parse AI output separated by `--- FILE: <name> ---` markers.
+
+    All writes are confined to *output_dir*; traversal/absolute names are
+    rejected (fail-closed) so extraction can never clobber source/user files.
+    """
     files: list[Path] = []
     current_name: str | None = None
     current_lines: list[str] = []
+
+    def _flush(name: str, lines: list[str]) -> None:
+        out_path = _safe_output_path(output_dir, name)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(lines), encoding="utf-8")
+        files.append(out_path)
 
     for line in raw.split("\n"):
         stripped = line.strip()
         if stripped.startswith("--- FILE:") and stripped.endswith("---"):
             # Flush previous file
             if current_name:
-                out_path = output_dir / current_name
-                out_path.write_text("\n".join(current_lines), encoding="utf-8")
-                files.append(out_path)
+                _flush(current_name, current_lines)
             # Start new file
             current_name = stripped.replace("--- FILE:", "").replace("---", "").strip()
             current_lines = []
@@ -490,11 +518,68 @@ def _parse_ai_output(raw: str, output_dir: Path) -> list[Path]:
 
     # Flush last file
     if current_name:
-        out_path = output_dir / current_name
-        out_path.write_text("\n".join(current_lines), encoding="utf-8")
-        files.append(out_path)
+        _flush(current_name, current_lines)
 
     return files
+
+
+def _normalize_extracted_frontmatter(paths: list[Path]) -> None:
+    """Normalize AI-extracted Markdown frontmatter to canonical ``codd.node_id``.
+
+    Greenfield design docs key node identity under ``codd.node_id`` with
+    ``codd.source: extracted``. The AI extractor emits free-form frontmatter
+    (commonly a top-level ``id:``), so restored docs would be invisible to the
+    planner/restore DAG linkage. Lift the node identity into ``codd.node_id`` and
+    mark the source as ``extracted`` so the DAG can link restored docs the same
+    way it links generated ones. Idempotent and only touches ``.md`` files.
+    """
+    import re
+
+    for path in paths:
+        if path.suffix.lower() not in {".md", ".markdown"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        match = re.match(r"\A---\s*\n(.*?)\n---\s*\n?", text, re.DOTALL)
+        if match:
+            try:
+                front = yaml.safe_load(match.group(1)) or {}
+            except yaml.YAMLError:
+                front = {}
+            if not isinstance(front, dict):
+                front = {}
+            body = text[match.end():]
+        else:
+            front = {}
+            body = text
+
+        codd_block = front.get("codd")
+        if not isinstance(codd_block, dict):
+            codd_block = {}
+
+        # Resolve node identity from canonical, then nested, then common aliases.
+        node_id = codd_block.get("node_id")
+        if not (isinstance(node_id, str) and node_id.strip()):
+            for alias in ("node_id", "id", "nodeId", "node"):
+                value = front.get(alias)
+                if isinstance(value, str) and value.strip():
+                    node_id = value.strip()
+                    break
+
+        if not (isinstance(node_id, str) and node_id.strip()):
+            # No identity to normalize — leave the file untouched.
+            continue
+
+        codd_block["node_id"] = node_id.strip()
+        codd_block.setdefault("type", "design")
+        codd_block["source"] = "extracted"
+        front["codd"] = codd_block
+        # Drop redundant top-level identity aliases now folded into codd.node_id.
+        for alias in ("id", "nodeId", "node"):
+            front.pop(alias, None)
+
+        rendered = yaml.safe_dump(front, sort_keys=False, allow_unicode=True)
+        separator = "" if body.startswith("\n") else "\n"
+        path.write_text(f"---\n{rendered}---\n{separator}{body}", encoding="utf-8")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -515,8 +600,10 @@ def run_extract_ai(
         output_dir: Output directory (default: {project_root}/.codd/extract/).
         prompt_file: Path to a custom prompt file. Overrides the built-in baseline preset.
     """
+    from codd.extract_paths import default_extract_output_dir
+
     project_root = project_root.resolve()
-    out = Path(output_dir) if output_dir else project_root / ".codd" / "extract"
+    out = Path(output_dir) if output_dir else default_extract_output_dir(project_root)
     out.mkdir(parents=True, exist_ok=True)
 
     # Phase 1: Pre-scan
@@ -541,6 +628,10 @@ def run_extract_ai(
 
     # Phase 4: Parse and write
     generated = _parse_ai_output(raw_output, out)
+
+    # Phase 4b: Normalize node identity to canonical codd.node_id so the DAG can
+    # link restored docs the same way it links greenfield-generated docs.
+    _normalize_extracted_frontmatter(generated)
 
     # Also save raw output
     raw_path = out / "_raw_ai_output.txt"

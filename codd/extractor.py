@@ -136,9 +136,25 @@ def build_extract_init_metadata(project_root: Path, extracted_at: str | None = N
     }
 
 
-def add_extract_init_frontmatter(paths: list[Path], metadata: dict[str, str]) -> None:
-    """Add codd init metadata to generated Markdown frontmatter or YAML payloads."""
+def add_extract_init_frontmatter(
+    paths: list[Path],
+    metadata: dict[str, str],
+    output_dir: Path | None = None,
+) -> None:
+    """Add codd init metadata to generated Markdown frontmatter or YAML payloads.
+
+    When *output_dir* is given, any path that resolves OUTSIDE it is skipped
+    (fail-closed): ``--init`` must only annotate freshly-generated extract docs
+    and must never rewrite existing source or user files.
+    """
+    base = output_dir.resolve() if output_dir is not None else None
     for path in paths:
+        if base is not None:
+            try:
+                path.resolve().relative_to(base)
+            except ValueError:
+                # Path escapes the extract output dir — refuse to touch it.
+                continue
         suffix = path.suffix.lower()
         if suffix in {".md", ".markdown"}:
             _upsert_markdown_codd_metadata(path, metadata)
@@ -1035,10 +1051,11 @@ def run_extract(project_root: Path, language: str | None = None,
     if output:
         output_dir = Path(output)
     else:
-        output_dir = project_root / ".codd" / "extract"
+        from codd.extract_paths import default_extract_output_dir
+        output_dir = default_extract_output_dir(project_root)
     generated = synth_docs(facts, output_dir)
     if init_metadata is not None:
-        add_extract_init_frontmatter(generated, init_metadata)
+        add_extract_init_frontmatter(generated, init_metadata, output_dir=output_dir)
 
     return ExtractResult(
         output_dir=output_dir,

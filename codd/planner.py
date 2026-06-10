@@ -15,7 +15,13 @@ from typing import Any
 import yaml
 
 import codd.generator as generator_module
-from codd.generator import WaveArtifact, _load_project_config, _load_wave_artifacts
+from codd.generator import (
+    WaveArtifact,
+    _load_project_config,
+    _load_wave_artifacts,
+    _resolve_generation_capabilities,
+)
+from codd.project_types import ProjectCapabilities
 from codd.validator import _iter_doc_files, _parse_codd_frontmatter, validate_project
 
 
@@ -52,6 +58,32 @@ Typical wave patterns:
 - Wave 6: implementation planning and infrastructure/build setup that depend on the approved overview + detailed design set
 - Baseline: after all waves are done and code is implemented, run codd extract to capture a factual snapshot of the codebase — this serves as the baseline for drift detection during maintenance
 """
+
+
+def _standard_v_model_patterns(capabilities: ProjectCapabilities | None = None) -> str:
+    """Return the V-model wave patterns, dropping the UX domain for non-UI types.
+
+    For UI projects (or the backward-compatible default), the domain-design wave
+    includes ``UX`` exactly as before. For non-UI projects (``user_interface``
+    False) UX is removed from the mandatory domains so a CLI/library/service
+    project is not pushed toward UI design artifacts.
+    """
+
+    if capabilities is None:
+        capabilities = generator_module.WEB_FALLBACK_CAPABILITIES
+    if capabilities.user_interface:
+        domains = "API, database, auth, UX, infrastructure/CI/CD, and integration design"
+    else:
+        domains = "API, database, auth, infrastructure/CI/CD, and integration design"
+    return (
+        "Typical wave patterns:\n"
+        "- Wave 1: acceptance criteria and decision records derived directly from requirements\n"
+        "- Wave 2: overview/system design that depends on requirements and wave 1 outputs\n"
+        f"- Wave 3-4: domain design such as {domains}\n"
+        "- Wave 5: detailed design artifacts under docs/detailed_design/ with Mermaid diagrams, ownership boundaries, and runtime flows\n"
+        "- Wave 6: implementation planning and infrastructure/build setup that depend on the approved overview + detailed design set\n"
+        "- Baseline: after all waves are done and code is implemented, run codd extract to capture a factual snapshot of the codebase — this serves as the baseline for drift detection during maintenance\n"
+    )
 
 
 @dataclass(frozen=True)
@@ -370,11 +402,12 @@ def plan_init(
 
     requirement_documents = _load_requirement_documents(project_root, config)
     extracted_documents: list[ExtractedDocument] = []
+    capabilities = _resolve_generation_capabilities(config, project_root)
 
     if requirement_documents:
         # Greenfield: use requirements
         resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="plan_init")
-        prompt = _build_plan_init_prompt(config, requirement_documents)
+        prompt = _build_plan_init_prompt(config, requirement_documents, capabilities)
     else:
         # Brownfield: try extracted docs
         extracted_documents = _load_extracted_documents(project_root, config)
@@ -385,7 +418,7 @@ def plan_init(
                 "or create requirement docs with CoDD frontmatter for greenfield projects."
             )
         resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="plan_init")
-        prompt = _build_brownfield_plan_init_prompt(config, extracted_documents)
+        prompt = _build_brownfield_plan_init_prompt(config, extracted_documents, capabilities)
 
     prompt = generator_module._inject_lexicon(prompt, project_root)
     raw_wave_config = generator_module._invoke_ai_command(resolved_ai_command, prompt)
@@ -751,7 +784,13 @@ def _load_requirement_documents(project_root: Path, config: dict[str, Any]) -> l
     return documents
 
 
-def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[RequirementDocument]) -> str:
+def _build_plan_init_prompt(
+    config: dict[str, Any],
+    requirement_documents: list[RequirementDocument],
+    capabilities: ProjectCapabilities | None = None,
+) -> str:
+    if capabilities is None:
+        capabilities = generator_module.WEB_FALLBACK_CAPABILITIES
     project = config.get("project") or {}
     scan = config.get("scan") or {}
     doc_dirs = scan.get("doc_dirs") or []
@@ -772,7 +811,7 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         MECE_DOCUMENT_STRUCTURE.rstrip(),
         "",
         "Standard V-model artifact patterns:",
-        STANDARD_V_MODEL_PATTERNS.rstrip(),
+        _standard_v_model_patterns(capabilities).rstrip(),
         "",
         "Instructions:",
         "- Read the requirement documents below and produce a MECE (Mutually Exclusive, Collectively Exhaustive) document set: every requirement section maps to at least one design artifact (no gaps), and each artifact has a distinct responsibility (no overlaps).",
@@ -786,8 +825,14 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         "- If requirements describe actors, permissions, mutable commands, lifecycle states, cross-actor visibility, or external side effects, assign a design artifact responsibility for an Operational Behavior Model before implementation planning. This may be a standalone docs/design/ artifact or an explicit section in a relevant design/detailed design artifact.",
         "- The Operational Behavior Model is design-time source of truth, not an E2E test artifact. It must define actor/action/state/outcome obligations so implementation cannot omit them and tests can be generated from them later.",
         "- For actor-facing operations on object-specific or parameterized surfaces, the Operational Behavior Model must also define how the actor reaches the operation surface (entry/list/parent surface, visible navigation affordance, or equivalent trigger). Direct deep links or lower-layer API access are not sufficient design contracts.",
-        "- If requirements describe user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, assign a design artifact responsibility for actor-facing surface/copy obligations before implementation planning.",
-        "- Actor-facing surface/copy obligations must define each surface's purpose, primary audience, allowed and forbidden actions/navigation, required user-visible copy intent, and forbidden copy patterns. The copy must use the audience's job-to-be-done language, not implementation rationale, internal process notes, demo/test labels, or hidden authority-boundary explanations.",
+        *(
+            [
+                "- If requirements describe user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, assign a design artifact responsibility for actor-facing surface/copy obligations before implementation planning.",
+                "- Actor-facing surface/copy obligations must define each surface's purpose, primary audience, allowed and forbidden actions/navigation, required user-visible copy intent, and forbidden copy patterns. The copy must use the audience's job-to-be-done language, not implementation rationale, internal process notes, demo/test labels, or hidden authority-boundary explanations.",
+            ]
+            if capabilities.user_interface
+            else []
+        ),
         "- conventions are release-blocking constraints. If a convention is violated, the project is not releasable.",
         "- Extract conventions from the requirement documents for these categories:",
         "  security constraints (tenant isolation, authentication, authorization, auditability),",
@@ -862,7 +907,11 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
         "conventionsは『違反したらリリース不可の制約』として抽出し、各artifactへ必ず割り当てること。",
         "詳細設計waveが必要な場合は docs/detailed_design/ 配下に Mermaid 図を含む artifact を提案せよ。",
         "業務上のactor/action/state/outcomeがある場合は、実装前の設計artifactとしてOperational Behavior Modelを必ず担当させ、E2Eテスト側へ先送りしないこと。",
-        "利用者に見える画面・導線・文言・ロール説明がある場合は、各surfaceの目的・対象actor・許可/禁止される導線・必要文言・禁止文言を設計artifactで必ず担当させること。",
+        *(
+            ["利用者に見える画面・導線・文言・ロール説明がある場合は、各surfaceの目的・対象actor・許可/禁止される導線・必要文言・禁止文言を設計artifactで必ず担当させること。"]
+            if capabilities.user_interface
+            else []
+        ),
         "",
         "Requirement documents:",
     ]
@@ -881,38 +930,52 @@ def _build_plan_init_prompt(config: dict[str, Any], requirement_documents: list[
 
 
 def _load_extracted_documents(project_root: Path, config: dict[str, Any]) -> list[ExtractedDocument]:
-    """Load extracted docs from codd/extracted/ directory."""
-    from codd.config import find_codd_dir
-    codd_dir = find_codd_dir(project_root) or project_root / "codd"
-    extracted_dir = codd_dir / "extracted"
-    if not extracted_dir.is_dir():
-        return []
+    """Load extracted docs from the canonical extract output location.
+
+    Discovery uses the shared :mod:`codd.extract_paths` source of truth so the
+    planner reads exactly where ``codd extract`` writes (``.codd/extract/``),
+    with legacy ``<codd_dir>/extracted/`` kept discoverable for older projects.
+    """
+    from codd.extract_paths import extracted_doc_search_dirs
 
     documents: list[ExtractedDocument] = []
-    for doc_path in sorted(extracted_dir.rglob("*.md")):
-        parsed = _parse_codd_frontmatter(doc_path)
-        if parsed.error:
-            continue
-        codd = parsed.codd or {}
-        if codd.get("source") != "extracted":
-            continue
-        node_id = codd.get("node_id")
-        if not isinstance(node_id, str) or not node_id.strip():
-            continue
-        documents.append(
-            ExtractedDocument(
-                node_id=node_id.strip(),
-                path=doc_path.relative_to(project_root).as_posix(),
-                content=doc_path.read_text(encoding="utf-8"),
+    seen_paths: set[Path] = set()
+    for extracted_dir in extracted_doc_search_dirs(project_root):
+        for doc_path in sorted(extracted_dir.rglob("*.md")):
+            resolved = doc_path.resolve()
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+            parsed = _parse_codd_frontmatter(doc_path)
+            if parsed.error:
+                continue
+            codd = parsed.codd or {}
+            if codd.get("source") != "extracted":
+                continue
+            node_id = codd.get("node_id")
+            if not isinstance(node_id, str) or not node_id.strip():
+                continue
+            try:
+                rel_path = doc_path.relative_to(project_root).as_posix()
+            except ValueError:
+                rel_path = doc_path.as_posix()
+            documents.append(
+                ExtractedDocument(
+                    node_id=node_id.strip(),
+                    path=rel_path,
+                    content=doc_path.read_text(encoding="utf-8"),
+                )
             )
-        )
     return documents
 
 
 def _build_brownfield_plan_init_prompt(
     config: dict[str, Any],
     extracted_documents: list[ExtractedDocument],
+    capabilities: ProjectCapabilities | None = None,
 ) -> str:
+    if capabilities is None:
+        capabilities = generator_module.WEB_FALLBACK_CAPABILITIES
     project = config.get("project") or {}
     scan = config.get("scan") or {}
     doc_dirs = scan.get("doc_dirs") or []
@@ -935,7 +998,7 @@ def _build_brownfield_plan_init_prompt(
         MECE_DOCUMENT_STRUCTURE.rstrip(),
         "",
         "Standard V-model artifact patterns:",
-        STANDARD_V_MODEL_PATTERNS.rstrip(),
+        _standard_v_model_patterns(capabilities).rstrip(),
         "",
         "Instructions:",
         "- Read the extracted documents below. They describe the existing codebase structure, modules, symbols, dependencies, and patterns.",
@@ -949,8 +1012,14 @@ def _build_brownfield_plan_init_prompt(
         "- If the extracted documents imply actors, permissions, mutable commands, lifecycle states, cross-actor visibility, or external side effects, assign a design artifact responsibility for an Operational Behavior Model before implementation planning.",
         "- The Operational Behavior Model is design-time source of truth, not an E2E test artifact. It must define actor/action/state/outcome obligations so future changes and tests can trace back to design.",
         "- For actor-facing operations on object-specific or parameterized surfaces, the Operational Behavior Model must also define how the actor reaches the operation surface (entry/list/parent surface, visible navigation affordance, or equivalent trigger). Direct deep links or lower-layer API access are not sufficient design contracts.",
-        "- If the extracted documents imply user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, assign a design artifact responsibility for actor-facing surface/copy obligations before implementation planning.",
-        "- Actor-facing surface/copy obligations must define each surface's purpose, primary audience, allowed and forbidden actions/navigation, required user-visible copy intent, and forbidden copy patterns. The copy must use the audience's job-to-be-done language, not implementation rationale, internal process notes, demo/test labels, or hidden authority-boundary explanations.",
+        *(
+            [
+                "- If the extracted documents imply user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, assign a design artifact responsibility for actor-facing surface/copy obligations before implementation planning.",
+                "- Actor-facing surface/copy obligations must define each surface's purpose, primary audience, allowed and forbidden actions/navigation, required user-visible copy intent, and forbidden copy patterns. The copy must use the audience's job-to-be-done language, not implementation rationale, internal process notes, demo/test labels, or hidden authority-boundary explanations.",
+            ]
+            if capabilities.user_interface
+            else []
+        ),
         "- conventions are release-blocking constraints. Extract them from the patterns detected in the extracted documents (e.g., authentication, database models, API routes).",
         "- When frameworks are detected, also extract framework implicit conventions (routing patterns, directory-to-URL mapping rules, middleware semantics, ORM conventions, build-tool behaviors — any framework-specific rule that the framework enforces silently and that generated code must respect).",
         "- Do not add extracted documents themselves to wave_config — they are inputs, not outputs.",

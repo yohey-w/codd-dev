@@ -5,15 +5,26 @@ from __future__ import annotations
 import json
 import logging
 import re
-import shlex
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from codd.claude_cli import with_default_claude_permission_bypass
+from codd.ai_patch import (
+    DEFAULT_FIX_SYSTEM_PROMPT,
+    FIX_BLOCK_COMMENT_RE,
+    FIX_BLOCK_PRECEDED_RE,
+    FIX_BLOCK_RE,
+    apply_fix_blocks,
+    parse_fix_blocks,
+    prepare_fix_ai_command,
+)
 from codd.config import find_codd_dir, load_project_config
+from codd.dag.impact import (
+    find_impl_candidates as _shared_find_impl_candidates,
+    is_test_path as _shared_is_test_path,
+)
 from codd.generator import _invoke_ai_command, _resolve_ai_command
 from codd.scanner import _extract_frontmatter
 
@@ -277,36 +288,18 @@ def _extract_diagnosis(ai_output: str) -> str:
 
 # ---------------------------------------------------------------------------
 # AI invocation for fix (source-in → fixed-source-out → write back)
+#
+# The block-parsing regexes, the system prompt, and the apply mechanism were
+# extracted verbatim into codd.ai_patch (shared with PHENOMENON-mode
+# implementation propagation). The aliases and wrappers below preserve the
+# historical codd.fixer API exactly — including patchability of
+# ``codd.fixer._invoke_ai_command`` in tests.
 # ---------------------------------------------------------------------------
 
-# Regex patterns to extract fenced code blocks tagged with file paths.
-
-# Primary: ```language path/to/file.py
-_FIX_BLOCK_RE = re.compile(
-    r"```[a-zA-Z]*\s+([\w./_-]+)\s*\n(.*?)```",
-    re.DOTALL,
-)
-
-# Fallback 1: **path/to/file.py** or `path/to/file.py` on preceding line
-# followed by a code block
-_FIX_BLOCK_PRECEDED_RE = re.compile(
-    r"(?:\*\*|`)([\w./_-]+\.\w+)(?:\*\*|`)\s*:?\s*\n```[a-zA-Z]*\s*\n(.*?)```",
-    re.DOTALL,
-)
-
-# Fallback 2: // filepath: path/to/file.py as first line inside code block
-_FIX_BLOCK_COMMENT_RE = re.compile(
-    r"```[a-zA-Z]*\s*\n\s*(?://|#)\s*(?:filepath|file):\s*([\w./_-]+)\s*\n(.*?)```",
-    re.DOTALL,
-)
-
-# System prompt optimized for code fix (not document generation)
-_FIX_SYSTEM_PROMPT = (
-    "You are a code repair assistant. You receive error logs, current source code, "
-    "and design documents. Output the complete fixed source for each file in fenced "
-    "code blocks tagged with the file path. Do not output explanations before the "
-    "code blocks. Fix implementation to match the design specification."
-)
+_FIX_BLOCK_RE = FIX_BLOCK_RE
+_FIX_BLOCK_PRECEDED_RE = FIX_BLOCK_PRECEDED_RE
+_FIX_BLOCK_COMMENT_RE = FIX_BLOCK_COMMENT_RE
+_FIX_SYSTEM_PROMPT = DEFAULT_FIX_SYSTEM_PROMPT
 
 
 def _prepare_fix_ai_command(ai_command: str) -> str:
@@ -315,26 +308,7 @@ def _prepare_fix_ai_command(ai_command: str) -> str:
     If the command contains a --system-prompt intended for document generation,
     replace it with the fix-optimized system prompt.
     """
-    parts = with_default_claude_permission_bypass(shlex.split(ai_command))
-    cleaned: list[str] = []
-    skip_next = False
-    has_system_prompt = False
-
-    for tok in parts:
-        if skip_next:
-            skip_next = False
-            continue
-        if tok == "--system-prompt":
-            skip_next = True
-            has_system_prompt = True
-            continue
-        cleaned.append(tok)
-
-    # Add fix-specific system prompt
-    if has_system_prompt or "--print" in cleaned:
-        cleaned.extend(["--system-prompt", _FIX_SYSTEM_PROMPT])
-
-    return shlex.join(cleaned)
+    return prepare_fix_ai_command(ai_command, system_prompt=_FIX_SYSTEM_PROMPT)
 
 
 def _invoke_fix_ai(ai_command: str, prompt: str, project_root: Path) -> str:
@@ -355,31 +329,7 @@ def _invoke_fix_ai(ai_command: str, prompt: str, project_root: Path) -> str:
     ai_output = _invoke_ai_command(fixed_command, prompt)
 
     # Parse fenced code blocks with file paths and write them back
-    applied: list[str] = []
-    seen_paths: set[str] = set()
-
-    # Try all patterns, primary first
-    for pattern in (_FIX_BLOCK_RE, _FIX_BLOCK_PRECEDED_RE, _FIX_BLOCK_COMMENT_RE):
-        for match in pattern.finditer(ai_output):
-            file_path_str = match.group(1)
-            fixed_code = match.group(2)
-
-            if file_path_str in seen_paths:
-                continue  # Already applied by a higher-priority pattern
-
-            target = project_root / file_path_str
-            if not target.resolve().is_relative_to(project_root.resolve()):
-                logger.warning("Skipping file outside project: %s", file_path_str)
-                continue
-
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(fixed_code, encoding="utf-8")
-            seen_paths.add(file_path_str)
-            applied.append(file_path_str)
-            logger.info("Applied fix to: %s", file_path_str)
-
-    if not applied:
-        logger.warning("AI output contained no parseable file blocks to apply")
+    apply_fix_blocks(parse_fix_blocks(ai_output), project_root)
 
     return ai_output
 
@@ -965,16 +915,8 @@ def _collect_source_files(
 
 
 def _is_test_path(path: str) -> bool:
-    """Check if a path looks like a test file."""
-    parts = path.replace("\\", "/").split("/")
-    # Directory-based: tests/, __tests__/, test/, spec/
-    if any(p in ("tests", "__tests__", "test", "spec") for p in parts):
-        return True
-    # File-based: *.spec.*, *.test.*, test_*
-    basename = parts[-1] if parts else ""
-    if ".spec." in basename or ".test." in basename or basename.startswith("test_"):
-        return True
-    return False
+    """Check if a path looks like a test file (shared: codd.dag.impact)."""
+    return _shared_is_test_path(path)
 
 
 def _infer_impl_paths(project_root: Path, test_paths: list[str]) -> list[str]:
@@ -1017,46 +959,8 @@ def _infer_impl_paths(project_root: Path, test_paths: list[str]) -> list[str]:
 
 
 def _find_impl_candidates(project_root: Path, domain: str) -> list[str]:
-    """Find implementation files matching a domain name."""
-    candidates: list[str] = []
-    domain_lower = domain.lower().replace("-", "_")
-
-    # Strategy 1: API route files — **/api/{domain}/route.{ts,js}
-    # Handles both standard (src/app/api/) and generated (src/generated/*/app/api/)
-    domain_kebab = domain_lower.replace("_", "-")
-    for domain_variant in {domain_lower, domain_kebab}:
-        for ext in ("ts", "tsx", "js"):
-            for match in project_root.glob(f"**/api/{domain_variant}/route.{ext}"):
-                if match.is_file():
-                    rel = str(match.relative_to(project_root))
-                    if rel not in candidates:
-                        candidates.append(rel)
-
-    # Strategy 3: Generated/service files — src/**/domain*.ts
-    for pattern in (
-        f"src/**/*{domain_lower}*",
-        f"src/**/*{domain_kebab}*",
-        f"lib/**/*{domain_lower}*",
-    ):
-        for match in project_root.glob(pattern):
-            if match.is_file() and not _is_test_path(str(match.relative_to(project_root))):
-                rel = str(match.relative_to(project_root))
-                if rel not in candidates:
-                    candidates.append(rel)
-
-    # Strategy 4: Python — {domain}.py, app.py in same directory
-    for pattern in (
-        f"**/{domain_lower}.py",
-        f"**/app.py",
-        f"src/**/{domain_lower}.py",
-    ):
-        for match in project_root.glob(pattern):
-            if match.is_file() and not _is_test_path(str(match.relative_to(project_root))):
-                rel = str(match.relative_to(project_root))
-                if rel not in candidates:
-                    candidates.append(rel)
-
-    return candidates
+    """Find implementation files matching a domain name (shared: codd.dag.impact)."""
+    return _shared_find_impl_candidates(project_root, domain)
 
 
 def _extract_api_endpoints_from_failures(failures: list[FailureInfo]) -> list[str]:

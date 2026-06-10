@@ -134,12 +134,11 @@ def test_audit_blocking_mode_leaves_all_items_as_ask(tmp_path):
 
 
 def test_project_type_defaults_exist_for_all_required_types():
-    assert sorted(path.stem for path in DEFAULTS_DIR.glob("*.yaml")) == [
-        "cli",
-        "iot",
-        "mobile",
-        "web",
-    ]
+    # Discovery-based: the four historical types plus the universal generic
+    # baseline must all ship a question profile.
+    discovered = sorted(path.stem for path in DEFAULTS_DIR.glob("*.yaml"))
+    for expected in ("cli", "generic", "iot", "mobile", "web"):
+        assert expected in discovered, f"missing question profile: {expected}.yaml"
 
 
 def test_codd_yaml_questions_override_defaults(tmp_path):

@@ -1,4 +1,10 @@
 project_type: mobile
+# Capability vocabulary documented in generic.yaml.
+capabilities:
+  user_interface: true
+  network_surface: "http"
+  e2e_modality: "device"
+  long_running_service: false
 default_artifacts:
   - id: "design:requirements"
     title: "Requirements Definition"

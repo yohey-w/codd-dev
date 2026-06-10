@@ -187,7 +187,9 @@ def test_verify_without_auto_repair_uses_standalone_path(monkeypatch):
     result = CliRunner().invoke(main, ["verify", "--path", "/tmp/demo"])
 
     assert result.exit_code == 0
-    assert captured == {"path": "/tmp/demo", "sprint": None, "prefer_standalone": True}
+    # The sprint concept was removed (design → code directly); verify no longer
+    # threads a sprint selector through to the standalone path.
+    assert captured == {"path": "/tmp/demo", "prefer_standalone": True}
 
 
 def test_repair_from_report_runs_repair_loop(tmp_path: Path, monkeypatch):

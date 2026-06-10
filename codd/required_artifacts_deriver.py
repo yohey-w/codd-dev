@@ -17,10 +17,15 @@ from codd.config import load_project_config
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.knowledge_fetcher import KnowledgeFetcher
 from codd.lexicon import AskItem
+from codd.project_types import (
+    CUSTOM_PROJECT_TYPE,
+    GENERIC_PROJECT_TYPE,
+    resolve_project_type,
+    supported_project_types,
+)
 
 
 DEFAULTS_DIR = Path(__file__).parent / "required_artifacts" / "defaults"
-SUPPORTED_PROJECT_TYPES = ("web", "cli", "mobile", "iot")
 VALID_ARTIFACT_SOURCES = {"ai_derived", "user_override", "default_template"}
 # Sourced from codd.defaults; see feedback_codd_default_values_policy.
 AI_TIMEOUT_SECONDS = int(_DEFAULT_AI_TIMEOUT_SECONDS)
@@ -162,11 +167,12 @@ class RequiredArtifactsDeriver:
                 if isinstance(item, dict)
             ]
 
+        if project_type == CUSTOM_PROJECT_TYPE:
+            return []
         defaults_path = DEFAULTS_DIR / f"{project_type}.yaml"
         if not defaults_path.exists():
-            if project_type == "custom":
-                return []
-            defaults_path = DEFAULTS_DIR / "web.yaml"
+            # No silent web fallback: use the conservative generic baseline.
+            defaults_path = DEFAULTS_DIR / f"{GENERIC_PROJECT_TYPE}.yaml"
 
         payload = yaml.safe_load(defaults_path.read_text(encoding="utf-8")) or {}
         artifacts = payload.get("default_artifacts", [])
@@ -194,11 +200,19 @@ class RequiredArtifactsDeriver:
         if isinstance(project, dict):
             configured = str(project.get("type") or "").lower()
         configured = str(self.config.get("project_type") or configured).lower()
-        if configured == "custom" or configured in SUPPORTED_PROJECT_TYPES:
+
+        known = set(supported_project_types(self.project_root))
+        if configured == CUSTOM_PROJECT_TYPE or configured in known:
             return configured
 
         detected = self.fetcher.detect_project_type().lower()
-        return detected if detected in SUPPORTED_PROJECT_TYPES else "web"
+        resolved, reason = resolve_project_type(
+            configured or None, detected or None, self.project_root
+        )
+        if configured and resolved == GENERIC_PROJECT_TYPE:
+            # Unknown configured type: warn, then use the generic baseline (NOT web).
+            print(f"warning: {reason}")
+        return resolved
 
     def _read_requirement_docs(self, requirement_docs: list[str]) -> str:
         paths = [
