@@ -10,7 +10,11 @@ from typing import Any, Mapping, Optional
 import yaml
 
 from codd.action_outcome import canonical_action_verb
-from codd.requirements_meta import normalize_operation_flow, operation_flow_operations
+from codd.requirements_meta import (
+    normalize_operation_flow,
+    operation_enables,
+    operation_flow_operations,
+)
 
 
 @dataclass
@@ -226,6 +230,17 @@ _CROSS_ROUTE_STATE_RESTORE_ACCEPTANCE = (
     "actor leaves the operation surface for a different in-app route and returns, and the "
     "state is restored on re-entry without relying on a full page reload."
 )
+_ENABLEMENT_CHAIN_ACCEPTANCE = (
+    "Evidence exercises the enabling operation's outcome as the enabled actor's capability "
+    "(enabling operation first, then the enabled actor completes the enabled operation through "
+    "the granted access), not merely as something the enabled actor observes."
+)
+_ACCESS_PATH_VARIATION_ACCEPTANCE = (
+    "Evidence establishes access exclusively through the declared access path; fixtures must "
+    "not mix access paths, so each declared path is proven independently."
+)
+_ACCESS_PATH_VARIATION_AXIS_PREFIX = "access_path_variation"
+_UNRELATED_ACCESS_PATH = "unrelated"
 _SCENARIO_STATE_ISOLATION_ACCEPTANCE = (
     "Evidence establishes scenario-owned or idempotently reset preconditions before assertions; "
     "mutable shared seed state is not trusted unless it is recreated or proven unchanged, and "
@@ -419,7 +434,9 @@ class ScenarioExtractor:
         for source, raw_flow in flows:
             flow = normalize_operation_flow(raw_flow, source=source) or {}
             flow_actors = _actor_values(flow)
-            for index, operation in enumerate(operation_flow_operations(flow)):
+            flow_operations = operation_flow_operations(flow)
+            operations_by_id = _operations_by_id(flow_operations)
+            for index, operation in enumerate(flow_operations):
                 operation_id = str(operation.get("id") or operation.get("name") or f"operation[{index}]")
                 primary_actors = _actor_values(operation) or flow_actors or ["primary actor"]
                 denied_actors = _values_from_keys(operation, _DENIED_ACTOR_KEYS)
@@ -708,6 +725,17 @@ class ScenarioExtractor:
                                 ],
                             )
                         )
+
+                scenarios.extend(
+                    _enablement_scenarios(
+                        flow=flow,
+                        source=source,
+                        grant_operation=operation,
+                        grant_operation_id=operation_id,
+                        grant_actors=primary_actors,
+                        operations_by_id=operations_by_id,
+                    )
+                )
 
         return _dedupe_operational_scenarios(scenarios)
 
@@ -1482,6 +1510,39 @@ def _default_dod_obligations(
             )
         )
 
+    if axis == "enablement_chain":
+        obligations.append(
+            DodObligation(
+                id="enablement_exercise",
+                text=(
+                    "The test first completes the enabling operation through its public trigger and then "
+                    "proves the enabled actor completes the enabled operation through the granted access; "
+                    "pre-provisioned direct-ownership fixtures alone are insufficient."
+                ),
+            )
+        )
+
+    if axis.startswith(f"{_ACCESS_PATH_VARIATION_AXIS_PREFIX}:"):
+        obligations.append(
+            DodObligation(
+                id="access_path_isolation",
+                text=(
+                    "The test constructs access exclusively via the declared access path (or proves its "
+                    "absence for the negative variant) so the assertion isolates that path."
+                ),
+            )
+        )
+        if axis == f"{_ACCESS_PATH_VARIATION_AXIS_PREFIX}:{_UNRELATED_ACCESS_PATH}":
+            obligations.append(
+                DodObligation(
+                    id="no_forbidden_mutation",
+                    text=(
+                        "The actor without an access relationship cannot complete the operation and no "
+                        "forbidden state mutation is persisted."
+                    ),
+                )
+            )
+
     return _dedupe_dod_obligations([*obligations, *_operation_dod_obligations(operation)])
 
 
@@ -1566,6 +1627,174 @@ def _dedupe_dod_obligations(obligations: list[DodObligation]) -> list[DodObligat
     return deduped
 
 
+def _operations_by_id(operations: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Index flow operations by their declared id/name for enables resolution."""
+
+    indexed: dict[str, dict[str, Any]] = {}
+    for index, operation in enumerate(operations):
+        operation_id = str(operation.get("id") or operation.get("name") or f"operation[{index}]")
+        indexed.setdefault(operation_id, operation)
+    return indexed
+
+
+def _enablement_scenarios(
+    *,
+    flow: Mapping[str, Any],
+    source: str,
+    grant_operation: Mapping[str, Any],
+    grant_operation_id: str,
+    grant_actors: list[str],
+    operations_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[UserScenario]:
+    """Derive composite scenarios from an operation's ``enables`` declarations.
+
+    Two coverage axes per declared (enabled actor, enabled operation) pair:
+
+    - ``enablement_chain``: the enabling operation's outcome is exercised as
+      the enabled actor's capability — complete the enabling operation first,
+      then prove the enabled actor can complete the enabled operation through
+      the granted access (capability exercise, not observation).
+    - ``access_path_variation:<path>``: one happy-path variant per declared
+      access path, plus a negative variant
+      (``access_path_variation:unrelated``) proving an actor with no access
+      relationship cannot execute the operation.
+
+    Only *declared* causal links produce scenarios; no link inference happens
+    here, so undeclared projects derive exactly the same scenario set as
+    before.
+    """
+
+    entries = operation_enables(grant_operation, source=f"{source}#{grant_operation_id}")
+    if not entries:
+        return []
+
+    scenarios: list[UserScenario] = []
+    grant_actor = grant_actors[0] if grant_actors else "primary actor"
+    for entry in entries:
+        enabled_actor = str(entry["actor"])
+        for enabled_operation_id in entry["operations"]:
+            enabled_operation = dict(operations_by_id.get(enabled_operation_id) or {})
+            verb = canonical_action_verb(enabled_operation.get("verb")) or canonical_action_verb(
+                enabled_operation_id
+            )
+            target = _operation_target(enabled_operation) or _operation_target(grant_operation)
+            target_phrase = target or "the operation target"
+            routes = _routes_from_operation(enabled_operation)
+            trigger = _trigger_from_operation(enabled_operation, verb=verb, target=target)
+            base_preconditions = _operation_preconditions(flow, enabled_operation)
+            outcomes = _operation_outcomes(enabled_operation)
+
+            chain_outcomes = _dedupe_strings(
+                [
+                    *outcomes,
+                    f"{enabled_actor} can complete {enabled_operation_id} as a result of {grant_operation_id}.",
+                ]
+            )
+            scenarios.append(
+                _operational_scenario(
+                    name=f"{enabled_actor} {enabled_operation_id} enabled by {grant_operation_id}",
+                    actor=enabled_actor,
+                    axis="enablement_chain",
+                    operation=enabled_operation or grant_operation,
+                    source=source,
+                    operation_id=enabled_operation_id,
+                    routes=routes,
+                    trigger=trigger,
+                    preconditions=_dedupe_strings(
+                        [
+                            *base_preconditions,
+                            f"{grant_actor} has completed {grant_operation_id}.",
+                            (
+                                f"{enabled_actor}'s access to {target_phrase} exists only through the "
+                                f"outcome of {grant_operation_id} (no direct-ownership fixture shortcut)."
+                            ),
+                        ]
+                    ),
+                    outcomes=chain_outcomes,
+                    priority="high",
+                    extra_steps=[
+                        f"As {grant_actor}, complete {grant_operation_id} through its public trigger.",
+                        (
+                            f"As {enabled_actor}, exercise {enabled_operation_id} against the resource "
+                            f"enabled by {grant_operation_id}."
+                        ),
+                    ],
+                    acceptance=[
+                        (
+                            f"{enabled_actor} can complete {enabled_operation_id} after {grant_actor} "
+                            f"completes {grant_operation_id}."
+                        ),
+                        _PUBLIC_BOUNDARY_ACCEPTANCE,
+                        _ENABLEMENT_CHAIN_ACCEPTANCE,
+                        *_visible_outcome_acceptance(outcomes),
+                    ],
+                )
+            )
+
+            for access_path in entry["access_paths"]:
+                scenarios.append(
+                    _operational_scenario(
+                        name=f"{enabled_actor} {enabled_operation_id} via {access_path} access path",
+                        actor=enabled_actor,
+                        axis=f"{_ACCESS_PATH_VARIATION_AXIS_PREFIX}:{access_path}",
+                        operation=enabled_operation or grant_operation,
+                        source=source,
+                        operation_id=enabled_operation_id,
+                        routes=routes,
+                        trigger=trigger,
+                        preconditions=_dedupe_strings(
+                            [
+                                *base_preconditions,
+                                (
+                                    f"{enabled_actor} holds access to {target_phrase} via the declared "
+                                    f"'{access_path}' access path only."
+                                ),
+                            ]
+                        ),
+                        outcomes=outcomes,
+                        priority="high",
+                        acceptance=[
+                            (
+                                f"{enabled_actor} can complete {enabled_operation_id} when access exists "
+                                f"via the '{access_path}' path."
+                            ),
+                            _PUBLIC_BOUNDARY_ACCEPTANCE,
+                            _ACCESS_PATH_VARIATION_ACCEPTANCE,
+                            *_visible_outcome_acceptance(outcomes),
+                        ],
+                    )
+                )
+
+            scenarios.append(
+                _operational_scenario(
+                    name=f"{enabled_actor} without an access path cannot {enabled_operation_id}",
+                    actor=f"{enabled_actor} without access",
+                    axis=f"{_ACCESS_PATH_VARIATION_AXIS_PREFIX}:{_UNRELATED_ACCESS_PATH}",
+                    operation=enabled_operation or grant_operation,
+                    source=source,
+                    operation_id=enabled_operation_id,
+                    routes=routes,
+                    trigger=trigger,
+                    preconditions=_dedupe_strings(
+                        [
+                            (
+                                f"No access path (declared or otherwise) links the actor to {target_phrase}."
+                            ),
+                        ]
+                    ),
+                    outcomes=[],
+                    priority="high",
+                    acceptance=[
+                        f"An actor with no access relationship cannot complete {enabled_operation_id}.",
+                        _PUBLIC_BOUNDARY_ACCEPTANCE,
+                        "The forbidden access produces no persisted state change.",
+                    ],
+                )
+            )
+
+    return scenarios
+
+
 def _operational_scenario(
     *,
     name: str,
@@ -1645,6 +1874,8 @@ def _render_operational_scenarios_markdown(collection: ScenarioCollection) -> st
         "- partial_signal_contract: event, callback, queue, webhook, scheduler, adapter, provider, or external-source triggers handle minimal or partially unavailable source signals instead of only ideal full-payload stubs.",
         "- navigation_prerequisite: parameterized actor-facing operation routes are reachable through product navigation, not only direct deep links or lower-layer shortcuts.",
         "- cross_route_state_restore: declared client-side UI state survives a same-app navigation round-trip (leave to a different in-app route and return) and is re-hydrated on re-entry, not only after a full page reload.",
+        "- enablement_chain: a declared `enables` relationship is exercised end-to-end — the enabling operation completes first, then the enabled actor completes the enabled operation through the granted access (capability exercise, not observation).",
+        "- access_path_variation:<path>: each declared access path (e.g. granted, direct) independently supports the enabled operation; access_path_variation:unrelated proves an actor with no access relationship is rejected.",
         "",
     ]
     if collection.source_operation_flows:

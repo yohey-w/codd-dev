@@ -808,6 +808,26 @@ def _scenario_dod_obligations(scenario: UserScenario) -> list[DodObligation]:
                 ),
             )
         )
+    if scenario.coverage_axis == "enablement_chain":
+        obligations.append(
+            DodObligation(
+                id="enablement_exercise",
+                text=(
+                    "The enabling operation is completed first through its public trigger, then the "
+                    "enabled actor completes the enabled operation through the granted access."
+                ),
+            )
+        )
+    if (scenario.coverage_axis or "").startswith("access_path_variation:"):
+        obligations.append(
+            DodObligation(
+                id="access_path_isolation",
+                text=(
+                    "Access is constructed exclusively via the declared access path (or proven absent "
+                    "for the negative variant)."
+                ),
+            )
+        )
     if scenario.coverage_axis == "cross_route_state_restore":
         obligations.append(
             DodObligation(
