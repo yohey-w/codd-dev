@@ -16,6 +16,14 @@ from codd.llm.design_doc_extractor import ExpectedExtraction, ExpectedNode
 
 DEFAULT_PATH_PREFIX_TOLERANT = ("src/", "lib/", "app/")
 _BRACKET_SEGMENT_RE = re.compile(r"\[[^\]]+\]")
+# ``kind="common"`` is overloaded: design docs opt in via frontmatter, but
+# implementation/test files matched by ``common_node_patterns`` are also
+# reclassified to ``kind="common"`` (for the transitive-closure exemption).
+# ``.md`` is the codebase-wide doc discriminator (same principle as
+# dependency_freshness): non-markdown common nodes are code artifacts and
+# must remain inside the implementation matching pool, otherwise real
+# implementations are misreported as missing_implementation.
+_DOC_SUFFIX = ".md"
 
 
 @dataclass
@@ -76,9 +84,18 @@ class ImplementationCoverageCheck(DagCheck):
                 )
 
         if expected_impl_nodes:
+            # Historical behavior preserved on purpose: a glob path_hint that
+            # matches any project file suppresses the additional_implementation
+            # pass entirely (the FS lookup never referenced the candidate
+            # node). Changing this would surface new amber findings in
+            # existing projects, so the quirk stays until explicitly revised.
+            fs_claimed = any(
+                _fs_glob_match(_normalize_hint(expected.path_hint), root)
+                for expected in expected_impl_nodes
+            )
             for impl_node in _nodes_by_kind(target_dag, "impl_file"):
-                if any(
-                    _hint_matches_node(expected.path_hint, impl_node, root, self.settings)
+                if fs_claimed or any(
+                    _hint_matches_node(expected.path_hint, impl_node, self.settings)
                     for expected in expected_impl_nodes
                 ):
                     continue
@@ -141,21 +158,34 @@ def _matches_any_artifact(
     if expected_node.kind == "impl_file":
         return _matches_any_impl(dag, expected_node.path_hint, project_root, settings)
     for candidate in _candidate_nodes(dag, expected_node.kind):
-        if _hint_matches_node(expected_node.path_hint, candidate, project_root, settings):
+        if _hint_matches_node(expected_node.path_hint, candidate, settings):
             return True
-    return False
+    return _fs_fallback_match(_normalize_hint(expected_node.path_hint), project_root)
 
 
 def _candidate_nodes(dag: DAG, expected_kind: str) -> list[Node]:
     if expected_kind == "test_file":
-        return _nodes_by_kind(dag, "test_file")
+        return _nodes_by_kind(dag, "test_file") + _code_common_nodes(dag)
     if expected_kind == "config_file":
         return [
             node
             for node in sorted(dag.nodes.values(), key=lambda item: item.id)
             if node.kind in {"config_file", "deployment_doc", "impl_file"}
-        ]
-    return _nodes_by_kind(dag, "impl_file")
+        ] + _code_common_nodes(dag)
+    return _impl_candidate_nodes(dag)
+
+
+def _impl_candidate_nodes(dag: DAG) -> list[Node]:
+    return _nodes_by_kind(dag, "impl_file") + _code_common_nodes(dag)
+
+
+def _code_common_nodes(dag: DAG) -> list[Node]:
+    """Code-side common nodes (non-markdown paths; see ``_DOC_SUFFIX`` note)."""
+    return [
+        node
+        for node in _nodes_by_kind(dag, "common")
+        if not _normalize_hint(node.path or node.id or "").lower().endswith(_DOC_SUFFIX)
+    ]
 
 
 def _matches_any_impl(
@@ -167,7 +197,7 @@ def _matches_any_impl(
     hint = _normalize_hint(path_hint)
     if not hint:
         return False
-    candidates = [candidate for node in _nodes_by_kind(dag, "impl_file") for candidate in _node_path_candidates(node)]
+    candidates = [candidate for node in _impl_candidate_nodes(dag) for candidate in _node_path_candidates(node)]
 
     if any(_exact_path_match(hint, candidate) for candidate in candidates):
         return True
@@ -180,15 +210,12 @@ def _matches_any_impl(
     if any(_soft_path_match(hint, candidate) for candidate in candidates):
         return True
 
-    if project_root is not None and any(char in hint for char in "*?[]"):
-        return any((project_root / match).is_file() for match in fnmatch.filter(_project_files(project_root), hint))
-    return False
+    return _fs_fallback_match(hint, project_root)
 
 
 def _hint_matches_node(
     path_hint: str,
     node: Node,
-    project_root: Path | None = None,
     settings: dict[str, Any] | None = None,
 ) -> bool:
     hint = _normalize_hint(path_hint)
@@ -206,9 +233,40 @@ def _hint_matches_node(
             return True
         if _soft_path_match(hint, candidate):
             return True
-    if project_root is not None and any(char in hint for char in "*?[]"):
-        return any((project_root / match).is_file() for match in fnmatch.filter(_project_files(project_root), hint))
     return False
+
+
+def _fs_fallback_match(hint: str, project_root: Path | None) -> bool:
+    """Match a hint against the file system when no DAG node satisfies it.
+
+    Glob hints are matched with fnmatch; the literal-bracket-escaped form of
+    the pattern is tried as well so bracketed directory names are not misread
+    as character classes. Literal hints are resolved directly: an existing
+    file satisfies the hint (the artifact exists even when the scanner did not
+    register a node for it).
+    """
+    if project_root is None or not hint:
+        return False
+    if any(char in hint for char in "*?[]"):
+        files = _project_files(project_root)
+        for pattern in (hint, _escape_literal_brackets(hint)):
+            if fnmatch.filter(files, pattern):
+                return True
+    try:
+        return (project_root / hint).is_file()
+    except OSError:
+        return False
+
+
+def _fs_glob_match(hint: str, project_root: Path | None) -> bool:
+    """Glob-only FS lookup, kept identical to the historical fallback (raw
+    fnmatch, no literal-bracket escaping) so the additional_implementation
+    pass keeps its exact pre-existing behavior."""
+    if project_root is None or not hint:
+        return False
+    if not any(char in hint for char in "*?[]"):
+        return False
+    return any((project_root / match).is_file() for match in fnmatch.filter(_project_files(project_root), hint))
 
 
 def _node_path_candidates(node: Node) -> list[str]:

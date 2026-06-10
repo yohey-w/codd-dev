@@ -54,13 +54,14 @@ class EnvironmentCoverageCheck(DagCheck):
 
         violations: list[dict[str, Any]] = []
         for axis in axes:
+            related_journeys = self._related_journeys(target_dag, axis)
             for variant in axis.variants:
                 related_tests = self._find_tests_for_axis_variant(target_dag, axis, variant)
                 if variant.criticality is None:
                     violations.append(self._criticality_unclear(axis, variant))
                 if not related_tests:
                     violations.append(self._missing_test(axis, variant))
-                for journey in self._related_journeys(target_dag, axis):
+                for journey in self._scoped_journeys(related_journeys, axis, variant):
                     if not self._test_executes_journey_under_variant(journey, related_tests):
                         violations.append(self._journey_not_executed(axis, variant, journey))
 
@@ -103,6 +104,22 @@ class EnvironmentCoverageCheck(DagCheck):
             for node in sorted(dag.nodes.values(), key=lambda item: item.id)
             if node.kind in {"test_file", "verification_test"} and self._node_mentions_axis_variant(node, axis, variant)
         ]
+
+    def _scoped_journeys(
+        self,
+        journeys: list[dict[str, Any]],
+        axis: CoverageAxis,
+        variant: CoverageVariant,
+    ) -> list[dict[str, Any]]:
+        """Honor an opt-in journey scope declaration on the variant or axis.
+
+        Undeclared scope keeps the historical behavior: every related journey
+        is required under every variant (full cross product).
+        """
+        scope = axis.journey_scope_for(variant)
+        if scope is None:
+            return journeys
+        return [journey for journey in journeys if scope.applies_to(str(journey.get("name") or ""))]
 
     def _related_journeys(self, dag: DAG, axis: CoverageAxis) -> list[dict[str, Any]]:
         journeys: list[dict[str, Any]] = []

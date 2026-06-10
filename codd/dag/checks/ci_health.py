@@ -323,6 +323,13 @@ def _trigger_names(value: Any) -> set[str]:
     return set()
 
 
+# Keys that carry the actual verification spec inside a hook mapping. When a
+# mapping declares one of these alongside a string-valued ``verification:``
+# entry, the ``verification`` value is a name/label for the hook (schema:
+# ``- verification: <label>`` + ``command:``/``url:`` ...), not a command.
+_VERIFICATION_SPEC_KEYS = ("command", "run", "script", "test", "url")
+
+
 def _hook_commands(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
@@ -333,8 +340,13 @@ def _hook_commands(value: Any) -> list[str]:
         return commands
     if isinstance(value, dict):
         commands: list[str] = []
-        for key in ("post_deploy", "post_deploy_steps", "post_deploy_hooks", "verification", "verifications"):
+        for key in ("post_deploy", "post_deploy_steps", "post_deploy_hooks"):
             commands.extend(_hook_commands(value.get(key)))
+        for key in ("verification", "verifications"):
+            item = value.get(key)
+            if _is_verification_label(item, value):
+                continue
+            commands.extend(_hook_commands(item))
         for key in ("command", "run", "script", "test"):
             commands.extend(_hook_commands(value.get(key)))
         targets = value.get("targets")
@@ -343,6 +355,16 @@ def _hook_commands(value: Any) -> list[str]:
                 commands.extend(_hook_commands(target_config))
         return commands
     return []
+
+
+def _is_verification_label(value: Any, mapping: dict[str, Any]) -> bool:
+    """True when a string-valued ``verification:``/``verifications:`` entry is
+    a hook label rather than a command: the surrounding mapping carries the
+    actual spec (an explicit command key or an endpoint url). Collecting the
+    label as a command would misreport it as a CI-missing verification."""
+    if not isinstance(value, str):
+        return False
+    return any(mapping.get(key) is not None for key in _VERIFICATION_SPEC_KEYS)
 
 
 def _command_values(value: Any) -> list[str]:

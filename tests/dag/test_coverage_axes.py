@@ -174,3 +174,110 @@ def test_environment_coverage_skeleton_passes():
 
     assert result.passed is True
     assert result.block_deploy is True
+
+
+# --- journey scope (opt-in axis/variant -> journey applicability) ----------
+
+
+def test_journey_scope_undeclared_keeps_serialization_stable():
+    variant = CoverageVariant(id="shape_a", label="Shape A", criticality="high")
+    axis = CoverageAxis(
+        axis_type="runtime_shape",
+        rationale="r",
+        variants=[variant],
+        source="lexicon",
+    )
+
+    assert "journey_scope" not in variant.to_dict()
+    assert "journey_scope" not in axis.to_dict()
+
+
+def test_journey_scope_list_shorthand_is_include_list():
+    variant = CoverageVariant.from_dict({"id": "shape_a", "journey_scope": ["flow_one", "flow_*"]})
+
+    assert variant.journey_scope is not None
+    assert variant.journey_scope.applies_to("flow_one") is True
+    assert variant.journey_scope.applies_to("flow_two") is True
+    assert variant.journey_scope.applies_to("other") is False
+
+
+def test_journey_scope_empty_include_means_no_journeys():
+    variant = CoverageVariant.from_dict({"id": "shape_a", "journey_scope": {"include": []}})
+
+    assert variant.journey_scope is not None
+    assert variant.journey_scope.applies_to("anything") is False
+
+
+def test_journey_scope_exclude_only_keeps_other_journeys():
+    variant = CoverageVariant.from_dict({"id": "shape_a", "journey_scope": {"exclude": ["flow_one"]}})
+
+    assert variant.journey_scope is not None
+    assert variant.journey_scope.applies_to("flow_one") is False
+    assert variant.journey_scope.applies_to("flow_two") is True
+
+
+def test_journey_scope_exclude_wins_over_include():
+    variant = CoverageVariant.from_dict(
+        {"id": "shape_a", "journey_scope": {"include": ["flow_*"], "exclude": ["flow_two"]}}
+    )
+
+    assert variant.journey_scope is not None
+    assert variant.journey_scope.applies_to("flow_one") is True
+    assert variant.journey_scope.applies_to("flow_two") is False
+
+
+def test_journey_scope_round_trips_through_to_dict():
+    variant = CoverageVariant.from_dict(
+        {"id": "shape_a", "journey_scope": {"include": ["flow_*"], "exclude": ["flow_two"]}}
+    )
+
+    loaded = CoverageVariant.from_dict(variant.to_dict())
+
+    assert loaded == variant
+
+
+def test_axis_journey_scope_round_trips_through_to_dict():
+    axis = CoverageAxis.from_dict(
+        {
+            "axis_type": "runtime_shape",
+            "journey_scope": {"exclude": ["flow_two"]},
+            "variants": [{"id": "shape_a"}],
+        },
+        default_source="lexicon",
+    )
+
+    loaded = CoverageAxis.from_dict(axis.to_dict())
+
+    assert loaded == axis
+    assert loaded.journey_scope is not None
+    assert loaded.journey_scope.applies_to("flow_two") is False
+
+
+def test_invalid_journey_scope_warns_and_keeps_variant():
+    with pytest.warns(UserWarning, match="journey_scope ignored"):
+        variant = CoverageVariant.from_dict({"id": "shape_a", "journey_scope": 42})
+
+    assert variant.id == "shape_a"
+    assert variant.journey_scope is None
+
+
+def test_journey_scope_for_variant_overrides_axis_default():
+    from codd.dag.coverage_axes import JourneyScope
+
+    axis_scope = JourneyScope(include=["axis_flow"])
+    variant_scope = JourneyScope(include=["variant_flow"])
+    scoped_variant = CoverageVariant(id="a", label="A", journey_scope=variant_scope)
+    plain_variant = CoverageVariant(id="b", label="B")
+    axis = CoverageAxis(
+        axis_type="runtime_shape",
+        rationale="r",
+        variants=[scoped_variant, plain_variant],
+        source="lexicon",
+        journey_scope=axis_scope,
+    )
+
+    assert axis.journey_scope_for(scoped_variant) is variant_scope
+    assert axis.journey_scope_for(plain_variant) is axis_scope
+    assert CoverageAxis(
+        axis_type="x", rationale="r", variants=[plain_variant], source="lexicon"
+    ).journey_scope_for(plain_variant) is None

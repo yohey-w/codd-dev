@@ -234,6 +234,69 @@ def test_impl_edges_are_ignored(tmp_path):
     assert result.violations[0]["upstream"] == UPSTREAM
 
 
+def test_common_code_nodes_are_ignored(tmp_path):
+    """kind="common" nodes with non-markdown paths are code, not docs.
+
+    ``common_node_patterns`` assigns kind="common" to shared source files
+    (for the transitive-closure exemption); their code->code depends_on edges
+    must not enter the doc freshness check — the reconciliation ledger never
+    acknowledges non-md paths, so they would be permanent false positives.
+    """
+    repo = _init_repo(tmp_path)
+    dag = _doc_dag()
+    # Shared code files classified common via common_node_patterns.
+    dag.add_node(Node(id="src/lib/auth.ext", kind="common", path="src/lib/auth.ext", attributes={}))
+    dag.add_node(
+        Node(id="src/shared/config.ext", kind="common", path="src/shared/config.ext", attributes={})
+    )
+    # code->code edge between two common code nodes (expected_extraction origin).
+    dag.add_edge(Edge(from_id="src/lib/auth.ext", to_id="src/shared/config.ext", kind="depends_on"))
+    # doc->code and code->doc edges must be out of scope too.
+    dag.add_edge(Edge(from_id=DOWNSTREAM, to_id="src/shared/config.ext", kind="depends_on"))
+    dag.add_edge(Edge(from_id="src/lib/auth.ext", to_id=UPSTREAM, kind="depends_on"))
+    (repo / "src" / "lib").mkdir(parents=True)
+    (repo / "src" / "shared").mkdir(parents=True)
+    (repo / "src" / "lib" / "auth.ext").write_text("code v1\n", encoding="utf-8")
+    (repo / "src" / "shared" / "config.ext").write_text("code v1\n", encoding="utf-8")
+    _commit_all(repo, "add shared code", "2030-01-01T00:00:00")
+    # Upstream code changes alone — would trip the recency heuristic if included.
+    (repo / "src" / "shared" / "config.ext").write_text("code v2\n", encoding="utf-8")
+    _commit_all(repo, "update shared code", "2030-01-02T00:00:00")
+
+    result = DependencyFreshnessCheck(dag, repo, {}).run()
+    assert result.violations == []
+    assert result.edges_checked == 1  # only the doc->doc edge
+
+
+def test_common_markdown_docs_remain_in_scope(tmp_path):
+    """kind="common" nodes with .md paths (frontmatter type: common) stay checked."""
+    repo = _init_repo(tmp_path)
+    common_doc = "docs/design/_common/conventions.md"
+    (repo / common_doc).parent.mkdir(parents=True)
+    (repo / common_doc).write_text(
+        "---\nnode_id: conventions\ntype: common\n---\n# Conventions\nrule v1\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add common doc")
+    dag = DAG()
+    dag.add_node(Node(id=DOWNSTREAM, kind="design_doc", path=DOWNSTREAM, attributes={}))
+    dag.add_node(Node(id=common_doc, kind="common", path=common_doc, attributes={}))
+    dag.add_edge(Edge(from_id=DOWNSTREAM, to_id=common_doc, kind="depends_on"))
+    # Common doc drifts after the downstream's last commit.
+    (repo / common_doc).write_text(
+        "---\nnode_id: conventions\ntype: common\n---\n# Conventions\nrule v2\n",
+        encoding="utf-8",
+    )
+    _commit_all(repo, "update common doc", "2030-01-02T00:00:00")
+
+    result = DependencyFreshnessCheck(dag, repo, {}).run()
+    assert result.edges_checked == 1
+    assert len(result.violations) == 1
+    assert result.violations[0]["upstream"] == common_doc
+    assert result.violations[0]["kind"] == "never_reconciled"
+
+
 def test_record_reconciliation_writes_ledger(tmp_path):
     repo = _init_repo(tmp_path)
     assert record_reconciliation(repo, DOWNSTREAM, UPSTREAM) is True
