@@ -17,6 +17,7 @@ CHECK_MODULES = (
     "codd.dag.checks.node_completeness",
     "codd.dag.checks.edge_validity",
     "codd.dag.checks.depends_on_consistency",
+    "codd.dag.checks.dependency_freshness",
     "codd.dag.checks.task_completion",
     "codd.dag.checks.transitive_closure",
     "codd.dag.checks.ui_coherence",
@@ -97,6 +98,33 @@ def run_checks(
             # back to the no-arg form.
             results.append(check.run())
     return results
+
+
+def unselected_check_names(
+    project_root: Path,
+    settings: dict[str, Any] | None = None,
+) -> list[str]:
+    """Registered DAG checks that the effective ``enabled_checks`` does not select.
+
+    ``enabled_checks`` (from the project-type defaults or a ``codd.yaml``
+    ``dag:`` override) is an explicit allowlist: when present, checks shipped
+    after the list was written silently never run. This helper powers the
+    ``codd dag verify`` notice that keeps that gap visible instead of letting
+    it silently no-op. Returns an empty list when no allowlist is in effect
+    (all registered checks run) or when settings cannot be resolved.
+    """
+
+    _ensure_checks_registered()
+    registry = get_registry()
+    try:
+        dag_settings = load_dag_settings(Path(project_root).resolve(), settings)
+    except (FileNotFoundError, ValueError, OSError):
+        return []
+    requested = dag_settings.get("enabled_checks")
+    if not isinstance(requested, (list, tuple)):
+        return []
+    selected = {str(name) for name in requested}
+    return sorted(name for name in registry if name not in selected)
 
 
 def _resolve_codd_config(

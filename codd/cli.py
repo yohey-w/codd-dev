@@ -25,7 +25,10 @@ from codd.action_outcome import (
     extract_action_requirements_from_flows,
 )
 from codd.bridge import get_command_handler
-from codd.capability_completeness import capability_completeness_warnings
+from codd.capability_completeness import (
+    capability_completeness_warnings,
+    enablement_declaration_nudges,
+)
 from codd.config import find_codd_dir, load_project_config
 from codd.surface_reconciliation import (
     iter_markup_source_texts,
@@ -619,9 +622,9 @@ def _doctor_warnings(project_root: Path) -> list[str]:
     coverage = _action_outcome_coverage(project_root, config)
     warnings.extend(_action_outcome_warning_messages(coverage, legacy_crud_configured=has_crud_flow_targets))
     warnings.extend(_operation_outcome_projection_warnings(project_root, config, coverage.requirements))
-    warnings.extend(
-        capability_completeness_warnings(_operation_flows_from_project(project_root, config), config)
-    )
+    operation_flows = _operation_flows_from_project(project_root, config)
+    warnings.extend(capability_completeness_warnings(operation_flows, config))
+    warnings.extend(enablement_declaration_nudges(operation_flows, config))
     warnings.extend(_orphan_cover_marker_warnings(project_root, config))
     warnings.extend(_runtime_evidence_placeholder_warnings(project_root, config))
     target_actions = action_target_specs_from_config(config)
@@ -6590,7 +6593,7 @@ def dag_verify(
     apply_changes: bool,
 ):
     """Run DAG completeness checks."""
-    from codd.dag.runner import run_all_checks
+    from codd.dag.runner import run_all_checks, unselected_check_names
 
     project_root = Path(project_path).resolve()
     try:
@@ -6598,6 +6601,16 @@ def dag_verify(
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
+
+    # enabled_checks is an explicit allowlist; surface registered checks it
+    # leaves out so a newly shipped check never becomes a silent no-op.
+    # Skipped when the user already narrowed the run with --check.
+    unselected: list[str] = []
+    if not check_names:
+        try:
+            unselected = unselected_check_names(project_root)
+        except Exception:  # visibility aid must never break verification
+            unselected = []
 
     opt_out_results = [result for result in results if _dag_result_status(result) == "opt_out"]
     failed_red = [
@@ -6615,6 +6628,13 @@ def dag_verify(
 
     if output_format == "json":
         click.echo(json.dumps([_dag_result_to_dict(result) for result in results], indent=2, default=str))
+        if unselected:
+            # stderr keeps the stdout JSON array shape intact for consumers.
+            click.echo(
+                f"note: {len(unselected)} registered check(s) not selected by enabled_checks: "
+                + ", ".join(unselected),
+                err=True,
+            )
     else:
         for result in results:
             severity = _dag_result_severity(result)
@@ -6637,6 +6657,12 @@ def dag_verify(
             click.echo(f"\n{len(opt_out_results)} active opt-out(s) (deploy allowed):")
             for result in opt_out_results:
                 click.echo(f"  - {_dag_result_name(result)}: {_dag_result_message(result)}")
+        if unselected:
+            click.echo(
+                f"\nnote: {len(unselected)} registered check(s) not selected by enabled_checks "
+                f"and therefore not run: {', '.join(unselected)} — add them to dag.enabled_checks "
+                "in codd.yaml (or remove the list to run all registered checks)."
+            )
 
     if auto_repair:
         from codd.dag.auto_repair import apply_auto_repair

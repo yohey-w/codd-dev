@@ -351,6 +351,12 @@ def run_commit(
     if all_paths:
         _git_commit_propagation(project_root, all_paths, commit_reason)
 
+    # Acknowledge doc-to-doc reconciliation in the freshness ledger. This
+    # covers both auto-applied docs and HITL docs — including HITL docs the
+    # human judged "no update needed" — so the dependency_freshness check
+    # treats the upstream's current commit as reconciled state.
+    _record_reconciliation_acks(project_root, state)
+
     # Clean up state file
     _clear_verify_state(project_root)
 
@@ -920,12 +926,12 @@ def _save_verify_state(
         "hitl_node_ids": [v.doc.node_id for v in hitl],
         "auto_docs": [
             {"node_id": v.doc.node_id, "path": v.doc.path, "band": v.band,
-             "confidence": v.confidence}
+             "confidence": v.confidence, "upstream_paths": list(v.doc.changed_files)}
             for v in auto_applied
         ],
         "hitl_docs": [
             {"node_id": v.doc.node_id, "path": v.doc.path, "band": v.band,
-             "confidence": v.confidence}
+             "confidence": v.confidence, "upstream_paths": list(v.doc.changed_files)}
             for v in hitl
         ],
     }
@@ -959,6 +965,31 @@ def _clear_verify_state(project_root: Path) -> None:
     state_path = codd_dir / VERIFY_STATE_FILE
     if state_path.exists():
         state_path.unlink()
+
+
+def _record_reconciliation_acks(project_root: Path, state: dict) -> int:
+    """Write reconciliation-ledger acks for every doc -> upstream-doc pair.
+
+    Only doc-to-doc propagation (Path B) is acknowledged: upstream paths are
+    filtered to design documents (``.md``). Source-file paths from Path A are
+    ignored — the freshness ledger tracks doc-to-doc ``depends_on`` edges.
+    Failures are non-fatal: the ledger is advisory state.
+    """
+
+    from codd.reconciliation_ledger import record_reconciliation
+
+    count = 0
+    for item in state.get("auto_docs", []) + state.get("hitl_docs", []):
+        downstream = str(item.get("path") or "")
+        if not downstream:
+            continue
+        for upstream in item.get("upstream_paths", []) or []:
+            upstream_path = str(upstream)
+            if not upstream_path.endswith(".md") or upstream_path == downstream:
+                continue
+            if record_reconciliation(project_root, downstream, upstream_path):
+                count += 1
+    return count
 
 
 def _record_hitl_knowledge(

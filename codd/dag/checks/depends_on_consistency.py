@@ -28,6 +28,8 @@ class DependsOnConsistencyResult:
     passed: bool = True
     skipped: bool = False
     warnings: list[str] = field(default_factory=list)
+    records_compared: int = 0
+    message: str = ""
 
 
 @register_dag_check("depends_on_consistency")
@@ -79,9 +81,22 @@ class DependsOnConsistencyCheck:
                 *_value_table_violations(payload, dag),
             ]
         )
+        records_compared = _count_comparison_records(payload, edge_lookup, dag)
+        # Visibility only — behaviour is unchanged. An empty propagation
+        # output (e.g. a baseline placeholder with no comparison records)
+        # previously produced an indistinguishable green PASS; now the
+        # summary states explicitly that nothing was exercised.
+        message = ""
+        if records_compared == 0:
+            message = (
+                "0 records compared — propagation output contains no comparable "
+                "depends_on values; consistency was not exercised"
+            )
         return DependsOnConsistencyResult(
             violations=violations,
             passed=len(violations) == 0,
+            records_compared=records_compared,
+            message=message,
         )
 
 
@@ -119,6 +134,39 @@ def _configured_output_path(settings: dict[str, Any]) -> str | None:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return None
+
+
+def _count_comparison_records(
+    payload: Any,
+    edge_lookup: dict[tuple[str, str], str],
+    dag: Any,
+) -> int:
+    """Count comparison records actually evaluated against depends_on edges."""
+
+    count = 0
+    for record in _iter_records(payload):
+        from_node = _string_field(record, "from_node", "source_node", "source", "from", "node_a")
+        to_node = _string_field(record, "to_node", "target_node", "target", "to", "node_b")
+        if not from_node or not to_node:
+            continue
+        edge_kind = _string_field(record, "edge_kind", "edge", "kind") or edge_lookup.get((from_node, to_node))
+        if edge_kind != "depends_on" and (from_node, to_node) not in edge_lookup:
+            continue
+        children = record.get("values") or record.get("comparisons") or record.get("checks")
+        if isinstance(children, list):
+            count += sum(1 for child in children if isinstance(child, dict))
+        else:
+            count += 1
+
+    values_by_node = _extract_values_by_node(payload)
+    if values_by_node:
+        for edge in getattr(dag, "edges", []):
+            if getattr(edge, "kind", None) != "depends_on":
+                continue
+            from_values = values_by_node.get(str(getattr(edge, "from_id")), {})
+            to_values = values_by_node.get(str(getattr(edge, "to_id")), {})
+            count += len(set(from_values) & set(to_values))
+    return count
 
 
 def _depends_on_edge_lookup(dag: Any) -> dict[tuple[str, str], str]:

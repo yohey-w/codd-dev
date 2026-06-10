@@ -168,3 +168,107 @@ def test_verify_runner_called_with_project_root(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert calls[0]["project_root"] == tmp_path.resolve()
+
+
+# --- enabled_checks allowlist visibility -------------------------------------
+#
+# enabled_checks is an explicit allowlist (project-type defaults or a codd.yaml
+# dag: override). Checks registered after the list was written silently never
+# ran; `codd dag verify` now prints a notice so the gap is a visible choice.
+
+
+def _write_pinned_project(tmp_path) -> None:
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        "project:\n  name: demo\ndag:\n  enabled_checks:\n    - node_completeness\n",
+        encoding="utf-8",
+    )
+
+
+def test_verify_notice_lists_unselected_checks(tmp_path, monkeypatch):
+    _write_pinned_project(tmp_path)
+    _patch_results(monkeypatch, [_CheckResult("node_completeness")])
+
+    result = CliRunner().invoke(main, ["dag", "verify", "--project-path", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "not selected by enabled_checks" in result.output
+    assert "dependency_freshness" in result.output
+
+
+def test_verify_no_notice_with_explicit_check_flag(tmp_path, monkeypatch):
+    _write_pinned_project(tmp_path)
+    _patch_results(monkeypatch, [_CheckResult("node_completeness")])
+
+    result = CliRunner().invoke(
+        main,
+        ["dag", "verify", "--project-path", str(tmp_path), "--check", "node_completeness"],
+    )
+
+    assert result.exit_code == 0
+    assert "not selected by enabled_checks" not in result.output
+
+
+def test_verify_no_notice_without_allowlist(tmp_path, monkeypatch):
+    # generic project type: no enabled_checks default → all checks run.
+    _patch_results(monkeypatch, [_CheckResult("node_completeness")])
+
+    result = CliRunner().invoke(main, ["dag", "verify", "--project-path", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "not selected by enabled_checks" not in result.output
+
+
+def test_verify_json_stdout_stays_parseable_with_notice(tmp_path, monkeypatch):
+    _write_pinned_project(tmp_path)
+    _patch_results(monkeypatch, [_CheckResult("node_completeness")])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["dag", "verify", "--project-path", str(tmp_path), "--format", "json"],
+    )
+
+    assert result.exit_code == 0
+    # click >= 8.2 separates stderr; the stdout JSON array must stay parseable.
+    assert json.loads(result.stdout)[0]["check_name"] == "node_completeness"
+    assert "not selected by enabled_checks" in result.stderr
+
+
+def test_unselected_check_names_pinned_project(tmp_path):
+    from codd.dag.runner import unselected_check_names
+
+    _write_pinned_project(tmp_path)
+    unselected = unselected_check_names(tmp_path)
+    assert "dependency_freshness" in unselected
+    assert "node_completeness" not in unselected
+    assert unselected == sorted(unselected)
+
+
+def test_unselected_check_names_without_allowlist(tmp_path):
+    from codd.dag.runner import unselected_check_names
+
+    assert unselected_check_names(tmp_path) == []
+
+
+def test_dependency_freshness_in_default_allowlists():
+    """The built-in project-type defaults must select the new check."""
+    import yaml
+
+    from codd.dag.builder import DEFAULTS_DIR
+
+    for name in ("web", "cli", "iot", "mobile"):
+        payload = yaml.safe_load((DEFAULTS_DIR / f"{name}.yaml").read_text(encoding="utf-8"))
+        assert "dependency_freshness" in payload["enabled_checks"], name
+
+
+def test_web_default_allowlist_selects_dependency_freshness(tmp_path):
+    """A web-type project without a codd.yaml pin runs the check by default."""
+    from codd.dag.runner import unselected_check_names
+
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    unselected = unselected_check_names(tmp_path)
+    assert "dependency_freshness" not in unselected
+    # Remaining gap stays visible rather than silently shrinking to zero.
+    assert "user_journey_coherence" in unselected

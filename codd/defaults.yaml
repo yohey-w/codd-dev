@@ -87,3 +87,23 @@ orphan_cover_markers:
   # Flag `codd: covers operation=X` test markers whose operation X is not declared
   # in any operation_flow (reverse reconciliation of the audit covers path).
   enabled: true
+dependency_freshness:
+  # Doc-to-doc depends_on freshness backed by the reconciliation ledger
+  # (<codd-dir>/reconciliation_ledger.json, written by `codd propagate --commit`).
+  # The ledger is the primary mechanism. Default is an amber advisory in
+  # `codd dag verify` (exit code unchanged); opt in to hard-gating with
+  # severity: red. Without a ledger entry for an edge the check falls back to
+  # a commit-recency heuristic — best-effort onboarding triage, not proof of
+  # freshness: a joint tip commit (both docs touched together) is
+  # disambiguated via exclusive-commit history, but repeated bulk commits can
+  # still mask drift. The missing baseline is always reported explicitly.
+  # NOTE: projects whose codd.yaml pins dag.enabled_checks must add
+  # `dependency_freshness` to that list (codd dag verify prints a notice
+  # listing registered-but-unselected checks).
+  enabled: true
+  severity: amber
+enables_nudge:
+  # Doctor advisory: an operation whose visible_to/expected_outcomes mention
+  # another declared actor but that declares no `enables` relationship gets a
+  # nudge to consider declaring one (observation vs capability-granting).
+  enabled: true

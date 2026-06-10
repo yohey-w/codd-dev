@@ -2,6 +2,7 @@ enabled_checks:
   - node_completeness
   - edge_validity
   - depends_on_consistency
+  - dependency_freshness
   - task_completion
   - transitive_closure
 design_doc_patterns:
