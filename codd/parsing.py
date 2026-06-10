@@ -96,12 +96,26 @@ class ApiSpecInfo:
 
 @dataclass
 class ConfigInfo:
-    """Normalized representation of infrastructure/configuration files."""
+    """Normalized representation of infrastructure/configuration files.
+
+    ``services`` and ``resources`` are the original, stable surfaces that
+    existing consumers rely on. The optional fields below are additive (default
+    empty) and carry the richer, NFR-relevant facts surfaced by the R1 IaC
+    parsing expansion (CI/CD pipelines, Dockerfile build stages, and bare
+    "recognized but not deep-parsed" evidence files). Backward compatible: a
+    consumer reading only ``services``/``resources`` keeps working unchanged.
+    """
 
     format: str
     file_path: str
     services: list[dict[str, Any]] = field(default_factory=list)
     resources: list[dict[str, Any]] = field(default_factory=list)
+    # Additive, optional surfaces (R1 expansion):
+    pipelines: list[dict[str, Any]] = field(default_factory=list)
+    images: list[dict[str, Any]] = field(default_factory=list)
+    # Mark a file that was *recognized* as ops/observability evidence but not
+    # structurally parsed (Prometheus rules, Ansible, Helm Chart.yaml, …).
+    recognized_kind: str = ""
 
 
 @dataclass
@@ -2118,10 +2132,32 @@ class DockerComposeExtractor:
 
 
 class KubernetesExtractor:
-    """Extract Kubernetes resources from YAML manifests."""
+    """Extract Kubernetes resources from YAML manifests.
+
+    The set of parsed kinds is intentionally broad so that downstream IaC→NFR
+    mapping (:mod:`codd.iac_nfr`) can recover availability, scalability,
+    capacity, reliability/health, security/isolation and durability/DR facts
+    deterministically. ``ConfigInfo.resources`` entries always carry ``kind`` +
+    ``name``; kind-specific fields are additive.
+    """
 
     format = "kubernetes"
-    supported_kinds = {"ConfigMap", "Deployment", "Ingress", "Service"}
+    # Workload kinds whose pod template carries containers / probes / resources.
+    _WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}
+    supported_kinds = {
+        "ConfigMap",
+        "CronJob",
+        "DaemonSet",
+        "Deployment",
+        "HorizontalPodAutoscaler",
+        "Ingress",
+        "Job",
+        "NetworkPolicy",
+        "PersistentVolumeClaim",
+        "PodDisruptionBudget",
+        "Service",
+        "StatefulSet",
+    }
 
     def detect_k8s_manifests(self, project_root: Path) -> list[Path]:
         matches: list[Path] = []
@@ -2149,28 +2185,16 @@ class KubernetesExtractor:
                 continue
 
             metadata = doc.get("metadata") or {}
+            namespace = metadata.get("namespace")
             resource: dict[str, Any] = {
                 "kind": kind,
                 "name": metadata.get("name", ""),
             }
+            if namespace:
+                resource["namespace"] = namespace
 
-            if kind == "Deployment":
-                spec = doc.get("spec") or {}
-                pod_spec = ((spec.get("template") or {}).get("spec") or {})
-                resource["replicas"] = spec.get("replicas", 1)
-                resource["containers"] = [
-                    {
-                        "name": container.get("name", ""),
-                        "image": container.get("image", ""),
-                        "ports": [
-                            port.get("containerPort")
-                            for port in container.get("ports", []) or []
-                            if isinstance(port, dict) and "containerPort" in port
-                        ],
-                    }
-                    for container in pod_spec.get("containers", []) or []
-                    if isinstance(container, dict)
-                ]
+            if kind in self._WORKLOAD_KINDS:
+                self._populate_workload(kind, doc, resource)
             elif kind == "Service":
                 spec = doc.get("spec") or {}
                 resource["service_type"] = spec.get("type", "ClusterIP")
@@ -2203,10 +2227,141 @@ class KubernetesExtractor:
             elif kind == "ConfigMap":
                 data = doc.get("data") or {}
                 resource["data_keys"] = sorted(str(key) for key in data.keys())
+            elif kind == "HorizontalPodAutoscaler":
+                self._populate_hpa(doc, resource)
+            elif kind == "NetworkPolicy":
+                self._populate_network_policy(doc, resource)
+            elif kind == "PodDisruptionBudget":
+                spec = doc.get("spec") or {}
+                if "minAvailable" in spec:
+                    resource["min_available"] = spec.get("minAvailable")
+                if "maxUnavailable" in spec:
+                    resource["max_unavailable"] = spec.get("maxUnavailable")
+            elif kind == "PersistentVolumeClaim":
+                spec = doc.get("spec") or {}
+                resource["access_modes"] = _normalize_list(spec.get("accessModes"))
+                resource["storage_class"] = spec.get("storageClassName")
+                requests = ((spec.get("resources") or {}).get("requests") or {})
+                if isinstance(requests, dict):
+                    resource["storage"] = requests.get("storage")
 
             info.resources.append(resource)
 
         return info
+
+    def _populate_workload(self, kind: str, doc: dict[str, Any], resource: dict[str, Any]) -> None:
+        spec = doc.get("spec") or {}
+        # CronJob nests the workload spec under spec.jobTemplate.spec; Job/others
+        # carry it directly under spec.
+        if kind == "CronJob":
+            resource["schedule"] = spec.get("schedule")
+            job_spec = ((spec.get("jobTemplate") or {}).get("spec") or {})
+        else:
+            job_spec = spec
+
+        pod_spec = ((job_spec.get("template") or {}).get("spec") or {})
+
+        if kind in {"Deployment", "StatefulSet"}:
+            resource["replicas"] = spec.get("replicas", 1)
+        if kind == "StatefulSet":
+            resource["service_name"] = spec.get("serviceName")
+        if kind == "Job":
+            if "completions" in job_spec:
+                resource["completions"] = job_spec.get("completions")
+            if "parallelism" in job_spec:
+                resource["parallelism"] = job_spec.get("parallelism")
+
+        resource["containers"] = [
+            self._parse_container(container)
+            for container in pod_spec.get("containers", []) or []
+            if isinstance(container, dict)
+        ]
+
+    @staticmethod
+    def _parse_container(container: dict[str, Any]) -> dict[str, Any]:
+        parsed: dict[str, Any] = {
+            "name": container.get("name", ""),
+            "image": container.get("image", ""),
+            "ports": [
+                port.get("containerPort")
+                for port in container.get("ports", []) or []
+                if isinstance(port, dict) and "containerPort" in port
+            ],
+        }
+        resources = container.get("resources")
+        if isinstance(resources, dict):
+            requests = resources.get("requests")
+            limits = resources.get("limits")
+            captured: dict[str, Any] = {}
+            if isinstance(requests, dict) and requests:
+                captured["requests"] = {str(k): v for k, v in requests.items()}
+            if isinstance(limits, dict) and limits:
+                captured["limits"] = {str(k): v for k, v in limits.items()}
+            if captured:
+                parsed["resources"] = captured
+        probes: dict[str, bool] = {}
+        for probe_key in ("livenessProbe", "readinessProbe", "startupProbe"):
+            if isinstance(container.get(probe_key), dict):
+                probes[probe_key] = True
+        if probes:
+            parsed["probes"] = probes
+        return parsed
+
+    @staticmethod
+    def _populate_hpa(doc: dict[str, Any], resource: dict[str, Any]) -> None:
+        spec = doc.get("spec") or {}
+        resource["min_replicas"] = spec.get("minReplicas")
+        resource["max_replicas"] = spec.get("maxReplicas")
+        target = spec.get("scaleTargetRef") or {}
+        if isinstance(target, dict) and target:
+            resource["scale_target"] = {
+                "kind": target.get("kind"),
+                "name": target.get("name"),
+            }
+        metrics: list[dict[str, Any]] = []
+        # autoscaling/v2 metrics list. Each entry has a `type` (Resource | Pods |
+        # Object | External) and a same-name-lowercased sub-block carrying the
+        # metric identity, e.g. {type: Resource, resource: {name: cpu}}.
+        for metric in spec.get("metrics", []) or []:
+            if not isinstance(metric, dict):
+                continue
+            metric_type = metric.get("type")
+            name = None
+            if isinstance(metric_type, str) and metric_type:
+                block_key = metric_type[0].lower() + metric_type[1:]
+                block = metric.get(block_key)
+                if isinstance(block, dict):
+                    name = block.get("name")
+                    nested_metric = block.get("metric")
+                    if name is None and isinstance(nested_metric, dict):
+                        name = nested_metric.get("name")
+            metrics.append({"type": metric_type, "name": name})
+        # autoscaling/v1 single CPU target.
+        if "targetCPUUtilizationPercentage" in spec:
+            metrics.append(
+                {"type": "Resource", "name": "cpu", "target": spec.get("targetCPUUtilizationPercentage")}
+            )
+        if metrics:
+            resource["metrics"] = metrics
+
+    @staticmethod
+    def _populate_network_policy(doc: dict[str, Any], resource: dict[str, Any]) -> None:
+        spec = doc.get("spec") or {}
+        policy_types = _normalize_list(spec.get("policyTypes"))
+        ingress = spec.get("ingress")
+        egress = spec.get("egress")
+        # Infer policy types from declared rule blocks when policyTypes is absent.
+        if not policy_types:
+            if isinstance(ingress, list):
+                policy_types.append("Ingress")
+            if isinstance(egress, list):
+                policy_types.append("Egress")
+        resource["policy_types"] = policy_types
+        resource["ingress_rules"] = len(ingress) if isinstance(ingress, list) else 0
+        resource["egress_rules"] = len(egress) if isinstance(egress, list) else 0
+        pod_selector = spec.get("podSelector")
+        if isinstance(pod_selector, dict):
+            resource["pod_selector"] = pod_selector
 
 
 class TerraformExtractor:
@@ -2246,14 +2401,16 @@ class TerraformExtractor:
                 if not isinstance(instances, dict):
                     continue
                 for name, attributes in instances.items():
-                    info.resources.append(
-                        {
-                            "kind": "resource",
-                            "type": resource_type.strip('"'),
-                            "name": name.strip('"'),
-                            "attributes": attributes or {},
-                        }
-                    )
+                    entry: dict[str, Any] = {
+                        "kind": "resource",
+                        "type": resource_type.strip('"'),
+                        "name": name.strip('"'),
+                        "attributes": attributes or {},
+                    }
+                    flags = self._nfr_flags(attributes)
+                    if flags:
+                        entry["nfr_flags"] = flags
+                    info.resources.append(entry)
 
         for block in parsed.get("data", []) or []:
             if not isinstance(block, dict):
@@ -2297,19 +2454,91 @@ class TerraformExtractor:
 
         return info
 
+    # NFR-relevant attribute keys. We do not build a full HCL semantic engine;
+    # we surface the attributes (already captured) that prescribe a
+    # non-functional requirement so downstream mapping can reason about them.
+    # Substring match (lowercased) keeps this provider-neutral: e.g.
+    # ``backup_retention_period`` (RDS) and ``backup_retention_days`` both match.
+    _NFR_FLAG_KEYS: tuple[str, ...] = (
+        "replicas",
+        "min_size",
+        "max_size",
+        "desired_capacity",
+        "min_capacity",
+        "max_capacity",
+        "multi_az",
+        "availability_zone",
+        "backup_retention",
+        "deletion_protection",
+        "autoscaling",
+        "skip_final_snapshot",
+        "storage_encrypted",
+        "encrypted",
+    )
+
+    @classmethod
+    def _nfr_flags(cls, attributes: Any) -> dict[str, Any]:
+        """Surface NFR-relevant attributes from a Terraform resource block.
+
+        Returns a flat mapping of ``{matched_key: value}`` for any attribute
+        whose (lowercased) key contains one of the NFR-relevant tokens. Nested
+        blocks (lists/dicts) are walked one level so attributes inside
+        ``scaling_config``-style sub-blocks are still surfaced.
+        """
+
+        if not isinstance(attributes, dict):
+            return {}
+        flags: dict[str, Any] = {}
+
+        def _consider(key: str, value: Any) -> None:
+            lowered = key.lower()
+            if any(token in lowered for token in cls._NFR_FLAG_KEYS):
+                # Last write wins; nested keys are namespaced to avoid clobber.
+                flags.setdefault(key, value)
+
+        for key, value in attributes.items():
+            if not isinstance(key, str):
+                continue
+            _consider(key, value)
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    if isinstance(sub_key, str):
+                        _consider(sub_key, sub_value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        for sub_key, sub_value in item.items():
+                            if isinstance(sub_key, str):
+                                _consider(sub_key, sub_value)
+        return flags
+
+    # Simple ``key = value`` assignment (no nested blocks) for the regex fallback.
+    _ASSIGN_RE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$', re.MULTILINE)
+
     def _extract_resources_regex(self, content: str, file_path: str) -> ConfigInfo:
-        """Fallback parser for simple Terraform blocks when python-hcl2 is unavailable."""
+        """Fallback parser for simple Terraform blocks when python-hcl2 is unavailable.
+
+        Without python-hcl2 we cannot build a full attribute tree, but we still
+        surface NFR-relevant top-level ``key = value`` assignments per block so
+        the IaC→NFR layer keeps working (durability/DR, scalability flags) even
+        in the dependency-free path.
+        """
         info = ConfigInfo(format=self.format, file_path=file_path)
 
-        for kind, block_type, name in self._RESOURCE_BLOCK_RE.findall(content):
-            info.resources.append(
-                {
-                    "kind": kind,
-                    "type": block_type,
-                    "name": name,
-                    "attributes": {},
-                }
-            )
+        for match in self._RESOURCE_BLOCK_RE.finditer(content):
+            kind, block_type, name = match.group(1), match.group(2), match.group(3)
+            block_body = self._slice_block_body(content, match.end())
+            attributes = self._scalar_assignments(block_body)
+            entry: dict[str, Any] = {
+                "kind": kind,
+                "type": block_type,
+                "name": name,
+                "attributes": attributes,
+            }
+            flags = self._nfr_flags(attributes)
+            if flags:
+                entry["nfr_flags"] = flags
+            info.resources.append(entry)
 
         for kind, name in self._NAMED_BLOCK_RE.findall(content):
             info.resources.append(
@@ -2321,6 +2550,303 @@ class TerraformExtractor:
             )
 
         return info
+
+    @staticmethod
+    def _slice_block_body(content: str, start: int) -> str:
+        """Return the text of a brace-delimited block beginning just after its ``{``."""
+
+        depth = 1
+        for index in range(start, len(content)):
+            char = content[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return content[start:index]
+        return content[start:]
+
+    @classmethod
+    def _scalar_assignments(cls, block_body: str) -> dict[str, Any]:
+        """Extract top-level scalar ``key = value`` pairs from a block body."""
+
+        attributes: dict[str, Any] = {}
+        depth = 0
+        for raw_line in block_body.splitlines():
+            line = raw_line.strip()
+            # Track nesting so we only read this block's own top-level scalars.
+            opens = line.count("{") + line.count("[")
+            closes = line.count("}") + line.count("]")
+            if depth == 0 and opens == closes:
+                match = cls._ASSIGN_RE.match(raw_line)
+                if match:
+                    key, value = match.group(1), match.group(2)
+                    attributes.setdefault(key, cls._coerce_scalar(value))
+            depth += opens - closes
+            if depth < 0:
+                depth = 0
+        return attributes
+
+    @staticmethod
+    def _coerce_scalar(value: str) -> Any:
+        token = value.split("#", 1)[0].strip().rstrip(",").strip()
+        if (token.startswith('"') and token.endswith('"')) or (
+            token.startswith("'") and token.endswith("'")
+        ):
+            return token[1:-1]
+        lowered = token.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        try:
+            return int(token)
+        except ValueError:
+            pass
+        try:
+            return float(token)
+        except ValueError:
+            pass
+        return token
+
+
+class GitHubActionsExtractor:
+    """Extract CI/CD facts from GitHub Actions workflow files.
+
+    Tolerant of arbitrary YAML: a malformed or non-mapping workflow yields an
+    empty :class:`ConfigInfo` rather than raising. Each workflow becomes one
+    entry in ``ConfigInfo.pipelines`` carrying its triggers, jobs, classified
+    steps (build/test/deploy), and any secret/env references — the raw material
+    for recovering deployment topology and CI gates as operational facts.
+    """
+
+    format = "github-actions"
+    _WORKFLOW_DIR = Path(".github") / "workflows"
+    _BUILD_TOKENS = ("build", "compile", "package", "bundle", "docker build")
+    _TEST_TOKENS = ("test", "pytest", "jest", "vitest", "lint", "check", "coverage")
+    _DEPLOY_TOKENS = (
+        "deploy",
+        "release",
+        "publish",
+        "rollout",
+        "terraform apply",
+        "kubectl apply",
+        "helm upgrade",
+        "push",
+    )
+    _SECRET_RE = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}")
+
+    def detect_workflow_files(self, project_root: Path) -> list[Path]:
+        workflow_dir = Path(project_root) / self._WORKFLOW_DIR
+        if not workflow_dir.is_dir():
+            return []
+        matches: list[Path] = []
+        for file_path in sorted(workflow_dir.iterdir()):
+            if file_path.is_file() and file_path.suffix.lower() in {".yml", ".yaml"}:
+                matches.append(file_path)
+        return matches
+
+    def extract_workflow(self, content: str, file_path: str) -> ConfigInfo:
+        info = ConfigInfo(format=self.format, file_path=file_path)
+        payload = _load_structured_document(content, file_path)
+        if not isinstance(payload, dict):
+            return info
+
+        pipeline: dict[str, Any] = {
+            "name": str(payload.get("name") or Path(file_path).stem),
+            "triggers": self._extract_triggers(payload),
+            "jobs": [],
+            "secrets": sorted(set(self._SECRET_RE.findall(content))),
+        }
+
+        jobs = payload.get("jobs")
+        if isinstance(jobs, dict):
+            for job_name, job_cfg in jobs.items():
+                if not isinstance(job_cfg, dict):
+                    continue
+                pipeline["jobs"].append(self._extract_job(str(job_name), job_cfg))
+
+        info.pipelines.append(pipeline)
+        return info
+
+    def _extract_triggers(self, payload: dict[str, Any]) -> list[str]:
+        # PyYAML parses the bareword ``on:`` key as the boolean True.
+        on = payload.get("on", payload.get(True))
+        if isinstance(on, str):
+            return [on]
+        if isinstance(on, list):
+            return [str(item) for item in on]
+        if isinstance(on, dict):
+            return [str(key) for key in on.keys()]
+        return []
+
+    def _extract_job(self, job_name: str, job_cfg: dict[str, Any]) -> dict[str, Any]:
+        steps_out: list[dict[str, Any]] = []
+        env_keys: set[str] = set()
+
+        job_env = job_cfg.get("env")
+        if isinstance(job_env, dict):
+            env_keys.update(str(k) for k in job_env.keys())
+
+        for step in job_cfg.get("steps", []) or []:
+            if not isinstance(step, dict):
+                continue
+            label = str(step.get("name") or step.get("uses") or step.get("run") or "")
+            run = str(step.get("run") or "")
+            uses = str(step.get("uses") or "")
+            haystack = f"{label}\n{run}\n{uses}".lower()
+            step_env = step.get("env")
+            if isinstance(step_env, dict):
+                env_keys.update(str(k) for k in step_env.keys())
+            steps_out.append(
+                {
+                    "name": label,
+                    "uses": uses or None,
+                    "kinds": self._classify_step(haystack),
+                }
+            )
+
+        return {
+            "name": job_name,
+            "runs_on": job_cfg.get("runs-on"),
+            "environment": self._job_environment(job_cfg),
+            "steps": steps_out,
+            "env": sorted(env_keys),
+        }
+
+    @staticmethod
+    def _job_environment(job_cfg: dict[str, Any]) -> Any:
+        environment = job_cfg.get("environment")
+        if isinstance(environment, dict):
+            return environment.get("name")
+        return environment
+
+    @classmethod
+    def _classify_step(cls, haystack: str) -> list[str]:
+        kinds: list[str] = []
+        if any(token in haystack for token in cls._DEPLOY_TOKENS):
+            kinds.append("deploy")
+        if any(token in haystack for token in cls._BUILD_TOKENS):
+            kinds.append("build")
+        if any(token in haystack for token in cls._TEST_TOKENS):
+            kinds.append("test")
+        return kinds
+
+
+class DockerfileExtractor:
+    """Light parser for Dockerfile base images, ports, entrypoint, and stages."""
+
+    format = "dockerfile"
+    _FROM_RE = re.compile(r"^\s*FROM\s+(\S+)(?:\s+AS\s+(\S+))?", re.IGNORECASE)
+    _EXPOSE_RE = re.compile(r"^\s*EXPOSE\s+(.+)$", re.IGNORECASE)
+    _ENTRYPOINT_RE = re.compile(r"^\s*ENTRYPOINT\s+(.+)$", re.IGNORECASE)
+    _CMD_RE = re.compile(r"^\s*CMD\s+(.+)$", re.IGNORECASE)
+
+    def detect_dockerfiles(self, project_root: Path) -> list[Path]:
+        matches: list[Path] = []
+        for root, dirs, files in os.walk(project_root):
+            dirs[:] = [
+                directory
+                for directory in dirs
+                if directory not in _IGNORED_DIR_NAMES and not directory.startswith(".pytest_cache")
+            ]
+            for filename in files:
+                if filename == "Dockerfile" or filename.startswith("Dockerfile."):
+                    matches.append(Path(root) / filename)
+        return matches
+
+    def extract_dockerfile(self, content: str, file_path: str) -> ConfigInfo:
+        info = ConfigInfo(format=self.format, file_path=file_path)
+        image: dict[str, Any] = {
+            "base_images": [],
+            "stages": [],
+            "ports": [],
+            "entrypoint": None,
+            "cmd": None,
+        }
+
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            from_match = self._FROM_RE.match(line)
+            if from_match:
+                base, stage = from_match.group(1), from_match.group(2)
+                image["base_images"].append(base)
+                if stage:
+                    image["stages"].append(stage)
+                continue
+            expose_match = self._EXPOSE_RE.match(line)
+            if expose_match:
+                for token in expose_match.group(1).split():
+                    port = token.split("/", 1)[0]
+                    if port:
+                        image["ports"].append(port)
+                continue
+            entry_match = self._ENTRYPOINT_RE.match(line)
+            if entry_match:
+                image["entrypoint"] = entry_match.group(1).strip()
+                continue
+            cmd_match = self._CMD_RE.match(line)
+            if cmd_match:
+                image["cmd"] = cmd_match.group(1).strip()
+
+        if any(image[key] for key in ("base_images", "ports", "entrypoint", "cmd")):
+            info.images.append(image)
+        return info
+
+
+class OpsEvidenceExtractor:
+    """Recognition-only discovery of ops/observability/config-management files.
+
+    These are *not* deep-parsed; the goal is to surface their PRESENCE as
+    evidence (Prometheus/Alertmanager rules → observability/SLO; Ansible →
+    deployment/config management; Helm chart → deployment packaging) so the
+    IaC→NFR layer can record candidate acceptance-criteria sources and a fuller
+    deployment topology. A structured parse can be layered on later without
+    changing this contract.
+    """
+
+    format = "ops-evidence"
+
+    # (recognized_kind, predicate) — predicate takes a lowercased file name and
+    # POSIX relative path. Ordered; first match wins.
+    @staticmethod
+    def _classify(name: str, rel_posix: str) -> str | None:
+        lname = name.lower()
+        lpath = rel_posix.lower()
+        if lname.startswith("alertmanager"):
+            return "alertmanager_config"
+        if lname.endswith(".rules.yml") or lname.endswith(".rules.yaml"):
+            return "prometheus_rules"
+        if lname.startswith("prometheus") and lname.endswith((".yml", ".yaml")):
+            return "prometheus_config"
+        if lname == "chart.yaml":
+            return "helm_chart"
+        if lname.startswith("playbook") and lname.endswith((".yml", ".yaml")):
+            return "ansible_playbook"
+        if "/roles/" in f"/{lpath}" or lpath.startswith("roles/"):
+            # Ansible role task/handler files live under roles/<name>/tasks etc.
+            if lname in {"main.yml", "main.yaml"}:
+                return "ansible_role"
+        return None
+
+    def detect_ops_files(self, project_root: Path) -> list[tuple[Path, str]]:
+        root = Path(project_root)
+        matches: list[tuple[Path, str]] = []
+        for file_path in _iter_project_files(root, {".yaml", ".yml"}):
+            rel = file_path.relative_to(root).as_posix()
+            recognized = self._classify(file_path.name, rel)
+            if recognized:
+                matches.append((file_path, recognized))
+        return matches
+
+    def build_evidence(self, recognized_kind: str, file_path: str) -> ConfigInfo:
+        return ConfigInfo(
+            format=self.format,
+            file_path=file_path,
+            recognized_kind=recognized_kind,
+        )
 
 
 class BuildDepsExtractor:

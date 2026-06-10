@@ -51,3 +51,23 @@ default_artifacts:
     depends_on: ["design:system_design"]
     scope: "Hazard analysis, fail-safe states, watchdogs, manual override, and regulatory constraints"
     condition: "requirements mention safety, hazards, regulated operation, physical controls, or fail-safe behavior"
+  - id: "design:non_functional_requirements"
+    title: "Non-Functional Requirements"
+    depends_on: ["design:requirements"]
+    scope: "Availability, scalability, performance/capacity, reliability, security/isolation, durability/DR, and observability/SLO targets for the device fleet and cloud backend, with acceptance thresholds. Reconcile with NFRs recovered from cloud Infrastructure-as-Code."
+    always_required: true
+  - id: "design:infrastructure_design"
+    title: "Cloud Infrastructure Design"
+    depends_on: ["design:system_design"]
+    scope: "Cloud provisioned resources, networking, isolation boundaries, and the Infrastructure-as-Code (Terraform/Kubernetes/containers) that realizes them"
+    condition: "requirements or IaC describe deployment, infrastructure, servers, containers, or operations"
+  - id: "design:deployment_design"
+    title: "Deployment Design"
+    depends_on: ["design:system_design"]
+    scope: "Cloud runtime topology, environment matrix, release/rollout strategy, and CI/CD delivery pipeline"
+    condition: "requirements or IaC describe deployment, infrastructure, servers, containers, or operations"
+  - id: "design:operations_runbook"
+    title: "Operations Runbook"
+    depends_on: ["design:system_design"]
+    scope: "Fleet/cloud scaling, health/monitoring, backup/restore, incident response, and routine operational procedures"
+    condition: "requirements or IaC describe deployment, infrastructure, servers, containers, or operations"

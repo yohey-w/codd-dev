@@ -101,3 +101,28 @@ def test_extract_ai_pre_scan_preserves_invalid_python_raw_text_and_excludes_test
     assert "def unfinished(" in scan.source_files["src/sample/broken.py"]
     assert "tests/test_sample.py" not in scan.source_files
     assert scan.test_files == ["tests/test_sample.py"]
+
+
+def test_extract_ai_pre_scan_includes_test_file_contents_with_assertions():
+    """Prescan now ingests representative test FILE CONTENT (not just paths).
+
+    Tests are the richest source of acceptance criteria; restoration needs the
+    actual assertions, so the content (including the assert line) must be present.
+    """
+    scan = pre_scan(FIXTURE_ROOT)
+
+    assert "tests/test_sample.py" in scan.test_file_contents
+    body = scan.test_file_contents["tests/test_sample.py"]
+    assert "def test_helper" in body
+    assert "assert helper(" in body  # the acceptance-criterion evidence
+
+
+def test_extract_ai_prompt_renders_test_file_contents_section():
+    """The AI prompt surfaces the test content under a dedicated section."""
+    from codd.extract_ai import _build_prompt
+
+    scan = pre_scan(FIXTURE_ROOT)
+    prompt = _build_prompt(scan)
+
+    assert "Test File Contents" in prompt
+    assert "assert helper(" in prompt

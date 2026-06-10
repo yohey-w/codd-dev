@@ -2514,7 +2514,7 @@ def generate(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: st
 
 
 @main.command()
-@click.option("--wave", required=True, type=click.IntRange(min=1), help="Wave number to restore")
+@click.option("--wave", required=False, default=None, type=click.IntRange(min=1), help="Wave number to restore")
 @click.option("--path", default=".", help="Project root directory")
 @click.option("--force", is_flag=True, help="Overwrite existing files")
 @click.option(
@@ -2523,7 +2523,34 @@ def generate(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: st
     help="Override AI CLI command (defaults to codd.yaml ai_command or 'claude --print')",
 )
 @click.option("--feedback", default=None, help="Review feedback to address in this restoration (from codd review)")
-def restore(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str | None):
+@click.option(
+    "--report",
+    "report_mode",
+    is_flag=True,
+    default=False,
+    help=(
+        "Do not restore; instead print a coverage/limits report over the already-"
+        "restored docs (recovered-by-band, evidence-source attribution, the "
+        "irrecoverable open-questions ceiling, artifact-type coverage, "
+        "maintenance readiness). No AI/LLM call. Pair with --format json."
+    ),
+)
+@click.option(
+    "--format",
+    "report_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format for --report (text or json).",
+)
+def restore(
+    wave: int | None,
+    path: str,
+    force: bool,
+    ai_cmd: str | None,
+    feedback: str | None,
+    report_mode: bool,
+    report_format: str,
+):
     """Restore design documents from extracted codebase facts (brownfield).
 
     Unlike 'generate' which creates design docs from requirements (greenfield),
@@ -2532,11 +2559,36 @@ def restore(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str
 
     Run 'codd extract' first, then 'codd plan --init' to create wave_config,
     then 'codd restore --wave N' to reconstruct design docs.
-    """
-    from codd.restore import restore_wave
 
+    Use 'codd restore --report' (after restoring) to see how far restoration
+    got: provenance-backed statements by confidence band, evidence-source
+    attribution, the irrecoverable-in-principle open-questions ceiling, coverage
+    by artifact type / V-model layer, and DAG maintenance readiness.
+    """
     project_root = Path(path).resolve()
     _require_codd_dir(project_root)
+
+    if report_mode:
+        from codd.config import load_project_config
+        from codd.restoration_report import (
+            build_restoration_report,
+            render_report_json,
+            render_report_text,
+        )
+
+        config = load_project_config(project_root)
+        report = build_restoration_report(project_root, config)
+        if report_format == "json":
+            click.echo(render_report_json(report))
+        else:
+            click.echo(render_report_text(report))
+        return
+
+    if wave is None:
+        click.echo("Error: --wave is required unless --report is given")
+        raise SystemExit(1)
+
+    from codd.restore import restore_wave
 
     try:
         results = restore_wave(project_root, wave, force=force, ai_command=ai_cmd, feedback=feedback)

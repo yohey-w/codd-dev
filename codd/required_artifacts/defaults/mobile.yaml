@@ -51,3 +51,23 @@ default_artifacts:
     depends_on: ["design:system_design"]
     scope: "Store submission, signing, release channels, rollout, compatibility, and update policy"
     condition: "requirements mention app stores, enterprise distribution, signing, releases, or platform versions"
+  - id: "design:non_functional_requirements"
+    title: "Non-Functional Requirements"
+    depends_on: ["design:requirements"]
+    scope: "Availability, scalability, performance/capacity, reliability, security/isolation, durability/DR, and observability/SLO targets for the app and its backend, with acceptance thresholds. Reconcile with NFRs recovered from any backend Infrastructure-as-Code."
+    always_required: true
+  - id: "design:infrastructure_design"
+    title: "Backend Infrastructure Design"
+    depends_on: ["design:system_design"]
+    scope: "Backend provisioned resources, networking, isolation boundaries, and the Infrastructure-as-Code (Terraform/Kubernetes/containers) that realizes them"
+    condition: "requirements or IaC describe deployment, infrastructure, servers, containers, or operations"
+  - id: "design:deployment_design"
+    title: "Backend Deployment Design"
+    depends_on: ["design:system_design"]
+    scope: "Backend runtime topology, environment matrix, release/rollout strategy, and CI/CD delivery pipeline"
+    condition: "requirements or IaC describe deployment, infrastructure, servers, containers, or operations"
+  - id: "design:operations_runbook"
+    title: "Operations Runbook"
+    depends_on: ["design:system_design"]
+    scope: "Backend scaling, health/monitoring, backup/restore, incident response, and routine operational procedures"
+    condition: "requirements or IaC describe deployment, infrastructure, servers, containers, or operations"

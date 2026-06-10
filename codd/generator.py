@@ -664,6 +664,7 @@ def _render_document(
     global_conventions: list[dict[str, Any]],
     depended_by: list[dict[str, Any]],
     body: str,
+    restoration_meta: dict[str, Any] | None = None,
 ) -> str:
     # For test code files, use comment-style headers instead of YAML frontmatter
     if _is_test_code_output(artifact.output):
@@ -694,6 +695,14 @@ def _render_document(
     operation_flow = _extract_operation_flow_contract(body)
     if operation_flow is not None:
         codd_block["operation_flow"] = operation_flow
+    # Restoration-only, additive provenance / confidence / open-questions blocks.
+    # Greenfield generation passes restoration_meta=None, so generated docs are
+    # byte-for-byte unchanged. The DAG scanner reads only known codd: keys and
+    # tolerates these extra sibling keys (see scanner._extract_frontmatter).
+    if restoration_meta:
+        for key, value in restoration_meta.items():
+            if value:
+                codd_block[key] = value
     frontmatter = yaml.safe_dump(
         {"codd": codd_block},
         allow_unicode=True,
@@ -718,6 +727,47 @@ def _extract_operation_flow_contract(body: str) -> dict[str, Any] | None:
         normalized = normalize_operation_flow(flow, source="generated_document.operation_flow")
         if normalized is not None:
             return normalized
+    return None
+
+
+def extract_restoration_meta(body: str) -> dict[str, Any] | None:
+    """Lift a restoration evidence block (``codd_restoration:``) from a body.
+
+    Brownfield restoration asks the AI to emit one fenced YAML block carrying the
+    machine-readable provenance / confidence-band / open-questions metadata that
+    the *deterministic* facts cannot by themselves express (mapping prose claims
+    to the evidence that backs them). CoDD lifts that block out of the prose into
+    document frontmatter (the same lift pattern used for ``operation_flow``), so
+    a downstream report (R3) can inspect "how far restoration got" without
+    re-parsing prose. Returns the recognized sub-keys only, or ``None``.
+
+    Greenfield generation never injects this block, so generated docs are
+    unaffected.
+    """
+
+    recognized = ("provenance", "confidence_bands", "open_questions", "assumptions")
+    for match in re.finditer(
+        r"```(?:yaml|yml)\s*\n(?P<body>.*?)\n```", body, flags=re.IGNORECASE | re.DOTALL
+    ):
+        try:
+            payload = yaml.safe_load(match.group("body")) or {}
+        except yaml.YAMLError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        block = payload.get("codd_restoration")
+        if not isinstance(block, dict):
+            # Also tolerate the keys living directly at top level of the block.
+            if not any(k in payload for k in recognized):
+                continue
+            block = payload
+        meta: dict[str, Any] = {}
+        for key in recognized:
+            value = block.get(key)
+            if value:
+                meta[key] = value
+        if meta:
+            return meta
     return None
 
 

@@ -109,6 +109,43 @@ artifacts:
       - "tests/e2e/**/*"
       - "**/*.e2e.*"
 
+  - id: non_functional_requirements
+    description: "Authored non-functional requirements (availability, scalability, capacity, reliability, security, durability/DR, observability/SLO targets)."
+    kind: ssot
+    produced_by: plan
+    default_path_globs:
+      - "docs/requirements/non_functional*"
+      - "docs/requirements/nfr*"
+      - "docs/non_functional*"
+
+  - id: infrastructure_design
+    description: "Infrastructure design: provisioned resources, networking, isolation, and the Infrastructure-as-Code that realizes them."
+    kind: ssot
+    produced_by: generate
+    default_path_globs:
+      - "docs/infra/**"
+      - "docs/infrastructure/**"
+      - "docs/design/**/infra*.md"
+
+  - id: deployment_design
+    description: "Deployment design: runtime topology, environments, release/rollout strategy, and CI/CD delivery."
+    kind: ssot
+    produced_by: generate
+    default_path_globs:
+      - "docs/deploy/**"
+      - "docs/deployment/**"
+      - "docs/design/**/deploy*.md"
+
+  - id: operations_runbook
+    description: "Operations runbook: scaling, health/monitoring, backup/restore, incident response, and routine operational procedures."
+    kind: ssot
+    produced_by: generate
+    default_path_globs:
+      - "docs/operations/**"
+      - "docs/ops/**"
+      - "docs/runbook*.md"
+      - "docs/runbooks/**"
+
   # ---------------------------------------------------------------------------
   # Derived-view artifacts — machine-generated FROM ssot; never hand-maintained
   # ---------------------------------------------------------------------------

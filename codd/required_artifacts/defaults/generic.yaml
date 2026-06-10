@@ -40,3 +40,23 @@ default_artifacts:
     depends_on: ["design:system_design"]
     scope: "Data model, persistence, storage lifecycle, retention, and consistency rules"
     condition: "requirements mention data persistence, storage, records, state, or history"
+  - id: "design:non_functional_requirements"
+    title: "Non-Functional Requirements"
+    depends_on: ["design:requirements"]
+    scope: "Availability, scalability, performance/capacity, reliability, security/isolation, durability/DR, and observability/SLO targets, with acceptance thresholds. Reconcile with NFRs recovered from any Infrastructure-as-Code. Omit only for a pure library/CLI with no runtime service or operational concerns."
+    condition: "requirements or IaC mention availability, scalability, performance, capacity, reliability, security, durability, backups, monitoring, SLOs, deployment, infrastructure, servers, or operations"
+  - id: "design:infrastructure_design"
+    title: "Infrastructure Design"
+    depends_on: ["design:system_design"]
+    scope: "Provisioned resources, networking, isolation boundaries, and the Infrastructure-as-Code (Terraform/Kubernetes/containers) that realizes them"
+    condition: "requirements or IaC describe deployment, infrastructure, servers, containers, or operations"
+  - id: "design:deployment_design"
+    title: "Deployment Design"
+    depends_on: ["design:system_design"]
+    scope: "Runtime topology, environment matrix, release/rollout strategy, and CI/CD delivery pipeline"
+    condition: "requirements or IaC describe deployment, infrastructure, servers, containers, or operations"
+  - id: "design:operations_runbook"
+    title: "Operations Runbook"
+    depends_on: ["design:system_design"]
+    scope: "Scaling, health/monitoring, backup/restore, incident response, and routine operational procedures"
+    condition: "requirements or IaC describe deployment, infrastructure, servers, containers, or operations"
