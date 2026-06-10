@@ -395,6 +395,72 @@ def test_restore_prompt_differs_from_generate_prompt():
     assert "AuthService" in prompt
 
 
+def test_restore_design_prompt_contains_operational_behavior_block():
+    """Restored design docs must carry the SHARED Operational Behavior Model block.
+
+    The block is defined once in generator.OPERATIONAL_BEHAVIOR_MODEL_BLOCK and
+    imported by both generator and restore (no copy-paste).
+    """
+    from codd.generator import OPERATIONAL_BEHAVIOR_MODEL_BLOCK
+
+    artifact = WaveArtifact(
+        wave=1,
+        node_id="design:system",
+        output="docs/design/system-design.md",
+        title="System Design",
+        depends_on=[],
+        conventions=[],
+        modules=["auth"],
+    )
+    extracted = [
+        ExtractedDocument(
+            node_id="design:extract:auth",
+            path="codd/extracted/modules/auth.md",
+            content="# auth\n\nclass AuthService\n",
+        )
+    ]
+
+    prompt = _build_restoration_prompt(artifact, extracted)
+
+    # The shared block (every non-empty line) must be present verbatim.
+    for line in OPERATIONAL_BEHAVIOR_MODEL_BLOCK:
+        if line.strip():
+            assert line in prompt
+    assert "Operational Behavior Model (DESIGN-TIME, CRITICAL):" in prompt
+    assert "operation_flow:" in prompt
+
+
+def test_restore_non_design_prompt_omits_operational_behavior_block():
+    """Requirement docs should not inject the design-only operational block."""
+    artifact = WaveArtifact(
+        wave=0,
+        node_id="req:system",
+        output="docs/requirements/inferred_requirements.md",
+        title="Inferred Requirements",
+        depends_on=[],
+        conventions=[],
+        modules=[],
+    )
+    extracted = [
+        ExtractedDocument(
+            node_id="design:extract:auth",
+            path="codd/extracted/modules/auth.md",
+            content="# auth\n",
+        )
+    ]
+
+    prompt = _build_restoration_prompt(artifact, extracted)
+    assert "Operational Behavior Model (DESIGN-TIME, CRITICAL):" not in prompt
+
+
+def test_operational_behavior_block_is_single_source_of_truth():
+    """generator and restore must use the exact same block object (no copy)."""
+    import codd.generator as gen
+    import codd.restore as restore
+
+    assert restore.OPERATIONAL_BEHAVIOR_MODEL_BLOCK is gen.OPERATIONAL_BEHAVIOR_MODEL_BLOCK
+
+
 def test_is_relevant_extracted_doc():
     """Relevance filter includes system-context and matching modules."""
     system_ctx = ExtractedDocument(

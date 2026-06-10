@@ -1,0 +1,42 @@
+# Conservative, universal baseline profile.
+#
+# Used for any project type that has no dedicated profile (and as the explicit
+# fallback for unknown configured types — replacing the old silent web fallback).
+# It declares ONLY artifacts that apply to essentially every software project,
+# plus a couple of broadly-conditional ones gated on the requirements. No
+# web-only artifacts (no screens / UX / screen-flow).
+#
+# capabilities vocabulary (consumed by the generation pipeline; see
+# codd/project_types.py:ProjectCapabilities). Each profile may declare:
+#   user_interface:        bool   — has a visual UI (screens, UX, design tokens)
+#   network_surface:       "http" | "none" — exposes network endpoints/routes
+#   e2e_modality:          "browser" | "cli" | "device" | "none" — how e2e runs
+#   long_running_service:  bool   — a deployable running server (runbooks, CI startup)
+# Omitted keys fall back to these conservative generic values.
+project_type: generic
+capabilities:
+  user_interface: false
+  network_surface: "none"
+  e2e_modality: "cli"
+  long_running_service: false
+default_artifacts:
+  - id: "design:requirements"
+    title: "Requirements Definition"
+    depends_on: []
+    scope: "Functional and non-functional requirements, assumptions, constraints, and acceptance boundaries"
+    always_required: true
+  - id: "design:system_design"
+    title: "System Design"
+    depends_on: ["design:requirements"]
+    scope: "Overall architecture, component boundaries, runtime lifecycle, and integration points"
+    always_required: true
+  - id: "design:interface_design"
+    title: "Interface Design"
+    depends_on: ["design:requirements"]
+    scope: "Public surface of the system: commands, APIs, function/library signatures, inputs, and outputs"
+    condition: "requirements mention an interface, API, commands, function calls, inputs, or outputs"
+  - id: "design:data_design"
+    title: "Data Design"
+    depends_on: ["design:system_design"]
+    scope: "Data model, persistence, storage lifecycle, retention, and consistency rules"
+    condition: "requirements mention data persistence, storage, records, state, or history"

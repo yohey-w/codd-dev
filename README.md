@@ -23,6 +23,8 @@
 
 Most "AI-assisted dev" tools focus on the **generation** side. CoDD focuses on the **constraint** side: the LLM is most useful when it has a precise picture of what *must* be true. CoDD ties every artifact (requirements → design → lexicon → source → tests → runtime) into a single DAG, drives an LLM repair loop against it, and surfaces what is structurally unrepairable — honestly.
 
+With an enabled artifact contract, `codd plan/generate/implement/verify` judge completion by the artifacts actually produced, not by the command merely returning — a harness-level mechanism that lets even a weaker model stay on the north star.
+
 ---
 
 ## 🚀 Get started in 60 seconds
@@ -42,7 +44,7 @@ Already shipping? Describe what you want fixed:
 codd fix "login error messages are hard to understand"   # natural-language phenomenon mode
 ```
 
-`codd fix [PHENOMENON]` is CoDD's second entry-point: state the desired change in plain words, CoDD locates the affected design docs via lexicon + semantic scoring, updates them with an LLM, and runs the DAG verify gate before any code is touched. `--dry-run` previews, `--non-interactive` runs in CI.
+`codd fix [PHENOMENON]` is CoDD's second entry-point: state the desired change in plain words, CoDD locates the affected design docs via lexicon + semantic scoring and updates them with an LLM. From there the change flows **design → implementation → tests → verify**: Stage 4 deterministically resolves the affected implementation + test files from the DAG, makes an allowlist-confined LLM patch, and runs a verify gate (no new red DAG check + local tests pass) with targeted rollback (only files this run wrote are reverted) on failure. Opt out with `--no-propagate-impl`; add `--propagate` to also reconcile dependent design docs. `--dry-run` previews, `--non-interactive` runs in CI.
 
 ---
 
@@ -87,7 +89,9 @@ CoDD is one CLI organised in four layers. Pick what you need; the rest stays out
 | 🔍 **`codd elicit`** | Finds *specification holes* against industry-standard lexicons. |
 | 🔄 **`codd diff`** | Detects drift between requirements and actual implementation. |
 | 🛠️ **`codd dag verify --auto-repair`** | Validates the full DAG; LLM proposes patches; loop until SUCCESS or MAX_ATTEMPTS. |
-| 🎯 **`codd fix`** / **`codd fix [PHENOMENON]`** | Two modes — auto-detect CI failures, or describe a desired change in natural language. |
+| 🎯 **`codd fix`** / **`codd fix [PHENOMENON]`** | Two modes — auto-detect CI failures, or describe a desired change in natural language; phenomenon mode flows design → implementation → tests → verify (opt out via `--no-propagate-impl`). |
+| 🧭 **`codd operations {derive,show,approve,merge}`** | Detects requirement units anchored to no declared operation, has the AI propose `operation_flow` entries, and writes a proposal for human review — nothing reaches `codd.yaml` until `approve` + `merge`. Opt-in, non-destructive. |
+| 📜 **`codd contract {show,suggest,adopt,verify}`** | V-model artifact contract. `suggest`/`adopt` are requirement-driven selection of *which* catalog artifacts a project declares per stage (`suggest` detects the project's signals — requirement docs, design docs, lexicon, declared `operation_flow`, source dirs, test/e2e suites — and writes a reviewable proposal, never touching `codd.yaml`; `adopt` merges it non-destructively and idempotently, `--enable` to turn the gate on). `verify`/gate are the completion side: with the contract enabled, a stage can't claim completion until its declared artifacts are produced/validate. `show` renders the catalog + this project's contract. Opt-in; absent/disabled contract = no-op. |
 | 🌐 **`codd brownfield`** | Extract → diff → elicit pipeline for existing codebases. |
 
 ### Quality gates
@@ -134,7 +138,6 @@ This is what lets one core work for Next.js, Django, FastAPI, Rails, Go services
 
 Up next:
 
-- Auto-propagation of impl/test changes from `codd fix [PHENOMENON]` (AC #8 completion)
 - App-Server-driven benchmark publication (P50 / P95 / P99 for subprocess vs JSON-RPC)
 - Lexicon plug-in marketplace
 

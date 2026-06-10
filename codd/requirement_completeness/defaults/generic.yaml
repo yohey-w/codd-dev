@@ -1,0 +1,99 @@
+# Conservative, universal baseline questions.
+#
+# Used for any project type without a dedicated profile (and as the fallback for
+# unknown configured types). These cover spec holes that apply to essentially
+# every software project. NOTHING domain-specific (no WCAG / viewport /
+# concurrent-users — those live in the web profile).
+project_type: generic
+default_questions:
+  - id: q_error_handling
+    question: "How should failures and invalid input be handled?"
+    type: select
+    blocking: false
+    aliases: ["error handling", "failures", "exceptions", "validation", "invalid input"]
+    search_query: "software error handling strategy validation best practices 2026"
+    options:
+      - id: fail_fast_clear_errors
+        label: "Fail fast with clear, actionable errors"
+        cost_effort: low
+        recommended: true
+      - id: degrade_gracefully
+        label: "Degrade gracefully and continue where safe"
+        cost_effort: medium
+      - id: custom
+        label: "Other / custom"
+        type: free_text
+  - id: q_configuration
+    question: "How is the system configured at runtime?"
+    type: select
+    blocking: false
+    aliases: ["configuration", "config file", "environment variables", "settings"]
+    search_query: "application configuration environment variables file precedence 2026"
+    options:
+      - id: file_and_env
+        label: "Config file plus environment variables"
+        cost_effort: medium
+        recommended: true
+      - id: env_only
+        label: "Environment variables only"
+        cost_effort: low
+      - id: none
+        label: "No runtime configuration needed"
+        cost_effort: low
+  - id: q_observability
+    question: "What logging, metrics, or diagnostics are required?"
+    type: multiselect
+    blocking: false
+    aliases: ["observability", "logging", "metrics", "monitoring", "diagnostics", "tracing"]
+    search_query: "software observability logging metrics tracing baseline 2026"
+    options:
+      - id: structured_logging
+        label: "Structured logging"
+        cost_effort: low
+        recommended: true
+      - id: metrics
+        label: "Metrics / counters"
+        cost_effort: medium
+      - id: tracing
+        label: "Distributed tracing"
+        cost_effort: high
+      - id: none
+        label: "Minimal / none"
+        cost_effort: low
+  - id: q_testing_strategy
+    question: "What testing strategy should the project target?"
+    type: select
+    blocking: false
+    aliases: ["testing", "tests", "test strategy", "coverage", "ci"]
+    search_query: "software testing strategy unit integration e2e baseline 2026"
+    options:
+      - id: unit_and_integration
+        label: "Unit plus integration tests"
+        cost_effort: medium
+        recommended: true
+      - id: unit_only
+        label: "Unit tests only"
+        cost_effort: low
+      - id: full_pyramid
+        label: "Full pyramid including end-to-end"
+        cost_effort: high
+  - id: q_distribution
+    question: "How will the software be packaged and distributed?"
+    type: select
+    blocking: false
+    aliases: ["distribution", "packaging", "release", "deploy", "install"]
+    search_query: "software packaging distribution release channels 2026"
+    options:
+      - id: package_or_artifact
+        label: "Language package or build artifact"
+        cost_effort: low
+        recommended: true
+      - id: container_image
+        label: "Container image"
+        cost_effort: medium
+      - id: source_only
+        label: "Source distribution only"
+        cost_effort: low
+      - id: custom
+        label: "Other / custom"
+        type: free_text

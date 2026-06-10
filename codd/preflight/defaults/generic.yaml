@@ -1,0 +1,20 @@
+project_type: generic
+# Universal high-risk operations that warrant a rollback strategy regardless of
+# project type. Production deploys, destructive data operations, and secret
+# publication are critical for any kind of software. This mirrors the prior
+# behavior where a project with no detectable type was treated as web for
+# safety purposes. Lower-risk lifecycle operations (version bumps, dependency
+# lock changes) are intentionally NOT listed here — per-type profiles add them.
+critical_operations:
+  - deploy_to_production
+  - deploy_to_prod
+  - db_migration_production
+  - db_migration_prod
+  - drop_table
+  - alter_table_production
+  - api_key_publish
+  - oauth_client_secret_publish
+  - external_link_publish
+  - send_email_bulk
+  - charge_payment
+  - gdpr_data_delete

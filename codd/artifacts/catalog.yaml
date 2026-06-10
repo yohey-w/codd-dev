@@ -1,0 +1,158 @@
+# CoDD Core Artifact Catalog
+#
+# A universal, GENERAL lineup of V-model artifacts that a CoDD-managed project
+# may produce. This catalog is shipped with CoDD and is project-agnostic: it
+# names NO project, framework, or domain. Which artifacts a given project
+# actually USES is selected per-project via an opt-in `artifact_contract:`
+# section in that project's codd.yaml (mirroring the lexicon suggest + opt-in
+# pattern: the catalog is universal; selection is per-project).
+#
+# Normalization principle (database-normalization analogy):
+#   * `kind: ssot`         — holds irreducible decisions a human/AI must author.
+#                            Each decision lives in EXACTLY ONE ssot artifact.
+#   * `kind: derived_view` — machine-generated FROM ssot artifacts; never
+#                            independently maintained. Must declare `derived_from`
+#                            referencing the ssot ids it is computed from.
+#
+# No two ssot artifacts may own the same class of decision (that duplication is
+# the real-world drift incident: two design documents both holding the same
+# isolation facts, which then diverged). Anything mechanically re-derivable from
+# an ssot artifact is a derived_view, not an ssot artifact.
+#
+# Entry fields:
+#   id                : stable catalog identifier (referenced by contracts).
+#   description       : one-line, project-agnostic summary.
+#   kind              : ssot | derived_view.
+#   derived_from      : list of catalog ids (REQUIRED + non-empty for
+#                       derived_view; MUST be empty/absent for ssot).
+#   produced_by       : the CoDD stage/command that produces the artifact
+#                       (e.g. plan, generate, implement, extract, verify).
+#   default_path_globs: conventional locations (glob patterns) where the
+#                       artifact lives; used by the deterministic existence gate.
+#   validator         : optional name of a deterministic check. Absent/null ⇒
+#                       the default "exists and non-empty" gate is applied.
+
+version: 1
+
+artifacts:
+  # ---------------------------------------------------------------------------
+  # SSOT artifacts — irreducible authored decisions
+  # ---------------------------------------------------------------------------
+  - id: requirements
+    description: "Functional requirements and constraints authored by the human (the north-star input)."
+    kind: ssot
+    produced_by: plan
+    default_path_globs:
+      - "docs/requirements*.md"
+      - "docs/requirements/**/*.md"
+      - "requirements*.md"
+
+  - id: design_spec
+    description: "Design specification documents describing structure, behavior, and decisions."
+    kind: ssot
+    produced_by: generate
+    default_path_globs:
+      - "docs/design/**/*.md"
+      - "docs/design*.md"
+      - "design/**/*.md"
+    validator: design_doc_frontmatter
+
+  - id: lexicon
+    description: "Project lexicon: canonical domain terms and their authoritative definitions."
+    kind: ssot
+    produced_by: generate
+    default_path_globs:
+      - "**/project_lexicon.yaml"
+      - "**/lexicon.yaml"
+
+  - id: operation_flow
+    description: "Declared operation flow: actor/verb/target/expected-outcome units of behavior."
+    kind: ssot
+    produced_by: plan
+    default_path_globs:
+      - "**/codd.yaml"
+
+  - id: test_doc
+    description: "Test specification documents and verifiable-behavior tables describing what must be verified."
+    kind: ssot
+    produced_by: generate
+    default_path_globs:
+      - "docs/test*.md"
+      - "docs/tests/**/*.md"
+      - "docs/design/**/*test*.md"
+
+  - id: source
+    description: "Application source code implementing the design specification."
+    kind: ssot
+    produced_by: implement
+    default_path_globs:
+      - "src/**/*"
+      - "lib/**/*"
+      - "app/**/*"
+
+  - id: test_suite
+    description: "Executable unit/integration tests that verify the source against the test documents."
+    kind: ssot
+    produced_by: implement
+    default_path_globs:
+      - "tests/**/*"
+      - "test/**/*"
+      - "**/*_test.*"
+      - "**/test_*.*"
+
+  - id: e2e_suite
+    description: "Executable end-to-end tests exercising real operation flows against a running system."
+    kind: ssot
+    produced_by: implement
+    default_path_globs:
+      - "e2e/**/*"
+      - "tests/e2e/**/*"
+      - "**/*.e2e.*"
+
+  # ---------------------------------------------------------------------------
+  # Derived-view artifacts — machine-generated FROM ssot; never hand-maintained
+  # ---------------------------------------------------------------------------
+  - id: dependency_graph
+    description: "Machine-built dependency/DAG view over design specs and source (not independently authored)."
+    kind: derived_view
+    derived_from:
+      - design_spec
+      - source
+    produced_by: extract
+    default_path_globs:
+      - "**/scan/**/*.jsonl"
+      - "**/scan/**/*.json"
+
+  - id: coverage_report
+    description: "Computed coverage of test documents/behaviors by the executable test and e2e suites."
+    kind: derived_view
+    derived_from:
+      - test_doc
+      - test_suite
+      - e2e_suite
+    produced_by: verify
+    default_path_globs:
+      - "**/coverage*.json"
+      - "**/coverage*.xml"
+      - "**/*coverage*.yaml"
+
+  - id: traceability_matrix
+    description: "Computed mapping from requirements to design, tests, and source (requirement reconciliation view)."
+    kind: derived_view
+    derived_from:
+      - requirements
+      - design_spec
+      - operation_flow
+    produced_by: verify
+    default_path_globs:
+      - "**/traceability*.json"
+      - "**/reconciliation*.json"
+
+  - id: reconciliation_ledger
+    description: "Computed freshness ledger of doc-to-doc depends_on acknowledgements (not authored)."
+    kind: derived_view
+    derived_from:
+      - design_spec
+    produced_by: verify
+    default_path_globs:
+      - "**/reconciliation_ledger.json"

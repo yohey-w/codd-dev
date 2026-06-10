@@ -14,7 +14,26 @@ import yaml
 
 from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import load_project_config
+from codd.project_types import (
+    ProjectCapabilities,
+    load_capabilities,
+    resolve_project_type,
+)
 from codd.requirements_meta import normalize_operation_flow
+
+
+# Full-capability profile used as the backward-compatible default when a project
+# does NOT declare a project type. Historically the generation pipeline assumed a
+# web application unconditionally (UI + HTTP + browser E2E + long-running server),
+# so an untyped/legacy project must keep producing exactly that output. Only when
+# a project explicitly configures a known type do we switch to type-appropriate
+# capabilities (e.g. a `cli` project drops browser E2E and server startup).
+WEB_FALLBACK_CAPABILITIES = ProjectCapabilities(
+    user_interface=True,
+    network_surface="http",
+    e2e_modality="browser",
+    long_running_service=True,
+)
 
 
 DEFAULT_AI_COMMAND = (
@@ -23,6 +42,9 @@ DEFAULT_AI_COMMAND = (
 )
 DEFAULT_RELATION = "depends_on"
 DEFAULT_SEMANTIC = "governance"
+# Bounded regeneration attempts when a generated body fails output validation.
+# Overridable per project via `generate.body_retry.max_retries` in codd.yaml.
+DEFAULT_BODY_MAX_RETRIES = 2
 DOC_TYPE_BY_DIR = {
     "requirements": "requirement",
     "design": "design",
@@ -48,6 +70,333 @@ DETAILED_DESIGN_SECTIONS = [
     "Implementation Implications",
     "Open Questions",
 ]
+
+# Shared design-time guidance injected into design-document prompts. Both the
+# greenfield generator and the brownfield restorer import this single definition
+# so restored docs carry the same operation_flow / operational-behavior structure
+# as generated ones (single source of truth — never copy-paste these lines).
+OPERATIONAL_BEHAVIOR_MODEL_BLOCK = [
+    "",
+    "Operational Behavior Model (DESIGN-TIME, CRITICAL):",
+    "- Do not postpone operational workflow discovery to E2E generation. The design document must define the actor/action/state/outcome model before implementation planning.",
+    "- If dependency documents describe actors, permissions, mutable commands, measured/observed events, automatic triggers, thresholds, timers, callbacks, derived or aggregate read models, latest/last/resume state, cross-actor visibility, lifecycle states, or external side effects, include a `### Operational Behavior Model` subsection in the appropriate required section.",
+    "- In that subsection, include one fenced YAML block with top-level `operation_flow:`. CoDD will lift this block into document metadata so downstream implementation and E2E generation share the same source of truth.",
+    "- The `operation_flow.operations` entries must be generic and implementation-ready: `id`, `actor`, `verb`, `target`, `trigger`, `preconditions`, `expected_outcomes`, and, when applicable, `forbidden_actors`, `visible_to`, `route`/`path`, `ui_pattern`, lifecycle `from_state`/`to_state`, `measurement_source`, `durable_state`, `readback`, `consumer_surfaces`, `threshold`, `boundary_cases`, and `dod_obligations`.",
+    "- For each non-trivial operation, include machine-checkable `dod_obligations` with stable `id` and concrete text derived from the requirements/design. Each obligation must be assertable by an E2E runner without human judgment; avoid vague wording such as 'works correctly', 'reasonable', or 'properly'.",
+    "- For passive or automatic behavior, name the actor-facing public trigger (for example a user action, stream event, timer, callback, or system observation). A manual admin shortcut or direct storage write is not the same operation unless the requirements declare it as the public surface.",
+    "- Enumerate operational obligations across these MECE axes before coding: happy path, persistence/readback, permission boundary, terminal-state guard, cross-actor reflection, derived-state/read-model chain, and threshold/boundary behavior.",
+    "- This is not an E2E scenario list. E2E tests are only evidence generated later from the design-time operation model.",
+    "",
+    "Actor-Facing Surface/Copy Obligations (DESIGN-TIME, CRITICAL):",
+    "- If dependency documents describe user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, define the actor-facing surface/copy obligations before implementation planning.",
+    "- For each relevant surface, state its purpose, primary audience/actor, allowed actions/navigation, forbidden actions/navigation, required visible copy intent, and forbidden copy patterns.",
+    "- User-visible copy must use the audience's job-to-be-done language. Do not expose implementation rationale, internal process notes, demo/test/sample labels, environment assumptions, or hidden authority-boundary explanations unless the audience's explicit task is to administer those boundaries.",
+    "- Entry or pre-authentication surfaces must not expose ambiguous role-resolved or protected navigation; navigation must match the surface purpose and current access state.",
+    "- When requirements use internal role identifiers and business/user-facing role names, prefer the business/user-facing labels in visible copy and document the mapping.",
+]
+
+
+def _operation_flow_field_list(capabilities: ProjectCapabilities) -> str:
+    """Build the optional operation-flow field enumeration for a capability set.
+
+    `route`/`path` & `ui_pattern` only make sense when the project exposes an
+    HTTP surface or a user interface; a CLI operation's surface is a command, so
+    we substitute generic `entry_point`/`invocation` fields instead.
+    """
+
+    if capabilities.network_surface == "http" or capabilities.user_interface:
+        surface_fields = "`route`/`path`, `ui_pattern`, "
+    else:
+        surface_fields = "`entry_point`/`invocation`, "
+    return (
+        "- The `operation_flow.operations` entries must be generic and "
+        "implementation-ready: `id`, `actor`, `verb`, `target`, `trigger`, "
+        "`preconditions`, `expected_outcomes`, and, when applicable, "
+        "`forbidden_actors`, `visible_to`, "
+        f"{surface_fields}lifecycle `from_state`/`to_state`, "
+        "`measurement_source`, `durable_state`, `readback`, "
+        "`consumer_surfaces`, `threshold`, `boundary_cases`, and "
+        "`dod_obligations`."
+    )
+
+
+def build_operational_behavior_model_block(
+    capabilities: ProjectCapabilities | None = None,
+) -> list[str]:
+    """Build the design-time Operational Behavior Model guidance for a capability set.
+
+    The universal operation_flow contract (id/actor/verb/target/trigger/
+    preconditions/expected_outcomes/lifecycle/measurement/durable_state/readback/
+    boundary_cases/dod) is ALWAYS emitted. UI/route-specific guidance is
+    conditional:
+
+    * route/path & ui_pattern emphasis only when ``network_surface == "http"`` or
+      ``user_interface`` (otherwise described as generic entry_point/invocation).
+    * the "Actor-Facing Surface/Copy Obligations" block only when
+      ``user_interface`` is true.
+
+    When ``capabilities`` is ``None`` the full backward-compatible (web) block is
+    returned — identical to the legacy ``OPERATIONAL_BEHAVIOR_MODEL_BLOCK``.
+    """
+
+    if capabilities is None:
+        capabilities = WEB_FALLBACK_CAPABILITIES
+
+    block = [
+        "",
+        "Operational Behavior Model (DESIGN-TIME, CRITICAL):",
+        "- Do not postpone operational workflow discovery to E2E generation. The design document must define the actor/action/state/outcome model before implementation planning.",
+        "- If dependency documents describe actors, permissions, mutable commands, measured/observed events, automatic triggers, thresholds, timers, callbacks, derived or aggregate read models, latest/last/resume state, cross-actor visibility, lifecycle states, or external side effects, include a `### Operational Behavior Model` subsection in the appropriate required section.",
+        "- In that subsection, include one fenced YAML block with top-level `operation_flow:`. CoDD will lift this block into document metadata so downstream implementation and E2E generation share the same source of truth.",
+        _operation_flow_field_list(capabilities),
+        "- For each non-trivial operation, include machine-checkable `dod_obligations` with stable `id` and concrete text derived from the requirements/design. Each obligation must be assertable by an E2E runner without human judgment; avoid vague wording such as 'works correctly', 'reasonable', or 'properly'.",
+        "- For passive or automatic behavior, name the actor-facing public trigger (for example a user action, stream event, timer, callback, or system observation). A manual admin shortcut or direct storage write is not the same operation unless the requirements declare it as the public surface.",
+        "- Enumerate operational obligations across these MECE axes before coding: happy path, persistence/readback, permission boundary, terminal-state guard, cross-actor reflection, derived-state/read-model chain, and threshold/boundary behavior.",
+        "- This is not an E2E scenario list. E2E tests are only evidence generated later from the design-time operation model.",
+    ]
+
+    if capabilities.user_interface:
+        block.extend(
+            [
+                "",
+                "Actor-Facing Surface/Copy Obligations (DESIGN-TIME, CRITICAL):",
+                "- If dependency documents describe user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, define the actor-facing surface/copy obligations before implementation planning.",
+                "- For each relevant surface, state its purpose, primary audience/actor, allowed actions/navigation, forbidden actions/navigation, required visible copy intent, and forbidden copy patterns.",
+                "- User-visible copy must use the audience's job-to-be-done language. Do not expose implementation rationale, internal process notes, demo/test/sample labels, environment assumptions, or hidden authority-boundary explanations unless the audience's explicit task is to administer those boundaries.",
+                "- Entry or pre-authentication surfaces must not expose ambiguous role-resolved or protected navigation; navigation must match the surface purpose and current access state.",
+                "- When requirements use internal role identifiers and business/user-facing role names, prefer the business/user-facing labels in visible copy and document the mapping.",
+            ]
+        )
+
+    return block
+
+
+def _resolve_generation_capabilities(
+    config: dict[str, Any] | None,
+    project_root: Path | None,
+) -> ProjectCapabilities:
+    """Resolve the capabilities the generation prompts should adapt to.
+
+    Reads the configured project type from ``required_artifacts.project_type`` or
+    ``project.type`` (the same keys the artifact deriver / completeness auditor
+    consult) and loads its capability profile. When NO project type is
+    configured we return the full-capability web fallback so legacy/untyped
+    projects keep producing today's web-style prompts (backward compatibility).
+    """
+
+    if not isinstance(config, dict):
+        return WEB_FALLBACK_CAPABILITIES
+
+    configured = ""
+    required_artifacts = config.get("required_artifacts")
+    if isinstance(required_artifacts, dict):
+        configured = str(required_artifacts.get("project_type") or "").strip().lower()
+    if not configured:
+        project_section = config.get("project")
+        if isinstance(project_section, dict):
+            configured = str(project_section.get("type") or "").strip().lower()
+    if not configured:
+        configured = str(config.get("project_type") or "").strip().lower()
+
+    if not configured:
+        # Untyped project: preserve the historical web-application behavior.
+        return WEB_FALLBACK_CAPABILITIES
+
+    resolved, _reason = resolve_project_type(configured, None, project_root)
+    return load_capabilities(resolved, project_root)
+
+
+# Universal test-doc guidance — applies to every project type regardless of
+# capabilities (unit + integration coverage, traceability, operation_flow).
+_TEST_DOC_UNIVERSAL_HEAD = [
+    "",
+    "Design-to-test traceability (CRITICAL):",
+    "- Before defining test scenarios, enumerate ALL verifiable behaviors from the dependency design documents. A verifiable behavior is any system action, state transition, or output that the design specifies and that can be asserted in a test.",
+    "- Every verifiable behavior must map to at least one test scenario — if a design document specifies a transition chain (e.g. action → intermediate state → final state), each link in the chain requires a separate assertion.",
+    "- Include a traceability section in the test document that lists each verifiable behavior and its corresponding test scenario(s). Flag any behavior that lacks coverage.",
+    "- Write that traceability section as a Markdown table whose FIRST column is a stable verifiable-behavior id of the form `VB-<id>` (e.g. `VB-01`, `VB-AUTH-02`), one row per verifiable behavior. Header wording and language are free; CoDD machine-parses the `VB-` id in the first cell (`codd test audit`), so never merge multiple behaviors into one row and never omit the id column.",
+    "- Treat design-time `operation_flow` records as the authoritative source for operational test obligations. Do not invent E2E-only behavior that is absent from requirements or design; instead flag missing design obligations.",
+]
+
+
+def _build_test_doc_block(capabilities: ProjectCapabilities) -> list[str]:
+    """Build the test-document meta-prompt guidance, branched on e2e_modality.
+
+    Unit + integration guidance is universal. The end-to-end layer adapts:
+
+    * ``browser``  → browser-E2E (Playwright/Cypress, UI flows, server startup) + API split.
+    * ``cli``      → end-to-end tests that invoke the built CLI as a subprocess
+      and assert exit codes / stdout / stderr / produced files. No browser, no server.
+    * ``device``   → on-device / emulator / hardware-in-the-loop E2E. No web server.
+    * ``none``     → integration tests only; no end-to-end UI/browser layer applies.
+
+    Server-startup language is only emitted when ``long_running_service`` is true.
+    """
+
+    modality = capabilities.e2e_modality
+    lines = list(_TEST_DOC_UNIVERSAL_HEAD)
+
+    if modality == "browser":
+        lines.extend(
+            [
+                "",
+                "E2E Test Generation Meta-Prompt section rules:",
+                "- The final section '## E2E Test Generation Meta-Prompt' serves as a machine-readable instruction for `codd propagate` to auto-generate E2E tests.",
+                "- MECE domain decomposition: Split E2E tests into non-overlapping behavioral domains. Each file owns exactly one domain.",
+                "- Scenario derivation: First derive test obligations from design-time `operation_flow` and verifiable behaviors, then derive concrete E2E evidence candidates. Cover positive, negative, persistence/readback, permission-boundary, terminal-state, cross-actor-reflection, derived-state/read-model chain, and threshold/boundary cases when the design declares those axes.",
+                "- Actor-facing surface/copy coverage: Derive browser E2E obligations from design-time surface/copy obligations. Assert required visible labels/copy, assert forbidden actions/links/copy patterns are absent, and cover actor-specific wording where the design declares different audiences.",
+                "- For measured or observed behavior, test the producer -> durable state/event -> derived value/read model -> consumer surface chain. If a value has a threshold, percentage, count, duration, score, or latest/last/resume rule, include below/at/above-boundary assertions where feasible.",
+                "- Architecture adaptation: Include a rule that test generation must scan the actual route/endpoint structure and mark unimplemented endpoints with `test.fixme()` instead of skipping.",
+                "- Quality gate: Define pass criteria — all PASS, zero SKIP, operation_flow/verifiable-behavior coverage, and any release-blocking constraints from conventions.",
+                "- Execution policy: Run the whole selected suite, collect every failure, and only then start repair so related failures can be fixed coherently.",
+                "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`.",
+                "- Shared helpers: Mandate a `tests/e2e/helpers/` directory for auth flows, test data setup, and common assertions to avoid duplication across spec files.",
+                "- Mutating test data: Any E2E scenario that creates or updates records MUST use per-run unique identifiers and explicit cleanup/idempotent teardown so repeated runs cannot fail from stale data or uniqueness constraints.",
+                "- Scenario fixtures: Any E2E scenario that depends on pre-existing records MUST establish or idempotently reset those preconditions inside the scenario/helper before assertions; do not trust mutable shared seed state unless the test recreates it or proves it unchanged.",
+                "- Generation markers: All generated files must include `// @generated-from:` and `// @generated-by: codd propagate` headers. Manual tests marked with `// @manual` must be preserved on regeneration.",
+                "",
+                "E2E Test Level Separation (CRITICAL):",
+                "- E2E tests MUST be split into two distinct levels: API integration tests and browser tests. These are NOT interchangeable.",
+                "- API integration tests use HTTP client mode (e.g. Playwright `request` context, `supertest`, `fetch`) to verify endpoint responses, status codes, and data contracts. These test the server, not the user experience.",
+                "- Browser tests use real browser automation (e.g. Playwright `page`, Cypress `cy`) to simulate actual user interactions: clicking buttons, filling forms, navigating pages, and verifying visible UI state.",
+                "- For web applications with authentication, browser tests MUST include a login-redirect-render flow: (1) navigate to login page, (2) fill credentials and submit, (3) assert redirect to the correct post-login URL, (4) assert the target page renders expected content. This catches redirect misconfigurations and route mismatches that API tests cannot detect.",
+                "- For any page transition triggered by a user action (form submit, link click, button click), browser tests MUST verify both the resulting URL (via URL assertion) and at least one visible content element on the destination page. Checking only the HTTP status is insufficient — a 200 with wrong content or a silent redirect to a 404 page will be missed.",
+                "- Server health baseline: Every HTTP request assertion MUST first verify the response status is < 500 before checking business-logic status codes (200, 302, 401, etc.). A 5xx is a server error (unhandled exception, DB down) — categorically different from a 4xx (auth failure, not found). Without this, a DB failure silently passes when tests only check for specific success codes.",
+                "- Output file naming: API integration tests → `tests/e2e/<domain>.spec.ts`, browser tests → `tests/e2e/<domain>.browser.spec.ts`. This makes the test level immediately visible from the filename.",
+                "",
+                "E2E Runtime Environment rules:",
+                "- E2E tests for web applications require a running server. The meta-prompt MUST specify how to start the application under test before running E2E tests.",
+                "- Detect the project type from package.json scripts, framework config, or entry points. Include the appropriate startup sequence (e.g., build → start → wait-for-ready) in the E2E instructions.",
+                "- For CI environments, specify that the server must run in the background with a health-check wait before test execution begins.",
+                "- Browser tests require a headed or headless browser. Specify the browser launch configuration (e.g. `use: { headless: true }`) in the test config.",
+            ]
+        )
+    elif modality == "cli":
+        lines.extend(
+            [
+                "",
+                "E2E Test Generation Meta-Prompt section rules (CLI):",
+                "- The final section '## E2E Test Generation Meta-Prompt' serves as a machine-readable instruction for `codd propagate` to auto-generate end-to-end CLI tests.",
+                "- This project has NO browser and NO long-running web server. End-to-end tests MUST invoke the built/installed CLI as a subprocess and assert on its observable contract: process exit code, stdout, stderr, and any files or artifacts produced. Do NOT use Playwright/Cypress, do NOT launch a browser, and do NOT start a web server.",
+                "- MECE domain decomposition: Split end-to-end CLI tests into non-overlapping behavioral domains (one command or coherent command-group per domain file).",
+                "- Scenario derivation: First derive obligations from design-time `operation_flow` and verifiable behaviors, then derive concrete CLI-invocation evidence candidates. Cover positive runs, invalid-argument/usage errors (non-zero exit codes), idempotency/re-run behavior, and boundary inputs the design declares.",
+                "- For each scenario: build/locate the CLI entry point, run it with explicit arguments and a controlled working directory, then assert the exit code, the relevant stdout/stderr substrings or structured output, and the on-disk side effects (created/updated/removed files, their contents).",
+                "- For measured or derived behavior, assert the command's output value chain (input -> processing -> emitted result) rather than any UI surface.",
+                "- Quality gate: Define pass criteria — all PASS, zero SKIP, operation_flow/verifiable-behavior coverage, and any release-blocking constraints from conventions.",
+                "- Execution policy: Run the whole selected suite, collect every failure, and only then start repair so related failures can be fixed coherently.",
+                "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`.",
+                "- Shared helpers: Mandate a helpers directory for CLI-invocation wrappers, temp-directory/workspace setup, and common assertions to avoid duplication across files.",
+                "- Mutating test data: Any scenario that writes files or persistent state MUST use per-run unique paths/identifiers and explicit cleanup (or an isolated temp workspace) so repeated runs cannot fail from stale data.",
+                "- Generation markers: All generated files must include `// @generated-from:` (or language-appropriate comment) and `// @generated-by: codd propagate` headers. Manual tests marked `// @manual` must be preserved on regeneration.",
+            ]
+        )
+    elif modality == "device":
+        lines.extend(
+            [
+                "",
+                "E2E Test Generation Meta-Prompt section rules (on-device):",
+                "- The final section '## E2E Test Generation Meta-Prompt' serves as a machine-readable instruction for `codd propagate` to auto-generate on-device end-to-end tests.",
+                "- This project runs on a device or emulator, NOT a web server in a browser. End-to-end tests MUST drive the application on an emulator/simulator or real hardware-in-the-loop and assert on observable device behavior (UI elements via the platform's UI-automation framework, on-device state, sensor/peripheral effects, emitted events). Do NOT assume a browser-on-a-web-server.",
+                "- MECE domain decomposition: Split on-device E2E tests into non-overlapping behavioral domains. Each file owns exactly one domain.",
+                "- Scenario derivation: First derive obligations from design-time `operation_flow` and verifiable behaviors, then derive concrete on-device evidence candidates. Cover positive, negative, persistence/readback, permission-boundary, terminal-state, and threshold/boundary cases when the design declares those axes.",
+                "- Actor-facing surface/copy coverage: When the design declares user-facing surfaces/copy, assert required visible labels/copy and forbidden actions/copy on the device UI using the platform's UI-automation locators.",
+                "- For measured or observed behavior (sensors, callbacks, network), test the producer -> durable state/event -> derived value -> consumer surface chain on the device.",
+                "- Provisioning: Specify the emulator/simulator or device-farm configuration and any build/install step required to deploy the app under test before the suite runs.",
+                "- Quality gate: Define pass criteria — all PASS, zero SKIP, operation_flow/verifiable-behavior coverage, and any release-blocking constraints from conventions.",
+                "- Execution policy: Run the whole selected suite, collect every failure, and only then start repair so related failures can be fixed coherently.",
+                "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`.",
+                "- Generation markers: All generated files must include `// @generated-from:` (or language-appropriate comment) and `// @generated-by: codd propagate` headers. Manual tests marked `// @manual` must be preserved on regeneration.",
+            ]
+        )
+    else:  # "none"
+        lines.extend(
+            [
+                "",
+                "Integration test rules (no end-to-end layer):",
+                "- This project has NO user-facing surface and NO end-to-end UI/browser layer; an end-to-end UI/browser test layer does NOT apply. Do NOT generate Playwright/Cypress browser tests, do NOT launch a browser, and do NOT start a web server.",
+                "- Provide thorough unit and integration coverage instead: exercise public functions/APIs and module boundaries directly, asserting return values, raised errors, and persisted/observable state.",
+                "- Scenario derivation: Derive obligations from design-time `operation_flow` and verifiable behaviors. Cover positive, negative, persistence/readback, boundary, and error-handling cases the design declares.",
+                "- Quality gate: Define pass criteria — all PASS, zero SKIP, operation_flow/verifiable-behavior coverage, and any release-blocking constraints from conventions.",
+                "- Execution policy: Run the whole selected suite, collect every failure, and only then start repair so related failures can be fixed coherently.",
+                "- Generation markers: All generated files must include a `@generated-from:` and `@generated-by: codd propagate` header (language-appropriate comment). Manual tests marked `@manual` must be preserved on regeneration.",
+            ]
+        )
+
+    return lines
+
+
+def _build_operations_doc_block(capabilities: ProjectCapabilities) -> list[str]:
+    """Build the operations-document meta-prompt guidance, branched on capabilities.
+
+    Server-startup / running-service CI steps are emitted only when
+    ``long_running_service`` is true. For non-services, operations are framed as
+    release / distribution / packaging plus type-appropriate monitoring. Env-var
+    examples use neutral phrasing rather than web-stack-specific names.
+    """
+
+    is_service = capabilities.long_running_service
+    is_browser_e2e = capabilities.e2e_modality == "browser"
+
+    if is_service:
+        pipeline_intro = [
+            "",
+            "CI/CD Pipeline Generation Meta-Prompt section rules:",
+            "- The final section '## CI/CD Pipeline Generation Meta-Prompt' serves as a machine-readable instruction for generating `.github/workflows/ci.yml`.",
+            "- Derive CI jobs from the test strategy document: for each test level (unit, integration, E2E, performance), create a corresponding CI job.",
+            "- Include build verification: `npm run build` (or equivalent) must pass before tests run.",
+            "- Database setup: If the project uses a database, include a service container (e.g. PostgreSQL) with seed step.",
+            "- Environment variables: List required project-required secrets/credentials and configuration env vars from the project config and mark which should be GitHub Secrets.",
+            "- Merge gate: All test jobs must pass before PR merge is allowed. Specify branch protection rule recommendations.",
+            "- Output file: `.github/workflows/ci.yml`. Include `// @generated-by: codd propagate` as a YAML comment.",
+            "- Trigger: `on: pull_request` to main/develop branches.",
+            "- Caching: Include dependency caching (node_modules, pip cache, etc.) for faster CI runs.",
+            "- Failure notification: Recommend but do not require Slack/email notification on failure.",
+        ]
+    else:
+        pipeline_intro = [
+            "",
+            "CI/CD Pipeline Generation Meta-Prompt section rules:",
+            "- The final section '## CI/CD Pipeline Generation Meta-Prompt' serves as a machine-readable instruction for generating `.github/workflows/ci.yml`.",
+            "- This project is NOT a long-running service. Frame operations as build → test → release/distribution/packaging, not server deployment. Do NOT generate server-startup, health-check, or running-service steps.",
+            "- Derive CI jobs from the test strategy document: for each test level (unit, integration, etc.), create a corresponding CI job.",
+            "- Include build verification: the project's build/packaging command must pass before tests run.",
+            "- Release/distribution: include a release job appropriate to the artifact type (e.g. publish a package/binary/library to its registry or attach build artifacts to a release) rather than deploying a server.",
+            "- Environment variables: List the project-required secrets/credentials and configuration env vars from the project config, and mark which should be GitHub Secrets.",
+            "- Merge gate: All test jobs must pass before PR merge is allowed. Specify branch protection rule recommendations.",
+            "- Output file: `.github/workflows/ci.yml`. Include `# @generated-by: codd propagate` as a YAML comment.",
+            "- Trigger: `on: pull_request` to main/develop branches.",
+            "- Caching: Include dependency caching (node_modules, pip cache, etc.) for faster CI runs.",
+            "- Monitoring: frame monitoring around release health / error reporting / usage telemetry appropriate to the artifact, not server uptime checks.",
+            "- Failure notification: Recommend but do not require Slack/email notification on failure.",
+        ]
+
+    common_tail = [
+        "",
+        "Prerequisite Validation rules:",
+        "- Before referencing any tool or package in a CI step (e.g., a linter, test runner, build tool), verify it exists in the project's dependency manifest (package.json, requirements.txt, pyproject.toml, etc.).",
+        "- If a required tool is missing, either add an install step in CI or note it as a prerequisite that must be added to the project's dev dependencies.",
+        "- Do not generate CI steps that invoke tools the project has not installed.",
+        "",
+        "Runtime Compatibility rules:",
+        "- When generating configuration files or CI steps, detect the project's existing tool versions (framework, linter, test runner) and produce version-compatible output.",
+        "- Avoid generating config formats or flags that require a newer version than what the project uses (e.g., flat config for ESLint <9, or module syntax for older Node.js).",
+        "- If version information is available in package.json, requirements.txt, or lock files, use it to guide config format choices.",
+    ]
+
+    lines = pipeline_intro + common_tail
+
+    if is_service and is_browser_e2e:
+        lines.extend(
+            [
+                "",
+                "E2E Job Server Startup rules:",
+                "- If the CI includes E2E tests for a web application, the E2E job MUST include steps to build and start the application server before running tests.",
+                "- Detect the project type (web app, CLI, library) from the project structure and only add server startup for web applications.",
+                "- Include a readiness check (e.g., wait-on, curl health endpoint) between server start and test execution to avoid race conditions.",
+            ]
+        )
+
+    return lines
 MARKDOWN_FENCE_RE = re.compile(r"^\s*```(?:markdown|md)?\s*\n(?P<body>.*)\n```\s*$", re.IGNORECASE | re.DOTALL)
 FENCE_LINE_RE = re.compile(r"^\s*```(?:[a-zA-Z0-9_-]+)?\s*$")
 TITLE_HEADING_RE = re.compile(r"^\s*#\s+(?P<title>.+?)\s*$")
@@ -131,6 +480,8 @@ def generate_wave(
     global_conventions = _normalize_conventions(config.get("conventions", []))
     depended_by_map = _build_depended_by_map(artifacts)
     document_node_paths = build_document_node_path_map(project_root, config)
+    body_max_retries = _body_max_retries(config)
+    capabilities = _resolve_generation_capabilities(config, project_root)
 
     results: list[GenerationResult] = []
     for artifact in selected:
@@ -153,6 +504,8 @@ def generate_wave(
                 ai_command=resolved_ai_command,
                 project_root=project_root,
                 feedback=feedback,
+                max_retries=body_max_retries,
+                capabilities=capabilities,
             ),
         )
         output_path.write_text(content, encoding="utf-8")
@@ -163,6 +516,18 @@ def generate_wave(
 
 def _load_project_config(project_root: Path) -> dict[str, Any]:
     return load_project_config(project_root)
+
+
+def _body_max_retries(config: dict[str, Any]) -> int:
+    """Read `generate.body_retry.max_retries` (0 disables the retry loop)."""
+    generate_cfg = config.get("generate")
+    if isinstance(generate_cfg, dict):
+        body_retry = generate_cfg.get("body_retry")
+        if isinstance(body_retry, dict):
+            value = body_retry.get("max_retries")
+            if isinstance(value, int) and value >= 0:
+                return value
+    return DEFAULT_BODY_MAX_RETRIES
 
 
 def _load_wave_artifacts(config: dict[str, Any]) -> list[WaveArtifact]:
@@ -444,14 +809,54 @@ def _generate_document_body(
     ai_command: str,
     project_root: Path | None = None,
     feedback: str | None = None,
+    max_retries: int = DEFAULT_BODY_MAX_RETRIES,
+    capabilities: ProjectCapabilities | None = None,
 ) -> str:
-    prompt = _build_generation_prompt(artifact, dependency_documents, conventions, feedback=feedback)
-    prompt = _inject_lexicon(prompt, project_root)
-    return _sanitize_generated_body(
-        artifact.title,
-        _invoke_ai_command(ai_command, prompt),
-        output_path=artifact.output,
+    """Generate one document body with a bounded validation-feedback retry loop.
+
+    Output fluctuation (empty body, TODO scaffold, unstructured summary, meta
+    commentary, missing Mermaid in detailed design) raises ``ValueError`` from
+    sanitization/validation. Each retry feeds that error back to the model as
+    review feedback. Infra failures (``AI command failed``) and exhausted
+    retries propagate the original ``ValueError`` unchanged (backward compat).
+    """
+
+    current_feedback = feedback
+    last_error: ValueError | None = None
+    for attempt in range(max(0, max_retries) + 1):
+        prompt = _build_generation_prompt(
+            artifact, dependency_documents, conventions,
+            feedback=current_feedback, capabilities=capabilities,
+        )
+        prompt = _inject_lexicon(prompt, project_root)
+        try:
+            return _sanitize_generated_body(
+                artifact.title,
+                _invoke_ai_command(ai_command, prompt),
+                output_path=artifact.output,
+            )
+        except ValueError as exc:
+            if str(exc).startswith("AI command failed"):
+                raise  # infra failure: retrying the same broken command cannot help
+            last_error = exc
+            current_feedback = _combine_retry_feedback(feedback, exc)
+    assert last_error is not None
+    raise last_error
+
+
+def _combine_retry_feedback(original_feedback: str | None, error: ValueError) -> str:
+    """Merge the caller-provided feedback with the validation error for a retry."""
+
+    retry_note = (
+        "The previous generation attempt was REJECTED by CoDD output validation "
+        f"with this error: {error}. "
+        "Regenerate the COMPLETE document body and fix that problem: start directly "
+        "with the document content, use the required `## ` section headings, and "
+        "never emit meta commentary, TODO placeholders, or a summary of the document."
     )
+    if original_feedback and original_feedback.strip():
+        return f"{original_feedback.rstrip()}\n\n{retry_note}"
+    return retry_note
 
 
 def _is_test_code_output(output_path: str) -> bool:
@@ -464,10 +869,15 @@ def _build_generation_prompt(
     dependency_documents: list[DependencyDocument],
     conventions: list[dict[str, Any]],
     feedback: str | None = None,
+    capabilities: ProjectCapabilities | None = None,
 ) -> str:
+    if capabilities is None:
+        capabilities = WEB_FALLBACK_CAPABILITIES
     # Test code generation mode: output executable test code, not a Markdown document
     if _is_test_code_output(artifact.output):
-        return _build_test_code_prompt(artifact, dependency_documents, conventions, feedback=feedback)
+        return _build_test_code_prompt(
+            artifact, dependency_documents, conventions, feedback=feedback, capabilities=capabilities
+        )
 
     doc_type = _infer_doc_type(artifact.output)
     is_detailed_design = _is_detailed_design_output(artifact.output)
@@ -509,27 +919,7 @@ def _build_generation_prompt(
         )
 
     if doc_type == "design":
-        lines.extend(
-            [
-                "",
-                "Operational Behavior Model (DESIGN-TIME, CRITICAL):",
-                "- Do not postpone operational workflow discovery to E2E generation. The design document must define the actor/action/state/outcome model before implementation planning.",
-                "- If dependency documents describe actors, permissions, mutable commands, measured/observed events, automatic triggers, thresholds, timers, callbacks, derived or aggregate read models, latest/last/resume state, cross-actor visibility, lifecycle states, or external side effects, include a `### Operational Behavior Model` subsection in the appropriate required section.",
-                "- In that subsection, include one fenced YAML block with top-level `operation_flow:`. CoDD will lift this block into document metadata so downstream implementation and E2E generation share the same source of truth.",
-                "- The `operation_flow.operations` entries must be generic and implementation-ready: `id`, `actor`, `verb`, `target`, `trigger`, `preconditions`, `expected_outcomes`, and, when applicable, `forbidden_actors`, `visible_to`, `route`/`path`, `ui_pattern`, lifecycle `from_state`/`to_state`, `measurement_source`, `durable_state`, `readback`, `consumer_surfaces`, `threshold`, `boundary_cases`, and `dod_obligations`.",
-                "- For each non-trivial operation, include machine-checkable `dod_obligations` with stable `id` and concrete text derived from the requirements/design. Each obligation must be assertable by an E2E runner without human judgment; avoid vague wording such as 'works correctly', 'reasonable', or 'properly'.",
-                "- For passive or automatic behavior, name the actor-facing public trigger (for example a user action, stream event, timer, callback, or system observation). A manual admin shortcut or direct storage write is not the same operation unless the requirements declare it as the public surface.",
-                "- Enumerate operational obligations across these MECE axes before coding: happy path, persistence/readback, permission boundary, terminal-state guard, cross-actor reflection, derived-state/read-model chain, and threshold/boundary behavior.",
-                "- This is not an E2E scenario list. E2E tests are only evidence generated later from the design-time operation model.",
-                "",
-                "Actor-Facing Surface/Copy Obligations (DESIGN-TIME, CRITICAL):",
-                "- If dependency documents describe user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, define the actor-facing surface/copy obligations before implementation planning.",
-                "- For each relevant surface, state its purpose, primary audience/actor, allowed actions/navigation, forbidden actions/navigation, required visible copy intent, and forbidden copy patterns.",
-                "- User-visible copy must use the audience's job-to-be-done language. Do not expose implementation rationale, internal process notes, demo/test/sample labels, environment assumptions, or hidden authority-boundary explanations unless the audience's explicit task is to administer those boundaries.",
-                "- Entry or pre-authentication surfaces must not expose ambiguous role-resolved or protected navigation; navigation must match the surface purpose and current access state.",
-                "- When requirements use internal role identifiers and business/user-facing role names, prefer the business/user-facing labels in visible copy and document the mapping.",
-            ]
-        )
+        lines.extend(build_operational_behavior_model_block(capabilities))
 
     lines.extend(
         [
@@ -550,79 +940,10 @@ def _build_generation_prompt(
         )
 
     if doc_type == "test":
-        lines.extend(
-            [
-                "",
-                "Design-to-test traceability (CRITICAL):",
-                "- Before defining test scenarios, enumerate ALL verifiable behaviors from the dependency design documents. A verifiable behavior is any system action, state transition, or output that the design specifies and that can be asserted in a test.",
-                "- Every verifiable behavior must map to at least one test scenario — if a design document specifies a transition chain (e.g. action → intermediate state → final state), each link in the chain requires a separate assertion.",
-                "- Include a traceability section in the test document that lists each verifiable behavior and its corresponding test scenario(s). Flag any behavior that lacks coverage.",
-                "- Treat design-time `operation_flow` records as the authoritative source for operational test obligations. Do not invent E2E-only behavior that is absent from requirements or design; instead flag missing design obligations.",
-                "",
-                "E2E Test Generation Meta-Prompt section rules:",
-                "- The final section '## E2E Test Generation Meta-Prompt' serves as a machine-readable instruction for `codd propagate` to auto-generate E2E tests.",
-                "- MECE domain decomposition: Split E2E tests into non-overlapping behavioral domains. Each file owns exactly one domain.",
-                "- Scenario derivation: First derive test obligations from design-time `operation_flow` and verifiable behaviors, then derive concrete E2E evidence candidates. Cover positive, negative, persistence/readback, permission-boundary, terminal-state, cross-actor-reflection, derived-state/read-model chain, and threshold/boundary cases when the design declares those axes.",
-                "- Actor-facing surface/copy coverage: Derive browser E2E obligations from design-time surface/copy obligations. Assert required visible labels/copy, assert forbidden actions/links/copy patterns are absent, and cover actor-specific wording where the design declares different audiences.",
-                "- For measured or observed behavior, test the producer -> durable state/event -> derived value/read model -> consumer surface chain. If a value has a threshold, percentage, count, duration, score, or latest/last/resume rule, include below/at/above-boundary assertions where feasible.",
-                "- Architecture adaptation: Include a rule that test generation must scan the actual route/endpoint structure and mark unimplemented endpoints with `test.fixme()` instead of skipping.",
-                "- Quality gate: Define pass criteria — all PASS, zero SKIP, operation_flow/verifiable-behavior coverage, and any release-blocking constraints from conventions.",
-                "- Execution policy: Run the whole selected suite, collect every failure, and only then start repair so related failures can be fixed coherently.",
-                "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`.",
-                "- Shared helpers: Mandate a `tests/e2e/helpers/` directory for auth flows, test data setup, and common assertions to avoid duplication across spec files.",
-                "- Mutating test data: Any E2E scenario that creates or updates records MUST use per-run unique identifiers and explicit cleanup/idempotent teardown so repeated runs cannot fail from stale data or uniqueness constraints.",
-                "- Scenario fixtures: Any E2E scenario that depends on pre-existing records MUST establish or idempotently reset those preconditions inside the scenario/helper before assertions; do not trust mutable shared seed state unless the test recreates it or proves it unchanged.",
-                "- Generation markers: All generated files must include `// @generated-from:` and `// @generated-by: codd propagate` headers. Manual tests marked with `// @manual` must be preserved on regeneration.",
-                "",
-                "E2E Test Level Separation (CRITICAL):",
-                "- E2E tests MUST be split into two distinct levels: API integration tests and browser tests. These are NOT interchangeable.",
-                "- API integration tests use HTTP client mode (e.g. Playwright `request` context, `supertest`, `fetch`) to verify endpoint responses, status codes, and data contracts. These test the server, not the user experience.",
-                "- Browser tests use real browser automation (e.g. Playwright `page`, Cypress `cy`) to simulate actual user interactions: clicking buttons, filling forms, navigating pages, and verifying visible UI state.",
-                "- For web applications with authentication, browser tests MUST include a login-redirect-render flow: (1) navigate to login page, (2) fill credentials and submit, (3) assert redirect to the correct post-login URL, (4) assert the target page renders expected content. This catches redirect misconfigurations and route mismatches that API tests cannot detect.",
-                "- For any page transition triggered by a user action (form submit, link click, button click), browser tests MUST verify both the resulting URL (via URL assertion) and at least one visible content element on the destination page. Checking only the HTTP status is insufficient — a 200 with wrong content or a silent redirect to a 404 page will be missed.",
-                "- Server health baseline: Every HTTP request assertion MUST first verify the response status is < 500 before checking business-logic status codes (200, 302, 401, etc.). A 5xx is a server error (unhandled exception, DB down) — categorically different from a 4xx (auth failure, not found). Without this, a DB failure silently passes when tests only check for specific success codes.",
-                "- Output file naming: API integration tests → `tests/e2e/<domain>.spec.ts`, browser tests → `tests/e2e/<domain>.browser.spec.ts`. This makes the test level immediately visible from the filename.",
-                "",
-                "E2E Runtime Environment rules:",
-                "- E2E tests for web applications require a running server. The meta-prompt MUST specify how to start the application under test before running E2E tests.",
-                "- Detect the project type from package.json scripts, framework config, or entry points. Include the appropriate startup sequence (e.g., build → start → wait-for-ready) in the E2E instructions.",
-                "- For CI environments, specify that the server must run in the background with a health-check wait before test execution begins.",
-                "- Browser tests require a headed or headless browser. Specify the browser launch configuration (e.g. `use: { headless: true }`) in the test config.",
-            ]
-        )
+        lines.extend(_build_test_doc_block(capabilities))
 
     if doc_type == "operations":
-        lines.extend(
-            [
-                "",
-                "CI/CD Pipeline Generation Meta-Prompt section rules:",
-                "- The final section '## CI/CD Pipeline Generation Meta-Prompt' serves as a machine-readable instruction for generating `.github/workflows/ci.yml`.",
-                "- Derive CI jobs from the test strategy document: for each test level (unit, integration, E2E, performance), create a corresponding CI job.",
-                "- Include build verification: `npm run build` (or equivalent) must pass before tests run.",
-                "- Database setup: If the project uses a database, include a service container (e.g. PostgreSQL) with seed step.",
-                "- Environment variables: List required env vars from the project config (e.g. NEXTAUTH_SECRET, DATABASE_URL) and mark which should be GitHub Secrets.",
-                "- Merge gate: All test jobs must pass before PR merge is allowed. Specify branch protection rule recommendations.",
-                "- Output file: `.github/workflows/ci.yml`. Include `// @generated-by: codd propagate` as a YAML comment.",
-                "- Trigger: `on: pull_request` to main/develop branches.",
-                "- Caching: Include dependency caching (node_modules, pip cache, etc.) for faster CI runs.",
-                "- Failure notification: Recommend but do not require Slack/email notification on failure.",
-                "",
-                "Prerequisite Validation rules:",
-                "- Before referencing any tool or package in a CI step (e.g., a linter, test runner, build tool), verify it exists in the project's dependency manifest (package.json, requirements.txt, pyproject.toml, etc.).",
-                "- If a required tool is missing, either add an install step in CI or note it as a prerequisite that must be added to the project's dev dependencies.",
-                "- Do not generate CI steps that invoke tools the project has not installed.",
-                "",
-                "Runtime Compatibility rules:",
-                "- When generating configuration files or CI steps, detect the project's existing tool versions (framework, linter, test runner) and produce version-compatible output.",
-                "- Avoid generating config formats or flags that require a newer version than what the project uses (e.g., flat config for ESLint <9, or module syntax for older Node.js).",
-                "- If version information is available in package.json, requirements.txt, or lock files, use it to guide config format choices.",
-                "",
-                "E2E Job Server Startup rules:",
-                "- If the CI includes E2E tests for a web application, the E2E job MUST include steps to build and start the application server before running tests.",
-                "- Detect the project type (web app, CLI, library) from the project structure and only add server startup for web applications.",
-                "- Include a readiness check (e.g., wait-on, curl health endpoint) between server start and test execution to avoid race conditions.",
-            ]
-        )
+        lines.extend(_build_operations_doc_block(capabilities))
 
     if conventions:
         lines.extend(
@@ -691,8 +1012,12 @@ def _build_test_code_prompt(
     dependency_documents: list[DependencyDocument],
     conventions: list[dict[str, Any]],
     feedback: str | None = None,
+    capabilities: ProjectCapabilities | None = None,
 ) -> str:
     """Build a prompt that generates executable test code (not a Markdown document)."""
+    if capabilities is None:
+        capabilities = WEB_FALLBACK_CAPABILITIES
+    is_browser_e2e = capabilities.e2e_modality == "browser"
     # Detect test framework from output filename
     ext = PurePosixPath(artifact.output).suffix
     if ext in ('.ts', '.js'):
@@ -720,30 +1045,55 @@ def _build_test_code_prompt(
         "Conventions to enforce in tests:",
         conv_text,
         "",
-        "Test separation rules:",
-        "- Tests that can run in CI (headless browser + test DB) must NOT be tagged.",
-        "- Tests that require a deployed environment (VPS, staging) must be tagged with @cdp-only in the describe block name.",
-        "  Example: test.describe('Deploy Smoke @cdp-only', () => { ... })",
-        "- The Playwright config uses `grepInvert: /@cdp-only/` in CI to exclude deploy-only tests.",
-        "- CI tests: login flow, redirect checks, route protection, role-based access.",
-        "- CDP-only tests: visual layout checks, mobile viewport, deployed URL smoke tests.",
-        "",
-        "Server health baseline (CRITICAL):",
-        "- Every test that makes an HTTP request MUST assert the response status is < 500 BEFORE any business-logic assertions.",
-        "  Example: expect(response.status()).toBeLessThan(500);",
-        "- 5xx = server broke (unhandled exception, DB down). 4xx = business logic rejection (auth failure, not found). These are categorically different.",
-        "- Without this assertion, a DB connection failure silently passes when the test only checks for specific success codes like [200, 302].",
-        "- For browser tests after page.goto() or form submission, check response?.status() < 500 before asserting page content.",
-        "- For API tests, assert < 500 first, then assert the specific expected status code.",
-        "",
-        "Actor-facing surface/copy coverage (CRITICAL):",
-        "- If dependency documents declare actor-facing surface/copy obligations, browser tests MUST assert the required visible labels/copy and MUST assert forbidden actions, links, or copy patterns are absent.",
-        "- For role-specific surfaces, test the audience-specific wording and available navigation for that actor instead of only checking that the route returns 200.",
-        "- Do not accept generic smoke assertions when the design declares concrete visible copy, role labels, or forbidden navigation.",
-        "",
     ]
 
-    if framework == "Playwright":
+    if is_browser_e2e:
+        lines.extend([
+            "Test separation rules:",
+            "- Tests that can run in CI (headless browser + test DB) must NOT be tagged.",
+            "- Tests that require a deployed environment (VPS, staging) must be tagged with @cdp-only in the describe block name.",
+            "  Example: test.describe('Deploy Smoke @cdp-only', () => { ... })",
+            "- The Playwright config uses `grepInvert: /@cdp-only/` in CI to exclude deploy-only tests.",
+            "- CI tests: login flow, redirect checks, route protection, role-based access.",
+            "- CDP-only tests: visual layout checks, mobile viewport, deployed URL smoke tests.",
+            "",
+            "Server health baseline (CRITICAL):",
+            "- Every test that makes an HTTP request MUST assert the response status is < 500 BEFORE any business-logic assertions.",
+            "  Example: expect(response.status()).toBeLessThan(500);",
+            "- 5xx = server broke (unhandled exception, DB down). 4xx = business logic rejection (auth failure, not found). These are categorically different.",
+            "- Without this assertion, a DB connection failure silently passes when the test only checks for specific success codes like [200, 302].",
+            "- For browser tests after page.goto() or form submission, check response?.status() < 500 before asserting page content.",
+            "- For API tests, assert < 500 first, then assert the specific expected status code.",
+            "",
+            "Actor-facing surface/copy coverage (CRITICAL):",
+            "- If dependency documents declare actor-facing surface/copy obligations, browser tests MUST assert the required visible labels/copy and MUST assert forbidden actions, links, or copy patterns are absent.",
+            "- For role-specific surfaces, test the audience-specific wording and available navigation for that actor instead of only checking that the route returns 200.",
+            "- Do not accept generic smoke assertions when the design declares concrete visible copy, role labels, or forbidden navigation.",
+            "",
+        ])
+    elif capabilities.e2e_modality == "cli":
+        lines.extend([
+            "CLI end-to-end rules (no browser, no server):",
+            "- This project has NO browser and NO web server. Invoke the built/installed CLI as a subprocess and assert on its exit code, stdout, stderr, and the files/artifacts it produces. Do NOT use a browser, page objects, or HTTP server startup.",
+            "- Cover positive runs, invalid-usage runs (assert non-zero exit code and the error message), and re-run/idempotency behavior.",
+            "- Use an isolated temporary working directory per test and assert on-disk side effects (created/updated/removed files and their contents).",
+            "",
+        ])
+    else:
+        lines.extend([
+            "Integration test rules (no end-to-end UI/browser layer):",
+            "- This project has no user-facing browser surface. Exercise the public API/functions and module boundaries directly; assert return values, raised errors, and persisted/observable state. Do NOT use a browser or start a web server.",
+            "",
+        ])
+
+    lines.extend([
+        "Verifiable-behavior traceability markers:",
+        "- If a dependency test document declares verifiable-behavior ids (a traceability table whose first column is `VB-<id>`), annotate each test with a comment marker `codd: covers vb=<id>` for every behavior that test proves (`codd test audit` reconciles these markers).",
+        "- If a declared behavior cannot be tested yet, add an explicit `codd: blocked vb=<id> reason=<short_reason>` comment marker instead of leaving it silently uncovered.",
+        "",
+    ])
+
+    if framework == "Playwright" and is_browser_e2e:
         lines.extend([
             "Playwright-specific rules:",
             "- Import from '@playwright/test': test, expect, Page",

@@ -1,4 +1,10 @@
 # Fallback suffix coverage for common project types.
+#
+# NOTE: this profile intentionally declares NO `enabled_checks`. For a
+# generic/unknown project type the DAG runner runs ALL registered checks (an
+# empty allowlist = run everything), which is the safe default. Per-type
+# profiles such as cli.yaml that want to PIN a subset declare enabled_checks
+# explicitly.
 implementation_suffixes:
   [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".rs", ".rb", ".cs", ".kt", ".swift", ".ex", ".scala", ".c", ".cpp"]
 test_suffixes:

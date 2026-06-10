@@ -30,6 +30,16 @@ from codd.fix.design_updater import (
     apply_update,
     update_design_doc,
 )
+from codd.fix.impl_propagation import (
+    CheckRunner,
+    ImplPropagationResult,
+    TestRunner,
+    collect_propagation_targets,
+    dag_has_code_nodes,
+    default_check_runner,
+    run_impl_propagation,
+    safe_red_check_names,
+)
 from codd.fix.interactive_prompt import (
     InteractivePrompt,
     Option,
@@ -71,10 +81,46 @@ class PhenomenonFixResult:
     aborted: bool = False
     abort_reason: str = ""
     dry_run: bool = False
+    # Stage 4: implementation propagation (design update → impl/tests)
+    strategy: str = "patch"
+    propagate_impl_enabled: bool = True
+    affected_impl_paths: list[str] = field(default_factory=list)
+    affected_test_paths: list[str] = field(default_factory=list)
+    impl_target_sources: dict[str, str] = field(default_factory=dict)
+    propagation: ImplPropagationResult | None = None
+    # Stage 5: optional design propagation (codd propagate, Path B)
+    design_propagation: Any = None
+    design_propagation_error: str = ""
 
     @property
     def changed(self) -> bool:
         return bool(self.applied_paths)
+
+
+def _load_config_or_empty(project_root: Path) -> dict[str, Any]:
+    """Load the project config, tolerating a missing/broken codd.yaml.
+
+    Stage 4 (impl propagation) needs the local test command from config but
+    must never abort the design-update pipeline just because config loading
+    fails — an empty mapping degrades to the deterministic defaults.
+    """
+    try:
+        return load_project_config(project_root)
+    except Exception:  # noqa: BLE001 — config availability, not validity
+        return {}
+
+
+def _config_propagate_impl(config: dict[str, Any]) -> bool:
+    """Resolve ``fix.phenomenon.propagate_impl`` (default on)."""
+    if not isinstance(config, dict):
+        return True
+    fix_cfg = config.get("fix", {})
+    if not isinstance(fix_cfg, dict):
+        return True
+    phenom_cfg = fix_cfg.get("phenomenon", {})
+    if not isinstance(phenom_cfg, dict):
+        return True
+    return bool(phenom_cfg.get("propagate_impl", True))
 
 
 def run_phenomenon_fix(
@@ -91,6 +137,11 @@ def run_phenomenon_fix(
     include_common: bool = True,
     ai_invoke: AiInvoke | None = None,
     prompt: InteractivePrompt | None = None,
+    propagate_impl: bool | None = None,
+    propagate: bool = False,
+    strategy: str = "patch",
+    check_runner: CheckRunner | None = None,
+    test_runner: TestRunner | None = None,
 ) -> PhenomenonFixResult:
     """Drive the PHENOMENON-mode fix pipeline.
 
@@ -104,22 +155,56 @@ def run_phenomenon_fix(
             non-interactive defaults (controlled by on_ambiguity).
         on_ambiguity: 'abort' | 'default' | 'top1'.
         max_attempts: maximum design-update + risk loop iterations.
-        dry_run: when True, never write any file. Diff is returned.
+        dry_run: when True, never write any file. Diff is returned, plus the
+            impl/test files that WOULD be updated by Stage 4.
         push: reserved for future use; no auto-push in MVP.
         allow_delete: pass-through to design_updater.
         include_common: include kind="common" nodes as candidates.
         ai_invoke: dependency injection point for tests.
         prompt: dependency injection point for tests.
+        propagate_impl: Stage 4 (design update → impl/tests) switch. None
+            resolves from config ``fix.phenomenon.propagate_impl`` (default
+            on; set ``false`` in codd.yaml to stop at the design update).
+        propagate: when True and Stage 4 verified, run design propagation
+            (``codd propagate --update``) to reconcile dependent design docs.
+        strategy: 'patch' (default) updates affected files in place;
+            'regenerate' is a reserved extension point (not implemented).
+        check_runner / test_runner: dependency-injection points for the
+            deterministic Stage-4 verification gate.
     """
     result = PhenomenonFixResult(
         phenomenon_text=phenomenon_text,
         dry_run=dry_run,
+        strategy=strategy,
     )
 
     if not phenomenon_text or not phenomenon_text.strip():
         result.aborted = True
         result.abort_reason = "phenomenon_text is empty"
         return result
+
+    if strategy not in ("patch", "regenerate"):
+        result.aborted = True
+        result.abort_reason = (
+            f"unknown strategy {strategy!r} — expected 'patch' or 'regenerate'"
+        )
+        return result
+    if strategy == "regenerate":
+        result.aborted = True
+        result.abort_reason = (
+            "strategy 'regenerate' is not implemented yet — only 'patch' is "
+            "available (regeneration via the implementer is a planned "
+            "extension point)"
+        )
+        return result
+
+    config = _load_config_or_empty(project_root)
+    propagate_impl_enabled = (
+        propagate_impl
+        if propagate_impl is not None
+        else _config_propagate_impl(config)
+    )
+    result.propagate_impl_enabled = propagate_impl_enabled
 
     ai = ai_invoke or _build_default_ai_invoke(project_root, ai_command)
     ui = prompt or InteractivePrompt(
@@ -178,8 +263,22 @@ def run_phenomenon_fix(
         return result
 
     # ------------------------------------------------------------------
+    # Stage-4 baseline: the impl-propagation gate passes only when no *new*
+    # red DAG check appears versus the state BEFORE any design update. Capture
+    # it now, while the design docs are still untouched (real runs only).
+    # ------------------------------------------------------------------
+    will_propagate = propagate_impl_enabled and not dry_run
+    baseline_red: set[str] | None = None
+    if will_propagate:
+        baseline_red = safe_red_check_names(
+            check_runner or default_check_runner, project_root
+        )
+
+    # ------------------------------------------------------------------
     # Step 3: Update each target (with attempt loop)
     # ------------------------------------------------------------------
+    applied_updates: list[tuple[str, DesignUpdate]] = []
+    proposed_updates: list[tuple[str, DesignUpdate]] = []
     for target in targets:
         target_path = project_root / target.path
         if not target_path.exists():
@@ -209,8 +308,119 @@ def run_phenomenon_fix(
         result.attempts.extend(attempt_outcome.attempts)
         if attempt_outcome.applied_path:
             result.applied_paths.append(attempt_outcome.applied_path)
+            if attempt_outcome.applied_update is not None:
+                applied_updates.append((target.node_id, attempt_outcome.applied_update))
+        if attempt_outcome.proposed_update is not None:
+            proposed_updates.append((target.node_id, attempt_outcome.proposed_update))
+
+    # ------------------------------------------------------------------
+    # Stage 4: implementation propagation (design update → impl/tests)
+    # ------------------------------------------------------------------
+    if propagate_impl_enabled:
+        _run_stage4_propagation(
+            result,
+            project_root=project_root,
+            phenomenon_text=phenomenon_text,
+            applied_updates=applied_updates,
+            proposed_updates=proposed_updates,
+            dag=dag,
+            ai=ai,
+            config=config,
+            max_attempts=max_attempts,
+            dry_run=dry_run,
+            baseline_red=baseline_red,
+            check_runner=check_runner,
+            test_runner=test_runner,
+        )
+
+    # ------------------------------------------------------------------
+    # Stage 5: optional design propagation (codd propagate --update, Path B)
+    # ------------------------------------------------------------------
+    if propagate and not dry_run and result.applied_paths:
+        _run_stage5_design_propagation(
+            result,
+            project_root=project_root,
+            ai_command=ai_command,
+        )
 
     return result
+
+
+def _run_stage4_propagation(
+    result: PhenomenonFixResult,
+    *,
+    project_root: Path,
+    phenomenon_text: str,
+    applied_updates: list[tuple[str, DesignUpdate]],
+    proposed_updates: list[tuple[str, DesignUpdate]],
+    dag: Any,
+    ai: AiInvoke,
+    config: dict[str, Any],
+    max_attempts: int,
+    dry_run: bool,
+    baseline_red: set[str] | None,
+    check_runner: CheckRunner | None,
+    test_runner: TestRunner | None,
+) -> None:
+    """Stage 4: propagate the applied design update into impl + tests.
+
+    Dry-run only previews the affected files (deterministic DAG impact); a
+    real run drives the narrow LLM patch slot wrapped by the verify gate.
+    """
+    if dry_run:
+        if not proposed_updates:
+            return
+        node_ids = [node_id for node_id, _update in proposed_updates]
+        impl_paths, test_paths, sources = collect_propagation_targets(
+            dag, node_ids, project_root
+        )
+        result.affected_impl_paths = impl_paths
+        result.affected_test_paths = test_paths
+        result.impl_target_sources = sources
+        return
+
+    if not applied_updates:
+        return
+
+    propagation = run_impl_propagation(
+        project_root,
+        phenomenon_text=phenomenon_text,
+        applied=applied_updates,
+        ai_invoke=ai,
+        config=config,
+        max_attempts=max_attempts,
+        check_runner=check_runner,
+        test_runner=test_runner,
+        baseline_red_checks=baseline_red,
+    )
+    result.propagation = propagation
+    result.affected_impl_paths = propagation.impl_paths
+    result.affected_test_paths = propagation.test_paths
+    result.impl_target_sources = propagation.target_sources
+
+
+def _run_stage5_design_propagation(
+    result: PhenomenonFixResult,
+    *,
+    project_root: Path,
+    ai_command: str | None,
+) -> None:
+    """Stage 5: reconcile dependent design docs (codd propagate --update).
+
+    Best-effort — a propagation failure must not undo the verified Stage-3/4
+    result, so any error is captured rather than raised.
+    """
+    try:
+        from codd.propagator import run_propagate
+
+        result.design_propagation = run_propagate(
+            project_root,
+            "HEAD",
+            update=True,
+            ai_command=ai_command,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort reconciliation
+        result.design_propagation_error = str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +432,10 @@ def run_phenomenon_fix(
 class _AttemptLoopOutcome:
     attempts: list[PhenomenonFixAttempt]
     applied_path: str | None
+    applied_update: DesignUpdate | None = None
+    # The update the loop *would* apply but did not (dry-run): drives the
+    # Stage-4 impact preview without writing anything.
+    proposed_update: DesignUpdate | None = None
 
 
 def _run_attempt_loop(
@@ -298,7 +512,11 @@ def _run_attempt_loop(
                     aborted_reason="dry_run: not applying",
                 )
             )
-            return _AttemptLoopOutcome(attempts=attempts, applied_path=None)
+            return _AttemptLoopOutcome(
+                attempts=attempts,
+                applied_path=None,
+                proposed_update=update,
+            )
 
         try:
             decision = _confirm_apply(
@@ -349,6 +567,7 @@ def _run_attempt_loop(
         return _AttemptLoopOutcome(
             attempts=attempts,
             applied_path=target.path,
+            applied_update=update,
         )
 
     return _AttemptLoopOutcome(attempts=attempts, applied_path=None)

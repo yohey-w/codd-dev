@@ -13,6 +13,7 @@ from typing import Any
 
 import codd.generator as generator_module
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
+from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 
 
@@ -259,8 +260,13 @@ class Implementer:
         self.ai_command = ai_command
         self.use_derived_steps = _use_derived_steps_enabled(self.config, use_derived_steps)
 
-    def run_implement(self, spec: ImplementSpec) -> ImplementationResult:
-        """Read ``spec.design_node`` and generate files under ``spec.output_paths``."""
+    def run_implement(self, spec: ImplementSpec, *, feedback: str | None = None) -> ImplementationResult:
+        """Read ``spec.design_node`` and generate files under ``spec.output_paths``.
+
+        ``feedback`` carries review findings from a previous attempt (e.g. the
+        verifiable-behavior coverage gate) and is injected into the prompt the
+        same way ``codd generate`` injects review feedback.
+        """
         spec = _normalize_spec_paths(spec)
         _check_guard_files_uniqueness(self.project_root, self.config)
         _create_output_paths(self.project_root, spec.output_paths)
@@ -290,13 +296,16 @@ class Implementer:
             document_conventions,
         )
         coding_principles = _load_coding_principles(self.project_root, self.config)
+        capabilities = generator_module._resolve_generation_capabilities(
+            self.config, self.project_root
+        )
         design_md_content = (
-            _load_design_md_content(self.project_root)
+            _load_design_md_content(self.project_root, capabilities=capabilities)
             if _spec_generates_ui_file(spec, (self.config.get("project") or {}).get("language"), design_context.content)
             else None
         )
         screen_flow_content = (
-            _load_screen_flow_for_implementation(self.project_root)
+            _load_screen_flow_for_implementation(self.project_root, capabilities=capabilities)
             if _spec_looks_ui_facing(spec, design_context.content)
             else None
         )
@@ -326,6 +335,8 @@ class Implementer:
             screen_flow_content=screen_flow_content,
             screen_flow_routes=screen_flow_routes,
             impl_steps_context=impl_steps_context,
+            feedback=feedback,
+            capabilities=capabilities,
         )
         prompt = generator_module._inject_lexicon(prompt, self.project_root)
         resolved_ai_command = generator_module._resolve_ai_command(
@@ -383,6 +394,7 @@ def implement_tasks(
     use_derived_steps: bool | None = None,
     task: str | None = None,
     language: str | None = None,
+    feedback: str | None = None,
     **_ignored: Any,
 ) -> list[ImplementationResult]:
     project_root = Path(project_root).resolve()
@@ -412,7 +424,7 @@ def implement_tasks(
         config=config,
         ai_command=ai_command,
         use_derived_steps=use_derived_steps,
-    ).run_implement(spec)
+    ).run_implement(spec, feedback=feedback)
     return [result]
 
 
@@ -763,7 +775,13 @@ def _load_coding_principles(project_root: Path, config: dict[str, Any]) -> str |
     return principles_path.read_text(encoding="utf-8")
 
 
-def _load_design_md_content(project_root: Path) -> str | None:
+def _load_design_md_content(
+    project_root: Path, capabilities: ProjectCapabilities | None = None
+) -> str | None:
+    # Only UI projects have design tokens / a DESIGN.md to warn about. For a
+    # non-UI project (CLI, library, service), silently skip — never emit a
+    # "UI file generation" warning that does not apply.
+    has_ui = capabilities is None or capabilities.user_interface
     try:
         from codd.design_md import DesignMdExtractor
     except ImportError:
@@ -771,12 +789,13 @@ def _load_design_md_content(project_root: Path) -> str | None:
 
     design_md_path = project_root / "DESIGN.md"
     if not design_md_path.exists():
-        warnings.warn(
-            "DESIGN.md not found. UI file generation will proceed without design tokens. "
-            "Consider creating DESIGN.md (https://github.com/google-labs-code/design.md)",
-            UserWarning,
-            stacklevel=3,
-        )
+        if has_ui:
+            warnings.warn(
+                "DESIGN.md not found. UI file generation will proceed without design tokens. "
+                "Consider creating DESIGN.md (https://github.com/google-labs-code/design.md)",
+                UserWarning,
+                stacklevel=3,
+            )
         return None
 
     result = DesignMdExtractor().extract(design_md_path)
@@ -790,7 +809,12 @@ def _load_design_md_content(project_root: Path) -> str | None:
     return "\n".join(lines)
 
 
-def _load_screen_flow_for_implementation(project_root: Path) -> str | None:
+def _load_screen_flow_for_implementation(
+    project_root: Path, capabilities: ProjectCapabilities | None = None
+) -> str | None:
+    # screen-flow.md / route definitions only apply to UI projects. A non-UI
+    # project must never see a "UI file generation"/"route definitions" warning.
+    has_ui = capabilities is None or capabilities.user_interface
     try:
         from codd.screen_flow_validator import find_screen_flow_path
 
@@ -800,12 +824,13 @@ def _load_screen_flow_for_implementation(project_root: Path) -> str | None:
         screen_flow_path = default_path if default_path.exists() else None
 
     if screen_flow_path is None:
-        warnings.warn(
-            "screen-flow.md not found. UI file generation will proceed without "
-            "route definitions. Consider creating docs/extracted/screen-flow.md.",
-            UserWarning,
-            stacklevel=3,
-        )
+        if has_ui:
+            warnings.warn(
+                "screen-flow.md not found. UI file generation will proceed without "
+                "route definitions. Consider creating docs/extracted/screen-flow.md.",
+                UserWarning,
+                stacklevel=3,
+            )
         return None
     return screen_flow_path.read_text(encoding="utf-8")
 
@@ -1051,7 +1076,13 @@ def _build_implementation_prompt(
     screen_flow_content: str | None = None,
     screen_flow_routes: list[str] | None = None,
     impl_steps_context: str | None = None,
+    feedback: str | None = None,
+    capabilities: ProjectCapabilities | None = None,
 ) -> str:
+    # Default to UI-capable so untyped/legacy (web-ish) projects keep emitting the
+    # UI wrapper guidance exactly as before; only an explicit no-UI capability set
+    # suppresses UI-specific wrapper vocabulary.
+    has_ui = capabilities is None or capabilities.user_interface
     project = config.get("project") or {}
     frameworks = project.get("frameworks") or []
     language = _normalize_implementation_language(project.get("language"))
@@ -1106,6 +1137,19 @@ def _build_implementation_prompt(
         "- Favor small coherent modules rather than one monolithic file.",
         "- Cross-file imports may use relative imports or project-local aliases, but keep the output internally coherent.",
         "",
+    ]
+
+    if _spec_targets_tests(spec, config):
+        lines.extend(
+            [
+                "Verifiable-behavior traceability markers:",
+                "- If the design or dependency test documents declare verifiable-behavior ids (a traceability table whose first column is `VB-<id>`), annotate each generated test with a comment marker `codd: covers vb=<id>` for every behavior that test proves (`codd test audit` reconciles these markers).",
+                "- If a declared behavior cannot be tested yet, add an explicit `codd: blocked vb=<id> reason=<short_reason>` comment marker instead of leaving it silently uncovered.",
+                "",
+            ]
+        )
+
+    lines.extend([
         "Required output format (repeat this block for each file and output nothing else):",
         f"=== FILE: {example_output}/<filename>{default_extension} ===",
         f"```{code_fence_language}",
@@ -1116,7 +1160,7 @@ def _build_implementation_prompt(
         "",
         "Design document content:",
         design_context.content.rstrip(),
-    ]
+    ])
 
     if spec.dependency_design_nodes:
         lines.extend(["", "Explicit dependency design nodes:"])
@@ -1201,7 +1245,7 @@ def _build_implementation_prompt(
         lines.append(screen_flow_content[:SCREEN_FLOW_PROMPT_LIMIT].rstrip())
         lines.extend(["--- END SCREEN-FLOW ---", ""])
 
-    if _is_wrapper_task(spec.design_node, " ".join([*spec.output_paths, design_context.content])):
+    if has_ui and _is_wrapper_task(spec.design_node, " ".join([*spec.output_paths, design_context.content])):
         lines.extend(
             [
                 "--- WRAPPER COMPONENT RULES ---",
@@ -1215,7 +1259,29 @@ def _build_implementation_prompt(
             ]
         )
 
+    if feedback:
+        lines.extend(
+            [
+                "",
+                "--- REVIEW FEEDBACK (from previous implementation attempt) ---",
+                "A reviewer found issues with a previous version of this implementation.",
+                "You MUST address ALL of the following feedback in this generation:",
+                feedback.rstrip(),
+                "--- END REVIEW FEEDBACK ---",
+                "",
+            ]
+        )
+
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _spec_targets_tests(spec: ImplementSpec, config: dict[str, Any]) -> bool:
+    """Whether this implement run generates test artifacts (VB marker guidance)."""
+    from codd.verifiable_behavior_audit import is_test_related_implement
+
+    return is_test_related_implement(
+        config, design_node=spec.design_node, output_paths=spec.output_paths
+    )
 
 
 def _write_generated_files(
