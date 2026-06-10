@@ -57,6 +57,27 @@ def test_shipped_catalog_path_exists():
     assert CATALOG_PATH.exists()
 
 
+def test_catalog_declares_infra_ops_nfr_ssot_artifacts():
+    """R1: infra/ops/NFR artifacts are SSOT (no derived_from) and verifiable."""
+
+    catalog = load_catalog()
+    expected = {
+        "infrastructure_design": "generate",
+        "deployment_design": "generate",
+        "operations_runbook": "generate",
+        "non_functional_requirements": "plan",
+    }
+    for artifact_id, produced_by in expected.items():
+        artifact = catalog.get(artifact_id)
+        assert artifact is not None, f"missing catalog artifact: {artifact_id}"
+        assert artifact.is_ssot
+        assert not artifact.derived_from
+        assert artifact.produced_by == produced_by
+        # Default existence gate (no special validator) + conventional locations.
+        assert artifact.default_path_globs
+        assert artifact.validator is None
+
+
 def _write_catalog(tmp_path: Path, body: str) -> Path:
     p = tmp_path / "catalog.yaml"
     p.write_text(body, encoding="utf-8")

@@ -24,9 +24,12 @@ from codd.parsing import (
     BuildDepsInfo,
     ConfigInfo,
     DockerComposeExtractor,
+    DockerfileExtractor,
+    GitHubActionsExtractor,
     GraphQlExtractor,
     KubernetesExtractor,
     OpenApiExtractor,
+    OpsEvidenceExtractor,
     ProtobufExtractor,
     TerraformExtractor,
     TestExtractor,
@@ -924,6 +927,16 @@ def _discover_config(facts: ProjectFacts, project_root: Path):
             "detect_tf_files",
             "extract_resources",
         ),
+        (
+            GitHubActionsExtractor(),
+            "detect_workflow_files",
+            "extract_workflow",
+        ),
+        (
+            DockerfileExtractor(),
+            "detect_dockerfiles",
+            "extract_dockerfile",
+        ),
     ]
 
     for extractor, detect_method_name, extract_method_name in extractors:
@@ -937,8 +950,20 @@ def _discover_config(facts: ProjectFacts, project_root: Path):
 
             relative_path = file_path.relative_to(project_root).as_posix()
             config = extract_method(content, relative_path)
-            if config.services or config.resources:
+            if config.services or config.resources or config.pipelines or config.images:
                 facts.infra_config[relative_path] = config
+
+    # Recognition-only ops/observability/config-management evidence: surface
+    # PRESENCE (no deep parse) so the IaC→NFR layer can note candidate
+    # observability/SLO and deployment-topology sources.
+    ops_extractor = OpsEvidenceExtractor()
+    for file_path, recognized_kind in ops_extractor.detect_ops_files(project_root):
+        relative_path = file_path.relative_to(project_root).as_posix()
+        if relative_path in facts.infra_config:
+            continue
+        facts.infra_config[relative_path] = ops_extractor.build_evidence(
+            recognized_kind, relative_path
+        )
 
 
 def _discover_build_deps(project_root: Path) -> BuildDepsInfo | None:

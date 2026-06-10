@@ -63,6 +63,11 @@ MAX_FILE_SIZE = 50_000
 # Max total context size (chars) — leave room for instructions
 MAX_CONTEXT_CHARS = 400_000
 
+# Sub-budget for representative test file CONTENT (bounded within MAX_CONTEXT_CHARS).
+# Tests are the richest functional-requirements evidence, but we cap their share so
+# they cannot crowd out source/IaC context.
+MAX_TEST_CONTEXT_CHARS = 120_000
+
 # Directories to always skip
 SKIP_DIRS = {
     "node_modules", ".next", "dist", "build", "coverage",
@@ -84,7 +89,11 @@ class PreScanResult:
     source_files: dict[str, str]      # path -> content
     config_files: dict[str, str]      # path -> content
     iac_files: dict[str, str]         # path -> content
-    test_files: list[str]             # path list (not contents — too large)
+    test_files: list[str]             # path list (full inventory)
+    # Bounded, representative test FILE CONTENT. Tests are the richest source of
+    # acceptance criteria / verifiable behaviors; restoration needs the actual
+    # assertions, not just paths. Bounded the same way source/IaC text is.
+    test_file_contents: dict[str, str] = field(default_factory=dict)
     total_files: int = 0
     total_chars: int = 0
 
@@ -315,10 +324,24 @@ def pre_scan(project_root: Path) -> PreScanResult:
             result.iac_files[rel] = content
             total_chars += len(content)
 
-    # Test files (paths only)
-    result.test_files = [
-        str(f.relative_to(project_root)) for f in _find_test_files(project_root)
-    ]
+    # Test files: full path inventory, plus bounded representative CONTENT.
+    test_paths = _find_test_files(project_root)
+    result.test_files = [str(f.relative_to(project_root)) for f in test_paths]
+
+    # Tests carry the richest functional-requirements evidence (assertions /
+    # acceptance criteria). Include bounded test file content the same way source
+    # and IaC text is bounded, so restoration can recover verifiable behaviors.
+    test_chars = 0
+    for f in test_paths:
+        if total_chars > MAX_CONTEXT_CHARS or test_chars > MAX_TEST_CONTEXT_CHARS:
+            break
+        content = _read_file_safe(f)
+        if not content:
+            continue
+        rel = str(f.relative_to(project_root))
+        result.test_file_contents[rel] = content
+        total_chars += len(content)
+        test_chars += len(content)
 
     result.total_files = (
         len(result.framework_files) + len(result.source_files)
@@ -375,11 +398,19 @@ def _build_prompt(scan: PreScanResult) -> str:
         for path, content in scan.iac_files.items():
             sections.append(f"### {path}\n```\n{content}\n```\n")
 
-    # Test file list
+    # Test file list (full inventory) + representative content
     if scan.test_files:
-        sections.append("## Test Files (paths only)\n```")
+        sections.append("## Test Files (full path inventory)\n```")
         sections.append("\n".join(scan.test_files))
         sections.append("```\n")
+
+    # Representative test FILE CONTENT — tests are the richest source of
+    # acceptance criteria / verifiable behaviors (assertions). Restoration uses
+    # these to recover functional requirements rather than guessing them.
+    if scan.test_file_contents:
+        sections.append("## Test File Contents (representative — acceptance criteria evidence)\n")
+        for path, content in scan.test_file_contents.items():
+            sections.append(f"### {path}\n```\n{content}\n```\n")
 
     # Final instruction
     sections.append("""

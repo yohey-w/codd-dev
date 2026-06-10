@@ -374,3 +374,73 @@ def test_example_lms_sample_can_require_screen_flow(monkeypatch, tmp_path):
     artifacts = RequiredArtifactsDeriver(tmp_path, ai_command="mock-ai").derive([], [])
 
     assert any(artifact["id"] == "design:screen_flow_design" for artifact in artifacts)
+
+
+# ---------------------------------------------------------------------------
+# R1: infra/ops/NFR artifacts wired into the shipped profiles
+# ---------------------------------------------------------------------------
+_INFRA_TRIO = (
+    "design:infrastructure_design",
+    "design:deployment_design",
+    "design:operations_runbook",
+)
+
+
+def _profile_entries(project_type: str) -> dict[str, dict]:
+    payload = yaml.safe_load((DEFAULTS_DIR / f"{project_type}.yaml").read_text(encoding="utf-8"))
+    return {entry["id"]: entry for entry in payload.get("default_artifacts", [])}
+
+
+@pytest.mark.parametrize("project_type", ["web", "cli", "mobile", "iot", "generic"])
+def test_all_profiles_declare_infra_ops_nfr_artifacts(project_type):
+    entries = _profile_entries(project_type)
+    for artifact_id in (*_INFRA_TRIO, "design:non_functional_requirements"):
+        assert artifact_id in entries, f"{project_type} missing {artifact_id}"
+
+
+@pytest.mark.parametrize("project_type", ["web", "cli", "mobile", "iot", "generic"])
+def test_infra_trio_is_capability_conditioned_not_forced(project_type):
+    """The infra trio must be condition-gated (deployable infra), never forced.
+
+    A pure library/CLI with no infra must not be saddled with these — i.e. they
+    carry a non-empty ``condition:`` and are not ``always_required``.
+    """
+
+    entries = _profile_entries(project_type)
+    for artifact_id in _INFRA_TRIO:
+        entry = entries[artifact_id]
+        assert entry.get("condition"), f"{project_type}:{artifact_id} must be conditioned"
+        assert not entry.get("always_required", False)
+        # Phrased to fire on deployable infra / IaC signals.
+        assert "infrastructure" in entry["condition"] or "deployment" in entry["condition"]
+
+
+@pytest.mark.parametrize("project_type", ["web", "mobile", "iot"])
+def test_nfr_always_required_for_service_project_types(project_type):
+    entry = _profile_entries(project_type)["design:non_functional_requirements"]
+    assert entry.get("always_required") is True
+
+
+@pytest.mark.parametrize("project_type", ["cli", "generic"])
+def test_nfr_conditioned_for_library_capable_baselines(project_type):
+    """cli/generic may be a pure library: NFR must be conditioned, not forced."""
+
+    entry = _profile_entries(project_type)["design:non_functional_requirements"]
+    assert not entry.get("always_required", False)
+    assert entry.get("condition")
+
+
+def test_profiles_remain_backward_compatible_for_preexisting_artifacts():
+    """Additive only: the historical artifact ids and their flags are unchanged."""
+
+    web = _profile_entries("web")
+    # Pre-existing always_required baseline still intact.
+    assert web["design:requirements"]["always_required"] is True
+    assert web["design:system_design"]["always_required"] is True
+    # Pre-existing conditional artifact untouched.
+    assert web["design:api_design"].get("always_required", False) is False
+    assert web["design:api_design"]["condition"]
+    # generic still has NO web-only artifacts.
+    generic = _profile_entries("generic")
+    assert "design:screen_flow_design" not in generic
+    assert "design:ux_design" not in generic
