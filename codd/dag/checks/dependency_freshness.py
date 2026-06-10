@@ -50,6 +50,13 @@ from codd.reconciliation_ledger import (
 
 SETTINGS_KEY = "dependency_freshness"
 _DOC_NODE_KINDS = {"design_doc", "common"}
+# ``kind="common"`` is overloaded: design docs opt in via frontmatter, but
+# implementation/test files matched by ``common_node_patterns`` also get
+# ``kind="common"`` (for the transitive-closure exemption). Only markdown
+# nodes are documents; ``.md`` is the codebase-wide doc discriminator and the
+# only extension the reconciliation ledger writer acknowledges, so non-md
+# common nodes can never be reconciled and must stay out of this check.
+_DOC_SUFFIX = ".md"
 
 
 @dataclass
@@ -309,14 +316,29 @@ def _doc_to_doc_edges(dag: Any) -> list[tuple[str, str]]:
         to_node = nodes.get(to_id)
         if from_node is None or to_node is None:
             continue
-        if getattr(from_node, "kind", None) not in _DOC_NODE_KINDS:
-            continue
-        if getattr(to_node, "kind", None) not in _DOC_NODE_KINDS:
-            continue
         downstream = str(getattr(from_node, "path", None) or from_id)
         upstream = str(getattr(to_node, "path", None) or to_id)
+        if not _is_doc_node(from_node, downstream):
+            continue
+        if not _is_doc_node(to_node, upstream):
+            continue
         pairs.append((downstream, upstream))
     return sorted(set(pairs))
+
+
+def _is_doc_node(node: Any, path: str) -> bool:
+    """True when the node is a design *document* (not a common code file).
+
+    ``design_doc`` nodes are documents by construction. ``common`` nodes are
+    documents only when their path is markdown: ``common_node_patterns`` also
+    assigns ``kind="common"`` to source/test files, which share the kind
+    string but are code, not docs.
+    """
+
+    kind = getattr(node, "kind", None)
+    if kind == "design_doc":
+        return True
+    return kind == "common" and path.endswith(_DOC_SUFFIX)
 
 
 def _git_history_available(project_root: Path, edges: list[tuple[str, str]]) -> bool:

@@ -136,3 +136,77 @@ def test_c8_amber_when_verification_not_in_workflow(tmp_path: Path) -> None:
     assert result.status == "warn"
     assert result.severity == "amber"
     assert result.findings[0].violation_type == "ci_verification_not_in_workflow"
+
+
+# --- verification hook label schema -----------------------------------------
+
+
+def test_c8_labeled_verification_with_command_is_matched_by_command(tmp_path: Path) -> None:
+    """``verification:`` holding a hook name next to ``command:`` is a label;
+    only the command must appear in the CI workflow."""
+
+    _write_workflow(
+        tmp_path,
+        "name: ci\non: [push, pull_request]\njobs:\n  test:\n    steps:\n      - run: pytest tests/e2e\n",
+    )
+    (tmp_path / "deploy.yaml").write_text(
+        "targets:\n"
+        "  primary:\n"
+        "    post_deploy:\n"
+        "      - verification: gate_name\n"
+        "        command: pytest tests/e2e\n"
+        "        required: true\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path, {"provider": "github_actions"})
+
+    assert result.status == "pass"
+    assert result.findings == []
+
+
+def test_c8_labeled_endpoint_verification_is_not_collected_as_command(tmp_path: Path) -> None:
+    """An endpoint verification (``verification:`` + ``url:``) declares no
+    command, so it imposes no CI command obligation."""
+
+    _write_workflow(
+        tmp_path,
+        "name: ci\non: [push, pull_request]\njobs:\n  test:\n    steps:\n      - run: pytest tests/unit\n",
+    )
+    (tmp_path / "deploy.yaml").write_text(
+        "targets:\n"
+        "  primary:\n"
+        "    post_deploy:\n"
+        "      - verification: health\n"
+        "        url: https://example.invalid/api/health\n"
+        "        expected_status: 200\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path, {"provider": "github_actions"})
+
+    assert result.status == "pass"
+    assert result.findings == []
+
+
+def test_c8_bare_verification_string_is_still_a_command(tmp_path: Path) -> None:
+    """Without a sibling spec key, a string ``verification:`` value keeps its
+    historical meaning: it is the verification command itself."""
+
+    _write_workflow(
+        tmp_path,
+        "name: ci\non: [push, pull_request]\njobs:\n  test:\n    steps:\n      - run: pytest tests/unit\n",
+    )
+    (tmp_path / "deploy.yaml").write_text(
+        "targets:\n"
+        "  primary:\n"
+        "    post_deploy:\n"
+        "      - verification: pytest tests/e2e\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path, {"provider": "github_actions"})
+
+    assert result.status == "warn"
+    assert result.findings[0].violation_type == "ci_verification_not_in_workflow"
+    assert result.findings[0].details == ["pytest tests/e2e"]

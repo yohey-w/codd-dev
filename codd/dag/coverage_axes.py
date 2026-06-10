@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
+import fnmatch
 from pathlib import Path
 from typing import Any, Literal
 import warnings
@@ -20,14 +21,102 @@ VALID_SOURCES = {"design_doc", "lexicon", "llm_derived"}
 
 
 @dataclass
+class JourneyScope:
+    """Opt-in declaration of which journeys a coverage axis/variant applies to.
+
+    ``include``: journey-name patterns (``fnmatch``) the declarer applies to.
+        ``None`` means "no restriction" (every journey); an empty list means
+        "no journeys".
+    ``exclude``: journey-name patterns the declarer does not apply to,
+        evaluated after ``include``.
+
+    When no scope is declared anywhere, checks must keep their historical
+    behavior (the full axis x journey cross product).
+    """
+
+    include: list[str] | None = None
+    exclude: list[str] = field(default_factory=list)
+
+    def applies_to(self, journey_name: str) -> bool:
+        name = str(journey_name or "").strip()
+        if self.include is not None and not _matches_any_pattern(name, self.include):
+            return False
+        return not _matches_any_pattern(name, self.exclude)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.include is not None:
+            payload["include"] = list(self.include)
+        if self.exclude:
+            payload["exclude"] = list(self.exclude)
+        return payload
+
+    @classmethod
+    def from_value(cls, value: Any) -> "JourneyScope | None":
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return cls(include=_pattern_list(value))
+        if isinstance(value, list):
+            return cls(include=_pattern_list(value))
+        if isinstance(value, dict):
+            include = value.get("include")
+            exclude = value.get("exclude")
+            if include is None and exclude is None:
+                raise ValueError("journey_scope mapping requires include and/or exclude")
+            return cls(
+                include=_pattern_list(include) if include is not None else None,
+                exclude=_pattern_list(exclude) if exclude is not None else [],
+            )
+        raise ValueError("journey_scope must be a string, list, or mapping")
+
+
+def _pattern_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, (list, tuple, set)):
+        patterns: list[str] = []
+        for item in value:
+            if not isinstance(item, (str, int, float)):
+                raise ValueError("journey scope patterns must be strings")
+            text = str(item).strip()
+            if text:
+                patterns.append(text)
+        return patterns
+    raise ValueError("journey scope patterns must be a string or a list of strings")
+
+
+def _matches_any_pattern(name: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
+def _journey_scope_or_warn(payload: dict[str, Any], owner: str) -> JourneyScope | None:
+    try:
+        return JourneyScope.from_value(payload.get("journey_scope"))
+    except ValueError as exc:
+        warnings.warn(f"{owner} journey_scope ignored: {exc}", UserWarning, stacklevel=3)
+        return None
+
+
+@dataclass
 class CoverageVariant:
     id: str
     label: str
     attributes: dict[str, Any] = field(default_factory=dict)
     criticality: Criticality | None = "medium"
+    journey_scope: JourneyScope | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "label": self.label,
+            "attributes": deepcopy(self.attributes),
+            "criticality": self.criticality,
+        }
+        if self.journey_scope is not None:
+            payload["journey_scope"] = self.journey_scope.to_dict()
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Any) -> "CoverageVariant":
@@ -52,6 +141,7 @@ class CoverageVariant:
             label=label,
             attributes=deepcopy(attributes),
             criticality=criticality,
+            journey_scope=_journey_scope_or_warn(payload, f"coverage variant {variant_id}"),
         )
 
 
@@ -62,15 +152,27 @@ class CoverageAxis:
     variants: list[CoverageVariant]
     source: AxisSource
     owner_section: str = ""
+    journey_scope: JourneyScope | None = None
+
+    def journey_scope_for(self, variant: CoverageVariant) -> JourneyScope | None:
+        """Effective scope for a variant: variant declaration wins, then the
+        axis-level declaration; ``None`` keeps the historical full cross
+        product."""
+        if variant.journey_scope is not None:
+            return variant.journey_scope
+        return self.journey_scope
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "axis_type": self.axis_type,
             "rationale": self.rationale,
             "variants": [variant.to_dict() for variant in self.variants],
             "source": self.source,
             "owner_section": self.owner_section,
         }
+        if self.journey_scope is not None:
+            payload["journey_scope"] = self.journey_scope.to_dict()
+        return payload
 
     @classmethod
     def from_dict(
@@ -105,6 +207,7 @@ class CoverageAxis:
             variants=variants,
             source=source,
             owner_section=str(payload.get("owner_section") or default_owner_section).strip(),
+            journey_scope=_journey_scope_or_warn(payload, f"coverage axis {axis_type}"),
         )
 
 

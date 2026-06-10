@@ -312,3 +312,148 @@ def test_result_message_counts_red_and_amber(tmp_path: Path):
     result = _run(_dag_with_axis(axis), tmp_path)
 
     assert "1 red and 1 amber" in result.message
+
+
+# --- journey scope (opt-in) -------------------------------------------------
+
+
+def _scoped_axis(variant_scope=None, axis_scope=None, *, variant_id: str = "shape_a"):
+    from codd.dag.coverage_axes import JourneyScope
+
+    def _scope(value):
+        if value is None:
+            return None
+        return JourneyScope.from_value(value)
+
+    return CoverageAxis(
+        axis_type="runtime_shape",
+        rationale="Scoped coverage.",
+        variants=[
+            CoverageVariant(
+                id=variant_id,
+                label=variant_id,
+                criticality="critical",
+                journey_scope=_scope(variant_scope),
+            )
+        ],
+        source="lexicon",
+        owner_section="project_lexicon.yaml",
+        journey_scope=_scope(axis_scope),
+    )
+
+
+def _satisfy_variant(dag: DAG, variant_id: str = "shape_a") -> None:
+    _add_test(dag, {"coverage_axes": [{"axis_type": "runtime_shape", "variant_id": variant_id}]})
+
+
+def test_variant_journey_scope_include_limits_cross_product(tmp_path: Path):
+    dag = _dag_with_axis(_scoped_axis(variant_scope={"include": ["flow_one"]}))
+    _add_journey(dag, "flow_one")
+    _add_journey(dag, "flow_two", "docs/design/other.md")
+    _satisfy_variant(dag)
+
+    result = _run(dag, tmp_path)
+
+    journeys = {item.get("journey") for item in result.violations}
+    assert "flow_one" in journeys
+    assert "flow_two" not in journeys
+
+
+def test_variant_journey_scope_empty_include_drops_all_journeys(tmp_path: Path):
+    dag = _dag_with_axis(_scoped_axis(variant_scope={"include": []}))
+    _add_journey(dag, "flow_one")
+    _satisfy_variant(dag)
+
+    result = _run(dag, tmp_path)
+
+    assert result.violations == []
+
+
+def test_variant_journey_scope_exclude_drops_named_journey(tmp_path: Path):
+    dag = _dag_with_axis(_scoped_axis(variant_scope={"exclude": ["flow_two"]}))
+    _add_journey(dag, "flow_one")
+    _add_journey(dag, "flow_two", "docs/design/other.md")
+    _satisfy_variant(dag)
+
+    result = _run(dag, tmp_path)
+
+    journeys = {item.get("journey") for item in result.violations}
+    assert "flow_one" in journeys
+    assert "flow_two" not in journeys
+
+
+def test_axis_journey_scope_applies_to_variants_without_own_scope(tmp_path: Path):
+    dag = _dag_with_axis(_scoped_axis(axis_scope={"include": ["flow_one"]}))
+    _add_journey(dag, "flow_one")
+    _add_journey(dag, "flow_two", "docs/design/other.md")
+    _satisfy_variant(dag)
+
+    result = _run(dag, tmp_path)
+
+    journeys = {item.get("journey") for item in result.violations}
+    assert journeys == {"flow_one"}
+
+
+def test_variant_journey_scope_overrides_axis_scope(tmp_path: Path):
+    dag = _dag_with_axis(
+        _scoped_axis(variant_scope={"include": ["flow_two"]}, axis_scope={"include": ["flow_one"]})
+    )
+    _add_journey(dag, "flow_one")
+    _add_journey(dag, "flow_two", "docs/design/other.md")
+    _satisfy_variant(dag)
+
+    result = _run(dag, tmp_path)
+
+    journeys = {item.get("journey") for item in result.violations}
+    assert journeys == {"flow_two"}
+
+
+def test_undeclared_journey_scope_keeps_full_cross_product(tmp_path: Path):
+    dag = _dag_with_axis()
+    _add_journey(dag, "flow_one")
+    _add_journey(dag, "flow_two", "docs/design/other.md")
+    _satisfy_variant(dag)
+
+    result = _run(dag, tmp_path)
+
+    journeys = {item.get("journey") for item in result.violations}
+    assert journeys == {"flow_one", "flow_two"}
+
+
+def test_journey_scope_does_not_remove_missing_test_violation(tmp_path: Path):
+    dag = _dag_with_axis(_scoped_axis(variant_scope={"include": []}))
+    _add_journey(dag, "flow_one")
+
+    result = _run(dag, tmp_path)
+
+    assert [item["type"] for item in result.violations] == ["missing_test_for_variant"]
+
+
+def test_builder_attaches_lexicon_axis_journey_scope(tmp_path: Path):
+    _write(
+        tmp_path / "project_lexicon.yaml",
+        yaml.safe_dump(
+            {
+                "coverage_axes": [
+                    {
+                        "axis_type": "runtime_shape",
+                        "variants": [
+                            {
+                                "id": "shape_a",
+                                "criticality": "critical",
+                                "journey_scope": {"include": ["flow_one"]},
+                            }
+                        ],
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+    )
+
+    dag = build_dag(tmp_path, {"lexicon_file": "project_lexicon.yaml"})
+
+    scope = dag.coverage_axes[0].variants[0].journey_scope
+    assert scope is not None
+    assert scope.applies_to("flow_one") is True
+    assert scope.applies_to("flow_two") is False
