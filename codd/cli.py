@@ -125,6 +125,12 @@ class _CliVerificationResult:
     failures: list[Any] | None = None
     check_results: list[Any] | None = None
     runtime_results: list[Any] | None = None
+    # FX3 execution evidence (mirrors repair.verify_runner.VerificationResult)
+    tests_executed: bool = False
+    test_command: str | None = None
+    tests_summary: str = ""
+    typecheck_executed: bool = False
+    source_integrity: str = ""
 
 
 @dataclass(frozen=True)
@@ -2004,6 +2010,15 @@ def _resolve_required_value(
     help="Name of the CoDD config directory (default: codd). Use .codd when codd/ is your source directory.",
 )
 @click.option(
+    "--project-type",
+    default=None,
+    help=(
+        "Project type for capability-aware generation (cli, web, mobile, iot, generic, or a "
+        "project-local custom profile). Written to required_artifacts.project_type in codd.yaml; "
+        "unknown types fall back to generic with a warning. Unset = legacy web-style fallback."
+    ),
+)
+@click.option(
     "--suggest-lexicons/--no-suggest-lexicons",
     default=True,
     help="Detect project manifests and offer lexicon plug-in suggestions.",
@@ -2027,6 +2042,7 @@ def init(
     dest: str,
     requirements: str | None,
     config_dir: str,
+    project_type: str | None,
     suggest_lexicons: bool,
     llm_enhanced: bool,
     auto_approve: bool,
@@ -2072,6 +2088,8 @@ def init(
             req_path = _import_requirements(dest_path, Path(requirements), project_name)
             rel_req = req_path.relative_to(dest_path).as_posix()
             click.echo(f"Requirements imported: {rel_req} (frontmatter added)")
+            if project_type:
+                _record_project_type(dest_path, codd_dir, project_type)
             click.echo(f"\nNext: codd generate --wave 2  (AI generates design docs)")
             return
         click.echo(f"Error: {codd_dir} already exists. Use --requirements to import a requirements file.")
@@ -2093,6 +2111,11 @@ def init(
     # Version file
     (dest_path / ".codd_version").write_text("0.2.0\n", encoding="utf-8")
 
+    # Project type → capability-aware generation (no browser-test residue for
+    # a cli project). Unset keeps the legacy web-style fallback untouched.
+    if project_type:
+        _record_project_type(dest_path, codd_dir, project_type)
+
     # Import requirements if provided
     if requirements:
         req_path = _import_requirements(dest_path, Path(requirements), project_name)
@@ -2113,6 +2136,53 @@ def init(
 
     if suggest_lexicons:
         _offer_lexicon_suggestions(dest_path, llm_enhanced=llm_enhanced, auto_approve=auto_approve)
+
+
+def _record_project_type(project_root: Path, codd_dir: Path, project_type: str) -> None:
+    """Validate *project_type* against the registry and persist it to codd.yaml.
+
+    Writes ``required_artifacts.project_type`` (the key the generator,
+    implementer, artifact deriver and completeness auditor all consult).
+    Unknown types resolve to ``generic`` with a warning — never silently to
+    web (consistent with codd.project_types.resolve_project_type). Appends a
+    new section as text so the template's comments survive; an existing
+    ``required_artifacts`` section is never rewritten blindly.
+    """
+    from codd.project_types import resolve_project_type
+
+    requested = project_type.strip().lower()
+    resolved, reason = resolve_project_type(requested, None, project_root)
+    if resolved != requested:
+        click.echo(f"Warning: {reason}")
+
+    config_path = codd_dir / "codd.yaml"
+    text = config_path.read_text(encoding="utf-8")
+    existing = yaml.safe_load(text) or {}
+    section = existing.get("required_artifacts") if isinstance(existing, dict) else None
+    if isinstance(section, dict):
+        current = str(section.get("project_type") or "").strip()
+        if current:
+            click.echo(
+                f"required_artifacts.project_type already set: {current} (left unchanged)"
+            )
+            return
+        # The section exists without project_type: appending a duplicate
+        # `required_artifacts:` mapping would silently REPLACE the section on
+        # the next YAML load and drop its sibling keys. Ask for a manual edit.
+        click.echo(
+            "Warning: codd.yaml already has a required_artifacts section; "
+            f"add `project_type: \"{resolved}\"` to it manually."
+        )
+        return
+    block = (
+        "\n"
+        "# Project type (drives capability-aware generation: UI, network surface,\n"
+        "# e2e modality). Profiles: codd/required_artifacts/defaults/*.yaml.\n"
+        "required_artifacts:\n"
+        f'  project_type: "{resolved}"\n'
+    )
+    config_path.write_text(text.rstrip("\n") + "\n" + block, encoding="utf-8")
+    click.echo(f"Project type: {resolved}")
 
 
 def _offer_lexicon_suggestions(
@@ -3464,6 +3534,15 @@ def brownfield_cmd(
     type=click.Path(exists=True),
     help="Requirements document to import (any format; CoDD adds frontmatter automatically)",
 )
+@click.option(
+    "--project-type",
+    default=None,
+    help=(
+        "Project type for capability-aware generation (cli, web, mobile, iot, generic, or a "
+        "project-local custom profile). Recorded in codd.yaml (required_artifacts.project_type) "
+        "and in the session for --resume. Unset = legacy web-style fallback."
+    ),
+)
 @click.option("--ai-cmd", default=None, help="Override AI CLI command for every stage of this run")
 @click.option(
     "--elicit/--no-elicit",
@@ -3503,6 +3582,7 @@ def greenfield_cmd(
     project_name: str | None,
     language: str | None,
     requirements: str | None,
+    project_type: str | None,
     ai_cmd: str | None,
     elicit_enabled: bool | None,
     max_repair_attempts: int | None,
@@ -3531,6 +3611,7 @@ def greenfield_cmd(
         project_name=project_name,
         language=language,
         requirements=requirements,
+        project_type=project_type,
         ai_command=ai_cmd,
         elicit=elicit_enabled,
         max_repair_attempts=max_repair_attempts,
@@ -4899,16 +4980,19 @@ def verify(
     if not auto_repair:
         result = _run_verify_once(**verify_kwargs)
         _emit_verify_summary(result)
+        if not result.passed:
+            # FX3 honesty: a failed verification must fail the command. The
+            # old behavior raised SystemExit only on the --runtime path, so a
+            # plain `codd verify` with red failures printed a summary and
+            # exited 0 — a false green on the CLI surface itself.
+            raise SystemExit(result.exit_code)
         if runtime:
-            if not result.passed:
-                raise SystemExit(result.exit_code)
             _run_runtime_smoke_gate(
                 path=path,
                 runtime_base_url=runtime_base_url,
                 runtime_skip=_runtime_smoke_skip(runtime_skip),
             )
-        if result.passed:
-            _enforce_stage_contract_gate(Path(path).resolve(), "verify", opt_out=no_contract_gate)
+        _enforce_stage_contract_gate(Path(path).resolve(), "verify", opt_out=no_contract_gate)
         return
 
     project_root = Path(path).resolve()
@@ -6967,8 +7051,24 @@ def _implement_output_paths_for_cli(config: dict[str, Any], design_node: str) ->
             paths = [str(item) for item in value if str(item).strip()]
             if paths:
                 return paths
-    slug = re.sub(r"[^a-zA-Z0-9]+", "_", design_node).strip("_").lower() or "implement"
-    return [f"src/{slug}"]
+    # No explicit mapping: fall back to ONE shared canonical source root so
+    # that every unconfigured task (e.g. greenfield-derived tasks) amends the
+    # same application layout. The old per-task default (src/<task_slug>/)
+    # fragmented a greenfield build into N disjoint app copies — observed in
+    # the 2026-06 real-AI dogfood where 15 derived tasks each produced their
+    # own cli/core/storage under src/<task_id>/. Precedence:
+    #   implement.output_root (explicit) > scan.source_dirs[0] > "src".
+    output_root = implement.get("output_root") if isinstance(implement, dict) else None
+    if isinstance(output_root, str) and output_root.strip():
+        return [output_root.strip()]
+    scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+    source_dirs = scan.get("source_dirs") if isinstance(scan, dict) else None
+    if isinstance(source_dirs, list):
+        for item in source_dirs:
+            text = str(item).strip()
+            if text:
+                return [text]
+    return ["src"]
 
 
 def _nested_config_value(config: dict[str, Any], path: tuple[str, ...]) -> Any:
@@ -7521,6 +7621,42 @@ def _emit_verify_summary(result: _CliVerificationResult) -> None:
         for item in skipped_items[:10]:
             click.echo(f"    - {_summary_node_id(item)} -> {_summary_output(item)}")
 
+    _emit_verify_evidence(result)
+
+
+_EVIDENCE_CHECK_NAMES = {"source_integrity", "test_command", "typecheck_command"}
+
+
+def _emit_verify_evidence(result: _CliVerificationResult) -> None:
+    """FX3: show WHAT the verification executed, and the evidence failures.
+
+    The DAG/verification-test sections above cannot represent the new
+    execution-evidence checks (source integrity, test command, typecheck) —
+    without these lines a source-integrity failure would be invisible in the
+    summary while the command exits nonzero.
+    """
+    # getattr with defaults: tests stub _run_verify_once with duck-typed
+    # result objects that predate the evidence fields.
+    tests_summary = str(getattr(result, "tests_summary", "") or "")
+    tests = tests_summary or ("executed" if getattr(result, "tests_executed", False) else "not executed")
+    test_command = getattr(result, "test_command", None)
+    if test_command:
+        tests = f"{tests} [{test_command}]"
+    typecheck = "executed" if getattr(result, "typecheck_executed", False) else "not executed"
+    integrity = str(getattr(result, "source_integrity", "") or "") or "not checked"
+    click.echo(f"  Execution evidence: tests={tests}; typecheck={typecheck}; source integrity={integrity}")
+
+    evidence_failures = [
+        item
+        for item in (getattr(result, "failures", None) or [])
+        if str(_summary_value(item, "check_name") or "") in _EVIDENCE_CHECK_NAMES
+    ]
+    if evidence_failures:
+        click.echo("  Evidence failures:")
+        for item in evidence_failures[:10]:
+            check_name = str(_summary_value(item, "check_name") or "check")
+            click.echo(f"    - {check_name} -> {_summary_output(item)}")
+
 
 def _summary_value(item: Any, key: str) -> Any:
     if isinstance(item, dict):
@@ -7585,6 +7721,11 @@ def _cli_result_from_standalone_verify(result: Any) -> _CliVerificationResult:
         failures=list(getattr(result, "failures", []) or []),
         check_results=list(getattr(result, "check_results", []) or []),
         runtime_results=list(getattr(result, "runtime_results", []) or []),
+        tests_executed=bool(getattr(result, "tests_executed", False)),
+        test_command=getattr(result, "test_command", None),
+        tests_summary=str(getattr(result, "tests_summary", "") or ""),
+        typecheck_executed=bool(getattr(result, "typecheck_executed", False)),
+        source_integrity=str(getattr(result, "source_integrity", "") or ""),
     )
 
 

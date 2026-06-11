@@ -78,16 +78,28 @@ def main():
         return
     if "V-model plan derivation assistant" in PROMPT:
         log("plan_derive")
-        sys.stdout.write(json.dumps({"tasks": [{
-            "id": "implement_core_module",
-            "title": "Implement the core module",
-            "description": "Create the core add operation described by the core design document.",
-            "source_design_doc": "docs/design/core_design.md",
-            "v_model_layer": "detailed",
-            "expected_outputs": ["src/core"],
-            "test_kinds": ["unit"],
-            "dependencies": [],
-        }]}))
+        sys.stdout.write(json.dumps({"tasks": [
+            {
+                "id": "implement_core_module",
+                "title": "Implement the core module",
+                "description": "Create the core add operation described by the core design document.",
+                "source_design_doc": "docs/design/core_design.md",
+                "v_model_layer": "detailed",
+                "expected_outputs": ["src"],
+                "test_kinds": ["unit"],
+                "dependencies": [],
+            },
+            {
+                "id": "implement_cli_module",
+                "title": "Implement the CLI front end",
+                "description": "Create the thin command-line front end described by the CLI design document.",
+                "source_design_doc": "docs/design/cli_design.md",
+                "v_model_layer": "detailed",
+                "expected_outputs": ["src"],
+                "test_kinds": ["unit"],
+                "dependencies": ["implement_core_module"],
+            },
+        ]}))
         return
     if "implementation depth deriver" in PROMPT:
         log("impl_steps")
@@ -143,11 +155,54 @@ def design_document():
 def implementation_files():
     match = re.search(r"^Output paths: (.+)$", PROMPT, re.M)
     output = match.group(1).split(",")[0].strip() if match else "src/core"
+    log("output:" + output)
+    if "Design node: docs/design/cli_design.md" in PROMPT:
+        # Second derived task: a DIFFERENT module written into the SAME
+        # canonical output root — the two tasks must coexist, not fragment
+        # into per-task src/<task_id>/ app copies.
+        return (
+            "=== FILE: " + output + "/cli.py ===\\n"
+            "```python\\n"
+            "def main():\\n"
+            "    return 0\\n"
+            "```\\n"
+        )
+    # FX3: the build must contain something verify can EXECUTE. The stub
+    # emits a real (trivial but executable) pytest file next to the module it
+    # tests, plus a repo-root pyproject.toml whose [tool.pytest.ini_options]
+    # section makes detect_test_command resolve "pytest --tb=short -q". The
+    # greenfield verify stage then proves the autopilot actually RAN the
+    # generated tests instead of certifying an unexecuted build.
     return (
         "=== FILE: " + output + "/core.py ===\\n"
         "```python\\n"
         "def add(a, b):\\n"
         "    return a + b\\n"
+        "```\\n"
+        "=== FILE: " + output + "/test_core.py ===\\n"
+        "```python\\n"
+        "from core import add\\n"
+        "\\n"
+        "\\n"
+        "def test_add():\\n"
+        "    assert add(2, 3) == 5\\n"
+        "```\\n"
+        "=== FILE: pyproject.toml ===\\n"
+        "```toml\\n"
+        "[tool.pytest.ini_options]\\n"
+        "addopts = \\"-p no:cacheprovider\\"\\n"
+        "```\\n"
+        "=== FILE: .github/workflows/ci.yml ===\\n"
+        "```yaml\\n"
+        "name: ci\\n"
+        "on:\\n"
+        "  push:\\n"
+        "  pull_request:\\n"
+        "jobs:\\n"
+        "  test:\\n"
+        "    runs-on: ubuntu-latest\\n"
+        "    steps:\\n"
+        "      - uses: actions/checkout@v4\\n"
         "```\\n"
     )
 

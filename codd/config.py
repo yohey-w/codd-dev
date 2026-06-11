@@ -74,6 +74,12 @@ def _deep_merge(defaults: Any, project: Any, path: tuple[str, ...] = ()) -> Any:
         # Explicit source roots define module boundaries; merging defaults changes semantics.
         return deepcopy(project)
 
+    if path == ("implement", "root_artifact_patterns") and isinstance(project, list):
+        # The repo-root artifact allowlist is a policy, not an accumulator: an
+        # explicit project list replaces the defaults so a project can narrow
+        # it or disable it entirely (empty list = off).
+        return deepcopy(project)
+
     if isinstance(defaults, list) and isinstance(project, list):
         return _merge_lists(defaults, project)
 

@@ -376,3 +376,32 @@ def test_cli_greenfield_failure_exits_nonzero_with_report(tmp_path: Path) -> Non
     assert result.exit_code == 1
     assert "Failed stage: init" in result.output
     assert "codd greenfield --resume" in result.output
+
+
+def test_cli_greenfield_project_type_flag_reaches_the_pipeline(tmp_path: Path, monkeypatch) -> None:
+    import codd.greenfield.pipeline as pipeline_module
+    from codd.greenfield.pipeline import GreenfieldResult
+
+    captured: dict[str, object] = {}
+
+    class RecordingPipeline:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, project_root, *, resume=False, dry_run=False):
+            return GreenfieldResult(
+                project_root=Path(project_root), status="success", stages=[], session_path=None
+            )
+
+    monkeypatch.setattr(pipeline_module, "GreenfieldPipeline", RecordingPipeline)
+    result = CliRunner().invoke(
+        main, ["greenfield", "--path", str(tmp_path), "--project-type", "cli"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["project_type"] == "cli"
+
+
+def test_cli_greenfield_help_documents_project_type() -> None:
+    result = CliRunner().invoke(main, ["greenfield", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--project-type" in result.output

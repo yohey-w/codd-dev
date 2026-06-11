@@ -53,6 +53,51 @@ requirement_completeness:
   semantic_check: false
   ai_generate_options: false
   ai_timeout_seconds: 30
+implement:
+  # Write-time syntax sanity gate for `codd implement`: every AI-produced file
+  # payload with a stdlib-checkable format (Python via ast, JSON, YAML, TOML)
+  # must parse BEFORE anything is written to disk. A failure routes a clear
+  # "file X is not valid <format>" message into ONE bounded retry through the
+  # implement feedback prompt; if the retry also fails, the task fails loudly
+  # naming the offending files — a syntactically broken file is never silently
+  # written as "task done". Formats without a stdlib parser (TypeScript,
+  # JavaScript, Go, ...) are skipped on purpose; the verify stage is their
+  # backstop. The gate only inspects what the AI produced for the files being
+  # written — never pre-existing project files. Cheap and deterministic (no
+  # LLM calls). Set false to opt out.
+  syntax_gate: true
+  # Shared canonical output root for implement tasks WITHOUT an explicit
+  # default_output_paths / implement_targets mapping (e.g. greenfield-derived
+  # tasks). null = derive from scan.source_dirs[0] (usually "src/"). Every
+  # unconfigured task then amends ONE coherent app layout; the old per-task
+  # default (src/<task_slug>/) fragmented a greenfield build into N disjoint
+  # app copies. Explicit per-design mappings always win over this root.
+  output_root: null
+  # Repo-root infrastructure artifacts: AI-emitted file paths matching these
+  # patterns are written at the PROJECT ROOT instead of being confined under
+  # (or dropped for being outside) the task's output paths. Matching is
+  # deterministic: a "<dir>/**" pattern matches any file under that top-level
+  # directory; any other pattern is fnmatch-ed component-by-component. The
+  # match also applies to the path tail after stripping an output-path prefix
+  # (an AI told to stay under src/ emits src/.github/workflows/ci.yml — that
+  # workflow belongs at .github/workflows/ci.yml, where CI actually runs).
+  # Existing root files that carry no codd @generated-by marker but COULD
+  # carry one (marker-capable formats) are never overwritten — user-authored
+  # content wins; formats codd cannot mark (YAML/JSON/TOML/no-suffix) follow
+  # the implementer's normal overwrite semantics so re-runs converge.
+  # Override with your own list to extend or disable (empty list = off).
+  root_artifact_patterns:
+    - ".github/**"
+    - ".gitlab-ci.yml"
+    - "pyproject.toml"
+    - "setup.cfg"
+    - "package.json"
+    - "Dockerfile*"
+    - "docker-compose*"
+    - ".gitignore"
+    - "README*"
+    - "Makefile"
+    - "LICENSE*"
 fix:
   test_command: null  # auto-detected from package.json / pyproject.toml
   max_attempts: 3
@@ -92,6 +137,34 @@ test_coverage:
 verify:
   typecheck_command: null
   test_command: null
+  # ── FX3 execution evidence (anti-false-green) ──────────────────────────
+  # `codd verify` (standalone runner) now produces EXECUTION EVIDENCE on top
+  # of the structural DAG checks:
+  #   1. source_integrity — deterministic stdlib parse check of the files
+  #      under scan.source_dirs (.py via ast, .json, .yaml/.yml, .toml).
+  #      Bounded by file count; languages without a stdlib parser are skipped
+  #      (their backstop is the executed test/typecheck command). Any syntax
+  #      error FAILS verification naming the broken files. Fast and LLM-free,
+  #      hence default ON; set false to opt out.
+  #   2. test command — verify.test_command (or fix.test_command) when set,
+  #      otherwise auto-detected (pytest config, package.json test script,
+  #      Cargo.toml, go.mod, *.bats, Makefile test target). A detected
+  #      command is RUN (bounded by test_timeout_seconds); nonzero exit FAILS
+  #      verification with the output captured for the repair loop. No
+  #      detectable command -> recorded as "tests not executed".
+  #   3. typecheck command — verify.typecheck_command (or typecheck.command
+  #      when typecheck.enabled) is run the same way when configured.
+  # The honesty rule: when NOTHING executable ran and only structural DAG
+  # checks passed, plain `codd verify` still passes but prints a prominent
+  # WARNING (existing brownfield/CI configs may intentionally be
+  # structural-only); the greenfield autopilot treats the same state as a
+  # verify STAGE FAILURE — it cannot certify a build it never executed.
+  # Set allow_structural_only: true to declare structural-only verification
+  # as the project's intended contract (silences the warning, passes the
+  # autopilot gate).
+  source_integrity: true
+  allow_structural_only: false
+  test_timeout_seconds: 600
   report_output: "docs/test/verify_report.md"
   e2e_setup_command: null  # e.g. "npx playwright install chromium"
   e2e_command: null         # all E2E tests
