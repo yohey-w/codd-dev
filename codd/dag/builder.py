@@ -15,6 +15,7 @@ from typing import Any
 import yaml
 
 from codd.config import load_project_config
+from codd.discovery import scan_exclude_patterns as shared_scan_exclude_patterns
 from codd.dag import DAG, Edge, Node
 from codd.dag.coverage_axes import CoverageAxis, extract_coverage_axes_from_design_doc, extract_coverage_axes_from_lexicon
 from codd.dag.extractor import extract_design_doc_metadata, extract_imports, scan_capability_evidence
@@ -1499,11 +1500,9 @@ def _apply_scan_patterns(settings: dict[str, Any], config: dict[str, Any]) -> No
     source_dirs = _as_list(scan.get("source_dirs"))
     test_dirs = _as_list(scan.get("test_dirs"))
     doc_dirs = _as_list(scan.get("doc_dirs"))
-    exclude_patterns = [
-        str(pattern)
-        for pattern in _as_list(scan.get("exclude"))
-        if isinstance(pattern, str) and pattern.strip()
-    ]
+    # Shared safe accessor (codd.discovery); the settings key name
+    # ("scan_exclude_patterns") and the DAG glob engine are unchanged.
+    exclude_patterns = shared_scan_exclude_patterns(config)
 
     if source_dirs:
         _extend_unique(

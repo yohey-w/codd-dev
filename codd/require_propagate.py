@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import difflib
-import re
 from pathlib import Path
 from typing import Any
 
 from codd.config import find_codd_dir, load_project_config
 from codd.graph import CEG
+from codd.propagation_common import parse_frontmatter_diff, render_updated_doc_content
 from codd.propagator import (
     AffectedDoc,
     _build_update_prompt,
@@ -20,7 +20,6 @@ from codd.propagator import (
 
 
 REQUIREMENT_PATH_PREFIXES = ("docs/requirements/", "requirements/")
-_FRONTMATTER_FIELD = re.compile(r"^\s*([A-Za-z0-9_.-]+):\s*(.*?)\s*$")
 
 
 def require_propagate(
@@ -98,83 +97,13 @@ def _detect_requirements_changes(project_root: Path, base_ref: str) -> list[dict
 
 
 def _parse_frontmatter_changes(diff_text: str) -> list[dict]:
-    changes: list[dict] = []
-    current_file: str | None = None
-    removed: dict[str, str] = {}
-    added: dict[str, str] = {}
-    field_order: list[str] = []
-    in_frontmatter = False
-    saw_frontmatter = False
+    """Parse requirement frontmatter changes from a unified diff.
 
-    def remember(field: str, value: str, bucket: dict[str, str]) -> None:
-        if field not in field_order:
-            field_order.append(field)
-        bucket[field] = value
-
-    def flush() -> None:
-        nonlocal removed, added, field_order
-        if current_file is None:
-            return
-        for field in field_order:
-            old = removed.get(field)
-            new = added.get(field)
-            if old == new:
-                continue
-            changes.append(
-                {
-                    "file": current_file,
-                    "field": field,
-                    "old": old,
-                    "new": new,
-                }
-            )
-        removed = {}
-        added = {}
-        field_order = []
-
-    for line in diff_text.splitlines():
-        if line.startswith("diff --git "):
-            flush()
-            current_file = _path_from_diff_header(line)
-            in_frontmatter = False
-            saw_frontmatter = False
-            continue
-
-        if line.startswith("+++ b/"):
-            current_file = line[len("+++ b/"):].strip()
-            continue
-        if line.startswith("--- a/") or line.startswith("index "):
-            continue
-        if current_file is None or not _is_requirement_path(current_file):
-            continue
-        if not line or line[0] not in " +-":
-            continue
-
-        prefix = line[0]
-        content = line[1:]
-        if content.strip() == "---":
-            if not saw_frontmatter:
-                saw_frontmatter = True
-                in_frontmatter = True
-            elif in_frontmatter:
-                in_frontmatter = False
-            continue
-        if not in_frontmatter:
-            continue
-        if prefix not in "+-":
-            continue
-
-        match = _FRONTMATTER_FIELD.match(content)
-        if not match:
-            continue
-        field, value = match.groups()
-        if prefix == "-":
-            remember(field, value, removed)
-        else:
-            remember(field, value, added)
-
-    flush()
-    return changes
+    Name/signature kept for API stability; the parsing now lives in
+    :func:`codd.propagation_common.parse_frontmatter_diff`, built on
+    :mod:`codd.frontmatter` semantics instead of a hand-rolled line regex.
+    """
+    return parse_frontmatter_diff(diff_text, path_filter=_is_requirement_path)
 
 
 def _find_ceg_scan_dir(project_root: Path) -> Path | None:
@@ -368,17 +297,12 @@ def _format_changes_for_prompt(changes: list[dict]) -> str:
 
 
 def _render_updated_doc_content(original_content: str, new_body: str) -> str:
-    """Render the document content that _write_updated_doc would write."""
-    match = re.match(r"^(---\s*\n.*?\n---\s*\n)", original_content, re.DOTALL)
-    frontmatter = match.group(1) if match else ""
+    """Render the document content that _write_updated_doc would write.
 
-    body_lines = new_body.strip().split("\n")
-    if body_lines and body_lines[0].startswith("# "):
-        title_match = re.search(r"^# .+$", original_content, re.MULTILINE)
-        if title_match:
-            body_lines[0] = title_match.group(0)
-
-    return frontmatter + "\n".join(body_lines) + "\n"
+    Delegates to the shared renderer so the preview can never drift from
+    what ``--apply`` (via ``_write_updated_doc``) actually writes.
+    """
+    return render_updated_doc_content(original_content, new_body)
 
 
 def _to_affected_doc(node: dict, changes: list[dict], ceg: CEG) -> AffectedDoc:
@@ -464,10 +388,3 @@ def _is_design_doc_node(node: dict) -> bool:
     if node_type == "design":
         return True
     return path.endswith(".md") and not _is_requirement_path(path)
-
-
-def _path_from_diff_header(line: str) -> str | None:
-    parts = line.split()
-    if len(parts) >= 4 and parts[3].startswith("b/"):
-        return parts[3][2:]
-    return None

@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from codd.frontmatter import apply_aliases, as_list as _as_list, parse_frontmatter
 from codd.requirements_meta import normalize_operation_flow
 
 
@@ -120,16 +121,13 @@ def extract_design_doc_metadata(
     """Return Markdown frontmatter and normalized ``depends_on`` entries."""
 
     content = md_path.read_text(encoding="utf-8", errors="ignore")
-    frontmatter: dict[str, Any] = {}
-    body = content
-
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) == 3:
-            loaded = yaml.safe_load(parts[1]) or {}
-            if isinstance(loaded, dict):
-                frontmatter = loaded
-            body = parts[2]
+    parsed = parse_frontmatter(content)
+    if parsed.exception is not None:
+        # DAG construction must fail loudly on malformed frontmatter: a doc
+        # whose node_id cannot be read would otherwise silently drop a node.
+        raise parsed.exception
+    frontmatter: dict[str, Any] = parsed.mapping
+    body = parsed.body
 
     frontmatter = resolve_frontmatter_aliases(frontmatter, frontmatter_alias)
     codd_meta = frontmatter.get("codd", {})
@@ -172,30 +170,13 @@ def extract_verification_means_catalog(project_lexicon_path: Path) -> dict[str, 
     return deepcopy(catalog) if isinstance(catalog, dict) else None
 
 
-def _as_list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    return [value]
-
-
 def resolve_frontmatter_aliases(
     frontmatter: dict[str, Any],
     frontmatter_alias: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return frontmatter with configured alias keys copied to canonical keys."""
 
-    if not isinstance(frontmatter_alias, dict) or not frontmatter_alias:
-        return deepcopy(frontmatter)
-
-    resolved = deepcopy(frontmatter)
-    for alias_key, canonical_key in _frontmatter_alias_map(frontmatter_alias).items():
-        if alias_key in resolved and canonical_key not in resolved:
-            resolved[canonical_key] = deepcopy(resolved[alias_key])
-    return resolved
+    return apply_aliases(frontmatter, frontmatter_alias)
 
 
 def extract_design_doc_journey_attrs(
@@ -223,14 +204,6 @@ def extract_design_doc_journey_attrs(
             strict=strict,
         )
     return attributes
-
-
-def _frontmatter_alias_map(frontmatter_alias: dict[str, str]) -> dict[str, str]:
-    return {
-        str(alias_key).strip(): str(canonical_key).strip()
-        for alias_key, canonical_key in frontmatter_alias.items()
-        if str(alias_key).strip() and str(canonical_key).strip()
-    }
 
 
 def _extract_structured_entries(

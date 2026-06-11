@@ -21,6 +21,11 @@ from codd.deployment import (
     VerificationKind,
     VerificationTestNode,
 )
+from codd.frontmatter import (
+    as_list as _as_list,
+    codd_block,
+    split_frontmatter as _split_frontmatter,
+)
 
 
 MARKDOWN_H2_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
@@ -83,7 +88,7 @@ def extract_deployment_docs(
             path=rel_path,
             sections=_extract_markdown_sections(body),
             deploy_target_ref=_frontmatter_target_ref(frontmatter),
-            depends_on=_as_str_list(frontmatter.get("depends_on")),
+            depends_on=_as_str_list(_frontmatter_value(frontmatter, "depends_on")),
         )
 
     for path in _deploy_yaml_candidates(root):
@@ -671,10 +676,11 @@ def _deploy_yaml_target_ref(payload: dict[str, Any]) -> str | None:
 
 
 def _frontmatter_target_ref(frontmatter: dict[str, Any]) -> str | None:
-    for key in ("deploy_target_ref", "deploy_target", "target"):
-        value = frontmatter.get(key)
-        if isinstance(value, str) and value:
-            return value
+    for source in (frontmatter, codd_block(frontmatter) or {}):
+        for key in ("deploy_target_ref", "deploy_target", "target"):
+            value = source.get(key)
+            if isinstance(value, str) and value:
+                return value
     return None
 
 
@@ -682,19 +688,19 @@ def _extract_markdown_sections(body: str) -> list[str]:
     return [_section_key(match.group(1)) for match in MARKDOWN_H2_RE.finditer(body)]
 
 
-def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
-    if not content.startswith("---"):
-        return {}, content
-    lines = content.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}, content
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            frontmatter_text = "\n".join(lines[1:index])
-            body = "\n".join(lines[index + 1 :])
-            payload = yaml.safe_load(frontmatter_text) or {}
-            return (payload if isinstance(payload, dict) else {}), body
-    return {}, content
+def _frontmatter_value(frontmatter: dict[str, Any], *keys: str) -> Any:
+    """Read ``keys`` from frontmatter, falling back to the nested ``codd:`` block.
+
+    CoDD-generated documents nest metadata under ``codd:``; hand-written
+    deployment docs use top-level keys. Top-level keys always win.
+    """
+    nested = codd_block(frontmatter) or {}
+    for source in (frontmatter, nested):
+        for key in keys:
+            value = source.get(key)
+            if value:
+                return value
+    return None
 
 
 def _runtime_state_for_section(section: str) -> tuple[RuntimeStateKind, str, str] | None:
@@ -901,7 +907,7 @@ def _load_design_doc_records(project_root: Path, config: dict[str, Any]) -> list
                 "path": path,
                 "frontmatter": frontmatter,
                 "body": body,
-                "acceptance_criteria": frontmatter.get("acceptance_criteria"),
+                "acceptance_criteria": _frontmatter_value(frontmatter, "acceptance_criteria"),
             }
         )
     return records
@@ -943,7 +949,7 @@ def _iter_design_docs(design_docs: list | dict) -> Iterable[dict[str, str]]:
             doc_id = str(design_doc.get("id") or design_doc.get("node_id") or design_doc.get("path") or doc_id)
             frontmatter = design_doc.get("frontmatter")
             if isinstance(frontmatter, dict):
-                criteria = _criteria_text(frontmatter.get("acceptance_criteria") or frontmatter.get("criteria"))
+                criteria = _criteria_text(_frontmatter_value(frontmatter, "acceptance_criteria", "criteria"))
             criteria = criteria or _criteria_text(
                 design_doc.get("acceptance_criteria") or design_doc.get("criteria") or design_doc.get("body") or design_doc
             )
@@ -952,7 +958,7 @@ def _iter_design_docs(design_docs: list | dict) -> Iterable[dict[str, str]]:
             if isinstance(attributes, dict):
                 frontmatter = attributes.get("frontmatter", {})
                 if isinstance(frontmatter, dict):
-                    criteria = _criteria_text(frontmatter.get("acceptance_criteria") or frontmatter.get("criteria"))
+                    criteria = _criteria_text(_frontmatter_value(frontmatter, "acceptance_criteria", "criteria"))
             doc_id = str(getattr(design_doc, "id", doc_id))
             criteria = criteria or _criteria_text(design_doc)
         yield {"id": _normalize_output_path(doc_id), "criteria": criteria}
@@ -1088,16 +1094,6 @@ def _section_key(value: str) -> str:
 def _slug(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "_", value.strip().lower()).strip("_")
     return slug or "unknown"
-
-
-def _as_list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    return [value]
 
 
 def _as_str_list(value: Any) -> list[str]:

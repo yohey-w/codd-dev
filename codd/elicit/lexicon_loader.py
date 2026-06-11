@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from codd.frontmatter import FrontmatterError, split_frontmatter
+
 
 class LexiconLoadError(Exception):
     """Raised when an elicitation lexicon manifest is malformed."""
@@ -130,23 +132,16 @@ def _resolve_existing_path(base_dir: Path, declared_path: str, field_name: str) 
 
 
 def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
-    lines = content.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
-        return {}, content
-
-    for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
-            metadata_text = "".join(lines[1:index])
-            body = "".join(lines[index + 1 :])
-            try:
-                metadata = yaml.safe_load(metadata_text) or {}
-            except yaml.YAMLError as exc:
-                raise LexiconLoadError("prompt extension frontmatter is invalid") from exc
-            if not isinstance(metadata, dict):
-                raise LexiconLoadError("prompt extension frontmatter must be a mapping")
-            return metadata, body
-
-    raise LexiconLoadError("prompt extension frontmatter is missing a closing delimiter")
+    try:
+        return split_frontmatter(content, strict=True)
+    except FrontmatterError as exc:
+        if exc.code == "invalid_yaml":
+            raise LexiconLoadError("prompt extension frontmatter is invalid") from exc
+        if exc.code == "not_mapping":
+            raise LexiconLoadError("prompt extension frontmatter must be a mapping") from exc
+        raise LexiconLoadError(
+            "prompt extension frontmatter is missing a closing delimiter"
+        ) from exc
 
 
 def _load_recommended_kinds(path: Path) -> list[str]:

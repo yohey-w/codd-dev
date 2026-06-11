@@ -433,7 +433,7 @@ def test_plan_command_json_output_has_expected_schema(tmp_path):
     _write_requirement(project)
     runner = CliRunner()
 
-    result = runner.invoke(main, ["plan", "--path", str(project), "--json"])
+    result = runner.invoke(main, ["plan", "--path", str(project), "--format", "json"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)

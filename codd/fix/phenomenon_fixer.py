@@ -9,8 +9,6 @@ path is never touched.
 from __future__ import annotations
 
 import logging
-import os
-import shlex
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,7 +48,12 @@ from codd.fix.phenomenon_parser import (
     parse_phenomenon,
 )
 from codd.fix.risk_classifier import RiskAssessment, classify_risk
-from codd.generator import _resolve_ai_command
+from codd.ai_invoke import (
+    force_claude_print,
+    is_codex_exec_command,
+    prepare_read_only_codex,
+    resolve_ai_command as _resolve_ai_command,
+)
 
 logger = logging.getLogger("codd.fix.phenomenon_fixer")
 
@@ -761,13 +764,11 @@ def _build_default_ai_invoke(
     safe_workspace = tempfile.TemporaryDirectory(prefix="codd-fix-ai-")
     safe_root = Path(safe_workspace.name)
     resolved = _prepare_plain_text_ai_command(resolved, safe_root)
-    parts = shlex.split(resolved)
-    if parts:
-        head = parts[0].lower()
-        if "claude" in head and "-p" not in parts and "--print" not in parts:
-            parts.append("--print")
-            resolved = shlex.join(parts)
+    resolved = force_claude_print(resolved)
 
+    # NOTE: ``get_ai_command`` / ``load_project_config`` stay module-level call
+    # sites here (not folded into codd.ai_invoke) — tests monkeypatch them on
+    # this module to fake transports.
     adapter = get_ai_command(config, project_root=safe_root, command_override=resolved)
 
     def invoke(prompt: str) -> str:
@@ -777,53 +778,8 @@ def _build_default_ai_invoke(
     return invoke
 
 
-def _prepare_plain_text_ai_command(command: str, safe_root: Path) -> str:
-    """Harden agentic AI CLIs so phenomenon-fix LLM calls cannot edit the project."""
-
-    parts = shlex.split(command)
-    if not _is_codex_exec_command(parts):
-        return command
-
-    prompt_arg: str | None = None
-    if parts and parts[-1] == "-":
-        prompt_arg = parts.pop()
-
-    cleaned: list[str] = []
-    skip_next = False
-    flags_with_value = {"--sandbox", "-s", "--cd", "-C", "--add-dir"}
-    banned_flags = {
-        "--full-auto",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--dangerously-bypass-hook-trust",
-    }
-    for part in parts:
-        if skip_next:
-            skip_next = False
-            continue
-        if part in banned_flags:
-            continue
-        if part in flags_with_value:
-            skip_next = True
-            continue
-        if part.startswith("--sandbox=") or part.startswith("--cd=") or part.startswith("--add-dir="):
-            continue
-        cleaned.append(part)
-
-    cleaned.extend([
-        "--sandbox",
-        "read-only",
-        "--cd",
-        safe_root.as_posix(),
-        "--skip-git-repo-check",
-        "--ephemeral",
-    ])
-    if prompt_arg is not None:
-        cleaned.append(prompt_arg)
-    return shlex.join(cleaned)
-
-
-def _is_codex_exec_command(parts: list[str]) -> bool:
-    if len(parts) < 2:
-        return False
-    binary = os.path.basename(parts[0]).lower()
-    return "codex" in binary and parts[1] == "exec"
+# RF4: codex read-only hardening lives in codd.ai_invoke; the historical
+# private names are kept because tests (and possibly downstream code) import
+# them from this module.
+_prepare_plain_text_ai_command = prepare_read_only_codex
+_is_codex_exec_command = is_codex_exec_command

@@ -1,7 +1,8 @@
 """CoDD AI Extract — AI-powered design document recovery from codebases.
 
-Uses _invoke_ai_command() (subprocess + stdin) to pass project context
-to an AI CLI (default: claude --print) and generate 6-layer design docs.
+Uses the unified codd.ai_invoke layer (subprocess + stdin, bounded retries)
+to pass project context to an AI CLI (default: claude --print) and generate
+6-layer design docs.
 
 Two-phase approach:
   Phase 1: Deterministic pre-scan (Python) — discover files, read key contents
@@ -10,15 +11,18 @@ Two-phase approach:
 
 from __future__ import annotations
 
-import os
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from codd.claude_cli import with_default_claude_permission_bypass
+from codd.ai_invoke import invoke_ai
+from codd.discovery import (
+    DEFAULT_IGNORED_DIRS,
+    SOURCE_EXTENSIONS as _SHARED_SOURCE_EXTENSIONS,
+    iter_source_files,
+)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -53,9 +57,10 @@ SCHEMA_PATTERNS = [
 
 # Generic source extensions included in the AI context scan. The deterministic
 # parser decides language-specific structure later; this layer keeps raw text.
-SOURCE_EXTENSIONS = {
-    ".go", ".java", ".js", ".jsx", ".php", ".py", ".rb", ".ts", ".tsx", ".vue",
-}
+# Unified language coverage — single source of truth lives in codd.discovery.
+# Context size is bounded by MAX_FILE_SIZE / MAX_CONTEXT_CHARS (count/size
+# caps), never by silently narrowing the language coverage.
+SOURCE_EXTENSIONS = _SHARED_SOURCE_EXTENSIONS
 
 # Max file size to include in prompt (bytes)
 MAX_FILE_SIZE = 50_000
@@ -68,12 +73,9 @@ MAX_CONTEXT_CHARS = 400_000
 # they cannot crowd out source/IaC context.
 MAX_TEST_CONTEXT_CHARS = 120_000
 
-# Directories to always skip
-SKIP_DIRS = {
-    "node_modules", ".next", "dist", "build", "coverage",
-    ".turbo", ".cache", "vendor", "tmp", "__pycache__",
-    ".git", ".venv", "venv", "env",
-}
+# Directories to always skip — single source of truth lives in codd.discovery
+# (kept under the historical local name for in-module use).
+SKIP_DIRS = DEFAULT_IGNORED_DIRS
 
 
 # ═══════════════════════════════════════════════════════════
@@ -195,23 +197,14 @@ def _find_source_files(root: Path) -> list[Path]:
 def _find_source_files_by_extension(root: Path) -> list[Path]:
     """Find source files generically by extension, preserving raw text for AI."""
     files: list[Path] = []
-    for current, dirs, filenames in os.walk(root):
-        dirs[:] = [
-            d for d in dirs
-            if d not in SKIP_DIRS and not d.startswith(".")
-        ]
-        current_path = Path(current)
-        for filename in filenames:
-            path = current_path / filename
-            if path.suffix not in SOURCE_EXTENSIONS:
-                continue
-            try:
-                rel_parts = path.relative_to(root).parts
-            except ValueError:
-                continue
-            if _is_test_path(rel_parts) or any(part in SKIP_DIRS for part in rel_parts):
-                continue
-            files.append(path)
+    for path in iter_source_files(root, extensions=SOURCE_EXTENSIONS):
+        try:
+            rel_parts = path.relative_to(root).parts
+        except ValueError:
+            continue
+        if _is_test_path(rel_parts):
+            continue
+        files.append(path)
     return files
 
 
@@ -468,35 +461,20 @@ Rules:
 # Phase 3: AI invocation + output parsing
 # ═══════════════════════════════════════════════════════════
 
+# Bounded retries for the (single, expensive) brownfield extraction call.
+# RF4 improvement: extraction used to abort on one transient CLI hiccup
+# (nonzero exit / empty output); it now retries up to 2 times.
+EXTRACT_AI_RETRIES = 2
+
+
 def _invoke_ai_command(ai_command: str, prompt: str) -> str:
-    """Invoke AI CLI via subprocess with prompt on stdin.
+    """Invoke AI CLI via the unified layer (codd.ai_invoke).
 
-    Mirrors generator._invoke_ai_command() pattern.
+    Same semantics as before RF4 (permission bypass, stdin prompt, stdout
+    capture, no file-writing-agent routing) PLUS bounded retries on transient
+    failures.
     """
-    import shlex
-    command = with_default_claude_permission_bypass(shlex.split(ai_command))
-    if not command:
-        raise ValueError("ai_command must not be empty")
-
-    try:
-        result = subprocess.run(
-            command,
-            input=prompt,
-            capture_output=True,
-            text=True, encoding="utf-8",
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise ValueError(f"AI command not found: {command[0]}") from exc
-
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
-        raise ValueError(f"AI command failed: {detail}")
-
-    if not result.stdout.strip():
-        raise ValueError("AI command returned empty output")
-
-    return result.stdout
+    return invoke_ai(ai_command, prompt, retries=EXTRACT_AI_RETRIES)
 
 
 def _safe_output_path(output_dir: Path, name: str) -> Path:

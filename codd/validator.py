@@ -13,6 +13,7 @@ import yaml
 from codd.bridge import load_bridge_registry
 from codd.coherence_adapters import design_token_violation_to_event, validation_issue_to_event
 from codd.coherence_engine import EventBus
+from codd.frontmatter import parse_frontmatter
 
 
 NODE_ID_PATTERN = re.compile(r"^(?P<prefix>[a-z_]+):(?P<name>.+)$")
@@ -483,26 +484,17 @@ def _parse_codd_frontmatter(file_path: Path) -> FrontmatterParseResult:
             }
         )
 
-    match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-    if not match:
-        return FrontmatterParseResult(
-            error={
-                "code": "missing_frontmatter",
-                "message": "missing CoDD YAML frontmatter",
-            }
-        )
-
-    try:
-        frontmatter = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as exc:
+    result = parse_frontmatter(content)
+    if result.error == "invalid_yaml":
         return FrontmatterParseResult(
             error={
                 "code": "invalid_frontmatter",
-                "message": f"invalid YAML frontmatter: {exc}",
+                "message": result.error_message or "invalid YAML frontmatter",
             }
         )
 
-    if not isinstance(frontmatter, dict) or not isinstance(frontmatter.get("codd"), dict):
+    codd = result.mapping.get("codd")
+    if not isinstance(codd, dict):
         return FrontmatterParseResult(
             error={
                 "code": "missing_frontmatter",
@@ -510,7 +502,7 @@ def _parse_codd_frontmatter(file_path: Path) -> FrontmatterParseResult:
             }
         )
 
-    return FrontmatterParseResult(codd=frontmatter["codd"])
+    return FrontmatterParseResult(codd=codd)
 
 
 def _is_valid_node_id(node_id: str, allowed_prefixes: set[str] | None = None) -> bool:

@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from codd.confidence import classify_band as _classify_band
+
 
 class CEG:
     """Conditioned Evidence Graph — JSONL-backed dependency graph.
@@ -258,12 +260,12 @@ class CEG:
                       green_threshold: float = 0.90,
                       green_min_evidence: int = 2,
                       amber_threshold: float = 0.50) -> str:
-        if confidence >= green_threshold and evidence_count >= green_min_evidence:
-            return "green"
-        elif confidence >= amber_threshold:
-            return "amber"
-        else:
-            return "gray"
+        # Canonical semantics live in codd.confidence (single owner of the
+        # band vocabulary + thresholds); this method delegates unchanged.
+        return _classify_band(
+            confidence, evidence_count,
+            green_threshold, green_min_evidence, amber_threshold,
+        )
 
     # ── Selective refresh ──
 

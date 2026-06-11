@@ -42,10 +42,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from codd.confidence import BAND_GREEN, cap_testimony
+
 # Constants of the testimony evidence class (structural, not configurable):
-# testimony is a CLAIM about intent and is therefore capped at amber.
+# testimony is a CLAIM about intent and is therefore capped at amber. The cap
+# itself is owned by codd.confidence (the canonical confidence vocabulary);
+# deriving the constant through it makes the rule provably consistent: even
+# the best testimony (green-grade support) can never exceed amber.
 KIND_TESTIMONY = "testimony"
-TESTIMONY_BAND = "amber"
+TESTIMONY_BAND = cap_testimony(BAND_GREEN)  # == "amber"
 
 # Bounds (keep total subprocess calls predictable).
 DEFAULT_MAX_LOCATORS = 50

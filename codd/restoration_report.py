@@ -46,13 +46,15 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
+from codd.confidence import BAND_AMBER, BAND_GREEN
 from codd.scanner import _extract_frontmatter
 
 # ---------------------------------------------------------------------------
 # Vocabulary
 # ---------------------------------------------------------------------------
-BAND_GREEN = "green"
-BAND_AMBER = "amber"
+# Band names are owned by codd.confidence (the canonical confidence model);
+# restored frontmatter uses the green/amber subset (the restore prompt contract
+# never emits gray), so only those two are counted here.
 BANDS: tuple[str, ...] = (BAND_GREEN, BAND_AMBER)
 
 # Evidence-source classes, inferred from a provenance locator's *shape*.
@@ -666,7 +668,7 @@ def _summarize_document(
     summary = RestoredArtifactSummary(
         node_id=node_id or rel,
         path=rel,
-        artifact_id=_classify_artifact_id(rel, str(codd.get("type") or "")),
+        artifact_id=_classify_artifact_id(rel, str(codd.get("type") or ""), node_id=node_id),
         statement_count=statement_count,
         band_counts={k: v for k, v in band_counts.items() if v},
         source_counts={k: v for k, v in source_counts.items() if v},
@@ -731,8 +733,26 @@ def _extract_depends_on_ids(depends_on: Any) -> list[str]:
     return out
 
 
-def _classify_artifact_id(rel_path: str, doc_type: str) -> str | None:
-    """Map a restored doc to a catalog artifact id by path/type heuristics."""
+def _classify_artifact_id(rel_path: str, doc_type: str, node_id: str = "") -> str | None:
+    """Map a restored doc to a catalog artifact id.
+
+    Resolution order: (1) the cross-space artifact-id resolver
+    (:mod:`codd.artifact_ids`) on the doc's declared ``node_id`` — a doc that
+    names its own identity (a catalog id, or a required-artifacts id like
+    ``design:operations_runbook`` / DAG-style ``design:operations-runbook``)
+    is authoritative; (2) path-token inference; (3) the doc ``type`` field
+    (the original heuristics, kept as the fallback).
+    """
+
+    if node_id:
+        try:
+            from codd.artifact_ids import resolve_artifact_id
+
+            resolved = resolve_artifact_id(node_id)
+        except Exception:
+            resolved = None
+        if resolved is not None:
+            return resolved.id
 
     lowered = PurePosixPath(rel_path).as_posix().lower()
     for artifact_id, tokens in _ARTIFACT_PATH_TOKENS:

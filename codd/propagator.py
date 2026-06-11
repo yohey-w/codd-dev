@@ -7,19 +7,28 @@ import re
 import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from codd._git_helper import _diff_files, _resolve_base_ref
 from codd.config import find_codd_dir, load_project_config
 from codd.coherence_engine import DriftEvent, EventBus, Orchestrator, use_coherence_bus
+from codd.confidence import classify_band as _confidence_classify_band
+from codd.confidence import thresholds_from_config
 from codd.fixup_drift_strategies import FixProposal, get_strategy
 from codd.generator import (
     _invoke_ai_command,
     _resolve_ai_command,
     MARKDOWN_FENCE_RE,
 )
-from codd.scanner import _extract_frontmatter
+from codd.propagation_common import (
+    doc_modules,
+    get_changed_files,
+    iter_design_docs,
+    map_files_to_modules as _map_files_to_modules,
+    read_codd_frontmatter as _extract_frontmatter,
+    render_updated_doc_content,
+)
 
 
 def _json_default(obj: Any) -> str:
@@ -826,13 +835,18 @@ def _classify_docs_by_band(
     affected_docs: list[AffectedDoc],
     bands_config: dict[str, Any],
 ) -> list[VerifiedDoc]:
-    """Classify affected docs into green/amber/gray bands using graph evidence."""
-    from codd.graph import CEG
+    """Classify affected docs into green/amber/gray bands using graph evidence.
 
-    green_cfg = bands_config.get("green", {})
-    green_threshold = green_cfg.get("min_confidence", 0.90)
-    green_min_evidence = green_cfg.get("min_evidence_count", 2)
-    amber_threshold = bands_config.get("amber", {}).get("min_confidence", 0.50)
+    Band semantics are the canonical ones from :mod:`codd.confidence` (the
+    same model ``CEG.classify_band`` delegates to): threshold reading via
+    :func:`codd.confidence.thresholds_from_config` and classification via
+    :func:`codd.confidence.classify_band`. The "no graph → amber" fallback is
+    kept explicit, and it agrees with the model: without a graph
+    ``_get_doc_confidence`` yields ``(0.5, 0)``, which classifies as amber.
+    """
+    green_threshold, green_min_evidence, amber_threshold = thresholds_from_config(
+        bands_config
+    )
 
     # Try to load graph for confidence data
     graph = _load_graph(project_root, config)
@@ -841,9 +855,8 @@ def _classify_docs_by_band(
     for doc in affected_docs:
         confidence, evidence_count = _get_doc_confidence(graph, doc)
 
-        # Use CEG.classify_band if graph available, else inline fallback
         if graph is not None:
-            band = graph.classify_band(
+            band = _confidence_classify_band(
                 confidence, evidence_count,
                 green_threshold, green_min_evidence, amber_threshold,
             )
@@ -1073,41 +1086,7 @@ def _git_commit_propagation(
 
 def _get_changed_files(project_root: Path, diff_target: str) -> list[str]:
     """Get changed files from git diff."""
-    try:
-        result = subprocess.run(
-            ["git", "-c", "core.quotePath=false", "diff", "--name-only", diff_target],
-            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root),
-        )
-        if result.returncode != 0:
-            return []
-        return [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
-    except FileNotFoundError:
-        return []
-
-
-def _map_files_to_modules(
-    changed_files: list[str],
-    source_dirs: list[str],
-) -> dict[str, str]:
-    """Map changed source files to module names.
-
-    Module = first directory under a source_dir.
-    e.g. src/auth/service.py with source_dirs=["src"] → module "auth"
-    """
-    file_module: dict[str, str] = {}
-    normalized_dirs = [d.rstrip("/") for d in source_dirs]
-
-    for f in changed_files:
-        parts = PurePosixPath(f).parts
-        for src_dir in normalized_dirs:
-            src_parts = PurePosixPath(src_dir).parts
-            if parts[: len(src_parts)] == src_parts and len(parts) > len(src_parts) + 1:
-                # First dir after source_dir is the module
-                module_name = parts[len(src_parts)]
-                file_module[f] = module_name
-                break
-
-    return file_module
+    return get_changed_files(project_root, diff_target)
 
 
 def _find_design_docs_by_modules(
@@ -1120,43 +1099,32 @@ def _find_design_docs_by_modules(
     affected: list[AffectedDoc] = []
     seen_node_ids: set[str] = set()
 
-    doc_dirs = config.get("scan", {}).get("doc_dirs", [])
-
-    for doc_dir in doc_dirs:
-        full_path = project_root / doc_dir
-        if not full_path.exists():
+    for md_file, codd_data in iter_design_docs(project_root, config):
+        modules = doc_modules(codd_data)
+        if not modules:
             continue
 
-        for md_file in full_path.rglob("*.md"):
-            codd_data = _extract_frontmatter(md_file)
-            if not codd_data or "node_id" not in codd_data:
-                continue
+        matched = set(modules) & changed_modules
+        if not matched:
+            continue
 
-            doc_modules = codd_data.get("modules", [])
-            if not doc_modules:
-                continue
+        node_id = codd_data["node_id"]
+        if node_id in seen_node_ids:
+            continue
+        seen_node_ids.add(node_id)
 
-            matched = set(doc_modules) & changed_modules
-            if not matched:
-                continue
+        # Collect changed files for matched modules
+        matched_files = [f for f, m in file_module_map.items() if m in matched]
 
-            node_id = codd_data["node_id"]
-            if node_id in seen_node_ids:
-                continue
-            seen_node_ids.add(node_id)
-
-            # Collect changed files for matched modules
-            matched_files = [f for f, m in file_module_map.items() if m in matched]
-
-            rel_path = md_file.relative_to(project_root).as_posix()
-            affected.append(AffectedDoc(
-                node_id=node_id,
-                path=rel_path,
-                title=codd_data.get("title", node_id),
-                modules=doc_modules,
-                matched_modules=sorted(matched),
-                changed_files=matched_files,
-            ))
+        rel_path = md_file.relative_to(project_root).as_posix()
+        affected.append(AffectedDoc(
+            node_id=node_id,
+            path=rel_path,
+            title=codd_data.get("title", node_id),
+            modules=modules,
+            matched_modules=sorted(matched),
+            changed_files=matched_files,
+        ))
 
     # Also check wave_config artifacts (they have modules but may not be scanned yet)
     wave_config = config.get("wave_config")
@@ -1256,36 +1224,25 @@ def _find_docs_depending_on(
 
     # Resolve node_ids to file paths by scanning doc_dirs
     affected: list[AffectedDoc] = []
-    doc_dirs = config.get("scan", {}).get("doc_dirs", [])
 
-    for doc_dir in doc_dirs:
-        full_path = project_root / doc_dir
-        if not full_path.exists():
+    for md_file, codd_data in iter_design_docs(project_root, config):
+        node_id = codd_data["node_id"]
+        if node_id not in dependent_node_ids:
             continue
 
-        for md_file in full_path.rglob("*.md"):
-            codd_data = _extract_frontmatter(md_file)
-            if not codd_data or "node_id" not in codd_data:
-                continue
+        rel_path = md_file.relative_to(project_root).as_posix()
+        if rel_path in changed_paths:
+            continue  # Don't update the doc that was changed
 
-            node_id = codd_data["node_id"]
-            if node_id not in dependent_node_ids:
-                continue
-
-            rel_path = md_file.relative_to(project_root).as_posix()
-            if rel_path in changed_paths:
-                continue  # Don't update the doc that was changed
-
-            triggering = sorted(dependent_node_ids[node_id])
-            affected.append(AffectedDoc(
-                node_id=node_id,
-                path=rel_path,
-                title=codd_data.get("title", node_id),
-                modules=codd_data.get("modules", []),
-                matched_modules=[],  # not module-based
-                changed_files=[d["path"] for d in changed_docs
-                               if d["node_id"] in dependent_node_ids[node_id]],
-            ))
+        affected.append(AffectedDoc(
+            node_id=node_id,
+            path=rel_path,
+            title=codd_data.get("title", node_id),
+            modules=doc_modules(codd_data),
+            matched_modules=[],  # not module-based
+            changed_files=[d["path"] for d in changed_docs
+                           if d["node_id"] in dependent_node_ids[node_id]],
+        ))
 
     return affected
 
@@ -1435,22 +1392,6 @@ def _sanitize_update_body(body: str) -> str:
 
 def _write_updated_doc(doc_path: Path, original_content: str, new_body: str) -> None:
     """Replace the body of a design document while preserving frontmatter."""
-    # Split original into frontmatter + body
-    import re
-
-    match = re.match(r'^(---\s*\n.*?\n---\s*\n)', original_content, re.DOTALL)
-    if match:
-        frontmatter = match.group(1)
-    else:
-        frontmatter = ""
-
-    # Find the title in the new body and skip it (frontmatter already has context)
-    body_lines = new_body.strip().split("\n")
-    if body_lines and body_lines[0].startswith("# "):
-        # Keep the title from original
-        title_match = re.search(r'^# .+$', original_content, re.MULTILINE)
-        if title_match:
-            title_line = title_match.group(0)
-            body_lines[0] = title_line
-
-    doc_path.write_text(frontmatter + "\n".join(body_lines) + "\n", encoding="utf-8")
+    doc_path.write_text(
+        render_updated_doc_content(original_content, new_body), encoding="utf-8"
+    )
