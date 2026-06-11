@@ -1,13 +1,16 @@
 """Change propagation engine — impact analysis from git diff."""
 
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
+from codd.confidence import thresholds_from_config
 from codd.graph import CEG
-from codd.scanner import _extract_frontmatter
+from codd.propagation_common import (
+    get_changed_files,
+    read_codd_frontmatter as _extract_frontmatter,
+)
 
 
 def run_impact(project_root: Path, codd_dir: Path, diff_target: str,
@@ -28,11 +31,8 @@ def run_impact(project_root: Path, codd_dir: Path, diff_target: str,
     for f in changed_files:
         print(f"  - {f}")
 
-    # Load band thresholds from config
-    bands = config.get("bands", {})
-    green_conf = bands.get("green", {}).get("min_confidence", 0.90)
-    green_evidence = bands.get("green", {}).get("min_evidence_count", 2)
-    amber_conf = bands.get("amber", {}).get("min_confidence", 0.50)
+    # Load band thresholds from config (canonical reader: codd.confidence)
+    green_conf, green_evidence, amber_conf = thresholds_from_config(config)
     max_depth = config.get("propagation", {}).get("max_depth", 10)
 
     # Resolve changed files to graph node IDs
@@ -72,18 +72,7 @@ def run_impact(project_root: Path, codd_dir: Path, diff_target: str,
 
 def _get_changed_files(project_root: Path, diff_target: str) -> list:
     """Get list of changed files from git diff."""
-    try:
-        result = subprocess.run(
-            ["git", "-c", "core.quotePath=false", "diff", "--name-only", diff_target],
-            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root)
-        )
-        if result.returncode != 0:
-            print(f"Warning: git diff failed: {result.stderr.strip()}")
-            return []
-        return [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
-    except FileNotFoundError:
-        print("Warning: git not found.")
-        return []
+    return get_changed_files(project_root, diff_target, warn=True)
 
 
 def _resolve_start_nodes(ceg: CEG, project_root: Path, changed_files: list) -> list:

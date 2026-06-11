@@ -10,6 +10,7 @@ from typing import Any, Mapping, Optional
 import yaml
 
 from codd.action_outcome import canonical_action_verb
+from codd.frontmatter import frontmatter_or_yaml_payload as _frontmatter_or_yaml_payload
 from codd.requirements_meta import (
     normalize_operation_flow,
     operation_enables,
@@ -72,7 +73,6 @@ _ACTION_KEYS = {"action", "actions", "useraction", "useractions", "operation", "
 _TRANSITION_KEYS = {"transition", "transitions", "next", "nextroute", "遷移", "遷移先"}
 _LOW_VALUE_WORDS = {"none", "n/a", "na", "-"}
 _HIGH_KEYWORDS = {"auth", "login", "signup", "checkout", "payment", "admin", "security"}
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*", re.DOTALL)
 _DOC_SUFFIXES = {".md", ".yaml", ".yml"}
 _MUTATING_VERBS = {
     "create",
@@ -1124,25 +1124,6 @@ def _configured_doc_files(project_root: Path, config: Mapping[str, Any]) -> list
         seen.add(key)
         deduped.append(path)
     return deduped
-
-
-def _frontmatter_or_yaml_payload(path: Path) -> dict[str, Any] | None:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    if path.suffix == ".md":
-        match = _FRONTMATTER_RE.search(text)
-        if not match:
-            return None
-        raw = match.group(1)
-    else:
-        raw = text
-    try:
-        payload = yaml.safe_load(raw) or {}
-    except yaml.YAMLError:
-        return None
-    return dict(payload) if isinstance(payload, Mapping) else None
 
 
 def _actor_values(mapping: Mapping[str, Any]) -> list[str]:

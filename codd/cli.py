@@ -31,6 +31,7 @@ from codd.capability_completeness import (
     enablement_declaration_nudges,
 )
 from codd.config import find_codd_dir, load_project_config
+from codd.frontmatter import frontmatter_or_yaml_payload as _frontmatter_or_yaml_payload
 from codd.requirement_reconciliation import (
     discover_requirement_docs,
     requirement_reconciliation_warnings,
@@ -43,6 +44,73 @@ from codd.lexicon import LEXICON_FILENAME, load_lexicon, load_project_extends
 from codd.skills_cli import manager as skills_manager
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+
+def project_root_option(param: str = "path", **overrides):
+    """Project-root option accepted as both ``--path`` and ``--project-path``.
+
+    ``param`` preserves the parameter name each command function already
+    expects (``path`` or ``project_path``), so call sites migrate without
+    changing their signatures. Keyword ``overrides`` (e.g. ``default=None``)
+    take precedence over the shared defaults.
+    """
+    kwargs: dict[str, Any] = {
+        "default": ".",
+        "show_default": True,
+        "help": "Project root directory",
+    }
+    kwargs.update(overrides)
+    return click.option("--path", "--project-path", param, **kwargs)
+
+
+def _resolve_output_format(output_format: str, as_json: bool, command: str) -> str:
+    """Fold the deprecated ``--json`` flag into the standard ``--format``.
+
+    Emits a one-line deprecation note on stderr when ``--json`` is used so
+    existing scripts keep working while stdout stays machine-readable.
+    """
+    if as_json:
+        click.echo(
+            f"note: '--json' is deprecated; use '{command} --format json' instead.",
+            err=True,
+        )
+        return "json"
+    return output_format
+
+
+class _AliasedGroup(click.Group):
+    """Group whose deprecated legacy verbs resolve to canonical subcommands.
+
+    RF6 unifies every HITL proposal flow on the canonical verb lifecycle
+    ``derive → show → approve → apply``. Legacy verbs keep working as hidden
+    aliases: they never appear in ``--help`` (only canonical names are
+    listed in ``list_commands``), and using one emits a one-line stderr
+    deprecation note while behaving identically to the canonical command.
+    """
+
+    def __init__(self, *args: Any, aliases: dict[str, str] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        #: legacy verb -> canonical subcommand name
+        self.command_aliases: dict[str, str] = dict(aliases or {})
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        canonical = self.command_aliases.get(cmd_name)
+        if canonical is not None:
+            if not ctx.resilient_parsing:
+                click.echo(
+                    f"note: 'codd {self.name} {cmd_name}' is deprecated; "
+                    f"use 'codd {self.name} {canonical}'.",
+                    err=True,
+                )
+            cmd_name = canonical
+        return super().get_command(ctx, cmd_name)
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        # Return the canonical name so usage/error text never shows the alias.
+        _name, cmd, rest = super().resolve_command(ctx, args)
+        return (cmd.name if cmd is not None else None), cmd, rest
 
 
 class CoddCLIError(RuntimeError):
@@ -411,7 +479,7 @@ def _append_brownfield_bootstrap_todos(config_path: Path) -> None:
     config_path.write_text(existing + separator + _BROWNFIELD_BOOTSTRAP_TODOS, encoding="utf-8")
 
 
-@click.group()
+@click.group(epilog="Health: codd check (start here). Drill down with doctor, dag verify, and contract verify.")
 @click.version_option(package_name="codd-dev")
 @click.pass_context
 def main(ctx: click.Context):
@@ -424,7 +492,7 @@ def main(ctx: click.Context):
 @main.command("version")
 @click.option("--check", "check_project", is_flag=True, help="Check installed CoDD against codd.yaml requirement")
 @click.option("--strict", is_flag=True, help="Exit non-zero when the version requirement is not satisfied")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def version_cmd(check_project: bool, strict: bool, project_path: str) -> None:
     """Print the installed CoDD version."""
     installed = _installed_codd_version()
@@ -449,7 +517,7 @@ def version_cmd(check_project: bool, strict: bool, project_path: str) -> None:
 
 @main.command("preflight")
 @click.argument("task_yaml", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--strict", is_flag=True, help="Treat high severity as halt-worthy")
 @click.option("--ntfy-topic", default="", help="ntfy topic for critical alerts")
 @click.option(
@@ -463,7 +531,7 @@ def preflight(task_yaml: Path, project_path: str, strict: bool, ntfy_topic: str,
 
 
 @main.command("doctor")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def doctor(project_path: str) -> None:
     """Run project-level configuration diagnostics."""
     project_root = Path(project_path).resolve()
@@ -483,7 +551,7 @@ def doctor(project_path: str) -> None:
 
 @main.command("gungi")
 @click.argument("task_yaml", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--strict", is_flag=True, help="Treat high severity as halt-worthy")
 @click.option("--ntfy-topic", default="", help="ntfy topic for critical alerts")
 @click.option(
@@ -530,6 +598,288 @@ def _run_preflight_command(
         reason = "strict high severity" if strict_halt else "critical issue found"
         click.echo(f"HALT recommended: {reason}")
         raise SystemExit(1)
+
+
+@main.command("check", epilog="Task-YAML preflight stays separate: run 'codd preflight <task.yaml>'.")
+@project_root_option("project_path")
+@click.option("--full", "run_full", is_flag=True, default=False, help="Also run policy and coverage threshold gates.")
+@click.option(
+    "--fix",
+    "apply_fixes",
+    is_flag=True,
+    default=False,
+    help="Apply mechanical auto-repairs during the dag stage (same as 'codd dag verify --auto-repair --apply').",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    help="Output format",
+)
+def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_format: str) -> None:
+    """Run the aggregated project health check (start here).
+
+    Aggregates, in order: doctor diagnostics (advisory), dag verify
+    (all registered checks per project config), and contract verify
+    (no-op when the artifact contract is disabled). With --full it also
+    runs the policy and coverage threshold gates when configured.
+
+    Exit code is non-zero only when a gate fails (red dag check,
+    enabled-contract failure, policy critical violation, or coverage
+    threshold violation). Advisory findings (doctor warnings, amber dag
+    checks) keep exit 0.
+    """
+    from codd.artifact_contract import CatalogError, load_catalog, load_contract, verify_contract
+    from codd.dag.runner import run_all_checks, unselected_check_names
+
+    project_root = Path(project_path).resolve()
+    _require_codd_dir(project_root)
+
+    as_text = output_format == "text"
+    payload: dict[str, Any] = {}
+    notices: list[str] = []
+    errors: dict[str, str] = {}
+    gates_failed = 0
+    advisories = 0
+
+    def _section(title: str) -> None:
+        if as_text:
+            click.echo(f"== {title} ==")
+
+    def _line(message: str) -> None:
+        if as_text:
+            click.echo(message)
+
+    # --- doctor (advisory) -------------------------------------------------
+    _section("doctor (advisory)")
+    try:
+        doctor_warnings = _doctor_warnings(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        doctor_warnings = []
+        errors["doctor"] = str(exc)
+        notices.append(f"doctor could not run: {exc}")
+    payload["doctor"] = doctor_warnings
+    advisories += len(doctor_warnings)
+    if "doctor" in errors:
+        _line(f"  ERROR — {errors['doctor']}")
+    elif doctor_warnings:
+        _line(f"  WARN — {len(doctor_warnings)} advisory finding(s)")
+        for warning in doctor_warnings:
+            _line(f"  WARNING: {warning}")
+        _line("  Run 'codd doctor' for details.")
+    else:
+        _line("  PASS — no warnings")
+
+    # --- dag verify (gate) -------------------------------------------------
+    _section("dag verify")
+    dag_results: list[Any] = []
+    try:
+        dag_results = run_all_checks(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        errors["dag"] = str(exc)
+        gates_failed += 1
+        _line(f"  FAIL — {exc}")
+    payload["dag"] = [_dag_result_to_dict(result) for result in dag_results]
+
+    unselected: list[str] = []
+    if dag_results:
+        try:
+            unselected = unselected_check_names(project_root)
+        except Exception:  # visibility aid must never break the health check
+            unselected = []
+    if unselected:
+        notices.append(
+            f"{len(unselected)} registered dag check(s) not selected by enabled_checks: "
+            + ", ".join(unselected)
+        )
+
+    failed_red = [
+        result
+        for result in dag_results
+        if not _dag_result_passed(result)
+        and _dag_result_severity(result) == "red"
+        and _dag_result_status(result) != "opt_out"
+    ]
+    amber_findings = [
+        result
+        for result in dag_results
+        if _dag_result_severity(result) == "amber" and _dag_result_has_findings(result)
+    ]
+    if failed_red:
+        gates_failed += 1
+    advisories += len(amber_findings)
+    for result in dag_results:
+        severity = _dag_result_severity(result)
+        status_value = _dag_result_status(result)
+        if status_value == "opt_out":
+            status = "OPT_OUT"
+        elif _dag_result_passed(result):
+            status = "PASS"
+        else:
+            status = "WARN" if severity == "amber" else "FAIL"
+        _line(f"  {status}  {_dag_result_name(result)} [{severity}]")
+    if failed_red or amber_findings:
+        _line("  Run 'codd dag verify' for details.")
+
+    if apply_fixes and dag_results:
+        from codd.dag.auto_repair import apply_auto_repair
+
+        outcome = apply_auto_repair(project_root, dag_results, dry_run=False)
+        payload["repairs"] = {
+            "applied": [action.description for action in outcome.applied],
+            "skipped": [action.description for action in outcome.skipped],
+        }
+        _line(f"  Applied {len(outcome.applied)} auto-repair(s):")
+        for action in outcome.applied:
+            _line(f"    - {action.description}")
+        if outcome.skipped:
+            _line(f"  Skipped {len(outcome.skipped)} non-repairable violation(s).")
+        if outcome.applied:
+            notices.append("auto-repairs applied; re-run 'codd check' to verify the repaired state.")
+
+    # --- contract verify (gate, no-op when disabled) -----------------------
+    _section("contract verify")
+    contract_payload: dict[str, Any] = {"enabled": False, "status": "skipped"}
+    try:
+        config = load_project_config(project_root)
+        contract = load_contract(config)
+        if not contract.enabled:
+            contract_payload = {
+                "enabled": False,
+                "status": "skipped",
+                "reason": "artifact_contract is disabled (opt-in)",
+            }
+            _line("  skipped: artifact_contract is disabled (opt-in)")
+        elif not contract.stages:
+            contract_payload = {
+                "enabled": True,
+                "status": "skipped",
+                "reason": "artifact_contract declares no stages",
+            }
+            _line("  skipped: artifact_contract is enabled but declares no stages")
+        else:
+            catalog = load_catalog()
+            report = verify_contract(catalog, contract, project_root)
+            contract_payload = {
+                "enabled": True,
+                "status": "fail" if report.has_failures else "pass",
+                "failure_count": report.failure_count,
+                "stages": [
+                    {
+                        "stage": stage_report.stage,
+                        "passed": stage_report.passed,
+                        "checks": [
+                            {
+                                "artifact_id": check.artifact_id,
+                                "ok": check.ok,
+                                "status": check.status,
+                                "detail": check.detail,
+                                "matched_paths": list(check.matched_paths),
+                            }
+                            for check in stage_report.checks
+                        ],
+                    }
+                    for stage_report in report.stages
+                ],
+            }
+            for stage_report in report.stages:
+                verdict = "PASS" if stage_report.passed else "FAIL"
+                _line(f"  {verdict}  stage {stage_report.stage}")
+            if report.has_failures:
+                gates_failed += 1
+                _line(f"  {report.failure_count} required artifact(s) missing/invalid.")
+                _line("  Run 'codd contract verify' for details.")
+    except (CatalogError, FileNotFoundError, ValueError) as exc:
+        errors["contract"] = str(exc)
+        gates_failed += 1
+        contract_payload = {"enabled": True, "status": "error", "error": str(exc)}
+        _line(f"  FAIL — {exc}")
+    payload["contract"] = contract_payload
+
+    if run_full:
+        # --- policy (gate, skipped when unconfigured) ----------------------
+        _section("policy")
+        try:
+            full_config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            full_config = {}
+        if not full_config.get("policies"):
+            payload["policy"] = {"status": "skipped", "reason": "no policies configured in codd.yaml"}
+            _line("  skipped: no policies configured in codd.yaml")
+        else:
+            from codd.policy import run_policy
+
+            try:
+                policy_result = run_policy(project_root)
+                payload["policy"] = {
+                    "status": "pass" if policy_result.pass_ else "fail",
+                    "critical": policy_result.critical_count,
+                    "warnings": policy_result.warning_count,
+                }
+                advisories += policy_result.warning_count
+                if policy_result.pass_:
+                    _line(f"  PASS — critical: 0, warnings: {policy_result.warning_count}")
+                else:
+                    gates_failed += 1
+                    _line(
+                        f"  FAIL — critical: {policy_result.critical_count}, "
+                        f"warnings: {policy_result.warning_count}"
+                    )
+                    _line("  Run 'codd policy' for details.")
+            except (FileNotFoundError, ValueError) as exc:
+                errors["policy"] = str(exc)
+                gates_failed += 1
+                payload["policy"] = {"status": "error", "error": str(exc)}
+                _line(f"  FAIL — {exc}")
+
+        # --- coverage check (gate, skipped when unconfigured) --------------
+        _section("coverage check")
+        coverage_config = full_config.get("coverage") if isinstance(full_config.get("coverage"), dict) else {}
+        if not (coverage_config or {}).get("thresholds"):
+            payload["coverage"] = {
+                "status": "skipped",
+                "reason": "no coverage.thresholds configured in codd.yaml",
+            }
+            _line("  skipped: no coverage.thresholds configured in codd.yaml")
+        else:
+            from codd.lexicon_cli.reporter import CoverageReporter
+            from codd.lexicon_cli.threshold import evaluate, load_thresholds
+
+            try:
+                coverage_report = CoverageReporter(project_root).build("all")
+                threshold_config = load_thresholds(_default_threshold_path(project_root))
+                violations = evaluate(coverage_report, threshold_config)
+                payload["coverage"] = {
+                    "status": "fail" if violations else "pass",
+                    "totals": coverage_report.totals,
+                    "violations": [asdict(violation) for violation in violations],
+                }
+                if violations:
+                    gates_failed += 1
+                    _line(f"  FAIL — {len(violations)} threshold violation(s)")
+                    _line("  Run 'codd coverage check' for details.")
+                else:
+                    _line("  PASS — all coverage thresholds met")
+            except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+                errors["coverage"] = str(exc)
+                gates_failed += 1
+                payload["coverage"] = {"status": "error", "error": str(exc)}
+                _line(f"  FAIL — {exc}")
+
+    if errors:
+        payload["errors"] = errors
+    payload["summary"] = {"gates_failed": gates_failed, "advisories": advisories}
+
+    if as_text:
+        click.echo(f"\nSummary: {gates_failed} gate(s) failed, {advisories} advisory finding(s)")
+    else:
+        click.echo(json.dumps(payload, indent=2, default=str))
+    for notice in notices:
+        click.echo(f"note: {notice}", err=True)
+
+    raise SystemExit(1 if gates_failed else 0)
 
 
 _MUTATING_ENDPOINT_RE = re.compile(
@@ -617,7 +967,6 @@ _TERMINAL_OUTCOME_NAMES = {
     "terminal_state_guard",
     "non_repeatable_guard",
 }
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*", re.DOTALL)
 _GENERATED_E2E_PLACEHOLDER_RE = re.compile(
     r"TODO:\s*Add assertions based on acceptance criteria|Generated CoDD E2E requires concrete assertions",
     re.IGNORECASE,
@@ -652,8 +1001,13 @@ _DOC_SUFFIXES = {".md", ".yaml", ".yml"}
 
 
 def _doctor_warnings(project_root: Path) -> list[str]:
+    from codd.config_schema import project_config_key_warnings
+
     config = load_project_config(project_root)
     warnings: list[str] = []
+    # Config-key typo guard (advisory): unknown codd.yaml keys are silently
+    # ignored by the loader, so surface them here with did-you-mean hints.
+    warnings.extend(project_config_key_warnings(project_root))
     has_crud_flow_targets = _has_crud_flow_targets(config)
     has_action_outcome_targets = _has_action_outcome_targets(config)
     if (
@@ -753,22 +1107,6 @@ def _configured_doc_files(project_root: Path, config: dict[str, Any]) -> list[Pa
             if path.is_file() and path.suffix in _DOC_SUFFIXES:
                 files.append(path)
     return files
-
-
-def _frontmatter_or_yaml_payload(path: Path) -> dict[str, Any] | None:
-    text = _read_text_best_effort(path)
-    if path.suffix == ".md":
-        match = _FRONTMATTER_RE.search(text)
-        if not match:
-            return None
-        raw = match.group(1)
-    else:
-        raw = text
-    try:
-        payload = yaml.safe_load(raw) or {}
-    except yaml.YAMLError:
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _action_outcome_warning_messages(
@@ -1911,14 +2249,10 @@ def _operations_codd_dir(project_path: str) -> tuple[Path, Path]:
 def _build_operations_ai_invoke(project_root: Path, config: dict[str, Any], ai_cmd: str | None):
     """Build a plain text-in/text-out AI invoker for operation derivation."""
 
+    from codd.ai_invoke import force_claude_print, resolve_ai_command
     from codd.deployment.providers.ai_command_factory import get_ai_command
-    from codd.generator import _resolve_ai_command
 
-    resolved = _resolve_ai_command(config, ai_cmd, command_name="generate")
-    parts = shlex.split(resolved)
-    if parts and "claude" in parts[0].lower() and "-p" not in parts and "--print" not in parts:
-        parts.append("--print")
-        resolved = shlex.join(parts)
+    resolved = force_claude_print(resolve_ai_command(config, ai_cmd, command_name="generate"))
     adapter = get_ai_command(config, project_root=project_root, command_override=resolved)
 
     def invoke(prompt: str) -> str:
@@ -1927,13 +2261,16 @@ def _build_operations_ai_invoke(project_root: Path, config: dict[str, Any], ai_c
     return invoke
 
 
-@main.group("operations")
+@main.group("operations", cls=_AliasedGroup, aliases={"merge": "apply"})
 def operations_cmd() -> None:
-    """Derive, review, approve, and merge candidate operation_flow entries (HITL)."""
+    """Derive, review, approve, and apply candidate operation_flow entries (HITL).
+
+    Lifecycle: derive → show → approve → apply (alias: merge deprecated).
+    """
 
 
 @operations_cmd.command("derive")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--ai-cmd", default=None, help="Override AI CLI command (defaults to codd.yaml ai_command).")
 @click.option("--output", default=None, help="Proposal artifact path (default: <codd-dir>/operations_proposal.yaml).")
 def operations_derive_cmd(project_path: str, ai_cmd: str | None, output: str | None) -> None:
@@ -1960,11 +2297,11 @@ def operations_derive_cmd(project_path: str, ai_cmd: str | None, output: str | N
         click.echo(f"Skipped (no usable proposal): {len(result.skipped_units)}")
     click.echo(f"Proposal written: {rel}")
     if result.artifact.proposals:
-        click.echo("Review with `codd operations show`, then `codd operations approve` and `codd operations merge`.")
+        click.echo("Review with `codd operations show`, then `codd operations approve` and `codd operations apply`.")
 
 
 @operations_cmd.command("show")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--output", default=None, help="Proposal artifact path (default: <codd-dir>/operations_proposal.yaml).")
 def operations_show_cmd(project_path: str, output: str | None) -> None:
     """Show declared operations and any pending proposal (diff-style)."""
@@ -1977,7 +2314,7 @@ def operations_show_cmd(project_path: str, output: str | None) -> None:
 
 
 @operations_cmd.command("approve")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--output", default=None, help="Proposal artifact path (default: <codd-dir>/operations_proposal.yaml).")
 @click.option("--all", "approve_all", is_flag=True, default=False, help="Approve every pending proposal.")
 @click.option("--id", "ids", multiple=True, help="Approve a specific proposal id (repeatable).")
@@ -2004,12 +2341,12 @@ def operations_approve_cmd(project_path: str, output: str | None, approve_all: b
         click.echo("No matching proposals approved.")
 
 
-@operations_cmd.command("merge")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@operations_cmd.command("apply")
+@project_root_option("project_path")
 @click.option("--output", default=None, help="Proposal artifact path (default: <codd-dir>/operations_proposal.yaml).")
 @click.option("--dry-run", is_flag=True, default=False, help="Show the merge diff without writing codd.yaml.")
-def operations_merge_cmd(project_path: str, output: str | None, dry_run: bool) -> None:
-    """Merge approved proposal entries into codd.yaml operation_flow."""
+def operations_apply_cmd(project_path: str, output: str | None, dry_run: bool) -> None:
+    """Apply (merge) approved proposal entries into codd.yaml operation_flow."""
     import codd.operations_derive as opx
 
     project_root, codd_dir = _operations_codd_dir(project_path)
@@ -2049,13 +2386,16 @@ def operations_merge_cmd(project_path: str, output: str | None, dry_run: bool) -
     click.echo(f"Merged {count} operation(s) into {_display_path(codd_yaml, project_root)}")
 
 
-@main.group("contract")
+@main.group("contract", cls=_AliasedGroup, aliases={"suggest": "derive", "adopt": "apply"})
 def contract_cmd() -> None:
-    """Inspect and verify the per-project artifact contract (V-model gate)."""
+    """Inspect and verify the per-project artifact contract (V-model gate).
+
+    Lifecycle: derive → show → apply (alias: suggest/adopt deprecated).
+    """
 
 
 @contract_cmd.command("show")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def contract_show_cmd(project_path: str) -> None:
     """Render the resolved artifact catalog and this project's contract."""
     from codd.artifact_contract import (
@@ -2065,6 +2405,7 @@ def contract_show_cmd(project_path: str) -> None:
         render_catalog,
         render_contract,
     )
+    from codd.artifact_ids import render_required_id_mapping
 
     project_root = Path(project_path).resolve()
     config = load_project_config(project_root)
@@ -2076,10 +2417,13 @@ def contract_show_cmd(project_path: str) -> None:
     contract = load_contract(config)
     click.echo(render_catalog(catalog))
     click.echo(render_contract(contract))
+    # Cross-space resolver status: required_artifacts ids <-> catalog ids,
+    # including the drift guard for unmapped required ids.
+    click.echo(render_required_id_mapping(catalog))
 
 
 @contract_cmd.command("verify")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--stage", default=None, help="Verify only this stage (default: all declared stages).")
 def contract_verify_cmd(project_path: str, stage: str | None) -> None:
     """Deterministically verify required artifacts exist per declared stage.
@@ -2142,21 +2486,21 @@ def _contract_codd_dir(project_path: str) -> tuple[Path, Path]:
     return project_root, codd_dir
 
 
-@contract_cmd.command("suggest")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@contract_cmd.command("derive")
+@project_root_option("project_path")
 @click.option(
     "--output",
     default=None,
     help="Proposal file path (default: <codd-dir>/contract_proposal.yaml).",
 )
-def contract_suggest_cmd(project_path: str, output: str | None) -> None:
+def contract_derive_cmd(project_path: str, output: str | None) -> None:
     """Deterministically SELECT which catalog artifacts this project uses.
 
     The catalog enumerates candidate artifacts universally; this inspects the
     project's signals (existing files, requirement docs, declared operation_flow)
     and proposes a per-stage `artifact_contract` mapping. Read-only: writes a
     reviewable proposal file only — NEVER codd.yaml. Review, then `codd contract
-    adopt`.
+    apply`.
     """
     import codd.artifact_contract as acx
     from codd.requirement_reconciliation import discover_requirement_docs
@@ -2189,11 +2533,11 @@ def contract_suggest_cmd(project_path: str, output: str | None) -> None:
 
     click.echo(acx.render_suggestion(proposal))
     click.echo(f"\nProposal written: {_display_path(out_path, project_root)}")
-    click.echo("Review, then apply with `codd contract adopt` (add --enable to turn the gate on).")
+    click.echo("Review, then apply with `codd contract apply` (add --enable to turn the gate on).")
 
 
-@contract_cmd.command("adopt")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@contract_cmd.command("apply")
+@project_root_option("project_path")
 @click.option(
     "--output",
     default=None,
@@ -2206,8 +2550,8 @@ def contract_suggest_cmd(project_path: str, output: str | None) -> None:
     default=False,
     help="Also set artifact_contract.enabled: true (otherwise left as-is — opt-in).",
 )
-def contract_adopt_cmd(project_path: str, output: str | None, dry_run: bool, enable: bool) -> None:
-    """Merge the proposed per-stage selection into codd.yaml (non-destructive, opt-in)."""
+def contract_apply_cmd(project_path: str, output: str | None, dry_run: bool, enable: bool) -> None:
+    """Apply (merge) the proposed per-stage selection into codd.yaml (non-destructive, opt-in)."""
     import codd.artifact_contract as acx
 
     project_root, codd_dir = _contract_codd_dir(project_path)
@@ -2217,7 +2561,7 @@ def contract_adopt_cmd(project_path: str, output: str | None, dry_run: bool, ena
     if not proposal.suggestions:
         click.echo(
             f"No proposal found at {_display_path(out_path, project_root)}. "
-            "Run `codd contract suggest` first."
+            "Run `codd contract derive` first."
         )
         raise SystemExit(1)
 
@@ -2252,7 +2596,7 @@ def lexicon_cmd() -> None:
 @click.option("--installed", "installed_only", is_flag=True, help="Show installed lexicons only.")
 @click.option("--available", "available_only", is_flag=True, help="Show available, uninstalled lexicons only.")
 @click.option("--all", "show_all", is_flag=True, help="Show installed and available lexicons.")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def lexicon_list_cmd(installed_only: bool, available_only: bool, show_all: bool, project_path: str) -> None:
     """List installed and bundled lexicons."""
     from codd.lexicon_cli.manager import LexiconManager
@@ -2279,7 +2623,7 @@ def lexicon_list_cmd(installed_only: bool, available_only: bool, show_all: bool,
 
 @lexicon_cmd.command("install")
 @click.argument("lexicon_ids", nargs=-1, required=True)
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def lexicon_install_cmd(lexicon_ids: tuple[str, ...], project_path: str) -> None:
     """Install bundled lexicons into project_lexicon.yaml."""
     from codd.lexicon_cli.manager import LexiconManager
@@ -2309,10 +2653,10 @@ def lexicon_install_cmd(lexicon_ids: tuple[str, ...], project_path: str) -> None
 
 @lexicon_cmd.command("diff")
 @click.argument("lexicon_id")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option(
     "--format",
-    "format_name",
+    "output_format",
     type=click.Choice(["json", "md"]),
     default="md",
     show_default=True,
@@ -2323,7 +2667,7 @@ def lexicon_install_cmd(lexicon_ids: tuple[str, ...], project_path: str) -> None
 def lexicon_diff_cmd(
     lexicon_id: str,
     project_path: str,
-    format_name: str,
+    output_format: str,
     with_ai: bool,
     ai_cmd: str | None,
 ) -> None:
@@ -2342,7 +2686,7 @@ def lexicon_diff_cmd(
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
 
-    click.echo(to_json(result) if format_name == "json" else format_diff_md(result), nl=False)
+    click.echo(to_json(result) if output_format == "json" else format_diff_md(result), nl=False)
 
 
 def _echo_lexicon_records(label: str, records: list[Any]) -> None:
@@ -2373,10 +2717,10 @@ def skills_install(skill_name: str, target: str, scope: str, mode: str, force: b
 @skills.command("list")
 @click.option("--target", type=click.Choice(["claude", "codex", "both"]), default="both")
 @click.option("--scope", type=click.Choice(["user", "repo", "all"]), default="all")
-@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
-def skills_list(target: str, scope: str, fmt: str) -> None:
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def skills_list(target: str, scope: str, output_format: str) -> None:
     """List installed CoDD skills."""
-    skills_manager.list_skills(target, scope, fmt)
+    skills_manager.list_skills(target, scope, output_format)
 
 
 @skills.command("remove")
@@ -2390,7 +2734,7 @@ def skills_remove(skill_name: str, target: str, scope: str, keep_backup: bool) -
 
 
 @main.command()
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 def scan(path: str):
     """Scan codebase and update dependency graph (Stage 1)."""
     from codd.scanner import run_scan
@@ -2402,7 +2746,7 @@ def scan(path: str):
 
 @main.command()
 @click.option("--diff", default="HEAD", help="Git diff target (default: HEAD, shows uncommitted changes)")
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--output", default=None, help="Output file (default: stdout)")
 def impact(diff: str, path: str, output: str):
     """Analyze change impact from git diff."""
@@ -2414,7 +2758,7 @@ def impact(diff: str, path: str, output: str):
 
 
 @main.command("watch")
-@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 @click.option("--debounce", default=500, show_default=True, type=int, help="Debounce interval in milliseconds")
 @click.option("--background", is_flag=True, default=False, help="Run watcher in background mode")
 @click.option("--status", is_flag=True, default=False, help="Show watcher status")
@@ -2457,7 +2801,7 @@ def watch_cmd(project_path: str, debounce: int, background: bool, status: bool) 
 
 @main.command()
 @click.option("--wave", required=True, type=click.IntRange(min=1), help="Wave number to generate")
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--force", is_flag=True, help="Overwrite existing files")
 @click.option(
     "--ai-cmd",
@@ -2515,7 +2859,7 @@ def generate(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: st
 
 @main.command()
 @click.option("--wave", required=False, default=None, type=click.IntRange(min=1), help="Wave number to restore")
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--force", is_flag=True, help="Overwrite existing files")
 @click.option(
     "--ai-cmd",
@@ -2611,7 +2955,7 @@ def restore(
 
 
 @main.command()
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--output", default="docs/requirements/", help="Output directory for generated requirements")
 @click.option("--scope", default=None, help="Limit to a specific service boundary")
 @click.option(
@@ -2835,14 +3179,14 @@ def _run_require_check(project_root: Path) -> None:
 @click.option("--interactive", is_flag=True, default=False, help="Review findings inline and save approved items.")
 @click.option(
     "--format",
-    "format_name",
+    "output_format",
     type=click.Choice(["json", "md"]),
     default="md",
     show_default=True,
     help="Discovery output format.",
 )
 @click.option("--lexicon", "lexicon_path", default=None, help="Lexicon directory, manifest path, or plug-in name.")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option(
     "--ai-cmd",
     default=None,
@@ -2852,7 +3196,7 @@ def _run_require_check(project_root: Path) -> None:
 def elicit(
     ctx: click.Context,
     interactive: bool,
-    format_name: str,
+    output_format: str,
     lexicon_path: str | None,
     project_path: str,
     ai_cmd: str | None,
@@ -2890,7 +3234,7 @@ def elicit(
             click.echo(f"Updated: {file_path}")
         return
 
-    if format_name == "json":
+    if output_format == "json":
         click.echo(JsonFormatter().format(elicit_result), nl=False)
         return
 
@@ -2952,20 +3296,20 @@ def _resolve_elicit_lexicon_path(project_root: Path, lexicon_path: str) -> Path:
 @click.argument("input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--format",
-    "format_name",
+    "output_format",
     type=click.Choice(["auto", "md", "json"]),
     default="auto",
     show_default=True,
     help="Input format. Auto uses the file extension.",
 )
-@click.option("--path", "project_path", default=".", help="Project root directory")
-def elicit_apply_cmd(input_file: Path, format_name: str, project_path: str) -> None:
+@project_root_option("project_path")
+def elicit_apply_cmd(input_file: Path, output_format: str, project_path: str) -> None:
     """Apply approved elicit findings to project state."""
     from codd.elicit.apply import ElicitApplyEngine, load_findings_from_file
 
     project_root = Path(project_path).resolve()
     try:
-        findings = load_findings_from_file(input_file, None if format_name == "auto" else format_name)
+        findings = load_findings_from_file(input_file, None if output_format == "auto" else output_format)
         result = ElicitApplyEngine(project_root).apply(findings)
     except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         click.echo(f"Error: {exc}")
@@ -2994,7 +3338,7 @@ def elicit_apply_cmd(input_file: Path, format_name: str, project_path: str) -> N
 )
 @click.option(
     "--format",
-    "format_name",
+    "output_format",
     type=click.Choice(["json", "md"]),
     default="md",
     show_default=True,
@@ -3010,7 +3354,7 @@ def brownfield_cmd(
     target_path: Path,
     requirements_path: Path | None,
     lexicon_path: Path | None,
-    format_name: str,
+    output_format: str,
     output: Path | None,
     ai_cmd: str | None,
 ) -> None:
@@ -3024,11 +3368,11 @@ def brownfield_cmd(
             requirements_path=requirements_path,
             lexicon_path=lexicon_path,
         )
-        formatted = format_brownfield_result(result, format_name)
+        formatted = format_brownfield_result(result, output_format)
         output_path = _project_file(
             project_root,
             output,
-            f".codd/brownfield_report.{format_name}",
+            f".codd/brownfield_report.{output_format}",
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(formatted, encoding="utf-8")
@@ -3050,7 +3394,7 @@ def brownfield_cmd(
 @click.option("--requirements", "requirements_path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option(
     "--format",
-    "format_name",
+    "output_format",
     type=click.Choice(["json", "md"]),
     default="md",
     show_default=True,
@@ -3058,7 +3402,7 @@ def brownfield_cmd(
 )
 @click.option("--interactive", is_flag=True, default=False, help="Review findings inline and apply approved items.")
 @click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option(
     "--ai-cmd",
     default=None,
@@ -3069,7 +3413,7 @@ def diff_cmd(
     ctx: click.Context,
     extract_input: Path | None,
     requirements_path: Path | None,
-    format_name: str,
+    output_format: str,
     interactive: bool,
     output: Path | None,
     project_path: str,
@@ -3087,7 +3431,7 @@ def diff_cmd(
     project_root = Path(project_path).resolve()
     extract_path = _resolve_diff_extract_input(project_root, extract_input)
     req_path = _project_file(project_root, requirements_path, "docs/requirements/requirements.md")
-    output_path = _project_file(project_root, output, "drift_findings.md") if output is not None or format_name == "md" else None
+    output_path = _project_file(project_root, output, "drift_findings.md") if output is not None or output_format == "md" else None
 
     try:
         from codd.diff.engine import DiffEngine
@@ -3117,7 +3461,7 @@ def diff_cmd(
             click.echo(f"Updated: {file_path}")
         return
 
-    formatted = JsonFormatter().format(findings) if format_name == "json" else MdFormatter().format(findings)
+    formatted = JsonFormatter().format(findings) if output_format == "json" else MdFormatter().format(findings)
     if output_path is None:
         click.echo(formatted, nl=False)
         return
@@ -3147,20 +3491,20 @@ def diff_cmd(
 @click.argument("input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--format",
-    "format_name",
+    "output_format",
     type=click.Choice(["auto", "md", "json"]),
     default="auto",
     show_default=True,
     help="Input format. Auto uses the file extension.",
 )
-@click.option("--path", "project_path", default=".", help="Project root directory")
-def diff_apply_cmd(input_file: Path, format_name: str, project_path: str) -> None:
+@project_root_option("project_path")
+def diff_apply_cmd(input_file: Path, output_format: str, project_path: str) -> None:
     """Apply approved comparison findings to project artifacts."""
     from codd.diff.apply import DiffApplyEngine, load_findings_from_file
 
     project_root = Path(project_path).resolve()
     try:
-        findings = load_findings_from_file(input_file, None if format_name == "auto" else format_name)
+        findings = load_findings_from_file(input_file, None if output_format == "auto" else output_format)
         result = DiffApplyEngine(project_root).apply(findings)
     except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         click.echo(f"Error: {exc}")
@@ -3249,7 +3593,7 @@ def _run_diff_engine(
 
 @main.command()
 @click.option("--diff", default="HEAD", help="Git diff target (default: HEAD, shows uncommitted changes)")
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--update", is_flag=True, help="Actually update affected design docs via AI")
 @click.option("--verify", is_flag=True, help="Auto-apply green band, list amber/gray for HITL review")
 @click.option("--commit", "do_commit", is_flag=True, help="Commit HITL changes and record knowledge")
@@ -3470,7 +3814,7 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
 
 
 @main.command("propagate-from")
-@click.option("--project-path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 @click.option("--files", multiple=True, required=True, help="Changed file path. Can be repeated.")
 @click.option(
     "--source",
@@ -3506,7 +3850,7 @@ def propagate_from(project_path: str, files: tuple[str, ...], source: str, edito
 
 
 @main.group(invoke_without_command=True)
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--design", default=None, help="Design document path or design node id to implement")
 @click.option("--output", "outputs", multiple=True, help="Output path. May be repeated.")
 @click.option("--depends-on", "depends_on", multiple=True, help="Dependency design document path or node id. May be repeated.")
@@ -3740,7 +4084,7 @@ def _stage_gate_enabled(config: dict[str, Any]) -> bool:
 @click.option("--design-doc", "design_docs", multiple=True, help="Design document path. May be repeated.")
 @click.option("--force", is_flag=True, help="Bypass cached implementation steps")
 @click.option("--dry-run", is_flag=True, help="Print derived steps without writing cache")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--provider", default=None, help="Implementation step deriver provider name")
 @click.option("--ai-cmd", default=None, help="Override AI command")
 def implement_plan_cmd(
@@ -3799,7 +4143,7 @@ def implement_plan_cmd(
 @click.option("--all", "approve_all", is_flag=True, help="Approve all pending steps")
 @click.option("--show-only", is_flag=True, help="Only show cached steps")
 @click.option("--show-layer-breakdown", is_flag=True, help="Show explicit and inferred step groups")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def implement_steps_cmd(
     task_id: str,
     approve: bool,
@@ -3861,7 +4205,7 @@ def _echo_impl_step_layer_breakdown(record: Any) -> None:
 @implement.command("augment")
 @click.option("--task", "task_id", required=True, help="Implementation task id or title match")
 @click.option("--design-doc", "design_docs", multiple=True, help="Design document path. May be repeated.")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--provider", default=None, help="Best practice augmenter provider name")
 @click.option("--ai-cmd", default=None, help="Override AI command")
 def implement_augment_cmd(
@@ -3934,7 +4278,7 @@ def implement_augment_cmd(
 
 @implement.command("run")
 @click.option("--task", "task_id", default=None, help="Generate only one task by task ID or title match")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--ai-cmd", default=None, help="Override AI CLI command")
 @click.option("--use-derived-steps", default="true", help="Inject derived implementation steps: true or false")
 @click.option("--chunk-size", default=None, type=click.IntRange(min=1), help="Run derived steps in chunks of this size")
@@ -4077,7 +4421,7 @@ def implement_run_cmd(
 @implement.command("resume")
 @click.option("--task", "task_id", required=True, help="Implementation task id or title match")
 @click.option("--history", required=True, help="History id or path from a previous chunked run")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--ai-cmd", default=None, help="Override AI CLI command")
 @click.option("--chunk-size", default=5, type=click.IntRange(min=1), show_default=True, help="Chunk size")
 @click.option(
@@ -4250,7 +4594,7 @@ def _git_modified_files(project_root: Path) -> list[Path]:
 
 
 @main.command()
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--output-dir", default=None, help="Output directory for assembled project (default: src/)")
 @click.option(
     "--ai-cmd",
@@ -4274,7 +4618,7 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 
 
 @main.command()
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--e2e", is_flag=True, default=False, help="Run E2E tests (CI-safe, excludes @cdp-only)")
 @click.option("--deploy", is_flag=True, default=False, help="Run deploy/CDP-only E2E tests against deployed URL")
 @click.option("--base-url", default=None, help="Override BASE_URL for E2E tests")
@@ -4570,7 +4914,7 @@ def e2e():
 
 
 @e2e.command("generate")
-@click.option("--path", default=".", show_default=True, help="Project root")
+@project_root_option()
 @click.option(
     "--base-url",
     default="http://localhost:3000",
@@ -4598,7 +4942,7 @@ def e2e_generate(path: str, base_url: str, output: str | None, framework: str, m
 
 
 @e2e.command("extract")
-@click.option("--path", default=".", show_default=True, help="Project root")
+@project_root_option()
 @click.option("--output", default=None, help="Output scenario catalog path")
 @click.option(
     "--mode",
@@ -4613,7 +4957,7 @@ def e2e_extract(path: str, output: str | None, mode: str) -> None:
 
 
 @e2e.command("audit")
-@click.option("--path", default=".", show_default=True, help="Project root")
+@project_root_option()
 @click.option("--output", default=None, help="Output report path")
 @click.option(
     "--format",
@@ -4652,7 +4996,7 @@ def e2e_audit(
 
 
 @e2e.command("workflow-plan")
-@click.option("--path", default=".", show_default=True, help="Project root")
+@project_root_option()
 @click.option("--output", default=None, help="Output workflow plan path")
 @click.option(
     "--format",
@@ -4711,7 +5055,7 @@ def e2e_workflow_plan(
 
 
 @main.command("e2e-generate")
-@click.option("--path", default=".", show_default=True, help="Project root")
+@project_root_option()
 @click.option(
     "--base-url",
     default="http://localhost:3000",
@@ -4739,7 +5083,7 @@ def e2e_generate_legacy(path: str, base_url: str, output: str | None, framework:
 
 
 @main.group(invoke_without_command=True)
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--language", default=None, help="Override language detection (python/typescript/javascript/go — full support; java — symbols only)")
 @click.option("--source-dirs", default=None, help="Comma-separated source directories (default: auto-detect)")
 @click.option("--output", default=None, help="Output directory (default: <project-root>/.codd/extract/)")
@@ -4926,7 +5270,7 @@ def extract(
 
 
 @extract.command("design")
-@click.option("--path", "project_path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 @click.option("--design-doc", required=True, type=click.Path(dir_okay=False, path_type=Path), help="Design document path")
 @click.option("--force", is_flag=True, help="Ignore cached expected extraction and run extraction again")
 def extract_design(project_path: str, design_doc: Path, force: bool):
@@ -4967,7 +5311,7 @@ def extract_design(project_path: str, design_doc: Path, force: bool):
 
 
 @main.command("repair-slice")
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--files", required=True, help="Comma-separated list of located files to analyze")
 @click.option("--issue", default=None, help="Issue/bug description text for relevance scoring")
 @click.option("--issue-file", default=None, type=click.Path(exists=True), help="File containing issue text")
@@ -5019,7 +5363,7 @@ def repair_slice_cmd(path, files, issue, issue_file, language, source_dirs, top_
     default=False,
     help="Also validate screen-flow route coverage by extracted transition edges.",
 )
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, edges: bool, path: str):
     """Validate CoDD frontmatter and dependency references."""
     project_root = Path(path).resolve()
@@ -5102,7 +5446,7 @@ def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, edges: bool,
 
 
 @main.group(invoke_without_command=True)
-@click.option("--path", default=".", show_default=True, help="Project root directory")
+@project_root_option()
 @click.option(
     "--e2e-threshold",
     default=100.0,
@@ -5124,7 +5468,15 @@ def validate(lexicon: bool, design_tokens: bool, screen_flow: bool, edges: bool,
     type=float,
     help="Screen-flow coverage threshold percentage.",
 )
-@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    help="Output format",
+)
+@click.option("--json", "as_json", is_flag=True, hidden=True, help="Deprecated alias for --format json.")
 @click.pass_context
 def coverage(
     ctx: click.Context,
@@ -5132,6 +5484,7 @@ def coverage(
     e2e_threshold: float,
     lexicon_threshold: float,
     screen_flow_threshold: float,
+    output_format: str,
     as_json: bool,
 ):
     """Coverage metrics merge gate: E2E, design tokens, and lexicon."""
@@ -5140,6 +5493,7 @@ def coverage(
 
     from codd.coverage_metrics import run_coverage
 
+    as_json = _resolve_output_format(output_format, as_json, "codd coverage") == "json"
     project_root = Path(path).resolve()
     report = run_coverage(
         project_root,
@@ -5192,10 +5546,10 @@ def coverage(
     show_default=True,
     help="Lexicons to include: all or a comma-separated id list.",
 )
-@click.option("--path", "project_path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 @click.option(
     "--format",
-    "format_name",
+    "output_format",
     type=click.Choice(["json", "md", "html"]),
     default="md",
     show_default=True,
@@ -5207,7 +5561,7 @@ def coverage(
 def coverage_report_cmd(
     lexicons: str,
     project_path: str,
-    format_name: str,
+    output_format: str,
     output: Path | None,
     with_ai: bool,
     ai_cmd: str | None,
@@ -5225,9 +5579,9 @@ def coverage_report_cmd(
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
 
-    if format_name == "json":
+    if output_format == "json":
         rendered = to_json(report)
-    elif format_name == "html":
+    elif output_format == "html":
         rendered = format_coverage_report_html(report)
     else:
         rendered = format_coverage_report_md(report)
@@ -5251,7 +5605,7 @@ def coverage_report_cmd(
     show_default=True,
     help="Lexicons to include: all or a comma-separated id list.",
 )
-@click.option("--path", "project_path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 @click.option(
     "--threshold",
     "global_threshold",
@@ -5267,7 +5621,7 @@ def coverage_report_cmd(
 )
 @click.option(
     "--format",
-    "format_name",
+    "output_format",
     type=click.Choice(["human", "json", "md"]),
     default="human",
     show_default=True,
@@ -5281,7 +5635,7 @@ def coverage_check_cmd(
     project_path: str,
     global_threshold: float | None,
     threshold_file: Path | None,
-    format_name: str,
+    output_format: str,
     with_ai: bool,
     ai_cmd: str | None,
     exit_zero: bool,
@@ -5310,9 +5664,9 @@ def coverage_check_cmd(
         "totals": report.totals,
         "violations": [asdict(violation) for violation in violations],
     }
-    if format_name == "json":
+    if output_format == "json":
         click.echo(to_json(payload), nl=False)
-    elif format_name == "md":
+    elif output_format == "md":
         click.echo(_format_coverage_check_md(payload), nl=False)
     else:
         click.echo(_format_coverage_check_human(payload), nl=False)
@@ -5418,7 +5772,7 @@ def deploy(target, config_file, apply_mode, rollback, healthcheck_timeout):
 
 
 @main.command("fixup-drift")
-@click.option("--path", default=".", show_default=True, help="Project root directory")
+@project_root_option()
 @click.option(
     "--dry-run/--apply",
     default=True,
@@ -5470,7 +5824,7 @@ def fixup_drift(path: str, dry_run: bool, severity: str, kind: str):
 
 @main.command()
 @click.argument("phenomenon", nargs=-1)
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option("--max-attempts", default=3, type=click.IntRange(min=1, max=10),
               help="Maximum fix attempts (default: 3)")
 @click.option("--test-results", default=None, type=click.Path(exists=True),
@@ -5768,7 +6122,7 @@ def _emit_design_propagation_result(result) -> None:
 
 
 @main.command()
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 def policy(path: str):
     """Check source code against enterprise policy rules.
 
@@ -5855,7 +6209,7 @@ def _emit_screen_flow_drift_text(result) -> None:
 
 
 @main.command("drift")
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 @click.option(
     "--format",
     "output_format",
@@ -5980,8 +6334,16 @@ def drift(path: str, output_format: str, e2e: bool, screen_flow: bool):
 
 
 @main.group(invoke_without_command=True)
-@click.option("--path", default=".", help="Project root directory")
-@click.option("--json", "as_json", is_flag=True, help="Output plan as JSON")
+@project_root_option()
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    help="Output format",
+)
+@click.option("--json", "as_json", is_flag=True, hidden=True, help="Deprecated alias for --format json.")
 @click.option("--init", "initialize", is_flag=True, help="Generate wave_config from requirement docs")
 @click.option(
     "--derive",
@@ -6011,6 +6373,7 @@ def drift(path: str, output_format: str, e2e: bool, screen_flow: bool):
 def plan(
     ctx,
     path: str,
+    output_format: str,
     as_json: bool,
     initialize: bool,
     derive: bool,
@@ -6021,7 +6384,11 @@ def plan(
     ai_cmd: str | None,
     no_contract_gate: bool,
 ):
-    """Show wave execution status from configured artifacts."""
+    """Show wave execution status from configured artifacts.
+
+    Lifecycle (subcommands): derive → show → approve (approve applies
+    immediately; there is no separate apply step).
+    """
     if ctx.invoked_subcommand is not None:
         return
 
@@ -6034,6 +6401,7 @@ def plan(
         render_plan_text,
     )
 
+    as_json = _resolve_output_format(output_format, as_json, "codd plan") == "json"
     project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
 
@@ -6047,7 +6415,7 @@ def plan(
         if tasks:
             raise click.BadOptionUsage("tasks", "--tasks cannot be used with --derive")
         if as_json and regenerate_wave_config:
-            raise click.BadOptionUsage("json", "--json cannot be used with --regenerate-wave-config")
+            raise click.BadOptionUsage("format", "--format json cannot be used with --regenerate-wave-config")
 
         from codd import generator as generator_module
         from codd.required_artifacts_deriver import RequiredArtifactsDeriver
@@ -6108,7 +6476,7 @@ def plan(
 
     if initialize:
         if as_json:
-            raise click.BadOptionUsage("json", "--json cannot be used with --init")
+            raise click.BadOptionUsage("format", "--format json cannot be used with --init")
 
         try:
             result = plan_init(project_root, force=force, ai_command=ai_cmd)
@@ -6181,7 +6549,7 @@ def plan(
 @click.option("--force", is_flag=True, help="Bypass cached derived tasks")
 @click.option("--dry-run", is_flag=True, help="Print derived tasks without writing cache")
 @click.option("--merge-into-plan", is_flag=True, help="Append approved derived tasks to the implementation plan")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--provider", default=None, help="Plan deriver provider name")
 @click.option("--ai-cmd", default=None, help="Override AI command")
 def plan_derive_cmd(
@@ -6248,7 +6616,7 @@ def plan_derive_cmd(
     show_default=True,
     help="Approval status filter",
 )
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def plan_show_cmd(design_doc: str | None, status_filter: str, project_path: str):
     """Show derived implementation tasks."""
     from codd.llm.plan_deriver import iter_derived_task_records
@@ -6275,9 +6643,9 @@ def plan_show_cmd(design_doc: str | None, status_filter: str, project_path: str)
 @click.argument("design_doc")
 @click.option("--task", "task_id", default=None, help="Approve one derived task id")
 @click.option("--all", "approve_all", is_flag=True, help="Approve all pending tasks for the design document")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def plan_approve_cmd(design_doc: str, task_id: str | None, approve_all: bool, project_path: str):
-    """Approve derived implementation tasks."""
+    """Approve derived implementation tasks (applied immediately; no separate apply step)."""
     from codd.llm.plan_deriver import approve_cached_tasks, find_derived_task_cache
 
     if not approve_all and not task_id:
@@ -6465,9 +6833,17 @@ def _requirement_docs_from_lexicon_data(data: dict[str, Any]) -> list[str]:
 
 
 @main.command()
-@click.option("--path", default=".", help="Project root directory")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def measure(path: str, as_json: bool):
+@project_root_option()
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    help="Output format",
+)
+@click.option("--json", "as_json", is_flag=True, hidden=True, help="Deprecated alias for --format json.")
+def measure(path: str, output_format: str, as_json: bool):
     """Show project metrics — graph health, coverage, quality, and health score.
 
     Collects metrics about the dependency graph, document coverage,
@@ -6476,6 +6852,7 @@ def measure(path: str, as_json: bool):
     """
     from codd.measure import run_measure, format_measure_text, format_measure_json
 
+    as_json = _resolve_output_format(output_format, as_json, "codd measure") == "json"
     project_root = Path(path).resolve()
     _require_codd_dir(project_root)
 
@@ -6489,7 +6866,15 @@ def measure(path: str, as_json: bool):
 
 
 @main.command("mcp-server")
-@click.option("--project", default=".", help="Project root directory")
+@click.option(
+    "--path",
+    "--project-path",
+    "--project",
+    "project",
+    default=".",
+    show_default=True,
+    help="Project root directory",
+)
 def mcp_server(project: str):
     """Start MCP server for AI tool integration (stdio).
 
@@ -6508,7 +6893,7 @@ def mcp_server(project: str):
 
 
 @main.group("test", invoke_without_command=True)
-@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 @click.option("--related", multiple=True, help="Run only tests related to these files")
 @click.option("--dry-run", is_flag=True, default=False, help="Print the related test command without running it")
 @click.pass_context
@@ -6534,7 +6919,7 @@ def test_cmd(ctx, project_path: str, related: tuple[str, ...], dry_run: bool):
 
 
 @test_cmd.command("audit")
-@click.option("--path", default=".", show_default=True, help="Project root")
+@project_root_option()
 @click.option("--output", default=None, help="Output report path")
 @click.option(
     "--format",
@@ -6584,15 +6969,19 @@ def test_audit(
     )
 
 
-@main.group()
+@main.group(cls=_AliasedGroup, aliases={"list": "show"})
 def llm():
-    """Manage LLM-derived considerations."""
+    """Manage LLM-derived considerations.
+
+    Lifecycle: derive → show → approve (approve applies immediately; alias:
+    list deprecated). `skip` marks a consideration as skipped.
+    """
     pass
 
 
 @llm.command("derive")
 @click.argument("design_doc", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--ai-cmd", default=None, help="Override AI CLI command")
 @click.option("--model", default=None, help="Override AI model")
 @click.option("--force", is_flag=True, help="Bypass cached derived considerations")
@@ -6619,7 +7008,7 @@ def llm_derive(design_doc: Path, project_path: str, ai_cmd: str | None, model: s
 @llm.command("approve")
 @click.argument("consideration_id", required=False)
 @click.option("--all", "approve_all", is_flag=True, help="Approve all pending considerations")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def llm_approve(consideration_id: str | None, approve_all: bool, project_path: str):
     """Approve one or all pending considerations."""
     from codd.llm.approval import ApprovalCache, consideration_status, load_cached_considerations
@@ -6650,7 +7039,7 @@ def llm_approve(consideration_id: str | None, approve_all: bool, project_path: s
 
 @llm.command("skip")
 @click.argument("consideration_id")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def llm_skip(consideration_id: str, project_path: str):
     """Skip one consideration."""
     from codd.llm.approval import ApprovalCache, load_cached_considerations
@@ -6664,11 +7053,11 @@ def llm_skip(consideration_id: str, project_path: str):
     click.echo(f"Skipped consideration: {consideration_id}")
 
 
-@llm.command("list")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@llm.command("show")
+@project_root_option("project_path")
 @click.option("--format", "output_format", default="text", type=click.Choice(["text", "json"]))
-def llm_list(project_path: str, output_format: str):
-    """List generated considerations with approval status."""
+def llm_show(project_path: str, output_format: str):
+    """Show generated considerations with approval status."""
     from codd.llm.approval import consideration_status, consideration_to_dict, load_cached_considerations
 
     project_root = Path(project_path).resolve()
@@ -6698,7 +7087,7 @@ def qc():
 
 @qc.command("expand")
 @click.option("--task", "task_id", required=True, help="Task id or task YAML path")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--force", is_flag=True, help="Bypass cached expanded criteria")
 @click.option(
     "--design-doc",
@@ -6772,7 +7161,7 @@ def qc_expand(
 
 @qc.command("evaluate")
 @click.option("--task", "task_id", required=True, help="Task id or task YAML path")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--report-json", is_flag=True, help="Output a machine-readable report")
 def qc_evaluate(task_id: str, project_path: str, report_json: bool):
     """Evaluate the saved expanded criteria file."""
@@ -7191,7 +7580,7 @@ def _load_repair_proposal(path: Path) -> Any:
 
 @main.group(invoke_without_command=True)
 @click.option("--from-report", "from_report", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--max-attempts", default=None, type=click.IntRange(min=1), help="Maximum repair attempts")
 @click.option("--baseline-ref", default=None, help="Baseline git ref for repair classification")
 @click.option("--engine", "engine_name", default=None, help="Repair engine name")
@@ -7237,7 +7626,7 @@ def repair(
 
 
 @repair.command("history")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option("--last", "last", default=10, type=click.IntRange(min=1), show_default=True, help="Number of sessions")
 @click.option("--design-doc", "design_doc", default=None, help="Filter sessions containing a design doc path")
 def repair_history(project_path: str, last: int, design_doc: str | None):
@@ -7267,7 +7656,7 @@ def repair_history(project_path: str, last: int, design_doc: str | None):
 @repair.command("approve")
 @click.argument("history_id")
 @click.option("--attempt", "attempt", default=None, type=click.IntRange(min=0), help="Attempt number")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def repair_approve(history_id: str, attempt: int | None, project_path: str):
     """Approve a repair proposal in history."""
     from codd.repair.approval_repair import approve_repair_proposal
@@ -7308,7 +7697,7 @@ def repair_approve(history_id: str, attempt: int | None, project_path: str):
 
 @repair.command("status")
 @click.argument("history_id", required=False)
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 def repair_status(history_id: str | None, project_path: str):
     """Show repair session status."""
     from codd.repair.history import RepairHistory
@@ -7342,7 +7731,7 @@ def dag():
 
 
 @dag.command("build")
-@click.option("--path", "project_path", default=".", help="Project root directory")
+@project_root_option("project_path")
 @click.option(
     "--format",
     "output_format",
@@ -7394,7 +7783,7 @@ def dag_build(project_path: str, output_format: str, cache: bool, output: str | 
 
 
 @dag.command("verify")
-@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 @click.option("--check", "check_names", multiple=True, help="Run specific check(s) only")
 @click.option(
     "--format",
@@ -7515,7 +7904,7 @@ def dag_verify(
 
 
 @dag.command("visualize")
-@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 def dag_visualize(project_path: str):
     """Build and print the project DAG as Mermaid."""
     from codd.dag.builder import build_dag, render_mermaid
@@ -7530,7 +7919,7 @@ def dag_visualize(project_path: str):
 
 
 @dag.command("journeys")
-@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 @click.option(
     "--format",
     "output_format",
@@ -7569,7 +7958,7 @@ def dag_journeys(project_path: str, output_format: str):
 
 @dag.command("run-journey")
 @click.argument("journey_name")
-@click.option("--project-path", "--path", default=".", show_default=True, help="Project root directory")
+@project_root_option("project_path")
 @click.option(
     "--axis",
     "axis_overrides",
@@ -7830,7 +8219,7 @@ def hooks():
 
 
 @hooks.command("install")
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 def hooks_install(path: str):
     """Install the CoDD pre-commit hook into .git/hooks."""
     from codd.hooks import install_pre_commit_hook
@@ -7850,7 +8239,7 @@ def hooks_install(path: str):
 
 
 @hooks.command("run-pre-commit", hidden=True)
-@click.option("--path", default=".", help="Project root directory")
+@project_root_option()
 def hooks_run_pre_commit(path: str):
     """Run CoDD pre-commit checks."""
     from codd.hooks import run_pre_commit

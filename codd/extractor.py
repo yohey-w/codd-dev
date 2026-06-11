@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 
 from codd.bridge import load_bridge_registry
+from codd.discovery import default_exclude_patterns
 from codd.parsing import (
     AnsibleExtractor,
     BuildDepsExtractor,
@@ -210,11 +211,10 @@ def extract_facts(project_root: Path, language: str | None = None,
     """Extract structural facts from source code. Pure static analysis."""
 
     if exclude_patterns is None:
-        exclude_patterns = [
-            "**/node_modules/**", "**/__pycache__/**", "**/dist/**",
-            "**/.git/**", "**/venv/**", "**/.venv/**", "**/vendor/**",
-            "**/.tox/**", "**/build/**", "**/*.egg-info/**",
-        ]
+        # Unified ignore set — single source of truth lives in codd.discovery.
+        # Emits both top-level and nested glob forms (fnmatch's "**/x/**"
+        # does not match a top-level "x/").
+        exclude_patterns = default_exclude_patterns()
 
     # Auto-detect language if not provided
     if language is None:

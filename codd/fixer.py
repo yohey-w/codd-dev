@@ -27,6 +27,7 @@ from codd.dag.impact import (
 )
 from codd.generator import _invoke_ai_command, _resolve_ai_command
 from codd.scanner import _extract_frontmatter
+from codd.test_detection import detect_test_command
 
 logger = logging.getLogger("codd.fixer")
 
@@ -505,12 +506,9 @@ def _run_local_tests(project_root: Path, config: dict[str, Any]) -> list[Failure
         None: Tests could not be executed (no command, missing runtime, etc.).
               Callers MUST treat None as "unverified", NOT as "fixed".
     """
-    fix_config = config.get("fix", {})
-    test_command = fix_config.get("test_command")
-
-    if not test_command:
-        # Auto-detect from project
-        test_command = _detect_test_command(project_root)
+    # Precedence: explicit config (fix.test_command > verify.test_command)
+    # beats detection — unified in codd.test_detection.
+    test_command = detect_test_command(project_root, config=config)
 
     if not test_command:
         logger.warning("No test command configured or detected. Cannot verify fix.")
@@ -547,30 +545,12 @@ def _run_local_tests(project_root: Path, config: dict[str, Any]) -> list[Failure
 
 
 def _detect_test_command(project_root: Path) -> str | None:
-    """Auto-detect the test command for the project."""
-    pkg_json = project_root / "package.json"
-    if pkg_json.exists():
-        try:
-            pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
-            scripts = pkg.get("scripts", {})
-            # Prefer unit > test (E2E needs full-stack env, not available locally)
-            for key in ("test:unit", "test", "test:e2e"):
-                if key in scripts:
-                    return f"npm run {key}"
-        except json.JSONDecodeError:
-            pass
+    """Auto-detect the test command for the project.
 
-    pyproject = project_root / "pyproject.toml"
-    if pyproject.exists():
-        return "pytest --tb=short -q"
-
-    makefile = project_root / "Makefile"
-    if makefile.exists():
-        content = makefile.read_text(encoding="utf-8")
-        if "test:" in content:
-            return "make test"
-
-    return None
+    Thin wrapper kept for backward compatibility — the unified detector
+    (heuristics + documentation) lives in :mod:`codd.test_detection`.
+    """
+    return detect_test_command(project_root)
 
 
 # ---------------------------------------------------------------------------

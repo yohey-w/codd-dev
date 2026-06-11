@@ -16,6 +16,7 @@ from typing import Any, ClassVar, Literal, Mapping
 
 import yaml
 
+from codd.ai_invoke import resolve_ai_command as _shared_resolve_ai_command
 from codd.claude_cli import with_default_claude_permission_bypass
 from codd.dag import Node
 from codd.dag.extractor import extract_design_doc_metadata
@@ -325,14 +326,19 @@ def build_project_structure_summary(project_root: Path | str, max_entries: int =
 def _resolve_ai_command(config: Mapping[str, Any], override: str | None) -> str:
     if override is not None:
         return _non_empty_command(override)
+    # Extractor-specific layers (env var, llm.command) take precedence; the
+    # generic tail (ai_command > default) is delegated to the shared resolver
+    # in codd.ai_invoke (RF4) with this module's historical "ai" default.
     raw = (
         os.environ.get("CODD_AI_COMMAND")
         or _nested_str(config, ("ai_commands", "design_doc_extract"))
         or _nested_str(config, ("llm", "command"))
-        or _mapping(config).get("ai_command")
-        or DEFAULT_AI_COMMAND
     )
-    return _non_empty_command(raw)
+    if raw:
+        return _non_empty_command(raw)
+    return _non_empty_command(
+        _shared_resolve_ai_command(_mapping(config), None, default=DEFAULT_AI_COMMAND)
+    )
 
 
 def _resolve_timeout(config: Mapping[str, Any], override: float | None) -> float | None:

@@ -408,6 +408,73 @@ def test_render_suggestion_smoke(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# RF5: suggest notes the required_artifacts ids each artifact covers
+# ---------------------------------------------------------------------------
+def test_suggest_notes_covered_required_ids_for_resolvable_profile(tmp_path):
+    _scaffold_project(tmp_path)
+    config = {"required_artifacts": {"project_type": "web"}}
+    proposal = suggest_contract(load_catalog(), tmp_path, codd_config=config)
+    by_id = {s.artifact_id: s for s in proposal.suggestions}
+
+    assert by_id["requirements"].covers_required_ids == ("design:requirements",)
+    # design_spec covers exactly the web profile's design ids (declared order).
+    covers = by_id["design_spec"].covers_required_ids
+    assert "design:system_design" in covers
+    assert "design:ux_design" in covers
+    # ids from OTHER profiles are not claimed for a web project.
+    assert "design:command_interface_design" not in covers
+    assert "design:device_firmware_design" not in covers
+
+
+def test_suggest_covers_respects_profile_scope(tmp_path):
+    _scaffold_project(tmp_path)
+    config = {"required_artifacts": {"project_type": "cli"}}
+    proposal = suggest_contract(load_catalog(), tmp_path, codd_config=config)
+    by_id = {s.artifact_id: s for s in proposal.suggestions}
+    covers = by_id["design_spec"].covers_required_ids
+    assert "design:command_interface_design" in covers
+    assert "design:ux_design" not in covers  # web-only id
+
+
+def test_suggest_covers_empty_for_custom_profile(tmp_path):
+    """`custom` (the empty-artifacts sentinel) resolves to no profile ⇒ no covers."""
+
+    _scaffold_project(tmp_path)
+    config = {"required_artifacts": {"project_type": "custom"}}
+    proposal = suggest_contract(load_catalog(), tmp_path, codd_config=config)
+    assert all(s.covers_required_ids == () for s in proposal.suggestions)
+
+
+def test_proposal_roundtrip_preserves_covers(tmp_path):
+    _scaffold_project(tmp_path)
+    config = {"required_artifacts": {"project_type": "web"}}
+    proposal = suggest_contract(load_catalog(), tmp_path, codd_config=config)
+    path = proposal_path(tmp_path / ".codd")
+    write_proposal(path, proposal)
+    reloaded = load_proposal(path)
+    assert {s.artifact_id: s.covers_required_ids for s in reloaded.suggestions} == {
+        s.artifact_id: s.covers_required_ids for s in proposal.suggestions
+    }
+
+
+def test_render_suggestion_includes_covers_line(tmp_path):
+    _scaffold_project(tmp_path)
+    config = {"required_artifacts": {"project_type": "web"}}
+    out = render_suggestion(suggest_contract(load_catalog(), tmp_path, codd_config=config))
+    assert "covers required_artifacts:" in out
+    assert "design:requirements" in out
+
+
+def test_proposal_payload_without_covers_loads_backward_compatibly():
+    """Old proposal files (no covers_required_ids key) still load."""
+
+    proposal = ContractProposal.from_payload(
+        {"artifacts": [{"id": "requirements", "stage": "plan", "present": True, "implied": True}]}
+    )
+    assert proposal.suggestions[0].covers_required_ids == ()
+
+
+# ---------------------------------------------------------------------------
 # Phase 2: adopt (opt-in, non-destructive merge into codd.yaml)
 # ---------------------------------------------------------------------------
 def _proposal_for(stages: dict[str, list[str]]) -> ContractProposal:

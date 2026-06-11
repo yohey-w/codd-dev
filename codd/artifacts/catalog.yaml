@@ -31,8 +31,27 @@
 #                       artifact lives; used by the deterministic existence gate.
 #   validator         : optional name of a deterministic check. Absent/null ⇒
 #                       the default "exists and non-empty" gate is applied.
+#   required_artifact_ids : optional list of NAMESPACED required-artifact ids
+#                       (the `category:name` ids used by
+#                       required_artifacts/defaults/*.yaml and the
+#                       required-artifacts deriver) that this catalog artifact
+#                       covers. This is the explicit cross-space mapping the
+#                       artifact-id resolver (codd/artifact_ids.py) is built
+#                       from: each required id may map to AT MOST ONE catalog
+#                       artifact (validated on load, with `^[a-z0-9_]+:[a-z0-9_]+$`
+#                       syntax). Required ids with no catalog counterpart must
+#                       be listed in `intentionally_unmapped_required_ids`
+#                       below — never silently dropped (drift guard).
 
 version: 1
+
+# Required-artifact ids that deliberately map to NO catalog artifact. Currently
+# empty: every `design:*` id across the shipped profiles (cli/generic/iot/
+# mobile/web) maps to a catalog artifact. A future profile id that genuinely
+# has no catalog counterpart must be added here CONSCIOUSLY — the drift-guard
+# test (tests/test_artifact_ids.py) fails on any id that is neither mapped nor
+# declared here.
+intentionally_unmapped_required_ids: []
 
 artifacts:
   # ---------------------------------------------------------------------------
@@ -46,6 +65,8 @@ artifacts:
       - "docs/requirements*.md"
       - "docs/requirements/**/*.md"
       - "requirements*.md"
+    required_artifact_ids:
+      - "design:requirements"
 
   - id: design_spec
     description: "Design specification documents describing structure, behavior, and decisions."
@@ -56,6 +77,42 @@ artifacts:
       - "docs/design*.md"
       - "design/**/*.md"
     validator: design_doc_frontmatter
+    # Every profile-specific design document is a design_spec: the profiles
+    # subdivide the design space per project type; the catalog holds the one
+    # general artifact they all instantiate.
+    required_artifact_ids:
+      # shared / web
+      - "design:system_design"
+      - "design:api_design"
+      - "design:database_design"
+      - "design:ux_design"
+      - "design:screen_flow_design"
+      - "design:auth_authorization_design"
+      - "design:screen_transitions"
+      # cli
+      - "design:command_interface_design"
+      - "design:configuration_design"
+      - "design:io_contract_design"
+      - "design:error_handling_design"
+      - "design:distribution_design"
+      - "design:auth_integration_design"
+      # generic
+      - "design:interface_design"
+      - "design:data_design"
+      # iot
+      - "design:device_firmware_design"
+      - "design:connectivity_protocol_design"
+      - "design:cloud_backend_design"
+      - "design:data_retention_design"
+      - "design:security_design"
+      - "design:ota_update_design"
+      - "design:safety_design"
+      # mobile
+      - "design:navigation_design"
+      - "design:api_integration_design"
+      - "design:local_data_sync_design"
+      - "design:notification_design"
+      - "design:release_distribution_design"
 
   - id: lexicon
     description: "Project lexicon: canonical domain terms and their authoritative definitions."
@@ -117,6 +174,8 @@ artifacts:
       - "docs/requirements/non_functional*"
       - "docs/requirements/nfr*"
       - "docs/non_functional*"
+    required_artifact_ids:
+      - "design:non_functional_requirements"
 
   - id: infrastructure_design
     description: "Infrastructure design: provisioned resources, networking, isolation, and the Infrastructure-as-Code that realizes them."
@@ -126,6 +185,8 @@ artifacts:
       - "docs/infra/**"
       - "docs/infrastructure/**"
       - "docs/design/**/infra*.md"
+    required_artifact_ids:
+      - "design:infrastructure_design"
 
   - id: deployment_design
     description: "Deployment design: runtime topology, environments, release/rollout strategy, and CI/CD delivery."
@@ -135,6 +196,8 @@ artifacts:
       - "docs/deploy/**"
       - "docs/deployment/**"
       - "docs/design/**/deploy*.md"
+    required_artifact_ids:
+      - "design:deployment_design"
 
   - id: operations_runbook
     description: "Operations runbook: scaling, health/monitoring, backup/restore, incident response, and routine operational procedures."
@@ -145,6 +208,8 @@ artifacts:
       - "docs/ops/**"
       - "docs/runbook*.md"
       - "docs/runbooks/**"
+    required_artifact_ids:
+      - "design:operations_runbook"
 
   # ---------------------------------------------------------------------------
   # Derived-view artifacts — machine-generated FROM ssot; never hand-maintained

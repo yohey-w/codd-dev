@@ -13,6 +13,8 @@ from typing import Any
 
 import yaml
 
+from codd.discovery import scan_exclude_patterns
+from codd.frontmatter import read_frontmatter
 from codd.graph import CEG
 from codd.parsing import get_extractor
 
@@ -41,7 +43,8 @@ def run_scan(project_root: Path, codd_dir: Path):
         print(f"Preserved: {human_count} human evidence records")
 
     # Phase 1: Scan document frontmatter (all .md/.yaml in doc_dirs)
-    doc_dirs = config["scan"].get("doc_dirs", [])
+    scan_config = config.get("scan") or {}
+    doc_dirs = scan_config.get("doc_dirs", [])
     frontmatter_count = 0
     warnings = []
     for doc_dir in doc_dirs:
@@ -57,9 +60,9 @@ def run_scan(project_root: Path, codd_dir: Path):
         _load_legacy_annotations(ceg, annotations_dir)
 
     # Phase 2: Scan source code (imports, calls)
-    language = config["project"].get("language", "python")
-    source_dirs = config["scan"].get("source_dirs", [])
-    exclude_patterns = config["scan"].get("exclude", [])
+    language = (config.get("project") or {}).get("language", "python")
+    source_dirs = scan_config.get("source_dirs", [])
+    exclude_patterns = scan_exclude_patterns(config)
 
     for src_dir in source_dirs:
         full_path = project_root / src_dir
@@ -120,24 +123,9 @@ def _extract_frontmatter(file_path: Path) -> dict | None:
       ---
       # Document content
     """
-    try:
-        content = file_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
+    frontmatter = read_frontmatter(file_path)
+    if frontmatter is None:
         return None
-
-    # Match YAML frontmatter between --- delimiters
-    match = re.match(r'^---\s*\n(.*?)\n---', content, re.DOTALL)
-    if not match:
-        return None
-
-    try:
-        frontmatter = yaml.safe_load(match.group(1))
-    except yaml.YAMLError:
-        return None
-
-    if not isinstance(frontmatter, dict):
-        return None
-
     return frontmatter.get("codd")
 
 

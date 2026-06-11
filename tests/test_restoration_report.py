@@ -290,6 +290,92 @@ def test_restored_infra_artifact_detected(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# RF5: artifact-type classification via the cross-space id resolver
+# ---------------------------------------------------------------------------
+def test_artifact_classification_via_resolver_node_id(tmp_path: Path) -> None:
+    """A doc whose node_id names a required-artifacts id classifies through the
+    resolver even when its path/type carry no usable tokens."""
+
+    root = _make_project(tmp_path, project_type="web")
+    block = {
+        # required-artifacts space id; path has no operations//ops/runbook token.
+        "node_id": "design:operations_runbook",
+        "type": "",
+        "source": "extracted",
+        "depends_on": [],
+        "provenance": [
+            {"statement": "Nightly backup retained 30 days", "evidence": ["backup.sh"], "band": "amber"},
+        ],
+    }
+    _write_doc(root / "docs" / "extracted" / "keeping-lights-on.md", block)
+
+    report = build_restoration_report(root)
+    cov = {c.artifact_id: c for c in report.artifact_type_coverage}
+    assert cov["operations_runbook"].restored is True
+    assert cov["operations_runbook"].restored_paths == ["docs/extracted/keeping-lights-on.md"]
+
+
+def test_artifact_classification_resolver_accepts_dag_style_hyphens(tmp_path: Path) -> None:
+    root = _make_project(tmp_path, project_type="web")
+    block = {
+        "node_id": "design:non-functional-requirements",  # DAG node ids use hyphens
+        "type": "",
+        "source": "extracted",
+        "depends_on": [],
+        "provenance": [
+            {"statement": "p99 < 200ms", "evidence": ["k8s/api.yaml::Deployment::api"], "band": "amber"},
+        ],
+    }
+    _write_doc(root / "docs" / "extracted" / "targets.md", block)
+
+    report = build_restoration_report(root)
+    cov = {c.artifact_id: c for c in report.artifact_type_coverage}
+    assert cov["non_functional_requirements"].restored is True
+
+
+def test_artifact_classification_resolver_beats_path_tokens(tmp_path: Path) -> None:
+    """A doc that declares its own identity is authoritative over its location."""
+
+    root = _make_project(tmp_path, project_type="web")
+    block = {
+        "node_id": "design:operations_runbook",
+        "type": "design",
+        "source": "extracted",
+        "depends_on": [],
+        "provenance": [
+            {"statement": "Restart procedure", "evidence": ["scripts/restart.sh"], "band": "amber"},
+        ],
+    }
+    # Path tokens would say deployment_design; the declared id wins.
+    _write_doc(root / "docs" / "deployment" / "notes.md", block)
+
+    report = build_restoration_report(root)
+    cov = {c.artifact_id: c for c in report.artifact_type_coverage}
+    assert cov["operations_runbook"].restored is True
+    assert cov["deployment_design"].restored is False
+
+
+def test_artifact_classification_falls_back_to_path_tokens(tmp_path: Path) -> None:
+    """An unresolvable node_id keeps the original path-token inference."""
+
+    root = _make_project(tmp_path, project_type="web")
+    block = {
+        "node_id": "ops:weird-notes",  # not in either id space
+        "type": "",
+        "source": "extracted",
+        "depends_on": [],
+        "provenance": [
+            {"statement": "Rollout is canary-based", "evidence": [".github/workflows/cd.yml::Deploy"], "band": "amber"},
+        ],
+    }
+    _write_doc(root / "docs" / "deployment" / "notes.md", block)
+
+    report = build_restoration_report(root)
+    cov = {c.artifact_id: c for c in report.artifact_type_coverage}
+    assert cov["deployment_design"].restored is True
+
+
+# ---------------------------------------------------------------------------
 # Maintenance readiness detection
 # ---------------------------------------------------------------------------
 def test_maintenance_ready_when_edges_resolve(tmp_path: Path) -> None:

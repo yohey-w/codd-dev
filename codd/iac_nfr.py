@@ -44,6 +44,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
+from codd.confidence import (
+    CATEGORY_MEDIUM,
+    band_for,
+    band_for_fact,
+    numeric_for_category,
+)
+
 
 # ---------------------------------------------------------------------------
 # Categories & confidence
@@ -106,6 +113,43 @@ class NfrCandidate:
             "kind": self.kind,
             "evidence": dict(self.evidence),
         }
+
+    # -- canonical-confidence bridges (additive; `confidence` strings remain
+    #    the stored/serialized vocabulary for backward compatibility) --------
+    @property
+    def numeric_confidence(self) -> float:
+        """The candidate's confidence on the canonical 0.0–1.0 scale.
+
+        Bridged via :func:`codd.confidence.numeric_for_category`
+        (``high`` ⇒ 0.95, ``medium`` ⇒ 0.60). An unrecognized category is
+        treated as ``medium`` — the same "never over-state" lenience the
+        restoration report applies to unknown bands.
+        """
+
+        return numeric_for_category(
+            self.confidence,
+            default=numeric_for_category(CATEGORY_MEDIUM),
+        )
+
+    @property
+    def band(self) -> str:
+        """Derived confidence band (``green`` / ``amber`` / ``gray``).
+
+        Single-source decision (deliberate): a ``high`` candidate is a *direct
+        IaC fact* — a value deterministically parsed from its one authoritative
+        declaration (an explicit replica count, an explicit backup-retention
+        value). The bands-config ``min_evidence_count`` rule exists to demand
+        corroboration of INFERRED statements; a declaration read verbatim has
+        nothing to corroborate — it IS the source of truth. So ``high`` +
+        single-source classifies as green (:func:`codd.confidence.band_for_fact`).
+        ``medium`` candidates ARE inferred intent (e.g. monitoring rules
+        implying an SLO source), so they go through the standard
+        single-evidence rule (:func:`codd.confidence.band_for`) ⇒ amber.
+        """
+
+        if self.confidence == CONFIDENCE_HIGH:
+            return band_for_fact(self.numeric_confidence)
+        return band_for(self.numeric_confidence, evidence_count=1)
 
 
 def _source(file_path: str, *parts: str) -> str:

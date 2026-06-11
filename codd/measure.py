@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from codd.config import find_codd_dir, load_project_config
+from codd.discovery import scan_exclude_patterns, should_skip_path
 from codd.policy import run_policy
 from codd.validator import validate_project
 
@@ -206,14 +207,20 @@ def _collect_coverage_metrics(
 ) -> CoverageMetrics:
     """Collect coverage metrics: how many source files are tracked by CoDD."""
     source_dirs = (config.get("scan") or {}).get("source_dirs", [])
-    exclude_patterns = (config.get("scan") or {}).get("exclude", [])
+    exclude_patterns = scan_exclude_patterns(config)
 
-    # Count source files
+    # Count source files (honoring the unified ignore set + scan.exclude;
+    # previously exclude_patterns was read but never applied, so build
+    # artifacts and vendored dependencies inflated the count)
     source_files = 0
     for src_dir in source_dirs:
         full_path = project_root / src_dir
         if full_path.exists():
-            source_files += sum(1 for f in full_path.rglob("*") if f.is_file())
+            source_files += sum(
+                1 for f in full_path.rglob("*")
+                if f.is_file()
+                and not should_skip_path(f, project_root, exclude_patterns=exclude_patterns)
+            )
 
     # Count design documents
     doc_dirs = (config.get("scan") or {}).get("doc_dirs", [])

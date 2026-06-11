@@ -26,11 +26,14 @@ Three concerns live here:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+
+from codd.frontmatter import split_frontmatter
 
 
 CATALOG_PATH = Path(__file__).with_name("artifacts") / "catalog.yaml"
@@ -38,6 +41,10 @@ CATALOG_PATH = Path(__file__).with_name("artifacts") / "catalog.yaml"
 CONTRACT_KEY = "artifact_contract"
 
 _VALID_KINDS = {"ssot", "derived_view"}
+
+# Syntax of a NAMESPACED required-artifact id (the id space used by
+# required_artifacts/defaults/*.yaml), e.g. `design:system_design`.
+REQUIRED_ID_RE = re.compile(r"^[a-z0-9_]+:[a-z0-9_]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +59,10 @@ class CatalogArtifact:
     default_path_globs: tuple[str, ...] = ()
     derived_from: tuple[str, ...] = ()
     validator: str | None = None
+    # NAMESPACED required-artifact ids (`category:name`) this catalog artifact
+    # covers — the explicit cross-space mapping consumed by codd.artifact_ids.
+    # Optional and additive: entries without it behave exactly as before.
+    required_artifact_ids: tuple[str, ...] = ()
 
     @property
     def is_ssot(self) -> bool:
@@ -66,6 +77,10 @@ class CatalogArtifact:
 class ArtifactCatalog:
     version: int
     artifacts: tuple[CatalogArtifact, ...]
+    # Required-artifact ids that deliberately map to NO catalog artifact
+    # (declared at the catalog top level). The drift guard treats any required
+    # id that is neither mapped nor listed here as an error.
+    intentionally_unmapped_required_ids: tuple[str, ...] = ()
 
     def get(self, artifact_id: str) -> CatalogArtifact | None:
         for artifact in self.artifacts:
@@ -88,7 +103,11 @@ def load_catalog(path: str | Path | None = None) -> ArtifactCatalog:
     Raises :class:`CatalogError` if the catalog breaks normalization:
     duplicate ids, unknown ``kind``, an ssot artifact that declares
     ``derived_from``, or a derived_view whose ``derived_from`` is empty or
-    references an id not present in the catalog.
+    references an id not present in the catalog. The optional cross-space
+    mapping is also validated: every ``required_artifact_ids`` entry (and every
+    ``intentionally_unmapped_required_ids`` entry) must match
+    ``^[a-z0-9_]+:[a-z0-9_]+$``, a required id may map to AT MOST ONE catalog
+    artifact, and an intentionally-unmapped id must not also be mapped.
     """
 
     catalog_path = Path(path) if path is not None else CATALOG_PATH
@@ -134,10 +153,21 @@ def load_catalog(path: str | Path | None = None) -> ArtifactCatalog:
                 default_path_globs=tuple(str(g) for g in (entry.get("default_path_globs") or [])),
                 derived_from=derived_from,
                 validator=str(validator) if validator else None,
+                required_artifact_ids=tuple(
+                    str(r) for r in (entry.get("required_artifact_ids") or [])
+                ),
             )
         )
 
-    catalog = ArtifactCatalog(version=version, artifacts=tuple(artifacts))
+    intentionally_unmapped = tuple(
+        str(r) for r in (raw.get("intentionally_unmapped_required_ids") or [])
+    )
+
+    catalog = ArtifactCatalog(
+        version=version,
+        artifacts=tuple(artifacts),
+        intentionally_unmapped_required_ids=intentionally_unmapped,
+    )
 
     # Normalization invariants: enforce SSOT vs derived_view separation.
     for artifact in artifacts:
@@ -157,6 +187,39 @@ def load_catalog(path: str | Path | None = None) -> ArtifactCatalog:
                         f"derived_view artifact '{artifact.id}' references "
                         f"unknown derived_from id '{ref}'"
                     )
+
+    # Cross-space mapping invariants: required-id syntax + uniqueness (one
+    # required id maps to at most one catalog artifact) + no overlap with the
+    # intentionally-unmapped declaration.
+    required_owner: dict[str, str] = {}
+    for artifact in artifacts:
+        for required_id in artifact.required_artifact_ids:
+            if not REQUIRED_ID_RE.match(required_id):
+                raise CatalogError(
+                    f"artifact '{artifact.id}' declares invalid required_artifact_id "
+                    f"'{required_id}' (expected `^[a-z0-9_]+:[a-z0-9_]+$`, "
+                    "e.g. 'design:system_design')"
+                )
+            owner = required_owner.get(required_id)
+            if owner is not None:
+                raise CatalogError(
+                    f"required artifact id '{required_id}' is mapped by both "
+                    f"'{owner}' and '{artifact.id}' (a required id maps to at "
+                    "most one catalog artifact)"
+                )
+            required_owner[required_id] = artifact.id
+    for required_id in intentionally_unmapped:
+        if not REQUIRED_ID_RE.match(required_id):
+            raise CatalogError(
+                "intentionally_unmapped_required_ids entry "
+                f"'{required_id}' is invalid (expected `^[a-z0-9_]+:[a-z0-9_]+$`)"
+            )
+        if required_id in required_owner:
+            raise CatalogError(
+                f"required artifact id '{required_id}' is declared "
+                "intentionally-unmapped but is mapped by catalog artifact "
+                f"'{required_owner[required_id]}'"
+            )
 
     return catalog
 
@@ -272,35 +335,10 @@ def _validate_design_doc_frontmatter(paths: list[Path]) -> tuple[str, str]:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        front = _extract_frontmatter(text)
+        front, _body = split_frontmatter(text)
         if front:
             return "pass", ""
     return "invalid", "no matched design document has a non-empty YAML frontmatter block"
-
-
-def _extract_frontmatter(text: str) -> Mapping[str, Any] | None:
-    stripped = text.lstrip("﻿")
-    if not stripped.startswith("---"):
-        return None
-    lines = stripped.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return None
-    body: list[str] = []
-    closed = False
-    for line in lines[1:]:
-        if line.strip() == "---":
-            closed = True
-            break
-        body.append(line)
-    if not closed:
-        return None
-    try:
-        data = yaml.safe_load("\n".join(body))
-    except yaml.YAMLError:
-        return None
-    if isinstance(data, Mapping) and data:
-        return data
-    return None
 
 
 _VALIDATORS = {
@@ -484,6 +522,9 @@ class ArtifactSuggestion:
     implied: bool  # do the project's signals say it SHOULD exist?
     matched_paths: tuple[str, ...]  # path globs that matched (if present)
     signal: str  # human-readable rationale for the decision
+    # required_artifacts ids (the `category:name` space) this artifact covers
+    # in the project's resolvable profile; empty when no profile resolves.
+    covers_required_ids: tuple[str, ...] = ()
 
     @property
     def selected(self) -> bool:
@@ -526,6 +567,7 @@ class ContractProposal:
                     "selected": s.selected,
                     "matched_paths": list(s.matched_paths),
                     "signal": s.signal,
+                    "covers_required_ids": list(s.covers_required_ids),
                 }
                 for s in self.suggestions
             ],
@@ -550,6 +592,9 @@ class ContractProposal:
                         implied=bool(record.get("implied", False)),
                         matched_paths=tuple(str(p) for p in (record.get("matched_paths") or [])),
                         signal=str(record.get("signal") or ""),
+                        covers_required_ids=tuple(
+                            str(r) for r in (record.get("covers_required_ids") or [])
+                        ),
                     )
                 )
         return proposal
@@ -595,12 +640,29 @@ def suggest_contract(
     targets authored/produced artifacts. Each artifact is mapped to the pipeline
     stage named by its catalog ``produced_by``.
 
+    When the project's required-artifacts profile is resolvable, each suggestion
+    also records ``covers_required_ids``: the profile's `category:name` ids the
+    suggested catalog artifact covers (via the catalog's cross-space mapping),
+    so a reviewer can see how the contract selection reconciles with the
+    required-artifacts plan/wave flow. Unresolvable profile ⇒ empty (fail-open).
+
     Pure / read-only: matches the tree and inspects config; writes nothing.
     """
 
     root = Path(project_root).resolve()
     req_docs = tuple(str(d) for d in requirement_docs)
     proposal = ContractProposal()
+
+    # Best-effort profile resolution for the covers annotation (lazy import:
+    # codd.artifact_ids imports this module, so importing it at module scope
+    # would be circular).
+    profile_ids: frozenset[str] = frozenset()
+    try:
+        from codd.artifact_ids import profile_required_ids_for_project
+
+        profile_ids = frozenset(profile_required_ids_for_project(root, codd_config))
+    except Exception:
+        profile_ids = frozenset()
 
     for artifact in catalog.artifacts:
         # derived_view artifacts are machine-generated; never authored ⇒ excluded.
@@ -645,6 +707,9 @@ def suggest_contract(
                 implied=implied,
                 matched_paths=rel,
                 signal="; ".join(signal_parts),
+                covers_required_ids=tuple(
+                    rid for rid in artifact.required_artifact_ids if rid in profile_ids
+                ),
             )
         )
 
@@ -815,6 +880,10 @@ def render_suggestion(proposal: ContractProposal) -> str:
         lines.append(f"  [{mark}] {s.artifact_id} (stage={s.stage}) {flags}")
         if s.signal:
             lines.append(f"          {s.signal}")
+        if s.covers_required_ids:
+            lines.append(
+                f"          covers required_artifacts: {', '.join(s.covers_required_ids)}"
+            )
     return "\n".join(lines)
 
 

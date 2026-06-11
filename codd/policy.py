@@ -16,6 +16,7 @@ import yaml
 
 from codd.bridge import load_bridge_registry
 from codd.config import load_project_config
+from codd.discovery import scan_exclude_patterns
 
 
 @dataclass(frozen=True)
@@ -119,7 +120,7 @@ def _run_policy_oss(
         return result
 
     source_dirs = (config.get("scan") or {}).get("source_dirs", [])
-    exclude_patterns = (config.get("scan") or {}).get("exclude", [])
+    exclude_patterns = scan_exclude_patterns(config)
 
     # Collect files to check
     if changed_files:
