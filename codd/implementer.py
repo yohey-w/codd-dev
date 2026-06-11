@@ -18,6 +18,25 @@ from codd.scanner import _extract_frontmatter, build_document_node_path_map
 
 
 FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
+# Repo-root infrastructure artifacts (implement.root_artifact_patterns):
+# AI-emitted paths matching these are written at the PROJECT ROOT instead of
+# being confined under (or dropped for being outside) the task output paths.
+# A CI workflow rerooted under src/<task>/.github/ never runs — observed in
+# the 2026-06 real-AI greenfield dogfood, where the final `codd check`
+# ci_health gate went red because the workflow landed inside the task dir.
+DEFAULT_ROOT_ARTIFACT_PATTERNS: tuple[str, ...] = (
+    ".github/**",
+    ".gitlab-ci.yml",
+    "pyproject.toml",
+    "setup.cfg",
+    "package.json",
+    "Dockerfile*",
+    "docker-compose*",
+    ".gitignore",
+    "README*",
+    "Makefile",
+    "LICENSE*",
+)
 LANGUAGE_EXT_MAP: dict[str, tuple[str, ...]] = {
     "typescript": (".ts", ".tsx"),
     "javascript": (".js", ".jsx"),
@@ -246,6 +265,83 @@ class ImplementationResult:
         return self.output_paths[0]
 
 
+class ImplementSyntaxGateError(RuntimeError):
+    """AI-produced file payload(s) failed the write-time syntax gate.
+
+    Raised BEFORE anything is written to disk: a syntactically broken file is
+    never silently persisted as "task done". ``failures`` holds
+    ``(relative_path, error)`` pairs describing what the AI produced.
+    """
+
+    def __init__(self, failures: list[tuple[str, str]]) -> None:
+        self.failures = list(failures)
+        details = "; ".join(f"{path}: {error}" for path, error in self.failures)
+        super().__init__(
+            f"syntax gate rejected {len(self.failures)} generated file(s): {details}"
+        )
+
+    def feedback_message(self) -> str:
+        lines = [
+            "The previous implementation attempt produced syntactically invalid file content.",
+            "Regenerate ALL files for this task so that every file parses:",
+        ]
+        for path, error in self.failures:
+            lines.append(f"- file {path} is {error}")
+        return "\n".join(lines)
+
+
+def _syntax_gate_enabled(config: dict[str, Any]) -> bool:
+    """``implement.syntax_gate`` — default ON (see defaults.yaml)."""
+    section = config.get("implement")
+    if isinstance(section, dict) and "syntax_gate" in section:
+        return bool(section["syntax_gate"])
+    return True
+
+
+def _payload_syntax_error(relative_path: str, content: str) -> str | None:
+    """Best-effort syntax validation of one AI-produced payload.
+
+    Validates ONLY what the AI produced for files the implementer is about to
+    write — never pre-existing project files. Keyed purely by file extension
+    and the parsers the standard library (or codd's existing hard
+    dependencies) already ship: Python (``ast``), JSON, YAML, TOML. Formats
+    without such a parser (TypeScript, JavaScript, Go, ...) are skipped on
+    purpose — the verify-stage gate is their backstop. Cheap, deterministic,
+    no LLM calls. Returns a human/AI-readable error or ``None`` when valid.
+    """
+    suffix = PurePosixPath(relative_path).suffix.lower()
+    if suffix == ".py":
+        import ast
+
+        try:
+            ast.parse(content)
+        except SyntaxError as exc:
+            location = f"line {exc.lineno}" if exc.lineno else "unknown line"
+            return f"not valid Python ({location}: {exc.msg})"
+    elif suffix == ".json":
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as exc:
+            return f"not valid JSON (line {exc.lineno}: {exc.msg})"
+    elif suffix in {".yaml", ".yml"}:
+        import yaml
+
+        try:
+            yaml.safe_load(content)
+        except yaml.YAMLError as exc:
+            return f"not valid YAML ({exc})"
+    elif suffix == ".toml":
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+            return None
+        try:
+            tomllib.loads(content)
+        except tomllib.TOMLDecodeError as exc:
+            return f"not valid TOML ({exc})"
+    return None
+
+
 class Implementer:
     def __init__(
         self,
@@ -324,44 +420,54 @@ class Implementer:
             if self.use_derived_steps
             else None
         )
-        prompt = _build_implementation_prompt(
-            config=self.config,
-            design_context=design_context,
-            spec=spec,
-            dependency_documents=dependency_documents,
-            conventions=combined_conventions,
-            coding_principles=coding_principles,
-            design_md_content=design_md_content,
-            screen_flow_content=screen_flow_content,
-            screen_flow_routes=screen_flow_routes,
-            impl_steps_context=impl_steps_context,
-            feedback=feedback,
-            capabilities=capabilities,
-        )
-        prompt = generator_module._inject_lexicon(prompt, self.project_root)
         resolved_ai_command = generator_module._resolve_ai_command(
             self.config,
             self.ai_command,
             command_name="implement",
         )
-        try:
-            raw_output = generator_module._invoke_ai_command(
-                resolved_ai_command,
-                prompt,
-                project_root=self.project_root,
-            )
-        except ValueError as exc:
-            if "empty output" not in str(exc).casefold():
-                raise
-            if _skip_generation_enabled(design_context.content):
-                raw_output = ""
-            else:
-                raise _zero_generated_files_error(spec) from exc
-
         language = _normalize_implementation_language((self.config.get("project") or {}).get("language"))
-        if _skip_generation_enabled(design_context.content) and not raw_output.strip():
-            generated_files: list[Path] = []
-        else:
+        syntax_gate = _syntax_gate_enabled(self.config)
+        # Write-time syntax gate (implement.syntax_gate): a gate failure feeds
+        # ONE bounded retry through the existing feedback prompt injection;
+        # with the gate off there is a single attempt (legacy behavior).
+        max_attempts = 2 if syntax_gate else 1
+        current_feedback = feedback
+        generated_files: list[Path] = []
+        gate_error: ImplementSyntaxGateError | None = None
+        for _attempt in range(max_attempts):
+            prompt = _build_implementation_prompt(
+                config=self.config,
+                design_context=design_context,
+                spec=spec,
+                dependency_documents=dependency_documents,
+                conventions=combined_conventions,
+                coding_principles=coding_principles,
+                design_md_content=design_md_content,
+                screen_flow_content=screen_flow_content,
+                screen_flow_routes=screen_flow_routes,
+                impl_steps_context=impl_steps_context,
+                feedback=current_feedback,
+                capabilities=capabilities,
+            )
+            prompt = generator_module._inject_lexicon(prompt, self.project_root)
+            try:
+                raw_output = generator_module._invoke_ai_command(
+                    resolved_ai_command,
+                    prompt,
+                    project_root=self.project_root,
+                )
+            except ValueError as exc:
+                if "empty output" not in str(exc).casefold():
+                    raise
+                if _skip_generation_enabled(design_context.content):
+                    raw_output = ""
+                else:
+                    raise _zero_generated_files_error(spec) from exc
+
+            if _skip_generation_enabled(design_context.content) and not raw_output.strip():
+                generated_files = []
+                gate_error = None
+                break
             try:
                 generated_files = _write_generated_files(
                     project_root=self.project_root,
@@ -370,9 +476,20 @@ class Implementer:
                     dependency_documents=dependency_documents,
                     language=language,
                     raw_output=raw_output,
+                    syntax_gate=syntax_gate,
+                    root_artifact_patterns=_root_artifact_patterns_from_config(self.config),
                 )
+            except ImplementSyntaxGateError as exc:
+                gate_error = exc
+                current_feedback = _combine_feedback(feedback, exc.feedback_message())
+                continue
             except ValueError as exc:
                 raise _zero_generated_files_error(spec) from exc
+            gate_error = None
+            break
+
+        if gate_error is not None:
+            raise _syntax_gate_exhausted_error(spec, gate_error, attempts=max_attempts) from gate_error
 
         if len(generated_files) == 0 and not _skip_generation_enabled(design_context.content):
             raise _zero_generated_files_error(spec)
@@ -995,6 +1112,27 @@ def _zero_generated_files_error(spec: ImplementSpec) -> Exception:
     )
 
 
+def _syntax_gate_exhausted_error(
+    spec: ImplementSpec, error: ImplementSyntaxGateError, *, attempts: int
+) -> Exception:
+    """An honest failure beats a silent broken write."""
+    from codd.cli import CoddCLIError
+
+    failed_files = ", ".join(path for path, _ in error.failures)
+    return CoddCLIError(
+        f"Design '{spec.design_node}' produced syntactically invalid file(s) "
+        f"after {attempts} attempt(s): {failed_files}. {error}. "
+        "Nothing was written to disk for this task. "
+        "Set 'implement.syntax_gate: false' in codd.yaml to opt out of the write-time syntax gate."
+    )
+
+
+def _combine_feedback(original: str | None, addition: str) -> str:
+    if original and original.strip():
+        return f"{original.rstrip()}\n\n{addition}"
+    return addition
+
+
 def _spec_generates_ui_file(spec: ImplementSpec, language: Any, design_content: str) -> bool:
     for path in _candidate_generated_paths(spec, language, design_content):
         if path.suffix.lower() in UI_FILE_EXTENSIONS:
@@ -1178,6 +1316,7 @@ def _build_implementation_prompt(
         "- The tool will prepend traceability comments to each generated file; do not emit separate metadata files.",
         "- Do not emit prose, explanations, Markdown headings, YAML, TODOs, placeholders, or file descriptions outside the required FILE blocks.",
         "- Every generated file path must stay under one of the output paths shown above.",
+        *_root_artifact_prompt_lines(config),
         extension_guidance,
         "- Favor small coherent modules rather than one monolithic file.",
         "- Cross-file imports may use relative imports or project-local aliases, but keep the output internally coherent.",
@@ -1320,6 +1459,24 @@ def _build_implementation_prompt(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _root_artifact_prompt_lines(config: dict[str, Any]) -> list[str]:
+    """One prompt line declaring the repo-root infrastructure exception.
+
+    Without it the AI obeys the confinement instruction and nests CI
+    workflows/manifests inside the output paths, where they never function.
+    Emitted only when the allowlist is active (non-empty patterns).
+    """
+    patterns = _root_artifact_patterns_from_config(config)
+    if not patterns:
+        return []
+    return [
+        "- EXCEPTION: repository-level infrastructure files matching "
+        f"{', '.join(patterns)} belong at the REPOSITORY ROOT — emit them with "
+        "their repo-root path (e.g. === FILE: .github/workflows/ci.yml ===), "
+        "never nested inside the output paths.",
+    ]
+
+
 def _spec_targets_tests(spec: ImplementSpec, config: dict[str, Any]) -> bool:
     """Whether this implement run generates test artifacts (VB marker guidance)."""
     from codd.verifiable_behavior_audit import is_test_related_implement
@@ -1337,22 +1494,137 @@ def _write_generated_files(
     dependency_documents: list[DependencyDocument],
     language: str,
     raw_output: str,
+    syntax_gate: bool = True,
+    root_artifact_patterns: list[str] | tuple[str, ...] | None = None,
 ) -> list[Path]:
-    file_payloads = _parse_file_payloads(raw_output, spec.output_paths, language)
+    file_payloads = _parse_file_payloads(
+        raw_output, spec.output_paths, language, root_artifact_patterns=root_artifact_patterns
+    )
+    if syntax_gate:
+        # Validate EVERY payload before writing ANY file: a gate failure leaves
+        # the working tree untouched (no partial half-broken task output).
+        failures = [
+            (relative_path, error)
+            for relative_path, content in file_payloads
+            if (error := _payload_syntax_error(relative_path, content)) is not None
+        ]
+        if failures:
+            raise ImplementSyntaxGateError(failures)
     traceability_comment = _build_traceability_comment(design_context, spec, dependency_documents)
+    output_prefixes = [PurePosixPath(item) for item in spec.output_paths]
     generated_paths: list[Path] = []
     for relative_path, content in file_payloads:
         destination = project_root / relative_path
         _ensure_inside_project(project_root, destination, "generated file")
+        is_root_artifact = not any(
+            _path_starts_with(PurePosixPath(relative_path), prefix) for prefix in output_prefixes
+        )
+        if is_root_artifact and _root_artifact_overwrite_blocked(destination, relative_path):
+            import sys
+
+            print(
+                f"Warning: kept existing root file {relative_path} "
+                "(no codd @generated-by marker; user-authored content wins)",
+                file=sys.stderr,
+            )
+            continue
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(_prepend_traceability_comment(relative_path, traceability_comment, content), encoding="utf-8")
         generated_paths.append(destination)
     return generated_paths
 
 
-def _parse_file_payloads(raw_output: str, output_paths: list[str], language: str) -> list[tuple[str, str]]:
+def _root_artifact_patterns_from_config(config: dict[str, Any]) -> list[str]:
+    """``implement.root_artifact_patterns`` — defaults shipped in defaults.yaml.
+
+    An explicit project list replaces the defaults entirely (empty list = the
+    allowlist is off and every out-of-scope path is dropped, the pre-FX2
+    behavior).
+    """
+    section = config.get("implement")
+    if isinstance(section, dict) and isinstance(section.get("root_artifact_patterns"), list):
+        return [str(item).strip() for item in section["root_artifact_patterns"] if str(item).strip()]
+    return list(DEFAULT_ROOT_ARTIFACT_PATTERNS)
+
+
+def _root_artifact_overwrite_blocked(destination: Path, relative_path: str) -> bool:
+    """User-authored repo-root files win over AI-emitted root artifacts.
+
+    A root-destined payload may only overwrite a file the implementer itself
+    generated (recognized by the ``@generated-by: codd implement`` traceability
+    marker). Formats codd cannot mark (no comment prefix registered — YAML,
+    JSON, TOML, suffix-less files) keep the implementer's normal overwrite
+    semantics so repeated runs converge on the latest generation.
+    """
+    if not destination.exists():
+        return False
+    if COMMENT_PREFIX_BY_SUFFIX.get(PurePosixPath(relative_path).suffix.lower()) is None:
+        return False
+    try:
+        existing = destination.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return True
+    return "@generated-by: codd implement" not in existing
+
+
+def _root_artifact_destination(
+    path: PurePosixPath,
+    output_prefixes: list[PurePosixPath],
+    patterns: list[str] | tuple[str, ...],
+) -> PurePosixPath | None:
+    """Resolve the repo-root destination for a root-destined artifact path.
+
+    Two accepted shapes (both deterministic, no LLM judgement):
+      1. The AI emitted the repo-root path directly (``.github/workflows/ci.yml``).
+      2. The AI obeyed the "stay under the output paths" instruction and nested
+         the artifact under an output prefix (``src/.github/workflows/ci.yml``);
+         stripping that prefix yields a pattern match, so the artifact is
+         rerooted to where it actually functions.
+    Returns ``None`` when the path is not a root artifact.
+    """
+    if not patterns:
+        return None
+    if _matches_root_artifact_pattern(path, patterns):
+        return path
+    for prefix in output_prefixes:
+        if len(path.parts) > len(prefix.parts) and _path_starts_with(path, prefix):
+            tail = PurePosixPath(*path.parts[len(prefix.parts):])
+            if _matches_root_artifact_pattern(tail, patterns):
+                return tail
+    return None
+
+
+def _matches_root_artifact_pattern(path: PurePosixPath, patterns: list[str] | tuple[str, ...]) -> bool:
+    from fnmatch import fnmatchcase
+
+    for pattern in patterns:
+        text = str(pattern).strip()
+        if not text:
+            continue
+        if text.endswith("/**"):
+            prefix_parts = PurePosixPath(text[:-3]).parts
+            if prefix_parts and len(path.parts) > len(prefix_parts) and tuple(path.parts[: len(prefix_parts)]) == prefix_parts:
+                return True
+            continue
+        pattern_parts = PurePosixPath(text).parts
+        if len(path.parts) == len(pattern_parts) and all(
+            fnmatchcase(part, pattern_part)
+            for part, pattern_part in zip(path.parts, pattern_parts)
+        ):
+            return True
+    return False
+
+
+def _parse_file_payloads(
+    raw_output: str,
+    output_paths: list[str],
+    language: str,
+    *,
+    root_artifact_patterns: list[str] | tuple[str, ...] | None = None,
+) -> list[tuple[str, str]]:
     cleaned_output = raw_output.strip()
     output_prefixes = [PurePosixPath(item) for item in output_paths]
+    root_patterns = list(root_artifact_patterns or ())
     matches = list(FILE_BLOCK_RE.finditer(cleaned_output))
     if not matches:
         fallback_content = _strip_code_fence(cleaned_output).strip()
@@ -1372,12 +1644,21 @@ def _parse_file_payloads(raw_output: str, output_paths: list[str], language: str
         if path.is_absolute() or ".." in path.parts:
             skipped.append(f"{path_text!r}: path traversal")
             continue
-        if not any(_path_starts_with(path, prefix) for prefix in output_prefixes):
+        root_destination = _root_artifact_destination(path, output_prefixes, root_patterns)
+        if root_destination is not None:
+            path = root_destination
+        elif not any(_path_starts_with(path, prefix) for prefix in output_prefixes):
             skipped.append(f"{path_text!r}: outside output paths {output_paths!r}")
             continue
 
-        content = _strip_code_fence(block).strip()
+        content = _strip_code_fence(block, destination=path_text).strip()
         if not content:
+            if _EMPTY_FENCE_BLOCK_RE.match(block):
+                # The AI explicitly emitted an empty fenced block: the file is
+                # intentionally empty (e.g. a package __init__.py). Write it
+                # empty instead of skipping it or leaking literal fences.
+                payloads.append((path.as_posix(), ""))
+                continue
             skipped.append(f"{path_text!r}: empty content")
             continue
         payloads.append((path.as_posix(), content.rstrip() + "\n"))
@@ -1509,16 +1790,68 @@ def _prepend_traceability_comment(relative_path: str, comment_block: str, conten
     return f"{formatted_comment}\n\n{content.lstrip()}"
 
 
-def _strip_code_fence(block: str) -> str:
+def _strip_code_fence(block: str, *, destination: str | None = None) -> str:
+    """Unwrap a markdown code fence around an AI-produced file payload.
+
+    ``destination`` is the relative path the payload will be written to; it
+    only gates the *orphan-line* cleanup below — content destined for markdown
+    files (where fence lines are legitimate) is never orphan-stripped. A
+    ``None`` destination is treated as non-markdown (the fallback payload path
+    never targets markdown files).
+    """
     stripped = block.strip()
+    # An EMPTY fenced block (``` lang? NEWLINE ```), optionally with blank
+    # lines between the fences, means "this file is intentionally empty".
+    # The old wrapper regex required a body line, so the literal fences leaked
+    # to disk verbatim (observed: __init__.py files written as ```python\n```,
+    # an immediate SyntaxError).
+    if _EMPTY_FENCE_BLOCK_RE.match(stripped):
+        return ""
     # Non-greedy `.*?` captures up to the FIRST closing fence; any trailing
     # prose/markdown after the fence is discarded (Issue #22, v-kato).
     # Drop the `$` end-of-string anchor so the match still wins when the
     # LLM ignored the "no commentary" instruction and appended explanations.
-    fenced = re.match(r"^```(?:[a-zA-Z0-9_+-]+)?\s*\n(?P<body>.*?)\n```", stripped, re.DOTALL)
+    # `\s*\n` after the language tag tolerates trailing spaces and CRLF.
+    fenced = re.match(r"^```(?:[a-zA-Z0-9_+-]+)?\s*\n(?P<body>.*?)\r?\n```", stripped, re.DOTALL)
     if fenced:
-        return fenced.group("body")
-    return stripped
+        stripped = fenced.group("body")
+    if destination is not None and PurePosixPath(destination).suffix.lower() in _MARKDOWN_SUFFIXES:
+        return stripped
+    return _strip_orphan_fence_lines(stripped)
+
+
+_MARKDOWN_SUFFIXES = {".md", ".markdown"}
+_EMPTY_FENCE_BLOCK_RE = re.compile(r"^```[a-zA-Z0-9_+-]*[ \t]*(?:\r?\n\s*)?```$")
+# A fence OPENER line (optional language tag) and a bare closing fence line.
+_ORPHAN_OPEN_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_+-]*[ \t]*\r?$")
+_ORPHAN_CLOSE_FENCE_RE = re.compile(r"^```[ \t]*\r?$")
+
+
+def _strip_orphan_fence_lines(content: str) -> str:
+    """Drop a LEADING orphan fence opener and/or a TRAILING lone ``` line.
+
+    Covers half-wrapped payloads (opening fence without a closing one, or the
+    reverse) that the full-wrapper regex cannot match. Only the first and last
+    non-blank lines are considered — fence lines in the MIDDLE of the content
+    (e.g. inside a string literal containing markdown) are never touched.
+    """
+    lines = content.splitlines(keepends=True)
+    start, end = 0, len(lines)
+    for index in range(len(lines)):
+        if not lines[index].strip():
+            continue
+        if _ORPHAN_OPEN_FENCE_RE.match(lines[index].rstrip("\n")):
+            start = index + 1
+        break
+    for index in range(len(lines) - 1, start - 1, -1):
+        if not lines[index].strip():
+            continue
+        if _ORPHAN_CLOSE_FENCE_RE.match(lines[index].rstrip("\n")):
+            end = index
+        break
+    if start == 0 and end == len(lines):
+        return content
+    return "".join(lines[start:end])
 
 
 def _looks_like_tsx(content: str) -> bool:

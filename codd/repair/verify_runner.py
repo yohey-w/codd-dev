@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import json
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,12 +12,16 @@ import subprocess
 import time
 import warnings
 
+import yaml
+
 from codd.config import find_codd_dir, load_project_config
 from codd.dag import DAG, reset_dag_cache
 from codd.dag.builder import build_dag, load_dag_settings
 from codd.dag.runner import run_checks
 from codd.deployment.providers import VERIFICATION_TEMPLATES
+from codd.discovery import iter_source_files, scan_exclude_patterns
 from codd.repair.schema import VerificationFailureReport
+from codd.test_detection import detect_test_command
 
 
 DEFAULT_CHECKS: tuple[str, ...] = (
@@ -27,6 +33,33 @@ DEFAULT_CHECKS: tuple[str, ...] = (
     "deployment_completeness",
     "user_journey_coherence",
     "environment_coverage",
+)
+
+#: FX3 execution-evidence constants.
+#:
+#: Source-integrity parse checks are bounded by FILE COUNT (never by language
+#: subsetting): a pathological monorepo must not turn a fast deterministic
+#: gate into a multi-minute scan.
+SOURCE_INTEGRITY_MAX_FILES = 2000
+
+#: Formats with a stdlib parser. Everything else (TypeScript, Go, ...) is
+#: skipped on purpose — there is no in-process parser to key on, and shipping
+#: per-language toolchains would violate the language-neutrality rule. Their
+#: backstop is the executed test/typecheck command.
+SOURCE_INTEGRITY_EXTENSIONS: tuple[str, ...] = (".py", ".json", ".yaml", ".yml", ".toml")
+
+#: Bounded wall-clock budget for the detected/configured test + typecheck
+#: commands (``verify.test_timeout_seconds``). Mirrors the existing
+#: ``verify.verification_timeout`` convention used by verification-test nodes.
+DEFAULT_TEST_TIMEOUT_SECONDS = 600.0
+
+#: The honesty rule: a verification that verified nothing must say so.
+STRUCTURAL_ONLY_WARNING = (
+    "verification executed no tests/typecheck/runtime checks — structural DAG checks only. "
+    "This proves document/graph coherence, NOT that the code works. "
+    "Set verify.test_command (or add a detectable test setup: pytest config, package.json "
+    "test script, Cargo.toml, go.mod, *.bats, Makefile test target), or set "
+    "verify.allow_structural_only: true to accept structural-only verification."
 )
 
 
@@ -46,6 +79,34 @@ class VerificationResult:
     runtime_results: list[Any] = field(default_factory=list)
     failure: VerificationFailureReport | None = None
     warnings: list[str] = field(default_factory=list)
+    # ── FX3 execution evidence (additive; defaults keep old constructors valid) ──
+    #: True when a test command actually ran to a captured exit status.
+    tests_executed: bool = False
+    #: The resolved test command (explicit config or detect_test_command), if any.
+    test_command: str | None = None
+    #: One-line human summary of the test run ("no test command detected",
+    #: "1 passed in 0.03s", "failed (exit 1)", ...).
+    tests_summary: str = ""
+    #: True when a configured typecheck command actually ran.
+    typecheck_executed: bool = False
+    #: One-line status of the deterministic parse check over project sources
+    #: ("checked N file(s)", "disabled", "N parse error(s)", "not checked").
+    source_integrity: str = "not checked"
+
+    @property
+    def executed_anything(self) -> bool:
+        """Did this verification EXECUTE anything (vs. only structural checks)?
+
+        The dogfood false-green: structural DAG checks all passed on a project
+        of 10 syntactically broken files because no test/typecheck/runtime
+        command ever ran and "nothing was executed" silently counted as PASS.
+        Callers gate honesty on this property.
+        """
+        return bool(
+            self.tests_executed
+            or self.typecheck_executed
+            or _any_runtime_executed(self.runtime_results)
+        )
 
 
 @dataclass
@@ -74,7 +135,15 @@ class VerifyRunner:
         self.runtime_skip = frozenset(str(item) for item in (runtime_skip or ()))
 
     def run(self) -> VerificationResult:
-        """Reset DAG state, run C1-C7 checks, then run executable verification tests."""
+        """Reset DAG state, run C1-C7 checks, then run executable verification tests.
+
+        FX3: in addition to the structural DAG checks and verification-test
+        nodes, the runner now produces EXECUTION EVIDENCE — it parse-checks
+        the project sources (deterministic, no LLM), runs the configured
+        typecheck command, and runs the explicit/detected test command. The
+        result reports exactly what was executed so a "passed" can never
+        again silently mean "nothing ran".
+        """
 
         self.reset_dag_cache()
         if not self._has_codd_yaml():
@@ -98,18 +167,45 @@ class VerifyRunner:
                 for failure in [self._failure_from_runtime_result(result)]
                 if failure is not None
             )
+            # FX3 execution evidence — order: cheap deterministic parse check
+            # first (names broken files even when the suite cannot start),
+            # then the configured typecheck, then the test command.
+            source_integrity, integrity_failures = self._source_integrity_failures(settings)
+            failures.extend(integrity_failures)
+            typecheck_executed, typecheck_failure = self._run_typecheck_command(settings)
+            if typecheck_failure is not None:
+                failures.append(typecheck_failure)
+            tests_executed, test_command, tests_summary, test_failure = self._run_test_command(settings)
+            if test_failure is not None:
+                failures.append(test_failure)
         except Exception as exc:  # noqa: BLE001 - verification must fail gracefully for repair loop.
             if _is_missing_expected_proof_break(exc):
                 return self._warning_result("expected proof break missing; skipped proof-break verification")
             return self._error_result("verification_error", str(exc))
 
-        return VerificationResult(
+        result = VerificationResult(
             passed=not failures,
             failures=failures,
             check_results=check_results,
             runtime_results=runtime_results,
             failure=self._repair_failure_report(failures, dag),
+            tests_executed=tests_executed,
+            test_command=test_command,
+            tests_summary=tests_summary,
+            typecheck_executed=typecheck_executed,
+            source_integrity=source_integrity,
         )
+        # The honesty rule. Plain `codd verify` stays pass-WITH-WARNING by
+        # default because existing brownfield/CI configurations may be
+        # deliberately structural-only (doc-coherence gates with the test
+        # suite run elsewhere in the pipeline); hard-failing them would break
+        # every such pipeline overnight. The greenfield autopilot, by
+        # contrast, is certifying a build IT produced with no human in the
+        # loop — there it escalates to a stage FAILURE (see
+        # greenfield/pipeline.py _default_verify_runner).
+        if result.passed and not result.executed_anything and not structural_only_allowed(settings):
+            result.warnings.append(STRUCTURAL_ONLY_WARNING)
+        return result
 
     def reset_dag_cache(self) -> None:
         """Clear DAG cache state before rebuilding."""
@@ -177,6 +273,136 @@ class VerifyRunner:
                 results.append(_runtime_result(node.id, template_ref, False, _failure_output(node.id, str(exc))))
         return results
 
+    # ── FX3 execution evidence ──────────────────────────────
+
+    def _source_integrity_failures(self, settings: dict[str, Any]) -> tuple[str, list[VerificationFailure]]:
+        """Deterministic parse check of project sources (no LLM, no subprocess).
+
+        Walks ``scan.source_dirs`` through the shared discovery layer and
+        parses every file with a stdlib-checkable format (Python/JSON/YAML/
+        TOML). One failure per broken file, each naming the file in
+        ``details.failed_nodes`` so the repair loop maps it straight to the
+        implementation file. This alone would have caught the dogfood
+        disaster (10 broken .py files, verify green).
+        """
+        if _verify_setting(settings, "source_integrity", True) is False:
+            return "disabled", []
+        failures: list[VerificationFailure] = []
+        checked = 0
+        truncated = False
+        for path in iter_source_files(
+            self.project_root,
+            source_dirs=_scan_source_dirs(settings),
+            extra_excludes=scan_exclude_patterns(settings),
+            extensions=SOURCE_INTEGRITY_EXTENSIONS,
+        ):
+            if checked >= SOURCE_INTEGRITY_MAX_FILES:
+                truncated = True
+                break
+            checked += 1
+            error = _parse_error(path)
+            if error is None:
+                continue
+            relative = path.relative_to(self.project_root).as_posix()
+            failures.append(
+                VerificationFailure(
+                    check_name="source_integrity",
+                    source="source_integrity",
+                    message=f"{relative}: {error}",
+                    details={"failed_nodes": [relative], "parse_error": error},
+                )
+            )
+        suffix = f" (bounded at {SOURCE_INTEGRITY_MAX_FILES})" if truncated else ""
+        if failures:
+            return f"{len(failures)} parse error(s) in {checked} file(s){suffix}", failures
+        return f"checked {checked} file(s){suffix}", []
+
+    def _run_typecheck_command(self, settings: dict[str, Any]) -> tuple[bool, VerificationFailure | None]:
+        """Run ``verify.typecheck_command`` (or ``typecheck.command`` when
+        ``typecheck.enabled``). No command configured → not executed."""
+        command = _resolve_typecheck_command(settings)
+        if not command:
+            return False, None
+        executed, _summary, failure = self._run_evidence_command(
+            command, settings, check_name="typecheck_command", label="typecheck command"
+        )
+        return executed, failure
+
+    def _run_test_command(
+        self, settings: dict[str, Any]
+    ) -> tuple[bool, str | None, str, VerificationFailure | None]:
+        """Resolve and run the project's test command.
+
+        Explicit ``verify.test_command``/``fix.test_command`` wins; otherwise
+        :func:`codd.test_detection.detect_test_command` heuristics apply
+        (pytest config, package.json scripts, cargo, go, bats, Makefile).
+        No command detected → ``tests_executed=False`` — callers MUST treat
+        that as "unverified", never as "tests passed".
+        """
+        command = detect_test_command(self.project_root, config=settings)
+        if not command:
+            return False, None, "no test command detected", None
+        executed, summary, failure = self._run_evidence_command(
+            command, settings, check_name="test_command", label="test command"
+        )
+        return executed, command, summary, failure
+
+    def _run_evidence_command(
+        self,
+        command: str,
+        settings: dict[str, Any],
+        *,
+        check_name: str,
+        label: str,
+    ) -> tuple[bool, str, VerificationFailure | None]:
+        """Run one evidence command with the bounded verify timeout.
+
+        Returns ``(executed, summary, failure)``. ``executed`` is True when
+        the command actually ran (even when it failed or timed out — an
+        observed failure IS execution evidence; only "never ran" is not).
+        """
+        timeout = _test_timeout_seconds(settings)
+        try:
+            completed = subprocess.run(
+                command,
+                shell=True,
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            message = f"[TIMEOUT] {label} exceeded {timeout:g}s: {command}"
+            return (
+                True,
+                f"timed out after {timeout:g}s",
+                VerificationFailure(
+                    check_name=check_name,
+                    source=check_name,
+                    message=message,
+                    details={"command": command, "timeout_seconds": timeout},
+                ),
+            )
+        output = _command_output_tail(completed.stdout, completed.stderr)
+        if completed.returncode == 0:
+            return True, _last_line(completed.stdout) or "passed", None
+        if completed.returncode == 5 and "pytest" in command:
+            # pytest exit code 5 = "no tests collected": the runner started
+            # but nothing was executed, which must NOT count as evidence.
+            # Keyed on the command string the detector itself emits.
+            return False, f"{label} collected no tests (pytest exit code 5)", None
+        message = f"{label} failed (exit {completed.returncode}): {command}\n{output}".rstrip()
+        return (
+            True,
+            f"failed (exit {completed.returncode})",
+            VerificationFailure(
+                check_name=check_name,
+                source=check_name,
+                message=message,
+                details={"command": command, "exit_code": completed.returncode, "output": output},
+            ),
+        )
+
     def _failure_from_check_result(self, result: Any) -> VerificationFailure | None:
         if _result_passed(result) or _result_severity(result) != "red":
             return None
@@ -240,6 +466,103 @@ def run_standalone_verify(
         except (FileNotFoundError, ValueError):
             codd_yaml = {}
     return VerifyRunner(root, codd_yaml, runtime_skip=runtime_skip).run()
+
+
+def structural_only_allowed(settings: Mapping[str, Any] | None) -> bool:
+    """``verify.allow_structural_only`` — the explicit opt-out of the honesty rule.
+
+    A project that sets this declares "structural DAG coherence is the whole
+    contract of `codd verify` here" (e.g. doc-only repositories, or pipelines
+    whose test suite runs in a separate CI stage). Default: not allowed —
+    a verification that executed nothing warns (plain verify) or fails the
+    stage (greenfield autopilot).
+    """
+    return _verify_setting(dict(settings or {}), "allow_structural_only", False) is True
+
+
+def _verify_setting(settings: dict[str, Any], key: str, default: Any) -> Any:
+    verify = settings.get("verify")
+    if not isinstance(verify, Mapping):
+        return default
+    value = verify.get(key, default)
+    return default if value is None else value
+
+
+def _scan_source_dirs(settings: dict[str, Any]) -> list[str]:
+    scan = settings.get("scan")
+    raw = scan.get("source_dirs") if isinstance(scan, Mapping) else None
+    if isinstance(raw, list):
+        dirs = [str(item) for item in raw if str(item).strip()]
+        if dirs:
+            return dirs
+    return ["src/"]
+
+
+def _test_timeout_seconds(settings: dict[str, Any]) -> float:
+    return _positive_seconds(_verify_setting(settings, "test_timeout_seconds", None)) or DEFAULT_TEST_TIMEOUT_SECONDS
+
+
+def _resolve_typecheck_command(settings: dict[str, Any]) -> str | None:
+    explicit = _verify_setting(settings, "typecheck_command", None)
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    typecheck = settings.get("typecheck")
+    if isinstance(typecheck, Mapping) and typecheck.get("enabled"):
+        command = typecheck.get("command")
+        if isinstance(command, str) and command.strip():
+            return command.strip()
+    return None
+
+
+try:  # tomllib is stdlib from Python 3.11; tomli is its 3.10 backport.
+    import tomllib as _toml_parser  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    try:
+        import tomli as _toml_parser  # type: ignore[import-not-found, no-redef]
+    except ModuleNotFoundError:
+        _toml_parser = None  # type: ignore[assignment]
+
+
+def _parse_error(path: Path) -> str | None:
+    """Stdlib parse check for one file; None = parses (or unreadable/unknown)."""
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None  # binary/unreadable files are not this gate's business
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".py":
+            ast.parse(content)
+        elif suffix == ".json":
+            json.loads(content)
+        elif suffix in {".yaml", ".yml"}:
+            yaml.safe_load(content)
+        elif suffix == ".toml" and _toml_parser is not None:
+            _toml_parser.loads(content)
+    except Exception as exc:  # noqa: BLE001 - any parse failure is the finding.
+        return f"not valid {suffix.lstrip('.').upper()}: {exc}"
+    return None
+
+
+def _command_output_tail(stdout: str | None, stderr: str | None, limit: int = 4000) -> str:
+    combined = "\n".join(part.strip() for part in (stdout, stderr) if part and part.strip())
+    if len(combined) <= limit:
+        return combined
+    return f"... (truncated) ...\n{combined[-limit:]}"
+
+
+def _last_line(text: str | None) -> str:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def _any_runtime_executed(runtime_results: list[Any]) -> bool:
+    """A runtime entry counts as executed unless it was skipped."""
+    for entry in runtime_results or []:
+        skipped = entry.get("skipped") if isinstance(entry, Mapping) else getattr(entry, "skipped", None)
+        if not skipped:
+            return True
+    return False
 
 
 def _new_template(
@@ -509,8 +832,12 @@ def _is_missing_expected_proof_break(exc: BaseException) -> bool:
 
 __all__ = [
     "DEFAULT_CHECKS",
+    "SOURCE_INTEGRITY_EXTENSIONS",
+    "SOURCE_INTEGRITY_MAX_FILES",
+    "STRUCTURAL_ONLY_WARNING",
     "VerificationFailure",
     "VerificationResult",
     "VerifyRunner",
     "run_standalone_verify",
+    "structural_only_allowed",
 ]

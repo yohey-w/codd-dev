@@ -315,6 +315,7 @@ class GreenfieldPipeline:
         project_name: str | None = None,
         language: str | None = None,
         requirements: str | Path | None = None,
+        project_type: str | None = None,
         ai_command: str | None = None,
         elicit: bool | None = None,
         max_repair_attempts: int | None = None,
@@ -340,6 +341,7 @@ class GreenfieldPipeline:
         self.project_name = project_name
         self.language = language
         self.requirements = str(requirements) if requirements is not None else None
+        self.project_type = project_type
         self.ai_command = ai_command
         self._option_overrides = {
             "elicit": elicit,
@@ -377,6 +379,8 @@ class GreenfieldPipeline:
             self.language = str(stored["language"])
         if self.requirements is None and stored.get("requirements"):
             self.requirements = str(stored["requirements"])
+        if self.project_type is None and stored.get("project_type"):
+            self.project_type = str(stored["project_type"])
         for key, value in self._option_overrides.items():
             if value is None and stored.get(key) is not None:
                 self._option_overrides[key] = stored[key]
@@ -410,6 +414,7 @@ class GreenfieldPipeline:
                     "project_name": self.project_name,
                     "language": self.language,
                     "requirements": self.requirements,
+                    "project_type": self.project_type,
                     "ai_command": self.ai_command,
                     **options,
                 }
@@ -546,6 +551,13 @@ class GreenfieldPipeline:
         if existing is not None:
             record["status"] = STATUS_SKIPPED
             record["detail"] = f"CoDD config dir already exists: {existing.name}/"
+            if self.project_type:
+                # Record the project type on an already-initialized project so
+                # capability resolution applies to every downstream stage.
+                import codd.cli as cli_module
+
+                cli_module._record_project_type(project_root, existing, self.project_type)
+                record["detail"] += f" (project_type {self.project_type})"
             if self.requirements:
                 self._run_init(project_root)  # import requirements into the existing project
                 record["detail"] += " (requirements imported)"
@@ -565,6 +577,7 @@ class GreenfieldPipeline:
                 name=self.project_name,
                 language=self.language,
                 requirements=self.requirements,
+                project_type=self.project_type,
             )
             return
         import codd.cli as cli_module
@@ -577,6 +590,7 @@ class GreenfieldPipeline:
                 dest=str(project_root),
                 requirements=self.requirements,
                 config_dir="codd",
+                project_type=self.project_type,
                 suggest_lexicons=False,
                 llm_enhanced=False,
                 auto_approve=True,
@@ -1070,7 +1084,7 @@ def _default_verify_runner(
 
     result = run_standalone_verify(project_root)
     if result.passed:
-        return "verification passed"
+        return _certify_verify_executed(project_root, result)
 
     echo(f"[greenfield] verify failed ({len(result.failures)} failure(s)); starting automatic repair")
     from codd.config import load_project_config
@@ -1113,7 +1127,51 @@ def _default_verify_runner(
             f"verification failed and automatic repair ended with {outcome.status} "
             f"(history: {outcome.history_session_dir})"
         )
+    # Repair declared success from its own verify_callable; re-run standalone
+    # verify once so the executed-anything honesty gate also covers the
+    # post-repair state (a repair that fixed the DAG but left the build with
+    # nothing executable must not be certified either).
+    final = run_standalone_verify(project_root)
+    if not final.passed:
+        raise StageError(
+            f"automatic repair reported success but a fresh verification failed "
+            f"({len(final.failures)} failure(s))"
+        )
+    _certify_verify_executed(project_root, final)
     return f"verification passed after automatic repair ({len(outcome.attempts)} attempt(s))"
+
+
+def _certify_verify_executed(project_root: Path, result: Any) -> str:
+    """The greenfield half of the FX3 honesty rule.
+
+    Plain ``codd verify`` keeps "structural-only pass" as a pass-with-WARNING
+    (existing brownfield/CI configs may intentionally gate only document
+    coherence, with the test suite running in another pipeline stage). The
+    autopilot has no such excuse: it just built the system unattended and is
+    about to certify it, so "verification executed nothing" is a stage
+    FAILURE unless the project explicitly opted in via
+    ``verify.allow_structural_only: true``.
+    """
+    from codd.config import load_project_config
+    from codd.repair.verify_runner import structural_only_allowed
+
+    if getattr(result, "executed_anything", True):
+        evidence = f" (tests executed: {result.test_command})" if getattr(result, "tests_executed", False) else ""
+        return f"verification passed{evidence}"
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        config = {}
+    if structural_only_allowed(config):
+        return "verification passed (structural-only, allowed by verify.allow_structural_only)"
+    raise StageError(
+        "verify executed nothing (no test command detected, no typecheck command "
+        "configured, no runtime verification nodes) — autopilot cannot certify an "
+        "unexecuted build. Set verify.test_command in codd.yaml, add a detectable "
+        "test setup (pytest config, package.json test script, Cargo.toml, go.mod, "
+        "Makefile test target), or set verify.allow_structural_only: true to "
+        "accept structural-only verification."
+    )
 
 
 def _default_propagate_runner(project_root: Path, *, ai_command: str | None) -> str:

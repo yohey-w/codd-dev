@@ -53,6 +53,9 @@ def test_e2e_full_autopilot_with_scripted_ai(tmp_path: Path, stub_ai) -> None:
     core_file = project / "src" / "core" / "core.py"
     assert core_file.is_file()
     assert "def add(a, b):" in core_file.read_text(encoding="utf-8")
+    # FX3: the build contains an executable test + detectable pytest config...
+    assert (project / "src" / "core" / "test_core.py").is_file()
+    assert "[tool.pytest" in (project / "pyproject.toml").read_text(encoding="utf-8")
     # session records every stage as complete; verify/check are hard gates
     session = load_session(project)
     assert session["result"]["status"] == "success"
@@ -62,6 +65,10 @@ def test_e2e_full_autopilot_with_scripted_ai(tmp_path: Path, stub_ai) -> None:
     assert statuses["implement"] == "done"
     assert statuses["verify"] == "done"
     assert statuses["check"] == "done"
+    # ...and the verify stage REALLY executed it: autopilot must never certify
+    # an unexecuted build (the 2026-06 dogfood false-green).
+    assert "tests executed" in session["stages"]["verify"]["detail"]
+    assert "pytest" in session["stages"]["verify"]["detail"]
     assert all(status in {"done", "warning", "skipped"} for status in statuses.values())
     # the scripted AI really drove every AI-facing stage
     calls = set(stub_ai["calls"]())
@@ -92,6 +99,69 @@ def test_e2e_fresh_directory_initializes_then_builds(tmp_path: Path, stub_ai) ->
     assert (target / "docs" / "design" / "core_design.md").is_file()
     session = load_session(target)
     assert session["stages"]["init"]["status"] == "done"
+
+
+def test_e2e_shared_output_root_repo_root_ci_and_project_type(tmp_path: Path, stub_ai) -> None:
+    """FX2 regression harness for the 2026-06 real-AI dogfood findings.
+
+    A fresh CLI-app build with NO pre-seeded CI workflow and NO configured
+    implement mapping (the derived-task path). Pins all three structural
+    fixes at once:
+      1. the stub-emitted ``.github/workflows/ci.yml`` FILE block lands at the
+         REPO ROOT (a green final ``codd check`` proves ci_health sees it);
+      2. both derived tasks write into the SAME canonical ``src/`` layout —
+         no fragmented ``src/<task_id>/`` app copies;
+      3. ``--project-type cli`` is recorded in codd.yaml + the session and
+         resolves to CLI capabilities (no browser-test guidance).
+    """
+    target = tmp_path / "fresh-cli-app"
+    target.mkdir()
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Fresh CLI App\n\nStore numbers and add them via a CLI.\n", encoding="utf-8")
+
+    pipeline = GreenfieldPipeline(
+        project_name="fresh-cli-app",
+        language="python",
+        requirements=spec,
+        project_type="cli",
+        ai_command=stub_ai["command"],
+    )
+    result = pipeline.run(target)
+
+    assert result.status == "success", format_greenfield_result(result, "text")
+
+    # 1. The CI workflow landed at the repo root — there was no pre-seeded CI,
+    #    so the final check stage (ci_health) being green proves the rerooted
+    #    workflow is the one CI actually discovers.
+    workflow = target / ".github" / "workflows" / "ci.yml"
+    assert workflow.is_file()
+    assert "pull_request" in workflow.read_text(encoding="utf-8")
+
+    # 2. ONE coherent app at ONE location: both derived tasks share src/.
+    assert (target / "src" / "core.py").is_file()
+    assert (target / "src" / "cli.py").is_file()
+    src_entries = sorted(item.name for item in (target / "src").iterdir())
+    assert not any(name.startswith("implement_") for name in src_entries), src_entries
+    assert not (target / "src" / ".github").exists()  # no confined CI residue
+    # both implement units really ran against the shared root
+    assert stub_ai["calls"]().count("output:src") == 2
+    session = load_session(target)
+    assert set(session["stages"]["implement"]["units"]) == {
+        "implement_core_module",
+        "implement_cli_module",
+    }
+
+    # 3. project_type recorded in codd.yaml + session; capability resolution
+    #    is CLI-appropriate (the generation/implement prompts consume this).
+    config = yaml.safe_load((target / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+    assert config["required_artifacts"]["project_type"] == "cli"
+    assert session["options"]["project_type"] == "cli"
+    from codd.config import load_project_config
+    from codd.generator import _resolve_generation_capabilities
+
+    capabilities = _resolve_generation_capabilities(load_project_config(target), target)
+    assert capabilities.e2e_modality == "cli"
+    assert capabilities.user_interface is False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -502,3 +572,32 @@ def test_resume_explicit_ai_command_override_wins(tmp_path: Path) -> None:
     )
     assert resumed.run(project, resume=True).status == "success"
     assert resumed.ai_command == "override-ai --print"
+
+
+def test_resume_restores_project_type_from_session(tmp_path: Path) -> None:
+    # --project-type must survive --resume exactly like ai_command does: a
+    # resumed run without the flag keeps the type the original run recorded.
+    project = _initialized_project(tmp_path)
+
+    pipeline = GreenfieldPipeline(
+        project_type="cli",
+        **_fake_runners([], fail_on="generate:2"),
+    )
+    assert pipeline.run(project).status == "failed"
+    assert load_session(project)["options"]["project_type"] == "cli"
+
+    resumed = GreenfieldPipeline(**_fake_runners([]))  # no --project-type this time
+    assert resumed.run(project, resume=True).status == "success"
+    assert resumed.project_type == "cli"
+
+
+def test_project_type_on_existing_project_is_recorded_in_codd_yaml(tmp_path: Path) -> None:
+    # The init stage is skipped on an already-initialized project, but a
+    # provided project type must still reach codd.yaml so every downstream
+    # stage resolves capabilities correctly.
+    project = _initialized_project(tmp_path)
+    result = GreenfieldPipeline(project_type="cli", **_fake_runners([])).run(project)
+    assert result.status == "success"
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+    assert config["required_artifacts"]["project_type"] == "cli"
+    assert "project_type cli" in load_session(project)["stages"]["init"]["detail"]
