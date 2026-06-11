@@ -439,6 +439,51 @@ def get_valid_task_slugs(project_root: Path) -> set[str]:
     return values
 
 
+def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
+    """Deterministically enumerate ALL implement tasks.
+
+    Generalizes :func:`auto_detect_task` from "fail when multiple candidates
+    exist" to "list every candidate", using the same two sources in the same
+    precedence order:
+
+    1. Configured implement targets — ``implement.default_output_paths`` /
+       ``implement.implement_targets`` in codd.yaml, in declaration order.
+    2. Approved derived tasks from ``.codd/derived_tasks`` (cache-path order),
+       only consulted when no targets are configured.
+
+    Each entry is ``{"task_id", "design_node", "source"}`` where ``source`` is
+    ``"configured"`` or ``"derived"``. For derived tasks ``design_node`` is the
+    task's source design document (the artifact ``codd implement`` reads).
+    """
+    project_root = Path(project_root).resolve()
+    config = _load_project_config(project_root)
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for design in _configured_output_path_groups(config):
+        if design in seen:
+            continue
+        seen.add(design)
+        entries.append({"task_id": design, "design_node": design, "source": "configured"})
+    if entries:
+        return entries
+
+    from codd.llm.plan_deriver import iter_derived_task_records
+
+    for _cache_path, record in iter_derived_task_records(project_root):
+        for task in record.tasks:
+            if not task.approved or task.id in seen:
+                continue
+            seen.add(task.id)
+            entries.append(
+                {
+                    "task_id": task.id,
+                    "design_node": task.source_design_doc or task.id,
+                    "source": "derived",
+                }
+            )
+    return entries
+
+
 def auto_detect_task(project_root: Path) -> str:
     project_root = Path(project_root).resolve()
     config = _load_project_config(project_root)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 import sys
 import warnings
@@ -13,6 +14,9 @@ from codd.repair.schema import RepairProposal
 RepairApprovalMode = Literal["required", "auto", "per_attempt"]
 APPROVAL_MODES: set[str] = {"required", "auto", "per_attempt"}
 DEFAULT_MAX_FILES_PER_AUTO_PROPOSAL = 5
+
+#: CLI-facing repair modes (``codd verify --repair-mode``) → approval_mode.
+REPAIR_MODES: dict[str, RepairApprovalMode] = {"automatic": "auto", "hitl": "required"}
 
 _APPROVE_VALUES = {"1", "approve", "approved", "true", "y", "yes"}
 _REJECT_VALUES = {"0", "false", "n", "no", "reject", "rejected", "skip", "skipped"}
@@ -72,6 +76,38 @@ def approve_repair_proposal(
     return False
 
 
+def apply_repair_mode(config: Mapping[str, Any], repair_mode: str) -> dict[str, Any]:
+    """Return a copy of *config* with ``repair.approval_mode`` overridden for one run.
+
+    Maps the CLI-facing ``--repair-mode`` values onto the existing config
+    plumbing (:data:`REPAIR_MODES`):
+
+    - ``automatic`` → ``approval_mode: auto``. The flag itself is the explicit
+      opt-in, so ``repair.allow_auto.require_explicit_optin`` is set to true
+      when absent. Proposals exceeding
+      ``repair.allow_auto.max_files_per_proposal`` STILL escalate to required
+      approval (the safety valve in :func:`approve_repair_proposal` is kept).
+    - ``hitl`` → ``approval_mode: required``.
+
+    The input mapping is never mutated; callers pass the returned copy to the
+    repair loop for this run only (codd.yaml on disk is untouched).
+    """
+    approval = REPAIR_MODES.get(str(repair_mode or "").strip().lower())
+    if approval is None:
+        raise ValueError(
+            f"unknown repair mode: {repair_mode!r} (expected one of: {', '.join(sorted(REPAIR_MODES))})"
+        )
+    merged: dict[str, Any] = {key: deepcopy(value) for key, value in dict(config or {}).items()}
+    repair_config = dict(_mapping(merged.get("repair")))
+    repair_config["approval_mode"] = approval
+    if approval == "auto":
+        allow_auto = dict(_mapping(repair_config.get("allow_auto")))
+        allow_auto.setdefault("require_explicit_optin", True)
+        repair_config["allow_auto"] = allow_auto
+    merged["repair"] = repair_config
+    return merged
+
+
 def _approval_mode(value: str) -> RepairApprovalMode:
     text = str(value or "required")
     return text if text in APPROVAL_MODES else "required"  # type: ignore[return-value]
@@ -121,7 +157,9 @@ def _approval_message(proposal: RepairProposal, mode: RepairApprovalMode) -> str
 __all__ = [
     "APPROVAL_MODES",
     "DEFAULT_MAX_FILES_PER_AUTO_PROPOSAL",
+    "REPAIR_MODES",
     "RepairApprovalError",
     "RepairApprovalMode",
+    "apply_repair_mode",
     "approve_repair_proposal",
 ]

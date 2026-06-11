@@ -2800,7 +2800,14 @@ def watch_cmd(project_path: str, debounce: int, background: bool, status: bool) 
 
 
 @main.command()
-@click.option("--wave", required=True, type=click.IntRange(min=1), help="Wave number to generate")
+@click.option("--wave", required=False, default=None, type=click.IntRange(min=1), help="Wave number to generate")
+@click.option(
+    "--all-waves",
+    "all_waves",
+    is_flag=True,
+    default=False,
+    help="Generate every wave from wave_config in order, stopping at the first failure (mutually exclusive with --wave)",
+)
 @project_root_option()
 @click.option("--force", is_flag=True, help="Overwrite existing files")
 @click.option(
@@ -2815,9 +2822,22 @@ def watch_cmd(project_path: str, debounce: int, background: bool, status: bool) 
     default=False,
     help="Skip the artifact-contract completion gate for the 'generate' stage",
 )
-def generate(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: str | None, no_contract_gate: bool):
-    """Generate CoDD documents for a specific wave."""
+def generate(
+    wave: int | None,
+    all_waves: bool,
+    path: str,
+    force: bool,
+    ai_cmd: str | None,
+    feedback: str | None,
+    no_contract_gate: bool,
+):
+    """Generate CoDD documents for a specific wave (or all waves)."""
     from codd.generator import generate_wave, _load_project_config
+
+    if all_waves and wave is not None:
+        raise click.BadOptionUsage("all_waves", "--all-waves cannot be used with --wave")
+    if not all_waves and wave is None:
+        raise click.UsageError("Pass --wave N or --all-waves.")
 
     project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
@@ -2835,26 +2855,71 @@ def generate(wave: int, path: str, force: bool, ai_cmd: str | None, feedback: st
             click.echo(f"Error auto-generating wave_config: {exc}")
             raise SystemExit(1)
 
+    def _generate_one(wave_number: int) -> tuple[int, int]:
+        results = generate_wave(project_root, wave_number, force=force, ai_command=ai_cmd, feedback=feedback)
+        generated = 0
+        skipped = 0
+        for result in results:
+            rel_path = result.path.relative_to(project_root).as_posix()
+            click.echo(f"{result.status.capitalize()}: {rel_path} ({result.node_id})")
+            if result.status == "generated":
+                generated += 1
+            else:
+                skipped += 1
+        click.echo(f"Wave {wave_number}: {generated} generated, {skipped} skipped")
+        return generated, skipped
+
+    if all_waves:
+        try:
+            wave_numbers = _wave_numbers_from_config(_load_project_config(project_root))
+        except ValueError as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+        if not wave_numbers:
+            click.echo("Error: wave_config is empty; run 'codd plan --init' first.")
+            raise SystemExit(1)
+        completed: list[int] = []
+        total_generated = 0
+        total_skipped = 0
+        for wave_number in wave_numbers:
+            try:
+                generated, skipped = _generate_one(wave_number)
+            except (FileNotFoundError, ValueError) as exc:
+                click.echo(f"Error: wave {wave_number}: {exc}")
+                click.echo(
+                    f"Stopped at wave {wave_number}; "
+                    f"completed wave(s): {', '.join(str(item) for item in completed) or 'none'}"
+                )
+                raise SystemExit(1)
+            completed.append(wave_number)
+            total_generated += generated
+            total_skipped += skipped
+        click.echo(
+            f"All waves complete ({len(completed)} wave(s)): "
+            f"{total_generated} generated, {total_skipped} skipped"
+        )
+        _enforce_stage_contract_gate(project_root, "generate", opt_out=no_contract_gate)
+        return
+
     try:
-        results = generate_wave(project_root, wave, force=force, ai_command=ai_cmd, feedback=feedback)
+        _generate_one(int(wave))  # type: ignore[arg-type]
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
 
-    generated = 0
-    skipped = 0
-
-    for result in results:
-        rel_path = result.path.relative_to(project_root).as_posix()
-        click.echo(f"{result.status.capitalize()}: {rel_path} ({result.node_id})")
-        if result.status == "generated":
-            generated += 1
-        else:
-            skipped += 1
-
-    click.echo(f"Wave {wave}: {generated} generated, {skipped} skipped")
-
     _enforce_stage_contract_gate(project_root, "generate", opt_out=no_contract_gate)
+
+
+def _wave_numbers_from_config(config: dict[str, Any]) -> list[int]:
+    """Sorted wave numbers from wave_config (validating integer keys)."""
+    wave_config = config.get("wave_config") or {}
+    numbers: set[int] = set()
+    for key in wave_config:
+        try:
+            numbers.add(int(key))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"wave_config key must be an integer wave number, got {key!r}") from exc
+    return sorted(numbers)
 
 
 @main.command()
@@ -3387,6 +3452,101 @@ def brownfield_cmd(
         f"merged_findings={len(result.merged_findings)}"
     )
     click.echo(f"Output: {_display_path(output_path, project_root)}")
+
+
+@main.command("greenfield")
+@project_root_option("project_path")
+@click.option("--project-name", default=None, help="Project name for codd init (when not yet initialized)")
+@click.option("--language", default=None, help="Primary language for codd init (when not yet initialized)")
+@click.option(
+    "--requirements",
+    default=None,
+    type=click.Path(exists=True),
+    help="Requirements document to import (any format; CoDD adds frontmatter automatically)",
+)
+@click.option("--ai-cmd", default=None, help="Override AI CLI command for every stage of this run")
+@click.option(
+    "--elicit/--no-elicit",
+    "elicit_enabled",
+    default=None,
+    help="Run the advisory elicit+apply stage (default: greenfield.elicit config, true)",
+)
+@click.option(
+    "--max-repair-attempts",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Maximum automatic repair attempts during verify (default: greenfield.max_repair_attempts, 10)",
+)
+@click.option(
+    "--no-coverage-gate",
+    is_flag=True,
+    default=False,
+    help="Skip the verifiable-behavior coverage gate after each implement task",
+)
+@click.option("--resume", is_flag=True, default=False, help="Resume from .codd/greenfield_session.yaml")
+@click.option("--dry-run", is_flag=True, default=False, help="Print the resolved execution plan without invoking AI")
+@click.option(
+    "--ntfy-topic",
+    default=None,
+    help="ntfy topic (or full URL) for progress notifications — notify-only, never blocking",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    help="Result report format",
+)
+def greenfield_cmd(
+    project_path: str,
+    project_name: str | None,
+    language: str | None,
+    requirements: str | None,
+    ai_cmd: str | None,
+    elicit_enabled: bool | None,
+    max_repair_attempts: int | None,
+    no_coverage_gate: bool,
+    resume: bool,
+    dry_run: bool,
+    ntfy_topic: str | None,
+    output_format: str,
+) -> None:
+    """Run the unattended greenfield autopilot: requirements in, system out.
+
+    Write a requirements document; CoDD builds the system. Unattended: all
+    gates are auto-approved (elicit findings applied, derived tasks and
+    implementation steps approved, repair runs in automatic mode); progress is
+    optionally posted to ntfy (notify-only, never blocking).
+
+    \b
+    Stages: init → elicit (advisory) → plan --init → generate (all waves)
+    → implement (all tasks) → verify --auto-repair → propagate --commit
+    → check. Checkpoints land in .codd/greenfield_session.yaml after every
+    unit; resume an interrupted or failed run with 'codd greenfield --resume'.
+    """
+    from codd.greenfield.pipeline import GreenfieldPipeline, format_greenfield_result
+
+    pipeline = GreenfieldPipeline(
+        project_name=project_name,
+        language=language,
+        requirements=requirements,
+        ai_command=ai_cmd,
+        elicit=elicit_enabled,
+        max_repair_attempts=max_repair_attempts,
+        coverage_gate=False if no_coverage_gate else None,
+        ntfy_topic=ntfy_topic,
+        echo=click.echo,
+    )
+    try:
+        result = pipeline.run(Path(project_path).resolve(), resume=resume, dry_run=dry_run)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    click.echo(format_greenfield_result(result, output_format), nl=False)
+    if result.status == "failed":
+        raise SystemExit(1)
 
 
 @main.group("diff", invoke_without_command=True)
@@ -4202,6 +4362,48 @@ def _echo_impl_step_layer_breakdown(record: Any) -> None:
         )
 
 
+@implement.command("list-tasks")
+@project_root_option("project_path")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    help="Output format",
+)
+def implement_list_tasks_cmd(project_path: str, output_format: str) -> None:
+    """List all implement tasks deterministically.
+
+    Sources, in precedence order: configured targets
+    (implement.default_output_paths / implement_targets in codd.yaml), then
+    approved derived tasks (.codd/derived_tasks). Generalizes the implement-run
+    auto-detection from "fail when multiple candidates" to "list every
+    candidate" — useful for scripting (one task id per line).
+    """
+    from codd.implementer import list_implement_tasks
+
+    project_root = Path(project_path).resolve()
+    _require_codd_dir(project_root)
+    try:
+        tasks = list_implement_tasks(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+
+    if output_format == "json":
+        click.echo(json.dumps(tasks, ensure_ascii=False, indent=2))
+        return
+    if not tasks:
+        click.echo(
+            "No implement tasks found (configure implement.default_output_paths "
+            "in codd.yaml or approve derived tasks via 'codd plan derive')."
+        )
+        return
+    for task in tasks:
+        click.echo(task["task_id"])
+
+
 @implement.command("augment")
 @click.option("--task", "task_id", required=True, help="Implementation task id or title match")
 @click.option("--design-doc", "design_docs", multiple=True, help="Design document path. May be repeated.")
@@ -4640,6 +4842,17 @@ def assemble(path: str, output_dir: str | None, ai_cmd: str | None):
 )
 @click.option("--auto-repair", is_flag=True, default=False, help="Run RepairLoop when verification fails")
 @click.option("--max-attempts", default=None, type=click.IntRange(min=1), help="Maximum repair attempts")
+@click.option(
+    "--repair-mode",
+    "repair_mode",
+    type=click.Choice(["automatic", "hitl"]),
+    default=None,
+    help=(
+        "Override repair.approval_mode for this run (requires --auto-repair): "
+        "'automatic' auto-approves repair proposals (the flag is the explicit "
+        "opt-in; oversized proposals still escalate), 'hitl' requires approval."
+    ),
+)
 @click.option("--baseline-ref", default=None, help="Baseline git ref for repair classification")
 @click.option("--engine", "engine_name", default=None, help="Repair engine name")
 @click.option(
@@ -4659,11 +4872,14 @@ def verify(
     design_md: bool,
     auto_repair: bool,
     max_attempts: int | None,
+    repair_mode: str | None,
     baseline_ref: str | None,
     engine_name: str | None,
     no_contract_gate: bool,
 ) -> None:
     """Run build + test verification and trace failures to design documents."""
+    if repair_mode is not None and not auto_repair:
+        raise click.BadOptionUsage("repair_mode", "--repair-mode requires --auto-repair")
     if design_md:
         _run_design_md_lint(Path(path).resolve())
         return
@@ -4711,6 +4927,10 @@ def verify(
     repair_config = _load_required_repair_config(project_root)
     if repair_config is None:
         raise SystemExit(1)
+    if repair_mode is not None:
+        from codd.repair.approval_repair import apply_repair_mode
+
+        repair_config = apply_repair_mode(repair_config, repair_mode)
 
     outcome = _run_repair_loop(
         project_root,
