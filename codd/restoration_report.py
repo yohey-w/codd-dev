@@ -384,6 +384,9 @@ class RestorationReport:
     artifact_type_coverage: list[ArtifactTypeCoverage]
     maintenance: MaintenanceReadiness
     artifacts: list[RestoredArtifactSummary]
+    # Open questions for which git-history testimony supplied a candidate_answer
+    # lead (still needs_human_confirmation; a lead, not an answer).
+    open_questions_with_candidate_answers: int = 0
     project_type: str = "generic"
     project_type_reason: str = ""
     summary_line: str = ""
@@ -403,6 +406,7 @@ class RestorationReport:
             },
             "irrecoverable_in_principle": {
                 "open_question_total": self.open_question_total,
+                "open_questions_with_candidate_answers": self.open_questions_with_candidate_answers,
                 "groups": [g.to_dict() for g in self.open_question_groups],
             },
             "artifact_type_coverage": [c.to_dict() for c in self.artifact_type_coverage],
@@ -441,6 +445,7 @@ def build_restoration_report(
     total_statements = 0
     open_question_total = 0
     assumption_total = 0
+    candidate_answer_total = 0
 
     node_ids_present = {nid for nid, _ in documents if nid}
     declared_node_ids = _all_known_node_ids(project_root, config, node_ids_present)
@@ -461,6 +466,8 @@ def build_restoration_report(
             source_counts[src] = source_counts.get(src, 0) + count
         for q in doc_questions:
             theme = q.get("_theme", THEME_OTHER)
+            if q.get("candidate_answer"):
+                candidate_answer_total += 1
             open_questions_by_theme.setdefault(theme, []).append(
                 {k: v for k, v in q.items() if k != "_theme"}
             )
@@ -499,6 +506,7 @@ def build_restoration_report(
         open_question_total=open_question_total,
         open_question_groups=groups,
         assumption_total=assumption_total,
+        open_questions_with_candidate_answers=candidate_answer_total,
         artifact_type_coverage=coverage,
         maintenance=maintenance,
         artifacts=artifacts,
@@ -637,15 +645,21 @@ def _summarize_document(
         theme = classify_open_question_theme(
             str(q.get("question") or ""), str(q.get("why_unrecoverable") or "")
         )
-        questions_out.append(
-            {
-                "question": q.get("question"),
-                "why_unrecoverable": q.get("why_unrecoverable"),
-                "needs_human_confirmation": bool(q.get("needs_human_confirmation", True)),
-                "node_id": node_id or rel,
-                "_theme": theme,
-            }
-        )
+        entry: dict[str, Any] = {
+            "question": q.get("question"),
+            "why_unrecoverable": q.get("why_unrecoverable"),
+            "needs_human_confirmation": bool(q.get("needs_human_confirmation", True)),
+            "node_id": node_id or rel,
+            "_theme": theme,
+        }
+        # H2: git-history testimony may have attached a candidate_answer lead
+        # (provenance commit:<sha>, corroborated flag). Pass it through —
+        # it is a lead for the human, not an answer, so the question still
+        # counts as open above.
+        candidate = q.get("candidate_answer")
+        if isinstance(candidate, dict) and candidate:
+            entry["candidate_answer"] = candidate
+        questions_out.append(entry)
 
     assumption_count = len(_iter_assumptions(assumptions))
 
@@ -981,6 +995,12 @@ def render_report_text(report: RestorationReport) -> str:
         f"  {report.open_question_total} open question(s) require human "
         "confirmation, grouped by theme:"
     )
+    if report.open_questions_with_candidate_answers:
+        lines.append(
+            f"  {report.open_questions_with_candidate_answers} of them carry a "
+            "candidate_answer lead from git-history testimony (still need human "
+            "confirmation)."
+        )
     if report.open_question_groups:
         for group in report.open_question_groups:
             lines.append(f"  [{group.theme}] ({len(group.questions)})")

@@ -15,8 +15,13 @@ deterministic sources and feeds it into the restoration prompt:
 * **IaC → NFR/ops evidence** — :func:`codd.iac_nfr.derive_iac_nfrs` turns the
   structured ``ProjectFacts.infra_config`` into NFR candidates + operational
   facts, each already carrying ``source`` provenance + a ``confidence`` level.
-* **Docs/ADR/README/comments as rationale evidence** — the only in-repo source of
+* **Docs/ADR/README/comments as rationale evidence** — an in-repo source of
   the *why*; ingested (bounded) so the model can cite them rather than invent.
+* **Git history as testimony** — :mod:`codd.git_evidence` separates fact (the
+  diff) from testimony (the commit message — a claim about the *why*).
+  Testimony attaches only where its changes survive into HEAD (``git blame``),
+  is capped at the amber band, and may only feed ``candidate_answer`` entries
+  inside open questions or corroborate amber statements — never green facts.
 
 The prompt then demands a machine-readable provenance / confidence-band /
 open-questions block which :func:`codd.generator.extract_restoration_meta` lifts
@@ -46,6 +51,12 @@ from codd.generator import (
     _resolve_generation_capabilities,
     _sanitize_generated_body,
     extract_restoration_meta,
+)
+from codd.git_evidence import (
+    GitTestimony,
+    SupersessionChain,
+    collect_git_testimony,
+    detect_supersession_chains,
 )
 from codd.iac_nfr import NfrCandidate, derive_iac_nfrs
 from codd.planner import ExtractedDocument, _load_extracted_documents
@@ -126,6 +137,10 @@ class EvidenceBundle:
     infra_facts: list[dict[str, Any]] = field(default_factory=list)
     # supplementary rationale evidence {path, content}
     rationale_docs: list[dict[str, str]] = field(default_factory=list)
+    # git-history testimony (blame-anchored, amber-capped, kind=testimony)
+    git_testimony: list[GitTestimony] = field(default_factory=list)
+    # deterministic supersession chains (rejected-alternatives evidence)
+    supersession_chains: list[SupersessionChain] = field(default_factory=list)
 
     def has_any(self) -> bool:
         return bool(
@@ -133,6 +148,8 @@ class EvidenceBundle:
             or self.nfr_candidates
             or self.infra_facts
             or self.rationale_docs
+            or self.git_testimony
+            or self.supersession_chains
         )
 
 
@@ -221,7 +238,56 @@ def _assemble_evidence_bundle(project_root: Path, config: dict[str, Any]) -> Evi
         bundle.infra_facts = _summarize_infra_facts(facts.infra_config)
 
     bundle.rationale_docs = _collect_rationale_docs(project_root)
+
+    # Git-history testimony — blame-anchored to the files the extractor proved
+    # exist (the same anchors provenance locators use). Skippable via
+    # restore.git_evidence.enabled; degrades to empty for non-repos.
+    if facts is not None and _git_evidence_enabled(config):
+        file_paths = _collect_evidence_file_paths(facts)
+        if file_paths:
+            try:
+                bundle.git_testimony = collect_git_testimony(project_root, file_paths)
+            except Exception:
+                bundle.git_testimony = []
+            try:
+                bundle.supersession_chains = detect_supersession_chains(
+                    project_root, file_paths
+                )
+            except Exception:
+                bundle.supersession_chains = []
     return bundle
+
+
+def _git_evidence_enabled(config: dict[str, Any]) -> bool:
+    """Read restore.git_evidence.enabled (default true) safely."""
+    restore_section = config.get("restore") if isinstance(config, dict) else None
+    if not isinstance(restore_section, dict):
+        return True
+    git_section = restore_section.get("git_evidence")
+    if not isinstance(git_section, dict):
+        return True
+    return bool(git_section.get("enabled", True))
+
+
+def _collect_evidence_file_paths(facts: Any) -> list[str]:
+    """Source-file anchors for git testimony: the extracted modules' files.
+
+    Deterministic and bounded (collect_git_testimony re-caps at its own
+    max_locators); ordering is stable (sorted module names, file order as
+    extracted, de-duplicated).
+    """
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    modules = getattr(facts, "modules", {}) or {}
+    for module_name in sorted(modules):
+        module = modules[module_name]
+        for rel in getattr(module, "files", []) or []:
+            value = str(rel)
+            if value and value not in seen:
+                seen.add(value)
+                paths.append(value)
+    return paths
 
 
 def _safe_extract_facts(project_root: Path, config: dict[str, Any]):
@@ -680,6 +746,68 @@ def _build_evidence_blocks(
             "irrecoverable — emit them as open_questions, do NOT fabricate the 'why'.)"
         )
 
+    # --- Git history testimony (blame-anchored, amber-capped) ---------------
+    lines.extend(_build_git_testimony_block(evidence))
+
+    return lines
+
+
+def _build_git_testimony_block(evidence: EvidenceBundle) -> list[str]:
+    """Render git-history testimony + supersession chains into prompt lines.
+
+    Rendered only when present: a project without git history simply has no
+    testimony, and absence of evidence stays absent (open questions stay
+    blank rather than being padded with fake leads).
+    """
+
+    lines: list[str] = []
+    if not evidence.git_testimony and not evidence.supersession_chains:
+        return lines
+
+    lines.extend([
+        "",
+        "Git history testimony (UNVERIFIED — testimony, not fact). Each entry "
+        "below is a commit whose changes SURVIVE into the current code (anchored "
+        "via git blame, so superseded/stale intent is already excluded). The "
+        "DIFF behind each commit is fact, but the MESSAGE is a CLAIM by its "
+        "author about the 'why'. Testimony is capped at the amber band. You must "
+        "NOT assert testimony as fact and must NOT use it to justify a green "
+        "statement. Its REQUIRED use: attach it to a matching open_questions "
+        "entry as a candidate_answer (keeping needs_human_confirmation: true), "
+        "or cite it as corroboration for an amber statement:",
+    ])
+
+    if evidence.git_testimony:
+        for item in evidence.git_testimony[:100]:
+            corroboration = "[corroborated]" if item.corroborated else "[uncorroborated]"
+            day = item.date[:10] if item.date else "unknown date"
+            lines.append(
+                f"  - commit:{item.commit} ({day}) {corroboration} "
+                f"{item.subject} — {item.survival_note}"
+            )
+            if item.body_excerpt:
+                lines.append(f"      body: {item.body_excerpt}")
+    else:
+        lines.append("  (no surviving-commit testimony passed the noise filter)")
+
+    if evidence.supersession_chains:
+        lines.extend([
+            "",
+            "Supersession chains (deterministic rejected-alternatives evidence): "
+            "the history below shows an implementation being replaced or reverted "
+            "over time. That an alternative existed and was rejected is FACT; the "
+            "WHY of the rejection is testimony (amber). Use these to fill "
+            "candidate_answer leads on 'rejected alternatives' open questions — "
+            "never to assert the rejection rationale as fact:",
+        ])
+        for chain in evidence.supersession_chains[:40]:
+            trail = " -> ".join(
+                f"commit:{sha} ({date}) \"{subject}\"" for sha, date, subject in chain.commits
+            )
+            lines.append(f"  - {chain.file} decision trail: {trail}")
+            if chain.note:
+                lines.append(f"      note: {chain.note}")
+
     return lines
 
 
@@ -748,6 +876,16 @@ def _build_provenance_contract_block(bands: dict[str, Any] | None) -> list[str]:
         "priority weights among NFRs, threshold justifications, unbuilt/planned "
         "intent). Each item: {question: <what is missing>, why_unrecoverable: <why "
         "code cannot answer it>, needs_human_confirmation: true}.",
+        "    An open_questions entry MAY additionally carry candidate_answer: "
+        "{text: <the lead suggested by git-history testimony>, provenance: "
+        "\"commit:<short-sha> (<date>)\", corroborated: true|false} — ONLY when "
+        "the git history testimony above actually suggests an answer. A "
+        "candidate_answer is a LEAD for the human reviewer, not an answer: "
+        "needs_human_confirmation MUST remain true on that entry, the question "
+        "stays open, and commit testimony must NEVER be promoted into a green "
+        "statement or appear as evidence for a green provenance item. If no "
+        "testimony matches, leave the entry without candidate_answer — absence "
+        "of evidence stays absent.",
         "  assumptions: optional list of inferences you made that a human should "
         "confirm; each {assumption: <text>, basis: <evidence or 'none'>, "
         "needs_human_confirmation: true}.",
@@ -760,6 +898,9 @@ def _build_provenance_contract_block(bands: dict[str, Any] | None) -> list[str]:
         f"{amber_min_conf}).",
         "  - Statements that infer INTENT are at most amber. Statements with NO "
         "evidence are NOT statements at all — they are open_questions.",
+        "  - Git-history testimony (a `commit:<short-sha> (<date>)` locator) is "
+        "capped at amber: it may corroborate an amber statement, but a statement "
+        "whose only evidence is commit testimony can NEVER be green.",
         "",
         "NEVER-FABRICATE RULE (overrides everything): if the evidence above does not "
         "support a rationale/intent/NFR claim, you MUST NOT assert it. Emit an "

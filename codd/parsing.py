@@ -2401,11 +2401,12 @@ class TerraformExtractor:
                 if not isinstance(instances, dict):
                     continue
                 for name, attributes in instances.items():
+                    attributes = self._normalize_hcl2(attributes or {})
                     entry: dict[str, Any] = {
                         "kind": "resource",
                         "type": resource_type.strip('"'),
                         "name": name.strip('"'),
-                        "attributes": attributes or {},
+                        "attributes": attributes,
                     }
                     flags = self._nfr_flags(attributes)
                     if flags:
@@ -2424,7 +2425,7 @@ class TerraformExtractor:
                             "kind": "data",
                             "type": data_type.strip('"'),
                             "name": name.strip('"'),
-                            "attributes": attributes or {},
+                            "attributes": self._normalize_hcl2(attributes or {}),
                         }
                     )
 
@@ -2436,7 +2437,7 @@ class TerraformExtractor:
                     {
                         "kind": "module",
                         "name": name.strip('"'),
-                        "attributes": attributes or {},
+                        "attributes": self._normalize_hcl2(attributes or {}),
                     }
                 )
 
@@ -2448,11 +2449,41 @@ class TerraformExtractor:
                     {
                         "kind": "variable",
                         "name": name.strip('"'),
-                        "attributes": attributes or {},
+                        "attributes": self._normalize_hcl2(attributes or {}),
                     }
                 )
 
         return info
+
+    @classmethod
+    def _normalize_hcl2(cls, value: Any) -> Any:
+        """Normalize the python-hcl2 attribute tree.
+
+        python-hcl2 >= 5 preserves the surrounding double quotes on string
+        literals (round-trip support) and >= 8 injects ``__…__`` metadata keys
+        such as ``__is_block__``. Downstream consumers (NFR mapping, restore
+        prompts) want plain values, so strip both — recursively, since blocks
+        nest arbitrarily.
+        """
+
+        if isinstance(value, dict):
+            return {
+                key: cls._normalize_hcl2(item)
+                for key, item in value.items()
+                if not (
+                    isinstance(key, str) and key.startswith("__") and key.endswith("__")
+                )
+            }
+        if isinstance(value, list):
+            return [cls._normalize_hcl2(item) for item in value]
+        if (
+            isinstance(value, str)
+            and len(value) >= 2
+            and value.startswith('"')
+            and value.endswith('"')
+        ):
+            return value[1:-1]
+        return value
 
     # NFR-relevant attribute keys. We do not build a full HCL semantic engine;
     # we surface the attributes (already captured) that prescribe a
@@ -2799,12 +2830,13 @@ class DockerfileExtractor:
 class OpsEvidenceExtractor:
     """Recognition-only discovery of ops/observability/config-management files.
 
-    These are *not* deep-parsed; the goal is to surface their PRESENCE as
-    evidence (Prometheus/Alertmanager rules → observability/SLO; Ansible →
-    deployment/config management; Helm chart → deployment packaging) so the
-    IaC→NFR layer can record candidate acceptance-criteria sources and a fuller
-    deployment topology. A structured parse can be layered on later without
-    changing this contract.
+    This is the FALLBACK layer: Ansible and Prometheus/Alertmanager files are
+    deep-parsed first (:class:`AnsibleExtractor`,
+    :class:`PrometheusRulesExtractor`); any such file that yields no structured
+    facts — plus kinds with no deep parser (Helm Chart.yaml, role
+    defaults/vars) — still surfaces its PRESENCE as evidence (observability/SLO
+    and deployment-topology sources) so the IaC→NFR layer records it with
+    MEDIUM confidence rather than dropping it.
     """
 
     format = "ops-evidence"
@@ -2847,6 +2879,389 @@ class OpsEvidenceExtractor:
             file_path=file_path,
             recognized_kind=recognized_kind,
         )
+
+
+class AnsibleExtractor:
+    """Deep-parse Ansible playbooks and roles into structured facts.
+
+    Upgrades the previous recognition-only treatment: plays become
+    ``ConfigInfo.services`` entries (kind ``"play"``: name, hosts, become,
+    roles, task count) and every task/handler becomes a ``ConfigInfo.resources``
+    entry (kind ``"task"``/``"handler"``: name, module, cheap scalar args,
+    parent play/role). Role task files (``roles/<name>/tasks|handlers/main.yml``)
+    are parsed the same way with the role name captured.
+
+    Tolerant by construction: malformed YAML, non-list payloads, or weird task
+    shapes yield an empty/partial :class:`ConfigInfo` — never an exception. A
+    file that produces nothing falls back to the recognition-only path
+    (:class:`OpsEvidenceExtractor`), preserving the old behavior.
+    """
+
+    format = "ansible"
+
+    _PLAYBOOK_NAMES = {"site.yml", "site.yaml"}
+    # Task keys that are Ansible directives, not modules. The module is the
+    # first key NOT in this set (dict order is preserved by PyYAML).
+    _RESERVED_TASK_KEYS = {
+        "any_errors_fatal",
+        "args",
+        "async",
+        "become",
+        "become_method",
+        "become_user",
+        "changed_when",
+        "check_mode",
+        "collections",
+        "connection",
+        "delay",
+        "delegate_facts",
+        "delegate_to",
+        "diff",
+        "environment",
+        "failed_when",
+        "ignore_errors",
+        "ignore_unreachable",
+        "listen",
+        "local_action",
+        "loop",
+        "loop_control",
+        "module_defaults",
+        "name",
+        "no_log",
+        "notify",
+        "poll",
+        "register",
+        "retries",
+        "run_once",
+        "tags",
+        "throttle",
+        "timeout",
+        "until",
+        "vars",
+        "when",
+    }
+    _BLOCK_KEYS = ("block", "rescue", "always")
+
+    def detect_ansible_files(self, project_root: Path) -> list[Path]:
+        root = Path(project_root)
+        matches: list[Path] = []
+        for file_path in _iter_project_files(root, {".yaml", ".yml"}):
+            rel = file_path.relative_to(root).as_posix()
+            lname = file_path.name.lower()
+            if lname.startswith("playbook") or lname in self._PLAYBOOK_NAMES:
+                matches.append(file_path)
+                continue
+            if self._role_context(rel) is not None:
+                matches.append(file_path)
+                continue
+            # Content sniff: a YAML whose top level is a list of plays
+            # (dicts carrying ``hosts:``) is a playbook regardless of name.
+            try:
+                payload = yaml.safe_load(
+                    file_path.read_text(encoding="utf-8", errors="ignore")
+                )
+            except Exception:
+                continue
+            if self._looks_like_playbook(payload):
+                matches.append(file_path)
+        return matches
+
+    @staticmethod
+    def _looks_like_playbook(payload: Any) -> bool:
+        return isinstance(payload, list) and any(
+            isinstance(item, dict) and "hosts" in item for item in payload
+        )
+
+    @staticmethod
+    def _role_context(rel_posix: str) -> tuple[str, str] | None:
+        """Return ``(role_name, section)`` for ``roles/<n>/tasks|handlers/main.yml``."""
+
+        parts = rel_posix.lower().split("/")
+        if len(parts) < 4 or parts[-1] not in {"main.yml", "main.yaml"}:
+            return None
+        section = parts[-2]
+        if section not in {"tasks", "handlers"}:
+            return None
+        if parts[-4] != "roles":
+            return None
+        # Preserve the original (non-lowercased) role name.
+        return rel_posix.split("/")[-3], section
+
+    def extract_ansible(self, content: str, file_path: str) -> ConfigInfo:
+        info = ConfigInfo(format=self.format, file_path=file_path)
+        try:
+            payload = yaml.safe_load(content)
+        except Exception:
+            return info
+
+        role = self._role_context(Path(file_path).as_posix())
+        if role is not None:
+            role_name, section = role
+            if isinstance(payload, list):
+                tasks = self._parse_tasks(
+                    payload, parent=role_name, handler=(section == "handlers")
+                )
+                if tasks:
+                    info.resources.append(
+                        {"kind": "role", "name": role_name, "task_count": len(tasks)}
+                    )
+                    info.resources.extend(tasks)
+            return info
+
+        if not isinstance(payload, list):
+            return info
+
+        for play in payload:
+            if not isinstance(play, dict) or "hosts" not in play:
+                continue
+            self._parse_play(play, info)
+        return info
+
+    def _parse_play(self, play: dict[str, Any], info: ConfigInfo) -> None:
+        hosts = play.get("hosts")
+        name = str(play.get("name") or hosts or "")
+        roles: list[str] = []
+        for role in play.get("roles") or []:
+            if isinstance(role, str):
+                roles.append(role)
+            elif isinstance(role, dict):
+                label = role.get("role") or role.get("name")
+                if label:
+                    roles.append(str(label))
+
+        tasks: list[dict[str, Any]] = []
+        for section, is_handler in (
+            ("pre_tasks", False),
+            ("tasks", False),
+            ("post_tasks", False),
+            ("handlers", True),
+        ):
+            tasks.extend(
+                self._parse_tasks(play.get(section), parent=name, handler=is_handler)
+            )
+
+        info.services.append(
+            {
+                "kind": "play",
+                "name": name,
+                "hosts": str(hosts) if hosts is not None else "",
+                "become": bool(play.get("become")),
+                "roles": roles,
+                "task_count": len(tasks),
+            }
+        )
+        info.resources.extend(tasks)
+
+    def _parse_tasks(
+        self, tasks: Any, parent: str, handler: bool
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if not isinstance(tasks, list):
+            return out
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if any(key in task for key in self._BLOCK_KEYS):
+                for key in self._BLOCK_KEYS:
+                    out.extend(self._parse_tasks(task.get(key), parent, handler))
+                continue
+            module_raw = next(
+                (
+                    key
+                    for key in task
+                    if isinstance(key, str) and key not in self._RESERVED_TASK_KEYS
+                ),
+                None,
+            )
+            if module_raw is None:
+                continue
+            # Normalize FQCN (``ansible.builtin.service`` -> ``service``).
+            module = module_raw.rsplit(".", 1)[-1]
+            args = task.get(module_raw)
+            attributes: dict[str, Any] = {}
+            if isinstance(args, dict):
+                attributes = {
+                    str(key): value
+                    for key, value in args.items()
+                    if isinstance(value, (str, int, float, bool))
+                }
+            elif isinstance(args, str):
+                attributes = {"_raw": args}
+            out.append(
+                {
+                    "kind": "handler" if handler else "task",
+                    "name": str(task.get("name") or module),
+                    "module": module,
+                    "attributes": attributes,
+                    "parent": parent,
+                }
+            )
+        return out
+
+
+class PrometheusRulesExtractor:
+    """Deep-parse Prometheus rule files, scrape config, and Alertmanager config.
+
+    Alerting rules are SLO/acceptance-criteria gold: each ``alert`` carries a
+    threshold expression, a sustain duration (``for``), and a severity — i.e. a
+    machine-readable candidate acceptance criterion. This extractor upgrades
+    the previous recognition-only treatment into structured
+    ``ConfigInfo.resources`` entries:
+
+    * ``AlertRule`` / ``RecordingRule`` — name + attributes (expr, for,
+      severity, labels, summary/description annotations, group, interval).
+    * ``ScrapeJob`` — job name + shallow target count (``prometheus.yml`` with
+      ``scrape_configs:``).
+    * ``AlertmanagerReceiver`` / ``AlertmanagerRoute`` — names only, shallow.
+
+    Tolerant: malformed YAML or unexpected shapes yield an empty/partial
+    :class:`ConfigInfo`; such files fall back to the recognition-only path.
+    """
+
+    format = "prometheus"
+
+    def detect_prometheus_files(self, project_root: Path) -> list[Path]:
+        root = Path(project_root)
+        matches: list[Path] = []
+        for file_path in _iter_project_files(root, {".yaml", ".yml"}):
+            lname = file_path.name.lower()
+            if (
+                lname.endswith((".rules.yml", ".rules.yaml"))
+                or lname.startswith("prometheus")
+                or lname.startswith("alertmanager")
+            ):
+                matches.append(file_path)
+                continue
+            # Content sniff: ``groups:`` whose entries carry ``rules:`` is a
+            # Prometheus rule file regardless of name.
+            try:
+                payload = yaml.safe_load(
+                    file_path.read_text(encoding="utf-8", errors="ignore")
+                )
+            except Exception:
+                continue
+            if self._looks_like_rules(payload):
+                matches.append(file_path)
+        return matches
+
+    @staticmethod
+    def _looks_like_rules(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        groups = payload.get("groups")
+        return isinstance(groups, list) and any(
+            isinstance(group, dict) and isinstance(group.get("rules"), list)
+            for group in groups
+        )
+
+    def extract_prometheus(self, content: str, file_path: str) -> ConfigInfo:
+        info = ConfigInfo(format=self.format, file_path=file_path)
+        try:
+            payload = yaml.safe_load(content)
+        except Exception:
+            return info
+        if not isinstance(payload, dict):
+            return info
+
+        self._extract_rule_groups(payload, info)
+        self._extract_scrape_configs(payload, info)
+        self._extract_alertmanager(payload, info)
+        return info
+
+    def _extract_rule_groups(self, payload: dict[str, Any], info: ConfigInfo) -> None:
+        for group in payload.get("groups") or []:
+            if not isinstance(group, dict):
+                continue
+            group_name = str(group.get("name") or "")
+            interval = group.get("interval")
+            for rule in group.get("rules") or []:
+                if not isinstance(rule, dict):
+                    continue
+                entry = self._rule_entry(rule, group_name, interval)
+                if entry is not None:
+                    info.resources.append(entry)
+
+    @staticmethod
+    def _rule_entry(
+        rule: dict[str, Any], group_name: str, interval: Any
+    ) -> dict[str, Any] | None:
+        alert = rule.get("alert")
+        record = rule.get("record")
+        if alert is None and record is None:
+            return None
+        labels = rule.get("labels") if isinstance(rule.get("labels"), dict) else {}
+        annotations = (
+            rule.get("annotations") if isinstance(rule.get("annotations"), dict) else {}
+        )
+        attributes: dict[str, Any] = {
+            "expr": str(rule.get("expr") or ""),
+            "group": group_name,
+        }
+        if interval is not None:
+            attributes["interval"] = str(interval)
+        if alert is not None:
+            if rule.get("for") is not None:
+                attributes["for"] = str(rule.get("for"))
+            severity = labels.get("severity")
+            if severity is not None:
+                attributes["severity"] = str(severity)
+            if labels:
+                attributes["labels"] = {str(k): str(v) for k, v in labels.items()}
+            for key in ("summary", "description"):
+                if annotations.get(key) is not None:
+                    attributes[key] = str(annotations[key])
+            return {"kind": "AlertRule", "name": str(alert), "attributes": attributes}
+        return {"kind": "RecordingRule", "name": str(record), "attributes": attributes}
+
+    @staticmethod
+    def _extract_scrape_configs(payload: dict[str, Any], info: ConfigInfo) -> None:
+        for scrape in payload.get("scrape_configs") or []:
+            if not isinstance(scrape, dict):
+                continue
+            job_name = scrape.get("job_name")
+            if job_name is None:
+                continue
+            targets = 0
+            for static in scrape.get("static_configs") or []:
+                if isinstance(static, dict) and isinstance(static.get("targets"), list):
+                    targets += len(static["targets"])
+            info.resources.append(
+                {
+                    "kind": "ScrapeJob",
+                    "name": str(job_name),
+                    "attributes": {"targets_count": targets},
+                }
+            )
+
+    @staticmethod
+    def _extract_alertmanager(payload: dict[str, Any], info: ConfigInfo) -> None:
+        # Shallow by design: receiver names + route-tree presence only.
+        receivers = payload.get("receivers")
+        route = payload.get("route")
+        if not isinstance(receivers, list) and not isinstance(route, dict):
+            return
+        for receiver in receivers or []:
+            if isinstance(receiver, dict) and receiver.get("name") is not None:
+                info.resources.append(
+                    {
+                        "kind": "AlertmanagerReceiver",
+                        "name": str(receiver["name"]),
+                        "attributes": {},
+                    }
+                )
+        if isinstance(route, dict):
+            child_routes = route.get("routes")
+            info.resources.append(
+                {
+                    "kind": "AlertmanagerRoute",
+                    "name": str(route.get("receiver") or "default"),
+                    "attributes": {
+                        "child_routes": len(child_routes)
+                        if isinstance(child_routes, list)
+                        else 0,
+                    },
+                }
+            )
 
 
 class BuildDepsExtractor:
