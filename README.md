@@ -32,7 +32,15 @@ With an enabled artifact contract, `codd plan/generate/implement/verify` judge c
 ```bash
 pip install codd-dev
 
-# Inside your project root
+# Greenfield: write requirements, walk away
+codd greenfield --requirements docs/requirements/requirements.md
+```
+
+One command runs the whole unattended pipeline — init → elicit → plan → generate → implement → verify (auto-repair) → propagate → check — checkpointing after every unit (`codd greenfield --resume` picks up where it stopped, `--ntfy-topic` sends progress pings, `--dry-run` previews). The same pipeline ships as three vehicles so any setup can use it: a transparent shell composition ([examples/greenfield_autopilot.sh](examples/greenfield_autopilot.sh)), a Claude Code Agent Workflow template ([examples/claude_workflows/codd-greenfield.js](examples/claude_workflows/codd-greenfield.js)), and the `codd-greenfield` skill (`codd skills install codd-greenfield --target both` — works in Claude Code and Codex CLI).
+
+Working inside an existing project instead:
+
+```bash
 codd init --suggest-lexicons --llm-enhanced    # AI picks the lexicons that fit
 codd elicit                                    # AI finds gaps in your requirements
 codd dag verify --auto-repair --max-attempts 10  # AI fixes coherence violations
@@ -85,6 +93,7 @@ CoDD is one CLI organised in four layers. Pick what you need; the rest stays out
 
 | Command | One-line summary |
 | --- | --- |
+| 🚀 **`codd greenfield --requirements FILE`** | Unattended autopilot: requirements in, system out. All gates auto-approved, checkpoint/resume via `--resume`, ntfy notify-only. Its building blocks (`generate --all-waves`, `implement list-tasks`, `verify --repair-mode`) also work standalone. |
 | 🎯 **`codd init --suggest-lexicons --llm-enhanced`** | LLM scans code/docs, picks the right lexicon plug-ins. |
 | 🔍 **`codd elicit`** | Finds *specification holes* against industry-standard lexicons. |
 | 🔄 **`codd diff`** | Detects drift between requirements and actual implementation. |
@@ -171,6 +180,7 @@ Issues, PRs, and lexicon proposals are welcome — see [Issues](https://github.c
 CoDD ships hook recipes for editor and Git workflows:
 
 - Claude Code `PostToolUse` hook recipe for running CoDD checks after file edits
+- Claude Code requirements-nudge recipe (`claude_requirements_nudge.json`) — prints an advisory "requirements changed → run `codd greenfield --resume` or `codd check`" when files under `docs/requirements/` are edited (print-only; never auto-runs expensive pipelines)
 - Git `pre-commit` hook recipe for blocking commits when coherence checks fail
 
 Recipes live under `codd/hooks/recipes/`.

@@ -192,3 +192,17 @@ enables_nudge:
   # another declared actor but that declares no `enables` relationship gets a
   # nudge to consider declaring one (observation vs capability-granting).
   enabled: true
+greenfield:
+  # `codd greenfield` — the unattended autopilot: write a requirements
+  # document; CoDD plans waves, generates design docs, implements every task,
+  # verifies with automatic repair, propagates, and runs the final health
+  # check. All gates are auto-approved; checkpoints land in
+  # .codd/greenfield_session.yaml (resume with `codd greenfield --resume`).
+  # CLI flags override these per run.
+  elicit: true              # run the advisory elicit+apply stage (never blocking)
+  max_repair_attempts: 10   # automatic repair attempts during the verify stage
+  coverage_gate: true       # enforce the verifiable-behavior gate per implement task
+  ntfy_topic: ""            # ntfy topic/URL for progress pings (empty = off; notify-only)
+  propagate_commit: true    # run propagate --verify/--commit (advisory on a fresh build)
+  chunk_size: null          # run implement steps in chunks of N (null = single run)
+  timeout_per_chunk: 600    # seconds per chunk when chunk_size is set

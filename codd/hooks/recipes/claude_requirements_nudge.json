@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json, os; data=json.loads(os.environ.get('TOOL_INPUT') or '{}'); raw=data.get('file_paths') or data.get('file_path') or []; paths=raw if isinstance(raw, list) else [raw]; hits=[str(p) for p in paths if p and 'docs/requirements/' in str(p).replace(chr(92), '/') and str(p).endswith('.md')]; print('[codd] requirements changed (' + ', '.join(hits) + ') -> run: codd greenfield --resume (resume an autopilot run) or codd check (re-verify coherence)') if hits else None\""
+          }
+        ]
+      }
+    ]
+  }
+}
