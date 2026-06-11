@@ -331,10 +331,16 @@ def _payload_syntax_error(relative_path: str, content: str) -> str | None:
         except yaml.YAMLError as exc:
             return f"not valid YAML ({exc})"
     elif suffix == ".toml":
+        # tomllib is stdlib from 3.11; tomli is its <3.11 backport and a core
+        # dependency there. Skip only when neither exists (broken install) —
+        # mirrors the verify-stage parser chain.
         try:
             import tomllib
-        except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-            return None
+        except ModuleNotFoundError:
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ModuleNotFoundError:  # pragma: no cover - broken install
+                return None
         try:
             tomllib.loads(content)
         except tomllib.TOMLDecodeError as exc:
