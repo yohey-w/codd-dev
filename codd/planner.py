@@ -766,7 +766,10 @@ def _load_requirement_documents(project_root: Path, config: dict[str, Any]) -> l
             continue
 
         codd = parsed.codd or {}
-        if codd.get("type") != "requirement":
+        # Both singular and plural are accepted: `codd init --requirements`
+        # historically stamps `type: requirement`, while hand-authored docs and
+        # the artifact catalog vocabulary use `requirements`.
+        if codd.get("type") not in ("requirement", "requirements"):
             continue
 
         node_id = codd.get("node_id")

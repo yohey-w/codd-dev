@@ -937,3 +937,35 @@ def test_plan_init_prompt_shows_none_when_no_frameworks(tmp_path, mock_plan_init
     prompt = mock_plan_init_ai[0]["input"]
     assert "Detected/configured frameworks: (none)" in prompt
     assert "framework implicit conventions" in prompt
+
+
+def test_load_requirement_documents_accepts_plural_type(tmp_path):
+    # Hand-authored requirement docs (and the artifact-catalog vocabulary) use
+    # `type: requirements`, while `codd init --requirements` stamps the
+    # singular `requirement`. Discovery must accept both — a real greenfield
+    # autopilot run failed at `plan --init` because the user's doc used the
+    # plural form (2026-06-11 dogfood).
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_doc(
+        project,
+        "docs/requirements/requirements.md",
+        node_id="req:plural-form",
+        doc_type="requirements",
+    )
+
+    documents = planner_module._load_requirement_documents(
+        project, {"scan": {"doc_dirs": ["docs/"]}}
+    )
+
+    assert [doc.node_id for doc in documents] == ["req:plural-form"]
+
+
+def test_load_requirement_documents_accepts_singular_type(tmp_path):
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+
+    documents = planner_module._load_requirement_documents(
+        project, {"scan": {"doc_dirs": ["docs/"]}}
+    )
+
+    assert [doc.node_id for doc in documents] == ["req:project-requirements"]
