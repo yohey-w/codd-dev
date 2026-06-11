@@ -283,12 +283,19 @@ def _make_restored_body(input_text: str) -> str:
 @pytest.fixture
 def mock_restore_ai(monkeypatch):
     calls: list[dict[str, object]] = []
+    real_run = subprocess.run
 
-    def fake_run(command, *, input, capture_output, text, check, **kwargs):
-        calls.append({"command": command, "input": input})
-        return subprocess.CompletedProcess(
-            args=command, returncode=0, stdout=_make_restored_body(input), stderr=""
-        )
+    def fake_run(command, *args, **kwargs):
+        # Intercept only the mocked AI command. Other subprocesses (notably the
+        # read-only `git` calls made by H2's git-evidence collection) must run
+        # for real, otherwise blame-driven testimony cannot be exercised.
+        if isinstance(command, list) and command and command[0] == "mock-ai":
+            prompt = kwargs.get("input")
+            calls.append({"command": command, "input": prompt})
+            return subprocess.CompletedProcess(
+                args=command, returncode=0, stdout=_make_restored_body(prompt), stderr=""
+            )
+        return real_run(command, *args, **kwargs)
 
     monkeypatch.setattr(generator_module.subprocess, "run", fake_run)
     return calls
@@ -653,3 +660,249 @@ def _frontmatter(content: str) -> dict:
     assert content.startswith("---\n")
     end = content.index("\n---", 4)
     return yaml.safe_load(content[4:end])
+
+
+# ---------------------------------------------------------------------------
+# 9. H2: git-history testimony (blame-driven) wiring + prompt + contract
+# ---------------------------------------------------------------------------
+
+import os as _os
+import subprocess as _subprocess
+
+
+def _h2_git_env(date: str) -> dict:
+    return {
+        **_os.environ,
+        "GIT_AUTHOR_NAME": "Restorer",
+        "GIT_AUTHOR_EMAIL": "restorer@example.com",
+        "GIT_COMMITTER_NAME": "Restorer",
+        "GIT_COMMITTER_EMAIL": "restorer@example.com",
+        "GIT_AUTHOR_DATE": f"{date}T00:00:00 +0000",
+        "GIT_COMMITTER_DATE": f"{date}T00:00:00 +0000",
+    }
+
+
+def _h2_git(project: Path, *args: str, date: str = "2024-01-05") -> None:
+    _subprocess.run(
+        ["git", *args], cwd=str(project), env=_h2_git_env(date),
+        capture_output=True, text=True, check=True,
+    )
+
+
+def _init_git_history(project: Path) -> None:
+    """Turn the brownfield fixture into a real git repo with informative
+    history on the billing module: an initial commit, then a substantial
+    rewrite of service.py (→ surviving testimony + a supersession chain)."""
+    service = project / "src" / "billing" / "service.py"
+    v1_lines = [
+        "class BillingService:",
+        "    def charge(self, amount: int) -> bool:",
+        "        return amount > 0",
+    ] + [f"    # placeholder note {i} kept for padding" for i in range(10)]
+    service.write_text("\n".join(v1_lines) + "\n", encoding="utf-8")
+
+    _h2_git(project, "init", "-q", "-b", "main")
+    _h2_git(project, "add", "-A")
+    _h2_git(
+        project, "commit", "-q", "-m",
+        "feat(billing): validate charge amounts before capture", date="2024-01-05",
+    )
+
+    v2_lines = [
+        "class BillingService:",
+        "    MIN_AMOUNT = 1",
+        "",
+        "    def charge(self, amount: int) -> bool:",
+        "        if amount < self.MIN_AMOUNT:",
+        "            return False",
+        "        return True",
+    ] + [f"    # revised audit note {i} after the policy change" for i in range(8)]
+    service.write_text("\n".join(v2_lines) + "\n", encoding="utf-8")
+    _h2_git(project, "add", "-A")
+    _h2_git(
+        project, "commit", "-q", "-m",
+        "fix(billing): reject zero-amount charges per finance policy", date="2024-03-15",
+    )
+
+
+def test_git_testimony_reaches_restore_prompt(tmp_path, mock_restore_ai):
+    project = _setup_brownfield_project(tmp_path)
+    _init_git_history(project)
+
+    restore_wave(project, wave=0)
+    prompt = mock_restore_ai[0]["input"]
+
+    # The testimony section, clearly marked as testimony-not-fact.
+    assert "Git history testimony (UNVERIFIED — testimony, not fact)" in prompt
+    assert "capped at the amber band" in prompt
+    assert "NOT assert testimony as fact" in prompt
+    assert "candidate_answer" in prompt
+    # The surviving commit (the rewrite) attaches; entries carry the contract shape.
+    assert "fix(billing): reject zero-amount charges per finance policy" in prompt
+    assert "commit:" in prompt
+    assert "[corroborated]" in prompt
+    assert "still present at HEAD" in prompt
+
+
+def test_supersession_chain_reaches_restore_prompt(tmp_path, mock_restore_ai):
+    project = _setup_brownfield_project(tmp_path)
+    _init_git_history(project)
+
+    restore_wave(project, wave=0)
+    prompt = mock_restore_ai[0]["input"]
+
+    assert "Supersession chains" in prompt
+    assert "decision trail:" in prompt
+    # Both ends of the trail are present, oldest first.
+    assert "feat(billing): validate charge amounts before capture" in prompt
+    assert "rejected" in prompt
+
+
+def test_no_git_section_for_non_repo_project(tmp_path, mock_restore_ai):
+    """Backward compat: a project that is not a git repository restores
+    exactly as before — no testimony section, no fake absence text."""
+    project = _setup_brownfield_project(tmp_path)  # no git init
+
+    restore_wave(project, wave=0)
+    prompt = mock_restore_ai[0]["input"]
+
+    assert "Git history testimony" not in prompt
+    assert "Supersession chains" not in prompt
+
+
+def test_git_evidence_disabled_via_config(tmp_path, mock_restore_ai):
+    project = _setup_brownfield_project(tmp_path)
+    _init_git_history(project)
+    config = deepcopy(BASE_CONFIG)
+    config["restore"] = {"git_evidence": {"enabled": False}}
+    (project / "codd" / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+
+    restore_wave(project, wave=0)
+    prompt = mock_restore_ai[0]["input"]
+
+    assert "Git history testimony" not in prompt
+    assert "Supersession chains" not in prompt
+
+
+def test_contract_block_defines_candidate_answer_rules():
+    from codd.restore import _build_provenance_contract_block
+
+    text = "\n".join(_build_provenance_contract_block(BASE_CONFIG["bands"]))
+
+    # candidate_answer schema: provenance commit:<sha>, corroborated flag,
+    # human confirmation retained, testimony never green.
+    assert "candidate_answer" in text
+    assert 'commit:<short-sha> (<date>)' in text
+    assert "corroborated: true|false" in text
+    assert "needs_human_confirmation MUST remain true" in text
+    assert "NEVER be promoted into a green statement" in text
+    assert "whose only evidence is commit testimony can NEVER be green" in text
+    # The candidate answer is a lead, not an answer; absence stays absent.
+    assert "LEAD" in text
+    assert "absence of evidence stays absent" in text
+
+
+def test_evidence_bundle_git_fields_default_empty():
+    bundle = EvidenceBundle()
+    assert bundle.git_testimony == []
+    assert bundle.supersession_chains == []
+    assert bundle.has_any() is False
+
+    from codd.git_evidence import GitTestimony
+
+    bundle.git_testimony = [
+        GitTestimony(locator="a.py", commit="abc1234", date="2024-01-01", subject="feat: x")
+    ]
+    assert bundle.has_any() is True
+
+
+# ---------------------------------------------------------------------------
+# 10. H2: candidate_answer passes through the meta lift + serializer
+# ---------------------------------------------------------------------------
+
+def _restoration_block_with_candidate_answer() -> str:
+    return (
+        "```yaml\n"
+        "codd_restoration:\n"
+        "  provenance:\n"
+        "    - statement: charge rejects zero amount\n"
+        "      evidence:\n"
+        "        - tests/test_billing.py::test_charge_rejects_zero_amount\n"
+        "      band: green\n"
+        "  open_questions:\n"
+        "    - question: Why are zero-amount charges rejected?\n"
+        "      why_unrecoverable: The business rationale is not encoded in code.\n"
+        "      needs_human_confirmation: true\n"
+        "      candidate_answer:\n"
+        "        text: Finance policy required rejecting zero-amount charges.\n"
+        "        provenance: 'commit:abc1234 (2024-03-15)'\n"
+        "        corroborated: true\n"
+        "```\n"
+    )
+
+
+def test_extract_restoration_meta_passes_candidate_answer_through():
+    body = "# Doc\n\n## 1. Overview\n\nText.\n\n" + _restoration_block_with_candidate_answer()
+    meta = extract_restoration_meta(body)
+
+    assert meta is not None
+    question = meta["open_questions"][0]
+    # The lead is preserved AND the question stays open.
+    assert question["needs_human_confirmation"] is True
+    assert question["candidate_answer"]["provenance"] == "commit:abc1234 (2024-03-15)"
+    assert question["candidate_answer"]["corroborated"] is True
+    assert "Finance policy" in question["candidate_answer"]["text"]
+
+
+def test_render_document_serializes_candidate_answer():
+    from codd.generator import _render_document
+
+    artifact = WaveArtifact(
+        wave=1, node_id="req:x", output="docs/requirements/inferred_requirements.md",
+        title="Reqs", depends_on=[], conventions=[], modules=[],
+    )
+    body = "# Reqs\n\n## 1. Overview\n\nText.\n"
+    meta = extract_restoration_meta(
+        "# Doc\n\n" + _restoration_block_with_candidate_answer()
+    )
+
+    rendered = _render_document(
+        artifact=artifact, global_conventions=[], depended_by=[], body=body,
+        restoration_meta=meta,
+    )
+    codd = _frontmatter(rendered)["codd"]
+    question = codd["open_questions"][0]
+    assert question["candidate_answer"]["provenance"] == "commit:abc1234 (2024-03-15)"
+    assert question["candidate_answer"]["corroborated"] is True
+    assert question["needs_human_confirmation"] is True
+
+
+def test_restored_doc_roundtrips_candidate_answer(tmp_path, monkeypatch):
+    """End-to-end: an AI body carrying a candidate_answer lands in the restored
+    document's frontmatter unchanged (no whitelist drops nested keys)."""
+
+    def fake_run(command, *, input, capture_output, text, check, **kwargs):
+        body = (
+            "# Inferred Requirements\n\n"
+            "## 1. Overview\n\nO.\n\n"
+            "## 2. Functional Requirements\n\nF.\n\n"
+            "## 3. Non-Functional Requirements\n\nN.\n\n"
+            "## 4. Constraints\n\nC.\n\n"
+            "## 5. Open Questions\n\nSee block.\n\n"
+            "## 6. Human Review Issues\n\nNone.\n\n"
+            + _restoration_block_with_candidate_answer()
+        )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout=body, stderr="")
+
+    monkeypatch.setattr(generator_module.subprocess, "run", fake_run)
+
+    project = _setup_brownfield_project(tmp_path)
+    restore_wave(project, wave=0)
+
+    doc = project / "docs" / "requirements" / "inferred_requirements.md"
+    codd = _frontmatter(doc.read_text(encoding="utf-8"))["codd"]
+    question = codd["open_questions"][0]
+    assert question["candidate_answer"]["provenance"] == "commit:abc1234 (2024-03-15)"
+    assert question["needs_human_confirmation"] is True

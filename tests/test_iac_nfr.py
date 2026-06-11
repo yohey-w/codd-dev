@@ -22,11 +22,13 @@ from codd.iac_nfr import (
     derive_iac_nfrs,
 )
 from codd.parsing import (
+    AnsibleExtractor,
     DockerComposeExtractor,
     DockerfileExtractor,
     GitHubActionsExtractor,
     KubernetesExtractor,
     OpsEvidenceExtractor,
+    PrometheusRulesExtractor,
     TerraformExtractor,
 )
 
@@ -461,6 +463,279 @@ def test_helm_and_ansible_evidence_map_to_topology_operational_facts():
     assert any("Ansible playbook" in c.statement for c in topology)
     for cand in topology:
         assert cand.kind == KIND_OPERATIONAL_FACT
+
+
+# ---------------------------------------------------------------------------
+# Prometheus deep-parsed mappings (H1): parsed rules upgrade recognition-medium
+# to per-rule HIGH-confidence candidates.
+# ---------------------------------------------------------------------------
+def test_prometheus_alert_rule_maps_to_high_confidence_slo_candidate():
+    rules = textwrap.dedent(
+        """\
+        groups:
+          - name: availability
+            rules:
+              - alert: HighErrorRate
+                expr: rate(http_errors_total[5m]) / rate(http_requests_total[5m]) > 0.01
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: Error rate above 1%
+        """
+    )
+    info = PrometheusRulesExtractor().extract_prometheus(rules, "monitoring/app.rules.yml")
+    candidates = derive_iac_nfrs([info])
+
+    observability = _by_category(candidates, CAT_OBSERVABILITY)
+    assert len(observability) == 1
+    alert = observability[0]
+    # Parsed rules are HIGH-confidence NFR candidates (vs recognition MEDIUM).
+    assert alert.confidence == CONFIDENCE_HIGH
+    assert alert.kind == KIND_NFR
+    # The statement carries name + threshold expr + duration + severity and is
+    # explicitly phrased as a candidate acceptance criterion.
+    assert "HighErrorRate" in alert.statement
+    assert "rate(http_errors_total[5m])" in alert.statement
+    assert "5m" in alert.statement
+    assert "severity critical" in alert.statement
+    assert "candidate SLO/acceptance criterion" in alert.statement
+    # Provenance stays file::Kind::name.
+    assert alert.source == "monitoring/app.rules.yml::AlertRule::HighErrorRate"
+    assert alert.evidence["for"] == "5m"
+    assert alert.evidence["severity"] == "critical"
+
+
+def test_prometheus_recording_rule_is_observability_operational_fact():
+    rules = textwrap.dedent(
+        """\
+        groups:
+          - name: sli
+            rules:
+              - record: job:latency:p99
+                expr: histogram_quantile(0.99, rate(latency_bucket[5m]))
+        """
+    )
+    info = PrometheusRulesExtractor().extract_prometheus(rules, "sli.rules.yml")
+    candidates = derive_iac_nfrs([info])
+
+    observability = _by_category(candidates, CAT_OBSERVABILITY)
+    assert len(observability) == 1
+    record = observability[0]
+    assert record.kind == KIND_OPERATIONAL_FACT
+    assert record.confidence == CONFIDENCE_HIGH
+    assert "job:latency:p99" in record.statement
+    assert record.source == "sli.rules.yml::RecordingRule::job:latency:p99"
+
+
+def test_prometheus_scrape_jobs_map_to_medium_observability_facts():
+    scrape = textwrap.dedent(
+        """\
+        scrape_configs:
+          - job_name: api
+            static_configs:
+              - targets: ['api:8000', 'api2:8000']
+        """
+    )
+    info = PrometheusRulesExtractor().extract_prometheus(scrape, "prometheus.yml")
+    candidates = derive_iac_nfrs([info])
+
+    observability = _by_category(candidates, CAT_OBSERVABILITY)
+    assert len(observability) == 1
+    job = observability[0]
+    assert job.confidence == CONFIDENCE_MEDIUM
+    assert job.kind == KIND_OPERATIONAL_FACT
+    assert "job 'api'" in job.statement
+    assert job.source == "prometheus.yml::ScrapeJob::api"
+    assert job.evidence["targets_count"] == 2
+
+
+def test_alertmanager_receivers_map_to_observability_routing_fact():
+    am = textwrap.dedent(
+        """\
+        route:
+          receiver: ops-team
+          routes:
+            - match: {severity: critical}
+              receiver: pagerduty
+        receivers:
+          - name: ops-team
+          - name: pagerduty
+        """
+    )
+    info = PrometheusRulesExtractor().extract_prometheus(am, "alertmanager.yml")
+    candidates = derive_iac_nfrs([info])
+
+    observability = _by_category(candidates, CAT_OBSERVABILITY)
+    assert len(observability) == 1
+    routing = observability[0]
+    assert routing.confidence == CONFIDENCE_MEDIUM
+    assert routing.kind == KIND_OPERATIONAL_FACT
+    assert "ops-team" in routing.statement and "pagerduty" in routing.statement
+    assert routing.evidence["receivers"] == ["ops-team", "pagerduty"]
+    assert routing.evidence["default_receiver"] == "ops-team"
+
+
+# ---------------------------------------------------------------------------
+# Ansible deep-parsed mappings (H1)
+# ---------------------------------------------------------------------------
+_ANSIBLE_PLAYBOOK_FOR_NFR = textwrap.dedent(
+    """\
+    - name: Configure web servers
+      hosts: webservers
+      become: true
+      roles: [common]
+      tasks:
+        - name: Install nginx
+          apt:
+            name: nginx
+            state: present
+        - name: Ensure nginx running
+          service:
+            name: nginx
+            state: started
+            enabled: true
+        - name: Allow http
+          ufw:
+            rule: allow
+            port: "80"
+        - name: Nightly cleanup
+          cron:
+            name: cleanup
+            minute: "0"
+            hour: "2"
+        - name: Create deploy user
+          user:
+            name: deploy
+    """
+)
+
+
+def test_ansible_service_task_maps_to_high_reliability_operational_fact():
+    info = AnsibleExtractor().extract_ansible(_ANSIBLE_PLAYBOOK_FOR_NFR, "playbook.yml")
+    candidates = derive_iac_nfrs([info])
+
+    reliability = _by_category(candidates, CAT_RELIABILITY)
+    assert len(reliability) == 1
+    svc = reliability[0]
+    assert svc.confidence == CONFIDENCE_HIGH
+    assert svc.kind == KIND_OPERATIONAL_FACT
+    assert "service 'nginx'" in svc.statement
+    assert "state=started" in svc.statement
+    assert "system service" in svc.statement
+    assert svc.source == "playbook.yml::task::Ensure nginx running"
+
+
+def test_ansible_firewall_task_maps_to_high_security_nfr():
+    info = AnsibleExtractor().extract_ansible(_ANSIBLE_PLAYBOOK_FOR_NFR, "playbook.yml")
+    candidates = derive_iac_nfrs([info])
+
+    security = _by_category(candidates, CAT_SECURITY)
+    firewall = [c for c in security if "firewall" in c.statement]
+    assert len(firewall) == 1
+    assert firewall[0].confidence == CONFIDENCE_HIGH
+    # Restricting network access is prescriptive — an NFR, not just a fact.
+    assert firewall[0].kind == KIND_NFR
+    assert firewall[0].source == "playbook.yml::task::Allow http"
+
+    # User management is security/isolation evidence at MEDIUM.
+    accounts = [c for c in security if "user 'deploy'" in c.statement]
+    assert len(accounts) == 1
+    assert accounts[0].confidence == CONFIDENCE_MEDIUM
+    assert accounts[0].kind == KIND_OPERATIONAL_FACT
+
+
+def test_ansible_package_cron_and_play_map_to_deployment_topology():
+    info = AnsibleExtractor().extract_ansible(_ANSIBLE_PLAYBOOK_FOR_NFR, "playbook.yml")
+    candidates = derive_iac_nfrs([info])
+
+    topology = _by_category(candidates, CAT_TOPOLOGY)
+    # Package install -> MEDIUM topology fact.
+    package = next(c for c in topology if "package 'nginx'" in c.statement)
+    assert package.confidence == CONFIDENCE_MEDIUM
+    assert package.kind == KIND_OPERATIONAL_FACT
+    # Cron task -> HIGH topology fact carrying the schedule.
+    cron = next(c for c in topology if "cron job 'cleanup'" in c.statement)
+    assert cron.confidence == CONFIDENCE_HIGH
+    assert "hour=2" in cron.statement
+    # The play itself -> HIGH topology fact with hosts + roles.
+    play = next(c for c in topology if "play 'Configure web servers'" in c.statement)
+    assert play.confidence == CONFIDENCE_HIGH
+    assert "webservers" in play.statement
+    assert play.source == "playbook.yml::play::Configure web servers"
+    assert play.evidence["roles"] == ["common"]
+
+
+def test_ansible_role_maps_to_topology_fact_with_role_provenance():
+    role_tasks = textwrap.dedent(
+        """\
+        - name: Start postgres
+          service:
+            name: postgresql
+            state: started
+        """
+    )
+    info = AnsibleExtractor().extract_ansible(role_tasks, "roles/database/tasks/main.yml")
+    candidates = derive_iac_nfrs([info])
+
+    topology = _by_category(candidates, CAT_TOPOLOGY)
+    role = next(c for c in topology if "role 'database'" in c.statement)
+    assert role.kind == KIND_OPERATIONAL_FACT
+    assert role.source == "roles/database/tasks/main.yml::role::database"
+    # The role's tasks still map individually (service -> reliability).
+    reliability = _by_category(candidates, CAT_RELIABILITY)
+    assert any("postgresql" in c.statement for c in reliability)
+
+
+def test_ansible_unmapped_modules_yield_no_candidates():
+    playbook = textwrap.dedent(
+        """\
+        - hosts: all
+          tasks:
+            - name: Copy file
+              copy:
+                src: a
+                dest: b
+        """
+    )
+    info = AnsibleExtractor().extract_ansible(playbook, "playbook.yml")
+    candidates = derive_iac_nfrs([info])
+
+    # Only the play-level topology fact; the copy task maps to nothing.
+    assert len(candidates) == 1
+    assert candidates[0].category == CAT_TOPOLOGY
+
+
+# ---------------------------------------------------------------------------
+# Terraform deep-attribute mapping: hcl2 mode vs regex fallback (H1)
+# ---------------------------------------------------------------------------
+def test_terraform_hcl2_nested_encryption_flag_yields_security_candidate(monkeypatch):
+    """The hcl2 path derives NFRs from nested blocks; the fallback cannot."""
+
+    import codd.parsing as codd_parsing
+
+    tf = textwrap.dedent(
+        """\
+        resource "aws_instance" "worker" {
+          ami = "ami-123"
+
+          ebs_block_device {
+            device_name = "/dev/sdf"
+            encrypted   = true
+          }
+        }
+        """
+    )
+    extractor = TerraformExtractor()
+
+    assert codd_parsing.hcl2 is not None
+    deep = derive_iac_nfrs([extractor.extract_resources(tf, "ec2.tf")])
+    security = _by_category(deep, CAT_SECURITY)
+    assert any("encrypted at rest" in c.statement for c in security)
+
+    monkeypatch.setattr(codd_parsing, "hcl2", None)
+    shallow = derive_iac_nfrs([extractor.extract_resources(tf, "ec2.tf")])
+    assert not _by_category(shallow, CAT_SECURITY)
 
 
 # ---------------------------------------------------------------------------

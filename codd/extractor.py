@@ -20,6 +20,7 @@ import yaml
 
 from codd.bridge import load_bridge_registry
 from codd.parsing import (
+    AnsibleExtractor,
     BuildDepsExtractor,
     BuildDepsInfo,
     ConfigInfo,
@@ -30,6 +31,7 @@ from codd.parsing import (
     KubernetesExtractor,
     OpenApiExtractor,
     OpsEvidenceExtractor,
+    PrometheusRulesExtractor,
     ProtobufExtractor,
     TerraformExtractor,
     TestExtractor,
@@ -937,6 +939,16 @@ def _discover_config(facts: ProjectFacts, project_root: Path):
             "detect_dockerfiles",
             "extract_dockerfile",
         ),
+        (
+            AnsibleExtractor(),
+            "detect_ansible_files",
+            "extract_ansible",
+        ),
+        (
+            PrometheusRulesExtractor(),
+            "detect_prometheus_files",
+            "extract_prometheus",
+        ),
     ]
 
     for extractor, detect_method_name, extract_method_name in extractors:
@@ -953,9 +965,12 @@ def _discover_config(facts: ProjectFacts, project_root: Path):
             if config.services or config.resources or config.pipelines or config.images:
                 facts.infra_config[relative_path] = config
 
-    # Recognition-only ops/observability/config-management evidence: surface
-    # PRESENCE (no deep parse) so the IaC→NFR layer can note candidate
-    # observability/SLO and deployment-topology sources.
+    # Recognition-only ops/observability/config-management evidence — the
+    # FALLBACK layer. Ansible and Prometheus files are deep-parsed above; any
+    # such file that produced no structured facts (malformed/empty/unsupported
+    # shape), plus kinds with no deep parser yet (Helm Chart.yaml, role
+    # defaults/vars), still surfaces its PRESENCE so the IaC→NFR layer can note
+    # candidate observability/SLO and deployment-topology sources.
     ops_extractor = OpsEvidenceExtractor()
     for file_path, recognized_kind in ops_extractor.detect_ops_files(project_root):
         relative_path = file_path.relative_to(project_root).as_posix()

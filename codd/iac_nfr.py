@@ -29,8 +29,14 @@ facts already produced by :mod:`codd.parsing` (the ``infra_config`` map of
 
 The mapping table is encoded explicitly below (see :func:`derive_iac_nfrs` and
 the per-format helpers). It is vendor/stack-neutral: Kubernetes, Terraform,
-Docker and GitHub Actions are general tools, named directly; no specific
-company's resources are hardcoded.
+Docker, GitHub Actions, Ansible and Prometheus are general tools, named
+directly; no specific company's resources are hardcoded.
+
+Deep parse vs. recognition: Ansible plays/tasks and Prometheus rule files are
+deep-parsed (``format == "ansible"`` / ``"prometheus"``) and map to specific,
+mostly HIGH-confidence candidates; files that could not be deep-parsed still
+arrive as ``format == "ops-evidence"`` and keep the original recognition-only
+MEDIUM mappings as the fallback.
 """
 
 from __future__ import annotations
@@ -169,6 +175,10 @@ def derive_iac_nfrs(
             candidates.extend(_map_github_actions(config, gha_environments))
         elif fmt == "dockerfile":
             candidates.extend(_map_dockerfile(config))
+        elif fmt == "ansible":
+            candidates.extend(_map_ansible(config))
+        elif fmt == "prometheus":
+            candidates.extend(_map_prometheus(config))
         elif fmt == "ops-evidence":
             candidates.extend(_map_ops_evidence(config))
 
@@ -710,6 +720,302 @@ def _map_dockerfile(config: Any) -> list[NfrCandidate]:
                     evidence={"ports": ports},
                 )
             )
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Ansible (deep-parsed) mapping
+# ---------------------------------------------------------------------------
+# Module-name → mapping groups. Ansible module names are general tool
+# vocabulary (service/apt/cron/ufw/…), not project-specific.
+_ANSIBLE_SERVICE_MODULES = {"service", "systemd", "systemd_service", "sysvinit", "supervisorctl", "runit"}
+_ANSIBLE_PACKAGE_MODULES = {
+    "package",
+    "apt",
+    "yum",
+    "dnf",
+    "apk",
+    "zypper",
+    "pacman",
+    "homebrew",
+    "pip",
+    "npm",
+    "gem",
+}
+_ANSIBLE_FIREWALL_MODULES = {"ufw", "firewalld", "iptables", "nftables"}
+_ANSIBLE_ACCOUNT_MODULES = {"user", "group"}
+
+
+def _map_ansible(config: Any) -> list[NfrCandidate]:
+    """Deep-parsed Ansible plays/tasks → deployment topology / reliability / security.
+
+    Upgrades the recognition-only "Ansible present" MEDIUM fact: parsed plays
+    and tasks yield specific, HIGH-confidence facts (service supervision, cron
+    schedules, firewall rules) with per-task provenance.
+    """
+
+    out: list[NfrCandidate] = []
+    file_path = getattr(config, "file_path", "")
+
+    for play in getattr(config, "services", []) or []:
+        if play.get("kind") != "play":
+            continue
+        pname = play.get("name") or ""
+        hosts = play.get("hosts") or ""
+        roles = play.get("roles") or []
+        role_desc = f" applying roles {roles}" if roles else ""
+        out.append(
+            NfrCandidate(
+                category=CAT_TOPOLOGY,
+                statement=(
+                    f"Ansible play '{pname}' provisions host group '{hosts}'"
+                    f"{role_desc} -> deployment_topology: host provisioning / "
+                    "configuration management is automated"
+                ),
+                source=_source(file_path, "play", str(pname)),
+                confidence=CONFIDENCE_HIGH,
+                kind=KIND_OPERATIONAL_FACT,
+                evidence={
+                    "hosts": hosts,
+                    "roles": roles,
+                    "task_count": play.get("task_count"),
+                },
+            )
+        )
+
+    for resource in getattr(config, "resources", []) or []:
+        kind = resource.get("kind")
+        if kind == "role":
+            rname = resource.get("name") or ""
+            out.append(
+                NfrCandidate(
+                    category=CAT_TOPOLOGY,
+                    statement=(
+                        f"Ansible role '{rname}' defines "
+                        f"{resource.get('task_count')} reusable provisioning task(s) "
+                        "-> deployment_topology: reusable configuration management unit"
+                    ),
+                    source=_source(file_path, "role", str(rname)),
+                    confidence=CONFIDENCE_HIGH,
+                    kind=KIND_OPERATIONAL_FACT,
+                    evidence={"task_count": resource.get("task_count")},
+                )
+            )
+            continue
+        if kind not in {"task", "handler"}:
+            continue
+        out.extend(_ansible_task_candidates(file_path, resource))
+
+    return out
+
+
+def _ansible_task_candidates(file_path: str, task: dict[str, Any]) -> list[NfrCandidate]:
+    module = str(task.get("module") or "")
+    tname = str(task.get("name") or module)
+    attrs = task.get("attributes") or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    provenance = _source(file_path, str(task.get("kind") or "task"), tname)
+    subject = str(attrs.get("name") or tname)
+
+    if module in _ANSIBLE_SERVICE_MODULES:
+        detail_parts = [
+            f"{key}={attrs[key]}" for key in ("state", "enabled") if key in attrs
+        ]
+        detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+        return [
+            NfrCandidate(
+                category=CAT_RELIABILITY,
+                statement=(
+                    f"Ansible manages service '{subject}'{detail} as a system service "
+                    "-> reliability/health: the service is supervised by the init "
+                    "system and kept in its declared state"
+                ),
+                source=provenance,
+                confidence=CONFIDENCE_HIGH,
+                kind=KIND_OPERATIONAL_FACT,
+                evidence={"module": module, **attrs},
+            )
+        ]
+    if module in _ANSIBLE_PACKAGE_MODULES:
+        return [
+            NfrCandidate(
+                category=CAT_TOPOLOGY,
+                statement=(
+                    f"Ansible installs package '{subject}' via {module} -> "
+                    "deployment_topology: host-level runtime dependency is "
+                    "explicitly provisioned"
+                ),
+                source=provenance,
+                confidence=CONFIDENCE_MEDIUM,
+                kind=KIND_OPERATIONAL_FACT,
+                evidence={"module": module, **attrs},
+            )
+        ]
+    if module == "cron":
+        schedule_parts = [
+            f"{key}={attrs[key]}"
+            for key in ("minute", "hour", "day", "weekday", "month", "special_time")
+            if key in attrs
+        ]
+        schedule = f" ({', '.join(schedule_parts)})" if schedule_parts else ""
+        return [
+            NfrCandidate(
+                category=CAT_TOPOLOGY,
+                statement=(
+                    f"Ansible schedules cron job '{subject}'{schedule} -> "
+                    "deployment_topology: recurring batch/scheduled workload "
+                    "(operational task, not a long-running service)"
+                ),
+                source=provenance,
+                confidence=CONFIDENCE_HIGH,
+                kind=KIND_OPERATIONAL_FACT,
+                evidence={"module": module, **attrs},
+            )
+        ]
+    if module in _ANSIBLE_FIREWALL_MODULES:
+        return [
+            NfrCandidate(
+                category=CAT_SECURITY,
+                statement=(
+                    f"Ansible manages firewall rule '{tname}' via {module} -> "
+                    "security/isolation: host network access is explicitly restricted"
+                ),
+                source=provenance,
+                confidence=CONFIDENCE_HIGH,
+                kind=KIND_NFR,
+                evidence={"module": module, **attrs},
+            )
+        ]
+    if module in _ANSIBLE_ACCOUNT_MODULES:
+        return [
+            NfrCandidate(
+                category=CAT_SECURITY,
+                statement=(
+                    f"Ansible manages {module} '{subject}' -> security/isolation: "
+                    "OS accounts/groups are explicitly managed (least-privilege evidence)"
+                ),
+                source=provenance,
+                confidence=CONFIDENCE_MEDIUM,
+                kind=KIND_OPERATIONAL_FACT,
+                evidence={"module": module, **attrs},
+            )
+        ]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Prometheus / Alertmanager (deep-parsed) mapping
+# ---------------------------------------------------------------------------
+def _map_prometheus(config: Any) -> list[NfrCandidate]:
+    """Deep-parsed Prometheus facts → observability/SLO candidates.
+
+    Each alerting rule is a machine-readable *candidate acceptance criterion*:
+    the alert's threshold expression, sustain duration and severity prescribe a
+    condition the running system must not violate. These upgrade the previous
+    recognition-only MEDIUM fact to HIGH-confidence, per-rule NFR candidates.
+    """
+
+    out: list[NfrCandidate] = []
+    file_path = getattr(config, "file_path", "")
+    receiver_names: list[str] = []
+    route_evidence: dict[str, Any] | None = None
+
+    for resource in getattr(config, "resources", []) or []:
+        kind = resource.get("kind")
+        name = str(resource.get("name") or "")
+        attrs = resource.get("attributes") or {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+
+        if kind == "AlertRule":
+            expr = attrs.get("expr") or ""
+            duration = attrs.get("for")
+            severity = attrs.get("severity")
+            for_desc = f" sustained for {duration}" if duration else ""
+            severity_desc = f" at severity {severity}" if severity else ""
+            out.append(
+                NfrCandidate(
+                    category=CAT_OBSERVABILITY,
+                    statement=(
+                        f"Alert '{name}' fires when `{expr}`{for_desc}{severity_desc} "
+                        "-> candidate SLO/acceptance criterion: in normal operation the "
+                        f"monitored condition `{expr}` must not hold"
+                        f"{' beyond ' + str(duration) if duration else ''}"
+                    ),
+                    source=_source(file_path, "AlertRule", name),
+                    confidence=CONFIDENCE_HIGH,
+                    kind=KIND_NFR,
+                    evidence={
+                        key: attrs[key]
+                        for key in ("expr", "for", "severity", "group", "summary", "description")
+                        if key in attrs
+                    },
+                )
+            )
+        elif kind == "RecordingRule":
+            out.append(
+                NfrCandidate(
+                    category=CAT_OBSERVABILITY,
+                    statement=(
+                        f"Recording rule '{name}' precomputes `{attrs.get('expr') or ''}` "
+                        "-> observability/SLO: a derived metric is part of the "
+                        "monitoring model (likely an SLI input)"
+                    ),
+                    source=_source(file_path, "RecordingRule", name),
+                    confidence=CONFIDENCE_HIGH,
+                    kind=KIND_OPERATIONAL_FACT,
+                    evidence={"expr": attrs.get("expr"), "group": attrs.get("group")},
+                )
+            )
+        elif kind == "ScrapeJob":
+            out.append(
+                NfrCandidate(
+                    category=CAT_OBSERVABILITY,
+                    statement=(
+                        f"Prometheus scrapes job '{name}' "
+                        f"({attrs.get('targets_count', 0)} static target(s)) -> "
+                        "observability/SLO: the component is under active metrics monitoring"
+                    ),
+                    source=_source(file_path, "ScrapeJob", name),
+                    confidence=CONFIDENCE_MEDIUM,
+                    kind=KIND_OPERATIONAL_FACT,
+                    evidence={"targets_count": attrs.get("targets_count")},
+                )
+            )
+        elif kind == "AlertmanagerReceiver":
+            receiver_names.append(name)
+        elif kind == "AlertmanagerRoute":
+            route_evidence = {
+                "default_receiver": name,
+                "child_routes": attrs.get("child_routes"),
+            }
+
+    if receiver_names or route_evidence:
+        evidence: dict[str, Any] = {}
+        if receiver_names:
+            evidence["receivers"] = receiver_names
+        if route_evidence:
+            evidence.update(route_evidence)
+        receiver_desc = (
+            f"{len(receiver_names)} receiver(s): {', '.join(receiver_names)}"
+            if receiver_names
+            else "a route tree"
+        )
+        out.append(
+            NfrCandidate(
+                category=CAT_OBSERVABILITY,
+                statement=(
+                    f"Alertmanager routes alerts to {receiver_desc} -> "
+                    "observability/SLO: alert routing and on-call escalation are configured"
+                ),
+                source=_source(file_path, "Alertmanager"),
+                confidence=CONFIDENCE_MEDIUM,
+                kind=KIND_OPERATIONAL_FACT,
+                evidence=evidence,
+            )
+        )
 
     return out
 

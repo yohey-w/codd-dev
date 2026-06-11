@@ -64,6 +64,16 @@ fix:
     # stop at the design-doc update. Override per-invocation with
     # `--no-propagate-impl`.
     propagate_impl: true
+restore:
+  git_evidence:
+    # Brownfield restoration: git history as TESTIMONY evidence. Commit diffs
+    # are fact; commit messages are testimony (a claim about the "why") that
+    # attaches only where its changes survive into HEAD (git blame), is capped
+    # at the amber confidence band, and may only feed candidate_answer leads on
+    # open_questions or corroborate amber statements — never green facts.
+    # Set false to skip all git subprocess calls during `codd restore`
+    # (non-repo projects degrade to no testimony automatically either way).
+    enabled: true
 generate:
   body_retry:
     # `codd generate` re-asks the AI when a produced design-doc body fails

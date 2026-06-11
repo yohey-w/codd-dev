@@ -483,3 +483,64 @@ def test_cli_restore_requires_wave_without_report(tmp_path: Path) -> None:
     result = runner.invoke(main, ["restore", "--path", str(root)])
     assert result.exit_code != 0
     assert "--wave is required" in result.output
+
+
+# ---------------------------------------------------------------------------
+# H2: candidate_answer leads from git-history testimony
+# ---------------------------------------------------------------------------
+def _block_with_candidate_answer() -> dict:
+    block = _restored_requirements_block()
+    block["open_questions"][0]["candidate_answer"] = {
+        "text": "Postgres was chosen for transactional billing guarantees.",
+        "provenance": "commit:abc1234 (2023-05-01)",
+        "corroborated": True,
+    }
+    return block
+
+
+def test_candidate_answer_leads_counted_and_passed_through(tmp_path: Path) -> None:
+    root = _make_project(tmp_path, project_type="web")
+    _write_doc(root / "docs" / "requirements" / "inferred.md", _block_with_candidate_answer())
+
+    report = build_restoration_report(root)
+
+    # 2 open questions, 1 of which carries a git-history lead.
+    assert report.open_question_total == 2
+    assert report.open_questions_with_candidate_answers == 1
+
+    grouped = [q for g in report.open_question_groups for q in g.questions]
+    with_lead = [q for q in grouped if q.get("candidate_answer")]
+    assert len(with_lead) == 1
+    lead = with_lead[0]["candidate_answer"]
+    assert lead["provenance"] == "commit:abc1234 (2023-05-01)"
+    assert lead["corroborated"] is True
+    # A lead is NOT an answer: the question still needs human confirmation.
+    assert with_lead[0]["needs_human_confirmation"] is True
+
+
+def test_candidate_answer_count_in_json_and_text(tmp_path: Path) -> None:
+    root = _make_project(tmp_path, project_type="web")
+    _write_doc(root / "docs" / "requirements" / "inferred.md", _block_with_candidate_answer())
+
+    report = build_restoration_report(root)
+    payload = json.loads(render_report_json(report))
+    assert payload["irrecoverable_in_principle"]["open_questions_with_candidate_answers"] == 1
+
+    text = render_report_text(report)
+    assert "1 of them carry a candidate_answer lead from git-history testimony" in text
+
+
+def test_candidate_answer_absent_degrades_gracefully(tmp_path: Path) -> None:
+    """Documents without candidate_answer (all pre-H2 docs) behave exactly as
+    before: count is 0, no extra text line, JSON field present at 0."""
+    root = _make_project(tmp_path, project_type="web")
+    _write_doc(root / "docs" / "requirements" / "inferred.md", _restored_requirements_block())
+
+    report = build_restoration_report(root)
+    assert report.open_questions_with_candidate_answers == 0
+
+    payload = json.loads(render_report_json(report))
+    assert payload["irrecoverable_in_principle"]["open_questions_with_candidate_answers"] == 0
+
+    text = render_report_text(report)
+    assert "candidate_answer lead" not in text
