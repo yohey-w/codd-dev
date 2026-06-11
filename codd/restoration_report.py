@@ -759,7 +759,7 @@ def _classify_artifact_id(rel_path: str, doc_type: str, node_id: str = "") -> st
         if any(token in lowered for token in tokens):
             return artifact_id
     dt = (doc_type or "").strip().lower()
-    if dt == "requirement":
+    if dt in ("requirement", "requirements"):
         return "requirements"
     if dt == "operations":
         return "operations_runbook"

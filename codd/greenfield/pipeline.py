@@ -364,6 +364,23 @@ class GreenfieldPipeline:
         self.notifier = notifier
         self.echo = echo
 
+    def _restore_session_options(self, session: dict[str, Any]) -> None:
+        """Adopt persisted session options where this invocation set none."""
+        stored = session.get("options") or {}
+        if not isinstance(stored, dict):
+            return
+        if self.ai_command is None and stored.get("ai_command"):
+            self.ai_command = str(stored["ai_command"])
+        if self.project_name is None and stored.get("project_name"):
+            self.project_name = str(stored["project_name"])
+        if self.language is None and stored.get("language"):
+            self.language = str(stored["language"])
+        if self.requirements is None and stored.get("requirements"):
+            self.requirements = str(stored["requirements"])
+        for key, value in self._option_overrides.items():
+            if value is None and stored.get(key) is not None:
+                self._option_overrides[key] = stored[key]
+
     # ── public entry ────────────────────────────────────────
 
     def run(
@@ -377,8 +394,16 @@ class GreenfieldPipeline:
         if dry_run:
             return self._dry_run(project_root)
 
-        options = self._resolve_options(project_root)
         session = load_session(project_root) if resume else None
+        if session is not None:
+            # A resumed run must continue with the SAME options the original
+            # run recorded — most critically ai_command: silently falling back
+            # to the project-config default mid-pipeline switches the AI model
+            # between stages (found in the 2026-06-11 real-AI dogfood, where a
+            # --resume without --ai-cmd flipped sonnet to the opus default).
+            # Explicit CLI overrides on the resume invocation still win.
+            self._restore_session_options(session)
+        options = self._resolve_options(project_root)
         if session is None:
             session = new_session(
                 {

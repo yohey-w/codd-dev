@@ -466,3 +466,39 @@ def test_result_json_format(tmp_path: Path) -> None:
     assert [stage["name"] for stage in payload["stages"]] == list(STAGES)
     with pytest.raises(ValueError, match="unsupported greenfield format"):
         format_greenfield_result(result, "md")
+
+
+def test_resume_restores_ai_command_from_session(tmp_path: Path) -> None:
+    # A resumed run must keep using the ai_command the original run recorded.
+    # Found in the 2026-06-11 real-AI dogfood: `codd greenfield --resume`
+    # without --ai-cmd silently fell back to the project-config default and
+    # switched models mid-pipeline.
+    project = _initialized_project(tmp_path)
+
+    pipeline = GreenfieldPipeline(
+        ai_command="custom-ai --print",
+        **_fake_runners([], fail_on="generate:2"),
+    )
+    assert pipeline.run(project).status == "failed"
+
+    resumed = GreenfieldPipeline(**_fake_runners([]))  # no --ai-cmd this time
+    result = resumed.run(project, resume=True)
+
+    assert result.status == "success"
+    assert resumed.ai_command == "custom-ai --print"
+    assert load_session(project)["options"]["ai_command"] == "custom-ai --print"
+
+
+def test_resume_explicit_ai_command_override_wins(tmp_path: Path) -> None:
+    project = _initialized_project(tmp_path)
+    pipeline = GreenfieldPipeline(
+        ai_command="original-ai --print",
+        **_fake_runners([], fail_on="generate:2"),
+    )
+    assert pipeline.run(project).status == "failed"
+
+    resumed = GreenfieldPipeline(
+        ai_command="override-ai --print", **_fake_runners([])
+    )
+    assert resumed.run(project, resume=True).status == "success"
+    assert resumed.ai_command == "override-ai --print"

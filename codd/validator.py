@@ -562,7 +562,7 @@ def _classify_missing_reference(
             f"{relation} references planned node {target_id!r} from wave_config, but it has not been generated yet",
         )
 
-    if relation == "depends_on" and source_doc_type == "requirement":
+    if relation == "depends_on" and source_doc_type in ("requirement", "requirements"):
         if _is_requirement_phase_reference(target_id, service_boundary_modules):
             return (
                 LEVEL_WARNING,
