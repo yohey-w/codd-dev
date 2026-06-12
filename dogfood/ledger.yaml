@@ -278,6 +278,13 @@ axes:
       reset / timeout / 429-5xx) aborted a live greenfield run and forced a manual --resume. Fixed at the
       AI-invocation chokepoint (codd/ai_invoke.py): recoverable-error classifier + bounded auto-retry, so a
       transient blip no longer needs human --resume. saturation reset to 0.'
+    - '2026-06-12: surfaced F-ai-call-hang — a live greenfield run hung indefinitely on a SINGLE AI call
+      (47min+, process Sl, ~0.9% CPU, NO error, NO output). dc90c09 could not help: it only retries when the
+      CLI returns an error to classify, and a silent no-return stall returns nothing. Root cause: AI
+      subprocess calls had no wall-clock timeout. Fixed at the same chokepoint (codd/ai_invoke.py): every AI
+      subprocess call now carries a finite per-call timeout that kills the child and routes a stall into the
+      EXISTING transient auto-retry (a one-off stall self-recovers; a persistent hang fails loudly after the
+      bounded attempts instead of hanging forever). saturation reset to 0.'
   D8:
     description: adversarial content — prompt-injection in ingested docs and malicious/ escaping paths.
       Deterministic layers must treat all content as DATA, never execute embedded instructions, never
@@ -536,6 +543,48 @@ findings:
   class: mechanical
   derived_case_ids:
   - PC-d7-transient-resume
+- id: F-ai-call-hang
+  axis: D7
+  date: '2026-06-12'
+  model_used: claude opus 4.8 (max effort) — observed live during a greenfield run
+  symptom: 'a live greenfield run hung indefinitely: the model CLI subprocess stalled on a SINGLE call for
+    47+ minutes — process state Sl, ~0.9% CPU (blocked on I/O/network), with NO error emitted, NO output, and
+    no socket-close. The whole pipeline froze. The dc90c09 resilience fix did not help: it auto-retries only
+    when the CLI RETURNS an error to classify, and a silent no-return hang produces no error to classify.'
+  root_cause: 'AI subprocess invocations had no wall-clock timeout. The direct-subprocess path
+    (codd/ai_invoke.py `_invoke_subprocess`) called `subprocess.run(...)` with no `timeout=`, so a child that
+    blocked forever on a half-open socket blocked the parent forever; the file-writing-agent path had a
+    hardcoded non-configurable 3600s. With no timeout there was nothing to convert a silent stall into a
+    classifiable error, so the transient-retry plumbing (dc90c09) was never reached.'
+  fix_commit: 0f4da45  # short sha of the fix+tests+ledger commit
+  fix_description: 'codd/ai_invoke.py — every AI subprocess call now carries a finite per-call wall-clock
+    timeout. `_invoke_subprocess` passes `subprocess.run(..., timeout=call_timeout)` and
+    `invoke_file_writing_agent` uses the same resolved budget (replacing its hardcoded 3600s);
+    `subprocess.run` SIGKILLs and reaps the spawned child on timeout, so no zombie/orphan lingers. A
+    `subprocess.TimeoutExpired` is caught and re-raised as a transient `AI command failed: AI call timed out
+    after Ns`, which the transient classifier now matches (added a narrow `\btimed out\b` pattern), so a stall
+    flows into the EXISTING bounded auto-retry/backoff (`_invoke_with_recovery`, TRANSIENT_AUTO_RETRIES=3) —
+    no parallel path. A one-off network stall self-recovers; a persistently-hung call fails loudly after the
+    bounded attempts instead of hanging. Timeout is resolved by `resolve_ai_call_timeout` with precedence
+    CODD_AI_CALL_TIMEOUT env > CODD_AI_TIMEOUT_SECONDS env > ai.call_timeout_seconds > llm.timeout_seconds >
+    default; default = the shared SSoT codd.defaults.AI_TIMEOUT_SECONDS (3600s), documented in
+    codd/defaults.yaml (ai.call_timeout_seconds). 3600s is generous (longest legitimate single call observed
+    ~20min; the stall ran 47min+ and climbing) yet finite. Each retry attempt gets its own fresh timeout.
+    Preserves dc90c09 (transient + output-ceiling recovery) and 3ea34b4 (stdout file-contract). CLI-agnostic
+    (Claude + Codex). The deployment-adapter path (SubprocessAiCommand / CodexAppServerAiCommand) already
+    applies its own wall-clock timeout from the same SSoT, so it was already covered.'
+  regression_test: 'tests/test_ai_invoke.py — test_invoke_ai_passes_wall_clock_timeout_to_subprocess,
+    test_invoke_ai_timeout_then_succeeds, test_invoke_ai_persistent_timeout_fails_after_bounded_attempts,
+    test_invoke_ai_timeout_is_classified_transient, test_invoke_ai_each_retry_gets_fresh_timeout,
+    test_invoke_file_writing_agent_timeout_routes_to_transient_retry,
+    test_invoke_file_writing_agent_persistent_timeout_fails_clearly,
+    test_invoke_file_writing_agent_default_timeout_is_finite, test_default_call_timeout_matches_shared_ssot,
+    test_resolve_ai_call_timeout_precedence, test_resolve_ai_call_timeout_env_overrides,
+    test_resolve_ai_call_timeout_ignores_garbage_and_nonpositive.'
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-d7-ai-call-hang
 - id: F-enablement-coverage
   axis: D9
   date: '2026-06-10'
@@ -644,6 +693,19 @@ pending_cases:
   priority: 1
   status: done  # 2026-06-12 — surfaced+fixed F-transient-transport (codd/ai_invoke.py recoverable-error
     # classifier + bounded auto-retry at the shared chokepoint). Regression-tested in test_ai_invoke.py.
+- id: PC-d7-ai-call-hang
+  axis: D7
+  hypothesis: A model CLI that stalls a SINGLE call indefinitely with no error and no output (a silent
+    no-return hang, not a returned transport error) must NOT freeze the pipeline forever. Every AI subprocess
+    call needs a finite wall-clock timeout that kills the child and routes the stall into the same transient
+    auto-retry as a dropped socket. Build + regression-test the timeout, the kill-on-timeout, and the
+    transient routing.
+  origin: derived:F-ai-call-hang
+  priority: 1
+  status: done  # 2026-06-12 — surfaced+fixed F-ai-call-hang (codd/ai_invoke.py per-call wall-clock timeout
+    # at the shared chokepoint; TimeoutExpired kills the child and routes into the existing bounded transient
+    # auto-retry; configurable via ai.call_timeout_seconds / CODD_AI_CALL_TIMEOUT). Regression-tested in
+    # test_ai_invoke.py.
 - id: PC-d6-assemble-greenfield-codex
   axis: D6
   hypothesis: '`codd assemble` / `codd greenfield` route through the SAME file-writing-agent chokepoint
