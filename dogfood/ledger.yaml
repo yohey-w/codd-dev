@@ -417,7 +417,7 @@ findings:
   root_cause: 'the AI-invocation layer (codd/ai_invoke.py) treated the output-ceiling abort as a generic
     fatal "AI command failed" and raised, with no detection or recovery. The documented lever
     (CLAUDE_CODE_MAX_OUTPUT_TOKENS) was never applied automatically — the human applied it by hand.'
-  fix_commit: 81103d0  # short sha of the fix commit (see git log -1 after the commit)
+  fix_commit: dc90c09  # short sha of the fix commit (see git log -1 after the commit)
   fix_description: 'codd/ai_invoke.py — added a deterministic recoverable-error classifier and wired
     auto-recovery into invoke_ai at the shared chokepoint (so implement/generate/greenfield all benefit,
     regardless of the caller''s retries=0 default). `_is_output_ceiling_error(stderr)` matches the per-call
@@ -486,7 +486,7 @@ findings:
     exit became a fatal "AI command failed" unless the caller passed retries>0, and every call site uses the
     retries=0 default. A recoverable transport blip was therefore indistinguishable from a permanent failure
     and propagated up, breaking the greenfield session.'
-  fix_commit: 81103d0  # short sha of the fix commit (same commit as F-output-32k)
+  fix_commit: dc90c09  # short sha of the fix commit (same commit as F-output-32k)
   fix_description: 'codd/ai_invoke.py — `_is_transient_error(stderr)` deterministically matches recoverable
     transport patterns (CLI-agnostic, conservative): socket/connection closed|reset|aborted|refused,
     ECONNRESET/ECONNREFUSED/EPIPE/ETIMEDOUT, read/request/socket timed out, generic timeout, 429/500/502/503/504,
