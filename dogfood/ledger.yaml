@@ -233,13 +233,18 @@ axes:
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
-    saturation_counter: 1
+    saturation_counter: 0
     last_run: '2026-06-12'
     status: active
     cost: free
     automation: scripted
     runner: python dogfood/scripts/run_d7_chaos.py (stub-AI, randomized kill points).
     sut_model: none
+    history:
+    - '2026-06-12: surfaced F-transient-transport — a transient transport error (socket closed / connection
+      reset / timeout / 429-5xx) aborted a live greenfield run and forced a manual --resume. Fixed at the
+      AI-invocation chokepoint (codd/ai_invoke.py): recoverable-error classifier + bounded auto-retry, so a
+      transient blip no longer needs human --resume. saturation reset to 0.'
   D8:
     description: adversarial content — prompt-injection in ingested docs and malicious/ escaping paths.
       Deterministic layers must treat all content as DATA, never execute embedded instructions, never
@@ -406,14 +411,32 @@ findings:
   axis: D4
   date: '2026-06-12'
   model_used: claude sonnet (weakest viable, M1)
-  symptom: 32k output-token ceiling on big implement tasks — a large single-file implement gets truncated
-    at the model's output limit, producing an incomplete file with no fallback.
-  root_cause: under-investigation — implement issues one unbounded generation per task; on output-limit
-    it neither detects truncation nor falls back to chunked implementation.
-  fix_commit: null
-  regression_test: PENDING — add a regression that an output-truncation error triggers the chunked-implementation
-    fallback.
-  status: open
+  symptom: 32k output-token ceiling on big implement tasks — a model CLI aborts a single call with
+    "Claude's response exceeded the 32000 output token maximum" (CLAUDE_CODE_MAX_OUTPUT_TOKENS). The
+    whole task failed and a human had to re-run with the env var raised.
+  root_cause: 'the AI-invocation layer (codd/ai_invoke.py) treated the output-ceiling abort as a generic
+    fatal "AI command failed" and raised, with no detection or recovery. The documented lever
+    (CLAUDE_CODE_MAX_OUTPUT_TOKENS) was never applied automatically — the human applied it by hand.'
+  fix_commit: 81103d0  # short sha of the fix commit (see git log -1 after the commit)
+  fix_description: 'codd/ai_invoke.py — added a deterministic recoverable-error classifier and wired
+    auto-recovery into invoke_ai at the shared chokepoint (so implement/generate/greenfield all benefit,
+    regardless of the caller''s retries=0 default). `_is_output_ceiling_error(stderr)` matches the per-call
+    output-token-maximum patterns (CLI-agnostic: "output token maximum/limit", "max_output_tokens",
+    "exceeded the N output token", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"). On a ceiling hit, `_invoke_with_recovery`
+    re-issues the SAME call ONCE with CLAUDE_CODE_MAX_OUTPUT_TOKENS raised to 64000 — threaded as a per-call
+    subprocess env on the direct path (and into invoke_file_writing_agent''s child env so codex benefits too),
+    or raised on os.environ for the duration of the retried adapter call. `_raised_output_budget_env` returns
+    None when the budget is already >= the raised value, so a genuine ceiling at a high budget surfaces
+    honestly instead of looping. A one-line [codd] notice is logged on stderr so the recovery is visible in
+    greenfield stage output; the recovered call lets the stage proceed (no checkpoint-fail). The env-raise is
+    the CLI-agnostic recovery chosen over chunked-fallback: chunked_runner is only reachable from the implement
+    call site via an explicit chunk_size opt-in, whereas the env-raise covers every AI stage at one chokepoint
+    and exactly matches the manual fix. Generality gate held: classifier patterns are vendor-neutral, no
+    app/subject names; full suite green (4169 passed, 0 skipped).'
+  regression_test: 'tests/test_ai_invoke.py — test_invoke_ai_recovers_output_ceiling_by_raising_budget,
+    test_invoke_ai_output_ceiling_not_retried_when_budget_already_high, test_classifier_output_ceiling_matches_ceiling_messages,
+    test_invoke_ai_output_ceiling_recovery_threads_to_file_writing_agent.'
+  status: fixed
   class: mechanical
   derived_case_ids:
   - PC-d4-chunked-fallback
@@ -451,6 +474,35 @@ findings:
   derived_case_ids:
   - PC-d6-assemble-greenfield-codex
   - PC-d6-codex-other-stages
+- id: F-transient-transport
+  axis: D7
+  date: '2026-06-12'
+  model_used: claude sonnet (weakest viable, M1) — observed live during greenfield runs
+  symptom: 'a model CLI aborted a single call with a transient transport error ("API Error: The socket
+    connection was closed unexpectedly", and the connection-reset/timeout/429/5xx family). Today this
+    failed the whole task and a human had to `codd greenfield --resume` by hand, even though re-issuing
+    the identical call clears it.'
+  root_cause: 'the AI-invocation layer (codd/ai_invoke.py) had no transient-error classifier: every nonzero
+    exit became a fatal "AI command failed" unless the caller passed retries>0, and every call site uses the
+    retries=0 default. A recoverable transport blip was therefore indistinguishable from a permanent failure
+    and propagated up, breaking the greenfield session.'
+  fix_commit: 81103d0  # short sha of the fix commit (same commit as F-output-32k)
+  fix_description: 'codd/ai_invoke.py — `_is_transient_error(stderr)` deterministically matches recoverable
+    transport patterns (CLI-agnostic, conservative): socket/connection closed|reset|aborted|refused,
+    ECONNRESET/ECONNREFUSED/EPIPE/ETIMEDOUT, read/request/socket timed out, generic timeout, 429/500/502/503/504,
+    too many requests, rate limit, service/server/gateway unavailable|error, overloaded, EOF/unexpected
+    disconnect. `_invoke_with_recovery` (wired into invoke_ai at the shared chokepoint, active regardless of
+    the caller''s retries) bounded-auto-retries such errors up to TRANSIENT_AUTO_RETRIES=3 with an index-scaled
+    short backoff, logging a one-line [codd] notice per retry. Permanent auth/billing/validation/missing-binary
+    errors never match and surface immediately (mirrors the existing "AI command not found is permanent" rule).
+    Reuses the existing retry plumbing (does not add a parallel loop) and preserves the D6 stdout-contract fix.'
+  regression_test: 'tests/test_ai_invoke.py — test_invoke_ai_auto_retries_transient_socket_error_then_succeeds,
+    test_invoke_ai_transient_auto_retry_is_bounded, test_classifier_transient_error_matches_recoverable_patterns,
+    test_invoke_ai_does_not_auto_retry_permanent_auth_error.'
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-d7-transient-resume
 - id: F-enablement-coverage
   axis: D9
   date: '2026-06-10'
@@ -527,7 +579,11 @@ pending_cases:
     fallback.
   origin: derived:F-output-32k
   priority: 1
-  status: pending
+  status: done  # 2026-06-12 — resolved by F-output-32k via a different (better) lever than chunking. The
+    # CLI-agnostic recovery is the documented CLAUDE_CODE_MAX_OUTPUT_TOKENS env-raise at the shared
+    # ai_invoke chokepoint (covers every AI stage, not just implement). chunked_runner is only reachable
+    # from the implement call site behind an explicit chunk_size opt-in, so it is NOT the right place for
+    # transparent recovery of the other stages. Regression-tested in test_ai_invoke.py (see F-output-32k).
 - id: PC-d4-larger-app
   axis: D4
   hypothesis: Re-run the complexity ladder on an even-larger app once the chunked-fallback lands, to confirm
@@ -542,6 +598,15 @@ pending_cases:
   origin: derived:F-resume-options
   priority: 2
   status: pending
+- id: PC-d7-transient-resume
+  axis: D7
+  hypothesis: A transient transport error (socket closed / connection reset / timeout / 429-5xx) mid-run
+    must NOT require a human `codd greenfield --resume` — the AI-invocation layer should auto-retry the
+    recoverable call and let the stage proceed. Build + regression-test the classifier and bounded auto-retry.
+  origin: derived:F-transient-transport
+  priority: 1
+  status: done  # 2026-06-12 — surfaced+fixed F-transient-transport (codd/ai_invoke.py recoverable-error
+    # classifier + bounded auto-retry at the shared chokepoint). Regression-tested in test_ai_invoke.py.
 - id: PC-d6-assemble-greenfield-codex
   axis: D6
   hypothesis: '`codd assemble` / `codd greenfield` route through the SAME file-writing-agent chokepoint

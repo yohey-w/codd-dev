@@ -643,3 +643,211 @@ def test_extract_ai_gains_bounded_retries(monkeypatch):
 
     assert "L1_user_value" in output
     assert len(attempts) == 2
+
+
+# ═══════════════════════════════════════════════════════════
+# invoke_ai: recoverable-error auto-recovery (transient transport + output ceiling)
+# ═══════════════════════════════════════════════════════════
+#
+# Two recoverable CLI error classes observed in live greenfield runs forced a
+# human to manually --resume / re-run with a raised output budget:
+#   1. transient transport ("The socket connection was closed unexpectedly",
+#      connection reset, timeout, 429/5xx) — re-running the identical call clears
+#      it; and
+#   2. the per-call output-token ceiling ("response exceeded the 32000 output
+#      token maximum") — re-running with a raised CLAUDE_CODE_MAX_OUTPUT_TOKENS
+#      clears it. invoke_ai now auto-recovers both at the shared chokepoint,
+#      regardless of the caller's `retries`, so implement/generate/greenfield all
+#      benefit. Permanent errors (auth/validation/missing binary) are never
+#      retried. (Generality gate: classifier patterns are CLI-agnostic — they
+#      match Claude- and Codex-style stderr alike, not one vendor.)
+
+
+def test_classifier_transient_error_matches_recoverable_patterns():
+    transient = [
+        "API Error: The socket connection was closed unexpectedly",
+        "Error: connection reset by peer",
+        "read ECONNRESET",
+        "request timed out after 600s",
+        "API Error: 503 Service Unavailable",
+        "429 Too Many Requests",
+        "upstream gateway error",
+        "the server is overloaded, please try again",
+    ]
+    for message in transient:
+        assert ai_invoke._is_transient_error(message) is True, message
+    permanent = [
+        "401 Unauthorized: invalid API key",
+        "authentication_error: missing credentials",
+        "billing hard limit reached",
+        "invalid_request_error: bad prompt schema",
+        "AI command not found: claude",
+        "",
+    ]
+    for message in permanent:
+        assert ai_invoke._is_transient_error(message) is False, message
+
+
+def test_classifier_output_ceiling_matches_ceiling_messages():
+    ceilings = [
+        "Claude's response exceeded the 32000 output token maximum",
+        "max_output_tokens exceeded for this request",
+        "set CLAUDE_CODE_MAX_OUTPUT_TOKENS to raise the limit",
+        "the output token limit was reached",
+    ]
+    for message in ceilings:
+        assert ai_invoke._is_output_ceiling_error(message) is True, message
+    not_ceiling = [
+        "input is too long: 200000 prompt tokens",
+        "401 Unauthorized",
+        "connection reset",
+        "",
+    ]
+    for message in not_ceiling:
+        assert ai_invoke._is_output_ceiling_error(message) is False, message
+
+
+def test_invoke_ai_auto_retries_transient_socket_error_then_succeeds(monkeypatch):
+    # Live symptom: "The socket connection was closed unexpectedly". The whole
+    # task used to fail and a human had to --resume. It must now auto-retry.
+    monkeypatch.setattr(ai_invoke.time, "sleep", lambda _s: None)  # no real backoff
+    attempts = []
+
+    def fake_run(command, **kwargs):
+        attempts.append(command)
+        if len(attempts) == 1:
+            return _completed(
+                command,
+                returncode=1,
+                stderr="API Error: The socket connection was closed unexpectedly",
+            )
+        return _completed(command, stdout="recovered after socket reset")
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    # retries=0 (the default at every call site): recovery is independent of it.
+    assert invoke_ai("mock-ai", "prompt") == "recovered after socket reset"
+    assert len(attempts) == 2
+
+
+def test_invoke_ai_transient_auto_retry_is_bounded(monkeypatch):
+    monkeypatch.setattr(ai_invoke.time, "sleep", lambda _s: None)
+    attempts = []
+
+    def fake_run(command, **kwargs):
+        attempts.append(command)
+        return _completed(command, returncode=1, stderr="connection reset by peer")
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="connection reset by peer"):
+        invoke_ai("mock-ai", "prompt")
+    # 1 initial attempt + TRANSIENT_AUTO_RETRIES bounded retries.
+    assert len(attempts) == 1 + ai_invoke.TRANSIENT_AUTO_RETRIES
+
+
+def test_invoke_ai_recovers_output_ceiling_by_raising_budget(monkeypatch):
+    # Live symptom (F-output-32k): a single implement call aborts with the
+    # 32000 output-token ceiling. The recovery re-issues the SAME call once with
+    # a raised CLAUDE_CODE_MAX_OUTPUT_TOKENS in the child env — the documented
+    # lever the human applied manually.
+    monkeypatch.delenv(ai_invoke.OUTPUT_TOKENS_ENV, raising=False)
+    envs_seen: list[str | None] = []
+
+    def fake_run(command, **kwargs):
+        env = kwargs.get("env")
+        envs_seen.append(None if env is None else env.get(ai_invoke.OUTPUT_TOKENS_ENV))
+        if len(envs_seen) == 1:
+            return _completed(
+                command,
+                returncode=1,
+                stderr="Claude's response exceeded the 32000 output token maximum",
+            )
+        return _completed(command, stdout="full untruncated output")
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    assert invoke_ai("mock-ai", "prompt") == "full untruncated output"
+    assert len(envs_seen) == 2
+    # First call: default env (no override). Retry: raised budget passed through.
+    assert envs_seen[0] is None
+    assert envs_seen[1] == str(ai_invoke.RAISED_OUTPUT_TOKENS)
+
+
+def test_invoke_ai_output_ceiling_not_retried_when_budget_already_high(monkeypatch):
+    # If the budget is ALREADY at/above the raised value, a genuine ceiling must
+    # surface honestly instead of looping forever.
+    monkeypatch.setenv(ai_invoke.OUTPUT_TOKENS_ENV, str(ai_invoke.RAISED_OUTPUT_TOKENS))
+    attempts = []
+
+    def fake_run(command, **kwargs):
+        attempts.append(command)
+        return _completed(
+            command,
+            returncode=1,
+            stderr="response exceeded the 64000 output token maximum",
+        )
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="output token maximum"):
+        invoke_ai("mock-ai", "prompt")
+    assert len(attempts) == 1  # no pointless re-issue at an already-high budget
+
+
+def test_invoke_ai_does_not_auto_retry_permanent_auth_error(monkeypatch):
+    # Mirrors the "missing binary is permanent" rule: auth/validation errors are
+    # NOT transient and must fail immediately without burning auto-retries. With
+    # retries=0 (the default at every call site) the new recovery layer is the
+    # only thing that could re-issue the call — and it must not, for a permanent
+    # error. (The separate `retries`/feedback loop is exercised elsewhere.)
+    monkeypatch.setattr(ai_invoke.time, "sleep", lambda _s: None)
+    attempts = []
+
+    def fake_run(command, **kwargs):
+        attempts.append(command)
+        return _completed(
+            command,
+            returncode=1,
+            stderr="authentication_error: invalid x-api-key (401 Unauthorized)",
+        )
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="authentication_error"):
+        invoke_ai("mock-ai", "prompt")
+    assert len(attempts) == 1  # permanent: no transient/ceiling recovery
+
+
+def test_invoke_ai_output_ceiling_recovery_threads_to_file_writing_agent(monkeypatch, tmp_path):
+    # The output-ceiling env-raise must reach file-writing CLIs (codex) too: the
+    # raised budget is threaded into invoke_file_writing_agent's child env.
+    monkeypatch.delenv(ai_invoke.OUTPUT_TOKENS_ENV, raising=False)
+    agent_envs: list[str | None] = []
+
+    def fake_run(command, **kwargs):
+        if command and command[0] == "git":
+            sub = command[1] if len(command) > 1 else ""
+            if sub == "diff":
+                return _completed(command, stdout="")
+            if sub == "ls-files":
+                return _completed(command, stdout="")
+            return _completed(command, stdout="")
+        # the AI agent invocation
+        env = kwargs.get("env")
+        agent_envs.append(None if env is None else env.get(ai_invoke.OUTPUT_TOKENS_ENV))
+        if len(agent_envs) == 1:
+            return _completed(
+                command,
+                returncode=1,
+                stderr="response exceeded the 32000 output token maximum",
+            )
+        return _completed(command, stdout="=== FILE: src/x.py ===\nbody\n")
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    result = invoke_ai("codex exec -", "prompt", project_root=tmp_path)
+
+    assert "=== FILE: src/x.py ===" in result
+    assert agent_envs[0] is None
+    assert agent_envs[-1] == str(ai_invoke.RAISED_OUTPUT_TOKENS)
