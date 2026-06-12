@@ -634,7 +634,7 @@ findings:
     character X)" message did not steer the model to ASCII, so a model biased toward typographic/full-width
     punctuation by non-ASCII context kept reproducing the same class of error; compounded by a tight retry
     budget (2 total attempts) that left no room to recover after a corrective hint.'
-  fix_commit: F_SYNTAX_GATE_NONASCII_FEEDBACK_SHA  # placeholder — corrected to the real short sha in a tiny follow-up (mirrors c25d006)
+  fix_commit: 339a763  # short sha of the fix+tests+ledger commit
   fix_description: 'codd/implementer.py — the syntax-gate retry feedback is now explicit and corrective.
     ImplementSyntaxGateError carries the rejected payload(s); feedback_message() names the file path, the
     exact failing line, and EVERY offending non-ASCII character with its U+XXXX codepoint and (when free,
