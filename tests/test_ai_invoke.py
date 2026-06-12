@@ -12,6 +12,7 @@ from codd.ai_invoke import (
     DEFAULT_AI_COMMAND,
     force_claude_print,
     invoke_ai,
+    invoke_file_writing_agent,
     is_codex_exec_command,
     is_file_writing_agent,
     prepare_read_only_codex,
@@ -346,6 +347,89 @@ def test_invoke_ai_does_not_route_file_writing_without_project_root(monkeypatch)
     )
 
     assert invoke_ai("codex exec -", "prompt") == "ai output"
+
+
+# ═══════════════════════════════════════════════════════════
+# invoke_file_writing_agent: stdout-contract fallback (D6 cross-CLI)
+# ═══════════════════════════════════════════════════════════
+#
+# A CLI classified as "file-writing" (e.g. ``codex exec``) may, under a
+# read-only / text-out invocation, honour the prompt's stdout contract and emit
+# ``=== FILE: ===`` blocks on stdout while writing NOTHING to disk. Before the
+# D6 fix, invoke_file_writing_agent read results only from ``git diff`` and so
+# failed with "AI command did not produce any file changes", even though the
+# agent produced exactly the output CoDD's file-block parser consumes. The
+# fallback honours whichever channel the agent used, keeping the path
+# CLI-agnostic. (Generality gate: the git/on-disk path is unchanged, so the
+# file-writing Claude/codex behaviour does not regress.)
+
+
+def _file_writing_dispatch(*, agent_stdout, agent_returncode=0, changed="", untracked=""):
+    """Build a subprocess.run fake for invoke_file_writing_agent.
+
+    Routes git subcommands to canned outputs and the agent command to
+    *agent_stdout*. Records every git subcommand list in ``calls``.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        if command and command[0] == "git":
+            calls.append(command)
+            sub = command[1] if len(command) > 1 else ""
+            if sub == "diff":
+                return _completed(command, stdout=changed)
+            if sub == "ls-files":
+                return _completed(command, stdout=untracked)
+            return _completed(command, stdout="")  # add -A, reset, checkout
+        # the AI agent invocation
+        return _completed(command, returncode=agent_returncode, stdout=agent_stdout)
+
+    return fake_run, calls
+
+
+def test_file_writing_agent_falls_back_to_stdout_contract(monkeypatch, tmp_path):
+    stdout = "=== FILE: src/greeter/cli.py ===\n```python\nprint('hi')\n```\n"
+    fake_run, calls = _file_writing_dispatch(agent_stdout=stdout)
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    result = invoke_file_writing_agent(["codex", "exec", "-"], "prompt", tmp_path)
+
+    # The stdout contract is returned verbatim (CoDD's parser consumes it).
+    assert result == stdout
+    # Working tree is left clean: the staged baseline is unstaged via git reset.
+    assert ["git", "reset", "--quiet"] in calls
+
+
+def test_file_writing_agent_prefers_on_disk_writes_over_stdout(monkeypatch, tmp_path):
+    # When the agent ALSO wrote a file to disk, the on-disk content wins
+    # (unchanged behaviour — Claude/codex that write files keep working).
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text("ON_DISK = 1\n", encoding="utf-8")
+    fake_run, _calls = _file_writing_dispatch(
+        agent_stdout="=== FILE: ignored/stdout.py ===\nstdout body\n",
+        untracked="src/real.py",
+    )
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    result = invoke_file_writing_agent(["codex", "exec", "-"], "prompt", tmp_path)
+
+    assert "=== FILE: src/real.py ===" in result
+    assert "ON_DISK = 1" in result
+    assert "ignored/stdout.py" not in result
+
+
+def test_file_writing_agent_no_files_and_no_contract_still_raises(monkeypatch, tmp_path):
+    fake_run, _calls = _file_writing_dispatch(agent_stdout="I will think about it...\n")
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="did not produce any file changes"):
+        invoke_file_writing_agent(["codex", "exec", "-"], "prompt", tmp_path)
+
+
+def test_stdout_carries_file_contract_detector():
+    assert ai_invoke._stdout_carries_file_contract("=== FILE: a.py ===\nx\n") is True
+    assert ai_invoke._stdout_carries_file_contract("prose only, no blocks") is False
+    assert ai_invoke._stdout_carries_file_contract("") is False
 
 
 # ═══════════════════════════════════════════════════════════
