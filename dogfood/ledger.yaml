@@ -556,7 +556,7 @@ findings:
     blocked forever on a half-open socket blocked the parent forever; the file-writing-agent path had a
     hardcoded non-configurable 3600s. With no timeout there was nothing to convert a silent stall into a
     classifiable error, so the transient-retry plumbing (dc90c09) was never reached.'
-  fix_commit: 0f4da45  # short sha of the fix+tests+ledger commit
+  fix_commit: da60634  # short sha of the fix+tests+ledger commit
   fix_description: 'codd/ai_invoke.py — every AI subprocess call now carries a finite per-call wall-clock
     timeout. `_invoke_subprocess` passes `subprocess.run(..., timeout=call_timeout)` and
     `invoke_file_writing_agent` uses the same resolved budget (replacing its hardcoded 3600s);
