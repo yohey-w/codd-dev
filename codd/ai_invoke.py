@@ -15,6 +15,20 @@ now the single source of truth for:
   Claude, and optional routing through the deployment adapter
   (``get_ai_command``) so Codex App Server transport selection is preserved.
 
+Recoverable-error auto-recovery (CLI-agnostic, active at the shared chokepoint
+regardless of the caller's ``retries`` setting, so implement / generate /
+greenfield all benefit): a single AI call that aborts with a clearly-recoverable
+CLI error is recovered without human intervention instead of failing the task.
+``_is_transient_error`` (socket/connection drop, timeout, 429/5xx gateway,
+overload) triggers a bounded auto-retry with backoff; ``_is_output_ceiling_error``
+(the per-call output-token maximum) triggers ONE re-issue of the same call with a
+raised ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` budget — the documented lever, threaded
+as a per-call subprocess env (or raised on ``os.environ`` for the adapter path).
+CLIs that ignore the env var simply get one extra identical attempt. Both
+classifiers are conservative: permanent auth/billing/validation/missing-binary
+errors never match and surface immediately. Each recovery logs a one-line
+``[codd]`` notice on stderr so it is visible in greenfield stage output.
+
 Backward compatibility: ``codd.generator`` re-exports ``_resolve_ai_command``
 and ``_invoke_ai_command`` as aliases of these functions, so the many modules
 (and test monkeypatches) that import those names keep working unchanged.
@@ -36,6 +50,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -202,8 +217,13 @@ def is_codex_exec_command(parts: list[str]) -> bool:
 
 def invoke_file_writing_agent(
     command: list[str], prompt: str, project_root: Path,
+    *, env: Mapping[str, str] | None = None,
 ) -> str:
-    """Invoke an AI agent that writes files directly, capture changes as === FILE: === blocks."""
+    """Invoke an AI agent that writes files directly, capture changes as === FILE: === blocks.
+
+    *env*, when given, replaces the child process environment (used by the
+    output-ceiling recovery to raise ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``).
+    """
     cwd = str(project_root)
 
     # Stage all current state as baseline for change detection
@@ -213,6 +233,7 @@ def invoke_file_writing_agent(
         result = subprocess.run(
             command, input=prompt, capture_output=True, text=True, encoding="utf-8",
             check=False, cwd=cwd, timeout=3600,
+            env=dict(env) if env is not None else None,
         )
     except FileNotFoundError as exc:
         raise ValueError(f"AI command not found: {command[0]}") from exc
@@ -283,13 +304,24 @@ def invoke_file_writing_agent(
 
 def _invoke_subprocess(
     ai_command: str, prompt: str, *, project_root: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> str:
-    """Single-attempt subprocess invocation (the historical generator path)."""
+    """Single-attempt subprocess invocation (the historical generator path).
+
+    *env*, when given, replaces the child process environment — used by the
+    output-ceiling recovery to re-issue the same call with a raised
+    ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` budget.
+    """
     command = with_default_claude_permission_bypass(shlex.split(ai_command))
     if not command:
         raise ValueError("ai_command must not be empty")
 
     if is_file_writing_agent(command) and project_root is not None:
+        # Pass env only when an override is present so existing monkeypatched
+        # fakes with the historical (command, prompt, project_root) signature
+        # keep working (the common path passes env=None).
+        if env is not None:
+            return invoke_file_writing_agent(command, prompt, project_root, env=env)
         return invoke_file_writing_agent(command, prompt, project_root)
 
     try:
@@ -299,6 +331,7 @@ def _invoke_subprocess(
             capture_output=True,
             text=True, encoding="utf-8",
             check=False,
+            env=dict(env) if env is not None else None,
         )
     except FileNotFoundError as exc:
         raise ValueError(f"AI command not found: {command[0]}") from exc
@@ -317,6 +350,181 @@ def _is_transient_failure(exc: ValueError) -> bool:
     """Transient = nonzero exit or empty output. Missing binary is permanent."""
     message = str(exc)
     return message.startswith("AI command failed") or message == "AI command returned empty output"
+
+
+# ── Recoverable-error classification (CLI-agnostic) ─────────────────────────
+#
+# A model CLI can abort a single call for reasons that are NOT the prompt's
+# fault and that a re-run (or a re-run with a raised output budget) clears
+# without human intervention. We classify those conservatively from the CLI's
+# stderr/exit text so the invocation layer can auto-recover instead of failing
+# the whole task. The patterns are pattern-based and deliberately narrow — they
+# must match clearly-transient/recoverable conditions across CLIs (Claude,
+# Codex, and any other text-in/text-out CLI) and NEVER match a permanent
+# auth/billing/validation error (mirroring the "AI command not found is
+# permanent" rule: a permanent error must surface immediately, not loop).
+
+# Transient transport: connection resets, dropped sockets, gateway hiccups,
+# and timeouts. Re-issuing the identical call typically succeeds.
+_TRANSIENT_ERROR_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"socket connection was closed", re.IGNORECASE),
+    re.compile(r"connection (?:closed|reset|aborted|refused)", re.IGNORECASE),
+    re.compile(r"\bconnection error\b", re.IGNORECASE),
+    re.compile(r"\bECONNRESET\b|\bECONNREFUSED\b|\bEPIPE\b|\bETIMEDOUT\b", re.IGNORECASE),
+    re.compile(r"\b(?:read|request|connection|socket) ?timed? ?out\b", re.IGNORECASE),
+    re.compile(r"\btimeout\b", re.IGNORECASE),
+    re.compile(r"\b(?:429|500|502|503|504)\b", re.IGNORECASE),
+    re.compile(r"too many requests", re.IGNORECASE),
+    re.compile(r"rate limit", re.IGNORECASE),
+    re.compile(r"(?:service|server|gateway) (?:unavailable|error)", re.IGNORECASE),
+    re.compile(r"overloaded", re.IGNORECASE),
+    re.compile(r"\bEOF\b|unexpected(?:ly)? (?:closed|disconnect)", re.IGNORECASE),
+)
+
+# Output ceiling: the model hit its per-call output-token maximum. The
+# documented lever is the CLAUDE_CODE_MAX_OUTPUT_TOKENS env var; raising it and
+# re-issuing the SAME call is the CLI-agnostic recovery (a CLI that ignores the
+# env var simply gets one extra identical attempt — no harm).
+_OUTPUT_CEILING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"output token (?:maximum|limit)", re.IGNORECASE),
+    re.compile(r"max(?:imum)?[ _]output[ _]tokens", re.IGNORECASE),
+    re.compile(r"exceeded the \d+ output token", re.IGNORECASE),
+    re.compile(r"response exceeded.*output token", re.IGNORECASE),
+    re.compile(r"\bCLAUDE_CODE_MAX_OUTPUT_TOKENS\b", re.IGNORECASE),
+)
+
+#: Env var the output-ceiling recovery raises. CLI-agnostic: CLIs that honour it
+#: get a bigger budget; CLIs that don't are unaffected.
+OUTPUT_TOKENS_ENV = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+#: Budget the recovery sets when the ceiling is hit and the env is unset/low.
+RAISED_OUTPUT_TOKENS = 64000
+#: Bounded transient-transport auto-retries (in addition to any caller retries).
+TRANSIENT_AUTO_RETRIES = 3
+#: Short backoff (seconds) between transient auto-retries; index-scaled.
+TRANSIENT_BACKOFF_SECONDS = 1.5
+
+
+def _error_text(exc: ValueError) -> str:
+    """The CLI's stderr/stdout detail carried inside an ``AI command failed:``.
+
+    ``_invoke_subprocess`` raises ``AI command failed: <detail>`` where
+    *detail* is the CLI's stderr (or stdout). For classification we want that
+    detail, but matching the whole message is harmless too.
+    """
+    return str(exc)
+
+
+def _is_transient_error(stderr: str) -> bool:
+    """True when *stderr* clearly describes a transient/recoverable transport
+    failure (socket/connection drop, timeout, 429/5xx gateway, overload).
+
+    Conservative by construction: only re-runnable conditions match. Auth,
+    billing, quota-exhausted, and validation errors do NOT match and stay
+    permanent.
+    """
+    if not stderr:
+        return False
+    return any(pattern.search(stderr) for pattern in _TRANSIENT_ERROR_PATTERNS)
+
+
+def _is_output_ceiling_error(stderr: str) -> bool:
+    """True when *stderr* describes hitting the per-call output-token ceiling."""
+    if not stderr:
+        return False
+    return any(pattern.search(stderr) for pattern in _OUTPUT_CEILING_PATTERNS)
+
+
+def _raised_output_budget_env() -> dict[str, str] | None:
+    """A subprocess env with ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` raised.
+
+    Returns ``None`` (signalling "do not retry — the budget is already high")
+    when the current env already sets it at or above the raised value, so a
+    genuine ceiling at a deliberately-high budget surfaces honestly instead of
+    looping. Otherwise returns ``os.environ`` plus the raised value.
+    """
+    current = os.environ.get(OUTPUT_TOKENS_ENV)
+    if current is not None:
+        try:
+            if int(current.strip()) >= RAISED_OUTPUT_TOKENS:
+                return None
+        except ValueError:
+            pass  # unparseable current value: treat as low, raise it.
+    env = dict(os.environ)
+    env[OUTPUT_TOKENS_ENV] = str(RAISED_OUTPUT_TOKENS)
+    return env
+
+
+def _invoke_with_recovery(
+    attempt: Callable[..., str],
+    prompt: str,
+    *,
+    adapter_routed: bool = False,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Run one logical AI call with auto-recovery for recoverable errors.
+
+    Wraps a single :func:`invoke_ai` attempt (one prompt, no feedback rewrite)
+    with two CLI-agnostic recoveries that need NO human intervention and are
+    active regardless of the caller's ``retries`` setting (so implement /
+    generate / greenfield all benefit at their shared chokepoint):
+
+    1. **Transient transport** (``_is_transient_error``): socket/connection
+       drop, timeout, 429/5xx gateway, overload — bounded auto-retry with a
+       short backoff (:data:`TRANSIENT_AUTO_RETRIES` attempts).
+    2. **Output ceiling** (``_is_output_ceiling_error``): re-issue the SAME
+       call ONCE with a raised ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` budget (the
+       documented lever; CLIs that ignore it are unaffected). For the
+       subprocess path the budget is threaded as a per-call env; for the
+       adapter path (which owns its own env) the budget is raised on
+       ``os.environ`` only for the retried call and restored afterwards.
+
+    Permanent errors (missing binary, auth/billing/validation) are NOT matched
+    by either classifier and propagate immediately. A recovery emits a
+    one-line ``[codd]`` notice on stderr so it is visible in greenfield stage
+    output.
+    """
+    ceiling_recovered = False
+    transient_attempts = 0
+    while True:
+        try:
+            return attempt(prompt)
+        except ValueError as exc:
+            detail = _error_text(exc)
+            # Output ceiling: raise the budget and retry the SAME call once.
+            if not ceiling_recovered and _is_output_ceiling_error(detail):
+                raised_env = _raised_output_budget_env()
+                if raised_env is None:
+                    raise  # budget already high — surface honestly.
+                ceiling_recovered = True
+                print(
+                    f"[codd] AI hit the output-token ceiling; retrying once with "
+                    f"{OUTPUT_TOKENS_ENV}={RAISED_OUTPUT_TOKENS}.",
+                    file=sys.stderr,
+                )
+                if adapter_routed:
+                    prior = os.environ.get(OUTPUT_TOKENS_ENV)
+                    os.environ[OUTPUT_TOKENS_ENV] = str(RAISED_OUTPUT_TOKENS)
+                    try:
+                        return attempt(prompt)
+                    finally:
+                        if prior is None:
+                            os.environ.pop(OUTPUT_TOKENS_ENV, None)
+                        else:
+                            os.environ[OUTPUT_TOKENS_ENV] = prior
+                else:
+                    return attempt(prompt, raised_env)
+            # Transient transport: bounded auto-retry with backoff.
+            if transient_attempts < TRANSIENT_AUTO_RETRIES and _is_transient_error(detail):
+                transient_attempts += 1
+                print(
+                    f"[codd] transient AI transport error "
+                    f"(auto-retry {transient_attempts}/{TRANSIENT_AUTO_RETRIES}): "
+                    f"{detail[:200]}",
+                    file=sys.stderr,
+                )
+                sleep(TRANSIENT_BACKOFF_SECONDS * transient_attempts)
+                continue
+            raise
 
 
 def invoke_ai(
@@ -376,21 +584,28 @@ def invoke_ai(
 
             adapter = get_ai_command(config, project_root=effective_root, command_override=command_str)
 
-            def attempt(current_prompt: str) -> str:
+            # The deployment adapter owns its own subprocess env, so the
+            # output-ceiling env-raise cannot be threaded per-call. Recovery
+            # falls back to raising the budget on os.environ for the duration of
+            # the retried adapter call (restored in ``finally``). Transient
+            # auto-retry still applies via the same identical re-invocation.
+            def attempt(current_prompt: str, env: Mapping[str, str] | None = None) -> str:
                 return adapter.invoke(current_prompt)
         else:
             # Hardened calls are plain text-in/text-out by definition: never
             # route them through the file-writing-agent capture machinery.
             subprocess_root = None if harden_read_only else project_root
 
-            def attempt(current_prompt: str) -> str:
-                return _invoke_subprocess(command_str, current_prompt, project_root=subprocess_root)
+            def attempt(current_prompt: str, env: Mapping[str, str] | None = None) -> str:
+                return _invoke_subprocess(
+                    command_str, current_prompt, project_root=subprocess_root, env=env
+                )
 
         current_prompt = prompt
         max_attempts = max(0, retries) + 1
         for attempt_index in range(max_attempts):
             try:
-                return attempt(current_prompt)
+                return _invoke_with_recovery(attempt, current_prompt, adapter_routed=config is not None)
             except ValueError as exc:
                 if attempt_index + 1 >= max_attempts or not _is_transient_failure(exc):
                     raise
@@ -419,3 +634,13 @@ __all__ = [
 # Re-exported for tests/diagnostics: the stdout-contract detector used by the
 # file-writing-agent fallback (kept out of the public API surface above).
 __all__.append("_stdout_carries_file_contract")
+
+# Re-exported for tests/diagnostics: the recoverable-error classifiers and the
+# recovery wrapper used by ``invoke_ai`` (kept out of the public API surface).
+__all__ += [
+    "OUTPUT_TOKENS_ENV",
+    "RAISED_OUTPUT_TOKENS",
+    "TRANSIENT_AUTO_RETRIES",
+    "_is_output_ceiling_error",
+    "_is_transient_error",
+]
