@@ -88,12 +88,32 @@ def apply_results(ledger: dict, results: dict, today: str) -> int:
     return new_findings
 
 
-def convergence(ledger: dict) -> tuple[bool, list[str], list[dict]]:
+def _is_owner_only(entry: dict) -> bool:
+    """An axis/case is owner-only (not autonomously runnable) when it is flagged
+    so on either the automation channel or the status channel. Such axes/cases are
+    tracked but EXCLUDED from the autonomous convergence requirement: an autonomous
+    agent cannot run them without fabricating the owner-supplied input (author ==
+    solver), which collapses the gap they test. See dogfood/README.md."""
+    return entry.get("automation") == "owner-only" or entry.get("status") == "owner-only"
+
+
+def convergence(ledger: dict) -> tuple[bool, list[str], list[dict], list[str], list[dict]]:
+    """Autonomous convergence: every AUTONOMOUS axis saturated AND no AUTONOMOUS
+    pending case open. owner-only axes/cases are tracked separately and never gate."""
     axes = ledger.get("axes", {})
-    unsaturated = [aid for aid, a in axes.items() if a.get("status") != "saturated"]
-    open_cases = [c for c in ledger.get("pending_cases", []) if c.get("status") in ("pending", "running")]
+    owner_only_axes = [aid for aid, a in axes.items() if _is_owner_only(a)]
+    unsaturated = [
+        aid for aid, a in axes.items()
+        if not _is_owner_only(a) and a.get("status") != "saturated"
+    ]
+    cases = ledger.get("pending_cases", [])
+    owner_only_cases = [c for c in cases if _is_owner_only(c)]
+    open_cases = [
+        c for c in cases
+        if not _is_owner_only(c) and c.get("status") in ("pending", "running")
+    ]
     converged = not unsaturated and not open_cases
-    return converged, unsaturated, open_cases
+    return converged, unsaturated, open_cases, owner_only_axes, owner_only_cases
 
 
 def main() -> int:
@@ -111,7 +131,7 @@ def main() -> int:
 
     ledger = load_ledger()
     new_findings = apply_results(ledger, results, today)
-    converged, unsaturated, open_cases = convergence(ledger)
+    converged, unsaturated, open_cases, owner_only_axes, owner_only_cases = convergence(ledger)
 
     if not args.preview:
         save_ledger(ledger)
@@ -124,6 +144,10 @@ def main() -> int:
     print(f"  new findings this tick : {new_findings}")
     print(f"  unsaturated axes ({len(unsaturated)}): {', '.join(unsaturated) if unsaturated else '—'}")
     print(f"  open pending_cases     : {len(open_cases)}")
+    print(f"  owner-only axes ({len(owner_only_axes)}, excluded from convergence): "
+          f"{', '.join(owner_only_axes) if owner_only_axes else '—'}")
+    print(f"  owner-only pending_cases ({len(owner_only_cases)}, excluded): "
+          f"{len(owner_only_cases)}")
     print(f"  converged: {str(converged).lower()}")
     if args.preview:
         print("  (preview — ledger NOT written)")

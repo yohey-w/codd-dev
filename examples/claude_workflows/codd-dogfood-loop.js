@@ -94,18 +94,33 @@ export const meta = {
   phases: ["scripted-axes", "select-llm-axis", "run-llm-axis", "triage", "record"],
 };
 
-// The LLM axes and the README protocol each one follows. The SUT runs on the
-// assigned executor (README "Executor assignment"): the cheapest viable model
-// with Sonnet 4.6 as the floor for D1-D5/D9, and Codex (gpt-5.5 xhigh) for the
-// cross-CLI axis D6. The driver/triage themselves run on Opus 4.8 (Tier 2).
+// The AUTONOMOUSLY-RUNNABLE LLM axes and the README protocol each one follows.
+// The SUT runs on the assigned executor (README "Executor assignment"): the
+// cheapest viable model with Sonnet 4.6 as the floor for D1/D3/D4/D5/D9, and
+// Codex (gpt-5.5 xhigh) for the cross-CLI axis D6. The driver/triage themselves
+// run on Opus 4.8 (Tier 2).
+//
+// D2 is DELIBERATELY ABSENT here: it is OWNER-ONLY (see OWNER_ONLY_AXES below and
+// dogfood/README.md "Owner-only axes"). An autonomous agent must NOT fabricate the
+// "raw human requirements" D2 needs — doing so makes it both author and solver and
+// collapses the gap D2 tests. So this driver never auto-selects D2; it fires only
+// when the OWNER supplies a genuine requirements doc.
 const LLM_AXES = {
   D1: "First-contact protocol — hand a non-builder's plain-language spec (loose/plural type names, prose) to `codd greenfield`. Do NOT pre-clean the input; the mess is the test.",
-  D2: "Messy-requirements protocol — feed a contradictory/duplicated/under-specified requirements doc; check CoDD questions the gaps (elicit / open_questions) rather than guessing.",
   D3: "Stack-rotation protocol — pick a language+framework+IaC not seen recently; `codd greenfield --language <lang>`; record stack-specific assumptions that leak.",
   D4: "Complexity-ladder protocol — re-run greenfield one rung up the size ladder; findings are usually resource ceilings (token / time / memory).",
   D5: "Lightweight-model protocol (modifier on D1-D4) — set ai_command to the weakest model that can plausibly finish (Sonnet 4.6 is the floor; Haiku only where it can complete), then run an input-family axis. Record findings under the input axis.",
   D6: "Cross-CLI protocol — set ai_command to Codex (gpt-5.5 xhigh) and re-run a known greenfield input end to end; this is the cross-CLI axis by definition, surfacing prompt/format/tooling coupling.",
   D9: "Lifecycle protocol — apply a sequence of codd-evolve / codd fix changes to a living generated app; after each, assert coherence (codd validate / codd doctor / codd diff).",
+};
+
+// OWNER-ONLY axes — tracked in the ledger but NOT autonomously runnable, and
+// EXCLUDED from the autonomous convergence requirement (see dogfood/README.md
+// "Owner-only axes (the author==solver collapse)"). The driver must never
+// auto-select these or treat them as gating convergence; they fire only when the
+// owner supplies a genuine input the agent must not fabricate.
+const OWNER_ONLY_AXES = {
+  D2: "Messy-requirements protocol — OWNER-SUPPLIED requirements doc only. An autonomous agent must NOT fabricate the doc (author==solver collapse). Skipped by autonomous selection; excluded from convergence.",
 };
 
 // Shared rails for every axis agent.
@@ -152,24 +167,44 @@ the command exit nonzero on purpose). Quote the convergence report in your summa
   await phase("select-llm-axis");
   const explicitAxis = LLM_AXES[focus] ? focus : null;
   const selection = await agent(`${COMMON}
-SELECT the next LLM axis to run this iteration. Apply the README SELECT rule in order:
+SELECT the next LLM axis to run this iteration. NEVER select an OWNER-ONLY axis or
+an owner-only pending case (${Object.keys(OWNER_ONLY_AXES).join(", ")}) — these are
+not autonomously runnable (fabricating their input makes you author AND solver,
+collapsing the gap they test) and are excluded from autonomous convergence; in the
+ledger their status is "owner-only", never "pending"/"running". Apply the README
+SELECT rule in order, considering only AUTONOMOUS axes:
   1. A world-change trigger wins first: a new model released -> D5; a new
      framework/language/IaC in scope -> D3; a user reports an issue on a real
      repo -> D11 (already scripted; add the repo to dogfood/zoo.yaml instead);
      a new external benchmark -> D12.
   2. Otherwise prefer an OPEN entry in dogfood/ledger.yaml pending_cases whose
-     axis is an LLM axis (${Object.keys(LLM_AXES).join(", ")}), highest priority first.
-  3. Otherwise pick the least-recently-run unsaturated LLM axis.
+     axis is an autonomous LLM axis (${Object.keys(LLM_AXES).join(", ")}) and whose
+     status is pending/running, highest priority first. SKIP any case whose status
+     is "owner-only".
+  3. Otherwise pick the least-recently-run unsaturated AUTONOMOUS LLM axis.
 ${explicitAxis ? `The operator pinned this iteration to ${explicitAxis}; select it unless a world-change trigger overrides.` : ""}
-Report the chosen axis id and the one-line reason. End with: STATUS: OK — chose <axis>.`);
+If the only remaining work is owner-only (e.g. D2 awaiting an owner-supplied doc),
+report that there is no autonomous axis to run. Report the chosen axis id and the
+one-line reason. End with: STATUS: OK — chose <axis>.`);
 
   if (failed(selection)) {
     log("[dogfood] no LLM axis selected (all saturated, or selection failed). Check the convergence report above.");
     return;
   }
 
-  const chosen = (String(selection).match(/\b(D[1-9]|D9)\b/) || [])[0] || explicitAxis || "D1";
-  const protocol = LLM_AXES[chosen] || LLM_AXES.D1;
+  // Extract the chosen axis, but NEVER honour an owner-only axis (e.g. D2): those
+  // are not autonomously runnable and must not be selected even if the model's
+  // reasoning text mentions them. Fall back to the first autonomous LLM axis.
+  const mentioned = (String(selection).match(/\bD(?:1[0-4]|[1-9])\b/g) || []);
+  const chosen =
+    mentioned.find((a) => LLM_AXES[a]) ||
+    (explicitAxis && LLM_AXES[explicitAxis] ? explicitAxis : null) ||
+    Object.keys(LLM_AXES)[0];
+  if (mentioned.some((a) => OWNER_ONLY_AXES[a]) && !mentioned.some((a) => LLM_AXES[a])) {
+    log(`[dogfood] selection resolved to an owner-only axis (${mentioned.join(", ")}) — not autonomously runnable. Skipping; supply a genuine owner input to run it.`);
+    return;
+  }
+  const protocol = LLM_AXES[chosen] || LLM_AXES[Object.keys(LLM_AXES)[0]];
 
   // ── Phase 3: RUN the selected axis on the assigned SUT executor ─────────────
   // SUT executor matrix (see dogfood/README.md "Executor assignment" and the

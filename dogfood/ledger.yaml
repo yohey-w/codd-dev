@@ -83,10 +83,27 @@
 #   saturation_counter   : count of back-to-back runs with ZERO new findings.
 #                          Reset to 0 the instant a finding appears on this axis.
 #   last_run             : ISO date (or range) of the most recent run, or null.
-#   status               : saturated | active | unrun
+#   status               : saturated | active | unrun | owner-only
 #                          saturated == (saturation_counter >= saturation_k).
+#                          owner-only == not autonomously runnable; only fires when
+#                          the OWNER supplies a genuine input (see `automation:
+#                          owner-only` below). owner-only axes are TRACKED but do
+#                          NOT gate autonomous convergence.
 #   cost                 : free | cheap | llm | human  (executor economics).
-#   automation           : ci | scripted | manual.
+#   automation           : ci | scripted | manual | owner-only.
+#                          owner-only == the axis CANNOT be run by an autonomous
+#                          agent because doing so would make the agent both author
+#                          AND solver, collapsing the very gap the axis tests (the
+#                          divergent/human domain — see README "What dogfood CANNOT
+#                          find"). Distinct from `manual`: a `manual` axis is an
+#                          LLM/human-driven axis the autonomous loop CAN still run
+#                          (the agent supplies a genuine third-party-style input);
+#                          an `owner-only` axis requires a GENUINE owner-supplied
+#                          input the agent must not fabricate. owner-only axes are
+#                          EXCLUDED from the autonomous convergence requirement
+#                          (convergence = all AUTONOMOUS axes saturated AND no
+#                          autonomous pending_cases; owner-only axes/cases are
+#                          tracked but never gate and are never auto-selected).
 #   runner               : how to run it (script path or a named README protocol).
 #   sut_model            : which executor runs the system-under-test on this axis
 #                          (mirrors model_roles): none for deterministic/non-LLM
@@ -133,8 +150,13 @@
 #   A NEW finding RESETS its axis's saturation_counter to 0 (and may reset
 #   sibling axes — see README "RESET"). Every finding DERIVES follow-up cases
 #   appended to pending_cases. The loop is:
-#       converged := (every axis.status == "saturated")
-#                    AND (no pending_cases with status in {pending, running})
+#       converged := (every AUTONOMOUS axis.status == "saturated")
+#                    AND (no AUTONOMOUS pending_cases with status in {pending, running})
+#   AUTONOMOUS == automation != "owner-only". owner-only axes (and their
+#   pending_cases) are TRACKED but EXCLUDED from this requirement: an autonomous
+#   agent cannot run them without fabricating the owner-supplied input, which would
+#   make it both author and solver and collapse the gap the axis tests. So they
+#   never gate autonomous convergence and are never auto-selected as the next case.
 #   Because findings keep minting pending_cases, saturation is a moving target —
 #   that is what makes the loop continue "until no problems occur".
 # ═══════════════════════════════════════════════════════════════════════════
@@ -171,11 +193,22 @@ axes:
       or under-specified human requirements (the input is the test).
     saturation_counter: 0
     last_run: null
-    status: unrun
+    status: owner-only
     cost: llm
-    automation: manual
-    runner: README 'Messy-requirements protocol'.
+    automation: owner-only
+    runner: README 'Messy-requirements protocol' — OWNER-SUPPLIED input only (the agent must NOT fabricate
+      the requirements doc).
     sut_model: sonnet
+    note: 'Out of scope for the autonomous loop — fabricating raw requirements collapses the gap this axis
+      tests (author==solver). Fires only when the owner supplies a genuine requirements doc.'
+    history:
+    - '2026-06-12: reclassified owner-only. D2 verifies the gap between a real human''s raw/under-specified
+      requirements and CoDD''s elicit/open_questions machinery. If an autonomous agent fabricates the "raw
+      human requirements", it is both author and solver — the gap collapses and the run is theater
+      (self-made problem, self-solved). This is the documented "what dogfood CANNOT find" boundary (the
+      divergent/human domain), so D2 is not autonomously-runnable: it fires ONLY when the owner supplies a
+      genuine requirements doc. Tracked but EXCLUDED from autonomous convergence (does not gate, never
+      auto-selected).'
   D3:
     description: stack rotation — language/framework/IaC assumptions baked into the harness, surfaced
       by rotating to a NEW stack each run.
@@ -563,7 +596,11 @@ pending_cases:
     (elicit/open_questions) rather than silently guessing?
   origin: seed
   priority: 3
-  status: pending
+  status: owner-only  # 2026-06-12 — NOT autonomously runnable: an autonomous agent fabricating the "raw
+    # human requirements" becomes both author and solver, collapsing the gap D2 tests (theater). Fires
+    # only when the OWNER supplies a genuine requirements doc. Tracked but EXCLUDED from the loop's
+    # convergence math and 'next case' selection (owner-only != pending/running, so it never gates and is
+    # never auto-picked).
 - id: PC-d1-type-vocab-audit
   axis: D1
   hypothesis: 'The plural `requirements` finding implies siblings: audit ALL frontmatter type vocabularies

@@ -23,6 +23,7 @@ of: input / executor / environment / time / user / judge / self / loop-closure."
 ```
 while not converged:
   pick next case            # highest-value unrun axis, OR a pending derived case
+                            # (NEVER an owner-only axis/case — see "Owner-only axes")
   run it                    # weakest viable model (M1); LLM-free where the axis allows
   if finding(s):
      triage  -> fix in CoDD core (Generality Gate) -> regression test
@@ -30,8 +31,9 @@ while not converged:
      reset   that axis's saturation_counter to 0
   else:
      increment that axis's saturation_counter
-converged := every axis.saturation_counter >= K(=2)
-             AND no pending_cases with status in {pending, running}
+converged := every AUTONOMOUS axis.saturation_counter >= K(=2)
+             AND no AUTONOMOUS pending_cases with status in {pending, running}
+             # owner-only axes/cases (D2) are tracked but excluded — they never gate
 ```
 
 A finding **spawns new cases**. The real `type: requirements` plural finding
@@ -70,7 +72,8 @@ cheapest viable executor:
 | Axis kind | Executor | Why |
 |-----------|----------|-----|
 | deterministic (D8, D10, D11, D14; D7 stub-AI) | **free** — a Python script in `dogfood/scripts/`, zero LLM | the layer is pure; an LLM adds cost and noise |
-| LLM input-family (D1, D2, D3, D4, D6, D9) | **cheapest viable model** — codex-xhigh / sonnet | M1: the weak model is the better instrument anyway |
+| LLM input-family (D1, D3, D4, D6, D9) | **cheapest viable model** — codex-xhigh / sonnet | M1: the weak model is the better instrument anyway |
+| owner-only (D2) | **owner-supplied input** + cheapest viable model | not autonomously runnable: fabricating the input makes the agent author==solver (see "Owner-only axes"); excluded from autonomous convergence |
 | novel-finding triage / fix | **the strongest model** | reserved for *understanding* a new failure and generalizing the fix |
 
 The strongest model is **reserved for triaging novel findings**, not for
@@ -129,8 +132,12 @@ problems stop emerging" contract.
   it (typically D1, D4, D10, D11, D14) — set their `saturation_counter: 0`. A
   **new axis born** from a finding starts unrun. A **derived case** added to an
   axis blocks that axis's saturation until the case has been run dry.
-- **Convergence.** `converged == (∀ axis: status == "saturated") AND (no
-  pending_cases with status ∈ {pending, running})`. A moving target by design.
+- **Convergence.** `converged == (∀ AUTONOMOUS axis: status == "saturated") AND
+  (no AUTONOMOUS pending_cases with status ∈ {pending, running})`. A moving target
+  by design. **Owner-only axes are EXCLUDED** from this requirement: an axis whose
+  `automation: owner-only` (currently **D2**) is tracked but never gates autonomous
+  convergence and is never auto-selected as the next case — see "Owner-only axes"
+  below.
 
 ---
 
@@ -275,6 +282,34 @@ does not imply these are handled:
 When a finding turns out to be one of these, mark it `wontfix` with a note — it
 belongs to human judgment, not the loop.
 
+### Owner-only axes (the author==solver collapse) — D2
+
+One axis is **structurally not autonomously-runnable**, distinct from "manual".
+A `manual` LLM axis (D1, D3, D4, D6, D9) is still autonomous: the agent supplies
+a genuine *third-party-style* input (a non-builder's spec, an alien stack, a
+bigger app) it did not also design the solver for. **D2 (messy-human
+requirements)** is different. D2 verifies the gap between a *real human's*
+raw/under-specified requirements doc and CoDD's elicit / open-questions
+machinery. If an autonomous agent **fabricates** the "raw human requirements,"
+the agent becomes **both author and solver** — the gap D2 tests collapses and the
+run is theater (a self-made problem, self-solved). That is exactly the
+divergent/human domain above ("what dogfood cannot find").
+
+So D2 is marked **`automation: owner-only`** (and `status: owner-only`) in the
+ledger. It **fires only when the OWNER supplies a genuine requirements doc**; an
+autonomous agent must never synthesize one to "run D2." Consequences in the loop:
+
+- **Convergence excludes owner-only axes.** `converged == every AUTONOMOUS axis
+  saturated AND no AUTONOMOUS pending case open`. Owner-only axes and their
+  `pending_cases` are **tracked but never gate** — otherwise the autonomous loop
+  could never converge while waiting on input it is forbidden to invent.
+- **Selection skips owner-only.** The "next case" picker (both
+  `run_iteration.py` and the `codd-dogfood-loop.js` driver) never auto-selects an
+  owner-only axis or an owner-only pending case (their status is `owner-only`, not
+  `pending`/`running`).
+- `run_iteration.py` reports owner-only axes/cases on a separate line so they
+  stay visible without blocking the `converged:` verdict.
+
 ---
 
 ## Axis → runner map
@@ -282,7 +317,7 @@ belongs to human judgment, not the loop.
 | Axis | Name | Runner | Cost | Auto |
 |------|------|--------|------|------|
 | D1 | first-contact / dialect | manual: *First-contact protocol* | llm | manual |
-| D2 | messy-human requirements | manual: *Messy-requirements protocol* | llm | manual |
+| D2 | messy-human requirements | **owner-supplied** input only: *Messy-requirements protocol* | llm | owner-only |
 | D3 | stack rotation | manual: *Stack-rotation protocol* | llm | manual |
 | D4 | complexity ladder | manual: *Complexity-ladder protocol* | llm | manual |
 | D5 | weakest-viable-model | modifier: *Weakest-viable-model protocol* | cheap | manual |
@@ -304,9 +339,13 @@ The loop tick `python dogfood/run_iteration.py` runs **all** the scripted axes
 - **First-contact protocol (D1).** Hand a *non-builder's* plain-language spec
   (their dialect, loose type names, prose) to `codd greenfield` on the weakest
   viable model. Do not pre-clean the input — the mess is the test.
-- **Messy-requirements protocol (D2).** Feed a deliberately contradictory /
-  duplicated / under-specified requirements doc; watch elicitation, dedup, and
-  whether CoDD *questions the gaps* rather than guessing.
+- **Messy-requirements protocol (D2) — OWNER-ONLY.** Feed a deliberately
+  contradictory / duplicated / under-specified requirements doc; watch
+  elicitation, dedup, and whether CoDD *questions the gaps* rather than guessing.
+  **The requirements doc MUST be owner-supplied — an autonomous agent must not
+  fabricate it** (doing so makes the agent both author and solver and collapses
+  the gap this axis tests; see "Owner-only axes" above). Excluded from autonomous
+  convergence; fires only when the owner provides a genuine doc.
 - **Stack-rotation protocol (D3).** Choose a language + framework + IaC the
   harness has **not** seen recently; `codd greenfield --language <lang>`; record
   stack-specific assumptions that leak.
