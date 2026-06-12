@@ -337,18 +337,30 @@ class ImplementSyntaxGateError(RuntimeError):
         failures: list[tuple[str, str]],
         *,
         payloads: dict[str, str] | None = None,
+        confusable_failures: list[tuple[str, str]] | None = None,
     ) -> None:
         self.failures = list(failures)
         self.payloads = dict(payloads or {})
-        details = "; ".join(f"{path}: {error}" for path, error in self.failures)
+        # Confusable findings are a SEPARATE class from parse failures: the file
+        # parses, but a code-position identifier mixes scripts (homoglyph slip).
+        # Tracked alongside so one error type drives the same atomic-write +
+        # bounded-retry machinery as the syntax gate.
+        self.confusable_failures = list(confusable_failures or [])
+        all_failures = self.failures + self.confusable_failures
+        details = "; ".join(f"{path}: {error}" for path, error in all_failures)
         super().__init__(
-            f"syntax gate rejected {len(self.failures)} generated file(s): {details}"
+            f"syntax gate rejected {len(all_failures)} generated file(s): {details}"
         )
+
+    @property
+    def all_failures(self) -> list[tuple[str, str]]:
+        """Parse failures and confusable failures, for naming the rejected files."""
+        return self.failures + self.confusable_failures
 
     def feedback_message(self) -> str:
         lines = [
-            "The previous implementation attempt failed to parse and was NOT written.",
-            "Regenerate ALL files for this task so that every file parses cleanly:",
+            "The previous implementation attempt was rejected and was NOT written.",
+            "Regenerate ALL files for this task so that every file is correct:",
         ]
         for path, error in self.failures:
             lines.append(f"- file {path} is {error}")
@@ -364,6 +376,8 @@ class ImplementSyntaxGateError(RuntimeError):
                     f"  non-ASCII character(s) found in {path}: {joined}. "
                     "These are invalid in code position."
                 )
+        for path, error in self.confusable_failures:
+            lines.append(f"- file {path} {error}")
         lines.append(
             "Use ASCII for ALL code tokens (identifiers, operators, punctuation, "
             "statement terminators); replace typographic/full-width punctuation -- "
@@ -372,6 +386,15 @@ class ImplementSyntaxGateError(RuntimeError):
             "with their ASCII equivalents (-, ., ,, \", '). "
             "Non-ASCII is allowed ONLY inside string/text literals and comments."
         )
+        if self.confusable_failures:
+            lines.append(
+                "At least one identifier MIXES SCRIPTS (e.g. a Cyrillic or Greek "
+                "letter that looks like an ASCII letter -- a homoglyph -- inside an "
+                "otherwise-ASCII name). This parses but is a different name at "
+                "runtime (NameError / silent mismatch). Use ASCII Latin letters "
+                "for ALL code identifiers; only the listed code positions are "
+                "affected -- do NOT change text inside string literals or comments."
+            )
         return "\n".join(lines)
 
 
@@ -468,6 +491,193 @@ def _payload_syntax_error(relative_path: str, content: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Confusable / non-ASCII-in-code detector (layer 2, sibling of the syntax gate)
+#
+# The syntax gate (ast.parse) catches non-ASCII that BREAKS parsing — e.g. a
+# full-width period in a code position. It cannot catch a homoglyph in a
+# syntactically-VALID position: a Cyrillic ``е`` (U+0435) or ``а`` (U+0430)
+# substituted for ASCII ``e``/``a`` INSIDE an identifier (``іd`` looks like
+# ``id`` but is a different name). The file parses fine, may even pass tests
+# written with the same wrong char, but is semantically broken — a false-green.
+# Current-generation models (Sonnet AND Opus) emit these intermittently.
+#
+# Precision is the whole game here (false positives are the main risk), so the
+# detector is deliberately narrow:
+#   * It tokenizes (Python: stdlib ``tokenize``) and inspects ONLY code-position
+#     tokens — NAME/identifier and OP/operator tokens. STRING, COMMENT, and
+#     f-string text tokens (FSTRING_START/MIDDLE/END) are skipped ENTIRELY, so
+#     non-ASCII inside string literals and comments (Japanese UI copy, etc.) is
+#     never flagged. That is the critical false-positive guard.
+#   * In NAME tokens it flags only MIXED-SCRIPT identifiers: an identifier that
+#     mixes ASCII-Latin letters with Cyrillic or Greek letters. That is almost
+#     always a homoglyph slip (near-zero false-positive). A single-script
+#     non-Latin identifier that the language genuinely allows (a fully-Greek or
+#     fully-CJK name) is NOT flagged — only the Latin+Cyrillic/Greek mix is.
+#   * In OP tokens it flags ANY non-ASCII (full-width punctuation etc.); most of
+#     those already break the parser, this is a cheap belt-and-braces backstop.
+# Languages without a cheap stdlib tokenizer are skipped on purpose (Python is
+# where the observed failure lives; the syntax gate is the backstop elsewhere) —
+# correctness over coverage: skip rather than risk a false positive.
+
+# Unicode scripts that carry ASCII-Latin confusable homoglyphs. Detected via the
+# first word of ``unicodedata.name(ch)`` (e.g. "CYRILLIC SMALL LETTER IE"),
+# which avoids a heavyweight Unicode-database dependency.
+_CONFUSABLE_SCRIPTS = ("CYRILLIC", "GREEK")
+
+
+def _char_script(ch: str) -> str | None:
+    """The Unicode script name (first word of the char's Unicode name).
+
+    ``unicodedata.name`` yields e.g. ``"CYRILLIC SMALL LETTER IE"`` — the first
+    token is the script. Returns ``None`` for unnamed characters.
+    """
+    try:
+        return unicodedata.name(ch).split(" ", 1)[0]
+    except ValueError:
+        return None
+
+
+def _is_ascii_latin_letter(ch: str) -> bool:
+    return ch.isascii() and ch.isalpha()
+
+
+def _confusable_scripts_in_identifier(name: str) -> set[str]:
+    """Scripts from :data:`_CONFUSABLE_SCRIPTS` present in a MIXED-script name.
+
+    Returns the offending scripts ONLY when ``name`` mixes ASCII-Latin letters
+    with one or more confusable (Cyrillic/Greek) letters — the high-signal
+    homoglyph pattern. A pure-ASCII name, or a name with NO ASCII-Latin letter
+    at all (a legitimately single-script non-Latin identifier), returns an empty
+    set: not flagged.
+    """
+    has_ascii_latin = any(_is_ascii_latin_letter(ch) for ch in name)
+    if not has_ascii_latin:
+        return set()
+    offending: set[str] = set()
+    for ch in name:
+        if ch.isascii():
+            continue
+        script = _char_script(ch)
+        if script in _CONFUSABLE_SCRIPTS:
+            offending.add(script)
+    return offending
+
+
+def _describe_confusable_char(line_no: int, ch: str, *, identifier: str) -> str:
+    codepoint = f"U+{ord(ch):04X}"
+    script = _char_script(ch) or "UNKNOWN-SCRIPT"
+    try:
+        name = unicodedata.name(ch)
+    except ValueError:
+        name = None
+    suffix = f", {name}" if name else ""
+    return (
+        f"line {line_no}: identifier {identifier!r} contains {ch!r} "
+        f"({codepoint}{suffix}; {script} script)"
+    )
+
+
+def _confusable_findings(content: str) -> list[str]:
+    """Confusable non-ASCII characters in CODE positions of Python ``content``.
+
+    This is the Python engine: it tokenizes ``content`` with the stdlib
+    ``tokenize`` module. Language routing (which payloads reach here) is the
+    caller's job — :func:`_confusable_code_error` gates on the file suffix /
+    project language; non-Python formats never get this far (the syntax gate is
+    their backstop, and a line-level heuristic risks false positives on
+    string/comment spans). Returns human/AI-readable descriptions (bounded by
+    :data:`_NONASCII_FEEDBACK_CAP`); an empty list means nothing suspicious.
+
+    Only NAME tokens (checked for mixed-script identifiers) and OP tokens
+    (checked for any non-ASCII) are inspected. STRING/COMMENT/f-string-text
+    tokens are skipped — non-ASCII there is legitimate and never flagged.
+    """
+    import io
+    import tokenize
+
+    findings: list[str] = []
+    seen: set[tuple[int, int, str]] = set()
+
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(content).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        # Un-tokenizable input is the syntax gate's job, not this detector's.
+        return []
+
+    for tok in tokens:
+        if len(findings) >= _NONASCII_FEEDBACK_CAP:
+            break
+        line_no = tok.start[0]
+        if tok.type == tokenize.NAME:
+            if tok.string.isascii():
+                continue
+            scripts = _confusable_scripts_in_identifier(tok.string)
+            if not scripts:
+                continue
+            for ch in tok.string:
+                if ch.isascii() or _char_script(ch) not in _CONFUSABLE_SCRIPTS:
+                    continue
+                key = (line_no, tok.start[1], ch)
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append(
+                    _describe_confusable_char(line_no, ch, identifier=tok.string)
+                )
+                if len(findings) >= _NONASCII_FEEDBACK_CAP:
+                    break
+        elif tok.type == tokenize.OP:
+            for ch in tok.string:
+                if ch.isascii():
+                    continue
+                key = (line_no, tok.start[1], ch)
+                if key in seen:
+                    continue
+                seen.add(key)
+                codepoint = f"U+{ord(ch):04X}"
+                try:
+                    name = unicodedata.name(ch)
+                except ValueError:
+                    name = None
+                suffix = f", {name}" if name else ""
+                findings.append(
+                    f"line {line_no}: non-ASCII character {ch!r} ({codepoint}{suffix}) "
+                    "in an operator/punctuation position"
+                )
+                if len(findings) >= _NONASCII_FEEDBACK_CAP:
+                    break
+
+    return findings[:_NONASCII_FEEDBACK_CAP]
+
+
+def _confusable_code_error(relative_path: str, content: str, *, language: str) -> str | None:
+    """Best-effort confusable-character check of one AI-produced payload.
+
+    Returns a human/AI-readable error (naming the offending identifier(s)/char)
+    or ``None`` when the payload is clean. Only Python files (by ``.py`` suffix,
+    or ``language == "python"`` for an extensionless payload) are inspected;
+    every other format is skipped — the syntax gate is the backstop. Cheap,
+    deterministic, no LLM calls.
+    """
+    suffix = PurePosixPath(relative_path).suffix.lower()
+    is_python = suffix == ".py" or (suffix == "" and language == "python")
+    if not is_python:
+        return None
+    findings = _confusable_findings(content)
+    if not findings:
+        return None
+    return "contains confusable non-ASCII character(s) in code position: " + "; ".join(findings)
+
+
+def _confusable_check_enabled(config: dict[str, Any]) -> bool:
+    """``implement.confusable_check`` — default ON (see defaults.yaml)."""
+    section = config.get("implement")
+    if isinstance(section, dict) and "confusable_check" in section:
+        return bool(section["confusable_check"])
+    return True
+
+
 class Implementer:
     def __init__(
         self,
@@ -553,12 +763,15 @@ class Implementer:
         )
         language = _normalize_implementation_language((self.config.get("project") or {}).get("language"))
         syntax_gate = _syntax_gate_enabled(self.config)
-        # Write-time syntax gate (implement.syntax_gate): a gate failure feeds
-        # BOUNDED corrective retries through the existing feedback prompt
-        # injection (default 3 total attempts, configurable via
-        # implement.syntax_gate_max_attempts); with the gate off there is a
-        # single attempt (legacy behavior).
-        max_attempts = _syntax_gate_max_attempts(self.config) if syntax_gate else 1
+        confusable_check = _confusable_check_enabled(self.config)
+        # Write-time syntax gate (implement.syntax_gate) + confusable-character
+        # check (implement.confusable_check): either failure feeds BOUNDED
+        # corrective retries through the existing feedback prompt injection
+        # (default 3 total attempts, configurable via
+        # implement.syntax_gate_max_attempts); with both off there is a single
+        # attempt (legacy behavior).
+        gate_active = syntax_gate or confusable_check
+        max_attempts = _syntax_gate_max_attempts(self.config) if gate_active else 1
         current_feedback = feedback
         generated_files: list[Path] = []
         gate_error: ImplementSyntaxGateError | None = None
@@ -605,6 +818,7 @@ class Implementer:
                     language=language,
                     raw_output=raw_output,
                     syntax_gate=syntax_gate,
+                    confusable_check=confusable_check,
                     root_artifact_patterns=_root_artifact_patterns_from_config(self.config),
                 )
             except ImplementSyntaxGateError as exc:
@@ -1246,12 +1460,13 @@ def _syntax_gate_exhausted_error(
     """An honest failure beats a silent broken write."""
     from codd.cli import CoddCLIError
 
-    failed_files = ", ".join(path for path, _ in error.failures)
+    failed_files = ", ".join(path for path, _ in error.all_failures)
     return CoddCLIError(
-        f"Design '{spec.design_node}' produced syntactically invalid file(s) "
+        f"Design '{spec.design_node}' produced invalid file(s) "
         f"after {attempts} attempt(s): {failed_files}. {error}. "
         "Nothing was written to disk for this task. "
-        "Set 'implement.syntax_gate: false' in codd.yaml to opt out of the write-time syntax gate."
+        "Set 'implement.syntax_gate: false' in codd.yaml to opt out of the write-time syntax gate "
+        "(or 'implement.confusable_check: false' to opt out of the confusable-character check only)."
     )
 
 
@@ -1623,23 +1838,36 @@ def _write_generated_files(
     language: str,
     raw_output: str,
     syntax_gate: bool = True,
+    confusable_check: bool = True,
     root_artifact_patterns: list[str] | tuple[str, ...] | None = None,
 ) -> list[Path]:
     file_payloads = _parse_file_payloads(
         raw_output, spec.output_paths, language, root_artifact_patterns=root_artifact_patterns
     )
-    if syntax_gate:
+    if syntax_gate or confusable_check:
         # Validate EVERY payload before writing ANY file: a gate failure leaves
         # the working tree untouched (no partial half-broken task output).
         failures: list[tuple[str, str]] = []
         rejected_payloads: dict[str, str] = {}
+        confusable_failures: list[tuple[str, str]] = []
         for relative_path, content in file_payloads:
-            error = _payload_syntax_error(relative_path, content)
+            error = _payload_syntax_error(relative_path, content) if syntax_gate else None
             if error is not None:
                 failures.append((relative_path, error))
                 rejected_payloads[relative_path] = content
-        if failures:
-            raise ImplementSyntaxGateError(failures, payloads=rejected_payloads)
+                # A file that does not even parse is the syntax gate's domain;
+                # the confusable detector (which tokenizes) would add noise.
+                continue
+            if confusable_check:
+                confusable = _confusable_code_error(relative_path, content, language=language)
+                if confusable is not None:
+                    confusable_failures.append((relative_path, confusable))
+        if failures or confusable_failures:
+            raise ImplementSyntaxGateError(
+                failures,
+                payloads=rejected_payloads,
+                confusable_failures=confusable_failures,
+            )
     traceability_comment = _build_traceability_comment(design_context, spec, dependency_documents)
     output_prefixes = [PurePosixPath(item) for item in spec.output_paths]
     generated_paths: list[Path] = []
