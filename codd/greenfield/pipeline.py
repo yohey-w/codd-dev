@@ -689,6 +689,18 @@ class GreenfieldPipeline:
             record["units"][task.task_id] = STATUS_DONE
             self._checkpoint(project_root)
             self.echo(f"[greenfield] implement {task.task_id}: {detail}")
+
+        # Project-wide VB coverage gate — ONCE, after every implement task has
+        # run and all covering tests therefore exist. Per-task enforcement was
+        # disabled in _default_implement_task_runner precisely because the gate
+        # is project-wide; this is where it belongs. Honors the greenfield
+        # coverage_gate option (--no-coverage-gate / greenfield.coverage_gate:
+        # false) — when the owner turned it off, the final gate is skipped too.
+        _enforce_stage_coverage_gate(
+            project_root,
+            coverage_gate=bool(options.get("coverage_gate", True)),
+            echo=self.echo,
+        )
         record["detail"] = f"{len(tasks)} task(s) implemented"
 
     def _default_implement_task_runner(
@@ -736,16 +748,20 @@ class GreenfieldPipeline:
             if failed:
                 raise StageError(f"task {task.task_id}: {failed[0].error}")
 
-        _enforce_coverage_gate(
-            project_root,
-            config=config,
-            task=task,
-            output_paths=output_paths,
-            results=results,
-            coverage_gate=coverage_gate,
-            ai_command=ai_command,
-            echo=self.echo,
-        )
+        # NOTE: the verifiable-behavior (VB) coverage gate is intentionally NOT
+        # enforced per task here. The gate is PROJECT-WIDE (it reconciles every
+        # VB id declared across the test documents against `covers vb=` markers
+        # anywhere in the suite), but greenfield runs implement task-by-task.
+        # An early task (e.g. test fixtures/helpers) that legitimately writes no
+        # covering tests would see ~0 project coverage and hard-fail, even
+        # though later tasks add the covering tests. So the once-per-stage
+        # project-wide gate runs in :meth:`_stage_implement` AFTER all tasks
+        # complete (see :func:`_enforce_stage_coverage_gate`). Each task still
+        # gets its per-file syntax/confusable gates and tests via
+        # ``implement_tasks``. The ``coverage_gate`` arg is retained for the DI
+        # seam / standalone callers; the greenfield default runner ignores it
+        # at task granularity.
+        del coverage_gate  # gated once at stage end, never per task
         generated = sum(len(result.generated_files) for result in results)
         suffix = f", {approved} step(s) auto-approved" if approved else ""
         return f"{generated} file(s) generated{suffix}"
@@ -1024,52 +1040,70 @@ def _derive_and_approve_steps(
         return 0
 
 
-def _enforce_coverage_gate(
+def _enforce_stage_coverage_gate(
     project_root: Path,
     *,
-    config: dict[str, Any],
-    task: ImplementTaskRef,
-    output_paths: list[str],
-    results: list[Any],
     coverage_gate: bool,
-    ai_command: str | None,
     echo: Callable[[str], None],
 ) -> None:
-    """The verifiable-behavior coverage gate ``codd implement run`` enforces."""
+    """Project-wide verifiable-behavior coverage gate for the implement STAGE.
+
+    Runs ONCE after every implement task has completed, so all covering tests
+    already exist. This is the correct granularity for the project-wide VB
+    audit: it reconciles every VB id declared across the test documents against
+    ``codd: covers vb=`` markers anywhere in the suite. (The per-task gate is
+    deliberately disabled in :meth:`GreenfieldPipeline._default_implement_task_runner`
+    — an early fixtures/helper task that writes no covering tests would
+    otherwise hard-fail against the whole project's VBs.)
+
+    No ``rerun`` is wired: by stage end the build is complete, so any remaining
+    uncovered VB is a genuine failure of the whole implement stage, not a
+    transient gap to re-implement away. The failure is raised as a
+    :class:`StageError` carrying the gap list, which the pipeline records on the
+    implement stage record and surfaces through the existing checkpoint/resume
+    machinery.
+
+    Honors the greenfield ``coverage_gate`` option: when it is off
+    (``--no-coverage-gate`` / ``greenfield.coverage_gate: false``) the gate is
+    skipped entirely. The project-level ``test_coverage.gate`` config is also
+    respected (via :func:`run_implement_coverage_gate`).
+    """
+    from codd.config import load_project_config
     from codd.verifiable_behavior_audit import run_implement_coverage_gate
 
-    resolved_paths: list[str] = list(output_paths)
-    for result in results:
-        for item in getattr(result, "output_paths", []) or []:
-            try:
-                resolved_paths.append(Path(item).resolve().relative_to(project_root).as_posix())
-            except ValueError:
-                resolved_paths.append(str(item))
+    if not coverage_gate:
+        return
 
-    def _rerun(feedback: str) -> None:
-        from codd.implementer import implement_tasks
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        config = {}
 
-        implement_tasks(
-            project_root,
-            design=task.design_node,
-            output_paths=output_paths,
-            ai_command=ai_command,
-            use_derived_steps=True,
-            feedback=feedback,
-        )
+    # Pass the configured test dirs as the audited output paths so the gate
+    # treats this as a test-related run (it is — every test the build will ever
+    # have now exists) and evaluates the FULL project VB universe in one pass.
+    test_dirs = (config.get("scan") or {}).get("test_dirs")
+    if isinstance(test_dirs, list) and test_dirs:
+        audited_paths = [str(item) for item in test_dirs]
+    else:
+        audited_paths = ["tests/"]
 
     passed = run_implement_coverage_gate(
         project_root,
         config=config,
-        design_node=task.design_node,
-        output_paths=resolved_paths,
+        design_node=None,
+        output_paths=audited_paths,
         opt_out=not coverage_gate,
-        rerun=_rerun,
+        rerun=None,
         echo=echo,
         echo_error=echo,
     )
     if not passed:
-        raise StageError(f"task {task.task_id}: verifiable-behavior coverage gate failed")
+        raise StageError(
+            "verifiable-behavior coverage gate failed for the implement stage: "
+            "one or more declared verifiable behaviors have no `codd: covers vb=` "
+            "marker after all implement tasks completed (see the gap list above)"
+        )
 
 
 def _default_verify_runner(

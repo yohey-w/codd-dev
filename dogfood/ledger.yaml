@@ -221,17 +221,28 @@ axes:
     sut_model: sonnet
   D4:
     description: complexity ladder — scale-dependent failures; same pipeline, monotonically larger app
-      (todo CLI -> kakeibo web -> larger). Surfaces resource ceilings.
+      (single-task CLI -> multi-task web -> larger). Surfaces resource ceilings AND granularity
+      assumptions that only break above a task-count threshold.
     saturation_counter: 0
-    last_run: '2026-06-12'
+    last_run: '2026-06-13'
     status: active
     cost: llm
     automation: manual
     runner: README 'Complexity-ladder protocol'.
     sut_model: sonnet
     history:
-    - '2026-06-11..12: kakeibo (household-budget) web greenfield (claude sonnet, joint D4+D5) — surfaced
+    - '2026-06-11..12: household-budget web greenfield (claude sonnet, joint D4+D5) — surfaced
       F-output-32k (OPEN) + slow-amendment pace.'
+    - '2026-06-13: multi-task greenfield (claude sonnet SUT, 30 implement tasks) failed at an EARLY task
+      (test-fixtures) with "verifiable-behavior coverage gate failed: 45 of 45 verifiable behavior(s) have
+      no covers vb= marker". The VB coverage gate is PROJECT-WIDE but the greenfield pipeline enforced it
+      PER implement task, so any task that is not the one writing the covering tests (especially an early
+      fixtures/helper task) saw ~0 coverage and hard-failed even though later tasks would add the markers.
+      A single-task project never surfaced this (one implement == the whole project); the granularity
+      assumption only breaks above a task-count threshold — a complexity-ladder (D4) finding. Surfaced+fixed
+      F-vb-gate-per-task-granularity (gate disabled per-task in the greenfield runner; run ONCE project-wide
+      after all implement tasks; honors the greenfield coverage_gate opt-out; standalone implement gate
+      unchanged). saturation reset to 0.'
   D5:
     description: weakest-viable-model (instrument / MODIFIER, M1) — a weak model is the most SENSITIVE
       instrument; it trips on ambiguity a strong model papers over. Applied to input-family runs (D1-D4);
@@ -739,6 +750,56 @@ findings:
   class: conceptual
   derived_case_ids:
   - PC-d5-confusable-passthrough
+- id: F-vb-gate-per-task-granularity
+  axis: D4
+  date: '2026-06-13'
+  model_used: claude sonnet (weakest viable, M1) — observed live during a multi-task greenfield run
+  symptom: 'a live multi-task greenfield run (30 implement tasks, sonnet SUT) failed at an EARLY task
+    (implement_test_fixtures) with "verifiable-behavior coverage gate failed: 45 of 45 verifiable behavior(s)
+    have no `codd: covers vb=` marker". The early fixtures/helper task legitimately writes no covering tests
+    (later tasks do), so judged against the whole project''s VBs it saw ~0 coverage and hard-failed before
+    the covering tasks could run. A single-task project (e.g. a CLI todo) never surfaced this because there
+    one implement == the whole project; with 30 tasks the granularity assumption broke.'
+  root_cause: 'the verifiable-behavior coverage gate (codd.verifiable_behavior_audit.run_implement_coverage_gate,
+    invoked via the implementer''s per-task gate) is PROJECT-WIDE — it reconciles every VB id declared across
+    the test documents against `codd: covers vb=` markers anywhere in the suite — but the greenfield pipeline
+    enforced it PER implement task (codd/greenfield/pipeline.py _default_implement_task_runner called the
+    project-wide gate inside every task). Per-task enforcement of a project-wide invariant means any task that
+    is not the one writing the covering tests fails, even though the stage as a whole would satisfy the gate
+    once all tasks complete. The gate is RIGHT to want full coverage; it was enforced at the WRONG granularity.'
+  fix_commit: null  # filled by a tiny follow-up commit after this lands (self-reference; c25d006 precedent)
+  fix_description: 'codd/greenfield/pipeline.py — the project-wide VB coverage gate is now enforced ONCE per
+    implement STAGE instead of once per task. (1) Per-task: _default_implement_task_runner no longer calls
+    the coverage gate (the old _enforce_coverage_gate per-task call was removed); each task still gets its
+    per-file syntax + confusable gates and tests via implement_tasks, so a single early task is never judged
+    against all project VBs. (2) Once-per-stage: a new _enforce_stage_coverage_gate runs at the END of
+    _stage_implement, after every implement task has completed and all covering tests therefore exist; it
+    calls the existing project-wide run_implement_coverage_gate ONCE (design_node=None, audited output paths
+    = the configured scan.test_dirs so the audit evaluates the full project), with no rerun wired — by stage
+    end an uncovered VB is a genuine stage failure, raised as a StageError carrying the gap list, recorded on
+    the implement stage record and surfaced through the existing checkpoint/resume machinery. (3) The
+    greenfield coverage_gate option still controls it: _stage_implement passes options[coverage_gate] through,
+    and _enforce_stage_coverage_gate returns early when it is False (--no-coverage-gate / greenfield.coverage_gate:
+    false), so the owner''s opt-out skips the final gate too; the project-level test_coverage.gate config is
+    also respected via run_implement_coverage_gate. (4) The standalone codd implement run --task per-task gate
+    is UNCHANGED — cli.py is untouched; a user running one task explicitly still gets the per-task gate and its
+    --no-coverage-gate flag. Anti-false-green preserved: the gate is NOT disabled, only moved to the correct
+    granularity. Preserves prior fixes (syntax gate 339a763, confusable 79294fe, transient/ceiling dc90c09,
+    timeout da60634, stdout 3ea34b4). Generality gate held: developer-tool framing, no project/model/CLI names,
+    CLI/model-agnostic. Full suite green (4221 passed, 0 skipped; was 4216 + 5 new tests).'
+  regression_test: 'tests/greenfield/test_pipeline.py — test_vb_gate_does_not_fail_early_task_and_passes_once_later_task_covers
+    (task A writes fixtures with no covers markers, task B adds them; task A does NOT fail and the final
+    project-wide gate passes once B''s markers exist), test_vb_gate_fails_at_final_stage_when_no_task_ever_covers
+    (no task covers the VBs → failure surfaces at the FINAL stage gate after BOTH tasks ran, not at the early
+    task; verify/check never run), test_vb_gate_skipped_when_coverage_gate_option_false (greenfield.coverage_gate:
+    false and the constructor coverage_gate=False both skip the final gate), test_vb_gate_default_runner_does_not_enforce_per_task
+    (the REAL _default_implement_task_runner returns normally for a test-fixtures task with no covers markers
+    instead of raising), test_standalone_implement_per_task_gate_unchanged (the standalone CLI helper
+    _enforce_implement_coverage_gate still SystemExits per-task on uncovered VBs and still honors opt-out).'
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-d4-vb-gate-stage-granularity
 pending_cases:
 - id: PC-d6-codex-live
   axis: D6
@@ -890,3 +951,19 @@ pending_cases:
     # feedback through the existing bounded retry; opt-out implement.confusable_check, default ON). FX1
     # atomicity, honest failure, and the syntax gate preserved + independent. Critical false-positive guard
     # (non-ASCII in string/comment literals NOT flagged) regression-tested in tests/test_confusable_check.py.
+- id: PC-d4-vb-gate-stage-granularity
+  axis: D4
+  hypothesis: 'A project-wide invariant (the verifiable-behavior coverage gate) enforced PER implement task
+    fails any early task that is not the one writing the covering tests — a granularity bug that only appears
+    above a task-count threshold (single-task projects never surface it). The gate must NOT be disabled (that
+    loses the anti-false-green guarantee); it must move to the right granularity: OFF per greenfield task, run
+    ONCE project-wide after all implement tasks complete, still hard-gating by default and honoring the
+    greenfield coverage_gate opt-out, with the standalone per-task gate unchanged. Build + regression-test the
+    stage-granularity gate.'
+  origin: derived:F-vb-gate-per-task-granularity
+  priority: 1
+  status: done  # 2026-06-13 — surfaced+fixed F-vb-gate-per-task-granularity (codd/greenfield/pipeline.py:
+    # per-task gate removed from _default_implement_task_runner; new _enforce_stage_coverage_gate runs the
+    # existing project-wide run_implement_coverage_gate ONCE at the end of _stage_implement; honors the
+    # greenfield coverage_gate option; standalone codd implement run --task gate unchanged, cli.py untouched).
+    # Regression-tested in tests/greenfield/test_pipeline.py (5 tests).
