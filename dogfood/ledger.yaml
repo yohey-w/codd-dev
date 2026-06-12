@@ -41,34 +41,42 @@
 #                                the right fix is a NEW abstraction or a NEW
 #                                check-class, not a bug patch (precedent: the
 #                                human/visual-judge finding that birthed the
-#                                enablement check-axis) — escalate to a Fable 5
-#                                design pass and surface to the owner (Tier 3,
-#                                apex/owner, rare). Best-effort: the loop's content
-#                                can trip Fable 5's content-safety classifiers and
-#                                reroute to Opus 4.8 — a rerouted finding goes to
-#                                the OWNER queue (appropriate: conceptual findings
-#                                should reach the owner anyway).
+#                                enablement check-axis) — the apex model (Fable 5)
+#                                designs the new abstraction and the fix is
+#                                committed+pushed AUTONOMOUSLY, exactly like a
+#                                mechanical fix (Tier 3, apex, no owner-approval
+#                                gate). Best-effort: the loop's content can trip
+#                                Fable 5's content-safety classifiers and reroute
+#                                to Opus 4.8 — a rerouted finding is designed+fixed
+#                                by Opus AUTONOMOUSLY (it is NOT parked in an owner
+#                                queue). The owner gets no per-finding approval
+#                                request; loop findings, mechanical AND conceptual,
+#                                resolve without a human gate.
 #     portfolio_evolution      : periodic anti-convergence pass — "which failure
 #                                class does NO current axis cover?" Discovers NEW
 #                                dogfood axes / check-categories. Convergent
 #                                case-derivation (Opus, Tier 2) drifts toward
 #                                obvious variants; this divergent "what are we NOT
-#                                testing" judgment is the apex/owner role —
-#                                Fable 5 + owner (Tier 3).
+#                                testing" judgment is the apex role — Fable 5,
+#                                AUTONOMOUS (Tier 3; owner informed, not gating).
 #     reserved_for_owner_dialogue: Fable 5 is OUTSIDE the SUT role (too capable,
 #                                would hide gaps, violating M1) and OUTSIDE the
 #                                routine mechanical tiers (Opus is sufficient,
 #                                cheaper, classifier-free). It is PRESENT at the
 #                                apex tier (Tier 3 — conceptual-finding design +
-#                                portfolio evolution above) and in the owner-facing
-#                                strategy/design conversation. Caveat: the loop's
-#                                content — cross-model testing, input-validation/
-#                                adversarial cases, security-adjacent codebases —
-#                                can trip Fable 5's content-safety classifiers,
-#                                which auto-reroute to Opus 4.8; for the routine
-#                                tiers Opus is assigned directly to avoid that
-#                                reroute churn, and a rerouted Tier-3 finding lands
-#                                on the owner queue.
+#                                portfolio evolution above), which now runs
+#                                AUTONOMOUSLY with no per-finding owner-approval
+#                                step, and in the owner-facing PRODUCT-strategy
+#                                conversation (genuinely novel product direction,
+#                                not loop-internal fixes — that remains the owner's
+#                                domain). Caveat: the loop's content — cross-model
+#                                testing, input-validation/ adversarial cases,
+#                                security-adjacent codebases — can trip Fable 5's
+#                                content-safety classifiers, which auto-reroute to
+#                                Opus 4.8; for the routine tiers Opus is assigned
+#                                directly to avoid that reroute churn, and a
+#                                rerouted Tier-3 finding is resolved by Opus
+#                                autonomously (no owner queue).
 #
 # axes:            map D1..D14 -> per-axis state (the loop's saturation counters):
 #   description          : the failure class this axis is designed to surface.
@@ -103,9 +111,12 @@
 #   regression_test: the test that pins the fix so it can never silently return.
 #   status         : fixed | open | wontfix.
 #   class          : (optional) mechanical | conceptual. mechanical == a bug patch
-#                    to existing behaviour, fixed on Opus 4.8 (Tier 2). conceptual
-#                    == the fix is a NEW abstraction or NEW check-class, not a
-#                    patch — escalated to a Fable 5 design pass + owner (Tier 3).
+#                    to existing behaviour, designed+fixed on Opus 4.8 (Tier 2).
+#                    conceptual == the fix is a NEW abstraction or NEW check-class,
+#                    not a patch — designed by Fable 5 (reroute→Opus) and
+#                    committed+pushed AUTONOMOUSLY (Tier 3, no owner-approval gate).
+#                    The class now only routes WHICH MODEL designs the fix, not
+#                    whether a human approves it.
 #                    Absent == treat as mechanical (the default routine path).
 #   derived_case_ids: ids in `pending_cases` this finding spawned (loop fuel).
 #
@@ -137,9 +148,9 @@ model_roles:
   sut_executor_d6: codex gpt-5.5 xhigh
   iteration_driver: claude opus 4.8
   triage_and_fix: claude opus 4.8
-  conceptual_finding_design: claude fable 5 (apex/owner; rare)
-  portfolio_evolution: claude fable 5 (apex/owner; anti-convergence)
-  reserved_for_owner_dialogue: claude fable 5 (owner-facing dialogue; apex tier present in loop)
+  conceptual_finding_design: claude fable 5 (apex; autonomous — no owner-approval gate; reroute→opus, also autonomous)
+  portfolio_evolution: claude fable 5 (apex; autonomous; anti-convergence)
+  reserved_for_owner_dialogue: claude fable 5 (apex tier present in loop, autonomous; owner-facing product-strategy dialogue only — not a per-finding gate)
 axes:
   D1:
     description: first-contact / dialect — failures that appear only when a non-builder hand-writes input

@@ -165,10 +165,10 @@ approved assignment, recorded machine-readably in
 | **SUT executor** (default) | the `ai_command` CoDD uses to actually build the app/project under test, for the LLM axes D1-D5, D9 | **the cheapest viable model — Sonnet 4.6 is the floor** (Haiku only where it can complete) |
 | **SUT executor** (D6) | same, but the cross-CLI axis by definition | **Codex (gpt-5.5 xhigh)** |
 | **Iteration driver** | selects the next case, judges whether output is a real finding, derives sibling cases, updates the ledger | **Opus 4.8** |
-| **Triage + mechanical fix** | root-cause a **mechanical** finding (a bug patch to existing behaviour), fix CoDD core generically behind the generality gate, write the regression test | **Opus 4.8** |
-| **Conceptual-finding design** | when a finding is **conceptual** — the fix is a NEW abstraction or NEW check-class, not a patch — design the new concept and surface it to the owner | **Fable 5 + owner** (Tier 3, rare; reroute→owner) |
-| **Portfolio evolution (anti-convergence)** | periodically ask *"which failure class does NO current axis cover?"* and mint NEW axes / check-categories | **Fable 5 + owner** (Tier 3) |
-| **Owner dialogue** | the owner-facing strategy/design conversation | **Fable 5** |
+| **Triage + mechanical fix** | root-cause a **mechanical** finding (a bug patch to existing behaviour), fix CoDD core generically behind the generality gate, write the regression test | **Opus 4.8** (autonomous) |
+| **Conceptual-finding design** | when a finding is **conceptual** — the fix is a NEW abstraction or NEW check-class, not a patch — design the new concept, then commit+push it like any other fix | **Fable 5, autonomous** (Tier 3; reroute→Opus, also autonomous; no owner gate) |
+| **Portfolio evolution (anti-convergence)** | periodically ask *"which failure class does NO current axis cover?"* and mint NEW axes / check-categories | **Fable 5, autonomous** (Tier 3) |
+| **Owner dialogue** | the owner-facing **product-strategy** conversation (novel product direction, not loop-internal fixes) | **Fable 5** |
 
 **SUT floor = Sonnet 4.6 (M1).** A lighter model is the *higher-sensitivity
 instrument*: it surfaces harness gaps a stronger model papers over. Empirically,
@@ -201,33 +201,38 @@ classifies every finding:
   not a patch. The canonical precedent is the **D13 human/visual-judge** finding
   (mobile nav vanished on one viewport) whose fix was an entirely new
   *environment-coverage* check-axis — and likewise the enablement-coverage axis.
-  Conceptual findings escalate to a **Fable 5 design pass and are surfaced to the
-  owner (Tier 3)**. Mark them `class: conceptual` in the ledger.
+  Conceptual findings are designed by the **apex model (Fable 5)** and then
+  **committed+pushed autonomously, exactly like a mechanical fix — there is no
+  owner-approval gate (Tier 3)**. The mechanical/conceptual split now only routes
+  *which model designs the fix* (Opus for mechanical, Fable for conceptual), not
+  whether a human approves it. Mark them `class: conceptual` in the ledger.
 
 **Portfolio evolution (anti-convergence) — also Tier 3.** Convergent
 case-derivation (the Opus iteration driver, Tier 2) tends toward *obvious
 variants* of known axes. Periodically a divergent pass asks **"which failure
 class does NO current axis cover?"** to discover NEW dogfood axes / check
-categories. That "what are we NOT testing" judgment is the apex/owner role
-(Fable 5 + owner), not a convergent-derivation job.
+categories. That "what are we NOT testing" judgment is the apex role
+(Fable 5, autonomous — the owner is informed, not a gate), not a
+convergent-derivation job.
 
-**Classifier-reroute caveat → owner queue (Tier 3 is best-effort).** The loop's
-content — cross-model testing, adversarial / input-validation cases,
+**Classifier-reroute caveat → Opus, still autonomous (Tier 3 is best-effort).**
+The loop's content — cross-model testing, adversarial / input-validation cases,
 security-adjacent codebases — can trip Fable 5's content-safety classifiers and
 reroute to Opus 4.8. For the routine tiers we assign Opus *directly* to avoid
-that reroute churn. For Tier 3 a rerouted finding simply lands on the **owner
-queue** — which is the right destination anyway: a conceptual finding should
-reach the owner regardless. This is the **autonomy-boundary doctrine** applied to
-the QA loop: *existing-architecture-conformant fixes are autonomous (Tier 2 /
-Opus); new-concept creation needs the apex model + owner judgment (Tier 3).*
-M1 routes the SUT to the weak instrument; M2 (first-contact) is what surfaces
-the conceptual gaps in the first place; M3's world-change triggers are the same
-anti-convergence reflex the portfolio-evolution pass formalizes.
+that reroute churn. For Tier 3 a rerouted finding is simply **designed and fixed
+by Opus 4.8 autonomously** — it is NOT parked in an owner queue. The owner
+receives no per-finding approval request and no required feedback: **loop
+findings, mechanical AND conceptual, resolve autonomously** (designed by the
+apex model, committed+pushed like any other fix). M1 routes the SUT to the weak
+instrument; M2 (first-contact) is what surfaces the conceptual gaps in the first
+place; M3's world-change triggers are the same anti-convergence reflex the
+portfolio-evolution pass formalizes.
 
 The whole 4-tier stack is the owner's **"the apex model designs, the execution
 model executes"** thesis applied recursively to the QA loop: execution (build /
 mechanical fix / run) = Sonnet + Opus; design-level work (new concepts /
-portfolio blind-spots) = Fable + owner.
+portfolio blind-spots) = Fable. The owner gates none of the loop-internal
+work — only genuinely novel PRODUCT direction (below) stays the owner's domain.
 
 ### Cost tiers
 
@@ -238,22 +243,24 @@ portfolio blind-spots) = Fable + owner.
 - **Tier 2 — strong / episodic.** Opus 4.8 for the iteration driver and for
   **mechanical** triage/fix — invoked **only when a finding needs judgment,
   triage, or a bug patch**, never continuously.
-- **Tier 3 — apex / rare.** Fable 5 + owner for **conceptual** findings (the fix
-  is a new abstraction / new check-class) and for the **portfolio-evolution**
-  anti-convergence pass (minting new axes). Best-effort: the loop's content can
-  trip Fable 5's content-safety classifiers and reroute to Opus 4.8, in which
-  case the finding goes to the **owner queue** (the right destination for a
-  conceptual finding anyway). This is the autonomy-boundary doctrine:
-  existing-architecture-conformant fixes are autonomous (Tier 2); new-concept
-  creation needs the apex model + owner (Tier 3).
+- **Tier 3 — apex / rare.** Fable 5 (autonomous) for **conceptual** findings (the
+  fix is a new abstraction / new check-class) and for the **portfolio-evolution**
+  anti-convergence pass (minting new axes). The fix is committed+pushed like any
+  other — **no owner-approval gate**. Best-effort: the loop's content can trip
+  Fable 5's content-safety classifiers and reroute to Opus 4.8, in which case the
+  finding is **designed and fixed by Opus autonomously** (not parked for the
+  owner). Loop findings — mechanical AND conceptual — are resolved autonomously;
+  only genuinely novel PRODUCT direction stays the owner's domain.
 
 ---
 
 ## What dogfood CANNOT find (honest limits — the owner's domain)
 
-This loop hardens the harness against *recurring, observable* failure classes.
-It is structurally blind to three things — do not let green axes imply these are
-handled:
+This loop hardens the harness against *recurring, observable* failure classes,
+and now resolves **every** loop finding (mechanical AND conceptual) autonomously.
+What remains the owner's domain is not loop-internal fixes but genuinely novel
+*product* direction — it is structurally blind to three things, and a green axis
+does not imply these are handled:
 
 - **New-concept divergence.** When CoDD invents a genuinely new concept, LLMs
   converge to their training mode and the design *diverges* from intent. Keeping
