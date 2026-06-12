@@ -15,6 +15,7 @@ import codd.generator as generator_module
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
 from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
+import unicodedata
 
 
 FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
@@ -265,16 +266,80 @@ class ImplementationResult:
         return self.output_paths[0]
 
 
+# Cap on how many distinct offending characters we enumerate per file in the
+# retry feedback — enough to steer the model, bounded so the prompt stays small.
+_NONASCII_FEEDBACK_CAP = 5
+
+
+def _describe_nonascii_code_chars(content: str, *, lineno: int | None) -> list[str]:
+    """Enumerate non-ASCII characters the parser would treat as code tokens.
+
+    Best-effort and cheap (no LLM): scans ``content`` for characters outside
+    ASCII, reporting each with its line, the character itself, its U+XXXX
+    codepoint, and (when free, via ``unicodedata``) its Unicode name. The line
+    the parser flagged (``lineno``) is reported FIRST so the model sees the
+    exact failing position; remaining non-ASCII characters elsewhere in the
+    file follow (capped). Deterministic and language-neutral — the caller frames
+    the ASCII directive; this only surfaces the offending codepoints.
+
+    Note: this cannot perfectly distinguish a code position from inside a
+    string/comment on syntactically-broken input, so it lists every non-ASCII
+    character; the directive makes the rule explicit (ASCII for code tokens,
+    non-ASCII only inside literals/comments).
+    """
+    lines = content.splitlines()
+
+    def _describe_char(line_no: int, ch: str) -> str:
+        codepoint = f"U+{ord(ch):04X}"
+        try:
+            name = unicodedata.name(ch)
+        except ValueError:
+            name = None
+        suffix = f", {name}" if name else ""
+        return f"line {line_no}: {ch!r} ({codepoint}{suffix})"
+
+    described: list[str] = []
+    seen: set[tuple[int, str]] = set()
+
+    def _scan_line(line_no: int) -> None:
+        if line_no < 1 or line_no > len(lines):
+            return
+        for ch in lines[line_no - 1]:
+            if ord(ch) > 127 and (line_no, ch) not in seen:
+                seen.add((line_no, ch))
+                described.append(_describe_char(line_no, ch))
+
+    # Parser-flagged line first (the precise failing position), then the rest.
+    if lineno is not None:
+        _scan_line(lineno)
+    for line_no in range(1, len(lines) + 1):
+        if len(described) >= _NONASCII_FEEDBACK_CAP:
+            break
+        if line_no == lineno:
+            continue
+        _scan_line(line_no)
+
+    return described[:_NONASCII_FEEDBACK_CAP]
+
+
 class ImplementSyntaxGateError(RuntimeError):
     """AI-produced file payload(s) failed the write-time syntax gate.
 
     Raised BEFORE anything is written to disk: a syntactically broken file is
     never silently persisted as "task done". ``failures`` holds
-    ``(relative_path, error)`` pairs describing what the AI produced.
+    ``(relative_path, error)`` pairs describing what the AI produced;
+    ``payloads`` maps each path to the rejected content so the retry feedback
+    can pinpoint offending characters (codepoints) without re-parsing.
     """
 
-    def __init__(self, failures: list[tuple[str, str]]) -> None:
+    def __init__(
+        self,
+        failures: list[tuple[str, str]],
+        *,
+        payloads: dict[str, str] | None = None,
+    ) -> None:
         self.failures = list(failures)
+        self.payloads = dict(payloads or {})
         details = "; ".join(f"{path}: {error}" for path, error in self.failures)
         super().__init__(
             f"syntax gate rejected {len(self.failures)} generated file(s): {details}"
@@ -282,12 +347,38 @@ class ImplementSyntaxGateError(RuntimeError):
 
     def feedback_message(self) -> str:
         lines = [
-            "The previous implementation attempt produced syntactically invalid file content.",
-            "Regenerate ALL files for this task so that every file parses:",
+            "The previous implementation attempt failed to parse and was NOT written.",
+            "Regenerate ALL files for this task so that every file parses cleanly:",
         ]
         for path, error in self.failures:
             lines.append(f"- file {path} is {error}")
+            content = self.payloads.get(path)
+            if not content:
+                continue
+            offending = _describe_nonascii_code_chars(
+                content, lineno=_parsed_error_lineno(error)
+            )
+            if offending:
+                joined = "; ".join(offending)
+                lines.append(
+                    f"  non-ASCII character(s) found in {path}: {joined}. "
+                    "These are invalid in code position."
+                )
+        lines.append(
+            "Use ASCII for ALL code tokens (identifiers, operators, punctuation, "
+            "statement terminators); replace typographic/full-width punctuation -- "
+            "em dash (—, U+2014), full-width period (。, U+3002), full-width "
+            "comma (，, U+FF0C), smart quotes (“”‘’), etc. -- "
+            "with their ASCII equivalents (-, ., ,, \", '). "
+            "Non-ASCII is allowed ONLY inside string/text literals and comments."
+        )
         return "\n".join(lines)
+
+
+def _parsed_error_lineno(error: str) -> int | None:
+    """Pull the ``line N`` the format parsers embed in their error strings."""
+    match = re.search(r"\bline (\d+)\b", error)
+    return int(match.group(1)) if match else None
 
 
 def _syntax_gate_enabled(config: dict[str, Any]) -> bool:
@@ -296,6 +387,35 @@ def _syntax_gate_enabled(config: dict[str, Any]) -> bool:
     if isinstance(section, dict) and "syntax_gate" in section:
         return bool(section["syntax_gate"])
     return True
+
+
+# Total implement attempts allowed when the syntax gate is ON: one initial
+# generation plus bounded corrective retries. Default 3 (was 2) — a model primed
+# by non-ASCII context can slip typographic punctuation into code more than once,
+# and the actionable feedback needs an extra shot to land a clean file. Bounded
+# on purpose: a genuinely unfixable file still fails honestly, nothing written.
+DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS = 3
+
+
+def _syntax_gate_max_attempts(config: dict[str, Any]) -> int:
+    """``implement.syntax_gate_max_attempts`` — total attempts when the gate is ON.
+
+    Defaults to :data:`DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS`. Always at least 1
+    (the initial attempt); a configured value below 1 or a non-integer falls
+    back to the default. NEVER unbounded — the gate must still fail loudly on a
+    permanently-invalid file.
+    """
+    section = config.get("implement")
+    if isinstance(section, dict) and "syntax_gate_max_attempts" in section:
+        raw = section["syntax_gate_max_attempts"]
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS
+        if value >= 1:
+            return value
+        return DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS
+    return DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS
 
 
 def _payload_syntax_error(relative_path: str, content: str) -> str | None:
@@ -434,9 +554,11 @@ class Implementer:
         language = _normalize_implementation_language((self.config.get("project") or {}).get("language"))
         syntax_gate = _syntax_gate_enabled(self.config)
         # Write-time syntax gate (implement.syntax_gate): a gate failure feeds
-        # ONE bounded retry through the existing feedback prompt injection;
-        # with the gate off there is a single attempt (legacy behavior).
-        max_attempts = 2 if syntax_gate else 1
+        # BOUNDED corrective retries through the existing feedback prompt
+        # injection (default 3 total attempts, configurable via
+        # implement.syntax_gate_max_attempts); with the gate off there is a
+        # single attempt (legacy behavior).
+        max_attempts = _syntax_gate_max_attempts(self.config) if syntax_gate else 1
         current_feedback = feedback
         generated_files: list[Path] = []
         gate_error: ImplementSyntaxGateError | None = None
@@ -1509,13 +1631,15 @@ def _write_generated_files(
     if syntax_gate:
         # Validate EVERY payload before writing ANY file: a gate failure leaves
         # the working tree untouched (no partial half-broken task output).
-        failures = [
-            (relative_path, error)
-            for relative_path, content in file_payloads
-            if (error := _payload_syntax_error(relative_path, content)) is not None
-        ]
+        failures: list[tuple[str, str]] = []
+        rejected_payloads: dict[str, str] = {}
+        for relative_path, content in file_payloads:
+            error = _payload_syntax_error(relative_path, content)
+            if error is not None:
+                failures.append((relative_path, error))
+                rejected_payloads[relative_path] = content
         if failures:
-            raise ImplementSyntaxGateError(failures)
+            raise ImplementSyntaxGateError(failures, payloads=rejected_payloads)
     traceability_comment = _build_traceability_comment(design_context, spec, dependency_documents)
     output_prefixes = [PurePosixPath(item) for item in spec.output_paths]
     generated_paths: list[Path] = []

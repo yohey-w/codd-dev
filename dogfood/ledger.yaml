@@ -243,6 +243,16 @@ axes:
     automation: manual
     runner: README 'Weakest-viable-model protocol' (modifier on D1-D4).
     sut_model: sonnet
+    history:
+    - '2026-06-12: greenfield run (claude sonnet SUT, Japanese-context app) repeatedly failed the SAME
+      implement task (docs/test/test_strategy.md → src/index.py) — the model, primed by Japanese
+      requirements/context, slipped a NON-ASCII typographic character into a CODE position (run 1: line 286
+      。 U+3002 full-width period; run 2: line 4 — U+2014 em-dash). The FX1 write-time syntax gate correctly
+      rejected each (nothing written, no false-green) but the model never self-corrected across the bounded
+      retries: the generic "not valid Python (line N: invalid character X)" feedback did not steer it to
+      ASCII. Surfaced+fixed F-syntax-gate-nonascii-feedback (actionable codepoint-aware retry feedback +
+      bumped the bounded gate budget 2→3, configurable). Gate NOT weakened — a permanently-unfixable file
+      still fails honestly. saturation reset to 0.'
   D6:
     description: cross-CLI live run — hidden coupling to one CLI/model. Running the same input through
       a different live CLI (codex etc.) surfaces prompt/format/ tooling assumptions. The declared-but-unverified
@@ -610,6 +620,50 @@ findings:
   status: fixed
   class: conceptual
   derived_case_ids: []
+- id: F-syntax-gate-nonascii-feedback
+  axis: D5
+  date: '2026-06-12'
+  model_used: claude sonnet (weakest viable, M1) — observed live during a Japanese-context greenfield run
+  symptom: 'a live greenfield run (Japanese-context app, sonnet SUT) repeatedly failed the SAME implement
+    task (docs/test/test_strategy.md → src/index.py): the model, primed by Japanese requirements/context,
+    repeatedly emitted a NON-ASCII typographic punctuation character into a CODE position (run 1: line 286
+    。 U+3002 full-width period; run 2: line 4 — U+2014 em-dash). The FX1 write-time syntax gate correctly
+    rejected each attempt (nothing written — no false-green) and failed honestly after the bound, but the
+    model never self-corrected across the bounded retries.'
+  root_cause: 'the gate''s retry feedback was non-actionable: the generic "not valid Python (line N: invalid
+    character X)" message did not steer the model to ASCII, so a model biased toward typographic/full-width
+    punctuation by non-ASCII context kept reproducing the same class of error; compounded by a tight retry
+    budget (2 total attempts) that left no room to recover after a corrective hint.'
+  fix_commit: F_SYNTAX_GATE_NONASCII_FEEDBACK_SHA  # placeholder — corrected to the real short sha in a tiny follow-up (mirrors c25d006)
+  fix_description: 'codd/implementer.py — the syntax-gate retry feedback is now explicit and corrective.
+    ImplementSyntaxGateError carries the rejected payload(s); feedback_message() names the file path, the
+    exact failing line, and EVERY offending non-ASCII character with its U+XXXX codepoint and (when free,
+    via unicodedata) its Unicode name, then issues a clear ASCII directive: use ASCII for all code tokens
+    (identifiers, operators, punctuation, statement terminators) and replace typographic/full-width
+    punctuation (em dash —/U+2014, full-width period 。/U+3002, full-width comma ，/U+FF0C, smart quotes)
+    with ASCII equivalents (-, ., ,, ", '') — non-ASCII allowed ONLY inside string/text literals and
+    comments. New helper _describe_nonascii_code_chars(content, lineno) enumerates the codepoints
+    (parser-flagged line first, bounded to 5). The bounded gate budget was bumped from 2 to 3 total attempts
+    via new _syntax_gate_max_attempts(config) (configurable knob implement.syntax_gate_max_attempts, default
+    3, minimum 1, documented in codd/defaults.yaml; junk/sub-1 falls back to default — NEVER unbounded). All
+    FX1 behavior preserved: atomic validate-all-then-write (nothing written until every payload parses),
+    honest loud failure after the bound naming the files, the implement.syntax_gate opt-out flag. The gate
+    is NOT weakened — a genuinely unfixable file still fails with nothing written. CLI/language-agnostic
+    (the feedback is about the GENERATED code, not the CLI; helps sonnet/claude/codex alike). Preserves
+    FX1, dc90c09 (transient/output-ceiling), da60634 (timeout), 3ea34b4 (stdout contract). Generality gate
+    held: full suite green (4190 passed, 0 skipped; was 4181 + 9 new/updated tests).'
+  regression_test: 'tests/test_implement_syntax_gate.py (section 7) — test_gate_feedback_contains_codepoint_line_and_ascii_directive,
+    test_gate_feedback_without_payload_still_carries_ascii_directive, test_nonascii_in_code_recovers_within_bounded_attempts
+    (model slips 。 then — then lands clean on attempt 3, recovers within the new budget),
+    test_permanently_nonascii_file_still_fails_with_nothing_written (gate not weakened),
+    test_syntax_gate_max_attempts_is_configurable, test_syntax_gate_max_attempts_resolver_defaults_and_clamps,
+    test_describe_nonascii_code_chars_reports_codepoint_and_name, test_describe_nonascii_code_chars_flagged_line_first_and_bounded,
+    test_describe_nonascii_code_chars_empty_when_pure_ascii; updated test_broken_python_fails_after_bounded_retry_and_writes_nothing
+    and test_structured_formats_are_gate_checked for the new (3) budget; the syntax_gate opt-out test is unchanged.'
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-d5-nonascii-code-feedback
 pending_cases:
 - id: PC-d6-codex-live
   axis: D6
@@ -726,3 +780,18 @@ pending_cases:
   origin: derived:F-codex-filewriting-stdout
   priority: 2
   status: pending
+- id: PC-d5-nonascii-code-feedback
+  axis: D5
+  hypothesis: A weak model primed by non-ASCII (e.g. Japanese) requirements/context repeatedly emits
+    typographic/full-width punctuation into code positions; the write-time syntax gate correctly rejects
+    but the bounded retries exhaust because the feedback is non-actionable. The retry feedback must name
+    the offending codepoint(s) + line and direct the model to ASCII for code tokens, with one more bounded
+    attempt — so a recoverable slip converges within the budget while a genuinely unfixable file still
+    fails honestly. Build + regression-test the actionable feedback and the (configurable) budget.
+  origin: derived:F-syntax-gate-nonascii-feedback
+  priority: 1
+  status: done  # 2026-06-12 — surfaced+fixed F-syntax-gate-nonascii-feedback (codd/implementer.py:
+    # codepoint-aware ImplementSyntaxGateError.feedback_message + _describe_nonascii_code_chars; bounded
+    # gate budget 2→3 via _syntax_gate_max_attempts / implement.syntax_gate_max_attempts). FX1 atomicity,
+    # honest failure, and opt-out preserved; gate not weakened. Regression-tested in
+    # tests/test_implement_syntax_gate.py (section 7).
