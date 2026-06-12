@@ -8,6 +8,25 @@ ai_commands:
   plan_derive: null
   design_doc_extract: null
   criteria_expand: null
+ai:
+  # Wall-clock timeout (seconds) for a SINGLE AI subprocess call. A model CLI can
+  # stall one call indefinitely with no error and no output (blocked on a
+  # half-open socket); the recoverable-error retry never fires because nothing is
+  # ever returned to classify, so without this the whole pipeline can freeze
+  # forever. Every AI call carries this finite budget — a stall that exceeds it
+  # kills the child and is treated as a transient transport error, flowing into
+  # the same bounded auto-retry/backoff as a dropped socket (a one-off network
+  # stall self-recovers; a persistently-hung call fails loudly after the bounded
+  # attempts instead of hanging). Each retry attempt gets its own fresh timeout.
+  #
+  # null = use the shared default (codd.defaults.AI_TIMEOUT_SECONDS = 3600s).
+  # 3600s is generous: a max-effort model writing a large design doc legitimately
+  # runs many minutes (longest legitimate single call observed ~20min); the
+  # silent stall this guard targets ran 47min+ and climbing. Lower it here for a
+  # tighter bound (e.g. 1200 for 20min). Override precedence (first wins):
+  #   CODD_AI_CALL_TIMEOUT env > CODD_AI_TIMEOUT_SECONDS env >
+  #   ai.call_timeout_seconds > llm.timeout_seconds > the 3600s default.
+  call_timeout_seconds: null
 coding_principles: null
 scan:
   source_dirs:

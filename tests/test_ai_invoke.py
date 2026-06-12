@@ -851,3 +851,220 @@ def test_invoke_ai_output_ceiling_recovery_threads_to_file_writing_agent(monkeyp
     assert "=== FILE: src/x.py ===" in result
     assert agent_envs[0] is None
     assert agent_envs[-1] == str(ai_invoke.RAISED_OUTPUT_TOKENS)
+
+
+# ═══════════════════════════════════════════════════════════
+# invoke_ai: wall-clock timeout on a silently-hung AI call (anti-hang)
+# ═══════════════════════════════════════════════════════════
+#
+# Live symptom (F-ai-call-hang, axis D7): a model CLI subprocess stalled on a
+# single call for 47min+ — process Sl, ~0.9% CPU, blocked on I/O, NO error and
+# NO output. The recoverable-error retry never fired (nothing was returned to
+# classify), so the whole pipeline froze forever. Root cause: AI subprocess
+# calls had no wall-clock timeout. The fix gives every AI subprocess call a
+# finite timeout; a stall raises subprocess.TimeoutExpired (which kills the
+# spawned child), and the timeout is treated as a TRANSIENT transport failure so
+# it flows into the SAME bounded auto-retry/backoff as a dropped socket. A
+# one-off stall self-recovers; a persistently-hung call fails loudly after the
+# bounded attempts instead of hanging.
+
+
+def _timeout_expired(command, timeout):
+    """A subprocess.TimeoutExpired exactly as subprocess.run raises it.
+
+    subprocess.run kills and reaps the child before raising this, so simulating
+    the exception is the faithful "the call hung past the wall-clock budget"
+    fake — no real child, no real wait.
+    """
+    return subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+
+
+def test_default_call_timeout_matches_shared_ssot():
+    # The direct-subprocess timeout default is the same SSoT the deployment
+    # adapter uses, so every AI call site agrees by default.
+    from codd.defaults import AI_TIMEOUT_SECONDS
+
+    assert ai_invoke.DEFAULT_AI_CALL_TIMEOUT_SECONDS == AI_TIMEOUT_SECONDS == 3600.0
+
+
+def test_resolve_ai_call_timeout_precedence(monkeypatch):
+    monkeypatch.delenv(ai_invoke.AI_CALL_TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(ai_invoke.AI_TIMEOUT_ENV, raising=False)
+
+    # default when nothing set
+    assert ai_invoke.resolve_ai_call_timeout() == ai_invoke.DEFAULT_AI_CALL_TIMEOUT_SECONDS
+    # config keys: dedicated ai.call_timeout_seconds wins over llm.timeout_seconds
+    assert ai_invoke.resolve_ai_call_timeout({"llm": {"timeout_seconds": 600}}) == 600.0
+    assert (
+        ai_invoke.resolve_ai_call_timeout(
+            {"ai": {"call_timeout_seconds": 1200}, "llm": {"timeout_seconds": 600}}
+        )
+        == 1200.0
+    )
+    # explicit override beats everything
+    assert ai_invoke.resolve_ai_call_timeout({"ai": {"call_timeout_seconds": 1200}}, override=42) == 42.0
+
+
+def test_resolve_ai_call_timeout_env_overrides(monkeypatch):
+    # dedicated env beats shared env beats config
+    monkeypatch.setenv(ai_invoke.AI_TIMEOUT_ENV, "777")
+    assert ai_invoke.resolve_ai_call_timeout({"ai": {"call_timeout_seconds": 1200}}) == 777.0
+    monkeypatch.setenv(ai_invoke.AI_CALL_TIMEOUT_ENV, "900")
+    assert ai_invoke.resolve_ai_call_timeout({"ai": {"call_timeout_seconds": 1200}}) == 900.0
+
+
+def test_resolve_ai_call_timeout_ignores_garbage_and_nonpositive(monkeypatch):
+    # blank/unparseable/zero/negative are ignored (fall through) — never disable
+    # the timeout. Falls back to the default here.
+    monkeypatch.setenv(ai_invoke.AI_CALL_TIMEOUT_ENV, "not-a-number")
+    monkeypatch.delenv(ai_invoke.AI_TIMEOUT_ENV, raising=False)
+    assert ai_invoke.resolve_ai_call_timeout() == ai_invoke.DEFAULT_AI_CALL_TIMEOUT_SECONDS
+    assert ai_invoke.resolve_ai_call_timeout({"ai": {"call_timeout_seconds": 0}}) == \
+        ai_invoke.DEFAULT_AI_CALL_TIMEOUT_SECONDS
+    assert ai_invoke.resolve_ai_call_timeout({"ai": {"call_timeout_seconds": -5}}) == \
+        ai_invoke.DEFAULT_AI_CALL_TIMEOUT_SECONDS
+
+
+def test_invoke_ai_passes_wall_clock_timeout_to_subprocess(monkeypatch):
+    # Every AI subprocess call must carry a finite timeout= so a silent hang
+    # cannot block forever.
+    monkeypatch.delenv(ai_invoke.AI_CALL_TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(ai_invoke.AI_TIMEOUT_ENV, raising=False)
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return _completed(command)
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    invoke_ai("mock-ai", "prompt")
+    assert seen["timeout"] == ai_invoke.DEFAULT_AI_CALL_TIMEOUT_SECONDS
+    assert seen["timeout"] is not None and seen["timeout"] > 0
+
+
+def test_invoke_ai_timeout_then_succeeds(monkeypatch):
+    # (a) A call that exceeds the timeout is killed (subprocess.run does this on
+    # TimeoutExpired) and the one-off stall self-recovers on auto-retry.
+    monkeypatch.setattr(ai_invoke.time, "sleep", lambda _s: None)  # no real backoff
+    monkeypatch.delenv(ai_invoke.AI_CALL_TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(ai_invoke.AI_TIMEOUT_ENV, raising=False)
+    attempts = []
+
+    def fake_run(command, **kwargs):
+        attempts.append(command)
+        if len(attempts) == 1:
+            raise _timeout_expired(command, kwargs.get("timeout"))
+        return _completed(command, stdout="recovered after a hang")
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    # retries=0 (the default at every call site): recovery is independent of it.
+    assert invoke_ai("mock-ai", "prompt") == "recovered after a hang"
+    assert len(attempts) == 2
+
+
+def test_invoke_ai_persistent_timeout_fails_after_bounded_attempts(monkeypatch):
+    # (b) If the call keeps timing out, it must FAIL after the bounded attempts
+    # with a clear "AI call timed out after Ns" message — NOT hang forever.
+    monkeypatch.setattr(ai_invoke.time, "sleep", lambda _s: None)
+    monkeypatch.setenv(ai_invoke.AI_CALL_TIMEOUT_ENV, "5")  # tiny, deterministic
+    attempts = []
+
+    def fake_run(command, **kwargs):
+        attempts.append(command)
+        raise _timeout_expired(command, kwargs.get("timeout"))
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match=r"AI call timed out after 5s") as excinfo:
+        invoke_ai("mock-ai", "prompt")
+    # bounded: 1 initial attempt + TRANSIENT_AUTO_RETRIES, then it gives up.
+    assert len(attempts) == 1 + ai_invoke.TRANSIENT_AUTO_RETRIES
+    # the message is routed through the transient classifier (clear, finite).
+    assert "AI command failed" in str(excinfo.value)
+
+
+def test_invoke_ai_timeout_is_classified_transient():
+    # The timeout failure text must match the transient classifier so it routes
+    # into the SAME recovery path as a dropped socket (no parallel path).
+    msg = ai_invoke._AI_CALL_TIMEOUT_MESSAGE.format(seconds="5")
+    assert ai_invoke._is_transient_error(msg)
+
+
+def test_invoke_ai_each_retry_gets_fresh_timeout(monkeypatch):
+    # Per-call: the timeout= is supplied on EVERY subprocess attempt, not once.
+    monkeypatch.setattr(ai_invoke.time, "sleep", lambda _s: None)
+    monkeypatch.setenv(ai_invoke.AI_CALL_TIMEOUT_ENV, "5")
+    timeouts = []
+
+    def fake_run(command, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        if len(timeouts) < 3:
+            raise _timeout_expired(command, kwargs.get("timeout"))
+        return _completed(command, stdout="ok")
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    assert invoke_ai("mock-ai", "prompt") == "ok"
+    assert timeouts == [5.0, 5.0, 5.0]  # fresh, finite budget each attempt
+
+
+def test_invoke_file_writing_agent_timeout_routes_to_transient_retry(monkeypatch, tmp_path):
+    # The file-writing-agent path (codex / interactive claude) must ALSO carry a
+    # wall-clock timeout and route a stall into the same transient auto-retry.
+    monkeypatch.setattr(ai_invoke.time, "sleep", lambda _s: None)
+    monkeypatch.setenv(ai_invoke.AI_CALL_TIMEOUT_ENV, "5")
+    agent_attempts = []
+
+    def fake_run(command, **kwargs):
+        if command and command[0] == "git":
+            return _completed(command, stdout="")
+        # the AI agent invocation
+        agent_attempts.append(kwargs.get("timeout"))
+        if len(agent_attempts) == 1:
+            raise _timeout_expired(command, kwargs.get("timeout"))
+        return _completed(command, stdout="=== FILE: src/x.py ===\nbody\n")
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    result = invoke_ai("codex exec -", "prompt", project_root=tmp_path)
+    assert "=== FILE: src/x.py ===" in result
+    # the agent's AI call carried a finite timeout on the first (hung) attempt.
+    assert agent_attempts[0] == 5.0
+
+
+def test_invoke_file_writing_agent_persistent_timeout_fails_clearly(monkeypatch, tmp_path):
+    # A persistently-hung file-writing agent fails loudly with the timeout
+    # message after the bounded attempts — never an infinite hang.
+    monkeypatch.setattr(ai_invoke.time, "sleep", lambda _s: None)
+    monkeypatch.setenv(ai_invoke.AI_CALL_TIMEOUT_ENV, "5")
+
+    def fake_run(command, **kwargs):
+        if command and command[0] == "git":
+            return _completed(command, stdout="")
+        raise _timeout_expired(command, kwargs.get("timeout"))
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match=r"AI call timed out after 5s"):
+        invoke_ai("codex exec -", "prompt", project_root=tmp_path)
+
+
+def test_invoke_file_writing_agent_default_timeout_is_finite(monkeypatch, tmp_path):
+    # When no override is set, the file-writing path still self-resolves the
+    # shared finite default (regression: it must never run unbounded).
+    monkeypatch.delenv(ai_invoke.AI_CALL_TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(ai_invoke.AI_TIMEOUT_ENV, raising=False)
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        if command and command[0] == "git":
+            return _completed(command, stdout="")
+        seen["timeout"] = kwargs.get("timeout")
+        return _completed(command, stdout="=== FILE: src/x.py ===\nbody\n")
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    invoke_ai("codex exec -", "prompt", project_root=tmp_path)
+    assert seen["timeout"] == ai_invoke.DEFAULT_AI_CALL_TIMEOUT_SECONDS

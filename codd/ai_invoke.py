@@ -55,12 +55,49 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from codd.claude_cli import with_default_claude_permission_bypass
+from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 
 # Default AI command (moved from codd.generator; generator re-exports it).
 DEFAULT_AI_COMMAND = (
     'claude --print --permission-mode bypassPermissions '
     '--dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools ""'
 )
+
+# ── Wall-clock timeout on the AI subprocess (anti silent-hang) ──────────────
+#
+# A model CLI can stall a single call indefinitely with NO error and NO output
+# (process Sl, ~0 CPU, blocked on a half-open socket) — the recoverable-error
+# classifier never fires because nothing is ever returned to classify, so the
+# whole pipeline freezes forever. Every AI subprocess call therefore carries a
+# finite wall-clock timeout; ``subprocess.run(..., timeout=...)`` kills the
+# child it spawned before raising ``TimeoutExpired`` (CPython sends SIGKILL and
+# reaps it), so a timed-out call leaves no zombie/orphan. A timeout is treated
+# as a transient transport failure and flows into the SAME bounded auto-retry /
+# backoff as a dropped socket (see ``_invoke_with_recovery``): a one-off network
+# stall self-recovers, a persistently-hung call fails loudly after the bounded
+# attempts instead of hanging.
+#
+# Default is the shared SSoT ``codd.defaults.AI_TIMEOUT_SECONDS`` (3600s) so the
+# direct-subprocess path, the file-writing-agent path, and the deployment
+# adapter (``SubprocessAiCommand``, which already times out via the same SSoT)
+# all agree. 3600s is generous: heavy reasoning calls (large design docs on a
+# max-effort model) legitimately run many minutes; the longest legitimate single
+# call observed is ~20min, and the silent stall that motivated this guard ran
+# 47min+ and climbing — well clear of any real call. Operators who want a
+# tighter bound override per-call WITHOUT lowering the global default via, in
+# precedence order:
+#   1. ``CODD_AI_CALL_TIMEOUT`` env var (this guard's dedicated knob)
+#   2. ``CODD_AI_TIMEOUT_SECONDS`` env var (the shared AI-timeout SSoT)
+#   3. ``ai.call_timeout_seconds`` in codd.yaml (this guard's dedicated key)
+#   4. ``llm.timeout_seconds`` in codd.yaml (the shared AI-timeout SSoT)
+#   5. the ``AI_TIMEOUT_SECONDS`` default.
+# Each retry attempt gets its own fresh timeout (it is applied per subprocess
+# call, not across the whole recovery loop).
+DEFAULT_AI_CALL_TIMEOUT_SECONDS: float = float(_DEFAULT_AI_TIMEOUT_SECONDS)
+#: Dedicated env override for the per-call wall-clock timeout (highest priority).
+AI_CALL_TIMEOUT_ENV = "CODD_AI_CALL_TIMEOUT"
+#: Shared AI-timeout env override (honored as a fallback so all call sites agree).
+AI_TIMEOUT_ENV = "CODD_AI_TIMEOUT_SECONDS"
 
 # Plain text-in/text-out AI invoker signature shared across the codebase.
 AiInvoke = Callable[[str], str]
@@ -118,6 +155,60 @@ def resolve_ai_command(
     if not isinstance(raw_command, str) or not raw_command.strip():
         raise ValueError("ai_command must be a non-empty string")
     return raw_command.strip()
+
+
+def _coerce_positive_float(value: Any) -> float | None:
+    """Parse *value* into a positive float, or ``None`` if it isn't one.
+
+    Used to read the timeout from env strings and config scalars defensively: a
+    blank, unparseable, zero, or negative value is ignored (falls through to the
+    next override source) rather than turning the timeout off.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _config_nested_value(config: Mapping[str, Any] | None, *path: str) -> Any:
+    value: Any = config
+    for key in path:
+        if not isinstance(value, Mapping) or key not in value:
+            return None
+        value = value[key]
+    return value
+
+
+def resolve_ai_call_timeout(
+    config: Mapping[str, Any] | None = None,
+    override: float | None = None,
+) -> float:
+    """Resolve the per-call wall-clock timeout (seconds) for an AI subprocess.
+
+    Precedence (first positive value wins): explicit *override* >
+    ``CODD_AI_CALL_TIMEOUT`` env > ``CODD_AI_TIMEOUT_SECONDS`` env >
+    ``ai.call_timeout_seconds`` config > ``llm.timeout_seconds`` config >
+    :data:`DEFAULT_AI_CALL_TIMEOUT_SECONDS`. The two env vars and two config
+    keys keep this guard's dedicated knob (``ai.call_timeout_seconds`` /
+    ``CODD_AI_CALL_TIMEOUT``) layered on top of the shared AI-timeout SSoT
+    (``llm.timeout_seconds`` / ``CODD_AI_TIMEOUT_SECONDS``) so every AI call
+    site agrees by default. Always finite and positive.
+    """
+    candidates = (
+        override,
+        os.environ.get(AI_CALL_TIMEOUT_ENV),
+        os.environ.get(AI_TIMEOUT_ENV),
+        _config_nested_value(config, "ai", "call_timeout_seconds"),
+        _config_nested_value(config, "llm", "timeout_seconds"),
+    )
+    for candidate in candidates:
+        resolved = _coerce_positive_float(candidate)
+        if resolved is not None:
+            return resolved
+    return DEFAULT_AI_CALL_TIMEOUT_SECONDS
 
 
 # ═══════════════════════════════════════════════════════════
@@ -217,14 +308,20 @@ def is_codex_exec_command(parts: list[str]) -> bool:
 
 def invoke_file_writing_agent(
     command: list[str], prompt: str, project_root: Path,
-    *, env: Mapping[str, str] | None = None,
+    *, env: Mapping[str, str] | None = None, timeout: float | None = None,
 ) -> str:
     """Invoke an AI agent that writes files directly, capture changes as === FILE: === blocks.
 
     *env*, when given, replaces the child process environment (used by the
     output-ceiling recovery to raise ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``).
+    *timeout* is the per-call wall-clock budget (seconds); ``None`` resolves the
+    shared default via :func:`resolve_ai_call_timeout`. A timed-out child is
+    killed by ``subprocess.run`` before the failure is raised (no zombie), and
+    the failure is raised with the ``AI command failed:`` prefix so it routes
+    into the same transient auto-retry as a dropped socket.
     """
     cwd = str(project_root)
+    call_timeout = resolve_ai_call_timeout() if timeout is None else timeout
 
     # Stage all current state as baseline for change detection
     subprocess.run(["git", "add", "-A"], cwd=cwd, capture_output=True)
@@ -232,13 +329,15 @@ def invoke_file_writing_agent(
     try:
         result = subprocess.run(
             command, input=prompt, capture_output=True, text=True, encoding="utf-8",
-            check=False, cwd=cwd, timeout=3600,
+            check=False, cwd=cwd, timeout=call_timeout,
             env=dict(env) if env is not None else None,
         )
     except FileNotFoundError as exc:
         raise ValueError(f"AI command not found: {command[0]}") from exc
     except subprocess.TimeoutExpired:
-        raise ValueError("AI command timed out (3600s)")
+        # subprocess.run already SIGKILLed and reaped the child before raising.
+        # Surface as a transient failure so the recovery wrapper retries it.
+        raise ValueError(_AI_CALL_TIMEOUT_MESSAGE.format(seconds=_format_seconds(call_timeout)))
 
     print(
         f"[codd] file-writing agent finished: returncode={result.returncode} "
@@ -302,26 +401,49 @@ def invoke_file_writing_agent(
     return "\n".join(parts)
 
 
+#: Message raised on a wall-clock timeout. Carries the ``AI command failed:``
+#: prefix so it matches ``_is_transient_failure`` AND the "timed out" /
+#: "timeout" transient patterns — a timed-out call is routed into the SAME
+#: bounded auto-retry/backoff as a dropped socket, no parallel path.
+_AI_CALL_TIMEOUT_MESSAGE = "AI command failed: AI call timed out after {seconds}s"
+
+
+def _format_seconds(seconds: float) -> str:
+    """Render a timeout for messages: drop a redundant ``.0`` on whole numbers."""
+    return f"{int(seconds)}" if float(seconds).is_integer() else f"{seconds:g}"
+
+
 def _invoke_subprocess(
     ai_command: str, prompt: str, *, project_root: Path | None = None,
-    env: Mapping[str, str] | None = None,
+    env: Mapping[str, str] | None = None, timeout: float | None = None,
 ) -> str:
     """Single-attempt subprocess invocation (the historical generator path).
 
     *env*, when given, replaces the child process environment — used by the
     output-ceiling recovery to re-issue the same call with a raised
-    ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` budget.
+    ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` budget. *timeout* is the per-call
+    wall-clock budget (seconds); ``None`` resolves the shared default via
+    :func:`resolve_ai_call_timeout`. ``subprocess.run`` kills the child it
+    spawned on timeout (no zombie/orphan) before this re-raises the stall as a
+    transient ``AI command failed: AI call timed out ...`` so it flows into the
+    same auto-retry as a dropped socket.
     """
     command = with_default_claude_permission_bypass(shlex.split(ai_command))
     if not command:
         raise ValueError("ai_command must not be empty")
 
+    call_timeout = resolve_ai_call_timeout() if timeout is None else timeout
+
     if is_file_writing_agent(command) and project_root is not None:
-        # Pass env only when an override is present so existing monkeypatched
-        # fakes with the historical (command, prompt, project_root) signature
-        # keep working (the common path passes env=None).
-        if env is not None:
-            return invoke_file_writing_agent(command, prompt, project_root, env=env)
+        # Pass env/timeout only when an override is present so existing
+        # monkeypatched fakes with the historical (command, prompt,
+        # project_root) signature keep working (the common path passes env=None
+        # and timeout=None, and invoke_file_writing_agent self-resolves the same
+        # shared timeout default via resolve_ai_call_timeout()).
+        if env is not None or timeout is not None:
+            return invoke_file_writing_agent(
+                command, prompt, project_root, env=env, timeout=call_timeout
+            )
         return invoke_file_writing_agent(command, prompt, project_root)
 
     try:
@@ -331,10 +453,15 @@ def _invoke_subprocess(
             capture_output=True,
             text=True, encoding="utf-8",
             check=False,
+            timeout=call_timeout,
             env=dict(env) if env is not None else None,
         )
     except FileNotFoundError as exc:
         raise ValueError(f"AI command not found: {command[0]}") from exc
+    except subprocess.TimeoutExpired:
+        # subprocess.run already SIGKILLed and reaped the child before raising.
+        # Surface as a transient failure so the recovery wrapper retries it.
+        raise ValueError(_AI_CALL_TIMEOUT_MESSAGE.format(seconds=_format_seconds(call_timeout)))
 
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
@@ -373,6 +500,11 @@ _TRANSIENT_ERROR_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bECONNRESET\b|\bECONNREFUSED\b|\bEPIPE\b|\bETIMEDOUT\b", re.IGNORECASE),
     re.compile(r"\b(?:read|request|connection|socket) ?timed? ?out\b", re.IGNORECASE),
     re.compile(r"\btimeout\b", re.IGNORECASE),
+    # Bare "timed out" (no transport-word prefix) — our own wall-clock-timeout
+    # message ("AI call timed out after Ns") and any CLI that reports a plain
+    # stall. Conservative: permanent auth/billing/validation errors never say
+    # "timed out", so this routes a hung call into the same transient retry.
+    re.compile(r"\btimed out\b", re.IGNORECASE),
     re.compile(r"\b(?:429|500|502|503|504)\b", re.IGNORECASE),
     re.compile(r"too many requests", re.IGNORECASE),
     re.compile(r"rate limit", re.IGNORECASE),
@@ -563,6 +695,15 @@ def invoke_ai(
             adapter factory (``get_ai_command``) so the Codex App Server
             transport (and its fallback chain) is honored. ``None`` keeps the
             direct subprocess path.
+
+    Wall-clock timeout: every direct-subprocess AI call carries a finite
+    per-call timeout (resolved via :func:`resolve_ai_call_timeout`; default
+    :data:`DEFAULT_AI_CALL_TIMEOUT_SECONDS`). A stall that exceeds it kills the
+    child and raises a transient ``AI call timed out ...`` that flows into the
+    same bounded auto-retry as a dropped socket, so a silent no-output hang can
+    no longer freeze the pipeline forever. Each retry attempt gets a fresh
+    timeout. The deployment-adapter path owns its own timeout (the adapter
+    already applies ``resolve_timeout`` from the shared SSoT).
     """
     command_str = ai_command
 
@@ -597,6 +738,10 @@ def invoke_ai(
             subprocess_root = None if harden_read_only else project_root
 
             def attempt(current_prompt: str, env: Mapping[str, str] | None = None) -> str:
+                # timeout is left to _invoke_subprocess to resolve (via
+                # resolve_ai_call_timeout) so the historical call sites/fakes
+                # with the (command, prompt, project_root[, env]) shape keep
+                # working; the resolver still honours the env vars and config.
                 return _invoke_subprocess(
                     command_str, current_prompt, project_root=subprocess_root, env=env
                 )
@@ -619,6 +764,9 @@ def invoke_ai(
 
 __all__ = [
     "AiInvoke",
+    "AI_CALL_TIMEOUT_ENV",
+    "AI_TIMEOUT_ENV",
+    "DEFAULT_AI_CALL_TIMEOUT_SECONDS",
     "DEFAULT_AI_COMMAND",
     "RetryFeedback",
     "force_claude_print",
@@ -627,6 +775,7 @@ __all__ = [
     "is_codex_exec_command",
     "is_file_writing_agent",
     "prepare_read_only_codex",
+    "resolve_ai_call_timeout",
     "resolve_ai_command",
 ]
 
