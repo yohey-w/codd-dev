@@ -95,6 +95,26 @@ implement:
   # unfixable file still fails loudly with nothing written. No effect when
   # syntax_gate is false (single attempt, legacy behavior).
   syntax_gate_max_attempts: 3
+  # confusable_check (default ON): a SECOND write-time check, sibling of the
+  # syntax gate, for non-ASCII lookalike (homoglyph) characters that the parser
+  # ACCEPTS. The syntax gate catches non-ASCII that breaks parsing; it cannot
+  # catch a Cyrillic "е" (U+0435) or "а" (U+0430) substituted for an ASCII
+  # letter INSIDE an identifier -- "іd" looks like "id" but is a different name
+  # (NameError / silent dict-key mismatch at runtime). The file parses, may even
+  # pass tests written with the same wrong char, but is semantically broken: a
+  # false-green. Current-generation models emit these intermittently. This check
+  # tokenizes (Python: stdlib `tokenize`) and inspects ONLY code-position tokens
+  # (identifiers, operators) -- STRING and COMMENT tokens are skipped entirely,
+  # so non-ASCII inside string literals / comments (Japanese UI copy, etc.) is
+  # NEVER flagged. It flags only MIXED-SCRIPT identifiers (ASCII-Latin mixed with
+  # Cyrillic/Greek -- the high-signal homoglyph pattern, near-zero false-positive)
+  # and non-ASCII in operator positions. Single-script non-Latin identifiers a
+  # language genuinely allows are NOT flagged. Non-Python files are skipped (the
+  # syntax gate is their backstop). A failure routes the same actionable retry
+  # feedback through the same bounded budget (syntax_gate_max_attempts) and the
+  # same atomic "nothing written until clean" guarantee. Cheap, deterministic,
+  # no LLM calls. Set false to opt out of the confusable check only.
+  confusable_check: true
   # Shared canonical output root for implement tasks WITHOUT an explicit
   # default_output_paths / implement_targets mapping (e.g. greenfield-derived
   # tasks). null = derive from scan.source_dirs[0] (usually "src/"). Every

@@ -253,6 +253,16 @@ axes:
       ASCII. Surfaced+fixed F-syntax-gate-nonascii-feedback (actionable codepoint-aware retry feedback +
       bumped the bounded gate budget 2→3, configurable). Gate NOT weakened — a permanently-unfixable file
       still fails honestly. saturation reset to 0.'
+    - '2026-06-12: owner-reported broader robustness gap (current-gen models, Sonnet AND Opus, emit
+      non-ASCII LOOKALIKE/homoglyph chars intermittently) — distinct from the typographic-in-code case
+      above. A Cyrillic е (U+0435) / а (U+0430) / і (U+0456) substituted for an ASCII letter INSIDE an
+      otherwise-ASCII identifier (іd vs id; dеf as a mixed-script NAME) is a SYNTACTICALLY-VALID position:
+      the file PARSES FINE, so the FX1 syntax gate (ast.parse) passes it — a NEW false-green class (passes
+      parse, may pass tests written with the same wrong char, semantically broken: NameError / silent
+      dict-key mismatch at runtime). The syntax gate structurally cannot catch it (the file is valid).
+      Surfaced+fixed F-confusable-passthrough — a SEPARATE deterministic confusable detector
+      (implement.confusable_check, default ON), a sibling check at the same write-time gate point.
+      Conceptual: a NEW check LAYER, not a tweak to the existing gate. saturation stays 0 (new finding).'
   D6:
     description: cross-CLI live run — hidden coupling to one CLI/model. Running the same input through
       a different live CLI (codex etc.) surfaces prompt/format/ tooling assumptions. The declared-but-unverified
@@ -664,6 +674,71 @@ findings:
   class: mechanical
   derived_case_ids:
   - PC-d5-nonascii-code-feedback
+- id: F-confusable-passthrough
+  axis: D5
+  date: '2026-06-12'
+  model_used: current-generation models broadly (owner-reported; reproduced deterministically) — affects
+    Sonnet AND Opus, not a single weak model. Leans conceptual (a NEW check layer, not a model-sensitivity
+    instrument finding).
+  symptom: 'a NEW false-green class the FX1 syntax gate cannot catch. Current-generation models
+    intermittently emit non-ASCII LOOKALIKE (homoglyph) characters in generated code — not typographic
+    punctuation in a code position (which the syntax gate already catches because it breaks parsing) but
+    homoglyphs in SYNTACTICALLY-VALID positions the parser ACCEPTS: a Cyrillic е (U+0435) / а (U+0430) /
+    і (U+0456) substituted for an ASCII letter INSIDE an otherwise-ASCII identifier (іd looks like id but
+    is a different name; a Cyrillic е inside def makes dеf a mixed-script NAME, not the keyword). The file
+    PARSES FINE, so the write-time syntax gate (ast.parse) passes it; it may even pass tests written with
+    the same wrong char, but is semantically broken at runtime (NameError / silent dict-key mismatch).
+    This is a model-generation-instability robustness gap that passes the parse-only gate.'
+  root_cause: 'no confusable-detection layer existed. The syntax gate validates only that a payload PARSES;
+    a homoglyph in a valid identifier position parses, so the gate (correctly, by its contract) lets it
+    through. Catching it needs a SEPARATE deterministic check that distinguishes code positions from
+    string/comment literals (non-ASCII is legitimate in literals — Japanese UI copy — and must NOT be
+    flagged) and flags the high-signal homoglyph pattern.'
+  fix_commit: PENDING  # short sha recorded in an immediately-following follow-up commit (c25d006 precedent)
+  fix_description: 'codd/implementer.py — a new write-time confusable-character check (layer 2), sibling of
+    the syntax gate, run at the SAME point in the implementer write path and reusing the SAME machinery:
+    atomic validate-all-then-write (nothing on disk until every payload is clean), the bounded retry budget
+    (implement.syntax_gate_max_attempts, default 3), and the ImplementSyntaxGateError feedback/retry loop.
+    PRECISION is the whole design (false positives are the main risk), so it is deliberately narrow:
+    _confusable_findings tokenizes Python with the stdlib `tokenize` module and inspects ONLY code-position
+    tokens — NAME/identifier and OP/operator — and skips STRING, COMMENT, and f-string text tokens ENTIRELY,
+    so non-ASCII inside string literals and comments is NEVER flagged (the critical false-positive guard).
+    In NAME tokens it flags ONLY mixed-script identifiers (_confusable_scripts_in_identifier: an identifier
+    mixing ASCII-Latin with Cyrillic/Greek, detected via the first word of unicodedata.name — the
+    near-zero-false-positive homoglyph signal); a single-script non-Latin identifier a language genuinely
+    allows (pure Greek/CJK) is NOT flagged. In OP tokens it flags any non-ASCII (full-width punctuation;
+    most already break parse — cheap backstop). Non-Python files are skipped (_confusable_code_error gates
+    on .py suffix / project language; the syntax gate is their backstop) and un-tokenizable input returns
+    empty (that is the syntax gate''s job). On detection, ImplementSyntaxGateError carries confusable_failures
+    and feedback_message() names the file, line, the confusable char (codepoint + Unicode name + script),
+    the identifier, and directs "this identifier mixes scripts (likely a homoglyph); use ASCII Latin letters
+    for ALL code identifiers — do NOT change text inside string literals or comments." Opt-out
+    implement.confusable_check (default ON, documented in codd/defaults.yaml); independent of the syntax gate
+    (each can be toggled separately; either failure drives the bounded retry). CLI/model-agnostic and
+    language-aware (Python precise via tokenize; others conservatively skipped). Preserves FX1 syntax gate,
+    339a763 feedback, dc90c09 (transient/ceiling), da60634 (timeout), 3ea34b4 (stdout contract). Generality
+    gate held: no project names, developer-tool framing, general to any project/model. Full suite green
+    (4216 passed, 0 skipped; was 4190 + 26 new tests).'
+  regression_test: 'tests/test_confusable_check.py (26 tests) — mixed-script classification
+    (test_mixed_script_latin_plus_cyrillic_is_flagged, test_mixed_script_latin_plus_greek_is_flagged,
+    test_pure_ascii_identifier_is_not_flagged, test_single_script_non_latin_identifier_is_not_flagged);
+    code-vs-literal isolation (test_findings_skip_non_ascii_inside_string_literal,
+    test_findings_skip_non_ascii_inside_comment, test_findings_skip_non_ascii_inside_fstring_text — the
+    critical false-positive guard); engine behavior (test_findings_flag_mixed_script_identifier_with_codepoint_and_script,
+    test_findings_empty_for_clean_ascii, test_findings_bounded_to_cap, test_findings_on_untokenizable_input_returns_empty);
+    payload routing (test_confusable_code_error_flags_python_homoglyph, ..._clean_python_is_none,
+    ..._string_comment_literal_is_none, ..._non_python_suffix_skipped, ..._extensionless_python_by_language);
+    feedback (test_confusable_feedback_names_file_codepoint_script_and_mixed_script_directive,
+    test_all_failures_merges_parse_and_confusable_failures); end-to-end
+    (test_homoglyph_identifier_is_flagged_and_not_written — proves the payload PARSES yet is rejected and
+    nothing is written; test_homoglyph_def_token_is_flagged; test_homoglyph_recovers_within_bounded_attempts;
+    test_japanese_string_and_comment_pass_the_gate — end-to-end false-positive guard, written on FIRST
+    attempt); opt-out + independence (test_confusable_check_opt_out_writes_homoglyph_file,
+    test_confusable_check_enabled_resolver, test_syntax_gate_off_but_confusable_on_still_catches_homoglyph).'
+  status: fixed
+  class: conceptual
+  derived_case_ids:
+  - PC-d5-confusable-passthrough
 pending_cases:
 - id: PC-d6-codex-live
   axis: D6
@@ -795,3 +870,23 @@ pending_cases:
     # gate budget 2→3 via _syntax_gate_max_attempts / implement.syntax_gate_max_attempts). FX1 atomicity,
     # honest failure, and opt-out preserved; gate not weakened. Regression-tested in
     # tests/test_implement_syntax_gate.py (section 7).
+- id: PC-d5-confusable-passthrough
+  axis: D5
+  hypothesis: Current-generation models (Sonnet AND Opus) intermittently emit non-ASCII LOOKALIKE
+    (homoglyph) characters in generated code in SYNTACTICALLY-VALID positions the parser accepts — a
+    Cyrillic/Greek letter substituted for an ASCII letter INSIDE an otherwise-ASCII identifier (іd vs id;
+    dеf as a mixed-script NAME). The file parses, so the parse-only syntax gate passes it; it may even pass
+    tests written with the same wrong char, but is semantically broken (NameError / silent mismatch) — a
+    NEW false-green class. A SEPARATE deterministic confusable detector is needed, scoped to code positions
+    (tokenize NAME/OP, skip STRING/COMMENT/f-string text) and flagging mixed-script identifiers (near-zero
+    false-positive); non-ASCII in legitimate string/comment literals must NOT be flagged. Integrate at the
+    write-time gate with the same atomic-write + bounded-retry + actionable feedback; opt-out + language-aware.
+  origin: derived:F-confusable-passthrough
+  priority: 1
+  status: done  # 2026-06-12 — surfaced+fixed F-confusable-passthrough (codd/implementer.py: new
+    # confusable_check layer — _confusable_findings via stdlib tokenize inspects only NAME/OP tokens,
+    # skips STRING/COMMENT/f-string text; _confusable_scripts_in_identifier flags Latin+Cyrillic/Greek
+    # mixed-script identifiers; ImplementSyntaxGateError.confusable_failures drives codepoint+script-aware
+    # feedback through the existing bounded retry; opt-out implement.confusable_check, default ON). FX1
+    # atomicity, honest failure, and the syntax gate preserved + independent. Critical false-positive guard
+    # (non-ASCII in string/comment literals NOT flagged) regression-tested in tests/test_confusable_check.py.
