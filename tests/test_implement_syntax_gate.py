@@ -30,10 +30,14 @@ import codd.implementer as implementer_module
 from codd.ai_patch import parse_fix_blocks
 from codd.cli import CoddCLIError
 from codd.implementer import (
+    DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS,
     ImplementSpec,
+    ImplementSyntaxGateError,
     Implementer,
+    _describe_nonascii_code_chars,
     _payload_syntax_error,
     _strip_code_fence,
+    _syntax_gate_max_attempts,
 )
 
 
@@ -112,6 +116,22 @@ BROKEN_PY_OUTPUT = (
     "```python\n"
     "def ok() -> int:\n"
     "    return 2\n"
+    "```\n"
+)
+# The EXACT live-dogfood shape: a model primed by Japanese context slips a
+# full-width period (。, U+3002) into a code position — invalid Python.
+NONASCII_PY_OUTPUT = (
+    "=== FILE: src/auth/service.py ===\n"
+    "```python\n"
+    "def build_auth() -> bool:\n"
+    "    return True。\n"  # full-width period in code position
+    "```\n"
+)
+# An em-dash (—, U+2014) used where an ASCII operator/punctuation belongs.
+EMDASH_PY_OUTPUT = (
+    "=== FILE: src/auth/service.py ===\n"
+    "```python\n"
+    "x = 1 — 2\n"  # em-dash where '-' belongs
     "```\n"
 )
 
@@ -226,16 +246,18 @@ def test_broken_python_fails_after_bounded_retry_and_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = _project(tmp_path)
-    calls = _patch_ai_sequence(monkeypatch, [BROKEN_PY_OUTPUT, BROKEN_PY_OUTPUT])
+    calls = _patch_ai_sequence(monkeypatch, [BROKEN_PY_OUTPUT])
 
     with pytest.raises(CoddCLIError, match=r"src/auth/service\.py"):
         Implementer(project).run_implement(ImplementSpec("docs/design/auth.md", ["src/auth"]))
 
-    # ONE bounded retry: exactly two AI invocations, then an honest failure.
-    assert len(calls) == 2
-    # The retry prompt carries the syntax error as review feedback.
+    # Bounded retries: the default budget is 3 total AI invocations, then an
+    # honest failure.
+    assert len(calls) == 3
+    # Each retry prompt carries the syntax error as review feedback.
     assert "not valid Python" in calls[1]
     assert "src/auth/service.py" in calls[1]
+    assert "not valid Python" in calls[2]
     # The broken content is NOT on disk — and neither is the valid sibling
     # (validate-all-then-write keeps the task output atomic).
     assert not (project / "src" / "auth" / "service.py").exists()
@@ -288,11 +310,11 @@ def test_structured_formats_are_gate_checked(
 ) -> None:
     project = _project(tmp_path)
     block = f"=== FILE: src/auth/{filename} ===\n```\n{broken}```\n"
-    calls = _patch_ai_sequence(monkeypatch, [block, block])
+    calls = _patch_ai_sequence(monkeypatch, [block])
 
     with pytest.raises(CoddCLIError, match=filename.replace(".", r"\.")):
         Implementer(project).run_implement(ImplementSpec("docs/design/auth.md", ["src/auth"]))
-    assert len(calls) == 2
+    assert len(calls) == 3  # default bounded budget
     assert not (project / "src" / "auth" / filename).exists()
 
     # The valid counterpart passes the gate and lands on disk.
@@ -357,3 +379,127 @@ def test_ai_patch_empty_fence_block_yields_empty_content_not_fences() -> None:
     block parses as an (intentionally) empty file."""
     blocks = parse_fix_blocks("```python src/pkg/__init__.py\n```")
     assert blocks == [("src/pkg/__init__.py", "")]
+
+
+# ---------------------------------------------------------------------------
+# 7. Non-ASCII-in-code retry feedback (F-syntax-gate-nonascii-feedback)
+#    The gate is RIGHT to reject; the fix is actionable feedback + one more try.
+# ---------------------------------------------------------------------------
+
+
+def test_describe_nonascii_code_chars_reports_codepoint_and_name() -> None:
+    """The detector names the char, its U+XXXX codepoint, and (free) its name."""
+    described = _describe_nonascii_code_chars("def f():\n    return True。\n", lineno=2)
+    assert len(described) == 1
+    entry = described[0]
+    assert "line 2" in entry
+    assert "U+3002" in entry  # full-width period
+    assert "IDEOGRAPHIC FULL STOP" in entry  # unicodedata name, when cheap
+
+
+def test_describe_nonascii_code_chars_flagged_line_first_and_bounded() -> None:
+    """Parser-flagged line is reported first; the enumeration is capped."""
+    content = "a = '—'\n" + "".join(f"b{i} = '。'\n" for i in range(10))
+    described = _describe_nonascii_code_chars(content, lineno=3)
+    assert described, "expected at least one offending character"
+    assert "line 3" in described[0]  # the parser-flagged line leads
+    assert len(described) <= 5  # bounded so the prompt stays small
+
+
+def test_describe_nonascii_code_chars_empty_when_pure_ascii() -> None:
+    assert _describe_nonascii_code_chars("def f():\n    return 1\n", lineno=1) == []
+
+
+def test_gate_feedback_contains_codepoint_line_and_ascii_directive() -> None:
+    """The injected retry feedback must steer the model to ASCII — explicitly."""
+    error = ImplementSyntaxGateError(
+        [("src/auth/service.py", "not valid Python (line 2: invalid character '。' (U+3002))")],
+        payloads={"src/auth/service.py": "def f():\n    return True。\n"},
+    )
+    feedback = error.feedback_message()
+    # File path + the failing line + the offending codepoint.
+    assert "src/auth/service.py" in feedback
+    assert "line 2" in feedback
+    assert "U+3002" in feedback
+    # The actionable ASCII directive (generic, language-neutral framing).
+    assert "ASCII" in feedback
+    assert "code position" in feedback
+    assert "literals and comments" in feedback
+    # Mentions the canonical typographic offenders with their codepoints.
+    assert "U+2014" in feedback  # em dash guidance
+
+
+def test_gate_feedback_without_payload_still_carries_ascii_directive() -> None:
+    """Even with no captured payload, the ASCII directive is always present."""
+    error = ImplementSyntaxGateError(
+        [("src/auth/service.py", "not valid Python (line 9: invalid syntax)")]
+    )
+    feedback = error.feedback_message()
+    assert "src/auth/service.py" in feedback
+    assert "ASCII" in feedback
+    assert "U+2014" in feedback
+
+
+def test_nonascii_in_code_recovers_within_bounded_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live-dogfood case: model slips 。 twice, then lands a clean file on
+    the THIRD attempt — now within the (default 3) budget. Pre-fix (budget 2)
+    this exhausted and failed."""
+    project = _project(tmp_path)
+    calls = _patch_ai_sequence(
+        monkeypatch,
+        [NONASCII_PY_OUTPUT, EMDASH_PY_OUTPUT, VALID_PY_OUTPUT],
+    )
+
+    result = Implementer(project).run_implement(
+        ImplementSpec("docs/design/auth.md", ["src/auth"])
+    )
+
+    assert len(calls) == 3  # recovered on the third (last allowed) attempt
+    # The corrective feedback reached the model on each retry, with codepoints.
+    assert "U+3002" in calls[1]  # first retry flags the full-width period
+    assert "U+2014" in calls[2]  # second retry flags the em-dash
+    service = project / "src" / "auth" / "service.py"
+    assert service in result.generated_files
+    ast.parse(service.read_text(encoding="utf-8"))
+
+
+def test_permanently_nonascii_file_still_fails_with_nothing_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuinely unfixable file is NOT written — the gate is not weakened."""
+    project = _project(tmp_path)
+    calls = _patch_ai_sequence(monkeypatch, [NONASCII_PY_OUTPUT])
+
+    with pytest.raises(CoddCLIError, match=r"src/auth/service\.py"):
+        Implementer(project).run_implement(ImplementSpec("docs/design/auth.md", ["src/auth"]))
+
+    assert len(calls) == DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS  # bounded, not unbounded
+    assert not (project / "src" / "auth" / "service.py").exists()
+
+
+def test_syntax_gate_max_attempts_is_configurable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """implement.syntax_gate_max_attempts overrides the default budget."""
+    project = _project(
+        tmp_path, implement_config={"syntax_gate": True, "syntax_gate_max_attempts": 2}
+    )
+    calls = _patch_ai_sequence(monkeypatch, [NONASCII_PY_OUTPUT])
+
+    with pytest.raises(CoddCLIError):
+        Implementer(project).run_implement(ImplementSpec("docs/design/auth.md", ["src/auth"]))
+
+    assert len(calls) == 2  # honored the configured (lower) budget
+
+
+def test_syntax_gate_max_attempts_resolver_defaults_and_clamps() -> None:
+    """Default is 3; junk / sub-1 values fall back to the default; >=1 honored."""
+    assert _syntax_gate_max_attempts({}) == DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS == 3
+    assert _syntax_gate_max_attempts({"implement": {"syntax_gate_max_attempts": 5}}) == 5
+    assert _syntax_gate_max_attempts({"implement": {"syntax_gate_max_attempts": 1}}) == 1
+    # Sub-1 and non-integer fall back to the default (never unbounded, never 0).
+    assert _syntax_gate_max_attempts({"implement": {"syntax_gate_max_attempts": 0}}) == 3
+    assert _syntax_gate_max_attempts({"implement": {"syntax_gate_max_attempts": -4}}) == 3
+    assert _syntax_gate_max_attempts({"implement": {"syntax_gate_max_attempts": "x"}}) == 3

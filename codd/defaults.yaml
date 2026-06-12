@@ -85,6 +85,16 @@ implement:
   # written — never pre-existing project files. Cheap and deterministic (no
   # LLM calls). Set false to opt out.
   syntax_gate: true
+  # Total `codd implement` attempts when the syntax gate is ON: one initial
+  # generation plus bounded corrective retries. On a gate failure the retry
+  # prompt names the offending file, the failing line, and the exact non-ASCII
+  # character(s) with their U+XXXX codepoint, plus an ASCII-punctuation
+  # directive -- steering a model (primed by non-ASCII requirements/context)
+  # that slipped typographic/full-width punctuation into a code position back
+  # to a parseable file. Default 3; minimum 1. NEVER unbounded -- a genuinely
+  # unfixable file still fails loudly with nothing written. No effect when
+  # syntax_gate is false (single attempt, legacy behavior).
+  syntax_gate_max_attempts: 3
   # Shared canonical output root for implement tasks WITHOUT an explicit
   # default_output_paths / implement_targets mapping (e.g. greenfield-derived
   # tasks). null = derive from scan.source_dirs[0] (usually "src/"). Every
