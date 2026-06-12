@@ -1,0 +1,39 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# zoo.yaml — the alien-repo zoo (axis D11)
+# ═══════════════════════════════════════════════════════════════════════════
+# A list of repos run through CoDD's DETERMINISTIC layers only (extract_facts,
+# derive_iac_nfrs, frontmatter, restoration_report). NO LLM. A crash/exception
+# on any available repo is a FINDING.
+#
+# Each entry:
+#   name : stable label.
+#   path : (optional) a LOCAL directory. Used as-is if it exists.
+#   url  : (optional) a git URL. Cloned ONLY if a clone is possible offline-safe;
+#          when unavailable (offline / clone fails) the repo is SKIPPED with a
+#          note (graceful degradation), never a failure.
+#   note : free text.
+#
+# Ships 3 local synthetic fixtures so the zoo runs OFFLINE and FREE out of the
+# box. Add real OSS repos by appending entries with `path:` (already cloned) or
+# `url:` (cloned on demand where the environment allows).
+# ═══════════════════════════════════════════════════════════════════════════
+
+repos:
+  - name: flat-layout-python
+    path: dogfood/fixtures/flat_py_app
+    note: "synthetic: flat repo, modules at root, no src/."
+
+  - name: src-layout-dialects
+    path: dogfood/fixtures/src_layout_app
+    note: "synthetic: src/ layout + non-canonical (flat/plural/list) frontmatter dialects."
+
+  - name: iac-bearing
+    path: dogfood/fixtures/iac_app
+    note: "synthetic: docker-compose + Dockerfile + k8s manifest, exercises derive_iac_nfrs."
+
+  # ── Real OSS repos (optional). Uncomment / add your own. Offline-safe: an
+  #    unreachable url is SKIPPED, not failed. Prefer small repos to keep the
+  #    deterministic pass fast and free.
+  # - name: example-oss
+  #   url: https://github.com/some/small-repo
+  #   note: "real alien repo — cloned on demand where the environment allows."

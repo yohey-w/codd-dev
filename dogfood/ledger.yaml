@@ -1,0 +1,553 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Dogfood Verification Loop — Ledger (machine-readable loop state)
+# ═══════════════════════════════════════════════════════════════════════════
+# SINGLE SOURCE OF TRUTH for the self-perpetuating dogfood loop. It survives
+# sessions: an agent (or human) restarts the loop by reading THIS file, picking
+# the next case, running it, and appending the result. Never restart from memory.
+#
+# The protocol that drives this ledger lives in dogfood/README.md. Read it
+# before mutating this file. The loop tick `python dogfood/run_iteration.py`
+# reads and writes the machine-readable parts of this file.
+#
+# ── TOP-LEVEL SCHEMA ─────────────────────────────────────────────────────────
+# protocol_version : schema/loop-protocol version string.
+# saturation_k     : K — consecutive finding-free runs needed to saturate an axis.
+#
+# model_roles:     the APPROVED executor assignment — which model runs which role
+#                  in this QA harness. The loop has model-bearing roles and
+#                  model-free machinery; this block records the assignment so the
+#                  loop is reproducible and cost-bounded across sessions:
+#     loop_machinery           : run_iteration.py tick, ledger I/O, convergence
+#                                math — NO model (deterministic, free).
+#     automatable_axes         : the deterministic axis runners (D7,D8,D10,D11,
+#                                D14) — NO model.
+#     sut_executor_default     : the model the system-under-test (the app/project
+#                                CoDD builds) runs on for the LLM axes — the
+#                                cheapest viable executor; Sonnet 4.6 is the floor
+#                                (M1: a lighter model is the higher-sensitivity
+#                                instrument; it surfaces harness gaps a stronger
+#                                model papers over).
+#     sut_executor_d6          : D6 is cross-CLI by definition — Codex (gpt-5.5
+#                                xhigh).
+#     iteration_driver         : selects the next case, judges real-vs-noise,
+#                                derives sibling cases, updates the ledger —
+#                                Opus 4.8 (Tier 2, episodic).
+#     triage_and_fix           : root-cause a finding, fix CoDD core behind the
+#                                generality gate, write the regression test —
+#                                Opus 4.8 (M1: fix on the strongest practical
+#                                model). Handles MECHANICAL findings (a bug patch
+#                                to existing behaviour).
+#     conceptual_finding_design : when triage classifies a finding as CONCEPTUAL —
+#                                the right fix is a NEW abstraction or a NEW
+#                                check-class, not a bug patch (precedent: the
+#                                human/visual-judge finding that birthed the
+#                                enablement check-axis) — escalate to a Fable 5
+#                                design pass and surface to the owner (Tier 3,
+#                                apex/owner, rare). Best-effort: the loop's content
+#                                can trip Fable 5's content-safety classifiers and
+#                                reroute to Opus 4.8 — a rerouted finding goes to
+#                                the OWNER queue (appropriate: conceptual findings
+#                                should reach the owner anyway).
+#     portfolio_evolution      : periodic anti-convergence pass — "which failure
+#                                class does NO current axis cover?" Discovers NEW
+#                                dogfood axes / check-categories. Convergent
+#                                case-derivation (Opus, Tier 2) drifts toward
+#                                obvious variants; this divergent "what are we NOT
+#                                testing" judgment is the apex/owner role —
+#                                Fable 5 + owner (Tier 3).
+#     reserved_for_owner_dialogue: Fable 5 is OUTSIDE the SUT role (too capable,
+#                                would hide gaps, violating M1) and OUTSIDE the
+#                                routine mechanical tiers (Opus is sufficient,
+#                                cheaper, classifier-free). It is PRESENT at the
+#                                apex tier (Tier 3 — conceptual-finding design +
+#                                portfolio evolution above) and in the owner-facing
+#                                strategy/design conversation. Caveat: the loop's
+#                                content — cross-model testing, input-validation/
+#                                adversarial cases, security-adjacent codebases —
+#                                can trip Fable 5's content-safety classifiers,
+#                                which auto-reroute to Opus 4.8; for the routine
+#                                tiers Opus is assigned directly to avoid that
+#                                reroute churn, and a rerouted Tier-3 finding lands
+#                                on the owner queue.
+#
+# axes:            map D1..D14 -> per-axis state (the loop's saturation counters):
+#   description          : the failure class this axis is designed to surface.
+#   saturation_counter   : count of back-to-back runs with ZERO new findings.
+#                          Reset to 0 the instant a finding appears on this axis.
+#   last_run             : ISO date (or range) of the most recent run, or null.
+#   status               : saturated | active | unrun
+#                          saturated == (saturation_counter >= saturation_k).
+#   cost                 : free | cheap | llm | human  (executor economics).
+#   automation           : ci | scripted | manual.
+#   runner               : how to run it (script path or a named README protocol).
+#   sut_model            : which executor runs the system-under-test on this axis
+#                          (mirrors model_roles): none for deterministic/non-LLM
+#                          axes (D7,D8,D10,D11,D14); sonnet for the LLM
+#                          input-family axes (D1-D5,D9); codex for the cross-CLI
+#                          axis (D6); benchmark-harness for D12 (whatever the
+#                          external benchmark uses); human for D13. Driver/triage
+#                          run on Opus 4.8 regardless of axis (see model_roles).
+#   history              : (optional) human narrative of notable past runs.
+#
+# findings:        flat list (the loop's memory of every real defect), each:
+#   id             : stable id, e.g. "F-plural-type".
+#   axis           : the axis that surfaced it (D1..D14).
+#   date           : ISO date observed.
+#   model_used     : the executor that surfaced it (M1: the weakest one usually;
+#                    drawn from the model_roles assignment — typically the
+#                    sut_model of the axis that surfaced it, or "deterministic
+#                    (no LLM)" for the automatable axes).
+#   symptom        : what was observed.
+#   root_cause     : why it happened (blank/"under-investigation" if open).
+#   fix_commit     : commit/version that closed it, or null if OPEN.
+#   regression_test: the test that pins the fix so it can never silently return.
+#   status         : fixed | open | wontfix.
+#   class          : (optional) mechanical | conceptual. mechanical == a bug patch
+#                    to existing behaviour, fixed on Opus 4.8 (Tier 2). conceptual
+#                    == the fix is a NEW abstraction or NEW check-class, not a
+#                    patch — escalated to a Fable 5 design pass + owner (Tier 3).
+#                    Absent == treat as mechanical (the default routine path).
+#   derived_case_ids: ids in `pending_cases` this finding spawned (loop fuel).
+#
+# pending_cases:   the work queue (derived + planned cases), each:
+#   id             : stable id, e.g. "PC-d6-codex-live".
+#   axis           : axis this case exercises.
+#   hypothesis     : what we expect to learn / the question it answers.
+#   origin         : "seed" | "derived:<finding-id>" | "world-change:<event>".
+#   priority       : 1 (highest) .. 5.
+#   status         : pending | running | done | blocked.
+#
+# ── CONVERGENCE / SATURATION / DERIVE (the heart) ────────────────────────────
+#   An axis is SATURATED only after K=2 consecutive finding-free runs.
+#   A NEW finding RESETS its axis's saturation_counter to 0 (and may reset
+#   sibling axes — see README "RESET"). Every finding DERIVES follow-up cases
+#   appended to pending_cases. The loop is:
+#       converged := (every axis.status == "saturated")
+#                    AND (no pending_cases with status in {pending, running})
+#   Because findings keep minting pending_cases, saturation is a moving target —
+#   that is what makes the loop continue "until no problems occur".
+# ═══════════════════════════════════════════════════════════════════════════
+
+protocol_version: '1.1'
+saturation_k: 2
+model_roles:
+  loop_machinery: none
+  automatable_axes: none
+  sut_executor_default: claude sonnet 4.6
+  sut_executor_d6: codex gpt-5.5 xhigh
+  iteration_driver: claude opus 4.8
+  triage_and_fix: claude opus 4.8
+  conceptual_finding_design: claude fable 5 (apex/owner; rare)
+  portfolio_evolution: claude fable 5 (apex/owner; anti-convergence)
+  reserved_for_owner_dialogue: claude fable 5 (owner-facing dialogue; apex tier present in loop)
+axes:
+  D1:
+    description: first-contact / dialect — failures that appear only when a non-builder hand-writes input
+      in their own dialect (plural/loose type names, prose, naive layouts). Stubs never discover these
+      (M2); only real first contact.
+    saturation_counter: 0
+    last_run: '2026-06-11'
+    status: active
+    cost: llm
+    automation: manual
+    runner: README 'First-contact protocol' — weakest viable model (D5).
+    sut_model: sonnet
+    history:
+    - '2026-06-11: hand-written todo-CLI greenfield (claude sonnet, joint D1+D5) — surfaced F-plural-type
+      and F-verify-exit0 (both fixed e97fa1e/cb25158).'
+  D2:
+    description: messy-human requirements — elicitation/coherence failures on contradictory, duplicated,
+      or under-specified human requirements (the input is the test).
+    saturation_counter: 0
+    last_run: null
+    status: unrun
+    cost: llm
+    automation: manual
+    runner: README 'Messy-requirements protocol'.
+    sut_model: sonnet
+  D3:
+    description: stack rotation — language/framework/IaC assumptions baked into the harness, surfaced
+      by rotating to a NEW stack each run.
+    saturation_counter: 0
+    last_run: null
+    status: unrun
+    cost: llm
+    automation: manual
+    runner: README 'Stack-rotation protocol'.
+    sut_model: sonnet
+  D4:
+    description: complexity ladder — scale-dependent failures; same pipeline, monotonically larger app
+      (todo CLI -> kakeibo web -> larger). Surfaces resource ceilings.
+    saturation_counter: 0
+    last_run: '2026-06-12'
+    status: active
+    cost: llm
+    automation: manual
+    runner: README 'Complexity-ladder protocol'.
+    sut_model: sonnet
+    history:
+    - '2026-06-11..12: kakeibo (household-budget) web greenfield (claude sonnet, joint D4+D5) — surfaced
+      F-output-32k (OPEN) + slow-amendment pace.'
+  D5:
+    description: weakest-viable-model (instrument / MODIFIER, M1) — a weak model is the most SENSITIVE
+      instrument; it trips on ambiguity a strong model papers over. Applied to input-family runs (D1-D4);
+      findings recorded under the input axis.
+    saturation_counter: 0
+    last_run: '2026-06-12'
+    status: active
+    cost: cheap
+    automation: manual
+    runner: README 'Weakest-viable-model protocol' (modifier on D1-D4).
+    sut_model: sonnet
+  D6:
+    description: cross-CLI live run — hidden coupling to one CLI/model. Running the same input through
+      a different live CLI (codex etc.) surfaces prompt/format/ tooling assumptions. The declared-but-unverified
+      multi-CLI risk.
+    saturation_counter: 0
+    last_run: '2026-06-12'
+    status: active
+    cost: llm
+    automation: manual
+    runner: README 'Cross-CLI protocol'.
+    sut_model: codex
+    history:
+    - '2026-06-12: first live cross-CLI run (codex gpt-5.5 xhigh as SUT) on a greeter-CLI greenfield —
+      working ai_command `codex exec --model gpt-5.5 -c model_reasoning_effort=xhigh --sandbox <ro|ws> --skip-git-repo-check
+      --cd <proj>` (note: gpt-5.5-codex is rejected for ChatGPT accounts; plain gpt-5.5 works, model
+      reply on stdout, diagnostics on stderr). init/plan(--init)/generate(--all-waves, 7 artifacts/4 waves)
+      all drove cleanly via codex stdout — planner/generator are NOT claude-coupled. implement surfaced
+      F-codex-filewriting-stdout (mechanical, fixed): the file-writing-agent path discarded codex''s valid
+      `=== FILE:` stdout and demanded on-disk git writes. After fix, implement produced 4 working files
+      and the generated greeter ran correctly (Hello, Alice! / exit2 on misuse). saturation reset to 0.'
+  D7:
+    description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
+      and partially-written artifacts.
+    saturation_counter: 1
+    last_run: '2026-06-12'
+    status: active
+    cost: free
+    automation: scripted
+    runner: python dogfood/scripts/run_d7_chaos.py (stub-AI, randomized kill points).
+    sut_model: none
+  D8:
+    description: adversarial content — prompt-injection in ingested docs and malicious/ escaping paths.
+      Deterministic layers must treat all content as DATA, never execute embedded instructions, never
+      read/write outside the project tree.
+    saturation_counter: 1
+    last_run: '2026-06-12'
+    status: active
+    cost: free
+    automation: scripted
+    runner: python dogfood/scripts/run_d8_adversarial.py.
+    sut_model: none
+  D9:
+    description: lifecycle evolution — coherence drift across N sequential changes (codd-evolve / codd
+      fix) on a living generated app; the long-tail failures of real delivery, invisible to one-shot runs.
+    saturation_counter: 0
+    last_run: '2026-06-10'
+    status: active
+    cost: llm
+    automation: manual
+    runner: README 'Lifecycle protocol'.
+    sut_model: sonnet
+    history:
+    - '2026-05..06: osato-equivalent 2-month sequential delivery — surfaced enablement-coverage / dependency-freshness
+      / requirement-reconciliation gaps (all fixed v2.22.0).'
+  D10:
+    description: round-trip fidelity — loss in the extract/restore round trip. Generate greenfield ->
+      archive+delete docs -> extract/restore from code -> diff restored vs originals. Coverage drops are
+      findings. Deterministic-measurable.
+    saturation_counter: 1
+    last_run: '2026-06-12'
+    status: active
+    cost: free
+    automation: scripted
+    runner: python dogfood/scripts/run_d10_roundtrip.py (deterministic extract+restoration coverage).
+    sut_model: none
+  D11:
+    description: alien-repo zoo — parser/extractor crashes and silent misses on diverse real-world repos.
+      DETERMINISTIC layers only (extract_facts, IaC->NFR, frontmatter, restoration_report). No LLM. Free,
+      CI-able.
+    saturation_counter: 1
+    last_run: '2026-06-12'
+    status: active
+    cost: free
+    automation: scripted
+    runner: python dogfood/scripts/run_d11_zoo.py (reads dogfood/zoo.yaml; offline fixtures + optional
+      real repos).
+    sut_model: none
+    history:
+    - '2026-05..06: external-user brownfield repos (issues #27-29) — real alien repos, fixed 45726e6 (D11-equivalent).'
+  D12:
+    description: external benchmarks — regressions against an independently-curated benchmark (SWE-bench),
+      with an anti-overfit guard.
+    saturation_counter: 1
+    last_run: '2026-06-11'
+    status: active
+    cost: llm
+    automation: ci
+    runner: external SWE-bench harness (out of this loop's free tier).
+    sut_model: benchmark-harness
+    history:
+    - '2026-06-11: SWE-bench 73/73 passing, anti-overfit guard clean — no new findings (1 dry run).'
+  D13:
+    description: 'human-judge / visual acceptance — failures only a human eye catches: visual regressions,
+      taste, broken UX that passes every automated gate. Findings enter the SAME triage as script findings.'
+    saturation_counter: 0
+    last_run: '2026-06-02'
+    status: active
+    cost: human
+    automation: manual
+    runner: README 'Human-judge protocol'.
+    sut_model: human
+    history:
+    - '2026-06-02: demo-day human caught mobile nav disappearing on one viewport -> the environment-coverage
+      axes were born (fixed v2.22.0).'
+  D14:
+    description: self-application — regressions in codd's own read-only checks when pointed at codd-dev
+      itself (the harness eating its own cooking). Deterministic, free. Read-only only; cannot self-build
+      (see README limits).
+    saturation_counter: 1
+    last_run: '2026-06-12'
+    status: active
+    cost: free
+    automation: scripted
+    runner: python dogfood/scripts/run_d14_self.py (dag verify red-check + config-key validation).
+    sut_model: none
+findings:
+- id: F-plural-type
+  axis: D1
+  date: '2026-06-11'
+  model_used: claude sonnet (weakest viable, M1)
+  symptom: 'frontmatter `type: requirements` (plural) silently ignored by the type matcher — only the
+    singular `requirement` was recognized; a hand-written doc using the plural produced zero discovery.'
+  root_cause: type vocabulary matching was singular-exact; no plural/loose-form tolerance for the type
+    field.
+  fix_commit: e97fa1e
+  regression_test: tests/greenfield/test_pipeline.py (plural-type acceptance)
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-d1-type-vocab-audit
+- id: F-resume-options
+  axis: D7
+  date: '2026-06-11'
+  model_used: claude sonnet
+  symptom: resume did not restore previously-selected options — an interrupted run resumed with defaults,
+    losing the operator's choices.
+  root_cause: session checkpoint did not persist/replay the selected-option set across resume.
+  fix_commit: e97fa1e
+  regression_test: tests/greenfield/test_pipeline.py (resume option restoration)
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-d7-kill-resume
+- id: F-output-fragmentation
+  axis: D4
+  date: '2026-06-11'
+  model_used: claude sonnet
+  symptom: src/<task_id>/ path fragmentation — code from multiple tasks scattered into per-task app copies
+    instead of one canonical tree.
+  root_cause: implement output rooting keyed on task id rather than the design doc's canonical output
+    path.
+  fix_commit: cb25158
+  regression_test: tests/greenfield/test_pipeline.py (two tasks coexist in one output root)
+  status: fixed
+  class: mechanical
+  derived_case_ids: []
+- id: F-fence-contamination
+  axis: D5
+  date: '2026-06-11'
+  model_used: claude sonnet
+  symptom: markdown-fence contamination — ```-fences leaked into generated source files.
+  root_cause: 'the implement file-extraction did not strip surrounding code fences from the model''s `===
+    FILE: ===` blocks.'
+  fix_commit: cb25158
+  regression_test: tests/greenfield/test_pipeline.py (fence-stripped output)
+  status: fixed
+  class: mechanical
+  derived_case_ids: []
+- id: F-verify-false-green
+  axis: D5
+  date: '2026-06-11'
+  model_used: claude sonnet
+  symptom: verify reported false-green — it certified a build whose implementation was incomplete / whose
+    tests were never actually executed.
+  root_cause: verify accepted an unexecuted build as passing; no proof the generated tests ran.
+  fix_commit: cb25158
+  regression_test: tests/greenfield/test_pipeline.py (verify proves tests ran)
+  status: fixed
+  class: mechanical
+  derived_case_ids: []
+- id: F-verify-exit0
+  axis: D1
+  date: '2026-06-11'
+  model_used: claude sonnet
+  symptom: verify exited 0 even when the test suite was red.
+  root_cause: the verify stage did not propagate a nonzero exit when the underlying suite failed.
+  fix_commit: cb25158
+  regression_test: tests/greenfield/test_cli_flags.py (verify exit code reflects suite result)
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-d6-codex-live
+- id: F-output-32k
+  axis: D4
+  date: '2026-06-12'
+  model_used: claude sonnet (weakest viable, M1)
+  symptom: 32k output-token ceiling on big implement tasks — a large single-file implement gets truncated
+    at the model's output limit, producing an incomplete file with no fallback.
+  root_cause: under-investigation — implement issues one unbounded generation per task; on output-limit
+    it neither detects truncation nor falls back to chunked implementation.
+  fix_commit: null
+  regression_test: PENDING — add a regression that an output-truncation error triggers the chunked-implementation
+    fallback.
+  status: open
+  class: mechanical
+  derived_case_ids:
+  - PC-d4-chunked-fallback
+  - PC-d4-larger-app
+- id: F-codex-filewriting-stdout
+  axis: D6
+  date: '2026-06-12'
+  model_used: codex gpt-5.5 xhigh (cross-CLI SUT, M1 instrument)
+  symptom: '`codd implement` (and `codd assemble`/greenfield, which share the path) failed with "AI command
+    did not produce any file changes" when the SUT was codex. The implement prompt mandates the stdout
+    contract ("emit `=== FILE: <path> ===` blocks and output nothing else; ABSOLUTE PROHIBITION on prose"),
+    and codex honoured it exactly — emitting well-formed `=== FILE:` blocks on stdout while writing nothing
+    to disk. But `invoke_file_writing_agent` (entered because `is_file_writing_agent` returns True for
+    any command containing "codex") read results ONLY from `git diff`/`git ls-files`, so it saw zero on-disk
+    changes and raised — even though the agent produced exactly the output CoDD''s file-block parser consumes.'
+  root_cause: 'a CLI-coupling: codex was classified file-writing-only, and the harness''s result channel
+    (filesystem via git) contradicted the prompt''s declared output channel (stdout `=== FILE:` contract).
+    Claude `--print` (the only previously-exercised SUT) emits the same contract on stdout but is routed
+    through the plain subprocess path, so the mismatch never surfaced. The two halves — prompt says "print
+    to stdout", harness says "I will read your files from disk" — only disagree for an agent that obeys
+    the prompt without also writing files (codex under read-only / text-out).'
+  fix_commit: null  # working tree only — owner commits later (no-commit constraint)
+  fix_description: 'codd/ai_invoke.py — `invoke_file_writing_agent` now falls back to stdout when no on-disk
+    changes are detected AND stdout already carries the `=== FILE:` contract (new `_stdout_carries_file_contract`
+    detector). On-disk writes still win when present (Claude/codex-that-writes unchanged), so the path
+    is now CLI-agnostic: it honours whichever channel the agent actually used. Fix lives at the shared
+    chokepoint, so it covers BOTH file-writing call sites (implementer.py:460 and assembler.py:54) — no
+    codex-special-casing. Generality gate held: full suite green (4161 passed, 0 skipped; was 4157+4 new
+    tests), Claude path covered by existing tests + new prefers-on-disk regression.'
+  regression_test: 'tests/test_ai_invoke.py — test_file_writing_agent_falls_back_to_stdout_contract, test_file_writing_agent_prefers_on_disk_writes_over_stdout
+    (no-regress for the Claude/on-disk path), test_file_writing_agent_no_files_and_no_contract_still_raises,
+    test_stdout_carries_file_contract_detector.'
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-d6-assemble-greenfield-codex
+  - PC-d6-codex-other-stages
+- id: F-enablement-coverage
+  axis: D9
+  date: '2026-06-10'
+  model_used: claude (real delivery, multi-month)
+  symptom: granted capabilities were not traced to where they are exercised; stale doc dependencies were
+    not flagged; delivered surface not reconciled against requirements.
+  root_cause: no enablement-coverage / dependency-freshness / requirement-reconciliation axes existed.
+  fix_commit: v2.22.0
+  regression_test: tests for dependency_freshness + environment_coverage DAG checks
+  status: fixed
+  class: conceptual
+  derived_case_ids: []
+- id: F-mobile-nav-viewport
+  axis: D13
+  date: '2026-06-02'
+  model_used: human eye (demo-day)
+  symptom: central-admin mobile navigation vanished on one viewport; every automated gate was green because
+    tests covered a single viewport only.
+  root_cause: no environment-coverage axis (Web=viewport / Mobile=device / CLI=terminal) existed; coverage
+    was single-environment.
+  fix_commit: v2.22.0
+  regression_test: environment_coverage DAG check tests
+  status: fixed
+  class: conceptual
+  derived_case_ids: []
+pending_cases:
+- id: PC-d6-codex-live
+  axis: D6
+  hypothesis: Does the same greenfield input drive a non-claude CLI (codex) end-to-end? Surfaces prompt/format/tooling
+    coupling — the declared-but-unverified multi-CLI risk.
+  origin: derived:F-verify-exit0
+  priority: 1
+  status: done  # 2026-06-12 — ran init/plan/generate/implement on codex; surfaced+fixed F-codex-filewriting-stdout.
+- id: PC-d10-roundtrip
+  axis: D10
+  hypothesis: After greenfield then doc-deletion, does deterministic extract+restore recover the original
+    node inventory, or are nodes/coverage lost in the round trip?
+  origin: seed
+  priority: 1
+  status: pending
+- id: PC-d9-evolution-run
+  axis: D9
+  hypothesis: Apply a planned sequence of codd-evolve/fix changes to a generated app; does cross-artifact
+    coherence hold after each step, or does drift accumulate?
+  origin: seed
+  priority: 2
+  status: pending
+- id: PC-d11-zoo
+  axis: D11
+  hypothesis: Do the deterministic layers (extract_facts, derive_iac_nfrs, frontmatter, restoration_report)
+    survive diverse repo conventions without crashing or silently missing structure?
+  origin: seed
+  priority: 2
+  status: pending
+- id: PC-d2-raw-human-requirements
+  axis: D2
+  hypothesis: On a deliberately messy/contradictory human requirements doc, does CoDD question the gaps
+    (elicit/open_questions) rather than silently guessing?
+  origin: seed
+  priority: 3
+  status: pending
+- id: PC-d1-type-vocab-audit
+  axis: D1
+  hypothesis: 'The plural `requirements` finding implies siblings: audit ALL frontmatter type vocabularies
+    for singular/plural strictness (design/lexicon/journey/etc.) and audit whether other doc-discovery
+    sites share the same singular-only assumption.'
+  origin: derived:F-plural-type
+  priority: 2
+  status: pending
+- id: PC-d4-chunked-fallback
+  axis: D4
+  hypothesis: An output-truncation error from the implement step should trigger a chunked-implementation
+    fallback (split the file/task) instead of shipping a truncated file. Build + regression-test this
+    fallback.
+  origin: derived:F-output-32k
+  priority: 1
+  status: pending
+- id: PC-d4-larger-app
+  axis: D4
+  hypothesis: Re-run the complexity ladder on an even-larger app once the chunked-fallback lands, to confirm
+    the ceiling is genuinely raised (not just shifted).
+  origin: derived:F-output-32k
+  priority: 3
+  status: pending
+- id: PC-d7-kill-resume
+  axis: D7
+  hypothesis: 'Randomized kill points across a stub-AI greenfield run: does every resume restore options
+    and converge without duplicate/corrupt artifacts? (Now scripted: run_d7_chaos.py.)'
+  origin: derived:F-resume-options
+  priority: 2
+  status: pending
+- id: PC-d6-assemble-greenfield-codex
+  axis: D6
+  hypothesis: '`codd assemble` / `codd greenfield` route through the SAME file-writing-agent chokepoint
+    (assembler.py:54 passes project_root) that broke implement with codex. The F-codex-filewriting-stdout
+    fix lives at the shared chokepoint so it SHOULD cover them, but per M2 (first-contact) verify a live
+    end-to-end `codd greenfield` on codex produces a coherent app — confirm the assemble stage''s stdout
+    contract is consumed too, not just implement''s.'
+  origin: derived:F-codex-filewriting-stdout
+  priority: 1
+  status: pending
+- id: PC-d6-codex-other-stages
+  axis: D6
+  hypothesis: 'Audit the remaining AI stages for codex coupling beyond the file-writing path. plan/generate
+    (no project_root → plain stdout path) ran clean this round; fixer forces `--print` + parses stdout
+    fenced blocks; but extract/restore/require/propagate/ai_patch were NOT exercised live on codex. Run
+    each on codex and confirm no stdout-format / prompt-shape / flag assumption leaks (e.g. fenced-block
+    vs `=== FILE:` parsers diverging across CLIs).'
+  origin: derived:F-codex-filewriting-stdout
+  priority: 2
+  status: pending

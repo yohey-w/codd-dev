@@ -1,0 +1,18 @@
+services:
+  api:
+    image: example/api:latest
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+    ports:
+      - "8080:8080"
+  cache:
+    image: redis:7
+    deploy:
+      replicas: 1

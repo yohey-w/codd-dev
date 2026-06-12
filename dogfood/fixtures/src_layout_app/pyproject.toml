@@ -1,0 +1,7 @@
+[project]
+name = "src-layout-fixture"
+version = "0.0.0"
+description = "Synthetic src-layout zoo fixture for CoDD dogfood. Not a real project."
+
+[tool.setuptools.packages.find]
+where = ["src"]
