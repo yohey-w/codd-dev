@@ -601,3 +601,236 @@ def test_project_type_on_existing_project_is_recorded_in_codd_yaml(tmp_path: Pat
     config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
     assert config["required_artifacts"]["project_type"] == "cli"
     assert "project_type cli" in load_session(project)["stages"]["init"]["detail"]
+
+
+# ═══════════════════════════════════════════════════════════
+# VB coverage gate: enforced ONCE per implement STAGE, not per task
+# (regression for F-vb-gate-per-task-granularity)
+# ═══════════════════════════════════════════════════════════
+#
+# The verifiable-behavior coverage gate is PROJECT-WIDE: it reconciles every VB
+# id declared across the test documents against `codd: covers vb=` markers
+# anywhere in the suite. A multi-task greenfield run implements task-by-task, so
+# an EARLY task (e.g. test fixtures/helpers) that legitimately writes no
+# covering tests would, under per-task enforcement, see ~0 project coverage and
+# hard-fail — even though a LATER task adds the covering tests. The fix moves
+# the gate to a single project-wide check after ALL implement tasks complete.
+
+_VB_DOC = """# Test Plan
+
+| VB | Description | Scenario |
+| --- | --- | --- |
+| VB-add | adds two numbers | add(2, 3) == 5 |
+| VB-cli | cli returns zero | main() == 0 |
+"""
+
+
+def _vb_project(tmp_path: Path, *, greenfield_config: dict | None = None) -> Path:
+    """A stub project that declares two verifiable behaviors in docs/test."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print", greenfield_config=greenfield_config)
+    vb_doc = project / "docs" / "test" / "behaviors.md"
+    vb_doc.parent.mkdir(parents=True, exist_ok=True)
+    vb_doc.write_text(_VB_DOC, encoding="utf-8")
+    return project
+
+
+def _two_task_lister(project_root):
+    """Task A writes test fixtures (no covers markers); task B writes the
+    covering tests. Task A is enumerated FIRST — the exact early-task case that
+    used to hard-fail the project-wide gate."""
+    return [
+        ImplementTaskRef(task_id="implement_test_fixtures", design_node="docs/design/core_design.md"),
+        ImplementTaskRef(task_id="implement_covering_tests", design_node="docs/design/cli_design.md"),
+    ]
+
+
+def _vb_runners(calls: list[str], *, task_b_covers: bool):
+    """DI runners for a VB-coverage scenario.
+
+    Everything except implement is a recording no-op so the test isolates the
+    real ``_stage_implement`` + project-wide gate. The implement task runner is
+    the REAL default runner's contract: task A writes a fixtures file with NO
+    covers marker; task B optionally writes the covering tests.
+    """
+
+    runners = _fake_runners(calls)
+    runners["task_lister"] = _two_task_lister
+
+    def implement_task_runner(project_root, task, **kwargs):
+        calls.append(f"implement:{task.task_id}")
+        tests_dir = project_root / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        if task.task_id == "implement_test_fixtures":
+            # An early test-related task that legitimately covers no VB yet.
+            (tests_dir / "conftest.py").write_text(
+                "import pytest\n\n\n@pytest.fixture\ndef sample():\n    return 5\n",
+                encoding="utf-8",
+            )
+            return "1 file(s) generated"
+        if task_b_covers:
+            (tests_dir / "test_behaviors.py").write_text(
+                "# codd: covers vb=VB-add\n"
+                "def test_add():\n    assert True\n\n\n"
+                "# codd: covers vb=VB-cli\n"
+                "def test_cli():\n    assert True\n",
+                encoding="utf-8",
+            )
+        else:
+            # A later task that STILL writes no covering markers.
+            (tests_dir / "test_behaviors.py").write_text(
+                "def test_nothing():\n    assert True\n",
+                encoding="utf-8",
+            )
+        return "1 file(s) generated"
+
+    runners["implement_task_runner"] = implement_task_runner
+    return runners
+
+
+def test_vb_gate_does_not_fail_early_task_and_passes_once_later_task_covers(tmp_path: Path) -> None:
+    """Task A (fixtures, no covers) must NOT fail; the project-wide gate passes
+    once task B's covers markers exist."""
+    project = _vb_project(tmp_path)
+    calls: list[str] = []
+    result = GreenfieldPipeline(**_vb_runners(calls, task_b_covers=True)).run(project)
+
+    assert result.status == "success", format_greenfield_result(result, "text")
+    # Both tasks ran, in order, and NEITHER was marked failed.
+    session = load_session(project)
+    units = session["stages"]["implement"]["units"]
+    assert units == {"implement_test_fixtures": "done", "implement_covering_tests": "done"}
+    assert calls.index("implement:implement_test_fixtures") < calls.index("implement:implement_covering_tests")
+    assert session["stages"]["implement"]["status"] == "done"
+
+
+def test_vb_gate_fails_at_final_stage_when_no_task_ever_covers(tmp_path: Path) -> None:
+    """When NO task covers the VBs, the failure surfaces at the FINAL project-wide
+    gate (after every task ran), not at the early fixtures task."""
+    project = _vb_project(tmp_path)
+    calls: list[str] = []
+    result = GreenfieldPipeline(**_vb_runners(calls, task_b_covers=False)).run(project)
+
+    assert result.status == "failed"
+    assert result.failed_stage == "implement"
+    # Crucially: BOTH tasks completed before the gate fired — the early task did
+    # not hard-fail. The implement stage as a whole is what failed.
+    assert "implement:implement_test_fixtures" in calls
+    assert "implement:implement_covering_tests" in calls
+    session = load_session(project)
+    units = session["stages"]["implement"]["units"]
+    assert units["implement_test_fixtures"] == "done"
+    assert units["implement_covering_tests"] == "done"
+    # The recorded error names the VB coverage gate and lists the gap.
+    detail = session["stages"]["implement"]["detail"]
+    assert "verifiable-behavior coverage gate" in detail
+    # verify/check never ran — the stage gate stopped the pipeline.
+    assert "verify" not in calls
+    assert "check" not in calls
+
+
+def test_vb_gate_skipped_when_coverage_gate_option_false(tmp_path: Path) -> None:
+    """``greenfield.coverage_gate: false`` (the owner opted out) skips the final
+    project-wide gate even when VBs are uncovered."""
+    project = _vb_project(tmp_path, greenfield_config={"coverage_gate": False})
+    calls: list[str] = []
+    # task_b_covers=False would fail the gate if it ran; coverage_gate off skips it.
+    result = GreenfieldPipeline(**_vb_runners(calls, task_b_covers=False)).run(project)
+
+    assert result.status == "success", format_greenfield_result(result, "text")
+    session = load_session(project)
+    assert session["stages"]["implement"]["status"] == "done"
+    # The opt-out also flows through the constructor flag.
+    calls_ctor: list[str] = []
+    project2 = _vb_project(tmp_path / "ctor")
+    result2 = GreenfieldPipeline(coverage_gate=False, **_vb_runners(calls_ctor, task_b_covers=False)).run(project2)
+    assert result2.status == "success", format_greenfield_result(result2, "text")
+
+
+def test_vb_gate_default_runner_does_not_enforce_per_task(tmp_path: Path) -> None:
+    """The greenfield default implement-task runner must NOT hard-fail a single
+    task against the project-wide VB universe.
+
+    Exercises the REAL ``_default_implement_task_runner`` (not a DI seam) with a
+    DI seam only for the AI step derivation. Task A writes test fixtures with no
+    covers marker; with per-task enforcement this raised
+    ``StageError(... coverage gate failed)``. After the fix the per-task run
+    returns normally — the gate is owed once at stage end instead.
+    """
+    project = _vb_project(tmp_path)
+    pipeline = GreenfieldPipeline()
+    task = ImplementTaskRef(task_id="implement_test_fixtures", design_node="docs/design/core_design.md")
+
+    # Stub the implement machinery so we test ONLY the gating decision, not real
+    # codegen: write a fixtures file (test-related, zero covers markers).
+    import codd.greenfield.pipeline as pipeline_mod
+
+    def fake_implement_tasks(project_root, **kwargs):
+        tests_dir = Path(project_root) / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        (tests_dir / "conftest.py").write_text("FIXTURE = 1\n", encoding="utf-8")
+
+        class _Result:
+            error = None
+            generated_files = [tests_dir / "conftest.py"]
+            output_paths = ["tests/conftest.py"]
+
+        return [_Result()]
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr("codd.implementer.implement_tasks", fake_implement_tasks)
+    # Skip AI-backed step derivation (advisory; returns 0 cleanly).
+    monkey.setattr(pipeline_mod, "_derive_and_approve_steps", lambda *a, **k: 0)
+    # Pin the configured output path for the design node to the tests dir.
+    monkey.setattr(pipeline_mod, "_output_paths_for_task", lambda config, task: ["tests/"])
+    try:
+        # coverage_gate=True would, under the OLD per-task behavior, raise.
+        detail = pipeline._default_implement_task_runner(
+            project,
+            task,
+            ai_command=None,
+            coverage_gate=True,
+            chunk_size=None,
+            timeout_per_chunk=600,
+        )
+    finally:
+        monkey.undo()
+
+    assert "file(s) generated" in detail  # returned normally, did NOT raise
+
+
+def test_standalone_implement_per_task_gate_unchanged(tmp_path: Path) -> None:
+    """The standalone ``codd implement run --task`` per-task gate is UNCHANGED.
+
+    The fix only changes how the GREENFIELD PIPELINE invokes implement; a user
+    running one task explicitly still gets the per-task project-wide gate. This
+    pins that the CLI helper the standalone command calls
+    (``codd.cli._enforce_implement_coverage_gate``) still hard-fails (SystemExit)
+    when a test-related task leaves declared VBs uncovered.
+    """
+    project = _vb_project(tmp_path)
+    # A test-related output with no covering markers — the standalone gate must
+    # still reject this per task (its semantics are deliberately untouched).
+    tests_dir = project / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "test_partial.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+
+    import codd.cli as cli_module
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module._enforce_implement_coverage_gate(
+            project,
+            design_node="docs/test/behaviors.md",
+            output_paths=["tests/test_partial.py"],
+            opt_out=False,
+            rerun=None,
+        )
+    assert excinfo.value.code == 1
+
+    # And opt-out (the standalone --no-coverage-gate flag) still bypasses it.
+    cli_module._enforce_implement_coverage_gate(
+        project,
+        design_node="docs/test/behaviors.md",
+        output_paths=["tests/test_partial.py"],
+        opt_out=True,
+        rerun=None,
+    )
