@@ -694,7 +694,7 @@ findings:
     through. Catching it needs a SEPARATE deterministic check that distinguishes code positions from
     string/comment literals (non-ASCII is legitimate in literals — Japanese UI copy — and must NOT be
     flagged) and flags the high-signal homoglyph pattern.'
-  fix_commit: PENDING  # short sha recorded in an immediately-following follow-up commit (c25d006 precedent)
+  fix_commit: 79294fe  # short sha of the fix+tests+ledger commit
   fix_description: 'codd/implementer.py — a new write-time confusable-character check (layer 2), sibling of
     the syntax gate, run at the SAME point in the implementer write path and reusing the SAME machinery:
     atomic validate-all-then-write (nothing on disk until every payload is clean), the bounded retry budget
