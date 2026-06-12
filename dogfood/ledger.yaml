@@ -767,7 +767,7 @@ findings:
     project-wide gate inside every task). Per-task enforcement of a project-wide invariant means any task that
     is not the one writing the covering tests fails, even though the stage as a whole would satisfy the gate
     once all tasks complete. The gate is RIGHT to want full coverage; it was enforced at the WRONG granularity.'
-  fix_commit: null  # filled by a tiny follow-up commit after this lands (self-reference; c25d006 precedent)
+  fix_commit: 1959e73  # short sha of the fix+tests+ledger commit (recorded in this follow-up; c25d006 precedent)
   fix_description: 'codd/greenfield/pipeline.py — the project-wide VB coverage gate is now enforced ONCE per
     implement STAGE instead of once per task. (1) Per-task: _default_implement_task_runner no longer calls
     the coverage gate (the old _enforce_coverage_gate per-task call was removed); each task still gets its
