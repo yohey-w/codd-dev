@@ -31,6 +31,7 @@ unchanged (e.g. ``AiCommandError``), exactly as the pre-RF4 builders did.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -48,6 +49,24 @@ DEFAULT_AI_COMMAND = (
 
 # Plain text-in/text-out AI invoker signature shared across the codebase.
 AiInvoke = Callable[[str], str]
+
+# The implement/generate file-output contract a text-in/text-out CLI emits on
+# stdout: one ``=== FILE: <path> ===`` header per generated file. Kept local
+# (not imported from ``codd.implementer``) to avoid a circular import — the
+# marker shape is a stable cross-module contract.
+_FILE_BLOCK_MARKER = re.compile(r"^=== FILE: .+? ===\s*$", re.MULTILINE)
+
+
+def _stdout_carries_file_contract(stdout: str) -> bool:
+    """True when *stdout* already contains the ``=== FILE: ===`` output contract.
+
+    A CLI that honours the prompt's stdout contract (emit ``=== FILE:`` blocks,
+    write nothing to disk) is just as valid as one that writes files directly;
+    both produce output CoDD's file-block parser consumes. Detecting the
+    contract on stdout lets the file-writing-agent path stay CLI-agnostic
+    instead of *requiring* on-disk writes.
+    """
+    return bool(stdout and _FILE_BLOCK_MARKER.search(stdout))
 
 # Retry feedback hook: (previous_prompt, error, attempt_index) -> next prompt.
 RetryFeedback = Callable[[str, ValueError, int], str]
@@ -226,6 +245,16 @@ def invoke_file_writing_agent(
     all_files = sorted(set(changed_files + new_files))
 
     if not all_files:
+        # CLI-agnostic fallback: an agent classified as "file-writing" may still
+        # honour the prompt's stdout contract (emit ``=== FILE: ===`` blocks,
+        # write nothing to disk) — e.g. ``codex exec`` under a read-only or
+        # text-out invocation. That stdout is exactly what CoDD's file-block
+        # parser consumes, so use it directly instead of failing on the absence
+        # of on-disk writes. Restore the staged baseline first so the working
+        # tree is left untouched.
+        if _stdout_carries_file_contract(result.stdout):
+            subprocess.run(["git", "reset", "--quiet"], cwd=cwd, capture_output=True)
+            return result.stdout
         raise ValueError("AI command did not produce any file changes")
 
     # Read changed files and format as CoDD file blocks
@@ -385,3 +414,8 @@ __all__ = [
     "prepare_read_only_codex",
     "resolve_ai_command",
 ]
+
+
+# Re-exported for tests/diagnostics: the stdout-contract detector used by the
+# file-writing-agent fallback (kept out of the public API surface above).
+__all__.append("_stdout_carries_file_contract")
