@@ -26,8 +26,10 @@ from codd.operational_e2e_audit import (
     _COVER_MARKER_RE,
     _DOD_MARKER_RE,
     _iter_test_files,
+    _load_optional_config,
     _md_cell,
     _rel_path,
+    _resolve_vb_scan_dirs,
 )
 
 VB_AUDIT_CONTRACT_VERSION = "verifiable-behavior-audit/v1"
@@ -487,55 +489,6 @@ def run_implement_coverage_gate(
 # Internals
 # ---------------------------------------------------------------------------
 
-
-def _load_optional_config(project_root: Path) -> dict[str, Any]:
-    from codd.config import load_project_config
-
-    try:
-        return load_project_config(project_root)
-    except (FileNotFoundError, ValueError):
-        return {}
-
-
-def _resolve_vb_scan_dirs(project_root: Path, config: dict[str, Any] | None) -> list[str] | None:
-    """Resolve where to scan for ``covers vb=`` markers.
-
-    Generated test files do not always live under ``scan.test_dirs``: a
-    greenfield build commonly emits them under ``src/tests/`` while
-    ``scan.test_dirs`` is the conventional ``tests/``. Scanning only the
-    configured test dirs therefore reports a false-RED (every VB "uncovered")
-    because the markers are never seen.
-
-    The fix is scope-general: scan the union of the configured ``test_dirs`` and
-    ``source_dirs`` (deduplicated, order-preserving). The marker scan is
-    suffix-filtered to test files, so including source roots only ever picks up
-    actual test files (e.g. ``src/tests/test_x.py``) and never source modules.
-    When neither is configured, return ``None`` so the caller falls back to the
-    default ``tests/`` scope (and, failing that, the project root).
-    """
-
-    scan_section = (config or {}).get("scan")
-    scan_section = scan_section if isinstance(scan_section, dict) else {}
-    merged: list[str] = []
-    seen: set[str] = set()
-    for key in ("test_dirs", "source_dirs"):
-        raw = scan_section.get(key)
-        if not isinstance(raw, list):
-            continue
-        for item in raw:
-            rel = str(item).strip()
-            if not rel:
-                continue
-            norm = rel.replace("\\", "/").strip("/")
-            if norm in seen:
-                continue
-            seen.add(norm)
-            merged.append(rel)
-    if merged:
-        return merged
-    # No scan config at all: scan the whole project tree so generated tests are
-    # found wherever they landed (suffix filter keeps this to test files only).
-    return [str(project_root)]
 
 
 def _scan_vb_markers(
