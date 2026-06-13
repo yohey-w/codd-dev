@@ -678,6 +678,27 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
     else:
         _line("  PASS — no warnings")
 
+    # --- vb declarations (gate) -------------------------------------------
+    # Incoherent verifiable-behavior declarations (same id, different meaning in
+    # two docs) make 100% coverage structurally impossible — fail loudly. The
+    # WARNING-severity case (a non-canonical doc with first-column VB rows) is
+    # already surfaced as a doctor advisory above with migration guidance.
+    _section("vb declarations")
+    try:
+        vb_errors = _vb_declaration_issue_messages(project_root, load_project_config(project_root), severity="error")
+    except (FileNotFoundError, ValueError) as exc:
+        vb_errors = []
+        errors["vb_declarations"] = str(exc)
+        _line(f"  ERROR — {exc}")
+    payload["vb_declarations"] = vb_errors
+    if vb_errors:
+        gates_failed += 1
+        _line(f"  FAIL — {len(vb_errors)} colliding verifiable-behavior declaration(s)")
+        for message in vb_errors:
+            _line(f"  ERROR: {message}")
+    elif "vb_declarations" not in errors:
+        _line("  PASS — coherent VB declarations")
+
     # --- dag verify (gate) -------------------------------------------------
     _section("dag verify")
     dag_results: list[Any] = []
@@ -1046,7 +1067,36 @@ def _doctor_warnings(project_root: Path) -> list[str]:
     target_actions = action_target_specs_from_config(config)
     warnings.extend(_weak_action_outcome_warning_messages(target_actions))
     warnings.extend(_terminal_action_outcome_warning_messages(target_actions))
+    warnings.extend(_vb_declaration_issue_messages(project_root, config, severity="warning"))
     return warnings
+
+
+def _vb_declaration_issue_messages(
+    project_root: Path,
+    config: dict[str, Any],
+    *,
+    severity: str,
+) -> list[str]:
+    """VB-declaration coherence diagnostics at a given severity.
+
+    Detects colliding / multi-source verifiable-behavior declarations across
+    test docs (same id, different meaning → ERROR; a non-canonical doc with a
+    first-column ``VB-*`` table → WARNING with migration guidance for existing
+    brownfield projects). VALIDATION only — coverage semantics are untouched.
+    Returns the formatted messages for the requested severity.
+    """
+
+    from codd.verifiable_behavior_audit import (
+        parse_vb_tables_by_doc,
+        validate_vb_declarations,
+    )
+
+    try:
+        behaviors_by_doc = parse_vb_tables_by_doc(project_root, config=config)
+    except (OSError, ValueError):
+        return []
+    issues = validate_vb_declarations(behaviors_by_doc, strict=False)
+    return [issue.message for issue in issues if issue.severity == severity]
 
 
 def _has_crud_flow_targets(config: dict[str, Any]) -> bool:

@@ -46,6 +46,178 @@ _DEFAULT_VB_DOC_DIR = "docs/test"
 # VB audit re-scans the matched span with this token regex to recover every id.
 _VB_TOKEN_RE = re.compile(r"vb\s*=\s*(?P<vb>[A-Za-z0-9_.:-]+)", re.IGNORECASE)
 
+# Canonical verifiable-behavior declaration doc. Exactly ONE generated test
+# document owns the VB id namespace (declares every VB once in a first-column
+# ``VB-*`` table); every other test doc references those canonical ids in a
+# later column instead of minting a parallel ``VB-*`` table. This prevents two
+# docs from declaring the same numeric id with different semantics — the
+# structural defect that makes 100% coverage impossible (see
+# parse_vb_table / load_verifiable_behaviors "first wins" dedup).
+_CANONICAL_VB_NODE_ID = "test:test-strategy"
+_CANONICAL_VB_OUTPUT_PATH = "docs/test/test_strategy.md"
+
+
+def is_canonical_vb_doc(node_id: str | None = None, output_path: str | None = None) -> bool:
+    """Whether a test doc is the canonical VB declaration document.
+
+    The canonical doc (``test:test-strategy`` / ``docs/test/test_strategy.md``)
+    is the sole owner of the VB id namespace. Matching is generic: any project
+    whose test-strategy node/path uses the standard CoDD naming is canonical.
+    Detection accepts either the node id or the output path so it works both at
+    generation time (node id known) and audit time (only paths on disk).
+    """
+
+    if node_id is not None:
+        normalized_node = node_id.strip().replace("\\", "/").casefold()
+        if normalized_node == _CANONICAL_VB_NODE_ID:
+            return True
+    if output_path is not None:
+        normalized_path = output_path.strip().replace("\\", "/").casefold()
+        if normalized_path == _CANONICAL_VB_OUTPUT_PATH:
+            return True
+        # Tolerate an absolute or nested path whose tail is the canonical file.
+        if normalized_path.endswith("/" + _CANONICAL_VB_OUTPUT_PATH):
+            return True
+        if PurePosixPath(normalized_path).name == "test_strategy.md":
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class VBDeclarationIssue:
+    """A VB-declaration coherence problem detected across test documents."""
+
+    kind: str  # "collision" | "noncanonical_declaration" | "duplicate"
+    severity: str  # "error" | "warning"
+    vb_id: str
+    message: str
+    docs: tuple[str, ...] = ()
+
+
+def validate_vb_declarations(
+    behaviors_by_doc: dict[str, list[VerifiableBehavior]],
+    *,
+    canonical_doc: str | None = None,
+    strict: bool = False,
+) -> list[VBDeclarationIssue]:
+    """Validate that the declared VB namespace is coherent across documents.
+
+    DECLARATION validation only — it never touches coverage semantics (no alias
+    tables, no similarity matching). It reports:
+
+    * **collision** (always ERROR): the same normalized VB id is declared in two
+      or more docs with DIFFERENT descriptions — an incoherent namespace where
+      one id means two things.
+    * **duplicate** (always WARNING): the same id+description declared in more
+      than one doc — redundant but coherent.
+    * **noncanonical_declaration**: a non-canonical doc declares first-column
+      ``VB-*`` rows. ERROR under ``strict`` (new/CI/greenfield), WARNING with
+      migration guidance otherwise (existing brownfield docs).
+
+    ``behaviors_by_doc`` maps each doc's display path to its parsed VB rows.
+    ``canonical_doc`` is the display path of the canonical declarer when known;
+    otherwise canonical-ness is inferred from the standard CoDD naming.
+    """
+
+    issues: list[VBDeclarationIssue] = []
+
+    def _is_canonical(doc: str) -> bool:
+        if canonical_doc is not None:
+            return doc == canonical_doc
+        return is_canonical_vb_doc(output_path=doc)
+
+    # --- collisions / duplicates across docs (normalized id) ----------------
+    grouped: dict[str, list[VerifiableBehavior]] = {}
+    for doc, behaviors in behaviors_by_doc.items():
+        for behavior in behaviors:
+            grouped.setdefault(_normalize_vb_id(behavior.vb_id), []).append(behavior)
+
+    for normalized_id, group in sorted(grouped.items()):
+        docs = sorted({behavior.source_doc or "" for behavior in group})
+        if len(docs) < 2:
+            continue
+        descriptions = {behavior.description.strip().casefold() for behavior in group}
+        display_id = group[0].vb_id
+        if len(descriptions) > 1:
+            issues.append(
+                VBDeclarationIssue(
+                    kind="collision",
+                    severity="error",
+                    vb_id=display_id,
+                    docs=tuple(docs),
+                    message=(
+                        f"VB id `{display_id}` is declared with different descriptions in "
+                        f"multiple documents ({', '.join(docs)}); the VB namespace is "
+                        "incoherent. Declare each verifiable behavior exactly once in the "
+                        f"canonical doc (`{_CANONICAL_VB_OUTPUT_PATH}`) and reference it "
+                        "elsewhere — never re-mint the same id with a different meaning."
+                    ),
+                )
+            )
+        else:
+            issues.append(
+                VBDeclarationIssue(
+                    kind="duplicate",
+                    severity="warning",
+                    vb_id=display_id,
+                    docs=tuple(docs),
+                    message=(
+                        f"VB id `{display_id}` is declared identically in multiple documents "
+                        f"({', '.join(docs)}); keep a single canonical declaration and "
+                        "reference it from the other doc(s)."
+                    ),
+                )
+            )
+
+    # --- non-canonical docs that declare first-column VB rows ---------------
+    for doc in sorted(behaviors_by_doc):
+        behaviors = behaviors_by_doc[doc]
+        if not behaviors or _is_canonical(doc):
+            continue
+        sample = ", ".join(sorted({behavior.vb_id for behavior in behaviors})[:5])
+        issues.append(
+            VBDeclarationIssue(
+                kind="noncanonical_declaration",
+                severity="error" if strict else "warning",
+                vb_id=sample,
+                docs=(doc,),
+                message=(
+                    f"`{doc}` declares first-column VB id(s) ({sample}), but it is not the "
+                    f"canonical VB document (`{_CANONICAL_VB_OUTPUT_PATH}`). Move every "
+                    "auditable VB row into the canonical doc and convert this table to a "
+                    "reference mapping (first column AC-*/requirement id; canonical VB ids "
+                    "in a later column). Do not add duplicate markers to tests as the fix."
+                ),
+            )
+        )
+
+    return issues
+
+
+def parse_vb_tables_by_doc(
+    project_root: Path,
+    *,
+    config: dict[str, Any] | None = None,
+    docs: Iterable[Path | str] | None = None,
+) -> dict[str, list[VerifiableBehavior]]:
+    """Parse each discovered test doc's VB table, keyed by display path.
+
+    Unlike :func:`load_verifiable_behaviors` (which dedups across docs, "first
+    wins"), this keeps per-doc declarations so a collision validator can see all
+    sources of a given id.
+    """
+
+    project_root = Path(project_root).resolve()
+    by_doc: dict[str, list[VerifiableBehavior]] = {}
+    for doc_path in discover_vb_documents(project_root, config=config, docs=docs):
+        try:
+            text = doc_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        display = _rel_path(doc_path, project_root)
+        by_doc[display] = parse_vb_table(text, source_doc=display)
+    return by_doc
+
 
 @dataclass(frozen=True)
 class VerifiableBehavior:

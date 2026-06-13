@@ -426,6 +426,7 @@ def plan_init(
 
     from codd.config import find_codd_dir
     config["wave_config"] = wave_config
+    _set_canonical_vb_doc_config(config, wave_config)
     codd_dir = find_codd_dir(project_root)
     config_path = (codd_dir or project_root / "codd") / "codd.yaml"
     config_path.write_text(
@@ -439,6 +440,54 @@ def plan_init(
         requirement_paths=[d.path for d in requirement_documents] or [d.path for d in extracted_documents],
         wave_config=wave_config,
     )
+
+
+def _set_canonical_vb_doc_config(
+    config: dict[str, Any],
+    wave_config: dict[str, Any],
+) -> None:
+    """Pin the canonical VB declaration doc in ``test_coverage.docs`` (greenfield).
+
+    When the planned waves include the canonical VB document
+    (``test:test-strategy`` / ``docs/test/test_strategy.md``), record it as the
+    explicit VB-audit source so the canonical declarer is unambiguous. This is
+    a clarity aid (the audit auto-discovers ``docs/test/**/*.md`` otherwise); it
+    is skipped if the user has already configured ``test_coverage.docs`` so we
+    never clobber an explicit choice. Generic: it keys off the standard CoDD
+    canonical naming, not any one project's specifics.
+    """
+
+    from codd.verifiable_behavior_audit import is_canonical_vb_doc
+
+    section = config.get("test_coverage")
+    if isinstance(section, dict) and section.get("docs"):
+        return  # respect an explicit configuration
+
+    canonical_output: str | None = None
+    for entries in wave_config.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            node_id = entry.get("node_id") or entry.get("id")
+            output = entry.get("output")
+            if is_canonical_vb_doc(
+                node_id=node_id if isinstance(node_id, str) else None,
+                output_path=output if isinstance(output, str) else None,
+            ):
+                if isinstance(output, str) and output.strip():
+                    canonical_output = output.strip()
+                break
+        if canonical_output:
+            break
+
+    if not canonical_output:
+        return
+    if not isinstance(section, dict):
+        section = {}
+    section["docs"] = [canonical_output]
+    config["test_coverage"] = section
 
 
 def _ensure_lexicon(project_root: Path) -> None:

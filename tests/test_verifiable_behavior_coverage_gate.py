@@ -199,3 +199,173 @@ def test_opt_out_skips_gate_entirely(tmp_path):
     )
     assert passed is True
     assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# Single-canonical-doc fix: coherent project reaches 100%; real omissions RED;
+# the existing bounded retry still drives real coverage (no second gate loop).
+# ---------------------------------------------------------------------------
+
+
+def _canonical_strategy(project: Path, rows: str) -> None:
+    """Write the canonical VB declaration doc (docs/test/test_strategy.md)."""
+    _write(project / "docs" / "test" / "test_strategy.md", "| VB | D |\n| --- | --- |\n" + rows)
+
+
+def test_coherent_canonical_project_reaches_full_coverage(tmp_path):
+    """ANTI_FALSE_RED: one canonical doc + matching markers → uncovered=0, OK."""
+    project = tmp_path
+    _canonical_strategy(
+        project,
+        "| VB-01 | add creates a task |\n| VB-02 | done exits nonzero |\n| VB-39 | no browser/HTTP |\n",
+    )
+    # A reference-only acceptance doc maps AC ids to canonical VBs (no first-col VB).
+    _write(
+        project / "docs" / "test" / "acceptance_criteria.md",
+        "| AC ID | Criterion | Canonical VBs |\n| --- | --- | --- |\n| AC-07 | errors | VB-02 |\n",
+    )
+    _write(
+        project / "tests" / "test_app.py",
+        "# codd: covers vb=VB-01\n"
+        "# codd: covers vb=VB-02\n"
+        "# codd: covers vb=VB-39\n"
+        "def test_app():\n    assert True\n",
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    report = build_vb_coverage_audit(project, config=config)
+    assert report.summary["vb_count"] == 3
+    assert report.summary["uncovered"] == 0
+    assert report.summary["covered"] == 3
+
+    errors: list[str] = []
+    passed = run_implement_coverage_gate(
+        project,
+        config=config,
+        design_node="test:test-strategy",
+        output_paths=["tests/"],
+        echo=lambda _m: None,
+        echo_error=errors.append,
+    )
+    assert passed is True
+    assert errors == []
+
+
+def test_genuine_omission_still_reds_with_no_sibling_autocover(tmp_path):
+    """ANTI_FALSE_GREEN: drop one marker → that exact VB REDs; no sibling cover."""
+    project = tmp_path
+    # VB-14 ("no GUI") and VB-39 ("no Selenium") are semantic siblings — proving
+    # one must NOT auto-cover the other.
+    _canonical_strategy(
+        project,
+        "| VB-14 | CLI has no GUI/browser/web |\n| VB-39 | E2E imports no Selenium/HTTP |\n",
+    )
+    # Only VB-14 is covered; VB-39 has NO marker.
+    _write(
+        project / "tests" / "test_noweb.py",
+        "# codd: covers vb=VB-14\ndef test_noweb():\n    assert True\n",
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    report = build_vb_coverage_audit(project, config=config)
+    statuses = {row.vb_id: row.coverage_status for row in report.rows}
+    assert statuses["VB-14"] == "covered"
+    assert statuses["VB-39"] == "uncovered"  # sibling did NOT cover it
+
+    errors: list[str] = []
+    passed = run_implement_coverage_gate(
+        project,
+        config=config,
+        design_node="test:test-strategy",
+        output_paths=["tests/"],
+        rerun=None,  # no retry callback → fail immediately on the real gap
+        echo=lambda _m: None,
+        echo_error=errors.append,
+    )
+    assert passed is False
+    assert any("VB-39" in message for message in errors)
+
+
+def test_blocked_is_distinct_from_covered(tmp_path):
+    """ANTI_FALSE_GREEN: an explicit blocked marker is reported, not counted covered."""
+    project = tmp_path
+    _canonical_strategy(project, "| VB-01 | a |\n| VB-02 | b |\n")
+    _write(
+        project / "tests" / "t.py",
+        "# codd: covers vb=VB-01\n"
+        "# codd: blocked vb=VB-02 reason=needs-hardware\n"
+        "def t():\n    assert True\n",
+    )
+    report = build_vb_coverage_audit(project, config={"scan": {"test_dirs": ["tests/"]}})
+    assert report.summary["covered"] == 1
+    assert report.summary["blocked"] == 1
+    assert report.summary["uncovered"] == 0
+    statuses = {row.vb_id: row.coverage_status for row in report.rows}
+    assert statuses == {"VB-01": "covered", "VB-02": "blocked"}
+
+
+def test_existing_bounded_retry_still_drives_real_coverage(tmp_path):
+    """The kept implement-stage retry feeds gap feedback then PASSes once fixed.
+
+    Guards that the fix did NOT add a second gate-side repair loop and did NOT
+    break the existing ``test_coverage.max_retries`` path (a real omission is
+    repaired by adding a genuine covering marker, not duplicate markers).
+    """
+    project = tmp_path
+    _canonical_strategy(project, "| VB-01 | a |\n| VB-31 | missing id keeps list unchanged |\n")
+    # Start with only VB-01 covered (VB-31 is a genuine omission, like the dogfood case).
+    _write(
+        project / "tests" / "t.py",
+        "# codd: covers vb=VB-01\ndef t():\n    assert True\n",
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}, "test_coverage": {"max_retries": 2}}
+
+    rerun_feedback: list[str] = []
+
+    def rerun(feedback: str) -> None:
+        rerun_feedback.append(feedback)
+        # The "implementer" adds the genuine missing marker on the first retry.
+        _write(
+            project / "tests" / "t2.py",
+            "# codd: covers vb=VB-31\ndef t2():\n    assert True\n",
+        )
+
+    errors: list[str] = []
+    passed = run_implement_coverage_gate(
+        project,
+        config=config,
+        design_node="test:test-strategy",
+        output_paths=["tests/"],
+        rerun=rerun,
+        echo=lambda _m: None,
+        echo_error=errors.append,
+    )
+    assert passed is True
+    assert len(rerun_feedback) == 1  # bounded: one retry sufficed
+    assert "VB-31" in rerun_feedback[0]  # gap feedback named the real omission
+    assert errors == []
+
+
+def test_bounded_retry_exhausts_and_fails_on_persistent_omission(tmp_path):
+    """The retry is bounded by max_retries and still REDs if the gap remains."""
+    project = tmp_path
+    _canonical_strategy(project, "| VB-01 | a |\n| VB-31 | persistent omission |\n")
+    _write(project / "tests" / "t.py", "# codd: covers vb=VB-01\ndef t():\n    assert True\n")
+    config = {"scan": {"test_dirs": ["tests/"]}, "test_coverage": {"max_retries": 2}}
+
+    attempts: list[str] = []
+
+    def rerun(feedback: str) -> None:
+        attempts.append(feedback)  # never actually adds the marker
+
+    errors: list[str] = []
+    passed = run_implement_coverage_gate(
+        project,
+        config=config,
+        design_node="test:test-strategy",
+        output_paths=["tests/"],
+        rerun=rerun,
+        echo=lambda _m: None,
+        echo_error=errors.append,
+    )
+    assert passed is False
+    assert len(attempts) == 2  # bounded by max_retries
+    assert any("VB-31" in message for message in errors)

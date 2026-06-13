@@ -673,16 +673,23 @@ def test_render_document_uses_comment_headers_for_test_code():
 
 
 def test_generate_test_document_includes_design_to_test_traceability(tmp_path, mock_ai_cli):
-    """Test documents must include design-to-test traceability instructions."""
+    """Test documents must include design-to-test traceability instructions.
+
+    acceptance_criteria.md (node ``design:acceptance-criteria``) is NOT the
+    canonical VB declarer (``docs/test/test_strategy.md``), so it receives the
+    REFERENCE-ONLY traceability head: it must reference canonical VB ids rather
+    than mint its own first-column ``VB-*`` table. The modality-driven E2E
+    guidance below is unchanged.
+    """
     project = _setup_project(tmp_path)
 
     generate_wave(project, 1)
 
-    # Wave 1 includes acceptance_criteria.md which is a test doc
+    # Wave 1 includes acceptance_criteria.md which is a (reference-only) test doc.
     prompt = mock_ai_cli[0]["input"]
     assert "Design-to-test traceability" in prompt
-    assert "verifiable behaviors" in prompt
-    assert "traceability section" in prompt
+    assert "REFERENCE-ONLY" in prompt
+    assert "MUST NOT declare VB ids" in prompt
     assert "design-time `operation_flow` records as the authoritative source" in prompt
     assert "derived-state/read-model chain" in prompt
     assert "below/at/above-boundary assertions" in prompt

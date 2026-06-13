@@ -208,23 +208,54 @@ def _resolve_generation_capabilities(
     return load_capabilities(resolved, project_root)
 
 
-# Universal test-doc guidance — applies to every project type regardless of
-# capabilities (unit + integration coverage, traceability, operation_flow).
-_TEST_DOC_UNIVERSAL_HEAD = [
+# Test-doc traceability guidance — applies to every project type regardless of
+# capabilities (unit + integration coverage, traceability, operation_flow). It
+# is ROLE-AWARE: exactly one generated test document (the canonical doc,
+# ``docs/test/test_strategy.md`` / node ``test:test-strategy``) owns the
+# verifiable-behavior id namespace and declares every VB once in a first-column
+# ``VB-*`` table. Every other test document (e.g. acceptance_criteria.md) is
+# reference-only: it must NOT mint a parallel ``VB-*`` table — it references the
+# canonical ids in a later column. This prevents two docs from declaring the
+# same numeric id with different semantics, which makes 100% VB coverage
+# structurally impossible (the implementer can only mark one id per behavior).
+_TEST_DOC_CANONICAL_VB_HEAD = [
     "",
-    "Design-to-test traceability (CRITICAL):",
+    "Design-to-test traceability (CRITICAL — this is the CANONICAL verifiable-behavior registry):",
+    "- This document is the single canonical owner of the verifiable-behavior (VB) id namespace for the project. Declare EVERY verifiable behavior here exactly once; no other test document may declare VB ids.",
     "- Before defining test scenarios, enumerate ALL verifiable behaviors from the dependency design documents. A verifiable behavior is any system action, state transition, or output that the design specifies and that can be asserted in a test.",
     "- Every verifiable behavior must map to at least one test scenario — if a design document specifies a transition chain (e.g. action → intermediate state → final state), each link in the chain requires a separate assertion.",
-    "- Include a traceability section in the test document that lists each verifiable behavior and its corresponding test scenario(s). Flag any behavior that lacks coverage.",
+    "- Include a traceability section that lists each verifiable behavior and its corresponding test scenario(s). Flag any behavior that lacks coverage.",
     "- Write that traceability section as a Markdown table whose FIRST column is a stable verifiable-behavior id of the form `VB-<id>` (e.g. `VB-01`, `VB-AUTH-02`), one row per verifiable behavior. Header wording and language are free; CoDD machine-parses the `VB-` id in the first cell (`codd test audit`), so never merge multiple behaviors into one row and never omit the id column.",
+    "- Declare each behavior under exactly one stable id; do not split one behavior across two ids or reuse an id for two different behaviors.",
     "- Treat design-time `operation_flow` records as the authoritative source for operational test obligations. Do not invent E2E-only behavior that is absent from requirements or design; instead flag missing design obligations.",
 ]
 
+_TEST_DOC_REFERENCE_VB_HEAD = [
+    "",
+    "Design-to-test traceability (CRITICAL — this document is REFERENCE-ONLY for verifiable behaviors):",
+    "- The canonical verifiable-behavior (VB) registry lives in `docs/test/test_strategy.md`. This document MUST NOT declare VB ids and MUST NOT contain any Markdown table whose FIRST column is a `VB-*` id.",
+    "- Use your own first-column ids appropriate to this document (e.g. `AC-01` for acceptance criteria, or a requirement id). Reference the canonical VB ids only in a LATER column, e.g. a column headed `Canonical VBs` listing `VB-07, VB-29`.",
+    "- Concretely: a traceability/mapping table here looks like `| AC ID | Acceptance criterion | Canonical VBs |`, never `| VB-01 | ... |`. CoDD machine-parses any first-cell `VB-*` as a declaration, so a `VB-*` first column here would collide with the canonical registry.",
+    "- Do not restate or renumber the canonical VB table; map your acceptance criteria / requirements to the existing canonical VB ids instead.",
+    "- Treat design-time `operation_flow` records as the authoritative source for operational test obligations. Do not invent behavior that is absent from requirements or design; instead flag missing design obligations.",
+]
 
-def _build_test_doc_block(capabilities: ProjectCapabilities) -> list[str]:
+
+def _build_test_doc_block(
+    capabilities: ProjectCapabilities,
+    *,
+    node_id: str | None = None,
+    output_path: str | None = None,
+) -> list[str]:
     """Build the test-document meta-prompt guidance, branched on e2e_modality.
 
-    Unit + integration guidance is universal. The end-to-end layer adapts:
+    Unit + integration guidance is universal. The traceability head is
+    ROLE-AWARE: the canonical VB doc (``test:test-strategy`` /
+    ``docs/test/test_strategy.md``) gets the declaration head; every other test
+    doc gets the reference-only head (no first-column ``VB-*`` table). When the
+    role is unknown (no ``node_id``/``output_path`` — e.g. single-doc projects
+    or legacy callers), default to canonical so a lone test doc still declares
+    VBs and back-compat holds. The end-to-end layer adapts:
 
     * ``browser``  → browser-E2E (Playwright/Cypress, UI flows, server startup) + API split.
     * ``cli``      → end-to-end tests that invoke the built CLI as a subprocess
@@ -235,8 +266,15 @@ def _build_test_doc_block(capabilities: ProjectCapabilities) -> list[str]:
     Server-startup language is only emitted when ``long_running_service`` is true.
     """
 
+    from codd.verifiable_behavior_audit import is_canonical_vb_doc
+
     modality = capabilities.e2e_modality
-    lines = list(_TEST_DOC_UNIVERSAL_HEAD)
+    if node_id is None and output_path is None:
+        is_canonical = True
+    else:
+        is_canonical = is_canonical_vb_doc(node_id=node_id, output_path=output_path)
+    head = _TEST_DOC_CANONICAL_VB_HEAD if is_canonical else _TEST_DOC_REFERENCE_VB_HEAD
+    lines = list(head)
 
     if modality == "browser":
         lines.extend(
@@ -513,7 +551,51 @@ def generate_wave(
         output_path.write_text(content, encoding="utf-8")
         results.append(GenerationResult(node_id=artifact.node_id, path=output_path, status="generated"))
 
+    _enforce_vb_declaration_coherence(project_root, config, results)
     return results
+
+
+def _enforce_vb_declaration_coherence(
+    project_root: Path,
+    config: dict[str, Any],
+    results: list[GenerationResult],
+) -> None:
+    """Fail generation if the generated test docs declare an incoherent VB space.
+
+    Deterministic cross-document post-check (defaults-must-not-flake): after the
+    test docs are written, parse every discovered VB table and reject:
+
+    * a non-canonical test doc with first-column ``VB-*`` rows (a model that
+      ignored the reference-only instruction), and
+    * two docs declaring the same normalized VB id with DIFFERENT descriptions
+      (an incoherent namespace where one id means two things).
+
+    Identical duplicates (same id+description) only warn. Treated as a
+    generation defect — NOT a coverage gap — so it is never "fixed" by stuffing
+    duplicate markers. Runs only when this wave generated at least one test doc
+    so unrelated waves are unaffected.
+    """
+
+    if not any(
+        result.status == "generated" and _infer_doc_type(str(result.path)) == "test"
+        for result in results
+    ):
+        return
+
+    from codd.verifiable_behavior_audit import parse_vb_tables_by_doc, validate_vb_declarations
+
+    behaviors_by_doc = parse_vb_tables_by_doc(project_root, config=config)
+    # Newly generated output must be canonical by construction → strict.
+    issues = validate_vb_declarations(behaviors_by_doc, strict=True)
+    errors = [issue for issue in issues if issue.severity == "error"]
+    if errors:
+        detail = "\n".join(f"  - {issue.message}" for issue in errors)
+        raise ValueError(
+            "Generated test documents declare an incoherent verifiable-behavior namespace:\n"
+            f"{detail}\n"
+            "Exactly one document (docs/test/test_strategy.md) must declare VB ids; all other "
+            "test docs must reference canonical VB ids in a later column."
+        )
 
 
 def _load_project_config(project_root: Path) -> dict[str, Any]:
@@ -976,7 +1058,13 @@ def _build_generation_prompt(
         )
 
     if doc_type == "test":
-        lines.extend(_build_test_doc_block(capabilities))
+        lines.extend(
+            _build_test_doc_block(
+                capabilities,
+                node_id=artifact.node_id,
+                output_path=artifact.output,
+            )
+        )
 
     if doc_type == "operations":
         lines.extend(_build_operations_doc_block(capabilities))
@@ -1391,6 +1479,39 @@ def _validate_generated_body(title: str, body: str, *, output_path: str | None =
     if output_path and _is_detailed_design_output(output_path):
         if not MERMAID_FENCE_RE.search(body):
             raise ValueError(f"AI command returned detailed design without Mermaid diagrams for {title!r}")
+
+    _validate_test_doc_vb_declaration(body, output_path=output_path)
+
+
+def _validate_test_doc_vb_declaration(body: str, *, output_path: str | None) -> None:
+    """Reject a reference-only test doc that mints a first-column ``VB-*`` table.
+
+    Only the canonical VB document (``docs/test/test_strategy.md``) may declare
+    VB ids. A non-canonical test doc (e.g. acceptance_criteria.md) that emits
+    first-column ``VB-*`` rows would collide with the canonical registry and make
+    100% coverage structurally impossible, so this raises ``ValueError`` —
+    feeding deterministic feedback into the bounded generation-retry loop rather
+    than relying on the prompt alone (defaults-must-not-flake). Non-test docs and
+    the canonical doc are unaffected.
+    """
+
+    if not output_path or _infer_doc_type(output_path) != "test":
+        return
+    from codd.verifiable_behavior_audit import is_canonical_vb_doc, parse_vb_table
+
+    if is_canonical_vb_doc(output_path=output_path):
+        return
+    declared = parse_vb_table(body)
+    if not declared:
+        return
+    sample = ", ".join(sorted({behavior.vb_id for behavior in declared})[:5])
+    raise ValueError(
+        f"Non-canonical test document {output_path!r} declares first-column verifiable-behavior "
+        f"id(s) ({sample}). Only docs/test/test_strategy.md may declare VB ids. Remove the "
+        "first-column `VB-*` table from this document: use AC-*/requirement ids in the first "
+        "column and reference the canonical VB ids (from docs/test/test_strategy.md) in a later "
+        "column instead."
+    )
 
 
 def _first_content_line_after_title(body: str) -> str | None:
