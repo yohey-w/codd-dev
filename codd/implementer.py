@@ -8,8 +8,10 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import sys
+import time
 import warnings
-from typing import Any
+from typing import Any, Callable
 
 import codd.generator as generator_module
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
@@ -441,6 +443,81 @@ def _syntax_gate_max_attempts(config: dict[str, Any]) -> int:
     return DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS
 
 
+class NoUsableGeneratedFiles(RuntimeError):
+    """One implement attempt yielded NO usable generated files (transiently).
+
+    Raised inside :func:`Implementer._run_implementation_generation_attempt`
+    when a single prompt->invoke->write pass produces nothing writable for a
+    reason that a re-issue of the SAME effective prompt can clear:
+
+    - (a) the AI returned empty output, or a file-writing agent produced no
+      (readable) file changes;
+    - (b) the AI emitted file block(s) but every one was invalid / out of scope
+      (``_write_generated_files`` ValueError);
+    - (c) the payload parsed but filtered down to zero usable files.
+
+    This is DISTINCT from :class:`ImplementSyntaxGateError` (files were produced
+    but failed deterministic syntax/confusable validation) and from
+    ``skip_generation: true`` (an explicit, sanctioned 0-file success). The
+    supervisor loop in :func:`Implementer.run_implement` retries this a bounded
+    number of times and then raises the SAME ``_zero_generated_files_error`` as
+    a no-retry world would — never a softer outcome.
+    """
+
+
+# A transient no-usable-output AI response on a single implement attempt is
+# re-issued a bounded number of times before the zero-files hard-fail gate (the
+# greenfield dogfood finding: a single empty/unparseable codex response exit-0
+# hard-failed a multi-hour autopilot run, yet re-running the identical call
+# succeeded). SEPARATE from the transient-transport knob in ai_invoke
+# (TRANSIENT_AUTO_RETRIES) on purpose: transport drop and no-usable-file output
+# are different failure classes; tying them to one knob makes later tuning
+# unsafe. Numerically aligned with that precedent (3 / 1.5s).
+DEFAULT_NO_USABLE_FILE_RETRIES = 3
+#: Short backoff (seconds) between no-usable-output retries; index-scaled
+#: (1.5s / 3.0s / 4.5s for retries 1/2/3).
+DEFAULT_NO_USABLE_FILE_BACKOFF_SECONDS = 1.5
+
+
+def _no_usable_file_retries(config: dict[str, Any]) -> int:
+    """``implement.no_usable_file_retries`` — retries on a no-usable-output attempt.
+
+    Defaults to :data:`DEFAULT_NO_USABLE_FILE_RETRIES` (so 4 total attempts).
+    A configured value below 0 or a non-integer falls back to the default.
+    Bounded on purpose: a genuinely insufficient design still fails honestly
+    with the same zero-files error, nothing written.
+    """
+    section = config.get("implement")
+    if isinstance(section, dict) and "no_usable_file_retries" in section:
+        raw = section["no_usable_file_retries"]
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_NO_USABLE_FILE_RETRIES
+        if value >= 0:
+            return value
+        return DEFAULT_NO_USABLE_FILE_RETRIES
+    return DEFAULT_NO_USABLE_FILE_RETRIES
+
+
+# The file-writing-agent (e.g. codex exec) and the text-out path both surface a
+# "no usable output" condition as a ValueError. An empty-output ValueError and
+# the file-writing-agent "did not produce any (readable) file changes" capture
+# errors are the SAME no-usable class for implement: re-issuing the identical
+# call can clear them. Matched conservatively from the message text so genuine
+# permanent errors (missing binary, auth/billing/validation) never match.
+_NO_USABLE_OUTPUT_MARKERS: tuple[str, ...] = (
+    "empty output",
+    "did not produce any file changes",
+    "did not produce any readable file changes",
+)
+
+
+def _is_no_usable_output_error(exc: ValueError) -> bool:
+    detail = str(exc).casefold()
+    return any(marker in detail for marker in _NO_USABLE_OUTPUT_MARKERS)
+
+
 def _payload_syntax_error(relative_path: str, content: str) -> str | None:
     """Best-effort syntax validation of one AI-produced payload.
 
@@ -695,11 +772,15 @@ class Implementer:
         config: dict[str, Any] | None = None,
         ai_command: str | None = None,
         use_derived_steps: bool | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.config = config if config is not None else _load_project_config(self.project_root)
         self.ai_command = ai_command
         self.use_derived_steps = _use_derived_steps_enabled(self.config, use_derived_steps)
+        # Injectable backoff between no-usable-output retries (tests stub it to
+        # avoid real sleeps); mirrors ai_invoke._invoke_with_recovery's ``sleep``.
+        self._sleep = sleep
 
     def run_implement(self, spec: ImplementSpec, *, feedback: str | None = None) -> ImplementationResult:
         """Read ``spec.design_node`` and generate files under ``spec.output_paths``.
@@ -780,75 +861,180 @@ class Implementer:
         # implement.syntax_gate_max_attempts); with both off there is a single
         # attempt (legacy behavior).
         gate_active = syntax_gate or confusable_check
-        max_attempts = _syntax_gate_max_attempts(self.config) if gate_active else 1
-        current_feedback = feedback
-        generated_files: list[Path] = []
-        gate_error: ImplementSyntaxGateError | None = None
-        for _attempt in range(max_attempts):
-            prompt = _build_implementation_prompt(
-                config=self.config,
-                design_context=design_context,
-                spec=spec,
-                dependency_documents=dependency_documents,
-                conventions=combined_conventions,
-                coding_principles=coding_principles,
-                design_md_content=design_md_content,
-                screen_flow_content=screen_flow_content,
-                screen_flow_routes=screen_flow_routes,
-                impl_steps_context=impl_steps_context,
-                feedback=current_feedback,
-                capabilities=capabilities,
-            )
-            prompt = generator_module._inject_lexicon(prompt, self.project_root)
-            try:
-                raw_output = generator_module._invoke_ai_command(
-                    resolved_ai_command,
-                    prompt,
-                    project_root=self.project_root,
-                )
-            except ValueError as exc:
-                if "empty output" not in str(exc).casefold():
-                    raise
-                if _skip_generation_enabled(design_context.content):
-                    raw_output = ""
-                else:
-                    raise _zero_generated_files_error(spec) from exc
+        # Two INDEPENDENT bounded retry budgets compose ADDITIVELY (never
+        # nested — nesting would multiply into 4x3 model calls). The syntax
+        # gate re-issues only on ImplementSyntaxGateError (files produced but
+        # deterministically invalid); the no-usable budget re-issues only on a
+        # transient no-usable-output attempt (empty/unparseable/all-out-of-scope
+        # /filtered-to-0). A no-usable retry does NOT consume syntax budget (no
+        # file reached validation) and vice-versa; the last exhausted gate
+        # decides the error. With the syntax gate OFF there are no syntax
+        # retries (legacy single-attempt-per-output semantics for that branch).
+        syntax_gate_max_attempts = _syntax_gate_max_attempts(self.config) if gate_active else 1
+        no_usable_file_retries = _no_usable_file_retries(self.config)
 
-            if _skip_generation_enabled(design_context.content) and not raw_output.strip():
-                generated_files = []
-                gate_error = None
-                break
+        current_feedback = feedback
+        no_usable_retries_used = 0
+        syntax_rejections = 0
+        while True:
             try:
-                generated_files = _write_generated_files(
-                    project_root=self.project_root,
-                    design_context=design_context,
+                generated_files = self._run_implementation_generation_attempt(
                     spec=spec,
+                    design_context=design_context,
                     dependency_documents=dependency_documents,
+                    combined_conventions=combined_conventions,
+                    coding_principles=coding_principles,
+                    design_md_content=design_md_content,
+                    screen_flow_content=screen_flow_content,
+                    screen_flow_routes=screen_flow_routes,
+                    impl_steps_context=impl_steps_context,
+                    capabilities=capabilities,
+                    resolved_ai_command=resolved_ai_command,
                     language=language,
-                    raw_output=raw_output,
                     syntax_gate=syntax_gate,
                     confusable_check=confusable_check,
-                    root_artifact_patterns=_root_artifact_patterns_from_config(self.config),
+                    current_feedback=current_feedback,
                 )
+            except NoUsableGeneratedFiles as exc:
+                # A no-usable retry never bypasses the eventual hard fail: once
+                # the budget is spent, raise the SAME zero-files error a no-retry
+                # world would (no softer warning, no partial success, no fallback
+                # artifact) — carrying the last no-usable reason as context.
+                if no_usable_retries_used >= no_usable_file_retries:
+                    raise _zero_generated_files_error(spec) from exc
+                no_usable_retries_used += 1
+                print(
+                    f"[codd] implement produced no usable files "
+                    f"(no-usable retry {no_usable_retries_used}/{no_usable_file_retries}): "
+                    f"{str(exc)[:200]}",
+                    file=sys.stderr,
+                )
+                self._sleep(
+                    DEFAULT_NO_USABLE_FILE_BACKOFF_SECONDS * no_usable_retries_used
+                )
+                continue
             except ImplementSyntaxGateError as exc:
-                gate_error = exc
+                syntax_rejections += 1
+                if syntax_rejections >= syntax_gate_max_attempts:
+                    raise _syntax_gate_exhausted_error(
+                        spec, exc, attempts=syntax_gate_max_attempts
+                    ) from exc
+                # Feedback only RESTATES the file-output contract (the rejected
+                # files + the ASCII directive); it never broadens allowed paths,
+                # changes the target language, or suggests placeholder files.
                 current_feedback = _combine_feedback(feedback, exc.feedback_message())
                 continue
-            except ValueError as exc:
-                raise _zero_generated_files_error(spec) from exc
-            gate_error = None
             break
 
-        if gate_error is not None:
-            raise _syntax_gate_exhausted_error(spec, gate_error, attempts=max_attempts) from gate_error
-
-        if len(generated_files) == 0 and not _skip_generation_enabled(design_context.content):
-            raise _zero_generated_files_error(spec)
         return ImplementationResult(
             design_node=spec.design_node,
             output_paths=[_resolve_output_path(self.project_root, item) for item in spec.output_paths],
             generated_files=generated_files,
         )
+
+    def _run_implementation_generation_attempt(
+        self,
+        *,
+        spec: ImplementSpec,
+        design_context: DesignContext,
+        dependency_documents: list[DependencyDocument],
+        combined_conventions: list[str],
+        coding_principles: Any,
+        design_md_content: str | None,
+        screen_flow_content: str | None,
+        screen_flow_routes: list[Any],
+        impl_steps_context: Any,
+        capabilities: ProjectCapabilities,
+        resolved_ai_command: str,
+        language: str,
+        syntax_gate: bool,
+        confusable_check: bool,
+        current_feedback: str | None,
+    ) -> list[Path]:
+        """One prompt -> invoke -> write pass; the file-output contract boundary.
+
+        Returns the generated files on success. Routes the three transient
+        zero-file conditions into :class:`NoUsableGeneratedFiles` for the
+        supervisor loop to retry:
+
+        - (a) empty AI output / file-writing-agent "no (readable) file changes"
+          — UNLESS ``skip_generation: true`` (then return ``[]``, the sole
+          sanctioned 0-file success), checked BEFORE treating empty as
+          no-usable;
+        - (b) ``_write_generated_files`` ValueError (all blocks invalid / out of
+          scope);
+        - (c) the pass returned but filtered down to zero usable files.
+
+        :class:`ImplementSyntaxGateError` propagates unchanged (the syntax/
+        confusable gate stays active on EVERY retry). Path/scope validation is
+        re-run verbatim — out-of-scope/absolute/traversal/non-output-prefix
+        files stay rejected on retry; the prompt is never mutated to coax a file
+        through.
+        """
+        skip_generation = _skip_generation_enabled(design_context.content)
+        prompt = _build_implementation_prompt(
+            config=self.config,
+            design_context=design_context,
+            spec=spec,
+            dependency_documents=dependency_documents,
+            conventions=combined_conventions,
+            coding_principles=coding_principles,
+            design_md_content=design_md_content,
+            screen_flow_content=screen_flow_content,
+            screen_flow_routes=screen_flow_routes,
+            impl_steps_context=impl_steps_context,
+            feedback=current_feedback,
+            capabilities=capabilities,
+        )
+        prompt = generator_module._inject_lexicon(prompt, self.project_root)
+        try:
+            raw_output = generator_module._invoke_ai_command(
+                resolved_ai_command,
+                prompt,
+                project_root=self.project_root,
+            )
+        except ValueError as exc:
+            # skip_generation is the ONLY 0-file success: check it BEFORE
+            # treating empty output as no-usable, so a skip doc never triggers a
+            # retry. Empty output AND file-writing-agent "no (readable) file
+            # changes" are both the no-usable class for a non-skip design.
+            if not _is_no_usable_output_error(exc):
+                raise
+            if skip_generation:
+                raw_output = ""
+            else:
+                raise NoUsableGeneratedFiles(str(exc)) from exc
+
+        if skip_generation and not raw_output.strip():
+            return []
+        try:
+            generated_files = _write_generated_files(
+                project_root=self.project_root,
+                design_context=design_context,
+                spec=spec,
+                dependency_documents=dependency_documents,
+                language=language,
+                raw_output=raw_output,
+                syntax_gate=syntax_gate,
+                confusable_check=confusable_check,
+                root_artifact_patterns=_root_artifact_patterns_from_config(self.config),
+            )
+        except ImplementSyntaxGateError:
+            # Files were produced but failed deterministic validation: this is
+            # the syntax gate's domain, NOT a no-usable retry. Propagate.
+            raise
+        except ValueError as exc:
+            # (b) parsed but ALL blocks invalid / out of scope. Retry as
+            # no-usable instead of converting straight to the hard fail.
+            raise NoUsableGeneratedFiles(str(exc)) from exc
+
+        # (c) parsed but filtered to zero usable files (and not an explicit
+        # skip): retry as no-usable.
+        if len(generated_files) == 0 and not skip_generation:
+            raise NoUsableGeneratedFiles(
+                f"Design '{spec.design_node}' produced 0 usable generated files."
+            )
+        return generated_files
 
 
 def implement_tasks(
