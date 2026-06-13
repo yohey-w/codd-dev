@@ -294,7 +294,7 @@ axes:
       a different live CLI (codex etc.) surfaces prompt/format/ tooling assumptions. The declared-but-unverified
       multi-CLI risk.
     saturation_counter: 0
-    last_run: '2026-06-12'
+    last_run: '2026-06-13'
     status: active
     cost: llm
     automation: manual
@@ -309,6 +309,15 @@ axes:
       F-codex-filewriting-stdout (mechanical, fixed): the file-writing-agent path discarded codex''s valid
       `=== FILE:` stdout and demanded on-disk git writes. After fix, implement produced 4 working files
       and the generated greeter ran correctly (Hello, Alice! / exit2 on misuse). saturation reset to 0.'
+    - '2026-06-13: second cross-CLI run (codex gpt-5.5 xhigh) on the todo-CLI greenfield (git repo, after the
+      gate false-RED sweep). init/elicit(10 findings)/plan(5 waves)/generate(5 waves) ALL drove cleanly via
+      codex again — vendor-independence holds through generate. implement FAILED "produced 0 generated files":
+      NOT the stdout-capture path (F-codex-filewriting-stdout holds) — codex non-deterministically emits BARE
+      basenames (task_model.py) instead of src/-prefixed, and _parse_file_payloads dropped every block outside
+      the output prefix (claude always prefixes src/, so this vendor difference was invisible until codex).
+      Surfaced+fixed F-codex-bare-basename-dropped (c9081a0: _reroot_bare_basename reroots single-output-prefix
+      bare basenames; multi-component/multi-prefix still drop; fabricates nothing). Live re-run captured 5
+      files; full e2e (verify/check) resumed with the fix. saturation stays 0 (productive).'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -986,6 +995,38 @@ findings:
   class: conceptual
   derived_case_ids:
   - PC-confusable-greek-precision
+- id: F-codex-bare-basename-dropped
+  axis: D6
+  date: '2026-06-13'
+  model_used: codex gpt-5.5 xhigh (cross-CLI SUT, M1 instrument)
+  symptom: 'second cross-CLI greenfield (todo-CLI, codex SUT): init/elicit/plan/generate drove cleanly, then
+    implement FAILED "Design docs/detailed_design/task_domain_and_storage.md produced 0 generated files".
+    codex DID emit file content via the stdout `=== FILE:` contract, but named files by BARE basename
+    (task_model.py) rather than src/-prefixed (src/task_model.py); the parser dropped every block as "outside
+    output paths [src/]" -> all invalid -> 0 generated files. claude always emits the src/ prefix, so this
+    vendor difference was invisible until codex. A false-RED-adjacent vendor-coupling: the SUT did the work,
+    CoDD dropped it on a path-prefix technicality.'
+  root_cause: '_parse_file_payloads (codd/implementer.py ~2022) skips any `=== FILE:` block whose path does
+    not start with a configured output prefix; codex non-deterministically omits the src/ prefix (deriving
+    filenames from the design''s logical module names like module:task_model), so all blocks are skipped and
+    implementer.py:837-838 re-raises _zero_generated_files_error. The stdout-capture fix (F-codex-filewriting-
+    stdout, 3ea34b4) works correctly — the defect is downstream, in path matching.'
+  fix_commit: c9081a0
+  fix_description: 'codd/implementer.py: new _reroot_bare_basename() wired into _parse_file_payloads — when
+    EXACTLY ONE output prefix is configured (the dominant implement-task case) and a block path is a bare
+    basename (single path component), reroot it under that prefix (task_model.py -> src/task_model.py).
+    Conservative + anti-false-green: multi-component deliberate paths (src/other/x.py, tests/y.py, lib/z.py)
+    still drop, multiple output prefixes -> ambiguous -> still drop, and nothing is fabricated (only relocates
+    a path the model already emitted WITH content). General — no project literals; helps any text-out CLI whose
+    file naming omits the output prefix. Confirmed the recent syntax-gate edits (safe_load_all/BOM strip) are
+    downstream of capture and did NOT cause this. Live codex re-run of define_task_model captured 5 files to
+    src/. Full suite 4247 passed, 0 skipped (+4 regression tests).'
+  regression_test: 'tests/implement/test_root_artifacts.py — parser-level reroot, preserved skip semantics
+    (multi-component path + multi-prefix), and an E2E run_implement through the file-writing-agent capture with
+    a codex-style command emitting bare-named `=== FILE:` blocks on stdout and writing nothing to disk
+    (synthesized, no live codex needed).'
+  status: fixed
+  class: mechanical
 pending_cases:
 - id: PC-spec-grounded-repair-arbitration
   axis: D4
