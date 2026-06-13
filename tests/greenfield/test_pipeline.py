@@ -1004,3 +1004,113 @@ def test_test_only_task_output_paths_resolve_to_test_dirs(tmp_path: Path) -> Non
         test_kinds=("unit",),
     )
     assert _output_paths_for_task(config, colocated) != ["tests/"]
+
+
+# ═══════════════════════════════════════════════════════════
+# verify stage ensures a runnable test setup (the "runnable tests" guarantee)
+# ═══════════════════════════════════════════════════════════
+#
+# The 2026-06 real-AI dogfood gap: a live build reached verify with real pytest
+# tests under tests/, but no test config existed (no pyproject/pytest.ini/...),
+# so detect_test_command returned None and verify "executed nothing" — the
+# autopilot correctly refused to certify an unexecuted build, but the build was
+# unverifiable through no fault of the tests. The verify stage now
+# DETERMINISTICALLY scaffolds the stack's test-runner config first (idempotent,
+# non-clobbering), so a known stack is always runnable independent of AI luck.
+
+
+def _python_project_with_tests_but_no_config(tmp_path: Path) -> Path:
+    """A project mid-pipeline: source + real pytest tests, but NO test config.
+
+    Reproduces the dogfood state the verify stage must rescue. Uses the configured
+    scan dirs (src/, tests/) so the ensured pythonpath/testpaths derive from
+    config, not literals.
+    """
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    (project / "src").mkdir(parents=True, exist_ok=True)
+    (project / "src" / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"
+    )
+    (project / "tests").mkdir(parents=True, exist_ok=True)
+    (project / "tests" / "test_calc.py").write_text(
+        "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+    return project
+
+
+def test_verify_stage_scaffolds_runner_then_executes(tmp_path: Path) -> None:
+    from codd.test_detection import detect_test_command
+
+    project = _python_project_with_tests_but_no_config(tmp_path)
+    # Pre-condition: the live gap — tests exist but nothing is detectable.
+    assert detect_test_command(project) is None
+
+    record: dict = {"status": "pending", "detail": ""}
+    GreenfieldPipeline()._stage_verify(project, record, {"max_repair_attempts": 1})
+
+    # The stage scaffolded a detectable, runnable config (derived from scan dirs)
+    pyproject = project / "pyproject.toml"
+    assert pyproject.is_file()
+    text = pyproject.read_text(encoding="utf-8")
+    assert "[tool.pytest.ini_options]" in text
+    assert 'testpaths = ["tests"]' in text
+    assert 'pythonpath = ["src", "."]' in text
+    assert detect_test_command(project) == "pytest --tb=short -q"
+    # ...and verify REALLY executed the generated tests (not structural-only).
+    assert "tests executed" in record["detail"]
+    assert "pytest" in record["detail"]
+
+
+def test_verify_stage_anti_false_green_fails_when_tests_fail(tmp_path: Path) -> None:
+    """Scaffolding makes the runner DETECTABLE; it must not mask real failures."""
+    project = _python_project_with_tests_but_no_config(tmp_path)
+    # Make the (now runnable) test fail.
+    (project / "tests" / "test_calc.py").write_text(
+        "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 999\n",
+        encoding="utf-8",
+    )
+
+    record: dict = {"status": "pending", "detail": ""}
+    with pytest.raises(StageError):
+        GreenfieldPipeline()._stage_verify(project, record, {"max_repair_attempts": 1})
+    # the runner was still ensured (detectable) — the failure is an HONEST one.
+    assert (project / "pyproject.toml").is_file()
+
+
+def test_verify_stage_does_not_clobber_existing_config(tmp_path: Path) -> None:
+    project = _python_project_with_tests_but_no_config(tmp_path)
+    original = (
+        '[project]\nname = "demo"\n\n'
+        '[tool.pytest.ini_options]\n'
+        'pythonpath = ["src"]\n'
+        'addopts = "-p no:cacheprovider"\n'
+    )
+    (project / "pyproject.toml").write_text(original, encoding="utf-8")
+
+    record: dict = {"status": "pending", "detail": ""}
+    GreenfieldPipeline()._stage_verify(project, record, {"max_repair_attempts": 1})
+
+    # An author/AI-provided config is authoritative — left byte-for-byte intact.
+    assert (project / "pyproject.toml").read_text(encoding="utf-8") == original
+    assert "tests executed" in record["detail"]
+
+
+def test_verify_stage_unknown_stack_still_gates_honesty(tmp_path: Path) -> None:
+    """A stack without an ensurer must NOT be certified when nothing executes.
+
+    The scaffold is stack-specific; for an unsupported language the verify
+    honesty gate (FX3) is still the authority and refuses to certify an
+    unexecuted build.
+    """
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    # Override the recorded language to one with no test-runner ensurer.
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+    config["project"]["language"] = "rust"
+    (project / "codd" / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    record: dict = {"status": "pending", "detail": ""}
+    with pytest.raises(StageError, match="executed nothing"):
+        GreenfieldPipeline()._stage_verify(project, record, {"max_repair_attempts": 1})
+    # no pyproject scaffolded for an unsupported stack.
+    assert not (project / "pyproject.toml").exists()

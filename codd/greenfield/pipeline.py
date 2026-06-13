@@ -788,6 +788,17 @@ class GreenfieldPipeline:
     # ── stage: verify ───────────────────────────────────────
 
     def _stage_verify(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        # Deterministically guarantee the stack's test runner is DETECTABLE
+        # before verify runs. The build now contains source + tests (implement
+        # finished), but whether a runnable test config exists was left to the
+        # generating AI's luck (2026-06 dogfood: one CLI emitted a pyproject,
+        # another did not → verify "executed nothing"). This ensures a
+        # detectable, runnable config for a known stack without clobbering an
+        # AI/user one. It only makes the runner DETECTABLE; it does NOT relax
+        # verification — the anti-false-green honesty gate below still refuses to
+        # certify an unexecuted build.
+        self._ensure_test_runner(project_root)
+
         runner = self.verify_runner or _default_verify_runner
         record["detail"] = str(
             runner(
@@ -797,6 +808,38 @@ class GreenfieldPipeline:
                 echo=self.echo,
             )
         )
+
+    def _ensure_test_runner(self, project_root: Path) -> None:
+        """Scaffold a detectable, runnable test-runner config for the stack.
+
+        Stack-general: dispatches through the project-type/capability registry
+        (:func:`codd.project_types.ensure_test_runner_config`), which is
+        idempotent and non-clobbering and derives every path from the project's
+        configured ``scan.source_dirs`` / ``scan.test_dirs``. Advisory — any
+        failure is logged and swallowed; the verify honesty gate remains the
+        authority on whether the build is certifiable.
+        """
+        try:
+            from codd.config import load_project_config
+            from codd.project_types import ensure_test_runner_config
+
+            try:
+                config = load_project_config(project_root)
+            except (FileNotFoundError, ValueError):
+                config = {}
+            project_section = config.get("project") if isinstance(config.get("project"), dict) else {}
+            language = self.language or (project_section.get("language") if isinstance(project_section, dict) else None)
+            scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+            result = ensure_test_runner_config(
+                project_root,
+                language=language,
+                source_dirs=scan.get("source_dirs") if isinstance(scan, dict) else None,
+                test_dirs=scan.get("test_dirs") if isinstance(scan, dict) else None,
+            )
+            if result.action in ("created", "augmented"):
+                self.echo(f"[greenfield] verify: ensured test runner — {result.detail}")
+        except Exception as exc:  # noqa: BLE001 — scaffolding is advisory; verify still gates honesty.
+            self.echo(f"[greenfield] verify: test-runner ensure skipped (non-blocking): {exc}")
 
     # ── stage: propagate (advisory on a fresh build) ────────
 

@@ -24,6 +24,7 @@ Design goals:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -233,3 +234,255 @@ def _as_choice(value: Any, allowed: set[str], fallback: str) -> str:
     if isinstance(value, str) and value.strip().lower() in allowed:
         return value.strip().lower()
     return fallback
+
+
+# ═══════════════════════════════════════════════════════════
+# Stack-general test-runner configuration (the "runnable tests" guarantee)
+# ═══════════════════════════════════════════════════════════
+#
+# A greenfield build must be VERIFIABLE: by the time the autopilot reaches the
+# verify stage, ``codd.test_detection.detect_test_command`` has to resolve a
+# runnable test command for the project's stack. That detection keys off a
+# stack-specific config file (Python: a ``pyproject.toml`` carrying
+# ``[tool.pytest.ini_options]``; Node: a ``package.json`` ``test`` script; etc.).
+# Whether that file exists is otherwise left to chance — the generating AI may or
+# may not emit one (observed in the 2026-06 real-AI dogfood: one CLI emitted a
+# pyproject, another did not, so verify "executed nothing" and the build could
+# not be certified). This module makes the test-runner config DETERMINISTIC per
+# stack, centralized here in the capability layer rather than scattered as path
+# literals across the pipeline.
+#
+# Design:
+#   * One ENSURER per language/stack, registered in ``_TEST_RUNNER_ENSURERS``.
+#     Adding a stack = adding one function (node→package.json, go→go.mod, …); no
+#     core edit elsewhere.
+#   * The goal is RUNNABLE, not merely DETECTABLE. For Python a *bare*
+#     ``pyproject.toml`` is already detectable (``detect_test_command`` rule 5
+#     → pytest), yet src-layout tests still fail to import without a
+#     ``pythonpath``. So each ensurer owns its own "already runnable?" check
+#     against a STRONG marker for its stack — it does not defer to the coarse
+#     detectability probe (that probe only guards stacks WITHOUT an ensurer, so a
+#     non-native setup an AI wired up is respected).
+#   * Every ensurer is IDEMPOTENT and NON-CLOBBERING: it leaves an existing
+#     strong config untouched (an AI/user-provided one is authoritative), only
+#     AUGMENTS a partial config file in place (preserving the rest byte-for-byte)
+#     when it lacks the test-runner section, and derives every path from the
+#     project's configured ``scan.source_dirs`` / ``scan.test_dirs`` — never
+#     hardcoded "src"/"tests".
+#   * It makes the runner RUNNABLE only. It never weakens verification: tests
+#     still actually execute and still fail honestly (anti-false-green is owned by
+#     the verify layer, not here).
+
+_PYTEST_INI_SECTION = "[tool.pytest.ini_options]"
+_PYPROJECT_FILENAME = "pyproject.toml"
+
+
+@dataclass(frozen=True)
+class EnsureTestRunnerResult:
+    """Outcome of ensuring a stack's test-runner config exists.
+
+    ``action`` is one of:
+      * ``"created"``   — a new config file was written.
+      * ``"augmented"`` — an existing config file gained the test-runner section.
+      * ``"present"``   — a runnable test setup already existed (left untouched).
+      * ``"unsupported"`` — no ensurer for this language/stack (no-op).
+    """
+
+    language: str
+    action: str
+    path: Path | None = None
+    detail: str = ""
+
+
+def _normalize_dirs(dirs: Any) -> list[str]:
+    """Normalize a ``scan.*_dirs`` value to clean, slash-free relative roots."""
+    if not isinstance(dirs, (list, tuple)):
+        return []
+    roots: list[str] = []
+    for item in dirs:
+        text = str(item).strip().replace("\\", "/").strip("/")
+        if text and text not in roots:
+            roots.append(text)
+    return roots
+
+
+def _toml_str_array(values: list[str]) -> str:
+    """Render a list of strings as a TOML inline array (deterministic order)."""
+    inner = ", ".join('"' + value.replace('"', '\\"') + '"' for value in values)
+    return "[" + inner + "]"
+
+
+def _render_pytest_ini_section(*, testpaths: list[str], pythonpath: list[str]) -> str:
+    """Build a minimal, valid ``[tool.pytest.ini_options]`` TOML block.
+
+    ``pythonpath`` lets pytest import a ``src``-layout package (and flat-layout
+    modules via ``"."``) without an installed/editable package — the missing
+    piece that makes generated tests both DETECTABLE and importable. ``addopts``
+    disables the cache plugin so a read-only / sandboxed checkout never fails on
+    ``.pytest_cache`` creation.
+    """
+    lines = [_PYTEST_INI_SECTION]
+    if testpaths:
+        lines.append(f"testpaths = {_toml_str_array(testpaths)}")
+    if pythonpath:
+        lines.append(f"pythonpath = {_toml_str_array(pythonpath)}")
+    lines.append('addopts = "-p no:cacheprovider"')
+    return "\n".join(lines) + "\n"
+
+
+def _python_pythonpath(source_dirs: list[str]) -> list[str]:
+    """Resolve the pytest ``pythonpath`` for a Python project.
+
+    Covers every configured source root (so a ``src/`` layout is importable) and
+    always appends ``"."`` so flat-layout modules at the repo root import too.
+    """
+    roots = list(source_dirs)
+    if "." not in roots:
+        roots.append(".")
+    return roots
+
+
+def _ensure_python_test_runner(
+    project_root: Path,
+    *,
+    source_dirs: list[str],
+    test_dirs: list[str],
+) -> EnsureTestRunnerResult:
+    """Ensure a RUNNABLE, pytest-detectable ``pyproject.toml`` for a Python project.
+
+    "Runnable" means more than "detectable": the marker checked here is the
+    strong ``[tool.pytest`` section (which carries ``pythonpath``), NOT mere
+    presence of a ``pyproject.toml`` (a bare one is detectable as pytest but
+    leaves src-layout tests unimportable). Behaviour:
+
+      * a ``pyproject.toml`` that already carries a ``[tool.pytest`` section is
+        left untouched (author/AI intent is authoritative);
+      * a ``pyproject.toml`` WITHOUT one (e.g. a bare ``[project]`` table) gets
+        the section APPENDED — the rest of the file is preserved byte-for-byte,
+        and the added ``pythonpath`` is what finally makes the tests importable;
+      * otherwise a minimal new file is written.
+    """
+    from codd.test_detection import _has_strong_pytest_config, detect_test_command
+
+    # Strong, runnable pytest config already present (pytest.ini / setup.cfg /
+    # pyproject [tool.pytest]) → author intent is authoritative, do nothing.
+    if _has_strong_pytest_config(project_root):
+        return EnsureTestRunnerResult(
+            language="python",
+            action="present",
+            detail="a strong pytest config already exists; left untouched",
+        )
+
+    # A DIFFERENT, non-pytest test command is already wired up (a Makefile
+    # target, a package.json script, cargo, …). Respect the author's chosen
+    # runner instead of forcing pytest on top of it. The lone exception is the
+    # WEAK "a bare pyproject.toml exists" rule: that is detectable as pytest but
+    # not necessarily runnable (no pythonpath), so we fall through to upgrade it.
+    detected = detect_test_command(project_root)
+    pyproject = project_root / _PYPROJECT_FILENAME
+    bare_pyproject_only = pyproject.exists() and "[tool.pytest" not in _read_text_or_empty(pyproject)
+    if detected is not None and not bare_pyproject_only:
+        return EnsureTestRunnerResult(
+            language="python",
+            action="present",
+            detail=f"a non-pytest test command is already detectable ({detected}); left untouched",
+        )
+
+    section = _render_pytest_ini_section(
+        testpaths=test_dirs,
+        pythonpath=_python_pythonpath(source_dirs),
+    )
+
+    if pyproject.exists():
+        existing = _read_text_or_empty(pyproject)
+        separator = "" if existing.endswith("\n") or not existing else "\n"
+        pyproject.write_text(existing + separator + "\n" + section, encoding="utf-8")
+        return EnsureTestRunnerResult(
+            language="python",
+            action="augmented",
+            path=pyproject,
+            detail=f"appended {_PYTEST_INI_SECTION} to existing pyproject.toml",
+        )
+
+    pyproject.write_text(section, encoding="utf-8")
+    return EnsureTestRunnerResult(
+        language="python",
+        action="created",
+        path=pyproject,
+        detail=f"wrote pyproject.toml with {_PYTEST_INI_SECTION}",
+    )
+
+
+def _read_text_or_empty(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+# Language → ensurer. Add a stack here (and only here) to make its greenfield
+# builds deterministically verifiable: node → a package.json test script, go →
+# go.mod, rust → Cargo.toml, etc. The dispatch, non-clobber guard and CLI-
+# agnostic wiring all stay unchanged.
+_TestRunnerEnsurer = Callable[..., EnsureTestRunnerResult]
+_TEST_RUNNER_ENSURERS: dict[str, _TestRunnerEnsurer] = {
+    "python": _ensure_python_test_runner,
+}
+
+
+def supported_test_runner_languages() -> list[str]:
+    """Languages for which greenfield can deterministically ensure a test runner."""
+    return sorted(_TEST_RUNNER_ENSURERS)
+
+
+def ensure_test_runner_config(
+    project_root: Path | str,
+    *,
+    language: str | None,
+    source_dirs: Any = None,
+    test_dirs: Any = None,
+) -> EnsureTestRunnerResult:
+    """Guarantee a RUNNABLE, detectable test setup for ``language``'s stack.
+
+    Stack-general entry point. For a language WITH a registered ensurer, the
+    ensurer owns the present/augment/create decision (it checks its own STRONG
+    marker — e.g. a ``[tool.pytest`` section, not mere ``pyproject.toml``
+    presence — so it can upgrade a bare config that is detectable but not
+    runnable). For a language WITHOUT an ensurer, this returns an
+    ``"unsupported"`` no-op UNLESS a test command is already detectable, in which
+    case a provided (possibly non-native) setup is respected.
+
+    Either way an AI/user-provided setup is never clobbered, and the verify layer
+    remains the authority that refuses to certify an unexecuted build. All path
+    inputs default to the conventional roots only when not provided; normally the
+    caller passes the project's configured ``scan.source_dirs`` /
+    ``scan.test_dirs`` so nothing is hardcoded.
+    """
+    root = Path(project_root)
+    lang = (language or "").strip().lower()
+
+    ensurer = _TEST_RUNNER_ENSURERS.get(lang)
+    if ensurer is None:
+        # No native ensurer for this stack. Respect any test command an AI/user
+        # already wired up (stack-agnostic), otherwise it is an advisory no-op:
+        # the verify honesty gate still refuses to certify an unexecuted build.
+        from codd.test_detection import detect_test_command
+
+        if detect_test_command(root) is not None:
+            return EnsureTestRunnerResult(
+                language=lang or "unknown",
+                action="present",
+                detail="a test command is already detectable; left untouched",
+            )
+        return EnsureTestRunnerResult(
+            language=lang or "unknown",
+            action="unsupported",
+            detail=(
+                f"no deterministic test-runner ensurer for language {lang!r}; "
+                "relying on the generated project to provide a detectable setup"
+            ),
+        )
+
+    source_roots = _normalize_dirs(source_dirs) or ["src"]
+    test_roots = _normalize_dirs(test_dirs) or ["tests"]
+    return ensurer(root, source_dirs=source_roots, test_dirs=test_roots)
