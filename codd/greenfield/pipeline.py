@@ -788,16 +788,22 @@ class GreenfieldPipeline:
     # ── stage: verify ───────────────────────────────────────
 
     def _stage_verify(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
-        # Deterministically guarantee the stack's test runner is DETECTABLE
-        # before verify runs. The build now contains source + tests (implement
-        # finished), but whether a runnable test config exists was left to the
-        # generating AI's luck (2026-06 dogfood: one CLI emitted a pyproject,
-        # another did not → verify "executed nothing"). This ensures a
-        # detectable, runnable config for a known stack without clobbering an
-        # AI/user one. It only makes the runner DETECTABLE; it does NOT relax
-        # verification — the anti-false-green honesty gate below still refuses to
-        # certify an unexecuted build.
+        # Deterministically guarantee the stack's topology + test runner are
+        # present before verify runs. The build now contains source + tests
+        # (implement finished), but whether a runnable, COHERENT layout exists
+        # was left to the generating AI's luck (2026-06 dogfood: source used
+        # package-relative imports while tests flat-imported by bare basename, an
+        # environment-dependent false green). The harness owns the topology:
+        #   1. ensure the layout scaffold + a runnable pyproject (no pythonpath
+        #      "."; tests run against the real package);
+        #   2. run the AST import-coherence GATE before pytest — incoherent
+        #      source/tests FAIL HONESTLY here instead of crashing pytest or
+        #      passing by accident.
+        # Both are idempotent and non-clobbering, so this also applies on
+        # --resume. The verify honesty gate below remains the final authority on
+        # whether the (now coherent) build is certifiable.
         self._ensure_test_runner(project_root)
+        self._enforce_import_coherence(project_root)
 
         runner = self.verify_runner or _default_verify_runner
         record["detail"] = str(
@@ -809,37 +815,102 @@ class GreenfieldPipeline:
             )
         )
 
-    def _ensure_test_runner(self, project_root: Path) -> None:
-        """Scaffold a detectable, runnable test-runner config for the stack.
+    def _layout_inputs(self, project_root: Path) -> tuple[dict[str, Any], str | None, Any, Any]:
+        """Resolve (config, language, source_dirs, test_dirs) for the stack profile."""
+        from codd.config import load_project_config
 
-        Stack-general: dispatches through the project-type/capability registry
-        (:func:`codd.project_types.ensure_test_runner_config`), which is
-        idempotent and non-clobbering and derives every path from the project's
-        configured ``scan.source_dirs`` / ``scan.test_dirs``. Advisory — any
-        failure is logged and swallowed; the verify honesty gate remains the
-        authority on whether the build is certifiable.
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+        project_section = config.get("project") if isinstance(config.get("project"), dict) else {}
+        language = self.language or (
+            project_section.get("language") if isinstance(project_section, dict) else None
+        )
+        scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+        source_dirs = scan.get("source_dirs") if isinstance(scan, dict) else None
+        test_dirs = scan.get("test_dirs") if isinstance(scan, dict) else None
+        return config, language, source_dirs, test_dirs
+
+    def _layout_project_name(self, project_root: Path, config: dict[str, Any]) -> str:
+        project_section = config.get("project") if isinstance(config.get("project"), dict) else {}
+        configured = project_section.get("name") if isinstance(project_section, dict) else None
+        return str(self.project_name or configured or project_root.name)
+
+    def _ensure_test_runner(self, project_root: Path) -> None:
+        """Scaffold the stack topology + a runnable, COHERENT test-runner config.
+
+        Stack-general: dispatches through the layout-profile registry
+        (:func:`codd.project_types.resolve_layout_profile` +
+        :func:`scaffold_layout`), which is idempotent and non-clobbering and
+        derives every path from the project name + configured
+        ``scan.source_dirs`` / ``scan.test_dirs``. The emitted pyproject has NO
+        ``pythonpath="."`` — tests run against the real package (anti-false-
+        green). Advisory — any failure is logged and swallowed; the coherence
+        gate and verify honesty gate remain the authorities.
         """
         try:
-            from codd.config import load_project_config
-            from codd.project_types import ensure_test_runner_config
+            from codd.project_types import resolve_layout_profile, scaffold_layout
 
-            try:
-                config = load_project_config(project_root)
-            except (FileNotFoundError, ValueError):
-                config = {}
-            project_section = config.get("project") if isinstance(config.get("project"), dict) else {}
-            language = self.language or (project_section.get("language") if isinstance(project_section, dict) else None)
-            scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
-            result = ensure_test_runner_config(
-                project_root,
+            config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
+            profile = resolve_layout_profile(
                 language=language,
-                source_dirs=scan.get("source_dirs") if isinstance(scan, dict) else None,
-                test_dirs=scan.get("test_dirs") if isinstance(scan, dict) else None,
+                project_name=self._layout_project_name(project_root, config),
+                source_dirs=source_dirs,
+                test_dirs=test_dirs,
             )
-            if result.action in ("created", "augmented"):
-                self.echo(f"[greenfield] verify: ensured test runner — {result.detail}")
-        except Exception as exc:  # noqa: BLE001 — scaffolding is advisory; verify still gates honesty.
-            self.echo(f"[greenfield] verify: test-runner ensure skipped (non-blocking): {exc}")
+            if profile is None:
+                # No layout profile for this stack: fall back to the runner-only
+                # ensure (respects an AI/user-provided detectable setup; the
+                # verify honesty gate still refuses to certify an unexecuted build).
+                from codd.project_types import ensure_test_runner_config
+
+                result = ensure_test_runner_config(
+                    project_root,
+                    language=language,
+                    project_name=self._layout_project_name(project_root, config),
+                    source_dirs=source_dirs,
+                    test_dirs=test_dirs,
+                )
+                if result.action in ("created", "augmented"):
+                    self.echo(f"[greenfield] verify: ensured test runner — {result.detail}")
+                return
+            scaffold = scaffold_layout(project_root, profile)
+            if scaffold.created:
+                self.echo(
+                    f"[greenfield] verify: scaffolded layout ({', '.join(scaffold.created)}) — {scaffold.detail}"
+                )
+        except Exception as exc:  # noqa: BLE001 — scaffolding is advisory; the gates enforce honesty.
+            self.echo(f"[greenfield] verify: layout scaffold skipped (non-blocking): {exc}")
+
+    def _enforce_import_coherence(self, project_root: Path) -> None:
+        """Run the AST import-coherence gate BEFORE pytest.
+
+        Stack-general and profile-driven. A FAIL means source + tests disagree
+        on package/import context (e.g. a test importing a source module by bare
+        basename) — that is a genuine, environment-dependent false-green risk, so
+        it raises :class:`StageError` and fails the verify stage with an
+        actionable message INSTEAD of letting pytest crash or pass by accident.
+        Honors the explicit opt-out ``coherence.import_coherence: false``; the
+        gate is never weakened silently. A stack without a layout profile (or the
+        gate opted out) is a passing no-op.
+        """
+        from codd.import_coherence import check_import_coherence
+
+        config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
+        result = check_import_coherence(
+            project_root,
+            language=language,
+            project_name=self._layout_project_name(project_root, config),
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+        )
+        if not result.passed:
+            self.echo(f"[greenfield] verify: {result.summary()}")
+            raise StageError(result.summary())
+        if result.detail:
+            self.echo(f"[greenfield] verify: {result.detail}")
 
     # ── stage: propagate (advisory on a fresh build) ────────
 
@@ -1215,7 +1286,65 @@ def _output_paths_for_task(config: dict[str, Any], task: ImplementTaskRef) -> li
     routed = _test_only_output_paths(config, task)
     if routed:
         return routed
-    return cli_module._implement_output_paths_for_cli(config, task.task_id)
+    explicit = cli_module._implement_output_paths_for_cli(config, task.task_id)
+    # A-core: when the harness owns a layout profile and the task fell through to
+    # the bare source-root default (``src``), route SOURCE output INTO the package
+    # root (``src/<package_name>``) so the model writes a coherent src-layout
+    # package — package-absolute imports work and the import-coherence gate
+    # passes. An explicit ``implement.default_output_paths`` / ``output_root`` is
+    # respected (the default-detector returns those before the bare root). Never
+    # reroutes a path the author/test-routing already chose.
+    return _route_source_into_package(config, explicit)
+
+
+def _route_source_into_package(config: dict[str, Any], explicit: list[str]) -> list[str]:
+    profile = _resolve_layout_profile_from_config(config)
+    if profile is None:
+        return explicit
+    source_root = profile.source_root
+    package_root = profile.package_root
+    rerouted: list[str] = []
+    targets_source = False
+    for path in explicit:
+        norm = str(path).strip().replace("\\", "/").strip("/")
+        # Upgrade the BARE source root itself (e.g. "src") to the package root;
+        # leave any more specific path (already under the package, a test dir, or
+        # an explicit subpath) exactly as chosen.
+        if norm == source_root:
+            rerouted.append(package_root)
+            targets_source = True
+        else:
+            rerouted.append(path)
+            if norm == package_root or norm.startswith(package_root + "/") or norm.startswith(
+                source_root + "/"
+            ):
+                targets_source = True
+    if not targets_source:
+        return explicit
+    # Implementing a module legitimately also emits its tests; allow the test
+    # root so generated tests land under tests/ (where the coherence gate + the
+    # runner's testpaths expect them) instead of being dropped as "outside output
+    # paths". The package root stays the source destination.
+    if profile.test_root not in rerouted:
+        rerouted.append(profile.test_root)
+    return rerouted
+
+
+def _resolve_layout_profile_from_config(config: dict[str, Any]):
+    from codd.project_types import resolve_layout_profile
+
+    project_section = config.get("project") if isinstance(config.get("project"), dict) else {}
+    language = project_section.get("language") if isinstance(project_section, dict) else None
+    project_name = project_section.get("name") if isinstance(project_section, dict) else None
+    scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+    source_dirs = scan.get("source_dirs") if isinstance(scan, dict) else None
+    test_dirs = scan.get("test_dirs") if isinstance(scan, dict) else None
+    return resolve_layout_profile(
+        language=language,
+        project_name=project_name,
+        source_dirs=source_dirs,
+        test_dirs=test_dirs,
+    )
 
 
 def _test_only_output_paths(config: dict[str, Any], task: ImplementTaskRef) -> list[str] | None:

@@ -49,12 +49,14 @@ def test_e2e_full_autopilot_with_scripted_ai(tmp_path: Path, stub_ai) -> None:
     cli_design = project / "docs" / "design" / "cli_design.md"
     assert core_design.is_file() and "## 1." in core_design.read_text(encoding="utf-8")
     assert cli_design.is_file()
-    # implement wrote real source files under the configured output path
-    core_file = project / "src" / "core" / "core.py"
+    # implement wrote real source files INTO the harness-owned package
+    # (A-core: src/<package_name>/, package name derived from "stub-app").
+    core_file = project / "src" / "stub_app" / "core.py"
     assert core_file.is_file()
     assert "def add(a, b):" in core_file.read_text(encoding="utf-8")
-    # FX3: the build contains an executable test + detectable pytest config...
-    assert (project / "src" / "core" / "test_core.py").is_file()
+    # FX3 + A-core: the build contains an executable test under tests/ importing
+    # the package ABSOLUTELY, and the scaffold ensured a runnable pyproject.
+    assert (project / "tests" / "test_core.py").is_file()
     assert "[tool.pytest" in (project / "pyproject.toml").read_text(encoding="utf-8")
     # session records every stage as complete; verify/check are hard gates
     session = load_session(project)
@@ -137,14 +139,19 @@ def test_e2e_shared_output_root_repo_root_ci_and_project_type(tmp_path: Path, st
     assert workflow.is_file()
     assert "pull_request" in workflow.read_text(encoding="utf-8")
 
-    # 2. ONE coherent app at ONE location: both derived tasks share src/.
-    assert (target / "src" / "core.py").is_file()
-    assert (target / "src" / "cli.py").is_file()
-    src_entries = sorted(item.name for item in (target / "src").iterdir())
-    assert not any(name.startswith("implement_") for name in src_entries), src_entries
+    # 2. ONE coherent app at ONE location: both derived tasks share the SAME
+    #    harness-owned package (A-core: src/<package_name>/), not fragmented
+    #    src/<task_id>/ copies. Package name derives from "fresh-cli-app".
+    pkg_dir = target / "src" / "fresh_cli_app"
+    assert (pkg_dir / "core.py").is_file()
+    assert (pkg_dir / "cli.py").is_file()
+    pkg_entries = sorted(item.name for item in pkg_dir.iterdir())
+    assert not any(name.startswith("implement_") for name in pkg_entries), pkg_entries
     assert not (target / "src" / ".github").exists()  # no confined CI residue
-    # both implement units really ran against the shared root
-    assert stub_ai["calls"]().count("output:src") == 2
+    # both implement units really ran against the shared package root (the bare
+    # source root "src" is routed into the package, so the recorded output is the
+    # package dir).
+    assert stub_ai["calls"]().count("output:src/fresh_cli_app") == 2
     session = load_session(target)
     assert set(session["stages"]["implement"]["units"]) == {
         "implement_core_module",
@@ -1022,18 +1029,21 @@ def test_test_only_task_output_paths_resolve_to_test_dirs(tmp_path: Path) -> Non
 def _python_project_with_tests_but_no_config(tmp_path: Path) -> Path:
     """A project mid-pipeline: source + real pytest tests, but NO test config.
 
-    Reproduces the dogfood state the verify stage must rescue. Uses the configured
-    scan dirs (src/, tests/) so the ensured pythonpath/testpaths derive from
-    config, not literals.
+    Reproduces the dogfood state the verify stage must rescue. A-core: the source
+    lives in the harness-owned src-layout PACKAGE (``src/stub_app/``) and the test
+    imports it PACKAGE-ABSOLUTELY, so the build is COHERENT and the import gate
+    passes; the only missing piece is the runnable pyproject the scaffold ensures.
+    Project name ``stub-app`` -> package ``stub_app``.
     """
     project = make_stub_project(tmp_path, "stub-ai-cli --print")
-    (project / "src").mkdir(parents=True, exist_ok=True)
-    (project / "src" / "calc.py").write_text(
-        "def add(a, b):\n    return a + b\n", encoding="utf-8"
-    )
+    pkg = project / "src" / "stub_app"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
     (project / "tests").mkdir(parents=True, exist_ok=True)
+    (project / "tests" / "__init__.py").write_text("", encoding="utf-8")
     (project / "tests" / "test_calc.py").write_text(
-        "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+        "from stub_app.calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n",
         encoding="utf-8",
     )
     return project
@@ -1055,7 +1065,11 @@ def test_verify_stage_scaffolds_runner_then_executes(tmp_path: Path) -> None:
     text = pyproject.read_text(encoding="utf-8")
     assert "[tool.pytest.ini_options]" in text
     assert 'testpaths = ["tests"]' in text
-    assert 'pythonpath = ["src", "."]' in text
+    # A-core anti-false-green: source root ONLY, never "." — tests run against
+    # the real package, not flat modules on PYTHONPATH.
+    assert 'pythonpath = ["src"]' in text
+    assert '"."' not in text
+    assert "--import-mode=importlib" in text
     assert detect_test_command(project) == "pytest --tb=short -q"
     # ...and verify REALLY executed the generated tests (not structural-only).
     assert "tests executed" in record["detail"]
@@ -1067,7 +1081,7 @@ def test_verify_stage_anti_false_green_fails_when_tests_fail(tmp_path: Path) -> 
     project = _python_project_with_tests_but_no_config(tmp_path)
     # Make the (now runnable) test fail.
     (project / "tests" / "test_calc.py").write_text(
-        "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 999\n",
+        "from stub_app.calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 999\n",
         encoding="utf-8",
     )
 
@@ -1078,13 +1092,35 @@ def test_verify_stage_anti_false_green_fails_when_tests_fail(tmp_path: Path) -> 
     assert (project / "pyproject.toml").is_file()
 
 
+def test_verify_stage_fails_honestly_on_incoherent_imports(tmp_path: Path) -> None:
+    """A-core: source + tests disagreeing on package context FAIL before pytest.
+
+    A flat-source / bare-basename build (the codex3 incoherence) must fail the
+    import-coherence gate HONESTLY rather than crash pytest or pass by accident.
+    """
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    (project / "src").mkdir(parents=True, exist_ok=True)
+    (project / "src" / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"
+    )
+    (project / "tests").mkdir(parents=True, exist_ok=True)
+    (project / "tests" / "test_calc.py").write_text(
+        "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+
+    record: dict = {"status": "pending", "detail": ""}
+    with pytest.raises(StageError, match="import-coherence"):
+        GreenfieldPipeline()._stage_verify(project, record, {"max_repair_attempts": 1})
+
+
 def test_verify_stage_does_not_clobber_existing_config(tmp_path: Path) -> None:
     project = _python_project_with_tests_but_no_config(tmp_path)
     original = (
         '[project]\nname = "demo"\n\n'
         '[tool.pytest.ini_options]\n'
         'pythonpath = ["src"]\n'
-        'addopts = "-p no:cacheprovider"\n'
+        'addopts = "-p no:cacheprovider --import-mode=importlib"\n'
     )
     (project / "pyproject.toml").write_text(original, encoding="utf-8")
 
