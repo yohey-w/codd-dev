@@ -414,6 +414,15 @@ axes:
       run surfaced a new robustness gap. Fix strategy under GPT-5.5 consult AA64C4BF (GPT-consult -> autonomous).
       codex6 = NOT a clean run (hit a finding) -> saturation stays 0; after the 0-files-retry fix lands, codex7
       is the clean re-validation run-1. codex5 still running (separate, invalid-for-saturation). saturation 0.'
+    - '2026-06-14: F-greenfield-implement-0files-noretry FIXED (862d7e3). GPT-5.5 consult AA64C4BF (read the
+      repo) -> hybrid: bounded no-usable-output retry at the file-output-contract boundary in run_implement
+      (NoUsableGeneratedFiles + supervisor loop, two independent additive counters, dedicated budget=3/backoff
+      1.5, generate out of scope, file-writing-agent clean-tree-before-retry trap fixed). Anti-false-green
+      intact (0-files still hard-fails after budget with same error; skip_generation untouched; no scope/path
+      relaxation; gates every retry). Full suite 4343 green, 9+3 regression tests. Loop note: gpt_check.sh/
+      gpt_get.sh HUNG on the streaming tab — recovered via edge_cdp.py eval(stop-button)+save_text (recorded in
+      memory). Next: codex7 = clean D6 re-validation run-1 on the fixed main; saturation stays 0 until 2
+      consecutive clean runs. saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1315,16 +1324,28 @@ findings:
     wrapper. Net: a hung codex IS retried, but an exit-0 empty/unparseable codex is NOT => single-blip whole-run
     hard-fail. Robustness / defaults-must-not-flake gap (NOT a false-green: the gate correctly fails 0 files;
     the gap is the absence of a bounded transient retry before that gate).'
-  fix_commit: pending
-  fix_description: 'PENDING GPT-5.5 consult AA64C4BF (fix strategy = GPT-consult -> autonomous, no owner ask).
-    Strategy under review: re-issue a transient empty/unparseable/no-usable-file implement attempt a bounded N
-    times (reuse TRANSIENT_AUTO_RETRIES=3 / backoff 1.5) before the hard-fail gate, covering all 3 paths.
-    Anti-false-green INVARIANT to preserve: never accept 0 files as success except explicit skip_generation:true;
-    after N retries still 0 => hard-fail EXACTLY as today; do NOT relax scope/path on retry; keep syntax +
-    confusable gates active; no "looks empty => assume skip" heuristic; compose bounded with the syntax-gate
-    retry loop. GPT deciding layer (i general recovery-wrapper / ii targeted implement-loop / hybrid) + whether
-    generate is in scope.'
-  status: in_progress
+  fix_commit: 862d7e3
+  fix_description: 'GPT-5.5 consult AA64C4BF (read the repo, 9m13s) -> hybrid design, implemented autonomously
+    (no owner ask). VERDICT=hybrid: the retry lives at the file-output-contract boundary in run_implement, NOT
+    in _invoke_with_recovery (which returns raw text before parse/filter, so it cannot see paths b/c). New
+    NoUsableGeneratedFiles exception (implementer.py:446) collects all 3 zero-file paths — (a) empty AI output /
+    file-writing-agent "no (readable) file changes" via _is_no_usable_output_error, (b) _write_generated_files
+    all-blocks-invalid ValueError, (c) parsed-but-filtered-to-0 — each retried; ImplementSyntaxGateError stays
+    its own path. Supervisor loop (implementer.py:876-935) with TWO INDEPENDENT ADDITIVE counters (no-usable +
+    syntax) so budgets do not multiply; last-exhausted gate decides the error (no-usable -> same
+    _zero_generated_files_error as before; invalid -> _syntax_gate_exhausted_error). Helper
+    _run_implementation_generation_attempt (937-1041) does one prompt->invoke->write pass. Dedicated budget
+    DEFAULT_NO_USABLE_FILE_RETRIES=3 / DEFAULT_NO_USABLE_FILE_BACKOFF_SECONDS=1.5 (separate knob, not the
+    transient constants — different failure class), config implement.no_usable_file_retries, sleep injected,
+    backoff 1.5/3.0/4.5s. GENERATE intentionally OUT of scope (it has its own body-validation retry
+    DEFAULT_BODY_MAX_RETRIES). GPT-flagged TRAP fixed: ai_invoke.invoke_file_writing_agent both failure paths now
+    restore/reset the git index+tree before raising, so an implement retry starts from a clean baseline.
+    Anti-false-green ALL hold: 0-files still hard-fails after budget with the SAME error (from exc carries last
+    reason); skip_generation checked first (empty+skip -> [] accepted, 0 retries); no scope/path relaxation
+    (same _write_generated_files validation re-run); syntax+confusable gates active every retry; [codd] stderr
+    notice per retry. Tests: tests/test_implement_no_usable_retry.py — 9 required + 3 extras (incl.
+    no_usable_file_retries:0 == legacy immediate hard-fail). Full suite 4343 passed, 0 failed, 0 skipped.'
+  status: fixed
   class: conceptual
 pending_cases:
 - id: PC-d6-b0-failure-attribution
