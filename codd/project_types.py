@@ -237,44 +237,260 @@ def _as_choice(value: Any, allowed: set[str], fallback: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
-# Stack-general test-runner configuration (the "runnable tests" guarantee)
+# Stack layout profiles (the harness OWNS repo topology / module resolution)
 # ═══════════════════════════════════════════════════════════
 #
-# A greenfield build must be VERIFIABLE: by the time the autopilot reaches the
-# verify stage, ``codd.test_detection.detect_test_command`` has to resolve a
-# runnable test command for the project's stack. That detection keys off a
-# stack-specific config file (Python: a ``pyproject.toml`` carrying
-# ``[tool.pytest.ini_options]``; Node: a ``package.json`` ``test`` script; etc.).
-# Whether that file exists is otherwise left to chance — the generating AI may or
-# may not emit one (observed in the 2026-06 real-AI dogfood: one CLI emitted a
-# pyproject, another did not, so verify "executed nothing" and the build could
-# not be certified). This module makes the test-runner config DETERMINISTIC per
-# stack, centralized here in the capability layer rather than scattered as path
-# literals across the pipeline.
+# Model-independence principle (A-core): the harness REMOVES the degrees of
+# freedom the model should NOT vary. The repository TOPOLOGY and the
+# MODULE-RESOLUTION contract are harness-owned; the model only fills the
+# CONTENTS (domain logic, behavior, test behavior, messages). A greenfield build
+# that lets the model invent project structure produces source + tests that
+# DISAGREE on package/import context (observed 2026-06 cross-vendor: source uses
+# package-relative ``from .todo_store import X`` while tests flat-import
+# ``import todo_store`` — a real import failure masked only by an accidental
+# ``pythonpath="."``, an environment-dependent FALSE GREEN).
 #
-# Design:
-#   * One ENSURER per language/stack, registered in ``_TEST_RUNNER_ENSURERS``.
-#     Adding a stack = adding one function (node→package.json, go→go.mod, …); no
-#     core edit elsewhere.
-#   * The goal is RUNNABLE, not merely DETECTABLE. For Python a *bare*
-#     ``pyproject.toml`` is already detectable (``detect_test_command`` rule 5
-#     → pytest), yet src-layout tests still fail to import without a
-#     ``pythonpath``. So each ensurer owns its own "already runnable?" check
-#     against a STRONG marker for its stack — it does not defer to the coarse
-#     detectability probe (that probe only guards stacks WITHOUT an ensurer, so a
-#     non-native setup an AI wired up is respected).
-#   * Every ensurer is IDEMPOTENT and NON-CLOBBERING: it leaves an existing
-#     strong config untouched (an AI/user-provided one is authoritative), only
-#     AUGMENTS a partial config file in place (preserving the rest byte-for-byte)
-#     when it lacks the test-runner section, and derives every path from the
-#     project's configured ``scan.source_dirs`` / ``scan.test_dirs`` — never
-#     hardcoded "src"/"tests".
-#   * It makes the runner RUNNABLE only. It never weakens verification: tests
-#     still actually execute and still fail honestly (anti-false-green is owned by
-#     the verify layer, not here).
+# A ``LayoutProfile`` is the single, stack-specific declaration of that
+# topology: the package name (derived deterministically from the project name),
+# the source/package/test roots (derived from ``scan.*_dirs``), the test runner,
+# the install mode, and the test IMPORT POLICY the coherence gate enforces. One
+# profile per stack, centralized here in the registry — Python is implemented
+# now; node/go/rust are future profiles added as one entry each, with NO
+# scattered "src"/"tests"/"<package>" literals anywhere in the pipeline.
+
+_VALID_TEST_IMPORT_POLICIES = {"package_absolute", "flat"}
+
+
+@dataclass(frozen=True)
+class LayoutProfile:
+    """Harness-owned repository topology + module-resolution contract for a stack.
+
+    Every path is DERIVED (from the project name + ``scan.source_dirs`` /
+    ``scan.test_dirs``), never hardcoded. The generation pipeline writes INTO
+    ``package_root`` so source lands inside the package; the coherence gate
+    enforces ``test_import_policy`` (Python: ``package_absolute`` — a test must
+    import a generated source module as ``from <package_name>.<mod> import ...``,
+    never by bare basename); the test-runner ensurer + scaffold realize
+    ``runner`` / ``install_mode`` so tests run against the REAL installed package
+    (anti-false-green: an accidental flat import no longer resolves).
+    """
+
+    language: str
+    package_name: str
+    source_root: str
+    package_root: str
+    test_root: str
+    runner: str = "pytest"
+    install_mode: str = "editable"  # "editable" | "none"
+    test_import_policy: str = "package_absolute"  # "package_absolute" | "flat"
+    requires_package_init: bool = True
+    requires_test_init: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "language": self.language,
+            "package_name": self.package_name,
+            "source_root": self.source_root,
+            "package_root": self.package_root,
+            "test_root": self.test_root,
+            "runner": self.runner,
+            "install_mode": self.install_mode,
+            "test_import_policy": self.test_import_policy,
+        }
+
+
+def normalize_package_name(project_name: str | None, *, fallback: str = "app") -> str:
+    """Derive a valid Python package identifier from a project name.
+
+    ``todo-cli`` → ``todo_cli``; ``2048 Game`` → ``_2048_game``; empty/garbage →
+    ``fallback``. Deterministic and pure so the same project name always yields
+    the same package, which is what makes source + tests + pyproject agree.
+    """
+    raw = str(project_name or "").strip().lower()
+    chars: list[str] = []
+    for ch in raw:
+        chars.append(ch if (ch.isalnum() or ch == "_") else "_")
+    collapsed = "".join(chars).strip("_")
+    while "__" in collapsed:
+        collapsed = collapsed.replace("__", "_")
+    if not collapsed:
+        return fallback
+    if collapsed[0].isdigit():
+        collapsed = "_" + collapsed
+    return collapsed
+
+
+def _first_clean_dir(dirs: Any, default: str) -> str:
+    """First normalized (slash-free) root from a ``scan.*_dirs`` value, or default."""
+    normalized = _normalize_dirs(dirs)
+    return normalized[0] if normalized else default
+
+
+def _python_layout_profile(
+    *,
+    project_name: str | None,
+    source_dirs: Any,
+    test_dirs: Any,
+) -> LayoutProfile:
+    """Python ``python_src_package`` profile: a src-layout, installed package.
+
+    * ``package_name`` derives from the project name (normalized identifier).
+    * ``source_root`` from ``scan.source_dirs`` (default ``src``).
+    * ``package_root`` = ``<source_root>/<package_name>`` — source lives in a
+      named package, so package-absolute imports work both in tests (installed)
+      and at runtime (``python -m <package_name>``).
+    * ``test_root`` from ``scan.test_dirs`` (default ``tests``).
+    * runner=pytest, install_mode=editable, policy=package_absolute.
+    """
+    package_name = normalize_package_name(project_name)
+    source_root = _first_clean_dir(source_dirs, "src")
+    test_root = _first_clean_dir(test_dirs, "tests")
+    return LayoutProfile(
+        language="python",
+        package_name=package_name,
+        source_root=source_root,
+        package_root=f"{source_root}/{package_name}",
+        test_root=test_root,
+        runner="pytest",
+        install_mode="editable",
+        test_import_policy="package_absolute",
+        requires_package_init=True,
+        requires_test_init=True,
+    )
+
+
+# Language → layout-profile builder. ONE entry per stack (the only place a stack
+# registers its topology). node/go/rust extend here with a single function each.
+_LayoutProfileBuilder = Callable[..., LayoutProfile]
+_LAYOUT_PROFILE_BUILDERS: dict[str, _LayoutProfileBuilder] = {
+    "python": _python_layout_profile,
+}
+
+
+def supported_layout_profile_languages() -> list[str]:
+    """Languages with a harness-owned layout profile (deterministic topology)."""
+    return sorted(_LAYOUT_PROFILE_BUILDERS)
+
+
+def resolve_layout_profile(
+    *,
+    language: str | None,
+    project_name: str | None,
+    source_dirs: Any = None,
+    test_dirs: Any = None,
+) -> LayoutProfile | None:
+    """Resolve the :class:`LayoutProfile` for a stack, or ``None`` if unsupported.
+
+    Stack-general dispatch through :data:`_LAYOUT_PROFILE_BUILDERS`. Every path
+    is derived from ``project_name`` + the configured ``scan.*_dirs`` — there
+    are NO hardcoded ``src``/``tests``/``<package>`` literals outside the
+    per-stack builder's documented defaults.
+    """
+    builder = _LAYOUT_PROFILE_BUILDERS.get((language or "").strip().lower())
+    if builder is None:
+        return None
+    return builder(project_name=project_name, source_dirs=source_dirs, test_dirs=test_dirs)
+
+
+# ═══════════════════════════════════════════════════════════
+# Deterministic scaffold (harness creates topology; model fills contents)
+# ═══════════════════════════════════════════════════════════
+#
+# The scaffold realizes a :class:`LayoutProfile` on disk: pyproject (package
+# metadata + pytest config, NO ``pythonpath="."``), ``<package_root>/__init__``,
+# ``<package_root>/__main__``, and the test ``__init__`` the profile requires.
+# It is CREATE-ONLY and IDEMPOTENT: it never moves or rewrites model-authored
+# files (that would violate "harness owns structure, not contents" and could
+# corrupt author intent — an EXISTING incoherent build must instead FAIL the
+# coherence gate honestly and be REGENERATED, not silently healed). A valid
+# Claude-consistent layout is therefore left byte-for-byte alone; a second call
+# is a no-op.
 
 _PYTEST_INI_SECTION = "[tool.pytest.ini_options]"
 _PYPROJECT_FILENAME = "pyproject.toml"
+
+#: Package-init marker so a created ``__init__.py`` is recognised as scaffold
+#: (idempotent) and never an author file we might clobber on re-augment.
+_SCAFFOLD_INIT_DOC = '"""Package root (scaffolded by codd greenfield)."""\n'
+
+
+@dataclass(frozen=True)
+class ScaffoldResult:
+    """Outcome of realizing a layout profile on disk."""
+
+    language: str
+    created: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+    detail: str = ""
+
+
+def scaffold_layout(
+    project_root: Path | str,
+    profile: LayoutProfile,
+) -> ScaffoldResult:
+    """Create the profile's topology (create-only, idempotent, non-clobbering).
+
+    Returns the relative paths created vs. skipped (already present). Only the
+    Python profile is realized today; an unknown ``profile.language`` is a no-op.
+    """
+    if profile.language == "python":
+        return _scaffold_python(Path(project_root), profile)
+    return ScaffoldResult(language=profile.language, detail="no scaffolder for stack")
+
+
+def _scaffold_python(project_root: Path, profile: LayoutProfile) -> ScaffoldResult:
+    created: list[str] = []
+    skipped: list[str] = []
+
+    def _ensure_file(rel: str, content: str) -> None:
+        target = project_root / rel
+        if target.exists():
+            skipped.append(rel)
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        created.append(rel)
+
+    package_dir = profile.package_root
+    # __init__ makes <source_root>/<package_name> an importable package; __main__
+    # gives ``python -m <package_name>`` an entry point. Both package-relative.
+    if profile.requires_package_init:
+        _ensure_file(
+            f"{package_dir}/__init__.py",
+            _SCAFFOLD_INIT_DOC,
+        )
+        _ensure_file(
+            f"{package_dir}/__main__.py",
+            (
+                '"""Console entry point (scaffolded by codd greenfield)."""\n\n'
+                "def main() -> int:\n"
+                "    raise NotImplementedError\n\n\n"
+                'if __name__ == "__main__":\n'
+                "    raise SystemExit(main())\n"
+            ),
+        )
+    if profile.requires_test_init:
+        _ensure_file(f"{profile.test_root}/__init__.py", "")
+
+    runner_result = _ensure_python_test_runner(
+        project_root,
+        profile=profile,
+    )
+    if runner_result.action in ("created", "augmented") and runner_result.path is not None:
+        created.append(_PYPROJECT_FILENAME)
+    elif runner_result.action == "present":
+        skipped.append(_PYPROJECT_FILENAME)
+
+    detail = (
+        f"package={profile.package_root}, test_root={profile.test_root}, "
+        f"runner={runner_result.action}"
+    )
+    return ScaffoldResult(
+        language="python",
+        created=tuple(created),
+        skipped=tuple(skipped),
+        detail=detail,
+    )
 
 
 @dataclass(frozen=True)
@@ -312,55 +528,75 @@ def _toml_str_array(values: list[str]) -> str:
     return "[" + inner + "]"
 
 
-def _render_pytest_ini_section(*, testpaths: list[str], pythonpath: list[str]) -> str:
+def _render_pytest_ini_section(*, testpaths: list[str], source_root: str) -> str:
     """Build a minimal, valid ``[tool.pytest.ini_options]`` TOML block.
 
-    ``pythonpath`` lets pytest import a ``src``-layout package (and flat-layout
-    modules via ``"."``) without an installed/editable package — the missing
-    piece that makes generated tests both DETECTABLE and importable. ``addopts``
-    disables the cache plugin so a read-only / sandboxed checkout never fails on
-    ``.pytest_cache`` creation.
+    ANTI-FALSE-GREEN (A-core): ``pythonpath`` is the SOURCE ROOT ONLY — never
+    ``"."``. The prior fix put ``pythonpath = [<src>, "."]`` so tests ran without
+    an installed package, but ``"."`` (plus a flat ``src`` layout) let a test
+    resolve a source module by BARE BASENAME (``import todo_store``) even when the
+    source uses package-relative imports — an environment-dependent FALSE GREEN.
+    With the harness-owned src-layout PACKAGE (``<source_root>/<package_name>/``),
+    a source-root-only ``pythonpath`` makes the package-absolute import
+    ``from <package_name>.<mod> import ...`` resolve while a bare ``import <mod>``
+    does NOT (there is no top-level ``<source_root>/<mod>.py``). Combined with
+    ``--import-mode=importlib`` (no ``sys.path[0]`` insertion of the test's own
+    dir), an accidental flat import stays a real failure. The package metadata
+    (see :func:`_python_editable_metadata`) additionally makes ``pip install -e .``
+    work for real deployment, but is not required for tests to run. ``addopts``
+    also disables the cache plugin so a read-only checkout never fails on
+    ``.pytest_cache``.
     """
     lines = [_PYTEST_INI_SECTION]
     if testpaths:
         lines.append(f"testpaths = {_toml_str_array(testpaths)}")
-    if pythonpath:
-        lines.append(f"pythonpath = {_toml_str_array(pythonpath)}")
-    lines.append('addopts = "-p no:cacheprovider"')
+    clean_root = source_root.strip().replace("\\", "/").strip("/")
+    if clean_root:
+        lines.append(f"pythonpath = {_toml_str_array([clean_root])}")
+    lines.append('addopts = "-p no:cacheprovider --import-mode=importlib"')
     return "\n".join(lines) + "\n"
 
 
-def _python_pythonpath(source_dirs: list[str]) -> list[str]:
-    """Resolve the pytest ``pythonpath`` for a Python project.
+def _python_editable_metadata(profile: LayoutProfile) -> str:
+    """A ``[project]`` + setuptools src-layout table for an editable install.
 
-    Covers every configured source root (so a ``src/`` layout is importable) and
-    always appends ``"."`` so flat-layout modules at the repo root import too.
+    Makes ``pip install -e .`` install ``<package_name>`` from
+    ``<source_root>``, so tests import the REAL package (package-absolute) rather
+    than relying on PYTHONPATH. Only written when the file does not already carry
+    a ``[project]`` table (we never clobber author metadata).
     """
-    roots = list(source_dirs)
-    if "." not in roots:
-        roots.append(".")
-    return roots
+    pkg = profile.package_name
+    src = profile.source_root
+    return (
+        "[build-system]\n"
+        'requires = ["setuptools>=61"]\n'
+        'build-backend = "setuptools.build_meta"\n\n'
+        "[project]\n"
+        f'name = "{pkg}"\n'
+        'version = "0.0.0"\n\n'
+        "[tool.setuptools.packages.find]\n"
+        f'where = ["{src}"]\n'
+    )
 
 
 def _ensure_python_test_runner(
     project_root: Path,
     *,
-    source_dirs: list[str],
-    test_dirs: list[str],
+    profile: LayoutProfile,
 ) -> EnsureTestRunnerResult:
     """Ensure a RUNNABLE, pytest-detectable ``pyproject.toml`` for a Python project.
 
-    "Runnable" means more than "detectable": the marker checked here is the
-    strong ``[tool.pytest`` section (which carries ``pythonpath``), NOT mere
-    presence of a ``pyproject.toml`` (a bare one is detectable as pytest but
-    leaves src-layout tests unimportable). Behaviour:
+    A-core: "runnable" now means "the installed package is importable and tests
+    run against it" — NOT "src is on PYTHONPATH". The emitted pyproject carries
+    (a) package metadata for an editable install and (b) a ``[tool.pytest``
+    section with ``--import-mode=importlib`` and NO ``pythonpath``. Behaviour:
 
-      * a ``pyproject.toml`` that already carries a ``[tool.pytest`` section is
-        left untouched (author/AI intent is authoritative);
+      * a ``pyproject.toml`` already carrying a ``[tool.pytest`` section is left
+        untouched (author/AI intent is authoritative);
       * a ``pyproject.toml`` WITHOUT one (e.g. a bare ``[project]`` table) gets
-        the section APPENDED — the rest of the file is preserved byte-for-byte,
-        and the added ``pythonpath`` is what finally makes the tests importable;
-      * otherwise a minimal new file is written.
+        the pytest section APPENDED — the rest preserved byte-for-byte; package
+        metadata is only added when no ``[project]`` table exists;
+      * otherwise a minimal new file (metadata + pytest section) is written.
     """
     from codd.test_detection import _has_strong_pytest_config, detect_test_command
 
@@ -377,10 +613,11 @@ def _ensure_python_test_runner(
     # target, a package.json script, cargo, …). Respect the author's chosen
     # runner instead of forcing pytest on top of it. The lone exception is the
     # WEAK "a bare pyproject.toml exists" rule: that is detectable as pytest but
-    # not necessarily runnable (no pythonpath), so we fall through to upgrade it.
+    # not runnable as an installed package, so we fall through to upgrade it.
     detected = detect_test_command(project_root)
     pyproject = project_root / _PYPROJECT_FILENAME
-    bare_pyproject_only = pyproject.exists() and "[tool.pytest" not in _read_text_or_empty(pyproject)
+    pyproject_text = _read_text_or_empty(pyproject) if pyproject.exists() else ""
+    bare_pyproject_only = pyproject.exists() and "[tool.pytest" not in pyproject_text
     if detected is not None and not bare_pyproject_only:
         return EnsureTestRunnerResult(
             language="python",
@@ -389,27 +626,34 @@ def _ensure_python_test_runner(
         )
 
     section = _render_pytest_ini_section(
-        testpaths=test_dirs,
-        pythonpath=_python_pythonpath(source_dirs),
+        testpaths=[profile.test_root], source_root=profile.source_root
     )
 
     if pyproject.exists():
-        existing = _read_text_or_empty(pyproject)
+        existing = pyproject_text
+        addition = section
+        # Add package metadata only when the file has no [project] table, so an
+        # editable install can resolve the package; never clobber author metadata.
+        if "[project]" not in existing and "[build-system]" not in existing:
+            addition = _python_editable_metadata(profile) + "\n" + section
         separator = "" if existing.endswith("\n") or not existing else "\n"
-        pyproject.write_text(existing + separator + "\n" + section, encoding="utf-8")
+        pyproject.write_text(existing + separator + "\n" + addition, encoding="utf-8")
         return EnsureTestRunnerResult(
             language="python",
             action="augmented",
             path=pyproject,
-            detail=f"appended {_PYTEST_INI_SECTION} to existing pyproject.toml",
+            detail=f"appended {_PYTEST_INI_SECTION} (importlib mode) to existing pyproject.toml",
         )
 
-    pyproject.write_text(section, encoding="utf-8")
+    pyproject.write_text(
+        _python_editable_metadata(profile) + "\n" + section,
+        encoding="utf-8",
+    )
     return EnsureTestRunnerResult(
         language="python",
         action="created",
         path=pyproject,
-        detail=f"wrote pyproject.toml with {_PYTEST_INI_SECTION}",
+        detail=f"wrote pyproject.toml (editable package + {_PYTEST_INI_SECTION}, importlib mode)",
     )
 
 
@@ -422,8 +666,8 @@ def _read_text_or_empty(path: Path) -> str:
 
 # Language → ensurer. Add a stack here (and only here) to make its greenfield
 # builds deterministically verifiable: node → a package.json test script, go →
-# go.mod, rust → Cargo.toml, etc. The dispatch, non-clobber guard and CLI-
-# agnostic wiring all stay unchanged.
+# go.mod, rust → Cargo.toml, etc. Each ensurer drives off the resolved
+# :class:`LayoutProfile` for its stack, so topology lives in ONE place.
 _TestRunnerEnsurer = Callable[..., EnsureTestRunnerResult]
 _TEST_RUNNER_ENSURERS: dict[str, _TestRunnerEnsurer] = {
     "python": _ensure_python_test_runner,
@@ -439,6 +683,7 @@ def ensure_test_runner_config(
     project_root: Path | str,
     *,
     language: str | None,
+    project_name: str | None = None,
     source_dirs: Any = None,
     test_dirs: Any = None,
 ) -> EnsureTestRunnerResult:
@@ -453,10 +698,9 @@ def ensure_test_runner_config(
     case a provided (possibly non-native) setup is respected.
 
     Either way an AI/user-provided setup is never clobbered, and the verify layer
-    remains the authority that refuses to certify an unexecuted build. All path
-    inputs default to the conventional roots only when not provided; normally the
-    caller passes the project's configured ``scan.source_dirs`` /
-    ``scan.test_dirs`` so nothing is hardcoded.
+    remains the authority that refuses to certify an unexecuted build. All paths
+    derive from the resolved :class:`LayoutProfile` (``project_name`` +
+    ``scan.source_dirs`` / ``scan.test_dirs``); nothing is hardcoded.
     """
     root = Path(project_root)
     lang = (language or "").strip().lower()
@@ -483,6 +727,25 @@ def ensure_test_runner_config(
             ),
         )
 
-    source_roots = _normalize_dirs(source_dirs) or ["src"]
-    test_roots = _normalize_dirs(test_dirs) or ["tests"]
-    return ensurer(root, source_dirs=source_roots, test_dirs=test_roots)
+    profile = resolve_layout_profile(
+        language=lang,
+        project_name=project_name,
+        source_dirs=source_dirs,
+        test_dirs=test_dirs,
+    )
+    if profile is not None:
+        return ensurer(root, profile=profile)
+
+    # Fallback (no profile builder for an ensurer-having stack — shouldn't
+    # happen, but keep the path total): synthesize a minimal profile from dirs.
+    source_root = _first_clean_dir(source_dirs, "src")
+    test_root = _first_clean_dir(test_dirs, "tests")
+    package_name = normalize_package_name(project_name)
+    fallback_profile = LayoutProfile(
+        language=lang,
+        package_name=package_name,
+        source_root=source_root,
+        package_root=f"{source_root}/{package_name}",
+        test_root=test_root,
+    )
+    return ensurer(root, profile=fallback_profile)

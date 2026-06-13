@@ -52,22 +52,28 @@ class TestPythonEnsureCreatesDetectableRunner:
         assert detect_test_command(tmp_path) == "pytest --tb=short -q"
 
     def test_testpaths_and_pythonpath_derive_from_scan_dirs(self, tmp_path):
-        # No hardcoded "src"/"tests": custom roots must flow through verbatim.
+        # No hardcoded "src"/"tests": the FIRST configured source root flows
+        # through as the (sole) pythonpath. A-core: NO "." (false-green hole).
         ensure_test_runner_config(
             tmp_path,
             language="python",
+            project_name="my-app",
             source_dirs=["app/", "lib/"],
             test_dirs=["spec/"],
         )
         text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
         assert "[tool.pytest.ini_options]" in text
         assert 'testpaths = ["spec"]' in text
-        # pythonpath covers every source root, plus "." for flat-layout modules.
-        assert 'pythonpath = ["app", "lib", "."]' in text
+        # pythonpath = the source root ONLY (the package lives under app/my_app);
+        # NO "." — a bare flat import must not resolve.
+        assert 'pythonpath = ["app"]' in text
+        assert '"."' not in text
+        # importlib mode: no sys.path[0] insertion of the test dir.
+        assert "--import-mode=importlib" in text
 
-    def test_emitted_pyproject_is_valid_toml(self, tmp_path):
+    def test_emitted_pyproject_is_valid_toml_and_has_no_dot_pythonpath(self, tmp_path):
         ensure_test_runner_config(
-            tmp_path, language="python", source_dirs=["src/"], test_dirs=["tests/"]
+            tmp_path, language="python", project_name="demo", source_dirs=["src/"], test_dirs=["tests/"]
         )
         try:
             import tomllib
@@ -76,25 +82,38 @@ class TestPythonEnsureCreatesDetectableRunner:
         parsed = tomllib.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
         ini = parsed["tool"]["pytest"]["ini_options"]
         assert ini["testpaths"] == ["tests"]
-        assert "." in ini["pythonpath"]
+        # A-core anti-false-green: source root only, never ".".
+        assert ini["pythonpath"] == ["src"]
+        assert "." not in ini["pythonpath"]
+        # editable package metadata is present so `pip install -e .` resolves it.
+        assert parsed["project"]["name"] == "demo"
+        assert parsed["tool"]["setuptools"]["packages"]["find"]["where"] == ["src"]
 
-    def test_pythonpath_makes_src_layout_importable_at_runtime(self, tmp_path):
-        # The pythonpath choice must actually let pytest import a src-layout
-        # package without an installed/editable package.
-        (tmp_path / "src").mkdir()
-        (tmp_path / "src" / "mymod.py").write_text("def add(a, b):\n    return a + b\n")
+    def test_package_layout_importable_and_bare_basename_fails(self, tmp_path):
+        # The harness-owned package layout: a package-absolute import RESOLVES,
+        # and a bare-basename import does NOT (no "." on pythonpath). This is the
+        # whole anti-false-green point of A-core.
+        from codd.project_types import resolve_layout_profile, scaffold_layout
+
+        profile = resolve_layout_profile(
+            language="python", project_name="demo-pkg", source_dirs=["src/"], test_dirs=["tests/"]
+        )
+        # write a real module INTO the package root the profile owns.
+        pkg_dir = tmp_path / profile.package_root
+        pkg_dir.mkdir(parents=True)
+        (pkg_dir / "__init__.py").write_text("")
+        (pkg_dir / "mymod.py").write_text("def add(a, b):\n    return a + b\n")
         tests_dir = tmp_path / "tests"
         tests_dir.mkdir()
-        (tests_dir / "test_mymod.py").write_text(
-            "from mymod import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+        # coherent (package-absolute) test:
+        (tests_dir / "test_ok.py").write_text(
+            f"from {profile.package_name}.mymod import add\n\n\n"
+            "def test_add():\n    assert add(2, 3) == 5\n"
         )
+        scaffold_layout(tmp_path, profile)
 
-        ensure_test_runner_config(
-            tmp_path, language="python", source_dirs=["src/"], test_dirs=["tests/"]
-        )
         command = detect_test_command(tmp_path)
         assert command == "pytest --tb=short -q"
-
         proc = subprocess.run(
             [sys.executable, "-m", *command.split()],
             cwd=tmp_path,
@@ -103,6 +122,20 @@ class TestPythonEnsureCreatesDetectableRunner:
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "1 passed" in proc.stdout
+
+        # Now a BARE-BASENAME import of the same module must NOT resolve.
+        (tests_dir / "test_bare.py").write_text(
+            "import importlib\n\n\n"
+            "def test_bare():\n    importlib.import_module('mymod')\n"
+        )
+        proc2 = subprocess.run(
+            [sys.executable, "-m", *command.split(), "tests/test_bare.py"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        assert proc2.returncode != 0, proc2.stdout + proc2.stderr
+        assert "No module named 'mymod'" in (proc2.stdout + proc2.stderr)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -131,7 +164,7 @@ class TestNonClobber:
         (tmp_path / "pyproject.toml").write_text(original, encoding="utf-8")
 
         result = ensure_test_runner_config(
-            tmp_path, language="python", source_dirs=["src/"], test_dirs=["tests/"]
+            tmp_path, language="python", project_name="demo", source_dirs=["src/"], test_dirs=["tests/"]
         )
 
         assert result.action == "augmented"
@@ -139,7 +172,11 @@ class TestNonClobber:
         # the original [project] table is preserved; the pytest section is added.
         assert original.strip() in text
         assert "[tool.pytest.ini_options]" in text
-        assert 'pythonpath = ["src", "."]' in text
+        # A-core: source root only, no "." (the existing [project] is kept, so no
+        # duplicate metadata is injected).
+        assert 'pythonpath = ["src"]' in text
+        assert '"."' not in text
+        assert text.count("[project]") == 1
         assert detect_test_command(tmp_path) == "pytest --tb=short -q"
 
     def test_idempotent_second_call_is_a_noop(self, tmp_path):
@@ -207,11 +244,13 @@ class TestStackGenerality:
 
     def test_defaults_when_scan_dirs_absent(self, tmp_path):
         # When no scan dirs are passed, conventional roots are used (never crash).
-        result = ensure_test_runner_config(tmp_path, language="python")
+        result = ensure_test_runner_config(tmp_path, language="python", project_name="demo")
         assert result.action == "created"
         text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
         assert 'testpaths = ["tests"]' in text
-        assert 'pythonpath = ["src", "."]' in text
+        # A-core: source root only, never ".".
+        assert 'pythonpath = ["src"]' in text
+        assert '"."' not in text
 
 
 # ═══════════════════════════════════════════════════════════
