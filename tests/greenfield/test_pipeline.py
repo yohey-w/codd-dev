@@ -342,6 +342,33 @@ def test_propagate_failure_degrades_to_warning(tmp_path: Path) -> None:
     assert load_session(project)["stages"]["propagate"]["status"] == "warning"
 
 
+def test_default_propagate_runner_runs_on_clean_build(tmp_path: Path, monkeypatch) -> None:
+    """The REAL propagate glue RUNS (no "No verify state found" skip) on a clean build.
+
+    Regression for the greenfield propagate skip observed in the codex4 M2 run:
+    ``_default_propagate_runner`` does ``run_verify`` then ``run_commit``. On a
+    fresh build the diff is empty, so verify finds nothing — but it must still
+    leave state for commit to consume, so the runner returns a real result
+    instead of raising and being swallowed as a non-blocking skip.
+    """
+    from codd.greenfield.pipeline import _default_propagate_runner
+
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+
+    # Empty git diff: a clean, just-built tree with nothing to reconcile.
+    monkeypatch.setattr(
+        "codd.propagator.subprocess.run",
+        lambda *args, **kwargs: __import__("subprocess").CompletedProcess(
+            args=args[0] if args else [], returncode=0, stdout="", stderr="",
+        ),
+    )
+
+    # Must NOT raise "No verify state found"; returns an honest zero-doc result.
+    detail = _default_propagate_runner(project, ai_command=None)
+    assert "committed=0" in detail
+    assert "No verify state" not in detail
+
+
 def test_uninitialized_project_without_name_fails_with_clear_message(tmp_path: Path) -> None:
     target = tmp_path / "bare"
     target.mkdir()

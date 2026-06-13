@@ -768,6 +768,118 @@ def test_run_commit_without_verify_state_fails(tmp_path):
         run_commit(project)
 
 
+def test_run_verify_no_changed_files_persists_empty_state(tmp_path, monkeypatch):
+    """verify with no changed files persists empty state so commit can run.
+
+    Regression for the greenfield propagate skip: an empty diff must NOT leave
+    ``run_commit`` stateless (which would raise "No verify state found" and make
+    the autopilot's verify→commit SKIP). Verify ran clean → state exists.
+    """
+    project = _setup_project(tmp_path)
+
+    monkeypatch.setattr(
+        "codd.propagator.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="", stderr="",
+        ),
+    )
+
+    result = run_verify(project, diff_target="HEAD")
+
+    assert result.changed_files == []
+    state = _load_verify_state(project)
+    assert state is not None  # verify RAN — distinct from "never ran"
+    assert state["auto_docs"] == []
+    assert state["hitl_docs"] == []
+
+
+def test_run_verify_no_affected_docs_persists_empty_state(tmp_path, monkeypatch):
+    """verify with changed files but no tracked design doc persists empty state."""
+    project = _setup_project(tmp_path)
+
+    # A changed file that maps to NO design-doc module (no 'docs/' coverage).
+    monkeypatch.setattr(
+        "codd.propagator.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="README.md\n", stderr="",
+        ),
+    )
+
+    result = run_verify(project, diff_target="HEAD")
+
+    assert result.changed_files == ["README.md"]
+    assert result.auto_applied == [] and result.needs_hitl == []
+    state = _load_verify_state(project)
+    assert state is not None
+    assert state["auto_docs"] == [] and state["hitl_docs"] == []
+
+
+def test_verify_then_commit_runs_on_empty_diff(tmp_path, monkeypatch):
+    """The greenfield flow: verify→commit on a clean build RUNS (no skip).
+
+    This is the exact sequence ``_default_propagate_runner`` executes. Before the
+    fix it raised "No verify state found"; now it completes with an honest
+    zero-doc reconciliation (committed=0, knowledge=0) and clears its state.
+    """
+    project = _setup_project(tmp_path)
+
+    monkeypatch.setattr(
+        "codd.propagator.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="", stderr="",
+        ),
+    )
+
+    run_verify(project, diff_target="HEAD")
+    result = run_commit(project, reason="codd greenfield autopilot")
+
+    assert isinstance(result, CommitResult)
+    assert result.committed_files == []  # nothing to reconcile — honest no-op
+    assert result.knowledge_recorded == 0
+    # State consumed and cleared so a stale empty state can't mask a later run.
+    assert _load_verify_state(project) is None
+
+
+def test_empty_verify_does_not_mask_real_drift(tmp_path, monkeypatch):
+    """Empty-state persistence must NOT suppress real reconciliation.
+
+    Anti-false-green guard: when verify DOES find an affected doc, it still
+    classifies + persists the affected doc (not an empty state), so commit
+    reconciles it. Proves the empty-state fix is scoped to the genuinely-empty
+    case and does not weaken propagate.
+    """
+    project = _setup_project(tmp_path)
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+    _setup_graph(project, config)
+
+    def patched_subprocess(command, *, capture_output=False, text=False,
+                           cwd=None, check=False, input=None, **kw):
+        if command[0] == "git" and "diff" in command:
+            if "--name-only" in command:
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0,
+                    stdout="src/auth/service.py\n", stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=command, returncode=0,
+                stdout="diff --git a/src/auth/service.py\n+changed\n", stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=command, returncode=0, stdout="## 1. Overview\n\nUpdated.\n", stderr="",
+        )
+
+    monkeypatch.setattr("codd.propagator.subprocess.run", patched_subprocess)
+    monkeypatch.setattr(generator_module.subprocess, "run", patched_subprocess)
+
+    result = run_verify(project, diff_target="HEAD")
+
+    # Real drift was detected and surfaced — NOT collapsed into an empty state.
+    assert result.auto_applied or result.needs_hitl
+    state = _load_verify_state(project)
+    assert state is not None
+    assert state["auto_docs"] or state["hitl_docs"]
+
+
 # -- CLI tests: verify and commit modes ----------------------------------------
 
 

@@ -237,6 +237,14 @@ def run_verify(
     # Step 1: Get affected docs (source→doc or doc→doc)
     changed_files = _get_changed_files(project_root, diff_target)
     if not changed_files:
+        # Verify RAN and found nothing to reconcile. Persist an empty state so a
+        # subsequent ``run_commit`` (e.g. the greenfield autopilot's unconditional
+        # verify→commit) sees "verify completed, zero affected docs" and performs
+        # its real — but zero-doc — reconciliation, instead of mistaking this for
+        # "verify never ran" and aborting with "No verify state found". The state
+        # file is the discriminator: present-but-empty = ran clean; absent = never
+        # ran (run_commit still guards that case).
+        _save_verify_state(project_root, [], [], [], diff_target)
         return VerifyResult([], {}, [], [], [])
 
     file_module_map = _map_files_to_modules(changed_files, source_dirs)
@@ -262,6 +270,10 @@ def run_verify(
             diff_text = _get_code_diff(project_root, diff_target, changed_files)
 
     if not affected_docs:
+        # Changed files exist but none maps to a tracked design doc: verify ran
+        # clean, nothing to reconcile. Persist empty state (same rationale as the
+        # no-changed-files path above) so verify→commit completes honestly.
+        _save_verify_state(project_root, [], [], [], diff_target)
         return VerifyResult(changed_files, file_module_map, [], [], [])
 
     # Step 2: Classify by confidence band
