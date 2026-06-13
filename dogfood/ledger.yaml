@@ -328,6 +328,17 @@ axes:
       test_kinds + Python _is_test_file matches all .py) and re-consulted GPT-5.5 itself to land the
       expected_outputs-driven design. Open follow-up: live fresh-codex e2e re-validation
       (PC-d6-codex-greenfield-e2e-revalidate). saturation stays 0 (productive).'
+    - '2026-06-13: M2 e2e revalidation (fresh codex3, fixed harness) reached verify for the FIRST time —
+      init→elicit→plan→generate→implement→stage VB gate ALL PASSED (contract-aware done 6e4241a + reroot c9081a0
+      + scoped-assertions worked cross-vendor; tests generated under tests/unit,tests/e2e with covers vb= = the
+      VB gate that died last run now passes). verify surfaced 2 new gaps: (1) F-greenfield-verify-no-test-command
+      — no runnable test config was guaranteed so verify "executed nothing"; FIXED f82116c (deterministic
+      stack-aware pyproject/pytest ensure at verify start, anti-false-green; CONFIRMED on resume: verify now
+      executes). (2) F-greenfield-import-coherence — generated source (relative imports) vs tests (flat imports)
+      disagree -> real failures once runnable; observed, under verify auto-repair on the resume. M2 thesis
+      materially validated: the model-independent harness drives a DIFFERENT vendor end-to-end through build +
+      tests + VB gate + (now) real test execution; remaining gaps are honest verify-caught issues, not
+      false-greens. saturation stays 0 (productive).'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1071,6 +1082,59 @@ findings:
   class: mechanical
   derived_case_ids:
   - PC-d6-codex-greenfield-e2e-revalidate
+- id: F-greenfield-verify-no-test-command
+  axis: D6
+  date: '2026-06-13'
+  model_used: codex gpt-5.5 (cross-CLI SUT, M2 e2e revalidation); fixed by Opus
+  symptom: 'the M2 fresh-codex greenfield (codex3) reached verify for the FIRST time (init→...→implement→stage
+    VB gate ALL PASSED — contract-aware/reroot/scoped fixes worked cross-vendor). verify then FAILED: "verify
+    executed nothing (no test command detected ...)". The project had real pytest tests under tests/ (covers vb=
+    markers) but NO detectable test config (no pyproject/pytest.ini/setup.cfg), so detect_test_command returned
+    None and verify (correctly, anti-false-green) refused to certify an unexecuted build.'
+  root_cause: 'greenfield never GUARANTEED a runnable test setup for the stack — it depended on the AI happening
+    to emit a pyproject (pyproject is in implement.root_artifact_patterns but not guaranteed; Claude got lucky,
+    codex did not). detect_test_command (codd/test_detection.py:51) + verify_runner are correct; the gap was the
+    missing deterministic wiring.'
+  fix_commit: f82116c
+  fix_description: 'codd/project_types.py: new ensure_test_runner_config (stack registry _TEST_RUNNER_ENSURERS,
+    one ensurer per language; Python writes/augments pyproject.toml [tool.pytest.ini_options] with testpaths from
+    scan.test_dirs + pythonpath from scan.source_dirs + "."). codd/greenfield/pipeline.py _stage_verify calls it
+    at verify-stage START (so it fires on --resume too, after source+tests exist). Stack-general (no
+    src/tests/vendor literals; paths from scan config; extend via one ensurer per language). Idempotent: leaves a
+    strong existing config byte-for-byte, respects other detectable runners, only augments a bare pyproject, no-op
+    on 2nd call. Anti-false-green preserved: only makes the runner runnable/detectable — verify still executes and
+    fails honestly (failing test→non-zero→StageError; empty suite→exit5; unsupported stack still hits the
+    "executed nothing" gate); allow_structural_only stays opt-in. Full suite 4271 passed, 0 skipped. CONFIRMED
+    live on codex3 resume: "verify: ensured test runner — wrote pyproject.toml" then verify EXECUTED (no longer
+    "executed nothing").'
+  regression_test: 'tests/test_test_runner_ensure.py (create/augment/present/idempotent, path-from-config, real
+    src-layout importability, no-op unknown lang, anti-false-green fail+empty-suite); tests/greenfield/test_pipeline.py
+    (verify scaffolds-then-executes, honest-failure, no-clobber, unsupported-stack honesty).'
+  status: fixed
+  class: mechanical
+- id: F-greenfield-import-coherence
+  axis: D6
+  date: '2026-06-13'
+  model_used: codex gpt-5.5 (cross-CLI SUT, M2 e2e); observed (under verify auto-repair)
+  symptom: 'once verify could RUN (f82116c), codex3''s generated suite failed with a real generation-coherence
+    bug: generated SOURCE uses package-relative imports (from .todo_model) while generated TESTS flat-import
+    (import todo_store). pythonpath=["src","."] makes the test-side flat import resolve, but source-side relative
+    imports still fail ("attempted relative import with no known parent package") because modules are imported
+    top-level, not as a package. Source and tests disagree on the import model — surfaced cross-vendor (codex;
+    Claude tends to be internally consistent).'
+  root_cause: 'greenfield does not pin a single import/package layout that source AND tests both honor; the AI can
+    emit package-style source (relative imports + __init__) with flat-style tests (or vice versa) and nothing
+    reconciles them. Same family as the layout-drift findings (F-codex-bare-basename-dropped / the duplicate-tree
+    RC). This is anti-false-green-CORRECT: the incoherent build yields a real non-zero collection error, so verify
+    fails honestly rather than certifying nothing.'
+  fix_commit: null  # observed; first deferred to verify auto-repair (codex3 resume in progress); else a coherence fix
+  fix_description: 'NOT fixed in core here. On the codex3 --resume, verify now executes and surfaced this real
+    failure; greenfield verify auto-repair is attempting to reconcile the imports (codex repair running). If it
+    converges -> check:success. If not, the structural fix is to pin a single package/import layout in the
+    design/contract so source+tests agree (a coherence/contract concern adjacent to the deferred
+    layout-canonicalization). Tracked by the resume outcome.'
+  status: open
+  class: conceptual
 pending_cases:
 - id: PC-spec-grounded-repair-arbitration
   axis: D4
