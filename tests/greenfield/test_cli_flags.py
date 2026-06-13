@@ -375,7 +375,8 @@ def test_cli_greenfield_full_run_with_scripted_ai(tmp_path: Path, stub_ai) -> No
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output[result.output.index("{"):])
     assert payload["status"] == "success"
-    assert (project / "src" / "core" / "core.py").is_file()
+    # A-core: source lands in the harness-owned package (src/<package_name>/).
+    assert (project / "src" / "stub_app" / "core.py").is_file()
 
 
 def test_cli_greenfield_failure_exits_nonzero_with_report(tmp_path: Path) -> None:

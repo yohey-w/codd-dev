@@ -156,9 +156,15 @@ def implementation_files():
     match = re.search(r"^Output paths: (.+)$", PROMPT, re.M)
     output = match.group(1).split(",")[0].strip() if match else "src/core"
     log("output:" + output)
+    # A-core: the harness OWNS the topology — the implement output root is the
+    # src-layout PACKAGE (``src/<package_name>``), so source lands INSIDE the
+    # package and tests import it PACKAGE-ABSOLUTELY. Derive the package token
+    # from the output path (segment after ``src/``); fall back to the leaf.
+    parts = [p for p in output.replace("\\\\", "/").strip("/").split("/") if p]
+    package = parts[1] if len(parts) >= 2 and parts[0] == "src" else (parts[-1] if parts else "app")
     if "Design node: docs/design/cli_design.md" in PROMPT:
         # Second derived task: a DIFFERENT module written into the SAME
-        # canonical output root — the two tasks must coexist, not fragment
+        # canonical package root — the two tasks must coexist, not fragment
         # into per-task src/<task_id>/ app copies.
         return (
             "=== FILE: " + output + "/cli.py ===\\n"
@@ -167,30 +173,26 @@ def implementation_files():
             "    return 0\\n"
             "```\\n"
         )
-    # FX3: the build must contain something verify can EXECUTE. The stub
-    # emits a real (trivial but executable) pytest file next to the module it
-    # tests, plus a repo-root pyproject.toml whose [tool.pytest.ini_options]
-    # section makes detect_test_command resolve "pytest --tb=short -q". The
-    # greenfield verify stage then proves the autopilot actually RAN the
-    # generated tests instead of certifying an unexecuted build.
+    # FX3 + A-core: the build must contain something verify can EXECUTE, AND
+    # source + tests must be COHERENT (share one package context). The stub emits
+    # the module INSIDE the package and a real pytest file under tests/ that
+    # imports it PACKAGE-ABSOLUTELY (``from <package>.core import add``). The
+    # greenfield verify stage scaffolds the runnable pyproject (editable package +
+    # importlib mode, NO pythonpath ".") and then proves the autopilot actually
+    # RAN the generated tests instead of certifying an unexecuted build.
     return (
         "=== FILE: " + output + "/core.py ===\\n"
         "```python\\n"
         "def add(a, b):\\n"
         "    return a + b\\n"
         "```\\n"
-        "=== FILE: " + output + "/test_core.py ===\\n"
+        "=== FILE: tests/test_core.py ===\\n"
         "```python\\n"
-        "from core import add\\n"
+        "from " + package + ".core import add\\n"
         "\\n"
         "\\n"
         "def test_add():\\n"
         "    assert add(2, 3) == 5\\n"
-        "```\\n"
-        "=== FILE: pyproject.toml ===\\n"
-        "```toml\\n"
-        "[tool.pytest.ini_options]\\n"
-        "addopts = \\"-p no:cacheprovider\\"\\n"
         "```\\n"
         "=== FILE: .github/workflows/ci.yml ===\\n"
         "```yaml\\n"
@@ -225,6 +227,13 @@ def stub_ai(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def _package_name(project_name: str) -> str:
+    """Derive the package identifier the layout profile uses (``stub-app`` -> ``stub_app``)."""
+    from codd.project_types import normalize_package_name
+
+    return normalize_package_name(project_name)
+
+
 def make_stub_project(
     tmp_path: Path,
     ai_command: str,
@@ -248,7 +257,15 @@ def make_stub_project(
             "exclude": [],
         },
         "graph": {"store": "jsonl", "path": "codd/scan"},
-        "implement": {"default_output_paths": {"docs/design/core_design.md": ["src/core"]}},
+        # A-core: the configured output root is the src-layout PACKAGE
+        # (``src/<package_name>``) so source lands inside the package and the
+        # import-coherence gate passes. Package name derives from the project
+        # name (``stub-app`` -> ``stub_app``).
+        "implement": {
+            "default_output_paths": {
+                "docs/design/core_design.md": [f"src/{_package_name(name)}"]
+            }
+        },
     }
     if greenfield_config is not None:
         config["greenfield"] = greenfield_config
