@@ -156,6 +156,11 @@ artifacts:
       - "test/**/*"
       - "**/*_test.*"
       - "**/test_*.*"
+      # JS/TS co-located conventions CoDD itself generates and recognizes
+      # elsewhere (Jest/Vitest): foo.test.ts, foo.spec.tsx, __tests__/.
+      - "**/*.test.*"
+      - "**/*.spec.*"
+      - "**/__tests__/**/*"
 
   - id: e2e_suite
     description: "Executable end-to-end tests exercising real operation flows against a running system."
@@ -165,6 +170,10 @@ artifacts:
       - "e2e/**/*"
       - "tests/e2e/**/*"
       - "**/*.e2e.*"
+      # Cypress/Playwright conventions: foo.cy.ts, cypress/, playwright/.
+      - "**/*.cy.*"
+      - "cypress/**/*"
+      - "playwright/**/*"
 
   - id: non_functional_requirements
     description: "Authored non-functional requirements (availability, scalability, capacity, reliability, security, durability/DR, observability/SLO targets)."

@@ -346,15 +346,75 @@ _VALIDATORS = {
 }
 
 
+def _glob_to_caseless_regex(pattern: str) -> re.Pattern[str]:
+    """Translate a path glob into a case-insensitive regex over POSIX rel-paths.
+
+    Mirrors :meth:`pathlib.Path.glob` segment semantics so the caseless second
+    pass matches exactly what the case-sensitive ``Path.glob`` pass would, only
+    case-folded: ``*`` matches within a single path segment (never ``/``),
+    ``**`` matches any number of segments (including zero), ``?`` matches one
+    non-separator char. Anything else is matched literally.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        ch = pattern[i]
+        if ch == "*":
+            if pattern[i : i + 2] == "**":
+                i += 2
+                # ``**/`` matches zero or more leading segments, so ``**/*.md``
+                # also matches a top-level file. Consume an optional trailing
+                # slash and emit a group that allows the zero-segment case.
+                if pattern[i : i + 1] == "/":
+                    i += 1
+                    out.append("(?:.*/)?")
+                else:
+                    out.append(".*")
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif ch == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(ch))
+            i += 1
+    return re.compile("^" + "".join(out) + "$", re.IGNORECASE)
+
+
 def _match_paths(project_root: Path, globs: tuple[str, ...]) -> list[Path]:
     matched: list[Path] = []
     seen: set[Path] = set()
+
+    def _add(path: Path) -> None:
+        # Dedup by resolved path so the case-sensitive and caseless passes never
+        # double-count the same file.
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            return
+        seen.add(key)
+        matched.append(path)
+
+    # Pass 1 — exact, case-sensitive glob (unchanged behavior).
     for pattern in globs:
         for path in project_root.glob(pattern):
-            if path in seen:
-                continue
-            seen.add(path)
-            matched.append(path)
+            _add(path)
+
+    # Pass 2 — case-INSENSITIVE match over the tree. Required because the
+    # catalog globs are lowercase but a correct artifact may be cased
+    # differently (e.g. root ``REQUIREMENTS.md``); the deriver discovers such
+    # files, so the contract must too. This only ADDS matches that the lowercase
+    # pattern would have caught case-insensitively — a genuinely-missing
+    # artifact still matches nothing, so true-RED detection is preserved.
+    regexes = [_glob_to_caseless_regex(pattern) for pattern in globs]
+    for path in project_root.rglob("*"):
+        rel = path.relative_to(project_root).as_posix()
+        if any(rx.match(rel) for rx in regexes):
+            _add(path)
     return matched
 
 
