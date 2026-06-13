@@ -18,6 +18,15 @@ class VerificationFailureReport:
     error_messages: list[str]
     dag_snapshot: dict
     timestamp: str
+    # ── B0 failure attribution (additive; defaults keep old constructors valid) ──
+    #: Classification of an executed test/typecheck failure (see
+    #: ``codd.repair.test_failure_attribution.FAILURE_CLASSES``). Empty for
+    #: structural DAG failures, which are attributed by node, not by class.
+    failure_class: str = ""
+    #: True when the failure is code-addressable (the repair engine may attempt
+    #: a fix) AND was attributed to concrete project files. Drives the
+    #: repairability "observed ⇒ current" bypass of the changed-files gate.
+    code_addressable: bool = False
 
 
 @dataclass

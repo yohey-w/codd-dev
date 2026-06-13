@@ -580,10 +580,15 @@ def _coerce_violation_report(value: Any, fallback: VerificationFailureReport) ->
         message = str(value.get("message") or value.get("error_message") or "")
         messages = value.get("error_messages")
         error_messages = [str(item) for item in messages] if isinstance(messages, list) else [message or _fallback_message(fallback)]
-        failed_nodes = _string_list(value.get("failed_nodes")) or _node_refs(value.get("details")) or list(fallback.failed_nodes)
+        details = value.get("details")
+        failed_nodes = _string_list(value.get("failed_nodes")) or _node_refs(details) or list(fallback.failed_nodes)
         snapshot = value.get("dag_snapshot") if isinstance(value.get("dag_snapshot"), dict) else fallback.dag_snapshot
         timestamp = str(value.get("timestamp") or fallback.timestamp or _timestamp())
-        return VerificationFailureReport(check_name, failed_nodes, error_messages, snapshot, timestamp)
+        failure_class = _attr_or_detail(value, details, "failure_class", str, fallback.failure_class)
+        code_addressable = _attr_or_detail(value, details, "code_addressable", bool, fallback.code_addressable)
+        return VerificationFailureReport(
+            check_name, failed_nodes, error_messages, snapshot, timestamp, failure_class, code_addressable
+        )
     check_name = str(getattr(value, "check_name", fallback.check_name) or fallback.check_name)
     message = str(getattr(value, "message", "") or "")
     messages = getattr(value, "error_messages", None)
@@ -593,7 +598,26 @@ def _coerce_violation_report(value: Any, fallback: VerificationFailureReport) ->
     snapshot = getattr(value, "dag_snapshot", None)
     dag_snapshot = snapshot if isinstance(snapshot, dict) else fallback.dag_snapshot
     timestamp = str(getattr(value, "timestamp", None) or fallback.timestamp or _timestamp())
-    return VerificationFailureReport(check_name, failed_nodes, error_messages, dag_snapshot, timestamp)
+    failure_class = _attr_or_detail(value, details, "failure_class", str, fallback.failure_class)
+    code_addressable = _attr_or_detail(value, details, "code_addressable", bool, fallback.code_addressable)
+    return VerificationFailureReport(
+        check_name, failed_nodes, error_messages, dag_snapshot, timestamp, failure_class, code_addressable
+    )
+
+
+def _attr_or_detail(value: Any, details: Any, key: str, cast: Callable[[Any], Any], default: Any) -> Any:
+    """Read ``key`` from the object/mapping, else from its ``details``, else default.
+
+    Lets B0's ``failure_class``/``code_addressable`` survive coercion whether the
+    verify result exposes them as top-level fields (VerificationFailureReport) or
+    only inside ``details`` (the runner's VerificationFailure).
+    """
+    direct = _value(value, key)
+    if direct not in (None, ""):
+        return cast(direct)
+    if isinstance(details, Mapping) and details.get(key) not in (None, ""):
+        return cast(details.get(key))
+    return default
 
 
 def _coerce_classification(value: Any) -> RepairabilityClassification:

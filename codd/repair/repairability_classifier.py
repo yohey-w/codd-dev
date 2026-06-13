@@ -36,7 +36,20 @@ class RepairabilityClassifier:
         pending: list[Any] = []
         for item in items:
             affected = _affected_paths(item, self.repo_path)
-            if affected and _intersects_changed_files(affected, changed_files):
+            if _is_observed_code_failure(item) and affected:
+                # B0: a test/typecheck failure was OBSERVED in this very verify
+                # run, so by definition it reflects the CURRENT tree — it cannot
+                # be "pre-existing/unrelated". In the greenfield path the
+                # implementer commits source+tests in one shot, so
+                # ``git diff baseline..HEAD`` is empty and the changed-files
+                # intersection below would (wrongly) send every such failure to
+                # the LLM meta-classifier as unrepairable. We route it straight
+                # to repairable instead. This applies ONLY to code-addressable
+                # classes (import/collection, assertion, runtime); environment/
+                # build/harness failures are NOT force-routed — making the
+                # engine thrash on a missing service is not repair.
+                repairable.append(item)
+            elif affected and _intersects_changed_files(affected, changed_files):
                 repairable.append(item)
             else:
                 pending.append(item)
@@ -158,6 +171,33 @@ def _affected_paths(item: Any, repo_path: Path) -> set[str]:
                 if normalized:
                     paths.add(normalized)
     return paths
+
+
+#: Checks whose failures are produced by EXECUTING the project's own tests /
+#: typecheck — i.e. observed at verify time, hence describing the current tree.
+_OBSERVED_EXECUTION_CHECKS = frozenset({"test_command", "typecheck_command"})
+
+
+def _is_observed_code_failure(item: Any) -> bool:
+    """B0: was this an executed test/typecheck failure that is code-addressable?
+
+    Such a failure was OBSERVED in this verify run, so it reflects the CURRENT
+    tree and cannot be "pre-existing/unrelated" — it should bypass the
+    changed-files gate (which is empty in the greenfield single-commit path) and
+    go straight to repairable. Environment/build/harness failures are excluded
+    by ``code_addressable`` being False, so this never forces the engine to
+    thrash on un-patchable infrastructure.
+    """
+    check_name = str(_value(item, "check_name") or "")
+    if check_name not in _OBSERVED_EXECUTION_CHECKS:
+        return False
+    direct = _value(item, "code_addressable")
+    if direct is not None:
+        return bool(direct)
+    details = _value(item, "details")
+    if isinstance(details, Mapping):
+        return bool(details.get("code_addressable"))
+    return False
 
 
 def _value(item: Any, key: str) -> Any:

@@ -21,6 +21,7 @@ from codd.dag.runner import run_checks
 from codd.deployment.providers import VERIFICATION_TEMPLATES
 from codd.discovery import iter_source_files, scan_exclude_patterns
 from codd.repair.schema import VerificationFailureReport
+from codd.repair.test_failure_attribution import attribute_command_failure
 from codd.test_detection import detect_test_command
 
 
@@ -392,6 +393,17 @@ class VerifyRunner:
             # Keyed on the command string the detector itself emits.
             return False, f"{label} collected no tests (pytest exit code 5)", None
         message = f"{label} failed (exit {completed.returncode}): {command}\n{output}".rstrip()
+        details: dict[str, Any] = {
+            "command": command,
+            "exit_code": completed.returncode,
+            "output": output,
+        }
+        # B0 — classify + attribute the failure to concrete project files so it
+        # gets a NON-EMPTY failed_nodes and becomes addressable by the repair
+        # engine (instead of falling through to "unrepairable"). Parsing runs
+        # over the FULL captured output (not the truncated tail) so every FAILED
+        # / traceback line is visible. A failure here must never abort verify.
+        self._attach_failure_attribution(details, command, completed, check_name)
         return (
             True,
             f"failed (exit {completed.returncode})",
@@ -399,9 +411,58 @@ class VerifyRunner:
                 check_name=check_name,
                 source=check_name,
                 message=message,
-                details={"command": command, "exit_code": completed.returncode, "output": output},
+                details=details,
             ),
         )
+
+    def _attach_failure_attribution(
+        self,
+        details: dict[str, Any],
+        command: str,
+        completed: "subprocess.CompletedProcess[str]",
+        check_name: str,
+    ) -> None:
+        """Run B0 attribution and fold the result into ``details`` in place.
+
+        Populates ``failed_nodes`` (EDITABLE source/config targets only),
+        ``evidence_nodes`` (read-only failing test files), ``failure_class``,
+        ``code_addressable``, ``failure_diagnosis`` and a per-path ``attribution``
+        (path/provenance/editable) so the repair loop can engage on editable
+        targets while never being handed a test file to neuter. Best-effort: any
+        parser error leaves ``details`` unchanged.
+        """
+        try:
+            full_output = "\n".join(
+                part for part in (completed.stdout, completed.stderr) if part
+            )
+            attribution = attribute_command_failure(
+                command=command,
+                output=full_output,
+                project_root=self.project_root,
+                check_name=check_name,
+            )
+        except Exception:  # noqa: BLE001 - attribution must never abort verify.
+            return
+        if attribution is None:
+            return
+        details["failure_class"] = attribution.failure_class
+        details["code_addressable"] = attribution.code_addressable
+        if attribution.diagnosis:
+            details["failure_diagnosis"] = attribution.diagnosis
+        if attribution.attributed:
+            details["attribution"] = [
+                {"path": item.path, "provenance": item.provenance, "editable": item.editable}
+                for item in attribution.attributed
+            ]
+        # failed_nodes carries EDITABLE targets only (consumed downstream as
+        # patch candidates). Read-only test evidence goes to evidence_nodes so
+        # the RCA has context but the engine cannot patch it.
+        failed_nodes = attribution.failed_nodes
+        if failed_nodes:
+            details["failed_nodes"] = failed_nodes
+        evidence_nodes = attribution.evidence_nodes
+        if evidence_nodes:
+            details["evidence_nodes"] = evidence_nodes
 
     def _failure_from_check_result(self, result: Any) -> VerificationFailure | None:
         if _result_passed(result) or _result_severity(result) != "red":
@@ -443,12 +504,15 @@ class VerifyRunner:
     ) -> VerificationFailureReport | None:
         if not failures:
             return None
+        failure_class, code_addressable = _aggregate_attribution(failures)
         return VerificationFailureReport(
             check_name=failures[0].check_name,
             failed_nodes=_failed_nodes(failures),
             error_messages=[failure.message for failure in failures],
             dag_snapshot=_dag_snapshot(dag),
             timestamp=datetime.now(timezone.utc).isoformat(),
+            failure_class=failure_class,
+            code_addressable=code_addressable,
         )
 
 
@@ -775,6 +839,27 @@ def _failed_nodes(failures: list[VerificationFailure]) -> list[str]:
     for failure in failures:
         _collect_node_refs(failure.details, nodes)
     return _dedupe(nodes)
+
+
+def _aggregate_attribution(failures: list[VerificationFailure]) -> tuple[str, bool]:
+    """Roll B0 per-failure attribution up to the aggregate report.
+
+    ``code_addressable`` is True if ANY constituent failure is a code-addressable
+    test/typecheck failure — that is enough to justify the repairability
+    "observed ⇒ current" bypass for the batch. ``failure_class`` reports the
+    first code-addressable class found (falling back to the first class present)
+    purely for diagnostics.
+    """
+    classes = [str(f.details.get("failure_class") or "") for f in failures if f.details.get("failure_class")]
+    code_addressable = any(bool(f.details.get("code_addressable")) for f in failures)
+    failure_class = ""
+    for failure in failures:
+        if failure.details.get("code_addressable"):
+            failure_class = str(failure.details.get("failure_class") or "")
+            break
+    if not failure_class and classes:
+        failure_class = classes[0]
+    return failure_class, code_addressable
 
 
 def _collect_node_refs(value: Any, nodes: list[str]) -> None:
