@@ -318,6 +318,16 @@ axes:
       Surfaced+fixed F-codex-bare-basename-dropped (c9081a0: _reroot_bare_basename reroots single-output-prefix
       bare basenames; multi-component/multi-prefix still drop; fabricates nothing). Live re-run captured 5
       files; full e2e (verify/check) resumed with the fix. saturation stays 0 (productive).'
+    - '2026-06-13: same codex run, 2nd finding — implement 16/16 done but ZERO tests + duplicate app trees;
+      stage VB gate correctly failed. Test tasks emitted app code yet passed = task-level FALSE-GREEN
+      (F-implement-task-done-artifact-blind, 6e4241a). First gpt-strategic-divergence trial: parallel GPT-5.5
+      review + Opus investigation CONVERGED on the root cause (task-done unverified) and the reject-list; they
+      DIVERGED only on the reroot (GPT inferred "contributing"; Opus REFUTED with @design-node file evidence
+      -> KEEP c9081a0). The divergence pinned exactly GPT''s file-blindness and Opus-facts-first won. Bonus:
+      the fixer caught that the naive converged rule would false-RED the Claude keystone (source tasks carry
+      test_kinds + Python _is_test_file matches all .py) and re-consulted GPT-5.5 itself to land the
+      expected_outputs-driven design. Open follow-up: live fresh-codex e2e re-validation
+      (PC-d6-codex-greenfield-e2e-revalidate). saturation stays 0 (productive).'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1027,6 +1037,40 @@ findings:
     (synthesized, no live codex needed).'
   status: fixed
   class: mechanical
+- id: F-implement-task-done-artifact-blind
+  axis: D6
+  date: '2026-06-13'
+  model_used: codex gpt-5.5 (cross-CLI SUT, M1) surfaced; diagnosed by parallel GPT-5.5 review + Opus investigation (convergent); fixed by Opus
+  symptom: 'codex greenfield todo-CLI: all 16 implement tasks marked done, but ZERO test files generated and
+    the app duplicated in two layouts (flat src/*.py + package src/todo_cli/*.py); the stage-end VB coverage
+    gate then correctly failed (no covers vb= markers). The 3 test-writing tasks emitted APP code and still
+    passed done = a task-level FALSE-GREEN. Claude never surfaced it (its consistent layout produced tests
+    every time); the defect is CLI-agnostic, not codex-specific.'
+  root_cause: '_default_implement_task_runner (codd/greenfield/pipeline.py ~746-765) marked a task done on
+    "produced >=1 parseable file / no error" (generated = sum(len(r.generated_files))), never verifying the
+    task produced its INTENDED artifact type. The intent already existed but was discarded: DerivedTask
+    carries expected_outputs + test_kinds (plan_deriver.py ~39-40) but _default_task_lister (~937-944) built
+    ImplementTaskRef without them, so every task fell back to the single shared src/ prefix. (The duplicate
+    trees are a separate RC: per-design-node regeneration with clean=False + codex layout drift; H2 reroot
+    REFUTED as the cause via @design-node file markers, so c9081a0 was KEPT.)'
+  fix_commit: 6e4241a
+  fix_description: 'P1 (closes the false-green): expected_outputs + test_kinds plumbed onto ImplementTaskRef
+    (pipeline.py:296-298), propagated by list_implement_tasks + _default_task_lister; new _verify_task_contract
+    runs after implement_tasks and FAILs the task unless required artifact kinds are in the produced kinds.
+    Drives ONLY off expected_outputs classified against configured scan.test_dirs/source_dirs + the reused
+    test-suffix classifier (operational_e2e_audit._TEST_SUFFIXES) — never task names, vendor, or path literals.
+    Critical refinement (a naive rule would have false-RED the Claude keystone, whose source tasks carry
+    test_kinds:["unit"] and where Python _is_test_file matches every .py): test_kinds is coverage metadata NOT
+    a deliverable signal; bare .py is never a test; the source side is positive location-based (under a source
+    root), never `not _is_test_file`; no-declared-output tasks are exempt (no false-RED). P2: TEST-only,
+    non-source-rooted tasks route output_paths to scan.test_dirs (source/mixed/colocated unchanged). VB gate
+    unchanged; reroot kept. 5 regression tests; full suite 4252 passed, 0 skipped; Claude keystone e2e green.'
+  regression_test: 'tests/greenfield/test_pipeline.py — test-task-source-only FAILS, test-task-with-tests
+    PASSES, source-task+sibling-test PASSES, no-declared-output exempt, test-only output_paths -> test_dirs.'
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-d6-codex-greenfield-e2e-revalidate
 pending_cases:
 - id: PC-spec-grounded-repair-arbitration
   axis: D4
@@ -1053,6 +1097,16 @@ pending_cases:
     derivation (E2E check generation) is degraded by the unknown classification.'
   origin: observed:kakeibo-greenfield-verify
   priority: 3
+  status: open
+- id: PC-d6-codex-greenfield-e2e-revalidate
+  axis: D6
+  hypothesis: 'F-implement-task-done-artifact-blind (6e4241a) and F-codex-bare-basename-dropped (c9081a0) are
+    covered by synthesized unit/regression tests, but the codex greenfield e2e was never re-validated LIVE end
+    to end (codex2 got contaminated by repro runs). Run a FRESH codex gpt-5.5 greenfield to completion
+    (init->check, result:success) on a clean dir to confirm the cross-CLI path now produces real tests and
+    passes the VB gate without manual intervention — the real first-contact confirmation (M2).'
+  origin: derived:F-implement-task-done-artifact-blind
+  priority: 2
   status: open
 - id: PC-gate-false-red-sweep
   axis: D14
