@@ -97,7 +97,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -278,12 +278,23 @@ def _utc_now() -> str:
 
 @dataclass(frozen=True)
 class ImplementTaskRef:
-    """One implement unit: a task id plus how to run it."""
+    """One implement unit: a task id plus how to run it.
+
+    ``expected_outputs`` and ``test_kinds`` carry the DECLARED intent of the
+    task (verbatim from the :class:`~codd.llm.plan_deriver.DerivedTask` it came
+    from) so the runner can verify that the implementer actually produced the
+    intended *kind* of artifact (e.g. a test-writing task that emitted only
+    application code is a task-level false-GREEN). They are empty when the task
+    came from a configured ``implement_targets`` mapping (which declares no
+    V-model intent).
+    """
 
     task_id: str
     design_node: str
     output_paths: tuple[str, ...] | None = None
     source: str = "configured"
+    expected_outputs: tuple[str, ...] = ()
+    test_kinds: tuple[str, ...] = ()
 
 
 # DI seam signatures (all keyword-overridable on the pipeline constructor).
@@ -748,6 +759,14 @@ class GreenfieldPipeline:
             if failed:
                 raise StageError(f"task {task.task_id}: {failed[0].error}")
 
+            # Contract-aware task-done verification: a task is "done" only if the
+            # implementer produced the KIND of artifact the task declared (e.g. a
+            # test-writing task must emit at least one test file, not just app
+            # code). Drives off the declared expected_outputs — never task names,
+            # vendor CLI, or path literals. No-op for tasks with no declared
+            # output kind. See _verify_task_contract for the rules.
+            _verify_task_contract(task, results, project_root, config)
+
         # NOTE: the verifiable-behavior (VB) coverage gate is intentionally NOT
         # enforced per task here. The gate is PROJECT-WIDE (it reconciles every
         # VB id declared across the test documents against `covers vb=` markers
@@ -939,6 +958,8 @@ def _default_task_lister(project_root: Path) -> list[ImplementTaskRef]:
             task_id=entry["task_id"],
             design_node=entry["design_node"],
             source=entry["source"],
+            expected_outputs=tuple(entry.get("expected_outputs") or ()),
+            test_kinds=tuple(entry.get("test_kinds") or ()),
         )
         for entry in list_implement_tasks(project_root)
     ]
@@ -979,10 +1000,196 @@ def _default_task_deriver(project_root: Path, *, ai_command: str | None) -> int:
     return len(tasks)
 
 
+# ═══════════════════════════════════════════════════════════
+# Contract-aware task verification (artifact KIND, not name/path)
+# ═══════════════════════════════════════════════════════════
+#
+# A greenfield task is marked ``done`` only after the implementer produced the
+# KIND of artifact the task DECLARED. Without this, a test-writing task that
+# emitted only application code (observed cross-CLI: some CLIs laid tests under
+# the app's source root and produced zero test files) still passed "produced
+# >=1 parseable file" and the stage-end VB gate took the blame. The fix drives
+# the task's DECLARED intent (``expected_outputs``) — never task names, vendor
+# CLI, ``test_kinds`` (that is coverage-level metadata, not a deliverable
+# contract), or hardcoded path literals (roots come from ``scan.*_dirs``).
+#
+# Classification rules (deliberately conservative to avoid false-RED):
+#   • A path under a configured ``test_dirs`` root is a TEST artifact.
+#   • A test-SHAPED filename is a TEST artifact. ``.py`` ALONE is never enough
+#     (every Python file ends in ``.py``); only ``test_*.py`` / ``*_test.py``
+#     count, plus the language-specific ``.test.``/``.spec.``/``.cy.`` suffixes.
+#   • A path under a configured ``source_dirs`` root (that is not test-shaped via
+#     a language-specific test suffix) is a SOURCE artifact.
+#   • Anything else is UNKNOWN and imposes no requirement.
+# Verification passes when every declared kind is represented among generated
+# files (``required_kinds ⊆ produced_kinds``); UNKNOWN never gates.
+
+_KIND_SOURCE = "source"
+_KIND_TEST = "test"
+
+
+def _scan_roots(config: dict[str, Any], key: str) -> list[str]:
+    scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+    raw = scan.get(key) if isinstance(scan, dict) else None
+    if not isinstance(raw, list):
+        return []
+    roots: list[str] = []
+    for item in raw:
+        text = str(item).strip().replace("\\", "/").strip("/")
+        if text:
+            roots.append(text)
+    return roots
+
+
+def _path_under_root(rel_path: str, roots: list[str]) -> bool:
+    norm = str(rel_path).strip().replace("\\", "/").strip("/")
+    if not norm:
+        return False
+    for root in roots:
+        if norm == root or norm.startswith(root + "/"):
+            return True
+    return False
+
+
+def _non_py_test_suffixes() -> tuple[str, ...]:
+    from codd.operational_e2e_audit import _TEST_SUFFIXES
+
+    return tuple(suffix for suffix in _TEST_SUFFIXES if suffix != ".py")
+
+
+def _has_test_shape(rel_path: str) -> bool:
+    """A filename that is unambiguously a test, language-independent.
+
+    Reuses the project's :data:`_TEST_SUFFIXES` for the specific (non-Python)
+    suffixes, and recognises the conventional pytest/unittest naming for Python
+    (``test_*.py`` / ``*_test.py``) — never bare ``.py``.
+    """
+    name = PurePosixPath(str(rel_path).replace("\\", "/")).name
+    if name.endswith(_non_py_test_suffixes()):
+        return True
+    if name.endswith(".py"):
+        return name.startswith("test_") or name[:-3].endswith("_test")
+    return False
+
+
+def _classify_declared_output(rel_path: str, config: dict[str, Any]) -> str | None:
+    """Classify ONE ``expected_outputs`` entry as the deliverable KIND it implies.
+
+    Returns ``_KIND_TEST`` / ``_KIND_SOURCE`` / ``None`` (unknown — e.g. a bare
+    artifact name, a doc, or a path under no configured root).
+    """
+    if _path_under_root(rel_path, _scan_roots(config, "test_dirs")):
+        return _KIND_TEST
+    if _has_test_shape(rel_path):
+        return _KIND_TEST
+    if _path_under_root(rel_path, _scan_roots(config, "source_dirs")):
+        return _KIND_SOURCE
+    return None
+
+
+def _required_kinds(task: ImplementTaskRef, config: dict[str, Any]) -> set[str]:
+    kinds: set[str] = set()
+    for output in task.expected_outputs:
+        kind = _classify_declared_output(str(output), config)
+        if kind is not None:
+            kinds.add(kind)
+    return kinds
+
+
+def _produced_kinds(generated_files: list[Any], project_root: Path, config: dict[str, Any]) -> set[str]:
+    """Classify the files a task actually produced.
+
+    Source-side is positive-location based (under a configured ``source_dirs``
+    root and not a language-specific test file), NOT "anything that isn't a
+    test" — because for Python the suffix classifier would wrongly call every
+    ``.py`` a test and make the source requirement unsatisfiable (false-RED).
+    A file that is BOTH test-shaped and under a source root (a colocated test
+    such as ``src/foo/test_foo.py`` or ``src/foo.test.ts``) is allowed to count
+    for the source side too only when it is not a non-Python test suffix.
+    """
+    test_roots = _scan_roots(config, "test_dirs")
+    source_roots = _scan_roots(config, "source_dirs")
+    non_py_test = _non_py_test_suffixes()
+    try:
+        root = Path(project_root).resolve()
+    except OSError:
+        root = Path(project_root)
+    kinds: set[str] = set()
+    for raw in generated_files:
+        try:
+            rel = Path(raw).resolve().relative_to(root)
+            rel_path = rel.as_posix()
+        except (ValueError, OSError):
+            rel_path = PurePosixPath(str(raw).replace("\\", "/")).as_posix()
+        in_test_dir = _path_under_root(rel_path, test_roots)
+        if in_test_dir or _has_test_shape(rel_path):
+            kinds.add(_KIND_TEST)
+        if _path_under_root(rel_path, source_roots) and not in_test_dir:
+            name = PurePosixPath(rel_path).name
+            if not name.endswith(non_py_test):
+                kinds.add(_KIND_SOURCE)
+    return kinds
+
+
+def _verify_task_contract(
+    task: ImplementTaskRef,
+    results: list[Any],
+    project_root: Path,
+    config: dict[str, Any],
+) -> None:
+    """Raise :class:`StageError` if the task did not produce a declared KIND.
+
+    No-op when the task declares no recognisable output kinds (skeleton /
+    ``skip_generation`` / bare-name outputs) — that path must never false-RED.
+    """
+    required = _required_kinds(task, config)
+    if not required:
+        return
+    generated: list[Any] = []
+    for result in results:
+        generated.extend(getattr(result, "generated_files", ()) or ())
+    produced = _produced_kinds(generated, project_root, config)
+    missing = required - produced
+    if missing:
+        raise StageError(
+            f"task {task.task_id}: declared output kind(s) {sorted(required)} "
+            f"but produced only {sorted(produced) or ['<none>']} "
+            f"(missing {sorted(missing)}); the implementer did not generate the "
+            f"intended artifact type"
+        )
+
+
 def _output_paths_for_task(config: dict[str, Any], task: ImplementTaskRef) -> list[str]:
     import codd.cli as cli_module
 
+    # Contract-aware routing: a TEST-only task whose declared outputs are not
+    # already source-rooted should be written under the configured test dirs
+    # (the design's intent), instead of falling through to the shared source
+    # root. This keeps a CLI from laying tests inside the app's source tree.
+    # SOURCE / MIXED / colocated-test / unknown tasks keep the existing default
+    # so a source task that also emits a sibling test (e.g. core.py +
+    # test_core.py) is never misrouted wholesale into tests/.
+    routed = _test_only_output_paths(config, task)
+    if routed:
+        return routed
     return cli_module._implement_output_paths_for_cli(config, task.task_id)
+
+
+def _test_only_output_paths(config: dict[str, Any], task: ImplementTaskRef) -> list[str] | None:
+    required = _required_kinds(task, config)
+    if required != {_KIND_TEST}:
+        return None
+    source_roots = _scan_roots(config, "source_dirs")
+    # If any declared output is already source-rooted (a colocated test), respect
+    # the declaration rather than forcing everything into tests/.
+    if any(_path_under_root(str(output), source_roots) for output in task.expected_outputs):
+        return None
+    test_dirs = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+    raw = test_dirs.get("test_dirs") if isinstance(test_dirs, dict) else None
+    if not isinstance(raw, list):
+        return None
+    paths = [str(item).strip() for item in raw if str(item).strip()]
+    return paths or None
 
 
 def _derive_and_approve_steps(

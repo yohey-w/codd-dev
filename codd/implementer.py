@@ -919,9 +919,13 @@ def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
     2. Approved derived tasks from ``.codd/derived_tasks`` (cache-path order),
        only consulted when no targets are configured.
 
-    Each entry is ``{"task_id", "design_node", "source"}`` where ``source`` is
-    ``"configured"`` or ``"derived"``. For derived tasks ``design_node`` is the
-    task's source design document (the artifact ``codd implement`` reads).
+    Each entry is ``{"task_id", "design_node", "source", "expected_outputs",
+    "test_kinds"}`` where ``source`` is ``"configured"`` or ``"derived"``. For
+    derived tasks ``design_node`` is the task's source design document (the
+    artifact ``codd implement`` reads) and ``expected_outputs``/``test_kinds``
+    are the task's declared intent (verbatim from the ``DerivedTask``), so
+    callers can verify the implementer produced the intended *kind* of artifact.
+    Configured targets declare no V-model intent, so those two fields are empty.
     """
     project_root = Path(project_root).resolve()
     config = _load_project_config(project_root)
@@ -931,7 +935,15 @@ def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
         if design in seen:
             continue
         seen.add(design)
-        entries.append({"task_id": design, "design_node": design, "source": "configured"})
+        entries.append(
+            {
+                "task_id": design,
+                "design_node": design,
+                "source": "configured",
+                "expected_outputs": [],
+                "test_kinds": [],
+            }
+        )
     if entries:
         return entries
 
@@ -947,6 +959,8 @@ def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
                     "task_id": task.id,
                     "design_node": task.source_design_doc or task.id,
                     "source": "derived",
+                    "expected_outputs": list(task.expected_outputs),
+                    "test_kinds": list(task.test_kinds),
                 }
             )
     return entries
