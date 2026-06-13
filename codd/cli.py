@@ -5008,13 +5008,28 @@ def verify(
         _enforce_stage_contract_gate(project_root, "verify", opt_out=no_contract_gate)
         return
 
-    repair_config = _load_required_repair_config(project_root)
-    if repair_config is None:
-        raise SystemExit(1)
-    if repair_mode is not None:
+    # Split on repair_mode so the per-run opt-in reaches the gate while plain
+    # brownfield `codd verify --auto-repair` stays owner-gated:
+    #   - repair_mode is None  → KEEP the brownfield gate (_load_required_repair_config
+    #     rejects a missing/empty repair: section). The resolved config is the
+    #     disk config; no per-run allow_auto.require_explicit_optin is injected, so
+    #     `repair.approval_mode: auto` without that opt-in still fails the gate.
+    #   - repair_mode set      → load the project config directly and apply the
+    #     per-run override (apply_repair_mode), so `--repair-mode automatic` works
+    #     end-to-end even with NO on-disk repair: section (the flag IS the opt-in).
+    if repair_mode is None:
+        repair_config = _load_required_repair_config(project_root)
+        if repair_config is None:
+            raise SystemExit(1)
+    else:
         from codd.repair.approval_repair import apply_repair_mode
 
-        repair_config = apply_repair_mode(repair_config, repair_mode)
+        try:
+            base_config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"WARN: codd.yaml is required for repair: {exc}")
+            raise SystemExit(1)
+        repair_config = apply_repair_mode(base_config, repair_mode)
 
     outcome = _run_repair_loop(
         project_root,
@@ -7786,6 +7801,10 @@ def _run_repair_loop(
         engine_name=str(engine_name or repair.get("engine_name") or repair.get("engine") or "llm"),
         llm_client=SubprocessAiCommand(project_root=project_root, config=repair_config),
         repo_path=project_root,
+        # Use the SAME resolved config for the approval gate. For --repair-mode
+        # automatic this is the apply_repair_mode copy (carries the per-run
+        # opt-in); for plain --auto-repair it is the disk config (owner-gated).
+        codd_yaml=repair_config,
     )
     return RepairLoop(config, project_root).run(
         resolved_failure,

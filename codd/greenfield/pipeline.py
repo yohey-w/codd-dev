@@ -1528,6 +1528,12 @@ def _default_verify_runner(
         engine_name=str(repair_section.get("engine_name") or repair_section.get("engine") or "llm"),
         llm_client=SubprocessAiCommand(command=ai_command, project_root=project_root, config=config),
         repo_path=project_root,
+        # Thread the per-run automatic opt-in (apply_repair_mode set
+        # repair.allow_auto.require_explicit_optin=true on this copy) to the
+        # approval gate. Without this the loop re-reads codd.yaml from disk —
+        # which on a fresh greenfield project has no repair: section — and the
+        # autopilot dies at REPAIR_FAILED instead of self-healing.
+        codd_yaml=config,
     )
     outcome = RepairLoop(loop_config, project_root).run(
         failure,
