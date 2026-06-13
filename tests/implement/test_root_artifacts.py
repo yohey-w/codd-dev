@@ -195,6 +195,48 @@ def test_parse_still_drops_out_of_scope_non_artifact_paths() -> None:
 
 
 # ═══════════════════════════════════════════════════════════
+# Bare-basename rerooting under a single output dir
+#
+# The 2026-06-13 cross-CLI greenfield dogfood (codex as SUT): codex honoured the
+# stdout file-contract and emitted well-formed ``=== FILE: ===`` blocks, but
+# named the files from the design's logical modules (``module:task_model`` →
+# ``task_model.py``) WITHOUT the configured ``src/`` source prefix. Every block
+# was then skipped as "outside output paths" and the task hard-failed with the
+# misleading "produced 0 generated files / add skip_generation" error — genuine
+# output silently discarded. A bare basename under a single output dir is
+# rerooted to where it belongs; deliberately different paths still drop.
+# ═══════════════════════════════════════════════════════════
+
+def test_parse_reroots_bare_basename_under_single_output_dir() -> None:
+    """codex's bare-named files (no src/ prefix) are captured, not dropped."""
+    raw = (
+        _block("task_model.py", "class Task:\n    pass\n", "python")
+        + _block("task_store.py", "def load():\n    return []\n", "python")
+    )
+    payloads = _parse_file_payloads(raw, ["src/"], "python")
+    assert [path for path, _ in payloads] == ["src/task_model.py", "src/task_store.py"]
+
+
+def test_parse_bare_basename_not_rerooted_with_multiple_output_dirs() -> None:
+    """Ambiguous target (>1 output prefix) — a bare name stays dropped."""
+    raw = _block("foo.py", "x = 1\n", "python")
+    with pytest.raises(ValueError, match="outside output paths"):
+        _parse_file_payloads(raw, ["src/", "lib/"], "python")
+
+
+def test_parse_multicomponent_foreign_path_not_rerooted() -> None:
+    """A deliberate sibling/foreign dir is NOT relocated; only bare names reroot."""
+    raw = (
+        _block("tests/test_x.py", "def test_x():\n    assert True\n", "python")
+        + _block("main.py", "print('hi')\n", "python")
+    )
+    # tests/test_x.py is a deliberate directory choice -> dropped;
+    # main.py is a bare name -> rerooted under the single src/ prefix.
+    payloads = _parse_file_payloads(raw, ["src/"], "python")
+    assert [path for path, _ in payloads] == ["src/main.py"]
+
+
+# ═══════════════════════════════════════════════════════════
 # End-to-end through Implementer.run_implement
 # ═══════════════════════════════════════════════════════════
 
@@ -344,3 +386,61 @@ def test_implement_prompt_declares_the_root_artifact_exception(
     assert "REPOSITORY ROOT" in prompt
     assert ".github/workflows/ci.yml" in prompt
     assert re.search(r"stay under one of the output paths", prompt)
+
+
+# ═══════════════════════════════════════════════════════════
+# Greenfield codex path: stdout file-contract + bare basenames
+#
+# Reproduces the 2026-06-13 cross-CLI greenfield dogfood failure end-to-end
+# WITHOUT a live codex: a codex-style ``ai_command`` is routed through the
+# file-writing-agent capture, codex "emits" well-formed ``=== FILE: ===`` blocks
+# on STDOUT and writes NOTHING to disk, and names the files from the design's
+# logical modules WITHOUT the configured ``src/`` prefix. The implement task
+# must CAPTURE those files (the stdout-contract fallback) AND reroot the bare
+# names under ``src/`` — not hard-fail with "produced 0 generated files".
+# ═══════════════════════════════════════════════════════════
+
+def test_run_implement_codex_stdout_contract_bare_basenames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import codd.ai_invoke as ai_invoke
+
+    project = _project(tmp_path)
+    # Configure codex (a file-writing agent) so the implement call routes through
+    # invoke_file_writing_agent, exactly like the live greenfield run.
+    config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+    config["ai_command"] = "codex exec --model gpt-5.5 --skip-git-repo-check"
+    (project / "codd" / "codd.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    # The file-writing-agent capture diffs the git tree; give it a real repo.
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=project, check=True)
+
+    # codex honours the stdout file-contract: bare-named blocks (no src/), and
+    # writes NOTHING to disk. Mirrors the captured raw output from the dogfood.
+    codex_stdout = (
+        _block("task_model.py", "class Task:\n    pass\n", "python")
+        + _block("task_store.py", "def load():\n    return []\n", "python")
+    )
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        # codex call: emit the stdout contract, write nothing to disk.
+        if command and "codex" in str(command[0]):
+            return subprocess.CompletedProcess(
+                args=command, returncode=0, stdout=codex_stdout, stderr=""
+            )
+        # everything else (git add/diff/ls-files/reset/checkout) is real.
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", fake_run)
+
+    result = Implementer(project).run_implement(ImplementSpec("docs/design/auth.md", ["src/"]))
+
+    generated = {path.relative_to(project).as_posix() for path in result.generated_files}
+    assert generated == {"src/task_model.py", "src/task_store.py"}
+    assert (project / "src" / "task_model.py").is_file()
+    assert (project / "src" / "task_store.py").is_file()
+    # codex wrote nothing to disk; the bare names must NOT leak at the repo root.
+    assert not (project / "task_model.py").exists()

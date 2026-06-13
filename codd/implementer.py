@@ -1987,6 +1987,47 @@ def _matches_root_artifact_pattern(path: PurePosixPath, patterns: list[str] | tu
     return False
 
 
+def _reroot_bare_basename(
+    path: PurePosixPath, output_prefixes: list[PurePosixPath]
+) -> PurePosixPath | None:
+    """Reroot a bare-basename file block under the single configured output dir.
+
+    A text-out CLI (codex, and any other ``=== FILE: ===``-emitting model) names
+    the file from the design's logical module (e.g. ``module:task_model`` →
+    ``task_model.py``) and intermittently omits the configured source prefix —
+    emitting ``task_model.py`` instead of ``src/task_model.py``. The block is
+    well-formed and the content is real; dropping it as "outside output paths"
+    discards genuine output and surfaces as the misleading "produced 0 generated
+    files" error (the 2026-06-13 cross-CLI greenfield dogfood: codex emitted the
+    correct files under bare names and every block was skipped).
+
+    Conservative by construction so it captures only what the model genuinely
+    meant for the output directory and never silently relocates a deliberately
+    different path:
+
+    * Only a **bare basename** (a single path component, e.g. ``task_model.py``)
+      is rerooted. A multi-component path the model chose on purpose — a sibling
+      tree (``src/other/service.py``), a different top-level dir (``tests/x.py``,
+      ``lib/y.py``) — is NOT rerooted and stays dropped, preserving the
+      out-of-scope skip semantics.
+    * Only when exactly **one** output prefix is configured (the dominant
+      implement-task case: a single source root such as ``src/``). With multiple
+      output paths the target is ambiguous, so the bare name stays dropped.
+
+    Returns the rerooted ``<prefix>/<basename>`` path, or ``None`` when no
+    rerooting applies (caller then keeps the existing skip behavior). Fabricates
+    nothing — it only relocates a path the model already emitted with content.
+    """
+    if len(output_prefixes) != 1:
+        return None
+    if len(path.parts) != 1:
+        return None
+    prefix = output_prefixes[0]
+    if not prefix.parts:
+        return None
+    return prefix / path
+
+
 def _parse_file_payloads(
     raw_output: str,
     output_paths: list[str],
@@ -2020,8 +2061,12 @@ def _parse_file_payloads(
         if root_destination is not None:
             path = root_destination
         elif not any(_path_starts_with(path, prefix) for prefix in output_prefixes):
-            skipped.append(f"{path_text!r}: outside output paths {output_paths!r}")
-            continue
+            rerooted = _reroot_bare_basename(path, output_prefixes)
+            if rerooted is not None:
+                path = rerooted
+            else:
+                skipped.append(f"{path_text!r}: outside output paths {output_paths!r}")
+                continue
 
         content = _strip_code_fence(block, destination=path_text).strip()
         if not content:
