@@ -389,6 +389,13 @@ axes:
       consecutive ZERO-finding runs (K=2) before rotating. The M2 GREEN result stands (the autopilot reaches a
       working green system cross-vendor); but "問題が発生しなくなるまで" on D6 is not met while the propagate finding
       is open. Remaining on D6: B-full (designer-reserved) + the propagate-skip fix. saturation -> 0.'
+    - '2026-06-14: propagate-skip FIXED (677639e) — run_verify persists an empty verify-state on a clean run so
+      greenfield verify->commit performs its (zero-doc) reconciliation instead of skipping; never-ran still
+      guarded (no false-pass). Full suite 4325 green. D6 RE-VALIDATION started: fresh codex5 greenfield launched
+      (A-core + B0 + propagate fix all in main). Need TWO consecutive ZERO-finding clean runs (K=2) to saturate
+      D6 before rotating to D10; codex5 = run 1. (The propagate-fix subagent a12038ce held its commit waiting on
+      an in-flight GPT consult and ended without committing — recurring subagent-cant-await-async-GPT pattern;
+      parent reviewed+validated its uncommitted working-tree fix and shipped it.) saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1311,7 +1318,12 @@ pending_cases:
     drift goes unpropagated as a result. Surfaced both on kakeibo-era and codex4 runs.'
   origin: observed:codex4-M2-complete
   priority: 3
-  status: open
+  status: done  # 2026-06-14 — FIXED 677639e: run_verify persists an empty verify-state when it ran clean (no
+    # changed files / no affected docs) so greenfield verify->commit sees "ran, zero affected docs" and performs
+    # its real zero-doc reconciliation instead of skipping on "No verify state found"; absent state (verify never
+    # ran) still guarded (no false-pass). Full suite 4325 passed (+139 test lines). GPT consult 38CC891A was
+    # in-flight when the subagent held the commit; the fix is reviewed+validated and shipped — any GPT divergence
+    # folds as a follow-up.
 - id: PC-gate-false-red-sweep
   axis: D14
   hypothesis: 'F-vb-coverage-gate-false-red proved a deterministic QUALITY GATE can false-RED — block a
