@@ -115,6 +115,24 @@ implement:
   # same atomic "nothing written until clean" guarantee. Cheap, deterministic,
   # no LLM calls. Set false to opt out of the confusable check only.
   confusable_check: true
+  # Bounded retries when a single `codd implement` attempt yields NO usable
+  # generated files for a TRANSIENT reason that re-issuing the identical call
+  # can clear: empty AI output, a file-writing agent that produced no (readable)
+  # file changes, file block(s) that were ALL invalid/out-of-scope, or a parse
+  # that filtered down to zero usable files. A single such response (a model
+  # emitting empty/unparseable text on one invocation, exit 0) otherwise
+  # hard-fails a whole multi-hour greenfield autopilot run with no retry, even
+  # though the re-issue succeeds. This budget is SEPARATE from (and additive
+  # with) syntax_gate_max_attempts -- a no-usable retry produced no file to
+  # validate, so it does not consume syntax-gate budget and vice-versa.
+  # Backoff is index-scaled (1.5s / 3.0s / 4.5s). ANTI-FALSE-GREEN: 0 files is
+  # STILL a failure by default -- only explicit `skip_generation: true` in the
+  # design doc is a 0-file success; after this budget is exhausted the SAME
+  # "produced 0 generated files" error is raised; retries NEVER relax path/scope
+  # constraints and the syntax/confusable gates stay active on every retry.
+  # Default 3 (4 total attempts); minimum 0 (0 = opt out / legacy no-retry
+  # hard-fail). NEVER unbounded.
+  no_usable_file_retries: 3
   # Shared canonical output root for implement tasks WITHOUT an explicit
   # default_output_paths / implement_targets mapping (e.g. greenfield-derived
   # tasks). null = derive from scan.source_dirs[0] (usually "src/"). Every

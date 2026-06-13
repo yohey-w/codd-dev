@@ -375,6 +375,11 @@ def invoke_file_writing_agent(
         if _stdout_carries_file_contract(result.stdout):
             subprocess.run(["git", "reset", "--quiet"], cwd=cwd, capture_output=True)
             return result.stdout
+        # No on-disk changes and no stdout file contract: leave the staged
+        # baseline (git add -A above) UNstaged so an implement-level retry starts
+        # from the same clean working tree it inherited, then surface the
+        # no-usable-output failure.
+        subprocess.run(["git", "reset", "--quiet"], cwd=cwd, capture_output=True)
         raise ValueError("AI command did not produce any file changes")
 
     # Read changed files and format as CoDD file blocks
@@ -388,6 +393,16 @@ def invoke_file_writing_agent(
             parts.append("")
 
     if not parts:
+        # The agent touched files on disk but none were readable as text. Revert
+        # to the staged baseline (same cleanup as the success branch below)
+        # BEFORE raising, so an implement-level retry starts from a clean tree
+        # rather than inheriting the agent's half-written artifacts.
+        subprocess.run(["git", "checkout", "--", "."], cwd=cwd, capture_output=True)
+        for f in new_files:
+            fp = project_root / f
+            if fp.is_file():
+                fp.unlink()
+        subprocess.run(["git", "reset", "--quiet"], cwd=cwd, capture_output=True)
         raise ValueError("AI command did not produce any readable file changes")
 
     # Revert: restore tracked files from index, remove agent-created files
