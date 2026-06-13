@@ -435,6 +435,23 @@ axes:
       via GPT consult (owner reserved only for net-new concept/positioning/taste/North-Star). Note: this is at
       VERIFY, untouched by the 0-files implement fix — codex7 may hit it too if its generated code needs repair.
       saturation 0.'
+    - '2026-06-14: VERDICT CONFIRMED (facts ae0bec481 + raw code) = autopilot wiring BUG. apply_repair_mode
+      builds an in-memory config with the opt-in but RepairLoop.run() re-reads codd.yaml from disk (loop.py:149)
+      and passes THAT to the approval gate, discarding the patch; fresh projects have no repair: section -> gate
+      raises REPAIR_FAILED. Same break in codd verify --repair-mode automatic. GPT-5.5 consult 907E4A1F (14m25s,
+      read the repo) CONFIRMED the threading fix BUT found a MATERIAL false-green hole I had under-weighted:
+      patch-scope is enforced only at PROMPT level — RepairProposal accepts arbitrary file_path + GitPatcher only
+      checks path-in-tree, NOT path-in-editable-set. So auto-apply could WEAKEN THE ORACLE (edit codd.yaml/
+      pytest config/conftest/CI/ or a design-spec doc that derives a test) and the post-repair verify would then
+      pass against the weakened oracle = false-green it cannot catch. codex5 own repair edited docs/infra/ci.md
+      (a spec doc) for a code-addressable failure = exactly that vector. => GPT''s consult PREVENTED shipping a
+      false-green-enabling fix (validates the directive: repair-domain fixes go through GPT consult). Fix now
+      = 3 parts shipping together: (1) thread resolved config to the gate, (2) CLI split (repair_mode None ->
+      _load_required_repair_config keeps brownfield owner-gated; else apply_repair_mode), (3) code-level
+      auto-mode patch-scope validator (proposal paths must be in the primary RCA editable set; tests read-only
+      except harness_contract_violation; spec/doc/gate-control edits for code_addressable failures escalate/fail,
+      never silently applied). Implement subagent a51fa50936 (GPT design, no re-consult). Candidate finding
+      F-greenfield-autorepair-optin-and-scope, full entry on fix landing. saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
