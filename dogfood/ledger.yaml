@@ -243,6 +243,13 @@ axes:
       F-vb-gate-per-task-granularity (gate disabled per-task in the greenfield runner; run ONCE project-wide
       after all implement tasks; honors the greenfield coverage_gate opt-out; standalone implement gate
       unchanged). saturation reset to 0.'
+    - '2026-06-13: same run, NEXT layer — the per-task fix let the run reach the once-per-stage gate, which
+      then false-RED''d 45/45 despite the suite carrying broad `codd: covers vb=` markers. Three brittleness
+      defects in verifiable_behavior_audit.py (id-normalization VB-08 vs vb=08; scan-scope tests under
+      src/tests/ vs declared tests/; greedy regex dropping multi-id `vb=22 vb=23 vb=24`). Surfaced+fixed
+      F-vb-coverage-gate-false-red (77495ee) — canonical id key on both sides, source+test scope union with
+      root fallback, every-token marker parse; gate not weakened. Loop working as designed: fix one gate
+      layer -> reach further -> expose the next. saturation stays 0.'
   D5:
     description: weakest-viable-model (instrument / MODIFIER, M1) — a weak model is the most SENSITIVE
       instrument; it trips on ambiguity a strong model papers over. Applied to input-family runs (D1-D4);
@@ -800,7 +807,63 @@ findings:
   class: mechanical
   derived_case_ids:
   - PC-d4-vb-gate-stage-granularity
+- id: F-vb-coverage-gate-false-red
+  axis: D4
+  date: '2026-06-13'
+  model_used: claude sonnet (weakest viable, M1) — same live 30-task greenfield run as F-vb-gate-per-task-granularity
+  symptom: 'once the per-task granularity fix (F-vb-gate-per-task-granularity, 1959e73) let the run reach the
+    END of the implement stage, the once-per-stage project-wide gate reported "45 of 45 verifiable behavior(s)
+    have no `codd: covers vb=` marker" — a total false-RED. The generated suite DID carry broad coverage
+    (markers like `# codd: covers vb=22 vb=23 vb=24`, `vb=08`, `vb=27 vb=28 vb=29` across src/tests/*.py); the
+    gate blocked a genuinely-covered codebase and halted an otherwise-successful unattended run. ALL 45 failing
+    (not a subset) was the tell of a systematic matcher/scope defect, not a real coverage gap.'
+  root_cause: 'THREE independent defects in codd/verifiable_behavior_audit.py, all required to produce 45/45:
+    (H-A id-format) _normalize_vb_id only casefolded, so declared id VB-08 -> "vb-08" while the value captured
+    from marker `vb=08` was "08" — vb-08 != 08, zero matches for every VB. (H-B scan-scope) build_vb_coverage_audit
+    resolved the marker-scan scope from scan.test_dirs alone; the project declared test_dirs:[tests/] but the
+    SUT wrote the suite under src/tests/, so _iter_test_files walked a non-existent dir and saw zero markers.
+    (3rd, multi-token) _COVER_MARKER_RE''s greedy trailing group swallowed extra tokens, so `# codd: covers
+    vb=22 vb=23 vb=24` yielded only 22 — VB-23/24 stayed uncovered even after H-A/H-B. The gate''s intent (full
+    coverage) was right; its id matching, file scope, and marker parsing were each too brittle to absorb
+    reasonable SUT output (M1: the harness must tolerate what a weak-but-reasonable model naturally emits —
+    `vb=22` for VB-22, tests under src/, multiple ids on one line). The evil twin of false-green: a gate
+    rejecting a correct artifact.'
+  fix_commit: 77495ee
+  fix_description: 'codd/verifiable_behavior_audit.py: (1) _normalize_vb_id rewritten to a canonical key —
+    casefold, strip a token-scoped leading `vb` (^vb(?=[-_= \t]|$) so inner-vb identifier bodies stay
+    symmetric), strip leading -_= separators, strip leading zeros from a purely-numeric remainder (08->8)
+    else keep the alphanumeric form (auth-1); applied to BOTH declared ids and marker/blocker/orphan values
+    so VB-08, vb=08, vb=8, VB-8 all key to 8 while VB-1 (->1) does NOT collide with VB-11 (->11). (2) new
+    _resolve_vb_scan_dirs scans the dedup union of scan.test_dirs + scan.source_dirs with a project-root
+    fallback when no scan config exists, _is_test_file suffix-filtering to test files only — generated tests
+    under src/tests/ (or any configured root) are now seen. (3) new _VB_TOKEN_RE + reworked covers loop in
+    _scan_vb_markers recovers EVERY vb= token on a line (leading token + any swallowed into details). Blocked
+    `codd: blocked vb=` opt-out, --no-coverage-gate, and the operational E2E audit path are unchanged; the
+    gate is NOT weakened — only made robust to id spelling, suite location, and multi-id markers. Live
+    read-only re-audit of the real run: 45/45 covered, 0 uncovered, 0 orphans (was 45/45 FAILED). Full suite
+    4231 passed, 0 skipped (4221 + 10 new gate tests). Generality held: no project/model/CLI/path literal.'
+  regression_test: 'tests/test_verifiable_behavior_coverage_gate.py (10 tests) — VB-1/VB-11 non-collision,
+    non-numeric VB-AUTH-1/VB-add, multi-token covers line, src/tests scope discovery, project-root fallback,
+    blocked opt-out, coverage_gate disable.'
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-gate-false-red-sweep
 pending_cases:
+- id: PC-gate-false-red-sweep
+  axis: D14
+  hypothesis: 'F-vb-coverage-gate-false-red proved a deterministic QUALITY GATE can false-RED — block a
+    correct artifact — when its id-matching, file-scope, or token-parsing is stricter than the reasonable
+    output it judges. This is the evil twin of false-green and generalizes beyond the VB gate. Audit CoDD''s
+    OTHER deterministic gates/audits (syntax gate, confusable check, freshness/coherence ledger, contract
+    checks, codd check, propagate reconciliation) for the same three brittleness classes: (a) id/key
+    normalization symmetry between declared and observed forms, (b) scan-scope resolution vs where artifacts
+    actually land, (c) greedy/loose parsing that drops valid tokens. Each gate must absorb reasonable
+    model/layout variation WITHOUT weakening its anti-false-green guarantee. Self-application (D14): apply
+    CoDD''s own correctness lens to CoDD''s own gates.'
+  origin: derived:F-vb-coverage-gate-false-red
+  priority: 1
+  status: open
 - id: PC-d6-codex-live
   axis: D6
   hypothesis: Does the same greenfield input drive a non-claude CLI (codex) end-to-end? Surfaces prompt/format/tooling
