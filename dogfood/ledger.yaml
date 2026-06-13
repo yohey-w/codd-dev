@@ -452,6 +452,17 @@ axes:
       except harness_contract_violation; spec/doc/gate-control edits for code_addressable failures escalate/fail,
       never silently applied). Implement subagent a51fa50936 (GPT design, no re-consult). Candidate finding
       F-greenfield-autorepair-optin-and-scope, full entry on fix landing. saturation 0.'
+    - '2026-06-14: F-greenfield-autorepair-optin-and-scope FIXED (4103b9e). 3-part GPT-validated fix: thread
+      per-run opt-in to the approval gate + CLI split (brownfield stays owner-gated) + NEW code-level auto-mode
+      patch-scope validator (auto_scope_guard.py) that blocks oracle/spec/gate-control edits for code-addressable
+      failures (the false-green vector GPT caught). Full suite 4372 green (+29 tests incl. scope-reject e2e).
+      KEY LESSON: GPT-5.5 consult 907E4A1F found a material false-green hole my first analysis missed — enabling
+      auto-apply without a code-level scope guard would have let a repair weaken the oracle (codex5 own ci.md
+      spec-edit was that vector). The directive (repair-domain fixes via GPT consult) directly prevented shipping
+      a false-green-enabler. Now both fixes (0-files 862d7e3 + autorepair 4103b9e) are in main; codex8 launched
+      = clean D6 re-validation run-1 on the fully-fixed code (codex7 still running on the pre-autorepair-fix main
+      = 0-files validation only). D6 saturation requires 2 consecutive clean runs (check:success + propagate real
+      build + all stages clean + zero new findings) on the both-fix code. saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1374,6 +1385,56 @@ findings:
     (same _write_generated_files validation re-run); syntax+confusable gates active every retry; [codd] stderr
     notice per retry. Tests: tests/test_implement_no_usable_retry.py — 9 required + 3 extras (incl.
     no_usable_file_retries:0 == legacy immediate hard-fail). Full suite 4343 passed, 0 failed, 0 skipped.'
+  status: fixed
+  class: conceptual
+- id: F-greenfield-autorepair-optin-and-scope
+  axis: D6
+  date: '2026-06-14'
+  model_used: codex gpt-5.5 xhigh (SUT codex5 surfaced it) + Opus facts-investigation (ae0bec481) + GPT-5.5 consult (907E4A1F, 14m25s, read the repo, found the false-green hole) + Opus implementation
+  symptom: 'a greenfield AUTOPILOT run (codex5) reached implement 15/15 then FAILED at verify with REPAIR_FAILED
+    — "auto repair approval requires repair.allow_auto.require_explicit_optin=true". The auto-repair pipeline ran
+    CORRECTLY (root-caused two governance-test failures as clean code-gaps vs design specs, produced a proposal)
+    but could not APPLY because the opt-in was not honored => the greenfield autopilot, which is DESIGNED to
+    self-heal in automatic mode, cannot apply repairs; any run whose generated code needs repair dies at verify
+    (codex4 only survived because its code needed zero repairs). Intermittently exposed (codex variance).'
+  root_cause: 'TWO layers. (1) WIRING BUG: apply_repair_mode() builds an in-memory config copy with
+    repair.approval_mode=auto + allow_auto.require_explicit_optin=true (the per-run opt-in), and greenfield
+    _default_verify_runner / the CLI build it — but RepairLoop.run() (loop.py:149) re-reads codd.yaml FROM DISK
+    and passes THAT disk config to approve_repair_proposal, DISCARDING the patch; a fresh project has no repair:
+    section => gate raises. Same break in codd verify --repair-mode automatic. (2) FALSE-GREEN HOLE (found by
+    GPT-5.5 907E4A1F, NOT in my first analysis): patch-scope was enforced only at PROMPT level — RepairProposal
+    accepts arbitrary file_path and GitPatcher only checks path-in-tree, NOT path-in-editable-set. So simply
+    enabling auto-apply would let a repair WEAKEN THE ORACLE (edit codd.yaml/pytest config/conftest/CI/ or a
+    design-spec doc that derives a test); the post-repair verify then passes against the weakened oracle = a
+    false-green it structurally cannot catch. codex5 own proposal edited docs/infra/ci.md (a spec doc) for a
+    code-addressable failure = exactly that vector. So the wiring fix ALONE was unsafe.'
+  fix_commit: 4103b9e
+  fix_description: 'GPT-5.5-validated 3-part fix shipped together (threading alone rejected as false-green-
+    enabling). (1) THREADING: RepairLoopConfig gains read-only codd_yaml field (loop.py:57); run() resolves it
+    once (self.config.codd_yaml or _load_codd_yaml()) for the whole loop and passes to approve_repair_proposal
+    (loop.py:155-164); greenfield _default_verify_runner passes codd_yaml=config (pipeline.py:1532-1539). (2)
+    CLI SPLIT (cli.py:5020-5032, 7799-7808): repair_mode None -> _load_required_repair_config (keeps brownfield
+    owner-gate, rejects missing repair: section); else -> apply_repair_mode; _run_repair_loop passes
+    codd_yaml=repair_config. Net: codd verify --repair-mode automatic works with no on-disk repair: section;
+    plain codd verify --auto-repair stays owner-gated. (3) CODE-LEVEL AUTO-MODE PATCH-SCOPE VALIDATOR (new
+    codd/repair/auto_scope_guard.py, integrated loop.py:296-319 via _auto_scope_decision): in AUTO mode, after
+    approval, before apply, every proposal path must be in the editable allowlist resolved from the PICKED
+    PRIMARY failure failed_nodes + RCA affected_nodes (not the whole batch). Role-aware: source/config may
+    auto-apply for code_addressable; test files read-only except a harness_contract_violation naming them;
+    spec/design/requirements docs + test-harness/gate-control files (codd.yaml, pytest/pyproject/package.json
+    test config, conftest, CI workflows, docs/design|specs|requirements) are NOT auto-edited for a
+    code_addressable failure -> honest REPAIR_FAILED. Containment strictly enforced when the primary failure
+    resolved concrete paths (B0); structural DAG failures keep legacy behavior while oracle/test protections
+    still block the false-green vector. All prior guards intact (post-repair-verify, greenfield second
+    run_standalone_verify + _certify_verify_executed, max_files valve, attribution editability) — the validator
+    only ADDS. Full suite 4372 passed, 0 failed, 0 skipped (+29 new).'
+  regression_test: 'tests/repair/test_auto_repair_optin_and_scope.py (e2e groups do NOT mock RepairLoop/
+    _run_repair_loop): CLI automatic no-disk-repair -> REPAIR_SUCCESS + codd.yaml unchanged + test file
+    unchanged; greenfield automatic via real _default_verify_runner + _certify_verify_executed; brownfield-stays-
+    gated (plain --auto-repair rejects; disk approval_mode:auto w/o opt-in -> opt-in error, no change); scope
+    rejects (failing-test edit / codd.yaml weaken / spec-doc edit all rejected, no files changed) + positive
+    harness_contract_violation scaffold-fix allowed; max-files valve escalates -> rejected; role-aware unit
+    coverage.'
   status: fixed
   class: conceptual
 pending_cases:
