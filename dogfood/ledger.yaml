@@ -409,13 +409,23 @@ axes:
     description: self-application — regressions in codd's own read-only checks when pointed at codd-dev
       itself (the harness eating its own cooking). Deterministic, free. Read-only only; cannot self-build
       (see README limits).
-    saturation_counter: 1
-    last_run: '2026-06-12'
+    saturation_counter: 0
+    last_run: '2026-06-13'
     status: active
     cost: free
     automation: scripted
     runner: python dogfood/scripts/run_d14_self.py (dag verify red-check + config-key validation).
     sut_model: none
+    history:
+    - '2026-06-13: MANUAL D14 self-application sweep (PC-gate-false-red-sweep) — 4 read-only Opus auditors
+      generalized the kakeibo VB-gate false-RED across CoDD''s OTHER deterministic gates for the 3 brittleness
+      classes (id-norm asymmetry / scan-scope / greedy-parse). Found+fixed 6 CONFIRMED false-REDs
+      (F-gate-false-red-sweep: 6e047df e2e scan-scope, 6d777a1 multi-doc-YAML + BOM syntax gate, ded269f
+      artifact-contract case + test/e2e globs, 88e788a propagate monorepo path-base); 1 deferred
+      (F-confusable-greek-false-red). Many gates CLEAN (verifiable_behavior_audit siblings, coverage_auditor,
+      requirement_completeness, coherence_engine/adapters, codd check aggregator, artifact_ids). Confirmed the
+      false-RED class was SYSTEMIC, not unique to the VB gate. saturation reset to 0 (productive). Full suite
+      4243 passed, 0 skipped.'
 findings:
 - id: F-plural-type
   axis: D1
@@ -917,6 +927,65 @@ findings:
   class: conceptual
   derived_case_ids:
   - PC-spec-grounded-repair-arbitration
+- id: F-gate-false-red-sweep
+  axis: D14
+  date: '2026-06-13'
+  model_used: discovery=4 read-only Opus auditors (D14 self-application); SUT N/A (auditing CoDD's own gates)
+  symptom: 'generalizing the kakeibo VB-gate false-RED (F-vb-coverage-gate-false-red): a manual D14 sweep
+    audited CoDD''s OTHER deterministic gates for the 3 brittleness classes — (a) id/key normalization
+    asymmetry, (b) scan-scope vs artifact location, (c) greedy/loose parsing dropping valid tokens. SIX
+    confirmed false-REDs (each reproduced): deterministic gates failing CORRECT artifacts. Proves the class
+    was SYSTEMIC, not unique to the VB gate.'
+  root_cause: 'six independent defects, same family as the VB gate: (1) operational_e2e_audit _iter_test_files
+    scanned only tests/ ignoring source_dirs (class b — VB-gate sibling, not mirrored); (2) syntax gate
+    yaml.safe_load rejected valid ---multi-doc YAML (class c); (3) syntax gate ast.parse/json.loads rejected a
+    leading UTF-8 BOM CPython accepts (class c); (4) propagate change-detection emitted repo-root-relative git
+    paths resolved against project_root -> monorepo-subdir projects silently no-op propagate -> DependencyFreshness
+    false-REDs never_reconciled on a coherent project (class b); (5) artifact_contract _match_paths was
+    case-sensitive -> uppercase REQUIREMENTS.md reported missing (codd check exit 1) though the deriver finds it
+    (class a, internal asymmetry); (6) artifact catalog test_suite/e2e_suite globs missed the .spec./.test./
+    __tests__/ conventions CoDD itself generates (class b).'
+  fix_commit: 6e047df,6d777a1,ded269f,88e788a
+  fix_description: '6e047df FIX1 operational_e2e_audit reuses shared _resolve_vb_scan_dirs (lifted to
+    operational_e2e_audit, re-imported by verifiable_behavior_audit to avoid a cycle): test_dirs=None scans
+    test_dirs+source_dirs (whole tree if unconfigured), _is_test_file keeps it to real tests. 6d777a1 FIX2
+    yaml.safe_load->list(safe_load_all); FIX3 strip one leading U+FEFF before py/json parse only (disk write
+    unchanged). ded269f FIX6 _match_paths adds a case-insensitive 2nd pass (glob->caseless-regex over tree,
+    dedup by resolved path); FIX7 additive catalog globs. 88e788a FIX5 added --relative to the 3
+    change-detection git calls (already cwd=project_root) -> project-relative paths in monorepo subdirs, no-op
+    at repo root. EVERY fix verified by revert (regression test fails on old, passes on new); anti-false-green
+    preserved (malformed YAML, real syntax error, only-README requirements, truly-unmarked operation all still
+    fail). General, no project literals. Full suite 4243 passed, 0 skipped.'
+  regression_test: 'test_operational_e2e_audit.test_operational_audit_scans_source_tree_when_e2e_lives_under_src;
+    test_implement_syntax_gate.test_valid_multi_document_yaml_passes_gate /
+    test_leading_bom_on_py_and_json_passes_gate; test_artifact_contract.test_verify_requirements_matches_uppercase_filename
+    (+only-readme-still-missing) / test_verify_test_suite_matches_colocated_spec_convention (+dunder/cypress);
+    test_propagation_common.test_get_changed_files_returns_project_relative_paths_in_monorepo_subdir.'
+  status: fixed
+  class: mechanical
+  derived_case_ids:
+  - PC-gate-false-red-sweep
+- id: F-confusable-greek-false-red
+  axis: D14
+  date: '2026-06-13'
+  model_used: read-only Opus auditor (D14 self-application)
+  symptom: 'the confusable/homoglyph check flags ANY identifier mixing ASCII-Latin with a Greek letter, so
+    legitimate scientific identifiers (x_θ, μ_kg, ω_max) — idiomatic correct Python in numpy/scipy/ML code —
+    are FALSELY rejected (class c). Confirmed (x_θ -> ImplementSyntaxGateError).'
+  root_cause: '_CONFUSABLE_SCRIPTS treats every GREEK letter as Latin-confusable, but Greek MATH letters
+    (theta/gamma/mu/omega/lambda...) are visually DISTINCT from ASCII and are NOT homoglyphs. DELIBERATE,
+    test-asserted policy (tests/test_confusable_check.py asserts xα is flagged).'
+  fix_commit: null  # DEFERRED — not autonomously changed.
+  fix_description: 'DEFERRED. This is the owner-motivated anti-false-green homoglyph defense. The auditor''s
+    safe fix narrows the Greek arm to the genuine Latin-confusable Greek subset while keeping Cyrillic fully
+    flagged (the owner''s actual concern). But narrowing a security-ish gate carries false-GREEN risk if the
+    subset is imperfect, the false-RED is low-frequency for CoDD''s typical web/CLI generation, and it reverses
+    a test-asserted policy. Per anti-false-green discipline + the owner''s expressed preference, recorded not
+    auto-changed. See PC-confusable-greek-precision.'
+  status: deferred
+  class: conceptual
+  derived_case_ids:
+  - PC-confusable-greek-precision
 pending_cases:
 - id: PC-spec-grounded-repair-arbitration
   axis: D4
@@ -957,6 +1026,18 @@ pending_cases:
     CoDD''s own correctness lens to CoDD''s own gates.'
   origin: derived:F-vb-coverage-gate-false-red
   priority: 1
+  status: done  # 2026-06-13 — executed (manual D14 sweep, 4 read-only auditors). Found+fixed 6 false-REDs
+    # (F-gate-false-red-sweep: 6e047df/6d777a1/ded269f/88e788a) + 1 deferred (F-confusable-greek-false-red).
+    # Many gates CLEAN. False-RED class confirmed SYSTEMIC. Full suite 4243 passed, 0 skipped.
+- id: PC-confusable-greek-precision
+  axis: D14
+  hypothesis: 'narrow the confusable check''s Greek arm to the genuine Latin-confusable Greek subset so
+    legitimate scientific identifiers (x_θ, μ_kg, ω_max) stop false-RED-ing, WITHOUT weakening Cyrillic
+    homoglyph detection (the owner''s actual concern) or letting a real Greek homoglyph through. Precision
+    tradeoff on an owner-motivated anti-false-green gate that also reverses a test-asserted policy ->
+    deliberate decision, not autonomous. See F-confusable-greek-false-red.'
+  origin: derived:F-confusable-greek-false-red
+  priority: 2
   status: open
 - id: PC-d6-codex-live
   axis: D6
