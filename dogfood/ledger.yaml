@@ -359,6 +359,17 @@ axes:
       the gate (regenerate not resume). Fresh codex4 e2e launched to confirm a different vendor now reaches verify
       GREEN. Remaining for full green on ANY failure: B0 (failure attribution, PC-d6-b0-failure-attribution,
       autonomous) + B-full arbitration (designer-reserved). saturation 0.'
+    - '2026-06-13: B0 SHIPPED to main (04393c2) — fixes F-autorepair-test-command-unrepairable. greenfield verify
+      auto-repair can now ENGAGE on a pytest/test_command failure: a pytest adapter classifies the failure +
+      attributes it to concrete editable source files (failed_nodes), with failing test files kept as read-only
+      evidence (editable only for harness-contract) so repair can NEVER neuter a test to go green; an observed
+      code-addressable failure is routed past the empty-baseline diff gate. Decided/implemented autonomously
+      (GPT-5.5 consult drove the editable-source vs read-only-test split, closing the "make the test pass"
+      false-green). B-full (spec-grounded arbitration) still designer-reserved. Full suite 4320 green (+15). With
+      A-core (gap-A prevented) + B0 (test failures repairable, anti-false-green), the greenfield autopilot can
+      now: own the topology, generate a coherent package, run the tests, AND attempt honest repair on real test
+      failures — the structural backbone for "requirements -> working system" cross-vendor. codex4 (mid-run) will
+      pick up B0 on --resume if its verify hits a non-import failure. saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -966,16 +977,26 @@ findings:
     is DAG-node/doc-coherence scoped and has NO code-vs-test arbitration path. A code-fixer EXISTS
     (codd/fixer.py run_fix — detects test/build failures, maps to design docs, AI-fixes, re-runs tests) but is
     only reachable via `codd fix`, NOT wired into greenfield verify auto-repair.'
-  fix_commit: null  # DEFERRED — owner decision (new-concept). NOT autonomously implemented.
-  fix_description: 'DEFERRED to owner. Wiring fixer.run_fix into greenfield auto-repair naively would make a
-    "make the test pass" fixer DAMAGE correct code — this very run proves the failing test, not the code, was
-    wrong. A correct repair must ARBITRATE code-vs-test against the spec (acceptance criteria / VBs as SSoT)
-    before patching either side — a significant design concept adjacent to the owner-reserved "AI asks"
-    direction ([[project_codd_questioning_ai]]). No small, anti-false-green, existing-arch wiring exists. Per
-    the autonomy boundary (new-concept => owner), recorded not built. See PC-spec-grounded-repair-arbitration.'
-  status: deferred
+  fix_commit: 04393c2  # B0 (failure attribution + observed-code-addressable routing); B-full arbitration still deferred
+  fix_description: 'FIXED by B0 (04393c2) — the "unrepairable" dead-end is resolved WITHOUT building B-full. B0:
+    a new pytest adapter (codd/repair/test_failure_attribution.py) CLASSIFIES a test_command failure
+    (import/collection, assertion, runtime, env/build, harness-contract) and ATTRIBUTES it to concrete editable
+    project files (parsed from FAILED/ERROR-collecting/traceback/ImportError lines); verify_runner folds these
+    into the failure details (failed_nodes=editable targets, evidence_nodes=read-only test files, failure_class,
+    code_addressable); repairability_classifier routes an OBSERVED + code_addressable failure straight to
+    repairable (bypassing the empty git-diff gate — greenfield uses baseline_ref=HEAD, so populating failed_nodes
+    alone was necessary-but-insufficient). ANTI-FALSE-GREEN is structural: editability (not presence) is the
+    guard — failing TEST files are read-only evidence (never an editable target for assertion/runtime failures
+    => no test-neutering); a test is editable ONLY for a harness_contract_violation (the test IS the defect); an
+    assertion with no resolvable source frame yields no editable target => honest non-green. B-full (spec-grounded
+    test-vs-code arbitration) NOT built — designer-reserved (PC-spec-grounded-repair-arbitration). GPT-5.5 consult
+    drove the editable-source vs read-only-test-evidence split (pushback on the "make the test pass" risk). Full
+    suite 4320 passed, 0 skipped (+15 tests). Auto-repair now ENGAGES on code-addressable test failures; if it
+    still cannot fix within bounds, verify fails honestly.'
+  status: fixed
   class: conceptual
   derived_case_ids:
+  - PC-d6-b0-failure-attribution
   - PC-spec-grounded-repair-arbitration
 - id: F-gate-false-red-sweep
   axis: D14
@@ -1209,7 +1230,11 @@ pending_cases:
     required. Autonomous (GPT-consult-gated, not owner-gated).'
   origin: derived:F-greenfield-artifact-coherence
   priority: 1
-  status: open
+  status: done  # 2026-06-13 — B0 implemented (04393c2): classify+attribute test_command failures (pytest
+    # adapter) -> editable failed_nodes + read-only evidence_nodes; observed+code_addressable routed to
+    # repairable past the empty-diff gate. Anti-false-green via editability guard (no test-neutering). B-full
+    # (arbitration) NOT built (designer-reserved). GPT-5.5-consulted. Full suite 4320 passed. Fixes
+    # F-autorepair-test-command-unrepairable.
 - id: PC-spec-grounded-repair-arbitration
   axis: D4
   hypothesis: 'OWNER DECISION (new-concept, see F-autorepair-test-command-unrepairable). greenfield verify
