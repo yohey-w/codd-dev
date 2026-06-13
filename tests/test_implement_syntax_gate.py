@@ -334,6 +334,39 @@ def test_unparseable_formats_are_skipped_by_design() -> None:
     assert "not valid TOML" in _payload_syntax_error("a.toml", "= bad")
 
 
+def test_valid_multi_document_yaml_passes_gate() -> None:
+    """FIX 2: a valid ``---``-separated multi-doc YAML (k8s, multi-resource CI)
+    must pass; only genuinely malformed YAML still fails."""
+    multi_doc = (
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata:\n"
+        "  name: a\n"
+        "---\n"
+        "apiVersion: v1\n"
+        "kind: Service\n"
+        "metadata:\n"
+        "  name: b\n"
+    )
+    assert _payload_syntax_error("k8s/manifests.yaml", multi_doc) is None
+    assert _payload_syntax_error("k8s/manifests.yml", multi_doc) is None
+    # A malformed document inside a multi-doc stream still fails (true-RED kept).
+    assert "not valid YAML" in _payload_syntax_error(
+        "k8s/manifests.yaml", "kind: A\n---\nkey: [a,\n"
+    )
+
+
+def test_leading_bom_on_py_and_json_passes_gate() -> None:
+    """FIX 3: a leading UTF-8 BOM (U+FEFF) loads fine via utf-8-sig in CPython
+    and JSON, so BOM-prefixed valid payloads must pass; real errors still fail."""
+    bom = "﻿"
+    assert _payload_syntax_error("a.py", bom + "def f():\n    return 1\n") is None
+    assert _payload_syntax_error("a.json", bom + '{"ok": true}') is None
+    # BOM does not mask a genuine syntax/JSON error (true-RED preserved).
+    assert "not valid Python" in _payload_syntax_error("a.py", bom + "def f(:")
+    assert "not valid JSON" in _payload_syntax_error("a.json", bom + "{")
+
+
 # ---------------------------------------------------------------------------
 # 5. Markdown destinations end-to-end: fences survive the pipeline
 # ---------------------------------------------------------------------------
