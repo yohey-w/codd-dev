@@ -250,6 +250,14 @@ axes:
       F-vb-coverage-gate-false-red (77495ee) — canonical id key on both sides, source+test scope union with
       root fallback, every-token marker parse; gate not weakened. Loop working as designed: fix one gate
       layer -> reach further -> expose the next. saturation stays 0.'
+    - '2026-06-13: gate fixed -> verify RAN the suite (58/59 pass). The app is CORRECT; the 1 failure was a
+      false-RED in a SUT-GENERATED test (whole-document `\d+\.\d+` scan matching the standard viewport meta
+      initial-scale=1.0, not an amount). Surfaced+fixed F-test-gen-scoped-assertions (adab4a8: test-gen
+      guidance to scope content assertions). ALSO surfaced F-autorepair-test-command-unrepairable: greenfield
+      auto-repair attempts 0 patches on test_command failures (failed_nodes:[] -> unrepairable; fixer.py
+      unwired) -> DEFERRED to owner (spec-grounded test/code arbitration = new concept). Net: weak-model
+      autopilot built a correct Flask app; verify correctly caught issues; repair conservatism correctly
+      avoided damaging correct code. saturation stays 0.'
   D5:
     description: weakest-viable-model (instrument / MODIFIER, M1) — a weak model is the most SENSITIVE
       instrument; it trips on ambiguity a strong model papers over. Applied to input-family runs (D1-D4);
@@ -849,7 +857,93 @@ findings:
   class: mechanical
   derived_case_ids:
   - PC-gate-false-red-sweep
+- id: F-test-gen-scoped-assertions
+  axis: D4
+  date: '2026-06-13'
+  model_used: claude sonnet (weakest viable, M1) — same live kakeibo greenfield run, verify stage
+  symptom: 'with the coverage gate fixed (77495ee) verify finally RAN the generated suite: 58/59 passed,
+    1 FAILED — test_sum08_no_decimal_in_amounts_or_percentages: "Decimal values found in response (violates
+    integer-only rule): [''1.0'']". The app CODE is correct (all amounts/percentages integer: sum(int(...)),
+    total*100//expense_total floor division — honors VB-32/41/45); the 1.0 is the STANDARD viewport meta tag
+    `initial-scale=1.0`. The SUT-generated helper assert_no_decimal_in_amounts regex-scanned the WHOLE
+    document (re.findall(r"\\d+\\.\\d+", response.data)) instead of the amount/percentage cells -> false-RED
+    on incidental standard markup. The false-green twin occurring in a GENERATED TEST authored by a weak model.'
+  root_cause: 'CoDD test-generation guidance never told the model to SCOPE content-constraint assertions to
+    the values/elements under test; a weak-but-reasonable model defaults to a whole-response regex/scan that
+    matches unrelated document scaffolding (viewport meta, doctype, asset version query strings, framework
+    boilerplate) and FALSE-fails correct code. M1: the harness must steer the weakest viable model away from
+    foreseeable false-RED test patterns.'
+  fix_commit: adab4a8
+  fix_description: 'codd/implementer.py _build_implementation_prompt: inside the test-generation-only block
+    (_spec_targets_tests gate, after the VB-marker guidance) added a "Scoped assertions (precision, not
+    weakening)" sub-section — (1) assert content constraints only against the specific values/elements under
+    test (parse the relevant DOM nodes / table cells / JSON fields / matched record); (2) do NOT enforce via
+    regex/substring/scan over the entire response (full output carries standard scaffolding that can
+    coincidentally match and FALSE-fail correct code); (3) still assert the constraint fully — scoping makes
+    the test STRONGER not weaker; the `codd: covers vb=` coverage requirement is untouched. Additive, gated to
+    test-related specs only. Generality: zero project literals (regression-tested for their ABSENCE). Full
+    suite 4233 passed, 0 skipped (+2 anchor tests). NOTE: helps FUTURE generation only — the already-generated
+    kakeibo helper needs regeneration to pick it up.'
+  regression_test: 'tests/test_implement.py — test_test_generation_prompt_guides_scoped_content_assertions,
+    test_non_test_generation_prompt_omits_scoped_assertion_block (gating).'
+  status: fixed
+  class: mechanical
+- id: F-autorepair-test-command-unrepairable
+  axis: D4
+  date: '2026-06-13'
+  model_used: claude sonnet (weakest viable, M1) — same run; finding is about the repair ENGINE, not the SUT
+  symptom: 'greenfield verify auto-repair ended PARTIAL_SUCCESS / ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING
+    with partial_success_patches: [] — it attempted ZERO patches against the one failing test and halted the
+    unattended run. A test_command failure that reflected a simple, spec-grounded defect was deemed
+    unrepairable. (In this instance the right repair was to fix the TEST, not the code — see
+    F-test-gen-scoped-assertions — which makes naive repair dangerous; see recommendation.)'
+  root_cause: 'two layers. (1) RepairabilityClassifier._affected_paths (codd/repair/repairability_classifier.py
+    ~152-160) keys repairability on file-path attribution via failed_nodes; a holistic test_command check
+    carries failed_nodes: [] -> empty affected set -> cannot intersect changed files (classify ~39) -> pending
+    -> the LLM meta-classifier (repair/templates/repairability_meta.md "broad mismatch -> unrepairable")
+    lands a whole-suite failure on unrepairable; the loop (codd/repair/loop.py ~174-186) emits PARTIAL_SUCCESS.
+    (2) the repair ENGINE (codd/repair/llm_repair_engine.py, wired by codd/greenfield/pipeline.py ~1145-1158)
+    is DAG-node/doc-coherence scoped and has NO code-vs-test arbitration path. A code-fixer EXISTS
+    (codd/fixer.py run_fix — detects test/build failures, maps to design docs, AI-fixes, re-runs tests) but is
+    only reachable via `codd fix`, NOT wired into greenfield verify auto-repair.'
+  fix_commit: null  # DEFERRED — owner decision (new-concept). NOT autonomously implemented.
+  fix_description: 'DEFERRED to owner. Wiring fixer.run_fix into greenfield auto-repair naively would make a
+    "make the test pass" fixer DAMAGE correct code — this very run proves the failing test, not the code, was
+    wrong. A correct repair must ARBITRATE code-vs-test against the spec (acceptance criteria / VBs as SSoT)
+    before patching either side — a significant design concept adjacent to the owner-reserved "AI asks"
+    direction ([[project_codd_questioning_ai]]). No small, anti-false-green, existing-arch wiring exists. Per
+    the autonomy boundary (new-concept => owner), recorded not built. See PC-spec-grounded-repair-arbitration.'
+  status: deferred
+  class: conceptual
+  derived_case_ids:
+  - PC-spec-grounded-repair-arbitration
 pending_cases:
+- id: PC-spec-grounded-repair-arbitration
+  axis: D4
+  hypothesis: 'OWNER DECISION (new-concept, see F-autorepair-test-command-unrepairable). greenfield verify
+    auto-repair cannot resolve test_command failures — the most common real failure. The correct capability
+    is a SPEC-GROUNDED arbiter: on a failing test, decide against the acceptance-criteria/VB SSoT whether the
+    CODE violates the spec (then patch source via the existing codd/fixer.py) or the TEST misencodes the spec
+    (then regenerate/repair the test), or the spec is ambiguous (then surface a question — the owner-reserved
+    "AI asks" direction). Anti-false-green is load-bearing: never auto-weaken a test or auto-patch code to go
+    green without spec grounding. This closes the autopilot loop for North-Star "requirements -> working
+    system" but is a design concept the owner reserves. Blocked-on: owner.'
+  origin: derived:F-autorepair-test-command-unrepairable
+  priority: 1
+  status: blocked-owner
+- id: PC-d3-server-rendered-ui-pattern-catalog
+  axis: D3
+  hypothesis: 'during the kakeibo run the DAG extractor logged repeated "unknown operation_flow ui_pattern"
+    UserWarnings for server-rendered web patterns (form submission with PRG redirect, server-rendered HTML
+    table, GET form submission with query parameters, server-rendered HTML summary table). NON-FATAL — they
+    did not block verify (verify failed on a test, not these). Low priority: the operation_flow ui_pattern
+    catalog (codd/dag/extractor.py normalize_operation_flow) lacks common server-rendered/MPA patterns, so it
+    degrades to generic handling and emits noise. Audit the catalog for the server-rendered web idiom set;
+    either recognize them or silence the warning when generic handling is intended. Confirm no downstream
+    derivation (E2E check generation) is degraded by the unknown classification.'
+  origin: observed:kakeibo-greenfield-verify
+  priority: 3
+  status: open
 - id: PC-gate-false-red-sweep
   axis: D14
   hypothesis: 'F-vb-coverage-gate-false-red proved a deterministic QUALITY GATE can false-RED — block a
