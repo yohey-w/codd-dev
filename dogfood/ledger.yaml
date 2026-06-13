@@ -423,6 +423,18 @@ axes:
       gpt_get.sh HUNG on the streaming tab — recovered via edge_cdp.py eval(stop-button)+save_text (recorded in
       memory). Next: codex7 = clean D6 re-validation run-1 on the fixed main; saturation stays 0 until 2
       consecutive clean runs. saturation 0.'
+    - '2026-06-14: codex5 (separate, invalid-for-saturation, old code 677639e) reached implement 15/15 then
+      FAILED at VERIFY with REPAIR_FAILED — reason "auto repair approval requires repair.allow_auto.require_explicit_optin=true".
+      The auto-repair pipeline ran CORRECTLY (root_cause_analysis = clean code-gaps vs design specs: a missing
+      conftest pytest skip-gate hook + an extra src import, "NOT test defects"; produced a valid unified_diff)
+      but could NOT APPLY because the opt-in was not enabled => the greenfield AUTOPILOT cannot self-heal,
+      contradicting its "requirements -> unattended -> green" North Star. Intermittently exposed (codex4 needed
+      no repair so it passed; a run whose generated code needs repair dies at verify). New candidate finding
+      (verdict pending Opus facts-investigation ae0bec481): defaults/autopilot gap vs operator-missing-flag vs
+      intended owner-gated safety. Repo-source decides; per directive repair-arbitration fixes are now autonomous
+      via GPT consult (owner reserved only for net-new concept/positioning/taste/North-Star). Note: this is at
+      VERIFY, untouched by the 0-files implement fix — codex7 may hit it too if its generated code needs repair.
+      saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
