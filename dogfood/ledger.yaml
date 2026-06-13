@@ -349,6 +349,16 @@ axes:
       spec-grounded repair arbitration — both escalated to the owner (new-concept). This single M2 arc surfaced
       and/or fixed SIX D6 items (bare-basename, task-done-artifact-blind, verify-no-test-command FIXED;
       import-coherence, autorepair-test-command reconfirmed; + the gpt-strategic-divergence trial). saturation 0.'
+    - '2026-06-13: A-core SHIPPED to main (d0d76c7) — the structural answer to gap-A. Decided via 2 GPT-5.5
+      consults (A/B 6BC3B25A + create-only-vs-migrate sub-fork 37A29483; GPT read the repo source and converged
+      with Opus on create-only + honest-fail) then implemented AUTONOMOUSLY per the new owner directive (fix
+      strategies = GPT-consult -> autonomous, no owner hearing). A-core makes the HARNESS own repository topology
+      / module resolution (layout profile + create-only scaffold + AST import-coherence gate + no-"." importlib
+      execution) = model-independence essence ("remove the degrees of freedom the model should not vary"); also
+      closed f82116c''s pythonpath="." false-green. Full suite 4305 green (+34). codex3 old build honest-fails
+      the gate (regenerate not resume). Fresh codex4 e2e launched to confirm a different vendor now reaches verify
+      GREEN. Remaining for full green on ANY failure: B0 (failure attribution, PC-d6-b0-failure-attribution,
+      autonomous) + B-full arbitration (designer-reserved). saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1137,18 +1147,69 @@ findings:
     reconciles them. Same family as the layout-drift findings (F-codex-bare-basename-dropped / the duplicate-tree
     RC). This is anti-false-green-CORRECT: the incoherent build yields a real non-zero collection error, so verify
     fails honestly rather than certifying nothing.'
-  fix_commit: null  # observed; first deferred to verify auto-repair (codex3 resume in progress); else a coherence fix
-  fix_description: 'NOT fixed in core. CONFIRMED on the codex3 --resume: verify now EXECUTED (gap-1 fix f82116c)
-    and surfaced this real failure; greenfield verify auto-repair then ended PARTIAL_SUCCESS /
-    ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING — it could NOT repair the pytest/test_command failure (same root
-    as F-autorepair-test-command-unrepairable: a test_command failure carries failed_nodes=[] so the repair
-    engine deems it unrepairable). So full green needs EITHER (a) pin a single package/import layout in the
-    design/contract so source+tests agree (coherence fix, adjacent to layout-canonicalization), OR (b) the
-    owner-gated spec-grounded test/code arbitration in verify auto-repair (PC-spec-grounded-repair-arbitration).
-    Both are owner/strategic calls — escalated, not auto-built.'
-  status: open
+  fix_commit: f9deda9,6bc8bba,d0d76c7  # A-core structurally prevents gap-A; see F-greenfield-artifact-coherence
+  fix_description: 'gap-A is now STRUCTURALLY PREVENTED by A-core (F-greenfield-artifact-coherence, merged to
+    main d0d76c7): the harness OWNS the layout (generation routes source INTO src/<package>/), the
+    import-coherence gate enforces package-absolute test imports BEFORE pytest, and execution runs against the
+    real package (pythonpath=source-root only, no "."; --import-mode=importlib) so accidental flat imports
+    cannot mask incoherence. Fresh greenfield runs now cohere; an EXISTING incoherent build (codex3) honest-fails
+    the gate with a "regenerate, not --resume" diagnosis (create-only scaffold never rewrites model files —
+    confirmed: codex3 fails with 3 bare-basename + 5 source-outside findings). The codex3 auto-repair
+    PARTIAL_SUCCESS earlier ALSO reconfirmed F-autorepair-test-command-unrepairable: a NON-import test failure
+    would still hit failed_nodes=[] -> needs B0 (PC-d6-b0-failure-attribution), separate from this coherence fix.'
+  status: fixed
   class: conceptual
+- id: F-greenfield-artifact-coherence
+  axis: D6
+  date: '2026-06-13'
+  model_used: decided via 2 GPT-5.5 strategic consults (GPT read the repo) + Opus synthesis; implemented by Opus
+  symptom: 'M2 showed cross-vendor greenfield (codex) generating source+tests that disagree on package/import
+    context (gap-A), AND a prior verify-wiring fix (f82116c) had a false-green hole (pythonpath=["src","."] let
+    bare flat imports accidentally resolve). Root: the harness did not OWN the artifact topology — it let the
+    model choose project structure, so weaker/other-vendor models drift the layout and break import coherence.'
+  root_cause: 'model-independence requires the harness to remove the degrees of freedom the model should NOT
+    vary. CoDD was letting the model author repository topology + module resolution (loose) instead of owning
+    them (canonical) with the model only filling content. GPT-5.5 (consulted, read the repo source) + Opus
+    converged: own the topology; do NOT auto-migrate existing artifacts (create-only + honest-fail).'
+  fix_commit: f9deda9,6bc8bba,d0d76c7
+  fix_description: 'A-core (merged to main d0d76c7; full suite 4305 passed, 0 skipped, +34 tests): (1) per-stack
+    LayoutProfile registry (codd/project_types.py; Python python_src_package derives package_name from project
+    name, roots from scan config; node/go/rust extend by one builder; no scattered literals). (2) deterministic
+    CREATE-ONLY idempotent scaffold (pyproject + <pkg>/__init__/__main__ + tests/__init__; never moves/rewrites
+    model files), run at verify stage so it also applies on --resume. (3) AST import-coherence gate
+    (codd/import_coherence.py) BEFORE pytest, fatal: flags bare-basename test imports (incl. the importlib
+    tuple-loop pattern), source-outside-package, missing __init__, shadowing, pyproject manifest mismatch;
+    false-RED-guarded (only flags bare imports of modules actually in the generated source inventory); opt-out
+    coherence.import_coherence (default on); message says "regenerate, not --resume". (4) anti-false-green
+    execution: emitted pytest pythonpath=source-root ONLY (f82116c''s "." DELETED) + --import-mode=importlib +
+    package metadata for pip install -e . — package-absolute imports resolve, accidental flat imports do NOT
+    (verified at runtime). Decided via GPT-5.5 consults: A/B (6BC3B25A) + migrate-vs-create-only sub-fork
+    (37A29483, GPT read the repo and independently reached create-only+honest-fail, all 5 guardrails satisfied).
+    Validated: codex3 incoherent build honest-fails (8 findings); stub-AI greenfield e2e reaches verify GREEN
+    with a coherent package; fresh codex4 e2e running for cross-vendor confirmation.'
+  regression_test: 'tests/test_layout_profile.py (profile resolution, name normalization, idempotent
+    non-clobbering scaffold); tests/test_import_coherence.py (coherent passes; 3 bare-basename forms fail;
+    shadowing/source-outside/missing-init/manifest-mismatch fail; opt-out; full codex3 reproduction);
+    tests/test_test_runner_ensure.py updated (no ".", package-absolute resolves + bare fails at runtime).'
+  status: fixed
+  class: conceptual
+  derived_case_ids:
+  - PC-d6-b0-failure-attribution
 pending_cases:
+- id: PC-d6-b0-failure-attribution
+  axis: D6
+  hypothesis: 'B0 (NOT B-full): greenfield verify auto-repair cannot repair a pytest/test_command failure
+    because such a failure carries failed_nodes=[] and the repair engine deems it unrepairable
+    (F-autorepair-test-command-unrepairable). B0 = classify the pytest failure (import/collection, assertion,
+    runtime, env/build, harness-contract) and ATTRIBUTE it to the relevant DAG/verification node(s) so it is
+    repairable at all — WITHOUT building B-full (spec-grounded test/code arbitration, which stays
+    designer-reserved). GPT-5.5 (A/B consult) endorsed B0 as an existing-arch autonomous extension needed for a
+    fresh greenfield to reach full green when a NON-import test failure occurs (A-core only prevents the
+    import-coherence class). Implement after observing codex4: if it stalls on a non-import test failure, B0 is
+    required. Autonomous (GPT-consult-gated, not owner-gated).'
+  origin: derived:F-greenfield-artifact-coherence
+  priority: 1
+  status: open
 - id: PC-spec-grounded-repair-arbitration
   axis: D4
   hypothesis: 'OWNER DECISION (new-concept, see F-autorepair-test-command-unrepairable). greenfield verify
