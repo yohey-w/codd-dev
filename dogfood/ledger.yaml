@@ -293,8 +293,8 @@ axes:
     description: cross-CLI live run — hidden coupling to one CLI/model. Running the same input through
       a different live CLI (codex etc.) surfaces prompt/format/ tooling assumptions. The declared-but-unverified
       multi-CLI risk.
-    saturation_counter: 0
-    last_run: '2026-06-13'
+    saturation_counter: 1
+    last_run: '2026-06-14'
     status: active
     cost: llm
     automation: manual
@@ -370,6 +370,21 @@ axes:
       now: own the topology, generate a coherent package, run the tests, AND attempt honest repair on real test
       failures — the structural backbone for "requirements -> working system" cross-vendor. codex4 (mid-run) will
       pick up B0 on --resume if its verify hits a non-import failure. saturation 0.'
+    - '2026-06-14: ★ FULL M2 ACHIEVED ★ — codex4 (fresh codex gpt-5.5, A-core d0d76c7 + B0 04393c2 in main)
+      reached check:SUCCESS fully autonomously: init→elicit→plan→generate→implement(16/16)→stage VB gate PASS→
+      verify DONE (tests executed via pytest AND passed)→check DONE (health check passed); propagate=warning
+      (non-blocking, PC-d6-greenfield-propagate-verify-state). A-core made codex generate a COHERENT package
+      (src/todo_cli/ + tests/unit,e2e package-absolute); verify ran the tests and they PASSED so B0 was not even
+      exercised (no failure to repair) — A-core ALONE got this run to green. LIVE PROOF: generated todo CLI runs
+      all FRs (add/list/done; invalid id→exit 1; todo.json persists across processes); generated pytest 62
+      passed; codd check 0 gates failed. This closes the D6 cross-vendor arc: a DIFFERENT vendor drove
+      requirements → working green system fully autonomously AFTER Fable5 was export-controlled = the
+      model-independence thesis proven LIVE end-to-end. The whole arc (this session): codex surfaced
+      bare-basename-drop, task-done-artifact-blind, verify-no-test-command, import-coherence, autorepair-
+      test-command across runs; each fixed (c9081a0/6e4241a/f82116c/A-core d0d76c7/B0 04393c2) via GPT-5.5
+      consult→autonomous; codex4 is the clean re-validation. D6 essentially saturated for the greenfield/cli
+      path; remaining: B-full (designer-reserved) + the low-pri propagate warning. saturation -> 1 (clean green
+      run, only a non-blocking warning).'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1270,12 +1285,29 @@ pending_cases:
     passes the VB gate without manual intervention — the real first-contact confirmation (M2).'
   origin: derived:F-implement-task-done-artifact-blind
   priority: 2
-  status: partial  # 2026-06-13 — M2 substantially ACHIEVED: the fixed harness drove a DIFFERENT vendor
-    # (codex gpt-5.5) end-to-end init→elicit→plan→generate→implement(15/15)→stage VB gate PASS→verify EXECUTED
-    # the generated tests, catching a REAL import-coherence bug (no false-green). check:success NOT reached:
-    # gap-2 (F-greenfield-import-coherence) + verify auto-repair's test_command limit
-    # (F-autorepair-test-command-unrepairable). Model-independence CORE validated; full autonomous green is
-    # gated on the deferred coherence/arbitration work (owner/strategic).
+  status: done  # 2026-06-14 — FULL M2 ACHIEVED. codex4 (fresh codex gpt-5.5, A-core+B0 in main) reached
+    # check:SUCCESS: init→elicit→plan→generate→implement(16/16)→stage VB gate PASS→verify DONE ("verification
+    # passed, tests executed: pytest --tb=short -q")→check DONE ("health check passed"); propagate=warning
+    # (non-blocking). A-core made codex generate a COHERENT package (src/todo_cli/ + tests/unit,e2e,
+    # package-absolute imports); verify RAN the tests and they PASSED — so B0 wasn't even exercised (no test
+    # failure to repair). Live proof: the generated todo CLI runs all FRs (add/list/done; invalid id -> exit 1;
+    # todo.json persists across processes); generated pytest 62 passed; codd check 0 gates failed. The earlier
+    # partial run (codex3) needed A-core+B0; this fresh run with both in main is FULLY GREEN = model-independence
+    # LIVE COMPLETE: a DIFFERENT vendor drove requirements -> working green system fully autonomously after
+    # Fable5 was export-controlled. Only non-blocking follow-up: greenfield propagate "No verify state found"
+    # warning (PC-d6-greenfield-propagate-verify-state, low-pri).
+- id: PC-d6-greenfield-propagate-verify-state
+  axis: D6
+  hypothesis: 'observed during the M2-complete codex4 run: the greenfield propagate stage emitted a
+    NON-BLOCKING warning "propagate skipped (non-blocking): No verify state found. Run codd propagate --verify
+    first." — check:success was still reached, so this did not block M2. But it means the autopilot''s
+    propagate stage expects a verify-state artifact that the in-flow verify did not leave where propagate looks.
+    Low priority: wire the greenfield verify stage to persist the verify state propagate needs (or have
+    propagate read the in-session verify result) so propagate runs instead of skipping. Confirm no coherence
+    drift goes unpropagated as a result. Surfaced both on kakeibo-era and codex4 runs.'
+  origin: observed:codex4-M2-complete
+  priority: 3
+  status: open
 - id: PC-gate-false-red-sweep
   axis: D14
   hypothesis: 'F-vb-coverage-gate-false-red proved a deterministic QUALITY GATE can false-RED — block a
