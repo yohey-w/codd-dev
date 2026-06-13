@@ -453,24 +453,33 @@ def _payload_syntax_error(relative_path: str, content: str) -> str | None:
     no LLM calls. Returns a human/AI-readable error or ``None`` when valid.
     """
     suffix = PurePosixPath(relative_path).suffix.lower()
+    # A single leading UTF-8 BOM (U+FEFF) is valid in real source: CPython loads
+    # BOM-prefixed .py via utf-8-sig and JSON parsers accept a BOM-prefixed
+    # document, so a payload that imports/loads cleanly must not be rejected here.
+    # The strip is validation-only; what gets written to disk is unaffected.
+    parse_content = content[1:] if content[:1] == "﻿" else content
     if suffix == ".py":
         import ast
 
         try:
-            ast.parse(content)
+            ast.parse(parse_content)
         except SyntaxError as exc:
             location = f"line {exc.lineno}" if exc.lineno else "unknown line"
             return f"not valid Python ({location}: {exc.msg})"
     elif suffix == ".json":
         try:
-            json.loads(content)
+            json.loads(parse_content)
         except json.JSONDecodeError as exc:
             return f"not valid JSON (line {exc.lineno}: {exc.msg})"
     elif suffix in {".yaml", ".yml"}:
         import yaml
 
         try:
-            yaml.safe_load(content)
+            # safe_load accepts only ONE document; a valid ``---``-separated
+            # multi-document file (k8s manifests, multi-resource CI) is correct
+            # input. safe_load_all parses every document; consume the generator
+            # so each one is actually validated. Malformed YAML still raises.
+            list(yaml.safe_load_all(content))
         except yaml.YAMLError as exc:
             return f"not valid YAML ({exc})"
     elif suffix == ".toml":
