@@ -328,7 +328,16 @@ def test_cli_implement_list_tasks_text_and_json(tmp_path: Path) -> None:
     result = CliRunner().invoke(main, ["implement", "list-tasks", "--path", str(project), "--format", "json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload[0] == {"task_id": "docs/design/auth.md", "design_node": "docs/design/auth.md", "source": "configured"}
+    # The JSON contract now also carries each task's declared intent
+    # (expected_outputs/test_kinds) so scripts can verify artifact kind.
+    # Configured targets declare no V-model intent, so both are empty here.
+    assert payload[0] == {
+        "task_id": "docs/design/auth.md",
+        "design_node": "docs/design/auth.md",
+        "source": "configured",
+        "expected_outputs": [],
+        "test_kinds": [],
+    }
 
 
 def test_cli_implement_list_tasks_empty_message(tmp_path: Path) -> None:

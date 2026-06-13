@@ -834,3 +834,173 @@ def test_standalone_implement_per_task_gate_unchanged(tmp_path: Path) -> None:
         opt_out=True,
         rerun=None,
     )
+
+
+# ═══════════════════════════════════════════════════════════
+# Contract-aware task-done verification (D6 cross-CLI false-GREEN)
+# ═══════════════════════════════════════════════════════════
+#
+# A greenfield task must be marked "done" only when the implementer produced the
+# KIND of artifact the task DECLARED (via expected_outputs). A test-writing task
+# that emitted only application code (a real cross-CLI failure: a CLI laid the
+# tests under the app's source root and produced zero test files) used to pass
+# "produced >=1 parseable file"; the stage-end VB gate then took the blame. The
+# check drives ONLY off declared expected_outputs + config roots — never task
+# names, vendor CLI, test_kinds, or hardcoded path literals. It must also NEVER
+# false-RED a correct build (source tasks, colocated tests, no-output skeletons).
+
+def _run_contract_task(
+    project: Path,
+    task: ImplementTaskRef,
+    files_to_write: list[str],
+):
+    """Drive the REAL ``_default_implement_task_runner`` with a fake implementer
+    that writes exactly ``files_to_write`` (project-relative). Returns the
+    runner's detail string; raises ``StageError`` if the contract check fails.
+    """
+    import codd.greenfield.pipeline as pipeline_mod
+
+    def fake_implement_tasks(project_root, **kwargs):
+        written: list[Path] = []
+        for rel in files_to_write:
+            path = Path(project_root) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# generated\n", encoding="utf-8")
+            written.append(path)
+
+        class _Result:
+            error = None
+            generated_files = written
+            output_paths = list(files_to_write)
+
+        return [_Result()]
+
+    pipeline = GreenfieldPipeline()
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr("codd.implementer.implement_tasks", fake_implement_tasks)
+    monkey.setattr(pipeline_mod, "_derive_and_approve_steps", lambda *a, **k: 0)
+    # Pin output paths so the test isolates the CONTRACT check, not routing.
+    monkey.setattr(pipeline_mod, "_output_paths_for_task", lambda config, task: ["src/"])
+    try:
+        return pipeline._default_implement_task_runner(
+            project,
+            task,
+            ai_command=None,
+            coverage_gate=False,
+            chunk_size=None,
+            timeout_per_chunk=600,
+        )
+    finally:
+        monkey.undo()
+
+
+def test_contract_check_fails_test_task_that_produced_only_source(tmp_path: Path) -> None:
+    """(a) A task whose declared outputs are TESTS but which produced only source
+    files must FAIL the contract check (this is the D6 false-GREEN)."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    task = ImplementTaskRef(
+        task_id="add_persistence_tests",
+        design_node="docs/design/core_design.md",
+        expected_outputs=("tests/test_persistence.py",),
+        test_kinds=("unit",),
+    )
+    with pytest.raises(StageError) as excinfo:
+        _run_contract_task(project, task, files_to_write=["src/core/persistence.py"])
+    message = str(excinfo.value)
+    assert "add_persistence_tests" in message
+    assert "test" in message  # names the missing kind
+    assert "did not generate the intended artifact type" in message
+
+
+def test_contract_check_passes_test_task_that_produced_tests(tmp_path: Path) -> None:
+    """(b) A test-deliverable task that produced an actual test file PASSES."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    task = ImplementTaskRef(
+        task_id="add_persistence_tests",
+        design_node="docs/design/core_design.md",
+        expected_outputs=("tests/test_persistence.py",),
+        test_kinds=("unit",),
+    )
+    detail = _run_contract_task(project, task, files_to_write=["tests/test_persistence.py"])
+    assert "file(s) generated" in detail
+
+
+def test_contract_check_passes_source_task_that_produced_source(tmp_path: Path) -> None:
+    """(c) A SOURCE task that produced source PASSES — and Python ``.py`` source
+    must NOT be misread as a test (the suffix classifier alone would). This is
+    the consistent-layout case that must never false-RED."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    task = ImplementTaskRef(
+        task_id="implement_core_module",
+        design_node="docs/design/core_design.md",
+        expected_outputs=("src",),
+        test_kinds=("unit",),  # coverage metadata — must NOT make it a test task
+    )
+    # Emits a source file AND a colocated sibling test (the keystone shape).
+    detail = _run_contract_task(
+        project, task, files_to_write=["src/core/core.py", "src/core/test_core.py"]
+    )
+    assert "file(s) generated" in detail
+
+
+def test_contract_check_exempts_task_with_no_declared_outputs(tmp_path: Path) -> None:
+    """(d) A task that declares NO recognisable output kind (skeleton / bare
+    artifact name) imposes NO requirement — never a false-RED."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    task = ImplementTaskRef(
+        task_id="scaffold_project",
+        design_node="docs/design/core_design.md",
+        expected_outputs=(),  # nothing declared
+        test_kinds=(),
+    )
+    # Even producing an unclassifiable artifact passes (no declared contract).
+    detail = _run_contract_task(project, task, files_to_write=["README.md"])
+    assert "file(s) generated" in detail
+
+    # A bare artifact name (under no configured root, not test-shaped) is also
+    # UNKNOWN → exempt.
+    task_bare = ImplementTaskRef(
+        task_id="produce_artifact",
+        design_node="docs/design/core_design.md",
+        expected_outputs=("some_artifact",),
+        test_kinds=(),
+    )
+    detail_bare = _run_contract_task(project, task_bare, files_to_write=["build/some_artifact"])
+    assert "file(s) generated" in detail_bare
+
+
+def test_test_only_task_output_paths_resolve_to_test_dirs(tmp_path: Path) -> None:
+    """(e) P2 routing: a TEST-only task's output_paths resolve to the configured
+    ``scan.test_dirs`` (not the shared source root), so the implementer writes
+    tests where the design intends them."""
+    from codd.config import load_project_config
+    from codd.greenfield.pipeline import _output_paths_for_task
+
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    config = load_project_config(project)
+
+    test_task = ImplementTaskRef(
+        task_id="add_usage_tests",
+        design_node="docs/design/core_design.md",
+        expected_outputs=("tests/test_usage.py",),
+        test_kinds=("unit",),
+    )
+    assert _output_paths_for_task(config, test_task) == ["tests/"]
+
+    # A SOURCE task keeps the existing (source) default — NOT rerouted to tests/.
+    source_task = ImplementTaskRef(
+        task_id="implement_core_module",
+        design_node="docs/design/core_design.md",
+        expected_outputs=("src",),
+        test_kinds=("unit",),
+    )
+    assert _output_paths_for_task(config, source_task) != ["tests/"]
+
+    # A colocated test (declared under a source root) is respected, NOT moved.
+    colocated = ImplementTaskRef(
+        task_id="add_colocated_test",
+        design_node="docs/design/core_design.md",
+        expected_outputs=("src/core/test_core.py",),
+        test_kinds=("unit",),
+    )
+    assert _output_paths_for_task(config, colocated) != ["tests/"]
