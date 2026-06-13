@@ -1177,3 +1177,85 @@ def test_verify_stage_unknown_stack_still_gates_honesty(tmp_path: Path) -> None:
         GreenfieldPipeline()._stage_verify(project, record, {"max_repair_attempts": 1})
     # no pyproject scaffolded for an unsupported stack.
     assert not (project / "pyproject.toml").exists()
+
+
+# ---------------------------------------------------------------------------
+# a+ refinement: the greenfield propagate window must cover the REAL build
+# delta. A fresh build has its generated source<->design UNTRACKED (and may
+# have no commits at all), so a plain ``git diff HEAD`` sees nothing and bare
+# 677639e would "reconcile zero docs" while the whole build silently drifts
+# (false-green, confirmed in the codex4 run). The default runner now uses the
+# fresh-build window, which includes untracked artifacts under the configured
+# source/doc dirs.
+# ---------------------------------------------------------------------------
+
+
+def _git_init(project: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=project, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=project, check=True)
+
+
+def test_greenfield_propagate_reconciles_untracked_build_not_zero(tmp_path: Path) -> None:
+    """The default propagate runner reconciles an UNTRACKED fresh build (not zero).
+
+    GPT Test 6 (end-to-end, uncommitted-build variant = the codex4 mode). A real
+    git repo with NO commits and an untracked generated source file under a
+    configured module + a matching design doc: the runner must surface that build
+    delta through the fresh-build window and reconcile the design doc, instead of
+    seeing an empty ``git diff HEAD`` and silently reconciling zero.
+    """
+    import subprocess
+    import unittest.mock as mock
+
+    from codd.greenfield.pipeline import _default_propagate_runner
+    from codd.propagator import _load_verify_state
+
+    project = make_stub_project(tmp_path, "stub-ai-cli --print", name="gf-build")
+
+    # A generated source module + a design doc that covers it (module "core").
+    (project / "src" / "core").mkdir(parents=True, exist_ok=True)
+    (project / "src" / "core" / "service.py").write_text(
+        "def run():\n    return 1\n", encoding="utf-8"
+    )
+    design = project / "docs" / "design" / "core_design.md"
+    design.parent.mkdir(parents=True, exist_ok=True)
+    fm = yaml.dump(
+        {"codd": {"node_id": "design:core", "type": "design",
+                  "title": "Core Design", "modules": ["core"]}},
+        sort_keys=False,
+    )
+    design.write_text(f"---\n{fm}---\n\n# Core Design\n\n## 1. Overview\n\nCore.\n", encoding="utf-8")
+
+    _git_init(project)  # NO commit: the whole build is untracked (HEAD absent).
+
+    # The fresh-build window must report the untracked source as part of the
+    # build delta — proof the runner is NOT blind to the generated build.
+    from codd.propagator import GREENFIELD_BUILD_DIFF_TARGET, _get_changed_files
+
+    build_changed = _get_changed_files(project, GREENFIELD_BUILD_DIFF_TARGET)
+    assert "src/core/service.py" in build_changed
+    assert "docs/design/core_design.md" in build_changed
+
+    # No-graph project → the affected design doc is amber (HITL), so verify
+    # leaves a docs_classified state (NOT an empty "reconciled zero" state). The
+    # AI is never invoked on the amber path, so no stub is needed for that; we
+    # stub the generator only defensively.
+    real_run = subprocess.run
+
+    def stub(command, *a, **kw):
+        if command and command[0] == "git":
+            return real_run(command, *a, **kw)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="## 1. Overview\n\nCore.\n", stderr="")
+
+    import codd.generator as gen
+
+    with mock.patch.object(gen.subprocess, "run", stub):
+        detail = _default_propagate_runner(project, ai_command=None)
+
+    assert "No verify state" not in detail
+    # State was consumed (cleared) by commit, proving the verify->commit ran.
+    assert _load_verify_state(project) is None

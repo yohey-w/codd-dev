@@ -1588,10 +1588,20 @@ def _certify_verify_executed(project_root: Path, result: Any) -> str:
 
 
 def _default_propagate_runner(project_root: Path, *, ai_command: str | None) -> str:
-    """``codd propagate --verify`` then ``codd propagate --commit``."""
-    from codd.propagator import run_commit, run_verify
+    """``codd propagate --verify`` then ``codd propagate --commit``.
 
-    run_verify(project_root, "HEAD", ai_command=ai_command)
+    Uses the greenfield/fresh-build diff window
+    (:data:`codd.propagator.GREENFIELD_BUILD_DIFF_TARGET`), NOT a plain
+    ``HEAD`` diff. A just-built project normally has no commits and all
+    generated files untracked, so ``git diff HEAD`` would see nothing and
+    propagate would reconcile ZERO docs while the entire generated build sits
+    unreconciled (false-green). The build window also includes untracked
+    artifacts under the configured source/doc dirs, so propagate reconciles the
+    real generated source<->design.
+    """
+    from codd.propagator import GREENFIELD_BUILD_DIFF_TARGET, run_commit, run_verify
+
+    run_verify(project_root, GREENFIELD_BUILD_DIFF_TARGET, ai_command=ai_command)
     result = run_commit(project_root, reason="codd greenfield autopilot")
     return (
         f"committed={len(result.committed_files)}, "

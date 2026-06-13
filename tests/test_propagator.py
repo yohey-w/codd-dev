@@ -610,10 +610,15 @@ def test_verify_state_save_load_clear(tmp_path):
         band="amber", confidence=0.65, evidence_count=1,
     )]
 
-    _save_verify_state(project, auto, hitl, ["design:sys"], "HEAD")
+    _save_verify_state(
+        project, auto, hitl, ["design:sys"], "HEAD",
+        verify_outcome="docs_classified", changed_files=["src/a.py"],
+    )
 
     state = _load_verify_state(project)
     assert state is not None
+    assert state["state_type"] == "codd.propagate.verify"
+    assert state["verify_outcome"] == "docs_classified"
     assert state["auto_node_ids"] == ["design:sys"]
     assert state["hitl_node_ids"] == ["design:auth"]
     assert len(state["auto_docs"]) == 1
@@ -710,8 +715,12 @@ def test_run_commit_records_knowledge(tmp_path, monkeypatch):
     # Save a fake verify state with HITL docs
     codd_dir = project / "codd"
     state = {
+        "schema_version": 1,
+        "state_type": "codd.propagate.verify",
         "timestamp": "2026-04-07T12:00:00+00:00",
         "diff_target": "HEAD",
+        "verify_outcome": "docs_classified",
+        "changed_files": ["docs/detailed_design/auth_detail.md"],
         "auto_node_ids": [],
         "hitl_node_ids": ["design:auth-detail"],
         "auto_docs": [],
@@ -930,8 +939,12 @@ def test_propagate_cli_commit_mode(tmp_path, monkeypatch):
     # Create verify state
     codd_dir = project / "codd"
     state = {
+        "schema_version": 1,
+        "state_type": "codd.propagate.verify",
         "timestamp": "2026-04-07T12:00:00+00:00",
         "diff_target": "HEAD",
+        "verify_outcome": "docs_classified",
+        "changed_files": ["docs/detailed_design/auth_detail.md"],
         "auto_node_ids": [],
         "hitl_node_ids": ["design:auth-detail"],
         "auto_docs": [],
@@ -1024,3 +1037,223 @@ class TestSanitizeUpdateBody:
     def test_raises_on_whitespace_only(self):
         with pytest.raises(ValueError, match="empty output"):
             _sanitize_update_body("   \n\n  ")
+
+
+# ---------------------------------------------------------------------------
+# a+ refinement (GPT-5.5 consult): state contract + sentinel, stale-empty-state
+# guard, and the greenfield/fresh-build diff window. These extend 677639e
+# (which only persisted an empty state) to close two confirmed anti-false-green
+# holes: a present-but-foreign state must not be trusted, an empty "verified
+# nothing" state must not mask drift that appeared afterward, and the greenfield
+# window must cover the REAL build delta (untracked generated source<->design)
+# instead of reconciling zero docs while the whole build silently drifts.
+# ---------------------------------------------------------------------------
+
+
+def _init_git_repo(project: Path) -> None:
+    """Initialize a real git repo at ``project`` with a deterministic identity."""
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=project, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=project, check=True)
+
+
+def _git_commit_all(project: Path, message: str) -> None:
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=project, check=True)
+
+
+def test_run_commit_rejects_foreign_state_sentinel(tmp_path):
+    """A present-but-foreign/corrupt state is rejected (sentinel validation).
+
+    Anti-false-green: absent state is "never ran" (already an error). A state
+    file that exists but lacks the ``codd.propagate.verify`` sentinel (a foreign
+    writer, a corrupted/legacy file) must NOT be trusted as a real verify run —
+    it must error rather than silently committing against unknown fields.
+    """
+    project = _setup_project(tmp_path)
+    codd_dir = project / "codd"
+    # No state_type sentinel — looks nothing like our contract.
+    (codd_dir / VERIFY_STATE_FILE).write_text(
+        json.dumps({"diff_target": "HEAD", "hitl_docs": []}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="Invalid or unrecognized"):
+        run_commit(project)
+
+
+def test_empty_verified_state_cannot_hide_later_drift(tmp_path):
+    """Stale-guard: an empty verify state errors if changed files differ later.
+
+    GPT Test 5. Run verify on a clean repo (records ``no_changed_files`` with an
+    empty changed-files signature), then introduce a real change, then commit.
+    The signature now differs, so commit must refuse and demand a fresh verify
+    instead of reusing the empty "verified nothing" state to commit zero docs.
+    This is the anti-false-green regression that bare-677639e could not catch.
+    """
+    project = _setup_project(tmp_path)
+    _init_git_repo(project)
+    _git_commit_all(project, "baseline")
+
+    # Clean tree → verify finds nothing and persists an empty, signed state.
+    result = run_verify(project, diff_target="HEAD")
+    assert result.changed_files == []
+    state = _load_verify_state(project)
+    assert state is not None
+    assert state["verify_outcome"] == "no_changed_files"
+    assert state["changed_files"] == []
+
+    # New drift appears AFTER the empty verify (a tracked source file changes).
+    (project / "src" / "auth" / "service.py").write_text(
+        "class AuthService:\n    def login(self):\n        ...\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="stale"):
+        run_commit(project, reason="should be refused")
+
+
+def test_greenfield_build_window_sees_untracked_source(tmp_path):
+    """Diff-window: the greenfield window includes untracked generated artifacts.
+
+    GPT Test 6 (uncommitted-build variant — the confirmed codex4 mode). A fresh
+    build has its generated source untracked and may have NO commits at all, so
+    plain ``git diff HEAD`` returns nothing. The greenfield build window must
+    instead surface the untracked files under the configured source/doc dirs so
+    propagate reconciles the real build rather than zero.
+    """
+    from codd.propagator import GREENFIELD_BUILD_DIFF_TARGET, _get_changed_files
+
+    project = _setup_project(tmp_path)
+    _init_git_repo(project)  # NO commit — mirrors the fresh-build "no HEAD" case.
+
+    changed = _get_changed_files(project, GREENFIELD_BUILD_DIFF_TARGET)
+
+    # The generated, untracked source + design docs are part of the build delta.
+    assert "src/auth/service.py" in changed
+    assert "docs/design/system_design.md" in changed
+    # A plain HEAD diff on a commit-less repo sees nothing (the false-green trap).
+    assert _get_changed_files(project, "HEAD") == []
+
+
+def test_greenfield_build_window_excludes_scan_exclude_globs(tmp_path):
+    """The build window honors ``scan.exclude`` (no project literals leak in)."""
+    from codd.propagator import GREENFIELD_BUILD_DIFF_TARGET, _get_changed_files
+
+    project = _setup_project(tmp_path)
+    # Add an exclude glob to the config and an artifact that matches it.
+    config_path = project / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["scan"]["exclude"] = ["**/__pycache__/**"]
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    cache_dir = project / "src" / "auth" / "__pycache__"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "service.cpython-312.pyc").write_text("bytecode", encoding="utf-8")
+
+    _init_git_repo(project)
+    changed = _get_changed_files(project, GREENFIELD_BUILD_DIFF_TARGET)
+
+    assert "src/auth/service.py" in changed  # real source still seen
+    assert not any("__pycache__" in f for f in changed)  # excluded artifact dropped
+
+
+def test_greenfield_build_window_reconciles_real_doc_to_doc_drift(tmp_path):
+    """The greenfield flow reconciles a REAL untracked build and ACKs the ledger.
+
+    GPT Test 4 (doc-to-doc reconciliation), exercised through the actual
+    greenfield window rather than a mocked diff. An untracked downstream design
+    doc that ``depends_on`` an untracked upstream doc is reconciled by
+    verify→commit, and the reconciliation ledger records the downstream->upstream
+    edge — proving propagate does real work on the fresh build (NOT "zero").
+    """
+    from codd.propagator import GREENFIELD_BUILD_DIFF_TARGET
+    from codd.reconciliation_ledger import edge_key, load_ledger
+
+    project = tmp_path / "gf"
+    project.mkdir()
+    codd_dir = project / "codd"
+    (codd_dir / "scan").mkdir(parents=True)
+    config = {
+        "version": "0.1.0",
+        "project": {"name": "gf", "language": "python"},
+        "ai_command": "mock-ai --print",
+        "scan": {
+            "source_dirs": ["src"],
+            "test_dirs": ["tests"],
+            "doc_dirs": ["docs/"],
+            "config_files": [],
+            "exclude": [],
+        },
+        "graph": {"store": "jsonl", "path": "codd/scan"},
+        "bands": {"green": {"min_confidence": 0.90, "min_evidence_count": 2}},
+    }
+    (codd_dir / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    _write_design_doc(
+        project / "docs" / "upstream.md",
+        node_id="doc:upstream", title="Upstream", modules=[],
+        body="## 1. Overview\n\nThreshold is 100.\n",
+    )
+    # Downstream depends_on upstream (recorded in frontmatter for completeness;
+    # the dependency edge the propagator walks comes from the graph below).
+    down = project / "docs" / "downstream.md"
+    down.parent.mkdir(parents=True, exist_ok=True)
+    fm = yaml.safe_dump(
+        {"codd": {"node_id": "doc:downstream", "type": "design",
+                  "title": "Downstream", "modules": [],
+                  "depends_on": ["doc:upstream"]}},
+        sort_keys=False,
+    )
+    down.write_text(f"---\n{fm}---\n\n# Downstream\n\n## 1. Overview\n\nUses threshold 100.\n", encoding="utf-8")
+
+    # Graph: downstream -> upstream (so incoming(upstream) yields downstream).
+    from codd.graph import CEG
+
+    graph = CEG(codd_dir / "scan")
+    graph.upsert_node("doc:upstream", "design", path="docs/upstream.md")
+    graph.upsert_node("doc:downstream", "design", path="docs/downstream.md")
+    eid = graph.add_edge("doc:downstream", "doc:upstream", "depends_on", "technical")
+    graph.add_evidence(eid, "frontmatter", "frontmatter", 0.95, "depends_on")
+    graph.add_evidence(eid, "human", "review", 0.90, "confirmed")
+    graph.close()
+
+    _init_git_repo(project)
+    # Commit both docs so last_commit_for_path resolves for the upstream ack,
+    # then MODIFY upstream WITHOUT committing: a working-tree change the
+    # greenfield window catches via ``git diff HEAD`` (the doc-to-doc drift the
+    # fresh-build propagate must reconcile).
+    _git_commit_all(project, "initial design docs")
+    (project / "docs" / "upstream.md").write_text(
+        "---\n"
+        + yaml.safe_dump({"codd": {"node_id": "doc:upstream", "type": "design",
+                                   "title": "Upstream", "modules": []}}, sort_keys=False)
+        + "---\n\n# Upstream\n\n## 1. Overview\n\nThreshold is 200.\n",
+        encoding="utf-8",
+    )
+
+    # AI stub for the green-band auto-apply (returns an updated body). Only the
+    # AI invocation in the generator is replaced; every ``git`` call still hits
+    # the real binary (captured before patching to avoid self-recursion).
+    import codd.generator as _gen
+    import unittest.mock as _mock
+
+    _real_run = subprocess.run
+
+    def patched_subprocess(command, *a, **kw):
+        if command and command[0] == "git":
+            return _real_run(command, *a, **kw)
+        return subprocess.CompletedProcess(
+            args=command, returncode=0,
+            stdout="## 1. Overview\n\nUses threshold 200.\n", stderr="",
+        )
+
+    with _mock.patch.object(_gen.subprocess, "run", patched_subprocess):
+        result = run_verify(project, diff_target=GREENFIELD_BUILD_DIFF_TARGET)
+        # Real drift surfaced — downstream needs reconciliation (NOT zero).
+        assert result.auto_applied or result.needs_hitl
+        commit = run_commit(project, reason="codd greenfield autopilot")
+
+    # The ledger ACKs the downstream -> upstream reconciliation.
+    ledger = load_ledger(project)
+    assert ledger is not None
+    assert edge_key("docs/downstream.md", "docs/upstream.md") in ledger.get("edges", {})
+    assert commit.committed_files is not None

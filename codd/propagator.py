@@ -110,6 +110,32 @@ class ReversePropagationResult:
 
 # Path for verify state persistence (relative to codd dir)
 VERIFY_STATE_FILE = "propagate_state.json"
+
+# State-file contract (anti-false-green). ``run_verify`` always persists a
+# state carrying this sentinel + a ``verify_outcome`` so ``run_commit`` can
+# tell three cases apart: never-ran (no state -> error), ran-clean (empty
+# outcome -> honest zero-doc commit, guarded against later drift), and
+# reconciled docs. See run_verify / run_commit.
+VERIFY_STATE_SCHEMA_VERSION = 1
+VERIFY_STATE_TYPE = "codd.propagate.verify"
+VERIFY_OUTCOME_NO_CHANGED_FILES = "no_changed_files"
+VERIFY_OUTCOME_NO_AFFECTED_DOCS = "no_affected_docs"
+VERIFY_OUTCOME_DOCS_CLASSIFIED = "docs_classified"
+_EMPTY_VERIFY_OUTCOMES = frozenset(
+    {VERIFY_OUTCOME_NO_CHANGED_FILES, VERIFY_OUTCOME_NO_AFFECTED_DOCS}
+)
+
+# Sentinel diff target for the greenfield/fresh-build window. A freshly built
+# project commonly has NO commits and ALL generated files untracked, so a plain
+# ``git diff HEAD`` sees "no changed files" and propagate would reconcile zero
+# docs while the ENTIRE build is unreconciled (false-green). When this sentinel
+# is the diff target, change detection ALSO includes untracked project files
+# under the configured ``scan.source_dirs`` / ``scan.doc_dirs`` (minus
+# ``scan.exclude``), so propagate reconciles the real generated build. Normal
+# callers pass a real ref (default ``HEAD``) and get the unchanged
+# "what changed in my working tree since <ref>" behavior.
+GREENFIELD_BUILD_DIFF_TARGET = "__codd_greenfield_build__"
+
 DESIGN_MD_DIFF_PATHS = ["DESIGN.md", "docs/design/DESIGN.md"]
 LEXICON_DIFF_PATHS = ["project_lexicon.yaml", "docs/lexicon/project_lexicon.yaml"]
 _YAML_KEY_VALUE_RE = re.compile(r"^(?P<indent>\s*)(?:-\s*)?(?P<key>[A-Za-z0-9_.$-]+)\s*:\s*(?P<value>.*)$")
@@ -243,8 +269,13 @@ def run_verify(
         # its real — but zero-doc — reconciliation, instead of mistaking this for
         # "verify never ran" and aborting with "No verify state found". The state
         # file is the discriminator: present-but-empty = ran clean; absent = never
-        # ran (run_commit still guards that case).
-        _save_verify_state(project_root, [], [], [], diff_target)
+        # ran (run_commit still guards that case). The ``changed_files`` signature
+        # is stored so run_commit's stale-guard rejects this empty state if drift
+        # appears afterward.
+        _save_verify_state(
+            project_root, [], [], [], diff_target,
+            verify_outcome=VERIFY_OUTCOME_NO_CHANGED_FILES, changed_files=[],
+        )
         return VerifyResult([], {}, [], [], [])
 
     file_module_map = _map_files_to_modules(changed_files, source_dirs)
@@ -272,8 +303,13 @@ def run_verify(
     if not affected_docs:
         # Changed files exist but none maps to a tracked design doc: verify ran
         # clean, nothing to reconcile. Persist empty state (same rationale as the
-        # no-changed-files path above) so verify→commit completes honestly.
-        _save_verify_state(project_root, [], [], [], diff_target)
+        # no-changed-files path above) so verify→commit completes honestly. The
+        # changed-files signature is recorded so the stale-guard fires if the set
+        # changes before commit.
+        _save_verify_state(
+            project_root, [], [], [], diff_target,
+            verify_outcome=VERIFY_OUTCOME_NO_AFFECTED_DOCS, changed_files=changed_files,
+        )
         return VerifyResult(changed_files, file_module_map, [], [], [])
 
     # Step 2: Classify by confidence band
@@ -306,7 +342,10 @@ def run_verify(
             updated.append(doc.node_id)
 
     # Step 4: Save state for --commit
-    _save_verify_state(project_root, auto_apply, hitl, updated, diff_target)
+    _save_verify_state(
+        project_root, auto_apply, hitl, updated, diff_target,
+        verify_outcome=VERIFY_OUTCOME_DOCS_CLASSIFIED, changed_files=changed_files,
+    )
 
     return VerifyResult(changed_files, file_module_map, auto_apply, hitl, updated)
 
@@ -329,13 +368,38 @@ def run_commit(
     """
     state = _load_verify_state(project_root)
     if state is None:
+        # Never ran. This stays an error — NOT relaxed — so a skipped verify can
+        # never masquerade as "successfully reconciled zero docs" (the rejected
+        # false-green option). Absent state = verify never ran.
         raise ValueError(
             "No verify state found. Run 'codd propagate --verify' first."
+        )
+    if state.get("state_type") != VERIFY_STATE_TYPE:
+        # Present but not our contract (foreign/corrupt/legacy file): treat as
+        # not-a-valid-verify-state rather than trusting unknown fields.
+        raise ValueError(
+            "Invalid or unrecognized propagate verify state "
+            f"(expected state_type {VERIFY_STATE_TYPE!r}). "
+            "Run 'codd propagate --verify' first."
         )
 
     hitl_node_ids = set(state.get("hitl_node_ids", []))
     auto_node_ids = set(state.get("auto_node_ids", []))
     diff_target = state.get("diff_target", "HEAD")
+
+    # Anti-false-green stale guard: an EMPTY "verify found nothing" state must not
+    # be reused to commit after new drift appeared. Re-derive the current changed
+    # files (same window the state recorded) and compare signatures; a mismatch
+    # means the working tree changed since that empty verify, so refuse and force
+    # a fresh verify. NOT a wall-clock check — HITL review can take hours; the
+    # signal is the changed-files set, not elapsed time.
+    if state.get("verify_outcome") in _EMPTY_VERIFY_OUTCOMES:
+        current_changed = _get_changed_files(project_root, diff_target)
+        if sorted(current_changed) != sorted(state.get("changed_files", [])):
+            raise ValueError(
+                "Verify state is stale: changed files differ from the last "
+                "'codd propagate --verify' run. Run 'codd propagate --verify' again."
+            )
 
     # Find which HITL docs were actually modified
     modified_files = _get_changed_files(project_root, diff_target)
@@ -938,15 +1002,27 @@ def _save_verify_state(
     hitl: list[VerifiedDoc],
     updated: list[str],
     diff_target: str,
+    *,
+    verify_outcome: str,
+    changed_files: list[str],
 ) -> None:
-    """Save verify state for subsequent --commit."""
+    """Save verify state for subsequent --commit.
+
+    The state carries the contract sentinel (:data:`VERIFY_STATE_TYPE`), a
+    ``verify_outcome``, and the ``changed_files`` signature so ``run_commit``
+    can validate provenance and detect stale empty states (anti-false-green).
+    """
     codd_dir = find_codd_dir(project_root)
     if codd_dir is None:
         return
 
     state = {
+        "schema_version": VERIFY_STATE_SCHEMA_VERSION,
+        "state_type": VERIFY_STATE_TYPE,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "diff_target": diff_target,
+        "verify_outcome": verify_outcome,
+        "changed_files": sorted(changed_files),
         "auto_node_ids": updated,
         "hitl_node_ids": [v.doc.node_id for v in hitl],
         "auto_docs": [
@@ -1097,8 +1173,116 @@ def _git_commit_propagation(
 
 
 def _get_changed_files(project_root: Path, diff_target: str) -> list[str]:
-    """Get changed files from git diff."""
+    """Get changed files for the propagation window.
+
+    For a normal ref (default ``HEAD``) this is plain
+    ``git diff --name-only <ref>`` — the interactive CLI's "what changed in my
+    working tree since <ref>" model, unchanged.
+
+    For the :data:`GREENFIELD_BUILD_DIFF_TARGET` sentinel it is the REAL build
+    delta: tracked changes since HEAD (when HEAD exists) UNIONED with untracked
+    files under the configured ``scan.source_dirs`` / ``scan.doc_dirs`` (minus
+    ``scan.exclude``). This is what makes greenfield propagate reconcile the
+    just-generated source<->design instead of reconciling zero docs while the
+    whole untracked build silently drifts (anti-false-green).
+    """
+    if diff_target == GREENFIELD_BUILD_DIFF_TARGET:
+        return _get_build_changed_files(project_root)
     return get_changed_files(project_root, diff_target)
+
+
+def _get_build_changed_files(project_root: Path) -> list[str]:
+    """Return the real fresh-build change set (tracked + untracked artifacts).
+
+    Stack-agnostic: the considered roots are exactly the configured
+    ``scan.source_dirs`` and ``scan.doc_dirs``; exclusions are the configured
+    ``scan.exclude`` globs (same accessor + glob semantics the scanner uses).
+    No project, framework, or language literals.
+    """
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        config = {}
+    scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+    roots: list[str] = []
+    for key in ("source_dirs", "doc_dirs"):
+        raw = scan.get(key) if isinstance(scan, dict) else None
+        if isinstance(raw, list):
+            roots.extend(str(item).strip() for item in raw if str(item).strip())
+
+    files: set[str] = set()
+    # Tracked changes since HEAD only count when HEAD actually resolves — on a
+    # commit-less fresh build ``git diff HEAD`` errors and contributes nothing
+    # (get_changed_files returns [] on non-zero exit), which is correct here.
+    if _head_exists(project_root):
+        files.update(get_changed_files(project_root, "HEAD"))
+
+    files.update(_list_untracked_under_roots(project_root, roots, config))
+    return sorted(files)
+
+
+def _head_exists(project_root: Path) -> bool:
+    """True when ``HEAD`` resolves to a commit (the repo has at least one)."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root),
+        )
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0
+
+
+def _list_untracked_under_roots(
+    project_root: Path, roots: list[str], config: dict[str, Any]
+) -> list[str]:
+    """Untracked, non-ignored files under ``roots`` (minus ``scan.exclude``)."""
+    if not roots:
+        return []
+    from codd.discovery import scan_exclude_patterns
+
+    pathspecs = [r.rstrip("/") for r in roots if r.strip()]
+    try:
+        result = subprocess.run(
+            ["git", "-c", "core.quotePath=false", "ls-files", "--others",
+             "--exclude-standard", "--", *pathspecs],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(project_root),
+        )
+    except FileNotFoundError:
+        return []
+    if result.returncode != 0:
+        return []
+
+    exclude_patterns = scan_exclude_patterns(config)
+    out: list[str] = []
+    for line in result.stdout.splitlines():
+        rel = line.strip()
+        if not rel:
+            continue
+        if any(_match_exclude(rel, pat) for pat in exclude_patterns):
+            continue
+        out.append(rel)
+    return out
+
+
+def _match_exclude(path: str, pattern: str) -> bool:
+    """Glob match for ``scan.exclude``; ``**`` also matches across separators."""
+    import fnmatch
+
+    if fnmatch.fnmatch(path, pattern):
+        return True
+    # ``fnmatch`` does not treat ``**`` specially, so ``**/__pycache__/**`` will
+    # not match ``a/__pycache__/b`` on its own; emulate the recursive-glob intent
+    # the scanner relies on by also matching the de-globbed middle segment.
+    if "**/" in pattern:
+        tail = pattern.split("**/", 1)[1]
+        if fnmatch.fnmatch(path, tail) or fnmatch.fnmatch(path, "*/" + tail):
+            return True
+        # ``**/x/**`` should match any path containing the ``x`` segment.
+        core = tail[:-3] if tail.endswith("/**") else tail
+        if core and (f"/{core}/" in f"/{path}/"):
+            return True
+    return False
 
 
 def _find_design_docs_by_modules(
