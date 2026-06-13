@@ -98,6 +98,55 @@ def test_get_changed_files_git_missing(tmp_path, monkeypatch, capsys):
     assert "Warning: git not found." in capsys.readouterr().out
 
 
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True, text=True)
+
+
+def test_get_changed_files_returns_project_relative_paths_in_monorepo_subdir(tmp_path):
+    """FIX 5 (false-RED, monorepo): when the CoDD project is a git-repo SUBDIR,
+    change detection must emit PROJECT-relative paths (``docs/x.md``), not
+    repo-root-relative ones (``packages/app/docs/x.md``). Otherwise propagate
+    resolves them against project_root with a doubled prefix, finds zero changed
+    docs, and freshness later false-REDs ``never_reconciled``."""
+    repo = tmp_path
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    project = repo / "packages" / "app"
+    (project / "docs").mkdir(parents=True)
+    doc = project / "docs" / "design.md"
+    doc.write_text("v1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+    doc.write_text("v2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "edit")
+
+    # project_root is the SUBDIR, not the repo root.
+    changed = get_changed_files(project, "HEAD~1")
+    assert changed == ["docs/design.md"]
+
+
+def test_get_changed_files_returns_relative_paths_at_repo_root(tmp_path):
+    """FIX 5 non-regression: when repo root == project root, paths are already
+    project-relative and ``--relative`` is a harmless no-op."""
+    repo = tmp_path
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "docs").mkdir()
+    doc = repo / "docs" / "design.md"
+    doc.write_text("v1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+    doc.write_text("v2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "edit")
+
+    changed = get_changed_files(repo, "HEAD~1")
+    assert changed == ["docs/design.md"]
+
+
 # ---------------------------------------------------------------------------
 # read_codd_frontmatter / iter_design_docs / doc_modules
 # ---------------------------------------------------------------------------
