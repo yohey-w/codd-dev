@@ -293,7 +293,7 @@ axes:
     description: cross-CLI live run — hidden coupling to one CLI/model. Running the same input through
       a different live CLI (codex etc.) surfaces prompt/format/ tooling assumptions. The declared-but-unverified
       multi-CLI risk.
-    saturation_counter: 1
+    saturation_counter: 0
     last_run: '2026-06-14'
     status: active
     cost: llm
@@ -382,9 +382,13 @@ axes:
       model-independence thesis proven LIVE end-to-end. The whole arc (this session): codex surfaced
       bare-basename-drop, task-done-artifact-blind, verify-no-test-command, import-coherence, autorepair-
       test-command across runs; each fixed (c9081a0/6e4241a/f82116c/A-core d0d76c7/B0 04393c2) via GPT-5.5
-      consult→autonomous; codex4 is the clean re-validation. D6 essentially saturated for the greenfield/cli
-      path; remaining: B-full (designer-reserved) + the low-pri propagate warning. saturation -> 1 (clean green
-      run, only a non-blocking warning).'
+      consult→autonomous; codex4 is the clean re-validation. CORRECTION (M3 + Stop-hook): codex4 was NOT a
+      zero-finding run — it surfaced PC-d6-greenfield-propagate-verify-state (propagate SILENTLY SKIPPED on "No
+      verify state found"), so per M3 a new finding RESETS D6 saturation to 0, NOT 1. Do NOT rotate to D10 yet:
+      fix the propagate-skip (in progress, a12038ce), then re-validate D6 with fresh codex runs until TWO
+      consecutive ZERO-finding runs (K=2) before rotating. The M2 GREEN result stands (the autopilot reaches a
+      working green system cross-vendor); but "問題が発生しなくなるまで" on D6 is not met while the propagate finding
+      is open. Remaining on D6: B-full (designer-reserved) + the propagate-skip fix. saturation -> 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
