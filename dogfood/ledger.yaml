@@ -396,6 +396,15 @@ axes:
       D6 before rotating to D10; codex5 = run 1. (The propagate-fix subagent a12038ce held its commit waiting on
       an in-flight GPT consult and ended without committing — recurring subagent-cant-await-async-GPT pattern;
       parent reviewed+validated its uncommitted working-tree fix and shipped it.) saturation 0.'
+    - '2026-06-14: propagate a+ refine SHIPPED (e81fab6). GPT-5.5 (consult 38CC891A, read the repo) caught that
+      the earlier bare-a propagate fix (677639e) was FALSE-GREEN — greenfield builds are UNTRACKED, HEAD diff saw
+      0 files, so propagate "reconciled zero" while the whole build was unreconciled. a+ adds: state sentinel +
+      stale-empty-state guard + a greenfield fresh-build diff window that unions untracked source/doc files
+      (codex4: 0 -> 16 real artifacts reconciled). Full suite 4331 green. F-greenfield-propagate-falsegreen-
+      diffwindow. LESSON (memory): WAIT for the GPT result before committing a fix strategy — I shipped bare-a
+      before the consult landed and GPT''s divergence was material. codex5 (running on bare-a) is INVALID for
+      saturation (its propagate is the false-green); a fresh codex6 on e81fab6 is the valid D6 run-1, launched
+      sequentially after codex5 finishes (avoid concurrent codex runs / budget). saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1242,6 +1251,40 @@ findings:
   class: conceptual
   derived_case_ids:
   - PC-d6-b0-failure-attribution
+- id: F-greenfield-propagate-falsegreen-diffwindow
+  axis: D6
+  date: '2026-06-14'
+  model_used: GPT-5.5 consult (38CC891A, read the repo, found the false-green) + Opus synthesis; implemented by Opus
+  symptom: 'the first propagate-skip fix (677639e "bare-a": persist empty verify-state on clean exits) was
+    INCOMPLETE + FALSE-GREEN. Confirmed against the real codex4 build: it has NO commits and ALL generated files
+    (src/todo_cli/, docs/, ...) are UNTRACKED; `git diff --name-only --relative HEAD` excludes untracked files,
+    so propagate --verify saw 0 changed files -> bare-a persisted an empty state -> propagate --commit
+    "reconciled ZERO docs" while the ENTIRE generated build was unreconciled = false-green (coherence ledger
+    silently recorded nothing for a whole project). Also an empty verify-state could mask drift appearing AFTER
+    the empty verify (no stale guard).'
+  root_cause: '(a) the greenfield propagate diff-window was HEAD-based — right for the interactive "what changed
+    since HEAD" CLI but WRONG for a fresh greenfield whose build is untracked, so the window missed the entire
+    build delta. (b) the verify-state had no provenance sentinel or stale guard, so "verified empty" was
+    indistinguishable from "never ran" and could be reused after new drift. GPT-5.5 (consulted, read the repo)
+    flagged both BEFORE they shipped; I had committed bare-a prematurely (lesson: wait for the GPT result).'
+  fix_commit: e81fab6
+  fix_description: 'a+ (builds on 677639e). (1) state contract: run_verify persists a real verify-state on ALL
+    exits with schema_version + state_type sentinel + verify_outcome + sorted changed_files signature; run_commit
+    validates (absent -> "No verify state found" [never-ran NOT relaxed]; foreign/corrupt -> "Invalid"). (2)
+    stale-empty-state guard: for an empty outcome, run_commit re-derives current changed files and errors if the
+    signature differs (drift after empty verify) — signature-based, not wall-clock. (3) greenfield fresh-build
+    diff window (load-bearing): GREENFIELD_BUILD_DIFF_TARGET; _get_build_changed_files unions tracked-since-HEAD
+    (when HEAD resolves) with UNTRACKED files under scan.source_dirs/doc_dirs (git ls-files --others
+    --exclude-standard) minus scan.exclude; greenfield propagates against this -> reconciles the real generated
+    source<->design (codex4: 0 -> 16 real artifacts). Normal CLI keeps HEAD default. Chose untracked-inclusion
+    (works with zero commits, mutates nothing). Full suite 4331 passed, 0 skipped. Anti-false-green: propagate
+    reconciles the real build (not zero); stale/never-ran/foreign all error; no gate weakened.'
+  regression_test: 'tests/test_propagator.py + tests/greenfield/test_pipeline.py — empty-verify-runs-commit,
+    commit-without-verify errors, foreign-sentinel rejected, real doc->doc drift reconciled with ledger ack,
+    empty-state-cannot-hide-later-drift (stale guard), greenfield window sees untracked source, window honors
+    scan.exclude, e2e greenfield reconciles an untracked build (not zero).'
+  status: fixed
+  class: conceptual
 pending_cases:
 - id: PC-d6-b0-failure-attribution
   axis: D6
