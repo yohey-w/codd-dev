@@ -1673,6 +1673,11 @@ def _build_implementation_prompt(
                 "- If the design or dependency test documents declare verifiable-behavior ids (a traceability table whose first column is `VB-<id>`), annotate each generated test with a comment marker `codd: covers vb=<id>` for every behavior that test proves (`codd test audit` reconciles these markers).",
                 "- If a declared behavior cannot be tested yet, add an explicit `codd: blocked vb=<id> reason=<short_reason>` comment marker instead of leaving it silently uncovered.",
                 "",
+                "Scoped assertions (precision, not weakening):",
+                "- When a test asserts a CONTENT constraint over rendered or serialized output (e.g. \"displayed amounts contain no decimal point\", \"no personal data appears in the response\", \"every listed price shows a currency symbol\"), assert ONLY against the specific values or elements the constraint governs: parse and read the relevant nodes/fields under test (DOM elements, table cells, the parsed JSON values, the matched record), not the whole response body.",
+                "- Do NOT enforce such a constraint with a regex, substring, or scan over the entire response/document. Full output carries standard scaffolding the constraint never meant to govern (markup metadata and attribute defaults, document preamble, framework boilerplate, asset/version query strings, generated ids) that can coincidentally match the pattern and FALSE-fail a correct implementation.",
+                "- Still assert the constraint fully — keep proving every declared behavior — just bind each assertion to its subject under test rather than to incidental document scaffolding. Precise scoping makes the test stronger, not weaker.",
+                "",
             ]
         )
 

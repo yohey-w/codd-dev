@@ -304,3 +304,54 @@ def test_implementation_prompt_forbids_meta_copy_in_user_facing_ui():
     assert "never surface design rationale" in prompt
     assert "implementation assumptions" in prompt
     assert "environment notes as visible text" in prompt
+
+
+def test_test_generation_prompt_guides_scoped_content_assertions():
+    """Test-targeting implement runs must steer the model to scope content
+    assertions to the subject under test (anti false-RED on incidental markup),
+    while keeping the verifiable-behavior coverage requirement intact."""
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python", "frameworks": ["flask"]}},
+        design_context=DesignContext(
+            node_id="test:acceptance",
+            path=Path("docs/test/acceptance_criteria.md"),
+            content="# Acceptance criteria\n",
+        ),
+        spec=ImplementSpec("docs/test/acceptance_criteria.md", ["src/tests"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    # The scoping principle is present and stated as precision, not weakening.
+    assert "Scoped assertions" in prompt
+    assert "subject under test" in prompt
+    assert "not the whole response body" in prompt
+    assert "entire response/document" in prompt
+    # The existing coverage requirement must still be enforced (additive, not a
+    # replacement): generated tests still assert every declared behavior.
+    assert "codd: covers vb=<id>" in prompt
+    assert "Still assert the constraint fully" in prompt
+    # General principle only — no project/example literals leaked into the guidance.
+    for literal in ("kakeibo", "viewport", "initial-scale", "summary"):
+        assert literal not in prompt
+
+
+def test_non_test_generation_prompt_omits_scoped_assertion_block():
+    """The scoped-assertion guidance is gated to test-targeting runs only, so a
+    plain source-implementation prompt must not carry it."""
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python", "frameworks": ["flask"]}},
+        design_context=DesignContext(
+            node_id="design:summary",
+            path=Path("docs/design/summary.md"),
+            content="# Summary design\n",
+        ),
+        spec=ImplementSpec("docs/design/summary.md", ["src/app"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert "Scoped assertions" not in prompt
+    assert "codd: covers vb=<id>" not in prompt
