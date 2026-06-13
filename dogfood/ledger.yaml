@@ -339,6 +339,16 @@ axes:
       materially validated: the model-independent harness drives a DIFFERENT vendor end-to-end through build +
       tests + VB gate + (now) real test execution; remaining gaps are honest verify-caught issues, not
       false-greens. saturation stays 0 (productive).'
+    - '2026-06-13: M2 FINAL reach point — codex3 resume confirmed gap-1 fix (f82116c): verify ensured the
+      pyproject and EXECUTED the generated tests. verify caught the real import-coherence failure (gap-2) and
+      auto-repair ended PARTIAL_SUCCESS — it could NOT repair the pytest/test_command failure
+      (=F-autorepair-test-command-unrepairable, the owner-gated arbitration gap, now reconfirmed LIVE). So
+      check:success was NOT reached, but the MODEL-INDEPENDENCE CORE is validated end-to-end: the fixed harness
+      drove a DIFFERENT vendor (codex) through build+tests+VB-gate+verify-EXECUTION+real-bug-catch with zero
+      false-greens. Full autonomous green is gated on (a) import-coherence pinning OR (b) owner-gated
+      spec-grounded repair arbitration — both escalated to the owner (new-concept). This single M2 arc surfaced
+      and/or fixed SIX D6 items (bare-basename, task-done-artifact-blind, verify-no-test-command FIXED;
+      import-coherence, autorepair-test-command reconfirmed; + the gpt-strategic-divergence trial). saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1128,11 +1138,14 @@ findings:
     RC). This is anti-false-green-CORRECT: the incoherent build yields a real non-zero collection error, so verify
     fails honestly rather than certifying nothing.'
   fix_commit: null  # observed; first deferred to verify auto-repair (codex3 resume in progress); else a coherence fix
-  fix_description: 'NOT fixed in core here. On the codex3 --resume, verify now executes and surfaced this real
-    failure; greenfield verify auto-repair is attempting to reconcile the imports (codex repair running). If it
-    converges -> check:success. If not, the structural fix is to pin a single package/import layout in the
-    design/contract so source+tests agree (a coherence/contract concern adjacent to the deferred
-    layout-canonicalization). Tracked by the resume outcome.'
+  fix_description: 'NOT fixed in core. CONFIRMED on the codex3 --resume: verify now EXECUTED (gap-1 fix f82116c)
+    and surfaced this real failure; greenfield verify auto-repair then ended PARTIAL_SUCCESS /
+    ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING — it could NOT repair the pytest/test_command failure (same root
+    as F-autorepair-test-command-unrepairable: a test_command failure carries failed_nodes=[] so the repair
+    engine deems it unrepairable). So full green needs EITHER (a) pin a single package/import layout in the
+    design/contract so source+tests agree (coherence fix, adjacent to layout-canonicalization), OR (b) the
+    owner-gated spec-grounded test/code arbitration in verify auto-repair (PC-spec-grounded-repair-arbitration).
+    Both are owner/strategic calls — escalated, not auto-built.'
   status: open
   class: conceptual
 pending_cases:
@@ -1171,7 +1184,12 @@ pending_cases:
     passes the VB gate without manual intervention — the real first-contact confirmation (M2).'
   origin: derived:F-implement-task-done-artifact-blind
   priority: 2
-  status: open
+  status: partial  # 2026-06-13 — M2 substantially ACHIEVED: the fixed harness drove a DIFFERENT vendor
+    # (codex gpt-5.5) end-to-end init→elicit→plan→generate→implement(15/15)→stage VB gate PASS→verify EXECUTED
+    # the generated tests, catching a REAL import-coherence bug (no false-green). check:success NOT reached:
+    # gap-2 (F-greenfield-import-coherence) + verify auto-repair's test_command limit
+    # (F-autorepair-test-command-unrepairable). Model-independence CORE validated; full autonomous green is
+    # gated on the deferred coherence/arbitration work (owner/strategic).
 - id: PC-gate-false-red-sweep
   axis: D14
   hypothesis: 'F-vb-coverage-gate-false-red proved a deterministic QUALITY GATE can false-RED — block a
