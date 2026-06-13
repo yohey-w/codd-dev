@@ -57,8 +57,14 @@ def get_changed_files(
     printing a warning on git failure; :mod:`codd.propagator` stays silent.
     """
     try:
+        # ``--relative`` emits paths relative to ``cwd`` (= project_root) and
+        # restricts output to that subtree. Without it, a CoDD project living in
+        # a git-repo SUBDIR (monorepo) gets repo-root-relative paths that, when
+        # resolved against project_root, double the prefix — so propagate finds
+        # zero changed docs and freshness later false-REDs ``never_reconciled``.
+        # At the repo root (repo root == project_root) it is a harmless no-op.
         result = subprocess.run(
-            ["git", "-c", "core.quotePath=false", "diff", "--name-only", diff_target],
+            ["git", "-c", "core.quotePath=false", "diff", "--name-only", "--relative", diff_target],
             capture_output=True, text=True, encoding="utf-8", cwd=str(project_root),
         )
     except FileNotFoundError:

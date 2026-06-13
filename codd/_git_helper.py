@@ -13,6 +13,10 @@ def _diff_files(base_ref: str, *, cwd: Path, paths: list[str] | None = None) -> 
         "-c",
         "core.quotePath=false",
         "diff",
+        # ``--relative`` makes paths (and any pathspec) project-root-relative
+        # when ``cwd`` is a git-repo subdir (monorepo), aligning with DAG/scanner
+        # node ids so ``require_propagate``'s consumer lines up; no-op at repo root.
+        "--relative",
         "--unified=200",
         base_ref,
     ]

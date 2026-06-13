@@ -1254,8 +1254,11 @@ def _get_code_diff(
 ) -> str:
     """Get the actual code diff for specific files."""
     try:
+        # ``--relative`` keeps the pathspec (project-relative ``files``) and the
+        # emitted diff headers in the same base as the DAG/scanner node ids when
+        # the CoDD project is a git-repo subdir (monorepo); a no-op at repo root.
         result = subprocess.run(
-            ["git", "-c", "core.quotePath=false", "diff", diff_target, "--"] + files,
+            ["git", "-c", "core.quotePath=false", "diff", "--relative", diff_target, "--"] + files,
             capture_output=True, text=True, encoding="utf-8", cwd=str(project_root),
         )
         if result.returncode != 0:

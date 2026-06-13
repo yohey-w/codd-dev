@@ -50,6 +50,8 @@ def test_git_helper_diff_files_with_changes(monkeypatch, tmp_path):
             "-c",
             "core.quotePath=false",
             "diff",
+            # FIX 5: --relative keeps paths project-root-relative in monorepo subdirs.
+            "--relative",
             "--unified=200",
             "HEAD~1",
             "--",
