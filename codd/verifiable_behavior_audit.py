@@ -38,6 +38,11 @@ _VB_ID_RE = re.compile(r"^VB-[A-Za-z0-9][A-Za-z0-9_.-]*$", re.IGNORECASE)
 _TABLE_ROW_RE = re.compile(r"^\s*\|(?P<cells>.+)\|\s*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _DEFAULT_VB_DOC_DIR = "docs/test"
+# A single ``vb=<id>`` token. A ``covers`` line may carry several of them
+# (``# codd: covers vb=22 vb=23 vb=24``); the shared cover regex captures only
+# the first and lets its greedy trailing-details group swallow the rest, so the
+# VB audit re-scans the matched span with this token regex to recover every id.
+_VB_TOKEN_RE = re.compile(r"vb\s*=\s*(?P<vb>[A-Za-z0-9_.:-]+)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -221,9 +226,7 @@ def build_vb_coverage_audit(
     if config is None:
         config = _load_optional_config(project_root)
     if test_dirs is None:
-        configured_test_dirs = (config.get("scan") or {}).get("test_dirs")
-        if isinstance(configured_test_dirs, list) and configured_test_dirs:
-            test_dirs = configured_test_dirs
+        test_dirs = _resolve_vb_scan_dirs(project_root, config)
 
     behaviors = load_verifiable_behaviors(project_root, config=config, docs=docs)
     covers, blockers, dod_markers = _scan_vb_markers(project_root, test_dirs=test_dirs)
@@ -494,6 +497,47 @@ def _load_optional_config(project_root: Path) -> dict[str, Any]:
         return {}
 
 
+def _resolve_vb_scan_dirs(project_root: Path, config: dict[str, Any] | None) -> list[str] | None:
+    """Resolve where to scan for ``covers vb=`` markers.
+
+    Generated test files do not always live under ``scan.test_dirs``: a
+    greenfield build commonly emits them under ``src/tests/`` while
+    ``scan.test_dirs`` is the conventional ``tests/``. Scanning only the
+    configured test dirs therefore reports a false-RED (every VB "uncovered")
+    because the markers are never seen.
+
+    The fix is scope-general: scan the union of the configured ``test_dirs`` and
+    ``source_dirs`` (deduplicated, order-preserving). The marker scan is
+    suffix-filtered to test files, so including source roots only ever picks up
+    actual test files (e.g. ``src/tests/test_x.py``) and never source modules.
+    When neither is configured, return ``None`` so the caller falls back to the
+    default ``tests/`` scope (and, failing that, the project root).
+    """
+
+    scan_section = (config or {}).get("scan")
+    scan_section = scan_section if isinstance(scan_section, dict) else {}
+    merged: list[str] = []
+    seen: set[str] = set()
+    for key in ("test_dirs", "source_dirs"):
+        raw = scan_section.get(key)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            rel = str(item).strip()
+            if not rel:
+                continue
+            norm = rel.replace("\\", "/").strip("/")
+            if norm in seen:
+                continue
+            seen.add(norm)
+            merged.append(rel)
+    if merged:
+        return merged
+    # No scan config at all: scan the whole project tree so generated tests are
+    # found wherever they landed (suffix filter keeps this to test files only).
+    return [str(project_root)]
+
+
 def _scan_vb_markers(
     project_root: Path,
     *,
@@ -509,16 +553,25 @@ def _scan_vb_markers(
             continue
         rel_path = _rel_path(path, project_root)
         for match in _COVER_MARKER_RE.finditer(text):
-            vb_id = match.group("vb")
-            if vb_id is None:
+            first_vb = match.group("vb")
+            if first_vb is None:
                 continue  # operation-subject marker; owned by the operational audit
-            covers.append(
-                VBCoverEvidence(
-                    path=rel_path,
-                    vb_id=vb_id.strip(),
-                    details=(match.group("details") or "").strip(),
+            # A single covers marker may list several `vb=` ids on one line
+            # (`# codd: covers vb=22 vb=23 vb=24`): the shared regex captures
+            # only the first and its greedy details group swallows the rest.
+            # Recover every id, treating the non-`vb=` remainder as shared
+            # details so all of them are reconciled, not just the first.
+            raw_details = match.group("details") or ""
+            extra_ids = [token.group("vb").strip() for token in _VB_TOKEN_RE.finditer(raw_details)]
+            details = _VB_TOKEN_RE.sub("", raw_details).strip()
+            for vb_id in [first_vb.strip(), *extra_ids]:
+                covers.append(
+                    VBCoverEvidence(
+                        path=rel_path,
+                        vb_id=vb_id,
+                        details=details,
+                    )
                 )
-            )
         for match in _BLOCKER_MARKER_RE.finditer(text):
             vb_id = match.group("vb")
             if vb_id is None:
@@ -601,5 +654,41 @@ def _detect_orphan_vb_markers(
     return orphans
 
 
+# A leading ``vb`` is only stripped when it is a standalone token — i.e. the
+# very next character is an id separator (``-``/``_``/``=``/space) or the value
+# ends there. This makes the rule symmetric: ``VB-08`` and a bare marker value
+# ``08`` converge, while a body that genuinely begins with ``vb`` (e.g.
+# ``VB-vbx`` vs marker ``vbx``) is preserved on both sides instead of being
+# eaten asymmetrically.
+_LEADING_VB_TOKEN_RE = re.compile(r"^vb(?=[-_= \t]|$)")
+_LEADING_SEPARATORS = "-_= \t"
+
+
 def _normalize_vb_id(value: str) -> str:
-    return value.strip().casefold()
+    """Canonical matching key for a verifiable-behavior id.
+
+    Declared ids (``VB-08``) and marker values (``vb=08`` → captured ``08``,
+    or ``vb=VB-08`` → captured ``VB-08``) must reconcile to the same key. The
+    canonical rule:
+
+    1. casefold and strip surrounding whitespace,
+    2. drop a single leading ``vb`` token (only when it stands alone, followed
+       by a separator or end) plus any leading separators (``-``/``_``/``=``/
+       space), so ``vb-08`` and bare ``08`` converge,
+    3. for a purely-numeric remainder, strip leading zeros (``08`` → ``8``)
+       so zero-padding never changes identity — while keeping distinct numbers
+       distinct (``1`` stays ``1``, ``11`` stays ``11``: no collision),
+    4. keep non-numeric remainders as-is (so schemes like ``VB-AUTH-1`` →
+       ``auth-1`` still work).
+
+    A value that reduces to nothing (e.g. a bare ``VB``) falls back to its
+    casefolded form so it never collides with a genuinely empty key.
+    """
+
+    base = value.strip().casefold()
+    remainder = _LEADING_VB_TOKEN_RE.sub("", base, count=1).lstrip(_LEADING_SEPARATORS)
+    if not remainder:
+        return base
+    if remainder.isdigit():
+        return remainder.lstrip("0") or "0"
+    return remainder
