@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from codd.claude_cli import DEFAULT_CLAUDE_EFFORT, DEFAULT_CLAUDE_MODEL
 from codd.e2e_extractor import DodObligation, ScenarioCollection, ScenarioExtractor, UserScenario
@@ -916,7 +916,17 @@ def _dedupe_dod_obligations(obligations: list[DodObligation]) -> list[DodObligat
 
 
 def _iter_test_files(project_root: Path, *, test_dirs: Iterable[Path | str] | None) -> Iterable[Path]:
-    dirs = list(test_dirs or ("tests",))
+    if test_dirs is None:
+        # No explicit scope: resolve the same way the VB audit does so a
+        # correct e2e test that landed under a source root (e.g.
+        # ``src/tests/e2e/``) is still seen. The suffix filter below keeps
+        # results to real test files, so widening the scan never picks up
+        # source modules and true-positives (genuinely uncovered operations)
+        # are preserved.
+        resolved = _resolve_vb_scan_dirs(project_root, _load_optional_config(project_root))
+        dirs: list[Path | str] = list(resolved) if resolved else ["tests"]
+    else:
+        dirs = list(test_dirs)
     for item in dirs:
         root = Path(item)
         if not root.is_absolute():
@@ -932,6 +942,56 @@ def _iter_test_files(project_root: Path, *, test_dirs: Iterable[Path | str] | No
 def _is_test_file(path: Path) -> bool:
     name = path.name
     return any(name.endswith(suffix) for suffix in _TEST_SUFFIXES)
+
+
+def _load_optional_config(project_root: Path) -> dict[str, Any]:
+    from codd.config import load_project_config
+
+    try:
+        return load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _resolve_vb_scan_dirs(project_root: Path, config: dict[str, Any] | None) -> list[str] | None:
+    """Resolve where to scan for ``covers`` markers (operation and vb subjects).
+
+    Generated test files do not always live under ``scan.test_dirs``: a
+    greenfield build commonly emits them under ``src/tests/`` while
+    ``scan.test_dirs`` is the conventional ``tests/``. Scanning only the
+    configured test dirs therefore reports a false-RED (every operation/VB
+    "uncovered") because the markers are never seen.
+
+    The fix is scope-general: scan the union of the configured ``test_dirs`` and
+    ``source_dirs`` (deduplicated, order-preserving). The marker scan is
+    suffix-filtered to test files, so including source roots only ever picks up
+    actual test files (e.g. ``src/tests/test_x.py``) and never source modules.
+    When neither is configured, return the project root so generated tests are
+    found wherever they landed (the suffix filter keeps this to test files).
+    """
+
+    scan_section = (config or {}).get("scan")
+    scan_section = scan_section if isinstance(scan_section, dict) else {}
+    merged: list[str] = []
+    seen: set[str] = set()
+    for key in ("test_dirs", "source_dirs"):
+        raw = scan_section.get(key)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            rel = str(item).strip()
+            if not rel:
+                continue
+            norm = rel.replace("\\", "/").strip("/")
+            if norm in seen:
+                continue
+            seen.add(norm)
+            merged.append(rel)
+    if merged:
+        return merged
+    # No scan config at all: scan the whole project tree so generated tests are
+    # found wherever they landed (suffix filter keeps this to test files only).
+    return [str(project_root)]
 
 
 def _classify_test_level(rel_path: str) -> str:

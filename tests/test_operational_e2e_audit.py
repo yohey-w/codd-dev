@@ -76,6 +76,69 @@ test('assign item persists', async () => {});
     assert report.summary["uncovered"] == 1
 
 
+def test_operational_audit_scans_source_tree_when_e2e_lives_under_src(tmp_path):
+    # FIX 1 (false-RED, scan-scope): a correctly-marked e2e test that lands
+    # under a configured source root (src/tests/e2e/, not the conventional
+    # tests/) must be seen. Before the fix the default scan scope was only
+    # tests/, so the marker was invisible and the operation reported uncovered.
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        """scan:
+  test_dirs: [tests]
+  source_dirs: [src]
+operation_flow:
+  operations:
+    - id: assign_item
+      actor: operator
+      verb: assign
+      target: work_item
+      route: /work-items
+      expected_outcomes: [assignment persists]
+    - id: archive_item
+      actor: operator
+      verb: archive
+      target: work_item
+      route: /work-items
+      expected_outcomes: [archive persists]
+""",
+        encoding="utf-8",
+    )
+    # Correct, fully-marked e2e test, but under src/tests/e2e/ (a source root).
+    e2e_dir = tmp_path / "src" / "tests" / "e2e"
+    e2e_dir.mkdir(parents=True)
+    (e2e_dir / "assign_item.spec.ts").write_text(
+        """// codd: covers operation=codd.yaml.operation_flow#assign_item axis=persistence_readback
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=persistence_readback obligation=scenario_state
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=persistence_readback obligation=public_trigger
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=persistence_readback obligation=observable_outcome
+// codd: dod operation=codd.yaml.operation_flow#assign_item axis=persistence_readback obligation=durable_readback
+test('assign item persists', async () => {});
+""",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    # The correctly-marked operation under src/tests/e2e is now covered...
+    assigned = next(
+        row
+        for row in report.rows
+        if row.source_operation.endswith("#assign_item")
+        and row.coverage_axis == "persistence_readback"
+    )
+    assert assigned.coverage_status == "covered_by_e2e"
+    assert assigned.matched_tests == ["src/tests/e2e/assign_item.spec.ts"]
+    # ...but a genuinely-unmarked operation still reports uncovered (true-RED preserved).
+    archived = next(
+        row
+        for row in report.rows
+        if row.source_operation.endswith("#archive_item")
+        and row.coverage_axis == "persistence_readback"
+    )
+    assert archived.coverage_status == "uncovered"
+
+
 def test_operational_audit_requires_dod_markers_after_covers_marker(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
