@@ -278,6 +278,84 @@ def test_verify_stage_filter(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# FIX 6 — case-insensitive artifact path matching
+# ---------------------------------------------------------------------------
+def test_verify_requirements_matches_uppercase_filename(tmp_path):
+    """FIX 6 (false-RED, case sensitivity): root ``REQUIREMENTS.md`` (uppercase)
+    is discovered by the requirements deriver, so the contract must accept it
+    too. Uses the shipped catalog whose lowercase glob is ``requirements*.md``."""
+    (tmp_path / "REQUIREMENTS.md").write_text("# Reqs\n- must work\n", encoding="utf-8")
+    catalog = load_catalog()
+    contract = load_contract(
+        {"artifact_contract": {"enabled": True, "stages": {"plan": ["requirements"]}}}
+    )
+    report = verify_contract(catalog, contract, tmp_path)
+    assert report.passed is True
+    check = report.stages[0].checks[0]
+    assert check.status == "pass"
+    assert "REQUIREMENTS.md" in check.matched_paths
+
+
+def test_verify_requirements_still_missing_with_only_readme(tmp_path):
+    """FIX 6 true-RED preserved: a project with only README.md (no requirements
+    doc in any case) still FAILS the requirements contract."""
+    (tmp_path / "README.md").write_text("# Project\n", encoding="utf-8")
+    catalog = load_catalog()
+    contract = load_contract(
+        {"artifact_contract": {"enabled": True, "stages": {"plan": ["requirements"]}}}
+    )
+    report = verify_contract(catalog, contract, tmp_path)
+    assert report.has_failures is True
+    assert report.stages[0].checks[0].status == "missing"
+
+
+# ---------------------------------------------------------------------------
+# FIX 7 — test/e2e convention globs in the shipped catalog
+# ---------------------------------------------------------------------------
+def test_verify_test_suite_matches_colocated_spec_convention(tmp_path):
+    """FIX 7 (false-RED, convention globs): JS/TS co-located tests CoDD itself
+    generates (foo.spec.tsx / __tests__/x.test.ts) must satisfy test_suite."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "Button.spec.tsx").write_text("test('x', () => {});\n", encoding="utf-8")
+    catalog = load_catalog()
+    contract = load_contract(
+        {"artifact_contract": {"enabled": True, "stages": {"implement": ["test_suite"]}}}
+    )
+    report = verify_contract(catalog, contract, tmp_path)
+    assert report.passed is True
+    assert report.stages[0].checks[0].status == "pass"
+
+
+def test_verify_test_suite_matches_dunder_tests_dir(tmp_path):
+    """FIX 7: the ``__tests__/`` directory convention also satisfies test_suite."""
+    nested = tmp_path / "src" / "__tests__"
+    nested.mkdir(parents=True)
+    (nested / "x.test.ts").write_text("test('x', () => {});\n", encoding="utf-8")
+    catalog = load_catalog()
+    contract = load_contract(
+        {"artifact_contract": {"enabled": True, "stages": {"implement": ["test_suite"]}}}
+    )
+    report = verify_contract(catalog, contract, tmp_path)
+    assert report.passed is True
+    assert report.stages[0].checks[0].status == "pass"
+
+
+def test_verify_e2e_suite_matches_cypress_convention(tmp_path):
+    """FIX 7: Cypress/Playwright conventions satisfy e2e_suite."""
+    cy = tmp_path / "cypress" / "e2e"
+    cy.mkdir(parents=True)
+    (cy / "login.cy.ts").write_text("it('x', () => {});\n", encoding="utf-8")
+    catalog = load_catalog()
+    contract = load_contract(
+        {"artifact_contract": {"enabled": True, "stages": {"implement": ["e2e_suite"]}}}
+    )
+    report = verify_contract(catalog, contract, tmp_path)
+    assert report.passed is True
+    assert report.stages[0].checks[0].status == "pass"
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 def test_render_catalog_and_contract_smoke():
