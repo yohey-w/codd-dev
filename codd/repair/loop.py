@@ -15,6 +15,7 @@ from codd.repair.approval_repair import (
     RepairApprovalMode,
     approve_repair_proposal,
 )
+from codd.repair.auto_scope_guard import evaluate_auto_patch_scope
 from codd.repair.engine import get_repair_engine
 from codd.repair.history import RepairHistory
 from codd.repair.repair_result import RepairResult
@@ -45,6 +46,15 @@ class RepairLoopConfig:
     notify_callable: Callable[[str], None] | None = None
     llm_client: Any | None = None
     repo_path: Path | str | None = None
+    #: Resolved (in-memory) project config to consult for the approval gate.
+    #: When set, the loop uses THIS for the whole run instead of re-reading
+    #: codd.yaml from disk — so a per-run opt-in (``apply_repair_mode`` for
+    #: ``--repair-mode automatic`` / the greenfield autopilot) actually reaches
+    #: :func:`approve_repair_proposal`. Read-only: typed as ``Mapping`` and never
+    #: mutated, so a repair cannot grant itself more approval by editing
+    #: codd.yaml mid-loop. ``None`` keeps the legacy disk re-read (plain
+    #: brownfield ``codd verify --auto-repair`` stays owner-gated on disk config).
+    codd_yaml: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -146,7 +156,16 @@ class RepairLoop:
 
         session_dir = self.history.new_session(self._history_dir())
         attempts: list[RepairAttemptRecord] = []
-        codd_yaml = self._load_codd_yaml()
+        # Resolve the approval config ONCE for the whole loop. A per-run opt-in
+        # (apply_repair_mode for --repair-mode automatic / greenfield autopilot)
+        # arrives via self.config.codd_yaml; absent that, fall back to disk. Using
+        # the SAME resolved config for every attempt means a repair cannot grant
+        # itself more approval rights by editing codd.yaml mid-loop.
+        codd_yaml = (
+            self.config.codd_yaml
+            if self.config.codd_yaml is not None
+            else self._load_codd_yaml()
+        )
         resolved_baseline_ref = baseline_ref or self._capture_current_head()
         current_violations = _violations_from_verify_result(initial_verify_result, fallback=failure)
         applied_patch_files: list[str] = []
@@ -263,6 +282,40 @@ class RepairLoop:
                     partial_success_patches=applied_patch_files,
                     baseline_ref=resolved_baseline_ref,
                     reason="REPAIR_REJECTED_BY_HITL",
+                )
+
+            # Code-level patch-scope guard (anti-false-green). In AUTO mode the
+            # approval gate alone cannot stop a proposal from editing the ORACLE
+            # (codd.yaml / pytest config / package.json test script / conftest /
+            # CI workflow / a design-spec doc that derives a test) to satisfy
+            # buggy code — a false-green the post-repair verify cannot catch
+            # (it would re-check the weakened oracle). Enforce, per the picked
+            # primary failure + RCA, that every patch path is in the editable
+            # candidate set and role-appropriate. An out-of-scope edit is an
+            # honest rejection (REPAIR_FAILED) in non-interactive auto mode.
+            scope = self._auto_scope_decision(codd_yaml, proposal, current_failure, rca)
+            if scope is not None and not scope.allowed:
+                apply_result = ApplyResult(False, [], _proposal_files(proposal), scope.reason)
+                attempts.append(
+                    self._record_attempt(
+                        session_dir,
+                        attempt_n,
+                        current_failure,
+                        rca,
+                        proposal,
+                        apply_result,
+                        None,
+                    )
+                )
+                return self._finalize(
+                    session_dir,
+                    "REPAIR_FAILED",
+                    attempts,
+                    scope.reason,
+                    remaining_violations=current_violations,
+                    partial_success_patches=applied_patch_files,
+                    baseline_ref=resolved_baseline_ref,
+                    reason=scope.reason,
                 )
 
             apply_exception = False
@@ -423,6 +476,30 @@ class RepairLoop:
             return load_project_config(self.project_root)
         except (FileNotFoundError, ValueError):
             return {}
+
+    def _auto_scope_decision(
+        self,
+        codd_yaml: Mapping[str, Any] | None,
+        proposal: RepairProposal,
+        failure: VerificationFailureReport,
+        rca: RootCauseAnalysis,
+    ) -> Any | None:
+        """Run the AUTO-mode patch-scope guard, or ``None`` when not in auto mode.
+
+        Only unattended AUTO approval can apply a repair with no human in the
+        loop, so the scope guard runs exactly there. ``required`` /
+        ``per_attempt`` keep their human gate (which already saw the file list in
+        the approval message) and are not second-guessed by this validator.
+        """
+        if str(self.config.approval_mode or "required") != "auto":
+            return None
+        return evaluate_auto_patch_scope(
+            proposal,
+            failure,
+            rca,
+            project_root=self.project_root,
+            codd_yaml=codd_yaml,
+        )
 
     def _load_affected_file_contents(self, rca: RootCauseAnalysis, dag: DAG) -> dict[str, str]:
         contents: dict[str, str] = {}
