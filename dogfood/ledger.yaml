@@ -405,6 +405,15 @@ axes:
       before the consult landed and GPT''s divergence was material. codex5 (running on bare-a) is INVALID for
       saturation (its propagate is the false-green); a fresh codex6 on e81fab6 is the valid D6 run-1, launched
       sequentially after codex5 finishes (avoid concurrent codex runs / budget). saturation 0.'
+    - '2026-06-14: codex6 (valid run launched concurrently on flat-plan, e81fab6) FAILED at implement stage,
+      first task: "domain_and_state_model.md produced 0 generated files." Opus facts-investigation verdict =
+      TRANSIENT codex variance (codex5 byte-identical implement code passed the same task; re-ran the failing
+      task 2x -> both succeeded, 6 files). New finding F-greenfield-implement-0files-noretry: a single transient
+      empty/unparseable codex response (exit 0) hard-fails the whole multi-hour run with no retry (3 zero-file
+      paths bypass the transport-only recovery wrapper). This is exactly the /goal loop working — a fresh valid
+      run surfaced a new robustness gap. Fix strategy under GPT-5.5 consult AA64C4BF (GPT-consult -> autonomous).
+      codex6 = NOT a clean run (hit a finding) -> saturation stays 0; after the 0-files-retry fix lands, codex7
+      is the clean re-validation run-1. codex5 still running (separate, invalid-for-saturation). saturation 0.'
   D7:
     description: chaos / interruption — resume/idempotency/dirty-state failures under kill->resume cycles
       and partially-written artifacts.
@@ -1284,6 +1293,38 @@ findings:
     empty-state-cannot-hide-later-drift (stale guard), greenfield window sees untracked source, window honors
     scan.exclude, e2e greenfield reconciles an untracked build (not zero).'
   status: fixed
+  class: conceptual
+- id: F-greenfield-implement-0files-noretry
+  axis: D6
+  date: '2026-06-14'
+  model_used: codex gpt-5.5 xhigh (SUT, surfaced it) + Opus facts-investigation (verdict=transient) + GPT-5.5 consult (fix strategy, AA64C4BF)
+  symptom: 'a greenfield autopilot run (codex6, CLI=codex gpt-5.5 xhigh) FAILED at the implement stage on the
+    FIRST task: "Design ''domain_and_state_model.md'' produced 0 generated files." But it was TRANSIENT, not a
+    real defect: the sibling run codex5 (BYTE-IDENTICAL implement-stage code — git diff of implementer.py between
+    the two commits is empty) PASSED the same first task; and re-running the EXACT failing task (same doc, same
+    codex command) twice BOTH succeeded (6 files incl. src/todo_cli/todo_model.py, returncode 0, zero skip/parse
+    warnings). => a single transient empty/short/unparseable codex response (exit 0) hard-fails the entire
+    multi-hour autopilot run with NO retry. The doc is exhaustively code-prescriptive (modules:[todo_model]),
+    so A (legit-empty) refuted; the repro showed no path-drop, so C (reroot/parse bug, c9081a0 class) refuted.'
+  root_cause: 'implementer.py implement loop (~783-851) retries ONLY on ImplementSyntaxGateError; the THREE
+    zero-file paths — (a) empty AI output, (b) parsed-but-all-blocks-invalid, (c) parsed-but-filtered-to-0 —
+    each hard-fail via _zero_generated_files_error with no retry. The shared AI-call recovery wrapper
+    _invoke_with_recovery (ai_invoke.py ~589-659) bounded-auto-retries ONLY transport-transient (socket/timeout/
+    429/5xx/overload) + output-ceiling; an empty/unparseable/no-usable-file outcome does NOT match those
+    patterns, and paths (b)/(c) are post-call parse/filter outcomes raised in the implementer OUTSIDE the
+    wrapper. Net: a hung codex IS retried, but an exit-0 empty/unparseable codex is NOT => single-blip whole-run
+    hard-fail. Robustness / defaults-must-not-flake gap (NOT a false-green: the gate correctly fails 0 files;
+    the gap is the absence of a bounded transient retry before that gate).'
+  fix_commit: pending
+  fix_description: 'PENDING GPT-5.5 consult AA64C4BF (fix strategy = GPT-consult -> autonomous, no owner ask).
+    Strategy under review: re-issue a transient empty/unparseable/no-usable-file implement attempt a bounded N
+    times (reuse TRANSIENT_AUTO_RETRIES=3 / backoff 1.5) before the hard-fail gate, covering all 3 paths.
+    Anti-false-green INVARIANT to preserve: never accept 0 files as success except explicit skip_generation:true;
+    after N retries still 0 => hard-fail EXACTLY as today; do NOT relax scope/path on retry; keep syntax +
+    confusable gates active; no "looks empty => assume skip" heuristic; compose bounded with the syntax-gate
+    retry loop. GPT deciding layer (i general recovery-wrapper / ii targeted implement-loop / hybrid) + whether
+    generate is in scope.'
+  status: in_progress
   class: conceptual
 pending_cases:
 - id: PC-d6-b0-failure-attribution
