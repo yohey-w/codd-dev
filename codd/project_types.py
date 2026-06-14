@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -262,6 +262,91 @@ def _as_choice(value: Any, allowed: set[str], fallback: str) -> str:
 _VALID_TEST_IMPORT_POLICIES = {"package_absolute", "flat", "relative"}
 
 
+# ═══════════════════════════════════════════════════════════
+# Implement-time native-oracle spec (the "first head" of the Artifact Contract
+# Graph → Native Oracle Adapter: see memory/project_codd_language_generality_acg)
+# ═══════════════════════════════════════════════════════════
+#
+# A compiler-class stack (TS=tsc, later Go=go build, Rust=cargo check) can PROVE
+# artifact-to-artifact symbol/module coherence statically, BEFORE running a line
+# of code. The greenfield IMPLEMENT stage is the right place to exercise that
+# proof: there the SUT can still freely edit ALL files (source AND tests), so an
+# incoherence (a test importing ``repoRoot`` while the helper exports
+# ``projectRoot``; ``src/index.ts`` importing ``runCli`` that ``./cli`` never
+# exports → TS2305/2724/2459) is made COHERENT before the run ever reaches verify
+# — where auto-repair is scope-blocked from rewriting test files and the symbol
+# mismatch ships as a permanent verify failure.
+#
+# The spec is the language-NEUTRAL declaration of that oracle: the command to run
+# and the SCOPE it must demonstrably cover (anti-false-green: a compiler proves
+# NOTHING about files outside its include scope — see :class:`OracleScopeSpec`).
+# It lives on the :class:`LayoutProfile` so a new compiler stack is one profile
+# entry + an evidence-normalizer entry, never a core edit. Stacks without a
+# compiler oracle (Python's composite, bash, …) declare ``None`` and the gate is
+# a strict NO-OP for them (their backstop stays the existing verify-stage gates).
+_VALID_ORACLE_KINDS = {"compiler", "composite"}
+
+
+@dataclass(frozen=True)
+class OracleScopeSpec:
+    """The file scope an implement-time oracle MUST be certified to cover.
+
+    Anti-false-green (the #1 failure mode in the design memo): a native oracle
+    "proves" nothing about files it never looked at. Before trusting a green
+    ``tsc`` we certify its config (e.g. ``tsconfig.json`` ``include``/``files``)
+    actually covers source + tests + e2e + helpers — otherwise an incoherent
+    test/helper would pass UNSEEN. The scope is expressed as the
+    :class:`LayoutProfile` ROOTS that must be inside the oracle's view; the
+    per-stack certifier (see ``codd.implement_oracle``) resolves them against the
+    project's real config. ``require_test_root`` is the load-bearing flag: the
+    whole reason to move the gate to implement-time is to catch test/helper
+    incoherence, so a config that excludes the test tree is a HARD FAIL, not a
+    silent pass.
+    """
+
+    require_source_root: bool = True
+    require_test_root: bool = True
+
+
+@dataclass(frozen=True)
+class ImplementOracleSpec:
+    """A stack's implement-time native-oracle (profile-driven, not hardcoded).
+
+    * ``command`` — the native coherence oracle, run from the project root during
+      the IMPLEMENT stage (TS: ``npx --no-install tsc --noEmit`` — a pure
+      typecheck, no emit). It must exit non-zero on a symbol/module incoherence.
+    * ``kind`` — ``"compiler"`` (a static all-paths checker: tsc/go build/cargo
+      check) or ``"composite"`` (a stack of weaker oracles unioned for a
+      no-compiler language; DEFERRED — see the Python extension point in
+      ``codd.implement_oracle``).
+    * ``scope`` — the :class:`OracleScopeSpec` the gate certifies BEFORE trusting
+      a pass (anti-false-green).
+    * ``requires_node_install`` — whether the blocking dependency-install
+      preflight must run first (TS: yes — ``tsc``/deps must be materialized).
+
+    The COMMAND is per-language (unavoidable: each toolchain has its own CLI
+    surface); the MEANING (run a coherence oracle at implement-time, certify its
+    scope, normalize failures, retry) is core. That split is the whole point of
+    the Artifact-Contract-Graph backbone.
+    """
+
+    command: str
+    kind: str = "compiler"
+    scope: OracleScopeSpec = field(default_factory=OracleScopeSpec)
+    requires_node_install: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command": self.command,
+            "kind": self.kind,
+            "requires_node_install": self.requires_node_install,
+            "scope": {
+                "require_source_root": self.scope.require_source_root,
+                "require_test_root": self.scope.require_test_root,
+            },
+        }
+
+
 @dataclass(frozen=True)
 class LayoutProfile:
     """Harness-owned repository topology + module-resolution contract for a stack.
@@ -274,6 +359,14 @@ class LayoutProfile:
     never by bare basename); the test-runner ensurer + scaffold realize
     ``runner`` / ``install_mode`` so tests run against the REAL installed package
     (anti-false-green: an accidental flat import no longer resolves).
+
+    ``implement_oracle`` (optional) declares a stack's IMPLEMENT-TIME native
+    coherence oracle (TS: ``tsc --noEmit``). When present, the greenfield
+    implement stage runs it after all units are generated and BEFORE verify, so
+    symbol/module incoherence is fixed while the SUT can still edit every file.
+    ``None`` (the default, and Python's value today) makes the gate a strict
+    NO-OP for that stack — its coherence backstop stays the existing verify-stage
+    gates. This is the single registration point for a new compiler stack.
     """
 
     language: str
@@ -286,6 +379,7 @@ class LayoutProfile:
     test_import_policy: str = "package_absolute"  # "package_absolute" | "flat"
     requires_package_init: bool = True
     requires_test_init: bool = True
+    implement_oracle: ImplementOracleSpec | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -297,6 +391,9 @@ class LayoutProfile:
             "runner": self.runner,
             "install_mode": self.install_mode,
             "test_import_policy": self.test_import_policy,
+            "implement_oracle": (
+                self.implement_oracle.to_dict() if self.implement_oracle is not None else None
+            ),
         }
 
 
@@ -470,6 +567,27 @@ def _python_layout_profile(
         test_import_policy="package_absolute",
         requires_package_init=True,
         requires_test_init=True,
+        # IMPLEMENT-TIME ORACLE — DEFERRED (separate task). Python has no single
+        # compiler that proves all-paths symbol coherence; the design's answer is
+        # a COMPOSITE oracle (``kind="composite"``) unioning weaker static
+        # oracles, run BEFORE pytest at implement-time, with an
+        # observability-gate that HARD-FAILS if any file is outside the union's
+        # view:
+        #     ruff / pyflakes  (undefined names, unresolved imports — no types)
+        #   + python -m py_compile <every source+test file>  (syntax/byte-compile)
+        #   + pytest --collect-only  (test↔helper symbol mismatch surfaces as an
+        #                             ImportError at COLLECTION — the exact class
+        #                             of bug 3f38dd7's AST gate caught for Python)
+        #   + a smoke harness  (call each generated public API / CLI entrypoint
+        #                        once so a function-body NameError that static
+        #                        analysis cannot see is still exercised)
+        # To wire it: set implement_oracle=ImplementOracleSpec(command=<composite
+        # runner>, kind="composite", scope=OracleScopeSpec(require_test_root=True))
+        # and register a Python normalizer in codd.implement_oracle. Until then
+        # this is None and the gate is a strict NO-OP for Python — the EXISTING
+        # verify-stage coherence gates (import_coherence / test_import_coherence /
+        # e2e_contract_coherence) remain Python's backstop, UNCHANGED.
+        implement_oracle=None,
     )
 
 
@@ -506,6 +624,23 @@ def _typescript_layout_profile(
         test_import_policy="relative",
         requires_package_init=False,
         requires_test_init=False,
+        # IMPLEMENT-TIME ORACLE (TS) — ``tsc --noEmit`` is a compiler-class
+        # coherence oracle: a pure typecheck (no emit) that statically proves
+        # every ``import``/symbol across src + tests + e2e + helpers resolves. Run
+        # at implement-time (after all units exist, before verify) it catches the
+        # src↔src and test↔helper symbol incoherence (TS2305/2724/2459) while the
+        # SUT can still edit test files — BEFORE verify's auto-repair is
+        # scope-blocked from doing so. ``--no-install`` keeps it offline-honest:
+        # the blocking node-install preflight (``requires_node_install``) is what
+        # materializes ``tsc`` + deps; a missing install must surface as an
+        # environment error, never an implicit network fetch. Scope is certified
+        # against ``tsconfig.json`` before a green result is trusted.
+        implement_oracle=ImplementOracleSpec(
+            command="npx --no-install tsc --noEmit",
+            kind="compiler",
+            scope=OracleScopeSpec(require_source_root=True, require_test_root=True),
+            requires_node_install=True,
+        ),
     )
 
 

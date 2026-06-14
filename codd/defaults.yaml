@@ -133,6 +133,43 @@ implement:
   # Default 3 (4 total attempts); minimum 0 (0 = opt out / legacy no-retry
   # hard-fail). NEVER unbounded.
   no_usable_file_retries: 3
+  # implement_oracle (default ON): the IMPLEMENT-TIME native-oracle gate. For a
+  # compiler-class stack (TypeScript = `tsc --noEmit`; Go/Rust later via profile
+  # + adapter) the greenfield implement stage runs the stack's native coherence
+  # oracle AFTER all units are generated and BEFORE verify -- while the SUT can
+  # still freely edit ALL files (source AND tests). It statically proves that
+  # independently-generated artifacts agree on the symbols/modules they import
+  # from each other (the src<->src and test<->helper mismatches -- TS2305/2724/
+  # 2459 -- that verify's `tsc` catches TOO LATE, where auto-repair is blocked
+  # from rewriting test files, so the mismatch ships as a permanent verify
+  # failure). Runs ONCE per stage (a per-unit tsc would false-fail on an import
+  # of a not-yet-generated unit). Before trusting a green result it CERTIFIES the
+  # oracle's config scope (tsconfig include/files) covers src + tests + e2e +
+  # helpers -- an uncovered test tree is a HARD FAIL, never a silent pass
+  # (anti-false-green). On failure it normalizes diagnostics to language-neutral
+  # evidence categories (missing_symbol / module_resolution_error /
+  # test_not_collected / environment_build_error / boundary_violation) and
+  # re-runs implementation with that feedback (bounded), so implement does not
+  # "succeed" until the oracle passes or fails honestly. A strict NO-OP for a
+  # stack with no declared implement-time oracle (Python today: its backstop
+  # stays the existing verify-stage coherence gates). Set false to opt out (this
+  # re-opens the false-green window the gate closes). Greenfield-only.
+  implement_oracle: true
+  # Total implement-oracle attempts: one initial check + bounded corrective
+  # retries that re-run implementation with normalized oracle feedback. Default 3
+  # (initial + 2); minimum 1. NEVER unbounded -- a genuinely uncurable
+  # incoherence still fails honestly (nothing is silently accepted). Only CURABLE
+  # incoherence is retried; an environment/toolchain failure (failed dependency
+  # install) is not handed to the SUT to "fix" in source.
+  oracle_max_attempts: 3
+  # Bounded wall-clock for ONE implement-oracle command run (seconds). tsc on a
+  # fresh build is fast, but a cold first run can compile a large module graph.
+  # Default 600.
+  oracle_timeout_seconds: 600
+  # Bounded wall-clock for the implement-oracle's BLOCKING dependency install
+  # (node stacks: npm/pnpm/yarn/bun -- so `tsc` + deps are materialized before
+  # the typecheck). A cold cache can pull a large tree. Default 900.
+  oracle_install_timeout_seconds: 900
   # Shared canonical output root for implement tasks WITHOUT an explicit
   # default_output_paths / implement_targets mapping (e.g. greenfield-derived
   # tasks). null = derive from scan.source_dirs[0] (usually "src/"). Every

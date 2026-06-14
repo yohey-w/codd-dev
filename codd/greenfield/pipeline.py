@@ -701,6 +701,22 @@ class GreenfieldPipeline:
             self._checkpoint(project_root)
             self.echo(f"[greenfield] implement {task.task_id}: {detail}")
 
+        # Implement-time native-oracle gate — ONCE, after every unit is generated
+        # and BEFORE the run advances to verify, while the SUT can still freely
+        # edit ALL files (source AND tests). For a compiler-class stack (TS=tsc
+        # --noEmit) this proves cross-artifact symbol/module coherence statically
+        # — the src↔src and test↔helper mismatches (TS2305/2724/2459) that verify
+        # catches TOO LATE (where auto-repair is scope-blocked from rewriting test
+        # files). STAGE-level for the same forward-reference reason the VB gate is
+        # (a per-unit tsc would false-fail on an import of a not-yet-generated
+        # unit). On failure it normalizes diagnostics to evidence categories and
+        # re-runs implementation with that feedback (bounded), so implement does
+        # not "succeed" until the oracle passes — or fails HONESTLY. A NO-OP for
+        # stacks with no declared oracle (Python today): see
+        # codd.project_types.ImplementOracleSpec. Runs BEFORE the VB coverage gate
+        # — code that does not even typecheck cannot have meaningful VB coverage.
+        self._enforce_implement_oracle_gate(project_root, tasks, options)
+
         # Project-wide VB coverage gate — ONCE, after every implement task has
         # run and all covering tests therefore exist. Per-task enforcement was
         # disabled in _default_implement_task_runner precisely because the gate
@@ -713,6 +729,116 @@ class GreenfieldPipeline:
             echo=self.echo,
         )
         record["detail"] = f"{len(tasks)} task(s) implemented"
+
+    def _enforce_implement_oracle_gate(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+        options: dict[str, Any],
+    ) -> None:
+        """Run the implement-time native-oracle gate (see _stage_implement).
+
+        Ensures the stack topology is scaffolded first (idempotent — the same
+        ``_ensure_test_runner`` verify uses), so the oracle's config (tsconfig)
+        exists to certify and run against AT implement-time. Then runs the gate
+        with a ``rerun(feedback)`` callback that re-invokes implementation for
+        every task carrying the normalized oracle feedback (the cross-file
+        incoherence is not localized to one task, so the whole build is
+        regenerated under the feedback — the same broad-rerun shape the VB
+        coverage gate uses). A non-passing final result is a StageError; an
+        uncertifiable oracle scope (OracleScopeError) propagates as a hard
+        failure. The whole gate is a NO-OP for a stack without a declared
+        implement-time oracle.
+        """
+        from codd.implement_oracle import (
+            OracleScopeError,
+            resolve_implement_oracle,
+            run_implement_oracle_gate,
+        )
+
+        config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
+        project_name = self._layout_project_name(project_root, config)
+
+        # Cheap NO-OP short-circuit: if the stack declares no implement-time
+        # oracle (Python today), do not even scaffold/echo — skip silently.
+        if resolve_implement_oracle(
+            project_root,
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+        ) is None:
+            return
+
+        # The oracle needs the scaffolded config (tsconfig) present NOW, at
+        # implement-time — verify's scaffold runs later. Idempotent + non-
+        # clobbering, so verify's re-scaffold is a no-op.
+        self._ensure_test_runner(project_root)
+
+        def _rerun(feedback: str) -> None:
+            self._rerun_tasks_with_feedback(project_root, tasks, feedback, options)
+
+        try:
+            result = run_implement_oracle_gate(
+                project_root,
+                language=language,
+                project_name=project_name,
+                source_dirs=source_dirs,
+                test_dirs=test_dirs,
+                config=config,
+                rerun=_rerun,
+                echo=self.echo,
+            )
+        except OracleScopeError as exc:
+            raise StageError(str(exc)) from exc
+
+        if not result.passed:
+            paths = f" (files: {', '.join(result.failed_paths)})" if result.failed_paths else ""
+            raise StageError(
+                f"implement-time native-oracle gate failed: the generated code does not "
+                f"typecheck — independently-generated artifacts disagree on the "
+                f"symbols/modules they import{paths}. Evidence categories: "
+                f"{result.category_counts()}. {result.detail}"
+            )
+
+    def _rerun_tasks_with_feedback(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+        feedback: str,
+        options: dict[str, Any],
+    ) -> None:
+        """Re-invoke implementation for every task carrying ``feedback``.
+
+        Routes through the SAME implement path the stage uses
+        (``implement_tasks`` with the resolved output paths), threading the
+        normalized oracle feedback so the SUT regenerates coherent files. Uses
+        the configured implement-task runner only when it is the default
+        (feedback-aware path); a custom injected runner has no feedback channel,
+        so this falls back to ``implement_tasks`` directly.
+        """
+        from codd.config import load_project_config
+        from codd.implementer import implement_tasks
+
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+        for task in tasks:
+            output_paths = (
+                list(task.output_paths)
+                if task.output_paths
+                else _output_paths_for_task(config, task)
+            )
+            implement_tasks(
+                project_root,
+                design=task.design_node,
+                output_paths=output_paths,
+                ai_command=self.ai_command,
+                use_derived_steps=True,
+                feedback=feedback,
+            )
 
     def _default_implement_task_runner(
         self,
