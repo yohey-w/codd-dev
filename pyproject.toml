@@ -79,6 +79,7 @@ include = [
     "codd/hooks/pre-commit",
     "codd_plugins/**/*.yaml",
     "codd_plugins/**/*.md",
+    "skills/**/*",
     "README.md",
     "LICENSE",
 ]
