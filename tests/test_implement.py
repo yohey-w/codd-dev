@@ -444,3 +444,72 @@ def test_non_test_generation_prompt_omits_e2e_no_runtime_import_rule():
         coding_principles=None,
     )
     assert "E2E no-runtime-import contract" not in prompt
+
+
+# ── Provenance banner placement (shebang-aware) ─────────────────────────
+
+_BANNER = "@generated-by: codd implement\n@generated-from: docs/design/x.md (design:x)"
+
+
+def test_prepend_banner_keeps_node_shebang_on_line_one():
+    """A `#!/usr/bin/env node` bin entry keeps its shebang on line 1; the
+    banner goes immediately after (else `tsc` raises TS18026)."""
+    content = '#!/usr/bin/env node\nimport { run } from "./run";\nrun();\n'
+    out = implementer_module._prepend_traceability_comment("src/cli.ts", _BANNER, content)
+    lines = out.splitlines()
+    assert lines[0] == "#!/usr/bin/env node"
+    assert lines[1] == "// @generated-by: codd implement"
+    assert "// @generated-from: docs/design/x.md (design:x)" in out
+    assert 'import { run } from "./run";' in out
+
+
+def test_prepend_banner_keeps_python_shebang_on_line_one():
+    """Language-agnostic: a Python shebang also stays on line 1."""
+    content = "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n"
+    out = implementer_module._prepend_traceability_comment("src/tool.py", _BANNER, content)
+    lines = out.splitlines()
+    assert lines[0] == "#!/usr/bin/env python3"
+    assert lines[1] == "# @generated-by: codd implement"
+    assert "import sys" in out
+
+
+def test_prepend_banner_non_shebang_unchanged():
+    """Normal content (no shebang) → banner at the very top, as before."""
+    content = 'import { run } from "./run";\nrun();\n'
+    out = implementer_module._prepend_traceability_comment("src/cli.ts", _BANNER, content)
+    lines = out.splitlines()
+    assert lines[0] == "// @generated-by: codd implement"
+    assert lines[1] == "// @generated-from: docs/design/x.md (design:x)"
+    assert out.endswith('import { run } from "./run";\nrun();\n')
+
+
+def test_prepend_banner_idempotent_for_shebang_file():
+    """Applying the header twice to a shebang file must not duplicate the banner
+    or push the shebang off line 1."""
+    content = "#!/usr/bin/env node\nconsole.log(1);\n"
+    once = implementer_module._prepend_traceability_comment("src/cli.ts", _BANNER, content)
+    twice = implementer_module._prepend_traceability_comment("src/cli.ts", _BANNER, once)
+    assert once == twice
+    assert twice.splitlines()[0] == "#!/usr/bin/env node"
+    assert twice.count("// @generated-by: codd implement") == 1
+
+
+def test_prepend_banner_idempotent_for_non_shebang_file():
+    """Idempotency for the ordinary top-of-file case is preserved."""
+    content = "def f():\n    return 1\n"
+    once = implementer_module._prepend_traceability_comment("src/m.py", _BANNER, content)
+    twice = implementer_module._prepend_traceability_comment("src/m.py", _BANNER, once)
+    assert once == twice
+    assert once.count("# @generated-by: codd implement") == 1
+
+
+def test_prepend_banner_shebang_ts_compiles_pattern():
+    """A tiny TS bin file keeps the shebang on line 1, so `tsc` would accept it
+    (no TS18026). Mirrors the codex2 dogfood regression."""
+    content = "#!/usr/bin/env node\nconsole.log(1)\n"
+    out = implementer_module._prepend_traceability_comment("src/cli.ts", _BANNER, content)
+    assert out.startswith("#!/usr/bin/env node\n")
+    # The shebang is the first line and nothing precedes it.
+    assert out.index("#!/usr/bin/env node") == 0
+    # Banner is still present (traceability preserved).
+    assert "@generated-by: codd implement" in out

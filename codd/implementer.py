@@ -2423,10 +2423,35 @@ def _prepend_traceability_comment(relative_path: str, comment_block: str, conten
         return content
 
     formatted_comment = "\n".join(f"{prefix} {line}" for line in comment_block.splitlines())
+    marker = f"{prefix} @generated-by: codd implement"
+
+    # A shebang (`#!...`) is only valid on the FIRST line of a file (e.g. a Node
+    # bin entry `#!/usr/bin/env node`, a Python script, a shell script). If the
+    # generated content opens with one, the provenance banner must go AFTER it so
+    # the shebang stays on line 1 — otherwise tools like `tsc` reject it
+    # (TS18026: '#!' can only be used at the start of a file). We only treat the
+    # shebang as line 1 when it is *literally* first (no leading blank lines);
+    # if the model emitted content before it, we cannot make it valid and fall
+    # back to the default top-of-file banner.
+    if content.startswith("#!"):
+        newline_index = content.find("\n")
+        if newline_index == -1:
+            shebang_line, rest = content, ""
+        else:
+            shebang_line, rest = content[:newline_index], content[newline_index + 1 :]
+        # Idempotency: if the banner already sits directly after the shebang,
+        # leave the file untouched (re-running implement must not duplicate it).
+        if rest.lstrip().startswith(marker):
+            return content
+        body = rest.lstrip()
+        if body:
+            return f"{shebang_line}\n{formatted_comment}\n\n{body}"
+        return f"{shebang_line}\n{formatted_comment}\n"
+
     stripped_content = content.lstrip()
-    if stripped_content.startswith(f"{prefix} @generated-by: codd implement"):
+    if stripped_content.startswith(marker):
         return content
-    return f"{formatted_comment}\n\n{content.lstrip()}"
+    return f"{formatted_comment}\n\n{stripped_content}"
 
 
 def _strip_code_fence(block: str, *, destination: str | None = None) -> str:
