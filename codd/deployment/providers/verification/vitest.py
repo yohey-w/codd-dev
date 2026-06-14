@@ -87,37 +87,19 @@ class VitestTemplate(VerificationTemplate):
         # ``vitest run`` = non-watch single run; the path positional scopes it to
         # the e2e file/dir so a CLI e2e node runs its OWN test, not the suite.
         #
-        # vitest's DEFAULT collection ``include`` is ``**/*.{test,spec}.?(c|m)[jt]s?(x)``
-        # — it does NOT match the ``.e2e.ts`` e2e convention this template ROUTES
-        # here. The positional path is applied by vitest as a *filename filter*,
-        # NOT as the collection glob; with the default ``include`` a ``.e2e.ts``
-        # target collects 0 files ("No test files found") and the anti-false-green
-        # 0-collected check correctly hard-fails a file that DOES have real tests.
-        # Pass ``--include`` covering the same e2e/unit/spec suffixes the template
-        # uses to FIND e2e files (``_RUNNABLE_TS_GLOBS``) so FIND and RUN agree and
-        # the targeted ``.e2e.*`` file is actually collected. The CLI ``--include``
-        # overrides config ``include`` for this run; the positional still filters
-        # to the specific file. The globs stay scoped to ``.e2e.*``/``.test.*``/
-        # ``.spec.*`` test files — non-test ``.ts`` files are never collected, and
-        # the 0-collected hard fail still catches a genuinely empty ``.e2e.ts``.
-        command = ["npx", "vitest", "run"]
-        for glob in self._include_globs():
-            command += ["--include", shlex.quote(glob)]
-        command.append(shlex.quote(test_target))
+        # COLLECTION is owned by ``vitest.config.ts`` ``test.include`` (the TS
+        # scaffold emits one whose include covers ``.test.*``/``.spec.*`` AND the
+        # ``.e2e.*`` e2e convention this provider ROUTES here — see
+        # ``_scaffold_typescript`` in ``project_types.py``). vitest's CLI has
+        # **no** ``--include`` flag (that is a Jest option); passing it makes
+        # vitest abort with ``CACError: Unknown option --include`` → 0 collected
+        # → an opaque anti-false-green hard fail. The positional is applied by
+        # vitest as a *filename filter* over the config-collected set, scoping the
+        # run to the specific e2e file while the scaffolded config guarantees
+        # ``.e2e.*`` is collectable. The 0-collected hard fail still catches a
+        # genuinely empty ``.e2e.*`` target.
+        command = ["npx", "vitest", "run", shlex.quote(test_target)]
         return " ".join(command)
-
-    def _include_globs(self) -> tuple[str, ...]:
-        """Recursive collection globs for ``--include``, derived from the same
-        ``_RUNNABLE_TS_GLOBS`` suffixes used to FIND e2e files (so FIND and RUN
-        agree). Each ``*.<suffix>.ts`` leaf is widened to ``**/*.<suffix>.{ts,tsx,js,jsx}``
-        so the e2e/unit/spec file is collected at any depth and for JS/TS + JSX.
-        """
-        globs: list[str] = []
-        for leaf in self._RUNNABLE_TS_GLOBS:
-            # ``*.e2e.ts`` -> ``e2e``; widen extension + make recursive.
-            suffix = leaf[2:].rsplit(".", 1)[0]  # strip leading "*." and trailing ext
-            globs.append(f"**/*.{suffix}.{{ts,tsx,js,jsx}}")
-        return tuple(globs)
 
     def execute(self, command: str) -> VerificationResult:
         started_at = time.monotonic()

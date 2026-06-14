@@ -254,6 +254,18 @@ class TestTypeScriptScaffold:
         assert "build" in pkg["scripts"]
         assert pkg["type"] == "module"  # coherent with NodeNext
 
+        # vitest.config.ts owns COLLECTION: its ``test.include`` must cover the
+        # routed ``.e2e.*`` convention (not just vitest's default .test/.spec),
+        # else a routed ``.e2e.ts`` collects 0 tests. vitest's CLI has no
+        # ``--include`` flag, so collection MUST be config-driven here.
+        assert (tmp_path / "vitest.config.ts").is_file()
+        assert "vitest.config.ts" in result.created
+        vitest_cfg = (tmp_path / "vitest.config.ts").read_text(encoding="utf-8")
+        assert "defineConfig" in vitest_cfg
+        assert "include:" in vitest_cfg
+        assert "**/*.e2e.{ts,tsx,cts,mts,js,jsx,cjs,mjs}" in vitest_cfg
+        assert "**/*.{test,spec}.{ts,tsx,cts,mts,js,jsx,cjs,mjs}" in vitest_cfg
+
     def test_idempotent_second_call_creates_nothing(self, tmp_path):
         profile = self._profile()
         scaffold_layout(tmp_path, profile)

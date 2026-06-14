@@ -231,22 +231,20 @@ def test_vitest_generate_test_command_e2e(tmp_path, monkeypatch):
         target="convert",
     )
     command = VitestTemplate().generate_test_command(runtime_state, "e2e")
-    # ``vitest run`` with an explicit collection ``--include`` (the default
-    # ``include`` omits ``.e2e.*``), positionally filtered to the e2e dir.
-    assert command == (
-        "npx vitest run "
-        "--include '**/*.test.{ts,tsx,js,jsx}' "
-        "--include '**/*.e2e.{ts,tsx,js,jsx}' "
-        "--include '**/*.spec.{ts,tsx,js,jsx}' "
-        "tests/e2e/"
-    )
+    # ``vitest run`` positionally filtered to the e2e dir. Collection (incl. the
+    # ``.e2e.*`` convention) is owned by the scaffolded ``vitest.config.ts``
+    # ``test.include`` — NOT a CLI flag: vitest's CLI has no ``--include`` (that
+    # is a Jest option) and passing it aborts the run with ``CACError``.
+    assert command == "npx vitest run tests/e2e/"
+    assert "--include" not in command
 
 
-def test_vitest_generate_test_command_includes_e2e_glob_so_e2e_ts_collected(tmp_path, monkeypatch):
-    # ROOT FIX: vitest's default ``include`` (``**/*.{test,spec}...``) does NOT
-    # match ``.e2e.ts``; the template ROUTES ``.e2e.ts`` here, so the built
-    # command MUST add an ``--include`` that covers ``.e2e.ts`` (else a real
-    # ``.e2e.ts`` collects 0 tests -> false anti-false-green hard fail).
+def test_vitest_generate_test_command_no_invalid_include_flag(tmp_path, monkeypatch):
+    # REGRESSION GUARD (vitest has NO ``--include`` CLI flag — Jest does): a
+    # routed ``.e2e.ts`` is made collectable by the scaffolded ``vitest.config.ts``
+    # ``test.include`` (see ``test_project_types``), NOT a CLI flag. Passing
+    # ``--include`` aborts vitest (``CACError: Unknown option --include``) -> 0
+    # collected -> opaque hard fail. The command is just ``run`` + positional.
     e2e_file = tmp_path / "tests" / "e2e" / "tempconv_cli_contract.e2e.ts"
     e2e_file.parent.mkdir(parents=True)
     e2e_file.write_text("import { it, expect } from 'vitest'; it('x', () => expect(1).toBe(1));\n")
@@ -258,18 +256,16 @@ def test_vitest_generate_test_command_includes_e2e_glob_so_e2e_ts_collected(tmp_
 
     command = VitestTemplate().generate_test_command(RuntimeState(), "e2e")
 
-    # The collection glob that lets vitest SEE the ``.e2e.ts`` file.
-    assert "--include" in command
-    assert "*.e2e.{ts,tsx,js,jsx}" in command
-    # ``--include`` precedes the positional file filter (compose: collect then filter).
-    assert command.index("--include") < command.index("tempconv_cli_contract.e2e.ts")
-    # The targeted file is still the positional filter, scoping the run to itself.
+    assert "--include" not in command
+    assert command.startswith("npx vitest run ")
+    # The routed file is the positional filter, scoping the run to itself.
     assert command.endswith("tests/e2e/tempconv_cli_contract.e2e.ts")
 
 
-def test_vitest_include_glob_covers_test_and_spec_no_regression(tmp_path, monkeypatch):
-    # No regression: ``.test.*`` and ``.spec.*`` must remain in the collection
-    # set so existing unit-style / spec-style e2e files still collect.
+def test_vitest_command_uses_only_valid_cli_surface(tmp_path, monkeypatch):
+    # vitest's CLI surface for our use is ``run`` + a positional filter. No
+    # ``--include`` in ANY form (it aborts the run); ``.test.*``/``.spec.*``/
+    # ``.e2e.*`` collection is config-driven (see the scaffolded vitest.config.ts).
     monkeypatch.chdir(tmp_path)
     runtime_state = RuntimeStateNode(
         identifier="runtime:cli:convert",
@@ -277,12 +273,8 @@ def test_vitest_include_glob_covers_test_and_spec_no_regression(tmp_path, monkey
         target="convert",
     )
     command = VitestTemplate().generate_test_command(runtime_state, "e2e")
-    assert "*.test.{ts,tsx,js,jsx}" in command
-    assert "*.spec.{ts,tsx,js,jsx}" in command
-    # Scoped: the include globs only ever match ``.e2e.``/``.test.``/``.spec.``
-    # TEST files — a bare ``*.ts`` (non-test) glob must NEVER be included.
-    assert "--include '**/*.{ts,tsx,js,jsx}'" not in command
-    assert "--include '**/*.ts'" not in command
+    assert "--include" not in command
+    assert command.split()[:3] == ["npx", "vitest", "run"]
 
 
 def test_vitest_template_passes_on_real_run(monkeypatch):

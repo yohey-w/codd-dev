@@ -674,6 +674,7 @@ def _scaffold_python(project_root: Path, profile: LayoutProfile) -> ScaffoldResu
 
 _TSCONFIG_FILENAME = "tsconfig.json"
 _PACKAGE_JSON_FILENAME = "package.json"
+_VITEST_CONFIG_FILENAME = "vitest.config.ts"
 
 #: A strict, NodeNext tsconfig. ``noEmit`` keeps ``tsc`` a pure typechecker
 #: (the executed ``tsc --noEmit`` gate); NodeNext module+resolution makes ESM
@@ -693,6 +694,28 @@ _SCAFFOLD_TSCONFIG: dict[str, Any] = {
     },
 }
 
+#: Scaffolded ``vitest.config.ts`` (create-only). vitest's DEFAULT
+#: ``test.include`` is ``**/*.{test,spec}.?(c|m)[jt]s?(x)`` — it does NOT match
+#: the ``.e2e.*`` e2e convention codex emits and this harness ROUTES to verify
+#: nodes (see ``find_spec_files`` in the vitest provider). Declaring the include
+#: here — the IDIOMATIC vitest mechanism; the CLI has no ``--include`` flag —
+#: makes FIND and RUN agree so a routed ``.e2e.ts`` is actually collected. Kept a
+#: strict superset of vitest's default so nothing already collected is excluded.
+_SCAFFOLD_VITEST_CONFIG = (
+    "// Scaffolded by codd greenfield (create-only). Collection include must\n"
+    "// cover the .e2e.* e2e convention, not just vitest's default .test/.spec.\n"
+    'import { defineConfig } from "vitest/config";\n'
+    "\n"
+    "export default defineConfig({\n"
+    "  test: {\n"
+    "    include: [\n"
+    '      "**/*.{test,spec}.{ts,tsx,cts,mts,js,jsx,cjs,mjs}",\n'
+    '      "**/*.e2e.{ts,tsx,cts,mts,js,jsx,cjs,mjs}",\n'
+    "    ],\n"
+    "  },\n"
+    "});\n"
+)
+
 
 def _scaffold_typescript(project_root: Path, profile: LayoutProfile) -> ScaffoldResult:
     created: list[str] = []
@@ -709,6 +732,16 @@ def _scaffold_typescript(project_root: Path, profile: LayoutProfile) -> Scaffold
         tsconfig.parent.mkdir(parents=True, exist_ok=True)
         tsconfig.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         created.append(_TSCONFIG_FILENAME)
+
+    # vitest.config.ts owns COLLECTION (test.include): without it vitest's default
+    # include skips the routed ``.e2e.*`` convention → 0-collected hard fail.
+    vitest_config = project_root / _VITEST_CONFIG_FILENAME
+    if vitest_config.exists():
+        skipped.append(_VITEST_CONFIG_FILENAME)
+    else:
+        vitest_config.parent.mkdir(parents=True, exist_ok=True)
+        vitest_config.write_text(_SCAFFOLD_VITEST_CONFIG, encoding="utf-8")
+        created.append(_VITEST_CONFIG_FILENAME)
 
     runner_result = _ensure_typescript_test_runner(project_root, profile=profile)
     if runner_result.action in ("created", "augmented"):
