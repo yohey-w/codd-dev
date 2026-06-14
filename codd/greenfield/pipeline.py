@@ -886,8 +886,8 @@ class GreenfieldPipeline:
     def _enforce_import_coherence(self, project_root: Path) -> None:
         """Run the AST import-coherence gates BEFORE pytest.
 
-        Stack-general and profile-driven. Two complementary, static (AST-only)
-        anti-false-green gates run here, both BEFORE pytest so an incoherence
+        Stack-general and profile-driven. Three complementary, static (AST-only)
+        anti-false-green gates run here, all BEFORE pytest so an incoherence
         fails HONESTLY with an actionable message instead of crashing pytest or
         passing by accident:
 
@@ -901,13 +901,24 @@ class GreenfieldPipeline:
            defined or re-exported there — otherwise pytest aborts at COLLECTION
            with an opaque exit-2 error (2026-06 dogfood). This gate is scoped to
            the test tree and never duplicates gate (1)'s source-package check.
+        3. **E2E-contract (no-runtime-import) coherence**
+           (:func:`check_e2e_contract_coherence`): for a CLI/subprocess e2e
+           modality, e2e tests AND their shared e2e helpers must invoke the
+           entrypoint as a SUBPROCESS and must NOT import the runtime/source
+           package (2026-06 dogfood: a function-scoped runtime import in an e2e
+           helper violated the project's OWN governance test → a run-phase
+           assertion failure auto-repair correctly refused to touch). MODALITY-
+           GATED: a no-op for browser/device e2e (which legitimately import a
+           client) and for untyped/undecidable projects.
 
-        Either FAIL raises :class:`StageError` and fails the verify stage with the
+        Any FAIL raises :class:`StageError` and fails the verify stage with the
         DIAGNOSE → REGENERATE message (the scaffold is create-only; --resume will
-        not rewrite generated files, and stubs are never auto-created). Both honor
-        the explicit opt-out ``coherence.import_coherence: false`` and are never
-        weakened silently. A stack without a layout profile is a passing no-op.
+        not rewrite generated files, and stubs/tests are never auto-created or
+        auto-edited). All honor the explicit opt-out
+        ``coherence.import_coherence: false`` and are never weakened silently. A
+        stack without a layout profile is a passing no-op.
         """
+        from codd.e2e_contract_coherence import check_e2e_contract_coherence
         from codd.import_coherence import check_import_coherence
         from codd.test_import_coherence import check_test_import_coherence
 
@@ -942,6 +953,25 @@ class GreenfieldPipeline:
             raise StageError(test_result.summary())
         if test_result.detail:
             self.echo(f"[greenfield] verify: {test_result.detail}")
+
+        # E2E-contract (no-runtime-import) coherence — same hook, same DIAGNOSE →
+        # REGENERATE stance. MODALITY-GATED: active only for a CLI/subprocess e2e
+        # contract (browser/device e2e legitimately imports a client → no-op). It
+        # never touches the repair scope-guard / attribution (deferred-B stays
+        # deferred) — it only adds an honest RED before pytest.
+        e2e_result = check_e2e_contract_coherence(
+            project_root,
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+        )
+        if not e2e_result.passed:
+            self.echo(f"[greenfield] verify: {e2e_result.summary()}")
+            raise StageError(e2e_result.summary())
+        if e2e_result.detail:
+            self.echo(f"[greenfield] verify: {e2e_result.detail}")
 
     # ── stage: propagate (advisory on a fresh build) ────────
 

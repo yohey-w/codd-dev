@@ -1328,3 +1328,80 @@ def test_verify_hook_passes_on_coherent_suite(tmp_path: Path) -> None:
     )
     # Must not raise.
     GreenfieldPipeline()._enforce_import_coherence(project)
+
+
+# ═══════════════════════════════════════════════════════════
+# e2e-contract (no-runtime-import) coherence gate (verify-stage hook)
+# ═══════════════════════════════════════════════════════════
+
+
+def _set_cli_project_type(project: Path) -> None:
+    """Mark the stub project's type as ``cli`` so its e2e modality resolves to cli.
+
+    The e2e-contract gate is modality-gated; the stub's default config carries no
+    project_type (undecidable). Declaring ``required_artifacts.project_type: cli``
+    is exactly what a real py-CLI greenfield run records, and what makes
+    :func:`check_e2e_contract_coherence` activate.
+    """
+    config_path = project / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    config.setdefault("required_artifacts", {})["project_type"] = "cli"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+
+def test_verify_hook_fails_on_e2e_runtime_import(tmp_path: Path) -> None:
+    """The verify-stage hook surfaces a runtime import under the e2e tree as a
+    StageError BEFORE pytest — the e2e-no-runtime-import contract the model itself
+    derived. This is the SIBLING of the symbol gate on the e2e-import-CONTRACT
+    axis (the dogfood shape: a function-scoped runtime import in an e2e helper).
+    """
+    project, tests, pkg_name = _coherence_project(tmp_path)
+    _set_cli_project_type(project)
+    e2e = tests / "e2e"
+    helpers = e2e / "helpers"
+    helpers.mkdir(parents=True)
+    (e2e / "__init__.py").write_text("")
+    (helpers / "__init__.py").write_text("")
+    # The exact dogfood violation: a function-scoped runtime import in a helper.
+    (helpers / "cli.py").write_text(
+        "def invoke_cli_unit(argv):\n"
+        f"    from {pkg_name}.core import add\n"
+        "    return add(argv)\n"
+    )
+    (e2e / "test_flow.py").write_text(
+        "from .helpers.cli import invoke_cli_unit\n\n\n"
+        "def test_run():\n    assert invoke_cli_unit(1) == 1\n"
+    )
+
+    with pytest.raises(StageError) as excinfo:
+        GreenfieldPipeline()._enforce_import_coherence(project)
+    message = str(excinfo.value)
+    assert "e2e_runtime_import" in message
+    assert pkg_name in message
+    # Honest DIAGNOSE → REGENERATE; never auto-edits the helper or the test.
+    assert "REGENERATE" in message
+    assert "tests are never auto-edited" in message
+
+
+def test_verify_hook_passes_on_subprocess_only_e2e(tmp_path: Path) -> None:
+    """A subprocess-only e2e suite (no runtime import under the e2e tree) clears
+    ALL three coherence gates at the verify hook — no false-RED.
+    """
+    project, tests, pkg_name = _coherence_project(tmp_path)
+    _set_cli_project_type(project)
+    e2e = tests / "e2e"
+    helpers = e2e / "helpers"
+    helpers.mkdir(parents=True)
+    (e2e / "__init__.py").write_text("")
+    (helpers / "__init__.py").write_text("")
+    (helpers / "cli.py").write_text(
+        "import subprocess\n\n\n"
+        "def invoke_cli(argv):\n"
+        "    return subprocess.run(['coh-app'] + argv, capture_output=True)\n"
+    )
+    (e2e / "test_flow.py").write_text(
+        "from .helpers.cli import invoke_cli\n\n\n"
+        "def test_run():\n    assert invoke_cli([]).returncode == 0\n"
+    )
+    # Must not raise.
+    GreenfieldPipeline()._enforce_import_coherence(project)

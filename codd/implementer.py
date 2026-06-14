@@ -1818,6 +1818,12 @@ def _build_implementation_prompt(
     # UI wrapper guidance exactly as before; only an explicit no-UI capability set
     # suppresses UI-specific wrapper vocabulary.
     has_ui = capabilities is None or capabilities.user_interface
+    # E2E modality drives the e2e-contract (no-runtime-import) test rule below.
+    # Default to the conservative ``cli`` baseline (``ProjectCapabilities``'s own
+    # default) so an untyped project still gets the no-runtime-import guidance,
+    # while an explicit browser/device modality (which legitimately imports a
+    # client/runtime in its e2e layer) does NOT.
+    e2e_modality = "cli" if capabilities is None else capabilities.e2e_modality
     project = config.get("project") or {}
     frameworks = project.get("frameworks") or []
     language = _normalize_implementation_language(project.get("language"))
@@ -1894,6 +1900,17 @@ def _build_implementation_prompt(
                 "",
             ]
         )
+
+        if e2e_modality == "cli":
+            lines.extend(
+                [
+                    "E2E no-runtime-import contract (release-blocking — this project's e2e modality is CLI/subprocess):",
+                    "- E2E tests AND their shared e2e helpers must drive the system the way a real user does: invoke the BUILT/INSTALLED entrypoint as a SUBPROCESS (run the command, then assert on its exit code, stdout, stderr, and the files/artifacts it produces). E2E tests and e2e helpers must NOT import the application/runtime (source) package — no `import <runtime_pkg>` and no `from <runtime_pkg> import ...`, not at module level and not inside a function/fixture body.",
+                    "- An in-process helper that DOES import the runtime package (e.g. to call a function directly) is a UNIT/integration helper — put it in the unit test tree, NOT under the e2e helper package. Keep the e2e helper package purely subprocess-driven.",
+                    "- If the design declares this e2e-no-runtime-import contract (e.g. an acceptance criterion / governance test asserting no runtime root is imported under the e2e tree), GENERATE that one governance check and then OBEY it everywhere in the e2e tree — do not generate the governance test and then violate it in a helper. Emit exactly ONE governance form per contract, and prefer an AST-based import check (parse the e2e files and inspect their import nodes) over a brittle literal-string/substring scan of the source text.",
+                    "",
+                ]
+            )
 
     lines.extend([
         "Required output format (repeat this block for each file and output nothing else):",

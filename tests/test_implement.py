@@ -355,3 +355,92 @@ def test_non_test_generation_prompt_omits_scoped_assertion_block():
 
     assert "Scoped assertions" not in prompt
     assert "codd: covers vb=<id>" not in prompt
+
+
+def test_test_generation_prompt_emits_e2e_no_runtime_import_rule_for_cli():
+    """A test-targeting run on a CLI e2e modality (the default) must steer the
+    model to keep the e2e layer subprocess-only and free of runtime imports — the
+    e2e-no-runtime-import contract, with an AST-check preference."""
+    from codd.project_types import ProjectCapabilities
+
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="test:acceptance",
+            path=Path("docs/test/acceptance_criteria.md"),
+            content="# Acceptance criteria\n",
+        ),
+        spec=ImplementSpec("docs/test/acceptance_criteria.md", ["src/tests"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+        capabilities=ProjectCapabilities(e2e_modality="cli"),
+    )
+
+    assert "E2E no-runtime-import contract" in prompt
+    assert "as a SUBPROCESS" in prompt
+    # In-process runtime-importing helpers belong in the unit tree, not e2e.
+    assert "UNIT/integration helper" in prompt
+    # Prefer an AST-based import check over brittle literal-string scanning.
+    assert "prefer an AST-based import check" in prompt
+    # Stack-neutral: no project/example literals leaked into the guidance.
+    for literal in ("todo_cli", "todo-cli", "Playwright", "tests/e2e"):
+        assert literal not in prompt
+
+
+def test_test_generation_prompt_e2e_rule_defaults_on_when_untyped():
+    """An untyped run (no capabilities) defaults to the conservative cli baseline,
+    so the e2e-no-runtime-import guidance is emitted (matches the gate default)."""
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="test:acceptance",
+            path=Path("docs/test/acceptance_criteria.md"),
+            content="# Acceptance criteria\n",
+        ),
+        spec=ImplementSpec("docs/test/acceptance_criteria.md", ["src/tests"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+    assert "E2E no-runtime-import contract" in prompt
+
+
+def test_test_generation_prompt_omits_e2e_rule_for_browser_modality():
+    """A browser e2e suite legitimately imports a client/runtime, so the
+    no-runtime-import rule MUST be gated out (anti-false guidance)."""
+    from codd.project_types import ProjectCapabilities
+
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="test:acceptance",
+            path=Path("docs/test/acceptance_criteria.md"),
+            content="# Acceptance criteria\n",
+        ),
+        spec=ImplementSpec("docs/test/acceptance_criteria.md", ["src/tests"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+        capabilities=ProjectCapabilities(e2e_modality="browser"),
+    )
+    assert "E2E no-runtime-import contract" not in prompt
+    # The shared test-helper symbol rule (ungated) is still present.
+    assert "Test-helper import coherence" in prompt
+
+
+def test_non_test_generation_prompt_omits_e2e_no_runtime_import_rule():
+    """The e2e-contract guidance is gated to test-targeting runs only."""
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="design:summary",
+            path=Path("docs/design/summary.md"),
+            content="# Summary design\n",
+        ),
+        spec=ImplementSpec("docs/design/summary.md", ["src/app"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+    assert "E2E no-runtime-import contract" not in prompt
