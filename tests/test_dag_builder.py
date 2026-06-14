@@ -75,6 +75,16 @@ def test_build_dag_import_edges(tmp_path):
     assert any(edge.from_id == "src/a.ts" and edge.to_id == "src/b.ts" and edge.kind == "imports" for edge in dag.edges)
 
 
+def test_is_test_file_recognizes_e2e_ts(tmp_path):
+    # The DAG test-file classifier must recognise the ``.e2e.ts`` convention
+    # alongside ``.test.``/``.spec.`` so a generated e2e file is a TEST node.
+    from codd.dag.builder import _is_test_file
+
+    assert _is_test_file(tmp_path / "tests" / "e2e" / "foo.e2e.ts", tmp_path) is True
+    assert _is_test_file(tmp_path / "tests" / "e2e" / "foo.test.ts", tmp_path) is True
+    assert _is_test_file(tmp_path / "src" / "foo.ts", tmp_path) is False
+
+
 def test_build_dag_plan_tasks_extracted(tmp_path):
     _write(tmp_path / "src" / "feature.ts", "export const feature = true;\n")
     _write(tmp_path / "docs" / "design" / "implementation_plan.md", "## 1-1 Build feature\noutputs:\n  - src/feature.ts\n")

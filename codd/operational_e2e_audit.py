@@ -70,6 +70,20 @@ _TEST_SUFFIXES = (
     ".test.js",
     ".spec.jsx",
     ".test.jsx",
+    # ``.e2e.<ext>`` is a legitimate e2e naming convention (vitest/jest/Angular)
+    # that codex emits unprompted. Without these the VB-marker scan and the
+    # operational-e2e marker scan SKIP genuine e2e test files (their
+    # ``codd: covers`` markers go unseen), so declared behaviors read as
+    # uncovered → a false-RED coverage gate. Recognising them only makes MORE
+    # real test files visible; the suffix filter still excludes source modules.
+    ".e2e.ts",
+    ".e2e.tsx",
+    ".e2e.js",
+    ".e2e.jsx",
+    ".e2e-spec.ts",
+    ".e2e-spec.tsx",
+    ".e2e-spec.js",
+    ".e2e-spec.jsx",
     ".cy.ts",
     ".cy.js",
     ".py",

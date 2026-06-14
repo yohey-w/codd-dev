@@ -303,6 +303,18 @@ def test_cli_modality_discovers_test_ts_glob(tmp_path):
     assert any(t.verification_template_ref == "vitest" for t in tests)
 
 
+def test_cli_modality_discovers_e2e_ts_glob(tmp_path):
+    # ``*.e2e.ts`` is the explicit e2e convention codex emits unprompted; it must
+    # be discovered as an E2E verification node (and routed to vitest for cli),
+    # else the verify stage never RUNS the generated e2e test.
+    _write(tmp_path / "tests" / "e2e" / "tempconv_conversion.e2e.ts", "test('x')\n")
+
+    tests = extract_verification_tests(tmp_path, _cli_config())
+
+    assert len(tests) == 1
+    assert tests[0].verification_template_ref == "vitest"
+
+
 def test_no_declared_type_keeps_legacy_playwright_routing(tmp_path):
     # Backward compatibility: no project_type configured → legacy extension
     # routing (.ts → playwright), so existing builds are unaffected.

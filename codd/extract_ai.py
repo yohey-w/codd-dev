@@ -217,6 +217,7 @@ def _is_test_path(parts: tuple[str, ...]) -> bool:
         or filename.endswith(("_test.py", "_spec.rb"))
         or ".test." in filename
         or ".spec." in filename
+        or ".e2e." in filename  # *.e2e.ts e2e naming convention
     )
 
 
@@ -246,9 +247,9 @@ def _find_test_files(root: Path) -> list[Path]:
     patterns = [
         "tests/test_*.py", "tests/**/test_*.py",
         "test/test_*.py", "test/**/test_*.py",
-        "tests/**/*.test.*", "tests/**/*.spec.*",
-        "test/**/*.test.*", "test/**/*.spec.*",
-        "src/**/*.test.*", "src/**/*.spec.*",
+        "tests/**/*.test.*", "tests/**/*.spec.*", "tests/**/*.e2e.*",
+        "test/**/*.test.*", "test/**/*.spec.*", "test/**/*.e2e.*",
+        "src/**/*.test.*", "src/**/*.spec.*", "src/**/*.e2e.*",
         "spec/**/*_spec.*",
     ]
     tests: list[Path] = []

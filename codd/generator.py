@@ -979,7 +979,11 @@ def _combine_retry_feedback(original_feedback: str | None, error: ValueError) ->
 
 def _is_test_code_output(output_path: str) -> bool:
     """Check if the output target is an executable test file (not a design doc)."""
-    return output_path.endswith(('.spec.ts', '.test.ts', '.spec.js', '.test.js', '.spec.py', '.test.py'))
+    return output_path.endswith((
+        '.spec.ts', '.test.ts', '.e2e.ts',
+        '.spec.js', '.test.js', '.e2e.js',
+        '.spec.py', '.test.py',
+    ))
 
 
 def _build_generation_prompt(

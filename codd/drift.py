@@ -185,7 +185,7 @@ def extract_e2e_have_url_assertions(
     )
     spec_globs = _string_list_config(
         e2e_config.get("spec_globs", e2e_config.get("file_globs")),
-        ["*.spec.ts"],
+        ["*.spec.ts", "*.e2e.ts"],
     )
 
     if not assertion_pattern or not test_dir.exists():

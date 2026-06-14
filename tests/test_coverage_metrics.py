@@ -70,6 +70,21 @@ def test_e2e_coverage_with_tests(tmp_path):
     assert result.passed is True
 
 
+def test_e2e_coverage_counts_e2e_ts_stems(tmp_path):
+    # ``.e2e.ts`` is a genuine e2e naming convention; such a file must count as a
+    # covering e2e test (its stem matches the scenario), like ``.spec.ts``.
+    _write_scenarios(tmp_path, ["Learner login via /login"])
+    tests_dir = tmp_path / "docs" / "e2e" / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_learner_login_via_login.e2e.ts").write_text("", encoding="utf-8")
+
+    result = compute_e2e_coverage(tmp_path)
+
+    assert result.total == 1
+    assert result.covered == 1
+    assert result.passed is True
+
+
 def test_e2e_coverage_missing_tests(tmp_path):
     _write_scenarios(tmp_path, ["Login", "Dashboard", "Settings"])
 

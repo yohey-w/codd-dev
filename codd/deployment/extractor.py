@@ -32,12 +32,19 @@ MARKDOWN_H2_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
 URL_PATH_RE = re.compile(r"(?<![:\w])/[A-Za-z0-9_./{}:-]+")
 
 DEPLOYMENT_DOC_PATTERNS = ("DEPLOYMENT.md", "DEPLOY.md", "docs/deploy/*.md")
-SMOKE_TEST_PATTERNS = ("tests/smoke/*.test.ts", "tests/smoke/*.spec.ts", "tests/smoke/*.sh")
-# Both globs are kept: Playwright's convention is ``*.spec.ts`` while a CLI
-# (vitest/jest) e2e is ``*.test.ts``. Routing to the right RUNNER happens in
-# :func:`_verification_template_ref` (by ``e2e_modality``); discovery must see
-# both shapes so a generated ``*.test.ts`` CLI e2e is not silently dropped.
-E2E_TEST_PATTERNS = ("tests/e2e/*.spec.ts", "tests/e2e/*.test.ts")
+SMOKE_TEST_PATTERNS = (
+    "tests/smoke/*.test.ts",
+    "tests/smoke/*.spec.ts",
+    "tests/smoke/*.e2e.ts",
+    "tests/smoke/*.sh",
+)
+# All globs are kept: Playwright's convention is ``*.spec.ts``, a CLI
+# (vitest/jest) e2e is commonly ``*.test.ts``, and ``*.e2e.ts`` is the explicit
+# e2e naming convention codex emits unprompted. Routing to the right RUNNER
+# happens in :func:`_verification_template_ref` (by ``e2e_modality``); discovery
+# must see every shape so a generated e2e test is not silently dropped (an
+# undiscovered ``.e2e.ts`` e2e means the verify stage never RUNS it).
+E2E_TEST_PATTERNS = ("tests/e2e/*.spec.ts", "tests/e2e/*.test.ts", "tests/e2e/*.e2e.ts")
 RUNTIME_CAPABILITY_INFERENCE_DEFAULTS = Path(__file__).parent / "defaults" / "runtime_capability_inference.yaml"
 
 DEPLOYMENT_SECTION_IMPL_PATTERNS: dict[str, tuple[str, ...]] = {

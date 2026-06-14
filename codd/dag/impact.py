@@ -146,9 +146,14 @@ def is_test_path(path: str) -> bool:
     # Directory-based: tests/, __tests__/, test/, spec/
     if any(p in ("tests", "__tests__", "test", "spec") for p in parts):
         return True
-    # File-based: *.spec.*, *.test.*, test_*
+    # File-based: *.spec.*, *.test.*, *.e2e.*, test_*
     basename = parts[-1] if parts else ""
-    if ".spec." in basename or ".test." in basename or basename.startswith("test_"):
+    if (
+        ".spec." in basename
+        or ".test." in basename
+        or ".e2e." in basename
+        or basename.startswith("test_")
+    ):
         return True
     return False
 

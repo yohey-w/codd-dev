@@ -315,10 +315,16 @@ def _actual_e2e_test_stems(tests_dir: Path) -> set[str]:
         return set()
 
     stems: set[str] = set()
-    for test_path in [*tests_dir.glob("*.spec.ts"), *tests_dir.glob("*.cy.ts")]:
+    for test_path in [
+        *tests_dir.glob("*.spec.ts"),
+        *tests_dir.glob("*.e2e.ts"),
+        *tests_dir.glob("*.cy.ts"),
+    ]:
         name = test_path.name
         if name.endswith(".spec.ts"):
             stems.add(name.removesuffix(".spec.ts"))
+        elif name.endswith(".e2e.ts"):
+            stems.add(name.removesuffix(".e2e.ts"))
         elif name.endswith(".cy.ts"):
             stems.add(name.removesuffix(".cy.ts"))
     return stems

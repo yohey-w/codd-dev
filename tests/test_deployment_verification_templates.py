@@ -264,5 +264,35 @@ def test_vitest_template_zero_tests_is_hard_fail_even_on_exit_0(monkeypatch):
     assert "0 tests" in result.output or "no test files" in result.output.lower()
 
 
+def test_vitest_find_spec_files_recognizes_e2e_ts(tmp_path):
+    # ``.e2e.ts`` is a genuine e2e naming convention; it must be SELECTED to run
+    # alongside ``.test.ts``. Before the fix only ``*.test.ts`` was globbed.
+    e2e_named = tmp_path / "tests" / "e2e" / "tempconv_conversion.e2e.ts"
+    test_named = tmp_path / "tests" / "e2e" / "cli.test.ts"
+    for path in (e2e_named, test_named):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("import 'vitest';\n")
+    found = VitestTemplate().find_spec_files(tmp_path, "e2e")
+    assert e2e_named in found
+    assert test_named in found
+
+
+def test_vitest_e2e_ts_run_zero_tests_still_hard_fails(monkeypatch):
+    # ANTI-FALSE-GREEN: the executed-count discipline applies to ``.e2e.ts`` runs
+    # too — a run that collects 0 tests is a hard fail even on exit 0.
+    class _Completed:
+        returncode = 0
+        stdout = "No test files found, exiting with code 0\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "codd.deployment.providers.verification.vitest.subprocess.run",
+        lambda *a, **k: _Completed(),
+    )
+    result = VitestTemplate().execute("npx vitest run tests/e2e/tempconv_conversion.e2e.ts")
+    assert result.passed is False
+    assert "0 tests" in result.output or "no test files" in result.output.lower()
+
+
 def test_vitest_template_contract_is_satisfied():
     assert isinstance(VitestTemplate(), VerificationTemplate)

@@ -124,14 +124,19 @@ class VitestTemplate(VerificationTemplate):
             duration=duration,
         )
 
+    #: TS/JS test-file shapes vitest can run for a CLI e2e: the default
+    #: ``*.test.ts`` glob, plus the explicit ``*.e2e.ts`` e2e convention codex
+    #: emits unprompted (and ``*.spec.ts`` for completeness). Missing ``.e2e.ts``
+    #: here meant a generated ``.e2e.ts`` e2e was never selected to RUN.
+    _RUNNABLE_TS_GLOBS: tuple[str, ...] = ("*.test.ts", "*.e2e.ts", "*.spec.ts")
+
     def find_spec_files(self, project_root: Path, test_kind: str) -> list[Path]:
-        # Generated CLI e2e tests are ``*.test.ts`` (vitest's default glob),
-        # unlike Playwright's ``*.spec.ts``.
-        if test_kind.lower() == "e2e":
-            pattern = "tests/e2e/**/*.test.ts"
-        else:
-            pattern = "tests/smoke/**/*.test.ts"
-        return sorted(project_root.glob(pattern))
+        base = "tests/e2e" if test_kind.lower() == "e2e" else "tests/smoke"
+        found: dict[str, Path] = {}
+        for leaf in self._RUNNABLE_TS_GLOBS:
+            for path in project_root.glob(f"{base}/**/{leaf}"):
+                found[str(path)] = path
+        return sorted(found.values())
 
 
 def _collected_zero(output: str) -> bool:

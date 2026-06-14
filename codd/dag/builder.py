@@ -997,7 +997,7 @@ def _test_convention_key(test_path: Path, project_root: Path) -> str | None:
     relative_parts = _relative_id(test_path, project_root).split("/")
     name = test_path.name
 
-    for marker in (".test.", ".spec."):
+    for marker in (".test.", ".spec.", ".e2e."):
         if marker in name:
             return name.split(marker, 1)[0]
 
@@ -1045,7 +1045,7 @@ def _convention_path_candidates(test_path: Path, project_root: Path, convention_
     }
     suffixes = suffix_groups.get(test_path.suffix, [".ts", ".tsx", ".js", ".jsx"])
 
-    if any(marker in test_path.name for marker in (".test.", ".spec.")):
+    if any(marker in test_path.name for marker in (".test.", ".spec.", ".e2e.")):
         candidates.append((test_path.parent / convention_key).resolve())
 
     for root_name in ("codd", "src"):
@@ -1058,7 +1058,10 @@ def _convention_path_candidates(test_path: Path, project_root: Path, convention_
 def _is_test_file(file_path: Path, project_root: Path) -> bool:
     relative_parts = _relative_id(file_path, project_root).split("/")
     name = file_path.name
-    if any(marker in name for marker in (".test.", ".spec.")):
+    # ``.e2e.`` is a legitimate e2e naming convention (vitest/jest/Angular)
+    # alongside ``.test.``/``.spec.``; recognising it keeps a generated
+    # ``foo.e2e.ts`` e2e classified as a TEST node in the DAG.
+    if any(marker in name for marker in (".test.", ".spec.", ".e2e.")):
         return True
     if file_path.suffix == ".bats":
         return True

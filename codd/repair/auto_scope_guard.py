@@ -145,7 +145,8 @@ _TEST_PATH = re.compile(
     r"|(^|/)test_[^/]+\.py$"  # pytest test_*.py
     r"|[^/]+_test\.(py|go)$"  # *_test.py / *_test.go
     r"|[^/]+\.test\.(js|jsx|ts|tsx)$"  # *.test.ts
-    r"|[^/]+\.spec\.(js|jsx|ts|tsx)$",  # *.spec.ts
+    r"|[^/]+\.spec\.(js|jsx|ts|tsx)$"  # *.spec.ts
+    r"|[^/]+\.e2e\.(js|jsx|ts|tsx)$",  # *.e2e.ts (e2e naming convention)
     re.IGNORECASE,
 )
 

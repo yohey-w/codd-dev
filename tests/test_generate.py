@@ -638,6 +638,9 @@ def test_is_test_code_output_detects_spec_ts():
     assert generator_module._is_test_code_output("tests/e2e/auth.spec.ts") is True
     assert generator_module._is_test_code_output("tests/e2e/browser-nav.spec.js") is True
     assert generator_module._is_test_code_output("tests/test_auth.test.py") is True
+    # ``.e2e.ts`` is a genuine e2e test-output naming convention.
+    assert generator_module._is_test_code_output("tests/e2e/tempconv.e2e.ts") is True
+    assert generator_module._is_test_code_output("tests/e2e/flow.e2e.js") is True
 
 
 def test_is_test_code_output_rejects_non_test_files():

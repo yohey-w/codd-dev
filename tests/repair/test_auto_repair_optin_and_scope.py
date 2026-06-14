@@ -430,6 +430,19 @@ def test_test_file_rejected_for_assertion_failure():
     assert decision.allowed is False
 
 
+def test_e2e_ts_test_file_rejected_for_assertion_failure():
+    # ANTI-FALSE-GREEN: a ``.e2e.ts`` file is a TEST file and must stay read-only
+    # for an assertion failure (auto-repair must not rewrite a generated e2e test
+    # into passing). Even outside a ``tests/`` dir the ``.e2e.ts`` suffix marks it.
+    decision = _scope(
+        "src/tempconv_conversion.e2e.ts",
+        failure_class="assertion_failure",
+        code_addressable=True,
+        allowlist=["src/index.ts"],
+    )
+    assert decision.allowed is False
+
+
 def test_named_scaffold_allowed_for_harness_contract():
     decision = _scope(
         "tests/test_scaffold.py",

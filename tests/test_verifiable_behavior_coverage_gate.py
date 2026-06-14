@@ -369,3 +369,66 @@ def test_bounded_retry_exhausts_and_fails_on_persistent_omission(tmp_path):
     assert passed is False
     assert len(attempts) == 2  # bounded by max_retries
     assert any("VB-31" in message for message in errors)
+
+
+# ---------------------------------------------------------------------------
+# .e2e.ts recognition — a genuine e2e naming convention codex emits unprompted.
+# Before the fix the suffix filter skipped these files, so their `covers vb=`
+# markers were NEVER scanned and the declared VBs read as uncovered (false-RED).
+# ---------------------------------------------------------------------------
+
+
+def test_is_test_file_recognizes_e2e_ts_variants():
+    from codd.operational_e2e_audit import _is_test_file
+
+    assert _is_test_file(Path("tests/e2e/foo.e2e.ts")) is True
+    assert _is_test_file(Path("tests/e2e/foo.e2e.tsx")) is True
+    assert _is_test_file(Path("tests/e2e/foo.e2e.js")) is True
+    assert _is_test_file(Path("tests/e2e/foo.e2e-spec.ts")) is True
+    # A non-test source module must NOT be treated as a test file.
+    assert _is_test_file(Path("src/foo.ts")) is False
+
+
+def test_vb_marker_in_e2e_ts_file_counts_as_covered(tmp_path):
+    """A `.e2e.ts` file with `// codd: covers vb=` covers the VB (was missed)."""
+    project = tmp_path
+    _canonical_strategy(project, "| VB-CLI-01 | conversion via CLI |\n")
+    # The marker lives ONLY in a `.e2e.ts` file (the convention codex chose).
+    _write(
+        project / "tests" / "e2e" / "tempconv_conversion.e2e.ts",
+        "// codd: covers vb=VB-CLI-01\n"
+        "import { describe, it } from 'vitest';\n"
+        "describe('cli', () => { it('converts', () => {}); });\n",
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    report = build_vb_coverage_audit(project, config=config)
+    statuses = {row.vb_id: row.coverage_status for row in report.rows}
+    assert statuses["VB-CLI-01"] == "covered"
+
+    passed = run_implement_coverage_gate(
+        project,
+        config=config,
+        design_node="test:test-strategy",
+        output_paths=["tests/e2e/tempconv_conversion.e2e.ts"],
+        rerun=None,
+        echo=lambda _m: None,
+        echo_error=lambda _m: None,
+    )
+    assert passed is True
+
+
+def test_e2e_ts_recognition_does_not_weaken_gate_on_genuine_omission(tmp_path):
+    """ANTI-FALSE-GREEN: recognising `.e2e.ts` must NOT auto-cover an unmarked VB."""
+    project = tmp_path
+    _canonical_strategy(
+        project, "| VB-CLI-01 | covered |\n| VB-VAL-02 | genuinely unmarked |\n"
+    )
+    _write(
+        project / "tests" / "e2e" / "tempconv_conversion.e2e.ts",
+        "// codd: covers vb=VB-CLI-01\nimport 'vitest';\n",
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    report = build_vb_coverage_audit(project, config=config)
+    statuses = {row.vb_id: row.coverage_status for row in report.rows}
+    assert statuses["VB-CLI-01"] == "covered"
+    assert statuses["VB-VAL-02"] == "uncovered"  # no marker → still RED

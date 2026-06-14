@@ -363,3 +363,26 @@ class TestConservativeNonFlagging:
         (e2e / "test_ok.py").write_text("import subprocess\n\n\ndef test_a():\n    assert True\n")
         result = _check(tmp_path, config=_cli_config())
         assert result.passed, result.summary()
+
+    def test_typescript_e2e_tree_is_a_clean_noop(self, tmp_path):
+        # SCOPE: this gate is a Python-AST contract gate. A TypeScript project
+        # with a ``.e2e.ts`` e2e tree (even one that imports the runtime) is a
+        # clean PASSING no-op — the Python ``*.py`` scan finds nothing, so the
+        # gate neither crashes nor false-flags. TS import-contract analysis is a
+        # separate concern, intentionally NOT introduced by .e2e.ts suffix
+        # recognition (which only governs the VB scan + vitest run discovery).
+        e2e = tmp_path / "tests" / "e2e"
+        e2e.mkdir(parents=True)
+        (e2e / "tempconv.e2e.ts").write_text(
+            "import { convert } from '../../src/index';\nimport 'vitest';\n"
+        )
+        result = check_e2e_contract_coherence(
+            tmp_path,
+            language="typescript",
+            project_name="tempconv",
+            source_dirs=["src/"],
+            test_dirs=["tests/"],
+            config=_cli_config(),
+        )
+        assert result.passed
+        assert result.findings == []

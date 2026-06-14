@@ -138,3 +138,17 @@ def test_get_extractor_returns_python_ast_when_tree_sitter_missing(monkeypatch):
     extractor = get_extractor("python")
 
     assert isinstance(extractor, PythonAstExtractor)
+
+
+def test_test_extractor_recognizes_e2e_ts_suffix():
+    # Fact-extraction test→module mapping must see the ``.e2e.ts`` convention,
+    # else genuine e2e files are skipped during extraction.
+    from codd.parsing import TestExtractor
+
+    ts = TestExtractor("typescript")
+    assert ts._is_test_file("tempconv_conversion.e2e.ts") is True
+    assert ts._is_test_file("foo.e2e.tsx") is True
+    assert ts._is_test_file("foo.test.ts") is True
+    assert ts._is_test_file("foo.ts") is False  # non-test source must not match
+    js = TestExtractor("javascript")
+    assert js._is_test_file("foo.e2e.js") is True

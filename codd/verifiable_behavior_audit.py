@@ -567,7 +567,7 @@ def is_test_related_implement(
             if rel == prefix or rel.startswith(prefix + "/"):
                 return True
         name = PurePosixPath(rel).name
-        if re.search(r"\.(spec|test)\.[A-Za-z0-9]+$", name):
+        if re.search(r"\.(spec|test|e2e)\.[A-Za-z0-9]+$", name):
             return True
     return False
 

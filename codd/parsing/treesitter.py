@@ -481,7 +481,7 @@ def _extract_typescript_symbols(root: Any, content: str, file_path: str) -> list
                 # Const object / array → const_object symbol
                 # Skip test files — their fixtures/mocks add noise, not domain knowledge
                 _fp = file_path.lower()
-                if ".test." in _fp or ".spec." in _fp or "test-harness" in _fp:
+                if ".test." in _fp or ".spec." in _fp or ".e2e." in _fp or "test-harness" in _fp:
                     continue
                 value = _unwrap_value_node(raw_value)
                 if value is not None and value.type == "object":

@@ -181,6 +181,13 @@ class TestExtractor:
                     ".spec.tsx",
                     ".test.js",
                     ".spec.js",
+                    # ``.e2e.<ext>`` — the explicit e2e convention codex emits
+                    # unprompted; without it test→module mapping skips genuine
+                    # e2e files during fact extraction.
+                    ".e2e.ts",
+                    ".e2e.tsx",
+                    ".e2e.js",
+                    ".e2e.jsx",
                 )
             )
         if self.language == "go":
