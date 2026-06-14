@@ -858,6 +858,8 @@ class GreenfieldPipeline:
                 project_name=self._layout_project_name(project_root, config),
                 source_dirs=source_dirs,
                 test_dirs=test_dirs,
+                config=config,
+                project_root=project_root,
             )
             if profile is None:
                 # No layout profile for this stack: fall back to the runner-only
@@ -1350,16 +1352,42 @@ def _output_paths_for_task(config: dict[str, Any], task: ImplementTaskRef) -> li
     explicit = cli_module._implement_output_paths_for_cli(config, task.task_id)
     # A-core: when the harness owns a layout profile and the task fell through to
     # the bare source-root default (``src``), route SOURCE output INTO the package
-    # root (``src/<package_name>``) so the model writes a coherent src-layout
-    # package — package-absolute imports work and the import-coherence gate
-    # passes. An explicit ``implement.default_output_paths`` / ``output_root`` is
-    # respected (the default-detector returns those before the bare root). Never
-    # reroutes a path the author/test-routing already chose.
-    return _route_source_into_package(config, explicit)
+    # root (``src/<canonical_package>``) so the model writes a coherent src-layout
+    # package — package-absolute imports work and the import-coherence gate passes.
+    # The package name is the harness-owned CANONICAL name (config override >
+    # derive-from-the-model's-actual-single-package > project-name default), so a
+    # model that authored its own internally-coherent package (e.g. ``src/calc/``
+    # while the project is ``calc-lib``) is reconciled to ITS name rather than
+    # rejected and duplicated. We ALSO keep the bare ``source_root`` as an accepted
+    # output destination so that package — and a model emitting straight into
+    # ``src/<pkg>/`` — is never dropped as "outside output paths". An explicit
+    # ``implement.default_output_paths`` / ``output_root`` is respected.
+    return _route_source_into_package(config, explicit, project_root=_task_project_root(config, task))
 
 
-def _route_source_into_package(config: dict[str, Any], explicit: list[str]) -> list[str]:
-    profile = _resolve_layout_profile_from_config(config)
+def _task_project_root(config: dict[str, Any], task: ImplementTaskRef) -> Path | None:
+    """Best-effort project root for derive-from-actual canonical resolution.
+
+    ``ImplementTaskRef`` does not carry the project root, but the greenfield
+    pipeline always operates relative to CWD for an unconfigured task, and the
+    canonical resolver degrades safely to the project-name default when the root
+    is wrong/absent (derive-from-actual simply finds no package). Prefer an
+    explicit ``project.root`` if a project ever records one; else CWD.
+    """
+    project_section = config.get("project") if isinstance(config.get("project"), dict) else {}
+    root = project_section.get("root") if isinstance(project_section, dict) else None
+    if isinstance(root, str) and root.strip():
+        return Path(root)
+    try:
+        return Path.cwd()
+    except OSError:
+        return None
+
+
+def _route_source_into_package(
+    config: dict[str, Any], explicit: list[str], *, project_root: Path | None = None
+) -> list[str]:
+    profile = _resolve_layout_profile_from_config(config, project_root=project_root)
     if profile is None:
         return explicit
     source_root = profile.source_root
@@ -1368,9 +1396,9 @@ def _route_source_into_package(config: dict[str, Any], explicit: list[str]) -> l
     targets_source = False
     for path in explicit:
         norm = str(path).strip().replace("\\", "/").strip("/")
-        # Upgrade the BARE source root itself (e.g. "src") to the package root;
-        # leave any more specific path (already under the package, a test dir, or
-        # an explicit subpath) exactly as chosen.
+        # Upgrade the BARE source root itself (e.g. "src") to the CANONICAL package
+        # root; leave any more specific path (already under the package, a test
+        # dir, or an explicit subpath) exactly as chosen.
         if norm == source_root:
             rerouted.append(package_root)
             targets_source = True
@@ -1382,6 +1410,13 @@ def _route_source_into_package(config: dict[str, Any], explicit: list[str]) -> l
                 targets_source = True
     if not targets_source:
         return explicit
+    # Accept the bare source_root too: a model that authored its OWN coherent
+    # single package (``src/<its-name>/``) lands under source_root and must NOT be
+    # dropped as "outside output paths" (the calc/calc_lib duplication root cause).
+    # The canonical package_root stays the primary destination; the verify-phase
+    # gate + scaffold reconcile every artifact to the canonical name.
+    if source_root not in rerouted:
+        rerouted.append(source_root)
     # Implementing a module legitimately also emits its tests; allow the test
     # root so generated tests land under tests/ (where the coherence gate + the
     # runner's testpaths expect them) instead of being dropped as "outside output
@@ -1391,7 +1426,7 @@ def _route_source_into_package(config: dict[str, Any], explicit: list[str]) -> l
     return rerouted
 
 
-def _resolve_layout_profile_from_config(config: dict[str, Any]):
+def _resolve_layout_profile_from_config(config: dict[str, Any], *, project_root: Path | None = None):
     from codd.project_types import resolve_layout_profile
 
     project_section = config.get("project") if isinstance(config.get("project"), dict) else {}
@@ -1405,6 +1440,8 @@ def _resolve_layout_profile_from_config(config: dict[str, Any]):
         project_name=project_name,
         source_dirs=source_dirs,
         test_dirs=test_dirs,
+        config=config,
+        project_root=project_root,
     )
 
 

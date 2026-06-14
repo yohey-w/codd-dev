@@ -317,6 +317,8 @@ def check_e2e_contract_coherence(
             project_name=project_name,
             source_dirs=source_dirs,
             test_dirs=test_dirs,
+            config=config,
+            project_root=root,
         )
     if profile is None:
         return E2EContractResult(

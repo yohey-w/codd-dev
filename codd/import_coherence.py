@@ -358,14 +358,37 @@ def _check_shadowing(
     return findings
 
 
+def _detect_backend(parsed: dict[str, Any]) -> str:
+    """Classify the declared ``[build-system] build-backend`` (setuptools/hatchling/other)."""
+    build_system = parsed.get("build-system") if isinstance(parsed.get("build-system"), dict) else {}
+    backend = build_system.get("build-backend") if isinstance(build_system, dict) else None
+    token = backend.strip().lower() if isinstance(backend, str) else ""
+    if token.startswith("setuptools"):
+        return "setuptools"
+    if token.startswith("hatchling") or token.startswith("hatch"):
+        return "hatchling"
+    return token
+
+
 def _check_manifest_agreement(
     project_root: Path,
     profile: LayoutProfile,
 ) -> list[ImportCoherenceFinding]:
-    """Flag a pyproject that contradicts the profile's package name / source root.
+    """Flag a pyproject whose PACKAGING contradicts the profile (backend-aware).
 
-    Conservative: only flags a DECLARED setuptools ``where`` or ``[project]
-    name`` that disagrees; a pyproject without those keys imposes no requirement.
+    Validates the packaging declaration for BOTH supported backends — closing the
+    latent false-green where a HATCH project (with a setuptools-incoherent or
+    package-wrong wheel target) passed a setuptools-only check:
+
+    * **setuptools** — a declared ``[tool.setuptools.packages.find] where`` that
+      does not include the profile ``source_root``.
+    * **hatchling** — a declared ``[tool.hatch.build.targets.wheel] packages``
+      that does not include the profile ``package_root`` (``<src>/<pkg>``).
+
+    Conservative on the SETUPTOOLS side (only a declared ``where`` is checked) so
+    a pyproject without those keys imposes no requirement; but a hatch project is
+    held to its wheel-target packages when declared. A non-empty disagreement is
+    NEVER auto-passed — it is fed to the DIAGNOSE → REGENERATE path.
     """
     pyproject = project_root / "pyproject.toml"
     if not pyproject.exists():
@@ -378,8 +401,11 @@ def _check_manifest_agreement(
     if parsed is None:
         return []
     findings: list[ImportCoherenceFinding] = []
+    backend = _detect_backend(parsed)
 
     tool = parsed.get("tool") if isinstance(parsed.get("tool"), dict) else {}
+
+    # ── setuptools: validate packages.find where ⊇ source_root ──
     setuptools_cfg = tool.get("setuptools") if isinstance(tool, dict) else {}
     packages = setuptools_cfg.get("packages") if isinstance(setuptools_cfg, dict) else None
     if isinstance(packages, dict):
@@ -397,6 +423,31 @@ def _check_manifest_agreement(
                             f"include the profile source_root '{profile.source_root}'."
                         ),
                         details={"declared": declared, "expected": profile.source_root},
+                    )
+                )
+
+    # ── hatchling: validate wheel-target packages ⊇ package_root ──
+    # Only enforced for a hatch backend (a setuptools project may legitimately
+    # carry no [tool.hatch...] table). Closes the latent false-green: a hatch
+    # project previously passed the setuptools-only check while topology-wrong.
+    if backend == "hatchling":
+        hatch = tool.get("hatch") if isinstance(tool, dict) else {}
+        build = hatch.get("build") if isinstance(hatch, dict) else {}
+        targets = build.get("targets") if isinstance(build, dict) else {}
+        wheel = targets.get("wheel") if isinstance(targets, dict) else {}
+        wheel_packages = wheel.get("packages") if isinstance(wheel, dict) else None
+        if isinstance(wheel_packages, list) and wheel_packages:
+            declared_pkgs = [_norm(str(item)) for item in wheel_packages if str(item).strip()]
+            if declared_pkgs and profile.package_root not in declared_pkgs:
+                findings.append(
+                    ImportCoherenceFinding(
+                        kind="manifest_hatch_packages_mismatch",
+                        path="pyproject.toml",
+                        message=(
+                            f"[tool.hatch.build.targets.wheel] packages={declared_pkgs} does not "
+                            f"include the profile package_root '{profile.package_root}'."
+                        ),
+                        details={"declared": declared_pkgs, "expected": profile.package_root},
                     )
                 )
     return findings
@@ -446,6 +497,8 @@ def check_import_coherence(
             project_name=project_name,
             source_dirs=source_dirs,
             test_dirs=test_dirs,
+            config=config,
+            project_root=root,
         )
     if profile is None:
         return ImportCoherenceResult(

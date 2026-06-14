@@ -451,6 +451,8 @@ def check_test_import_coherence(
             project_name=project_name,
             source_dirs=source_dirs,
             test_dirs=test_dirs,
+            config=config,
+            project_root=root,
         )
     if profile is None:
         return TestImportCoherenceResult(

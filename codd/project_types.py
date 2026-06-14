@@ -25,7 +25,7 @@ Design goals:
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -321,6 +321,112 @@ def normalize_package_name(project_name: str | None, *, fallback: str = "app") -
     return collapsed
 
 
+def _config_package_name_override(config: Any) -> str | None:
+    """Read an explicit ``project.package_name`` override from project config.
+
+    The harness OWNS the package name; an owner may pin it explicitly via
+    ``project.package_name`` in ``codd.yaml`` (highest precedence — design-doc
+    PROSE is never the topology authority). Returns the normalized identifier, or
+    ``None`` when unset/blank/invalid so resolution falls through to the next
+    tier.
+    """
+    if not isinstance(config, Mapping):
+        return None
+    project_section = config.get("project")
+    if not isinstance(project_section, Mapping):
+        return None
+    raw = project_section.get("package_name")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    # Normalize so an owner who writes ``calc-lib`` still gets a valid identifier;
+    # a value that normalizes to the bare fallback (garbage) is treated as unset.
+    normalized = normalize_package_name(text)
+    return normalized if normalized != "app" or text.strip().lower() in {"app"} else None
+
+
+def _detect_single_top_level_package(
+    project_root: Path | None,
+    source_root: str,
+) -> str | None:
+    """Deterministically detect the model's single top-level src package, if unambiguous.
+
+    A greenfield SUT often authors its own package name internally coherently
+    (source uses ``from .mod import``, tests import ``from <pkg> import``,
+    ``[tool.coverage] source = ['<pkg>']`` — all agreeing on ``<pkg>``). When the
+    GENERATED structure has EXACTLY ONE top-level package directory under
+    ``source_root`` (a dir with an ``__init__.py`` and at least one other module),
+    that name is a deterministic ARTIFACT (not prose) and is the safest canonical:
+    adopting it keeps source/tests/imports/coverage byte-for-byte coherent instead
+    of rewriting every ``from <pkg> import`` in the model's tests.
+
+    Returns the package name only when the choice is UNAMBIGUOUS (exactly one such
+    top-level package); ``None`` otherwise (zero, or two+ — fall back to the
+    project-name default and let the deterministic scaffold/merge own topology).
+    """
+    if project_root is None:
+        return None
+    src_dir = Path(project_root) / _norm_rel(source_root)
+    if not src_dir.is_dir():
+        return None
+    candidates: list[str] = []
+    for child in sorted(src_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        name = child.name
+        if name in {"__pycache__"} or name.startswith("."):
+            continue
+        if not name.isidentifier():
+            continue
+        if not (child / "__init__.py").exists():
+            continue
+        candidates.append(name)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _norm_rel(rel: str) -> str:
+    return str(rel).strip().replace("\\", "/").strip("/")
+
+
+def resolve_canonical_package_name(
+    project_name: str | None,
+    *,
+    config: Any = None,
+    project_root: Path | None = None,
+    source_root: str = "src",
+) -> str:
+    """Resolve the ONE canonical Python package name the harness owns (deterministic).
+
+    Resolution order (highest precedence first):
+
+    1. **Explicit config override** — ``project.package_name`` in ``codd.yaml``.
+       The owner pinned it; honor it exactly. Design-doc prose is NEVER the
+       authority.
+    2. **Derive-from-actual** — the GENERATED structure's single unambiguous
+       top-level src package (see :func:`_detect_single_top_level_package`). The
+       structure is a deterministic artifact; adopting it keeps the model's
+       internally-coherent source/tests/imports/coverage byte-for-byte coherent
+       (no test-rewrite churn), which is both safer and cleaner than forcing a
+       name and rewriting imports.
+    3. **Project-name default** — ``normalize_package_name(project_name)``.
+       Deterministic and pure; the fallback when there is no override and no
+       single unambiguous existing package.
+
+    Every tier is deterministic and model-independent: the same inputs (config,
+    on-disk structure, project name) always yield the same canonical name, which
+    is what makes the reconciled source/pyproject/imports all agree.
+    """
+    override = _config_package_name_override(config)
+    if override is not None:
+        return override
+    detected = _detect_single_top_level_package(project_root, source_root)
+    if detected is not None:
+        return detected
+    return normalize_package_name(project_name)
+
+
 def _first_clean_dir(dirs: Any, default: str) -> str:
     """First normalized (slash-free) root from a ``scan.*_dirs`` value, or default."""
     normalized = _normalize_dirs(dirs)
@@ -332,10 +438,15 @@ def _python_layout_profile(
     project_name: str | None,
     source_dirs: Any,
     test_dirs: Any,
+    config: Any = None,
+    project_root: Path | None = None,
 ) -> LayoutProfile:
     """Python ``python_src_package`` profile: a src-layout, installed package.
 
-    * ``package_name`` derives from the project name (normalized identifier).
+    * ``package_name`` is the harness-owned CANONICAL name
+      (:func:`resolve_canonical_package_name`): explicit ``project.package_name``
+      override > the generated structure's single unambiguous top-level package >
+      ``normalize_package_name(project_name)``. Deterministic and model-independent.
     * ``source_root`` from ``scan.source_dirs`` (default ``src``).
     * ``package_root`` = ``<source_root>/<package_name>`` — source lives in a
       named package, so package-absolute imports work both in tests (installed)
@@ -343,8 +454,10 @@ def _python_layout_profile(
     * ``test_root`` from ``scan.test_dirs`` (default ``tests``).
     * runner=pytest, install_mode=editable, policy=package_absolute.
     """
-    package_name = normalize_package_name(project_name)
     source_root = _first_clean_dir(source_dirs, "src")
+    package_name = resolve_canonical_package_name(
+        project_name, config=config, project_root=project_root, source_root=source_root
+    )
     test_root = _first_clean_dir(test_dirs, "tests")
     return LayoutProfile(
         language="python",
@@ -365,6 +478,8 @@ def _typescript_layout_profile(
     project_name: str | None,
     source_dirs: Any,
     test_dirs: Any,
+    config: Any = None,  # noqa: ARG001 — accepted for builder-signature parity; TS uses path resolution, not a named package.
+    project_root: Path | None = None,  # noqa: ARG001 — parity (see above).
 ) -> LayoutProfile:
     """TypeScript (node) profile: a path-relative ``src`` layout, npm-installed.
 
@@ -415,6 +530,8 @@ def resolve_layout_profile(
     project_name: str | None,
     source_dirs: Any = None,
     test_dirs: Any = None,
+    config: Any = None,
+    project_root: Path | None = None,
 ) -> LayoutProfile | None:
     """Resolve the :class:`LayoutProfile` for a stack, or ``None`` if unsupported.
 
@@ -422,11 +539,23 @@ def resolve_layout_profile(
     is derived from ``project_name`` + the configured ``scan.*_dirs`` — there
     are NO hardcoded ``src``/``tests``/``<package>`` literals outside the
     per-stack builder's documented defaults.
+
+    ``config`` (the loaded project config) and ``project_root`` are optional and
+    feed the harness-owned CANONICAL package-name resolution (config override >
+    derive-from-actual single package > project-name default) for stacks that use
+    a named package (Python). Stacks that resolve by path (TypeScript) ignore
+    them. Omitting both preserves the pure project-name default (back-compat).
     """
     builder = _LAYOUT_PROFILE_BUILDERS.get((language or "").strip().lower())
     if builder is None:
         return None
-    return builder(project_name=project_name, source_dirs=source_dirs, test_dirs=test_dirs)
+    return builder(
+        project_name=project_name,
+        source_dirs=source_dirs,
+        test_dirs=test_dirs,
+        config=config,
+        project_root=project_root,
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -720,16 +849,83 @@ def _render_pytest_ini_section(*, testpaths: list[str], source_root: str) -> str
     return "\n".join(lines) + "\n"
 
 
-def _python_editable_metadata(profile: LayoutProfile) -> str:
-    """A ``[project]`` + setuptools src-layout table for an editable install.
+# ── Python build-backend awareness (the harness OWNS packaging topology) ──
+#
+# The harness owns the repository TOPOLOGY and the PACKAGING manifest fields that
+# realize it (where the wheel/editable install finds the package). It does NOT own
+# the model's domain intent — ``[project]``, dependencies, ``[tool.pytest]``, the
+# library logic. So packaging reconciliation is BACKEND-DETECTED and edits ONLY
+# the backend's packaging sub-table: never a setuptools table in a hatch project
+# or vice-versa (that would produce an incoherent manifest the build can't honor).
 
-    Makes ``pip install -e .`` install ``<package_name>`` from
-    ``<source_root>``, so tests import the REAL package (package-absolute) rather
-    than relying on PYTHONPATH. Only written when the file does not already carry
-    a ``[project]`` table (we never clobber author metadata).
+_BACKEND_SETUPTOOLS = "setuptools"
+_BACKEND_HATCHLING = "hatchling"
+
+
+def _detect_build_backend(text: str) -> str | None:
+    """Classify ``[build-system] build-backend`` → ``setuptools`` / ``hatchling`` / None.
+
+    ``None`` means "no build-system declared yet" (a fresh file we will create
+    with a default backend). An UNKNOWN/unrecognized backend string returns the
+    raw token so the caller can decline to edit (the manifest gate then fails
+    honestly rather than the harness guessing a packaging table for a backend it
+    doesn't understand — anti-false-green).
+    """
+    parsed = _parse_pyproject_toml(text)
+    if not isinstance(parsed, dict):
+        # Unparseable-but-nonempty: surface as an opaque non-None so the caller
+        # leaves it for the parse/manifest gates rather than editing blind.
+        return "" if text.strip() else None
+    build_system = parsed.get("build-system")
+    backend = build_system.get("build-backend") if isinstance(build_system, dict) else None
+    if not isinstance(backend, str) or not backend.strip():
+        # A pyproject without build-system but with content: unknown backend.
+        return None if not text.strip() else ""
+    token = backend.strip().lower()
+    if token.startswith("setuptools"):
+        return _BACKEND_SETUPTOOLS
+    if token.startswith("hatchling") or token.startswith("hatch"):
+        return _BACKEND_HATCHLING
+    return token  # a real but unsupported backend (flit/pdm/poetry/…) — decline.
+
+
+def _parse_pyproject_toml(text: str) -> dict[str, Any] | None:
+    if not text.strip():
+        return {}
+    try:  # tomllib is stdlib from 3.11.
+        import tomllib as parser  # type: ignore[import-not-found]
+    except ModuleNotFoundError:  # pragma: no cover - py<3.11
+        try:
+            import tomli as parser  # type: ignore[import-not-found, no-redef]
+        except ModuleNotFoundError:
+            return None
+    try:
+        loaded = parser.loads(text)
+    except Exception:  # noqa: BLE001 - a broken pyproject is the parse gate's job.
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _python_packaging_metadata(profile: LayoutProfile, *, backend: str) -> str:
+    """Full ``[build-system]`` + ``[project]`` + packaging table for a NEW file.
+
+    Backend-correct: setuptools gets ``[tool.setuptools.packages.find] where``;
+    hatchling gets ``[tool.hatch.build.targets.wheel] packages``. Used ONLY when
+    no pyproject exists — never to clobber author metadata.
     """
     pkg = profile.package_name
     src = profile.source_root
+    if backend == _BACKEND_HATCHLING:
+        return (
+            "[build-system]\n"
+            'requires = ["hatchling"]\n'
+            'build-backend = "hatchling.build"\n\n'
+            "[project]\n"
+            f'name = "{pkg}"\n'
+            'version = "0.0.0"\n\n'
+            "[tool.hatch.build.targets.wheel]\n"
+            f'packages = ["{src}/{pkg}"]\n'
+        )
     return (
         "[build-system]\n"
         'requires = ["setuptools>=61"]\n'
@@ -737,8 +933,162 @@ def _python_editable_metadata(profile: LayoutProfile) -> str:
         "[project]\n"
         f'name = "{pkg}"\n'
         'version = "0.0.0"\n\n'
+        "[tool.setuptools]\n"
+        f'package-dir = {{"" = "{src}"}}\n\n'
         "[tool.setuptools.packages.find]\n"
         f'where = ["{src}"]\n'
+    )
+
+
+# Back-compat alias: the prior name for the setuptools-only metadata builder.
+def _python_editable_metadata(profile: LayoutProfile) -> str:  # pragma: no cover - thin alias
+    return _python_packaging_metadata(profile, backend=_BACKEND_SETUPTOOLS)
+
+
+def _upsert_toml_table(text: str, header: str, body_lines: list[str]) -> str:
+    """Replace (or append) a single TOML table by HEADER, preserving all other text.
+
+    Surgical and byte-faithful for everything OUTSIDE ``[header]``: finds the
+    table that starts with ``[header]`` and rewrites only its non-blank body up to
+    the next table header (a line starting with ``[``), leaving ``[project]``,
+    deps, ``[tool.pytest]``, comments, ordering, AND blank-line separators
+    untouched. Appends a fresh table when the header is absent.
+
+    IDEMPOTENT: when the existing table's non-blank body already equals
+    ``body_lines``, the text is returned unchanged (so a second ensure is a true
+    no-op). ``body_lines`` are the lines UNDER the header (no header line).
+    """
+    lines = text.splitlines()
+    header_norm = header.strip()
+    out: list[str] = []
+    i = 0
+    replaced = False
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        if not replaced and stripped == header_norm:
+            # Capture the existing table body (until the next header / EOF),
+            # separating meaningful lines from a trailing blank-line block so we
+            # can preserve the original spacing to the next table.
+            i += 1
+            existing_body: list[str] = []
+            while i < n and not lines[i].lstrip().startswith("["):
+                existing_body.append(lines[i])
+                i += 1
+            # Trailing blank lines that separate this table from the next one.
+            trailing_blanks: list[str] = []
+            while existing_body and existing_body[-1].strip() == "":
+                trailing_blanks.insert(0, existing_body.pop())
+            if [ln.strip() for ln in existing_body if ln.strip()] == [
+                ln.strip() for ln in body_lines
+            ]:
+                # Already coherent — re-emit verbatim (idempotent no-op).
+                out.append(header)
+                out.extend(existing_body)
+                out.extend(trailing_blanks)
+            else:
+                out.append(header)
+                out.extend(body_lines)
+                out.extend(trailing_blanks)
+            replaced = True
+            continue
+        out.append(lines[i])
+        i += 1
+    if not replaced:
+        if out and out[-1].strip() != "":
+            out.append("")
+        out.append(header)
+        out.extend(body_lines)
+    rendered = "\n".join(out)
+    if not rendered.endswith("\n"):
+        rendered += "\n"
+    return rendered
+
+
+def _ensure_python_packaging(
+    project_root: Path,
+    *,
+    profile: LayoutProfile,
+) -> EnsureTestRunnerResult:
+    """ALWAYS reconcile the harness-owned PACKAGING fields, backend-correctly.
+
+    This is split from the pytest ensurer so that "the model owns test config"
+    (``[tool.pytest]``) NEVER suppresses "the harness owns packaging coherence".
+    Behavior, by build-backend detected in an EXISTING pyproject:
+
+      * **setuptools** → force ``[tool.setuptools] package-dir = {"" = "<src>"}``
+        and ``[tool.setuptools.packages.find] where = ["<src>"]`` so the package
+        at ``<package_root>`` is the installed package. Edits ONLY those two
+        sub-tables; ``[project]``, deps, ``[tool.pytest]`` are byte-for-byte
+        preserved.
+      * **hatchling** → force ``[tool.hatch.build.targets.wheel] packages =
+        ["<src>/<pkg>"]``. Never writes a setuptools table into a hatch project.
+      * **unknown/unsupported backend** (flit/pdm/poetry/…) → DECLINE to edit
+        (return ``present``); the manifest gate fails honestly rather than the
+        harness guessing a packaging table it cannot reason about (anti-false-
+        green). A NEW file (no pyproject) is created with a default setuptools
+        backend + coherent packaging.
+    """
+    pyproject = project_root / _PYPROJECT_FILENAME
+    src = profile.source_root
+    pkg = profile.package_name
+
+    if not pyproject.exists():
+        return EnsureTestRunnerResult(
+            language="python",
+            action="present",
+            detail="no pyproject.toml yet; packaging written by the runner-ensure step",
+        )
+
+    text = _read_text_or_empty(pyproject)
+    backend = _detect_build_backend(text)
+
+    if backend == _BACKEND_SETUPTOOLS:
+        new_text = _upsert_toml_table(text, "[tool.setuptools]", [f'package-dir = {{"" = "{src}"}}'])
+        new_text = _upsert_toml_table(
+            new_text, "[tool.setuptools.packages.find]", [f'where = ["{src}"]']
+        )
+        if new_text != text:
+            pyproject.write_text(new_text, encoding="utf-8")
+            return EnsureTestRunnerResult(
+                language="python",
+                action="augmented",
+                path=pyproject,
+                detail=(
+                    f"reconciled setuptools packaging (package-dir/where = ['{src}'], "
+                    f"package={profile.package_root})"
+                ),
+            )
+        return EnsureTestRunnerResult(
+            language="python", action="present", detail="setuptools packaging already coherent"
+        )
+
+    if backend == _BACKEND_HATCHLING:
+        new_text = _upsert_toml_table(
+            text, "[tool.hatch.build.targets.wheel]", [f'packages = ["{src}/{pkg}"]']
+        )
+        if new_text != text:
+            pyproject.write_text(new_text, encoding="utf-8")
+            return EnsureTestRunnerResult(
+                language="python",
+                action="augmented",
+                path=pyproject,
+                detail=f"reconciled hatchling packaging ([tool.hatch...wheel] packages = ['{src}/{pkg}'])",
+            )
+        return EnsureTestRunnerResult(
+            language="python", action="present", detail="hatchling packaging already coherent"
+        )
+
+    # Unknown/unsupported backend (a non-empty token) OR an unparseable file:
+    # DECLINE to edit. The manifest gate is the honest backstop; the harness
+    # never writes a packaging table for a backend it cannot reason about.
+    return EnsureTestRunnerResult(
+        language="python",
+        action="present",
+        detail=(
+            f"build-backend {backend!r} is not setuptools/hatchling; packaging left "
+            "untouched (manifest gate is the backstop)"
+        ),
     )
 
 
@@ -747,41 +1097,51 @@ def _ensure_python_test_runner(
     *,
     profile: LayoutProfile,
 ) -> EnsureTestRunnerResult:
-    """Ensure a RUNNABLE, pytest-detectable ``pyproject.toml`` for a Python project.
+    """Ensure a RUNNABLE pyproject: harness-owned PACKAGING + a pytest section.
 
-    A-core: "runnable" now means "the installed package is importable and tests
-    run against it" — NOT "src is on PYTHONPATH". The emitted pyproject carries
-    (a) package metadata for an editable install and (b) a ``[tool.pytest``
-    section with ``--import-mode=importlib`` and NO ``pythonpath``. Behaviour:
+    Two SEPARATE concerns, so the model owning ``[tool.pytest]`` never suppresses
+    harness-owned packaging coherence (the prior all-or-nothing bug):
 
-      * a ``pyproject.toml`` already carrying a ``[tool.pytest`` section is left
-        untouched (author/AI intent is authoritative);
-      * a ``pyproject.toml`` WITHOUT one (e.g. a bare ``[project]`` table) gets
-        the pytest section APPENDED — the rest preserved byte-for-byte; package
-        metadata is only added when no ``[project]`` table exists;
-      * otherwise a minimal new file (metadata + pytest section) is written.
+      1. **Packaging** (:func:`_ensure_python_packaging`) — ALWAYS reconciled,
+         backend-correctly (setuptools ``where``/``package-dir`` or hatchling
+         ``[tool.hatch...wheel] packages``), even when a strong pytest config
+         exists. Edits ONLY the harness-owned packaging sub-tables.
+      2. **Pytest section** — appended ONLY when no strong pytest config
+         (pytest.ini / setup.cfg / ``[tool.pytest]``) and no other test command
+         is wired up. A strong/AI-authored pytest config is authoritative and
+         left byte-for-byte.
+
+    A brand-new file (no pyproject, no other runner) is created with both a
+    backend-correct packaging block and a pytest section.
     """
     from codd.test_detection import _has_strong_pytest_config, detect_test_command
 
-    # Strong, runnable pytest config already present (pytest.ini / setup.cfg /
-    # pyproject [tool.pytest]) → author intent is authoritative, do nothing.
+    pyproject = project_root / _PYPROJECT_FILENAME
+
+    # ── Concern 1: packaging coherence — runs UNCONDITIONALLY on an existing file.
+    packaging = _ensure_python_packaging(project_root, profile=profile)
+
+    # ── Concern 2: pytest section.
+    # Strong pytest config present → model owns test config; do NOT append a pytest
+    # section. Packaging was STILL reconciled above (the split). Report the
+    # packaging outcome so the harness still owns topology.
     if _has_strong_pytest_config(project_root):
+        if packaging.action == "augmented":
+            return packaging
         return EnsureTestRunnerResult(
             language="python",
             action="present",
-            detail="a strong pytest config already exists; left untouched",
+            detail="a strong pytest config already exists; packaging checked, both coherent",
         )
 
-    # A DIFFERENT, non-pytest test command is already wired up (a Makefile
-    # target, a package.json script, cargo, …). Respect the author's chosen
-    # runner instead of forcing pytest on top of it. The lone exception is the
-    # WEAK "a bare pyproject.toml exists" rule: that is detectable as pytest but
-    # not runnable as an installed package, so we fall through to upgrade it.
     detected = detect_test_command(project_root)
-    pyproject = project_root / _PYPROJECT_FILENAME
     pyproject_text = _read_text_or_empty(pyproject) if pyproject.exists() else ""
     bare_pyproject_only = pyproject.exists() and "[tool.pytest" not in pyproject_text
     if detected is not None and not bare_pyproject_only:
+        # A non-pytest runner is the author's choice; respect it. Packaging was
+        # still reconciled above when a pyproject existed.
+        if packaging.action == "augmented":
+            return packaging
         return EnsureTestRunnerResult(
             language="python",
             action="present",
@@ -793,30 +1153,33 @@ def _ensure_python_test_runner(
     )
 
     if pyproject.exists():
-        existing = pyproject_text
+        # Packaging already reconciled in-place above; re-read so we append the
+        # pytest section onto the reconciled text.
+        existing = _read_text_or_empty(pyproject)
         addition = section
-        # Add package metadata only when the file has no [project] table, so an
-        # editable install can resolve the package; never clobber author metadata.
+        # Add packaging metadata only when the file declared NO build/project at
+        # all (an exotic bare file); the backend-aware packaging ensurer already
+        # handled the normal case in-place. Default backend = setuptools.
         if "[project]" not in existing and "[build-system]" not in existing:
-            addition = _python_editable_metadata(profile) + "\n" + section
+            addition = _python_packaging_metadata(profile, backend=_BACKEND_SETUPTOOLS) + "\n" + section
         separator = "" if existing.endswith("\n") or not existing else "\n"
         pyproject.write_text(existing + separator + "\n" + addition, encoding="utf-8")
         return EnsureTestRunnerResult(
             language="python",
             action="augmented",
             path=pyproject,
-            detail=f"appended {_PYTEST_INI_SECTION} (importlib mode) to existing pyproject.toml",
+            detail=f"appended {_PYTEST_INI_SECTION} (importlib mode); packaging reconciled",
         )
 
     pyproject.write_text(
-        _python_editable_metadata(profile) + "\n" + section,
+        _python_packaging_metadata(profile, backend=_BACKEND_SETUPTOOLS) + "\n" + section,
         encoding="utf-8",
     )
     return EnsureTestRunnerResult(
         language="python",
         action="created",
         path=pyproject,
-        detail=f"wrote pyproject.toml (editable package + {_PYTEST_INI_SECTION}, importlib mode)",
+        detail=f"wrote pyproject.toml (setuptools package + {_PYTEST_INI_SECTION}, importlib mode)",
     )
 
 
