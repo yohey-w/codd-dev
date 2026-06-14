@@ -1887,6 +1887,11 @@ def _build_implementation_prompt(
                 "- Do NOT enforce such a constraint with a regex, substring, or scan over the entire response/document. Full output carries standard scaffolding the constraint never meant to govern (markup metadata and attribute defaults, document preamble, framework boilerplate, asset/version query strings, generated ids) that can coincidentally match the pattern and FALSE-fail a correct implementation.",
                 "- Still assert the constraint fully — keep proving every declared behavior — just bind each assertion to its subject under test rather than to incidental document scaffolding. Precise scoping makes the test stronger, not weaker.",
                 "",
+                "Test-helper import coherence (release-blocking — a missing helper symbol crashes the whole suite at collection):",
+                "- Shared test utilities (fixtures, builders, assertion helpers, I/O wrappers) belong in ONE canonical location — a single helper module/package or the test `conftest` — and every test that needs them must import them from that same canonical location. Do not invent a different helper module per test or split the same helper across files.",
+                "- That canonical location MUST actually define (or, if it is a package `__init__`, re-export) EVERY symbol the tests import from it. Never import a name that is not defined anywhere in the test tree. If a package `__init__` is the shared surface, its re-exports must match the symbols the tests import exactly — no missing names, no imports of names the helpers never provide.",
+                "- Keep the import dialect for in-test-tree helpers consistent across the suite (one canonical form), so the helpers and their importers always agree.",
+                "",
             ]
         )
 

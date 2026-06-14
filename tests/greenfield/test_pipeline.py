@@ -28,7 +28,11 @@ from codd.greenfield.pipeline import (
     session_path,
 )
 
-from tests.greenfield.conftest import make_stub_project, write_ci_workflow
+from tests.greenfield.conftest import (
+    _package_name,
+    make_stub_project,
+    write_ci_workflow,
+)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1259,3 +1263,68 @@ def test_greenfield_propagate_reconciles_untracked_build_not_zero(tmp_path: Path
     assert "No verify state" not in detail
     # State was consumed (cleared) by commit, proving the verify->commit ran.
     assert _load_verify_state(project) is None
+
+
+# ═══════════════════════════════════════════════════════════
+# test-helper symbol-import coherence gate (verify-stage hook)
+# ═══════════════════════════════════════════════════════════
+
+
+def _coherence_project(tmp_path: Path) -> tuple[Path, Path, str]:
+    """A pre-initialized project with a coherent src package + test root.
+
+    Returns (project_root, tests_dir, package_name). The verify-stage hook
+    (:meth:`GreenfieldPipeline._enforce_import_coherence`) resolves the layout
+    profile from this project's ``codd.yaml`` exactly as the real pipeline does.
+    """
+    project = make_stub_project(tmp_path, ai_command="true", name="coh-app")
+    pkg_name = _package_name("coh-app")
+    pkg = project / "src" / pkg_name
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "core.py").write_text("def add(x):\n    return x\n")
+    tests = project / "tests"
+    tests.mkdir()
+    (tests / "__init__.py").write_text("")
+    return project, tests, pkg_name
+
+
+def test_verify_hook_fails_on_incoherent_test_helper_symbol(tmp_path: Path) -> None:
+    """The verify-stage hook surfaces a missing test-helper symbol as a StageError
+    BEFORE pytest — feeding the DIAGNOSE → REGENERATE path (not an opaque pytest
+    collection crash). This is the integration point the gate is wired into.
+    """
+    project, tests, pkg_name = _coherence_project(tmp_path)
+    (tests / "helpers.py").write_text("def run_cli(args):\n    return 0\n")
+    # A generated test imports a helper symbol nothing defines (the dogfood bug).
+    (tests / "test_core.py").write_text(
+        f"from {pkg_name}.core import add\n"
+        "from helpers import run_cli, combined_output\n\n\n"
+        "def test_add():\n    assert add(1) == 1\n"
+    )
+
+    with pytest.raises(StageError) as excinfo:
+        GreenfieldPipeline()._enforce_import_coherence(project)
+    message = str(excinfo.value)
+    assert "missing_test_helper_symbol" in message
+    assert "combined_output" in message
+    # Honest DIAGNOSE → REGENERATE stance; never auto-stubs.
+    assert "REGENERATE" in message
+    assert "stubs are never auto-created" in message
+
+
+def test_verify_hook_passes_on_coherent_suite(tmp_path: Path) -> None:
+    """A coherent suite (helpers define exactly what the tests import) clears BOTH
+    coherence gates at the verify hook — no false-RED.
+    """
+    project, tests, pkg_name = _coherence_project(tmp_path)
+    (tests / "helpers.py").write_text(
+        "def run_cli(args):\n    return 0\n\n\ndef combined_output(r):\n    return ''\n"
+    )
+    (tests / "test_core.py").write_text(
+        f"from {pkg_name}.core import add\n"
+        "from helpers import run_cli, combined_output\n\n\n"
+        "def test_add():\n    assert add(1) == 1\n"
+    )
+    # Must not raise.
+    GreenfieldPipeline()._enforce_import_coherence(project)

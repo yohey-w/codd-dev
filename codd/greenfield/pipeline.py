@@ -884,24 +884,39 @@ class GreenfieldPipeline:
             self.echo(f"[greenfield] verify: layout scaffold skipped (non-blocking): {exc}")
 
     def _enforce_import_coherence(self, project_root: Path) -> None:
-        """Run the AST import-coherence gate BEFORE pytest.
+        """Run the AST import-coherence gates BEFORE pytest.
 
-        Stack-general and profile-driven. A FAIL means source + tests disagree
-        on package/import context (e.g. a test importing a source module by bare
-        basename) — that is a genuine, environment-dependent false-green risk, so
-        it raises :class:`StageError` and fails the verify stage with an
-        actionable message INSTEAD of letting pytest crash or pass by accident.
-        Honors the explicit opt-out ``coherence.import_coherence: false``; the
-        gate is never weakened silently. A stack without a layout profile (or the
-        gate opted out) is a passing no-op.
+        Stack-general and profile-driven. Two complementary, static (AST-only)
+        anti-false-green gates run here, both BEFORE pytest so an incoherence
+        fails HONESTLY with an actionable message instead of crashing pytest or
+        passing by accident:
+
+        1. **Source/test package coherence** (:func:`check_import_coherence`):
+           source + tests must agree on package/import context (no test importing
+           a source module by bare basename — an environment-dependent false
+           green).
+        2. **Test-helper SYMBOL coherence** (:func:`check_test_import_coherence`):
+           every symbol a generated test imports from an in-test-tree helper
+           (sibling test module / helper package / ``conftest``) must actually be
+           defined or re-exported there — otherwise pytest aborts at COLLECTION
+           with an opaque exit-2 error (2026-06 dogfood). This gate is scoped to
+           the test tree and never duplicates gate (1)'s source-package check.
+
+        Either FAIL raises :class:`StageError` and fails the verify stage with the
+        DIAGNOSE → REGENERATE message (the scaffold is create-only; --resume will
+        not rewrite generated files, and stubs are never auto-created). Both honor
+        the explicit opt-out ``coherence.import_coherence: false`` and are never
+        weakened silently. A stack without a layout profile is a passing no-op.
         """
         from codd.import_coherence import check_import_coherence
+        from codd.test_import_coherence import check_test_import_coherence
 
         config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
+        project_name = self._layout_project_name(project_root, config)
         result = check_import_coherence(
             project_root,
             language=language,
-            project_name=self._layout_project_name(project_root, config),
+            project_name=project_name,
             source_dirs=source_dirs,
             test_dirs=test_dirs,
             config=config,
@@ -911,6 +926,22 @@ class GreenfieldPipeline:
             raise StageError(result.summary())
         if result.detail:
             self.echo(f"[greenfield] verify: {result.detail}")
+
+        # Test-helper symbol coherence — same hook, same DIAGNOSE → REGENERATE
+        # stance, scoped to the test tree (no overlap with the gate above).
+        test_result = check_test_import_coherence(
+            project_root,
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+        )
+        if not test_result.passed:
+            self.echo(f"[greenfield] verify: {test_result.summary()}")
+            raise StageError(test_result.summary())
+        if test_result.detail:
+            self.echo(f"[greenfield] verify: {test_result.detail}")
 
     # ── stage: propagate (advisory on a fresh build) ────────
 
