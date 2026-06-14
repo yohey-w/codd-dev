@@ -33,6 +33,10 @@ URL_PATH_RE = re.compile(r"(?<![:\w])/[A-Za-z0-9_./{}:-]+")
 
 DEPLOYMENT_DOC_PATTERNS = ("DEPLOYMENT.md", "DEPLOY.md", "docs/deploy/*.md")
 SMOKE_TEST_PATTERNS = ("tests/smoke/*.test.ts", "tests/smoke/*.spec.ts", "tests/smoke/*.sh")
+# Both globs are kept: Playwright's convention is ``*.spec.ts`` while a CLI
+# (vitest/jest) e2e is ``*.test.ts``. Routing to the right RUNNER happens in
+# :func:`_verification_template_ref` (by ``e2e_modality``); discovery must see
+# both shapes so a generated ``*.test.ts`` CLI e2e is not silently dropped.
 E2E_TEST_PATTERNS = ("tests/e2e/*.spec.ts", "tests/e2e/*.test.ts")
 RUNTIME_CAPABILITY_INFERENCE_DEFAULTS = Path(__file__).parent / "defaults" / "runtime_capability_inference.yaml"
 
@@ -62,6 +66,65 @@ def extract_deployment_nodes(project_root: Path, codd_config: dict[str, Any] | N
         "runtime_states": runtime_states,
         "verification_tests": verification_tests,
     }
+
+
+def _resolve_capabilities(project_root: Path, config: dict[str, Any]):
+    """Resolve the project's :class:`ProjectCapabilities` from its declared type.
+
+    The ``required_artifacts.project_type`` (or ``project.type``) key in
+    ``codd.yaml`` selects a capability profile; an unset/unknown type resolves to
+    the conservative ``generic`` baseline. Used to gate web/DB runtime injections
+    (#5) and to route e2e tests to the right runner (#3) by project MODALITY
+    rather than by file extension alone.
+    """
+    from codd.project_types import (
+        GENERIC_PROJECT_TYPE,
+        load_capabilities,
+        resolve_project_type,
+    )
+
+    configured = ""
+    required = config.get("required_artifacts")
+    if isinstance(required, dict):
+        configured = str(required.get("project_type") or "").strip().lower()
+    if not configured:
+        project = config.get("project")
+        if isinstance(project, dict):
+            configured = str(project.get("type") or "").strip().lower()
+
+    resolved, _reason = resolve_project_type(configured or None, None, project_root)
+    if resolved == "custom":
+        resolved = GENERIC_PROJECT_TYPE
+    return load_capabilities(resolved, project_root)
+
+
+def _explicit_e2e_modality(project_root: Path, config: dict[str, Any]) -> str | None:
+    """Return the e2e modality ONLY when a project_type is explicitly declared.
+
+    Returns ``None`` when no ``required_artifacts.project_type`` /
+    ``project.type`` is configured, so callers fall back to LEGACY behaviour
+    (extension-based routing — ``*.ts`` → playwright). This is the seam that
+    keeps existing non-web/no-config builds byte-for-byte compatible while a
+    project that DECLARES itself ``cli`` gets routed to the vitest runner. An
+    explicit ``deployment.e2e_modality`` in ``codd.yaml`` always wins.
+    """
+    deployment = config.get("deployment")
+    if isinstance(deployment, dict):
+        override = deployment.get("e2e_modality")
+        if isinstance(override, str) and override.strip():
+            return override.strip().lower()
+
+    configured = ""
+    required = config.get("required_artifacts")
+    if isinstance(required, dict):
+        configured = str(required.get("project_type") or "").strip().lower()
+    if not configured:
+        project = config.get("project")
+        if isinstance(project, dict):
+            configured = str(project.get("type") or "").strip().lower()
+    if not configured:
+        return None
+    return _resolve_capabilities(project_root, config).e2e_modality
 
 
 def extract_deployment_docs(
@@ -136,21 +199,67 @@ def extract_runtime_states(
                 ),
             )
 
-    for design_doc in _iter_design_docs(design_docs):
-        criteria = design_doc["criteria"]
-        if _mentions_any(criteria, ("login", "user", "ログイン")):
-            _add_runtime_state(
-                states,
-                RuntimeStateNode(
-                    identifier="runtime:db_seed:users",
-                    kind=RuntimeStateKind.DB_SEED,
-                    target="users",
-                    expected_value={"rows": ">=1"},
-                    actual_check_command="seed users table",
-                ),
-            )
+    # #5 — gate the web/DB runtime injection by project capability. A design
+    # mention of "user/login/ログイン" injected a ``runtime:db_seed:users`` state
+    # for EVERY project — even a CLI converter whose "user" is the operator, not
+    # a DB row — saddling a non-web build with a web runtime requirement it can
+    # never satisfy. We now SUPPRESS the injection ONLY for a project that
+    # EXPLICITLY declares a non-web/non-DB modality (e.g. ``project_type: cli``
+    # → network_surface="none", no UI). A project that does NOT declare a type
+    # keeps the LEGACY injection (backward compatible). An explicit
+    # ``deployment.infer_db_seed_from_criteria`` overrides in either direction.
+    if _db_seed_injection_allowed(root, config):
+        for design_doc in _iter_design_docs(design_docs):
+            criteria = design_doc["criteria"]
+            if _mentions_any(criteria, ("login", "user", "ログイン")):
+                _add_runtime_state(
+                    states,
+                    RuntimeStateNode(
+                        identifier="runtime:db_seed:users",
+                        kind=RuntimeStateKind.DB_SEED,
+                        target="users",
+                        expected_value={"rows": ">=1"},
+                        actual_check_command="seed users table",
+                    ),
+                )
 
     return [states[key] for key in sorted(states)]
+
+
+def _db_seed_injection_allowed(project_root: Path, config: dict[str, Any]) -> bool:
+    """Whether the criteria-driven ``runtime:db_seed:users`` node may be injected.
+
+    Backward-compatible default: injection is ALLOWED unless the project
+    EXPLICITLY declares a non-web/non-DB modality. Concretely, it is suppressed
+    only when a ``project_type`` is configured AND its capabilities have no UI
+    and ``network_surface == "none"`` (a pure CLI/library). A project with no
+    declared type keeps the legacy injection. An explicit
+    ``deployment.infer_db_seed_from_criteria: true|false`` overrides either way.
+    """
+    deployment = config.get("deployment")
+    if isinstance(deployment, dict):
+        override = deployment.get("infer_db_seed_from_criteria")
+        if isinstance(override, bool):
+            return override
+
+    configured = ""
+    required = config.get("required_artifacts")
+    if isinstance(required, dict):
+        configured = str(required.get("project_type") or "").strip().lower()
+    if not configured:
+        project = config.get("project")
+        if isinstance(project, dict):
+            configured = str(project.get("type") or "").strip().lower()
+    if not configured:
+        # No declared type → legacy behaviour (inject).
+        return True
+
+    capabilities = _resolve_capabilities(project_root, config)
+    web_ish = bool(
+        getattr(capabilities, "user_interface", False)
+        or str(getattr(capabilities, "network_surface", "none")).strip().lower() != "none"
+    )
+    return web_ish
 
 
 def infer_capabilities_provided(deploy_yaml: dict[str, Any], codd_yaml: dict[str, Any]) -> list[str]:
@@ -173,11 +282,12 @@ def extract_verification_tests(
 
     root = Path(project_root).resolve()
     config = codd_config if codd_config is not None else _load_project_config_or_empty(root)
+    e2e_modality = _explicit_e2e_modality(root, config)
     tests: dict[str, VerificationTestNode] = {}
     for path in _glob_paths(root, SMOKE_TEST_PATTERNS):
-        _add_verification_test(tests, root, path, VerificationKind.SMOKE)
+        _add_verification_test(tests, root, path, VerificationKind.SMOKE, e2e_modality=e2e_modality)
     for path in _glob_paths(root, E2E_TEST_PATTERNS):
-        _add_verification_test(tests, root, path, VerificationKind.E2E)
+        _add_verification_test(tests, root, path, VerificationKind.E2E, e2e_modality=e2e_modality)
 
     e2e_spec = root / "e2e-spec.md"
     if e2e_spec.is_file():
@@ -541,6 +651,8 @@ def _add_verification_test(
     project_root: Path,
     path: Path,
     kind: VerificationKind,
+    *,
+    e2e_modality: str | None = None,
 ) -> None:
     if not path.is_file():
         return
@@ -551,7 +663,7 @@ def _add_verification_test(
         identifier=identifier,
         kind=kind,
         target=_verification_target(path),
-        verification_template_ref=_verification_template_ref(path),
+        verification_template_ref=_verification_template_ref(path, e2e_modality=e2e_modality),
         expected_outcome={"source": rel_path},
         verified_by=sidecar.get("verified_by", []),
         axis_matrix=sidecar.get("axis_matrix", []),
@@ -795,10 +907,33 @@ def _verification_target(path: Path) -> str:
     return path.stem
 
 
-def _verification_template_ref(path: Path, *, cdp_browser_journey: bool = False) -> str:
+def _verification_template_ref(
+    path: Path,
+    *,
+    cdp_browser_journey: bool = False,
+    e2e_modality: str | None = None,
+) -> str:
+    """Pick the verification RUNNER for a test file.
+
+    #3 — route TypeScript/JavaScript e2e tests by project MODALITY, not by
+    extension alone. Previously ANY ``.ts/.tsx/.js/.jsx`` mapped to
+    ``playwright`` unconditionally, so a CLI project's vitest e2e ran as
+    ``npx playwright test`` → "No tests found" (a harness bug). Now:
+
+    * ``e2e_modality == "browser"`` → ``playwright`` (browser e2e).
+    * ``e2e_modality == "cli"``     → ``vitest`` (CLI e2e: ``npx vitest run``).
+    * ``e2e_modality`` unknown/None → LEGACY ``playwright`` (backward compatible
+      for projects that do not declare a type; ``.sh`` still → ``curl``).
+
+    ``device`` modality has no built-in runner template yet, so it also keeps
+    the legacy ``playwright`` default rather than silently dropping the test.
+    """
     if cdp_browser_journey:
         return "cdp_browser"
     if path.suffix in {".ts", ".tsx", ".js", ".jsx"}:
+        modality = (e2e_modality or "").strip().lower()
+        if modality == "cli":
+            return "vitest"
         return "playwright"
     if path.suffix == ".sh":
         return "curl"

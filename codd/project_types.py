@@ -24,6 +24,7 @@ Design goals:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -258,7 +259,7 @@ def _as_choice(value: Any, allowed: set[str], fallback: str) -> str:
 # now; node/go/rust are future profiles added as one entry each, with NO
 # scattered "src"/"tests"/"<package>" literals anywhere in the pipeline.
 
-_VALID_TEST_IMPORT_POLICIES = {"package_absolute", "flat"}
+_VALID_TEST_IMPORT_POLICIES = {"package_absolute", "flat", "relative"}
 
 
 @dataclass(frozen=True)
@@ -359,11 +360,47 @@ def _python_layout_profile(
     )
 
 
+def _typescript_layout_profile(
+    *,
+    project_name: str | None,
+    source_dirs: Any,
+    test_dirs: Any,
+) -> LayoutProfile:
+    """TypeScript (node) profile: a path-relative ``src`` layout, npm-installed.
+
+    Unlike Python's named-package layout, TypeScript modules resolve by PATH
+    (``import { x } from "./foo"`` / ``from "../src/foo"``), so there is no
+    ``<source_root>/<package_name>`` subdir — ``package_root == source_root``
+    and the test import policy is ``relative`` (path imports, not a bare
+    basename and not a Python-style package namespace). The runner is vitest by
+    default (the generated stack's choice; the ensurer respects an author's jest
+    setup). ``install_mode="node"`` selects the BLOCKING dependency-install
+    preflight (npm/pnpm/yarn/bun) rather than Python's editable install.
+    """
+    package_name = normalize_package_name(project_name)
+    source_root = _first_clean_dir(source_dirs, "src")
+    test_root = _first_clean_dir(test_dirs, "tests")
+    return LayoutProfile(
+        language="typescript",
+        package_name=package_name,
+        source_root=source_root,
+        package_root=source_root,
+        test_root=test_root,
+        runner="vitest",
+        install_mode="node",
+        test_import_policy="relative",
+        requires_package_init=False,
+        requires_test_init=False,
+    )
+
+
 # Language → layout-profile builder. ONE entry per stack (the only place a stack
-# registers its topology). node/go/rust extend here with a single function each.
+# registers its topology). go/rust extend here with a single function each.
 _LayoutProfileBuilder = Callable[..., LayoutProfile]
 _LAYOUT_PROFILE_BUILDERS: dict[str, _LayoutProfileBuilder] = {
     "python": _python_layout_profile,
+    "typescript": _typescript_layout_profile,
+    "node": _typescript_layout_profile,
 }
 
 
@@ -435,6 +472,8 @@ def scaffold_layout(
     """
     if profile.language == "python":
         return _scaffold_python(Path(project_root), profile)
+    if profile.language in ("typescript", "node"):
+        return _scaffold_typescript(Path(project_root), profile)
     return ScaffoldResult(language=profile.language, detail="no scaffolder for stack")
 
 
@@ -491,6 +530,130 @@ def _scaffold_python(project_root: Path, profile: LayoutProfile) -> ScaffoldResu
         skipped=tuple(skipped),
         detail=detail,
     )
+
+
+# ── TypeScript (node) scaffold ───────────────────────────────
+#
+# Realizes the TS profile on disk: a strict ``tsconfig.json`` and the
+# ``test``/``build`` package.json scripts, both CREATE-ONLY / non-clobbering.
+# The single hard contract is MODULE-SYSTEM COHERENCE: the scaffolded tsconfig
+# (``NodeNext`` resolution), package.json (``"type": "module"`` when we create
+# it), and the vitest runner must agree so the model-generated ``import``
+# statements resolve at typecheck AND at runtime. A package.json the model
+# already authored is the authority for ``type``/module system — we only ADD
+# missing scripts there, never rewrite its module config.
+
+_TSCONFIG_FILENAME = "tsconfig.json"
+_PACKAGE_JSON_FILENAME = "package.json"
+
+#: A strict, NodeNext tsconfig. ``noEmit`` keeps ``tsc`` a pure typechecker
+#: (the executed ``tsc --noEmit`` gate); NodeNext module+resolution makes ESM
+#: ``import "./mod.js"`` specifiers resolve consistently under node + vitest.
+_SCAFFOLD_TSCONFIG: dict[str, Any] = {
+    "//": "Scaffolded by codd greenfield (create-only). Strict + NodeNext for module coherence.",
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "strict": True,
+        "esModuleInterop": True,
+        "skipLibCheck": True,
+        "forceConsistentCasingInFileNames": True,
+        "noEmit": True,
+        "resolveJsonModule": True,
+    },
+}
+
+
+def _scaffold_typescript(project_root: Path, profile: LayoutProfile) -> ScaffoldResult:
+    created: list[str] = []
+    skipped: list[str] = []
+
+    tsconfig = project_root / _TSCONFIG_FILENAME
+    if tsconfig.exists():
+        skipped.append(_TSCONFIG_FILENAME)
+    else:
+        source_glob = f"{profile.source_root}/**/*"
+        test_glob = f"{profile.test_root}/**/*"
+        payload = dict(_SCAFFOLD_TSCONFIG)
+        payload["include"] = [source_glob, test_glob]
+        tsconfig.parent.mkdir(parents=True, exist_ok=True)
+        tsconfig.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        created.append(_TSCONFIG_FILENAME)
+
+    runner_result = _ensure_typescript_test_runner(project_root, profile=profile)
+    if runner_result.action in ("created", "augmented"):
+        created.append(_PACKAGE_JSON_FILENAME)
+    elif runner_result.action == "present":
+        skipped.append(_PACKAGE_JSON_FILENAME)
+
+    detail = (
+        f"source_root={profile.source_root}, test_root={profile.test_root}, "
+        f"runner={runner_result.action} ({runner_result.detail})"
+    )
+    return ScaffoldResult(
+        language=profile.language,
+        created=tuple(created),
+        skipped=tuple(skipped),
+        detail=detail,
+    )
+
+
+def _read_json_or_none(path: Path) -> dict[str, Any] | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def detect_node_package_manager(project_root: Path) -> str:
+    """Detect the node package manager from the present lockfile.
+
+    Returns one of ``pnpm`` / ``yarn`` / ``bun`` / ``npm``. ``npm`` is the
+    default when no lockfile is present (an ``npm install`` then CREATES
+    ``package-lock.json``). Lockfile presence — not a global tool guess —
+    drives this so the BLOCKING install preflight uses the project's own
+    declared manager and never reaches for an implicit global ``npx``.
+    """
+    root = Path(project_root)
+    if (root / "pnpm-lock.yaml").is_file():
+        return "pnpm"
+    if (root / "yarn.lock").is_file():
+        return "yarn"
+    if (root / "bun.lockb").is_file() or (root / "bun.lock").is_file():
+        return "bun"
+    return "npm"
+
+
+def node_install_command(project_root: Path) -> str:
+    """The BLOCKING dependency-install command for the detected manager.
+
+    Uses the reproducible ``ci``/``--frozen-lockfile`` form when a lockfile
+    exists, else the plain install (which creates the lock). This is run as a
+    verify PREFLIGHT — NOT as the advisory ``_ensure_test_runner`` — so an
+    install failure becomes an honest ``environment_build_error`` rather than a
+    swallowed warning.
+    """
+    root = Path(project_root)
+    manager = detect_node_package_manager(root)
+    has_lock = {
+        "pnpm": (root / "pnpm-lock.yaml").is_file(),
+        "yarn": (root / "yarn.lock").is_file(),
+        "bun": (root / "bun.lockb").is_file() or (root / "bun.lock").is_file(),
+        "npm": (root / "package-lock.json").is_file(),
+    }[manager]
+    if manager == "pnpm":
+        return "pnpm install --frozen-lockfile" if has_lock else "pnpm install"
+    if manager == "yarn":
+        return "yarn install --frozen-lockfile" if has_lock else "yarn install"
+    if manager == "bun":
+        return "bun install --frozen-lockfile" if has_lock else "bun install"
+    return "npm ci" if has_lock else "npm install"
 
 
 @dataclass(frozen=True)
@@ -664,6 +827,89 @@ def _read_text_or_empty(path: Path) -> str:
         return ""
 
 
+def _ensure_typescript_test_runner(
+    project_root: Path,
+    *,
+    profile: LayoutProfile,
+) -> EnsureTestRunnerResult:
+    """Ensure a RUNNABLE node test setup (a ``test`` script in package.json).
+
+    CREATE-ONLY / non-clobbering, mirroring the Python ensurer's discipline:
+
+      * an existing ``test`` script (any runner: vitest, jest, mocha, …) is
+        author intent → left untouched (``present``);
+      * a ``package.json`` WITHOUT a ``test`` script gains ``test`` (and
+        ``build`` when absent) while every other field is preserved
+        byte-for-faithfully (re-serialized JSON) → ``augmented``;
+      * no ``package.json`` → a minimal one is created with ``"type": "module"``
+        (coherent with the scaffolded NodeNext tsconfig), ``test`` + ``build``
+        scripts, and the package ``name`` derived from the project → ``created``.
+
+    The scripts use the runner the profile declares (vitest) and ``tsc`` for the
+    build; dependency INSTALL is handled by the blocking verify preflight
+    (:func:`node_install_command`), NEVER here.
+    """
+    runner = profile.runner or "vitest"
+    test_cmd = "vitest run" if runner == "vitest" else ("jest" if runner == "jest" else f"{runner}")
+    build_cmd = "tsc -p tsconfig.json"
+    package_json = project_root / _PACKAGE_JSON_FILENAME
+
+    if package_json.exists():
+        payload = _read_json_or_none(package_json)
+        if payload is None:
+            # Present but unparseable: do not clobber author content; the verify
+            # honesty/typecheck gates remain the authority.
+            return EnsureTestRunnerResult(
+                language=profile.language,
+                action="present",
+                detail="package.json exists but is not valid JSON; left untouched",
+            )
+        scripts = payload.get("scripts")
+        if not isinstance(scripts, dict):
+            scripts = {}
+        existing_test = str(scripts.get("test") or "").strip()
+        # A real test script (anything other than the npm-init placeholder) is
+        # author intent → leave the whole file untouched.
+        placeholder = "echo" in existing_test and "exit 1" in existing_test
+        if existing_test and not placeholder:
+            return EnsureTestRunnerResult(
+                language=profile.language,
+                action="present",
+                path=package_json,
+                detail=f"package.json already declares a test script ({existing_test}); left untouched",
+            )
+        added: list[str] = []
+        if not existing_test or placeholder:
+            scripts["test"] = test_cmd
+            added.append("test")
+        if "build" not in scripts:
+            scripts["build"] = build_cmd
+            added.append("build")
+        payload["scripts"] = scripts
+        package_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return EnsureTestRunnerResult(
+            language=profile.language,
+            action="augmented",
+            path=package_json,
+            detail=f"added package.json script(s): {', '.join(added)}",
+        )
+
+    payload = {
+        "name": profile.package_name,
+        "version": "0.0.0",
+        "private": True,
+        "type": "module",
+        "scripts": {"test": test_cmd, "build": build_cmd},
+    }
+    package_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return EnsureTestRunnerResult(
+        language=profile.language,
+        action="created",
+        path=package_json,
+        detail=f"wrote package.json (type=module, test={test_cmd!r}, build={build_cmd!r})",
+    )
+
+
 # Language → ensurer. Add a stack here (and only here) to make its greenfield
 # builds deterministically verifiable: node → a package.json test script, go →
 # go.mod, rust → Cargo.toml, etc. Each ensurer drives off the resolved
@@ -671,6 +917,8 @@ def _read_text_or_empty(path: Path) -> str:
 _TestRunnerEnsurer = Callable[..., EnsureTestRunnerResult]
 _TEST_RUNNER_ENSURERS: dict[str, _TestRunnerEnsurer] = {
     "python": _ensure_python_test_runner,
+    "typescript": _ensure_typescript_test_runner,
+    "node": _ensure_typescript_test_runner,
 }
 
 

@@ -232,6 +232,17 @@ verify:
   source_integrity: true
   allow_structural_only: false
   test_timeout_seconds: 600
+  # ── node/TypeScript blocking dependency-install preflight ──────────────
+  # For a node/TS project (project.language: typescript|node, or a package.json
+  # at the root when no language is declared), verify runs a BLOCKING install
+  # before typecheck/tests so `tsc` and the test runner have their deps:
+  #   npm ci  (lockfile present)  |  npm install  (creates the lock)
+  # pnpm/yarn/bun honored by lockfile detection; no implicit global npx. An
+  # install failure is an honest environment_build_error that FAILS the stage
+  # (never green, never a code-repair target), and typecheck/tests are skipped.
+  # Set false to opt out; install_timeout_seconds bounds the install.
+  install_preflight: true
+  install_timeout_seconds: 900
   report_output: "docs/test/verify_report.md"
   e2e_setup_command: null  # e.g. "npx playwright install chromium"
   e2e_command: null         # all E2E tests

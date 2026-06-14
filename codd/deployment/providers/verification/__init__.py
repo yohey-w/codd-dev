@@ -8,6 +8,7 @@ from . import cdp_wire as cdp_wire
 from . import curl as curl
 from . import form_strategies as form_strategies
 from . import playwright as playwright
+from . import vitest as vitest
 
 __all__ = [
     "assertion_handlers",
@@ -18,4 +19,5 @@ __all__ = [
     "curl",
     "form_strategies",
     "playwright",
+    "vitest",
 ]

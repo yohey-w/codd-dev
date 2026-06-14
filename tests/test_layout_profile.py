@@ -175,7 +175,7 @@ class TestScaffoldLayout:
 
     def test_unknown_stack_is_noop(self, tmp_path):
         profile = LayoutProfile(
-            language="rust",
+            language="go",
             package_name="x",
             source_root="src",
             package_root="src/x",
@@ -184,3 +184,145 @@ class TestScaffoldLayout:
         result = scaffold_layout(tmp_path, profile)
         assert result.created == ()
         assert list(tmp_path.iterdir()) == []
+
+
+# ═══════════════════════════════════════════════════════════
+# TypeScript (node) profile + scaffold (first-class TS support)
+# ═══════════════════════════════════════════════════════════
+
+
+import json as _json
+
+from codd.project_types import (  # noqa: E402
+    detect_node_package_manager,
+    node_install_command,
+)
+
+
+class TestTypeScriptLayoutProfile:
+    def test_typescript_profile_resolves_path_relative(self):
+        profile = resolve_layout_profile(
+            language="typescript",
+            project_name="ts-converter",
+            source_dirs=["src/"],
+            test_dirs=["tests/"],
+        )
+        assert profile is not None
+        assert profile.language == "typescript"
+        # path-relative: package_root == source_root (no named-package subdir).
+        assert profile.source_root == "src"
+        assert profile.package_root == "src"
+        assert profile.test_root == "tests"
+        assert profile.runner == "vitest"
+        assert profile.install_mode == "node"
+        assert profile.test_import_policy == "relative"
+
+    def test_node_alias_resolves_same_profile(self):
+        profile = resolve_layout_profile(language="node", project_name="x")
+        assert profile is not None
+        assert profile.language == "typescript"
+
+    def test_typescript_and_node_registered(self):
+        langs = supported_layout_profile_languages()
+        assert "typescript" in langs
+        assert "node" in langs
+
+
+class TestTypeScriptScaffold:
+    def _profile(self, name="ts-converter"):
+        return resolve_layout_profile(
+            language="typescript", project_name=name, source_dirs=["src/"], test_dirs=["tests/"]
+        )
+
+    def test_creates_tsconfig_and_package_json(self, tmp_path):
+        result = scaffold_layout(tmp_path, self._profile())
+        assert (tmp_path / "tsconfig.json").is_file()
+        assert (tmp_path / "package.json").is_file()
+        assert "tsconfig.json" in result.created
+        assert "package.json" in result.created
+
+        tsconfig = _json.loads((tmp_path / "tsconfig.json").read_text(encoding="utf-8"))
+        opts = tsconfig["compilerOptions"]
+        # strict + NodeNext = a coherent module contract so imports resolve.
+        assert opts["strict"] is True
+        assert opts["module"] == "NodeNext"
+        assert opts["moduleResolution"] == "NodeNext"
+        assert opts["noEmit"] is True
+
+        pkg = _json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert pkg["scripts"]["test"] == "vitest run"
+        assert "build" in pkg["scripts"]
+        assert pkg["type"] == "module"  # coherent with NodeNext
+
+    def test_idempotent_second_call_creates_nothing(self, tmp_path):
+        profile = self._profile()
+        scaffold_layout(tmp_path, profile)
+        snapshot = {
+            p.relative_to(tmp_path).as_posix(): p.read_text(encoding="utf-8")
+            for p in tmp_path.rglob("*")
+            if p.is_file()
+        }
+        result = scaffold_layout(tmp_path, profile)
+        assert result.created == ()
+        after = {
+            p.relative_to(tmp_path).as_posix(): p.read_text(encoding="utf-8")
+            for p in tmp_path.rglob("*")
+            if p.is_file()
+        }
+        assert after == snapshot  # byte-for-byte unchanged
+
+    def test_does_not_clobber_model_authored_tsconfig(self, tmp_path):
+        authored = '{\n  "compilerOptions": { "strict": false }\n}\n'
+        (tmp_path / "tsconfig.json").write_text(authored, encoding="utf-8")
+        result = scaffold_layout(tmp_path, self._profile())
+        # model-generated tsconfig is authoritative — left byte-for-byte.
+        assert (tmp_path / "tsconfig.json").read_text(encoding="utf-8") == authored
+        assert "tsconfig.json" in result.skipped
+
+    def test_merges_scripts_into_existing_package_json_without_clobber(self, tmp_path):
+        authored = {
+            "name": "authored",
+            "version": "1.2.3",
+            "dependencies": {"left-pad": "^1.0.0"},
+            "scripts": {"build": "tsc"},
+        }
+        (tmp_path / "package.json").write_text(_json.dumps(authored, indent=2), encoding="utf-8")
+        scaffold_layout(tmp_path, self._profile())
+        pkg = _json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        # added the missing test script, preserved everything else.
+        assert pkg["scripts"]["test"] == "vitest run"
+        assert pkg["scripts"]["build"] == "tsc"  # author's build untouched
+        assert pkg["version"] == "1.2.3"
+        assert pkg["dependencies"] == {"left-pad": "^1.0.0"}
+
+    def test_existing_real_test_script_left_untouched(self, tmp_path):
+        authored = {"name": "x", "scripts": {"test": "jest --ci"}}
+        (tmp_path / "package.json").write_text(_json.dumps(authored, indent=2), encoding="utf-8")
+        scaffold_layout(tmp_path, self._profile())
+        pkg = _json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert pkg["scripts"]["test"] == "jest --ci"  # author runner respected
+        assert "build" not in pkg["scripts"]  # untouched file
+
+
+class TestNodeInstallCommand:
+    def test_npm_default_no_lockfile(self, tmp_path):
+        assert detect_node_package_manager(tmp_path) == "npm"
+        assert node_install_command(tmp_path) == "npm install"
+
+    def test_npm_ci_with_lockfile(self, tmp_path):
+        (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+        assert node_install_command(tmp_path) == "npm ci"
+
+    def test_pnpm_detected(self, tmp_path):
+        (tmp_path / "pnpm-lock.yaml").write_text("", encoding="utf-8")
+        assert detect_node_package_manager(tmp_path) == "pnpm"
+        assert node_install_command(tmp_path) == "pnpm install --frozen-lockfile"
+
+    def test_yarn_detected(self, tmp_path):
+        (tmp_path / "yarn.lock").write_text("", encoding="utf-8")
+        assert node_install_command(tmp_path) == "yarn install --frozen-lockfile"
+
+    def test_bun_detected(self, tmp_path):
+        (tmp_path / "bun.lockb").write_text("", encoding="utf-8")
+        assert detect_node_package_manager(tmp_path) == "bun"
+        assert node_install_command(tmp_path) == "bun install --frozen-lockfile"

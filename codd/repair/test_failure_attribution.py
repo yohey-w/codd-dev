@@ -426,16 +426,22 @@ def _to_project_relative(value: str, root: Path) -> str:
     candidate = Path(text)
     if candidate.is_absolute():
         try:
-            return Path(candidate.resolve(strict=False)).relative_to(root).as_posix()
+            rel = Path(candidate.resolve(strict=False)).relative_to(root).as_posix()
         except ValueError:
             return ""  # outside the project tree (stdlib/site-packages frame)
+        if "node_modules" in rel.lower():
+            return ""  # vendored node dependency under the project root
+        return rel
     # Relative paths are already project-relative in pytest output. Reject any
     # that escape the project tree or point into vendored deps.
     if any(part == ".." for part in candidate.parts):
         return ""
     posix = candidate.as_posix().lstrip("./")
     lowered = posix.lower()
-    if "site-packages" in lowered or "dist-packages" in lowered:
+    # Vendored dependency trees are never the project's own source: Python's
+    # site-/dist-packages and node's node_modules. A diagnostic there is not a
+    # repairable project file.
+    if "site-packages" in lowered or "dist-packages" in lowered or "node_modules" in lowered:
         return ""
     return posix
 
@@ -450,8 +456,266 @@ def _dedupe(values) -> list[str]:
     return out
 
 
-# Register the pytest adapter on import.
+# ─────────────────────────────────────────────────────────────
+# vitest (+ jest) adapter
+# ─────────────────────────────────────────────────────────────
+#
+# vitest/jest report a failing TEST file:line — but for an ASSERTION failure
+# that frame points at the TEST, not the source defect. Editing the test to make
+# the assertion pass is exactly what B0 forbids. So this adapter keeps the
+# failing test file READ-ONLY evidence and INFERS the editable SOURCE candidate
+# from the failing test's own IMPORTS (the source module(s) it imports). A tsc
+# error, by contrast, names the source file directly and is editable.
+
+#: A test file path in vitest/jest output: ``FAIL tests/foo.test.ts`` /
+#: ``FAIL  src/foo.test.ts > suite > case`` / ``❯ tests/foo.test.ts:12:3``.
+_JS_TEST_PATH = re.compile(
+    r"(?:^|\s)(?P<path>[^\s:()'\"]+\.(?:test|spec)\.(?:ts|tsx|js|jsx|mts|cts|mjs|cjs))",
+    re.MULTILINE,
+)
+#: A stack/location frame ``path.ts:line:col`` (any TS/JS file, incl. source).
+_JS_FRAME = re.compile(
+    r"(?P<path>[^\s:()'\"]+\.(?:ts|tsx|js|jsx|mts|cts|mjs|cjs)):(?P<line>\d+):(?P<col>\d+)",
+    re.MULTILINE,
+)
+#: ESM/CJS import specifiers in a test file (to infer the source under test).
+_JS_IMPORT_FROM = re.compile(r"""\bfrom\s+['"](?P<spec>[^'"]+)['"]""")
+_JS_REQUIRE = re.compile(r"""\brequire\(\s*['"](?P<spec>[^'"]+)['"]\s*\)""")
+
+_JS_NO_TESTS_MARKERS = ("no test files found", "no tests found", "no test suites found")
+_JS_ASSERTION_MARKERS = (
+    "assertionerror",
+    "expected",  # vitest/jest: "expected X to be Y"
+    "to equal",
+    "to be",
+    "tobe(",
+    "toequal(",
+)
+
+
+def _is_vitest_or_jest(command: str, output: str) -> bool:
+    cmd = command.lower()
+    if "vitest" in cmd or "jest" in cmd:
+        return True
+    lowered = (output or "").lower()
+    # Defensive: recognise the runners' banners even behind ``npm test``.
+    return ("vitest" in lowered or "jest" in lowered) and (
+        " fail " in f" {lowered} " or "failed" in lowered or any(m in lowered for m in _JS_NO_TESTS_MARKERS)
+    )
+
+
+def parse_vitest_failure(output: str, project_root: Path, check_name: str) -> TestFailureAttribution:
+    """Classify + attribute a vitest/jest run; source inferred from test imports."""
+    text = output or ""
+    lowered = text.lower()
+
+    test_files = _project_paths(
+        [m.group("path") for m in _JS_TEST_PATH.finditer(text)], project_root
+    )
+    # All TS/JS frames; SOURCE frames = frames that are not a test file.
+    frame_paths = _project_paths(
+        [m.group("path") for m in _JS_FRAME.finditer(text)], project_root
+    )
+    source_frames = _dedupe([p for p in frame_paths if p not in set(test_files)])
+
+    # No tests collected → harness contract violation (the runner found nothing).
+    if any(marker in lowered for marker in _JS_NO_TESTS_MARKERS):
+        diagnosis = "vitest/jest collected 0 tests (no test files found)"
+        # The test files (if any matched) are the editable harness target.
+        attributed = [AttributedPath(p, PROVENANCE_TEST, editable=True) for p in test_files]
+        return TestFailureAttribution(
+            failure_class="harness_contract_violation",
+            attributed=attributed,
+            code_addressable=bool(attributed),
+            diagnosis=diagnosis,
+        )
+
+    is_assertion = any(marker in lowered for marker in _JS_ASSERTION_MARKERS)
+    failure_class = "assertion_failure" if is_assertion else (
+        "runtime_exception" if (test_files or source_frames) else "unknown"
+    )
+
+    # For an assertion failure whose only project frame is the TEST, INFER the
+    # source-under-test from the failing test's imports (those imports are the
+    # editable source candidates). Direct source frames (runtime exceptions
+    # thrown inside source) are always editable too.
+    inferred_sources: list[str] = []
+    if not source_frames and test_files:
+        inferred_sources = _infer_sources_from_test_imports(test_files, project_root)
+
+    attributed = _build_js_attribution(
+        failure_class=failure_class,
+        source_frames=_dedupe(source_frames + inferred_sources),
+        test_files=test_files,
+    )
+    has_editable = any(item.editable for item in attributed)
+    code_addressable = failure_class in CODE_ADDRESSABLE_CLASSES and has_editable
+    where = ", ".join(source_frames or inferred_sources or test_files) or "no project file frames found"
+    head = {
+        "assertion_failure": "assertion failed (vitest/jest)",
+        "runtime_exception": "uncaught exception during test (vitest/jest)",
+        "unknown": "vitest/jest test command failed",
+    }.get(failure_class, "vitest/jest test command failed")
+    return TestFailureAttribution(
+        failure_class=failure_class,
+        attributed=attributed,
+        code_addressable=code_addressable,
+        diagnosis=f"{head}: {where}",
+    )
+
+
+def _build_js_attribution(
+    *,
+    failure_class: str,
+    source_frames: list[str],
+    test_files: list[str],
+) -> list[AttributedPath]:
+    """Same anti-B-full invariant as :func:`_build_attribution`, for JS stacks.
+
+    SOURCE frames (direct or inferred-from-imports) are EDITABLE; TEST files are
+    READ-ONLY evidence for assertion/runtime failures (never auto-edited to make
+    an assertion pass). A ``harness_contract_violation`` is the lone case where
+    the test file is editable (handled by the caller for the no-tests path).
+    """
+    attributed: list[AttributedPath] = []
+    seen: set[str] = set()
+    for path in source_frames:
+        if path not in seen:
+            seen.add(path)
+            attributed.append(AttributedPath(path, PROVENANCE_SOURCE, editable=True))
+    test_editable = failure_class == "harness_contract_violation"
+    for path in test_files:
+        if path not in seen:
+            seen.add(path)
+            attributed.append(AttributedPath(path, PROVENANCE_TEST, editable=test_editable))
+    return attributed
+
+
+def _infer_sources_from_test_imports(test_files: list[str], project_root: Path) -> list[str]:
+    """Resolve the SOURCE module(s) a failing test imports → editable candidates.
+
+    Reads each failing test file, collects its relative ``import ... from "..."``
+    / ``require("...")`` specifiers (bare package specifiers like ``vitest`` are
+    ignored), and resolves them to real project files (trying the common
+    TS/JS extensions and ``index.*``). This is how an assertion failure that
+    only frames the TEST still yields an editable SOURCE target — without ever
+    marking the test editable.
+    """
+    root = project_root.resolve(strict=False)
+    resolved: list[str] = []
+    for rel_test in test_files:
+        test_path = (root / rel_test).resolve(strict=False)
+        try:
+            content = test_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        specs = [m.group("spec") for m in _JS_IMPORT_FROM.finditer(content)]
+        specs += [m.group("spec") for m in _JS_REQUIRE.finditer(content)]
+        for spec in specs:
+            if not spec.startswith("."):
+                continue  # bare package (vitest, node:fs, lodash, …) — not source
+            target = _resolve_relative_import(test_path.parent, spec, root)
+            if target is not None:
+                resolved.append(target)
+    return _dedupe(resolved)
+
+
+#: Extension/candidate order for resolving a relative import to a project file.
+_JS_IMPORT_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+
+
+def _resolve_relative_import(base_dir: Path, spec: str, root: Path) -> str | None:
+    raw = (base_dir / spec).resolve(strict=False)
+    candidates: list[Path] = []
+    # NodeNext specifiers carry a ``.js`` extension that maps to a ``.ts`` source;
+    # try the literal path, extension swaps, the bare path + each ext, and index.
+    if raw.suffix:
+        candidates.append(raw)
+        stem = raw.with_suffix("")
+        for ext in _JS_IMPORT_EXTS:
+            candidates.append(stem.with_suffix(ext))
+    else:
+        for ext in _JS_IMPORT_EXTS:
+            candidates.append(raw.with_suffix(ext))
+    for ext in _JS_IMPORT_EXTS:
+        candidates.append(raw / f"index{ext}")
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            rel = candidate.resolve(strict=False).relative_to(root).as_posix()
+        except ValueError:
+            return None
+        # Never point repair at a test file (an import of a test helper).
+        if re.search(r"\.(test|spec)\.[cm]?[jt]sx?$", rel):
+            return None
+        return rel
+    return None
+
+
+# ─────────────────────────────────────────────────────────────
+# tsc adapter
+# ─────────────────────────────────────────────────────────────
+
+#: ``path/file.ts(line,col): error TSxxxx: msg`` (tsc default pretty format).
+_TSC_DIAG_PAREN = re.compile(
+    r"^(?P<path>[^\s(][^(\n]*\.(?:ts|tsx|mts|cts))\((?P<line>\d+),(?P<col>\d+)\):\s*error\s+TS\d+",
+    re.MULTILINE,
+)
+#: ``path/file.ts:line:col - error TSxxxx`` (tsc ``--pretty false`` / some CIs).
+_TSC_DIAG_COLON = re.compile(
+    r"^(?P<path>[^\s:][^:\n]*\.(?:ts|tsx|mts|cts)):(?P<line>\d+):(?P<col>\d+)\s*-?\s*error\s+TS\d+",
+    re.MULTILINE,
+)
+
+
+def _is_tsc(command: str, output: str) -> bool:
+    cmd = command.lower()
+    if "tsc" in cmd:
+        return True
+    # Defensive: a tsc diagnostic shape — but ONLY when the command is not a
+    # known JS TEST runner (whose own adapter must win even if its output
+    # happens to echo a ``TSxxxx`` code), and not pytest.
+    if "vitest" in cmd or "jest" in cmd or "pytest" in cmd:
+        return False
+    return bool(re.search(r"error TS\d+", output or ""))
+
+
+def parse_tsc_failure(output: str, project_root: Path, check_name: str) -> TestFailureAttribution:
+    """Parse ``tsc`` diagnostics → EDITABLE source targets (TS error codes).
+
+    tsc names the offending SOURCE file directly, so a tsc error is repairable
+    when (and only when) it is attributed to a file inside the project tree.
+    Errors in vendored deps (``node_modules``) or outside the tree are dropped
+    by :func:`_project_paths`, so the engine never tries to patch a dependency.
+    """
+    text = output or ""
+    paths = [m.group("path") for m in _TSC_DIAG_PAREN.finditer(text)]
+    paths += [m.group("path") for m in _TSC_DIAG_COLON.finditer(text)]
+    source_paths = _project_paths(paths, project_root)
+    # A tsc diagnostic in a TEST file is still a real type error in project code
+    # the engine may fix (it is not an assertion-semantics rewrite), so tsc
+    # targets are editable regardless of test/source — unlike the vitest path.
+    attributed = [AttributedPath(p, PROVENANCE_SOURCE, editable=True) for p in source_paths]
+    failure_class = "import_collection_error" if attributed else "unknown"
+    code_addressable = bool(attributed)
+    where = ", ".join(source_paths) or "no project file diagnostics found"
+    return TestFailureAttribution(
+        failure_class=failure_class,
+        attributed=attributed,
+        code_addressable=code_addressable,
+        diagnosis=f"tsc type error(s): {where}",
+    )
+
+
+# Register the built-in adapters on import. ORDER MATTERS: the first matching
+# predicate wins (see ``_select_adapter``). tsc is registered BEFORE vitest/jest
+# so a pure ``tsc --noEmit`` command (which never contains "vitest"/"jest") is
+# parsed as type diagnostics; the JS-runner predicate also keys off the command
+# string, so a vitest run is unaffected by tsc's registration.
 register_adapter(_is_pytest, parse_pytest_failure)
+register_adapter(_is_tsc, parse_tsc_failure)
+register_adapter(_is_vitest_or_jest, parse_vitest_failure)
 
 
 __all__ = [
@@ -463,5 +727,7 @@ __all__ = [
     "TestFailureAttribution",
     "attribute_command_failure",
     "parse_pytest_failure",
+    "parse_tsc_failure",
+    "parse_vitest_failure",
     "register_adapter",
 ]

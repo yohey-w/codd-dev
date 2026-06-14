@@ -353,6 +353,168 @@ def test_greenfield_certify_honors_allow_structural_only(tmp_path: Path) -> None
 
 
 # ═══════════════════════════════════════════════════════════
+# #1 — node/TypeScript blocking dependency-install preflight
+# ═══════════════════════════════════════════════════════════
+
+
+def _node_settings(**verify: object) -> dict:
+    settings: dict = {
+        "project": {"type": "cli", "language": "typescript"},
+        "scan": {"source_dirs": ["src"]},
+    }
+    if verify:
+        settings["verify"] = dict(verify)
+    return settings
+
+
+def test_node_install_preflight_runs_and_blocks_on_failure(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    # Force the install command to a deterministic FAILURE (no real npm).
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "false")
+
+    result = VerifyRunner(tmp_path, _node_settings()).run()
+
+    assert result.passed is False
+    install_failures = [f for f in result.failures if f.check_name == "install_preflight"]
+    assert install_failures, "install failure must be surfaced"
+    # honest environment_build_error, NOT a code-repair target.
+    assert install_failures[0].details["failure_class"] == "environment_build_error"
+    assert install_failures[0].details["code_addressable"] is False
+
+
+def test_node_install_failure_skips_tests_and_typecheck(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    (tmp_path / "tsconfig.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "false")
+
+    result = VerifyRunner(
+        tmp_path, _node_settings(test_command="echo SHOULD_NOT_RUN")
+    ).run()
+
+    # Install failed → typecheck/tests must NOT have run (deps missing).
+    assert result.passed is False
+    assert result.tests_executed is False
+    assert result.typecheck_executed is False
+    assert "skipped" in result.tests_summary
+
+
+def test_node_install_success_allows_typecheck_and_tests(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "true")
+
+    # No tsconfig → no default tsc; an explicit passing test command runs.
+    result = VerifyRunner(tmp_path, _node_settings(test_command="true")).run()
+
+    assert result.tests_executed is True
+    assert not [f for f in result.failures if f.check_name == "install_preflight"]
+
+
+def test_install_preflight_opt_out_skips_install(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+
+    def _boom(root):  # would fail if called
+        raise AssertionError("install must not run when opted out")
+
+    monkeypatch.setattr(verify_runner_module, "node_install_command", _boom)
+    result = VerifyRunner(
+        tmp_path, _node_settings(install_preflight=False, allow_structural_only=True)
+    ).run()
+    assert result.passed is True
+
+
+def test_install_preflight_noop_for_python_project(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+
+    def _boom(root):
+        raise AssertionError("install preflight must not run for a python project")
+
+    monkeypatch.setattr(verify_runner_module, "node_install_command", _boom)
+    # generic python project, no package.json → not a node stack.
+    result = VerifyRunner(tmp_path, _settings(allow_structural_only=True)).run()
+    assert result.passed is True
+
+
+# ═══════════════════════════════════════════════════════════
+# #4 — tsc default typecheck + JS executed-test-count (0 ⇒ hard fail)
+# ═══════════════════════════════════════════════════════════
+
+
+def test_typescript_project_defaults_to_tsc_noemit(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    (tmp_path / "tsconfig.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "true")
+
+    captured: list[str] = []
+    real_run = verify_runner_module.subprocess.run
+
+    def _spy_run(command, *args, **kwargs):
+        captured.append(command)
+        # Stand in for tsc/test commands so we do not shell out to a real tsc.
+        kwargs = dict(kwargs)
+        return real_run("true", *args, **{**kwargs, "shell": True})
+
+    monkeypatch.setattr(verify_runner_module.subprocess, "run", _spy_run)
+    runner = VerifyRunner(tmp_path, _node_settings(test_command="true"))
+    result = runner.run()
+
+    assert result.typecheck_executed is True
+    assert any("tsc --noEmit" in cmd for cmd in captured), captured
+
+
+def test_tsc_default_disabled_when_no_tsconfig(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "true")
+    runner = VerifyRunner(tmp_path, _node_settings())
+    # no tsconfig.json → no implicit tsc typecheck resolved.
+    assert runner._resolve_typecheck_command(_node_settings()) is None
+
+
+def test_explicit_typecheck_command_overrides_tsc_default(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    (tmp_path / "tsconfig.json").write_text("{}", encoding="utf-8")
+    runner = VerifyRunner(tmp_path, _node_settings(typecheck_command="my-typecheck"))
+    assert runner._resolve_typecheck_command(_node_settings(typecheck_command="my-typecheck")) == "my-typecheck"
+
+
+def test_vitest_zero_tests_collected_is_hard_fail_even_on_exit_0(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "true")
+
+    # A command that names vitest (so the JS-runner gate applies) and EXITS 0
+    # but prints vitest's "no test files" banner. ``: vitest run`` is a shell
+    # no-op carrying the runner name into the command string.
+    cmd = "bash -c ': vitest run; echo \"No test files found, exiting with code 0\"; exit 0'"
+    result = VerifyRunner(tmp_path, _node_settings(test_command=cmd)).run()
+
+    assert result.passed is False
+    test_failures = [f for f in result.failures if f.check_name == "test_command"]
+    assert test_failures, "0-collected vitest must be a hard failure"
+    assert test_failures[0].details.get("executed_test_count") == 0
+
+
+def test_vitest_with_passing_tests_is_green(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "true")
+
+    cmd = (
+        "bash -c ': vitest run; echo \"Test Files  1 passed (1)\"; "
+        "echo \"Tests  3 passed (3)\"; exit 0'"
+    )
+    result = VerifyRunner(tmp_path, _node_settings(test_command=cmd)).run()
+
+    assert result.tests_executed is True
+    assert not [f for f in result.failures if f.check_name == "test_command"]
+
+
+# ═══════════════════════════════════════════════════════════
 # Defaults documentation
 # ═══════════════════════════════════════════════════════════
 
@@ -366,3 +528,5 @@ def test_defaults_yaml_declares_the_fx3_verify_keys() -> None:
     assert verify["source_integrity"] is True
     assert verify["allow_structural_only"] is False
     assert verify["test_timeout_seconds"] == 600
+    assert verify["install_preflight"] is True
+    assert verify["install_timeout_seconds"] == 900

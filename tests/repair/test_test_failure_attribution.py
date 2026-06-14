@@ -210,3 +210,165 @@ def test_attribution_is_best_effort_and_never_raises(monkeypatch) -> None:
     )
     assert result is not None
     assert result.failure_class in {"unknown", "runtime_exception"}
+
+
+# ─────────────────────────────────────────────────────────────
+# vitest / jest adapter (source inferred from the failing test's imports)
+# ─────────────────────────────────────────────────────────────
+
+
+def _ts_project(tmp_path) -> Path:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "converter.ts").write_text(
+        "export function convert(x: number): number { return x; }\n", encoding="utf-8"
+    )
+    (tmp_path / "tests" / "convert.test.ts").write_text(
+        'import { describe, it, expect } from "vitest";\n'
+        'import { convert } from "../src/converter.js";\n'
+        'describe("convert", () => { it("doubles", () => { expect(convert(1)).toBe(2); }); });\n',
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def test_vitest_assertion_infers_source_and_keeps_test_readonly(tmp_path) -> None:
+    root = _ts_project(tmp_path)
+    out = (
+        " FAIL  tests/convert.test.ts > convert > doubles\n"
+        "AssertionError: expected 1 to be 2 // Object.is equality\n"
+        " ❯ tests/convert.test.ts:3:38\n"
+        " Test Files  1 failed (1)\n"
+        "      Tests  1 failed (1)\n"
+    )
+    result = attribute_command_failure(
+        command="npx vitest run tests/convert.test.ts", output=out, project_root=root
+    )
+    assert result is not None
+    assert result.failure_class == "assertion_failure"
+    # SOURCE inferred from the test's import is the editable target …
+    assert "src/converter.ts" in result.failed_nodes
+    # … and the TEST file is read-only evidence, NEVER an editable patch target.
+    assert "tests/convert.test.ts" in result.evidence_nodes
+    assert "tests/convert.test.ts" not in result.failed_nodes
+    assert result.code_addressable is True
+    prov = _provenance(result)
+    assert prov["src/converter.ts"] == (PROVENANCE_SOURCE, True)
+    assert prov["tests/convert.test.ts"] == (PROVENANCE_TEST, False)
+
+
+def test_vitest_assertion_without_resolvable_source_is_honest_red(tmp_path) -> None:
+    # A test importing only a bare package (no relative source) → no editable
+    # target → not code-addressable (honest red, never a test rewrite).
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "math.test.ts").write_text(
+        'import { expect, test } from "vitest";\n'
+        'test("x", () => { expect(1 + 1).toBe(3); });\n',
+        encoding="utf-8",
+    )
+    out = (
+        " FAIL  tests/math.test.ts > x\n"
+        "AssertionError: expected 2 to be 3\n"
+        " ❯ tests/math.test.ts:2:25\n"
+        "      Tests  1 failed (1)\n"
+    )
+    result = attribute_command_failure(
+        command="vitest run", output=out, project_root=tmp_path
+    )
+    assert result is not None
+    assert result.failure_class == "assertion_failure"
+    assert result.failed_nodes == []  # no editable target
+    assert "tests/math.test.ts" in result.evidence_nodes
+    assert result.code_addressable is False
+
+
+def test_vitest_no_tests_collected_is_harness_violation(tmp_path) -> None:
+    result = attribute_command_failure(
+        command="npx vitest run tests/e2e/",
+        output="No test files found, exiting with code 1\n",
+        project_root=tmp_path,
+    )
+    assert result is not None
+    assert result.failure_class == "harness_contract_violation"
+
+
+def test_jest_recognised_by_command(tmp_path) -> None:
+    root = _ts_project(tmp_path)
+    out = (
+        "FAIL tests/convert.test.ts\n"
+        "  ● convert › doubles\n"
+        "    expect(received).toBe(expected)\n"
+        "      at Object.<anonymous> (tests/convert.test.ts:3:30)\n"
+        "Tests:       1 failed, 1 total\n"
+    )
+    result = attribute_command_failure(command="npx jest", output=out, project_root=root)
+    assert result is not None
+    assert result.failure_class == "assertion_failure"
+    assert "src/converter.ts" in result.failed_nodes
+    assert "tests/convert.test.ts" not in result.failed_nodes
+
+
+def test_vitest_runtime_exception_in_source_is_editable(tmp_path) -> None:
+    root = _ts_project(tmp_path)
+    out = (
+        " FAIL  tests/convert.test.ts > convert > doubles\n"
+        "TypeError: Cannot read properties of undefined\n"
+        " ❯ src/converter.ts:1:42\n"
+        " ❯ tests/convert.test.ts:3:20\n"
+        "      Tests  1 failed (1)\n"
+    )
+    result = attribute_command_failure(command="vitest run", output=out, project_root=root)
+    assert result is not None
+    assert result.failure_class == "runtime_exception"
+    # direct source frame → editable; test → read-only evidence.
+    assert "src/converter.ts" in result.failed_nodes
+    assert "tests/convert.test.ts" not in result.failed_nodes
+
+
+# ─────────────────────────────────────────────────────────────
+# tsc adapter (TSxxxx diagnostics → editable source)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_tsc_paren_format_attributes_source(tmp_path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "converter.ts").write_text("export const x = 1;\n", encoding="utf-8")
+    out = "src/converter.ts(3,17): error TS7006: Parameter 'x' implicitly has an 'any' type.\n"
+    result = attribute_command_failure(
+        command="npx tsc --noEmit", output=out, project_root=tmp_path
+    )
+    assert result is not None
+    assert "src/converter.ts" in result.failed_nodes
+    assert result.code_addressable is True
+    assert _provenance(result)["src/converter.ts"] == (PROVENANCE_SOURCE, True)
+
+
+def test_tsc_colon_format_attributes_source(tmp_path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "index.ts").write_text("export const x = 1;\n", encoding="utf-8")
+    out = "src/index.ts:5:9 - error TS2322: Type 'string' is not assignable to type 'number'.\n"
+    result = attribute_command_failure(command="tsc --noEmit", output=out, project_root=tmp_path)
+    assert result is not None
+    assert "src/index.ts" in result.failed_nodes
+
+
+def test_tsc_ignores_node_modules_diagnostics(tmp_path) -> None:
+    out = (
+        "node_modules/@types/node/fs.d.ts(10,5): error TS1110: Type expected.\n"
+        "src/app.ts(2,3): error TS2304: Cannot find name 'foo'.\n"
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.ts").write_text("foo();\n", encoding="utf-8")
+    result = attribute_command_failure(command="tsc --noEmit", output=out, project_root=tmp_path)
+    assert result is not None
+    assert "src/app.ts" in result.failed_nodes
+    assert all("node_modules" not in node for node in result.failed_nodes)
+
+
+def test_tsc_command_with_no_project_diagnostics_not_addressable(tmp_path) -> None:
+    result = attribute_command_failure(
+        command="tsc --noEmit", output="error TS18003: No inputs were found.\n", project_root=tmp_path
+    )
+    assert result is not None
+    assert result.failed_nodes == []
+    assert result.code_addressable is False

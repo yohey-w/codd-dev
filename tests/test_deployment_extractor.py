@@ -262,3 +262,144 @@ def extract_deployment_docs_with_sections(*sections: str):
     from codd.deployment import DeploymentDocNode
 
     return [DeploymentDocNode(path="DEPLOYMENT.md", sections=list(sections))]
+
+
+# ═══════════════════════════════════════════════════════════
+# #3 — e2e routing by ProjectCapabilities.e2e_modality (cli → vitest)
+# ═══════════════════════════════════════════════════════════
+
+
+def _cli_config():
+    return {"required_artifacts": {"project_type": "cli"}}
+
+
+def _web_config():
+    return {"required_artifacts": {"project_type": "web"}}
+
+
+def test_cli_modality_routes_ts_e2e_to_vitest(tmp_path):
+    _write(tmp_path / "tests" / "e2e" / "convert.test.ts", "test('cli converts')\n")
+
+    tests = extract_verification_tests(tmp_path, _cli_config())
+
+    assert len(tests) == 1
+    assert tests[0].verification_template_ref == "vitest"
+
+
+def test_browser_modality_routes_ts_e2e_to_playwright(tmp_path):
+    _write(tmp_path / "tests" / "e2e" / "login.spec.ts", "test('login')\n")
+
+    tests = extract_verification_tests(tmp_path, _web_config())
+
+    assert tests[0].verification_template_ref == "playwright"
+
+
+def test_cli_modality_discovers_test_ts_glob(tmp_path):
+    # CLI e2e files are *.test.ts (not Playwright's *.spec.ts) and must be found.
+    _write(tmp_path / "tests" / "e2e" / "cli.test.ts", "test('x')\n")
+
+    tests = extract_verification_tests(tmp_path, _cli_config())
+
+    assert any(t.verification_template_ref == "vitest" for t in tests)
+
+
+def test_no_declared_type_keeps_legacy_playwright_routing(tmp_path):
+    # Backward compatibility: no project_type configured → legacy extension
+    # routing (.ts → playwright), so existing builds are unaffected.
+    _write(tmp_path / "tests" / "e2e" / "login.spec.ts", "test('login')\n")
+
+    tests = extract_verification_tests(tmp_path)  # no config
+
+    assert tests[0].verification_template_ref == "playwright"
+
+
+def test_sh_e2e_still_routes_to_curl_under_cli(tmp_path):
+    _write(tmp_path / "tests" / "smoke" / "health.sh", "curl /health\n")
+
+    tests = extract_verification_tests(tmp_path, _cli_config())
+
+    assert tests[0].verification_template_ref == "curl"
+
+
+def test_deployment_e2e_modality_override_wins(tmp_path):
+    _write(tmp_path / "tests" / "e2e" / "x.test.ts", "test('x')\n")
+    config = {"deployment": {"e2e_modality": "cli"}}
+
+    tests = extract_verification_tests(tmp_path, config)
+
+    assert tests[0].verification_template_ref == "vitest"
+
+
+def test_vitest_template_is_registered():
+    from codd.deployment.providers import VERIFICATION_TEMPLATES
+    import codd.deployment.providers.verification  # noqa: F401
+
+    assert "vitest" in VERIFICATION_TEMPLATES
+
+
+# ═══════════════════════════════════════════════════════════
+# #5 — db_seed:users injection gated by project capability/modality
+# ═══════════════════════════════════════════════════════════
+
+
+def test_db_seed_not_injected_for_cli_modality(tmp_path):
+    states = extract_runtime_states(
+        tmp_path,
+        [],
+        [{"id": "docs/design/cmd.md", "acceptance_criteria": ["User runs the converter"]}],
+        _cli_config(),
+    )
+
+    assert all(state.identifier != "runtime:db_seed:users" for state in states)
+
+
+def test_db_seed_injected_for_web_modality(tmp_path):
+    states = extract_runtime_states(
+        tmp_path,
+        [],
+        [{"id": "docs/design/api.md", "acceptance_criteria": ["User can login"]}],
+        _web_config(),
+    )
+
+    assert any(state.identifier == "runtime:db_seed:users" for state in states)
+
+
+def test_db_seed_injected_when_no_type_declared_legacy(tmp_path):
+    # Backward compatibility: no declared type → legacy injection preserved.
+    states = extract_runtime_states(
+        tmp_path,
+        [],
+        [{"id": "docs/design/api.md", "acceptance_criteria": ["User can login"]}],
+    )
+
+    assert any(state.identifier == "runtime:db_seed:users" for state in states)
+
+
+def test_db_seed_explicit_override_suppresses_for_web(tmp_path):
+    config = {
+        "required_artifacts": {"project_type": "web"},
+        "deployment": {"infer_db_seed_from_criteria": False},
+    }
+    states = extract_runtime_states(
+        tmp_path,
+        [],
+        [{"id": "docs/design/api.md", "acceptance_criteria": ["User can login"]}],
+        config,
+    )
+
+    assert all(state.identifier != "runtime:db_seed:users" for state in states)
+
+
+def test_db_seed_explicit_override_enables_for_cli(tmp_path):
+    config = {
+        "required_artifacts": {"project_type": "cli"},
+        "deployment": {"infer_db_seed_from_criteria": True},
+    }
+    states = extract_runtime_states(
+        tmp_path,
+        [],
+        [{"id": "docs/design/cmd.md", "acceptance_criteria": ["User runs the converter"]}],
+        config,
+    )
+
+    assert any(state.identifier == "runtime:db_seed:users" for state in states)

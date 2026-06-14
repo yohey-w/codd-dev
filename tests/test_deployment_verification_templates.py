@@ -13,6 +13,7 @@ from codd.deployment.providers import (
 )
 from codd.deployment.providers.verification.curl import CurlTemplate
 from codd.deployment.providers.verification.playwright import PlaywrightTemplate
+from codd.deployment.providers.verification.vitest import VitestTemplate
 
 
 @pytest.fixture(autouse=True)
@@ -213,3 +214,55 @@ def test_verification_templates_registry_restores_after_temp_registration():
     VERIFICATION_TEMPLATES.clear()
     VERIFICATION_TEMPLATES.update(before)
     assert VERIFICATION_TEMPLATES == before
+
+
+# ── vitest CLI e2e template (#3 runner) ──────────────────────
+
+
+def test_vitest_template_registers():
+    assert VERIFICATION_TEMPLATES["vitest"] is VitestTemplate
+
+
+def test_vitest_generate_test_command_e2e(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runtime_state = RuntimeStateNode(
+        identifier="runtime:cli:convert",
+        kind=RuntimeStateKind.SERVER_RUNNING,
+        target="convert",
+    )
+    command = VitestTemplate().generate_test_command(runtime_state, "e2e")
+    assert command == "npx vitest run tests/e2e/"
+
+
+def test_vitest_template_passes_on_real_run(monkeypatch):
+    class _Completed:
+        returncode = 0
+        stdout = "Test Files  1 passed (1)\n Tests  2 passed (2)\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "codd.deployment.providers.verification.vitest.subprocess.run",
+        lambda *a, **k: _Completed(),
+    )
+    result = VitestTemplate().execute("npx vitest run tests/e2e/convert.test.ts")
+    assert result.passed is True
+
+
+def test_vitest_template_zero_tests_is_hard_fail_even_on_exit_0(monkeypatch):
+    # ANTI-FALSE-GREEN: vitest exits 0 with "No test files found" — must FAIL.
+    class _Completed:
+        returncode = 0
+        stdout = "No test files found, exiting with code 0\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "codd.deployment.providers.verification.vitest.subprocess.run",
+        lambda *a, **k: _Completed(),
+    )
+    result = VitestTemplate().execute("npx vitest run tests/e2e/")
+    assert result.passed is False
+    assert "0 tests" in result.output or "no test files" in result.output.lower()
+
+
+def test_vitest_template_contract_is_satisfied():
+    assert isinstance(VitestTemplate(), VerificationTemplate)

@@ -299,3 +299,56 @@ class TestAntiFalseGreen:
             text=True,
         )
         assert proc.returncode != 0  # exit 5 = no tests collected
+
+
+# ═══════════════════════════════════════════════════════════
+# TypeScript (node) ensurer — package.json test script (create-only)
+# ═══════════════════════════════════════════════════════════
+
+
+class TestTypeScriptEnsure:
+    def test_typescript_registered(self):
+        langs = supported_test_runner_languages()
+        assert "typescript" in langs
+        assert "node" in langs
+
+    def test_no_package_json_gets_one_with_test_script(self, tmp_path):
+        import json
+
+        result = ensure_test_runner_config(
+            tmp_path,
+            language="typescript",
+            project_name="ts-app",
+            source_dirs=["src/"],
+            test_dirs=["tests/"],
+        )
+        assert result.action == "created"
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert pkg["scripts"]["test"] == "vitest run"
+        # detect_test_command then resolves the npm test script.
+        assert detect_test_command(tmp_path) == "npm run test"
+
+    def test_existing_test_script_is_not_clobbered(self, tmp_path):
+        import json
+
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "x", "scripts": {"test": "jest --ci"}}), encoding="utf-8"
+        )
+        result = ensure_test_runner_config(tmp_path, language="node", project_name="x")
+        assert result.action == "present"
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert pkg["scripts"]["test"] == "jest --ci"
+
+    def test_placeholder_test_script_is_replaced(self, tmp_path):
+        import json
+
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {"name": "x", "scripts": {"test": 'echo "Error: no test specified" && exit 1'}}
+            ),
+            encoding="utf-8",
+        )
+        result = ensure_test_runner_config(tmp_path, language="typescript", project_name="x")
+        assert result.action == "augmented"
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert pkg["scripts"]["test"] == "vitest run"

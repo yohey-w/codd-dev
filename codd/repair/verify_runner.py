@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from codd.dag.builder import build_dag, load_dag_settings
 from codd.dag.runner import run_checks
 from codd.deployment.providers import VERIFICATION_TEMPLATES
 from codd.discovery import iter_source_files, scan_exclude_patterns
+from codd.project_types import node_install_command
 from codd.repair.schema import VerificationFailureReport
 from codd.repair.test_failure_attribution import attribute_command_failure
 from codd.test_detection import detect_test_command
@@ -170,15 +172,31 @@ class VerifyRunner:
             )
             # FX3 execution evidence — order: cheap deterministic parse check
             # first (names broken files even when the suite cannot start),
+            # then the BLOCKING dependency-install preflight (node stacks),
             # then the configured typecheck, then the test command.
             source_integrity, integrity_failures = self._source_integrity_failures(settings)
             failures.extend(integrity_failures)
-            typecheck_executed, typecheck_failure = self._run_typecheck_command(settings)
-            if typecheck_failure is not None:
-                failures.append(typecheck_failure)
-            tests_executed, test_command, tests_summary, test_failure = self._run_test_command(settings)
-            if test_failure is not None:
-                failures.append(test_failure)
+            typecheck_executed = False
+            tests_executed = False
+            test_command = None
+            tests_summary = ""
+            # #1 — BLOCKING dependency-install preflight. A node/TS build whose
+            # deps are not installed cannot be typechecked or tested; an install
+            # failure is an honest ``environment_build_error`` (NOT a code-repair
+            # target), so we record it and SKIP typecheck/tests (running them
+            # would only produce misleading "module not found" noise the engine
+            # might thrash on). Non-node stacks: no-op.
+            install_failure = self._run_install_preflight(settings)
+            if install_failure is not None:
+                failures.append(install_failure)
+                tests_summary = "skipped (dependency install failed)"
+            else:
+                typecheck_executed, typecheck_failure = self._run_typecheck_command(settings)
+                if typecheck_failure is not None:
+                    failures.append(typecheck_failure)
+                tests_executed, test_command, tests_summary, test_failure = self._run_test_command(settings)
+                if test_failure is not None:
+                    failures.append(test_failure)
         except Exception as exc:  # noqa: BLE001 - verification must fail gracefully for repair loop.
             if _is_missing_expected_proof_break(exc):
                 return self._warning_result("expected proof break missing; skipped proof-break verification")
@@ -318,16 +336,116 @@ class VerifyRunner:
             return f"{len(failures)} parse error(s) in {checked} file(s){suffix}", failures
         return f"checked {checked} file(s){suffix}", []
 
+    def _run_install_preflight(self, settings: dict[str, Any]) -> VerificationFailure | None:
+        """#1 — BLOCKING dependency install for a node/TS project.
+
+        Runs the package-manager install (``npm ci`` when a lockfile exists,
+        else ``npm install``; pnpm/yarn/bun honored by lockfile detection) so
+        the typecheck (``tsc``) and the test runner (vitest) actually have their
+        dependencies. This is DELIBERATELY a blocking verify step, NOT the
+        advisory ``ensure_test_runner`` (which swallows errors): an install
+        failure must surface as an honest ``environment_build_error`` and fail
+        the stage, never pass green and never be handed to the code-repair
+        engine. Returns a failure on nonzero exit / timeout, else ``None``.
+
+        Gating: only for a node stack — an explicit ``project.language`` of
+        ``typescript``/``node`` OR (no language declared but) a ``package.json``
+        present. Non-node projects and explicitly-disabled
+        (``verify.install_preflight: false``) are no-ops. No implicit global
+        ``npx``: the command is the project's own package manager.
+        """
+        if _verify_setting(settings, "install_preflight", True) is False:
+            return None
+        if not self._is_node_project(settings):
+            return None
+        command = node_install_command(self.project_root)
+        timeout = _install_timeout_seconds(settings)
+        try:
+            completed = subprocess.run(
+                command,
+                shell=True,
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return VerificationFailure(
+                check_name="install_preflight",
+                source="install_preflight",
+                message=f"[TIMEOUT] dependency install exceeded {timeout:g}s: {command}",
+                details={
+                    "command": command,
+                    "timeout_seconds": timeout,
+                    "failure_class": "environment_build_error",
+                    "code_addressable": False,
+                },
+            )
+        if completed.returncode == 0:
+            return None
+        output = _command_output_tail(completed.stdout, completed.stderr)
+        return VerificationFailure(
+            check_name="install_preflight",
+            source="install_preflight",
+            message=(
+                f"dependency install failed (exit {completed.returncode}): {command}\n{output}"
+            ).rstrip(),
+            details={
+                "command": command,
+                "exit_code": completed.returncode,
+                "output": output,
+                # Honest environment failure — NOT a code-repair target.
+                "failure_class": "environment_build_error",
+                "code_addressable": False,
+            },
+        )
+
+    def _is_node_project(self, settings: dict[str, Any]) -> bool:
+        """Whether this project is a node/TS stack (drives the install preflight).
+
+        True when ``project.language`` is ``typescript``/``node``, OR — when no
+        language is declared — a ``package.json`` exists at the project root.
+        A declared NON-node language (e.g. ``python``) is respected as a no.
+        """
+        project = settings.get("project") if isinstance(settings.get("project"), Mapping) else {}
+        language = ""
+        if isinstance(project, Mapping):
+            language = str(project.get("language") or "").strip().lower()
+        if language in ("typescript", "node"):
+            return True
+        if language:
+            return False
+        return (self.project_root / "package.json").is_file()
+
     def _run_typecheck_command(self, settings: dict[str, Any]) -> tuple[bool, VerificationFailure | None]:
         """Run ``verify.typecheck_command`` (or ``typecheck.command`` when
-        ``typecheck.enabled``). No command configured → not executed."""
-        command = _resolve_typecheck_command(settings)
+        ``typecheck.enabled``; or the node-stack default ``tsc --noEmit``).
+        No command resolved → not executed."""
+        command = self._resolve_typecheck_command(settings)
         if not command:
             return False, None
         executed, _summary, failure = self._run_evidence_command(
             command, settings, check_name="typecheck_command", label="typecheck command"
         )
         return executed, failure
+
+    def _resolve_typecheck_command(self, settings: dict[str, Any]) -> str | None:
+        """Explicit config first, else the node-stack default ``tsc --noEmit``.
+
+        #4 — for a TypeScript/node project (and absent an explicit
+        ``verify.typecheck_command`` / ``typecheck.command``), the default
+        typecheck is ``npx tsc --noEmit``: a nonzero ``tsc`` is a HARD verify
+        failure (it runs as a normal evidence command, so the existing
+        exit-code path classifies + attributes it). Non-node stacks keep
+        today's behaviour (no implicit typecheck)."""
+        explicit = _resolve_typecheck_command(settings)
+        if explicit:
+            return explicit
+        if _verify_setting(settings, "typecheck", None) is False:
+            return None
+        if self._is_node_project(settings) and (self.project_root / "tsconfig.json").is_file():
+            return "npx --no-install tsc --noEmit"
+        return None
 
     def _run_test_command(
         self, settings: dict[str, Any]
@@ -385,6 +503,32 @@ class VerifyRunner:
                 ),
             )
         output = _command_output_tail(completed.stdout, completed.stderr)
+        full_output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+        # ANTI-FALSE-GREEN (#4): a JS test runner (vitest/jest/playwright) that
+        # collected/ran ZERO tests is a HARD FAIL even on exit 0 — these runners
+        # exit 0 with "No test files found" / "No tests found", which must never
+        # pass as green-on-nothing. Checked BEFORE the exit-0 success path.
+        if _js_test_runner_collected_zero(command, full_output):
+            message = (
+                f"{label} collected/ran 0 tests (no test files / no tests found): {command}\n"
+                f"{output}"
+            ).rstrip()
+            return (
+                True,
+                f"{label} collected 0 tests (hard fail)",
+                VerificationFailure(
+                    check_name=check_name,
+                    source=check_name,
+                    message=message,
+                    details={
+                        "command": command,
+                        "exit_code": completed.returncode,
+                        "output": output,
+                        "failure_class": "harness_contract_violation",
+                        "executed_test_count": 0,
+                    },
+                ),
+            )
         if completed.returncode == 0:
             return True, _last_line(completed.stdout) or "passed", None
         if completed.returncode == 5 and "pytest" in command:
@@ -566,6 +710,18 @@ def _test_timeout_seconds(settings: dict[str, Any]) -> float:
     return _positive_seconds(_verify_setting(settings, "test_timeout_seconds", None)) or DEFAULT_TEST_TIMEOUT_SECONDS
 
 
+#: Dependency install can pull a large tree on a cold cache; give it a generous
+#: but bounded budget (override via ``verify.install_timeout_seconds``).
+DEFAULT_INSTALL_TIMEOUT_SECONDS = 900.0
+
+
+def _install_timeout_seconds(settings: dict[str, Any]) -> float:
+    return (
+        _positive_seconds(_verify_setting(settings, "install_timeout_seconds", None))
+        or DEFAULT_INSTALL_TIMEOUT_SECONDS
+    )
+
+
 def _resolve_typecheck_command(settings: dict[str, Any]) -> str | None:
     explicit = _verify_setting(settings, "typecheck_command", None)
     if isinstance(explicit, str) and explicit.strip():
@@ -606,6 +762,51 @@ def _parse_error(path: Path) -> str | None:
     except Exception as exc:  # noqa: BLE001 - any parse failure is the finding.
         return f"not valid {suffix.lstrip('.').upper()}: {exc}"
     return None
+
+
+#: Command markers for the JS test runners whose 0-collected runs exit 0.
+_JS_TEST_RUNNERS: tuple[str, ...] = ("vitest", "jest", "playwright")
+#: Output signatures proving a JS runner collected/ran NOTHING.
+_JS_NO_TESTS_MARKERS: tuple[str, ...] = (
+    "no test files found",
+    "no tests found",
+    "no test suites found",
+    "no tests ran",  # jest: "No tests found, exiting with code 0" / "no tests ran"
+)
+
+#: Positive "ran something" summaries (vitest ``Tests N passed``, jest
+#: ``Tests: N passed``, playwright ``N passed``). If a JS runner shows none of
+#: these AND no failure markers, it is treated as 0-collected.
+_JS_TESTS_RAN_RE = re.compile(
+    r"(tests?[:\s]+\d+\s+(?:passed|failed|skipped))|(\b\d+\s+(?:passed|failed)\b)",
+    re.IGNORECASE,
+)
+
+
+def _js_test_runner_collected_zero(command: str, output: str) -> bool:
+    """True when a JS test-runner command provably collected/ran 0 tests.
+
+    Conservative and command-gated: only applies to vitest/jest/playwright
+    commands (so pytest/cargo/go keep their own semantics). An explicit
+    "no test files/tests/suites" marker is a definite zero; otherwise, the
+    absence of BOTH a positive ``N passed/failed`` summary and any explicit
+    failure marker is also treated as zero (these runners always print a count
+    summary when they ran anything).
+    """
+    lowered_cmd = command.lower()
+    if not any(runner in lowered_cmd for runner in _JS_TEST_RUNNERS):
+        return False
+    lowered = output.lower()
+    if any(marker in lowered for marker in _JS_NO_TESTS_MARKERS):
+        return True
+    if _JS_TESTS_RAN_RE.search(output):
+        return False
+    # No positive count and no explicit "no tests" marker. Only call it zero
+    # when the output is also free of an obvious failure/error signal, so a
+    # crashed/garbled run is still reported as a normal failure by exit code.
+    if "fail" in lowered or "error" in lowered:
+        return False
+    return True
 
 
 def _command_output_tail(stdout: str | None, stderr: str | None, limit: int = 4000) -> str:
