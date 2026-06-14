@@ -65,7 +65,7 @@ class CurlTemplate(VerificationTemplate):
             return f"curl -s -o /dev/null -w '%{{http_code}}' -X POST {target}"
         return f"curl -s -o /dev/null -w '%{{http_code}}' {target}"
 
-    def execute(self, command: str) -> VerificationResult:
+    def execute(self, command: str, cwd: Path | None = None) -> VerificationResult:
         if self.dry_run:
             return VerificationResult(passed=True, output=command, duration=0.0)
 
@@ -74,6 +74,7 @@ class CurlTemplate(VerificationTemplate):
             completed = subprocess.run(
                 command,
                 shell=True,
+                cwd=cwd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,

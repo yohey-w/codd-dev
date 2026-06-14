@@ -83,7 +83,13 @@ class CdpBrowser(VerificationTemplate):
         self,
         command: str,
         axis_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
     ) -> VerificationResult:
+        # ``cwd`` is accepted for interface uniformity (the verify runner passes
+        # it to every template) but is intentionally unused here: this template
+        # drives a CDP browser session, not a cwd-rooted subprocess, and already
+        # resolves the project root from the execution plan itself
+        # (``generate_test_command`` stamps ``plan["project_root"]``).
         started_at = time.monotonic()
         wire: CdpWire | None = None
         result: VerificationResult | None = None

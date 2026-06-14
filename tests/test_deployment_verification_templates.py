@@ -363,3 +363,204 @@ def test_vitest_include_glob_run_on_empty_e2e_still_hard_fails(monkeypatch):
 
 def test_vitest_template_contract_is_satisfied():
     assert isinstance(VitestTemplate(), VerificationTemplate)
+
+
+# ── REGRESSION: verify command must run with cwd=project_root ─────────────────
+#
+# Root cause (greenfield tempconv-codex8, first v2.24.0 run): the per-node
+# verification path called ``template.execute(command)`` with NO cwd, so the
+# vitest subprocess inherited the ORCHESTRATOR's working directory (the CoDD
+# install tree), not the generated project. vitest then rooted at codd-dev,
+# loaded codd-dev's (absent) config + the DEFAULT include glob, found 0 test
+# files, and the anti-false-green gate (correctly) hard-failed every e2e node.
+# The fix threads ``cwd=project_root`` from the verify runner through every
+# template's ``execute`` into ``subprocess.run(cwd=...)``. These tests prove the
+# subprocess actually runs in the project dir (REAL subprocess, not a mock) by
+# having the command print ``os.getcwd()`` and asserting it equals the project —
+# while the CALLER's cwd is deliberately a different directory.
+
+import os  # noqa: E402 - localized to the regression block below.
+
+
+def _spy_subprocess_run(monkeypatch, module: str) -> dict[str, object]:
+    """Patch ``<module>.subprocess.run`` to record the ``cwd`` it was given.
+
+    Returns a dict that gets ``cwd`` populated on the next ``execute`` call.
+    The wrapped run still executes (returns a harmless 0-exit completion) so the
+    template's own success/failure handling is exercised, while we assert the
+    EXACT working directory threaded into ``subprocess.run`` — the precise thing
+    the bug got wrong (no cwd → inherits the orchestrator's directory).
+    """
+    seen: dict[str, object] = {}
+
+    def _spy(cmd, **kwargs):
+        seen["cwd"] = kwargs.get("cwd")
+        # A real-shaped passing completion so each template's exit-0 path runs.
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=" Tests  1 passed (1)\n", stderr=""
+        )
+
+    monkeypatch.setattr(f"{module}.subprocess.run", _spy)
+    return seen
+
+
+def test_vitest_execute_threads_project_root_as_cwd(tmp_path, monkeypatch):
+    # The exact shape of the bug: caller (orchestrator) cwd != generated project.
+    caller = tmp_path / "orchestrator_cwd"
+    project = tmp_path / "generated_project"
+    caller.mkdir()
+    project.mkdir()
+    monkeypatch.chdir(caller)
+    seen = _spy_subprocess_run(
+        monkeypatch, "codd.deployment.providers.verification.vitest"
+    )
+
+    VitestTemplate(timeout=30).execute("npx vitest run tests/e2e/", cwd=project)
+
+    assert seen["cwd"] == project  # NOT None, NOT the caller cwd
+
+
+def test_playwright_execute_threads_project_root_as_cwd(tmp_path, monkeypatch):
+    caller = tmp_path / "orchestrator_cwd"
+    project = tmp_path / "generated_project"
+    caller.mkdir()
+    project.mkdir()
+    monkeypatch.chdir(caller)
+    seen = _spy_subprocess_run(
+        monkeypatch, "codd.deployment.providers.verification.playwright"
+    )
+
+    PlaywrightTemplate(timeout=30).execute("npx playwright test", cwd=project)
+
+    assert seen["cwd"] == project
+
+
+def test_curl_execute_threads_project_root_as_cwd(tmp_path, monkeypatch):
+    project = tmp_path / "generated_project"
+    project.mkdir()
+    seen = _spy_subprocess_run(
+        monkeypatch, "codd.deployment.providers.verification.curl"
+    )
+
+    CurlTemplate(timeout=30).execute("curl -s http://localhost/api/health", cwd=project)
+
+    assert seen["cwd"] == project
+
+
+def test_execute_cwd_none_is_backward_compatible(tmp_path, monkeypatch):
+    # Backward-compat guard: ``cwd=None`` (the default — what every legacy
+    # ``execute(command)`` caller passes implicitly) passes ``cwd=None`` to
+    # ``subprocess.run``, i.e. KEEPS the caller's working directory. No existing
+    # direct caller (e.g. the provider unit tests, cli run-journey) changes
+    # behaviour.
+    seen = _spy_subprocess_run(
+        monkeypatch, "codd.deployment.providers.verification.vitest"
+    )
+
+    VitestTemplate(timeout=30).execute("npx vitest run tests/e2e/")
+
+    assert seen["cwd"] is None
+
+
+def test_vitest_roots_at_project_config_when_run_from_other_cwd(tmp_path, monkeypatch):
+    # The literal failure mode: vitest must collect the PROJECT's tests because
+    # it roots at the project (loads the project's vitest.config.ts), even though
+    # the caller's cwd is elsewhere. We simulate vitest with a tiny fake "vitest"
+    # on PATH that — like the real CLI — reads ``vitest.config.ts`` RELATIVE TO
+    # ITS OWN CWD and reports the tests it "found". Rooted at the project it
+    # finds the test (PASS); rooted at the caller's empty cwd it finds none and
+    # the anti-false-green gate hard-fails — exactly the codex8 symptom.
+    project = tmp_path / "generated_project"
+    caller = tmp_path / "orchestrator_cwd"
+    bindir = tmp_path / "fakebin"
+    (project / "tests" / "e2e").mkdir(parents=True)
+    caller.mkdir()
+    bindir.mkdir()
+    # Project has a config + a test file; the caller cwd has neither.
+    (project / "vitest.config.ts").write_text("export default {}\n", encoding="utf-8")
+    (project / "tests" / "e2e" / "conv.e2e.test.ts").write_text("// a test\n", encoding="utf-8")
+
+    # Fake `vitest`: prints a real vitest-shaped summary based on whether the
+    # config + test file exist in the CURRENT working directory.
+    fake = bindir / "vitest"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "has_cfg = os.path.exists('vitest.config.ts')\n"
+        "tests = []\n"
+        "for root, _dirs, files in os.walk('tests') if os.path.isdir('tests') else []:\n"
+        "    tests += [f for f in files if f.endswith('.e2e.test.ts')]\n"
+        "if has_cfg and tests:\n"
+        "    print('Test Files  1 passed (1)')\n"
+        "    print(' Tests  1 passed (1)')\n"
+        "else:\n"
+        "    print('No test files found, exiting with code 0')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    # Make the fake `vitest` resolve via PATH; command avoids npx network use.
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.chdir(caller)
+
+    command = "vitest run tests/e2e/conv.e2e.test.ts"
+    # Rooted at the PROJECT: config + test are found → PASS.
+    rooted_at_project = VitestTemplate(timeout=30).execute(command, cwd=project)
+    assert rooted_at_project.passed is True, rooted_at_project.output
+    # Rooted at the CALLER's cwd (the bug): nothing found → anti-false-green FAIL.
+    rooted_at_caller = VitestTemplate(timeout=30).execute(command, cwd=caller)
+    assert rooted_at_caller.passed is False
+    assert (
+        "0 tests" in rooted_at_caller.output
+        or "no test files" in rooted_at_caller.output.lower()
+    )
+
+
+def test_verify_runner_threads_project_root_as_cwd_to_template_execute(tmp_path, monkeypatch):
+    # End-to-end through the verify runner: a spy template records the ``cwd``
+    # the runner passed to ``execute``. Proves verify_runner.py threads
+    # ``self.project_root`` (the resolved project root) into the provider call —
+    # the actual line that was missing it.
+    from codd.dag import DAG, Node
+    from codd.deployment.providers import VerificationResult as ProviderVerificationResult
+    from codd.repair import verify_runner as verify_runner_module
+    from codd.repair.verify_runner import VerifyRunner
+
+    captured: dict[str, object] = {}
+
+    class SpyTemplate:
+        def __init__(self, timeout=None):
+            pass
+
+        def generate_test_command(self, runtime_state, test_kind: str) -> str:
+            return "noop"
+
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
+            captured["cwd"] = cwd
+            return ProviderVerificationResult(True, "ok")
+
+    dag = DAG()
+    dag.add_node(
+        Node(
+            "verification:e2e:flow",
+            "verification_test",
+            attributes={"kind": "e2e", "template_ref": "spy"},
+        )
+    )
+    monkeypatch.setattr(
+        verify_runner_module, "load_dag_settings", lambda project_root, settings: settings
+    )
+    monkeypatch.setattr(verify_runner_module, "build_dag", lambda project_root, settings: dag)
+
+    class _Check:
+        check_name = "node_completeness"
+        severity = "red"
+        passed = True
+
+    monkeypatch.setattr(verify_runner_module, "run_checks", lambda *a, **k: [_Check()])
+    monkeypatch.setitem(verify_runner_module.VERIFICATION_TEMPLATES, "spy", SpyTemplate)
+
+    runner = VerifyRunner(tmp_path, {"project": {"type": "generic"}})
+    runner.run()
+
+    assert captured["cwd"] == runner.project_root
+    assert captured["cwd"] == tmp_path.resolve()

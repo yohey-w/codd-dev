@@ -195,7 +195,7 @@ def test_verify_runner_executes_cdp_browser_template_by_python_import(tmp_path, 
             calls.append({"config": self.config, "steps": runtime_state.steps, "kind": test_kind})
             return "journey-command"
 
-        def execute(self, command: str) -> ProviderVerificationResult:
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
             calls.append({"command": command})
             return ProviderVerificationResult(True, "journey ok")
 
@@ -235,7 +235,7 @@ def test_verify_runner_prefers_cdp_steps_over_conceptual_journey_steps(tmp_path,
             assert runtime_state.steps == [{"action": "navigate", "target": "/login"}]
             return "journey-command"
 
-        def execute(self, command: str) -> ProviderVerificationResult:
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
             return ProviderVerificationResult(True, "journey ok")
 
     dag = _dag(
@@ -271,7 +271,7 @@ def test_verify_runner_runtime_failure_becomes_verification_failure(tmp_path, mo
         def generate_test_command(self, runtime_state, test_kind: str) -> str:
             return "runtime-command"
 
-        def execute(self, command: str) -> ProviderVerificationResult:
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
             return ProviderVerificationResult(False, "runtime failed")
 
     dag = _dag(Node("verification:e2e:flow", "verification_test", attributes={"kind": "e2e", "template_ref": "fake"}))
@@ -318,7 +318,7 @@ def test_verify_runner_keeps_runtime_state_inside_project_root(tmp_path, monkeyp
             type(self).seen_root = runtime_state.project_root
             return "ok"
 
-        def execute(self, command: str) -> ProviderVerificationResult:
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
             return ProviderVerificationResult(True, "ok")
 
     dag = _dag(Node("verification:e2e:flow", "verification_test", attributes={"kind": "e2e", "template_ref": "safe"}))

@@ -271,7 +271,15 @@ class VerifyRunner:
                 state = _runtime_state(node, self.project_root, template_config)
                 test_kind = str(node.attributes.get("kind") or "")
                 command = template.generate_test_command(state, test_kind)
-                result = template.execute(command)
+                # Run the verification command rooted at the PROJECT, not the
+                # orchestrator's cwd. A node/TS runner (vitest) keys config and
+                # test collection off the process working directory; executing it
+                # from the CoDD install tree loads the wrong vitest.config.ts and
+                # collects 0 tests (an opaque anti-false-green hard fail). The
+                # ``cwd`` threads through every template's ``execute`` so this is
+                # correct for vitest/playwright/curl alike. (The pytest evidence
+                # path already passes ``cwd`` in ``_run_evidence_command``.)
+                result = template.execute(command, cwd=self.project_root)
                 passed = bool(getattr(result, "passed", False))
                 output = _runtime_output(node.id, passed, getattr(result, "output", "") or "")
                 results.append(

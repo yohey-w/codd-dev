@@ -47,7 +47,7 @@ def test_t01_no_verification_timeout_preserves_default_template_behavior(tmp_pat
         def generate_test_command(self, runtime_state, test_kind: str) -> str:
             return "ok"
 
-        def execute(self, command: str) -> ProviderVerificationResult:
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
             return ProviderVerificationResult(True, "ok")
 
     _patch_pipeline(monkeypatch, _dag(_verification_node("verification:e2e:flow")))
@@ -71,7 +71,7 @@ def test_t02_per_node_seconds_caps_template_timeout(tmp_path: Path, monkeypatch)
         def generate_test_command(self, runtime_state, test_kind: str) -> str:
             return "ok"
 
-        def execute(self, command: str) -> ProviderVerificationResult:
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
             return ProviderVerificationResult(True, "ok")
 
     _patch_pipeline(monkeypatch, _dag(_verification_node("verification:e2e:flow")))
@@ -95,7 +95,7 @@ def test_t03_single_node_timeout_does_not_abort_remaining_nodes(tmp_path: Path, 
         def generate_test_command(self, runtime_state, test_kind: str) -> str:
             return str(runtime_state.identifier)
 
-        def execute(self, command: str) -> ProviderVerificationResult:
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
             executed.append(command)
             if "bad" in command:
                 raise subprocess.TimeoutExpired(command, 10)
@@ -124,7 +124,7 @@ def test_t04_total_seconds_budget_skips_remaining_nodes(tmp_path: Path, monkeypa
         def generate_test_command(self, runtime_state, test_kind: str) -> str:
             return str(runtime_state.identifier)
 
-        def execute(self, command: str) -> ProviderVerificationResult:
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
             executed.append(command)
             return ProviderVerificationResult(True, "ok")
 
@@ -146,7 +146,7 @@ def test_t05_all_nodes_pass_within_total_seconds(tmp_path: Path, monkeypatch):
         def generate_test_command(self, runtime_state, test_kind: str) -> str:
             return "ok"
 
-        def execute(self, command: str) -> ProviderVerificationResult:
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:
             return ProviderVerificationResult(True, "ok")
 
     nodes = [_verification_node(f"verification:e2e:{index:02d}") for index in range(22)]

@@ -67,8 +67,16 @@ class VerificationTemplate(ABC):
         """Generate the command used to verify ``runtime_state``."""
 
     @abstractmethod
-    def execute(self, command: str) -> "VerificationResult":
-        """Execute a verification command and return its result."""
+    def execute(self, command: str, cwd: Path | None = None) -> "VerificationResult":
+        """Execute a verification command and return its result.
+
+        ``cwd`` is the project root the command must run in. A test runner like
+        ``vitest`` roots its config/collection at the process working directory,
+        so executing it from the orchestrator's cwd (e.g. the CoDD install tree)
+        makes it load the WRONG ``vitest.config.ts`` and collect 0 tests. Pass
+        the generated project root here so every runner roots at the project.
+        ``None`` keeps the caller's current working directory (legacy behaviour).
+        """
 
 
 VERIFICATION_TEMPLATES: dict[str, type[VerificationTemplate]] = {}
