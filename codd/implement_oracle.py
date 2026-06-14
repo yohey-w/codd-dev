@@ -92,6 +92,7 @@ __all__ = [
     "EVIDENCE_CATEGORIES",
     "ImplementOracleFinding",
     "ImplementOracleResult",
+    "OracleRerunCallback",
     "OracleScopeError",
     "certify_oracle_scope",
     "normalize_oracle_output",
@@ -197,6 +198,12 @@ class ImplementOracleResult:
     failed_paths: list[str] = field(default_factory=list)
     detail: str = ""
     raw_output: str = ""
+    #: Structured diagnostics (code + primary file + symbol/module) for the SCOPED
+    #: rerun derivation + the loop-breaking signature. Empty for a pass / for a
+    #: non-TS oracle. Kept separate from ``findings`` (the SUT-facing normalized
+    #: evidence) because scope derivation needs the per-diagnostic counterpart
+    #: keys, not the language-neutral category. See ``codd.implement_oracle_scope``.
+    diagnostics: list[Any] = field(default_factory=list)
 
     def category_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -724,6 +731,16 @@ def _run_oracle_command(
                 message=(_output_tail(completed.stdout, completed.stderr) or "non-zero exit, no diagnostics"),
             )
         ]
+    # Structured diagnostics for the scoped rerun + the loop-breaking signature.
+    # Best-effort: a parser failure must never abort the gate (the scope layer
+    # degrades to broad on empty diagnostics).
+    diagnostics: list[Any] = []
+    try:
+        from codd.implement_oracle_scope import _parse_ts_diagnostics
+
+        diagnostics = _parse_ts_diagnostics(full_output, project_root)
+    except Exception:  # noqa: BLE001 — structured-diag parsing is enrichment only.
+        diagnostics = []
     return ImplementOracleResult(
         passed=False,
         executed=True,
@@ -732,6 +749,7 @@ def _run_oracle_command(
         failed_paths=failed_paths,
         detail=f"native oracle failed (exit {completed.returncode}); {len(findings)} diagnostic(s)",
         raw_output=full_output,
+        diagnostics=diagnostics,
     )
 
 
@@ -778,6 +796,16 @@ def resolve_implement_oracle(
     return profile, profile.implement_oracle
 
 
+#: The rerun callback the gate invokes to re-implement under the oracle feedback.
+#: ``scope is None`` ⇒ BROAD rerun (re-implement every task — the escalation
+#: fallback, the legacy behaviour). A non-None ``OracleRerunScope`` ⇒ a SCOPED
+#: rerun (re-implement only the scope's tasks, under its write-fence). The second
+#: positional is kept optional in spirit — a callback that ignores it falls back
+#: to broad, preserving back-compat for any plain ``Callable[[str], None]`` only
+#: if it accepts the extra arg; the pipeline's callback consumes the scope.
+OracleRerunCallback = Callable[[str, "Any"], None]
+
+
 def run_implement_oracle_gate(
     project_root: Path | str,
     *,
@@ -786,9 +814,12 @@ def run_implement_oracle_gate(
     source_dirs: Any = None,
     test_dirs: Any = None,
     config: Mapping[str, Any] | None = None,
-    rerun: Callable[[str], None] | None = None,
+    rerun: OracleRerunCallback | Callable[[str], None] | None = None,
     echo: Callable[[str], None] = print,
     profile: LayoutProfile | None = None,
+    scope_index: Any = None,
+    structured_source: Any = None,
+    manifest_paths: Any = None,
 ) -> ImplementOracleResult:
     """Run the implement-time native-oracle gate (stage-level, once).
 
@@ -799,10 +830,26 @@ def run_implement_oracle_gate(
          install failure is an honest ``environment_build_error`` (no retry).
       3. CERTIFY the oracle scope covers source + tests (raises
          :class:`OracleScopeError` on an uncertifiable scope — anti-false-green).
-      4. Run the oracle. On failure, normalize the diagnostics and, if a
-         ``rerun(feedback)`` callback is provided, re-invoke implementation with
-         the normalized feedback up to a bounded cap, re-running the oracle each
-         time. Returns the FINAL result (``passed`` True iff the oracle is clean).
+      4. Run the oracle. On failure, derive a SCOPED rerun and re-invoke
+         implementation through ``rerun(feedback, scope)`` up to a bounded cap,
+         re-running the oracle each time. Returns the FINAL result.
+
+    SCOPED RERUN + ESCALATION LADDER (the localized-rerun design)
+    -------------------------------------------------------------
+    A broad rerun (regenerate every task) is correct but slow. When a
+    ``scope_index`` (a ``codd.implement_oracle_scope.TaskOutputIndex``, the
+    path→owning-task map) is supplied, the gate derives the BOTH-ENDS-OF-THE-
+    BROKEN-EDGE scope from the diagnostics and re-implements only those tasks.
+    Broad is DEMOTED to a fallback rung. The ladder — driven by the diagnostic
+    SIGNATURE (the loop-breaker) — is:
+
+        narrow edge scope → expanded one-hop scope → broad → fail honestly
+
+    Escalation triggers: the diagnostics have no determinable owner (→ broad);
+    the SAME signature survives a scoped rerun (the scope was too small →
+    next rung); or a breadth/fan-out guard fires inside the derivation (→ broad).
+    Without a ``scope_index`` the gate behaves exactly as before — a broad rerun
+    every attempt — so the change is opt-in via the index.
 
     The caller (greenfield ``_stage_implement``) turns a non-passing result into
     a :class:`StageError`. ``OracleScopeError`` propagates (it is a hard
@@ -839,21 +886,62 @@ def run_implement_oracle_gate(
     certification = certify_oracle_scope(root, profile, spec)
     echo(f"[greenfield] implement-oracle: {certification}")
 
-    # 4. Run + bounded retry-with-feedback.
+    # 4. Run + bounded retry-with-feedback, escalating the rerun scope.
     max_attempts = _oracle_max_attempts(config)
     result = _run_oracle_command(root, profile, spec, config)
     attempt = 1
+    rung = _SCOPE_NARROW if scope_index is not None else _SCOPE_BROAD
+    last_signature: tuple[Any, ...] | None = None
     while not result.passed and result.executed and rerun is not None and attempt < max_attempts:
         # Only retry CURABLE incoherence — an environment/toolchain failure is not
         # something the SUT can fix in source, so do not burn retries on it.
         if _only_environment(result):
             break
+
+        # Loop-breaker: if the SAME diagnostic signature survived the previous
+        # scoped rerun, the scope was too small — escalate the ladder a rung
+        # (narrow → expanded → broad). Past broad with no progress → stop and
+        # fail honestly (the next loop guard / the final return handle it).
+        signature = _diagnostic_signature(result)
+        if last_signature is not None and signature == last_signature and scope_index is not None:
+            escalated = _next_rung(rung)
+            if escalated is None:
+                echo(
+                    "[greenfield] implement-oracle: signature unchanged after broad rerun — "
+                    "stopping (honest failure)."
+                )
+                break
+            echo(
+                f"[greenfield] implement-oracle: signature unchanged after {rung} rerun — "
+                f"escalating scope to {escalated}."
+            )
+            rung = escalated
+        last_signature = signature
+
+        # Derive the scope for this rung (broad when no index, or when the
+        # derivation's guards force it). A broad scope is passed as ``None`` so a
+        # callback that distinguishes scoped-vs-broad sees the legacy signal.
+        scope, forced_broad = _derive_scope_for_rung(
+            result=result,
+            project_root=root,
+            scope_index=scope_index,
+            rung=rung,
+            structured_source=structured_source,
+            manifest_paths=manifest_paths,
+            echo=echo,
+        )
+        if forced_broad and scope_index is not None:
+            rung = _SCOPE_BROAD  # a forced-broad derivation pins the rung (monotonic ladder)
+        scope_label = (
+            "broad" if scope is None or getattr(scope, "is_broad", lambda: False)() else getattr(scope, "rung", rung)
+        )
         echo(
             f"[greenfield] implement-oracle: {result.detail}; "
             f"re-running implementation with normalized feedback "
-            f"(attempt {attempt}/{max_attempts - 1}) — categories {result.category_counts()}"
+            f"(attempt {attempt}/{max_attempts - 1}, scope={scope_label}) — "
+            f"categories {result.category_counts()}"
         )
-        rerun(result.feedback_message())
+        _invoke_rerun(rerun, result.feedback_message(), scope)
         attempt += 1
         result = _run_oracle_command(root, profile, spec, config)
 
@@ -865,6 +953,109 @@ def run_implement_oracle_gate(
             f"{result.detail}; categories {result.category_counts()}"
         )
     return result
+
+
+# Ladder-rung constants mirrored here so the gate does not hard-import the scope
+# module at call time when no index is supplied (keeps the no-op path light).
+_SCOPE_NARROW = "narrow"
+_SCOPE_BROAD = "broad"
+
+
+def _next_rung(rung: str) -> str | None:
+    from codd.implement_oracle_scope import next_rung
+
+    return next_rung(rung)
+
+
+def _diagnostic_signature(result: ImplementOracleResult) -> tuple[Any, ...]:
+    """The result's diagnostic signature (the loop-breaker key); () if none."""
+    if not result.diagnostics:
+        return ()
+    try:
+        from codd.implement_oracle_scope import diagnostic_signature
+
+        return diagnostic_signature(result.diagnostics)
+    except Exception:  # noqa: BLE001 — signature is a guard; a parse miss ⇒ no guard.
+        return ()
+
+
+def _derive_scope_for_rung(
+    *,
+    result: ImplementOracleResult,
+    project_root: Path,
+    scope_index: Any,
+    rung: str,
+    structured_source: Any,
+    manifest_paths: Any,
+    echo: Callable[[str], None],
+) -> tuple[Any, bool]:
+    """Derive the rerun scope for ``rung`` → ``(scope, forced_broad)``.
+
+    ``scope is None`` ⇒ broad (the legacy signal the callback re-runs everything
+    on). ``forced_broad`` is True when the derivation itself demanded broad (no
+    determinable owner / too-wide / wide-fan-out artifact, or a derivation error)
+    so the caller can PIN the ladder rung at broad — the ladder is monotonic, it
+    never drops back to a narrower rung once broad was required. With no
+    ``scope_index`` (the back-compat path) returns ``(None, False)`` so behaviour
+    is exactly the legacy broad rerun without disturbing the rung bookkeeping.
+    """
+    if scope_index is None:
+        return None, False
+    try:
+        from codd.implement_oracle_scope import derive_oracle_rerun_scope
+
+        decision = derive_oracle_rerun_scope(
+            output=result.raw_output,
+            project_root=project_root,
+            index=scope_index,
+            rung=rung,
+            structured_source=structured_source,
+            manifest_paths=tuple(manifest_paths or ()),
+        )
+    except Exception as exc:  # noqa: BLE001 — a derivation failure degrades to broad.
+        echo(f"[greenfield] implement-oracle: scope derivation failed ({exc}); falling back to broad.")
+        return None, True
+    if decision.scope is None or decision.force_broad:
+        if decision.reason:
+            echo(f"[greenfield] implement-oracle: {decision.reason}")
+        return None, True
+    echo(f"[greenfield] implement-oracle: {decision.scope.detail}")
+    return decision.scope, decision.scope.rung == _SCOPE_BROAD
+
+
+def _invoke_rerun(rerun: Callable[..., None], feedback: str, scope: Any) -> None:
+    """Call the rerun callback, supporting both the scoped ``(feedback, scope)``
+    and the legacy single-arg ``(feedback)`` signatures.
+
+    Arity is decided by INSPECTION (not by catching ``TypeError``): a ``TypeError``
+    raised *inside* a 2-arg callback must propagate, not be silently retried as a
+    1-arg call. A callback that takes only one positional parameter (and no
+    ``*args``) is invoked with feedback alone (it cannot localize → broad).
+    """
+    if _accepts_scope_arg(rerun):
+        rerun(feedback, scope)
+    else:
+        rerun(feedback)
+
+
+def _accepts_scope_arg(rerun: Callable[..., None]) -> bool:
+    """True if ``rerun`` accepts a second positional (the scope) — else legacy."""
+    import inspect
+
+    try:
+        sig = inspect.signature(rerun)
+    except (TypeError, ValueError):
+        return True  # un-introspectable (builtin/C) — assume the new signature.
+    positional = 0
+    for param in sig.parameters.values():
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional += 1
+        elif param.kind is inspect.Parameter.VAR_POSITIONAL:
+            return True  # *args swallows the scope.
+    return positional >= 2
 
 
 def _only_environment(result: ImplementOracleResult) -> bool:

@@ -469,3 +469,81 @@ def test_real_tsc_gate_hard_fails_uncertifiable_scope(tmp_path: Path) -> None:
         run_implement_oracle_gate(
             ts_project, language="typescript", project_name="demo-cli", config={}, echo=lambda _m: None
         )
+
+
+# ════════════════════════════════════════════════════════════
+# REAL tsc + SCOPED rerun (the localized-rerun design, end-to-end)
+# ════════════════════════════════════════════════════════════
+
+
+class _ScopeTask:
+    """An ImplementTaskRef-shaped stand-in for the scope index."""
+
+    def __init__(self, task_id: str, output_paths) -> None:
+        self.task_id = task_id
+        self.output_paths = tuple(output_paths)
+
+
+def _scope_index_for_fixture(project: Path):
+    """File-level tasks so importer (index.ts) and exporter (cli.ts) own SEPARATE
+    tasks — the only way to prove the scope includes BOTH ends, not just one."""
+    from codd.implement_oracle_scope import build_path_owner_index
+
+    tasks = [
+        _ScopeTask("index_task", ["src/index.ts"]),
+        _ScopeTask("cli_task", ["src/cli.ts"]),
+        _ScopeTask("test_task", ["tests/cli.test.ts"]),
+        _ScopeTask("helper_task", ["tests/helpers/io.ts"]),
+    ]
+    return build_path_owner_index(tasks, project_root=project)
+
+
+def test_real_tsc_scoped_rerun_targets_both_ends(tmp_path: Path) -> None:
+    """REAL ``tsc`` + scoped rerun: the scope includes BOTH the importer's task
+    AND the exporter's task (the fix may belong to either) — not all tasks, not
+    only the importer. The corrective rerun then fixes both and the gate PASSES.
+    """
+    from codd.implement_oracle_scope import SCOPE_NARROW
+
+    ts_project = _prepared_ts_project(tmp_path, coherent=False)
+    index = _scope_index_for_fixture(ts_project)
+    captured_scopes: list = []
+
+    def rerun(feedback: str, scope=None) -> None:
+        captured_scopes.append(scope)
+        # Fix BOTH ends so the next real tsc run is clean.
+        (ts_project / "src" / "cli.ts").write_text(
+            "export function run(): number { return 0; }\n"
+            "export function runCli(): number { return run(); }\n",
+            encoding="utf-8",
+        )
+        (ts_project / "tests" / "helpers" / "io.ts").write_text(
+            "export function projectRoot(): string { return '.'; }\n"
+            "export function repoRoot(): string { return projectRoot(); }\n",
+            encoding="utf-8",
+        )
+
+    result = run_implement_oracle_gate(
+        ts_project,
+        language="typescript",
+        project_name="demo-cli",
+        config={"implement": {"oracle_max_attempts": 3}},
+        rerun=rerun,
+        echo=lambda _m: None,
+        scope_index=index,
+    )
+    assert result.passed is True
+    assert len(captured_scopes) == 1, "one corrective scoped rerun"
+    scope = captured_scopes[0]
+    assert scope is not None and not scope.is_broad(), "rerun must be SCOPED, not broad"
+    assert scope.rung == SCOPE_NARROW
+    task_set = set(scope.task_ids)
+    # src↔src edge: importer index_task AND exporter cli_task.
+    assert "index_task" in task_set, task_set
+    assert "cli_task" in task_set, "exporter task must be in scope (naive-targeted is invalid)"
+    # test↔helper edge: importer test_task AND exporter helper_task.
+    assert "test_task" in task_set, task_set
+    assert "helper_task" in task_set, task_set
+    # The write-fence allowed BOTH edge files (the scope is genuinely localized).
+    allowed = set(scope.allowed_paths)
+    assert "src/cli.ts" in allowed and "src/index.ts" in allowed

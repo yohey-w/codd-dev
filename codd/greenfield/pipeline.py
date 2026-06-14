@@ -741,14 +741,16 @@ class GreenfieldPipeline:
         Ensures the stack topology is scaffolded first (idempotent — the same
         ``_ensure_test_runner`` verify uses), so the oracle's config (tsconfig)
         exists to certify and run against AT implement-time. Then runs the gate
-        with a ``rerun(feedback)`` callback that re-invokes implementation for
-        every task carrying the normalized oracle feedback (the cross-file
-        incoherence is not localized to one task, so the whole build is
-        regenerated under the feedback — the same broad-rerun shape the VB
-        coverage gate uses). A non-passing final result is a StageError; an
-        uncertifiable oracle scope (OracleScopeError) propagates as a hard
-        failure. The whole gate is a NO-OP for a stack without a declared
-        implement-time oracle.
+        with a SCOPED ``rerun(feedback, scope)`` callback: on an oracle failure
+        the gate derives the both-ends-of-the-broken-edge scope and re-implements
+        ONLY the owning tasks (under a write-fence), escalating
+        narrow→expanded→broad only when the diagnostic signature fails to move
+        (see ``codd.implement_oracle_scope`` + ``run_implement_oracle_gate``).
+        ``scope is None`` ⇒ the broad fallback (re-implement every task — the
+        legacy shape the VB coverage gate uses). A non-passing final result is a
+        StageError; an uncertifiable oracle scope (OracleScopeError) propagates
+        as a hard failure. The whole gate is a NO-OP for a stack without a
+        declared implement-time oracle.
         """
         from codd.implement_oracle import (
             OracleScopeError,
@@ -776,8 +778,14 @@ class GreenfieldPipeline:
         # clobbering, so verify's re-scaffold is a no-op.
         self._ensure_test_runner(project_root)
 
-        def _rerun(feedback: str) -> None:
-            self._rerun_tasks_with_feedback(project_root, tasks, feedback, options)
+        # The path→owning-task index for the SCOPED rerun: declared task outputs
+        # UNION the config-derived output paths. Built once; the gate consults it
+        # to localize each rerun to the diagnostics' owners.
+        scope_index = self._build_oracle_scope_index(project_root, tasks, config)
+        manifest_paths = self._oracle_manifest_paths(project_root)
+
+        def _rerun(feedback: str, scope: Any = None) -> None:
+            self._rerun_tasks_with_feedback(project_root, tasks, feedback, options, scope=scope)
 
         try:
             result = run_implement_oracle_gate(
@@ -789,6 +797,8 @@ class GreenfieldPipeline:
                 config=config,
                 rerun=_rerun,
                 echo=self.echo,
+                scope_index=scope_index,
+                manifest_paths=manifest_paths,
             )
         except OracleScopeError as exc:
             raise StageError(str(exc)) from exc
@@ -802,29 +812,122 @@ class GreenfieldPipeline:
                 f"{result.category_counts()}. {result.detail}"
             )
 
+    def _build_oracle_scope_index(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+        config: dict[str, Any],
+    ) -> Any:
+        """Build the path→owning-task index used to scope an oracle rerun.
+
+        Unions each task's DECLARED ``output_paths`` with its CONFIG-derived
+        output paths (``_output_paths_for_task`` — the same resolution the rerun
+        itself uses), so a diagnostic on any owned file/dir maps back to the task
+        that wrote it. A failure to build the index degrades the gate to the
+        broad rerun (``None`` → ``scope_index`` unset), never aborts.
+        """
+        try:
+            from codd.implement_oracle_scope import build_path_owner_index
+
+            config_output_paths: dict[str, list[str]] = {}
+            for task in tasks:
+                try:
+                    config_output_paths[task.task_id] = (
+                        list(task.output_paths)
+                        if task.output_paths
+                        else _output_paths_for_task(config, task)
+                    )
+                except Exception:  # noqa: BLE001 — a task whose paths fail just falls to broad.
+                    config_output_paths[task.task_id] = list(task.output_paths or ())
+            return build_path_owner_index(
+                tasks,
+                project_root=project_root,
+                config=config,
+                config_output_paths=config_output_paths,
+            )
+        except Exception as exc:  # noqa: BLE001 — index build is best-effort.
+            self.echo(f"[greenfield] implement-oracle: scope index unavailable ({exc}); rerun stays broad.")
+            return None
+
+    def _oracle_manifest_paths(self, project_root: Path) -> tuple[str, ...]:
+        """Manifest/config files the write-fence always permits (they are shared).
+
+        A scoped rerun may legitimately touch the build manifest/config even when
+        no task "owns" it (e.g. adding a dependency the fix needs). Only files
+        that actually exist are listed, project-relative.
+        """
+        candidates = (
+            "package.json",
+            "tsconfig.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+        )
+        present: list[str] = []
+        for name in candidates:
+            if (project_root / name).is_file():
+                present.append(name)
+        return tuple(present)
+
     def _rerun_tasks_with_feedback(
         self,
         project_root: Path,
         tasks: list[ImplementTaskRef],
         feedback: str,
         options: dict[str, Any],
+        *,
+        scope: Any = None,
     ) -> None:
-        """Re-invoke implementation for every task carrying ``feedback``.
+        """Re-invoke implementation under ``feedback`` — SCOPED when ``scope`` set.
 
-        Routes through the SAME implement path the stage uses
-        (``implement_tasks`` with the resolved output paths), threading the
-        normalized oracle feedback so the SUT regenerates coherent files. Uses
-        the configured implement-task runner only when it is the default
-        (feedback-aware path); a custom injected runner has no feedback channel,
-        so this falls back to ``implement_tasks`` directly.
+        ``scope is None`` (or a broad scope) → re-implement EVERY task (the
+        legacy broad rerun). A scoped :class:`~codd.implement_oracle_scope.OracleRerunScope`
+        → re-implement ONLY its ``task_ids``, under a WRITE-FENCE: out-of-scope
+        files the SUT writes during the scoped rerun are reverted afterwards (an
+        out-of-scope CREATE is removed, an out-of-scope MODIFY is restored), so a
+        "targeted" rerun cannot silently regenerate the whole tree. The fence is
+        OFF for a broad rerun (broad legitimately rewrites everything).
+
+        Routes through the SAME implement path the stage uses (``implement_tasks``
+        with the resolved output paths), threading the normalized oracle feedback
+        so the SUT regenerates coherent files.
         """
         from codd.config import load_project_config
-        from codd.implementer import implement_tasks
 
         try:
             config = load_project_config(project_root)
         except (FileNotFoundError, ValueError):
             config = {}
+
+        scoped = scope is not None and not bool(getattr(scope, "is_broad", lambda: False)())
+        if not scoped:
+            self._reimplement_tasks(project_root, tasks, feedback, config)
+            return
+
+        # Scoped rerun: only the scope's tasks, fenced to its allowed paths.
+        target_ids = set(getattr(scope, "task_ids", ()) or ())
+        scoped_tasks = [task for task in tasks if task.task_id in target_ids]
+        if not scoped_tasks:
+            # Nothing resolvable in this scope (defensive) → broad, never a no-op.
+            self.echo("[greenfield] implement-oracle: scoped task set empty — re-running broad.")
+            self._reimplement_tasks(project_root, tasks, feedback, config)
+            return
+
+        allowed = tuple(getattr(scope, "allowed_paths", ()) or ())
+        with _OracleWriteFence(project_root, allowed_paths=allowed, echo=self.echo) as fence:
+            self._reimplement_tasks(project_root, scoped_tasks, feedback, config)
+            fence.enforce()
+
+    def _reimplement_tasks(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+        feedback: str,
+        config: dict[str, Any],
+    ) -> None:
+        """Re-run ``implement_tasks`` for each given task carrying ``feedback``."""
+        from codd.implementer import implement_tasks
+
         for task in tasks:
             output_paths = (
                 list(task.output_paths)
@@ -1251,6 +1354,144 @@ def _default_generate_wave_runner(project_root: Path, wave: int, *, ai_command: 
     results = generate_wave(project_root, wave, force=False, ai_command=ai_command)
     generated = sum(1 for result in results if result.status == "generated")
     return f"{generated} generated, {len(results) - generated} skipped"
+
+
+#: Directories never snapshotted/fenced — vendored deps, VCS, the codd cache,
+#: build output. A write here is not a SUT source-write the fence governs.
+_FENCE_EXCLUDE_DIRS = frozenset(
+    {"node_modules", ".git", ".codd", ".hg", ".svn", "dist", "build", "__pycache__", ".pytest_cache"}
+)
+#: Source/test file suffixes the fence tracks. Restricting to code keeps the
+#: snapshot cheap and avoids fighting tooling that touches caches/logs.
+_FENCE_TRACKED_SUFFIXES = frozenset(
+    {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py", ".json"}
+)
+
+
+class _OracleWriteFence:
+    """Restrict a SCOPED oracle rerun's writes to the scope's ``allowed_paths``.
+
+    Re-implementing only the scoped tasks does NOT stop the SUT from writing
+    OUT-of-scope files (the design's #1 implementation note). The fence snapshots
+    the tracked source/test tree on entry; on :meth:`enforce` it reverts every
+    out-of-scope change made during the rerun — an out-of-scope CREATE is deleted,
+    an out-of-scope MODIFY is restored to its pre-rerun bytes. In-scope writes
+    (under an allowed file/dir, or a manifest/config) pass untouched. This makes
+    a "targeted" rerun genuinely local: it cannot silently regenerate the tree.
+
+    ``allowed_paths`` entries are matched as exact files OR directory prefixes
+    (a task that owns ``src/`` may write any file under ``src/``). An EMPTY
+    allow-set means "no fence" (the broad rerun's signal) and the caller does not
+    construct a fence in that case.
+    """
+
+    def __init__(self, project_root: Path, *, allowed_paths: tuple[str, ...], echo: Callable[[str], str]):
+        self._root = Path(project_root).resolve()
+        self._allowed_files, self._allowed_dirs = self._split_allowed(allowed_paths)
+        self._echo = echo
+        self._snapshot: dict[str, bytes] = {}
+
+    def __enter__(self) -> "_OracleWriteFence":
+        self._snapshot = self._capture()
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        # The fence does not suppress exceptions; enforce() is called explicitly
+        # by the caller on the SUCCESS path so a failing rerun's exception still
+        # propagates with the tree left for the caller's error handling.
+        return None
+
+    def enforce(self) -> None:
+        """Revert every out-of-scope create/modify made since entry."""
+        current = self._capture()
+        reverted_modified: list[str] = []
+        reverted_created: list[str] = []
+
+        # Reverts for modified/created files.
+        for rel, content in current.items():
+            if self._is_allowed(rel):
+                continue
+            if rel in self._snapshot:
+                if self._snapshot[rel] != content:
+                    self._restore(rel, self._snapshot[rel])
+                    reverted_modified.append(rel)
+            else:
+                self._remove(rel)
+                reverted_created.append(rel)
+
+        # Re-create any tracked file the scoped rerun DELETED out of scope (a
+        # deletion is also an out-of-scope mutation we must undo).
+        reverted_deleted: list[str] = []
+        for rel, content in self._snapshot.items():
+            if rel in current or self._is_allowed(rel):
+                continue
+            self._restore(rel, content)
+            reverted_deleted.append(rel)
+
+        total = len(reverted_modified) + len(reverted_created) + len(reverted_deleted)
+        if total:
+            self._echo(
+                "[greenfield] implement-oracle: write-fence reverted "
+                f"{total} out-of-scope change(s) "
+                f"(modified={len(reverted_modified)}, created={len(reverted_created)}, "
+                f"deleted={len(reverted_deleted)}); the scoped rerun is kept local."
+            )
+
+    # ── internals ──
+    @staticmethod
+    def _split_allowed(allowed_paths: tuple[str, ...]) -> tuple[set[str], list[str]]:
+        files: set[str] = set()
+        dirs: list[str] = []
+        for raw in allowed_paths:
+            norm = str(raw).strip().replace("\\", "/").strip("/")
+            if not norm:
+                continue
+            if PurePosixPath(norm).suffix:
+                files.add(norm)
+            else:
+                dirs.append(norm)
+        return files, dirs
+
+    def _is_allowed(self, rel: str) -> bool:
+        if rel in self._allowed_files:
+            return True
+        for directory in self._allowed_dirs:
+            if rel == directory or rel.startswith(directory + "/"):
+                return True
+        return False
+
+    def _capture(self) -> dict[str, bytes]:
+        out: dict[str, bytes] = {}
+        for path in self._iter_tracked_files():
+            try:
+                out[path.relative_to(self._root).as_posix()] = path.read_bytes()
+            except OSError:
+                continue
+        return out
+
+    def _iter_tracked_files(self):
+        import os
+
+        for dirpath, dirnames, filenames in os.walk(self._root):
+            dirnames[:] = [d for d in dirnames if d not in _FENCE_EXCLUDE_DIRS]
+            for name in filenames:
+                if PurePosixPath(name).suffix in _FENCE_TRACKED_SUFFIXES:
+                    yield Path(dirpath) / name
+
+    def _restore(self, rel: str, content: bytes) -> None:
+        target = self._root / rel
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        except OSError as exc:
+            self._echo(f"[greenfield] implement-oracle: write-fence could not restore {rel} ({exc}).")
+
+    def _remove(self, rel: str) -> None:
+        target = self._root / rel
+        try:
+            target.unlink()
+        except OSError as exc:
+            self._echo(f"[greenfield] implement-oracle: write-fence could not remove {rel} ({exc}).")
 
 
 def _default_task_lister(project_root: Path) -> list[ImplementTaskRef]:
