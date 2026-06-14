@@ -701,6 +701,22 @@ class GreenfieldPipeline:
             self._checkpoint(project_root)
             self.echo(f"[greenfield] implement {task.task_id}: {detail}")
 
+        # Manifest↔lock coherence finalization — ONCE, at implement-end, AFTER the
+        # SUT has finished authoring package.json and BEFORE any frozen install
+        # (the implement-oracle's npm ci below, and verify's npm ci later). The SUT
+        # may have written an OLD test-toolchain dep (``"vitest": "^1.6.0"``) while
+        # the scaffold/gate install produced a lock with the LATEST resolution; a
+        # frozen ``npm ci`` then hard-fails on the lock↔manifest mismatch. This
+        # step RECONCILES the harness-owned toolchain dep versions back to the
+        # profile (vitest/typescript/@types/node are the VERIFIER's tooling, not
+        # the app's deps) and REFRESHES the lock (``npm install
+        # --package-lock-only``) so the frozen install passes HONESTLY. It runs
+        # BEFORE the implement-oracle so the oracle's own ``npm ci`` benefits from
+        # the coherent lock too. A strict NO-OP for stacks with no toolchain
+        # profile (Python today). verify's install stays FROZEN — see
+        # codd.dependency_lock_coherence.
+        self._finalize_dependency_lock_coherence(project_root)
+
         # Implement-time native-oracle gate — ONCE, after every unit is generated
         # and BEFORE the run advances to verify, while the SUT can still freely
         # edit ALL files (source AND tests). For a compiler-class stack (TS=tsc
@@ -729,6 +745,65 @@ class GreenfieldPipeline:
             echo=self.echo,
         )
         record["detail"] = f"{len(tasks)} task(s) implemented"
+
+    def _finalize_dependency_lock_coherence(self, project_root: Path) -> None:
+        """Reconcile harness-owned toolchain deps + refresh the lock (implement-end).
+
+        See the call site in :meth:`_stage_implement`. Ensures the stack topology
+        is scaffolded first (idempotent — the same ``_ensure_test_runner`` verify
+        uses) so a ``package.json`` exists to reconcile, then runs the profile-
+        driven finalization (:func:`finalize_dependency_lock_coherence`): reconcile
+        the manifest's harness-owned toolchain dep versions to the profile, refresh
+        the lock (``npm install --package-lock-only``), and materialize
+        node_modules with the FROZEN ``npm ci`` so a same-process implement-oracle
+        typecheck has its deps. A hard finalization failure (a lock refresh /
+        materialize that exits non-zero or times out) is an honest
+        ``environment_build_error`` raised as a :class:`StageError`. A strict
+        NO-OP for a stack with no toolchain profile (Python today).
+        """
+        from codd.dependency_lock_coherence import (
+            finalize_dependency_lock_coherence,
+            resolve_toolchain_profile,
+        )
+
+        config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
+        project_name = self._layout_project_name(project_root, config)
+
+        # Cheap NO-OP short-circuit: a stack with no toolchain profile (Python
+        # today) needs no scaffold/echo — skip silently.
+        if resolve_toolchain_profile(
+            project_root,
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+        ) is None:
+            return
+
+        # The finalization reconciles the SUT's package.json; make sure the
+        # scaffolded manifest (and its toolchain-script wiring) is present NOW, at
+        # implement-end. Idempotent + non-clobbering, so verify's re-scaffold is a
+        # no-op and a SUT-authored package.json is preserved (only its harness-
+        # owned toolchain dep VERSIONS are reconciled, by the step below).
+        self._ensure_test_runner(project_root)
+
+        result = finalize_dependency_lock_coherence(
+            project_root,
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+            echo=self.echo,
+        )
+        if not result.ok:
+            raise StageError(
+                "manifest↔lock coherence finalization failed at implement-end: "
+                f"{result.detail}. This is an environment/toolchain failure (the "
+                "lock could not be refreshed/materialized to match the reconciled "
+                "manifest), not a code defect."
+            )
 
     def _enforce_implement_oracle_gate(
         self,

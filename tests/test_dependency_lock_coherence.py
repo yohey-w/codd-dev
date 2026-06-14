@@ -1,0 +1,447 @@
+"""Tests for the implement-end manifest↔lock coherence finalization.
+
+Covers the design (/tmp/gpt_result_dep.txt, verdict (b)+(a)+(c)):
+  * (b) harness-owned toolchain dep VERSIONS are reconciled to the profile in the
+    SUT's package.json (app/domain deps untouched);
+  * (a) the lock is refreshed (``npm install --package-lock-only``) at implement-
+    end so a subsequent frozen ``npm ci`` matches — proven with a REAL ``npm ci``;
+  * (c) verify keeps using ``npm ci`` (frozen), never ``npm install``;
+  * Python is a strict NO-OP (no toolchain profile → today's path unaffected);
+  * the greenfield pipeline wires the finalization at implement-end, before the
+    implement-oracle's frozen install.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from codd.dependency_lock_coherence import (
+    DependencyLockResult,
+    finalize_dependency_lock_coherence,
+    reconcile_manifest_toolchain_deps,
+    resolve_toolchain_profile,
+)
+from codd.project_types import (
+    ToolchainDependency,
+    ToolchainDependencyProfile,
+    node_install_command,
+    resolve_layout_profile,
+)
+
+
+def _ts_toolchain() -> ToolchainDependencyProfile:
+    profile = resolve_layout_profile(language="typescript", project_name="x")
+    assert profile is not None
+    assert profile.toolchain_dependencies is not None
+    return profile.toolchain_dependencies
+
+
+# ════════════════════════════════════════════════════════════
+# The profile (b): harness owns the toolchain dep versions
+# ════════════════════════════════════════════════════════════
+
+
+class TestToolchainProfile:
+    def test_typescript_profile_declares_toolchain_deps(self):
+        tc = _ts_toolchain()
+        names = {d.name for d in tc.deps}
+        # The toolchain the TS scaffold's test/build scripts need.
+        assert "vitest" in names
+        assert "typescript" in names
+        assert "@types/node" in names
+        # All dev deps (the app does not ship its test runner / compiler).
+        assert all(d.dev for d in tc.deps)
+
+    def test_typescript_lock_refresh_is_package_lock_only(self):
+        tc = _ts_toolchain()
+        # Verdict (a): refresh ONLY the lock, no frozen check, no resolve-from-net.
+        assert tc.lock_refresh_command == "npm install --package-lock-only"
+        assert tc.manifest_filename == "package.json"
+        assert "package-lock.json" in tc.lock_filenames
+
+    def test_typescript_materialize_is_frozen(self):
+        tc = _ts_toolchain()
+        # The OPTIONAL same-process materialization stays FROZEN (npm ci), so even
+        # node_modules honors the freshly-coherent lock.
+        assert tc.materialize_command == "npm ci"
+
+    def test_python_profile_has_no_toolchain_contract(self):
+        profile = resolve_layout_profile(language="python", project_name="x")
+        assert profile is not None
+        # NO-OP: Python's path is unaffected (deferred extension point).
+        assert profile.toolchain_dependencies is None
+
+    def test_profile_to_dict_round_trips(self):
+        profile = resolve_layout_profile(language="typescript", project_name="x")
+        payload = profile.to_dict()
+        assert "toolchain_dependencies" in payload
+        assert payload["toolchain_dependencies"]["lock_refresh_command"] == (
+            "npm install --package-lock-only"
+        )
+
+
+# ════════════════════════════════════════════════════════════
+# Reconcile (b): SUT toolchain versions → profile; app deps untouched
+# ════════════════════════════════════════════════════════════
+
+
+class TestReconcileManifest:
+    def test_old_toolchain_version_reconciled_to_profile(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "todo",
+                    "version": "0.0.0",
+                    "type": "module",
+                    "devDependencies": {"vitest": "^1.6.0", "typescript": "^4.0.0"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        changed = reconcile_manifest_toolchain_deps(tmp_path, _ts_toolchain())
+        assert changed["vitest"] == ("^1.6.0", "^3.2.4")
+        assert changed["typescript"] == ("^4.0.0", "^5.9.2")
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert pkg["devDependencies"]["vitest"] == "^3.2.4"
+        assert pkg["devDependencies"]["typescript"] == "^5.9.2"
+        # missing toolchain dep is ADDED at the profile version.
+        assert pkg["devDependencies"]["@types/node"] == "^24.3.0"
+
+    def test_app_and_domain_deps_left_untouched(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "todo",
+                    "version": "1.2.3",
+                    "type": "module",
+                    "dependencies": {"chalk": "^5.0.0", "commander": "^12.0.0"},
+                    "devDependencies": {"vitest": "^1.6.0"},
+                    "scripts": {"test": "vitest run", "build": "tsc -p tsconfig.json"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        reconcile_manifest_toolchain_deps(tmp_path, _ts_toolchain())
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        # app deps + scripts + name/version are the SUT's property — byte-for-byte.
+        assert pkg["dependencies"] == {"chalk": "^5.0.0", "commander": "^12.0.0"}
+        assert pkg["scripts"] == {"test": "vitest run", "build": "tsc -p tsconfig.json"}
+        assert pkg["name"] == "todo"
+        assert pkg["version"] == "1.2.3"
+
+    def test_toolchain_dep_misplaced_in_dependencies_is_moved(self, tmp_path):
+        # A SUT that put vitest in (prod) dependencies → reconcile moves it to
+        # devDependencies so the lock never resolves two ranges for one name.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "todo",
+                    "dependencies": {"vitest": "^1.6.0", "chalk": "^5.0.0"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        reconcile_manifest_toolchain_deps(tmp_path, _ts_toolchain())
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert "vitest" not in pkg["dependencies"]
+        assert pkg["dependencies"] == {"chalk": "^5.0.0"}  # app dep stays
+        assert pkg["devDependencies"]["vitest"] == "^3.2.4"
+
+    def test_already_coherent_is_a_noop(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "todo",
+                    "devDependencies": {
+                        "vitest": "^3.2.4",
+                        "typescript": "^5.9.2",
+                        "@types/node": "^24.3.0",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = (tmp_path / "package.json").read_text(encoding="utf-8")
+        changed = reconcile_manifest_toolchain_deps(tmp_path, _ts_toolchain())
+        assert changed == {}
+        # already coherent → file is not rewritten.
+        assert (tmp_path / "package.json").read_text(encoding="utf-8") == before
+
+    def test_missing_manifest_is_noop(self, tmp_path):
+        assert reconcile_manifest_toolchain_deps(tmp_path, _ts_toolchain()) == {}
+
+    def test_unparseable_manifest_left_untouched(self, tmp_path):
+        (tmp_path / "package.json").write_text("{not json", encoding="utf-8")
+        # A broken manifest is the verify parse/honesty gate's job — never guessed.
+        assert reconcile_manifest_toolchain_deps(tmp_path, _ts_toolchain()) == {}
+        assert (tmp_path / "package.json").read_text(encoding="utf-8") == "{not json"
+
+
+# ════════════════════════════════════════════════════════════
+# Resolution + Python NO-OP
+# ════════════════════════════════════════════════════════════
+
+
+class TestResolveAndNoop:
+    def test_python_finalize_is_strict_noop(self, tmp_path):
+        # Python: a pyproject + a (hypothetical) package.json must NOT be touched.
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+        result = finalize_dependency_lock_coherence(
+            tmp_path, language="python", project_name="x", echo=lambda _m: None
+        )
+        assert result.skipped is True
+        assert result.applied is False
+        assert result.ok is True
+        assert resolve_toolchain_profile(tmp_path, language="python", project_name="x") is None
+
+    def test_unknown_language_is_noop(self, tmp_path):
+        result = finalize_dependency_lock_coherence(
+            tmp_path, language="ruby", project_name="x", echo=lambda _m: None
+        )
+        assert result.skipped is True
+        assert result.ok is True
+
+    def test_opt_out_disables_finalization(self, tmp_path):
+        (tmp_path / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+        config = {"implement": {"dependency_lock_coherence": False}}
+        assert (
+            resolve_toolchain_profile(
+                tmp_path, language="typescript", project_name="x", config=config
+            )
+            is None
+        )
+
+    def test_typescript_no_manifest_skips_without_failure(self, tmp_path):
+        # TS stack but the SUT authored no package.json (unusual) → skip, never fail.
+        result = finalize_dependency_lock_coherence(
+            tmp_path, language="typescript", project_name="x", echo=lambda _m: None
+        )
+        assert result.skipped is True
+        assert result.ok is True
+
+
+# ════════════════════════════════════════════════════════════
+# (c) verify stays FROZEN — node_install_command never loosens to npm install
+# ════════════════════════════════════════════════════════════
+
+
+class TestVerifyStaysFrozen:
+    def test_npm_ci_when_lock_present(self, tmp_path):
+        (tmp_path / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+        (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+        # Verdict (c): with a lock, verify's install is the FROZEN npm ci — NOT
+        # npm install. The whole fix is to make the lock match BEFORE this runs.
+        assert node_install_command(tmp_path) == "npm ci"
+
+    def test_npm_install_only_when_no_lock(self, tmp_path):
+        (tmp_path / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+        # No lock yet → npm install (which creates one). After our finalization a
+        # lock always exists, so verify takes the frozen npm ci path above.
+        assert node_install_command(tmp_path) == "npm install"
+
+    def test_verify_runner_install_preflight_uses_node_install_command(self):
+        # Guard: verify's blocking preflight resolves its command through
+        # node_install_command (the frozen-aware resolver) — it does not hardcode
+        # ``npm install``. (Belt-and-suspenders against a future loosening.)
+        import ast
+        import inspect
+
+        from codd.repair import verify_runner
+
+        source = inspect.getsource(verify_runner.VerifyRunner._run_install_preflight)
+        assert "node_install_command(self.project_root)" in source
+        # Check the CODE (not the docstring, which legitimately mentions the
+        # no-lock ``npm install`` fallback): no string literal in the function
+        # body hardcodes the unfrozen ``npm install`` install command.
+        func = ast.parse(inspect.getsource(verify_runner).encode()).body
+        target = next(
+            node
+            for node in ast.walk(ast.Module(body=func, type_ignores=[]))
+            if isinstance(node, ast.FunctionDef) and node.name == "_run_install_preflight"
+        )
+        body_strings = [
+            node.value
+            for node in ast.walk(target)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+        body_strings = body_strings[1:]  # drop the docstring (first constant)
+        assert not any("npm install" in s for s in body_strings)
+
+
+# ════════════════════════════════════════════════════════════
+# REAL npm integration (guarded) — the load-bearing anti-mock proof
+# ════════════════════════════════════════════════════════════
+
+
+def _npm() -> str | None:
+    return shutil.which("npm")
+
+
+@pytest.mark.skipif(_npm() is None, reason="npm not available")
+class TestRealNpmCi:
+    def _seed_bug(self, root: Path) -> None:
+        """Reproduce the codex9/codex10 bug exactly.
+
+        STEP 1 (scaffold/gate): package.json pins the LATEST vitest → the lock
+        resolves vitest 3.x. STEP 2 (SUT rewrites package.json to an OLD vitest) →
+        the lock now holds 3.x while the manifest demands ^1.6.0, the precise
+        ``@vitest/expect@3.x does not satisfy ^1.6.0`` divergence ``npm ci`` rejects.
+        """
+        (root / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "todo",
+                    "version": "0.0.0",
+                    "private": True,
+                    "type": "module",
+                    "devDependencies": {"vitest": "^3.2.4"},
+                    "scripts": {"test": "vitest run"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["npm", "install", "--package-lock-only", "--no-audit", "--no-fund"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        # SUT downgrade.
+        pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        pkg["devDependencies"]["vitest"] = "^1.6.0"
+        (root / "package.json").write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+
+    def _npm_ci(self, root: Path) -> int:
+        return subprocess.run(
+            ["npm", "ci", "--no-audit", "--no-fund"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        ).returncode
+
+    def test_npm_ci_fails_before_and_passes_after_finalization(self, tmp_path):
+        self._seed_bug(tmp_path)
+
+        # PRECONDITION: the bug is real — frozen npm ci rejects the mismatch.
+        assert self._npm_ci(tmp_path) != 0, (
+            "expected npm ci to FAIL on the lock↔manifest mismatch (the bug)"
+        )
+
+        # FINALIZE: reconcile manifest → refresh lock → materialize (frozen).
+        result = finalize_dependency_lock_coherence(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        assert result.ok, result.detail
+        assert result.applied is True
+        # (1) package.json's vitest is reconciled to the profile version.
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert pkg["devDependencies"]["vitest"] == "^3.2.4"
+
+        # (2) the lock matches: a subsequent FROZEN npm ci now SUCCEEDS — proving
+        # verify's frozen install would pass honestly (no loosening needed).
+        assert self._npm_ci(tmp_path) == 0, "npm ci must pass after finalization"
+
+    def test_lock_and_manifest_agree_after_finalization(self, tmp_path):
+        self._seed_bug(tmp_path)
+        finalize_dependency_lock_coherence(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        # The lock's resolved vitest must satisfy the reconciled manifest range.
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        lock = json.loads((tmp_path / "package-lock.json").read_text(encoding="utf-8"))
+        manifest_range = pkg["devDependencies"]["vitest"]
+        locked_root = lock["packages"][""]["devDependencies"]["vitest"]
+        # The lockfile records the SAME range the manifest declares (agreement).
+        assert locked_root == manifest_range
+        # And node_modules/vitest resolved to a concrete 3.x satisfying ^3.2.4.
+        resolved = lock["packages"]["node_modules/vitest"]["version"]
+        assert resolved.startswith("3.")
+
+
+# ════════════════════════════════════════════════════════════
+# Pipeline wiring: finalization runs at implement-end, before the oracle install
+# ════════════════════════════════════════════════════════════
+
+
+class TestPipelineWiring:
+    def test_stage_implement_calls_finalization_before_oracle(self, tmp_path, monkeypatch):
+        """The finalization is invoked at implement-end, BEFORE the implement-oracle
+        gate (so the oracle's own frozen ``npm ci`` benefits from the coherent
+        lock) and before the VB coverage gate."""
+        from codd.greenfield import pipeline as pipeline_module
+
+        calls: list[str] = []
+
+        pipe = pipeline_module.GreenfieldPipeline(
+            project_name="todo", language="typescript"
+        )
+
+        # Stub the three implement-end gates to record their order.
+        monkeypatch.setattr(
+            pipe, "_finalize_dependency_lock_coherence", lambda _root: calls.append("finalize")
+        )
+        monkeypatch.setattr(
+            pipe,
+            "_enforce_implement_oracle_gate",
+            lambda _root, _tasks, _options: calls.append("oracle"),
+        )
+        monkeypatch.setattr(
+            pipeline_module,
+            "_enforce_stage_coverage_gate",
+            lambda *_a, **_k: calls.append("coverage"),
+        )
+
+        # One trivial task so the loop body runs; its runner is a no-op.
+        task = pipeline_module.ImplementTaskRef(task_id="t1", design_node="d1")
+        monkeypatch.setattr(pipe, "task_lister", lambda _root: [task])
+        pipe.implement_task_runner = (
+            lambda *_a, **_k: "ok"  # type: ignore[assignment]
+        )
+
+        record: dict[str, object] = {}
+        pipe._stage_implement(tmp_path, record, {"coverage_gate": True})
+
+        assert calls == ["finalize", "oracle", "coverage"], calls
+
+    def test_finalize_helper_raises_stage_error_on_hard_failure(self, tmp_path, monkeypatch):
+        """A hard finalization failure (e.g. lock refresh exit!=0) becomes a
+        StageError so the autopilot fails honestly instead of proceeding to a
+        guaranteed-broken verify."""
+        from codd.greenfield import pipeline as pipeline_module
+
+        pipe = pipeline_module.GreenfieldPipeline(
+            project_name="todo", language="typescript"
+        )
+        (tmp_path / "package.json").write_text('{"name":"todo"}', encoding="utf-8")
+
+        # Make resolution non-None, scaffolding a no-op, and the finalization fail.
+        monkeypatch.setattr(pipe, "_ensure_test_runner", lambda _root: None)
+        monkeypatch.setattr(
+            pipeline_module.GreenfieldPipeline,
+            "_layout_inputs",
+            lambda _self, _root: ({}, "typescript", None, None),
+        )
+        import codd.dependency_lock_coherence as dlc
+
+        monkeypatch.setattr(
+            dlc,
+            "resolve_toolchain_profile",
+            lambda *_a, **_k: (object(), object()),
+        )
+        monkeypatch.setattr(
+            dlc,
+            "finalize_dependency_lock_coherence",
+            lambda *_a, **_k: DependencyLockResult(ok=False, applied=True, detail="lock refresh failed (exit 1)"),
+        )
+
+        with pytest.raises(pipeline_module.StageError, match="manifest↔lock coherence"):
+            pipe._finalize_dependency_lock_coherence(tmp_path)

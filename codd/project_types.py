@@ -347,6 +347,144 @@ class ImplementOracleSpec:
         }
 
 
+# ═══════════════════════════════════════════════════════════
+# Manifest↔lock coherence: the harness OWNS the test-toolchain dependency
+# versions + the lock-finalization contract (design: /tmp/gpt_result_dep.txt,
+# GPT-5.5 Pro consult 2026-06-15; verdict (b) primary + (a) finalization +
+# (c) forbidden).
+# ═══════════════════════════════════════════════════════════
+#
+# THE BUG (observed greenfield codex9/codex10): verify's frozen install
+# preflight (``npm ci``) hard-fails because the SUT wrote ``package.json`` with
+# an OLD test-toolchain dep (``"vitest": "^1.6.0"``) while the scaffold/gate
+# install had already produced ``package-lock.json`` with the LATEST resolution
+# (``@vitest/expect@3.2.6`` from vitest@3.x). ``npm ci`` requires lock↔manifest
+# agreement → "lock's @vitest/expect@3.2.6 does not satisfy ^1.6.0" → the run
+# never reaches a green typecheck/test.
+#
+# OWNERSHIP (the load-bearing decision — design verdict (b)): the test-toolchain
+# deps (vitest, typescript, tsx/ts-node, @types/node, coverage, the e2e runner)
+# are NOT the generated app's business dependencies — they are the HARNESS's
+# verification tooling. The split:
+#
+#   * SUT owns:     app runtime deps, domain libraries, source + test CONTENT.
+#   * harness owns: the test runner, the compiler/typechecker, coverage, the e2e
+#                   runner, the verify scripts, collection + module-resolution
+#                   config — and THE VERSIONS of those toolchain deps.
+#   * owner owns:   an explicit stack choice (a requirement saying "use Jest"
+#                   makes the PROFILE Jest — see the runner field on
+#                   :class:`LayoutProfile`; a future owner override could pin
+#                   toolchain versions the same way the package name is pinnable).
+#
+# So when the SUT's ``package.json`` sets a DIFFERENT version for a harness-owned
+# toolchain dep, the harness RECONCILES it back to the profile's version. This is
+# NOT vandalizing the SUT's output — it is "recovering the verifier's own
+# property" (the design's exact phrase). App/domain deps the SUT declared are
+# never touched.
+#
+# GENERAL CONTRACT (design section D — language-independent): this is the
+# manifest↔lock coherence contract, not an npm quirk. Every ecosystem has it:
+# package-lock.json / uv.lock / poetry.lock / Cargo.lock (and Go's go.sum, which
+# is a checksum-hygiene variant — ``go.mod ↔ go.sum``). The profile below is the
+# per-stack declaration so Python/Rust/Go become PROFILE + ADAPTER entries, not
+# core edits. TS/npm is implemented now; the others are documented extension
+# points (see the registry + ``codd.dependency_lock_coherence``).
+
+
+@dataclass(frozen=True)
+class ToolchainDependency:
+    """One harness-owned toolchain dependency: its name + the version the
+    profile pins.
+
+    ``dev`` (default True) declares the dep belongs in the manifest's
+    development-dependency section (npm ``devDependencies``) — true for every
+    test-toolchain dep (vitest/typescript/@types/node are not shipped with the
+    app). The version SPEC is a normal range string (``"^3.2.6"``); the harness
+    writes EXACTLY this spec, so a SUT that pinned an incompatible range is
+    reconciled to the profile's range (which the refreshed lock then resolves).
+    """
+
+    name: str
+    version: str
+    dev: bool = True
+
+
+@dataclass(frozen=True)
+class ToolchainDependencyProfile:
+    """A stack's harness-owned toolchain deps + the lock-finalization commands.
+
+    Profile-driven so the manifest↔lock coherence contract generalizes across
+    ecosystems with NO core edits (design section D). Fields:
+
+    * ``deps`` — the toolchain dependencies the harness OWNS the versions of
+      (vitest, typescript, @types/node, …). At implement-end the SUT's manifest
+      is reconciled so each of these declares the profile's version; an app/
+      domain dep the SUT added is NEVER in this set and is left untouched.
+    * ``manifest_filename`` — the dependency manifest the deps live in
+      (``package.json`` / ``pyproject.toml`` / ``Cargo.toml``).
+    * ``lock_filenames`` — the lock/checksum file(s) this contract finalizes
+      (``package-lock.json``; later ``uv.lock``/``poetry.lock``; ``Cargo.lock``;
+      ``go.sum``). The first present one (or the first listed) is the lock the
+      refresh produces.
+    * ``lock_refresh_command`` — the DETERMINISTIC command that updates ONLY the
+      lock to match the reconciled manifest, WITHOUT a frozen check
+      (``npm install --package-lock-only``; later ``uv lock``; ``cargo
+      generate-lockfile``; ``go mod tidy``). This is a harness FINALIZATION, not
+      a SUT repair loop — it runs once at implement-end.
+    * ``materialize_command`` — optional: after the lock is coherent, install
+      node_modules so the SAME-PROCESS implement-oracle typecheck has its deps
+      (``npm ci``). ``None`` skips materialization (the verify-stage install
+      preflight will materialize later). Kept FROZEN (``npm ci``) so even the
+      materialization honors the freshly-coherent lock rather than re-resolving.
+
+    The MEANING (reconcile harness-owned deps → refresh the lock deterministically
+    at implement-end → keep verify's install frozen) is core; only these COMMANDS
+    are per-ecosystem. ``None`` (the default, and Python's value today) makes the
+    finalization a strict NO-OP for that stack.
+    """
+
+    deps: tuple[ToolchainDependency, ...] = ()
+    manifest_filename: str = "package.json"
+    lock_filenames: tuple[str, ...] = ("package-lock.json",)
+    lock_refresh_command: str = "npm install --package-lock-only"
+    materialize_command: str | None = "npm ci"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "deps": [{"name": d.name, "version": d.version, "dev": d.dev} for d in self.deps],
+            "manifest_filename": self.manifest_filename,
+            "lock_filenames": list(self.lock_filenames),
+            "lock_refresh_command": self.lock_refresh_command,
+            "materialize_command": self.materialize_command,
+        }
+
+
+# ── The TS/npm toolchain profile (the only ecosystem implemented today) ──
+#
+# Versions are PINNED to current-major ranges so the scaffold/gate install and
+# the SUT-reconciled manifest agree on the SAME resolution the lock holds. These
+# are the toolchain deps the TS scaffold's ``test``/``build`` scripts need:
+#   * ``vitest``      — the test runner the profile declares (``runner=vitest``).
+#   * ``typescript``  — the ``tsc`` compiler the implement-oracle + build run.
+#   * ``@types/node`` — Node type declarations (a strict ``tsc`` over CLI/fs code
+#                       needs them; without it ``tsc`` errors on ``process``/etc).
+# A project that legitimately wants a DIFFERENT major (e.g. pinned vitest 1.x for
+# a plugin) is an OWNER stack choice; the future owner-override hook (mirroring
+# ``project.package_name``) is the place for that — NOT a SUT-authored downgrade,
+# which is exactly the incoherence this contract recovers from.
+_TYPESCRIPT_TOOLCHAIN_PROFILE = ToolchainDependencyProfile(
+    deps=(
+        ToolchainDependency(name="vitest", version="^3.2.4"),
+        ToolchainDependency(name="typescript", version="^5.9.2"),
+        ToolchainDependency(name="@types/node", version="^24.3.0"),
+    ),
+    manifest_filename="package.json",
+    lock_filenames=("package-lock.json",),
+    lock_refresh_command="npm install --package-lock-only",
+    materialize_command="npm ci",
+)
+
+
 @dataclass(frozen=True)
 class LayoutProfile:
     """Harness-owned repository topology + module-resolution contract for a stack.
@@ -380,6 +518,7 @@ class LayoutProfile:
     requires_package_init: bool = True
     requires_test_init: bool = True
     implement_oracle: ImplementOracleSpec | None = None
+    toolchain_dependencies: ToolchainDependencyProfile | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -393,6 +532,11 @@ class LayoutProfile:
             "test_import_policy": self.test_import_policy,
             "implement_oracle": (
                 self.implement_oracle.to_dict() if self.implement_oracle is not None else None
+            ),
+            "toolchain_dependencies": (
+                self.toolchain_dependencies.to_dict()
+                if self.toolchain_dependencies is not None
+                else None
             ),
         }
 
@@ -588,6 +732,20 @@ def _python_layout_profile(
         # verify-stage coherence gates (import_coherence / test_import_coherence /
         # e2e_contract_coherence) remain Python's backstop, UNCHANGED.
         implement_oracle=None,
+        # MANIFEST↔LOCK COHERENCE — DEFERRED for Python (separate task). The same
+        # contract applies (pyproject.toml ↔ uv.lock / poetry.lock: ``uv lock``
+        # /``poetry lock`` refresh the lock to the manifest, and ``--locked`` /
+        # ``--frozen`` is the equivalent of npm ci). But today's Python path does
+        # NOT pre-build a lock at scaffold time, and ``pip install -e .`` is not a
+        # frozen-lock install, so there is no manifest↔lock divergence to recover —
+        # making this a true NO-OP, not a gap. To wire it later: pin the Python
+        # test-toolchain deps (pytest, the typechecker) in a
+        # ToolchainDependencyProfile(manifest_filename="pyproject.toml",
+        # lock_filenames=("uv.lock",), lock_refresh_command="uv lock",
+        # materialize_command=...) and add the pyproject reconcile adapter in
+        # codd.dependency_lock_coherence. Until then None ⇒ the finalization is a
+        # strict NO-OP for Python (today's behaviour, unchanged).
+        toolchain_dependencies=None,
     )
 
 
@@ -641,6 +799,13 @@ def _typescript_layout_profile(
             scope=OracleScopeSpec(require_source_root=True, require_test_root=True),
             requires_node_install=True,
         ),
+        # MANIFEST↔LOCK COHERENCE (TS/npm) — the harness owns the test-toolchain
+        # dep VERSIONS (vitest/typescript/@types/node). At implement-end the SUT's
+        # package.json is reconciled to these, then ``npm install
+        # --package-lock-only`` refreshes the lock to match, so verify's frozen
+        # ``npm ci`` passes honestly (it never re-resolves; it just verifies). See
+        # :func:`codd.dependency_lock_coherence.finalize_dependency_lock_coherence`.
+        toolchain_dependencies=_TYPESCRIPT_TOOLCHAIN_PROFILE,
     )
 
 
