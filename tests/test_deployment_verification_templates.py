@@ -231,7 +231,58 @@ def test_vitest_generate_test_command_e2e(tmp_path, monkeypatch):
         target="convert",
     )
     command = VitestTemplate().generate_test_command(runtime_state, "e2e")
-    assert command == "npx vitest run tests/e2e/"
+    # ``vitest run`` with an explicit collection ``--include`` (the default
+    # ``include`` omits ``.e2e.*``), positionally filtered to the e2e dir.
+    assert command == (
+        "npx vitest run "
+        "--include '**/*.test.{ts,tsx,js,jsx}' "
+        "--include '**/*.e2e.{ts,tsx,js,jsx}' "
+        "--include '**/*.spec.{ts,tsx,js,jsx}' "
+        "tests/e2e/"
+    )
+
+
+def test_vitest_generate_test_command_includes_e2e_glob_so_e2e_ts_collected(tmp_path, monkeypatch):
+    # ROOT FIX: vitest's default ``include`` (``**/*.{test,spec}...``) does NOT
+    # match ``.e2e.ts``; the template ROUTES ``.e2e.ts`` here, so the built
+    # command MUST add an ``--include`` that covers ``.e2e.ts`` (else a real
+    # ``.e2e.ts`` collects 0 tests -> false anti-false-green hard fail).
+    e2e_file = tmp_path / "tests" / "e2e" / "tempconv_cli_contract.e2e.ts"
+    e2e_file.parent.mkdir(parents=True)
+    e2e_file.write_text("import { it, expect } from 'vitest'; it('x', () => expect(1).toBe(1));\n")
+
+    class RuntimeState:
+        project_root = tmp_path
+        source = "tests/e2e/tempconv_cli_contract.e2e.ts"
+        target = "convert"
+
+    command = VitestTemplate().generate_test_command(RuntimeState(), "e2e")
+
+    # The collection glob that lets vitest SEE the ``.e2e.ts`` file.
+    assert "--include" in command
+    assert "*.e2e.{ts,tsx,js,jsx}" in command
+    # ``--include`` precedes the positional file filter (compose: collect then filter).
+    assert command.index("--include") < command.index("tempconv_cli_contract.e2e.ts")
+    # The targeted file is still the positional filter, scoping the run to itself.
+    assert command.endswith("tests/e2e/tempconv_cli_contract.e2e.ts")
+
+
+def test_vitest_include_glob_covers_test_and_spec_no_regression(tmp_path, monkeypatch):
+    # No regression: ``.test.*`` and ``.spec.*`` must remain in the collection
+    # set so existing unit-style / spec-style e2e files still collect.
+    monkeypatch.chdir(tmp_path)
+    runtime_state = RuntimeStateNode(
+        identifier="runtime:cli:convert",
+        kind=RuntimeStateKind.SERVER_RUNNING,
+        target="convert",
+    )
+    command = VitestTemplate().generate_test_command(runtime_state, "e2e")
+    assert "*.test.{ts,tsx,js,jsx}" in command
+    assert "*.spec.{ts,tsx,js,jsx}" in command
+    # Scoped: the include globs only ever match ``.e2e.``/``.test.``/``.spec.``
+    # TEST files — a bare ``*.ts`` (non-test) glob must NEVER be included.
+    assert "--include '**/*.{ts,tsx,js,jsx}'" not in command
+    assert "--include '**/*.ts'" not in command
 
 
 def test_vitest_template_passes_on_real_run(monkeypatch):
@@ -290,6 +341,30 @@ def test_vitest_e2e_ts_run_zero_tests_still_hard_fails(monkeypatch):
         lambda *a, **k: _Completed(),
     )
     result = VitestTemplate().execute("npx vitest run tests/e2e/tempconv_conversion.e2e.ts")
+    assert result.passed is False
+    assert "0 tests" in result.output or "no test files" in result.output.lower()
+
+
+def test_vitest_include_glob_run_on_empty_e2e_still_hard_fails(monkeypatch):
+    # The ``--include`` fix only lets vitest SEE a ``.e2e.ts`` file; it must NOT
+    # let vitest pass on nothing. A genuinely empty ``.e2e.ts`` (the include glob
+    # matches it, but it declares no tests) still collects 0 -> still a HARD FAIL.
+    # This mirrors the real tempconv-codex4 ``filter:``/``include:`` output shape.
+    class _Completed:
+        returncode = 1
+        stdout = (
+            "No test files found, exiting with code 1\n"
+            "filter:  tests/e2e/empty.e2e.ts\n"
+            "include:  **/*.test.{ts,tsx,js,jsx}, **/*.e2e.{ts,tsx,js,jsx}\n"
+        )
+        stderr = ""
+
+    monkeypatch.setattr(
+        "codd.deployment.providers.verification.vitest.subprocess.run",
+        lambda *a, **k: _Completed(),
+    )
+    command = "npx vitest run --include '**/*.e2e.{ts,tsx,js,jsx}' tests/e2e/empty.e2e.ts"
+    result = VitestTemplate().execute(command)
     assert result.passed is False
     assert "0 tests" in result.output or "no test files" in result.output.lower()
 
