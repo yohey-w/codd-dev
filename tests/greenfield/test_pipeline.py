@@ -784,6 +784,158 @@ def test_vb_gate_skipped_when_coverage_gate_option_false(tmp_path: Path) -> None
     assert result2.status == "success", format_greenfield_result(result2, "text")
 
 
+def test_vb_gate_rerun_fires_and_test_scoped_repair_drives_coverage(tmp_path: Path) -> None:
+    """The (previously dormant) coverage feedback loop is now WIRED: an uncovered
+    VB at stage end triggers a TEST-scoped re-implementation that adds the genuine
+    covering marker, and the stage then PASSES.
+
+    The first implement pass (DI seam) writes a covering marker only for VB-add,
+    leaving VB-cli uncovered. The stage gate's rerun goes through the real
+    ``implement_tasks`` (patched here) which adds the missing VB-cli marker on a
+    real asserting test — exercising the live gate→feedback→test-rerun path.
+    """
+    project = _vb_project(tmp_path)
+    calls: list[str] = []
+    runners = _fake_runners(calls)
+    runners["task_lister"] = _two_task_lister
+
+    def implement_task_runner(project_root, task, **kwargs):
+        calls.append(f"implement:{task.task_id}")
+        tests_dir = Path(project_root) / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        if task.task_id == "implement_covering_tests":
+            # Covers VB-add only — VB-cli is left UNCOVERED on the first pass.
+            (tests_dir / "test_behaviors.py").write_text(
+                "# codd: covers vb=VB-add\ndef test_add():\n    assert add(2, 3) == 5\n",
+                encoding="utf-8",
+            )
+        return "1 file(s) generated"
+
+    runners["implement_task_runner"] = implement_task_runner
+
+    rerun_feedback: list[str] = []
+
+    def fake_implement_tasks(project_root, **kwargs):
+        # The stage gate's TEST-scoped rerun: add the missing VB-cli marker on a
+        # real asserting test (the honest repair the feedback asks for).
+        rerun_feedback.append(kwargs.get("feedback", ""))
+        tests_dir = Path(project_root) / "tests"
+        (tests_dir / "test_cli.py").write_text(
+            "# codd: covers vb=VB-cli\ndef test_cli():\n    assert main() == 0\n",
+            encoding="utf-8",
+        )
+        return []
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr("codd.implementer.implement_tasks", fake_implement_tasks)
+    try:
+        result = GreenfieldPipeline(**runners).run(project)
+    finally:
+        monkey.undo()
+
+    assert result.status == "success", format_greenfield_result(result, "text")
+    # The rerun fired and carried the real gap (VB-cli) in its feedback.
+    assert rerun_feedback, "the coverage feedback rerun did not fire"
+    assert all("VB-cli" in fb for fb in rerun_feedback)
+    # Both VBs are now covered on disk (the honest repair landed).
+    assert (project / "tests" / "test_cli.py").is_file()
+
+
+def test_vb_authenticity_gate_hard_fails_on_marker_on_empty_test(tmp_path: Path) -> None:
+    """ANTI-FALSE-GREEN at the STAGE level: a covering marker on an EMPTY test is
+    rejected by the authenticity gate even though the coverage audit sees a marker.
+
+    Both VBs carry a ``covers`` marker (coverage audit is satisfied), but VB-cli's
+    test has no assertion — the authenticity gate must fail the implement stage.
+    """
+    project = _vb_project(tmp_path)
+    calls: list[str] = []
+    runners = _fake_runners(calls)
+    runners["task_lister"] = _two_task_lister
+
+    def implement_task_runner(project_root, task, **kwargs):
+        calls.append(f"implement:{task.task_id}")
+        tests_dir = Path(project_root) / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        if task.task_id == "implement_covering_tests":
+            (tests_dir / "test_behaviors.py").write_text(
+                "# codd: covers vb=VB-add\n"
+                "def test_add():\n    assert add(2, 3) == 5\n\n"
+                # VB-cli is "covered" by a marker on an EMPTY test — false coverage.
+                "# codd: covers vb=VB-cli\n"
+                "def test_cli():\n    pass\n",
+                encoding="utf-8",
+            )
+        return "1 file(s) generated"
+
+    runners["implement_task_runner"] = implement_task_runner
+
+    # The rerun cannot fix it (it re-writes the same empty test), so the gate
+    # ultimately fails at the authenticity check.
+    def fake_implement_tasks(project_root, **kwargs):
+        return []
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr("codd.implementer.implement_tasks", fake_implement_tasks)
+    try:
+        result = GreenfieldPipeline(**runners).run(project)
+    finally:
+        monkey.undo()
+
+    assert result.status == "failed"
+    assert result.failed_stage == "implement"
+    detail = load_session(project)["stages"]["implement"]["detail"]
+    assert "marker-authenticity" in detail
+
+
+def test_vb_gate_reruns_native_oracle_after_test_repair(tmp_path: Path) -> None:
+    """A VB test rerun can break test↔helper symbol coherence, so the native
+    oracle MUST be re-asserted after the rerun (pipeline order is oracle→VB).
+
+    Patches the implement-oracle gate to record each invocation; an uncovered VB
+    forces one rerun, after which the oracle must run again (≥2 total: the normal
+    stage-end run + the post-VB-rerun re-assert)."""
+    project = _vb_project(tmp_path)
+    calls: list[str] = []
+    runners = _fake_runners(calls)
+    runners["task_lister"] = _two_task_lister
+
+    def implement_task_runner(project_root, task, **kwargs):
+        tests_dir = Path(project_root) / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        if task.task_id == "implement_covering_tests":
+            (tests_dir / "test_behaviors.py").write_text(
+                "# codd: covers vb=VB-add\ndef test_add():\n    assert add(2, 3) == 5\n",
+                encoding="utf-8",
+            )
+        return "1 file(s) generated"
+
+    runners["implement_task_runner"] = implement_task_runner
+
+    def fake_implement_tasks(project_root, **kwargs):
+        (Path(project_root) / "tests" / "test_cli.py").write_text(
+            "# codd: covers vb=VB-cli\ndef test_cli():\n    assert main() == 0\n",
+            encoding="utf-8",
+        )
+        return []
+
+    oracle_runs: list[str] = []
+    pipeline = GreenfieldPipeline(**runners)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr("codd.implementer.implement_tasks", fake_implement_tasks)
+    monkey.setattr(
+        pipeline, "_enforce_implement_oracle_gate", lambda *_a, **_k: oracle_runs.append("oracle")
+    )
+    try:
+        result = pipeline.run(project)
+    finally:
+        monkey.undo()
+
+    assert result.status == "success", format_greenfield_result(result, "text")
+    # Oracle ran at stage end AND was re-asserted after the VB test rerun.
+    assert len(oracle_runs) >= 2
+
+
 def test_vb_gate_default_runner_does_not_enforce_per_task(tmp_path: Path) -> None:
     """The greenfield default implement-task runner must NOT hard-fail a single
     task against the project-wide VB universe.

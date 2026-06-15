@@ -226,6 +226,7 @@ _TEST_DOC_CANONICAL_VB_HEAD = [
     "- Every verifiable behavior must map to at least one test scenario — if a design document specifies a transition chain (e.g. action → intermediate state → final state), each link in the chain requires a separate assertion.",
     "- Include a traceability section that lists each verifiable behavior and its corresponding test scenario(s). Flag any behavior that lacks coverage.",
     "- Write that traceability section as a Markdown table whose FIRST column is a stable verifiable-behavior id of the form `VB-<id>` (e.g. `VB-01`, `VB-AUTH-02`), one row per verifiable behavior. Header wording and language are free; CoDD machine-parses the `VB-` id in the first cell (`codd test audit`), so never merge multiple behaviors into one row and never omit the id column.",
+    "- Each VB id must be ATOMIC — name exactly one behavior. Never use range or list shorthand in an id (no `VB-EVAL-02..06`, no `VB-02,03`, no `VB-02〜06`); write one row with a distinct atomic id per behavior instead. A range id cannot be honestly covered by a single test marker, and its members would read as permanently uncovered.",
     "- Declare each behavior under exactly one stable id; do not split one behavior across two ids or reuse an id for two different behaviors.",
     "- Treat design-time `operation_flow` records as the authoritative source for operational test obligations. Do not invent E2E-only behavior that is absent from requirements or design; instead flag missing design obligations.",
 ]

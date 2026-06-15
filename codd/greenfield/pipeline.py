@@ -733,16 +733,29 @@ class GreenfieldPipeline:
         # — code that does not even typecheck cannot have meaningful VB coverage.
         self._enforce_implement_oracle_gate(project_root, tasks, options)
 
-        # Project-wide VB coverage gate — ONCE, after every implement task has
-        # run and all covering tests therefore exist. Per-task enforcement was
-        # disabled in _default_implement_task_runner precisely because the gate
-        # is project-wide; this is where it belongs. Honors the greenfield
-        # coverage_gate option (--no-coverage-gate / greenfield.coverage_gate:
-        # false) — when the owner turned it off, the final gate is skipped too.
+        # Project-wide VB coverage + marker-authenticity gate — ONCE, after every
+        # implement task has run and all covering tests therefore exist. Per-task
+        # enforcement was disabled in _default_implement_task_runner precisely
+        # because the gate is project-wide; this is where it belongs. Honors the
+        # greenfield coverage_gate option (--no-coverage-gate /
+        # greenfield.coverage_gate: false) — when the owner turned it off, the
+        # final gate is skipped too. The rerun is wired (was dormant): an
+        # uncovered VB drives a bounded, TEST-SCOPED re-implementation (source is
+        # never edited by a VB rerun) with gap feedback, and the native oracle is
+        # re-asserted after each test edit.
+        coverage_on = bool(options.get("coverage_gate", True))
         _enforce_stage_coverage_gate(
             project_root,
-            coverage_gate=bool(options.get("coverage_gate", True)),
+            coverage_gate=coverage_on,
             echo=self.echo,
+            rerun=self._make_vb_rerun_callback(project_root, tasks, options) if coverage_on else None,
+            rerun_oracle=(
+                (lambda: self._enforce_implement_oracle_gate(project_root, tasks, options))
+                if coverage_on
+                else None
+            ),
+            scope_resolver=self._make_vb_scope_resolver(project_root, tasks) if coverage_on else None,
+            authenticity_profile=self._resolve_layout_profile(project_root) if coverage_on else None,
         )
         record["detail"] = f"{len(tasks)} task(s) implemented"
 
@@ -1050,6 +1063,91 @@ class GreenfieldPipeline:
                 use_derived_steps=True,
                 feedback=feedback,
             )
+
+    def _make_vb_rerun_callback(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+        options: dict[str, Any],
+    ) -> Callable[[str, Any], None]:
+        """A ``rerun(feedback, scope)`` for the VB coverage gate's feedback loop.
+
+        Reuses the oracle's scoped, write-fenced rerun dispatch
+        (:meth:`_rerun_tasks_with_feedback`): a TEST-scoped
+        :class:`~codd.implement_oracle_scope.OracleRerunScope` re-implements ONLY
+        its test tasks, fenced to test files/helpers, so a VB coverage rerun can
+        never rewrite production source.
+        """
+
+        def _rerun(feedback: str, scope: Any = None) -> None:
+            self._rerun_tasks_with_feedback(project_root, tasks, feedback, options, scope=scope)
+
+        return _rerun
+
+    def _make_vb_scope_resolver(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+    ) -> Callable[[list[str]], Any]:
+        """A resolver mapping uncovered VB source docs → a TEST-scoped rerun scope.
+
+        Delegates to :func:`codd.vb_rerun_scope.derive_vb_rerun_scope` with the
+        pipeline's ``_output_paths_for_task`` so each task's outputs resolve the
+        same way the rerun itself resolves them. A derivation failure degrades to
+        a broad scope (never aborts the gate).
+        """
+        from codd.config import load_project_config
+
+        def _resolve(uncovered_source_docs: list[str]) -> Any:
+            try:
+                config = load_project_config(project_root)
+            except (FileNotFoundError, ValueError):
+                config = {}
+            try:
+                from codd.vb_rerun_scope import derive_vb_rerun_scope
+
+                return derive_vb_rerun_scope(
+                    uncovered_source_docs,
+                    tasks,
+                    config=config,
+                    path_resolver=_output_paths_for_task,
+                )
+            except Exception as exc:  # noqa: BLE001 — degrade to broad, never abort.
+                self.echo(f"[greenfield] VB rerun: scope derivation failed ({exc}); rerun stays broad.")
+                from codd.implement_oracle_scope import SCOPE_BROAD, OracleRerunScope
+
+                return OracleRerunScope(
+                    rung=SCOPE_BROAD,  # canonical broad ⇒ is_broad() True ⇒ unfenced
+                    task_ids=tuple(task.task_id for task in tasks),
+                    allowed_paths=(),
+                    detail="VB rerun: scope derivation error — broad fallback",
+                )
+
+        return _resolve
+
+    def _resolve_layout_profile(self, project_root: Path) -> Any:
+        """Resolve the active :class:`~codd.project_types.LayoutProfile` (or None).
+
+        Used by the marker-authenticity gate to obtain the per-language
+        test-block adapter (``profile.test_block_profile()``). Best-effort: any
+        resolution failure returns ``None`` so the gate degrades to its
+        language-agnostic stage-1 (orphan) check rather than aborting.
+        """
+        try:
+            from codd.project_types import resolve_layout_profile
+
+            config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
+            return resolve_layout_profile(
+                language=language,
+                project_name=self._layout_project_name(project_root, config),
+                source_dirs=source_dirs,
+                test_dirs=test_dirs,
+                config=config,
+                project_root=project_root,
+            )
+        except Exception as exc:  # noqa: BLE001 — authenticity degrades without a profile.
+            self.echo(f"[greenfield] VB authenticity: layout profile unavailable ({exc}); stage-1 only.")
+            return None
 
     def _default_implement_task_runner(
         self,
@@ -1997,8 +2095,12 @@ def _enforce_stage_coverage_gate(
     *,
     coverage_gate: bool,
     echo: Callable[[str], None],
+    rerun: Callable[[str, Any], None] | None = None,
+    rerun_oracle: Callable[[], None] | None = None,
+    scope_resolver: Callable[[list[str]], Any] | None = None,
+    authenticity_profile: Any = None,
 ) -> None:
-    """Project-wide verifiable-behavior coverage gate for the implement STAGE.
+    """Project-wide verifiable-behavior coverage + authenticity gate (implement STAGE).
 
     Runs ONCE after every implement task has completed, so all covering tests
     already exist. This is the correct granularity for the project-wide VB
@@ -2008,20 +2110,35 @@ def _enforce_stage_coverage_gate(
     — an early fixtures/helper task that writes no covering tests would
     otherwise hard-fail against the whole project's VBs.)
 
-    No ``rerun`` is wired: by stage end the build is complete, so any remaining
-    uncovered VB is a genuine failure of the whole implement stage, not a
-    transient gap to re-implement away. The failure is raised as a
-    :class:`StageError` carrying the gap list, which the pipeline records on the
-    implement stage record and surfaces through the existing checkpoint/resume
-    machinery.
+    Two gates, both HARD (raise :class:`StageError` on failure):
 
-    Honors the greenfield ``coverage_gate`` option: when it is off
-    (``--no-coverage-gate`` / ``greenfield.coverage_gate: false``) the gate is
-    skipped entirely. The project-level ``test_coverage.gate`` config is also
-    respected (via :func:`run_implement_coverage_gate`).
+    1. **Coverage** (:func:`run_implement_coverage_gate`): every declared VB has a
+       ``covers``/``blocked`` marker. When a ``rerun`` callback is wired, an
+       uncovered gap drives a bounded, TEST-SCOPED re-implementation with gap
+       feedback (the previously-dormant feedback loop, now live) before failing.
+    2. **Authenticity** (:func:`build_authenticity_report`): each ``covers``
+       marker is a *credible* claim — attached to an executable test block that
+       contains an assertion (anti-false-green; "add a marker" cannot be
+       satisfied by marking an empty/skipped test). Gracefully degrades for
+       stacks/files it cannot structurally parse.
+
+    ``rerun(feedback, scope)`` re-implements the scoped TEST tasks under a
+    write-fence (source is never edited by a VB rerun). ``scope_resolver`` maps
+    the uncovered VB source docs to that scope. ``rerun_oracle`` re-runs the
+    native implement-oracle AFTER a VB rerun (a test edit can break a helper
+    symbol; the pipeline order is oracle→VB, so the oracle must be re-asserted).
+
+    Honors the greenfield ``coverage_gate`` option and the project-level
+    ``test_coverage.gate`` config.
     """
     from codd.config import load_project_config
-    from codd.verifiable_behavior_audit import run_implement_coverage_gate
+    from codd.verifiable_behavior_audit import (
+        build_vb_coverage_audit,
+        coverage_gate_enabled,
+        coverage_gate_max_retries,
+        format_gap_feedback,
+        run_implement_coverage_gate,
+    )
 
     if not coverage_gate:
         return
@@ -2030,6 +2147,9 @@ def _enforce_stage_coverage_gate(
         config = load_project_config(project_root)
     except (FileNotFoundError, ValueError):
         config = {}
+
+    if not coverage_gate_enabled(config):
+        return
 
     # Pass the configured test dirs as the audited output paths so the gate
     # treats this as a test-related run (it is — every test the build will ever
@@ -2040,13 +2160,52 @@ def _enforce_stage_coverage_gate(
     else:
         audited_paths = ["tests/"]
 
+    # --- Gate 1: coverage, with the (now-live) TEST-scoped feedback rerun. ---
+    if rerun is not None and scope_resolver is not None:
+        # Drive the bounded feedback loop HERE so each rerun is TEST-scoped (the
+        # scope is recomputed from the current gap) and the native oracle is
+        # re-asserted after each test edit. ``run_implement_coverage_gate`` is
+        # then called once more with rerun=None to produce the final verdict +
+        # gap reporting (no second loop).
+        max_retries = coverage_gate_max_retries(config)
+        report = build_vb_coverage_audit(project_root, config=config)
+        attempt = 0
+        while report.rows and report.uncovered_rows and attempt < max_retries:
+            attempt += 1
+            uncovered_docs = sorted({row.source_doc for row in report.uncovered_rows if row.source_doc})
+            scope = scope_resolver(uncovered_docs)
+            echo(
+                f"Test coverage gate: {len(report.uncovered_rows)} uncovered verifiable behavior(s); "
+                f"re-running TEST tasks with gap feedback (attempt {attempt}/{max_retries})"
+            )
+            try:
+                rerun(format_gap_feedback(report), scope)
+                if rerun_oracle is not None:
+                    # A VB test rerun can break test↔helper symbol coherence;
+                    # re-assert the native oracle so a type/import break never
+                    # rides into verify.
+                    rerun_oracle()
+            except Exception as exc:  # noqa: BLE001
+                # A rerun that cannot proceed (e.g. a codegen/environment error)
+                # must NOT mask the gate's verdict: log and stop the bounded loop,
+                # then fall through to the final coverage audit, which fails
+                # HONESTLY on whatever VBs are still uncovered. (The oracle gate
+                # treats its rerun failures as hard because they ARE the defect;
+                # here the authority is the coverage audit below, not the rerun.)
+                echo(
+                    f"Test coverage gate: re-run attempt {attempt} could not complete ({exc}); "
+                    "stopping the feedback loop and evaluating coverage as-is."
+                )
+                break
+            report = build_vb_coverage_audit(project_root, config=config)
+
     passed = run_implement_coverage_gate(
         project_root,
         config=config,
         design_node=None,
         output_paths=audited_paths,
         opt_out=not coverage_gate,
-        rerun=None,
+        rerun=None,  # the scoped loop (above) already ran; this is the final verdict
         echo=echo,
         echo_error=echo,
     )
@@ -2056,6 +2215,29 @@ def _enforce_stage_coverage_gate(
             "one or more declared verifiable behaviors have no `codd: covers vb=` "
             "marker after all implement tasks completed (see the gap list above)"
         )
+
+    # --- Gate 2: marker authenticity (anti-false-green). HARD gate. ---
+    from codd.vb_marker_authenticity import build_authenticity_report
+
+    auth = build_authenticity_report(project_root, config=config, profile=authenticity_profile)
+    if auth.degraded_paths:
+        echo(
+            "Test coverage gate: marker-authenticity attachment/assertion checks skipped for "
+            f"{len(auth.degraded_paths)} un-parseable file(s) (stage-1 orphan check still applied): "
+            + ", ".join(auth.degraded_paths)
+        )
+    if not auth.passed:
+        for violation in auth.violations:
+            echo(violation.message)
+        raise StageError(
+            "verifiable-behavior marker-authenticity gate failed for the implement stage: "
+            f"{len(auth.violations)} `codd: covers vb=` marker(s) are not credible coverage claims "
+            "(attached to a skipped/empty test, an orphan id, or a test with no assertion). A "
+            "covers marker must sit on an executable test that asserts the behavior."
+        )
+    echo(
+        f"Test coverage gate: marker authenticity OK ({len(auth.degraded_paths)} file(s) stage-1-only)."
+    )
 
 
 def _default_verify_runner(

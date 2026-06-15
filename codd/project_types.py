@@ -589,6 +589,34 @@ class LayoutProfile:
 
         return tuple(paths)
 
+    def test_block_profile(self) -> Any:
+        """Resolve this stack's test-structure adapter for the VB authenticity gate.
+
+        Returns a ``codd.vb_marker_authenticity.TestBlockProfile`` (a per-language
+        parser that locates executable test blocks and resolves skip/assertion
+        facts) or ``None`` for a stack with no adapter — in which case the
+        authenticity gate gracefully degrades to its language-agnostic stage 1
+        (orphan-marker) check only. This is the SINGLE registration point for a
+        new stack's test parser, mirroring :meth:`harness_owned_scaffold_paths`
+        (dispatch on ``self.language``, no per-language logic in the gate). The
+        import is lazy so the authenticity module (which imports the VB audit) is
+        never pulled in at ``project_types`` import time.
+        """
+
+        try:
+            from codd.vb_marker_authenticity import (
+                PythonTestBlockProfile,
+                TypeScriptTestBlockProfile,
+            )
+        except Exception:  # noqa: BLE001 — adapter is optional; degrade if unavailable.
+            return None
+
+        if self.language == "python":
+            return PythonTestBlockProfile()
+        if self.language in ("typescript", "node", "javascript"):
+            return TypeScriptTestBlockProfile()
+        return None
+
 
 def normalize_package_name(project_name: str | None, *, fallback: str = "app") -> str:
     """Derive a valid Python package identifier from a project name.

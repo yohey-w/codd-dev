@@ -87,11 +87,25 @@ def is_canonical_vb_doc(node_id: str | None = None, output_path: str | None = No
 class VBDeclarationIssue:
     """A VB-declaration coherence problem detected across test documents."""
 
-    kind: str  # "collision" | "noncanonical_declaration" | "duplicate"
+    kind: str  # "collision" | "noncanonical_declaration" | "duplicate" | "range_shorthand"
     severity: str  # "error" | "warning"
     vb_id: str
     message: str
     docs: tuple[str, ...] = ()
+
+
+# Range-shorthand atomicity: a VB id must name exactly ONE behavior. A
+# declaration like ``VB-EVAL-02..06`` (an ellipsis range) or ``VB-02,03,04`` (a
+# comma list) collapses several behaviors into one id, which destroys
+# auditability — a single ``covers`` marker cannot prove five behaviors, and the
+# range is never minted as atomic rows, so the "missing" members read as
+# permanently uncovered. We forbid the SHORTHAND at declaration time and require
+# the generator to emit one atomic row per behavior. (We do NOT eat the shorthand
+# by expanding it on the marker side — that would re-introduce the false-coverage
+# this gate exists to prevent.) The ``..`` ellipsis and an in-id comma are the
+# unambiguous shorthand spellings; a plain hyphenated scheme (``VB-AUTH-1``) is
+# left untouched.
+_VB_RANGE_SHORTHAND_RE = re.compile(r"(\.\.|,|;|…|〜|～)")
 
 
 def validate_vb_declarations(
@@ -165,6 +179,37 @@ def validate_vb_declarations(
                         f"VB id `{display_id}` is declared identically in multiple documents "
                         f"({', '.join(docs)}); keep a single canonical declaration and "
                         "reference it from the other doc(s)."
+                    ),
+                )
+            )
+
+    # --- range-shorthand atomicity (always ERROR) ---------------------------
+    # A VB id that packs a range/list (``VB-EVAL-02..06``) is not atomic: it names
+    # several behaviors under one id, so it can never be honestly covered by one
+    # test marker. Flagged in EVERY doc (canonical or not) — atomicity is a
+    # property of the id itself, independent of where it is declared.
+    seen_range: set[tuple[str, str]] = set()
+    for doc in sorted(behaviors_by_doc):
+        for behavior in behaviors_by_doc[doc]:
+            if not _VB_RANGE_SHORTHAND_RE.search(behavior.vb_id):
+                continue
+            key = (doc, behavior.vb_id)
+            if key in seen_range:
+                continue
+            seen_range.add(key)
+            issues.append(
+                VBDeclarationIssue(
+                    kind="range_shorthand",
+                    severity="error",
+                    vb_id=behavior.vb_id,
+                    docs=(doc,),
+                    message=(
+                        f"VB id `{behavior.vb_id}` in `{doc}` uses range/list shorthand; a "
+                        "verifiable-behavior id must be ATOMIC (name exactly one behavior). "
+                        "Expand it into one row per behavior with a distinct id (e.g. "
+                        "`VB-EVAL-02`, `VB-EVAL-03`, …). A range cannot be honestly covered by a "
+                        "single `codd: covers vb=` marker, and its members would read as "
+                        "permanently uncovered."
                     ),
                 )
             )
@@ -580,6 +625,12 @@ def format_gap_feedback(report: VBAuditReport) -> str:
         "For EACH behavior listed below, add (or extend) a test that proves it and "
         "annotate that test with a comment marker of the exact form "
         "`codd: covers vb=<ID>` (one marker per behavior, placed inside the test file).",
+        # Anti-false-coverage: a covers marker is a CLAIM that the test proves the
+        # behavior; "add a marker" must never be satisfied by marking an empty or
+        # skipped test (the marker-authenticity gate will reject that).
+        "Do not add `codd: covers vb=X` to an existing test unless that test exercises the "
+        "public behavior described by X and contains assertions that would FAIL if X were "
+        "broken. If no such test exists, create or extend a real test FIRST, then mark it.",
         "If a behavior genuinely cannot be tested yet, add an explicit "
         "`codd: blocked vb=<ID> reason=<short_reason>` marker instead — never leave it silently uncovered.",
         "",

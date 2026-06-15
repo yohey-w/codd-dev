@@ -375,6 +375,17 @@ def _render_header_comments(scenario: UserScenario, context: GenerationContext, 
     if scenario.kind == "operational":
         source_operation = _source_operation_label(scenario)
         coverage_axis = scenario.coverage_axis or "unspecified"
+        # Machine-injection guard (anti-false-coverage): injecting a coverage
+        # marker is ONLY safe here because the mapping is HARNESS-OWNED and
+        # machine-known — this is a skeleton the harness itself generates for
+        # ``operation=<X>`` and the marker names that same operation. NEVER
+        # inject ``codd: covers vb=<id>`` into a free-form unit/integration test
+        # by guessing the VB from a test name or nearby text: a guessed marker is
+        # a false coverage claim the authenticity gate exists to reject. A VB
+        # marker may only be authored by the SUT on a test that genuinely proves
+        # the behavior, or attached to a harness-generated VB-specific skeleton
+        # whose asserting body the SUT fills in (still subject to the
+        # assertion-presence gate).
         lines.extend(
             [
                 "// Operational E2E policy: run the whole generated suite, collect all failures, then repair after the full campaign finishes.",

@@ -318,6 +318,57 @@ def test_validator_does_not_alias_sibling_vbs():
 
 
 # ---------------------------------------------------------------------------
+# Atomic VB declaration gate: range/list shorthand is an error (calclib drift)
+# ---------------------------------------------------------------------------
+
+
+def test_validator_flags_range_shorthand_vb_id_as_error():
+    """`VB-EVAL-02..06` packs five behaviors into one id — an atomicity violation.
+
+    A range id cannot be honestly covered by a single `covers` marker, so it must
+    be an ERROR (in canonical AND non-canonical docs), never rescued by alias
+    expansion on the marker side.
+    """
+    by_doc = {
+        "docs/test/test_strategy.md": [
+            VerifiableBehavior("VB-EVAL-02..06", "evaluate operators", "docs/test/test_strategy.md"),
+            VerifiableBehavior("VB-01", "single behavior", "docs/test/test_strategy.md"),
+        ],
+    }
+    issues = validate_vb_declarations(by_doc, strict=True)
+    ranges = [i for i in issues if i.kind == "range_shorthand"]
+    assert len(ranges) == 1
+    assert ranges[0].severity == "error"
+    assert ranges[0].vb_id == "VB-EVAL-02..06"
+    # The atomic id alongside it is NOT flagged.
+    assert not any(i.kind == "range_shorthand" and i.vb_id == "VB-01" for i in issues)
+
+
+def test_validator_flags_comma_and_fullwidth_range_shorthand():
+    by_doc = {
+        "docs/test/test_strategy.md": [
+            VerifiableBehavior("VB-02,03", "two behaviors", "docs/test/test_strategy.md"),
+            VerifiableBehavior("VB-AUTH-07〜09", "three behaviors", "docs/test/test_strategy.md"),
+        ],
+    }
+    issues = validate_vb_declarations(by_doc, strict=True)
+    flagged = {i.vb_id for i in issues if i.kind == "range_shorthand"}
+    assert flagged == {"VB-02,03", "VB-AUTH-07〜09"}
+
+
+def test_validator_does_not_flag_plain_hyphenated_scheme():
+    """Atomicity must not false-flag legitimate hyphenated ids (`VB-AUTH-1`)."""
+    by_doc = {
+        "docs/test/test_strategy.md": [
+            VerifiableBehavior("VB-AUTH-1", "login", "docs/test/test_strategy.md"),
+            VerifiableBehavior("VB-EVAL-02", "eval add", "docs/test/test_strategy.md"),
+        ],
+    }
+    issues = validate_vb_declarations(by_doc, strict=True)
+    assert not any(i.kind == "range_shorthand" for i in issues)
+
+
+# ---------------------------------------------------------------------------
 # Test 5: verifier-side validation via `codd check`
 # ---------------------------------------------------------------------------
 
