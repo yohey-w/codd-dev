@@ -514,10 +514,41 @@ class ToolchainDependencyProfile:
       (``npm ci``). ``None`` skips materialization (the verify-stage install
       preflight will materialize later). Kept FROZEN (``npm ci``) so even the
       materialization honors the freshly-coherent lock rather than re-resolving.
+    * ``frozen_install_command`` — the FROZEN install the verify campaign consumes
+      (``npm ci``). It NEVER re-resolves; it verifies that the current lock
+      reproduces the current manifest. The lock-freshness barrier validates the
+      refreshed lock with exactly this command BEFORE verify, so verify's own
+      frozen install (and the campaign's) passes honestly. (For npm it is the same
+      string as ``materialize_command``; kept a SEPARATE field because the two are
+      semantically distinct seams — materialize is an implement-end convenience,
+      the frozen install is the verify-time reproducibility check the barrier must
+      pass through.)
+    * ``completeness_refresh_command`` — the FULL refresh used as the barrier's
+      completeness FALLBACK (``npm install``) when the deterministic
+      ``lock_refresh_command`` (``--package-lock-only``) leaves the lock/manifest
+      still incoherent (a transitive omission like ufo/path-key). It re-resolves
+      the WHOLE tree, then the frozen install is retried. ``None`` disables the
+      fallback (the primary refresh is then the only path). See
+      :func:`codd.dependency_lock_coherence.ensure_lock_freshness_barrier`.
+    * ``workspace_manifest_globs`` — project-relative globs that match the stack's
+      SECONDARY/WORKSPACE manifests beyond the root one (npm workspaces:
+      ``packages/*/package.json`` etc.). They feed the manifest DIGEST so a
+      workspace-only dependency change still re-freezes the lock. Empty by default
+      (a single-package project); a workspace project declares its layout here.
+    * ``config_filenames`` — project-relative dependency-resolution CONFIG files
+      whose content changes the resolved tree (``.npmrc`` — ``legacy-peer-deps``,
+      registries, ``shamefully-hoist``). They feed the digest so a flag change
+      re-freezes. The barrier ALSO holds these constant between the refresh and the
+      frozen install (lock generation + npm ci must see the SAME flags).
+    * ``package_manager_version_command`` — the command whose stdout identifies the
+      package-manager VERSION/config (``npm --version``). Folded into the digest so
+      a manager upgrade (which can change lock format/resolution) re-freezes.
+      ``None`` omits it (best-effort; a manager with no stable version probe).
 
     The MEANING (reconcile harness-owned deps → refresh the lock deterministically
-    at implement-end → keep verify's install frozen) is core; only these COMMANDS
-    are per-ecosystem. ``None`` (the default, and Python's value today) makes the
+    at implement-end → keep verify's install frozen → re-freeze before verify when
+    the manifest set changed) is core; only these COMMANDS + FILE SETS are
+    per-ecosystem. ``None`` (the default, and Python's value today) makes the
     finalization a strict NO-OP for that stack.
     """
 
@@ -526,6 +557,11 @@ class ToolchainDependencyProfile:
     lock_filenames: tuple[str, ...] = ("package-lock.json",)
     lock_refresh_command: str = "npm install --package-lock-only"
     materialize_command: str | None = "npm ci"
+    frozen_install_command: str = "npm ci"
+    completeness_refresh_command: str | None = "npm install"
+    workspace_manifest_globs: tuple[str, ...] = ()
+    config_filenames: tuple[str, ...] = (".npmrc",)
+    package_manager_version_command: str | None = "npm --version"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -534,6 +570,11 @@ class ToolchainDependencyProfile:
             "lock_filenames": list(self.lock_filenames),
             "lock_refresh_command": self.lock_refresh_command,
             "materialize_command": self.materialize_command,
+            "frozen_install_command": self.frozen_install_command,
+            "completeness_refresh_command": self.completeness_refresh_command,
+            "workspace_manifest_globs": list(self.workspace_manifest_globs),
+            "config_filenames": list(self.config_filenames),
+            "package_manager_version_command": self.package_manager_version_command,
         }
 
 
@@ -560,6 +601,20 @@ _TYPESCRIPT_TOOLCHAIN_PROFILE = ToolchainDependencyProfile(
     lock_filenames=("package-lock.json",),
     lock_refresh_command="npm install --package-lock-only",
     materialize_command="npm ci",
+    frozen_install_command="npm ci",
+    # Completeness fallback: when ``--package-lock-only`` leaves a transitive
+    # omission (ufo/path-key) so the frozen ``npm ci`` still reports "Missing
+    # from lock file", a FULL ``npm install`` re-resolves the whole tree, then the
+    # barrier retries the frozen install. Both stay inside the barrier — verify is
+    # never the place a lock gets repaired (reproducibility).
+    completeness_refresh_command="npm install",
+    # npm workspaces conventions — secondary manifests whose dep changes must also
+    # re-freeze the lock. Harmless for a single-package project (matches nothing);
+    # a workspaces monorepo is covered without a core edit.
+    workspace_manifest_globs=("packages/*/package.json", "apps/*/package.json"),
+    # ``.npmrc`` changes the resolved tree (legacy-peer-deps, registries) → digest.
+    config_filenames=(".npmrc",),
+    package_manager_version_command="npm --version",
 )
 
 

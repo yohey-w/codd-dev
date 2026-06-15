@@ -1,9 +1,38 @@
-"""Implement-end manifest↔lock coherence finalization (design:
-/tmp/gpt_result_dep.txt, GPT-5.5 Pro consult 2026-06-15; verdict (b) primary +
-(a) finalization + (c) forbidden).
+"""Manifest↔lock coherence: implement-end finalization + verify-time freshness
+barrier (design: /tmp/gpt_result_dep.txt + /tmp/gpt_lock_result.txt, GPT-5.5 Pro
+consults 2026-06-15/16; verdict (b) primary + (a) finalization + (c) forbidden,
+then (c) dirty-marking + final lock-freshness barrier at position (a) verify-direct).
 
-WHAT
-====
+THE LOCK-FRESHNESS BARRIER (the codex15 sequencing gap this adds)
+================================================================
+The implement-end finalization below refreshes the lock ONCE, at implement-end.
+But the greenfield implement stage can re-write ``package.json`` AFTER that point
+— a VB-coverage rerun and an implement-oracle broad rerun both re-invoke the
+implementer, which can change deps. Observed (codex15): implement-end
+dep-coherence succeeded (03:51), then later reruns re-modified ``package.json``
+(06:00), leaving the 03:51 lock STALE (a ufo/path-key transitive omission). The
+verify campaign's frozen ``npm ci`` then hard-failed with "Missing from lock
+file". The freeze basis was pinned to implement-end, not to the FINAL manifest.
+
+THE FIX (design /tmp/gpt_lock_result.txt): a LOCK-FRESHNESS BARRIER, run verify-
+direct (BEFORE any frozen install in verify), that enforces the invariant::
+
+    No frozen install may run unless the lock is fresh for the current manifest set.
+
+It DIRTY-MARKS by a content DIGEST (not mtime): on every entry it computes the
+current manifest digest (root manifest + workspace manifests + ``.npmrc`` +
+package-manager version + the harness-owned dependency profile) and compares it to
+the ``last_frozen_manifest_digest`` recorded at the last freeze. If they DIFFER it
+re-runs the same barrier (reconcile harness-owned deps → refresh the lock →
+validate with a frozen install → record the digest), with a completeness FALLBACK
+(``npm install`` re-resolve) when ``--package-lock-only`` leaves the lock still
+incoherent. If they MATCH it is a NO-OP (no wasted refresh — verify just runs its
+``npm ci``). The freeze BASIS thus moves from implement-end to the FINAL manifest,
+which preserves reproducibility (verify stays a FROZEN install — it is never the
+place a lock is repaired) while making the codex15 rerun-modified manifest pass.
+
+WHAT (implement-end finalization)
+=================================
 After the greenfield IMPLEMENT stage (the SUT has finished authoring source,
 tests, AND ``package.json``) and BEFORE verify, this module:
 
@@ -45,6 +74,7 @@ today) makes the whole finalization a strict NO-OP.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from collections.abc import Callable, Mapping
@@ -62,6 +92,9 @@ from codd.project_types import (
 
 __all__ = [
     "DependencyLockResult",
+    "LockFreshnessResult",
+    "compute_manifest_digest",
+    "ensure_lock_freshness_barrier",
     "finalize_dependency_lock_coherence",
     "reconcile_manifest_toolchain_deps",
     "resolve_toolchain_profile",
@@ -434,6 +467,17 @@ def finalize_dependency_lock_coherence(
             )
         echo(f"[greenfield] dependency-lock: node_modules materialized (frozen: {materialize_cmd})")
 
+    # Record the frozen manifest digest so the verify-time lock-freshness barrier
+    # treats an UNCHANGED manifest as a no-op (and only re-freezes when a later
+    # implement-stage rerun actually changes the manifest set — the codex15 gap).
+    # Best-effort: a digest-record failure never fails the finalization (the
+    # barrier degrades to "no recorded digest" ⇒ it re-freezes, which is safe).
+    try:
+        digest = compute_manifest_digest(root, toolchain)
+        _write_frozen_digest(root, digest)
+    except Exception as exc:  # noqa: BLE001 — recording is best-effort; never block.
+        echo(f"[greenfield] dependency-lock: digest record skipped ({exc})")
+
     return DependencyLockResult(
         ok=True,
         applied=True,
@@ -443,5 +487,383 @@ def finalize_dependency_lock_coherence(
         detail=(
             f"reconciled {len(reconciled)} toolchain dep(s); lock refreshed via {refresh_cmd}"
             + (f"; materialized via {materialize_cmd}" if materialize_cmd else "")
+        ),
+    )
+
+
+# ── manifest digest (dirty-marking by CONTENT, not mtime) ──
+#
+# The barrier's dirty-marking is a CONTENT digest, never an mtime: a same-content
+# rewrite (an idempotent rerun) must NOT trigger a needless re-freeze, and a
+# workspace-manifest / ``.npmrc`` / package-manager-version / harness-profile
+# change MUST trigger one even if the root manifest's mtime is unchanged (GPT
+# design /tmp/gpt_lock_result.txt §C: "impl は mtime ではなく digest にすべき").
+
+
+#: Where the barrier records the digest the lock was last frozen for. A harness
+#: artifact under ``.codd/`` (never the SUT's), sibling to the verify report.
+_LOCK_STATE_RELPATH = ".codd/dependency_lock_state.json"
+_DIGEST_VERSION = "manifest-digest/v1"
+
+
+def _read_text_or_empty(path: Path) -> str:
+    """File content as text, or ``""`` when absent/unreadable (a missing optional
+    config — ``.npmrc`` — contributes an empty component, so adding it later
+    changes the digest)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _iter_workspace_manifests(
+    project_root: Path, toolchain: ToolchainDependencyProfile
+) -> list[Path]:
+    """Resolve the stack's WORKSPACE manifests (deterministic order).
+
+    Each ``workspace_manifest_globs`` entry is globbed from the project root; the
+    results are de-duplicated and SORTED so the digest is order-stable across
+    filesystems. The root manifest is handled separately by the caller, so a glob
+    that also matches it is filtered out here (no double counting).
+    """
+    root_manifest = (project_root / toolchain.manifest_filename).resolve()
+    seen: dict[str, Path] = {}
+    for pattern in toolchain.workspace_manifest_globs:
+        for match in project_root.glob(pattern):
+            if not match.is_file():
+                continue
+            resolved = match.resolve()
+            if resolved == root_manifest:
+                continue
+            seen[resolved.as_posix()] = match
+    return [seen[key] for key in sorted(seen)]
+
+
+def _package_manager_version(
+    project_root: Path, toolchain: ToolchainDependencyProfile, timeout: float
+) -> str:
+    """Best-effort package-manager version string for the digest.
+
+    A manager UPGRADE can change lock format / resolution, so it belongs in the
+    digest. Best-effort: a missing/failing probe contributes ``""`` (its absence
+    is itself stable) rather than failing the barrier — the lockfile-content
+    component still dominates correctness."""
+    command = toolchain.package_manager_version_command
+    if not command:
+        return ""
+    completed = _run(command, project_root, timeout)
+    if completed is None or completed.returncode != 0:
+        return ""
+    return (completed.stdout or "").strip()
+
+
+def compute_manifest_digest(
+    project_root: Path | str,
+    toolchain: ToolchainDependencyProfile,
+    *,
+    timeout: float = 30.0,
+) -> str:
+    """Content digest of the stack's full MANIFEST SET (the barrier's dirty-mark).
+
+    Folds, in a deterministic order:
+
+      1. the harness-owned dependency PROFILE (its ``to_dict`` — so a profile
+         version bump, or a change to the toolchain dep set / commands, re-freezes);
+      2. the ROOT manifest content (``package.json``);
+      3. every WORKSPACE manifest content, in sorted path order
+         (``packages/*/package.json`` …);
+      4. every dependency-resolution CONFIG file content, in declared order
+         (``.npmrc`` — flags that change the resolved tree);
+      5. the package-manager VERSION string (``npm --version``).
+
+    Each component is length-prefixed + path-tagged so concatenation is
+    unambiguous (no boundary-collision between two files). Returns a hex SHA-256.
+    The same inputs always yield the same digest (model-independent, reproducible);
+    ``timeout`` bounds only the version probe.
+    """
+    root = Path(project_root)
+    hasher = hashlib.sha256()
+
+    def _feed(tag: str, content: str) -> None:
+        encoded = content.encode("utf-8", errors="replace")
+        hasher.update(tag.encode("utf-8"))
+        hasher.update(b"\x00")
+        hasher.update(str(len(encoded)).encode("ascii"))
+        hasher.update(b"\x00")
+        hasher.update(encoded)
+        hasher.update(b"\x00")
+
+    _feed("version", _DIGEST_VERSION)
+    # (1) harness-owned profile — deterministic JSON so key order never drifts.
+    _feed("profile", json.dumps(toolchain.to_dict(), sort_keys=True, ensure_ascii=False))
+    # (2) root manifest.
+    _feed(
+        f"manifest:{toolchain.manifest_filename}",
+        _read_text_or_empty(root / toolchain.manifest_filename),
+    )
+    # (3) workspace manifests (sorted, relative-tagged).
+    for manifest in _iter_workspace_manifests(root, toolchain):
+        try:
+            rel = manifest.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            rel = manifest.name
+        _feed(f"workspace:{rel}", _read_text_or_empty(manifest))
+    # (4) dependency-resolution config files (declared order).
+    for config_name in toolchain.config_filenames:
+        _feed(f"config:{config_name}", _read_text_or_empty(root / config_name))
+    # (5) package-manager version.
+    _feed("pm-version", _package_manager_version(root, toolchain, timeout))
+
+    return hasher.hexdigest()
+
+
+def _read_frozen_digest(project_root: Path) -> str | None:
+    """The digest the lock was last frozen for, or ``None`` (never frozen / unreadable).
+
+    ``None`` makes the barrier conservatively re-freeze (a missing record is
+    treated as "not known fresh"), which is always safe."""
+    path = project_root / _LOCK_STATE_RELPATH
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("last_frozen_manifest_digest")
+    return str(value) if isinstance(value, str) and value else None
+
+
+def _write_frozen_digest(project_root: Path, digest: str) -> None:
+    """Record ``digest`` as the manifest set the lock is now frozen for."""
+    path = project_root / _LOCK_STATE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"version": _DIGEST_VERSION, "last_frozen_manifest_digest": digest},
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+# ── the lock-freshness barrier (verify-direct; the new invariant) ──
+
+
+@dataclass
+class LockFreshnessResult:
+    """Outcome of the verify-time lock-freshness barrier.
+
+    ``ran`` is True when the barrier did work (the manifest set changed since the
+    last freeze, so it reconciled + refreshed + re-froze). ``skipped`` is True
+    when the digest matched (no-op — verify's own frozen install reproduces the
+    fresh lock, so no refresh was needed) OR the stack has no toolchain contract.
+    ``ok`` is False ONLY on a hard failure (the lock could not be made to satisfy
+    a frozen install even after the completeness fallback) — an honest
+    ``environment_build_error`` the caller surfaces. ``used_fallback`` records that
+    the completeness fallback (full re-resolve) was needed.
+    """
+
+    ok: bool = True
+    ran: bool = False
+    skipped: bool = False
+    used_fallback: bool = False
+    reconciled: dict[str, tuple[str | None, str]] = field(default_factory=dict)
+    digest: str | None = None
+    detail: str = ""
+
+
+def _frozen_install_validates(
+    project_root: Path,
+    toolchain: ToolchainDependencyProfile,
+    timeout: float,
+) -> tuple[bool, str]:
+    """Whether the FROZEN install reproduces the current lock+manifest.
+
+    Runs ``toolchain.frozen_install_command`` (``npm ci``) — the SAME frozen check
+    verify will run — INSIDE the barrier so the lock is proven coherent BEFORE
+    verify consumes it. Returns ``(ok, output_tail)``; a timeout is a non-ok with a
+    timeout message. This is the barrier's invariant check ("lock fresh for the
+    current manifest set"), never a verify-time repair.
+    """
+    command = toolchain.frozen_install_command
+    completed = _run(command, project_root, timeout)
+    if completed is None:
+        return False, f"frozen install timed out after {timeout:g}s: {command}"
+    if completed.returncode != 0:
+        return False, _output_tail(completed.stdout, completed.stderr)
+    return True, ""
+
+
+def ensure_lock_freshness_barrier(
+    project_root: Path | str,
+    *,
+    language: str | None,
+    project_name: str | None,
+    source_dirs: Any = None,
+    test_dirs: Any = None,
+    config: Mapping[str, Any] | None = None,
+    echo: Callable[[str], None] = print,
+    profile: LayoutProfile | None = None,
+) -> LockFreshnessResult:
+    """Enforce "no frozen install runs unless the lock is fresh for the manifest set".
+
+    Run VERIFY-DIRECT (before any frozen install in verify). Sequence:
+
+      1. Resolve the toolchain profile. None → strict NO-OP (Python today).
+      2. Compute the current manifest digest. If it MATCHES the recorded
+         ``last_frozen_manifest_digest`` → NO-OP (``skipped=True``); verify's own
+         ``npm ci`` will reproduce the already-fresh lock. (No wasted refresh — the
+         design's "rerun が複数回続くと無駄が大きい" guard.)
+      3. If it DIFFERS, re-run the barrier:
+         a. RECONCILE harness-owned toolchain deps to the profile (same rule as
+            implement-end — recovers the verifier's own property; app deps
+            untouched).
+         b. REFRESH the lock deterministically (``npm install
+            --package-lock-only``).
+         c. VALIDATE with the FROZEN install (``npm ci``). On failure, run the
+            completeness FALLBACK (``npm install`` full re-resolve) then re-validate
+            — the ufo/path-key transitive-omission recovery, kept INSIDE the
+            barrier (never a verify-time repair).
+         d. On success RECORD the new digest. On failure return ``ok=False`` (an
+            honest environment failure).
+
+    A strict NO-OP for a stack with no toolchain profile. The frozen install + the
+    refresh hold the SAME ``.npmrc``/flags (the profile's single
+    ``frozen_install_command``/``lock_refresh_command``), so lock generation and
+    npm ci see identical resolution inputs (GPT §D).
+    """
+    root = Path(project_root)
+    resolved = resolve_toolchain_profile(
+        root,
+        language=language,
+        project_name=project_name,
+        source_dirs=source_dirs,
+        test_dirs=test_dirs,
+        config=config,
+        profile=profile,
+    )
+    if resolved is None:
+        return LockFreshnessResult(
+            ok=True,
+            skipped=True,
+            detail=f"no manifest↔lock toolchain contract for language {language!r} (barrier skipped)",
+        )
+    _profile, toolchain = resolved
+
+    manifest = root / toolchain.manifest_filename
+    if not manifest.is_file():
+        # No manifest to anchor a digest/lock — skip, never fail (mirrors the
+        # finalization's no-manifest branch).
+        return LockFreshnessResult(
+            ok=True,
+            skipped=True,
+            detail=f"no {toolchain.manifest_filename} present; lock-freshness barrier skipped",
+        )
+
+    timeout = _timeout_seconds(config)
+    current = compute_manifest_digest(root, toolchain, timeout=min(timeout, 30.0))
+    recorded = _read_frozen_digest(root)
+    if recorded is not None and recorded == current:
+        echo(
+            "[greenfield] lock-freshness: manifest set unchanged since last freeze "
+            "— lock is fresh (no refresh needed)"
+        )
+        return LockFreshnessResult(
+            ok=True,
+            skipped=True,
+            digest=current,
+            detail="manifest set unchanged since last freeze; frozen install will reproduce the lock",
+        )
+
+    # The manifest set changed (a post-implement-end rerun re-wrote it — codex15)
+    # or was never frozen → re-run the barrier so verify's frozen install passes.
+    echo(
+        "[greenfield] lock-freshness: manifest set changed since last freeze "
+        f"({'no prior record' if recorded is None else 'digest differs'}) — re-freezing the lock before verify"
+    )
+
+    # (a) reconcile harness-owned toolchain dep versions.
+    reconciled = reconcile_manifest_toolchain_deps(root, toolchain)
+    if reconciled:
+        summary = ", ".join(
+            f"{name}: {old or '<absent>'} → {new}" for name, (old, new) in sorted(reconciled.items())
+        )
+        echo(f"[greenfield] lock-freshness: reconciled {len(reconciled)} toolchain dep(s) ({summary})")
+
+    # (b) deterministic lock refresh (--package-lock-only).
+    refresh_cmd = toolchain.lock_refresh_command
+    completed = _run(refresh_cmd, root, timeout)
+    if completed is None:
+        detail = f"lock refresh timed out after {timeout:g}s: {refresh_cmd}"
+        echo(f"[greenfield] lock-freshness: {detail}")
+        return LockFreshnessResult(ok=False, ran=True, reconciled=reconciled, detail=detail)
+    if completed.returncode != 0:
+        tail = _output_tail(completed.stdout, completed.stderr)
+        detail = f"lock refresh failed (exit {completed.returncode}): {refresh_cmd}\n{tail}".rstrip()
+        echo(f"[greenfield] lock-freshness: {detail}")
+        return LockFreshnessResult(ok=False, ran=True, reconciled=reconciled, detail=detail)
+    echo(f"[greenfield] lock-freshness: lock refreshed to match manifest ({refresh_cmd})")
+
+    # (c) validate with the FROZEN install; completeness fallback on incoherence.
+    used_fallback = False
+    ok, output = _frozen_install_validates(root, toolchain, timeout)
+    if not ok:
+        fallback_cmd = toolchain.completeness_refresh_command
+        if not fallback_cmd:
+            detail = (
+                f"frozen install ({toolchain.frozen_install_command}) failed after lock refresh "
+                f"and no completeness fallback is configured:\n{output}"
+            ).rstrip()
+            echo(f"[greenfield] lock-freshness: {detail}")
+            return LockFreshnessResult(ok=False, ran=True, reconciled=reconciled, detail=detail)
+        echo(
+            "[greenfield] lock-freshness: frozen install still incoherent after "
+            f"--package-lock-only — running completeness fallback ({fallback_cmd})"
+        )
+        used_fallback = True
+        completed = _run(fallback_cmd, root, timeout)
+        if completed is None:
+            detail = f"completeness fallback timed out after {timeout:g}s: {fallback_cmd}"
+            echo(f"[greenfield] lock-freshness: {detail}")
+            return LockFreshnessResult(
+                ok=False, ran=True, used_fallback=True, reconciled=reconciled, detail=detail
+            )
+        if completed.returncode != 0:
+            tail = _output_tail(completed.stdout, completed.stderr)
+            detail = f"completeness fallback failed (exit {completed.returncode}): {fallback_cmd}\n{tail}".rstrip()
+            echo(f"[greenfield] lock-freshness: {detail}")
+            return LockFreshnessResult(
+                ok=False, ran=True, used_fallback=True, reconciled=reconciled, detail=detail
+            )
+        ok, output = _frozen_install_validates(root, toolchain, timeout)
+        if not ok:
+            detail = (
+                f"frozen install ({toolchain.frozen_install_command}) STILL failed after the "
+                f"completeness fallback ({fallback_cmd}) — lock cannot reproduce the manifest:\n{output}"
+            ).rstrip()
+            echo(f"[greenfield] lock-freshness: {detail}")
+            return LockFreshnessResult(
+                ok=False, ran=True, used_fallback=True, reconciled=reconciled, detail=detail
+            )
+
+    # (d) success — record the digest the lock is now frozen for. The fallback may
+    # have rewritten the lock (and thus the manifest set is the SAME, but recompute
+    # the digest to be exact about what we froze).
+    final_digest = compute_manifest_digest(root, toolchain, timeout=min(timeout, 30.0))
+    _write_frozen_digest(root, final_digest)
+    echo(
+        "[greenfield] lock-freshness: lock is fresh for the current manifest set "
+        f"(frozen install validated{'; via completeness fallback' if used_fallback else ''})"
+    )
+    return LockFreshnessResult(
+        ok=True,
+        ran=True,
+        used_fallback=used_fallback,
+        reconciled=reconciled,
+        digest=final_digest,
+        detail=(
+            f"re-froze lock for changed manifest set; reconciled {len(reconciled)} toolchain dep(s)"
+            + ("; used completeness fallback" if used_fallback else "")
         ),
     )

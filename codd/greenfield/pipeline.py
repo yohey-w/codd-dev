@@ -818,6 +818,65 @@ class GreenfieldPipeline:
                 "manifest), not a code defect."
             )
 
+    def _ensure_lock_freshness(self, project_root: Path) -> None:
+        """Run the verify-time lock-freshness barrier (see the call in _stage_verify).
+
+        Enforces "no frozen install runs unless the lock is fresh for the current
+        manifest set" BEFORE verify's frozen installs. Ensures the scaffold is
+        present (idempotent — same ``_ensure_test_runner`` verify uses) so a
+        ``package.json`` exists to digest/reconcile, then runs the profile-driven
+        barrier (:func:`ensure_lock_freshness_barrier`): it is a NO-OP when the
+        manifest set is unchanged since the last freeze (verify's own ``npm ci``
+        reproduces the lock), and re-reconciles + re-refreshes + re-validates (with
+        the completeness fallback) only when a post-implement-end rerun changed the
+        manifest (the observed dogfood gap). A hard barrier failure (the lock cannot satisfy
+        a frozen install even after the fallback) is an honest
+        ``environment_build_error`` raised as a :class:`StageError`. A strict NO-OP
+        for a stack with no toolchain profile (Python today).
+        """
+        from codd.dependency_lock_coherence import (
+            ensure_lock_freshness_barrier,
+            resolve_toolchain_profile,
+        )
+
+        config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
+        project_name = self._layout_project_name(project_root, config)
+
+        # Cheap NO-OP short-circuit: a stack with no toolchain profile (Python
+        # today) needs no scaffold/echo.
+        if resolve_toolchain_profile(
+            project_root,
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+        ) is None:
+            return
+
+        # The barrier digests + reconciles the SUT's package.json; ensure the
+        # scaffolded manifest is present (idempotent, non-clobbering — verify's own
+        # _ensure_test_runner already ran just above, so this is a no-op in the
+        # normal flow and a safety net for DI/standalone callers).
+        self._ensure_test_runner(project_root)
+
+        result = ensure_lock_freshness_barrier(
+            project_root,
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+            echo=self.echo,
+        )
+        if not result.ok:
+            raise StageError(
+                "lock-freshness barrier failed before verify: "
+                f"{result.detail}. This is an environment/toolchain failure (the "
+                "lock could not be made to satisfy a frozen install for the current "
+                "manifest set), not a code defect."
+            )
+
     def _enforce_implement_oracle_gate(
         self,
         project_root: Path,
@@ -1239,6 +1298,25 @@ class GreenfieldPipeline:
         # whether the (now coherent) build is certifiable.
         self._ensure_test_runner(project_root)
         self._enforce_import_coherence(project_root)
+
+        # Lock-freshness barrier — verify-direct, BEFORE any frozen install in
+        # verify (the verify runner's blocking ``npm ci`` preflight below AND the
+        # coverage-execution campaign's frozen install later both consume the lock).
+        # Implement-end dep-coherence already refreshed the lock ONCE, but the
+        # implement stage's VB-coverage / oracle reruns can re-write package.json
+        # AFTER that point, leaving the lock STALE (an observed dogfood gap: a
+        # transitive omission → frozen ``npm ci`` "Missing from lock file"). This
+        # barrier enforces the invariant "no frozen install runs unless the lock is
+        # fresh for the current manifest set": it dirty-marks by a content DIGEST
+        # (manifest + workspace manifests + .npmrc + pm version + harness profile)
+        # and, only when that digest CHANGED since the last freeze, re-reconciles +
+        # re-refreshes + re-validates (with a completeness fallback) and re-records
+        # the digest. An UNCHANGED manifest is a no-op (verify's own frozen install
+        # reproduces the fresh lock). It NEVER loosens verify's frozen install — it
+        # moves the freeze BASIS from implement-end to the final manifest. A strict
+        # NO-OP for a stack with no toolchain profile (Python today). See
+        # codd.dependency_lock_coherence.ensure_lock_freshness_barrier.
+        self._ensure_lock_freshness(project_root)
 
         runner = self.verify_runner or _default_verify_runner
         detail = str(

@@ -22,6 +22,12 @@ import pytest
 
 from codd.dependency_lock_coherence import (
     DependencyLockResult,
+    LockFreshnessResult,
+    _LOCK_STATE_RELPATH,
+    _read_frozen_digest,
+    _write_frozen_digest,
+    compute_manifest_digest,
+    ensure_lock_freshness_barrier,
     finalize_dependency_lock_coherence,
     reconcile_manifest_toolchain_deps,
     resolve_toolchain_profile,
@@ -445,3 +451,497 @@ class TestPipelineWiring:
 
         with pytest.raises(pipeline_module.StageError, match="manifest↔lock coherence"):
             pipe._finalize_dependency_lock_coherence(tmp_path)
+
+
+# ════════════════════════════════════════════════════════════
+# Lock-freshness barrier (codex15): the manifest DIGEST (dirty-mark by content)
+# ════════════════════════════════════════════════════════════
+
+
+def _no_pm_version_toolchain() -> ToolchainDependencyProfile:
+    """A TS toolchain with the package-manager version probe disabled.
+
+    The default profile folds ``npm --version`` into the digest, which (a) makes
+    the fast digest tests depend on npm being installed and (b) makes them
+    environment-sensitive. Disabling the probe isolates the FILE-content digest
+    behavior under test; a separate test covers the version-probe component.
+    """
+    base = resolve_layout_profile(language="typescript", project_name="x").toolchain_dependencies
+    return ToolchainDependencyProfile(
+        deps=base.deps,
+        manifest_filename=base.manifest_filename,
+        lock_filenames=base.lock_filenames,
+        lock_refresh_command=base.lock_refresh_command,
+        materialize_command=base.materialize_command,
+        frozen_install_command=base.frozen_install_command,
+        completeness_refresh_command=base.completeness_refresh_command,
+        workspace_manifest_globs=base.workspace_manifest_globs,
+        config_filenames=base.config_filenames,
+        package_manager_version_command=None,
+    )
+
+
+class TestManifestDigest:
+    def _pkg(self, root: Path, vitest: str = "^3.2.4") -> None:
+        (root / "package.json").write_text(
+            json.dumps({"name": "todo", "devDependencies": {"vitest": vitest}}) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_digest_is_deterministic_for_same_content(self, tmp_path):
+        self._pkg(tmp_path)
+        tc = _no_pm_version_toolchain()
+        a = compute_manifest_digest(tmp_path, tc)
+        b = compute_manifest_digest(tmp_path, tc)
+        assert a == b
+        assert len(a) == 64  # hex sha-256
+
+    def test_same_content_rewrite_does_not_change_digest(self, tmp_path):
+        # A same-content rewrite (idempotent rerun) must NOT look "dirty" — this is
+        # exactly why the design uses a CONTENT digest, not mtime.
+        self._pkg(tmp_path)
+        tc = _no_pm_version_toolchain()
+        before = compute_manifest_digest(tmp_path, tc)
+        self._pkg(tmp_path)  # rewrite identical bytes
+        assert compute_manifest_digest(tmp_path, tc) == before
+
+    def test_root_manifest_change_changes_digest(self, tmp_path):
+        self._pkg(tmp_path, vitest="^3.2.4")
+        tc = _no_pm_version_toolchain()
+        before = compute_manifest_digest(tmp_path, tc)
+        self._pkg(tmp_path, vitest="^1.6.0")  # the codex15-class re-write
+        assert compute_manifest_digest(tmp_path, tc) != before
+
+    def test_workspace_manifest_change_changes_digest(self, tmp_path):
+        # A WORKSPACE manifest dep change must re-freeze even when the root manifest
+        # is byte-for-byte unchanged (design §C: workspace manifests in the digest).
+        self._pkg(tmp_path)
+        ws = tmp_path / "packages" / "core"
+        ws.mkdir(parents=True)
+        (ws / "package.json").write_text(
+            json.dumps({"name": "@todo/core", "dependencies": {"left-pad": "^1.0.0"}}) + "\n",
+            encoding="utf-8",
+        )
+        tc = _no_pm_version_toolchain()
+        before = compute_manifest_digest(tmp_path, tc)
+        (ws / "package.json").write_text(
+            json.dumps({"name": "@todo/core", "dependencies": {"left-pad": "^1.3.0"}}) + "\n",
+            encoding="utf-8",
+        )
+        assert compute_manifest_digest(tmp_path, tc) != before
+
+    def test_npmrc_change_changes_digest(self, tmp_path):
+        # ``.npmrc`` flags change the resolved tree (legacy-peer-deps) → must change
+        # the digest even though no manifest changed (design §C: config in digest).
+        self._pkg(tmp_path)
+        tc = _no_pm_version_toolchain()
+        before = compute_manifest_digest(tmp_path, tc)
+        (tmp_path / ".npmrc").write_text("legacy-peer-deps=true\n", encoding="utf-8")
+        after = compute_manifest_digest(tmp_path, tc)
+        assert after != before
+        # And a change to its CONTENT changes it again.
+        (tmp_path / ".npmrc").write_text("legacy-peer-deps=false\n", encoding="utf-8")
+        assert compute_manifest_digest(tmp_path, tc) != after
+
+    def test_harness_profile_change_changes_digest(self, tmp_path):
+        # A harness-owned dependency PROFILE change (a version bump of a toolchain
+        # dep) must re-freeze even with the SUT's files untouched (design §C:
+        # harness-owned dependency profile in the digest).
+        self._pkg(tmp_path)
+        tc_old = _no_pm_version_toolchain()
+        before = compute_manifest_digest(tmp_path, tc_old)
+        tc_new = ToolchainDependencyProfile(
+            deps=(ToolchainDependency(name="vitest", version="^4.0.0"),),  # bumped
+            manifest_filename=tc_old.manifest_filename,
+            lock_filenames=tc_old.lock_filenames,
+            lock_refresh_command=tc_old.lock_refresh_command,
+            materialize_command=tc_old.materialize_command,
+            frozen_install_command=tc_old.frozen_install_command,
+            completeness_refresh_command=tc_old.completeness_refresh_command,
+            workspace_manifest_globs=tc_old.workspace_manifest_globs,
+            config_filenames=tc_old.config_filenames,
+            package_manager_version_command=None,
+        )
+        assert compute_manifest_digest(tmp_path, tc_new) != before
+
+    def test_pm_version_component_folds_in(self, tmp_path, monkeypatch):
+        # The package-manager version is part of the digest: a different reported
+        # version → a different digest (a manager upgrade can change lock format).
+        self._pkg(tmp_path)
+        tc = resolve_layout_profile(
+            language="typescript", project_name="x"
+        ).toolchain_dependencies  # has package_manager_version_command set
+        import codd.dependency_lock_coherence as dlc
+
+        class _Completed:
+            def __init__(self, out):
+                self.returncode = 0
+                self.stdout = out
+                self.stderr = ""
+
+        monkeypatch.setattr(dlc, "_run", lambda *_a, **_k: _Completed("10.8.2"))
+        d1 = compute_manifest_digest(tmp_path, tc)
+        monkeypatch.setattr(dlc, "_run", lambda *_a, **_k: _Completed("11.0.0"))
+        d2 = compute_manifest_digest(tmp_path, tc)
+        assert d1 != d2
+
+    def test_state_roundtrip(self, tmp_path):
+        assert _read_frozen_digest(tmp_path) is None  # never frozen
+        _write_frozen_digest(tmp_path, "abc123")
+        assert (tmp_path / _LOCK_STATE_RELPATH).is_file()
+        assert _read_frozen_digest(tmp_path) == "abc123"
+
+    def test_corrupt_state_reads_as_none(self, tmp_path):
+        path = tmp_path / _LOCK_STATE_RELPATH
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json", encoding="utf-8")
+        # A missing/garbled record ⇒ "not known fresh" ⇒ the barrier re-freezes (safe).
+        assert _read_frozen_digest(tmp_path) is None
+
+
+# ════════════════════════════════════════════════════════════
+# Lock-freshness barrier — control flow (stubbed commands, no real npm)
+# ════════════════════════════════════════════════════════════
+
+
+class TestLockFreshnessBarrierFlow:
+    def _pkg(self, root: Path, vitest: str = "^3.2.4") -> None:
+        (root / "package.json").write_text(
+            json.dumps({"name": "todo", "devDependencies": {"vitest": vitest}}) + "\n",
+            encoding="utf-8",
+        )
+
+    def _stub_commands(self, monkeypatch, *, fail_frozen_until_fallback=False):
+        """Record commands the barrier runs; no real npm. Returns the call list.
+
+        When ``fail_frozen_until_fallback`` is set, the FROZEN install
+        (``npm ci``) returns nonzero until the completeness fallback
+        (``npm install``) has run, then succeeds — modeling the ufo/path-key
+        transitive-omission recovery.
+        """
+        import codd.dependency_lock_coherence as dlc
+
+        calls: list[str] = []
+        state = {"fallback_done": False}
+
+        class _Completed:
+            def __init__(self, rc):
+                self.returncode = rc
+                self.stdout = ""
+                self.stderr = "Missing from lock file: ufo, path-key" if rc else ""
+
+        def _fake_run(command, _root, _timeout):
+            calls.append(command)
+            if command == "npm install":  # completeness fallback
+                state["fallback_done"] = True
+                return _Completed(0)
+            if command == "npm ci":  # frozen install
+                if fail_frozen_until_fallback and not state["fallback_done"]:
+                    return _Completed(1)
+                return _Completed(0)
+            # lock refresh (--package-lock-only) and pm version probe
+            return _Completed(0)
+
+        monkeypatch.setattr(dlc, "_run", _fake_run)
+        # Pin the digest so we control "changed" vs "unchanged" deterministically.
+        return calls
+
+    def test_unchanged_manifest_is_a_noop(self, tmp_path, monkeypatch):
+        # Record the digest as already-frozen → the barrier must SKIP (no refresh,
+        # no reconcile, no frozen install) — the "rerun が複数回続くと無駄" guard.
+        self._pkg(tmp_path)
+        calls = self._stub_commands(monkeypatch)
+        import codd.dependency_lock_coherence as dlc
+
+        digest = dlc.compute_manifest_digest(tmp_path, _no_pm_version_toolchain())
+        # Freeze record uses the SAME profile the barrier resolves (TS default has a
+        # pm-version probe; stub _run returns "" so the digest is stable here).
+        frozen = dlc.compute_manifest_digest(
+            tmp_path,
+            resolve_layout_profile(language="typescript", project_name="todo").toolchain_dependencies,
+        )
+        _write_frozen_digest(tmp_path, frozen)
+
+        result = ensure_lock_freshness_barrier(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        assert result.skipped is True
+        assert result.ran is False
+        assert result.ok is True
+        # No npm command ran at all (pure no-op besides the in-process digest probe).
+        assert "npm install --package-lock-only" not in calls
+        assert "npm ci" not in calls
+        assert "npm install" not in calls
+
+    def test_changed_manifest_refreshes_and_records(self, tmp_path, monkeypatch):
+        # No prior record (or a different digest) → the barrier reconciles, refreshes
+        # (--package-lock-only), validates with the frozen install, records digest.
+        self._pkg(tmp_path, vitest="^1.6.0")  # SUT downgrade (the codex15 re-write)
+        calls = self._stub_commands(monkeypatch)
+
+        result = ensure_lock_freshness_barrier(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        assert result.ok is True
+        assert result.ran is True
+        assert result.skipped is False
+        assert result.used_fallback is False
+        # Order (ignoring the digest's pm-version probe): refresh
+        # (--package-lock-only) THEN the frozen install validates it. The
+        # completeness fallback (full ``npm install``) was NOT needed.
+        dep_calls = [c for c in calls if c != "npm --version"]
+        assert dep_calls == ["npm install --package-lock-only", "npm ci"], dep_calls
+        # vitest was reconciled to the profile version in the manifest.
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert pkg["devDependencies"]["vitest"] == "^3.2.4"
+        # The new digest is recorded → an immediate re-run is now a no-op.
+        assert _read_frozen_digest(tmp_path) is not None
+
+    def test_completeness_fallback_runs_inside_barrier(self, tmp_path, monkeypatch):
+        # --package-lock-only leaves the frozen install incoherent (transitive
+        # omission) → the barrier runs the FULL ``npm install`` fallback, THEN the
+        # frozen install passes. The fallback is INSIDE the barrier (not verify).
+        self._pkg(tmp_path, vitest="^1.6.0")
+        calls = self._stub_commands(monkeypatch, fail_frozen_until_fallback=True)
+
+        result = ensure_lock_freshness_barrier(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        assert result.ok is True
+        assert result.ran is True
+        assert result.used_fallback is True
+        # Sequence of the DEPENDENCY commands (ignoring the digest's pm-version
+        # probe): --package-lock-only → npm ci (fails) → npm install (fallback) →
+        # npm ci (passes).
+        dep_calls = [c for c in calls if c != "npm --version"]
+        assert dep_calls == [
+            "npm install --package-lock-only",
+            "npm ci",
+            "npm install",
+            "npm ci",
+        ], dep_calls
+
+    def test_refresh_failure_is_hard_fail(self, tmp_path, monkeypatch):
+        # A lock refresh that exits nonzero is an honest environment failure.
+        self._pkg(tmp_path, vitest="^1.6.0")
+        import codd.dependency_lock_coherence as dlc
+
+        class _Completed:
+            def __init__(self, rc):
+                self.returncode = rc
+                self.stdout = ""
+                self.stderr = "boom" if rc else ""
+
+        monkeypatch.setattr(
+            dlc,
+            "_run",
+            lambda command, _r, _t: _Completed(1 if command == "npm install --package-lock-only" else 0),
+        )
+        result = ensure_lock_freshness_barrier(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        assert result.ok is False
+        assert result.ran is True
+        assert "lock refresh failed" in result.detail
+
+    def test_fallback_exhausted_is_hard_fail(self, tmp_path, monkeypatch):
+        # Frozen install fails, fallback runs, frozen install STILL fails → hard fail
+        # (not a silent green): the lock genuinely cannot reproduce the manifest.
+        self._pkg(tmp_path, vitest="^1.6.0")
+        import codd.dependency_lock_coherence as dlc
+
+        class _Completed:
+            def __init__(self, rc, err=""):
+                self.returncode = rc
+                self.stdout = ""
+                self.stderr = err
+
+        def _fake_run(command, _r, _t):
+            if command == "npm ci":
+                return _Completed(1, "Missing from lock file")
+            return _Completed(0)  # refresh + fallback "succeed" but never fix it
+
+        monkeypatch.setattr(dlc, "_run", _fake_run)
+        result = ensure_lock_freshness_barrier(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        assert result.ok is False
+        assert result.used_fallback is True
+        assert "STILL failed" in result.detail
+
+    def test_python_is_strict_noop(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+        result = ensure_lock_freshness_barrier(
+            tmp_path, language="python", project_name="x", echo=lambda _m: None
+        )
+        assert result.skipped is True
+        assert result.ran is False
+        assert result.ok is True
+
+    def test_no_manifest_is_noop(self, tmp_path):
+        result = ensure_lock_freshness_barrier(
+            tmp_path, language="typescript", project_name="x", echo=lambda _m: None
+        )
+        assert result.skipped is True
+        assert result.ok is True
+
+
+# ════════════════════════════════════════════════════════════
+# Lock-freshness barrier — REAL npm (the codex15 sequencing-gap proof)
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.skipif(_npm() is None, reason="npm not available")
+class TestRealNpmLockFreshnessBarrier:
+    def _npm_ci(self, root: Path) -> int:
+        return subprocess.run(
+            ["npm", "ci", "--no-audit", "--no-fund"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        ).returncode
+
+    def test_codex15_rerun_modified_manifest_passes_after_barrier(self, tmp_path):
+        """codex15 end-to-end: implement-end freeze, THEN a rerun re-writes the
+        manifest, leaving the lock stale; the verify-direct barrier re-freezes and
+        the frozen ``npm ci`` passes.
+
+        1. IMPLEMENT-END: finalize (reconcile + refresh + materialize) → lock fresh,
+           digest recorded.
+        2. POST-IMPLEMENT RERUN: a VB/oracle rerun re-writes package.json (adds an
+           app dep + downgrades the toolchain dep), making the recorded lock STALE.
+        3. PRECONDITION: a frozen ``npm ci`` now FAILS (the codex15 symptom).
+        4. VERIFY-DIRECT BARRIER: re-freezes the lock for the new manifest set.
+        5. POSTCONDITION: ``npm ci`` PASSES — verify's frozen install is honest.
+        """
+        # (1) implement-end finalization.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "todo",
+                    "version": "0.0.0",
+                    "private": True,
+                    "type": "module",
+                    "devDependencies": {"vitest": "^3.2.4"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        fin = finalize_dependency_lock_coherence(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        assert fin.ok, fin.detail
+        first_digest = _read_frozen_digest(tmp_path)
+        assert first_digest is not None  # implement-end recorded the freeze
+        assert self._npm_ci(tmp_path) == 0  # lock is fresh right after implement-end
+
+        # (2) a later rerun re-writes package.json: add a REAL app dep with a
+        # transitive subtree + downgrade the toolchain dep. The recorded lock no
+        # longer reproduces this manifest.
+        pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        pkg["dependencies"] = {"execa": "^9.0.0"}  # pulls a transitive subtree
+        pkg["devDependencies"]["vitest"] = "^1.6.0"  # toolchain downgrade
+        (tmp_path / "package.json").write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+
+        # (3) PRECONDITION: frozen npm ci fails on the now-stale lock.
+        assert self._npm_ci(tmp_path) != 0, "expected stale-lock npm ci to FAIL (the codex15 bug)"
+
+        # (4) the verify-direct barrier sees the digest changed → re-freezes.
+        result = ensure_lock_freshness_barrier(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        assert result.ok, result.detail
+        assert result.ran is True
+        assert result.skipped is False
+        assert _read_frozen_digest(tmp_path) != first_digest  # re-froze for new set
+
+        # (5) POSTCONDITION: the frozen npm ci now PASSES honestly.
+        assert self._npm_ci(tmp_path) == 0, "npm ci must pass after the lock-freshness barrier"
+        # The toolchain dep was reconciled; the app dep was preserved.
+        final_pkg = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+        assert final_pkg["devDependencies"]["vitest"] == "^3.2.4"
+        assert final_pkg["dependencies"] == {"execa": "^9.0.0"}
+
+    def test_unchanged_manifest_barrier_skips_no_refresh(self, tmp_path):
+        """After implement-end freeze, with NO further manifest change, the barrier
+        is a NO-OP — it does not refresh again (avoids the wasted-rerun cost) and
+        the frozen install still passes."""
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {"name": "todo", "private": True, "type": "module", "devDependencies": {"vitest": "^3.2.4"}}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        finalize_dependency_lock_coherence(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        digest_after_finalize = _read_frozen_digest(tmp_path)
+        lock_mtime = (tmp_path / "package-lock.json").stat().st_mtime_ns
+
+        result = ensure_lock_freshness_barrier(
+            tmp_path, language="typescript", project_name="todo", echo=lambda _m: None
+        )
+        assert result.skipped is True
+        assert result.ran is False
+        # The barrier did NOT rewrite the lock (no refresh happened).
+        assert (tmp_path / "package-lock.json").stat().st_mtime_ns == lock_mtime
+        assert _read_frozen_digest(tmp_path) == digest_after_finalize
+        assert self._npm_ci(tmp_path) == 0
+
+
+# ════════════════════════════════════════════════════════════
+# Pipeline wiring: barrier runs verify-direct, BEFORE the verify runner
+# ════════════════════════════════════════════════════════════
+
+
+class TestBarrierPipelineWiring:
+    def test_stage_verify_runs_barrier_before_verify_runner(self, tmp_path, monkeypatch):
+        """The lock-freshness barrier is invoked in _stage_verify BEFORE the verify
+        runner (whose blocking ``npm ci`` preflight is a frozen install) and before
+        the coverage-execution campaign (also a frozen install)."""
+        from codd.greenfield import pipeline as pipeline_module
+
+        calls: list[str] = []
+        pipe = pipeline_module.GreenfieldPipeline(project_name="todo", language="typescript")
+
+        monkeypatch.setattr(pipe, "_ensure_test_runner", lambda _root: None)
+        monkeypatch.setattr(pipe, "_enforce_import_coherence", lambda _root: None)
+        monkeypatch.setattr(pipe, "_ensure_lock_freshness", lambda _root: calls.append("barrier"))
+        monkeypatch.setattr(
+            pipe, "_enforce_coverage_execution_coherence", lambda _root, _opts: (calls.append("campaign") or "")
+        )
+        pipe.verify_runner = lambda *_a, **_k: (calls.append("verify_runner") or "ok")  # type: ignore[assignment]
+
+        record: dict[str, object] = {}
+        pipe._stage_verify(tmp_path, record, {"max_repair_attempts": 1})
+
+        assert calls == ["barrier", "verify_runner", "campaign"], calls
+
+    def test_barrier_helper_raises_stage_error_on_hard_failure(self, tmp_path, monkeypatch):
+        """A hard barrier failure becomes a StageError so verify fails honestly
+        instead of proceeding to a guaranteed-broken frozen install."""
+        from codd.greenfield import pipeline as pipeline_module
+
+        pipe = pipeline_module.GreenfieldPipeline(project_name="todo", language="typescript")
+        (tmp_path / "package.json").write_text('{"name":"todo"}', encoding="utf-8")
+
+        monkeypatch.setattr(pipe, "_ensure_test_runner", lambda _root: None)
+        monkeypatch.setattr(
+            pipeline_module.GreenfieldPipeline,
+            "_layout_inputs",
+            lambda _self, _root: ({}, "typescript", None, None),
+        )
+        import codd.dependency_lock_coherence as dlc
+
+        monkeypatch.setattr(dlc, "resolve_toolchain_profile", lambda *_a, **_k: (object(), object()))
+        monkeypatch.setattr(
+            dlc,
+            "ensure_lock_freshness_barrier",
+            lambda *_a, **_k: LockFreshnessResult(ok=False, ran=True, detail="lock cannot reproduce manifest"),
+        )
+
+        with pytest.raises(pipeline_module.StageError, match="lock-freshness barrier"):
+            pipe._ensure_lock_freshness(tmp_path)
