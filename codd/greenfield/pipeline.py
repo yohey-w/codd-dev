@@ -925,19 +925,52 @@ class GreenfieldPipeline:
             return None
 
     def _oracle_manifest_paths(self, project_root: Path) -> tuple[str, ...]:
-        """Manifest/config files the write-fence always permits (they are shared).
+        """Harness-owned shared files the write-fence permits + the orphan gate exempts.
 
-        A scoped rerun may legitimately touch the build manifest/config even when
-        no task "owns" it (e.g. adding a dependency the fix needs). Only files
-        that actually exist are listed, project-relative.
+        Two roles, one list (both legitimate for the same files):
+          * **write-fence permit** — a scoped rerun may touch shared build
+            manifest/config even when no task "owns" it (e.g. adding a dependency
+            the fix needs).
+          * **orphan-gate escape hatch** (``extra_owned``) — a scaffolded config
+            is a generated artifact owned by the HARNESS contract, not a task, so
+            it must not be mis-flagged as an unowned orphan.
+
+        Sources, unioned: (1) the active stack's :class:`LayoutProfile`
+        ``harness_owned_scaffold_paths`` (e.g. TS ``vitest.config.ts`` /
+        ``tsconfig.json`` / ``package.json`` — the files the scaffolder creates),
+        derived language-agnostically from the profile; (2) a small fallback set of
+        common lockfiles a manager may have produced that the profile does not
+        enumerate. Only files that actually EXIST are returned, project-relative.
         """
-        candidates = (
-            "package.json",
-            "tsconfig.json",
-            "package-lock.json",
-            "pnpm-lock.yaml",
-            "yarn.lock",
-        )
+        candidates: list[str] = []
+
+        def _add(rel: str) -> None:
+            if rel and rel not in candidates:
+                candidates.append(rel)
+
+        # (1) Profile-declared scaffold contract (language-agnostic, single source).
+        try:
+            from codd.project_types import resolve_layout_profile
+
+            config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
+            profile = resolve_layout_profile(
+                language=language,
+                project_name=self._layout_project_name(project_root, config),
+                source_dirs=source_dirs,
+                test_dirs=test_dirs,
+                config=config,
+                project_root=project_root,
+            )
+            if profile is not None:
+                for rel in profile.harness_owned_scaffold_paths():
+                    _add(rel)
+        except Exception as exc:  # noqa: BLE001 — escape hatch is best-effort; fall back to the static set.
+            self.echo(f"[greenfield] implement-oracle: scaffold-path contract unavailable ({exc}).")
+
+        # (2) Lockfile fallbacks not necessarily enumerated by the profile.
+        for name in ("package.json", "tsconfig.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"):
+            _add(name)
+
         present: list[str] = []
         for name in candidates:
             if (project_root / name).is_file():

@@ -338,3 +338,96 @@ class TestNodeInstallCommand:
         (tmp_path / "bun.lockb").write_text("", encoding="utf-8")
         assert detect_node_package_manager(tmp_path) == "bun"
         assert node_install_command(tmp_path) == "bun install --frozen-lockfile"
+
+
+# ═══════════════════════════════════════════════════════════
+# harness-owned scaffold paths (orphan-gate / write-fence contract)
+# ═══════════════════════════════════════════════════════════
+#
+# The orphan-artifact invariant is "every generated artifact is owned by exactly
+# one task OR an explicit harness/profile contract". The scaffold files (TS
+# vitest.config.ts / tsconfig.json / package.json) are the profile-contract
+# branch: declared here so the gate never mis-flags them as unowned orphans and
+# the scoped-rerun fence never reverts them. These tests pin the declaration AND
+# bind it to what the scaffolder ACTUALLY writes (drift guard: a new scaffold
+# file that is not also declared would re-open the false-positive).
+
+
+class TestHarnessOwnedScaffoldPaths:
+    def _ts_profile(self, name="ts-converter"):
+        return resolve_layout_profile(
+            language="typescript", project_name=name, source_dirs=["src/"], test_dirs=["tests/"]
+        )
+
+    def _py_profile(self, name="todo-cli"):
+        return resolve_layout_profile(
+            language="python", project_name=name, source_dirs=["src/"], test_dirs=["tests/"]
+        )
+
+    def test_typescript_declares_scaffold_config(self):
+        paths = self._ts_profile().harness_owned_scaffold_paths()
+        # The exact files _scaffold_typescript creates as harness contract.
+        for expected in ("tsconfig.json", "vitest.config.ts", "package.json"):
+            assert expected in paths, f"{expected} must be a declared harness scaffold path"
+        # Toolchain lock is part of the contract too (manifest↔lock coherence).
+        assert "package-lock.json" in paths
+
+    def test_python_declares_scaffold_topology(self):
+        paths = self._py_profile().harness_owned_scaffold_paths()
+        for expected in (
+            "pyproject.toml",
+            "src/todo_cli/__init__.py",
+            "src/todo_cli/__main__.py",
+            "tests/__init__.py",
+        ):
+            assert expected in paths, f"{expected} must be a declared harness scaffold path"
+
+    def test_python_paths_derive_from_profile_not_literals(self):
+        # Roots come from scan.*_dirs / the derived package — not hardcoded.
+        profile = resolve_layout_profile(
+            language="python", project_name="my-app", source_dirs=["lib/"], test_dirs=["spec/"]
+        )
+        paths = profile.harness_owned_scaffold_paths()
+        assert "lib/my_app/__init__.py" in paths
+        assert "spec/__init__.py" in paths
+
+    def test_unknown_stack_declares_nothing_stackspecific(self):
+        # A stack with no scaffolder declares no stack files (its toolchain, if any,
+        # still contributes the manifest/lock — here there is none → empty).
+        profile = LayoutProfile(
+            language="go",
+            package_name="x",
+            source_root="src",
+            package_root="src/x",
+            test_root="tests",
+        )
+        assert profile.harness_owned_scaffold_paths() == ()
+
+    def test_ts_declaration_covers_everything_the_scaffolder_creates(self, tmp_path):
+        """DRIFT GUARD: every config file the TS scaffold writes must be declared.
+
+        A scaffold file the scaffolder creates but the profile does NOT declare
+        would reappear as an orphan false-positive (the codex12 vitest.config.ts
+        bug). Bind the two so adding a scaffold file forces declaring it.
+        """
+        profile = self._ts_profile()
+        result = scaffold_layout(tmp_path, profile)
+        declared = set(profile.harness_owned_scaffold_paths())
+        # Restrict to root-level config files the scaffolder owns (it also creates
+        # package.json via the runner ensurer); generated package source/tests are
+        # task-owned, not harness-owned, so the scaffolder does not emit them here.
+        for created in result.created:
+            assert created in declared, (
+                f"scaffolder created {created!r} but the profile does not declare it as a "
+                f"harness-owned scaffold path — it would be mis-flagged as an orphan"
+            )
+
+    def test_py_declaration_covers_everything_the_scaffolder_creates(self, tmp_path):
+        """DRIFT GUARD (Python): scaffold-created files are all declared."""
+        profile = self._py_profile()
+        result = scaffold_layout(tmp_path, profile)
+        declared = set(profile.harness_owned_scaffold_paths())
+        for created in result.created:
+            assert created in declared, (
+                f"scaffolder created {created!r} but the profile does not declare it"
+            )

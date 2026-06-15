@@ -463,6 +463,37 @@ def test_find_orphan_artifacts_extra_owned_escape_hatch(tmp_path: Path) -> None:
     assert exempt == [], "extra_owned must exempt the path"
 
 
+def test_find_orphan_artifacts_scaffold_config_not_orphan(tmp_path: Path) -> None:
+    """The TS scaffold's ``vitest.config.ts`` is harness-owned, never an orphan.
+
+    Regression for the codex12 false-positive: ``vitest.config.ts`` is a ``.ts``
+    source the scaffolder writes at project root (no task owns it), so without the
+    harness/profile escape hatch the orphan gate flagged it. With the profile's
+    scaffold paths passed as ``extra_owned`` it is exempt — while a genuinely
+    invented file no task or scaffold owns is STILL detected (teeth intact).
+    """
+    from codd.project_types import resolve_layout_profile
+
+    _write(tmp_path, "src/index.ts", "export const a = 1;\n")  # task-owned
+    _write(tmp_path, "vitest.config.ts", "export default {};\n")  # scaffold-owned
+    _write(tmp_path, "e2e/invented.test.ts", "export const x = 1;\n")  # nobody owns this
+
+    profile = resolve_layout_profile(
+        language="typescript", project_name="conv", source_dirs=["src/"], test_dirs=["tests/"]
+    )
+    scaffold_paths = profile.harness_owned_scaffold_paths()
+    index = build_path_owner_index([_Task("src_task", ["src"])], project_root=tmp_path)
+
+    # WITHOUT the escape hatch: the scaffold config reads as an orphan (the bug).
+    bare = {o.path for o in find_orphan_artifacts(index, tmp_path)}
+    assert "vitest.config.ts" in bare, "precondition: scaffold config looks like an orphan"
+
+    # WITH the harness/profile contract: scaffold config exempt, invented file kept.
+    exempt = {o.path for o in find_orphan_artifacts(index, tmp_path, extra_owned=scaffold_paths)}
+    assert "vitest.config.ts" not in exempt, "scaffold config must be harness-owned, not an orphan"
+    assert "e2e/invented.test.ts" in exempt, "a genuine orphan must still be detected"
+
+
 # ─────────────────────────────────────────────────────────────
 # Gate-level escalation with a FAKE oracle (no toolchain needed)
 # ─────────────────────────────────────────────────────────────

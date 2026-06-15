@@ -171,13 +171,16 @@ implement:
   # implement task (or a declared harness/profile contract). An orphan (a file no
   # task owns) sits OUTSIDE the artifact-contract graph -- its repair scope and
   # write-fence are undecidable, so a non-deterministic SUT can keep mutating it
-  # invisibly. 'warn' (default) observes + reports orphans after implement but
-  # never blocks (the check is heuristic; a large behaviour change rolls out as
-  # warn). 'enforce' makes an orphan a hard stage failure. 'off' disables it. A
+  # invisibly. 'warn' observes + reports orphans after implement but never blocks
+  # (heuristic; the large behaviour change first rolled out as warn, validated on
+  # the dogfood zoo, then promoted). 'enforce' (default, owner-set 2026-06-15)
+  # makes an orphan a hard stage failure -- the orphan-artifact invariant. Scaffold
+  # /harness-owned files (vitest.config.ts, tsconfig.json, ...) are profile-owned
+  # and never flagged. 'off' disables it. A
   # legitimate helper a task wrote under its OWN output directory is adopted (it
   # is dir-owned), so the warn list should be small. Only active for stacks with
   # a declared implement-time oracle + a derivable owner index.
-  orphan_artifact_gate: warn
+  orphan_artifact_gate: enforce
   # Bounded wall-clock for ONE implement-oracle command run (seconds). tsc on a
   # fresh build is fast, but a cold first run can compile a large module graph.
   # Default 600.

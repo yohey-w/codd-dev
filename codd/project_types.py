@@ -540,6 +540,55 @@ class LayoutProfile:
             ),
         }
 
+    def harness_owned_scaffold_paths(self) -> tuple[str, ...]:
+        """Project-relative files the harness SCAFFOLD owns (the contract escape hatch).
+
+        These are the files :func:`scaffold_layout` creates for this stack —
+        topology + config the SUT never "owns" via a task, yet which are
+        legitimate generated artifacts (the orphan-artifact invariant's "owned by
+        a task OR an explicit harness/profile contract" branch). The orphan-gate
+        and the scoped-rerun write-fence consult this list so a scaffold file
+        (e.g. TS ``vitest.config.ts`` / ``tsconfig.json``) is never mis-flagged as
+        an unowned orphan and never reverted by the fence.
+
+        Language-agnostic: each path is DERIVED from this profile's own fields
+        (the same values the scaffolder uses) + the toolchain manifest/lock
+        filenames, so a new stack inherits the contract by populating its profile,
+        with no per-language logic in the gate. The list is a STATIC declaration of
+        what the scaffolder *can* create (not what is present on disk); callers
+        that need only existing files filter by ``is_file()``.
+        """
+        paths: list[str] = []
+
+        def _add(rel: str) -> None:
+            norm = _norm_rel(rel)
+            if norm and norm not in paths:
+                paths.append(norm)
+
+        # Dependency manifest + lockfile(s) the toolchain contract owns
+        # (package.json / package-lock.json; pyproject.toml / uv.lock; …).
+        toolchain = self.toolchain_dependencies
+        if toolchain is not None:
+            _add(toolchain.manifest_filename)
+            for lock in toolchain.lock_filenames:
+                _add(lock)
+
+        if self.language == "python":
+            # _scaffold_python: pyproject + package <__init__>/<__main__> + test <__init__>.
+            _add(_PYPROJECT_FILENAME)
+            if self.requires_package_init:
+                _add(f"{self.package_root}/__init__.py")
+                _add(f"{self.package_root}/__main__.py")
+            if self.requires_test_init:
+                _add(f"{self.test_root}/__init__.py")
+        elif self.language in ("typescript", "node"):
+            # _scaffold_typescript: tsconfig + vitest config + package.json.
+            _add(_TSCONFIG_FILENAME)
+            _add(_VITEST_CONFIG_FILENAME)
+            _add(_PACKAGE_JSON_FILENAME)
+
+        return tuple(paths)
+
 
 def normalize_package_name(project_name: str | None, *, fallback: str = "app") -> str:
     """Derive a valid Python package identifier from a project name.
