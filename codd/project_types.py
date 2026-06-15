@@ -287,6 +287,84 @@ _VALID_TEST_IMPORT_POLICIES = {"package_absolute", "flat", "relative"}
 _VALID_ORACLE_KINDS = {"compiler", "composite"}
 
 
+# ═══════════════════════════════════════════════════════════
+# Verify campaign: the harness OWNS the verification test command + its machine-
+# readable report (design: /tmp/gpt_vscope_result.txt, GPT-5.5 Pro consult
+# 2026-06-15; verdict A=(c)+(d): profile-defined campaign + execution reconcile).
+# ═══════════════════════════════════════════════════════════
+#
+# THE BUG (greenfield codex14): verify resolved the test command by the SUT's
+# ``package.json`` script priority (``detect_test_command``: test:unit > test >
+# test:e2e), ran ``test:unit`` (39 unit tests), exited 0, and declared
+# "verification passed" — while 28 declared verifiable behaviors were covered
+# ONLY by ``tests/e2e/*.e2e.test.ts`` files that ``test:unit`` NEVER runs. The
+# static VB coverage gate saw those markers and called them "covered"; verify
+# never executed them. Two SEPARATE proof systems (static coverage vs. one
+# detected command) let "covered but unexecuted" pass green.
+#
+# THE FIX (design verdict A): greenfield verify must NOT pick one SUT script. The
+# harness/profile OWNS a CANONICAL verification CAMPAIGN — a command that runs the
+# WHOLE VB-bearing test surface (unit AND e2e) and emits a MACHINE-READABLE report
+# the coverage-execution coherence gate reconciles against (see
+# :mod:`codd.coverage_execution_coherence`). The SUT may keep ``test:unit`` /
+# ``test:e2e`` scripts for its own convenience, but they are NEVER the pass
+# authority. ``detect_test_command`` stays UNCHANGED for brownfield/fixer
+# watch/partial-run use cases — this is a greenfield-verify-only campaign.
+#
+# GENERAL + PER-PROFILE: the campaign COMMAND + the report FORMAT are per-stack
+# (vitest JSON now; pytest JUnit XML / go test -json are documented extension
+# points). The MEANING (run the whole VB surface, parse executed+passed test
+# cases, reconcile with static coverage) is core. A stack whose profile declares
+# ``verify_campaign=None`` (Python today) keeps the existing verify-stage path
+# unchanged — the coherence gate is then a strict NO-OP for it.
+_VALID_RUNNER_REPORT_FORMATS = {"vitest-json", "pytest-junit-xml", "go-test-json"}
+
+
+@dataclass(frozen=True)
+class VerifyCampaignSpec:
+    """A stack's harness-owned greenfield verification campaign (profile-driven).
+
+    * ``command_template`` — the canonical verify command, run from the project
+      root during the greenfield VERIFY stage. It MUST run the WHOLE VB-bearing
+      test surface (unit AND e2e — never one SUT script) and write a
+      machine-readable report. ``{test_root}`` and ``{report}`` are substituted
+      with the profile's test root and the resolved report path (POSIX, project-
+      relative) before execution. TS: ``npx --no-install vitest run {test_root}
+      --reporter=json --outputFile={report}``.
+    * ``report_relpath`` — where the runner writes its machine-readable report
+      (project-relative; under ``.codd/`` so it is a harness artifact, never the
+      SUT's). The coherence gate reads + parses this.
+    * ``report_format`` — which per-profile adapter parses the report
+      (``vitest-json`` now; ``pytest-junit-xml`` / ``go-test-json`` are the
+      documented extension points). Selects the
+      :class:`~codd.coverage_execution_coherence.RunnerReportAdapter`.
+    * ``requires_node_install`` — whether the BLOCKING dependency-install
+      preflight must run first (TS: yes — vitest/deps must be materialized).
+
+    The COMMAND + FORMAT are per-language (each runner has its own CLI + report);
+    the MEANING (run the whole VB surface, reconcile executed+passed with static
+    coverage) is core. ``None`` on a profile makes the coherence gate a strict
+    NO-OP for that stack.
+    """
+
+    command_template: str
+    report_relpath: str
+    report_format: str
+    requires_node_install: bool = False
+
+    def resolve_command(self, *, test_root: str, report_path: str) -> str:
+        """The runnable command with ``{test_root}`` / ``{report}`` substituted."""
+        return self.command_template.format(test_root=test_root, report=report_path)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command_template": self.command_template,
+            "report_relpath": self.report_relpath,
+            "report_format": self.report_format,
+            "requires_node_install": self.requires_node_install,
+        }
+
+
 @dataclass(frozen=True)
 class OracleScopeSpec:
     """The file scope an implement-time oracle MUST be certified to cover.
@@ -519,6 +597,7 @@ class LayoutProfile:
     requires_test_init: bool = True
     implement_oracle: ImplementOracleSpec | None = None
     toolchain_dependencies: ToolchainDependencyProfile | None = None
+    verify_campaign: VerifyCampaignSpec | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -537,6 +616,9 @@ class LayoutProfile:
                 self.toolchain_dependencies.to_dict()
                 if self.toolchain_dependencies is not None
                 else None
+            ),
+            "verify_campaign": (
+                self.verify_campaign.to_dict() if self.verify_campaign is not None else None
             ),
         }
 
@@ -616,6 +698,33 @@ class LayoutProfile:
         if self.language in ("typescript", "node", "javascript"):
             return TypeScriptTestBlockProfile()
         return None
+
+    def runner_report_adapter(self) -> Any:
+        """Resolve this stack's runner-report adapter for the coherence gate.
+
+        Returns a ``codd.coverage_execution_coherence.RunnerReportAdapter`` that
+        normalizes the :class:`VerifyCampaignSpec` report into the set of executed
+        + passed test FILES (and, when available, test cases), or ``None`` for a
+        stack with no adapter. Selection keys off ``verify_campaign.report_format``
+        (``vitest-json`` now; ``pytest-junit-xml`` / ``go-test-json`` are the
+        documented extension points), so a new runner is one adapter + one profile
+        ``report_format`` value — never a core gate edit. The import is lazy so the
+        coherence module is not pulled in at ``project_types`` import time.
+
+        ``None`` when the profile declares no ``verify_campaign`` (Python today) or
+        the declared ``report_format`` has no registered adapter yet — the
+        coherence gate then degrades EXPLICITLY (it never silently passes a build
+        whose campaign report it cannot read; see the gate's observability rule).
+        """
+
+        campaign = self.verify_campaign
+        if campaign is None:
+            return None
+        try:
+            from codd.coverage_execution_coherence import resolve_runner_report_adapter
+        except Exception:  # noqa: BLE001 — adapter is optional; degrade if unavailable.
+            return None
+        return resolve_runner_report_adapter(campaign.report_format)
 
 
 def normalize_package_name(project_name: str | None, *, fallback: str = "app") -> str:
@@ -823,6 +932,23 @@ def _python_layout_profile(
         # codd.dependency_lock_coherence. Until then None ⇒ the finalization is a
         # strict NO-OP for Python (today's behaviour, unchanged).
         toolchain_dependencies=None,
+        # VERIFY CAMPAIGN — DEFERRED for Python (separate task). The MEANING is the
+        # same (run the whole VB-bearing test surface under one harness-owned
+        # command + a machine-readable report, then reconcile executed+passed with
+        # static VB coverage). To wire it: set verify_campaign=VerifyCampaignSpec(
+        # command_template="python -m pytest {test_root} --junitxml={report} ...",
+        # report_relpath=".codd/verify/pytest-junit.xml",
+        # report_format="pytest-junit-xml") and register a ``pytest-junit-xml``
+        # adapter in codd.coverage_execution_coherence (parse <testcase
+        # classname=.. name=..> + <skipped>/<failure>/<error> children → executed +
+        # passed files/cases). Python's pytest collects unit AND e2e in ONE run by
+        # default (no e2e-only-script split like npm), so today's verify path
+        # already executes the whole VB surface — making this a coherence-hardening
+        # ENHANCEMENT, not a false-green gap. Until wired, None ⇒ the coherence gate
+        # is a strict NO-OP for Python and the EXISTING verify-stage gates
+        # (import_coherence / e2e_contract_coherence + the VB coverage/authenticity
+        # gates) remain its backstop, UNCHANGED.
+        verify_campaign=None,
     )
 
 
@@ -883,6 +1009,28 @@ def _typescript_layout_profile(
         # ``npm ci`` passes honestly (it never re-resolves; it just verifies). See
         # :func:`codd.dependency_lock_coherence.finalize_dependency_lock_coherence`.
         toolchain_dependencies=_TYPESCRIPT_TOOLCHAIN_PROFILE,
+        # VERIFY CAMPAIGN (TS/vitest) — the harness-owned canonical verification
+        # command. It runs the WHOLE ``{test_root}`` (unit AND e2e — NOT a SUT
+        # ``test:unit`` script) under ``vitest run`` with the JSON reporter, so the
+        # coverage-execution coherence gate can reconcile which VB-covering test
+        # FILES actually executed + passed against the static VB coverage map. This
+        # is what closes the codex14 false-green (28 e2e-only VBs "covered" but the
+        # detected ``test:unit`` never ran them). ``--no-install`` keeps it offline-
+        # honest (the blocking node-install preflight materializes vitest). vitest
+        # COLLECTION (incl. the ``.e2e.*`` convention) is owned by the scaffolded
+        # ``vitest.config.ts`` ``test.include``; the positional ``{test_root}``
+        # filters to the project's test tree. The report lands under ``.codd/`` —
+        # a harness artifact, never the SUT's. See
+        # :mod:`codd.coverage_execution_coherence`.
+        verify_campaign=VerifyCampaignSpec(
+            command_template=(
+                "npx --no-install vitest run {test_root} "
+                "--reporter=json --outputFile={report}"
+            ),
+            report_relpath=".codd/verify/vitest-report.json",
+            report_format="vitest-json",
+            requires_node_install=True,
+        ),
     )
 
 

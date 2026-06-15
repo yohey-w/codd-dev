@@ -1241,7 +1241,7 @@ class GreenfieldPipeline:
         self._enforce_import_coherence(project_root)
 
         runner = self.verify_runner or _default_verify_runner
-        record["detail"] = str(
+        detail = str(
             runner(
                 project_root,
                 ai_command=self.ai_command,
@@ -1249,6 +1249,69 @@ class GreenfieldPipeline:
                 echo=self.echo,
             )
         )
+
+        # Coverage-execution coherence gate (anti-false-green, design
+        # /tmp/gpt_vscope_result.txt). The verify runner above proved the
+        # STRUCTURAL/typecheck/test-command path; this ADDS the execution-coherence
+        # proof: it runs the PROFILE-OWNED verify campaign (the WHOLE VB surface —
+        # unit AND e2e, NOT a single SUT script) and reconciles which VB-covering
+        # tests actually executed+passed against the static VB coverage map. It
+        # HARD-FAILS when a declared behavior is statically "covered" but its
+        # covering test was never run (e.g. an e2e-only VB whose e2e suite the
+        # detected ``test:unit`` skipped — the dogfood false-green this closes),
+        # or when an e2e surface exists but the campaign scanned 0 e2e files. NO-OP
+        # for a stack with no profile campaign (Python today). It NEVER weakens the
+        # verify runner above — it is an additional, stricter gate on top.
+        coherence_detail = self._enforce_coverage_execution_coherence(project_root, options)
+        record["detail"] = detail + coherence_detail
+
+    def _enforce_coverage_execution_coherence(
+        self, project_root: Path, options: dict[str, Any]
+    ) -> str:
+        """Run the profile-owned verify campaign + coverage-execution coherence gate.
+
+        Returns a short detail suffix (empty when the gate does not apply to this
+        stack). Honors the greenfield ``coverage_gate`` option (the same switch
+        that governs the implement-stage VB gates): when the owner turned VB
+        gating off, this execution-coherence gate is skipped too. A hard coherence
+        failure is raised as a :class:`StageError` so the autopilot stops and
+        reports honestly. A CAMPAIGN/observability error (the campaign could not
+        run to a parseable report, or an e2e surface was not observed) is ALSO a
+        StageError — an unobservable verification is not a pass.
+        """
+        if not bool(options.get("coverage_gate", True)):
+            return ""
+        from codd.coverage_execution_coherence import (
+            CampaignError,
+            CoherenceError,
+            coherence_gate_applies,
+            enforce_coverage_execution_coherence,
+        )
+
+        profile = self._resolve_layout_profile(project_root)
+        if profile is None or not coherence_gate_applies(profile):
+            return ""
+        try:
+            from codd.config import load_project_config
+
+            try:
+                config = load_project_config(project_root)
+            except (FileNotFoundError, ValueError):
+                config = {}
+            report = enforce_coverage_execution_coherence(
+                project_root, profile, config=config, echo=self.echo
+            )
+        except CoherenceError as exc:
+            raise StageError(str(exc)) from exc
+        except CampaignError as exc:
+            raise StageError(
+                "verify campaign (coverage-execution coherence) could not be "
+                f"observed: {exc}. An unobservable verification is not a pass — "
+                "check the campaign command / runner report output."
+            ) from exc
+        if not report.applicable:
+            return ""
+        return f"; coverage-execution coherence OK ({report.detail})"
 
     def _layout_inputs(self, project_root: Path) -> tuple[dict[str, Any], str | None, Any, Any]:
         """Resolve (config, language, source_dirs, test_dirs) for the stack profile."""
