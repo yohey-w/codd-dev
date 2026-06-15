@@ -22,11 +22,37 @@ each later stage only strengthens, never replaces, the earlier ones:
   EXECUTABLE test block. A marker on a ``it.skip`` / ``test.todo`` /
   ``describe.skip`` / ``@pytest.mark.skip`` / disabled block — or in a file the
   runner never executes — is not coverage: a skipped test asserts nothing.
-* **Stage 3 — assertion presence.** The attached test block must contain at least
-  one ASSERTION (``expect`` for vitest/jest, ``assert`` / ``pytest.raises`` for
-  pytest, ``t.Errorf`` / ``t.Fatalf`` for go, ``assert*`` for JUnit). An empty
-  test, or a smoke test that runs code but checks nothing, claims a behavior it
-  does not verify.
+
+  Attachment is *block-ized* (no fixed line lookahead): a contiguous run of
+  ``codd:`` marker comments + ordinary comments + blank lines is attached to the
+  NEXT executable test block, and ONLY if no non-test statement (``import`` /
+  ``const`` / ``for`` / a ``describe`` opener / …) appears before that block.
+  This is what lets a stack of 7 markers above one ``it(...)`` all attach to it,
+  while a file-top marker separated from the first test by ``import`` lines or a
+  fixtures ``const`` does NOT spuriously attach. A marker sitting directly above
+  a ``describe`` that contains several ``it``s attaches to the FIRST ``it`` only
+  (group-level fan-out would be false coverage; an explicit ``scope=describe``
+  syntax is a future, deliberately-unbuilt extension).
+* **Stage 3 — assertion EVIDENCE.** The attached test block must contain
+  assertion *evidence*. Evidence is an EVIDENCE GRAPH, not a textual ``expect(``
+  in the block body, because the standard e2e shape delegates the assertion to a
+  helper (``expectSuccessfulRun(result, fixture.stdout)`` whose body runs the
+  real ``expect(result.exitCode).toBe(0)``). Evidence is therefore::
+
+      direct primitive assertion in the test body
+      OR
+      a call to a RESOLVED helper whose body contains a primitive assertion/fail
+      AND references the helper's argument(s) (an "argument anchor")
+
+  The argument anchor is what keeps this anti-false-green: a no-op helper
+  (``function expectSuccess() { expect(true).toBe(true); }``) does not reference
+  its arguments, so marker-spam delegating to it still FAILS. The helper NAME
+  (``expect``/``assert``/``should``/``verify``/``ensure``/``require``/``check``…)
+  is used ONLY to decide WHICH call to resolve — never to hard-pass; a
+  ``checkConfig()`` whose body has no primitive assertion fails. Resolution is a
+  single hop through the same-repo import that binds the helper symbol (the same
+  import-resolution discipline as the native implement-oracle), and is delegated
+  to the per-profile adapter so the gate logic stays language-agnostic.
 
 Stages 4 (behavior-anchor) and 5 (mutation probe) from the design are
 deliberately NOT implemented here — proving that a natural-language VB row's
@@ -37,14 +63,18 @@ later without reworking this gate.
 
 GENERALITY (see ``feedback_codd_generality_preservation``): every language-
 specific operation — locating the test block a marker sits in, detecting skip,
-detecting an assertion — is delegated to a per-profile
+detecting a PRIMITIVE assertion, extracting an assertion-like helper call, and
+RESOLVING that call to its helper body — is delegated to a per-profile
 :class:`~codd.project_types.TestBlockProfile` adapter resolved from the active
 :class:`~codd.project_types.LayoutProfile`. The gate logic here is language-
 agnostic. When NO adapter is available for a stack (an unknown language, or a
 file the adapter cannot parse), the gate GRACEFULLY DEGRADES: stage 1 still
 applies (it is language-agnostic), stages 2-3 are SKIPPED for that file with a
 warning rather than failing — an un-parseable stack must never produce a
-false-RED.
+false-RED. When an adapter IS available but a *helper call cannot be resolved*
+(the parser exists, the helper just does not resolve to a credible body), that
+is a hard FAIL in greenfield strict: an unresolved assertion helper is not
+evidence (the design's "unresolved helper = fail" rule).
 """
 
 from __future__ import annotations
@@ -81,8 +111,14 @@ class TestBlock:
     ``start_line``/``end_line`` are 1-based inclusive line bounds of the block's
     body (the region a marker placed *inside* the block falls within, and the
     region searched for assertions). ``is_executable`` is False when the block is
-    skipped/todo/disabled (a marker attached to it is not coverage). ``label`` is
-    a short human name (the test title) for diagnostics.
+    skipped/todo/disabled (a marker attached to it is not coverage).
+    ``has_assertion`` is True when the body contains a DIRECT PRIMITIVE assertion
+    (a language built-in like ``expect(...)`` / ``assert`` — NOT a bare call to a
+    helper; helper delegation is resolved separately via
+    :meth:`TestBlockProfile.resolve_assertion_evidence`). ``body_text`` is the
+    block's body source (used by the gate to ask the adapter to resolve a
+    delegated-assertion helper). ``label`` is a short human name (the test title)
+    for diagnostics.
     """
 
     start_line: int
@@ -90,16 +126,35 @@ class TestBlock:
     is_executable: bool
     has_assertion: bool
     label: str = ""
+    body_text: str = ""
+
+
+#: Verdict for the assertion-EVIDENCE stage of ONE attached executable block.
+#: ``ok`` is True iff the block carries credible assertion evidence. ``reason``
+#: is a machine token the gate maps to a violation kind / message:
+#:   ``direct``              — a direct primitive assertion in the body (pass)
+#:   ``helper_resolved``     — a resolved helper with primitive + arg anchor (pass)
+#:   ``no_assertion``        — neither a primitive nor any assertion-like call
+#:   ``unresolved_helper``   — an assertion-like call not resolvable 1-hop
+#:   ``helper_no_primitive`` — resolved helper body has no primitive assertion/fail
+#:   ``constant_helper``     — resolved helper asserts only constants (no anchor)
+@dataclass(frozen=True)
+class AssertionEvidence:
+    ok: bool
+    reason: str
+    detail: str = ""
 
 
 class TestBlockProfile(Protocol):
     """Language-specific test-structure adapter (resolved from LayoutProfile).
 
     An implementation parses ONE test file's text into the executable test blocks
-    it contains, with skip/assertion facts already resolved per block. Returning
-    an empty list means "no recognizable test blocks" (the gate then degrades for
-    that file). Implementations must be PURE and best-effort: a parse they cannot
-    do should return ``[]`` (degrade), never raise.
+    it contains, with skip/PRIMITIVE-assertion facts already resolved per block,
+    and can RESOLVE a block's delegated-assertion helper one hop through the
+    same-repo import graph. Returning an empty block list means "no recognizable
+    test blocks" (the gate then degrades for that file). Implementations must be
+    PURE and best-effort: a parse they cannot do should return ``[]`` (degrade),
+    never raise.
     """
 
     def handles_file(self, rel_path: str) -> bool:
@@ -107,6 +162,19 @@ class TestBlockProfile(Protocol):
 
     def parse_test_blocks(self, text: str) -> list[TestBlock]:
         """Parse a test file's text into executable-test-block records."""
+
+    def resolve_assertion_evidence(
+        self, block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+    ) -> AssertionEvidence:
+        """Decide whether ``block`` carries assertion evidence (direct or via helper).
+
+        Called by the gate ONLY for an attached, executable block that has no
+        DIRECT primitive assertion (``block.has_assertion`` is False). The adapter
+        extracts assertion-like helper calls from ``block.body_text``, resolves
+        each one hop through ``importer_text``'s imports to its helper body, and
+        returns an :class:`AssertionEvidence` verdict. ``importer_rel`` /
+        ``project_root`` locate sibling helper modules for resolution.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -119,8 +187,10 @@ class AuthenticityViolation:
     """One inauthentic coverage CLAIM.
 
     ``kind`` is one of ``orphan`` (stage 1), ``skipped`` / ``unattached`` (stage
-    2), ``no_assertion`` (stage 3). ``vb_id`` is the claimed behavior; ``path``
-    and ``line`` locate the marker.
+    2), ``no_assertion`` (stage 3 — covers a body with no primitive AND no
+    credible helper evidence, including an unresolved / constant-only / no-op
+    helper). ``vb_id`` is the claimed behavior; ``path`` and ``line`` locate the
+    marker.
     """
 
     kind: str
@@ -186,31 +256,123 @@ def _scan_cover_markers_with_lines(text: str, rel_path: str) -> list[_CoverMarke
     return markers
 
 
-def _enclosing_block(marker_line: int, blocks: list[TestBlock]) -> TestBlock | None:
-    """The smallest test block whose body contains ``marker_line``.
+def _attached_block(marker_line: int, text: str, blocks: list[TestBlock]) -> TestBlock | None:
+    """The executable test block a marker on ``marker_line`` attaches to.
 
-    A ``covers`` marker is conventionally written on the line(s) immediately
-    ABOVE the test it annotates (a leading comment), so a marker that sits just
-    before a block's first body line still belongs to it. We therefore accept a
-    marker on the block's own lines OR on the lines directly preceding the block
-    up to the previous block's end. The SMALLEST containing/owning block wins so
-    a marker inside a nested ``it`` is attributed to the ``it``, not the
-    enclosing ``describe``.
+    A marker is either INSIDE a leaf test block's body, or written ABOVE the test
+    it annotates (the conventional leading comment). The algorithm:
+
+    1. Find the SMALLEST block whose body contains the marker line. If it is a
+       LEAF (``it``/``test``/``def test_*`` — not a ``describe`` group), the
+       marker is that leaf's (a marker inside a nested ``it`` is the ``it``'s, not
+       the enclosing ``describe``'s).
+    2. Otherwise the marker is a LEADING marker (above a test, possibly nested
+       inside a ``describe`` body but above the first ``it``). Find the nearest
+       test block opening AT/AFTER the marker (within the containing group, if
+       any) and attach ONLY when every line strictly between the marker and that
+       opener is a HEADER line (comment / marker / decorator / blank). A real
+       statement in between (``import`` / ``const`` / ``for`` / a fixtures decl)
+       means the marker is a banner / belongs to nothing → unattached. When the
+       chosen opener is itself a ``describe`` group, attach to its FIRST nested
+       test (group-level fan-out would be false coverage).
+
+    Returning ``None`` means "unattached" (stage-2 failure).
     """
 
-    best: TestBlock | None = None
+    lines = text.splitlines()
+
+    # 1. Smallest block CONTAINING the marker line.
+    containing: TestBlock | None = None
     for block in blocks:
-        # Inside the block body, or on the comment line(s) immediately above it.
-        if block.start_line - _MARKER_LOOKAHEAD <= marker_line <= block.end_line:
-            if best is None or (block.end_line - block.start_line) < (best.end_line - best.start_line):
-                best = block
-    return best
+        if block.start_line <= marker_line <= block.end_line:
+            if containing is None or (block.end_line - block.start_line) < (
+                containing.end_line - containing.start_line
+            ):
+                containing = block
+    if containing is not None and not _is_group_block(containing, blocks):
+        return containing  # marker inside a leaf test block.
+
+    # 2. Leading marker. Nearest test block opening AT/AFTER the marker. If the
+    # marker is inside a group body, restrict to that group's descendants so a
+    # marker in describe-A does not jump to a sibling describe-B's first test.
+    scope = containing
+    candidates = [b for b in blocks if b.start_line > marker_line]
+    if scope is not None:
+        candidates = [b for b in candidates if b.end_line <= scope.end_line]
+    if not candidates:
+        return None
+    opener = min(candidates, key=lambda b: b.start_line)
+    for ln in range(marker_line + 1, opener.start_line):  # 1-based exclusive range
+        stripped = lines[ln - 1].strip() if ln - 1 < len(lines) else ""
+        if not stripped:
+            continue
+        if _is_comment_or_marker_line(stripped):
+            continue
+        # A non-header statement separates the marker from the next test block.
+        return None
+    if _is_group_block(opener, blocks):
+        # describe group → attach to its FIRST nested test block.
+        return _first_child_block(opener, blocks)
+    return opener
 
 
-# How many lines a leading ``// codd: covers`` comment may sit above the test it
-# annotates. Markers are conventionally on the line directly above (1), but a
-# blank line or a second marker line is common, so allow a small window.
-_MARKER_LOOKAHEAD = 3
+_COMMENT_PREFIXES = ("//", "#", "/*", "*", "*/")
+
+
+def _is_comment_or_marker_line(stripped: str) -> bool:
+    """A line that belongs to a test's LEADING header block during attachment.
+
+    The attachment walk treats a contiguous run of these lines above a test as
+    the test's header, while the FIRST real statement (not one of these)
+    terminates the walk. Header lines are: a ``codd:`` marker, a pure comment
+    (any language), or a DECORATOR / annotation line (``@pytest.mark.skip`` /
+    ``@pytest.mark.parametrize`` / a TS method decorator) — a decorator binds to
+    the ``def`` that follows it, so it must not break the marker→test link (the
+    skip/non-skip of that def is already resolved by the per-profile parser).
+    """
+
+    if "codd:" in stripped:
+        return True
+    if stripped.startswith("@"):
+        return True
+    return stripped.startswith(_COMMENT_PREFIXES)
+
+
+def _block_opening_at(line: int, blocks: list[TestBlock]) -> TestBlock | None:
+    """The block whose opening (``start_line``) is exactly ``line``, if any."""
+
+    for block in blocks:
+        if block.start_line == line:
+            return block
+    return None
+
+
+def _is_group_block(block: TestBlock, blocks: list[TestBlock]) -> bool:
+    """Whether ``block`` strictly encloses at least one other (it is a group)."""
+
+    for other in blocks:
+        if other is block:
+            continue
+        if block.start_line <= other.start_line and other.end_line <= block.end_line:
+            if not (block.start_line == other.start_line and block.end_line == other.end_line):
+                return True
+    return False
+
+
+def _first_child_block(group: TestBlock, blocks: list[TestBlock]) -> TestBlock | None:
+    """The first (lowest start_line) block strictly nested inside ``group``."""
+
+    children = [
+        other
+        for other in blocks
+        if other is not group
+        and group.start_line <= other.start_line
+        and other.end_line <= group.end_line
+        and not (other.start_line == group.start_line and other.end_line == group.end_line)
+    ]
+    if not children:
+        return None
+    return min(children, key=lambda b: b.start_line)
 
 
 # ---------------------------------------------------------------------------
@@ -301,10 +463,11 @@ def build_authenticity_report(
             continue
 
         for marker in live_markers:
-            block = _enclosing_block(marker.line, blocks)
+            block = _attached_block(marker.line, text, blocks)
             if block is None:
                 # Stage 2 (attachment): marker is not inside/above any test block
-                # (e.g. a file-top banner, a helper, dead region).
+                # (e.g. a file-top banner, a helper, dead region, or separated
+                # from the next test by an import/const/non-test statement).
                 violations.append(
                     AuthenticityViolation(
                         kind="unattached",
@@ -313,8 +476,9 @@ def build_authenticity_report(
                         line=marker.line,
                         message=(
                             f"{rel}:{marker.line} `codd: covers vb={marker.vb_id}` is not attached to "
-                            "an executable test block (no test case at/below the marker). A coverage "
-                            "claim must sit on the test that proves the behavior."
+                            "an executable test block (no test case at/below the marker, or a "
+                            "non-test statement separates it from the next test). A coverage claim "
+                            "must sit on the test that proves the behavior."
                         ),
                     )
                 )
@@ -337,8 +501,23 @@ def build_authenticity_report(
                     )
                 )
                 continue
-            if not block.has_assertion:
-                # Stage 3 (assertion presence): empty / smoke-only test.
+
+            # ── Stage 3 (assertion EVIDENCE): direct primitive OR resolved helper ──
+            if block.has_assertion:
+                evidence = AssertionEvidence(ok=True, reason="direct")
+            else:
+                try:
+                    evidence = adapter.resolve_assertion_evidence(
+                        block,
+                        importer_text=text,
+                        importer_rel=rel,
+                        project_root=project_root,
+                    )
+                except Exception:  # noqa: BLE001 — resolver that throws ⇒ no evidence.
+                    evidence = AssertionEvidence(
+                        ok=False, reason="no_assertion", detail="resolver error"
+                    )
+            if not evidence.ok:
                 label = f" ({block.label})" if block.label else ""
                 violations.append(
                     AuthenticityViolation(
@@ -346,12 +525,7 @@ def build_authenticity_report(
                         vb_id=marker.vb_id,
                         path=rel,
                         line=marker.line,
-                        message=(
-                            f"{rel}:{marker.line} `codd: covers vb={marker.vb_id}` is attached to a "
-                            f"test{label} with NO assertion — running code without checking an "
-                            "outcome does not prove the behavior. Add an assertion that would FAIL "
-                            "if the behavior were broken."
-                        ),
+                        message=_no_assertion_message(rel, marker, label, evidence),
                     )
                 )
                 continue
@@ -379,6 +553,45 @@ def build_authenticity_report(
     )
 
 
+def _no_assertion_message(
+    rel: str, marker: _CoverMarker, label: str, evidence: AssertionEvidence
+) -> str:
+    """A reason-specific message for a stage-3 assertion-evidence failure.
+
+    All variants are the same ``no_assertion`` violation KIND (a body that does
+    not credibly prove the behavior) but the prose pinpoints WHY so the rerun
+    feedback is actionable — and never suggests "add a marker".
+    """
+
+    head = f"{rel}:{marker.line} `codd: covers vb={marker.vb_id}` is attached to a test{label}"
+    if evidence.reason == "unresolved_helper":
+        why = (
+            " whose only assertion is delegated to a helper that could not be resolved "
+            f"({evidence.detail or 'no resolvable helper body'}). An unresolved assertion "
+            "helper is not evidence — import the helper from a same-repo module whose body "
+            "runs a real assertion, or assert directly in the test."
+        )
+    elif evidence.reason == "helper_no_primitive":
+        why = (
+            f" that delegates to a helper ({evidence.detail or 'helper'}) whose body contains "
+            "NO assertion — calling a helper that checks nothing does not prove the behavior. "
+            "Make the helper assert (or assert directly in the test)."
+        )
+    elif evidence.reason == "constant_helper":
+        why = (
+            f" that delegates to a helper ({evidence.detail or 'helper'}) which asserts only "
+            "CONSTANTS (it never references its arguments, e.g. `expect(true).toBe(true)`) — a "
+            "constant assertion proves nothing. Assert against the call's actual result."
+        )
+    else:  # no_assertion
+        why = (
+            " with NO assertion — running code without checking an outcome does not prove the "
+            "behavior. Add an assertion (directly, or via a helper whose body asserts the result) "
+            "that would FAIL if the behavior were broken."
+        )
+    return head + why
+
+
 def format_authenticity_feedback(report: AuthenticityReport) -> str:
     """Render authenticity violations as SUT-facing rerun feedback.
 
@@ -392,9 +605,11 @@ def format_authenticity_feedback(report: AuthenticityReport) -> str:
         "Some `codd: covers vb=<id>` markers are not authentic coverage claims.",
         "A `covers` marker asserts that a test PROVES the behavior. Do not add or keep "
         "`codd: covers vb=X` on a test unless that test exercises the public behavior X "
-        "describes and contains an assertion that would FAIL if X were broken. Fix each "
-        "below by making the test real (enable it, add the missing assertion, or move the "
-        "marker to the test that actually proves the behavior) — never by silencing the gate.",
+        "describes and contains an assertion that would FAIL if X were broken (directly, or "
+        "via a helper whose body runs a real assertion against the call's result). Fix each "
+        "below by making the test real (enable it, add the missing assertion, resolve the "
+        "assertion helper, or move the marker to the test that actually proves the behavior) "
+        "— never by silencing the gate.",
         "",
         "Inauthentic coverage claims:",
     ]
@@ -442,9 +657,23 @@ def render_authenticity_markdown(report: AuthenticityReport) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Built-in per-profile adapters (python, typescript/javascript). A new stack
-# adds its adapter here and wires it in LayoutProfile.test_block_profile().
+# Shared helper-resolution machinery (language-agnostic skeleton; the per-
+# profile adapters supply the regexes/extensions for their stack).
 # ---------------------------------------------------------------------------
+
+
+#: Names that mark a call as an ASSERTION-LIKE helper worth resolving. The set is
+#: used ONLY to choose WHICH calls to resolve (never to pass on name alone). It is
+#: a prefix match on the call's leading identifier segment so ``expectSuccessfulRun``,
+#: ``assert_rejected``, ``requireSuccess``, ``verifyState``, ``ensureOk``,
+#: ``shouldMatch``, ``checkInvariant`` are all candidates.
+_ASSERTION_HELPER_NAME_RE = re.compile(
+    r"^(?:expect|assert|should|verify|ensure|require|check)", re.IGNORECASE
+)
+
+
+def _looks_like_assertion_helper(name: str) -> bool:
+    return bool(_ASSERTION_HELPER_NAME_RE.match(name or ""))
 
 
 def _shared_marker_lines(text: str) -> set[int]:
@@ -461,15 +690,31 @@ def _shared_marker_lines(text: str) -> set[int]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Built-in per-profile adapters (python, typescript/javascript). A new stack
+# adds its adapter here and wires it in LayoutProfile.test_block_profile().
+# ---------------------------------------------------------------------------
+
+
 _PY_TEST_DEF_RE = re.compile(r"^(?P<indent>[ \t]*)def\s+(?P<name>test_[A-Za-z0-9_]*)\s*\(")
 _PY_METHOD_TEST_RE = re.compile(r"^(?P<indent>[ \t]*)def\s+(?P<name>test_[A-Za-z0-9_]*)\s*\(self")
 # A skip applied via decorator on the lines directly above the def.
 _PY_SKIP_DECORATOR_RE = re.compile(
     r"@(?:pytest\.mark\.skip|pytest\.mark\.skipif|unittest\.skip|skip)\b", re.IGNORECASE
 )
-_PY_ASSERT_RE = re.compile(
-    r"(^|[^A-Za-z0-9_])(assert\b|pytest\.raises\b|self\.assert[A-Za-z]+\s*\(|"
-    r"self\.fail\s*\(|np\.testing\.assert|assert_that\s*\()",
+#: PRIMITIVE python assertion: a language built-in that FAILS on its own — an
+#: ``assert`` statement, ``pytest.raises``/``pytest.fail``, a ``unittest``
+#: ``self.assert*`` / ``self.fail`` call, or ``np.testing.assert*``. A bare call
+#: to a named helper (``assert_that(...)``, ``verify(...)``) is NOT primitive — it
+#: is resolved via the evidence graph so a no-op helper cannot pass on its name.
+_PY_PRIMITIVE_ASSERT_RE = re.compile(
+    r"(^|[^A-Za-z0-9_])(assert\b|pytest\.raises\b|pytest\.fail\s*\(|"
+    r"self\.assert[A-Za-z]+\s*\(|self\.fail\s*\(|np\.testing\.assert)",
+)
+#: A python ``def helper(...):`` header (captures name + the parameter list so the
+#: argument-anchor check can confirm the helper references its own arguments).
+_PY_DEF_RE = re.compile(
+    r"^(?P<indent>[ \t]*)def\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^)]*)\)"
 )
 
 
@@ -480,9 +725,11 @@ class PythonTestBlockProfile:
     A test block is a ``def test_*`` function; its body runs until the next line
     at an indent <= the def's indent (standard Python block scoping). Skip is a
     ``@pytest.mark.skip``/``skipif`` / ``unittest.skip`` decorator on the lines
-    above the def, or a ``pytest.skip(...)`` call in the body. An assertion is an
-    ``assert`` statement, ``pytest.raises``, a ``unittest`` ``self.assert*`` /
-    ``self.fail`` call, or a common ``assert_that`` helper.
+    above the def, or a ``pytest.skip(...)`` call in the body. A PRIMITIVE
+    assertion is an ``assert`` statement, ``pytest.raises``/``pytest.fail``, a
+    ``unittest`` ``self.assert*`` / ``self.fail`` call, or ``np.testing.assert``.
+    A bare call to a named assertion helper is resolved one hop via
+    :meth:`resolve_assertion_evidence`.
     """
 
     def handles_file(self, rel_path: str) -> bool:
@@ -502,7 +749,12 @@ class PythonTestBlockProfile:
             def_line = index + 1  # 1-based
             indent = len(match.group("indent").expandtabs())
             name = match.group("name")
-            # Body: from the line after the def until dedent to <= indent.
+            # Body: from the line after the def until dedent to <= indent. A
+            # ``codd:`` marker line at the def's own indent is NOT treated as the
+            # dedent boundary while scanning (so a leading marker for the NEXT
+            # test does not prematurely close this body) — but it IS trimmed from
+            # the body EXTENT afterwards, so this block does not "contain" the
+            # next test's leading marker (which must attach to the next test).
             body_start = def_line + 1
             body_end = def_line
             scan = index + 1
@@ -515,6 +767,13 @@ class PythonTestBlockProfile:
                         break
                 body_end = scan + 1
                 scan += 1
+            # Trim trailing blank / comment / marker lines from the body extent so
+            # ``end_line`` reflects the last real CODE line of this test.
+            while body_end > def_line:
+                tail = lines[body_end - 1].strip()
+                if tail and not _is_comment_or_marker_line(tail):
+                    break
+                body_end -= 1
             body_text = "\n".join(lines[def_line:body_end])  # def's body region
             # Skip via decorator above the def (scan upward over decorator lines).
             skipped = bool(re.search(r"\bpytest\.skip\s*\(", body_text)) or bool(
@@ -532,7 +791,7 @@ class PythonTestBlockProfile:
                     up -= 1
                     continue
                 break
-            has_assertion = bool(_PY_ASSERT_RE.search(body_text))
+            has_assertion = bool(_PY_PRIMITIVE_ASSERT_RE.search(body_text))
             blocks.append(
                 TestBlock(
                     start_line=def_line,
@@ -540,15 +799,24 @@ class PythonTestBlockProfile:
                     is_executable=not skipped,
                     has_assertion=has_assertion,
                     label=name,
+                    body_text=body_text,
                 )
             )
             index = scan
         return blocks
 
+    def resolve_assertion_evidence(
+        self, block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+    ) -> AssertionEvidence:
+        return _resolve_python_evidence(
+            block, importer_text=importer_text, importer_rel=importer_rel, project_root=project_root
+        )
+
 
 # vitest/jest: it(...) / test(...) blocks; describe(...) groups. Skip via
 # ``.skip`` / ``.todo`` / ``xit`` / ``xtest`` / ``it.skipIf`` and a
-# ``describe.skip`` wrapping. Assertion = ``expect(`` (or chai ``assert``).
+# ``describe.skip`` wrapping. PRIMITIVE assertion = ``expect(`` / vitest
+# ``assert``/``assert.*`` / ``vi.expect`` / a throw inside a fail helper.
 _TS_TEST_OPEN_RE = re.compile(
     r"^(?P<indent>[ \t]*)"
     r"(?P<x>x)?"
@@ -556,7 +824,28 @@ _TS_TEST_OPEN_RE = re.compile(
     r"(?P<mods>(?:\.(?:skip|only|todo|concurrent|sequential|each|skipIf|runIf|failing))*)"
     r"\s*(?:\.each\s*\([^)]*\)\s*)?\(",
 )
-_TS_ASSERT_RE = re.compile(r"(^|[^A-Za-z0-9_$])(expect\s*\(|assert\b|assert\.[A-Za-z]+\s*\(|should\b)")
+#: PRIMITIVE TS/JS assertion: a vitest/jest/chai BUILT-IN that fails on its own —
+#: ``expect(...)`` (incl. ``vi.expect``), chai ``assert``/``assert.*``, a Node
+#: ``assert(...)`` call, or a ``throw`` (the body of a throw-style fail helper).
+#: A bare call to a named helper (``expectSuccessfulRun(...)``) is NOT primitive —
+#: it is resolved one hop so a no-op helper cannot pass on its name.
+_TS_PRIMITIVE_ASSERT_RE = re.compile(
+    r"(^|[^A-Za-z0-9_$.])"
+    r"(?:(?:vi\.)?expect\s*\(|assert\s*\(|assert\.[A-Za-z]+\s*\(|throw\b)"
+)
+#: A TS/JS function/method DEFINITION NAME anchor. The parameter list (which may
+#: span several lines) and body are parsed by paren/brace matching from the
+#: ``(`` that follows — so multi-line signatures (a wrapped
+#: ``export function f(\n  a,\n  b\n): void {``) are handled, which the e2e
+#: ``expectRejectedRun(...)`` helper relies on. Covers ``function f(``,
+#: ``const f = (`` (arrow), ``const f = function (`` and method ``f(`` forms.
+_TS_FUNC_NAME_RES = (
+    re.compile(r"\bfunction\s+(?P<name>[A-Za-z_$][\w$]*)\s*\("),
+    re.compile(r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\("),
+    re.compile(
+        r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?function\s*\("
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -566,10 +855,13 @@ class TypeScriptTestBlockProfile:
     Brace-matched: each ``it``/``test``/``describe`` block runs from its opening
     line to the matching close brace. Skip is ``.skip``/``.todo`` (or ``xit`` /
     ``xtest`` / ``xdescribe``) on the block, OR a skip on an enclosing
-    ``describe``. Assertion = ``expect(`` (vitest/jest) or chai ``assert`` /
-    ``should``. Only LEAF ``it``/``test`` blocks (and a bare ``test`` with no
-    nested cases) are returned as coverage targets — a ``describe`` is a grouping
-    container whose skip/non-skip is inherited by its children.
+    ``describe``. A PRIMITIVE assertion = ``expect(`` (vitest/jest, incl.
+    ``vi.expect``), chai/Node ``assert`` / ``assert.*``, or a ``throw``. A bare
+    call to a named assertion helper is resolved one hop via
+    :meth:`resolve_assertion_evidence`. Only LEAF ``it``/``test`` blocks (and a
+    bare ``test`` with no nested cases) are returned as coverage targets — a
+    ``describe`` is a grouping container whose skip/non-skip is inherited by its
+    children.
     """
 
     def handles_file(self, rel_path: str) -> bool:
@@ -618,31 +910,34 @@ class TypeScriptTestBlockProfile:
                     return True
             return False
 
-        # Coverage targets = it/test blocks, and describe blocks that contain no
-        # nested it/test (a bare describe a marker could legitimately sit on).
+        # Emit ALL it/test/describe spans as blocks. Leaf it/test blocks are the
+        # coverage TARGETS; a describe (group) block is kept too — not as a target
+        # but as an attachment WAYPOINT, so a marker sitting on (or just above) a
+        # ``describe`` resolves to that group's first nested test (the gate's
+        # ``_attached_block`` redirects a group to its first child; a group is
+        # never itself a credible coverage target). This is what lets a marker
+        # written above a ``describe`` attach to its first ``it``.
         blocks: list[TestBlock] = []
         for span in spans:
-            if span["fn"] == "describe":
-                has_child_case = any(
-                    other is not span
-                    and other["fn"] in ("it", "test")
-                    and span["start"] <= other["start"]
-                    and other["end"] <= span["end"]
-                    for other in spans
-                )
-                if has_child_case:
-                    continue
             body = "\n".join(lines[span["start"] - 1 : span["end"]])
             blocks.append(
                 TestBlock(
                     start_line=span["start"],
                     end_line=span["end"],
                     is_executable=not _is_skipped(span),
-                    has_assertion=bool(_TS_ASSERT_RE.search(body)),
+                    has_assertion=bool(_TS_PRIMITIVE_ASSERT_RE.search(body)),
                     label=span["fn"],
+                    body_text=body,
                 )
             )
         return blocks
+
+    def resolve_assertion_evidence(
+        self, block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+    ) -> AssertionEvidence:
+        return _resolve_typescript_evidence(
+            block, importer_text=importer_text, importer_rel=importer_rel, project_root=project_root
+        )
 
     @staticmethod
     def _matching_close(lines: list[str], open_index: int) -> int:
@@ -691,3 +986,577 @@ def _net_braces(line: str) -> int:
         prev = ch
         i += 1
     return depth
+
+
+# ---------------------------------------------------------------------------
+# Per-profile 1-hop helper resolution (the assertion EVIDENCE graph).
+#
+# Both implementations follow the SAME shape (mirroring the native implement-
+# oracle's import resolution), differing only in their language regexes:
+#   1. Extract assertion-LIKE helper calls from the test body (name-pattern).
+#   2. For each, find the symbol's binding import in the importing file and
+#      resolve the specifier to a sibling module file (1 hop, same repo).
+#   3. In that module, find the helper's definition body and check it carries a
+#      PRIMITIVE assertion/fail AND references one of the helper's parameters
+#      (the argument anchor that defeats no-op / constant-only helpers).
+# A helper that itself delegates to a deeper helper is followed ONE more hop
+# (so expectSuccessfulRun → expectExitCode is honored), bounded to avoid cycles.
+# ---------------------------------------------------------------------------
+
+
+_MAX_HELPER_HOPS = 2
+
+#: A bare or member call ``name(`` / ``a.b.name(`` — captures the dotted callee.
+_CALL_RE = re.compile(r"(?P<callee>[A-Za-z_$][\w$.]*)\s*\(")
+
+
+def _extract_helper_calls(body_text: str) -> list[tuple[str, str]]:
+    """Assertion-like ``name(args)`` calls in a test body → (name, args) pairs.
+
+    Returns calls whose callee leading identifier matches the assertion-helper
+    name set. ``args`` is the raw argument text (used for the argument-anchor
+    check). Member calls (``foo.bar(...)``) are reduced to the final segment
+    (``bar``) for the name test, but only assertion-ish names are considered —
+    this is the candidate-selection step, never a pass.
+    """
+
+    out: list[tuple[str, str]] = []
+    for match in _CALL_RE.finditer(body_text):
+        callee = match.group("callee")
+        segment = callee.split(".")[-1]
+        if not _looks_like_assertion_helper(segment):
+            continue
+        args = _balanced_args(body_text, match.end("callee"))
+        out.append((segment, args))
+    return out
+
+
+def _balanced_args(text: str, open_paren_search_from: int) -> str:
+    """The argument text between the call's matched parens (best-effort).
+
+    ``open_paren_search_from`` is the index just past the callee; we find the next
+    ``(`` and return everything up to its matching ``)``. String/paren nesting is
+    tracked coarsely. Returns ``""`` if unbalanced.
+    """
+
+    i = text.find("(", open_paren_search_from)
+    if i < 0:
+        return ""
+    depth = 0
+    in_str: str | None = None
+    prev = ""
+    start = i + 1
+    j = i
+    n = len(text)
+    while j < n:
+        ch = text[j]
+        if in_str is not None:
+            if ch == in_str and prev != "\\":
+                in_str = None
+        elif ch in ("'", '"', "`"):
+            in_str = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:j]
+        prev = ch
+        j += 1
+    return ""
+
+
+def _arg_identifiers(args: str) -> set[str]:
+    """Identifiers appearing in a call's argument text (for the anchor check).
+
+    e.g. ``result, fixture.stdout`` → {result, fixture, stdout}. Used to confirm
+    the helper body references something derived from the CALL's arguments, so a
+    constant-only helper does not slip through on a coincidental name.
+    """
+
+    return set(re.findall(r"[A-Za-z_$][\w$]*", args or ""))
+
+
+# ── TypeScript / JavaScript resolution ──────────────────────────────────────
+
+#: Named import binding the helper symbol: ``import { a, b as c } from "./x"``.
+_TS_IMPORT_NAMED_RE = re.compile(
+    r"""\bimport\b[^;{]*\{(?P<names>[^}]*)\}\s*from\s*['"](?P<spec>[^'"]+)['"]""",
+    re.MULTILINE,
+)
+_TS_SOURCE_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+
+
+def _ts_imported_specifier(importer_text: str, symbol: str) -> str | None:
+    """The module specifier that imports ``symbol`` into the importing file."""
+
+    for match in _TS_IMPORT_NAMED_RE.finditer(importer_text):
+        for raw in match.group("names").split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            # ``orig as alias`` — the LOCAL binding is the alias (after ``as``).
+            local = name.split(" as ")[-1].strip()
+            if local == symbol:
+                return match.group("spec")
+    return None
+
+
+def _ts_resolve_specifier(importer_rel: str, spec: str, project_root: Path) -> Path | None:
+    """Resolve a relative TS specifier to a real sibling file (NodeNext-aware)."""
+
+    if not spec.startswith("."):
+        return None  # bare/package specifier — outside the 1-hop same-repo graph.
+    base = (project_root / importer_rel).resolve().parent
+    raw = (base / spec).resolve()
+    for candidate in _ts_candidates(raw):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _ts_candidates(raw: Path) -> list[Path]:
+    candidates: list[Path] = []
+    if raw.suffix:
+        candidates.append(raw)
+        stem = raw.with_suffix("")
+        for ext in _TS_SOURCE_EXTS:
+            candidates.append(stem.with_suffix(ext))
+    else:
+        for ext in _TS_SOURCE_EXTS:
+            candidates.append(raw.with_suffix(ext))
+    for ext in _TS_SOURCE_EXTS:
+        candidates.append(raw / f"index{ext}")
+    return candidates
+
+
+def _ts_find_function_def(module_text: str, name: str) -> "tuple[str, list[str]] | None":
+    """Find ``name``'s definition body + its parameter names in ``module_text``.
+
+    Returns ``(body_text, param_names)`` or ``None``. Anchored on the function
+    NAME, then the parameter list is read by paren-matching from the following
+    ``(`` (so a MULTI-LINE signature works), and the body is brace-matched from
+    the first ``{`` after the params. Arrow / function-expression / ``function``
+    declaration forms are all handled.
+    """
+
+    for pattern in _TS_FUNC_NAME_RES:
+        for m in pattern.finditer(module_text):
+            if m.group("name") != name:
+                continue
+            # The name-anchor match ends at the def's opening ``(``; paren-match
+            # the (possibly multi-line) params, then brace-match the body.
+            params, after = _read_paren_group(module_text, m.end() - 1)
+            if params is None:
+                continue
+            brace = module_text.find("{", after)
+            if brace < 0:
+                continue
+            body = _read_brace_group(module_text, brace)
+            return body, _split_params(params)
+    return None
+
+
+def _read_paren_group(text: str, open_idx: int) -> "tuple[str | None, int]":
+    """Inner text of the paren group whose ``(`` is at/just after ``open_idx``.
+
+    Returns ``(inner, index_after_close)`` or ``(None, open_idx)`` if unbalanced.
+    Tolerates nesting and string literals (so a typed param like
+    ``reasons: readonly string[]`` or a default ``= "x"`` is preserved).
+    """
+
+    i = text.find("(", open_idx)
+    if i < 0:
+        return None, open_idx
+    depth = 0
+    in_str: str | None = None
+    prev = ""
+    start = i + 1
+    j = i
+    n = len(text)
+    while j < n:
+        ch = text[j]
+        if in_str is not None:
+            if ch == in_str and prev != "\\":
+                in_str = None
+        elif ch in ("'", '"', "`"):
+            in_str = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:j], j + 1
+        prev = ch
+        j += 1
+    return None, open_idx
+
+
+def _read_brace_group(text: str, open_brace_idx: int) -> str:
+    """The full ``{ ... }`` block starting at ``open_brace_idx`` (best-effort)."""
+
+    depth = 0
+    in_str: str | None = None
+    prev = ""
+    j = open_brace_idx
+    n = len(text)
+    while j < n:
+        ch = text[j]
+        if in_str is not None:
+            if ch == in_str and prev != "\\":
+                in_str = None
+        elif ch in ("'", '"', "`"):
+            in_str = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_brace_idx : j + 1]
+        prev = ch
+        j += 1
+    return text[open_brace_idx:]
+
+
+# ── Python resolution ───────────────────────────────────────────────────────
+
+#: ``from pkg.mod import a, b as c`` / ``from .mod import x``.
+_PY_FROM_IMPORT_RE = re.compile(
+    r"^[ \t]*from\s+(?P<mod>[.\w]+)\s+import\s+(?P<names>[^\n#]+)", re.MULTILINE
+)
+
+
+def _py_imported_module(importer_text: str, symbol: str) -> str | None:
+    """The module path a ``from <mod> import <symbol>`` binds ``symbol`` from."""
+
+    for match in _PY_FROM_IMPORT_RE.finditer(importer_text):
+        names = match.group("names")
+        for raw in names.replace("(", " ").replace(")", " ").split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            local = name.split(" as ")[-1].strip()
+            if local == symbol:
+                return match.group("mod")
+    return None
+
+
+def _py_resolve_module(importer_rel: str, mod: str, project_root: Path) -> Path | None:
+    """Resolve a python ``from <mod> import`` module to a sibling file (1 hop).
+
+    Handles an explicit-relative ``from .mod`` / ``from ..pkg.mod`` against the
+    importer's directory, and an absolute dotted ``a.b.c`` against the project
+    root. Returns the module file (or its ``__init__.py``) if it exists.
+    """
+
+    importer_dir = (project_root / importer_rel).resolve().parent
+    if mod.startswith("."):
+        dots = len(mod) - len(mod.lstrip("."))
+        rest = mod[dots:]
+        base = importer_dir
+        for _ in range(dots - 1):
+            base = base.parent
+        rel_parts = rest.split(".") if rest else []
+    else:
+        base = project_root
+        rel_parts = mod.split(".")
+    target = base
+    for part in rel_parts:
+        target = target / part
+    for candidate in (target.with_suffix(".py"), target / "__init__.py"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _py_find_function_def(module_text: str, name: str) -> "tuple[str, list[str]] | None":
+    """Find python ``def name(...)``'s body + parameter names in ``module_text``."""
+
+    lines = module_text.splitlines()
+    total = len(lines)
+    for idx, line in enumerate(lines):
+        m = _PY_DEF_RE.match(line)
+        if not m or m.group("name") != name:
+            continue
+        params = _split_params(m.group("params"))
+        indent = len(m.group("indent").expandtabs())
+        end = idx + 1
+        scan = idx + 1
+        while scan < total:
+            raw = lines[scan]
+            stripped = raw.strip()
+            if stripped:
+                cur = len(raw[: len(raw) - len(raw.lstrip())].expandtabs())
+                if cur <= indent:
+                    break
+            end = scan + 1
+            scan += 1
+        body = "\n".join(lines[idx:end])
+        return body, params
+    return None
+
+
+# ── shared parameter handling ────────────────────────────────────────────────
+
+
+def _split_params(params: str) -> list[str]:
+    """Parameter NAMES from a (possibly typed/defaulted) parameter list.
+
+    ``result: CliRunResult, expected = ""`` → [result, expected];
+    ``self, result, stdout`` → [result, stdout] (``self``/``cls`` dropped).
+    """
+
+    out: list[str] = []
+    depth = 0
+    current = ""
+    for ch in params:
+        if ch in "[({<":
+            depth += 1
+            current += ch
+        elif ch in "])}>":
+            depth = max(0, depth - 1)
+            current += ch
+        elif ch == "," and depth == 0:
+            out.append(current)
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        out.append(current)
+    names: list[str] = []
+    for raw in out:
+        token = raw.strip()
+        if not token or token in ("self", "cls"):
+            continue
+        token = token.lstrip("*")  # *args / **kwargs / ...rest
+        # strip default / type annotation
+        token = re.split(r"[:=]", token, maxsplit=1)[0].strip()
+        token = token.strip("{}[] ")  # destructured param surface
+        name = re.match(r"^[A-Za-z_$][\w$]*", token)
+        if name:
+            names.append(name.group(0))
+    return names
+
+
+# ── language-agnostic evidence orchestrators (one per profile) ──────────────
+
+
+def _resolve_evidence(
+    block: TestBlock,
+    *,
+    importer_text: str,
+    importer_rel: str,
+    project_root: Path,
+    primitive_re: re.Pattern[str],
+    imported_lookup: Callable[[str, str], str | None],
+    module_resolver: Callable[[str, str, Path], Path | None],
+    def_finder: Callable[[str, str], "tuple[str, list[str]] | None"],
+) -> AssertionEvidence:
+    """Shared 1-hop helper-resolution engine (language plug-ins supply the rest).
+
+    ``primitive_re`` detects a primitive assertion/fail in a helper body;
+    ``imported_lookup(importer_text, symbol)`` returns the binding specifier/module;
+    ``module_resolver(importer_rel, spec, root)`` resolves it to a file;
+    ``def_finder(module_text, name)`` returns ``(body, params)`` for the helper.
+    """
+
+    calls = _extract_helper_calls(block.body_text)
+    if not calls:
+        return AssertionEvidence(ok=False, reason="no_assertion")
+
+    saw_unresolved = False
+    saw_no_primitive = False
+    saw_constant = False
+    last_helper = ""
+    for name, _args in calls:
+        last_helper = name
+        verdict = _resolve_one_helper(
+            name=name,
+            importer_text=importer_text,
+            importer_rel=importer_rel,
+            project_root=project_root,
+            primitive_re=primitive_re,
+            imported_lookup=imported_lookup,
+            module_resolver=module_resolver,
+            def_finder=def_finder,
+            hops=_MAX_HELPER_HOPS,
+            seen=frozenset(),
+        )
+        if verdict.ok:
+            return verdict
+        if verdict.reason == "unresolved_helper":
+            saw_unresolved = True
+        elif verdict.reason == "helper_no_primitive":
+            saw_no_primitive = True
+        elif verdict.reason == "constant_helper":
+            saw_constant = True
+    # No call produced evidence — report the most informative reason.
+    if saw_no_primitive:
+        return AssertionEvidence(ok=False, reason="helper_no_primitive", detail=last_helper)
+    if saw_constant:
+        return AssertionEvidence(ok=False, reason="constant_helper", detail=last_helper)
+    if saw_unresolved:
+        return AssertionEvidence(ok=False, reason="unresolved_helper", detail=last_helper)
+    return AssertionEvidence(ok=False, reason="no_assertion")
+
+
+def _resolve_one_helper(
+    *,
+    name: str,
+    importer_text: str,
+    importer_rel: str,
+    project_root: Path,
+    primitive_re: re.Pattern[str],
+    imported_lookup: Callable[[str, str], str | None],
+    module_resolver: Callable[[str, str, Path], Path | None],
+    def_finder: Callable[[str, str], "tuple[str, list[str]] | None"],
+    hops: int,
+    seen: frozenset[str],
+) -> AssertionEvidence:
+    """Resolve ONE assertion-like helper call to a credible body (≤``hops`` hops).
+
+    A helper passes when its body has a primitive assertion/fail that references
+    one of its parameters (the argument anchor). A helper whose body merely
+    delegates to a DEEPER assertion helper (forwarding its own params, checked via
+    ``inner_anchor & param_set`` below) is followed one more hop, so a chain like
+    ``expectSuccessfulRun → expectExitCode`` resolves.
+    """
+
+    if hops <= 0 or name in seen:
+        return AssertionEvidence(ok=False, reason="unresolved_helper", detail=name)
+    seen = seen | {name}
+
+    spec = imported_lookup(importer_text, name)
+    module_text = importer_text  # same-file helper is allowed (no import needed)
+    resolved_rel = importer_rel
+    if spec is not None:
+        module_file = module_resolver(importer_rel, spec, project_root)
+        if module_file is None:
+            return AssertionEvidence(ok=False, reason="unresolved_helper", detail=name)
+        try:
+            module_text = module_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return AssertionEvidence(ok=False, reason="unresolved_helper", detail=name)
+        try:
+            resolved_rel = module_file.resolve().relative_to(project_root).as_posix()
+        except ValueError:
+            resolved_rel = importer_rel
+
+    found = def_finder(module_text, name)
+    if found is None:
+        # Not defined in the binding module (and no same-file def) → unresolved.
+        return AssertionEvidence(ok=False, reason="unresolved_helper", detail=name)
+    body, params = found
+    param_set = set(params)
+
+    # Primitive assertion/fail in the helper body?
+    if primitive_re.search(body):
+        # Argument anchor (anti-no-op): a PRIMITIVE assertion LINE must reference
+        # one of the helper's own parameters. A helper that asserts only a
+        # constant (``expect(true).toBe(true)`` / ``assert True``) never does, so
+        # marker-spam delegating to it FAILS — the helper NAME is never trusted.
+        if _body_references_params(body, param_set, primitive_re):
+            return AssertionEvidence(ok=True, reason="helper_resolved", detail=name)
+        return AssertionEvidence(ok=False, reason="constant_helper", detail=name)
+
+    # No primitive here — does the body delegate to a DEEPER assertion helper,
+    # forwarding its own params? Follow one more hop.
+    for inner_name, inner_args in _extract_helper_calls(body):
+        inner_anchor = _arg_identifiers(inner_args)
+        if not (inner_anchor & param_set):
+            continue  # the inner call must carry THIS helper's data forward
+        deeper = _resolve_one_helper(
+            name=inner_name,
+            importer_text=module_text,
+            importer_rel=resolved_rel,
+            project_root=project_root,
+            primitive_re=primitive_re,
+            imported_lookup=imported_lookup,
+            module_resolver=module_resolver,
+            def_finder=def_finder,
+            hops=hops - 1,
+            seen=seen,
+        )
+        if deeper.ok:
+            return AssertionEvidence(ok=True, reason="helper_resolved", detail=name)
+    return AssertionEvidence(ok=False, reason="helper_no_primitive", detail=name)
+
+
+def _body_references_params(
+    body: str, param_set: set[str], primitive_re: re.Pattern[str]
+) -> bool:
+    """A primitive assertion in ``body`` references one of ``param_set``.
+
+    The "argument anchor": a primitive assertion must mention a parameter (or a
+    value derived from it), so a no-op helper that asserts only a CONSTANT
+    (``expect(true).toBe(true)`` / ``assert True``) and merely *names* a param
+    elsewhere is NOT anchored. The check is per primitive-assertion STATEMENT,
+    where a statement is the assertion line PLUS any following lines indented
+    MORE than it (its block) — so a context-manager assertion
+    (``with pytest.raises(...):\\n    fn()``) is anchored by the ``fn()`` call in
+    its block, while a trailing same-indent ``log(result)`` after a constant
+    ``expect(true)`` is not.
+    """
+
+    if not param_set:
+        return False
+    lines = body.splitlines()
+    total = len(lines)
+    for idx, line in enumerate(lines):
+        if not primitive_re.search(line):
+            continue
+        base_indent = len(line[: len(line) - len(line.lstrip())].expandtabs())
+        window = [line]
+        scan = idx + 1
+        while scan < total:
+            nxt = lines[scan]
+            if not nxt.strip():
+                scan += 1
+                continue
+            nxt_indent = len(nxt[: len(nxt) - len(nxt.lstrip())].expandtabs())
+            if nxt_indent <= base_indent:
+                break  # back to the assertion's own level — block ended.
+            window.append(nxt)
+            scan += 1
+        idents: set[str] = set()
+        for w in window:
+            idents |= set(re.findall(r"[A-Za-z_$][\w$]*", w))
+        if idents & param_set:
+            return True
+    return False
+
+
+def _resolve_typescript_evidence(
+    block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+) -> AssertionEvidence:
+    def _mod_resolver(rel: str, spec: str, root: Path) -> Path | None:
+        return _ts_resolve_specifier(rel, spec, root)
+
+    return _resolve_evidence(
+        block,
+        importer_text=importer_text,
+        importer_rel=importer_rel,
+        project_root=project_root,
+        primitive_re=_TS_PRIMITIVE_ASSERT_RE,
+        imported_lookup=_ts_imported_specifier,
+        module_resolver=_mod_resolver,
+        def_finder=_ts_find_function_def,
+    )
+
+
+def _resolve_python_evidence(
+    block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+) -> AssertionEvidence:
+    def _mod_resolver(rel: str, mod: str, root: Path) -> Path | None:
+        return _py_resolve_module(rel, mod, root)
+
+    return _resolve_evidence(
+        block,
+        importer_text=importer_text,
+        importer_rel=importer_rel,
+        project_root=project_root,
+        primitive_re=_PY_PRIMITIVE_ASSERT_RE,
+        imported_lookup=_py_imported_module,
+        module_resolver=_mod_resolver,
+        def_finder=_py_find_function_def,
+    )

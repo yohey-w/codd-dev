@@ -285,3 +285,358 @@ def test_existing_assert_true_marker_still_passes(tmp_path):
     )
     report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
     assert report.passed
+
+
+# ===========================================================================
+# Round-2 precision: assertion EVIDENCE graph (helper delegation, 1-hop) +
+# block-ized attachment. These guard the codex13 false-RED fix WITHOUT opening
+# a false-green hole (the gate is widened to follow helper bodies, never weakened
+# to pass on a helper NAME). See `/tmp/gpt_vb2_result.txt` (round-2 design).
+# ===========================================================================
+
+
+_E2E_ASSERTIONS_HELPER = (
+    "import { expect } from 'vitest';\n"
+    "import type { CliRunResult } from './cli.js';\n"
+    "export function expectExitCode(result: CliRunResult, exitCode: number): void {\n"
+    "  expect(result.exitCode).toBe(exitCode);\n"
+    "}\n"
+    "export function expectTrimmedStdout(result: CliRunResult, expected: string): void {\n"
+    "  expect(result.stdout.trim()).toBe(expected);\n"
+    "}\n"
+    "export function expectSuccessfulRun(result: CliRunResult, expectedStdout: string): void {\n"
+    "  expectExitCode(result, 0);\n"
+    "  expectTrimmedStdout(result, expectedStdout);\n"
+    "}\n"
+    "export function expectRejectedRun(\n"
+    "  result: CliRunResult,\n"
+    "  reasons: readonly string[],\n"
+    "  exitCode = 1\n"
+    "): void {\n"
+    "  expectExitCode(result, exitCode);\n"
+    "}\n"
+)
+
+
+def test_gate_passes_grouped_markers_with_helper_delegated_assertion(tmp_path):
+    """THE codex13 false-RED: 7 markers stacked above one `it()` whose body
+    delegates its assertion to an imported helper (`expectSuccessfulRun`, itself
+    delegating one hop to `expectExitCode` which runs a real `expect()` on its
+    argument). Every marker must attach (no fixed lookahead) AND the helper-body
+    assertion must count as evidence. This is the exact pattern that produced the
+    false-RED before round-2; it must now PASS."""
+    project = tmp_path
+    _canonical(
+        project,
+        "| VB-CONV-01 | a |\n| VB-CONV-02 | b |\n| VB-CONV-03 | c |\n"
+        "| VB-CONV-04 | d |\n| VB-CONV-05 | e |\n| VB-CONV-06 | f |\n| VB-CONV-07 | g |\n",
+    )
+    _write(project / "tests" / "e2e" / "helpers" / "assertions.ts", _E2E_ASSERTIONS_HELPER)
+    _write(
+        project / "tests" / "e2e" / "conv.e2e.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        "import { expectSuccessfulRun } from './helpers/assertions.js';\n"
+        "describe('conversions', () => {\n"
+        "  // codd: covers vb=VB-CONV-01\n"
+        "  // codd: covers vb=VB-CONV-02\n"
+        "  // codd: covers vb=VB-CONV-03\n"
+        "  // codd: covers vb=VB-CONV-04\n"
+        "  // codd: covers vb=VB-CONV-05\n"
+        "  // codd: covers vb=VB-CONV-06\n"
+        "  // codd: covers vb=VB-CONV-07\n"
+        "  it('runs the fixtures', async () => {\n"
+        "    const result = await runIt();\n"
+        "    expectSuccessfulRun(result, '212.00 F');\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+    assert report.degraded_paths == []
+
+
+def test_gate_passes_two_hop_rejected_run_helper(tmp_path):
+    """A helper whose body has NO direct primitive, only delegating to a deeper
+    assertion helper (expectRejectedRun -> expectExitCode), must still resolve as
+    evidence (1 extra hop)."""
+    project = tmp_path
+    _canonical(project, "| VB-REJ-01 | rejects |\n")
+    _write(project / "tests" / "e2e" / "helpers" / "assertions.ts", _E2E_ASSERTIONS_HELPER)
+    _write(
+        project / "tests" / "e2e" / "reject.e2e.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        "import { expectRejectedRun } from './helpers/assertions.js';\n"
+        "describe('rejects', () => {\n"
+        "  // codd: covers vb=VB-REJ-01\n"
+        "  it('rejects bad args', async () => {\n"
+        "    const result = await runIt();\n"
+        "    expectRejectedRun(result, ['usage']);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+
+
+def test_gate_fails_constant_only_helper_spam(tmp_path):
+    """ANTI-FALSE-GREEN: a no-op helper that asserts only a CONSTANT
+    (`expect(true).toBe(true)`, never referencing its argument) with markers
+    spammed on the calling test must FAIL — the helper NAME is not trusted, the
+    body's argument-anchor is."""
+    project = tmp_path
+    _canonical(project, "| VB-FAKE-01 | a |\n| VB-FAKE-02 | b |\n")
+    _write(
+        project / "tests" / "helpers" / "fake.ts",
+        "import { expect } from 'vitest';\n"
+        "export function expectSuccess(result: unknown): void {\n"
+        "  expect(true).toBe(true);\n"
+        "}\n",
+    )
+    _write(
+        project / "tests" / "fake.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        "import { expectSuccess } from './helpers/fake.js';\n"
+        "describe('fake', () => {\n"
+        "  // codd: covers vb=VB-FAKE-01\n"
+        "  // codd: covers vb=VB-FAKE-02\n"
+        "  it('pretends to test', () => {\n"
+        "    const result = run();\n"
+        "    expectSuccess(result);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    kinds = {(v.vb_id, v.kind) for v in report.violations}
+    assert ("VB-FAKE-01", "no_assertion") in kinds
+    assert ("VB-FAKE-02", "no_assertion") in kinds
+    assert any("CONSTANT" in v.message for v in report.violations)
+
+
+def test_gate_fails_unresolved_helper_greenfield_strict(tmp_path):
+    """ANTI-FALSE-GREEN: an assertion-like call whose helper cannot be resolved
+    (no import binds it / the module is absent) is NOT evidence in greenfield
+    strict — it must FAIL (design: 'unresolved helper = fail')."""
+    project = tmp_path
+    _canonical(project, "| VB-UNRES-01 | a |\n")
+    _write(
+        project / "tests" / "unres.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        "describe('unres', () => {\n"
+        "  // codd: covers vb=VB-UNRES-01\n"
+        "  it('calls a phantom helper', () => {\n"
+        "    const result = run();\n"
+        "    expectEverythingIsFine(result);\n"  # not imported, not defined anywhere
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-UNRES-01" for v in report.violations)
+    assert any("could not be resolved" in v.message for v in report.violations)
+
+
+def test_gate_fails_helper_with_no_primitive(tmp_path):
+    """ANTI-FALSE-GREEN: a resolvable helper whose body runs NO primitive
+    assertion at all (it just logs / does work) is not evidence — FAIL."""
+    project = tmp_path
+    _canonical(project, "| VB-NOOP-01 | a |\n")
+    _write(
+        project / "tests" / "helpers" / "noop.ts",
+        "export function checkResult(result: unknown): void {\n"
+        "  console.log(result);\n"  # no assertion, no fail
+        "}\n",
+    )
+    _write(
+        project / "tests" / "noop.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        "import { checkResult } from './helpers/noop.js';\n"
+        "describe('noop', () => {\n"
+        "  // codd: covers vb=VB-NOOP-01\n"
+        "  it('checks nothing', () => {\n"
+        "    const result = run();\n"
+        "    checkResult(result);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-NOOP-01" for v in report.violations)
+
+
+def test_gate_marker_block_not_attached_across_non_test_statement(tmp_path):
+    """ATTACHMENT: a contiguous marker block attaches to the NEXT test ONLY when
+    no real statement intervenes. A `const fixtures = ...` between the markers and
+    the first test means the markers are a file-top banner → unattached (the
+    file-top marker must not ride an import/const into a later test)."""
+    project = tmp_path
+    _canonical(project, "| VB-TOP-01 | a |\n")
+    _write(
+        project / "tests" / "banner.test.ts",
+        "import { describe, it, expect } from 'vitest';\n"
+        "// codd: covers vb=VB-TOP-01\n"
+        "const fixtures = [1, 2, 3];\n"  # a real statement separates marker from test
+        "describe('later', () => {\n"
+        "  it('adds', () => { expect(add(1, 2)).toBe(3); });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "unattached" and v.vb_id == "VB-TOP-01" for v in report.violations)
+
+
+def test_gate_marker_block_attaches_over_comments_and_blanks(tmp_path):
+    """ATTACHMENT: marker + ordinary comments + blank lines above a test all
+    attach to it (no fixed line lookahead), even when far more than 3 lines."""
+    project = tmp_path
+    _canonical(project, "| VB-FAR-01 | a |\n")
+    _write(
+        project / "tests" / "far.test.ts",
+        "import { describe, it, expect } from 'vitest';\n"
+        "describe('far', () => {\n"
+        "  // codd: covers vb=VB-FAR-01\n"
+        "  // a long\n"
+        "  // explanatory\n"
+        "  // comment\n"
+        "  //\n"
+        "  // spanning many lines\n"
+        "  it('adds', () => { expect(add(1, 2)).toBe(3); });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+
+
+def test_gate_describe_marker_attaches_to_first_it_only(tmp_path):
+    """ATTACHMENT: a marker directly above a `describe` containing several `it`s
+    attaches to the FIRST `it` only (no group-level fan-out / false coverage).
+    The first `it` asserts, so the marker is authentic; the gate does not silently
+    spread one marker across every child."""
+    project = tmp_path
+    _canonical(project, "| VB-GRP-01 | a |\n")
+    _write(
+        project / "tests" / "grp.test.ts",
+        "import { describe, it, expect } from 'vitest';\n"
+        "// codd: covers vb=VB-GRP-01\n"
+        "describe('group', () => {\n"
+        "  it('first asserts', () => { expect(a()).toBe(1); });\n"
+        "  it('second asserts', () => { expect(b()).toBe(2); });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+
+
+def test_gate_describe_marker_first_it_empty_fails(tmp_path):
+    """ATTACHMENT corollary: if the marker-above-describe binds to the FIRST it
+    and that first it has no assertion, the gate FAILS (it attributes the marker
+    to the first child specifically, not to whichever child happens to assert)."""
+    project = tmp_path
+    _canonical(project, "| VB-GRP-02 | a |\n")
+    _write(
+        project / "tests" / "grp2.test.ts",
+        "import { describe, it, expect } from 'vitest';\n"
+        "// codd: covers vb=VB-GRP-02\n"
+        "describe('group', () => {\n"
+        "  it('first is empty', () => {});\n"
+        "  it('second asserts', () => { expect(b()).toBe(2); });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-GRP-02" for v in report.violations)
+
+
+# ── python parity for the evidence graph ────────────────────────────────────
+
+
+def test_gate_python_helper_delegation_passes(tmp_path):
+    """Python parity: a test that delegates its assertion to an imported helper
+    whose body asserts on its argument resolves as evidence."""
+    project = tmp_path
+    _canonical(project, "| VB-PY-01 | a |\n")
+    _write(
+        project / "tests" / "helpers" / "__init__.py",
+        "",
+    )
+    _write(
+        project / "tests" / "helpers" / "asserts.py",
+        "def expect_ok(result):\n    assert result.code == 0\n",
+    )
+    _write(
+        project / "tests" / "test_py_helper.py",
+        "from tests.helpers.asserts import expect_ok\n"
+        "# codd: covers vb=VB-PY-01\n"
+        "def test_runs():\n    result = run()\n    expect_ok(result)\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+
+
+def test_gate_python_constant_helper_fails(tmp_path):
+    """Python parity (anti-false-green): a helper that asserts only a constant
+    (never its argument) does not make a marker authentic."""
+    project = tmp_path
+    _canonical(project, "| VB-PY-02 | a |\n")
+    _write(project / "tests" / "helpers" / "__init__.py", "")
+    _write(
+        project / "tests" / "helpers" / "fake.py",
+        "def verify_ok(result):\n    assert True\n",
+    )
+    _write(
+        project / "tests" / "test_py_fake.py",
+        "from tests.helpers.fake import verify_ok\n"
+        "# codd: covers vb=VB-PY-02\n"
+        "def test_runs():\n    result = run()\n    verify_ok(result)\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-PY-02" for v in report.violations)
+
+
+def test_codex13_real_project_passes():
+    """End-to-end against the actual codex13 greenfield output (the source of the
+    false-RED). The whole project's `covers vb=` markers must be authentic: 0
+    violations, 0 degraded. Skips cleanly if the fixture project is absent."""
+    import os
+
+    root = Path("/home/tono/codd-greenfield-tempconv-codex13")
+    if not (root / "codd" / "codd.yaml").is_file():
+        import pytest
+
+        pytest.skip("codex13 fixture project not present")
+    from codd.config import load_project_config
+
+    config = load_project_config(root)
+    profile = LayoutProfile(
+        language="typescript",
+        package_name="tempconv",
+        source_root="src",
+        package_root="src",
+        test_root="tests",
+    )
+    report = build_authenticity_report(root, config=config, profile=profile)
+    assert report.passed, [v.message for v in report.violations]
+    assert report.degraded_paths == []
