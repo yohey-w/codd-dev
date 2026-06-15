@@ -88,6 +88,28 @@ def test_write_fence_ignores_node_modules(tmp_path: Path) -> None:
     assert (tmp_path / "node_modules/dep/index.js").exists(), "node_modules untouched by fence"
 
 
+def test_write_fence_rejects_invented_orphan_test_file(tmp_path: Path) -> None:
+    """ACG invariant (3): a scoped rerun may NOT create an unowned artifact.
+
+    The codex11 oscillation invented a CONTRACT-OUTSIDE e2e test file each scoped
+    rerun (a different unowned artifact that re-broke the typecheck). The fence is
+    the live enforcement of 'scoped rerun may not create unowned artifacts': the
+    invented orphan test outside the scope's allowed paths is reverted, so it can
+    never persist to re-poison the next attempt.
+    """
+    _write(tmp_path, "src/cli.ts", "export function run(): number { return 0; }\n")
+    msgs: list[str] = []
+    with _OracleWriteFence(tmp_path, allowed_paths=("src/cli.ts",), echo=msgs.append) as fence:
+        # The non-deterministic SUT 'reconciles' by inventing an unowned e2e test
+        # (the contract-outside artifact) instead of fixing the real import.
+        _write(tmp_path, "tests/e2e/invented-boundary.e2e.test.ts", "export const x = 1;\n")
+        fence.enforce()
+    assert not (tmp_path / "tests/e2e/invented-boundary.e2e.test.ts").exists(), (
+        "an invented unowned artifact during a scoped rerun must be reverted"
+    )
+    assert any("reverted" in m for m in msgs)
+
+
 # ═════════════════════════════════════════════════════════════
 # (2) Scope dispatch in _rerun_tasks_with_feedback
 # ═════════════════════════════════════════════════════════════

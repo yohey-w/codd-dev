@@ -75,14 +75,19 @@ from typing import Protocol
 __all__ = [
     "DiagnosticEdge",
     "OracleRerunScope",
+    "OrphanArtifact",
     "ScopeDecision",
     "ScopeEscalation",
     "StructuredDiagnostic",
     "StructuredDiagnosticSource",
     "TaskOutputIndex",
+    "find_orphan_artifacts",
     "build_path_owner_index",
+    "classify_signature_progress",
     "derive_oracle_rerun_scope",
     "diagnostic_signature",
+    "exporter_surface_for_diagnostics",
+    "extract_public_surface",
 ]
 
 
@@ -165,6 +170,27 @@ _TS_IMPORT_NAMES = re.compile(
 _TS_IMPORT_DEFAULT = re.compile(
     r"""\bimport\s+(?:type\s+)?(?P<name>[A-Za-z_$][\w$]*)\s*(?:,\s*\{[^}]*\}\s*)?from\s*['"](?P<spec>[^'"]+)['"]""",
 )
+
+# ── public-surface extraction (the "current export list" for contract feedback) ──
+#: ``export { a, b as c }`` (a named re-export clause) — captures the brace body so
+#: each exported (possibly aliased) name can be pulled. Covers ``export { x }`` and
+#: ``export { x } from "./y"`` (the EXPORTED name is the alias, after ``as``).
+_TS_EXPORT_NAMED_CLAUSE = re.compile(r"""\bexport\s+(?:type\s+)?\{(?P<names>[^}]*)\}""")
+#: ``export const X`` / ``export function X`` / ``export class X`` /
+#: ``export (abstract) class`` / ``export async function`` / ``export let|var`` /
+#: ``export interface|type|enum X`` — the DECLARED public symbol.
+_TS_EXPORT_DECL = re.compile(
+    r"""\bexport\s+(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?"""
+    r"""(?:const|let|var|function\*?|class|interface|type|enum|namespace)\s+"""
+    r"""(?P<name>[A-Za-z_$][\w$]*)""",
+)
+#: ``export default …`` — the default export (surfaced as the synthetic name
+#: ``default`` so the SUT sees the module HAS a default vs only named exports).
+_TS_EXPORT_DEFAULT = re.compile(r"""\bexport\s+default\b""")
+#: ``export * from "./y"`` — a star re-export; we cannot enumerate the names
+#: without following it, so we surface it verbatim as ``* from "./y"`` so the SUT
+#: knows the surface is wider than the literal names listed.
+_TS_EXPORT_STAR = re.compile(r"""\bexport\s+\*(?:\s+as\s+(?P<ns>[A-Za-z_$][\w$]*))?\s+from\s+['"](?P<spec>[^'"]+)['"]""")
 
 #: Extension/candidate order for resolving a TS specifier to a real file. The
 #: NodeNext ``.js`` specifier maps to a ``.ts`` source, so we swap extensions and
@@ -349,6 +375,79 @@ def diagnostic_signature(diagnostics: Iterable[StructuredDiagnostic]) -> tuple[t
             )
         )
     return tuple(sorted(set(sig)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Progress / oscillation classification (the escalation decision, set-based)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The previous loop-breaker escalated ONLY on ``signature == last_signature``
+# (exact equality). That mis-reads OSCILLATION as progress: a non-deterministic
+# SUT that, each scoped rerun, fixes some errors but INVENTS different new ones
+# (20 → 4 → 6 diagnostics, all different sets) is never equal twice, so the gate
+# stays at the same rung until the budget is spent — exactly the 2026-06-15
+# codex11 failure. The fix (GPT-5.5 Pro consult, 2026-06-15) classifies the SET
+# relation between consecutive signatures, not their equality:
+#
+#   strict_progress : curr ⊊ prev          → real shrink, same incoherence — STAY
+#   soft_progress   : |curr| < |prev| AND  → fewer, but some NEW signatures; could
+#                     few new signatures      be genuine progress OR slow drift —
+#                                             allow ONCE per rung, then escalate
+#   oscillation     : curr ⊄ prev AND       → not a shrink and not contained —
+#                     |curr| >= |prev|        the SUT is thrashing — ESCALATE NOW
+#   stuck           : curr == prev          → no movement at all — ESCALATE
+#   (cycle)         : curr seen before in   → an A↔B↔A loop — ESCALATE (auxiliary,
+#                     the bounded history     the relation tests above usually fire
+#                                             first; cap is small so this is a net)
+#
+# All set-based: ``set(curr) < set(prev)`` is strict-subset; counts are the
+# secondary signal (the GPT table's "count decrease is auxiliary, set is primary").
+PROGRESS_STRICT = "strict_progress"
+PROGRESS_SOFT = "soft_progress"
+PROGRESS_OSCILLATION = "oscillation"
+PROGRESS_STUCK = "stuck"
+PROGRESS_CYCLE = "cycle"
+
+#: A "soft progress" step may introduce at most this many NEW signature entries
+#: and still count as (tentative) progress rather than oscillation. Small on
+#: purpose: a shrink that swaps in MANY new errors is drift, not convergence.
+_SOFT_PROGRESS_MAX_NEW = 2
+
+
+def classify_signature_progress(
+    current: tuple,
+    previous: tuple | None,
+    *,
+    history: Sequence[tuple] = (),
+) -> str:
+    """Classify the SET relation between two diagnostic signatures.
+
+    Returns one of ``PROGRESS_STRICT`` / ``PROGRESS_SOFT`` / ``PROGRESS_OSCILLATION``
+    / ``PROGRESS_STUCK`` / ``PROGRESS_CYCLE``. ``previous is None`` (the first
+    rerun, nothing to compare) is treated as ``PROGRESS_STRICT`` (give the current
+    rung its turn). ``history`` is the bounded set of EARLIER signatures (excluding
+    ``previous``); a ``current`` that reappears there is a cycle.
+
+    The caller maps the result to an escalation decision: STRICT keeps the rung;
+    SOFT keeps it AT MOST once per rung; OSCILLATION/STUCK/CYCLE escalate.
+    """
+    cur = frozenset(current)
+    if previous is None:
+        return PROGRESS_STRICT
+    prev = frozenset(previous)
+    if cur == prev:
+        return PROGRESS_STUCK
+    if cur and cur < prev:
+        return PROGRESS_STRICT
+    # A cycle: this exact signature was seen earlier (an A↔B↔A loop). Auxiliary —
+    # checked before the soft/oscillation split so a smaller-but-recurring set is
+    # not mistaken for soft progress.
+    if any(cur == frozenset(h) for h in history):
+        return PROGRESS_CYCLE
+    new_signatures = cur - prev
+    if len(cur) < len(prev) and len(new_signatures) <= _SOFT_PROGRESS_MAX_NEW:
+        return PROGRESS_SOFT
+    return PROGRESS_OSCILLATION
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -630,6 +729,118 @@ def _follow_reexports(target_rel: str, symbol: str | None, project_root: Path, *
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Public-surface extraction (the EXPORTER's current interface, for contract feedback)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# WHY: an oracle failure feedback that only echoes the IMPORTER's error
+# ("./helpers has no exported member expectSuccess") makes the SUT GUESS what the
+# exporter actually offers — and a non-deterministic SUT guesses a DIFFERENT wrong
+# symbol each rerun (the 2026-06-15 codex11 oscillation: it invented
+# ``expectSuccess`` then a different shape then dropped the vitest import). Showing
+# the exporter's CURRENT public surface ("./helpers exports {runTempconv, projectRoot}")
+# turns "invent a plausible name" into "reconcile to one of THESE". This is the
+# load-bearing convergence lever (GPT-5.5 Pro consult, 2026-06-15: feedback 3a).
+#
+# LANGUAGE-AGNOSTIC: ``extract_public_surface`` dispatches on file extension to a
+# per-language extractor. TS has one (regex-level, mirroring the import parser);
+# an unknown language returns ``None`` (graceful degradation — the gate simply
+# omits the surface line and keeps the generic guidance, never crashes). A Go/Rust
+# port adds one extractor entry, never a core edit.
+
+
+def extract_public_surface(path: str, project_root: Path) -> list[str] | None:
+    """The current public export surface of ``path`` → a list of names, or ``None``.
+
+    ``None`` means "no extractor for this file kind" (graceful degradation — the
+    caller omits the surface from feedback rather than fabricating one). An empty
+    list means "extractor ran, the file exports NOTHING" (a meaningful signal: the
+    importer demands a symbol from a module with no exports at all). Names are the
+    EXPORTED identifiers (the alias after ``as`` for a renamed re-export), plus the
+    synthetic ``default`` for a default export and a verbatim ``* from "<spec>"``
+    for an un-enumerable star re-export.
+    """
+    suffix = PurePosixPath(path).suffix
+    if suffix in _TS_SOURCE_EXTS:
+        content = _read((project_root / path).resolve())
+        if content is None:
+            return None
+        return _ts_public_surface(content)
+    return None
+
+
+def _ts_public_surface(content: str) -> list[str]:
+    """Extract the exported names from TypeScript/JavaScript source (regex level).
+
+    Covers named-declaration exports (``export const/function/class/interface/
+    type/enum X``), named-clause exports (``export { a, b as c }`` incl.
+    ``export { x } from "./y"`` re-exports — the EXPORTED name is the alias),
+    ``export default`` (→ the synthetic name ``default``), and ``export * from
+    "./y"`` (→ ``* from "./y"``). Order-stable, de-duplicated.
+    """
+    names: list[str] = []
+    for m in _TS_EXPORT_DECL.finditer(content):
+        names.append(m.group("name"))
+    for m in _TS_EXPORT_NAMED_CLAUSE.finditer(content):
+        for raw in m.group("names").split(","):
+            part = raw.strip()
+            if not part:
+                continue
+            # ``a as b`` exports ``b``; ``a`` exports ``a``. Strip a type-only
+            # keyword prefix (``type X``) that some clauses carry per-name.
+            exported = part.split(" as ")[-1].strip()
+            exported = exported.removeprefix("type ").strip()
+            if exported:
+                names.append(exported)
+    if _TS_EXPORT_DEFAULT.search(content):
+        names.append("default")
+    for m in _TS_EXPORT_STAR.finditer(content):
+        ns = m.group("ns")
+        spec = m.group("spec")
+        names.append(f"{ns} (* as) from \"{spec}\"" if ns else f"* from \"{spec}\"")
+    return list(dict.fromkeys(names))
+
+
+def exporter_surface_for_diagnostics(
+    diagnostics: Sequence[StructuredDiagnostic],
+    project_root: Path,
+    *,
+    structured_source: StructuredDiagnosticSource | None = None,
+) -> dict[str, list[str]]:
+    """Map each diagnostic's EXPORTER path → its current public surface.
+
+    For every missing-export / cannot-find-module / import-derived-name
+    diagnostic, resolve the exporter end of the broken edge (the same resolution
+    the scope derivation uses — :func:`_edge_for_diagnostic`) and extract that
+    file's current public surface. Returns ``{exporter_rel_path: [export names]}``;
+    a path whose extractor returns ``None`` (unknown language) is omitted. This is
+    the data the gate folds into the SUT-facing feedback so the SUT reconciles its
+    imports to the REAL surface instead of re-guessing (and re-oscillating).
+
+    Pure + best-effort: any per-diagnostic failure is skipped (a partial surface
+    map is still useful; never abort feedback assembly).
+    """
+    del structured_source  # reserved: a layer-1 source could supply surfaces directly
+    surfaces: dict[str, list[str]] = {}
+    for d in diagnostics:
+        try:
+            edge = _edge_for_diagnostic(d, project_root)
+        except Exception:  # noqa: BLE001 — one bad diagnostic must not kill the map.
+            continue
+        if edge is None:
+            continue
+        # The counterparts are the exporter candidate(s); the importer is the
+        # error site (its own surface is rarely the fix target, so we skip it).
+        for candidate in edge.counterparts:
+            norm = _norm(candidate)
+            if not norm or norm in surfaces:
+                continue
+            surface = extract_public_surface(norm, project_root)
+            if surface is not None:
+                surfaces[norm] = surface
+    return surfaces
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Specifier resolution (relative + tsconfig baseUrl/paths)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -806,6 +1017,72 @@ def build_path_owner_index(
     return TaskOutputIndex(
         exact=exact, dirs=tuple(dirs_sorted), all_task_ids=tuple(dict.fromkeys(all_ids))
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orphan artifact invariant (ACG: every generated artifact must have an owner)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# THE INVARIANT (GPT-5.5 Pro consult, 2026-06-15 — a natural ACG implication):
+#   1. Every generated artifact is owned by exactly one task (or an explicit
+#      harness/profile contract).
+#   2. Every public demand edge resolves to an owned supplier or is removed.
+#   3. A scoped rerun may not create an unowned artifact.
+#
+# (3) is enforced LIVE by the write-fence (out-of-scope creates are reverted) +
+# the targeted-edit feedback. (1)+(2) are checked here as a GLOBAL gate AFTER
+# implement: an orphan artifact (a generated source file no task owns) is a file
+# whose repair scope, responsibility, and write-fence are all undecidable — it sits
+# OUTSIDE the contract graph, so the SUT can keep mutating it invisibly (the
+# 2026-06-15 codex11 invented an unowned e2e test that re-broke each rerun).
+#
+# ROLLOUT SAFETY: the global gate defaults to WARN (observe + report, never block)
+# because attributing every file to a task is heuristic — a legitimate scaffold or
+# config file can read as an orphan. ``adopt-or-reject`` (directory ownership in
+# ``build_path_owner_index`` ADOPTS a helper a task wrote under its own output dir;
+# the fence REJECTS an out-of-scope create) keeps legitimate helpers owned, so the
+# warn list should be small. ``enforce`` is opt-in for projects that want the hard
+# invariant. Language-agnostic: the artifact set is the same tracked-source walk the
+# fence/fan-out use; no per-language logic here.
+
+
+@dataclass(frozen=True)
+class OrphanArtifact:
+    """A generated source artifact with no owning task (the invariant breach)."""
+
+    path: str
+    #: why it is flagged (for the warn/enforce message)
+    reason: str = "no owning task"
+
+
+def find_orphan_artifacts(
+    index: TaskOutputIndex,
+    project_root: Path,
+    *,
+    extra_owned: Iterable[str] = (),
+) -> list[OrphanArtifact]:
+    """Find generated source files under ``project_root`` that no task owns.
+
+    A file is an orphan when :meth:`TaskOutputIndex.owner_for` returns ``None`` for
+    it AND it is not in ``extra_owned`` (the harness/profile contract escape hatch:
+    manifests, scaffolded config, entrypoints a profile owns implicitly). Only
+    tracked SOURCE files (``_TS_SOURCE_EXTS``) under the project are considered;
+    vendored/build/VCS dirs are skipped. Pure + best-effort: an unreadable tree
+    yields an empty list (warn mode must never crash the gate).
+
+    This is the OBSERVATION primitive; the gate decides warn-vs-enforce. It is
+    deliberately conservative (source files only, owner-or-extra) so the default
+    WARN list stays signal, not noise.
+    """
+    owned_extra = {_norm(p) for p in extra_owned if _norm(p)}
+    orphans: list[OrphanArtifact] = []
+    for source_file in _iter_project_source_files(project_root):
+        rel = _to_relative(source_file, project_root)
+        if not rel or rel in owned_extra:
+            continue
+        if index.owner_for(rel) is None:
+            orphans.append(OrphanArtifact(path=rel))
+    return orphans
 
 
 # ─────────────────────────────────────────────────────────────────────────────

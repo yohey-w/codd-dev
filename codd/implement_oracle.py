@@ -94,6 +94,7 @@ __all__ = [
     "ImplementOracleResult",
     "OracleRerunCallback",
     "OracleScopeError",
+    "build_contract_feedback",
     "certify_oracle_scope",
     "normalize_oracle_output",
     "resolve_implement_oracle",
@@ -204,6 +205,11 @@ class ImplementOracleResult:
     #: evidence) because scope derivation needs the per-diagnostic counterpart
     #: keys, not the language-neutral category. See ``codd.implement_oracle_scope``.
     diagnostics: list[Any] = field(default_factory=list)
+    #: Orphan artifacts (generated source files no task owns) found by the global
+    #: orphan-artifact gate. Populated in WARN mode (observation; the gate does not
+    #: fail) and ENFORCE mode (the gate fails). Empty when the gate is off / no
+    #: scope index / no orphans. Project-relative paths, for the report + dashboard.
+    orphan_artifacts: list[str] = field(default_factory=list)
 
     def category_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -236,8 +242,21 @@ class ImplementOracleResult:
             "Ensure: (a) every `import { X } from \"./mod.js\"` imports a name `X` "
             "that `mod` actually `export`s; (b) test/helper files agree on the names "
             "they share (e.g. do not import `repoRoot` when the helper exports "
-            "`projectRoot`); (c) every imported module path resolves. Regenerate the "
-            "affected files so the whole project typechecks."
+            "`projectRoot`); (c) every imported module path resolves."
+        )
+        # (iii) Contract discipline — the anti-oscillation rule. A non-deterministic
+        # SUT, told only "symbol X is missing", tends to INVENT a new symbol/file
+        # each rerun (a different wrong guess every time → the diagnostics oscillate
+        # instead of converging). Forbid invention explicitly: reconcile to what
+        # ALREADY exists; a genuinely shared symbol goes in an OWNED module, not a
+        # newly-conjured file. (GPT-5.5 Pro consult, 2026-06-15: feedback iii.)
+        lines.append(
+            "Do NOT invent new symbols, helpers, or files to satisfy an import: "
+            "reconcile the import to a symbol the target module ALREADY exports (or "
+            "delete the import/usage if it is spurious). If two files must share a "
+            "symbol, add it to one OWNED module and import it — never duplicate it or "
+            "create an unowned shared file. Make the SMALLEST change that restores "
+            "coherence; do not rewrite unrelated code."
         )
         return "\n".join(lines)
 
@@ -246,10 +265,20 @@ class ImplementOracleResult:
 _FEEDBACK_FINDING_CAP = 12
 
 #: Total implement-oracle attempts: one initial check + bounded corrective
-#: retries. Default 3 (initial + 2). Bounded on purpose — a genuinely uncurable
-#: incoherence still fails honestly (nothing is silently accepted). Mirrors the
-#: implement syntax-gate's ``DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS`` discipline.
-DEFAULT_ORACLE_MAX_ATTEMPTS = 3
+#: retries, sized to the ESCALATION LADDER so every rung can actually be reached
+#: before the budget is spent. Default 5 = initial(1) + narrow(≤2) + expanded(1)
+#: + broad(1). A flat cap of 3 (the previous default) could not run all three
+#: rungs once — it died on ``narrow`` (initial + 2 reruns), so an oscillating SUT
+#: that needed ``expanded``/``broad`` never got there (2026-06-15 codex11 dogfood:
+#: 20→4→6 oscillation forced the gate to give up at cap=3 while still narrow).
+#: The second ``narrow`` attempt is only spent when progress is being made (see
+#: the progress/oscillation escalation in ``run_implement_oracle_gate``);
+#: oscillation escalates immediately, so the budget is not wasted thrashing one
+#: rung. Bounded on purpose — a genuinely uncurable incoherence still fails
+#: honestly (nothing is silently accepted). Override via
+#: ``implement.oracle_max_attempts``. Mirrors the implement syntax-gate's
+#: ``DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS`` discipline.
+DEFAULT_ORACLE_MAX_ATTEMPTS = 5
 
 
 def _oracle_max_attempts(config: Mapping[str, Any] | None) -> int:
@@ -277,6 +306,32 @@ def _oracle_opt_out(config: Mapping[str, Any] | None) -> bool:
     return False
 
 
+#: Orphan-artifact gate modes. ``warn`` (default) observes + reports orphans but
+#: never blocks; ``enforce`` makes an orphan a hard stage failure; ``off`` disables
+#: the check. Conservative default because the check is heuristic (see
+#: ``find_orphan_artifacts``) — a large behaviour change starts as warn.
+_ORPHAN_GATE_MODES = ("off", "warn", "enforce")
+DEFAULT_ORPHAN_ARTIFACT_GATE = "warn"
+
+
+def _orphan_artifact_gate_mode(config: Mapping[str, Any] | None) -> str:
+    """``implement.orphan_artifact_gate`` → ``off`` | ``warn`` | ``enforce``.
+
+    Default ``warn`` (observe + report, never block). An unrecognized value falls
+    back to the default rather than erroring — the gate must never be the thing
+    that breaks a build over a config typo.
+    """
+    section = (config or {}).get("implement") if isinstance(config, Mapping) else None
+    if isinstance(section, Mapping) and "orphan_artifact_gate" in section:
+        raw = section["orphan_artifact_gate"]
+        if isinstance(raw, bool):  # tolerate a bool: True→enforce, False→off
+            return "enforce" if raw else "off"
+        value = str(raw).strip().lower()
+        if value in _ORPHAN_GATE_MODES:
+            return value
+    return DEFAULT_ORPHAN_ARTIFACT_GATE
+
+
 def _oracle_timeout_seconds(config: Mapping[str, Any] | None) -> float:
     """Bounded wall-clock for the oracle command (``implement.oracle_timeout_seconds``)."""
     section = (config or {}).get("implement") if isinstance(config, Mapping) else None
@@ -298,6 +353,132 @@ DEFAULT_ORACLE_TIMEOUT_SECONDS = 600.0
 #: Install can pull a tree on a cold cache. Bounded; the verify preflight uses the
 #: same magnitude (see ``verify_runner.DEFAULT_INSTALL_TIMEOUT_SECONDS``).
 DEFAULT_ORACLE_INSTALL_TIMEOUT_SECONDS = 900.0
+
+
+# ── contract-aware feedback (exporter surface + targeted-edit directives) ──
+#
+# The base ``ImplementOracleResult.feedback_message()`` is contract-aware in
+# vocabulary (it names the broken edge + the no-invent rule) but cannot see the
+# EXPORTER's current interface or the rerun's allowed paths — those need
+# ``project_root`` + the derived scope, which only the gate holds. This builder
+# folds three convergence levers onto the base message at call time:
+#
+#   (1) EXPORTER SURFACE  — for each broken edge, the target module's CURRENT
+#       public exports ("./cli exports {run}"). Turns "invent a name for the
+#       missing symbol" into "reconcile to one of THESE". The #1 anti-oscillation
+#       lever (GPT-5.5 Pro consult, 2026-06-15: feedback 3a).
+#   (2) TARGETED-EDIT     — on a SCOPED (narrow/expanded) rerun, the explicit
+#       "edit only these files, minimal diff, do not create new files/symbols"
+#       directive + the allowed-paths fence list. This is what makes a scoped
+#       rerun a localized RECONCILE instead of a full re-sample (change 2). Broad
+#       reruns omit it (broad legitimately regenerates).
+#   (3) it is purely ADDITIVE — a stack with no surface extractor (unknown
+#       language) and no scope still gets the full base message, unchanged.
+#
+# Language-agnostic: the surface extraction lives behind
+# ``implement_oracle_scope.extract_public_surface`` (per-language; TS today,
+# graceful ``None`` otherwise). No TS-specific text appears here.
+
+#: Cap on exporter-surface entries listed in feedback (bounded prompt).
+_FEEDBACK_SURFACE_CAP = 12
+#: Cap on individual export names shown per module (a barrel can export hundreds).
+_FEEDBACK_SURFACE_NAMES_CAP = 40
+
+
+def build_contract_feedback(
+    result: ImplementOracleResult,
+    *,
+    project_root: Path,
+    scope: Any = None,
+) -> str:
+    """The SUT-facing feedback for a rerun: base message + surface + edit directives.
+
+    Always includes ``result.feedback_message()`` (the contract + no-invent rule).
+    Appends the EXPORTER SURFACE block when an extractor can recover any broken
+    edge's target exports, and — when ``scope`` is a NON-broad (scoped) rerun — the
+    TARGETED-EDIT block (minimal-diff directive + the allowed-paths write-fence).
+    Best-effort: any enrichment failure degrades to the base message (never raises).
+    """
+    base = result.feedback_message()
+    blocks: list[str] = [base]
+
+    # (1) Exporter surface — the current public interface of each broken edge's
+    # target module, so the SUT reconciles to a REAL symbol instead of guessing.
+    surface_block = _exporter_surface_block(result, project_root)
+    if surface_block:
+        blocks.append(surface_block)
+
+    # (2) Targeted-edit directive — only for a SCOPED rerun (narrow/expanded). A
+    # broad rerun (scope None / is_broad) legitimately regenerates everything, so
+    # it gets no minimal-diff fence.
+    scoped = scope is not None and not bool(getattr(scope, "is_broad", lambda: True)())
+    if scoped:
+        edit_block = _targeted_edit_block(scope)
+        if edit_block:
+            blocks.append(edit_block)
+
+    return "\n\n".join(blocks)
+
+
+def _exporter_surface_block(result: ImplementOracleResult, project_root: Path) -> str:
+    """The 'current public interface of the demanded module(s)' feedback block."""
+    if not result.diagnostics:
+        return ""
+    try:
+        from codd.implement_oracle_scope import exporter_surface_for_diagnostics
+
+        surfaces = exporter_surface_for_diagnostics(result.diagnostics, project_root)
+    except Exception:  # noqa: BLE001 — surface enrichment is best-effort.
+        return ""
+    if not surfaces:
+        return ""
+    lines = [
+        "CURRENT PUBLIC INTERFACE of the demanded module(s) — reconcile your "
+        "imports to these EXACT exports (do not invent members not listed):",
+    ]
+    for path, names in list(surfaces.items())[:_FEEDBACK_SURFACE_CAP]:
+        if names:
+            shown = names[:_FEEDBACK_SURFACE_NAMES_CAP]
+            more = len(names) - len(shown)
+            suffix = f", … (+{more} more)" if more > 0 else ""
+            lines.append(f"  - `{path}` exports: {{{', '.join(shown)}}}{suffix}")
+        else:
+            lines.append(
+                f"  - `{path}` exports NOTHING — the module has no public exports, so "
+                f"importing any named symbol from it is wrong (add the export to it, "
+                f"or import from the correct module)."
+            )
+    extra = len(surfaces) - _FEEDBACK_SURFACE_CAP
+    if extra > 0:
+        lines.append(f"  ... and {extra} more module(s).")
+    return "\n".join(lines)
+
+
+def _targeted_edit_block(scope: Any) -> str:
+    """The minimal-diff + write-fence feedback block for a SCOPED rerun.
+
+    Tells the SUT to RECONCILE the named files with the smallest possible change
+    and forbids creating files outside the scope — the prompt-side half of the
+    write-fence (the pipeline enforces the fence by reverting out-of-scope writes).
+    """
+    allowed = tuple(getattr(scope, "allowed_paths", ()) or ())
+    rung = getattr(scope, "rung", "scoped")
+    lines = [
+        f"TARGETED EDIT ({rung} scope): this is a LOCALIZED repair, not a "
+        "regeneration. Make the SMALLEST edit that makes the typecheck pass — "
+        "reconcile the imports/exports between the files below. Do NOT regenerate "
+        "them from scratch, do NOT create new files, and do NOT add new public "
+        "symbols beyond what is needed to satisfy the existing imports.",
+    ]
+    if allowed:
+        shown = list(allowed)[:_FEEDBACK_SURFACE_CAP]
+        more = len(allowed) - len(shown)
+        suffix = f", … (+{more} more)" if more > 0 else ""
+        lines.append(
+            "You may ONLY create/modify these paths (anything else you write will "
+            f"be reverted): {', '.join(shown)}{suffix}."
+        )
+    return "\n".join(lines)
 
 
 # ── scope certification (anti-false-green: the oracle must SEE src + tests) ──
@@ -892,30 +1073,58 @@ def run_implement_oracle_gate(
     attempt = 1
     rung = _SCOPE_NARROW if scope_index is not None else _SCOPE_BROAD
     last_signature: tuple[Any, ...] | None = None
+    #: Bounded history of EARLIER signatures (before ``last_signature``) for cycle
+    #: detection. Small window — the cap is small, so a long cycle would exhaust the
+    #: budget before recurring; this catches the tight A↔B↔A loop.
+    signature_history: list[tuple[Any, ...]] = []
+    #: Rungs that have already spent their ONE soft-progress allowance. A rung gets
+    #: at most one "fewer-but-some-new" pass before soft progress also escalates —
+    #: this is the ``narrow 2nd attempt only while progressing`` budget.
+    soft_progress_used: set[str] = set()
     while not result.passed and result.executed and rerun is not None and attempt < max_attempts:
         # Only retry CURABLE incoherence — an environment/toolchain failure is not
         # something the SUT can fix in source, so do not burn retries on it.
         if _only_environment(result):
             break
 
-        # Loop-breaker: if the SAME diagnostic signature survived the previous
-        # scoped rerun, the scope was too small — escalate the ladder a rung
-        # (narrow → expanded → broad). Past broad with no progress → stop and
-        # fail honestly (the next loop guard / the final return handle it).
+        # Loop-breaker (progress/oscillation, set-based — NOT exact equality). The
+        # previous design escalated only when the signature was IDENTICAL twice,
+        # which mis-read oscillation (a SUT inventing different errors each rerun)
+        # as progress and stayed pinned at one rung until the budget drained. Now
+        # we classify the SET relation to the previous signature and escalate on
+        # oscillation/stuck/cycle, keep the rung on a strict shrink, and allow a
+        # "fewer-but-some-new" soft step AT MOST ONCE per rung. (See
+        # ``classify_signature_progress``.)
         signature = _diagnostic_signature(result)
-        if last_signature is not None and signature == last_signature and scope_index is not None:
-            escalated = _next_rung(rung)
-            if escalated is None:
-                echo(
-                    "[greenfield] implement-oracle: signature unchanged after broad rerun — "
-                    "stopping (honest failure)."
-                )
-                break
-            echo(
-                f"[greenfield] implement-oracle: signature unchanged after {rung} rerun — "
-                f"escalating scope to {escalated}."
+        if last_signature is not None and scope_index is not None:
+            verdict = _classify_progress(signature, last_signature, signature_history)
+            should_escalate, escalate_reason = _escalation_decision(
+                verdict, rung=rung, soft_progress_used=soft_progress_used
             )
-            rung = escalated
+            if should_escalate:
+                escalated = _next_rung(rung)
+                if escalated is None:
+                    echo(
+                        f"[greenfield] implement-oracle: {escalate_reason} at broad rerun — "
+                        "stopping (honest failure)."
+                    )
+                    break
+                echo(
+                    f"[greenfield] implement-oracle: {escalate_reason} after {rung} rerun — "
+                    f"escalating scope to {escalated}."
+                )
+                rung = escalated
+            else:
+                echo(
+                    f"[greenfield] implement-oracle: {verdict} at {rung} rerun — "
+                    f"keeping scope (the repair is converging)."
+                )
+        # Record history AFTER the comparison: ``last_signature`` rolls into the
+        # bounded window so a later run can detect a cycle back to it.
+        if last_signature is not None:
+            signature_history.append(last_signature)
+            if len(signature_history) > _SIGNATURE_HISTORY_WINDOW:
+                signature_history.pop(0)
         last_signature = signature
 
         # Derive the scope for this rung (broad when no index, or when the
@@ -941,7 +1150,8 @@ def run_implement_oracle_gate(
             f"(attempt {attempt}/{max_attempts - 1}, scope={scope_label}) — "
             f"categories {result.category_counts()}"
         )
-        _invoke_rerun(rerun, result.feedback_message(), scope)
+        feedback = build_contract_feedback(result, project_root=root, scope=scope)
+        _invoke_rerun(rerun, feedback, scope)
         attempt += 1
         result = _run_oracle_command(root, profile, spec, config)
 
@@ -952,6 +1162,92 @@ def run_implement_oracle_gate(
             f"[greenfield] implement-oracle: FAILED after {attempt} attempt(s) — "
             f"{result.detail}; categories {result.category_counts()}"
         )
+
+    # Global orphan-artifact gate (invariant 1+2): after the typecheck loop, check
+    # that every generated source artifact has an owning task. Default WARN
+    # (observe + record on the result, never block); ENFORCE turns an orphan into a
+    # failure. Only runs with a scope index (the owner map) and a real oracle.
+    result = _apply_orphan_artifact_gate(
+        result, project_root=root, scope_index=scope_index, manifest_paths=manifest_paths, config=config, echo=echo
+    )
+    return result
+
+
+def _apply_orphan_artifact_gate(
+    result: ImplementOracleResult,
+    *,
+    project_root: Path,
+    scope_index: Any,
+    manifest_paths: Any,
+    config: Mapping[str, Any] | None,
+    echo: Callable[[str], None],
+) -> ImplementOracleResult:
+    """Run the global orphan-artifact gate; return the (possibly failed) result.
+
+    NO-OP unless a ``scope_index`` exists (no owner map ⇒ nothing to check) and the
+    mode is not ``off``. WARN records the orphans on ``result.orphan_artifacts`` and
+    logs them. ENFORCE additionally flips a passing result to a HARD failure (an
+    orphan artifact is an out-of-contract file the SUT can mutate invisibly). The
+    manifest/profile-owned files are treated as legitimately owned (the contract
+    escape hatch). Best-effort: any failure to compute orphans is swallowed (the
+    gate must never crash a build it was only observing).
+    """
+    if scope_index is None:
+        return result
+    mode = _orphan_artifact_gate_mode(config)
+    if mode == "off":
+        return result
+    try:
+        from codd.implement_oracle_scope import find_orphan_artifacts
+
+        orphans = find_orphan_artifacts(
+            scope_index, project_root, extra_owned=tuple(manifest_paths or ())
+        )
+    except Exception as exc:  # noqa: BLE001 — observation must not break the build.
+        echo(f"[greenfield] implement-oracle: orphan-artifact gate skipped ({exc}).")
+        return result
+    if not orphans:
+        return result
+
+    paths = [o.path for o in orphans]
+    result.orphan_artifacts = paths
+    listing = ", ".join(paths[:_FEEDBACK_FINDING_CAP]) + (
+        f", … (+{len(paths) - _FEEDBACK_FINDING_CAP} more)" if len(paths) > _FEEDBACK_FINDING_CAP else ""
+    )
+    if mode == "enforce":
+        echo(
+            f"[greenfield] implement-oracle: orphan-artifact gate (enforce) FAILED — "
+            f"{len(paths)} generated artifact(s) own no task: {listing}. Every "
+            f"artifact must be owned by a task (or declared harness/profile contract)."
+        )
+        if result.passed:
+            # Flip an otherwise-clean result to a hard failure, carrying an honest
+            # environment_build finding so the caller's StageError explains why.
+            return ImplementOracleResult(
+                passed=False,
+                executed=result.executed,
+                command=result.command,
+                findings=[
+                    ImplementOracleFinding(
+                        category=EVIDENCE_ENVIRONMENT_BUILD,
+                        code="orphan_artifact",
+                        message=(
+                            f"{len(paths)} generated artifact(s) own no task: {listing}"
+                        ),
+                    )
+                ],
+                detail=f"orphan-artifact gate (enforce): {len(paths)} unowned artifact(s)",
+                raw_output=result.raw_output,
+                diagnostics=result.diagnostics,
+                orphan_artifacts=paths,
+            )
+        return result
+    # WARN (default): observe + report, never block.
+    echo(
+        f"[greenfield] implement-oracle: orphan-artifact gate (warn) — "
+        f"{len(paths)} generated artifact(s) own no task: {listing}. (Observation "
+        f"only; set implement.orphan_artifact_gate: enforce to make this a hard gate.)"
+    )
     return result
 
 
@@ -977,6 +1273,72 @@ def _diagnostic_signature(result: ImplementOracleResult) -> tuple[Any, ...]:
         return diagnostic_signature(result.diagnostics)
     except Exception:  # noqa: BLE001 — signature is a guard; a parse miss ⇒ no guard.
         return ()
+
+
+#: How many earlier signatures the cycle detector remembers. Small — the attempt
+#: budget is small, so only a TIGHT cycle (A↔B↔A) can recur within it; a longer
+#: cycle drains the budget first (and the oscillation test catches its steps).
+_SIGNATURE_HISTORY_WINDOW = 4
+
+
+def _classify_progress(
+    signature: tuple[Any, ...],
+    last_signature: tuple[Any, ...] | None,
+    history: list[tuple[Any, ...]],
+) -> str:
+    """Classify progress between signatures (delegates to the scope module).
+
+    Best-effort: a classification failure degrades to ``stuck`` (escalate) — the
+    safe default, never an infinite stay at one rung.
+    """
+    try:
+        from codd.implement_oracle_scope import classify_signature_progress
+
+        return classify_signature_progress(signature, last_signature, history=history)
+    except Exception:  # noqa: BLE001 — a classify miss must escalate, not loop.
+        from codd.implement_oracle_scope import PROGRESS_STUCK
+
+        return PROGRESS_STUCK
+
+
+def _escalation_decision(
+    verdict: str,
+    *,
+    rung: str,
+    soft_progress_used: set[str],
+) -> tuple[bool, str]:
+    """Map a progress verdict → ``(should_escalate, human_reason)``.
+
+    * strict progress → stay (the repair is shrinking the SAME incoherence).
+    * soft progress → stay ONCE per rung (record the allowance), then escalate.
+    * oscillation / stuck / cycle → escalate immediately.
+
+    The soft allowance is the ``narrow 2nd attempt only while making progress``
+    budget the cap (default 5) is sized for: one extra narrow shot when the SUT is
+    genuinely converging, but no thrashing.
+    """
+    from codd.implement_oracle_scope import (
+        PROGRESS_CYCLE,
+        PROGRESS_OSCILLATION,
+        PROGRESS_SOFT,
+        PROGRESS_STRICT,
+        PROGRESS_STUCK,
+    )
+
+    if verdict == PROGRESS_STRICT:
+        return False, "strict progress"
+    if verdict == PROGRESS_SOFT:
+        if rung in soft_progress_used:
+            return True, "soft progress already spent its one allowance"
+        soft_progress_used.add(rung)
+        return False, "soft progress (one allowance)"
+    if verdict == PROGRESS_OSCILLATION:
+        return True, "diagnostics oscillating (not a shrink)"
+    if verdict == PROGRESS_CYCLE:
+        return True, "diagnostic cycle detected"
+    # PROGRESS_STUCK or any unknown verdict → escalate (safe default).
+    del PROGRESS_STUCK  # named for clarity; the fallthrough covers it
+    return True, "signature unchanged"
 
 
 def _derive_scope_for_rung(

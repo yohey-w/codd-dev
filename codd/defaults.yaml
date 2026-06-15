@@ -156,12 +156,28 @@ implement:
   # re-opens the false-green window the gate closes). Greenfield-only.
   implement_oracle: true
   # Total implement-oracle attempts: one initial check + bounded corrective
-  # retries that re-run implementation with normalized oracle feedback. Default 3
-  # (initial + 2); minimum 1. NEVER unbounded -- a genuinely uncurable
+  # retries that re-run implementation with normalized oracle feedback. Default 5,
+  # sized to the escalation LADDER so every rung can be reached: initial(1) +
+  # narrow(<=2) + expanded(1) + broad(1). The 2nd narrow attempt is only spent
+  # while the repair is making progress (the loop classifies shrink vs
+  # oscillation); oscillation escalates immediately, so the budget is not wasted
+  # thrashing one rung. Minimum 1. NEVER unbounded -- a genuinely uncurable
   # incoherence still fails honestly (nothing is silently accepted). Only CURABLE
   # incoherence is retried; an environment/toolchain failure (failed dependency
   # install) is not handed to the SUT to "fix" in source.
-  oracle_max_attempts: 3
+  oracle_max_attempts: 5
+  # Orphan-artifact gate (off | warn | enforce). The implement-time oracle's
+  # invariant: every GENERATED source artifact must be owned by exactly one
+  # implement task (or a declared harness/profile contract). An orphan (a file no
+  # task owns) sits OUTSIDE the artifact-contract graph -- its repair scope and
+  # write-fence are undecidable, so a non-deterministic SUT can keep mutating it
+  # invisibly. 'warn' (default) observes + reports orphans after implement but
+  # never blocks (the check is heuristic; a large behaviour change rolls out as
+  # warn). 'enforce' makes an orphan a hard stage failure. 'off' disables it. A
+  # legitimate helper a task wrote under its OWN output directory is adopted (it
+  # is dir-owned), so the warn list should be small. Only active for stacks with
+  # a declared implement-time oracle + a derivable owner index.
+  orphan_artifact_gate: warn
   # Bounded wall-clock for ONE implement-oracle command run (seconds). tsc on a
   # fresh build is fast, but a cold first run can compile a large module graph.
   # Default 600.
