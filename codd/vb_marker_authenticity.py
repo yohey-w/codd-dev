@@ -1159,8 +1159,10 @@ def _ts_find_function_def(module_text: str, name: str) -> "tuple[str, list[str]]
     Returns ``(body_text, param_names)`` or ``None``. Anchored on the function
     NAME, then the parameter list is read by paren-matching from the following
     ``(`` (so a MULTI-LINE signature works), and the body is brace-matched from
-    the first ``{`` after the params. Arrow / function-expression / ``function``
-    declaration forms are all handled.
+    the function-body ``{`` AFTER any return-type annotation (so a brace-bearing
+    return type like ``Promise<{ error: string }>`` / ``: { ok: boolean }`` is not
+    mistaken for the body — see :func:`_ts_body_brace_index`). Arrow /
+    function-expression / ``function`` declaration forms are all handled.
     """
 
     for pattern in _TS_FUNC_NAME_RES:
@@ -1168,16 +1170,178 @@ def _ts_find_function_def(module_text: str, name: str) -> "tuple[str, list[str]]
             if m.group("name") != name:
                 continue
             # The name-anchor match ends at the def's opening ``(``; paren-match
-            # the (possibly multi-line) params, then brace-match the body.
+            # the (possibly multi-line) params, then locate the BODY ``{`` past
+            # any return-type annotation, then brace-match the body.
             params, after = _read_paren_group(module_text, m.end() - 1)
             if params is None:
                 continue
-            brace = module_text.find("{", after)
+            brace = _ts_body_brace_index(module_text, after)
             if brace < 0:
                 continue
             body = _read_brace_group(module_text, brace)
             return body, _split_params(params)
     return None
+
+
+def _ts_body_brace_index(text: str, after_params: int) -> int:
+    """Index of the FUNCTION-BODY ``{`` that follows a TS signature's params.
+
+    ``after_params`` is the index just past the params' closing ``)``. Between it
+    and the body there may be a RETURN-TYPE ANNOTATION (``): T {``) and/or an arrow
+    (``) => {``). The naive "first ``{`` after the params" is WRONG when the return
+    type itself contains braces — ``): Promise<{ error: string }> {`` (the noteapi
+    false-RED), ``): { ok: boolean } {`` (object-type literal), or
+    ``): Promise<Array<{ id: number }>> {`` — there the first ``{`` is part of the
+    TYPE, not the body. This skips the annotation and returns the body ``{``.
+
+    The decision uses the ``:`` (return-type marker) as the disambiguator:
+
+    * The first significant token after the params is ``{`` → the BODY (no return
+      type at all, e.g. ``function g(a) {``).
+    * It is ``=>`` → an arrow with NO return type; the body is the next top-level
+      ``{`` (an EXPRESSION-bodied arrow has no block ``{`` → return ``-1`` so the
+      caller degrades rather than mis-extract).
+    * It is ``:`` → a return-type annotation. Consume the type (skipping balanced
+      ``<> () [] {}`` groups so a generic / tuple / object-type literal inside the
+      type is never seen at top level), and stop at the top-level ``{`` (body) or
+      ``=>`` (typed arrow → body is its next ``{``). An object-type literal that is
+      the WHOLE return type (``: { ok: boolean } {``) is the first balanced
+      ``{...}`` right after ``:`` — it is skipped, and the body is the ``{`` after.
+
+    Returns ``-1`` when no body brace is found (unbalanced / expression arrow).
+
+    KNOWN LIMITATION (fails CLOSED, never false-green): a return type that is
+    itself a FUNCTION TYPE (``): (x) => { y: 1 } {``) is not disambiguated — the
+    inner ``=>`` is read as the function's own arrow. This degrades to a wrong
+    body span ⇒ ``helper_no_primitive`` ⇒ the marker FAILS (a conservative
+    false-RED, not a false pass). Such a return annotation on an assertion helper
+    is vanishingly rare; the gate stays anti-false-green either way.
+    """
+
+    n = len(text)
+    i = _ts_skip_trivia(text, after_params)
+    if i >= n:
+        return -1
+    # No return-type annotation: an immediate body brace, or a `=>` arrow.
+    if text[i] == "{":
+        return i
+    if text.startswith("=>", i):
+        j = _ts_skip_trivia(text, i + 2)
+        return j if j < n and text[j] == "{" else -1
+    if text[i] != ":":
+        # Unexpected token between params and body — be permissive: take the next
+        # top-level brace past it (covers exotic but brace-free prefixes).
+        return _ts_scan_type_to_body(text, i)
+    # `:` return-type annotation. Skip it and consume the type up to the body.
+    return _ts_scan_type_to_body(text, i + 1)
+
+
+def _ts_skip_trivia(text: str, i: int) -> int:
+    """Advance ``i`` past whitespace and ``//`` / ``/* */`` comments."""
+
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch.isspace():
+            i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl + 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+        else:
+            break
+    return i
+
+
+#: Type-level binary operators that JOIN type atoms (``A | B``, ``A & B``). After
+#: one of these the parser expects ANOTHER atom, so a following object-type literal
+#: ``{...}`` is still part of the return type, not the body.
+_TS_TYPE_JOIN_CHARS = frozenset("|&")
+
+
+def _ts_scan_type_to_body(text: str, i: int) -> int:
+    """From inside a return-type annotation, return the body ``{`` index (or -1).
+
+    Models the return type as a sequence of type ATOMS joined by ``|`` / ``&``
+    operators, ending at the body ``{`` or a typed-arrow ``=>``. ``expecting_atom``
+    starts True (the type begins right after ``:`` or a join operator); a top-level
+    ``{`` while ``expecting_atom`` is an OBJECT-TYPE LITERAL atom (``: { ok } {`` /
+    ``: A | { err } {``) and is skipped as a balanced group, whereas a top-level
+    ``{`` while NOT expecting an atom (a complete type already consumed, no join
+    operator following) is the BODY. Generics ``<…>``, tuples ``[…]`` and paren
+    types ``(…)`` are skipped as balanced groups (their inner braces never surface).
+    """
+
+    n = len(text)
+    angle = paren = bracket = 0
+    expecting_atom = True
+    in_str: str | None = None
+    prev = ""
+    while i < n:
+        ch = text[i]
+        if in_str is not None:
+            if ch == in_str and prev != "\\":
+                in_str = None
+            prev = ch
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            in_str = ch
+            expecting_atom = False
+            prev = ch
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl
+            prev = ""
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            prev = ""
+            continue
+        top = angle == 0 and paren == 0 and bracket == 0
+        if ch == "<":
+            angle += 1
+            expecting_atom = False
+        elif ch == ">":
+            if angle > 0:
+                angle -= 1
+        elif ch == "(":
+            paren += 1
+            expecting_atom = False
+        elif ch == "[":
+            bracket += 1
+            expecting_atom = False
+        elif ch in (")", "]"):
+            if ch == ")" and paren > 0:
+                paren -= 1
+            elif ch == "]" and bracket > 0:
+                bracket -= 1
+        elif top and text.startswith("=>", i):
+            # Typed arrow: the body is the next top-level `{`.
+            j = _ts_skip_trivia(text, i + 2)
+            return j if j < n and text[j] == "{" else -1
+        elif top and ch == "{":
+            if not expecting_atom:
+                return i  # a complete type precedes this `{` → it is the body.
+            # Object-type literal atom (`: { ok } {` / `A | { err } {`) — skip its
+            # balanced group; an atom is now consumed (no longer expecting one).
+            group = _read_brace_group(text, i)
+            i += len(group)
+            expecting_atom = False
+            prev = "}"
+            continue
+        elif top and ch in _TS_TYPE_JOIN_CHARS:
+            expecting_atom = True  # `|`/`&` → another atom follows.
+        elif top and not ch.isspace():
+            expecting_atom = False  # identifier / `.` / `:` … consumes/continues an atom
+        prev = ch
+        i += 1
+    return -1
 
 
 def _read_paren_group(text: str, open_idx: int) -> "tuple[str | None, int]":
@@ -1668,11 +1832,15 @@ def _resolve_one_helper(
 
     # Primitive assertion/fail in the helper body?
     if primitive_re.search(body):
-        # Argument anchor (anti-no-op): a PRIMITIVE assertion LINE must reference
-        # one of the helper's own parameters. A helper that asserts only a
-        # constant (``expect(true).toBe(true)`` / ``assert True``) never does, so
+        # Argument anchor (anti-no-op): a PRIMITIVE assertion must reference one of
+        # the helper's own parameters OR a local DERIVED from a parameter (1-2
+        # hops), e.g. ``const body = await readJson(response); expect(body.error)``
+        # — ``body`` flows from the ``response`` param, so the assertion IS anchored
+        # to the call's data. A helper that asserts only a constant
+        # (``expect(true).toBe(true)`` / ``assert True``) references neither, so
         # marker-spam delegating to it FAILS — the helper NAME is never trusted.
-        if _body_references_params(body, param_set, primitive_re):
+        anchor_set = _params_and_derived_locals(body, param_set)
+        if _body_references_params(body, anchor_set, primitive_re):
             return AssertionEvidence(ok=True, reason="helper_resolved", detail=name)
         return AssertionEvidence(ok=False, reason="constant_helper", detail=name)
 
@@ -1700,20 +1868,75 @@ def _resolve_one_helper(
     return AssertionEvidence(ok=False, reason="helper_no_primitive", detail=name)
 
 
+#: An ASSIGNMENT binding a local from an expression: ``const body = …`` /
+#: ``let x = …`` / ``var y = …`` (TS/JS) and a bare ``name = …`` (Python). Captures
+#: the bound NAME(s) (lhs) and the RHS expression so a local derived from a
+#: parameter can be added to the anchor set. ``==`` / ``=>`` / ``<=`` / ``>=`` /
+#: ``!=`` are excluded (comparisons / arrows, not bindings). Single-name binds are
+#: matched anywhere a line allows; DESTRUCTURING (``const { a, b } = …`` /
+#: ``const [x] = …``) requires a leading ``const``/``let``/``var`` keyword and may
+#: not span a newline — this is what stops the lhs ``{…}`` alternative from
+#: swallowing the FUNCTION BODY's own opening brace.
+_ASSIGN_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"(?:const|let|var)\s+(?P<destructure>\{[^}\n]*\}|\[[^\]\n]*\])"
+    r"|(?:(?:const|let|var)\s+)?(?P<name>[A-Za-z_$][\w$]*)"
+    r")\s*=(?![=>])\s*(?P<rhs>.+)$",
+    re.MULTILINE,
+)
+#: Derivation hops: ``a = f(param); b = g(a); expect(b…)`` resolves with 2 passes.
+_MAX_DERIVE_PASSES = 2
+
+
+def _params_and_derived_locals(body: str, param_set: set[str]) -> set[str]:
+    """``param_set`` plus locals DERIVED from a parameter within ``body`` (≤2 hops).
+
+    The argument anchor must credit ``const body = await readJson(response);
+    expect(body.error)…`` — the assertion references ``body``, a local that FLOWS
+    from the ``response`` parameter, so it is genuinely anchored to the call's data
+    (root-cause-#2: the 2.31.0 anchor only saw a DIRECT param reference and wrongly
+    rejected param-derived locals). A binding ``X = <rhs>`` adds ``X`` to the set
+    iff its RHS references something already in the set (a param or an
+    already-derived local). Two passes follow a short ``param → a → b`` chain.
+    Constants never enter the set (``const k = 5`` references no param), so a
+    constant-only helper stays unanchored ⇒ FAIL. Destructured bindings
+    (``const { error } = body``) add each bound name when the RHS is derived.
+    """
+
+    if not param_set:
+        return set()
+    derived = set(param_set)
+    for _ in range(_MAX_DERIVE_PASSES):
+        grew = False
+        for match in _ASSIGN_RE.finditer(body):
+            rhs_idents = set(re.findall(r"[A-Za-z_$][\w$]*", match.group("rhs")))
+            if not (rhs_idents & derived):
+                continue
+            lhs = match.group("destructure") or match.group("name") or ""
+            for lhs_name in re.findall(r"[A-Za-z_$][\w$]*", lhs):
+                if lhs_name not in derived:
+                    derived.add(lhs_name)
+                    grew = True
+        if not grew:
+            break
+    return derived
+
+
 def _body_references_params(
     body: str, param_set: set[str], primitive_re: re.Pattern[str]
 ) -> bool:
     """A primitive assertion in ``body`` references one of ``param_set``.
 
     The "argument anchor": a primitive assertion must mention a parameter (or a
-    value derived from it), so a no-op helper that asserts only a CONSTANT
-    (``expect(true).toBe(true)`` / ``assert True``) and merely *names* a param
-    elsewhere is NOT anchored. The check is per primitive-assertion STATEMENT,
-    where a statement is the assertion line PLUS any following lines indented
-    MORE than it (its block) — so a context-manager assertion
-    (``with pytest.raises(...):\\n    fn()``) is anchored by the ``fn()`` call in
-    its block, while a trailing same-indent ``log(result)`` after a constant
-    ``expect(true)`` is not.
+    value derived from it — ``param_set`` is pre-expanded with param-derived locals
+    by :func:`_params_and_derived_locals` at the call site), so a no-op helper that
+    asserts only a CONSTANT (``expect(true).toBe(true)`` / ``assert True``) and
+    merely *names* a param elsewhere is NOT anchored. The check is per
+    primitive-assertion STATEMENT, where a statement is the assertion line PLUS any
+    following lines indented MORE than it (its block) — so a context-manager
+    assertion (``with pytest.raises(...):\\n    fn()``) is anchored by the ``fn()``
+    call in its block, while a trailing same-indent ``log(result)`` after a
+    constant ``expect(true)`` is not.
     """
 
     if not param_set:

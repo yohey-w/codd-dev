@@ -1016,3 +1016,334 @@ def test_codex16_real_project_passes():
     report = build_authenticity_report(root, config=config, profile=profile)
     assert report.passed, [v.message for v in report.violations]
     assert report.degraded_paths == []
+
+
+# ===========================================================================
+# Round-4 precision: (1) helper-BODY extraction past a brace-bearing RETURN
+# TYPE annotation, and (2) the argument anchor crediting a param-DERIVED local.
+# These guard the noteapi-codex false-RED: a real helper `expectJsonError(...):
+# Promise<{ error: string }>` whose body asserts on `body = await readJson(
+# response)`. 2.34.0 mis-extracted the body as the return type's `{ error:
+# string }` (no assertion ⇒ false-RED), and even with a correct body the anchor
+# only saw a DIRECT param reference (not `body` derived from `response`). Both are
+# fixed WITHOUT weakening anti-false-green: a constant-only helper still FAILS.
+# ===========================================================================
+
+
+from codd.vb_marker_authenticity import (  # noqa: E402 — grouped with the round-4 tests
+    _body_references_params,
+    _params_and_derived_locals,
+    _ts_find_function_def,
+    _PY_PRIMITIVE_ASSERT_RE,
+    _TS_PRIMITIVE_ASSERT_RE,
+)
+
+
+# ── unit: _ts_find_function_def body extraction past brace-bearing return types ──
+
+
+def test_ts_find_def_body_past_brace_bearing_return_type():
+    """ROOT CAUSE #1: the body ``{`` must be found AFTER the return-type
+    annotation, even when the annotation itself contains braces. The naive
+    "first ``{`` after the params" picked the return type's brace (the noteapi
+    false-RED). Each form below must yield a body that carries the real
+    ``expect(...)`` (a primitive assertion), not the return-type's brace text."""
+    forms = {
+        # the exact noteapi shape: Promise<{ ... }>
+        "promise_object": (
+            "export async function f(a: Response, b: number): "
+            "Promise<{ error: string }> {\n  expect(b).toBe(1);\n}"
+        ),
+        # bare object-type return literal: ': { ... }'
+        "object_literal": "function g(a): { ok: boolean } {\n  expect(a.ok).toBe(true);\n}",
+        # nested generic with an inner object: '<Array<{...}>>'
+        "nested_generic": (
+            "function h(a): Promise<Array<{ id: number }>> {\n  expect(a).toBe(1);\n}"
+        ),
+        # union of object literals
+        "union_objects": (
+            "function u(a): { ok: true } | { err: string } {\n  expect(a).toBe(1);\n}"
+        ),
+        # multi-line signature + brace-bearing return type (the literal noteapi form)
+        "multiline": (
+            "export async function w(\n  response: Response,\n  status: number\n"
+            "): Promise<{ error: string }> {\n  expect(status).toBe(1);\n}"
+        ),
+        # plain (no return type) — regression
+        "no_return_type": "function p(a) {\n  expect(a).toBe(1);\n}",
+        # simple named return type — regression
+        "void_return": "function v(a): void {\n  expect(a).toBe(1);\n}",
+        # arrow with a brace-bearing return type
+        "arrow_object_return": (
+            "const q = (a): Promise<{ x: number }> => {\n  expect(a).toBe(1);\n}"
+        ),
+    }
+    name_of = {
+        "promise_object": "f",
+        "object_literal": "g",
+        "nested_generic": "h",
+        "union_objects": "u",
+        "multiline": "w",
+        "no_return_type": "p",
+        "void_return": "v",
+        "arrow_object_return": "q",
+    }
+    for label, text in forms.items():
+        found = _ts_find_function_def(text, name_of[label])
+        assert found is not None, f"{label}: def not found"
+        body, _params = found
+        assert _TS_PRIMITIVE_ASSERT_RE.search(body), (
+            f"{label}: body has no primitive assertion — likely the return type's "
+            f"brace was mistaken for the body. body={body!r}"
+        )
+
+
+def test_ts_find_def_async_body_with_await_extracted():
+    """The async helper body (with ``await`` lines) must be extracted whole —
+    not truncated at the return type's brace. The noteapi helper has both an
+    ``await`` and a brace-bearing return type."""
+    text = (
+        "export async function expectJsonError(\n"
+        "  response: Response,\n"
+        "  status: number,\n"
+        "  exactError?: string\n"
+        "): Promise<{ error: string }> {\n"
+        "  await expectStatus(response, status);\n"
+        "  const body = await readJson<{ error: string }>(response);\n"
+        '  expect(typeof body.error).toBe("string");\n'
+        "  if (exactError !== undefined) {\n"
+        "    expect(body).toEqual({ error: exactError });\n"
+        "  }\n"
+        "  return body;\n"
+        "}\n"
+    )
+    found = _ts_find_function_def(text, "expectJsonError")
+    assert found is not None
+    body, params = found
+    assert params == ["response", "status", "exactError"]
+    assert "await expectStatus(response, status)" in body
+    assert "return body" in body  # the WHOLE body, through the last statement
+    assert _TS_PRIMITIVE_ASSERT_RE.search(body)
+
+
+def test_ts_expression_bodied_arrow_does_not_crash():
+    """An expression-bodied arrow (no ``{`` block) must not mis-extract — the
+    finder returns None rather than grabbing an unrelated brace (fails CLOSED)."""
+    text = "const r = (a) => expect(a).toBe(1);\n"
+    # No block body to extract; resolution simply finds no credible body (None).
+    assert _ts_find_function_def(text, "r") is None
+
+
+# ── unit: argument anchor over param-DERIVED locals (root cause #2) ──
+
+
+def test_anchor_credits_param_derived_local():
+    """ROOT CAUSE #2: an assertion on a local DERIVED from a param is anchored.
+    ``const body = readJson(response); expect(body.error)`` flows ``response`` →
+    ``body`` → the assertion, so it must count (the 2.34.0 anchor only saw a
+    DIRECT param reference and wrongly rejected this)."""
+    body = (
+        "{\n"
+        "  const body = await readJson(response);\n"
+        '  expect(typeof body.error).toBe("string");\n'
+        "}"
+    )
+    anchor = _params_and_derived_locals(body, {"response"})
+    assert "body" in anchor and "response" in anchor
+    assert _body_references_params(body, anchor, _TS_PRIMITIVE_ASSERT_RE) is True
+
+
+def test_anchor_credits_two_hop_derived_local():
+    """A 2-hop chain ``param → a → b`` then ``expect(b…)`` is anchored."""
+    body = "{\n  const a = parse(input);\n  const b = a.payload;\n  expect(b.ok).toBe(true);\n}"
+    anchor = _params_and_derived_locals(body, {"input"})
+    assert {"input", "a", "b"} <= anchor
+    assert _body_references_params(body, anchor, _TS_PRIMITIVE_ASSERT_RE) is True
+
+
+def test_anchor_credits_destructured_derived_local():
+    """A destructured bind ``const { error } = readJson(response)`` flows the
+    param to ``error`` (object) / ``first`` (array)."""
+    obj = '{\n  const { error } = await readJson(response);\n  expect(error).toBe("bad");\n}'
+    anchor = _params_and_derived_locals(obj, {"response"})
+    assert "error" in anchor
+    assert _body_references_params(obj, anchor, _TS_PRIMITIVE_ASSERT_RE) is True
+    arr = '{\n  const [first] = splitOf(input);\n  expect(first).toBe("x");\n}'
+    anchor2 = _params_and_derived_locals(arr, {"input"})
+    assert "first" in anchor2
+    assert _body_references_params(arr, anchor2, _TS_PRIMITIVE_ASSERT_RE) is True
+
+
+def test_anchor_python_param_derived_local():
+    """ROOT CAUSE #2 (python): ``def check(resp): data = parse(resp); assert
+    data.status == 200`` — ``data`` derives from the ``resp`` param, so anchored."""
+    body = "def check(resp):\n    data = parse(resp)\n    assert data.status == 200\n"
+    anchor = _params_and_derived_locals(body, {"resp"})
+    assert {"resp", "data"} <= anchor
+    assert _body_references_params(body, anchor, _PY_PRIMITIVE_ASSERT_RE) is True
+
+
+def test_anchor_rejects_constant_only_even_with_unused_derived_local():
+    """ANTI-FALSE-GREEN: a derived local existing in the body is NOT enough — the
+    ASSERTION itself must reference a param/derived value. A constant-only assert
+    (``expect(true).toBe(true)``) beside an unused derived local still FAILS."""
+    body = "{\n  const x = result.foo;\n  log(x);\n  expect(true).toBe(true);\n}"
+    anchor = _params_and_derived_locals(body, {"result"})
+    assert "x" in anchor  # x IS derived…
+    # …but the only assertion references neither result nor x → unanchored.
+    assert _body_references_params(body, anchor, _TS_PRIMITIVE_ASSERT_RE) is False
+
+
+def test_anchor_rejects_local_derived_from_constant():
+    """ANTI-FALSE-GREEN: a local bound from a CONSTANT (not a param) is not a
+    credible anchor — ``const k = 42; expect(k).toBe(42)`` proves nothing about
+    the call's arguments and must FAIL."""
+    body = "{\n  const k = 42;\n  expect(k).toBe(42);\n}"
+    anchor = _params_and_derived_locals(body, {"result"})
+    assert "k" not in anchor  # k flows from a constant, not a param
+    assert _body_references_params(body, anchor, _TS_PRIMITIVE_ASSERT_RE) is False
+
+
+# ── gate-level: the noteapi pattern PASSES, the constant-only sibling FAILS ──
+
+
+_HTTP_HELPER_WITH_BRACE_RETURN = (
+    "import { expect } from 'vitest';\n"
+    "export async function expectStatus(response: Response, status: number): Promise<void> {\n"
+    "  expect(response.status).toBe(status);\n"
+    "}\n"
+    "export async function readJson<T>(response: Response): Promise<T> {\n"
+    "  return (await response.json()) as T;\n"
+    "}\n"
+    "export async function expectJsonError(\n"
+    "  response: Response,\n"
+    "  status: number,\n"
+    "  exactError?: string\n"
+    "): Promise<{ error: string }> {\n"
+    "  await expectStatus(response, status);\n"
+    "  const body = await readJson<{ error: string }>(response);\n"
+    '  expect(typeof body.error).toBe("string");\n'
+    "  if (exactError !== undefined) {\n"
+    "    expect(body).toEqual({ error: exactError });\n"
+    "  }\n"
+    "  return body;\n"
+    "}\n"
+)
+
+
+def test_gate_passes_helper_with_brace_bearing_return_type(tmp_path):
+    """THE noteapi false-RED, gate level: a marker on a test delegating to
+    ``expectJsonError`` (return type ``Promise<{ error: string }>``, asserting on a
+    param-derived ``body``) must PASS. Before the fix this failed with
+    'body contains NO assertion' for VB-31/32/46/47."""
+    project = tmp_path
+    _canonical(project, "| VB-ERR-01 | rejects with json error |\n")
+    _write(project / "tests" / "e2e" / "helpers" / "http.ts", _HTTP_HELPER_WITH_BRACE_RETURN)
+    _write(
+        project / "tests" / "e2e" / "validation.spec.ts",
+        "import { describe, it } from 'vitest';\n"
+        "import { expectJsonError } from './helpers/http.js';\n"
+        "describe('validation', () => {\n"
+        "  // codd: covers vb=VB-ERR-01\n"
+        "  it('rejects an empty title', async () => {\n"
+        "    const response = await post('/notes', {});\n"
+        "    await expectJsonError(response, 400, 'title is required');\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+    assert report.degraded_paths == []
+
+
+def test_gate_still_fails_constant_helper_with_brace_return_type(tmp_path):
+    """ANTI-FALSE-GREEN: the body-extraction fix must NOT let a constant-only
+    helper pass just because it now has a (brace-bearing) return type. A helper
+    whose body is correctly extracted but asserts only a CONSTANT still FAILS."""
+    project = tmp_path
+    _canonical(project, "| VB-FAKE-RT | a |\n")
+    _write(
+        project / "tests" / "e2e" / "helpers" / "fake.ts",
+        "import { expect } from 'vitest';\n"
+        "export function expectFine(response: Response): { ok: boolean } {\n"
+        "  expect(true).toBe(true);\n"  # constant only — references no param
+        "  return { ok: true };\n"
+        "}\n",
+    )
+    _write(
+        project / "tests" / "e2e" / "fake.spec.ts",
+        "import { describe, it } from 'vitest';\n"
+        "import { expectFine } from './helpers/fake.js';\n"
+        "describe('fake', () => {\n"
+        "  // codd: covers vb=VB-FAKE-RT\n"
+        "  it('pretends', async () => {\n"
+        "    const response = await get('/x');\n"
+        "    expectFine(response);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-FAKE-RT" for v in report.violations)
+    assert any("CONSTANT" in v.message for v in report.violations)
+
+
+def test_gate_passes_python_param_derived_helper(tmp_path):
+    """Gate level (python): a helper asserting on a param-DERIVED local, with a
+    return-type annotation (``-> dict``), must PASS — the python anchor must also
+    credit derived values."""
+    project = tmp_path
+    _canonical(project, "| VB-PY-DRV | a |\n")
+    _write(project / "tests" / "helpers" / "__init__.py", "")
+    _write(
+        project / "tests" / "helpers" / "http.py",
+        "def expect_json_error(resp) -> dict:\n"
+        "    data = resp.json()\n"
+        "    assert data['error'] is not None\n"
+        "    return data\n",
+    )
+    _write(
+        project / "tests" / "test_validation.py",
+        "from tests.helpers.http import expect_json_error\n"
+        "# codd: covers vb=VB-PY-DRV\n"
+        "def test_rejects():\n"
+        "    resp = client.post('/notes', json={})\n"
+        "    expect_json_error(resp)\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+
+
+# ── end-to-end against the real noteapi-codex project (the false-RED source) ──
+
+
+def test_noteapi_codex_real_project_passes():
+    """End-to-end against the actual noteapi-codex greenfield output — the source
+    of the brace-bearing-return-type false-RED. Its e2e tests delegate to
+    ``expectJsonError`` (return type ``Promise<{ error: string }>``). All
+    ``covers vb=`` markers must be authentic: 0 violations, 0 degraded. Skips
+    cleanly if the fixture project is absent."""
+    root = Path("/home/tono/codd-greenfield-noteapi-codex")
+    if not (root / "codd" / "codd.yaml").is_file():
+        import pytest
+
+        pytest.skip("noteapi-codex fixture project not present")
+    from codd.config import load_project_config
+
+    config = load_project_config(root)
+    profile = LayoutProfile(
+        language="typescript",
+        package_name="noteapi",
+        source_root="src",
+        package_root="src",
+        test_root="tests",
+    )
+    report = build_authenticity_report(root, config=config, profile=profile)
+    assert report.passed, [v.message for v in report.violations]
+    assert report.degraded_paths == []
