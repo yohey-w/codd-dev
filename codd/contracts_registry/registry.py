@@ -42,6 +42,15 @@ VALID_FAIL_MODES: frozenset[str] = frozenset(
     {"honest_fail", "honest_red", "n/a"}
 )
 
+#: GPT §5A ``enforcement`` axis — how strongly the authority acts when it fires.
+#: ``hard`` = the gate raises (StageError / honest-fail); ``warn`` = the gate
+#: observes + reports but does NOT block (the rollout-safe state, e.g.
+#: declared-output-completeness behind a config flag); ``noop`` = not enforced
+#: (every ``uncovered`` backlog cell). The registry meta-test treats ``hard`` +
+#: ``warn`` covered contracts as requiring an importable authority + a real
+#: certification-fixture file; only ``hard`` contracts must be a blocking gate.
+VALID_ENFORCEMENTS: frozenset[str] = frozenset({"hard", "warn", "noop"})
+
 VALID_DIMENSIONS: frozenset[str] = frozenset(
     {
         "existence",
@@ -89,6 +98,15 @@ class Contract:
     finding_ids: tuple[str, ...] = ()
     predicted_issue: str = ""
     proposed_gate: str = ""
+    #: GPT §5A enforcement axis (default derived from status in __post_init__:
+    #: covered/uncertified → "hard"; uncovered → "noop"). A covered contract that
+    #: is intentionally WARN-only (observe, do not block — e.g.
+    #: declared-output-completeness behind a config flag) sets ``enforcement="warn"``
+    #: explicitly; it still requires an importable authority + a real fixture.
+    enforcement: str | None = None
+    #: optional config flag that toggles a warn-vs-enforce contract (documentation
+    #: + the audit can surface it). e.g. ``"implement.declared_output_completeness"``.
+    config_flag: str = ""
 
     def __post_init__(self) -> None:
         # Light structural validation. Kept here (not only in tests) so that a
@@ -98,6 +116,30 @@ class Contract:
             raise ValueError(
                 f"contract {self.id!r}: invalid status {self.status!r} "
                 f"(expected one of {sorted(VALID_STATUSES)})"
+            )
+        # Default the enforcement axis from status when unset (frozen → setattr):
+        # covered/uncertified contracts ENFORCE (hard) by default; uncovered are
+        # noop. An explicit value (e.g. "warn") is validated, never overwritten.
+        if self.enforcement is None:
+            object.__setattr__(
+                self,
+                "enforcement",
+                "noop" if self.status == "uncovered" else "hard",
+            )
+        if self.enforcement not in VALID_ENFORCEMENTS:
+            raise ValueError(
+                f"contract {self.id!r}: invalid enforcement {self.enforcement!r} "
+                f"(expected one of {sorted(VALID_ENFORCEMENTS)})"
+            )
+        if self.status == "uncovered" and self.enforcement != "noop":
+            raise ValueError(
+                f"contract {self.id!r}: uncovered contract must have "
+                f"enforcement='noop' (got {self.enforcement!r})"
+            )
+        if self.status != "uncovered" and self.enforcement == "noop":
+            raise ValueError(
+                f"contract {self.id!r}: {self.status} contract must enforce "
+                "(hard|warn), not noop"
             )
         if self.fail_mode not in VALID_FAIL_MODES:
             raise ValueError(
@@ -223,6 +265,52 @@ _COVERED: tuple[Contract, ...] = (
             "tests/greenfield/test_pipeline.py::source-task+sibling-test-PASSES",
         ),
         finding_ids=("F-implement-task-done-artifact-blind",),
+    ),
+    # ── artifact.owner.unique.v1 — exactly ONE owner per artifact (GPT r2 §3.3) ─
+    # The NEW hard gate: the orphan gate proves "≥1 owner"; this proves "≤1 owner"
+    # (deterministic, BEFORE implement-oracle). The owner index's first-owner-wins
+    # setdefault is the silent hole this closes.
+    Contract(
+        id="artifact.owner.unique.v1",
+        source_node="ImplementTask",
+        target_node="GeneratedArtifact",
+        edge_type="produces",
+        dimensions=("ownership", "uniqueness", "repairability"),
+        authority="codd.implement_oracle_scope.validate_task_output_ownership_uniqueness",
+        fail_mode="honest_fail",
+        status="covered",
+        certification_fixtures=(
+            "tests/test_acg_owner_uniqueness.py::test_duplicate_exact_output_owner_raises",
+            "tests/test_acg_owner_uniqueness.py::test_directory_and_exact_file_owner_conflict_raises",
+            "tests/test_acg_owner_uniqueness.py::test_overlapping_directory_owners_raises",
+            "tests/test_acg_owner_uniqueness.py::test_non_conflicting_distinct_files_ok",
+            "tests/test_acg_owner_uniqueness.py::test_pipeline_wires_owner_uniqueness_before_oracle",
+        ),
+        finding_ids=("PC-owner-uniqueness", "F-greenfield-artifact-coherence"),
+    ),
+    # ── declared-output-completeness — WARN (GPT r2 §3.4; §5 "次PRでhard化") ──
+    # Registered enforcement=warn behind a config flag: a task that declared EXACT
+    # output paths should have produced them. Warn-only by default so this does
+    # NOT hard-fail existing runs; ``implement.declared_output_completeness:
+    # enforce`` flips it to a StageError. (The kind-level slice is the separate
+    # hard contract ``task.done_requires_declared_outputs`` above.)
+    Contract(
+        id="task.declared_output_completeness",
+        source_node="ImplementTask.expected_outputs",
+        target_node="GeneratedArtifact",
+        edge_type="produces",
+        dimensions=("completeness", "existence"),
+        authority="codd.greenfield.pipeline._check_declared_output_completeness",
+        fail_mode="honest_red",
+        status="covered",
+        enforcement="warn",
+        config_flag="implement.declared_output_completeness",
+        certification_fixtures=(
+            "tests/test_acg_owner_uniqueness.py::test_declared_output_completeness_warn_does_not_raise",
+            "tests/test_acg_owner_uniqueness.py::test_declared_output_completeness_enforce_raises",
+            "tests/test_acg_owner_uniqueness.py::test_declared_output_completeness_satisfied_ok",
+        ),
+        finding_ids=("PC-declared-output-completeness",),
     ),
     # ── Source/Test -> Module/Symbol import coherence (Python import / topology) ─
     Contract(
@@ -356,6 +444,28 @@ _COVERED: tuple[Contract, ...] = (
             "tests/test_vb_marker_authenticity.py::test_gate_fails_barrel_reexporting_constant_helper",
         ),
         finding_ids=("F-vb-coverage-gate-false-red",),
+    ),
+    # ── verify.campaign.observable.v1 — declared campaign MUST be readable ───
+    # The NEW hard gate (GPT r2 §3.1): a profile that declares a verify campaign
+    # whose report_format has NO adapter cannot have its executions observed.
+    # Previously ``coherence_gate_applies`` returned False → silent NO-OP; now it
+    # honest-fails (an unobservable verification is not a pass).
+    Contract(
+        id="verify.campaign.observable.v1",
+        source_node="VerifyCampaign.report_format",
+        target_node="RunnerReportAdapter",
+        edge_type="executes",
+        dimensions=("observability", "execution"),
+        authority="codd.coverage_execution_coherence.certify_verify_campaign_observable",
+        fail_mode="honest_fail",
+        status="covered",
+        certification_fixtures=(
+            "tests/test_verify_campaign_observable.py::test_declared_campaign_without_adapter_raises",
+            "tests/test_verify_campaign_observable.py::test_declared_campaign_with_adapter_ok",
+            "tests/test_verify_campaign_observable.py::test_no_campaign_is_noop_ok",
+            "tests/test_verify_campaign_observable.py::test_pipeline_honest_fails_on_adapterless_campaign",
+        ),
+        finding_ids=("PC-verify-campaign-observable", "F-verify-false-green"),
     ),
     # ── CoverageClaim -> VerifyExecution observability (v2.32) ───────────────
     Contract(
@@ -547,12 +657,150 @@ _OUTER: tuple[Contract, ...] = (
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# UNCOVERED cells — GPT §2 "空セル：先回りで叩くべき潜在課題".
+# UNCOVERED cells — GPT §2/§3 "空セル：先回りで叩くべき潜在課題".
 # authority=None; each carries predicted_issue + proposed_gate from the table.
-# These are the PROACTIVE BACKLOG (NOT to be implemented in this minimal step).
+# These are the PROACTIVE BACKLOG (NOT implemented in this minimal step).
+#
+# The FIRST block (``_UNCOVERED_PRECISE``) is GPT round-2 §3's CODE-GROUNDED,
+# PRIORITIZED set — the remaining §3 cells after §3.1 (verify-campaign-observable)
+# and §3.3 (owner-uniqueness) were promoted to COVERED hard gates this PR, and
+# §3.4 (declared-output-completeness) to a COVERED warn gate. Each precise cell
+# carries the code anchor (in predicted_issue) + the proposed_gate WITH its
+# negative-fixture name (per GPT §3). §3.9 is the refined
+# ``plan.stage_order_topologically_certified`` above.
+#
+# The SECOND block (``_UNCOVERED_BACKLOG``) is the round-1 §2 空セル list — still
+# valid backlog GPT did not supersede.
 # ════════════════════════════════════════════════════════════════════════════
 
-_UNCOVERED: tuple[Contract, ...] = (
+_UNCOVERED_PRECISE: tuple[Contract, ...] = (
+    # GPT r2 §3.2 — campaign exit_code / failed non-VB tests.
+    Contract(
+        id="verify.campaign.clean_execution.v1",
+        source_node="VerifyCampaign",
+        target_node="RunnerExecution",
+        edge_type="executes",
+        dimensions=("execution", "observability"),
+        authority=None,
+        fail_mode="honest_fail",
+        status="uncovered",
+        predicted_issue=(
+            "run_verify_campaign keeps CampaignRun.exit_code but does NOT treat it "
+            "as pass authority, and build_coherence_report only checks the UNBLOCKED "
+            "VBs' covering files — so a non-VB e2e/integration test that FAILED "
+            "(run.execution.executed_failed_files non-empty, or exit_code != 0) can "
+            "still pass the coherence gate alone."
+        ),
+        proposed_gate=(
+            "enforce_campaign_clean_execution(run.execution, run.exit_code) around "
+            "build_coherence_report: exit_code != 0 OR executed_failed_files → "
+            "CoherenceError. negative fixture: a vitest JSON report with a failed "
+            "tests/e2e/non_vb.e2e.test.ts while every VB covering file passed → hard red."
+        ),
+    ),
+    # GPT r2 §3.5 — LayoutProfile scaffold-config certification.
+    Contract(
+        id="scaffold.config_certified_before_verify.v1",
+        source_node="LayoutProfile",
+        target_node="ScaffoldConfig",
+        edge_type="owns",
+        dimensions=("existence", "observability", "ownership"),
+        authority=None,
+        fail_mode="honest_fail",
+        status="uncovered",
+        predicted_issue=(
+            "TS scaffolds tsconfig.json + vitest.config.ts create-only and "
+            "_ensure_test_runner is advisory (swallows scaffold exceptions); only "
+            "tsconfig scope is hard-gated (certify_oracle_scope). Whether "
+            "vitest.config.ts actually includes the .e2e.* convention is not "
+            "certified — it is only caught LATER when the campaign scans 0 e2e."
+        ),
+        proposed_gate=(
+            "certify_profile_scaffold_contract(project_root, profile) before verify: "
+            "tsconfig includes source+test roots; vitest.config.ts includes the .e2e. "
+            "convention; package.json has the harness scripts/deps or the lock "
+            "finalizer can reconcile. negative fixture: a vitest.config.ts that "
+            "includes only .test.ts (no .e2e.ts) → red at scaffold certification, "
+            "not deferred to the campaign."
+        ),
+    ),
+    # GPT r2 §3.6 — recognized test file → parseable TestBlock authenticity strict.
+    Contract(
+        id="authenticity.observable_in_supported_stack.v1",
+        source_node="TestFile",
+        target_node="TestBlock",
+        edge_type="claims",
+        dimensions=("authenticity", "observability", "parsing"),
+        authority=None,
+        fail_mode="honest_red",
+        status="uncovered",
+        predicted_issue=(
+            "build_authenticity_report puts a marker-bearing recognized test file "
+            "into degraded_paths (skips Stage 2/3) when the adapter handles the file "
+            "but parses NO blocks; report.passed only checks violations — so a "
+            "supported-stack (TS/Python) test whose wrapper the parser cannot read "
+            "is 'authenticity unknown' yet can degrade-pass."
+        ),
+        proposed_gate=(
+            "strict_authenticity_observability=True greenfield default: when adapter "
+            "handles the file AND markers present AND no blocks parsed → "
+            "violation(kind='unobservable_test_structure'); unknown languages stay "
+            "warn/degrade. negative fixture: tests/foo.test.ts with covers vb=VB-1 "
+            "in a wrapper the parser does not recognize → red (today degrades to pass)."
+        ),
+    ),
+    # GPT r2 §3.7 — Python source/test import coherence implement-time oracle.
+    Contract(
+        id="python.import_coherence_oracle.v1",
+        source_node="GeneratedArtifact.python",
+        target_node="Symbol",
+        edge_type="reference",
+        dimensions=("existence", "identity", "execution"),
+        authority=None,
+        fail_mode="honest_red",
+        status="uncovered",
+        predicted_issue=(
+            "the Python LayoutProfile sets implement_oracle=None (composite oracle "
+            "deferred); pytest --collect-only + verify-stage gates are the backstop, "
+            "so a source module with an undefined import/symbol that no test imports "
+            "is invisible at implement-time."
+        ),
+        proposed_gate=(
+            "CompositePythonImplementOracle on the profile: py_compile over "
+            "source+tests; static import resolver / pyflakes; pytest --collect-only; "
+            "optional public-API smoke (opt-in). negative fixture: "
+            "src/app/hidden.py with `from .missing import X` that no test imports → "
+            "pytest green but composite oracle red."
+        ),
+    ),
+    # GPT r2 §3.8 — source_design_doc → unregistered doc provenance strict.
+    Contract(
+        id="source_design_doc.registered_doc_strict.v1",
+        source_node="ImplementTask.source_design_doc",
+        target_node="Document.registered",
+        edge_type="reference",
+        dimensions=("identity", "authenticity", "uniqueness"),
+        authority=None,
+        fail_mode="honest_fail",
+        status="uncovered",
+        predicted_issue=(
+            "resolve_document_ref has a compatibility branch that binds an EXISTING "
+            "markdown path to a synthetic doc:<rel> even when it carries no CoDD "
+            "frontmatter / is not in the DocumentReferenceIndex; source_design_doc is "
+            "the task-derivation authority, so an unregistered scratch doc can drive "
+            "derivation in non-strict mode."
+        ),
+        proposed_gate=(
+            "resolve_document_ref(strict_registered=True) for source_design_doc: "
+            "require a frontmatter-registered document, not just an existing file. "
+            "negative fixture: docs/scratch.md exists without CoDD frontmatter and a "
+            "task references source_design_doc: docs/scratch.md → red in strict mode."
+        ),
+    ),
+)
+
+
+_UNCOVERED_BACKLOG: tuple[Contract, ...] = (
     Contract(
         id="depends_on.resolves_to_one_task_or_document",
         source_node="ImplementTask.depends_on",
@@ -622,6 +870,8 @@ _UNCOVERED: tuple[Contract, ...] = (
             "or honest-fail."
         ),
     ),
+    # GPT r2 §3.9 (precise): task_dependency_order today = DECLARATION order
+    # (``index.all_task_ids``), which chunked-broad's last-resort pass trusts.
     Contract(
         id="plan.stage_order_topologically_certified",
         source_node="Plan",
@@ -631,8 +881,18 @@ _UNCOVERED: tuple[Contract, ...] = (
         authority=None,
         fail_mode="honest_fail",
         status="uncovered",
-        predicted_issue="a consumer task runs before its supplier task.",
-        proposed_gate="task dependency topological certification.",
+        predicted_issue=(
+            "task_dependency_order assumes declaration order IS dependency order "
+            "(codd.implement_oracle_scope.task_dependency_order ranks by "
+            "index.all_task_ids); a planner that emits a supplier AFTER its consumer "
+            "destabilizes the chunked_broad last-resort repair order."
+        ),
+        proposed_gate=(
+            "derive_task_dependency_order_from_artifact_edges() — topological order "
+            "from the import graph / declared depends_on; cycles honest-fail or chunk "
+            "per-SCC. negative fixture: consumer→supplier declaration order where the "
+            "consumer imports the supplier; assert the derived order is supplier-first."
+        ),
     ),
     Contract(
         id="output_owner.rerun_does_not_delete_others",
@@ -898,6 +1158,10 @@ _UNCOVERED: tuple[Contract, ...] = (
 
 
 # ── the assembled, frozen registry ──────────────────────────────────────────
+#: All uncovered cells = the precise GPT-r2-§3 prioritized set FIRST, then the
+#: round-1 §2 backlog. (Kept as two tuples for readability; the registry is flat.)
+_UNCOVERED: tuple[Contract, ...] = _UNCOVERED_PRECISE + _UNCOVERED_BACKLOG
+
 REGISTRY: tuple[Contract, ...] = _COVERED + _OUTER + _UNCOVERED
 
 

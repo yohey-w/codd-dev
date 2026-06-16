@@ -29,6 +29,7 @@ def _contract_to_entry(c: Contract) -> "OrderedDict[str, object]":
     entry["edge_type"] = c.edge_type
     entry["dimensions"] = list(c.dimensions)
     entry["status"] = c.status
+    entry["enforcement"] = c.enforcement
     entry["fail_mode"] = c.fail_mode
     if c.status == "uncovered":
         entry["authority"] = None
@@ -36,6 +37,8 @@ def _contract_to_entry(c: Contract) -> "OrderedDict[str, object]":
         entry["proposed_gate"] = c.proposed_gate
     else:
         entry["authority"] = c.authority
+        if c.config_flag:
+            entry["config_flag"] = c.config_flag
         entry["certification_fixtures"] = list(c.certification_fixtures)
     if c.finding_ids:
         entry["finding_ids"] = list(c.finding_ids)

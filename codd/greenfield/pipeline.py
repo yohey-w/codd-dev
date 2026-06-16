@@ -927,8 +927,18 @@ class GreenfieldPipeline:
 
         # The path→owning-task index for the SCOPED rerun: declared task outputs
         # UNION the config-derived output paths. Built once; the gate consults it
-        # to localize each rerun to the diagnostics' owners.
-        scope_index = self._build_oracle_scope_index(project_root, tasks, config)
+        # to localize each rerun to the diagnostics' owners. The config-derived
+        # paths are resolved ONCE here so the owner-uniqueness gate and the index
+        # see the SAME path set.
+        config_output_paths = self._resolve_oracle_config_output_paths(tasks, config)
+        # HARD owner-uniqueness gate (contract artifact.owner.unique.v1): runs
+        # BEFORE the index build (and OUTSIDE its best-effort except) so an
+        # ambiguous-ownership topology honest-fails deterministically rather than
+        # letting the index's first-owner-wins setdefault silently pick a winner.
+        self._certify_output_owner_uniqueness(tasks, config_output_paths)
+        scope_index = self._build_oracle_scope_index(
+            project_root, tasks, config, config_output_paths=config_output_paths
+        )
         manifest_paths = self._oracle_manifest_paths(project_root)
 
         def _rerun(feedback: str, scope: Any = None) -> None:
@@ -959,11 +969,67 @@ class GreenfieldPipeline:
                 f"{result.category_counts()}. {result.detail}"
             )
 
+    def _resolve_oracle_config_output_paths(
+        self,
+        tasks: list[ImplementTaskRef],
+        config: dict[str, Any],
+    ) -> dict[str, list[str]]:
+        """The config-derived output paths per task (the owner-index input).
+
+        Mirrors the resolution the rerun + owner-index use: a task's DECLARED
+        ``output_paths`` when present, else ``_output_paths_for_task`` (the same
+        config routing the rerun itself applies). Best-effort per task.
+        """
+        config_output_paths: dict[str, list[str]] = {}
+        for task in tasks:
+            try:
+                config_output_paths[task.task_id] = (
+                    list(task.output_paths)
+                    if task.output_paths
+                    else _output_paths_for_task(config, task)
+                )
+            except Exception:  # noqa: BLE001 — a task whose paths fail just falls to broad.
+                config_output_paths[task.task_id] = list(task.output_paths or ())
+        return config_output_paths
+
+    def _certify_output_owner_uniqueness(
+        self,
+        tasks: list[ImplementTaskRef],
+        config_output_paths: dict[str, list[str]],
+    ) -> None:
+        """HARD GATE (deterministic, before implement-oracle): exactly one owner.
+
+        Contract ``artifact.owner.unique.v1`` (GPT-5.5 Pro round-2 §3.3). The
+        owner index's ``setdefault`` lets the FIRST task silently win a contested
+        output; this raises a :class:`StageError` instead so an ambiguous-owner
+        topology (the same exact file declared by >1 task; a directory owner that
+        nests a different task's exact file; two overlapping directory owners)
+        fails fast and honestly — its repair scope/write-fence would otherwise be
+        undecidable. Pure structural check; never weakens an existing gate.
+        """
+        from codd.implement_oracle_scope import (
+            OwnerUniquenessError,
+            validate_task_output_ownership_uniqueness,
+        )
+
+        try:
+            validate_task_output_ownership_uniqueness(
+                tasks, config_output_paths=config_output_paths
+            )
+        except OwnerUniquenessError as exc:
+            raise StageError(
+                "implement-oracle output-owner uniqueness gate failed — an artifact "
+                "would be owned by more than one task, so a scoped rerun's "
+                f"responsibility and write-fence are ambiguous. {exc}"
+            ) from exc
+
     def _build_oracle_scope_index(
         self,
         project_root: Path,
         tasks: list[ImplementTaskRef],
         config: dict[str, Any],
+        *,
+        config_output_paths: dict[str, list[str]] | None = None,
     ) -> Any:
         """Build the path→owning-task index used to scope an oracle rerun.
 
@@ -976,16 +1042,10 @@ class GreenfieldPipeline:
         try:
             from codd.implement_oracle_scope import build_path_owner_index
 
-            config_output_paths: dict[str, list[str]] = {}
-            for task in tasks:
-                try:
-                    config_output_paths[task.task_id] = (
-                        list(task.output_paths)
-                        if task.output_paths
-                        else _output_paths_for_task(config, task)
-                    )
-                except Exception:  # noqa: BLE001 — a task whose paths fail just falls to broad.
-                    config_output_paths[task.task_id] = list(task.output_paths or ())
+            if config_output_paths is None:
+                config_output_paths = self._resolve_oracle_config_output_paths(
+                    tasks, config
+                )
             return build_path_owner_index(
                 tasks,
                 project_root=project_root,
@@ -1281,7 +1341,7 @@ class GreenfieldPipeline:
             # code). Drives off the declared expected_outputs — never task names,
             # vendor CLI, or path literals. No-op for tasks with no declared
             # output kind. See _verify_task_contract for the rules.
-            _verify_task_contract(task, results, project_root, config)
+            _verify_task_contract(task, results, project_root, config, echo=self.echo)
 
         # NOTE: the verifiable-behavior (VB) coverage gate is intentionally NOT
         # enforced per task here. The gate is PROJECT-WIDE (it reconciles every
@@ -1384,12 +1444,26 @@ class GreenfieldPipeline:
         from codd.coverage_execution_coherence import (
             CampaignError,
             CoherenceError,
+            certify_verify_campaign_observable,
             coherence_gate_applies,
             enforce_coverage_execution_coherence,
         )
 
         profile = self._resolve_layout_profile(project_root)
-        if profile is None or not coherence_gate_applies(profile):
+        if profile is None:
+            return ""
+        # HARD observability gate (contract verify.campaign.observable.v1): a
+        # profile that DECLARES a campaign but has no report adapter would make
+        # ``coherence_gate_applies`` False below — a silent NO-OP for a stack that
+        # asked to be verified. Honest-fail BEFORE that short-circuit instead.
+        try:
+            certify_verify_campaign_observable(profile)
+        except CampaignError as exc:
+            raise StageError(
+                "verify campaign (coverage-execution coherence) is declared but "
+                f"cannot be observed: {exc}"
+            ) from exc
+        if not coherence_gate_applies(profile):
             return ""
         try:
             from codd.config import load_project_config
@@ -2044,17 +2118,52 @@ def _produced_kinds(generated_files: list[Any], project_root: Path, config: dict
     return kinds
 
 
+#: ``implement.declared_output_completeness`` modes.
+_DECLARED_OUTPUT_COMPLETENESS_MODES = ("warn", "enforce", "off")
+DEFAULT_DECLARED_OUTPUT_COMPLETENESS = "warn"
+
+
+def _declared_output_completeness_mode(config: dict[str, Any] | None) -> str:
+    """``implement.declared_output_completeness`` → ``warn`` | ``enforce`` | ``off``.
+
+    Default ``warn`` (observe + report a missing declared output, never block) —
+    the rollout-safe setting for contract ``declared-output-completeness`` (GPT
+    round-2 §3.4 / §5). ``enforce`` turns a missing EXACT declared output into a
+    hard :class:`StageError`; ``off`` disables the check. An unrecognized value
+    falls back to the default rather than erroring (a config typo must never be
+    the thing that breaks a build).
+    """
+    section = config.get("implement") if isinstance(config, dict) else None
+    if isinstance(section, dict) and "declared_output_completeness" in section:
+        raw = section["declared_output_completeness"]
+        value = str(raw).strip().lower()
+        if value in _DECLARED_OUTPUT_COMPLETENESS_MODES:
+            return value
+    return DEFAULT_DECLARED_OUTPUT_COMPLETENESS
+
+
 def _verify_task_contract(
     task: ImplementTaskRef,
     results: list[Any],
     project_root: Path,
     config: dict[str, Any],
+    *,
+    echo: Callable[[str], None] = lambda _m: None,
 ) -> None:
     """Raise :class:`StageError` if the task did not produce a declared KIND.
 
     No-op when the task declares no recognisable output kinds (skeleton /
     ``skip_generation`` / bare-name outputs) — that path must never false-RED.
+
+    ALSO runs the declared-output-completeness check (contract
+    ``declared-output-completeness``, GPT round-2 §3.4): a task that declared
+    EXACT file paths in ``expected_outputs`` should have produced them. This is
+    ``warn`` by default (echo only — does NOT hard-fail existing runs), and
+    ``enforce`` only when ``implement.declared_output_completeness: enforce`` is
+    set. The kind check below is UNCHANGED (still a hard gate).
     """
+    _check_declared_output_completeness(task, results, project_root, config, echo=echo)
+
     required = _required_kinds(task, config)
     if not required:
         return
@@ -2070,6 +2179,76 @@ def _verify_task_contract(
             f"(missing {sorted(missing)}); the implementer did not generate the "
             f"intended artifact type"
         )
+
+
+def _check_declared_output_completeness(
+    task: ImplementTaskRef,
+    results: list[Any],
+    project_root: Path,
+    config: dict[str, Any],
+    *,
+    echo: Callable[[str], None],
+) -> None:
+    """WARN-by-default: an EXACT declared ``expected_outputs`` path was not produced.
+
+    Contract ``declared-output-completeness`` (GPT round-2 §3.4), registered
+    ``enforcement=warn`` behind ``implement.declared_output_completeness``. Only
+    EXACT file paths (a path with a file extension) participate — a directory or
+    bare-name declaration is left to the kind check (the design's "directory
+    output → at least one source/test file" is the kind gate). A declared file is
+    "produced" when it is in the task's generated files OR exists on disk. Missing
+    ones are WARNED (default) or, when ``enforce``, raised as a StageError.
+
+    Default warn-only so this PR does NOT hard-fail existing runs; the warn
+    signal is collected first (per GPT §5) before any future default-to-enforce.
+    """
+    mode = _declared_output_completeness_mode(config)
+    if mode == "off":
+        return
+    declared_files = [
+        str(out).strip().replace("\\", "/").strip("/")
+        for out in task.expected_outputs
+        if str(out).strip() and PurePosixPath(str(out).strip()).suffix
+    ]
+    if not declared_files:
+        return
+
+    try:
+        root = Path(project_root).resolve()
+    except OSError:
+        root = Path(project_root)
+
+    produced_rel: set[str] = set()
+    for result in results:
+        for raw in getattr(result, "generated_files", ()) or ():
+            try:
+                produced_rel.add(Path(raw).resolve().relative_to(root).as_posix())
+            except (ValueError, OSError):
+                produced_rel.add(PurePosixPath(str(raw).replace("\\", "/")).as_posix())
+
+    missing: list[str] = []
+    for rel in declared_files:
+        if rel in produced_rel:
+            continue
+        if (root / rel).is_file():
+            continue
+        missing.append(rel)
+    if not missing:
+        return
+
+    detail = (
+        f"task {task.task_id}: declared expected output(s) {sorted(missing)} were "
+        f"not produced (not generated and absent on disk)"
+    )
+    if mode == "enforce":
+        raise StageError(
+            detail + " — declared-output-completeness gate (enforce). The "
+            "implementer must produce every declared artifact path."
+        )
+    echo(
+        f"[greenfield] implement: declared-output-completeness (warn) — {detail}. "
+        "Set implement.declared_output_completeness: enforce to make this a hard gate."
+    )
 
 
 def _output_paths_for_task(config: dict[str, Any], task: ImplementTaskRef) -> list[str]:

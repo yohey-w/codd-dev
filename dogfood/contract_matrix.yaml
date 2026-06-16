@@ -12,10 +12,10 @@
 # ═══════════════════════════════════════════════════════════════════
 generated_from: codd/contracts/registry.py
 coverage_summary:
-  covered: 21
+  covered: 24
   uncertified: 0
-  uncovered: 21
-  total: 42
+  uncovered: 26
+  total: 50
 families:
   ImplementTask:
   - id: document_ref.binds_to_one_registered_document
@@ -27,6 +27,7 @@ families:
     - identity
     - uniqueness
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.reference_resolution.resolve_document_ref
     certification_fixtures:
@@ -46,6 +47,7 @@ families:
     dimensions:
     - ownership
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.implement_oracle_scope.find_orphan_artifacts
     certification_fixtures:
@@ -65,6 +67,7 @@ families:
     - ownership
     - routing
     status: covered
+    enforcement: hard
     fail_mode: honest_red
     authority: codd.greenfield.pipeline._verify_task_contract
     certification_fixtures:
@@ -73,6 +76,64 @@ families:
     - tests/greenfield/test_pipeline.py::source-task+sibling-test-PASSES
     finding_ids:
     - F-implement-task-done-artifact-blind
+  - id: artifact.owner.unique.v1
+    source_node: ImplementTask
+    target_node: GeneratedArtifact
+    edge_type: produces
+    dimensions:
+    - ownership
+    - uniqueness
+    - repairability
+    status: covered
+    enforcement: hard
+    fail_mode: honest_fail
+    authority: codd.implement_oracle_scope.validate_task_output_ownership_uniqueness
+    certification_fixtures:
+    - tests/test_acg_owner_uniqueness.py::test_duplicate_exact_output_owner_raises
+    - tests/test_acg_owner_uniqueness.py::test_directory_and_exact_file_owner_conflict_raises
+    - tests/test_acg_owner_uniqueness.py::test_overlapping_directory_owners_raises
+    - tests/test_acg_owner_uniqueness.py::test_non_conflicting_distinct_files_ok
+    - tests/test_acg_owner_uniqueness.py::test_pipeline_wires_owner_uniqueness_before_oracle
+    finding_ids:
+    - PC-owner-uniqueness
+    - F-greenfield-artifact-coherence
+  - id: task.declared_output_completeness
+    source_node: ImplementTask.expected_outputs
+    target_node: GeneratedArtifact
+    edge_type: produces
+    dimensions:
+    - completeness
+    - existence
+    status: covered
+    enforcement: warn
+    fail_mode: honest_red
+    authority: codd.greenfield.pipeline._check_declared_output_completeness
+    config_flag: implement.declared_output_completeness
+    certification_fixtures:
+    - tests/test_acg_owner_uniqueness.py::test_declared_output_completeness_warn_does_not_raise
+    - tests/test_acg_owner_uniqueness.py::test_declared_output_completeness_enforce_raises
+    - tests/test_acg_owner_uniqueness.py::test_declared_output_completeness_satisfied_ok
+    finding_ids:
+    - PC-declared-output-completeness
+  - id: source_design_doc.registered_doc_strict.v1
+    source_node: ImplementTask.source_design_doc
+    target_node: Document.registered
+    edge_type: reference
+    dimensions:
+    - identity
+    - authenticity
+    - uniqueness
+    status: uncovered
+    enforcement: noop
+    fail_mode: honest_fail
+    authority: null
+    predicted_issue: resolve_document_ref has a compatibility branch that binds an EXISTING markdown path
+      to a synthetic doc:<rel> even when it carries no CoDD frontmatter / is not in the DocumentReferenceIndex;
+      source_design_doc is the task-derivation authority, so an unregistered scratch doc can drive derivation
+      in non-strict mode.
+    proposed_gate: 'resolve_document_ref(strict_registered=True) for source_design_doc: require a frontmatter-registered
+      document, not just an existing file. negative fixture: docs/scratch.md exists without CoDD frontmatter
+      and a task references source_design_doc: docs/scratch.md → red in strict mode.'
   - id: depends_on.resolves_to_one_task_or_document
     source_node: ImplementTask.depends_on
     target_node: ImplementTask
@@ -83,6 +144,7 @@ families:
     - uniqueness
     - order
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: task dependency id typo / basename / stale id silently breaks ordering (scope explicitly
@@ -96,6 +158,7 @@ families:
     - completeness
     - routing
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: declared path/kind disagrees with the actual generated artifact; today a missing
@@ -110,6 +173,7 @@ families:
     - freshness
     - identity
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: after a design doc is updated, a stale derived task lingers against the old content.
@@ -121,6 +185,7 @@ families:
     dimensions:
     - ownership
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: a scoped rerun deletes or overwrites another task's artifact.
@@ -134,6 +199,7 @@ families:
     - identity
     - uniqueness
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.scanner.build_document_reference_index
     certification_fixtures:
@@ -150,6 +216,7 @@ families:
     - identity
     - uniqueness
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: an in-doc link stays a raw string and breaks, or mis-binds to a different doc/VB/AC.
@@ -164,6 +231,7 @@ families:
     - identity
     - routing
     status: covered
+    enforcement: hard
     fail_mode: honest_red
     authority: codd.import_coherence.check_import_coherence
     certification_fixtures:
@@ -174,6 +242,25 @@ families:
     finding_ids:
     - F-greenfield-import-coherence
     - F-greenfield-artifact-coherence
+  - id: python.import_coherence_oracle.v1
+    source_node: GeneratedArtifact.python
+    target_node: Symbol
+    edge_type: reference
+    dimensions:
+    - existence
+    - identity
+    - execution
+    status: uncovered
+    enforcement: noop
+    fail_mode: honest_red
+    authority: null
+    predicted_issue: the Python LayoutProfile sets implement_oracle=None (composite oracle deferred);
+      pytest --collect-only + verify-stage gates are the backstop, so a source module with an undefined
+      import/symbol that no test imports is invisible at implement-time.
+    proposed_gate: 'CompositePythonImplementOracle on the profile: py_compile over source+tests; static
+      import resolver / pyflakes; pytest --collect-only; optional public-API smoke (opt-in). negative
+      fixture: src/app/hidden.py with `from .missing import X` that no test imports → pytest green but
+      composite oracle red.'
   GeneratedTest:
   - id: test.helper_symbols_exist_before_run
     source_node: GeneratedTest
@@ -183,6 +270,7 @@ families:
     - existence
     - identity
     status: covered
+    enforcement: hard
     fail_mode: honest_red
     authority: codd.test_import_coherence.check_test_import_coherence
     certification_fixtures:
@@ -199,6 +287,7 @@ families:
     - execution
     - routing
     status: covered
+    enforcement: hard
     fail_mode: honest_red
     authority: codd.e2e_contract_coherence
     certification_fixtures:
@@ -215,6 +304,7 @@ families:
     - freshness
     - reproducibility
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.dependency_lock_coherence.ensure_lock_freshness_barrier
     certification_fixtures:
@@ -233,6 +323,7 @@ families:
     - reproducibility
     - ownership
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.dependency_lock_coherence.reconcile_manifest_toolchain_deps
     certification_fixtures:
@@ -250,6 +341,7 @@ families:
     - ownership
     - reproducibility
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: the SUT overwrites codd:verify / runner config in the manifest at a later stage.
@@ -264,6 +356,7 @@ families:
     - uniqueness
     - completeness
     status: covered
+    enforcement: hard
     fail_mode: honest_red
     authority: codd.verifiable_behavior_audit.build_vb_coverage_audit
     certification_fixtures:
@@ -283,6 +376,7 @@ families:
     - identity
     - uniqueness
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: range notation / duplicate semantics / a non-canonical first-column VB slips through
@@ -297,6 +391,7 @@ families:
     - authenticity
     - observability
     status: covered
+    enforcement: hard
     fail_mode: honest_red
     authority: codd.vb_marker_authenticity.build_authenticity_report
     certification_fixtures:
@@ -316,6 +411,7 @@ families:
     - authenticity
     - termination
     status: covered
+    enforcement: hard
     fail_mode: honest_red
     authority: codd.vb_marker_authenticity.build_authenticity_report
     certification_fixtures:
@@ -333,11 +429,50 @@ families:
     - authenticity
     - termination
     status: uncovered
+    enforcement: noop
     fail_mode: honest_red
     authority: null
     predicted_issue: a helper calling a helper at 3-hop+ depth yields a false-red or false-green beyond
       the currently-pinned 2-hop coverage.
     proposed_gate: 'bounded evidence-graph contract: explicit max-hops + cycle guard certified for N>2.'
+  VerifyCampaign:
+  - id: verify.campaign.observable.v1
+    source_node: VerifyCampaign.report_format
+    target_node: RunnerReportAdapter
+    edge_type: executes
+    dimensions:
+    - observability
+    - execution
+    status: covered
+    enforcement: hard
+    fail_mode: honest_fail
+    authority: codd.coverage_execution_coherence.certify_verify_campaign_observable
+    certification_fixtures:
+    - tests/test_verify_campaign_observable.py::test_declared_campaign_without_adapter_raises
+    - tests/test_verify_campaign_observable.py::test_declared_campaign_with_adapter_ok
+    - tests/test_verify_campaign_observable.py::test_no_campaign_is_noop_ok
+    - tests/test_verify_campaign_observable.py::test_pipeline_honest_fails_on_adapterless_campaign
+    finding_ids:
+    - PC-verify-campaign-observable
+    - F-verify-false-green
+  - id: verify.campaign.clean_execution.v1
+    source_node: VerifyCampaign
+    target_node: RunnerExecution
+    edge_type: executes
+    dimensions:
+    - execution
+    - observability
+    status: uncovered
+    enforcement: noop
+    fail_mode: honest_fail
+    authority: null
+    predicted_issue: run_verify_campaign keeps CampaignRun.exit_code but does NOT treat it as pass authority,
+      and build_coherence_report only checks the UNBLOCKED VBs' covering files — so a non-VB e2e/integration
+      test that FAILED (run.execution.executed_failed_files non-empty, or exit_code != 0) can still pass
+      the coherence gate alone.
+    proposed_gate: 'enforce_campaign_clean_execution(run.execution, run.exit_code) around build_coherence_report:
+      exit_code != 0 OR executed_failed_files → CoherenceError. negative fixture: a vitest JSON report
+      with a failed tests/e2e/non_vb.e2e.test.ts while every VB covering file passed → hard red.'
   CoverageClaim:
   - id: coverage_claim.requires_executed_passed_evidence
     source_node: CoverageClaim
@@ -347,6 +482,7 @@ families:
     - observability
     - execution
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.coverage_execution_coherence.enforce_coverage_execution_coherence
     certification_fixtures:
@@ -366,6 +502,7 @@ families:
     - discovery
     - observability
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.coverage_execution_coherence.build_test_inventory
     certification_fixtures:
@@ -381,6 +518,7 @@ families:
     - discovery
     - observability
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: VB scan / authenticity / e2e / verify each carry a DIFFERENT glob -> a test visible
@@ -395,6 +533,7 @@ families:
     - termination
     - repairability
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.implement_oracle.run_implement_oracle_gate
     certification_fixtures:
@@ -412,6 +551,7 @@ families:
     - execution
     - repairability
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.implement_oracle._execute_broad_campaign
     certification_fixtures:
@@ -431,6 +571,7 @@ families:
     - ownership
     - repairability
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.repair.auto_scope_guard
     certification_fixtures:
@@ -447,6 +588,7 @@ families:
     - authenticity
     - repairability
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: a test-failure repair weakens the assertions to go green (covered for pytest-style
@@ -461,6 +603,7 @@ families:
     - parsing
     - routing
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.ai_invoke.invoke_file_writing_agent
     certification_fixtures:
@@ -479,6 +622,7 @@ families:
     - parsing
     - routing
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: the stdout/file payload contract breaks in assemble/extract/fix stages (only the
@@ -493,6 +637,7 @@ families:
     - termination
     - budget
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.ai_invoke.invoke_ai
     certification_fixtures:
@@ -510,6 +655,7 @@ families:
     - repairability
     - budget
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.ai_invoke.invoke_ai
     certification_fixtures:
@@ -526,6 +672,7 @@ families:
     - budget
     - repairability
     status: covered
+    enforcement: hard
     fail_mode: honest_fail
     authority: codd.ai_invoke.invoke_ai
     certification_fixtures:
@@ -534,6 +681,48 @@ families:
     - tests/test_ai_invoke.py::test_invoke_ai_output_ceiling_recovery_threads_to_file_writing_agent
     finding_ids:
     - F-output-32k
+  LayoutProfile:
+  - id: scaffold.config_certified_before_verify.v1
+    source_node: LayoutProfile
+    target_node: ScaffoldConfig
+    edge_type: owns
+    dimensions:
+    - existence
+    - observability
+    - ownership
+    status: uncovered
+    enforcement: noop
+    fail_mode: honest_fail
+    authority: null
+    predicted_issue: TS scaffolds tsconfig.json + vitest.config.ts create-only and _ensure_test_runner
+      is advisory (swallows scaffold exceptions); only tsconfig scope is hard-gated (certify_oracle_scope).
+      Whether vitest.config.ts actually includes the .e2e.* convention is not certified — it is only caught
+      LATER when the campaign scans 0 e2e.
+    proposed_gate: 'certify_profile_scaffold_contract(project_root, profile) before verify: tsconfig includes
+      source+test roots; vitest.config.ts includes the .e2e. convention; package.json has the harness
+      scripts/deps or the lock finalizer can reconcile. negative fixture: a vitest.config.ts that includes
+      only .test.ts (no .e2e.ts) → red at scaffold certification, not deferred to the campaign.'
+  TestFile:
+  - id: authenticity.observable_in_supported_stack.v1
+    source_node: TestFile
+    target_node: TestBlock
+    edge_type: claims
+    dimensions:
+    - authenticity
+    - observability
+    - parsing
+    status: uncovered
+    enforcement: noop
+    fail_mode: honest_red
+    authority: null
+    predicted_issue: build_authenticity_report puts a marker-bearing recognized test file into degraded_paths
+      (skips Stage 2/3) when the adapter handles the file but parses NO blocks; report.passed only checks
+      violations — so a supported-stack (TS/Python) test whose wrapper the parser cannot read is 'authenticity
+      unknown' yet can degrade-pass.
+    proposed_gate: 'strict_authenticity_observability=True greenfield default: when adapter handles the
+      file AND markers present AND no blocks parsed → violation(kind=''unobservable_test_structure'');
+      unknown languages stay warn/degrade. negative fixture: tests/foo.test.ts with covers vb=VB-1 in
+      a wrapper the parser does not recognize → red (today degrades to pass).'
   Plan:
   - id: plan.stage_order_topologically_certified
     source_node: Plan
@@ -542,10 +731,15 @@ families:
     dimensions:
     - order
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
-    predicted_issue: a consumer task runs before its supplier task.
-    proposed_gate: task dependency topological certification.
+    predicted_issue: task_dependency_order assumes declaration order IS dependency order (codd.implement_oracle_scope.task_dependency_order
+      ranks by index.all_task_ids); a planner that emits a supplier AFTER its consumer destabilizes the
+      chunked_broad last-resort repair order.
+    proposed_gate: 'derive_task_dependency_order_from_artifact_edges() — topological order from the import
+      graph / declared depends_on; cycles honest-fail or chunk per-SCC. negative fixture: consumer→supplier
+      declaration order where the consumer imports the supplier; assert the derived order is supplier-first.'
   RunnerReport:
   - id: runner_report.case_level_marker_verified
     source_node: RunnerReport
@@ -555,6 +749,7 @@ families:
     - observability
     - execution
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: only file-level pass is observed; a per-case covers-marker cannot be verified executed.
@@ -568,6 +763,7 @@ families:
     - execution
     - observability
     status: uncovered
+    enforcement: noop
     fail_mode: honest_red
     authority: null
     predicted_issue: the compiler/oracle does not see tests/helpers/e2e, so an intentionally broken helper
@@ -581,6 +777,7 @@ families:
     - routing
     - discovery
     status: uncovered
+    enforcement: noop
     fail_mode: honest_red
     authority: null
     predicted_issue: e2e runner routing is hard-coded per tool (e.g. playwright), so a different modality's
@@ -596,6 +793,7 @@ families:
     - freshness
     - reproducibility
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: no lock-freshness adapter for uv / poetry / cargo / go.sum (only the npm/package-lock
@@ -610,6 +808,7 @@ families:
     - repairability
     - ownership
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: a new-runner failure has no editable-source set, so repair cannot attribute it (only
@@ -624,6 +823,7 @@ families:
     - execution
     - observability
     status: uncovered
+    enforcement: noop
     fail_mode: honest_red
     authority: null
     predicted_issue: tests skip because the environment is missing, yet the run is treated as green.
@@ -638,6 +838,7 @@ families:
     - observability
     - termination
     status: uncovered
+    enforcement: noop
     fail_mode: honest_red
     authority: null
     predicted_issue: the server is not started / wrong port / a background process leaks (the e2e-import
@@ -652,6 +853,7 @@ families:
     - replay
     - termination
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: budgeted-repair partial progress re-loops on resume instead of replaying completed
@@ -667,6 +869,7 @@ families:
     - discovery
     - reproducibility
     status: uncovered
+    enforcement: noop
     fail_mode: honest_fail
     authority: null
     predicted_issue: multiple package roots / test roots / lock roots in a monorepo/workspace confuse

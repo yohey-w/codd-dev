@@ -27,6 +27,7 @@ from codd.contracts_registry import certify as certify_mod
 from codd.contracts_registry import generate_matrix as gen_mod
 from codd.contracts_registry.registry import (
     VALID_DIMENSIONS,
+    VALID_ENFORCEMENTS,
     VALID_FAIL_MODES,
     VALID_STATUSES,
 )
@@ -129,6 +130,135 @@ def test_known_uncovered_backlog_cells_are_present():
         "doc_cross_link.resolves_to_one_target",
     ):
         assert expected in ids, f"missing known backlog cell {expected!r}"
+
+
+# ── the 2 NEW hard gates + the warn gate are registered as COVERED ──────────
+def test_new_round2_gates_are_covered():
+    by_id = {c.id: c for c in REGISTRY}
+    # artifact.owner.unique.v1 — new hard gate (GPT r2 §3.3).
+    owner = by_id["artifact.owner.unique.v1"]
+    assert owner.status == "covered" and owner.enforcement == "hard"
+    assert owner.authority == (
+        "codd.implement_oracle_scope.validate_task_output_ownership_uniqueness"
+    )
+    # verify.campaign.observable.v1 — new hard gate (GPT r2 §3.1).
+    obs = by_id["verify.campaign.observable.v1"]
+    assert obs.status == "covered" and obs.enforcement == "hard"
+    assert obs.authority == (
+        "codd.coverage_execution_coherence.certify_verify_campaign_observable"
+    )
+    # task.declared_output_completeness — registered WARN behind a config flag.
+    dly = by_id["task.declared_output_completeness"]
+    assert dly.status == "covered" and dly.enforcement == "warn"
+    assert dly.config_flag == "implement.declared_output_completeness"
+
+
+def test_precise_round2_uncovered_cells_are_present():
+    """GPT round-2 §3's remaining precise cells are in the backlog."""
+    ids = {c.id for c in REGISTRY}
+    for expected in (
+        "verify.campaign.clean_execution.v1",  # §3.2
+        "scaffold.config_certified_before_verify.v1",  # §3.5
+        "authenticity.observable_in_supported_stack.v1",  # §3.6
+        "python.import_coherence_oracle.v1",  # §3.7
+        "source_design_doc.registered_doc_strict.v1",  # §3.8
+    ):
+        assert expected in ids, f"missing precise §3 cell {expected!r}"
+
+
+# ── enforcement axis (GPT §5A) ───────────────────────────────────────────────
+def test_every_contract_has_valid_enforcement():
+    for c in REGISTRY:
+        assert c.enforcement in VALID_ENFORCEMENTS, f"{c.id}: bad enforcement"
+        if c.status == "uncovered":
+            assert c.enforcement == "noop", f"{c.id}: uncovered must be noop"
+        else:
+            assert c.enforcement in ("hard", "warn"), f"{c.id}: covered must enforce"
+
+
+def test_uncovered_with_non_noop_enforcement_is_rejected():
+    with pytest.raises(ValueError):
+        Contract(
+            id="bad.uncovered_hard",
+            source_node="A",
+            target_node="B",
+            edge_type="reference",
+            dimensions=("existence",),
+            authority=None,
+            fail_mode="honest_fail",
+            status="uncovered",
+            predicted_issue="x",
+            proposed_gate="y",
+            enforcement="hard",  # illegal for uncovered
+        )
+
+
+def test_invalid_enforcement_value_is_rejected():
+    with pytest.raises(ValueError):
+        Contract(
+            id="bad.enforcement",
+            source_node="A",
+            target_node="B",
+            edge_type="reference",
+            dimensions=("existence",),
+            authority="codd.x",
+            fail_mode="honest_fail",
+            status="covered",
+            certification_fixtures=("t",),
+            enforcement="sometimes",  # not in VALID_ENFORCEMENTS
+        )
+
+
+# ── GPT §5 CI meta-test: every ENFORCED contract is real ─────────────────────
+def test_every_enforced_contract_has_importable_authority():
+    """GPT §5 CI rule: ``enforcement: hard``/``warn`` ⇒ ``authority`` import-resolves.
+
+    A covered contract that names an authority symbol the codebase does not export
+    is a LIE in the coverage table — this catches an authority typo or a deleted
+    function the registry still claims.
+    """
+    import importlib
+
+    def _authority_resolves(dotted: str) -> bool:
+        # Accept EITHER a ``module.symbol`` (a function/class) OR a bare importable
+        # module path (a couple of contracts name a whole module as the authority,
+        # e.g. ``codd.e2e_contract_coherence``).
+        module_name, _, symbol = dotted.rpartition(".")
+        if module_name:
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:  # noqa: BLE001 — fall through to whole-module import
+                module = None
+            if module is not None and hasattr(module, symbol):
+                return True
+        try:  # whole dotted path as a module
+            importlib.import_module(dotted)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    for c in REGISTRY:
+        if c.enforcement in ("hard", "warn"):
+            assert c.authority, f"{c.id}: enforced contract must name an authority"
+            assert _authority_resolves(c.authority), (
+                f"{c.id}: authority {c.authority!r} does not import-resolve "
+                "(typo or deleted function/module?)"
+            )
+
+
+def test_every_enforced_contract_fixture_file_exists():
+    """GPT §5 CI rule: every ``hard``/``warn`` contract has ≥1 certification fixture
+    whose test FILE exists on disk (the negative-fixture-exists half)."""
+    root = certify_mod._repo_root()
+    for c in REGISTRY:
+        if c.enforcement in ("hard", "warn"):
+            assert c.certification_fixtures, (
+                f"{c.id}: enforced contract must name ≥1 certification fixture"
+            )
+            existing, missing = certify_mod._check_fixture_files(c, root)
+            assert not missing, (
+                f"{c.id}: certification fixture file(s) not found: {missing}"
+            )
 
 
 # ── Contract validation rejects malformed rows ──────────────────────────────

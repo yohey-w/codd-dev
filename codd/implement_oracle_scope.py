@@ -78,6 +78,8 @@ __all__ = [
     "OracleRepairPhase",
     "OracleRerunScope",
     "OrphanArtifact",
+    "OwnerUniquenessError",
+    "OwnerUniquenessViolation",
     "ScopeDecision",
     "ScopeEscalation",
     "StructuredDiagnostic",
@@ -93,6 +95,7 @@ __all__ = [
     "extract_public_surface",
     "importers_of",
     "task_dependency_order",
+    "validate_task_output_ownership_uniqueness",
 ]
 
 
@@ -1134,6 +1137,205 @@ def build_path_owner_index(
     return TaskOutputIndex(
         exact=exact, dirs=tuple(dirs_sorted), all_task_ids=tuple(dict.fromkeys(all_ids))
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Output-owner uniqueness invariant (ACG: exactly ONE owner per artifact)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# THE INVARIANT (GPT-5.5 Pro round-2 §3.3 — the "空セル" the orphan gate left):
+#   ``build_path_owner_index`` registers exact paths and directory owners with
+#   ``setdefault``, so when two tasks declare the SAME output the FIRST silently
+#   wins. The orphan gate checks "at least one owner"; this checks the OTHER half
+#   of ACG ownership — "at MOST one owner". A duplicate owner makes a scoped
+#   rerun's responsibility/write-fence ambiguous (which task regenerates the
+#   shared file? whose fence governs it?), so the same false-green class the
+#   orphan gate closes re-opens from the other side.
+#
+# DETERMINISTIC + BEFORE implement-oracle: this is a PURE structural check over
+# the SAME three path sources ``build_path_owner_index`` unions (declared output
+# paths + first-implement generated files + config-derived paths). It runs at
+# index-build time (the pipeline calls it just before ``build_path_owner_index``)
+# so a duplicate-owner topology honest-fails up-front, not after a 40-minute
+# rerun discovers the ambiguity. Language-agnostic: no per-language logic — it
+# reasons purely about declared path strings.
+#
+# WHAT COUNTS AS A CONFLICT (the three cases GPT §3.3 names):
+#   1. exact-vs-exact   — two tasks declare the SAME exact file path.
+#   2. dir-vs-exact     — task A owns directory ``src/`` and task B declares the
+#      exact file ``src/x.ts`` (B's file sits inside A's owned tree → two owners).
+#   3. dir-vs-dir       — task A owns ``src/`` and task B owns ``src/lib/`` (B's
+#      tree nests inside A's → overlapping directory ownership).
+#
+# A file's PARENT directory is owned only WEAKLY by the file's task (the same
+# ``setdefault`` semantics ``build_path_owner_index`` uses), so a task owning
+# ``src/a.ts`` and another owning ``src/b.ts`` do NOT conflict (the weak
+# ``src`` ownership of one does not steal the other's file). We mirror that:
+# weak parent-dir ownership never triggers a dir conflict; only an EXPLICITLY
+# declared directory output does.
+
+
+@dataclass(frozen=True)
+class OwnerUniquenessViolation:
+    """One artifact-ownership conflict (a path claimed by >1 task)."""
+
+    #: ``"duplicate_exact"`` | ``"dir_file_conflict"`` | ``"overlapping_dirs"``
+    kind: str
+    path: str
+    owners: tuple[str, ...]
+    detail: str = ""
+
+    @property
+    def message(self) -> str:
+        owners = ", ".join(self.owners)
+        if self.kind == "duplicate_exact":
+            return (
+                f"output path {self.path!r} is declared by {len(self.owners)} tasks "
+                f"({owners}) — exactly one task must own an artifact"
+            )
+        if self.kind == "dir_file_conflict":
+            return (
+                f"output {self.path!r} has both a directory owner and an exact-file "
+                f"owner ({owners}) — its repair scope/write-fence is ambiguous"
+            )
+        return (
+            f"output directories overlap ({self.detail}; owners {owners}) — nested "
+            f"directory ownership makes the inner files doubly owned"
+        )
+
+
+class OwnerUniquenessError(ValueError):
+    """Raised when ≥1 generated artifact would have more than one owning task.
+
+    Carries the structured :attr:`violations` so the caller (the greenfield
+    pipeline) can surface them in a single StageError. A ``ValueError`` subclass
+    (not a pipeline import) so this module stays dependency-free of the pipeline;
+    the pipeline catches it and re-raises as a ``StageError``.
+    """
+
+    def __init__(self, violations: "Sequence[OwnerUniquenessViolation]") -> None:
+        self.violations = tuple(violations)
+        joined = "; ".join(v.message for v in self.violations)
+        super().__init__(
+            f"output-owner uniqueness violated ({len(self.violations)} conflict(s)): {joined}"
+        )
+
+
+def validate_task_output_ownership_uniqueness(
+    tasks: Sequence[object],
+    *,
+    generated_files: Mapping[str, Iterable[str]] | None = None,
+    config_output_paths: Mapping[str, Iterable[str]] | None = None,
+) -> None:
+    """Raise :class:`OwnerUniquenessError` if any artifact would have >1 owner.
+
+    PURE + deterministic. Reasons over the SAME three path sources
+    :func:`build_path_owner_index` unions per task — declared ``output_paths``,
+    ``generated_files[task_id]``, ``config_output_paths[task_id]`` — and detects
+    the three GPT §3.3 conflict classes (exact-vs-exact, dir-vs-exact,
+    dir-vs-dir). No conflict ⇒ returns ``None``. Intended to run at index-build
+    time, BEFORE the implement-oracle, so an ambiguous-ownership topology fails
+    fast and honestly rather than letting the first-owner-wins ``setdefault``
+    silently pick a winner.
+
+    Only EXPLICITLY declared directory outputs participate in directory-conflict
+    detection (a file's parent dir is weakly owned and never steals another
+    task's file — mirroring ``build_path_owner_index``'s ``setdefault`` parent
+    handling). Duplicate self-declarations by the SAME task are not a conflict
+    (a task may list a path twice / declare it AND generate it).
+    """
+    gen = generated_files or {}
+    cfg_paths = config_output_paths or {}
+
+    # exact file path -> set of owning task ids; declared directory -> owners.
+    exact_owners: dict[str, list[str]] = {}
+    dir_owners: dict[str, list[str]] = {}
+
+    for task in tasks:
+        task_id = _task_id(task)
+        if task_id is None:
+            continue
+        declared = list(_task_output_paths(task) or ())
+        declared += list(gen.get(task_id, ()) or ())
+        declared += list(cfg_paths.get(task_id, ()) or ())
+        # De-dupe within a task: the SAME path declared twice by one task is not a
+        # multi-owner conflict.
+        seen_files: set[str] = set()
+        seen_dirs: set[str] = set()
+        for raw in declared:
+            norm = _norm(raw)
+            if not norm:
+                continue
+            if _looks_like_file(norm):
+                if norm in seen_files:
+                    continue
+                seen_files.add(norm)
+                owners = exact_owners.setdefault(norm, [])
+                if task_id not in owners:
+                    owners.append(task_id)
+            else:
+                if norm in seen_dirs:
+                    continue
+                seen_dirs.add(norm)
+                owners = dir_owners.setdefault(norm, [])
+                if task_id not in owners:
+                    owners.append(task_id)
+
+    violations: list[OwnerUniquenessViolation] = []
+
+    # 1. exact-vs-exact: a file path with more than one owning task.
+    for path, owners in sorted(exact_owners.items()):
+        if len(owners) > 1:
+            violations.append(
+                OwnerUniquenessViolation(
+                    kind="duplicate_exact", path=path, owners=tuple(owners)
+                )
+            )
+
+    # 2. dir-vs-exact: an explicitly-declared directory owner whose tree contains
+    #    an exact-file owner that is a DIFFERENT task.
+    for directory, dir_owner_ids in sorted(dir_owners.items()):
+        for file_path, file_owner_ids in exact_owners.items():
+            if file_path == directory or file_path.startswith(directory + "/"):
+                conflicting = sorted(set(dir_owner_ids) | set(file_owner_ids))
+                if len(conflicting) > 1:
+                    violations.append(
+                        OwnerUniquenessViolation(
+                            kind="dir_file_conflict",
+                            path=file_path,
+                            owners=tuple(conflicting),
+                            detail=f"file under directory owner {directory!r}",
+                        )
+                    )
+
+    # 3. dir-vs-dir: two explicitly-declared directory owners that nest, owned by
+    #    different tasks (src/ vs src/lib/). Compare each ordered pair once.
+    dir_items = sorted(dir_owners.items())
+    for i, (outer, outer_owners) in enumerate(dir_items):
+        for inner, inner_owners in dir_items[i + 1 :]:
+            # ``inner`` is the longer-or-equal path in sorted order? Not guaranteed;
+            # test nesting both directions.
+            a, b = outer, inner
+            if a == b:
+                continue
+            nested = b.startswith(a + "/") or a.startswith(b + "/")
+            if not nested:
+                continue
+            conflicting = sorted(set(outer_owners) | set(inner_owners))
+            if len(conflicting) > 1:
+                violations.append(
+                    OwnerUniquenessViolation(
+                        kind="overlapping_dirs",
+                        path=f"{a} / {b}",
+                        owners=tuple(conflicting),
+                        detail=f"directory {a!r} nests {b!r}"
+                        if b.startswith(a + "/")
+                        else f"directory {b!r} nests {a!r}",
+                    )
+                )
+
+    if violations:
+        raise OwnerUniquenessError(violations)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

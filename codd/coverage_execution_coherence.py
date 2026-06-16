@@ -992,6 +992,39 @@ def coherence_gate_applies(profile: Any) -> bool:
         return False
 
 
+def certify_verify_campaign_observable(profile: Any) -> None:
+    """HARD GATE (contract verify.campaign.observable.v1; GPT round-2 §3.1).
+
+    A profile that DECLARES a verify campaign but whose ``runner_report_adapter()``
+    is ``None`` cannot have its executions read — the campaign would run and the
+    coherence gate would silently NO-OP (``coherence_gate_applies`` returns False
+    for exactly this state). That is an OBSERVABILITY failure, not a pass: a
+    declared-but-unreadable campaign must honest-fail, never no-op.
+
+    Raises :class:`CampaignError` when ``profile.verify_campaign is not None`` AND
+    ``profile.runner_report_adapter() is None``. A profile with NO campaign
+    (Python today) is a legitimate no-op and passes silently; a profile whose
+    campaign HAS an adapter passes. Deterministic, side-effect-free (it runs no
+    command). The caller wires it BEFORE the campaign runs so the failure is
+    surfaced even though ``coherence_gate_applies`` would otherwise skip the stack.
+    """
+    campaign = getattr(profile, "verify_campaign", None)
+    if campaign is None:
+        return
+    getter = getattr(profile, "runner_report_adapter", None)
+    adapter = getter() if callable(getter) else None
+    if adapter is None:
+        report_format = getattr(campaign, "report_format", None)
+        raise CampaignError(
+            "verify campaign is declared but its report_format "
+            f"{report_format!r} has no registered runner-report adapter — the "
+            "campaign's executions cannot be observed, so the coverage-execution "
+            "coherence gate would silently NO-OP. An unobservable verification is "
+            "not a pass; register an adapter for this report_format (or remove the "
+            "campaign from the profile)."
+        )
+
+
 def enforce_coverage_execution_coherence(
     project_root: Path | str,
     profile: Any,
@@ -1080,6 +1113,7 @@ __all__ = [
     "VitestJsonReportAdapter",
     "build_coherence_report",
     "build_test_inventory",
+    "certify_verify_campaign_observable",
     "coherence_gate_applies",
     "enforce_coverage_execution_coherence",
     "format_coherence_feedback",
