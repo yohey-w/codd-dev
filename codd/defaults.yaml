@@ -189,6 +189,52 @@ implement:
   # (node stacks: npm/pnpm/yarn/bun -- so `tsc` + deps are materialized before
   # the typecheck). A cold cache can pull a large tree. Default 900.
   oracle_install_timeout_seconds: 900
+  # Broad-repair STRATEGY (incremental | legacy). When the implement-time oracle
+  # forces the BROAD rung (a wide-fan-out artifact -- a shared schema / barrel /
+  # public entrypoint imported by many files -- whose narrow repair would thrash),
+  # broad's EXECUTION is the question. 'incremental' (default) runs a BUDGETED
+  # RESIDUAL COHERENCE CAMPAIGN: re-implement only the shared exporter/supplier
+  # first, RE-RUN the whole-project oracle, then re-implement ONLY the importers it
+  # STILL proves broken (re-derived from the live residual diagnostics), in
+  # dependency order, bounded by a wall-clock budget + a recheck cap. Often the
+  # exporter fix alone clears every importer, so the whole project goes green
+  # WITHOUT re-implementing any consumer task. 'legacy' runs the old whole-project
+  # regeneration (re-implement EVERY task, ~17 tasks * ~40-50 min/attempt) -- which
+  # blew a 4h wall-clock on a strong SUT without converging. ANTI-FALSE-GREEN: in
+  # BOTH strategies the WHOLE-PROJECT oracle is the ONLY thing that can discharge
+  # the gate; a phase's local typecheck success proves nothing, and budget
+  # exhaustion / non-convergence / unresolved residual is an HONEST FAILURE with a
+  # partial-progress audit record, never a silent green.
+  oracle_broad_strategy: incremental
+  # Cumulative wall-clock budget for ONE broad CAMPAIGN, across all its phases
+  # (seconds). The campaign stops BEFORE starting a phase whose remaining budget
+  # could not also fit a verifying whole-project oracle recheck, then honest-fails
+  # (workspace changes persist for resume; never green). Default 2700 (45 min) --
+  # a residual campaign (1 supplier phase + a few importer phases) fits well
+  # inside it, vs the legacy-broad 4h blow-up. Only applies to the incremental
+  # strategy.
+  oracle_broad_wall_clock_seconds: 2700
+  # Cap on whole-project oracle RECHECKS within ONE broad campaign (each phase is
+  # followed by exactly one recheck -- the green authority). Bounds the campaign
+  # independent of the wall-clock so a fast-but-non-converging SUT still
+  # terminates. Default 8; minimum 1. Only applies to the incremental strategy.
+  oracle_broad_max_rechecks: 8
+  # Chunk size for the SUPPLIER phase of a broad campaign (how many supplier/
+  # exporter tasks to re-implement per supplier sub-phase). Default 1 -- the wide-
+  # fan-out artifact is typically a single shared module; one focused exporter fix
+  # is the highest-yield, lowest-cognitive-load step (especially for a weak SUT).
+  oracle_broad_chunk_size: 1
+  # Chunk size for the RESIDUAL IMPORTER phase (how many importer owner-tasks to
+  # re-implement per residual sub-phase). Default 2 -- residual importers are
+  # re-derived from the live diagnostics and repaired in dependency order; a small
+  # chunk keeps each rerun's allowed-paths surface and wall-clock bounded.
+  oracle_residual_chunk_size: 2
+  # Legacy whole-project broad opt-in (default false). true ⇒ a wide-fan-out
+  # artifact uses the OLD whole-project regeneration instead of the incremental
+  # campaign (equivalent to oracle_broad_strategy: legacy for the wide-fan-out
+  # trigger). Kept for parity / escape hatch; the incremental campaign is the
+  # default because legacy broad does not fit the wall-clock on real builds.
+  oracle_legacy_broad_enabled: false
   # Shared canonical output root for implement tasks WITHOUT an explicit
   # default_output_paths / implement_targets mapping (e.g. greenfield-derived
   # tasks). null = derive from scan.source_dirs[0] (usually "src/"). Every

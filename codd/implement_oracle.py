@@ -101,6 +101,11 @@ __all__ = [
     "run_implement_oracle_gate",
 ]
 
+#: Internal-but-tested campaign entry point (the anti-false-green acceptance tests
+#: drive it with a fake oracle + rerun). Not part of the stable public surface, but
+#: importable for the gate's unit tests.
+__test_exports__ = ["_execute_broad_campaign"]
+
 
 # ── evidence categories (language-neutral; the design's normalization target) ──
 #
@@ -306,6 +311,108 @@ def _oracle_opt_out(config: Mapping[str, Any] | None) -> bool:
     return False
 
 
+# ── broad-repair campaign config (the budgeted residual coherence campaign) ──
+#
+# When a wide-fan-out artifact forces the broad RUNG, broad's EXECUTION is no
+# longer "regenerate every task" (~17 tasks, ~40-50 min/attempt, wall-clock
+# blow-up). It is a budgeted residual coherence campaign: fix the shared supplier
+# first, re-measure the WHOLE-PROJECT oracle, fix only the residual importers it
+# still proves broken, bounded by a wall-clock budget + a recheck cap. These
+# readers expose the campaign knobs (defaults mirror ``codd/defaults.yaml``).
+
+#: Default cumulative wall-clock for ONE broad CAMPAIGN (across all its phases),
+#: in seconds. The campaign stops before an AI phase whose start would leave less
+#: than (a min call budget + an oracle recheck reserve), then honest-fails with a
+#: partial-progress record. 2700s = 45 min — a generous-but-bounded budget that a
+#: residual campaign (1 supplier phase + a few residual phases) fits inside, vs the
+#: 4h legacy-broad timeout. Override via ``implement.oracle_broad_wall_clock_seconds``.
+DEFAULT_ORACLE_BROAD_WALL_CLOCK_SECONDS = 2700.0
+#: Default cap on whole-project oracle RECHECKS inside one campaign (each phase is
+#: followed by a recheck). Bounds the campaign independent of the wall-clock so a
+#: fast-but-non-converging SUT still terminates. Override via
+#: ``implement.oracle_broad_max_rechecks``.
+DEFAULT_ORACLE_BROAD_MAX_RECHECKS = 8
+#: Reserve (seconds) kept back for the final whole-project oracle recheck + a
+#: minimal AI call, so the budget check never starts a phase it cannot also verify.
+#: Conservative; the oracle recheck is cheap relative to an AI phase.
+_BROAD_MIN_CALL_BUDGET_SECONDS = 60.0
+_BROAD_ORACLE_RECHECK_RESERVE_SECONDS = 30.0
+
+
+def _oracle_broad_strategy(config: Mapping[str, Any] | None) -> str:
+    """``implement.oracle_broad_strategy`` → ``incremental`` (default) | ``legacy``.
+
+    ``incremental`` runs the budgeted residual-coherence campaign on a wide-fan-out
+    broad. ``legacy`` runs the whole-project regen (the old behaviour). An
+    unrecognized value falls back to ``incremental`` (never breaks a build on a
+    config typo).
+    """
+    section = (config or {}).get("implement") if isinstance(config, Mapping) else None
+    if isinstance(section, Mapping) and "oracle_broad_strategy" in section:
+        value = str(section["oracle_broad_strategy"]).strip().lower()
+        if value in ("incremental", "legacy"):
+            return value
+    return "incremental"
+
+
+def _oracle_legacy_broad_enabled(config: Mapping[str, Any] | None) -> bool:
+    """``implement.oracle_legacy_broad_enabled`` (default False) OR strategy=legacy.
+
+    True ⇒ a wide-fan-out artifact uses the LEGACY whole-project broad rerun
+    instead of the incremental campaign. Either the explicit flag or
+    ``oracle_broad_strategy: legacy`` selects legacy.
+    """
+    section = (config or {}).get("implement") if isinstance(config, Mapping) else None
+    if isinstance(section, Mapping) and section.get("oracle_legacy_broad_enabled") is True:
+        return True
+    return _oracle_broad_strategy(config) == "legacy"
+
+
+def _oracle_broad_wall_clock_seconds(config: Mapping[str, Any] | None) -> float:
+    section = (config or {}).get("implement") if isinstance(config, Mapping) else None
+    if isinstance(section, Mapping):
+        raw = section.get("oracle_broad_wall_clock_seconds")
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_ORACLE_BROAD_WALL_CLOCK_SECONDS
+
+
+def _oracle_broad_max_rechecks(config: Mapping[str, Any] | None) -> int:
+    section = (config or {}).get("implement") if isinstance(config, Mapping) else None
+    if isinstance(section, Mapping) and "oracle_broad_max_rechecks" in section:
+        try:
+            value = int(section["oracle_broad_max_rechecks"])
+        except (TypeError, ValueError):
+            return DEFAULT_ORACLE_BROAD_MAX_RECHECKS
+        return value if value >= 1 else DEFAULT_ORACLE_BROAD_MAX_RECHECKS
+    return DEFAULT_ORACLE_BROAD_MAX_RECHECKS
+
+
+#: Default importer chunk size for the residual phase (owner-tasks per recheck).
+DEFAULT_ORACLE_RESIDUAL_CHUNK_SIZE = 2
+
+
+def _oracle_residual_chunk_size(config: Mapping[str, Any] | None) -> int:
+    """``implement.oracle_residual_chunk_size`` — residual importer owners per chunk.
+
+    The residual phase repairs at most this many residual owner-tasks per recheck
+    (dependency-ordered), iterating chunk-by-chunk so a large residual stays
+    bounded per rerun. <=0 ⇒ the default (never "no limit" by accident).
+    """
+    section = (config or {}).get("implement") if isinstance(config, Mapping) else None
+    if isinstance(section, Mapping) and "oracle_residual_chunk_size" in section:
+        try:
+            value = int(section["oracle_residual_chunk_size"])
+        except (TypeError, ValueError):
+            return DEFAULT_ORACLE_RESIDUAL_CHUNK_SIZE
+        return value if value >= 1 else DEFAULT_ORACLE_RESIDUAL_CHUNK_SIZE
+    return DEFAULT_ORACLE_RESIDUAL_CHUNK_SIZE
+
+
 #: Orphan-artifact gate modes. ``warn`` (default) observes + reports orphans but
 #: never blocks; ``enforce`` makes an orphan a hard stage failure; ``off`` disables
 #: the check. Conservative default because the check is heuristic (see
@@ -408,16 +515,36 @@ def build_contract_feedback(
     if surface_block:
         blocks.append(surface_block)
 
-    # (2) Targeted-edit directive — only for a SCOPED rerun (narrow/expanded). A
-    # broad rerun (scope None / is_broad) legitimately regenerates everything, so
-    # it gets no minimal-diff fence.
-    scoped = scope is not None and not bool(getattr(scope, "is_broad", lambda: True)())
-    if scoped:
+    # (2) Targeted-edit directive — for any FENCED rerun. A rerun is fenced when it
+    # is a scoped (narrow/expanded) scope, OR a broad-CAMPAIGN PHASE scope (which is
+    # logically broad — rung=broad — but carries non-empty ``allowed_paths``, so each
+    # phase is still a localized, minimal-diff reconcile). Only the LEGACY whole-
+    # project broad (scope None, or is_broad() with NO allowed_paths and no plan)
+    # legitimately regenerates everything and gets no minimal-diff fence.
+    if _is_fenced_scope(scope):
         edit_block = _targeted_edit_block(scope)
         if edit_block:
             blocks.append(edit_block)
 
     return "\n\n".join(blocks)
+
+
+def _is_fenced_scope(scope: Any) -> bool:
+    """True when ``scope`` runs UNDER a write-fence (scoped OR broad-campaign phase).
+
+    Mirrors the pipeline's fence decision: a scope is fenced when it has non-empty
+    ``allowed_paths`` (a narrow/expanded scope, or a broad-campaign phase scope), so
+    the targeted-edit / minimal-diff feedback applies. The legacy whole-project broad
+    (no ``allowed_paths``, no ``repair_plan``) is NOT fenced.
+    """
+    if scope is None:
+        return False
+    has_allowed = bool(getattr(scope, "allowed_paths", ()) or ())
+    if has_allowed:
+        return True
+    # A non-broad scope without an explicit fence still gets the directive (legacy
+    # narrow/expanded behaviour — its fence may be supplied elsewhere).
+    return not bool(getattr(scope, "is_broad", lambda: True)())
 
 
 def _exporter_surface_block(result: ImplementOracleResult, project_root: Path) -> str:
@@ -1138,9 +1265,41 @@ def run_implement_oracle_gate(
             structured_source=structured_source,
             manifest_paths=manifest_paths,
             echo=echo,
+            legacy_broad=_oracle_legacy_broad_enabled(config),
         )
         if forced_broad and scope_index is not None:
             rung = _SCOPE_BROAD  # a forced-broad derivation pins the rung (monotonic ladder)
+
+        # BROAD-CAMPAIGN branch: a wide-fan-out artifact yields a scope carrying a
+        # BroadRepairPlan. Instead of one rerun + one recheck, run the budgeted
+        # residual-coherence campaign (supplier-first → residual importers →
+        # chunked broad), re-running the WHOLE-PROJECT oracle after every phase.
+        # The whole-project oracle is the ONLY green authority; the campaign
+        # honest-fails on budget exhaustion / non-convergence (returns the failing
+        # result, which the caller turns into a StageError). Counts as ONE outer
+        # attempt (the campaign-count limit ``oracle_max_attempts`` still bounds how
+        # many campaigns can run).
+        if scope is not None and bool(getattr(scope, "is_broad_campaign", lambda: False)()):
+            echo(
+                f"[greenfield] implement-oracle: {result.detail}; entering broad repair "
+                f"campaign (attempt {attempt}/{max_attempts - 1}) — {scope.detail}"
+            )
+            result = _execute_broad_campaign(
+                result=result,
+                plan=scope.repair_plan,
+                project_root=root,
+                profile=profile,
+                spec=spec,
+                config=config,
+                rerun=rerun,
+                scope_index=scope_index,
+                structured_source=structured_source,
+                manifest_paths=manifest_paths,
+                echo=echo,
+            )
+            attempt += 1
+            continue
+
         scope_label = (
             "broad" if scope is None or getattr(scope, "is_broad", lambda: False)() else getattr(scope, "rung", rung)
         )
@@ -1350,6 +1509,7 @@ def _derive_scope_for_rung(
     structured_source: Any,
     manifest_paths: Any,
     echo: Callable[[str], None],
+    legacy_broad: bool = False,
 ) -> tuple[Any, bool]:
     """Derive the rerun scope for ``rung`` → ``(scope, forced_broad)``.
 
@@ -1360,6 +1520,12 @@ def _derive_scope_for_rung(
     never drops back to a narrower rung once broad was required. With no
     ``scope_index`` (the back-compat path) returns ``(None, False)`` so behaviour
     is exactly the legacy broad rerun without disturbing the rung bookkeeping.
+
+    A wide-fan-out artifact (with ``legacy_broad`` False) yields a BROAD-CAMPAIGN
+    scope (``scope.repair_plan`` set, ``scope.is_broad()`` True). The caller checks
+    ``is_broad_campaign()`` and branches to ``_execute_broad_campaign`` instead of
+    the single rerun+recheck. With ``legacy_broad`` True the wide-fan-out path falls
+    to the legacy whole-project broad (``scope is None``, forced_broad True).
     """
     if scope_index is None:
         return None, False
@@ -1373,6 +1539,7 @@ def _derive_scope_for_rung(
             rung=rung,
             structured_source=structured_source,
             manifest_paths=tuple(manifest_paths or ()),
+            legacy_broad=legacy_broad,
         )
     except Exception as exc:  # noqa: BLE001 — a derivation failure degrades to broad.
         echo(f"[greenfield] implement-oracle: scope derivation failed ({exc}); falling back to broad.")
@@ -1382,7 +1549,354 @@ def _derive_scope_for_rung(
             echo(f"[greenfield] implement-oracle: {decision.reason}")
         return None, True
     echo(f"[greenfield] implement-oracle: {decision.scope.detail}")
-    return decision.scope, decision.scope.rung == _SCOPE_BROAD
+    # A broad-campaign scope is NOT a forced-broad-to-pin signal: the caller runs
+    # the campaign and stays in control. Only the legacy broad rung pins.
+    is_campaign = bool(getattr(decision.scope, "is_broad_campaign", lambda: False)())
+    pin_broad = (decision.scope.rung == _SCOPE_BROAD) and not is_campaign
+    return decision.scope, pin_broad
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Broad repair campaign (the budgeted residual-coherence execution; GPT design §6)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _execute_broad_campaign(
+    *,
+    result: ImplementOracleResult,
+    plan: Any,
+    project_root: Path,
+    profile: LayoutProfile,
+    spec: ImplementOracleSpec,
+    config: Mapping[str, Any] | None,
+    rerun: Callable[..., None],
+    scope_index: Any,
+    structured_source: Any,
+    manifest_paths: Any,
+    echo: Callable[[str], None],
+) -> ImplementOracleResult:
+    """Run the budgeted residual-coherence campaign for a wide-fan-out broad rung.
+
+    The campaign (GPT design §2/§6):
+
+        result = whole_project_oracle()   # passed in (already failing)
+        while result.failed and budget_left and rechecks < broad_max_rechecks:
+            phase = next_phase(result)    # supplier_first → residual_importers
+                                          #   (re-derived from residual diagnostics)
+                                          #   → chunked_broad
+            rerun_targeted_phase(phase)   # ONLY phase-scope tasks, fenced, with
+                                          #   build_contract_feedback(scope=phase.scope)
+            result = whole_project_oracle()   # ALWAYS the global authority
+            if result.passed: return passed
+            if no_progress_or_cycle(signature, phase): advance_phase_or_break
+
+    ANTI-FALSE-GREEN INVARIANT (load-bearing): the WHOLE-PROJECT oracle is the ONLY
+    green authority. A phase's local edit making the phase files typecheck proves
+    NOTHING — green is returned ONLY when ``_run_oracle_command`` over the whole
+    project passes. Budget exhaustion, non-convergence (the same (signature, phase,
+    task_ids) recurring), or an exhausted phase skeleton → HONEST FAIL: return the
+    still-failing ``result`` (the caller raises StageError). Best-effort campaign
+    state is appended to ``.codd/oracle_repair/campaign.jsonl`` per phase (used ONLY
+    for resume-efficiency + the human audit, NEVER for the green decision).
+    """
+    import time
+
+    if plan is None:  # defensive: no plan ⇒ nothing to run, honest-fail unchanged
+        return result
+
+    budget = _oracle_broad_wall_clock_seconds(config)
+    max_rechecks = _oracle_broad_max_rechecks(config)
+    residual_chunk_size = _oracle_residual_chunk_size(config)
+    started = time.monotonic()
+    rechecks = 0
+    completed_phases: list[str] = []
+    #: (signature, phase, frozenset(task_ids)) tuples already EXECUTED — the
+    #: loop-breaker: re-seeing one means the same edit on the same files produced the
+    #: same residual (exporter↔importer oscillation / stuck) → do not retry it.
+    executed_keys: set[tuple[Any, str, frozenset]] = set()
+    any_changes = False
+
+    def _elapsed() -> float:
+        return time.monotonic() - started
+
+    def _budget_left_for_phase() -> bool:
+        remaining = budget - _elapsed()
+        return remaining >= (_BROAD_MIN_CALL_BUDGET_SECONDS + _BROAD_ORACLE_RECHECK_RESERVE_SECONDS)
+
+    supplier_ids = tuple(getattr(plan, "supplier_task_ids", ()) or ())
+
+    while not result.passed and rechecks < max_rechecks:
+        # Budget gate BEFORE the next AI phase: if too little wall-clock remains to
+        # run a phase AND its verifying recheck, stop now and honest-fail (the
+        # workspace changes persist for resume; never green).
+        if not _budget_left_for_phase():
+            _append_campaign_record(
+                project_root,
+                event="oracle_broad_budget_exhausted",
+                phase="(none)",
+                focus_paths=tuple(getattr(plan, "focus_paths", ()) or ()),
+                task_ids=(),
+                before_signature=_diagnostic_signature(result),
+                after_signature=_diagnostic_signature(result),
+                elapsed=_elapsed(),
+                status="budget_exhausted",
+                echo=echo,
+            )
+            echo(
+                f"[greenfield] implement-oracle: broad campaign wall-clock budget "
+                f"({budget:g}s) exhausted with residual diagnostics — honest failure "
+                f"(no green; partial progress kept for resume)."
+            )
+            return result
+
+        before_signature = _diagnostic_signature(result)
+        phase, phase_scope = _next_campaign_phase(
+            plan=plan,
+            result=result,
+            completed_phases=completed_phases,
+            supplier_ids=supplier_ids,
+            project_root=project_root,
+            scope_index=scope_index,
+            structured_source=structured_source,
+            manifest_paths=manifest_paths,
+            residual_chunk_size=residual_chunk_size,
+        )
+        if phase is None:
+            echo(
+                "[greenfield] implement-oracle: broad campaign exhausted its phases with "
+                "residual diagnostics — honest failure (no green)."
+            )
+            return result
+
+        task_ids = tuple(getattr(phase_scope, "task_ids", ()) or ())
+        key = (before_signature, phase, frozenset(task_ids))
+        if key in executed_keys:
+            # The same edit on the same files already produced this residual — the
+            # SUT is oscillating/stuck on this phase. Advance the phase; do not
+            # retry. (If this was the last phase, the next loop's next_phase → None
+            # → honest-fail.)
+            echo(
+                f"[greenfield] implement-oracle: broad campaign phase '{phase}' would "
+                f"repeat the same (signature, task_ids) — not retrying; advancing phase."
+            )
+            if phase not in completed_phases:
+                completed_phases.append(phase)
+            _append_campaign_record(
+                project_root,
+                event="oracle_broad_phase_skipped_cycle",
+                phase=phase,
+                focus_paths=tuple(getattr(phase, "focus_paths", ()) or ())
+                if hasattr(phase, "focus_paths")
+                else (),
+                task_ids=task_ids,
+                before_signature=before_signature,
+                after_signature=before_signature,
+                elapsed=_elapsed(),
+                status="cycle_no_retry",
+                echo=echo,
+            )
+            continue
+
+        executed_keys.add(key)
+
+        # Re-implement ONLY this phase's tasks, fenced to the phase scope's allowed
+        # paths, with contract feedback CARRYING the phase scope so the broad
+        # subphase ALSO emits the minimal-diff / allowed-paths / exporter-surface
+        # directives (today only scoped reruns get them).
+        feedback = build_contract_feedback(result, project_root=project_root, scope=phase_scope)
+        echo(
+            f"[greenfield] implement-oracle: broad campaign phase '{phase}' — "
+            f"{len(task_ids)} task(s) {list(task_ids)} "
+            f"(elapsed {_elapsed():.0f}s / {budget:g}s, recheck {rechecks + 1}/{max_rechecks})."
+        )
+        phase_started = time.monotonic()
+        _invoke_rerun(rerun, feedback, phase_scope)
+        any_changes = True
+        # supplier_first + chunked_broad are ONE-SHOT (design §5: supplier max-1 per
+        # focus artifact; chunked broad max-1 pass) → mark complete so they never
+        # re-run. residual_importers stays ELIGIBLE so it can repair the residual
+        # chunk-by-chunk across rechecks; the (signature, phase, task_ids) loop-
+        # breaker above advances it to chunked_broad once it stops making progress.
+        from codd.implement_oracle_scope import PHASE_RESIDUAL_IMPORTERS as _PHASE_RESIDUAL
+
+        if phase != _PHASE_RESIDUAL and phase not in completed_phases:
+            completed_phases.append(phase)
+
+        # ALWAYS re-run the WHOLE-PROJECT oracle — the only green authority.
+        result = _run_oracle_command(project_root, profile, spec, config)
+        rechecks += 1
+        after_signature = _diagnostic_signature(result)
+        phase_elapsed = time.monotonic() - phase_started
+
+        status = "passed" if result.passed else ("progress" if after_signature != before_signature else "stuck")
+        _append_campaign_record(
+            project_root,
+            event="oracle_broad_phase",
+            phase=phase,
+            focus_paths=tuple(getattr(phase_scope, "allowed_paths", ()) or ()),
+            task_ids=task_ids,
+            before_signature=before_signature,
+            after_signature=after_signature,
+            elapsed=phase_elapsed,
+            status=status,
+            echo=echo,
+        )
+
+        if result.passed:
+            echo(
+                f"[greenfield] implement-oracle: broad campaign converged after phase "
+                f"'{phase}' — whole-project oracle PASSED (green)."
+            )
+            return result
+
+    # Loop exit without a pass = honest failure (budget/recheck-cap/non-convergence).
+    if rechecks >= max_rechecks and not result.passed:
+        _append_campaign_record(
+            project_root,
+            event="oracle_broad_recheck_cap",
+            phase="(none)",
+            focus_paths=tuple(getattr(plan, "focus_paths", ()) or ()),
+            task_ids=(),
+            before_signature=_diagnostic_signature(result),
+            after_signature=_diagnostic_signature(result),
+            elapsed=_elapsed(),
+            status="recheck_cap",
+            echo=echo,
+        )
+        echo(
+            f"[greenfield] implement-oracle: broad campaign hit the recheck cap "
+            f"({max_rechecks}) without a clean whole-project oracle — honest failure."
+        )
+    del any_changes  # workspace changes already persisted by the reruns themselves
+    return result
+
+
+def _next_campaign_phase(
+    *,
+    plan: Any,
+    result: ImplementOracleResult,
+    completed_phases: list[str],
+    supplier_ids: tuple[str, ...],
+    project_root: Path,
+    scope_index: Any,
+    structured_source: Any,
+    manifest_paths: Any,
+    residual_chunk_size: int | None = None,
+) -> tuple[str | None, Any]:
+    """Pick the next campaign phase + its LIVE scope, or ``(None, None)`` if done.
+
+    * ``supplier_first`` (if not yet done) → the plan's supplier phase scope
+      (re-implement the shared exporter once).
+    * ``residual_importers`` → a scope RE-DERIVED from the CURRENT residual
+      diagnostics (the owner tasks the whole-project oracle STILL proves broken,
+      minus the supplier already fixed). Falls back to the plan's static importer
+      phase scope when the live derivation yields nothing but the static set is
+      non-empty. If both are empty (no residual owner), skip to the next phase.
+    * ``chunked_broad`` → the plan's all-tasks-dependency-order phase scope.
+
+    Returns the phase NAME + the :class:`OracleRerunScope` to run.
+    """
+    from codd.implement_oracle_scope import (
+        PHASE_CHUNKED_BROAD,
+        PHASE_RESIDUAL_IMPORTERS,
+        PHASE_SUPPLIER_FIRST,
+        derive_residual_importer_scope,
+    )
+
+    # 1. supplier_first — at most once (the plan skeleton ensures the single phase).
+    if PHASE_SUPPLIER_FIRST not in completed_phases:
+        supplier_phase = _plan_phase(plan, PHASE_SUPPLIER_FIRST)
+        if supplier_phase is not None and getattr(supplier_phase.scope, "task_ids", ()):
+            return PHASE_SUPPLIER_FIRST, supplier_phase.scope
+        completed_phases.append(PHASE_SUPPLIER_FIRST)  # nothing to fix here, skip
+
+    # 2. residual_importers — re-derive from the LIVE residual, excluding the
+    # supplier (avoid re-touching the exporter → no exporter↔importer oscillation).
+    if PHASE_RESIDUAL_IMPORTERS not in completed_phases:
+        live_scope = None
+        if scope_index is not None:
+            try:
+                live_scope = derive_residual_importer_scope(
+                    output=result.raw_output,
+                    project_root=project_root,
+                    index=scope_index,
+                    exclude_task_ids=supplier_ids,
+                    manifest_paths=tuple(manifest_paths or ()),
+                    structured_source=structured_source,
+                    chunk_size=residual_chunk_size,
+                )
+            except Exception:  # noqa: BLE001 — live derivation best-effort; fall to static.
+                live_scope = None
+        if live_scope is not None and getattr(live_scope, "task_ids", ()):
+            return PHASE_RESIDUAL_IMPORTERS, live_scope
+        static_phase = _plan_phase(plan, PHASE_RESIDUAL_IMPORTERS)
+        if static_phase is not None and getattr(static_phase.scope, "task_ids", ()):
+            return PHASE_RESIDUAL_IMPORTERS, static_phase.scope
+        completed_phases.append(PHASE_RESIDUAL_IMPORTERS)  # no residual owner, skip
+
+    # 3. chunked_broad — the last-resort full dependency-ordered pass.
+    if PHASE_CHUNKED_BROAD not in completed_phases:
+        chunked_phase = _plan_phase(plan, PHASE_CHUNKED_BROAD)
+        if chunked_phase is not None and getattr(chunked_phase.scope, "task_ids", ()):
+            return PHASE_CHUNKED_BROAD, chunked_phase.scope
+        completed_phases.append(PHASE_CHUNKED_BROAD)
+
+    return None, None
+
+
+def _plan_phase(plan: Any, phase_name: str) -> Any:
+    """The plan's :class:`OracleRepairPhase` with ``phase_name``, or ``None``."""
+    for phase in getattr(plan, "phases", ()) or ():
+        if getattr(phase, "phase", None) == phase_name:
+            return phase
+    return None
+
+
+def _append_campaign_record(
+    project_root: Path,
+    *,
+    event: str,
+    phase: str,
+    focus_paths: tuple[str, ...],
+    task_ids: tuple[str, ...],
+    before_signature: Any,
+    after_signature: Any,
+    elapsed: float,
+    status: str,
+    echo: Callable[[str], None],
+) -> None:
+    """Append one campaign event to ``.codd/oracle_repair/campaign.jsonl`` (best-effort).
+
+    Records phase, focus_paths, task_ids, before/after signature, elapsed, status —
+    used ONLY for resume-efficiency + the human audit, NEVER for the green decision.
+    A write failure is swallowed (the campaign must never crash the run on an audit
+    write) and only logged at debug-ish level.
+    """
+    try:
+        audit_dir = Path(project_root) / ".codd" / "oracle_repair"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "event": event,
+            "phase": phase,
+            "focus_paths": list(focus_paths),
+            "task_ids": list(task_ids),
+            "before_signature": _signature_to_jsonable(before_signature),
+            "after_signature": _signature_to_jsonable(after_signature),
+            "elapsed_seconds": round(float(elapsed), 3),
+            "status": status,
+        }
+        with (audit_dir / "campaign.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:  # noqa: BLE001 — audit write must never break the run.
+        echo(f"[greenfield] implement-oracle: campaign audit write skipped ({exc}).")
+
+
+def _signature_to_jsonable(signature: Any) -> list:
+    """Turn a diagnostic signature (tuple of tuples) into a JSON-serializable list."""
+    try:
+        return [list(entry) for entry in (signature or ())]
+    except TypeError:
+        return []
 
 
 def _invoke_rerun(rerun: Callable[..., None], feedback: str, scope: Any) -> None:

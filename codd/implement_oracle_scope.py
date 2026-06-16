@@ -73,7 +73,9 @@ from typing import Protocol
 
 
 __all__ = [
+    "BroadRepairPlan",
     "DiagnosticEdge",
+    "OracleRepairPhase",
     "OracleRerunScope",
     "OrphanArtifact",
     "ScopeDecision",
@@ -86,8 +88,11 @@ __all__ = [
     "classify_signature_progress",
     "derive_oracle_rerun_scope",
     "diagnostic_signature",
+    "derive_residual_importer_scope",
     "exporter_surface_for_diagnostics",
     "extract_public_surface",
+    "importers_of",
+    "task_dependency_order",
 ]
 
 
@@ -96,6 +101,22 @@ SCOPE_NARROW = "narrow"  # both ends of the broken demand edge(s)
 SCOPE_EXPANDED = "expanded"  # narrow + one import-hop neighbours of the edge ends
 SCOPE_BROAD = "broad"  # every implement task (the legacy behaviour, now a fallback)
 SCOPE_LADDER: tuple[str, ...] = (SCOPE_NARROW, SCOPE_EXPANDED, SCOPE_BROAD)
+
+
+# ── broad-campaign phases (the incremental broad execution; GPT design §6) ────
+#: ``broad`` is no longer "regenerate every task". When a wide-fan-out artifact
+#: forces the broad RUNG, its EXECUTION is a budgeted residual-coherence campaign:
+#: fix the shared supplier/exporter first, re-measure the whole-project oracle,
+#: then fix ONLY the residual importers it still proves broken — never the whole
+#: project. These name the campaign sub-phases (see :class:`OracleRepairPhase`).
+PHASE_SUPPLIER_FIRST = "supplier_first"  # repair the shared exporter task(s) only
+PHASE_RESIDUAL_IMPORTERS = "residual_importers"  # repair the still-broken importer owners
+PHASE_CHUNKED_BROAD = "chunked_broad"  # last resort: all tasks, dependency-ordered, 1 pass
+BROAD_CAMPAIGN_PHASES: tuple[str, ...] = (
+    PHASE_SUPPLIER_FIRST,
+    PHASE_RESIDUAL_IMPORTERS,
+    PHASE_CHUNKED_BROAD,
+)
 
 
 def next_rung(rung: str) -> str | None:
@@ -329,9 +350,21 @@ class OracleRerunScope:
     edges: tuple[DiagnosticEdge, ...] = ()
     #: human-readable why-this-scope detail (logged by the gate)
     detail: str = ""
+    #: When the broad RUNG was forced by a wide-fan-out artifact, this carries the
+    #: :class:`BroadRepairPlan` that turns broad's EXECUTION from "regenerate every
+    #: task" into a budgeted residual-coherence campaign (supplier-first → residual
+    #: importers → chunked broad). ``None`` for narrow/expanded scopes and for the
+    #: legacy whole-project broad fallback. A scope whose ``repair_plan`` is set is
+    #: a BROAD-CAMPAIGN scope: the gate branches to ``_execute_broad_campaign`` and
+    #: the pipeline fences each phase to its own allowed paths.
+    repair_plan: "BroadRepairPlan | None" = None
 
     def is_broad(self) -> bool:
         return self.rung == SCOPE_BROAD
+
+    def is_broad_campaign(self) -> bool:
+        """True when this is the incremental broad CAMPAIGN (carries a plan)."""
+        return self.repair_plan is not None
 
 
 @dataclass(frozen=True)
@@ -348,6 +381,90 @@ class ScopeDecision:
     scope: OracleRerunScope | None
     force_broad: bool = False
     reason: str = ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Broad-campaign plan (the incremental broad EXECUTION; GPT design §6)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# A wide-fan-out artifact (src/validation.ts re-exported by a dozen files) forces
+# the broad RUNG — but regenerating all ~17 tasks blows the wall-clock and a weak
+# SUT loses coherence across them. The plan turns broad's EXECUTION into a
+# budgeted residual-coherence campaign:
+#
+#   1. ``supplier_first``   — re-implement ONLY the supplier/exporter task(s) that
+#      own the wide-fan-out focus artifact, fenced to {supplier outputs + focus
+#      paths + manifest}. Often the type/export/schema fix on the supplier clears
+#      every importer's diagnostic; if so the whole-project oracle passes and we
+#      are done WITHOUT touching a single importer task.
+#   2. ``residual_importers`` — re-derived from the diagnostics the whole-project
+#      oracle STILL reports after the supplier fix: re-implement ONLY the owner
+#      tasks of those residual importer paths, fenced to {their outputs + manifest}.
+#   3. ``chunked_broad``    — last resort: all tasks in dependency order, one pass.
+#
+# The whole-project oracle is re-run after EVERY phase and is the ONLY green
+# authority (a phase's local success proves nothing). The plan is bounded
+# (supplier max-1/artifact; residual is a finite owner set; chunked-broad max-1
+# pass) so the campaign always terminates. ``next_phase`` advances through the
+# phases; the live residual-importer scope is re-derived by the gate from the
+# CURRENT residual diagnostics (the plan's ``importer_task_ids`` is the upfront
+# best-effort guess, refined per recheck), so the plan stays a declarative
+# skeleton and the gate owns the per-recheck residual derivation.
+
+
+@dataclass(frozen=True)
+class OracleRepairPhase:
+    """One sub-phase of a broad repair campaign (a scoped, fenced re-implement).
+
+    ``phase`` is one of :data:`PHASE_SUPPLIER_FIRST` / :data:`PHASE_RESIDUAL_IMPORTERS`
+    / :data:`PHASE_CHUNKED_BROAD`. ``scope`` is the :class:`OracleRerunScope` the
+    pipeline re-implements for THIS phase (its ``task_ids`` + its ``allowed_paths``
+    write-fence — so even a logically-broad campaign runs each phase fenced).
+    ``focus_paths`` are the artifacts the phase centres on (the wide-fan-out
+    supplier file for supplier_first; the residual importer paths for
+    residual_importers). ``reason`` is the human-readable why-this-phase.
+    """
+
+    phase: str
+    scope: OracleRerunScope
+    focus_paths: tuple[str, ...] = ()
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class BroadRepairPlan:
+    """The plan a wide-fan-out broad RUNG executes instead of whole-project regen.
+
+    ``focus_paths`` = the wide-fan-out artifact(s) that forced broad.
+    ``supplier_task_ids`` = the task(s) that OWN those focus artifacts (the
+    exporter end — repaired first). ``importer_task_ids`` = the owner tasks of the
+    files that IMPORT the focus artifact(s) (the upfront best-effort residual
+    candidate set; the gate refines it per recheck from the live residual
+    diagnostics). ``phases`` = the ordered skeleton the campaign walks
+    (supplier_first → residual_importers → chunked_broad), each a
+    :class:`OracleRepairPhase` with its own fenced scope.
+
+    Frozen + pure: built once at derivation time from the diagnostics + owner
+    index; the gate consults it but never mutates it.
+    """
+
+    focus_paths: tuple[str, ...]
+    supplier_task_ids: tuple[str, ...]
+    importer_task_ids: tuple[str, ...]
+    phases: tuple[OracleRepairPhase, ...] = ()
+
+    def next_phase(self, completed: tuple[str, ...]) -> OracleRepairPhase | None:
+        """The first skeleton phase whose name is not in ``completed``, else ``None``.
+
+        Pure helper: the gate tracks which phase NAMES it has already executed and
+        asks for the next one. ``None`` means the skeleton is exhausted (the
+        campaign honest-fails if the whole-project oracle is still red).
+        """
+        done = set(completed)
+        for phase in self.phases:
+            if phase.phase not in done:
+                return phase
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1098,6 +1215,7 @@ def derive_oracle_rerun_scope(
     rung: str,
     structured_source: StructuredDiagnosticSource | None = None,
     manifest_paths: Sequence[str] = (),
+    legacy_broad: bool = False,
 ) -> ScopeDecision:
     """Derive a bounded rerun scope at ladder ``rung`` from oracle output.
 
@@ -1110,6 +1228,12 @@ def derive_oracle_rerun_scope(
     = edge ends + the owning tasks' one-hop neighbours; ``SCOPE_BROAD`` = every
     task. Returns a :class:`ScopeDecision`: a bounded scope, or ``scope=None`` /
     ``force_broad=True`` when the diagnostics admit no usable narrow target.
+
+    ``legacy_broad`` (config ``implement.oracle_legacy_broad_enabled``): when True,
+    a wide-fan-out artifact (and ``rung == SCOPE_BROAD``) falls to the LEGACY
+    whole-project broad rerun. When False (the default), a wide-fan-out artifact
+    instead yields a BROAD-CAMPAIGN scope (a :class:`BroadRepairPlan` the gate
+    executes incrementally against the whole-project oracle).
     """
     if rung == SCOPE_BROAD:
         return ScopeDecision(scope=_broad_scope(index, manifest_paths), reason="ladder at broad")
@@ -1125,14 +1249,31 @@ def derive_oracle_rerun_scope(
 
     # Wide-fan-out guard: a public entrypoint / barrel / shared schema with many
     # consumers → broad (chasing a narrow edge would thrash). MEASURED fan-out,
-    # not a basename (a tiny index.ts stays scopable).
+    # not a basename (a tiny index.ts stays scopable). Instead of the legacy
+    # whole-project broad, build a BROAD-CAMPAIGN scope: a budgeted residual-
+    # coherence plan (supplier-first → residual importers → chunked broad) the gate
+    # executes against the whole-project oracle. The legacy whole-project broad is
+    # only used when explicitly opted in (``legacy_broad`` arg / config).
     wide = _wide_fanout_path(edge_paths, project_root)
     if wide is not None:
-        return ScopeDecision(
-            scope=None,
-            force_broad=True,
-            reason=f"wide-fan-out artifact '{wide}' (>= {_WIDE_FANOUT_IMPORTER_THRESHOLD} importers) → broad",
+        focus_path, importer_paths = wide
+        if legacy_broad:
+            return ScopeDecision(
+                scope=None,
+                force_broad=True,
+                reason=(
+                    f"wide-fan-out artifact '{focus_path}' "
+                    f"(>= {_WIDE_FANOUT_IMPORTER_THRESHOLD} importers) → legacy broad (opted in)"
+                ),
+            )
+        campaign = _build_broad_campaign_scope(
+            focus_path=focus_path,
+            importer_paths=importer_paths,
+            index=index,
+            edges=edges,
+            manifest_paths=manifest_paths,
         )
+        return ScopeDecision(scope=campaign, reason=campaign.detail)
 
     owners = _owners_for_paths(edge_paths, index)
     if not owners:
@@ -1227,19 +1368,22 @@ def _too_wide(owners: Sequence[str], index: TaskOutputIndex) -> bool:
     return len(owners) > threshold
 
 
-def _wide_fanout_path(paths: Sequence[str], project_root: Path) -> str | None:
-    """Return the first implicated path with wide MEASURED fan-out, else ``None``.
+def _wide_fanout_path(paths: Sequence[str], project_root: Path) -> tuple[str, tuple[str, ...]] | None:
+    """First implicated path with wide MEASURED fan-out + its importers, else ``None``.
 
     Counts, for each implicated path, how many OTHER project source files import
     it (resolving each project import specifier to a file). A path imported by
     ``>= _WIDE_FANOUT_IMPORTER_THRESHOLD`` files is a barrel/entrypoint/shared
-    module whose regeneration touches many consumers — go broad. Filesystem walk
-    is bounded to tracked source files and skips vendored dirs.
+    module whose regeneration touches many consumers — go broad. Returns the
+    ``(focus_path, importer_paths)`` tuple for the FIRST such path (so the
+    broad-campaign plan can target the supplier AND its actual importers), or
+    ``None`` when no implicated path is wide. Filesystem walk is bounded to tracked
+    source files and skips vendored dirs.
     """
     targets = {_norm(p) for p in paths if _norm(p)}
     if not targets:
         return None
-    counts: dict[str, int] = {t: 0 for t in targets}
+    importers: dict[str, list[str]] = {t: [] for t in targets}
     for source_file in _iter_project_source_files(project_root):
         rel = _to_relative(source_file, project_root)
         if not rel or rel in targets:
@@ -1253,12 +1397,58 @@ def _wide_fanout_path(paths: Sequence[str], project_root: Path) -> str | None:
             if not spec.startswith("."):
                 continue
             resolved = _resolve_specifier(base, spec, project_root)
-            if resolved in counts:
-                counts[resolved] += 1
-    for target, n in counts.items():
-        if n >= _WIDE_FANOUT_IMPORTER_THRESHOLD:
-            return target
+            if resolved in importers and rel not in importers[resolved]:
+                importers[resolved].append(rel)
+    for target in targets:  # deterministic order = the implicated-path order
+        if len(importers[target]) >= _WIDE_FANOUT_IMPORTER_THRESHOLD:
+            return target, tuple(importers[target])
     return None
+
+
+def importers_of(path: str, project_root: Path) -> tuple[str, ...]:
+    """Project source files that import ``path`` (resolved), in walk order.
+
+    The public, single-path counterpart of :func:`_wide_fanout_path`'s inner count
+    — used by the broad-campaign derivation to find the consumer tasks of a
+    wide-fan-out supplier, and re-usable by a Go/Rust adapter. Pure + best-effort:
+    an unreadable tree yields ``()``.
+    """
+    target = _norm(path)
+    if not target:
+        return ()
+    out: list[str] = []
+    for source_file in _iter_project_source_files(project_root):
+        rel = _to_relative(source_file, project_root)
+        if not rel or rel == target:
+            continue
+        content = _read(source_file)
+        if content is None:
+            continue
+        base = source_file.parent
+        for m in _TS_IMPORT_FROM.finditer(content):
+            spec = m.group("spec")
+            if not spec.startswith("."):
+                continue
+            if _resolve_specifier(base, spec, project_root) == target and rel not in out:
+                out.append(rel)
+    return tuple(out)
+
+
+def task_dependency_order(task_ids: Sequence[str], index: TaskOutputIndex) -> tuple[str, ...]:
+    """Order ``task_ids`` by their declaration order in the owner ``index``.
+
+    The owner index records ``all_task_ids`` in declaration order (the dependency
+    order the planner emitted — earlier tasks are typically the shared/supplier
+    modules). The chunked-broad phase walks tasks in this order so suppliers are
+    re-implemented before consumers. Unknown ids (not in the index) are appended
+    last in their given order. Pure + deterministic; de-duplicated.
+    """
+    rank = {tid: i for i, tid in enumerate(index.all_task_ids)}
+    wanted = _dedupe(task_ids)
+    known = [t for t in wanted if t in rank]
+    unknown = [t for t in wanted if t not in rank]
+    known.sort(key=lambda t: rank[t])
+    return tuple(known + unknown)
 
 
 #: Source-tree dirs the fan-out walk skips (vendored deps / VCS / build output).
@@ -1317,6 +1507,174 @@ def _broad_scope(index: TaskOutputIndex, manifest_paths: Sequence[str]) -> Oracl
         task_ids=tuple(index.all_task_ids),
         allowed_paths=(),  # empty ⇒ no fence (broad regenerates everything)
         detail=f"broad scope: all {len(index.all_task_ids)} task(s)",
+    )
+
+
+def _build_broad_campaign_scope(
+    *,
+    focus_path: str,
+    importer_paths: Sequence[str],
+    index: TaskOutputIndex,
+    edges: Sequence[DiagnosticEdge],
+    manifest_paths: Sequence[str],
+) -> OracleRerunScope:
+    """A broad-RUNG scope whose EXECUTION is the budgeted residual-coherence campaign.
+
+    Builds the :class:`BroadRepairPlan` for a wide-fan-out ``focus_path``:
+      * supplier task(s) = owner(s) of the focus artifact (the exporter end).
+      * importer task(s) = owner tasks of the ``importer_paths`` (the upfront
+        residual candidate set; refined per-recheck by the gate).
+      * phases skeleton: supplier_first (fenced to supplier outputs + focus +
+        manifest) → residual_importers (fenced to importer outputs + manifest) →
+        chunked_broad (all tasks, dependency order, manifest fence). The gate
+        re-derives the LIVE residual-importer scope from the current diagnostics on
+        each recheck; the skeleton's importer phase is the fallback when the live
+        derivation yields nothing.
+
+    The returned scope's ``rung`` is :data:`SCOPE_BROAD` (so existing
+    ``is_broad()`` callers still see broad) and its ``repair_plan`` is set (so the
+    gate branches to the incremental campaign and the pipeline fences each phase).
+    """
+    supplier_ids = tuple(_dedupe(_owners_for_paths([focus_path], index)))
+    importer_ids = tuple(
+        t for t in _dedupe(_owners_for_paths(importer_paths, index)) if t not in supplier_ids
+    )
+
+    # supplier_first: re-implement only the supplier task(s), fenced to their
+    # outputs + the focus artifact + manifest. This is the exporter-surface fix.
+    supplier_allowed = _allowed_paths(supplier_ids, [focus_path], index, manifest_paths)
+    supplier_scope = OracleRerunScope(
+        rung=SCOPE_BROAD,
+        task_ids=supplier_ids,
+        allowed_paths=tuple(supplier_allowed),
+        edges=tuple(edges),
+        detail=(
+            f"broad-campaign supplier_first: {len(supplier_ids)} supplier task(s) "
+            f"{list(supplier_ids)} for focus '{focus_path}'"
+        ),
+    )
+    supplier_phase = OracleRepairPhase(
+        phase=PHASE_SUPPLIER_FIRST,
+        scope=supplier_scope,
+        focus_paths=(focus_path,),
+        reason=f"repair shared exporter '{focus_path}' first (wide fan-out)",
+    )
+
+    # residual_importers: the upfront candidate importer owners, fenced to their
+    # outputs + manifest. (The gate refines this per-recheck from live residual.)
+    importer_allowed = _allowed_paths(importer_ids, importer_paths, index, manifest_paths)
+    importer_scope = OracleRerunScope(
+        rung=SCOPE_BROAD,
+        task_ids=importer_ids,
+        allowed_paths=tuple(importer_allowed),
+        edges=tuple(edges),
+        detail=(
+            f"broad-campaign residual_importers: {len(importer_ids)} importer task(s) "
+            f"{list(importer_ids)}"
+        ),
+    )
+    importer_phase = OracleRepairPhase(
+        phase=PHASE_RESIDUAL_IMPORTERS,
+        scope=importer_scope,
+        focus_paths=tuple(_dedupe(importer_paths)),
+        reason="repair the importers the whole-project oracle still proves broken",
+    )
+
+    # chunked_broad: every task, dependency-ordered, one pass. Fenced only to the
+    # union of all known outputs + manifest (effectively the whole tree, but still
+    # records an allowed set so the pipeline keeps the fence machinery uniform).
+    all_ordered = task_dependency_order(index.all_task_ids, index)
+    chunked_allowed = _allowed_paths(all_ordered, [], index, manifest_paths)
+    chunked_scope = OracleRerunScope(
+        rung=SCOPE_BROAD,
+        task_ids=all_ordered,
+        allowed_paths=tuple(chunked_allowed),
+        edges=tuple(edges),
+        detail=f"broad-campaign chunked_broad: all {len(all_ordered)} task(s), dependency order",
+    )
+    chunked_phase = OracleRepairPhase(
+        phase=PHASE_CHUNKED_BROAD,
+        scope=chunked_scope,
+        focus_paths=(),
+        reason="last-resort full dependency-ordered pass (1×)",
+    )
+
+    plan = BroadRepairPlan(
+        focus_paths=(focus_path,),
+        supplier_task_ids=supplier_ids,
+        importer_task_ids=importer_ids,
+        phases=(supplier_phase, importer_phase, chunked_phase),
+    )
+    return OracleRerunScope(
+        rung=SCOPE_BROAD,
+        task_ids=tuple(_dedupe([*supplier_ids, *importer_ids])),
+        allowed_paths=tuple(supplier_allowed),  # the FIRST phase's fence (informational)
+        edges=tuple(edges),
+        detail=(
+            f"broad-campaign for wide-fan-out '{focus_path}' "
+            f"({len(importer_paths)} importer(s)): supplier_first → residual_importers "
+            f"→ chunked_broad (budgeted residual coherence)"
+        ),
+        repair_plan=plan,
+    )
+
+
+def derive_residual_importer_scope(
+    *,
+    output: str,
+    project_root: Path,
+    index: TaskOutputIndex,
+    exclude_task_ids: Sequence[str] = (),
+    manifest_paths: Sequence[str] = (),
+    structured_source: StructuredDiagnosticSource | None = None,
+    chunk_size: int | None = None,
+) -> OracleRerunScope | None:
+    """A fenced scope over the owner tasks of the CURRENT residual diagnostics.
+
+    Called by the broad campaign AFTER the supplier phase: parse the diagnostics
+    the whole-project oracle STILL reports, map every implicated path to its owner
+    task, drop ``exclude_task_ids`` (the supplier already repaired — re-running it
+    would risk the exporter↔importer oscillation), order the residual owners in
+    dependency order, take at most ``chunk_size`` of them (the design's
+    ``oracle_residual_chunk_size`` — a bounded importer chunk per recheck so each
+    rerun's surface + wall-clock stays small; ``None``/``<=0`` ⇒ no limit = all
+    residual owners in one phase), and return a fenced :class:`OracleRerunScope`
+    over just those residual importer owner tasks. The fence = those tasks' outputs
+    + the residual paths they own + manifest, so the residual phase is a localized
+    reconcile. Returns ``None`` when no residual owner remains (e.g. the residual is
+    only in the excluded supplier, or unparseable) — the caller advances the phase.
+
+    Pure (no compiler run) + best-effort: a parse failure yields ``None``.
+    """
+    diagnostics = _collect_diagnostics(output, project_root, structured_source)
+    if not diagnostics:
+        return None
+    edges = _edges_from_diagnostics(diagnostics, project_root)
+    edge_paths = _dedupe([p for edge in edges for p in edge.paths])
+    if not edge_paths:
+        return None
+    excluded = set(exclude_task_ids)
+    owners = [t for t in _owners_for_paths(edge_paths, index) if t not in excluded]
+    if not owners:
+        return None
+    # Dependency-order the residual owners (suppliers before consumers) and take a
+    # bounded chunk so a large residual is repaired chunk-by-chunk across rechecks.
+    owners = list(task_dependency_order(owners, index))
+    if chunk_size is not None and chunk_size > 0:
+        owners = owners[:chunk_size]
+    # Fence to ONLY the chunk's own paths (so an out-of-chunk residual file written
+    # by this rerun is reverted — the chunk stays local).
+    chunk_paths = [p for p in edge_paths if index.owner_for(p) in set(owners)]
+    allowed = _allowed_paths(owners, chunk_paths or edge_paths, index, manifest_paths)
+    return OracleRerunScope(
+        rung=SCOPE_BROAD,
+        task_ids=tuple(owners),
+        allowed_paths=tuple(allowed),
+        edges=tuple(edges),
+        detail=(
+            f"broad-campaign residual_importers (live): {len(owners)} task(s) "
+            f"{list(owners)} from {len(edge_paths)} residual path(s)"
+        ),
     )
 
 

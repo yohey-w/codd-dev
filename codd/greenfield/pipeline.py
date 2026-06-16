@@ -1079,12 +1079,23 @@ class GreenfieldPipeline:
         except (FileNotFoundError, ValueError):
             config = {}
 
-        scoped = scope is not None and not bool(getattr(scope, "is_broad", lambda: False)())
-        if not scoped:
+        # A rerun is FENCED (scoped execution) when the scope carries non-empty
+        # ``allowed_paths`` — this covers a narrow/expanded scope AND a broad-CAMPAIGN
+        # PHASE scope (logically broad — rung=broad — but with a per-phase write-fence
+        # so the phase re-implements ONLY its tasks and out-of-scope writes revert).
+        # The LEGACY whole-project broad (scope None, OR is_broad() with NO
+        # allowed_paths and no repair_plan) re-implements every task UNFENCED.
+        scoped = scope is not None and bool(getattr(scope, "allowed_paths", ()) or ())
+        legacy_broad = scope is None or (
+            bool(getattr(scope, "is_broad", lambda: False)())
+            and not bool(getattr(scope, "allowed_paths", ()) or ())
+            and not getattr(scope, "repair_plan", None)
+        )
+        if legacy_broad or not scoped:
             self._reimplement_tasks(project_root, tasks, feedback, config)
             return
 
-        # Scoped rerun: only the scope's tasks, fenced to its allowed paths.
+        # Fenced rerun: only the scope's tasks, fenced to its allowed paths.
         target_ids = set(getattr(scope, "task_ids", ()) or ())
         scoped_tasks = [task for task in tasks if task.task_id in target_ids]
         if not scoped_tasks:
@@ -1104,16 +1115,25 @@ class GreenfieldPipeline:
         tasks: list[ImplementTaskRef],
         feedback: str,
         config: dict[str, Any],
-    ) -> None:
-        """Re-run ``implement_tasks`` for each given task carrying ``feedback``."""
+    ) -> dict[str, float]:
+        """Re-run ``implement_tasks`` for each given task carrying ``feedback``.
+
+        Returns ``{task_id: elapsed_seconds}`` so a broad-campaign caller can budget
+        + audit per-task cost. (The campaign's wall-clock gate measures elapsed
+        directly; the per-task map is the finer-grained record.)
+        """
+        import time
+
         from codd.implementer import implement_tasks
 
+        elapsed: dict[str, float] = {}
         for task in tasks:
             output_paths = (
                 list(task.output_paths)
                 if task.output_paths
                 else _output_paths_for_task(config, task)
             )
+            started = time.monotonic()
             implement_tasks(
                 project_root,
                 design=task.design_node,
@@ -1122,6 +1142,8 @@ class GreenfieldPipeline:
                 use_derived_steps=True,
                 feedback=feedback,
             )
+            elapsed[task.task_id] = time.monotonic() - started
+        return elapsed
 
     def _make_vb_rerun_callback(
         self,

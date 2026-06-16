@@ -257,22 +257,66 @@ def test_too_wide_scope_forces_broad(tmp_path: Path) -> None:
     assert "exceeds" in decision.reason
 
 
-def test_wide_fanout_artifact_forces_broad(tmp_path: Path) -> None:
-    """A barrel imported by MANY files (measured fan-out) → broad, not narrow."""
-    # A barrel ``src/barrel.ts`` imported by 7 consumers; a diagnostic implicating
-    # it must go broad (regenerating it touches every consumer).
+def _wide_fanout_fixture(tmp_path: Path):
+    """A barrel ``src/barrel.ts`` imported by 7 consumers (wide measured fan-out).
+
+    Returns ``(index, oracle_output)`` for the wide-fan-out derivation tests. Each
+    consumer ``src/cN.ts`` owns its own task so the campaign's importer tasks are
+    resolvable; ``barrel`` + ``dep`` own theirs (the supplier end).
+    """
     _write(tmp_path, "src/barrel.ts", 'import { z } from "./dep.js";\nexport const q = z;\n')
     _write(tmp_path, "src/dep.ts", "export const z = 1;\n")
+    tasks = [_Task("barrel_task", ["src/barrel.ts"]), _Task("dep_task", ["src/dep.ts"])]
     for i in range(7):
         _write(tmp_path, f"src/c{i}.ts", 'import { q } from "./barrel.js";\nexport const u = q;\n')
-    tasks = [_Task("barrel_task", ["src/barrel.ts"]), _Task("dep_task", ["src/dep.ts"])]
+        tasks.append(_Task(f"c{i}_task", [f"src/c{i}.ts"]))
     index = build_path_owner_index(tasks, project_root=tmp_path)
     out = 'src/barrel.ts(1,10): error TS2305: Module "./dep.js" has no exported member "z".\n'
+    return index, out
+
+
+def test_wide_fanout_artifact_yields_broad_campaign(tmp_path: Path) -> None:
+    """A barrel imported by MANY files (measured fan-out) → a BROAD-CAMPAIGN scope.
+
+    The DEFAULT (incremental) behaviour: instead of a legacy whole-project broad
+    (``scope=None, force_broad=True``), a wide-fan-out artifact yields an
+    ``OracleRerunScope`` whose ``rung`` is broad AND whose ``repair_plan`` is set —
+    the budgeted residual-coherence campaign the gate executes.
+    """
+    index, out = _wide_fanout_fixture(tmp_path)
     decision = derive_oracle_rerun_scope(
         output=out, project_root=tmp_path, index=index, rung=SCOPE_NARROW
     )
+    assert decision.scope is not None, "default wide-fan-out must yield a campaign scope, not None"
+    assert decision.force_broad is False, "a campaign scope is not the legacy forced-broad signal"
+    assert decision.scope.is_broad() is True
+    assert decision.scope.is_broad_campaign() is True
+    plan = decision.scope.repair_plan
+    assert plan is not None
+    assert "src/barrel.ts" in plan.focus_paths
+    # supplier = the focus owner (barrel_task); importers = the c*_task owners.
+    assert plan.supplier_task_ids == ("barrel_task",)
+    assert set(plan.importer_task_ids) == {f"c{i}_task" for i in range(7)}
+    # The phase skeleton is supplier_first → residual_importers → chunked_broad.
+    assert tuple(p.phase for p in plan.phases) == (
+        "supplier_first",
+        "residual_importers",
+        "chunked_broad",
+    )
+    # The supplier phase is fenced to the supplier's outputs + the focus path.
+    supplier_phase = next(p for p in plan.phases if p.phase == "supplier_first")
+    assert supplier_phase.scope.task_ids == ("barrel_task",)
+    assert "src/barrel.ts" in supplier_phase.scope.allowed_paths
+
+
+def test_wide_fanout_artifact_legacy_broad_when_opted_in(tmp_path: Path) -> None:
+    """``legacy_broad=True`` restores the whole-project broad (scope=None, forced)."""
+    index, out = _wide_fanout_fixture(tmp_path)
+    decision = derive_oracle_rerun_scope(
+        output=out, project_root=tmp_path, index=index, rung=SCOPE_NARROW, legacy_broad=True
+    )
     assert decision.scope is None and decision.force_broad is True
-    assert "fan-out" in decision.reason
+    assert "fan-out" in decision.reason and "legacy" in decision.reason
 
 
 def test_tiny_index_is_not_wide_fanout(tmp_path: Path) -> None:
