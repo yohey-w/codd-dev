@@ -1001,10 +1001,33 @@ def _net_braces(line: str) -> int:
 #      (the argument anchor that defeats no-op / constant-only helpers).
 # A helper that itself delegates to a deeper helper is followed ONE more hop
 # (so expectSuccessfulRun → expectExitCode is honored), bounded to avoid cycles.
+#
+# BARREL re-export following (step 2b). The binding module is frequently a
+# *barrel* — an index module that carries NO definition of its own and only
+# RE-EXPORTS sibling modules (TS ``export * from "./assertions"`` /
+# ``export { expectOk as ok } from "./asserts"``; Python ``__init__.py`` with
+# ``from .asserts import expect_ok``). The conventional e2e shape imports helpers
+# from such a barrel (``import { expectSuccessResult } from "./helpers"`` →
+# ``helpers/index.ts`` → ``export * from "./assertions"`` → the real
+# ``expectSuccessResult`` body). When ``def_finder`` finds no def in the binding
+# module, the resolver FOLLOWS the module's re-exports to the file that actually
+# defines the symbol (bounded by ``_MAX_REEXPORT_HOPS`` + a cycle guard). This is
+# purely an "ability to reach the real body"; the body still has to carry a
+# PRIMITIVE assertion + argument anchor — a barrel re-exporting a no-op/constant
+# helper still FAILS, and an unfollowable / depth-exhausted re-export is still an
+# unresolved helper (greenfield strict ⇒ fail). The follower is per-profile (TS
+# ``export */named/alias``; Python ``__init__`` ``from .x import y``) so the gate
+# stays language-agnostic; an unknown stack supplies no follower and degrades.
 # ---------------------------------------------------------------------------
 
 
 _MAX_HELPER_HOPS = 2
+#: Bound on how many re-export edges (barrel → barrel → … → defining module) the
+#: resolver will chase for ONE symbol. Generous enough for nested index barrels
+#: (``helpers/index → assertions/index → cli-assertions``) yet bounded to keep a
+#: pathological re-export web finite; combined with a per-symbol ``seen`` set of
+#: visited module files for cycle safety.
+_MAX_REEXPORT_HOPS = 4
 
 #: A bare or member call ``name(`` / ``a.b.name(`` — captures the dotted callee.
 _CALL_RE = re.compile(r"(?P<callee>[A-Za-z_$][\w$.]*)\s*\(")
@@ -1218,6 +1241,62 @@ def _read_brace_group(text: str, open_brace_idx: int) -> str:
     return text[open_brace_idx:]
 
 
+# ── TypeScript / JavaScript barrel re-export following ───────────────────────
+#
+# A barrel module re-exports siblings instead of defining the symbol. Two forms:
+#   ``export * from "./X"``                 (star — symbol unchanged, try X)
+#   ``export { Y } from "./X"``             (named — local name Y, original Y)
+#   ``export { Y as Z } from "./X"``        (named+alias — local Z, original Y)
+# A ``export {}`` with NO ``from`` clause is a LOCAL re-export of in-file symbols,
+# not a re-export edge, and is ignored here (the def, if any, is found in-file by
+# ``_ts_find_function_def`` already).
+
+#: ``export * from "./x"`` and ``export * as ns from "./x"`` (a namespace star
+#: binds a NAMESPACE object, not the bare symbol, so it is NOT a transparent
+#: re-export of ``symbol`` — only the plain ``export * from`` is followed).
+_TS_EXPORT_STAR_RE = re.compile(
+    r"""^[ \t]*export\s+\*\s+from\s*['"](?P<spec>[^'"]+)['"]""", re.MULTILINE
+)
+#: ``export { a, b as c } from "./x"`` (the ``from`` clause makes it a re-export).
+_TS_EXPORT_NAMED_FROM_RE = re.compile(
+    r"""^[ \t]*export\s+(?:type\s+)?\{(?P<names>[^}]*)\}\s*from\s*['"](?P<spec>[^'"]+)['"]""",
+    re.MULTILINE,
+)
+
+
+def _ts_reexport_edges(module_text: str, symbol: str) -> list[tuple[str, str]]:
+    """Re-export edges from a TS barrel that can carry ``symbol`` onward.
+
+    Returns ``(spec, original_name)`` pairs: ``spec`` is the relative module to
+    follow, ``original_name`` is the name to look for THERE (an alias flips the
+    name back). ``export * from "./x"`` forwards ``symbol`` unchanged. A named
+    re-export forwards ONLY when its LOCAL name (after ``as``) equals ``symbol``,
+    and the original (before ``as``) is what the target module defines. Order:
+    explicit named re-exports first (a precise alias should win over a star), then
+    ``export *`` fan-out. Only relative (same-repo) specs are returned.
+    """
+
+    edges: list[tuple[str, str]] = []
+    for match in _TS_EXPORT_NAMED_FROM_RE.finditer(module_text):
+        spec = match.group("spec")
+        if not spec.startswith("."):
+            continue
+        for raw in match.group("names").split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            parts = [p.strip() for p in name.split(" as ")]
+            original = parts[0]
+            local = parts[-1]
+            if local == symbol:
+                edges.append((spec, original))
+    for match in _TS_EXPORT_STAR_RE.finditer(module_text):
+        spec = match.group("spec")
+        if spec.startswith("."):
+            edges.append((spec, symbol))  # star forwards the name unchanged
+    return edges
+
+
 # ── Python resolution ───────────────────────────────────────────────────────
 
 #: ``from pkg.mod import a, b as c`` / ``from .mod import x``.
@@ -1239,6 +1318,42 @@ def _py_imported_module(importer_text: str, symbol: str) -> str | None:
             if local == symbol:
                 return match.group("mod")
     return None
+
+
+def _py_reexport_edges(module_text: str, symbol: str) -> list[tuple[str, str]]:
+    """Re-export edges from a Python ``__init__.py`` barrel carrying ``symbol``.
+
+    Mirrors :func:`_ts_reexport_edges` for the Python package-barrel convention.
+    Returns ``(mod, original_name)`` pairs: ``mod`` is the relative module to
+    follow (resolved with the SAME ``_py_resolve_module`` rules, with the barrel's
+    own path as the importer), ``original_name`` is the name to look for there.
+      ``from .x import y``        → forwards ``y`` unchanged when ``y == symbol``
+      ``from .x import y as z``   → forwards ``y`` when the LOCAL ``z == symbol``
+      ``from .x import *``        → forwards ``symbol`` unchanged (star)
+    Only explicit-relative imports (``from .x`` / ``from ..pkg.x``) are followed —
+    an absolute ``from app.x import y`` re-export is unusual in a test barrel and
+    is conservatively skipped (kept out of the same-dir 1-hop re-export graph).
+    """
+
+    edges: list[tuple[str, str]] = []
+    for match in _PY_FROM_IMPORT_RE.finditer(module_text):
+        mod = match.group("mod")
+        if not mod.startswith("."):
+            continue
+        names = match.group("names")
+        for raw in names.replace("(", " ").replace(")", " ").split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            if name == "*":
+                edges.append((mod, symbol))  # star re-export forwards the name
+                continue
+            parts = [p.strip() for p in name.split(" as ")]
+            original = parts[0]
+            local = parts[-1]
+            if local == symbol:
+                edges.append((mod, original))
+    return edges
 
 
 def _py_resolve_module(importer_rel: str, mod: str, project_root: Path) -> Path | None:
@@ -1351,13 +1466,19 @@ def _resolve_evidence(
     imported_lookup: Callable[[str, str], str | None],
     module_resolver: Callable[[str, str, Path], Path | None],
     def_finder: Callable[[str, str], "tuple[str, list[str]] | None"],
+    reexport_edges: Callable[[str, str], list[tuple[str, str]]] | None = None,
 ) -> AssertionEvidence:
     """Shared 1-hop helper-resolution engine (language plug-ins supply the rest).
 
     ``primitive_re`` detects a primitive assertion/fail in a helper body;
     ``imported_lookup(importer_text, symbol)`` returns the binding specifier/module;
     ``module_resolver(importer_rel, spec, root)`` resolves it to a file;
-    ``def_finder(module_text, name)`` returns ``(body, params)`` for the helper.
+    ``def_finder(module_text, name)`` returns ``(body, params)`` for the helper;
+    ``reexport_edges(module_text, symbol)`` (optional) returns the barrel
+    re-export edges that can carry ``symbol`` onward, so a helper imported from a
+    barrel index that only RE-EXPORTS its real definition is still reachable. A
+    profile that supplies no follower simply never crosses a barrel (degrades to
+    the 2.31.0 direct/simple-import behavior).
     """
 
     calls = _extract_helper_calls(block.body_text)
@@ -1379,6 +1500,7 @@ def _resolve_evidence(
             imported_lookup=imported_lookup,
             module_resolver=module_resolver,
             def_finder=def_finder,
+            reexport_edges=reexport_edges,
             hops=_MAX_HELPER_HOPS,
             seen=frozenset(),
         )
@@ -1400,6 +1522,75 @@ def _resolve_evidence(
     return AssertionEvidence(ok=False, reason="no_assertion")
 
 
+def _follow_reexports_for_def(
+    *,
+    name: str,
+    module_text: str,
+    module_rel: str,
+    project_root: Path,
+    module_resolver: Callable[[str, str, Path], Path | None],
+    def_finder: Callable[[str, str], "tuple[str, list[str]] | None"],
+    reexport_edges: Callable[[str, str], list[tuple[str, str]]],
+    depth: int,
+    visited: frozenset[str],
+) -> "tuple[tuple[str, list[str]], str, str] | None":
+    """Follow a barrel's re-export edges to the module that DEFINES ``name``.
+
+    ``module_text`` / ``module_rel`` are the current (barrel) module. Each
+    re-export edge ``(spec, original_name)`` from :func:`reexport_edges` is
+    resolved with the SAME ``module_resolver`` used for imports (the barrel acts
+    as the importer for its own relative re-exports), the target module is read,
+    and ``def_finder`` is tried there for ``original_name``. A target that is
+    itself a barrel is recursed into (``original_name`` carried forward, depth
+    decremented). Returns ``((body, params), defining_text, defining_rel)`` for
+    the FIRST edge that reaches a real def, or ``None`` if no edge within
+    ``depth`` hops resolves. Bounded by ``depth`` and a ``visited`` set of module
+    rel-paths (cycle guard: ``a → b → a`` barrels terminate).
+
+    Pure reach: the returned body is still subject to the caller's primitive +
+    argument-anchor checks, so a barrel that re-exports a no-op/constant helper
+    yields that no-op body (which then FAILS) — never a pass.
+    """
+
+    if depth <= 0 or module_rel in visited:
+        return None
+    visited = visited | {module_rel}
+
+    for spec, original in reexport_edges(module_text, name):
+        target_file = module_resolver(module_rel, spec, project_root)
+        if target_file is None:
+            continue
+        try:
+            target_text = target_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            target_rel = target_file.resolve().relative_to(project_root).as_posix()
+        except ValueError:
+            target_rel = spec
+        if target_rel in visited:
+            continue
+        found = def_finder(target_text, original)
+        if found is not None:
+            return found, target_text, target_rel
+        # Target is itself a barrel — recurse, carrying the (possibly aliased)
+        # original name onward and decrementing the re-export budget.
+        deeper = _follow_reexports_for_def(
+            name=original,
+            module_text=target_text,
+            module_rel=target_rel,
+            project_root=project_root,
+            module_resolver=module_resolver,
+            def_finder=def_finder,
+            reexport_edges=reexport_edges,
+            depth=depth - 1,
+            visited=visited,
+        )
+        if deeper is not None:
+            return deeper
+    return None
+
+
 def _resolve_one_helper(
     *,
     name: str,
@@ -1410,6 +1601,7 @@ def _resolve_one_helper(
     imported_lookup: Callable[[str, str], str | None],
     module_resolver: Callable[[str, str, Path], Path | None],
     def_finder: Callable[[str, str], "tuple[str, list[str]] | None"],
+    reexport_edges: Callable[[str, str], list[tuple[str, str]]] | None = None,
     hops: int,
     seen: frozenset[str],
 ) -> AssertionEvidence:
@@ -1420,6 +1612,13 @@ def _resolve_one_helper(
     delegates to a DEEPER assertion helper (forwarding its own params, checked via
     ``inner_anchor & param_set`` below) is followed one more hop, so a chain like
     ``expectSuccessfulRun → expectExitCode`` resolves.
+
+    When the binding module is a BARREL (it carries no def of ``name`` and only
+    re-exports siblings), the def is located by following the module's re-export
+    edges via ``reexport_edges`` (bounded by ``_MAX_REEXPORT_HOPS`` + a visited-
+    file cycle guard). The defining module's text/rel then replace the barrel's so
+    the SAME primitive + argument-anchor checks (and any deeper helper hop) run
+    against the real body — barrel following adds reach, never a pass.
     """
 
     if hops <= 0 or name in seen:
@@ -1443,8 +1642,26 @@ def _resolve_one_helper(
             resolved_rel = importer_rel
 
     found = def_finder(module_text, name)
+    if found is None and reexport_edges is not None and spec is not None:
+        # Binding module has no def of ``name`` — it may be a BARREL that only
+        # re-exports the real definition. Follow re-export edges to the defining
+        # module, then continue with the SAME credibility checks below.
+        followed = _follow_reexports_for_def(
+            name=name,
+            module_text=module_text,
+            module_rel=resolved_rel,
+            project_root=project_root,
+            module_resolver=module_resolver,
+            def_finder=def_finder,
+            reexport_edges=reexport_edges,
+            depth=_MAX_REEXPORT_HOPS,
+            visited=frozenset(),
+        )
+        if followed is not None:
+            found, module_text, resolved_rel = followed
     if found is None:
-        # Not defined in the binding module (and no same-file def) → unresolved.
+        # Not defined in the binding module, no same-file def, and no resolvable
+        # re-export chain reaches a def → unresolved (greenfield strict ⇒ fail).
         return AssertionEvidence(ok=False, reason="unresolved_helper", detail=name)
     body, params = found
     param_set = set(params)
@@ -1474,6 +1691,7 @@ def _resolve_one_helper(
             imported_lookup=imported_lookup,
             module_resolver=module_resolver,
             def_finder=def_finder,
+            reexport_edges=reexport_edges,
             hops=hops - 1,
             seen=seen,
         )
@@ -1541,6 +1759,7 @@ def _resolve_typescript_evidence(
         imported_lookup=_ts_imported_specifier,
         module_resolver=_mod_resolver,
         def_finder=_ts_find_function_def,
+        reexport_edges=_ts_reexport_edges,
     )
 
 
@@ -1559,4 +1778,5 @@ def _resolve_python_evidence(
         imported_lookup=_py_imported_module,
         module_resolver=_mod_resolver,
         def_finder=_py_find_function_def,
+        reexport_edges=_py_reexport_edges,
     )

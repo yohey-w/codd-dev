@@ -640,3 +640,379 @@ def test_codex13_real_project_passes():
     report = build_authenticity_report(root, config=config, profile=profile)
     assert report.passed, [v.message for v in report.violations]
     assert report.degraded_paths == []
+
+
+# ===========================================================================
+# Round-3 reach: BARREL re-export following. The conventional e2e shape imports
+# its assertion helpers from a barrel index (`import { expectSuccessResult } from
+# "./helpers"` → `helpers/index.ts` does `export * from "./assertions"` → the
+# real `expectSuccessResult` body). 2.31.0 resolved the import to the BARREL,
+# found no def there, and FAILED (`unresolved_helper`) — the codex16 false-RED
+# (54 genuine e2e markers wrongly failed). The gate now FOLLOWS the barrel's
+# re-exports to the defining module, WITHOUT weakening the anti-false-green
+# contract: the real body must still carry a primitive assertion + argument
+# anchor, an unreachable / depth-exhausted / cyclic re-export is still a fail,
+# and a barrel re-exporting a no-op/constant helper still fails.
+# ===========================================================================
+
+
+_BARREL_ASSERTIONS = (
+    "import { expect } from 'vitest';\n"
+    "import type { CliRunResult } from './cli.js';\n"
+    "export function expectSuccessResult(result: CliRunResult, stdout: string): void {\n"
+    "  expect(result.status).toBe(0);\n"
+    "  expect(result.stdout).toBe(stdout);\n"
+    "}\n"
+)
+#: A barrel index that ONLY re-exports siblings (no def of its own) — the exact
+#: shape codex16 generated (`tests/e2e/helpers/index.ts`).
+_BARREL_INDEX_STAR = (
+    "export * from './assertions';\n"
+    "export * from './cli';\n"
+    "export * from './workspace';\n"
+)
+
+
+def test_gate_passes_barrel_star_reexport(tmp_path):
+    """THE codex16 false-RED: a test imports its assertion helper from a barrel
+    (`from "./helpers"`) whose `index.ts` only `export * from "./assertions"`.
+    2.31.0 stopped at the barrel (no def there) → unresolved → fail. The gate now
+    follows the star re-export to `assertions.ts` and finds the real
+    `expectSuccessResult` (primitive `expect` on its argument) → PASS."""
+    project = tmp_path
+    _canonical(project, "| VB-RERUN-001 | reruns |\n")
+    _write(project / "tests" / "e2e" / "helpers" / "assertions.ts", _BARREL_ASSERTIONS)
+    _write(project / "tests" / "e2e" / "helpers" / "index.ts", _BARREL_INDEX_STAR)
+    _write(
+        project / "tests" / "e2e" / "rerun.e2e.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        'import { expectSuccessResult } from "./helpers";\n'
+        "describe('rerun', () => {\n"
+        "  // codd: covers vb=VB-RERUN-001\n"
+        "  it('reruns', async () => {\n"
+        "    const result = await runIt();\n"
+        "    expectSuccessResult(result, '212.00 F');\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+    assert report.degraded_paths == []
+
+
+def test_gate_fails_barrel_reexporting_constant_helper(tmp_path):
+    """ANTI-FALSE-GREEN: following a barrel does NOT relax the body check. A
+    barrel that `export *`s a no-op helper (`expect(true).toBe(true)`, never its
+    argument) is reached but still FAILS — barrel following adds reach only."""
+    project = tmp_path
+    _canonical(project, "| VB-FAKE-01 | a |\n")
+    _write(
+        project / "tests" / "e2e" / "helpers" / "fake-assertions.ts",
+        "import { expect } from 'vitest';\n"
+        "export function expectSuccessResult(result: unknown): void {\n"
+        "  expect(true).toBe(true);\n"  # constant — no argument anchor
+        "}\n",
+    )
+    _write(
+        project / "tests" / "e2e" / "helpers" / "index.ts",
+        "export * from './fake-assertions';\n",
+    )
+    _write(
+        project / "tests" / "e2e" / "fake.e2e.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        'import { expectSuccessResult } from "./helpers";\n'
+        "describe('fake', () => {\n"
+        "  // codd: covers vb=VB-FAKE-01\n"
+        "  it('pretends', () => {\n"
+        "    const result = run();\n"
+        "    expectSuccessResult(result);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-FAKE-01" for v in report.violations)
+    assert any("CONSTANT" in v.message for v in report.violations)
+
+
+def test_gate_fails_barrel_reexporting_no_primitive_helper(tmp_path):
+    """ANTI-FALSE-GREEN: a barrel reaching a helper whose body has NO primitive
+    assertion at all (just logs) still fails — the reached body is empty of
+    evidence."""
+    project = tmp_path
+    _canonical(project, "| VB-NOOP-01 | a |\n")
+    _write(
+        project / "tests" / "helpers" / "real.ts",
+        "export function checkResult(result: unknown): void {\n"
+        "  console.log(result);\n"  # no assertion
+        "}\n",
+    )
+    _write(project / "tests" / "helpers" / "index.ts", "export * from './real';\n")
+    _write(
+        project / "tests" / "noop.e2e.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        'import { checkResult } from "./helpers";\n'
+        "describe('noop', () => {\n"
+        "  // codd: covers vb=VB-NOOP-01\n"
+        "  it('checks nothing', () => {\n"
+        "    const result = run();\n"
+        "    checkResult(result);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-NOOP-01" for v in report.violations)
+
+
+def test_gate_passes_barrel_named_alias_reexport(tmp_path):
+    """`export { expectOk as expectSuccessResult } from "./asserts"` — a named
+    re-export with an ALIAS. The test's local name is the alias; following the
+    edge must look for the ORIGINAL name (`expectOk`) in the target module."""
+    project = tmp_path
+    _canonical(project, "| VB-ALIAS-01 | a |\n")
+    _write(
+        project / "tests" / "helpers" / "asserts.ts",
+        "import { expect } from 'vitest';\n"
+        "export function expectOk(result: { code: number }): void {\n"
+        "  expect(result.code).toBe(0);\n"
+        "}\n",
+    )
+    _write(
+        project / "tests" / "helpers" / "index.ts",
+        'export { expectOk as expectSuccessResult } from "./asserts";\n',
+    )
+    _write(
+        project / "tests" / "alias.e2e.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        'import { expectSuccessResult } from "./helpers";\n'
+        "describe('alias', () => {\n"
+        "  // codd: covers vb=VB-ALIAS-01\n"
+        "  it('aliased', () => {\n"
+        "    const result = run();\n"
+        "    expectSuccessResult(result);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+
+
+def test_gate_passes_nested_barrel_reexport(tmp_path):
+    """A barrel that re-exports ANOTHER barrel (`helpers/index` → `assertions/index`
+    → `core`). Following must recurse across barrel-to-barrel edges (bounded)."""
+    project = tmp_path
+    _canonical(project, "| VB-NEST-01 | a |\n")
+    _write(
+        project / "tests" / "helpers" / "assertions" / "core.ts",
+        "import { expect } from 'vitest';\n"
+        "export function expectOk(result: { code: number }): void {\n"
+        "  expect(result.code).toBe(0);\n"
+        "}\n",
+    )
+    _write(
+        project / "tests" / "helpers" / "assertions" / "index.ts",
+        "export * from './core';\n",
+    )
+    _write(project / "tests" / "helpers" / "index.ts", "export * from './assertions';\n")
+    _write(
+        project / "tests" / "nest.e2e.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        'import { expectOk } from "./helpers";\n'
+        "describe('nest', () => {\n"
+        "  // codd: covers vb=VB-NEST-01\n"
+        "  it('nested barrel', () => {\n"
+        "    const result = run();\n"
+        "    expectOk(result);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+
+
+def test_gate_fails_barrel_chain_exceeding_depth(tmp_path):
+    """BOUNDED DEPTH: a re-export chain LONGER than the budget (a line of barrels
+    each forwarding to the next, def only at the far end) must NOT resolve — the
+    follow is bounded, so an over-deep chain is `unresolved_helper` → fail. This
+    proves the bound is real (not just a cycle guard)."""
+    project = tmp_path
+    _canonical(project, "| VB-DEEP-01 | a |\n")
+    # Build a chain of barrels longer than _MAX_REEXPORT_HOPS, with the real def
+    # only at the very end so resolution MUST exhaust the budget first.
+    from codd.vb_marker_authenticity import _MAX_REEXPORT_HOPS
+
+    chain_len = _MAX_REEXPORT_HOPS + 2
+    helpers = project / "tests" / "helpers"
+    # b0 (entry barrel imported by the test) → b1 → ... → b{n-1} → leaf def
+    for i in range(chain_len):
+        _write(helpers / f"b{i}.ts", f"export * from './b{i + 1}';\n")
+    _write(
+        helpers / f"b{chain_len}.ts",
+        "import { expect } from 'vitest';\n"
+        "export function expectOk(result: { code: number }): void {\n"
+        "  expect(result.code).toBe(0);\n"
+        "}\n",
+    )
+    _write(helpers / "index.ts", "export * from './b0';\n")
+    _write(
+        project / "tests" / "deep.e2e.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        'import { expectOk } from "./helpers";\n'
+        "describe('deep', () => {\n"
+        "  // codd: covers vb=VB-DEEP-01\n"
+        "  it('too deep', () => {\n"
+        "    const result = run();\n"
+        "    expectOk(result);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-DEEP-01" for v in report.violations)
+    assert any("could not be resolved" in v.message for v in report.violations)
+
+
+def test_gate_barrel_cycle_guard_terminates(tmp_path):
+    """CYCLE GUARD: two barrels that re-export each other (`a → b → a`) and NEVER
+    define the symbol must terminate (no infinite recursion) and resolve to a
+    fail, not hang."""
+    project = tmp_path
+    _canonical(project, "| VB-CYC-01 | a |\n")
+    helpers = project / "tests" / "helpers"
+    _write(helpers / "a.ts", "export * from './b';\n")
+    _write(helpers / "b.ts", "export * from './a';\n")  # cycle, no def anywhere
+    _write(helpers / "index.ts", "export * from './a';\n")
+    _write(
+        project / "tests" / "cyc.e2e.test.ts",
+        "import { describe, it } from 'vitest';\n"
+        'import { expectOk } from "./helpers";\n'
+        "describe('cyc', () => {\n"
+        "  // codd: covers vb=VB-CYC-01\n"
+        "  it('cyclic barrel', () => {\n"
+        "    const result = run();\n"
+        "    expectOk(result);\n"
+        "  });\n"
+        "});\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-CYC-01" for v in report.violations)
+
+
+def test_gate_passes_python_init_reexport(tmp_path):
+    """Python parity: a test imports a helper from a package whose `__init__.py`
+    re-exports it (`from .asserts import expect_ok`). Following the `__init__`
+    re-export to `asserts.py` finds the real `assert` on its argument → PASS."""
+    project = tmp_path
+    _canonical(project, "| VB-PYRE-01 | a |\n")
+    _write(
+        project / "tests" / "helpers" / "asserts.py",
+        "def expect_ok(result):\n    assert result.code == 0\n",
+    )
+    _write(
+        project / "tests" / "helpers" / "__init__.py",
+        "from .asserts import expect_ok\n",
+    )
+    _write(
+        project / "tests" / "test_py_barrel.py",
+        "from tests.helpers import expect_ok\n"
+        "# codd: covers vb=VB-PYRE-01\n"
+        "def test_runs():\n    result = run()\n    expect_ok(result)\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+
+
+def test_gate_fails_python_init_reexport_constant_helper(tmp_path):
+    """Python parity (anti-false-green): a `__init__` re-exporting a constant-only
+    helper is reached but still fails — reach without a real argument anchor is
+    not evidence."""
+    project = tmp_path
+    _canonical(project, "| VB-PYRE-02 | a |\n")
+    _write(
+        project / "tests" / "helpers" / "fake.py",
+        "def verify_ok(result):\n    assert True\n",
+    )
+    _write(
+        project / "tests" / "helpers" / "__init__.py",
+        "from .fake import verify_ok\n",
+    )
+    _write(
+        project / "tests" / "test_py_barrel_fake.py",
+        "from tests.helpers import verify_ok\n"
+        "# codd: covers vb=VB-PYRE-02\n"
+        "def test_runs():\n    result = run()\n    verify_ok(result)\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-PYRE-02" for v in report.violations)
+
+
+def test_gate_passes_python_init_alias_reexport(tmp_path):
+    """Python parity: `from .asserts import expect_ok as expect_success` aliased
+    re-export in `__init__` — follow must search the ORIGINAL name `expect_ok`."""
+    project = tmp_path
+    _canonical(project, "| VB-PYRE-03 | a |\n")
+    _write(
+        project / "tests" / "helpers" / "asserts.py",
+        "def expect_ok(result):\n    assert result.code == 0\n",
+    )
+    _write(
+        project / "tests" / "helpers" / "__init__.py",
+        "from .asserts import expect_ok as expect_success\n",
+    )
+    _write(
+        project / "tests" / "test_py_alias.py",
+        "from tests.helpers import expect_success\n"
+        "# codd: covers vb=VB-PYRE-03\n"
+        "def test_runs():\n    result = run()\n    expect_success(result)\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
+
+
+def test_codex16_real_project_passes():
+    """End-to-end against the actual codex16 greenfield output — the BARREL
+    false-RED source. Its e2e tests import helpers from `tests/e2e/helpers`
+    (a `index.ts` barrel of `export * from "./assertions"` etc.), and the real
+    `expectSuccessResult` lives in `assertions.ts`. All `covers vb=` markers must
+    be authentic: 0 violations, 0 degraded. Skips cleanly if the fixture is absent."""
+    root = Path("/home/tono/codd-greenfield-tempconv-codex16")
+    if not (root / "codd" / "codd.yaml").is_file():
+        import pytest
+
+        pytest.skip("codex16 fixture project not present")
+    from codd.config import load_project_config
+
+    config = load_project_config(root)
+    profile = LayoutProfile(
+        language="typescript",
+        package_name="tempconv",
+        source_root="src",
+        package_root="src",
+        test_root="tests",
+    )
+    report = build_authenticity_report(root, config=config, profile=profile)
+    assert report.passed, [v.message for v in report.violations]
+    assert report.degraded_paths == []
