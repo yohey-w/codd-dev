@@ -8,6 +8,7 @@ Human knowledge (manual annotations, overrides) is NEVER deleted.
 
 import os
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -129,14 +130,107 @@ def _extract_frontmatter(file_path: Path) -> dict | None:
     return frontmatter.get("codd")
 
 
-def build_document_node_path_map(project_root: Path, config: dict[str, Any]) -> dict[str, Path]:
-    """Resolve document node IDs to project-relative paths."""
-    node_paths: dict[str, Path] = {}
+# ═══════════════════════════════════════════════════════════
+# Document Reference Index (ACG axis-1 reference resolution)
+# ═══════════════════════════════════════════════════════════
 
-    for doc_dir in config.get("scan", {}).get("doc_dirs", []):
-        full_path = project_root / doc_dir
+
+@dataclass(frozen=True)
+class DocumentEntry:
+    """One registered document: its node id, canonical path, and roots."""
+
+    node_id: str
+    path: Path  # project-relative
+    basename: str
+    doc_root: str  # the configured ``doc_dirs`` root this was found under
+
+
+@dataclass(frozen=True)
+class ReferenceCollision:
+    """Two registered documents sharing a key (node_id / alias)."""
+
+    kind: str  # "node_id" | "alias"
+    key: str
+    paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DocumentReferenceIndex:
+    """Multi-key index of registered documents for deterministic resolution.
+
+    * ``by_path`` — canonical project-relative POSIX path → entry (unique).
+    * ``by_node_id`` — node id → LIST of entries (duplicates recorded, never
+      silently overwritten).
+    * ``by_basename`` — filename → LIST of entries.
+    * ``by_alias`` — alias (canonical rel path, ``doc:<rel>``) → LIST of
+      entries.
+    * ``doc_roots`` — the configured ``scan.doc_dirs`` roots (normalized).
+    * ``collisions`` — recorded node_id/alias collisions.
+    """
+
+    by_path: dict[str, DocumentEntry]
+    by_node_id: dict[str, list[DocumentEntry]]
+    by_basename: dict[str, list[DocumentEntry]]
+    by_alias: dict[str, list[DocumentEntry]]
+    doc_roots: tuple[str, ...]
+    collisions: list[ReferenceCollision] = field(default_factory=list)
+
+
+def build_document_reference_index(
+    project_root: Path, config: dict[str, Any]
+) -> DocumentReferenceIndex:
+    """Build the multi-key document reference index from ``scan.doc_dirs``.
+
+    Walks the same source as :func:`build_document_node_path_map` (every ``.md``
+    under each configured ``doc_dirs`` root that carries CoDD frontmatter) plus
+    wave artifacts, and registers each document by path, node_id (list),
+    basename (list), and alias (list). Duplicate node_ids/aliases are recorded
+    as collisions rather than overwritten, so the resolver can fail-closed on
+    ambiguity.
+    """
+    by_path: dict[str, DocumentEntry] = {}
+    by_node_id: dict[str, list[DocumentEntry]] = {}
+    by_basename: dict[str, list[DocumentEntry]] = {}
+    by_alias: dict[str, list[DocumentEntry]] = {}
+    collisions: list[ReferenceCollision] = []
+
+    raw_doc_roots = list(config.get("scan", {}).get("doc_dirs", []))
+    doc_roots = tuple(Path(root).as_posix().rstrip("/") for root in raw_doc_roots)
+
+    def _register(entry: DocumentEntry) -> None:
+        rel_posix = entry.path.as_posix()
+        # by_path is filesystem-unique; first registration wins.
+        by_path.setdefault(rel_posix, entry)
+        by_basename.setdefault(entry.basename, []).append(entry)
+
+        existing_node = by_node_id.setdefault(entry.node_id, [])
+        existing_node.append(entry)
+        if len(existing_node) == 2:
+            collisions.append(
+                ReferenceCollision(
+                    kind="node_id",
+                    key=entry.node_id,
+                    paths=tuple(e.path.as_posix() for e in existing_node),
+                )
+            )
+
+        for alias in (rel_posix, f"doc:{rel_posix}"):
+            existing_alias = by_alias.setdefault(alias, [])
+            existing_alias.append(entry)
+            if len(existing_alias) == 2:
+                collisions.append(
+                    ReferenceCollision(
+                        kind="alias",
+                        key=alias,
+                        paths=tuple(e.path.as_posix() for e in existing_alias),
+                    )
+                )
+
+    for raw_root in raw_doc_roots:
+        full_path = project_root / raw_root
         if not full_path.exists():
             continue
+        doc_root_posix = Path(raw_root).as_posix().rstrip("/")
 
         for root, _, files in os.walk(full_path):
             for fname in files:
@@ -149,8 +243,15 @@ def build_document_node_path_map(project_root: Path, config: dict[str, Any]) -> 
                 if not codd_data:
                     continue
 
-                node_id = codd_data.get("node_id", f"doc:{rel.as_posix()}")
-                node_paths[str(node_id)] = rel
+                node_id = str(codd_data.get("node_id", f"doc:{rel.as_posix()}"))
+                _register(
+                    DocumentEntry(
+                        node_id=node_id,
+                        path=rel,
+                        basename=rel.name,
+                        doc_root=doc_root_posix,
+                    )
+                )
 
     from codd.generator import _load_wave_artifacts
 
@@ -160,8 +261,50 @@ def build_document_node_path_map(project_root: Path, config: dict[str, Any]) -> 
         artifacts = []
 
     for artifact in artifacts:
-        node_paths.setdefault(artifact.node_id, Path(artifact.output))
+        # Backward-compat semantics: wave artifacts only contribute a node_id
+        # mapping if that node_id isn't already registered (mirrors the old
+        # ``setdefault`` behavior in build_document_node_path_map).
+        if artifact.node_id in by_node_id:
+            continue
+        artifact_path = Path(artifact.output)
+        _register(
+            DocumentEntry(
+                node_id=artifact.node_id,
+                path=artifact_path,
+                basename=artifact_path.name,
+                doc_root="",
+            )
+        )
 
+    return DocumentReferenceIndex(
+        by_path=by_path,
+        by_node_id=by_node_id,
+        by_basename=by_basename,
+        by_alias=by_alias,
+        doc_roots=doc_roots,
+        collisions=collisions,
+    )
+
+
+def build_document_node_path_map(project_root: Path, config: dict[str, Any]) -> dict[str, Path]:
+    """Resolve document node IDs to project-relative paths.
+
+    Backward-compatible wrapper over :func:`build_document_reference_index`:
+    derives the legacy ``node_id -> Path`` mapping. Signature and return
+    semantics are unchanged (first frontmatter doc wins per node_id; wave
+    artifacts fill in via ``setdefault``).
+    """
+    index = build_document_reference_index(project_root, config)
+    node_paths: dict[str, Path] = {}
+    for node_id, entries in index.by_node_id.items():
+        # Preserve legacy semantics exactly: the old map did
+        # ``node_paths[node_id] = rel`` for each frontmatter doc in scan order
+        # (so a later duplicate frontmatter node_id overwrites an earlier one),
+        # then filled wave artifacts via ``setdefault`` (so a wave node_id never
+        # overwrote a frontmatter one). ``build_document_reference_index`` only
+        # registers a wave artifact when its node_id is otherwise absent, so the
+        # last entry in the list is the one the legacy dict would have kept.
+        node_paths[node_id] = entries[-1].path
     return node_paths
 
 

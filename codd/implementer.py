@@ -804,6 +804,7 @@ class Implementer:
             self.project_root,
             _ordered_unique([*explicit_dependencies, *design_dependencies]),
             node_paths,
+            self.config,
         )
         design_document = DependencyDocument(
             node_id=design_context.node_id,
@@ -1276,23 +1277,53 @@ def _load_design_context(project_root: Path, config: dict[str, Any], design_node
 
 
 def _resolve_design_path(project_root: Path, config: dict[str, Any], design_node: str) -> Path:
-    candidate = Path(design_node)
-    if candidate.is_absolute():
-        if not candidate.is_file():
-            raise FileNotFoundError(f"design document not found: {design_node}")
-        _ensure_inside_project(project_root, candidate, "design document")
-        return candidate
+    """Resolve a ``source_design_doc`` reference to its canonical file path.
 
-    project_relative = project_root / candidate
-    if project_relative.is_file():
-        return project_relative
+    Uses the shared deterministic reference resolver (ACG axis-1). Recovery of a
+    unique-basename reference (e.g. ``docs/api_interface_contract.md`` →
+    ``docs/design/api_interface_contract.md``) is allowed and audited; ambiguous
+    / unresolved / wrong-subcategory references honest-fail. The
+    ``FileNotFoundError`` contract is preserved (the resolver raises a
+    ``FileNotFoundError`` subclass).
+    """
+    from codd.reference_resolution import (
+        ReferenceResolutionError,
+        record_reference_resolution_event,
+        record_resolution_failure,
+        resolve_document_ref,
+    )
+    from codd.scanner import build_document_reference_index
 
-    node_paths = build_document_node_path_map(project_root, config)
-    mapped = node_paths.get(design_node)
-    if mapped is not None and (project_root / mapped).is_file():
-        return project_root / mapped
+    index = build_document_reference_index(project_root, config)
+    try:
+        binding = resolve_document_ref(
+            design_node,
+            project_root=project_root,
+            index=index,
+            producer=None,
+            ref_kind="source_design_doc",
+            allow_recovery=True,
+        )
+    except ReferenceResolutionError as exc:
+        record_resolution_failure(
+            project_root,
+            str(design_node),
+            stage="implement_read",
+            ref_kind="source_design_doc",
+            producer=None,
+            error=exc,
+        )
+        raise FileNotFoundError(f"design document not found: {design_node}") from exc
 
-    raise FileNotFoundError(f"design document not found: {design_node}")
+    record_reference_resolution_event(
+        project_root,
+        binding,
+        stage="implement_read",
+        status="recovered" if binding.recovered else "exact",
+    )
+    if binding.canonical_path is None:  # pragma: no cover - documents always have a path
+        raise FileNotFoundError(f"design document not found: {design_node}")
+    return project_root / binding.canonical_path
 
 
 def _relative_path(project_root: Path, path: Path) -> Path:
@@ -1729,6 +1760,7 @@ def _collect_dependency_documents(
     project_root: Path,
     initial_node_ids: list[str],
     node_paths: dict[str, Path],
+    config: dict[str, Any] | None = None,
 ) -> tuple[list[DependencyDocument], list[dict[str, Any]]]:
     documents: list[DependencyDocument] = []
     conventions: list[dict[str, Any]] = []
@@ -1747,7 +1779,7 @@ def _collect_dependency_documents(
         resolved_node_id = node_id
         if rel_path is None:
             try:
-                context = _load_design_context(project_root, {}, node_id)
+                context = _load_design_context(project_root, config or {}, node_id)
             except (FileNotFoundError, ValueError):
                 if node_id in required_node_ids:
                     missing.append(node_id)

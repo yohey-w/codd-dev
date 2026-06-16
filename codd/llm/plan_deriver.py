@@ -190,6 +190,7 @@ class SubprocessAiCommandPlanDeriver(PlanDeriver):
             default_v_model_layer=layer,
         )
         tasks = apply_declarative_v_model_layers(tasks, design_docs)
+        tasks = canonicalize_derived_task_references(tasks, project_context)
 
         if write_cache:
             write_derived_task_cache(
@@ -292,6 +293,110 @@ def apply_declarative_v_model_layers(tasks: list[DerivedTask], design_docs: list
         data["v_model_layer"] = layer
         overridden.append(DerivedTask.from_dict(data))
     return overridden
+
+
+def canonicalize_derived_task_references(
+    tasks: list[DerivedTask],
+    project_context: Mapping[str, Any],
+) -> list[DerivedTask]:
+    """Bind each task's ``source_design_doc`` to a canonical document path.
+
+    This is the PRIMARY fix for the ACG axis-1 reference supply-demand gap: a
+    SUT-supplied ``source_design_doc`` (e.g. ``docs/api_interface_contract.md``)
+    is normalized to the canonical registered path
+    (``docs/design/api_interface_contract.md``) *before* the derived-task bundle
+    / cache is persisted, so every downstream stage (cache reuse, implement,
+    repair, audit) sees a reference that already binds to exactly one document.
+
+    * Already-correct references are a no-op.
+    * Recoverable references are rewritten and audited (silent recovery is
+      forbidden).
+    * Ambiguous / unresolved / wrong-subcategory references honest-fail at
+      derivation time — a guessed/broken reference is NEVER persisted.
+
+    Only ``source_design_doc`` is canonicalized here (``depends_on`` /
+    ``expected_outputs`` are deliberately out of scope per the design — they are
+    a separate change with different typing/ownership semantics).
+    """
+    if not tasks:
+        return tasks
+
+    from codd.reference_resolution import (
+        ReferenceResolutionError,
+        record_reference_resolution_event,
+        record_resolution_failure,
+        resolve_document_ref,
+    )
+    from codd.scanner import build_document_reference_index
+
+    project_root, config = _resolve_root_and_config(project_context)
+    if project_root is None or config is None:
+        # Cannot build an index without a project root + config; leave tasks
+        # untouched (read-time resolution remains the safety net for legacy /
+        # external paths). This mirrors the resolver's fail-closed boundary
+        # without breaking callers that never supplied a project context.
+        return tasks
+
+    index = build_document_reference_index(project_root, config)
+    canonical: list[DerivedTask] = []
+    for task in tasks:
+        raw_ref = task.source_design_doc
+        try:
+            binding = resolve_document_ref(
+                raw_ref,
+                project_root=project_root,
+                index=index,
+                producer=task.id,
+                ref_kind="source_design_doc",
+                allow_recovery=True,
+            )
+        except ReferenceResolutionError as exc:
+            record_resolution_failure(
+                project_root,
+                str(raw_ref),
+                stage="plan_derivation",
+                ref_kind="source_design_doc",
+                producer=task.id,
+                error=exc,
+            )
+            raise
+
+        record_reference_resolution_event(
+            project_root,
+            binding,
+            stage="plan_derivation",
+            status="recovered" if binding.recovered else "exact",
+        )
+
+        if binding.canonical_path and binding.canonical_path != raw_ref:
+            data = task.to_dict()
+            data["source_design_doc"] = binding.canonical_path
+            canonical.append(DerivedTask.from_dict(data))
+        else:
+            canonical.append(task)
+    return canonical
+
+
+def _resolve_root_and_config(
+    project_context: Mapping[str, Any],
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """Best-effort extraction of (project_root, config) for canonicalization."""
+    raw_root = project_context.get("project_root")
+    if not raw_root:
+        return None, None
+    project_root = Path(str(raw_root)).resolve()
+
+    config = project_context.get("config")
+    if isinstance(config, Mapping):
+        return project_root, dict(config)
+
+    from codd.config import load_project_config
+
+    try:
+        loaded = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return None, None
+    return project_root, loaded
 
 
 def declarative_v_model_layer(node: Node) -> VModelLayer | None:

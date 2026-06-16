@@ -20,6 +20,7 @@ from codd.llm.plan_deriver import (
     SubprocessAiCommandPlanDeriver,
     apply_declarative_v_model_layers,
     approve_cached_tasks,
+    canonicalize_derived_task_references,
     derived_task_cache_key,
     derived_task_cache_path,
     design_doc_bundle,
@@ -29,6 +30,7 @@ from codd.llm.plan_deriver import (
     utc_timestamp,
     write_derived_task_cache,
 )
+from codd.reference_resolution import ReferenceResolutionError
 
 
 def _task_payload(task_id: str = "build_contract", **extra) -> dict:
@@ -351,3 +353,134 @@ def test_cli_plan_approve_all_and_one_task(tmp_path):
     assert all_result.exit_code == 0
     assert [task.approved for task in after_one.tasks] == [True, False]
     assert all(task.approved for task in after_all.tasks)
+
+
+# ── ingestion-time source_design_doc canonicalization (ACG axis-1) ───
+
+
+def _write_project_with_frontmatter_doc(
+    tmp_path: Path, rel: str, node_id: str
+) -> Path:
+    """A project whose design doc carries CoDD frontmatter (so it is a
+    registered document the resolver can recover toward)."""
+    project = tmp_path / "project"
+    project.mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(
+            {"project": {"name": "demo", "language": "python"}, "scan": {"doc_dirs": ["docs/"]}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    doc = project / rel
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(
+        f"---\ncodd:\n  node_id: \"{node_id}\"\n  type: design\n---\n\n# {node_id}\nBody\n",
+        encoding="utf-8",
+    )
+    return project
+
+
+def test_canonicalize_rewrites_recoverable_source_design_doc(tmp_path):
+    """The greenfield bug: SUT wrote ``docs/api_interface_contract.md`` but the
+    real registered doc is ``docs/design/api_interface_contract.md``. Ingestion
+    canonicalization must rewrite the stored ref to the canonical path."""
+    project = _write_project_with_frontmatter_doc(
+        tmp_path, "docs/design/api_interface_contract.md", "design:api-interface-contract"
+    )
+    task = DerivedTask.from_dict(
+        _task_payload(source_design_doc="docs/api_interface_contract.md")
+    )
+
+    [canonical] = canonicalize_derived_task_references([task], {"project_root": project})
+
+    assert canonical.source_design_doc == "docs/design/api_interface_contract.md"
+    # Audit recorded the recovery (silent recovery is forbidden).
+    audit = project / ".codd" / "audit" / "reference_resolution.jsonl"
+    assert audit.exists()
+    entry = json.loads(audit.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert entry["status"] == "recovered"
+    assert entry["stage"] == "plan_derivation"
+
+
+def test_canonicalize_noop_for_already_correct_ref(tmp_path):
+    project = _write_project_with_frontmatter_doc(
+        tmp_path, "docs/design/api_interface_contract.md", "design:api-interface-contract"
+    )
+    task = DerivedTask.from_dict(
+        _task_payload(source_design_doc="docs/design/api_interface_contract.md")
+    )
+
+    [canonical] = canonicalize_derived_task_references([task], {"project_root": project})
+
+    assert canonical.source_design_doc == "docs/design/api_interface_contract.md"
+
+
+def test_canonicalize_honest_fails_unresolvable_ref(tmp_path):
+    """An unresolvable (hallucinated) ref must honest-fail at derivation — a
+    broken reference is never persisted."""
+    project = _write_project_with_frontmatter_doc(
+        tmp_path, "docs/design/api_interface_contract.md", "design:api-interface-contract"
+    )
+    task = DerivedTask.from_dict(
+        _task_payload(source_design_doc="docs/design/does_not_exist.md")
+    )
+
+    with pytest.raises(ReferenceResolutionError):
+        canonicalize_derived_task_references([task], {"project_root": project})
+
+
+def test_canonicalize_honest_fails_wrong_subcategory_ref(tmp_path):
+    """A wrong-subcategory ref (asserts docs/test/ when the doc is docs/design/)
+    must honest-fail — the basename-recovery guard blocks it."""
+    project = _write_project_with_frontmatter_doc(
+        tmp_path, "docs/design/api_interface_contract.md", "design:api-interface-contract"
+    )
+    task = DerivedTask.from_dict(
+        _task_payload(source_design_doc="docs/test/api_interface_contract.md")
+    )
+
+    with pytest.raises(ReferenceResolutionError):
+        canonicalize_derived_task_references([task], {"project_root": project})
+
+
+def test_deriver_persists_canonical_source_design_doc(tmp_path):
+    """End-to-end through derive_tasks: the SUT's broken ref is recovered and the
+    PERSISTED cache record holds the canonical path."""
+    project = _write_project_with_frontmatter_doc(
+        tmp_path, "docs/design/api_interface_contract.md", "design:api-interface-contract"
+    )
+    raw = json.dumps(
+        {
+            "tasks": [
+                {
+                    "id": "build_contract",
+                    "title": "Build contract",
+                    "description": "Do it.",
+                    "source_design_doc": "docs/api_interface_contract.md",
+                    "v_model_layer": "detailed",
+                    "expected_outputs": [],
+                    "test_kinds": ["unit"],
+                    "dependencies": [],
+                }
+            ]
+        }
+    )
+    node = Node(
+        id="docs/design/api_interface_contract.md",
+        kind="design_doc",
+        path="docs/design/api_interface_contract.md",
+        attributes={"content": "Body", "frontmatter": {}},
+    )
+
+    tasks = SubprocessAiCommandPlanDeriver(FakeAiCommand([raw])).derive_tasks(
+        [node], "detailed", {"project_root": project}
+    )
+
+    assert tasks[0].source_design_doc == "docs/design/api_interface_contract.md"
+    cache_path = derived_task_cache_path([node], {"project_root": project})
+    record = read_derived_task_cache(cache_path)
+    assert record is not None
+    assert record.tasks[0].source_design_doc == "docs/design/api_interface_contract.md"
