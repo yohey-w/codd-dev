@@ -29,6 +29,7 @@ from codd.coverage_execution_coherence import (
     build_coherence_report,
     build_test_inventory,
     coherence_gate_applies,
+    enforce_campaign_clean_execution,
     enforce_coverage_execution_coherence,
     resolve_runner_report_adapter,
     run_verify_campaign,
@@ -626,3 +627,87 @@ def test_blocked_vb_is_exempt_from_execution_coherence(tmp_path):
     # VB-BLK-01 is blocked → not in the unblocked set → never an unverified failure.
     assert "VB-BLK-01" not in {v.vb_id for v in report.unverified_vbs}
     assert report.passed is True
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# 6. campaign clean-execution gate (contract verify.campaign.clean_execution.v1)
+#    A failing test that covers NO declared VB — or a non-zero runner exit — is
+#    invisible to build_coherence_report (it reconciles only UNBLOCKED VBs), so
+#    it would pass the per-VB coherence gate alone = a false-green. The
+#    clean-execution gate makes the campaign result itself a green authority.
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_clean_execution_failed_file_raises():
+    """A campaign whose report has ANY failed executed test file is hard-RED."""
+    execution = RunnerExecution(
+        executed_passed_files=frozenset({"tests/unit/ok.test.ts"}),
+        executed_failed_files=frozenset({"tests/e2e/non_vb.e2e.test.ts"}),
+        test_level_available=True,
+        total_cases=2,
+        passed_cases=1,
+    )
+    with pytest.raises(CoherenceError) as exc:
+        enforce_campaign_clean_execution(execution, 1)
+    assert "non_vb.e2e.test.ts" in str(exc.value)
+
+
+def test_clean_execution_nonzero_exit_raises():
+    """No failed FILES parsed, but the runner itself exited non-zero → still RED
+    (the campaign did not cleanly succeed; an unobservable failure is not green)."""
+    execution = RunnerExecution(
+        executed_passed_files=frozenset({"tests/unit/ok.test.ts"}),
+        test_level_available=True,
+        total_cases=1,
+        passed_cases=1,
+    )
+    with pytest.raises(CoherenceError) as exc:
+        enforce_campaign_clean_execution(execution, 2)
+    assert "non-zero" in str(exc.value) and "2" in str(exc.value)
+
+
+def test_clean_execution_all_pass_exit_zero_is_ok():
+    """A clean campaign (no failed files, exit 0) passes the gate — no false-RED."""
+    execution = RunnerExecution(
+        executed_passed_files=frozenset(
+            {"tests/unit/ok.test.ts", "tests/e2e/ok.e2e.test.ts"}
+        ),
+        test_level_available=True,
+        total_cases=2,
+        passed_cases=2,
+    )
+    # No raise.
+    enforce_campaign_clean_execution(execution, 0)
+
+
+def test_clean_execution_closes_false_green_for_failing_non_vb_test(tmp_path):
+    """KEYSTONE (registry negative fixture): every VB covering file PASSED — so
+    build_coherence_report alone is GREEN — but a test covering NO declared VB
+    FAILED. The per-VB coherence gate misses it (it reconciles only VBs); the
+    clean-execution gate makes the run RED. This is the exact false-green the
+    contract closes."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    # A non-VB test file (covers no declared VB) that FAILS, alongside all 4 VB
+    # covering files passing.
+    _write(
+        project / "tests" / "integration" / "smoke.test.ts",
+        'import { describe, it, expect } from "vitest";\n'
+        'describe("smoke", () => { it("db", () => { expect(1).toBe(2); }); });\n',
+    )
+    execution = _vitest_report(
+        project,
+        files={
+            "tests/unit/conversion.test.ts": [("c to f", "passed"), ("rejects nan", "passed")],
+            "tests/e2e/cli.e2e.test.ts": [("prints value", "passed"), ("bad arg", "passed")],
+            "tests/integration/smoke.test.ts": [("db", "failed")],
+        },
+    )
+    # The per-VB coherence gate ALONE would GREEN this run: all 4 VBs verified.
+    report = build_coherence_report(project, profile=profile, execution=execution)
+    assert report.passed is True, [v.message for v in report.unverified_vbs]
+    assert "tests/integration/smoke.test.ts" in execution.executed_failed_files
+    # The clean-execution gate closes the hole → hard RED.
+    with pytest.raises(CoherenceError) as exc:
+        enforce_campaign_clean_execution(execution, 1)
+    assert "smoke.test.ts" in str(exc.value)

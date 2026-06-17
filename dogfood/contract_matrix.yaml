@@ -12,9 +12,9 @@
 # ═══════════════════════════════════════════════════════════════════
 generated_from: codd/contracts/registry.py
 coverage_summary:
-  covered: 24
+  covered: 25
   uncertified: 0
-  uncovered: 26
+  uncovered: 25
   total: 50
 families:
   ImplementTask:
@@ -462,17 +462,18 @@ families:
     dimensions:
     - execution
     - observability
-    status: uncovered
-    enforcement: noop
+    status: covered
+    enforcement: hard
     fail_mode: honest_fail
-    authority: null
-    predicted_issue: run_verify_campaign keeps CampaignRun.exit_code but does NOT treat it as pass authority,
-      and build_coherence_report only checks the UNBLOCKED VBs' covering files — so a non-VB e2e/integration
-      test that FAILED (run.execution.executed_failed_files non-empty, or exit_code != 0) can still pass
-      the coherence gate alone.
-    proposed_gate: 'enforce_campaign_clean_execution(run.execution, run.exit_code) around build_coherence_report:
-      exit_code != 0 OR executed_failed_files → CoherenceError. negative fixture: a vitest JSON report
-      with a failed tests/e2e/non_vb.e2e.test.ts while every VB covering file passed → hard red.'
+    authority: codd.coverage_execution_coherence.enforce_campaign_clean_execution
+    certification_fixtures:
+    - tests/test_coverage_execution_coherence.py::test_clean_execution_failed_file_raises
+    - tests/test_coverage_execution_coherence.py::test_clean_execution_nonzero_exit_raises
+    - tests/test_coverage_execution_coherence.py::test_clean_execution_all_pass_exit_zero_is_ok
+    - tests/test_coverage_execution_coherence.py::test_clean_execution_closes_false_green_for_failing_non_vb_test
+    finding_ids:
+    - PC-campaign-clean-execution
+    - F-verify-false-green
   CoverageClaim:
   - id: coverage_claim.requires_executed_passed_evidence
     source_node: CoverageClaim

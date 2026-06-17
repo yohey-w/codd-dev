@@ -892,9 +892,10 @@ def run_verify_campaign(
     adapter. ANTI-FALSE-GREEN: a campaign that produced NO report, an UNREADABLE
     report, or an empty-execution report (collected 0 tests) is a :class:`CampaignError`
     (a harness/observability failure), NEVER a silent pass. The command's own exit
-    code is captured but is NOT the pass authority — the coherence gate is (a
-    campaign may exit nonzero because a covering test failed, which the gate
-    reports per-VB).
+    code is captured AND consulted by ``enforce_campaign_clean_execution``
+    (contract verify.campaign.clean_execution.v1): a non-zero exit, or ANY failed
+    executed test file, hard-fails there — independent of the per-VB coherence
+    gate, which alone would miss a failing test that covers no declared VB.
 
     Caller contract: only invoke when ``profile.verify_campaign`` is not None and
     ``profile.runner_report_adapter()`` resolves. A None campaign/adapter is the
@@ -1025,6 +1026,52 @@ def certify_verify_campaign_observable(profile: Any) -> None:
         )
 
 
+def enforce_campaign_clean_execution(
+    execution: RunnerExecution,
+    exit_code: int,
+    *,
+    echo: Callable[[str], None] = print,
+) -> None:
+    """HARD GATE (contract verify.campaign.clean_execution.v1; GPT round-2 §3.2).
+
+    The verify campaign's OWN result is a green authority IN ITS OWN RIGHT —
+    independent of VB reconciliation. ``build_coherence_report`` only checks that
+    each UNBLOCKED VB has an authentic covering file that executed and passed; a
+    FAILING test that covers NO declared VB (a plain integration / e2e / unit
+    test), or a runner that exited NON-ZERO for a non-VB reason, is invisible to it
+    and would pass the coherence gate alone — a false-green. This gate closes that
+    hole.
+
+    Raises :class:`CoherenceError` when ``execution.executed_failed_files`` is
+    non-empty (ANY executed test file had a failing/erroring case) OR
+    ``exit_code != 0`` (the runner itself reported failure). Deterministic and
+    side-effect-free — it runs no command (the caller already executed the
+    campaign). honest-fail: a failing test, or a non-zero runner exit, means the
+    build is RED, never silently green.
+    """
+
+    failed = sorted(execution.executed_failed_files)
+    nonzero_exit = exit_code != 0
+    if not failed and not nonzero_exit:
+        return
+    reasons: list[str] = []
+    if failed:
+        shown = ", ".join(failed[:10]) + (" …" if len(failed) > 10 else "")
+        reasons.append(f"{len(failed)} executed test file(s) FAILED: {shown}")
+    if nonzero_exit:
+        reasons.append(f"the verify campaign exited non-zero ({exit_code})")
+    detail = "; ".join(reasons)
+    echo(f"[greenfield] verify: campaign clean-execution gate FAILED — {detail}")
+    raise CoherenceError(
+        "verify campaign did not execute cleanly: "
+        + detail
+        + ". A failing test — even one that covers no declared verifiable behavior "
+        "— or a non-zero runner exit means the build is RED. The campaign result is "
+        "itself a green authority, independent of per-VB reconciliation; fix the "
+        "failing test(s) (or the runner error) before the run can be green."
+    )
+
+
 def enforce_coverage_execution_coherence(
     project_root: Path | str,
     profile: Any,
@@ -1060,6 +1107,12 @@ def enforce_coverage_execution_coherence(
         )
 
     run = run_verify_campaign(project_root, profile, config=config, echo=echo)
+    # HARD anti-false-green gate (verify.campaign.clean_execution.v1): the
+    # campaign's OWN result gates green BEFORE VB reconciliation — a failing test
+    # that covers no declared VB, or a non-zero runner exit, is RED here even
+    # though build_coherence_report (which only reconciles UNBLOCKED VBs) would
+    # miss it.
+    enforce_campaign_clean_execution(run.execution, run.exit_code, echo=echo)
     report = build_coherence_report(
         project_root, config=config, profile=profile, execution=run.execution
     )
@@ -1115,6 +1168,7 @@ __all__ = [
     "build_test_inventory",
     "certify_verify_campaign_observable",
     "coherence_gate_applies",
+    "enforce_campaign_clean_execution",
     "enforce_coverage_execution_coherence",
     "format_coherence_feedback",
     "render_coherence_markdown",

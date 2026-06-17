@@ -467,6 +467,30 @@ _COVERED: tuple[Contract, ...] = (
         ),
         finding_ids=("PC-verify-campaign-observable", "F-verify-false-green"),
     ),
+    # ── verify.campaign.clean_execution.v1 — the campaign result gates green ──
+    # The NEW hard gate (GPT r2 §3.2): build_coherence_report reconciles only the
+    # UNBLOCKED VBs against their covering files, so a FAILING test that covers no
+    # declared VB (a plain integration/e2e/unit test) — or a non-zero runner exit —
+    # was invisible to it and passed the coherence gate alone = a false-green.
+    # enforce_campaign_clean_execution makes the campaign's own result a green
+    # authority: any executed_failed_files, or exit_code != 0, is an honest-fail.
+    Contract(
+        id="verify.campaign.clean_execution.v1",
+        source_node="VerifyCampaign",
+        target_node="RunnerExecution",
+        edge_type="executes",
+        dimensions=("execution", "observability"),
+        authority="codd.coverage_execution_coherence.enforce_campaign_clean_execution",
+        fail_mode="honest_fail",
+        status="covered",
+        certification_fixtures=(
+            "tests/test_coverage_execution_coherence.py::test_clean_execution_failed_file_raises",
+            "tests/test_coverage_execution_coherence.py::test_clean_execution_nonzero_exit_raises",
+            "tests/test_coverage_execution_coherence.py::test_clean_execution_all_pass_exit_zero_is_ok",
+            "tests/test_coverage_execution_coherence.py::test_clean_execution_closes_false_green_for_failing_non_vb_test",
+        ),
+        finding_ids=("PC-campaign-clean-execution", "F-verify-false-green"),
+    ),
     # ── CoverageClaim -> VerifyExecution observability (v2.32) ───────────────
     Contract(
         id="coverage_claim.requires_executed_passed_evidence",
@@ -674,30 +698,6 @@ _OUTER: tuple[Contract, ...] = (
 # ════════════════════════════════════════════════════════════════════════════
 
 _UNCOVERED_PRECISE: tuple[Contract, ...] = (
-    # GPT r2 §3.2 — campaign exit_code / failed non-VB tests.
-    Contract(
-        id="verify.campaign.clean_execution.v1",
-        source_node="VerifyCampaign",
-        target_node="RunnerExecution",
-        edge_type="executes",
-        dimensions=("execution", "observability"),
-        authority=None,
-        fail_mode="honest_fail",
-        status="uncovered",
-        predicted_issue=(
-            "run_verify_campaign keeps CampaignRun.exit_code but does NOT treat it "
-            "as pass authority, and build_coherence_report only checks the UNBLOCKED "
-            "VBs' covering files — so a non-VB e2e/integration test that FAILED "
-            "(run.execution.executed_failed_files non-empty, or exit_code != 0) can "
-            "still pass the coherence gate alone."
-        ),
-        proposed_gate=(
-            "enforce_campaign_clean_execution(run.execution, run.exit_code) around "
-            "build_coherence_report: exit_code != 0 OR executed_failed_files → "
-            "CoherenceError. negative fixture: a vitest JSON report with a failed "
-            "tests/e2e/non_vb.e2e.test.ts while every VB covering file passed → hard red."
-        ),
-    ),
     # GPT r2 §3.5 — LayoutProfile scaffold-config certification.
     Contract(
         id="scaffold.config_certified_before_verify.v1",
