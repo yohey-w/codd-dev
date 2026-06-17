@@ -79,6 +79,7 @@ evidence (the design's "unresolved helper = fail" rule).
 
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1501,24 +1502,62 @@ def _ts_reexport_edges(module_text: str, symbol: str) -> list[tuple[str, str]]:
 
 # ── Python resolution ───────────────────────────────────────────────────────
 
-#: ``from pkg.mod import a, b as c`` / ``from .mod import x``.
-_PY_FROM_IMPORT_RE = re.compile(
-    r"^[ \t]*from\s+(?P<mod>[.\w]+)\s+import\s+(?P<names>[^\n#]+)", re.MULTILINE
-)
+#: ``from pkg.mod import a, b as c`` / ``from .mod import x`` — one top-level binding.
+@dataclass(frozen=True)
+class _PyFromImport:
+    mod: str
+    names: tuple[tuple[str, str], ...]  # (original, local)
+
+
+def _iter_py_from_imports(module_text: str) -> list[_PyFromImport]:
+    """TOP-LEVEL Python ``from X import ...`` bindings, parsed via ``ast.ImportFrom``.
+
+    Using Python's own parser (not a regex) makes parenthesized MULTI-LINE imports,
+    backslash continuations, aliases, inline comments, and ``*`` all parse by
+    SYNTAX. The previous regex (``names=[^\\n#]+``) truncated the load-bearing
+    ``from tests.e2e.helpers import (\\n  a,\\n  b,\\n)`` package-barrel form to
+    ``(`` — so a marker's assert-helper went unresolved and was wrongly reported
+    ``no_assertion`` (a false-RED that blocked Python greenfield;
+    ``PC-assertion-helper-package-barrel-falsered``). TOP-LEVEL only: a
+    function-local import is NOT a module binding (a broader ``ast.walk`` could
+    misattribute a local import and admit a false-green). A file that does not
+    parse degrades to ``[]`` (the compile layer owns SyntaxErrors; never raise).
+    """
+
+    try:
+        tree = ast.parse(module_text)
+    except (SyntaxError, ValueError):
+        return []
+    out: list[_PyFromImport] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        mod = "." * int(node.level or 0) + (node.module or "")
+        if not mod:
+            continue
+        out.append(
+            _PyFromImport(
+                mod=mod,
+                names=tuple(
+                    (alias.name, alias.asname or alias.name) for alias in node.names
+                ),
+            )
+        )
+    return out
 
 
 def _py_imported_module(importer_text: str, symbol: str) -> str | None:
     """The module path a ``from <mod> import <symbol>`` binds ``symbol`` from."""
 
-    for match in _PY_FROM_IMPORT_RE.finditer(importer_text):
-        names = match.group("names")
-        for raw in names.replace("(", " ").replace(")", " ").split(","):
-            name = raw.strip()
-            if not name:
-                continue
-            local = name.split(" as ")[-1].strip()
+    for item in _iter_py_from_imports(importer_text):
+        for original, local in item.names:
             if local == symbol:
-                return match.group("mod")
+                return item.mod
+            # ``from helpers import *`` may bind the symbol; the downstream
+            # resolver still requires a real def/re-export + assertion evidence,
+            # so admitting the star here never passes on its own.
+            if original == "*":
+                return item.mod
     return None
 
 
@@ -1538,21 +1577,14 @@ def _py_reexport_edges(module_text: str, symbol: str) -> list[tuple[str, str]]:
     """
 
     edges: list[tuple[str, str]] = []
-    for match in _PY_FROM_IMPORT_RE.finditer(module_text):
-        mod = match.group("mod")
+    for item in _iter_py_from_imports(module_text):
+        mod = item.mod
         if not mod.startswith("."):
             continue
-        names = match.group("names")
-        for raw in names.replace("(", " ").replace(")", " ").split(","):
-            name = raw.strip()
-            if not name:
-                continue
-            if name == "*":
+        for original, local in item.names:
+            if original == "*":
                 edges.append((mod, symbol))  # star re-export forwards the name
                 continue
-            parts = [p.strip() for p in name.split(" as ")]
-            original = parts[0]
-            local = parts[-1]
             if local == symbol:
                 edges.append((mod, original))
     return edges

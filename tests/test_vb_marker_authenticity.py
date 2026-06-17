@@ -1418,3 +1418,65 @@ def test_strict_observability_does_not_affect_genuine_covering_test(tmp_path):
     )
     assert strict.passed is True, [v.message for v in strict.violations]
     assert strict.degraded_paths == []
+
+
+# ---------------------------------------------------------------------------
+# assertion-helper import resolution via the ast.ImportFrom rewrite
+# (regression: PC-assertion-helper-package-barrel-falsered) — a covers-marker on a
+# test that asserts via an `assert_*` helper imported through a MULTI-LINE package
+# barrel must be credited. The pre-fix regex truncated `from pkg.helpers import (`
+# to `(` and wrongly reported no_assertion, blocking real Python greenfield.
+# ---------------------------------------------------------------------------
+
+
+def _pkg_barrel_helper_project(tmp_path, *, helper_body: str, importer: str):
+    """A src-layout-ish project whose e2e test imports an `assert_ok` helper through
+    a tests/e2e/helpers package barrel (__init__ re-exports from .asserts)."""
+    project = tmp_path
+    _canonical(project, "| VB-1 | does a thing |\n")
+    _write(project / "tests" / "__init__.py", "")
+    _write(project / "tests" / "e2e" / "__init__.py", "")
+    _write(project / "tests" / "e2e" / "helpers" / "__init__.py", "from .asserts import (\n    assert_ok,\n)\n")
+    _write(project / "tests" / "e2e" / "helpers" / "asserts.py", helper_body)
+    _write(
+        project / "tests" / "e2e" / "test_cli.py",
+        importer + "\n\n# codd: covers vb=VB-1\ndef test_cli_ok():\n    result = 0\n    assert_ok(result)\n",
+    )
+    return project
+
+
+def test_py_multiline_barrel_helper_import_is_credited(tmp_path):
+    """KEYSTONE: a covers-marker whose test asserts via an `assert_ok` helper imported
+    through a MULTI-LINE package barrel resolves + is credited (was a false-RED)."""
+    project = _pkg_barrel_helper_project(
+        tmp_path,
+        helper_body="def assert_ok(result):\n    assert result == 0\n",  # real assert on a param
+        importer="from tests.e2e.helpers import (\n    assert_ok,\n)",
+    )
+    report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is True, [(v.kind, v.message) for v in report.violations]
+
+
+def test_py_multiline_barrel_nonassert_helper_still_fails(tmp_path):
+    """The SAME multi-line barrel shape, but the helper does NOT assert → no_assertion.
+    The fix widens import RESOLUTION, never the assertion PROOF — pins no false-green."""
+    project = _pkg_barrel_helper_project(
+        tmp_path,
+        helper_body="def assert_ok(result):\n    return None\n",  # NO assertion
+        importer="from tests.e2e.helpers import (\n    assert_ok,\n)",
+    )
+    report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is False
+    assert any(v.kind == "no_assertion" for v in report.violations), [v.kind for v in report.violations]
+
+
+def test_py_backslash_continuation_import_resolves(tmp_path):
+    """A backslash-continuation import (which a names-regex fix would have MISSED) is
+    parsed by the ast rewrite → the helper resolves + is credited."""
+    project = _pkg_barrel_helper_project(
+        tmp_path,
+        helper_body="def assert_ok(result):\n    assert result == 0\n",
+        importer="from tests.e2e.helpers import assert_ok, \\\n    assert_ok as _alias",
+    )
+    report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is True, [(v.kind, v.message) for v in report.violations]
