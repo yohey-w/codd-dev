@@ -73,17 +73,41 @@ def test_typescript_profile_declares_tsc_oracle() -> None:
     assert profile.to_dict()["implement_oracle"]["command"] == spec.command
 
 
-def test_python_profile_has_no_oracle_yet() -> None:
-    """DEFERRED: Python's composite oracle is a separate task — gate is a no-op."""
+def test_python_profile_declares_composite_oracle() -> None:
+    """Python now declares the COMPOSITE implement-oracle (was DEFERRED).
+
+    The composite (compile + first-party import resolver + pytest --collect-only)
+    is wired in ``codd.implement_oracle._run_python_composite_oracle``; the spec's
+    ``command`` is a sentinel executed by the kind dispatch, not a shell command.
+    """
     profile = resolve_layout_profile(language="python", project_name="calc-lib")
     assert profile is not None
-    assert profile.implement_oracle is None
+    assert profile.implement_oracle is not None
+    assert profile.implement_oracle.kind == "composite"
+    assert profile.implement_oracle.command == "python-composite"
+    assert profile.implement_oracle.requires_node_install is False
+    assert profile.implement_oracle.scope.require_source_root is True
+    assert profile.implement_oracle.scope.require_test_root is True
 
 
-def test_resolve_implement_oracle_none_for_python(tmp_path: Path) -> None:
+def test_resolve_implement_oracle_present_for_python(tmp_path: Path) -> None:
+    resolved = resolve_implement_oracle(
+        tmp_path, language="python", project_name="calc-lib", config={}
+    )
+    assert resolved is not None
+    _profile, spec = resolved
+    assert spec.kind == "composite"
+    assert spec.command == "python-composite"
+
+
+def test_resolve_implement_oracle_none_when_python_opted_out(tmp_path: Path) -> None:
+    """The explicit opt-out still suppresses the Python oracle (re-opens risk)."""
     assert (
         resolve_implement_oracle(
-            tmp_path, language="python", project_name="calc-lib", config={}
+            tmp_path,
+            language="python",
+            project_name="calc-lib",
+            config={"implement": {"implement_oracle": False}},
         )
         is None
     )
@@ -234,9 +258,46 @@ def test_certify_scope_respects_relaxed_test_requirement(tmp_path: Path) -> None
 # Gate NO-OP behavior (no toolchain needed)
 # ════════════════════════════════════════════════════════════
 
-def test_gate_is_noop_for_python(tmp_path: Path) -> None:
+def test_gate_runs_composite_for_python(tmp_path: Path) -> None:
+    """The Python gate now EXECUTES the composite oracle (no longer a no-op).
+
+    A coherent minimal project passes all three layers. (The full composite
+    behaviour — keystone false-green, false-RED avoidance — is certified in
+    tests/test_python_implement_oracle.py; this asserts the gate is wired to run.)
+    """
+    (tmp_path / "src" / "calc_lib").mkdir(parents=True)
+    (tmp_path / "tests").mkdir(parents=True)
+    (tmp_path / "src" / "calc_lib" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "calc_lib" / "core.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"
+    )
+    (tmp_path / "tests" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "tests" / "test_core.py").write_text(
+        "from calc_lib.core import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+        encoding="utf-8",
+    )
+    # Make the package importable for --collect-only without an editable install.
+    (tmp_path / "conftest.py").write_text(
+        "import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))\n",
+        encoding="utf-8",
+    )
     result = run_implement_oracle_gate(
         tmp_path, language="python", project_name="calc-lib", config={}, echo=lambda _m: None
+    )
+    assert result.executed is True
+    assert result.passed is True, [
+        (f.category, f.code, f.message) for f in result.findings
+    ]
+
+
+def test_gate_python_noop_when_opted_out(tmp_path: Path) -> None:
+    """The explicit opt-out keeps the Python gate a passing no-op."""
+    result = run_implement_oracle_gate(
+        tmp_path,
+        language="python",
+        project_name="calc-lib",
+        config={"implement": {"implement_oracle": False}},
+        echo=lambda _m: None,
     )
     assert result.passed is True
     assert result.executed is False

@@ -83,13 +83,23 @@ def test_e2e_full_autopilot_with_scripted_ai(tmp_path: Path, stub_ai) -> None:
     assert "implement" in calls
 
 
-def test_e2e_fresh_directory_initializes_then_builds(tmp_path: Path, stub_ai) -> None:
+def test_e2e_fresh_directory_initializes_then_builds(tmp_path: Path, stub_ai, monkeypatch) -> None:
     """ensure-init path: an empty directory + name/language/requirements."""
     target = tmp_path / "fresh-app"
     target.mkdir()
     write_ci_workflow(target)  # a repo usually has CI; ci_health gates on it
     spec = tmp_path / "spec.md"
     spec.write_text("# Fresh App\n\nStore numbers and add them via a CLI.\n", encoding="utf-8")
+
+    # This is an INIT/build-orchestration regression harness (it pins the
+    # ensure-init path), not an implement-oracle test. The Python composite
+    # implement-oracle (+ its sibling owner-uniqueness gate) is now ACTIVE for
+    # Python and is certified independently (tests/test_python_implement_oracle.py,
+    # tests/test_acg_owner_uniqueness.py); neutralize the gate here so this test
+    # stays focused on init, mirroring test_vb_gate_reruns_native_oracle_after_test_repair.
+    monkeypatch.setattr(
+        GreenfieldPipeline, "_enforce_implement_oracle_gate", lambda *_a, **_k: None
+    )
 
     pipeline = GreenfieldPipeline(
         project_name="fresh-app",
@@ -107,7 +117,7 @@ def test_e2e_fresh_directory_initializes_then_builds(tmp_path: Path, stub_ai) ->
     assert session["stages"]["init"]["status"] == "done"
 
 
-def test_e2e_shared_output_root_repo_root_ci_and_project_type(tmp_path: Path, stub_ai) -> None:
+def test_e2e_shared_output_root_repo_root_ci_and_project_type(tmp_path: Path, stub_ai, monkeypatch) -> None:
     """FX2 regression harness for the 2026-06 real-AI dogfood findings.
 
     A fresh CLI-app build with NO pre-seeded CI workflow and NO configured
@@ -124,6 +134,18 @@ def test_e2e_shared_output_root_repo_root_ci_and_project_type(tmp_path: Path, st
     target.mkdir()
     spec = tmp_path / "spec.md"
     spec.write_text("# Fresh CLI App\n\nStore numbers and add them via a CLI.\n", encoding="utf-8")
+
+    # This harness pins CI-rerooting / shared-src-layout / project_type — NOT the
+    # implement-oracle. The Python composite implement-oracle (+ the sibling
+    # owner-uniqueness gate) is now ACTIVE for Python and certified independently;
+    # neutralize the gate here so this test stays focused on its three structural
+    # fixes (the stub's derived tasks both claim src + tests + the package dir, a
+    # config-path-resolution quirk that is the owner-uniqueness gate's separate
+    # concern, not this harness's subject). Mirrors
+    # test_vb_gate_reruns_native_oracle_after_test_repair's gate-patch pattern.
+    monkeypatch.setattr(
+        GreenfieldPipeline, "_enforce_implement_oracle_gate", lambda *_a, **_k: None
+    )
 
     pipeline = GreenfieldPipeline(
         project_name="fresh-cli-app",

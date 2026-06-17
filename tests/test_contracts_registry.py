@@ -160,7 +160,12 @@ def test_precise_round2_uncovered_cells_are_present():
         "verify.campaign.clean_execution.v1",  # §3.2
         "scaffold.config_certified_before_verify.v1",  # §3.5
         "authenticity.observable_in_supported_stack.v1",  # §3.6
-        "python.import_coherence_oracle.v1",  # §3.7
+        # §3.7 was the Python composite-oracle cell; it is now SPLIT — the
+        # import-resolution + test-collection layers are COVERED hard gates (see
+        # test_python_implement_oracle.py), and the undefined-name lint + public-API
+        # smoke residuals stay uncovered backlog.
+        "python.undefined_name_lint.v1",  # §3.7 residual (uncovered)
+        "python.public_api_smoke.v1",  # §3.7 residual (uncovered)
         "source_design_doc.registered_doc_strict.v1",  # §3.8
     ):
         assert expected in ids, f"missing precise §3 cell {expected!r}"

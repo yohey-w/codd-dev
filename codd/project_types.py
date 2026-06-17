@@ -952,27 +952,31 @@ def _python_layout_profile(
         test_import_policy="package_absolute",
         requires_package_init=True,
         requires_test_init=True,
-        # IMPLEMENT-TIME ORACLE — DEFERRED (separate task). Python has no single
-        # compiler that proves all-paths symbol coherence; the design's answer is
-        # a COMPOSITE oracle (``kind="composite"``) unioning weaker static
-        # oracles, run BEFORE pytest at implement-time, with an
-        # observability-gate that HARD-FAILS if any file is outside the union's
-        # view:
-        #     ruff / pyflakes  (undefined names, unresolved imports — no types)
-        #   + python -m py_compile <every source+test file>  (syntax/byte-compile)
-        #   + pytest --collect-only  (test↔helper symbol mismatch surfaces as an
-        #                             ImportError at COLLECTION — the exact class
-        #                             of bug 3f38dd7's AST gate caught for Python)
-        #   + a smoke harness  (call each generated public API / CLI entrypoint
-        #                        once so a function-body NameError that static
-        #                        analysis cannot see is still exercised)
-        # To wire it: set implement_oracle=ImplementOracleSpec(command=<composite
-        # runner>, kind="composite", scope=OracleScopeSpec(require_test_root=True))
-        # and register a Python normalizer in codd.implement_oracle. Until then
-        # this is None and the gate is a strict NO-OP for Python — the EXISTING
-        # verify-stage coherence gates (import_coherence / test_import_coherence /
-        # e2e_contract_coherence) remain Python's backstop, UNCHANGED.
-        implement_oracle=None,
+        # IMPLEMENT-TIME ORACLE — COMPOSITE (Python has no single compiler that
+        # proves all-paths symbol coherence). ``kind="composite"`` routes the gate
+        # to the in-process multi-tool executor in ``codd.implement_oracle``
+        # (``_run_python_composite_oracle``), which unions THREE hard layers run
+        # BEFORE pytest at implement-time, each with an observability gate that
+        # HARD-FAILS if a required tool did not see every source+test .py:
+        #     1. in-process compile() over every source+test .py  (syntax/encoding)
+        #   + 2. a first-party import/symbol resolver over every source+test .py
+        #        (the KEYSTONE: catches ``src/app/hidden.py: from .missing import
+        #        X`` that no test imports — invisible to py_compile + collect-only)
+        #   + 3. pytest --collect-only  (test↔helper symbol mismatch surfaces as an
+        #        ImportError at COLLECTION — the test-surface importability layer)
+        # ``command`` is a SENTINEL ("python-composite"); the kind dispatch runs
+        # the executor, not a shell command. ruff/pyflakes undefined-name lint is
+        # an OPTIONAL enhancement (``implement.python_name_lint: off|optional|
+        # required``, default optional → skip if absent) and a SEPARATE registry
+        # contract — when skipped the oracle does NOT claim undefined-local-name
+        # coverage. The existing verify-stage gates (import_coherence /
+        # test_import_coherence / e2e_contract_coherence) remain the backstop.
+        implement_oracle=ImplementOracleSpec(
+            command="python-composite",  # sentinel; executed by kind dispatch, not a shell
+            kind="composite",
+            scope=OracleScopeSpec(require_source_root=True, require_test_root=True),
+            requires_node_install=False,
+        ),
         # MANIFEST↔LOCK COHERENCE — DEFERRED for Python (separate task). The same
         # contract applies (pyproject.toml ↔ uv.lock / poetry.lock: ``uv lock``
         # /``poetry lock`` refresh the lock to the manifest, and ``--locked`` /

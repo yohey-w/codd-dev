@@ -264,7 +264,18 @@ def make_stub_project(
         "implement": {
             "default_output_paths": {
                 "docs/design/core_design.md": [f"src/{_package_name(name)}"]
-            }
+            },
+            # These greenfield-ORCHESTRATION tests use stub runners that do NOT
+            # produce coherent source/tests (the implement + verify runners are
+            # fakes), so the real implement-time composite oracle is not the system
+            # under test here — opt it out (the documented
+            # ``implement.implement_oracle: false`` escape hatch) so a stub project
+            # is not gated by a real compile/import/collect over placeholder files.
+            # The oracle itself is certified in tests/test_python_implement_oracle.py
+            # + tests/test_implement_oracle.py; its pipeline wiring (order: oracle →
+            # VB) is covered by test_vb_gate_reruns_native_oracle_after_test_repair,
+            # which patches the gate.
+            "implement_oracle": False,
         },
     }
     if greenfield_config is not None:

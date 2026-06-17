@@ -368,6 +368,52 @@ _COVERED: tuple[Contract, ...] = (
         ),
         finding_ids=("F-greenfield-test-helper-symbol-incoherence",),
     ),
+    # ── Python implement-time first-party import/symbol resolution (GPT §3.7) ─
+    # The Python composite oracle's KEYSTONE layer: a static AST resolver over ALL
+    # generated source+test .py proves every FIRST-PARTY module + imported symbol
+    # exists BEFORE pytest — closing the false-green where ``src/app/hidden.py:
+    # from .missing import X`` (a source module NO test imports) is invisible to
+    # py_compile (no resolution) and to collect-only (never imported). This is the
+    # Python equivalent of TS ``tsc --noEmit`` (TS2305/2307/2459 family).
+    Contract(
+        id="python.import_resolution_oracle.v1",
+        source_node="GeneratedArtifact.python",
+        target_node="Symbol",
+        edge_type="reference",
+        dimensions=("existence", "identity", "execution"),
+        authority="codd.implement_oracle._run_python_composite_oracle",
+        fail_mode="honest_red",
+        status="covered",
+        certification_fixtures=(
+            "tests/test_python_implement_oracle.py::test_hidden_missing_module_is_red_keystone",
+            "tests/test_python_implement_oracle.py::test_missing_imported_symbol_is_red",
+            "tests/test_python_implement_oracle.py::test_type_checking_import_is_ignored",
+            "tests/test_python_implement_oracle.py::test_guarded_optional_import_is_ignored",
+            "tests/test_python_implement_oracle.py::test_third_party_import_is_ignored",
+            "tests/test_python_implement_oracle.py::test_clean_project_passes",
+        ),
+        finding_ids=("PC-python-import-resolution",),
+    ),
+    # ── Python implement-time test-collection importability (GPT §3.7) ───────
+    # The Python composite oracle's pytest --collect-only layer: the generated
+    # test surface must import cleanly (ModuleNotFoundError / cannot-import-name /
+    # SyntaxError at collection = honest red). pytest absent is an
+    # environment_build_error, NEVER a silent skip (the profile's runner IS pytest).
+    Contract(
+        id="python.test_collection_oracle.v1",
+        source_node="GeneratedTest.python",
+        target_node="RunnerExecution",
+        edge_type="executes",
+        dimensions=("existence", "observability", "execution"),
+        authority="codd.implement_oracle._run_python_pytest_collect_layer",
+        fail_mode="honest_red",
+        status="covered",
+        certification_fixtures=(
+            "tests/test_python_implement_oracle.py::test_pytest_collection_error_is_red",
+            "tests/test_python_implement_oracle.py::test_clean_project_passes",
+        ),
+        finding_ids=("PC-python-test-collection",),
+    ),
     # ── Manifest -> Lock -> Install freshness barrier (v2.33) ───────────────
     Contract(
         id="manifest.lock_is_fresh_before_install",
@@ -767,28 +813,59 @@ _UNCOVERED_PRECISE: tuple[Contract, ...] = (
             "not deferred to the campaign."
         ),
     ),
-    # GPT r2 §3.7 — Python source/test import coherence implement-time oracle.
+    # GPT §3.7 (residual) — Python undefined-NAME lint (arbitrary NameError in an
+    # unimported function body). The composite oracle's import resolver proves
+    # imports + imported symbols, but a ``def f(): return missing_name`` inside an
+    # UNTESTED function is beyond static import resolution. ruff/pyflakes (F821)
+    # would catch it, but they are an OPTIONAL enhancement (default skip if absent),
+    # so this stays UNCOVERED until the lint is made required or a conservative
+    # name checker lands — the composite oracle deliberately does NOT claim this.
     Contract(
-        id="python.import_coherence_oracle.v1",
+        id="python.undefined_name_lint.v1",
         source_node="GeneratedArtifact.python",
-        target_node="Symbol",
+        target_node="Name",
         edge_type="reference",
-        dimensions=("existence", "identity", "execution"),
+        dimensions=("existence", "identity"),
         authority=None,
         fail_mode="honest_red",
         status="uncovered",
         predicted_issue=(
-            "the Python LayoutProfile sets implement_oracle=None (composite oracle "
-            "deferred); pytest --collect-only + verify-stage gates are the backstop, "
-            "so a source module with an undefined import/symbol that no test imports "
-            "is invisible at implement-time."
+            "the Python composite oracle covers import + imported-symbol resolution "
+            "but NOT an arbitrary undefined local/global name inside an unimported "
+            "function body (e.g. `def f(): return missing_name`); ruff/pyflakes F821 "
+            "is wired only as implement.python_name_lint=optional (skips when "
+            "absent), so undefined-name coverage is not yet guaranteed."
         ),
         proposed_gate=(
-            "CompositePythonImplementOracle on the profile: py_compile over "
-            "source+tests; static import resolver / pyflakes; pytest --collect-only; "
-            "optional public-API smoke (opt-in). negative fixture: "
-            "src/app/hidden.py with `from .missing import X` that no test imports → "
-            "pytest green but composite oracle red."
+            "make implement.python_name_lint=required (ruff/pyflakes F821) the "
+            "default once the toolchain dep is harness-pinned, or implement a "
+            "conservative in-CoDD name checker. negative fixture: "
+            "src/app/calc.py with `def f(): return undefined_name` that no test "
+            "exercises → composite oracle red on the name lint layer."
+        ),
+    ),
+    # GPT §3.7 (residual) — Python public-API smoke (function-body NameError that
+    # static analysis cannot see, exercised by importing/calling each public API).
+    Contract(
+        id="python.public_api_smoke.v1",
+        source_node="GeneratedArtifact.python",
+        target_node="RuntimeBehavior",
+        edge_type="executes",
+        dimensions=("existence", "execution", "observability"),
+        authority=None,
+        fail_mode="honest_red",
+        status="uncovered",
+        predicted_issue=(
+            "collect-only proves importability but never CALLS a public API / CLI "
+            "entrypoint, so a runtime NameError/AttributeError in a never-exercised "
+            "code path (a function the tests do not cover) is still invisible at "
+            "implement-time."
+        ),
+        proposed_gate=(
+            "a public-API smoke harness (opt-in): import each generated public "
+            "module + call each declared public entrypoint once. negative fixture: "
+            "a public function whose body raises NameError when first called → smoke "
+            "harness red even though import + collection are green."
         ),
     ),
     # GPT r2 §3.8 — source_design_doc → unregistered doc provenance strict.

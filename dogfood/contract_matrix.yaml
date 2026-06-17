@@ -12,10 +12,10 @@
 # ═══════════════════════════════════════════════════════════════════
 generated_from: codd/contracts/registry.py
 coverage_summary:
-  covered: 27
+  covered: 29
   uncertified: 0
-  uncovered: 23
-  total: 50
+  uncovered: 24
+  total: 53
 families:
   ImplementTask:
   - id: document_ref.binds_to_one_registered_document
@@ -262,7 +262,7 @@ families:
     finding_ids:
     - F-greenfield-import-coherence
     - F-greenfield-artifact-coherence
-  - id: python.import_coherence_oracle.v1
+  - id: python.import_resolution_oracle.v1
     source_node: GeneratedArtifact.python
     target_node: Symbol
     edge_type: reference
@@ -270,17 +270,56 @@ families:
     - existence
     - identity
     - execution
+    status: covered
+    enforcement: hard
+    fail_mode: honest_red
+    authority: codd.implement_oracle._run_python_composite_oracle
+    certification_fixtures:
+    - tests/test_python_implement_oracle.py::test_hidden_missing_module_is_red_keystone
+    - tests/test_python_implement_oracle.py::test_missing_imported_symbol_is_red
+    - tests/test_python_implement_oracle.py::test_type_checking_import_is_ignored
+    - tests/test_python_implement_oracle.py::test_guarded_optional_import_is_ignored
+    - tests/test_python_implement_oracle.py::test_third_party_import_is_ignored
+    - tests/test_python_implement_oracle.py::test_clean_project_passes
+    finding_ids:
+    - PC-python-import-resolution
+  - id: python.undefined_name_lint.v1
+    source_node: GeneratedArtifact.python
+    target_node: Name
+    edge_type: reference
+    dimensions:
+    - existence
+    - identity
     status: uncovered
     enforcement: noop
     fail_mode: honest_red
     authority: null
-    predicted_issue: the Python LayoutProfile sets implement_oracle=None (composite oracle deferred);
-      pytest --collect-only + verify-stage gates are the backstop, so a source module with an undefined
-      import/symbol that no test imports is invisible at implement-time.
-    proposed_gate: 'CompositePythonImplementOracle on the profile: py_compile over source+tests; static
-      import resolver / pyflakes; pytest --collect-only; optional public-API smoke (opt-in). negative
-      fixture: src/app/hidden.py with `from .missing import X` that no test imports → pytest green but
-      composite oracle red.'
+    predicted_issue: 'the Python composite oracle covers import + imported-symbol resolution but NOT an
+      arbitrary undefined local/global name inside an unimported function body (e.g. `def f(): return
+      missing_name`); ruff/pyflakes F821 is wired only as implement.python_name_lint=optional (skips when
+      absent), so undefined-name coverage is not yet guaranteed.'
+    proposed_gate: 'make implement.python_name_lint=required (ruff/pyflakes F821) the default once the
+      toolchain dep is harness-pinned, or implement a conservative in-CoDD name checker. negative fixture:
+      src/app/calc.py with `def f(): return undefined_name` that no test exercises → composite oracle
+      red on the name lint layer.'
+  - id: python.public_api_smoke.v1
+    source_node: GeneratedArtifact.python
+    target_node: RuntimeBehavior
+    edge_type: executes
+    dimensions:
+    - existence
+    - execution
+    - observability
+    status: uncovered
+    enforcement: noop
+    fail_mode: honest_red
+    authority: null
+    predicted_issue: collect-only proves importability but never CALLS a public API / CLI entrypoint,
+      so a runtime NameError/AttributeError in a never-exercised code path (a function the tests do not
+      cover) is still invisible at implement-time.
+    proposed_gate: 'a public-API smoke harness (opt-in): import each generated public module + call each
+      declared public entrypoint once. negative fixture: a public function whose body raises NameError
+      when first called → smoke harness red even though import + collection are green.'
   GeneratedTest:
   - id: test.helper_symbols_exist_before_run
     source_node: GeneratedTest
@@ -298,6 +337,23 @@ families:
     - tests/greenfield/test_pipeline.py (2 verify-hook integration)
     finding_ids:
     - F-greenfield-test-helper-symbol-incoherence
+  - id: python.test_collection_oracle.v1
+    source_node: GeneratedTest.python
+    target_node: RunnerExecution
+    edge_type: executes
+    dimensions:
+    - existence
+    - observability
+    - execution
+    status: covered
+    enforcement: hard
+    fail_mode: honest_red
+    authority: codd.implement_oracle._run_python_pytest_collect_layer
+    certification_fixtures:
+    - tests/test_python_implement_oracle.py::test_pytest_collection_error_is_red
+    - tests/test_python_implement_oracle.py::test_clean_project_passes
+    finding_ids:
+    - PC-python-test-collection
   - id: e2e.runtime_import_contract_coherent
     source_node: GeneratedTest.e2e
     target_node: Symbol
