@@ -1347,3 +1347,74 @@ def test_noteapi_codex_real_project_passes():
     report = build_authenticity_report(root, config=config, profile=profile)
     assert report.passed, [v.message for v in report.violations]
     assert report.degraded_paths == []
+
+
+# ---------------------------------------------------------------------------
+# strict observability (contract authenticity.observable_in_supported_stack.v1)
+# A marker-bearing file the adapter RECOGNIZES but parses NO test block out of is
+# a false-green when silently degraded — strict mode honest-fails it; an
+# UNSUPPORTED file still degrades (never a false-RED).
+# ---------------------------------------------------------------------------
+
+
+def test_strict_observability_flags_recognized_file_with_no_parseable_test(tmp_path):
+    """KEYSTONE: a .test.ts file the TS adapter RECOGNIZES but parses ZERO test
+    blocks out of, bearing a live marker. Non-strict (default) degrades to a PASS
+    (the pre-gate false-green); strict makes it an unobservable_test_structure
+    VIOLATION."""
+    project = tmp_path
+    _canonical(project, "| VB-1 | does a thing |\n")
+    # A recognized test file (.test.ts) with a live marker but NO it()/test() block.
+    _write(
+        project / "tests" / "empty.test.ts",
+        "// codd: covers vb=VB-1\nexport const helper = () => 42;\n",
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    # Non-strict (back-compat): recognized-but-unparseable → degraded → PASSES.
+    lax = build_authenticity_report(project, config=config, profile=TS_PROFILE)
+    assert "tests/empty.test.ts" in lax.degraded_paths
+    assert lax.passed is True
+    # Strict: an unobservable coverage claim in a SUPPORTED stack → hard violation.
+    strict = build_authenticity_report(
+        project, config=config, profile=TS_PROFILE, strict_observability=True
+    )
+    assert strict.passed is False
+    assert "unobservable_test_structure" in {v.kind for v in strict.violations}
+    assert any(v.vb_id == "VB-1" for v in strict.violations)
+    # Not double-counted as degraded once it became a violation.
+    assert "tests/empty.test.ts" not in strict.degraded_paths
+
+
+def test_strict_observability_still_degrades_unsupported_stack(tmp_path):
+    """A file NO adapter handles still degrades in strict mode — strict must never
+    false-RED an unsupported stack (only a RECOGNIZED-but-unparseable file fails)."""
+    project = tmp_path
+    _canonical(project, "| VB-1 | does a thing |\n")
+    _write(project / "tests" / "test_x.py", "# codd: covers vb=VB-1\nx = 1\n")
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    # profile=None → no adapter handles anything → unsupported → degrade (not fail).
+    strict = build_authenticity_report(
+        project, config=config, profile=None, strict_observability=True
+    )
+    assert "tests/test_x.py" in strict.degraded_paths
+    assert all(v.kind != "unobservable_test_structure" for v in strict.violations)
+    assert strict.passed is True
+
+
+def test_strict_observability_does_not_affect_genuine_covering_test(tmp_path):
+    """A real covering test (parseable block + assertion) passes in strict mode —
+    strict only fires on the no-parseable-block case, never a genuine test."""
+    project = tmp_path
+    _canonical(project, "| VB-1 | adds |\n")
+    _write(
+        project / "tests" / "ok.test.ts",
+        'import { it, expect } from "vitest";\n'
+        "// codd: covers vb=VB-1\n"
+        'it("adds", () => { expect(1 + 1).toBe(2); });\n',
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    strict = build_authenticity_report(
+        project, config=config, profile=TS_PROFILE, strict_observability=True
+    )
+    assert strict.passed is True, [v.message for v in strict.violations]
+    assert strict.degraded_paths == []

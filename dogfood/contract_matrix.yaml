@@ -12,9 +12,9 @@
 # ═══════════════════════════════════════════════════════════════════
 generated_from: codd/contracts/registry.py
 coverage_summary:
-  covered: 25
+  covered: 26
   uncertified: 0
-  uncovered: 25
+  uncovered: 24
   total: 50
 families:
   ImplementTask:
@@ -221,6 +221,26 @@ families:
     authority: null
     predicted_issue: an in-doc link stays a raw string and breaks, or mis-binds to a different doc/VB/AC.
     proposed_gate: document cross-link resolver + collision fixture.
+  TestFile:
+  - id: authenticity.observable_in_supported_stack.v1
+    source_node: TestFile
+    target_node: TestBlock
+    edge_type: claims
+    dimensions:
+    - authenticity
+    - observability
+    - parsing
+    status: covered
+    enforcement: hard
+    fail_mode: honest_red
+    authority: codd.vb_marker_authenticity.build_authenticity_report
+    certification_fixtures:
+    - tests/test_vb_marker_authenticity.py::test_strict_observability_flags_recognized_file_with_no_parseable_test
+    - tests/test_vb_marker_authenticity.py::test_strict_observability_still_degrades_unsupported_stack
+    - tests/test_vb_marker_authenticity.py::test_strict_observability_does_not_affect_genuine_covering_test
+    finding_ids:
+    - PC-authenticity-observable
+    - F-verify-false-green
   GeneratedArtifact:
   - id: source.imports_resolve_to_owned_symbols
     source_node: GeneratedArtifact
@@ -703,27 +723,6 @@ families:
       source+test roots; vitest.config.ts includes the .e2e. convention; package.json has the harness
       scripts/deps or the lock finalizer can reconcile. negative fixture: a vitest.config.ts that includes
       only .test.ts (no .e2e.ts) → red at scaffold certification, not deferred to the campaign.'
-  TestFile:
-  - id: authenticity.observable_in_supported_stack.v1
-    source_node: TestFile
-    target_node: TestBlock
-    edge_type: claims
-    dimensions:
-    - authenticity
-    - observability
-    - parsing
-    status: uncovered
-    enforcement: noop
-    fail_mode: honest_red
-    authority: null
-    predicted_issue: build_authenticity_report puts a marker-bearing recognized test file into degraded_paths
-      (skips Stage 2/3) when the adapter handles the file but parses NO blocks; report.passed only checks
-      violations — so a supported-stack (TS/Python) test whose wrapper the parser cannot read is 'authenticity
-      unknown' yet can degrade-pass.
-    proposed_gate: 'strict_authenticity_observability=True greenfield default: when adapter handles the
-      file AND markers present AND no blocks parsed → violation(kind=''unobservable_test_structure'');
-      unknown languages stay warn/degrade. negative fixture: tests/foo.test.ts with covers vb=VB-1 in
-      a wrapper the parser does not recognize → red (today degrades to pass).'
   Plan:
   - id: plan.stage_order_topologically_certified
     source_node: Plan

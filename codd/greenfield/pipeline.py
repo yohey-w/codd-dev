@@ -2561,7 +2561,12 @@ def _enforce_stage_coverage_gate(
     # --- Gate 2: marker authenticity (anti-false-green). HARD gate. ---
     from codd.vb_marker_authenticity import build_authenticity_report
 
-    auth = build_authenticity_report(project_root, config=config, profile=authenticity_profile)
+    # strict_observability (authenticity.observable_in_supported_stack.v1): in the
+    # autopilot a SUPPORTED test file the adapter recognizes but parses no executable
+    # test block out of is a false-green, not a degrade — honest-fail it.
+    auth = build_authenticity_report(
+        project_root, config=config, profile=authenticity_profile, strict_observability=True
+    )
     if auth.degraded_paths:
         echo(
             "Test coverage gate: marker-authenticity attachment/assertion checks skipped for "
@@ -2574,8 +2579,9 @@ def _enforce_stage_coverage_gate(
         raise StageError(
             "verifiable-behavior marker-authenticity gate failed for the implement stage: "
             f"{len(auth.violations)} `codd: covers vb=` marker(s) are not credible coverage claims "
-            "(attached to a skipped/empty test, an orphan id, or a test with no assertion). A "
-            "covers marker must sit on an executable test that asserts the behavior."
+            "(attached to a skipped/empty test, an orphan id, a test with no assertion, or an "
+            "unobservable test structure — a recognized file with no parseable test). A covers "
+            "marker must sit on an executable test that asserts the behavior."
         )
     echo(
         f"Test coverage gate: marker authenticity OK ({len(auth.degraded_paths)} file(s) stage-1-only)."

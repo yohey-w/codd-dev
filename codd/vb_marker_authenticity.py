@@ -387,12 +387,22 @@ def build_authenticity_report(
     profile: Any = None,
     test_dirs: Iterable[Path | str] | None = None,
     hooks: Iterable[AuthenticityHook] | None = None,
+    strict_observability: bool = False,
 ) -> AuthenticityReport:
     """Evaluate every ``covers vb=`` marker for structural authenticity.
 
     ``profile`` is the active :class:`~codd.project_types.LayoutProfile` (or any
     object exposing ``test_block_profile()``); when it is ``None`` or yields no
     adapter, stages 2-3 degrade to a warning and only stage 1 (orphan) applies.
+
+    ``strict_observability`` (contract authenticity.observable_in_supported_stack.v1):
+    when True, a marker-bearing file the adapter RECOGNIZES (``handles_file``) but
+    from which it parses ZERO executable test blocks is an
+    ``unobservable_test_structure`` VIOLATION rather than a silent degrade — a
+    SUPPORTED stack that yields no observable test is a false-green, not an
+    unparseable one. An UNSUPPORTED file (no adapter / not handled) still degrades
+    in either mode (never a false-RED). The greenfield autopilot passes True; the
+    default is False for back-compat with non-autopilot callers.
     """
 
     project_root = Path(project_root).resolve()
@@ -451,13 +461,41 @@ def build_authenticity_report(
 
         # ── Stages 2-3 need the per-profile structural parse ──
         blocks: list[TestBlock] = []
-        if adapter is not None and adapter.handles_file(rel):
+        adapter_handles = adapter is not None and adapter.handles_file(rel)
+        if adapter_handles:
             try:
                 blocks = adapter.parse_test_blocks(text)
             except Exception:  # noqa: BLE001 — a parser that throws degrades, never fails.
                 blocks = []
-        if adapter is None or not adapter.handles_file(rel) or not blocks:
-            # Graceful degradation: cannot structurally parse this stack/file.
+        if not blocks:
+            if adapter_handles and strict_observability:
+                # OBSERVABILITY (contract authenticity.observable_in_supported_stack.v1):
+                # the adapter RECOGNIZES this file type but extracted ZERO executable
+                # test blocks though live coverage markers are present. That is NOT an
+                # unsupported stack (which legitimately degrades) — it is an
+                # unobservable coverage claim in a SUPPORTED stack, so it honest-fails
+                # instead of silently degrading to a pass (the false-green this
+                # contract closes).
+                for marker in live_markers:
+                    violations.append(
+                        AuthenticityViolation(
+                            kind="unobservable_test_structure",
+                            vb_id=marker.vb_id,
+                            path=rel,
+                            line=marker.line,
+                            message=(
+                                f"{rel}:{marker.line} `codd: covers vb={marker.vb_id}` sits in a "
+                                "recognized test file from which the structural parser extracted NO "
+                                "executable test block — the coverage claim is unobservable (a marker "
+                                "with no parseable test proves nothing). Write a real test case the "
+                                "runner executes, or use `codd: blocked vb=… reason=…` if it genuinely "
+                                "cannot run yet."
+                            ),
+                        )
+                    )
+                continue
+            # Graceful degradation: an UNSUPPORTED stack/file (no adapter, or the
+            # adapter does not handle this file), or strict observability off.
             # Stage 1 already ran; skip stages 2-3 with a warning (never false-RED).
             degraded.append(rel)
             continue

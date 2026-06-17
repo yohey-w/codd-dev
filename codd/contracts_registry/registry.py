@@ -230,6 +230,28 @@ _COVERED: tuple[Contract, ...] = (
         ),
         finding_ids=("PC-docref-resolution",),
     ),
+    # ── authenticity.observable_in_supported_stack.v1 (GPT r2 §3.6) ──────────
+    # The NEW hard gate: a marker-bearing file the adapter RECOGNIZES but parses
+    # ZERO executable test blocks out of was silently degraded to a pass (only an
+    # UNSUPPORTED file should degrade). strict_observability=True (greenfield Gate 2)
+    # makes it an unobservable_test_structure violation — an unparseable test in a
+    # SUPPORTED stack is a false-green, not an unsupported one.
+    Contract(
+        id="authenticity.observable_in_supported_stack.v1",
+        source_node="TestFile",
+        target_node="TestBlock",
+        edge_type="claims",
+        dimensions=("authenticity", "observability", "parsing"),
+        authority="codd.vb_marker_authenticity.build_authenticity_report",
+        fail_mode="honest_red",
+        status="covered",
+        certification_fixtures=(
+            "tests/test_vb_marker_authenticity.py::test_strict_observability_flags_recognized_file_with_no_parseable_test",
+            "tests/test_vb_marker_authenticity.py::test_strict_observability_still_degrades_unsupported_stack",
+            "tests/test_vb_marker_authenticity.py::test_strict_observability_does_not_affect_genuine_covering_test",
+        ),
+        finding_ids=("PC-authenticity-observable", "F-verify-false-green"),
+    ),
     # ── Task -> GeneratedArtifact ownership / orphan prohibition (v2.29) ─────
     Contract(
         id="task.owns_generated_artifacts_no_orphans",
@@ -722,31 +744,6 @@ _UNCOVERED_PRECISE: tuple[Contract, ...] = (
             "finalizer can reconcile. negative fixture: a vitest.config.ts that "
             "includes only .test.ts (no .e2e.ts) → red at scaffold certification, "
             "not deferred to the campaign."
-        ),
-    ),
-    # GPT r2 §3.6 — recognized test file → parseable TestBlock authenticity strict.
-    Contract(
-        id="authenticity.observable_in_supported_stack.v1",
-        source_node="TestFile",
-        target_node="TestBlock",
-        edge_type="claims",
-        dimensions=("authenticity", "observability", "parsing"),
-        authority=None,
-        fail_mode="honest_red",
-        status="uncovered",
-        predicted_issue=(
-            "build_authenticity_report puts a marker-bearing recognized test file "
-            "into degraded_paths (skips Stage 2/3) when the adapter handles the file "
-            "but parses NO blocks; report.passed only checks violations — so a "
-            "supported-stack (TS/Python) test whose wrapper the parser cannot read "
-            "is 'authenticity unknown' yet can degrade-pass."
-        ),
-        proposed_gate=(
-            "strict_authenticity_observability=True greenfield default: when adapter "
-            "handles the file AND markers present AND no blocks parsed → "
-            "violation(kind='unobservable_test_structure'); unknown languages stay "
-            "warn/degrade. negative fixture: tests/foo.test.ts with covers vb=VB-1 "
-            "in a wrapper the parser does not recognize → red (today degrades to pass)."
         ),
     ),
     # GPT r2 §3.7 — Python source/test import coherence implement-time oracle.
