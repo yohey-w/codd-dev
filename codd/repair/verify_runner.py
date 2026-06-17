@@ -265,6 +265,11 @@ class VerifyRunner:
                 results.append(_runtime_result(node.id, template_ref, False, "verification template is not registered"))
                 continue
 
+            toolchain_error = _runtime_toolchain_failure(template_ref, self.project_root)
+            if toolchain_error:
+                results.append(_runtime_result(node.id, template_ref, False, toolchain_error))
+                continue
+
             template_config = template_settings.get(template_ref, {})
             try:
                 template = _new_template(template_cls, template_config, per_node_seconds=per_node_seconds)
@@ -967,6 +972,40 @@ def _runtime_result(node_id: str, template_ref: str, passed: bool, output: str) 
         "output": output,
         "duration": 0.0,
     }
+
+
+#: Verification templates whose runner needs a node/npm toolchain (a
+#: ``package.json`` + installed ``node_modules``). The toolchain-coherence
+#: preflight uses this to turn a cryptic runtime ``Cannot find module`` into an
+#: explicit, attributable CoDD contract failure.
+_NODE_VERIFICATION_TEMPLATES = frozenset({"playwright", "vitest"})
+
+
+def _runtime_toolchain_failure(template_ref: str, project_root: Path) -> str | None:
+    """Preflight: a node test harness needs a node manifest to be runnable.
+
+    When a generated verification node names a node/Playwright harness but the
+    project has no ``package.json``, the runner would execute ``npx playwright``
+    (or ``vitest``) and fail with a cryptic ``Cannot find module
+    '@playwright/test'`` at runtime — a failure that looks like, but is not, a
+    source-code defect. Convert it into an explicit CoDD contract failure BEFORE
+    running, so it is attributable.
+
+    This is anti-cryptic-failure, NOT anti-false-green: the run was already
+    honest-failing. The gate only ever rewrites the *message* of an existing
+    red; it never turns a red green, and it never fires when the toolchain IS
+    present (``package.json`` exists) so node/TS projects are unaffected.
+    """
+    if template_ref in _NODE_VERIFICATION_TEMPLATES:
+        if not (project_root / "package.json").is_file():
+            return (
+                "verification template requires a node test harness "
+                f"('{template_ref}') but no package.json exists at the project root. "
+                "Either select a language-native E2E harness for this project, or "
+                "provision a harness-owned node manifest declaring the test toolchain "
+                "(e.g. @playwright/test)."
+            )
+    return None
 
 
 def _skipped_result(node_id: str, reason: str) -> dict[str, Any]:

@@ -564,3 +564,49 @@ def test_verify_runner_threads_project_root_as_cwd_to_template_execute(tmp_path,
 
     assert captured["cwd"] == runner.project_root
     assert captured["cwd"] == tmp_path.resolve()
+
+
+def test_runtime_toolchain_failure_helper_node_harness_needs_manifest(tmp_path):
+    """C (unit): the toolchain-coherence preflight flags a node harness with no
+    package.json, leaves non-node templates alone, and clears once a manifest
+    exists. It is anti-cryptic-failure (never turns a red green)."""
+    from codd.repair.verify_runner import _runtime_toolchain_failure
+
+    # node harness + no manifest → explicit contract message
+    msg = _runtime_toolchain_failure("playwright", tmp_path)
+    assert msg is not None and "no package.json" in msg
+    assert _runtime_toolchain_failure("vitest", tmp_path) is not None
+    # non-node templates never trip it (pytest_http is language-native; curl is HTTP)
+    assert _runtime_toolchain_failure("curl", tmp_path) is None
+    assert _runtime_toolchain_failure("pytest_http", tmp_path) is None
+    # manifest present → gate clears, so node/TS projects are unaffected
+    (tmp_path / "package.json").write_text("{}\n", encoding="utf-8")
+    assert _runtime_toolchain_failure("playwright", tmp_path) is None
+
+
+def test_run_verification_tests_toolchain_gate_blocks_before_npx(tmp_path):
+    """C (integration): a Playwright verification node in a project with no
+    package.json fails EARLY with a clear toolchain-missing message instead of
+    the cryptic runtime ``Cannot find module '@playwright/test'`` — and without
+    invoking npx. The honest-fail stays red; only its message becomes a CoDD
+    contract failure."""
+    from codd.dag import DAG, Node
+    from codd.repair.verify_runner import VerifyRunner
+
+    dag = DAG()
+    dag.add_node(
+        Node(
+            "verification:e2e:flow",
+            "verification_test",
+            attributes={"kind": "e2e", "template_ref": "playwright"},
+        )
+    )
+    runner = VerifyRunner(tmp_path, {"project": {"type": "generic"}})
+    results = runner._run_verification_tests(dag, {})
+
+    assert len(results) == 1
+    result = results[0]
+    assert result["passed"] is False
+    assert result["template_ref"] == "playwright"
+    assert "node test harness" in result["output"]
+    assert "Cannot find module" not in result["output"]
