@@ -169,6 +169,52 @@ def test_pipeline_owner_uniqueness_passes_for_clean_topology():
     pipeline._certify_output_owner_uniqueness(tasks, config_output_paths)  # no raise
 
 
+def test_owner_uniqueness_no_false_red_on_python_src_layout_fallback():
+    """REGRESSION (PC-owner-uniqueness-python-fallback-paths): two tasks with NO
+    declared output_paths and NO config mapping must NOT trip owner-uniqueness.
+
+    Their ``_output_paths_for_task`` FALLBACK is the PERMISSIVE source_root +
+    package_root accept-list (``src`` + ``src/<pkg>``), which NESTS for a normal
+    Python src-layout. Feeding it to the gate (the v2.41 bug, exposed by a real
+    tipcalc Python greenfield run) false-RED'd the implement stage. The
+    owner-uniqueness resolution must yield DECLARED claims only — here, nothing —
+    while the ORACLE-scope resolution still carries the fallback."""
+    pipeline = GreenfieldPipeline()
+    tasks = [
+        ImplementTaskRef(task_id="expose_entrypoint", design_node="docs/infra/build.md"),
+        ImplementTaskRef(task_id="ci_release", design_node="docs/operations/runbook.md"),
+    ]
+    owner_paths = pipeline._resolve_owner_uniqueness_config_paths(tasks, {})
+    assert owner_paths == {}, owner_paths
+    # The gate does NOT raise (the regression was a false-RED here)...
+    pipeline._certify_output_owner_uniqueness(tasks, owner_paths)  # no raise
+    # ...but the oracle-scope resolution DOES still carry the permissive fallback
+    # (it needs to know where the SUT may have written) — that's the asymmetry.
+    oracle_paths = pipeline._resolve_oracle_config_output_paths(tasks, {})
+    assert any(oracle_paths.get(t.task_id) for t in tasks), oracle_paths
+
+
+def test_owner_uniqueness_keeps_config_declared_claims():
+    """Config-DECLARED ``implement.default_output_paths`` remain EXCLUSIVE claims
+    the gate reasons over — the fix drops only the permissive fallback, never a
+    genuine declared claim (so a real declared nesting conflict still honest-fails)."""
+    pipeline = GreenfieldPipeline()
+    tasks = [
+        ImplementTaskRef(task_id="a", design_node="docs/x.md"),
+        ImplementTaskRef(task_id="b", design_node="docs/y.md"),
+    ]
+    config = {
+        "implement": {
+            "default_output_paths": {"docs/x.md": ["src/pkg"], "docs/y.md": ["src"]}
+        }
+    }
+    owner_paths = pipeline._resolve_owner_uniqueness_config_paths(tasks, config)
+    assert owner_paths == {"a": ["src/pkg"], "b": ["src"]}, owner_paths
+    # DECLARED nesting dirs owned by DIFFERENT tasks is a real conflict -> honest-fail.
+    with pytest.raises(StageError):
+        pipeline._certify_output_owner_uniqueness(tasks, owner_paths)
+
+
 # ─────────────────────────────────────────────────────────────
 # task.declared_output_completeness — warn (default) vs enforce (GPT §3.4)
 # ─────────────────────────────────────────────────────────────

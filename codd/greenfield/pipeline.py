@@ -926,16 +926,23 @@ class GreenfieldPipeline:
         self._ensure_test_runner(project_root)
 
         # The path→owning-task index for the SCOPED rerun: declared task outputs
-        # UNION the config-derived output paths. Built once; the gate consults it
-        # to localize each rerun to the diagnostics' owners. The config-derived
-        # paths are resolved ONCE here so the owner-uniqueness gate and the index
-        # see the SAME path set.
+        # UNION the config-derived output paths (incl. the permissive
+        # ``_output_paths_for_task`` fallback so the index knows where to LOOK).
         config_output_paths = self._resolve_oracle_config_output_paths(tasks, config)
         # HARD owner-uniqueness gate (contract artifact.owner.unique.v1): runs
         # BEFORE the index build (and OUTSIDE its best-effort except) so an
         # ambiguous-ownership topology honest-fails deterministically rather than
         # letting the index's first-owner-wins setdefault silently pick a winner.
-        self._certify_output_owner_uniqueness(tasks, config_output_paths)
+        # It reasons over EXCLUSIVE ownership CLAIMS only — declared task outputs
+        # (read internally) + config-DECLARED default_output_paths — NOT the
+        # permissive fallback the index uses. Passing the fallback false-RED's a
+        # NORMAL Python src-layout (source_root nests package_root) whenever ≥2
+        # tasks with no declared output fall to ``_route_source_into_package``'s
+        # ``src`` + ``src/<pkg>`` accept-list (a "may write here", not an exclusive
+        # claim). See ``_resolve_owner_uniqueness_config_paths``.
+        self._certify_output_owner_uniqueness(
+            tasks, self._resolve_owner_uniqueness_config_paths(tasks, config)
+        )
         scope_index = self._build_oracle_scope_index(
             project_root, tasks, config, config_output_paths=config_output_paths
         )
@@ -991,6 +998,42 @@ class GreenfieldPipeline:
             except Exception:  # noqa: BLE001 — a task whose paths fail just falls to broad.
                 config_output_paths[task.task_id] = list(task.output_paths or ())
         return config_output_paths
+
+    def _resolve_owner_uniqueness_config_paths(
+        self,
+        tasks: list[ImplementTaskRef],
+        config: dict[str, Any],
+    ) -> dict[str, list[str]]:
+        """Per-task EXCLUSIVE-ownership CLAIMS for the owner-uniqueness gate.
+
+        Distinct from :meth:`_resolve_oracle_config_output_paths` (the oracle
+        scope index input): the uniqueness gate must reason over what a task
+        EXCLUSIVELY CLAIMS to own, not where it MAY write. The gate already reads
+        each task's declared ``output_paths`` internally, so this adds only the
+        config-DECLARED ``implement.default_output_paths`` / ``implement_targets``
+        mapping for the task's design node. It deliberately does NOT fall back to
+        ``_output_paths_for_task`` — that fallback returns the permissive
+        ``source_root`` + ``package_root`` accept-list (``_route_source_into_package``),
+        which is "this task MAY write under here", not an exclusive claim. Feeding
+        it to the gate false-RED's a normal Python src-layout (``src`` nests
+        ``src/<pkg>``) whenever ≥2 undeclared tasks share that fallback — the
+        v2.41 regression this resolves. TS was unaffected only because its
+        ``source_root == package_root`` (no nesting); the fix is layout-agnostic.
+        """
+        from codd.implementer import _configured_output_path_groups
+
+        try:
+            declared = _configured_output_path_groups(config)
+        except Exception:  # noqa: BLE001 — a malformed config maps to "nothing declared".
+            declared = {}
+        out: dict[str, list[str]] = {}
+        for task in tasks:
+            design = getattr(task, "design_node", None)
+            if design and design in declared:
+                paths = [str(p) for p in declared[design] if str(p).strip()]
+                if paths:
+                    out[task.task_id] = paths
+        return out
 
     def _certify_output_owner_uniqueness(
         self,
