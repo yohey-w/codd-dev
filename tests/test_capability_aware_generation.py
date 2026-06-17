@@ -337,3 +337,124 @@ def test_implementer_ui_still_warns_about_missing_screen_flow(tmp_path):
 
     with pytest.warns(UserWarning, match="route definitions"):
         _load_screen_flow_for_implementation(tmp_path, capabilities=WEB)
+
+
+# --------------------------------------------------------------------------- #
+# B: language-aware web E2E harness selection in the test-doc/test-code prompts.
+# --------------------------------------------------------------------------- #
+
+# Affirmative Playwright/.spec.ts naming line emitted ONLY by the TS browser
+# block — the clean discriminator for "this prompt instructs Playwright".
+_PLAYWRIGHT_NAMING_LINE = "API integration tests → `tests/e2e/<domain>.spec.ts`"
+_PYTHON_HTTP_E2E_HEADER = (
+    "E2E Test Generation Meta-Prompt section rules (Python HTTP E2E):"
+)
+
+
+def _canonical_test_doc(language: str | None) -> str:
+    return _join(
+        _build_test_doc_block(
+            WEB,
+            node_id="test:test-strategy",
+            output_path="docs/test/test_strategy.md",
+            project_language=language,
+        )
+    )
+
+
+def test_test_doc_python_browser_emits_pytest_http_not_playwright():
+    text = _canonical_test_doc("python")
+    # Python HTTP E2E guidance present...
+    assert _PYTHON_HTTP_E2E_HEADER in text
+    assert "pytest" in text
+    assert "test_<domain>.py" in text
+    # ...and the affirmative Playwright/.spec.ts naming instruction is absent.
+    assert _PLAYWRIGHT_NAMING_LINE not in text
+    assert "E2E Test Level Separation (CRITICAL):" not in text
+
+
+def test_test_doc_typescript_browser_keeps_playwright_unchanged():
+    text = _canonical_test_doc("typescript")
+    assert _PLAYWRIGHT_NAMING_LINE in text
+    assert "E2E Test Level Separation (CRITICAL):" in text
+    assert _PYTHON_HTTP_E2E_HEADER not in text
+
+
+def test_test_doc_unknown_language_is_byte_for_byte_legacy():
+    # Language unknown (None) must reproduce the historical (TS Playwright) block
+    # byte-for-byte — generality / backward-compat guarantee.
+    legacy = _build_test_doc_block(
+        WEB, node_id="test:test-strategy", output_path="docs/test/test_strategy.md"
+    )
+    typescript = _build_test_doc_block(
+        WEB,
+        node_id="test:test-strategy",
+        output_path="docs/test/test_strategy.md",
+        project_language="typescript",
+    )
+    assert legacy == typescript
+
+
+def test_test_doc_explicit_browser_python_keeps_playwright():
+    # NOTE: the doc-block resolver call does not pass constraints, so this proves
+    # the DEFAULT python+browser routing is pytest_http (covered above). The
+    # explicit-browser path is proven directly against resolve_e2e_harness in
+    # tests/test_e2e_harness.py. Here we only assert non-python is untouched.
+    text = _canonical_test_doc("go")
+    assert _PLAYWRIGHT_NAMING_LINE in text
+    assert _PYTHON_HTTP_E2E_HEADER not in text
+
+
+def _e2e_test_artifact(output: str) -> WaveArtifact:
+    return WaveArtifact(
+        wave=3,
+        node_id="test:e2e-items",
+        output=output,
+        title="Items E2E",
+        depends_on=[],
+        conventions=[],
+    )
+
+
+def test_test_code_python_http_e2e_gets_live_server_not_playwright():
+    # A Python E2E test-code artifact (.test.py under tests/e2e) with browser
+    # capability must get Python HTTP live-server guidance, NOT Playwright and
+    # NOT the "no browser, no server" integration fallback.
+    prompt = _build_generation_prompt(
+        _e2e_test_artifact("tests/e2e/items.test.py"),
+        [],
+        [],
+        capabilities=WEB,
+        project_language="python",
+    )
+    assert "Python HTTP end-to-end rules (live server, no browser):" in prompt
+    assert "pytest" in prompt
+    # The affirmative Playwright-rules block must be absent (the Python block's
+    # own "do NOT import '@playwright/test'" steering line is expected).
+    assert "Playwright-specific rules:" not in prompt
+    assert "Import from '@playwright/test'" not in prompt
+    # The "no browser, no server" integration fallback must NOT apply here — these
+    # tests DO require a live HTTP server.
+    assert "Do NOT use a browser or start a web server." not in prompt
+
+
+def test_test_code_typescript_browser_keeps_playwright_rules():
+    prompt = _build_generation_prompt(
+        _e2e_test_artifact("tests/e2e/items.spec.ts"),
+        [],
+        [],
+        capabilities=WEB,
+        project_language="typescript",
+    )
+    assert "Playwright-specific rules:" in prompt
+    assert "@playwright/test" in prompt
+    assert "Python HTTP end-to-end rules" not in prompt
+
+
+def test_resolve_project_language_reads_config():
+    from codd.generator import _resolve_project_language
+
+    assert _resolve_project_language({"project": {"language": "Python"}}) == "python"
+    assert _resolve_project_language({"project": {"name": "x"}}) is None
+    assert _resolve_project_language({}) is None
+    assert _resolve_project_language(None) is None

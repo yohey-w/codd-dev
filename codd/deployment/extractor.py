@@ -40,11 +40,21 @@ SMOKE_TEST_PATTERNS = (
 )
 # All globs are kept: Playwright's convention is ``*.spec.ts``, a CLI
 # (vitest/jest) e2e is commonly ``*.test.ts``, and ``*.e2e.ts`` is the explicit
-# e2e naming convention codex emits unprompted. Routing to the right RUNNER
-# happens in :func:`_verification_template_ref` (by ``e2e_modality``); discovery
+# e2e naming convention codex emits unprompted. The ``test_*.py``/``*_test.py``
+# globs discover Python HTTP e2e tests (pytest convention) emitted by the
+# language-aware web harness (:mod:`codd.e2e_harness`) for Python projects;
+# bare ``tests/e2e/*.py`` is intentionally NOT a pattern (it would wrongly grab
+# ``__init__.py`` / helper modules). Routing to the right RUNNER happens in
+# :func:`_verification_template_ref` (by extension + ``e2e_modality``); discovery
 # must see every shape so a generated e2e test is not silently dropped (an
-# undiscovered ``.e2e.ts`` e2e means the verify stage never RUNS it).
-E2E_TEST_PATTERNS = ("tests/e2e/*.spec.ts", "tests/e2e/*.test.ts", "tests/e2e/*.e2e.ts")
+# undiscovered e2e means the verify stage never RUNS it).
+E2E_TEST_PATTERNS = (
+    "tests/e2e/*.spec.ts",
+    "tests/e2e/*.test.ts",
+    "tests/e2e/*.e2e.ts",
+    "tests/e2e/test_*.py",
+    "tests/e2e/*_test.py",
+)
 RUNTIME_CAPABILITY_INFERENCE_DEFAULTS = Path(__file__).parent / "defaults" / "runtime_capability_inference.yaml"
 
 DEPLOYMENT_SECTION_IMPL_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -934,6 +944,11 @@ def _verification_template_ref(
 
     ``device`` modality has no built-in runner template yet, so it also keeps
     the legacy ``playwright`` default rather than silently dropping the test.
+
+    A ``.py`` e2e file routes to ``pytest_http`` (Python HTTP e2e), the
+    language-native runner emitted by the language-aware web harness
+    (:mod:`codd.e2e_harness`). The TS/JS modality routing and ``.sh`` → ``curl``
+    behavior are unchanged (generality: node-targeting behavior must not move).
     """
     if cdp_browser_journey:
         return "cdp_browser"
@@ -942,6 +957,8 @@ def _verification_template_ref(
         if modality == "cli":
             return "vitest"
         return "playwright"
+    if path.suffix == ".py":
+        return "pytest_http"
     if path.suffix == ".sh":
         return "curl"
     return "document"

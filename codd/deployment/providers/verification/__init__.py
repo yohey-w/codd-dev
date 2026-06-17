@@ -8,6 +8,7 @@ from . import cdp_wire as cdp_wire
 from . import curl as curl
 from . import form_strategies as form_strategies
 from . import playwright as playwright
+from . import pytest_http as pytest_http
 from . import vitest as vitest
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "curl",
     "form_strategies",
     "playwright",
+    "pytest_http",
     "vitest",
 ]

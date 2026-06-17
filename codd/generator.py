@@ -19,6 +19,7 @@ from codd.ai_invoke import (
     resolve_ai_command,
 )
 from codd.config import load_project_config
+from codd.e2e_harness import resolve_e2e_harness
 from codd.project_types import (
     ProjectCapabilities,
     load_capabilities,
@@ -208,6 +209,27 @@ def _resolve_generation_capabilities(
     return load_capabilities(resolved, project_root)
 
 
+def _resolve_project_language(config: dict[str, Any] | None) -> str | None:
+    """Resolve the project's host language for language-aware harness selection.
+
+    Reads ``project.language`` from ``codd.yaml`` (the same key the scanner
+    consults, where it defaults to ``python``). Returns ``None`` when no config /
+    language is present so callers keep legacy (language-unknown) behavior — a
+    ``None`` language never switches the browser E2E harness away from Playwright.
+    """
+
+    if not isinstance(config, dict):
+        return None
+    project_section = config.get("project")
+    if not isinstance(project_section, dict):
+        return None
+    language = project_section.get("language")
+    if not isinstance(language, str):
+        return None
+    normalized = language.strip().lower()
+    return normalized or None
+
+
 # Test-doc traceability guidance — applies to every project type regardless of
 # capabilities (unit + integration coverage, traceability, operation_flow). It
 # is ROLE-AWARE: exactly one generated test document (the canonical doc,
@@ -242,11 +264,51 @@ _TEST_DOC_REFERENCE_VB_HEAD = [
 ]
 
 
+def _python_http_e2e_doc_lines() -> list[str]:
+    """Test-doc meta-prompt guidance for a Python ``pytest`` HTTP E2E harness.
+
+    Emitted for a Python web project (HTTP surface) when no EXPLICIT browser
+    automation is required — the language-native counterpart of the TS Playwright
+    browser block. This is NOT a weakening of the browser block: it keeps every
+    web-E2E obligation (server readiness, <500 health baseline, response bodies,
+    server-rendered HTML content, JSON API contracts, persistence/readback,
+    teardown), but drives them through a Python HTTP client against a live server
+    instead of a browser/node toolchain. Browser-only obligations (clicking,
+    JS-rendered UI, visual layout) are out of scope here by design; a project
+    that truly needs them must declare an explicit browser harness (then the TS
+    Playwright block applies). Output files are pytest-convention ``.py`` names.
+    """
+
+    return [
+        "",
+        "E2E Test Generation Meta-Prompt section rules (Python HTTP E2E):",
+        "- The final section '## E2E Test Generation Meta-Prompt' serves as a machine-readable instruction for `codd propagate` to auto-generate Python HTTP end-to-end tests.",
+        "- This is a Python web project with an HTTP surface and NO explicit browser-automation requirement. End-to-end tests MUST be written in Python with `pytest` and drive the application over HTTP. Do NOT use Playwright/Cypress, do NOT write TypeScript/JavaScript, and do NOT emit `.spec.ts`/`.ts` files.",
+        "- HTTP client: Use a real HTTP client against a live server — either start the app's real server as a background subprocess and hit it with `httpx`/`requests`/stdlib `urllib`/`http.client`, OR use the framework's live-server test client (e.g. Flask `app.test_client()` / a `live_server` fixture) so requests exercise the real WSGI/ASGI stack end-to-end. Prefer a live server bound to a loopback port for true E2E.",
+        "- MECE domain decomposition: Split E2E tests into non-overlapping behavioral domains. Each file owns exactly one domain.",
+        "- Scenario derivation: First derive test obligations from design-time `operation_flow` and verifiable behaviors, then derive concrete HTTP E2E evidence candidates. Cover positive, negative, persistence/readback, permission-boundary, terminal-state, cross-actor-reflection, derived-state/read-model chain, and threshold/boundary cases when the design declares those axes.",
+        "- Server health baseline (CRITICAL): Every HTTP request assertion MUST first verify the response status is < 500 before checking business-logic status codes (200, 302, 401, etc.). A 5xx is a server error (unhandled exception, DB down) — categorically different from a 4xx (auth failure, not found). Without this, a DB failure silently passes when tests only check for specific success codes.",
+        "- Response-body & contract coverage: Assert on response bodies, not just status codes — for HTML endpoints assert required server-rendered content/copy is present and forbidden content/links are absent; for JSON APIs assert the response contract (keys, types, values) the design declares.",
+        "- Actor-facing surface/copy coverage: Derive HTTP E2E obligations from design-time surface/copy obligations. Assert required visible labels/copy appear in the rendered response, assert forbidden actions/links/copy patterns are absent, and cover actor-specific wording where the design declares different audiences.",
+        "- Persistence/readback: For any scenario that creates or updates state, assert the change is observable on a subsequent request (write -> read-back over HTTP), and for measured/derived values assert the producer -> durable state -> derived value -> consumer-surface chain. If a value has a threshold, percentage, count, duration, score, or latest/last/resume rule, include below/at/above-boundary assertions where feasible.",
+        "- Architecture adaptation: Test generation MUST scan the actual route/endpoint structure and mark unimplemented endpoints with `pytest.mark.skip`/`xfail(strict=True)` ONLY where the design declares them not-yet-implemented; never silently omit a declared obligation.",
+        "- Server lifecycle & teardown (CRITICAL): The meta-prompt MUST specify how to start the application under test (build/import the app, bind a loopback port, wait-for-ready via a health probe) before assertions, and MUST tear it down so NO background server process survives the test session. Use a pytest fixture for start/stop and bind an ephemeral port to avoid collisions.",
+        "- Quality gate: Define pass criteria — all PASS, zero SKIP, operation_flow/verifiable-behavior coverage, and any release-blocking constraints from conventions.",
+        "- Execution policy: Run the whole selected suite, collect every failure, and only then start repair so related failures can be fixed coherently.",
+        "- Output file mapping: Specify a table mapping each domain to its output file path under `tests/e2e/`, using pytest-convention Python filenames `test_<domain>.py` (NOT `.spec.ts`).",
+        "- Shared helpers: Mandate a `tests/e2e/helpers/` (or `conftest.py` fixtures) location for the live-server fixture, auth flows, test-data setup, and common assertions to avoid duplication across test modules.",
+        "- Mutating test data: Any E2E scenario that creates or updates records MUST use per-run unique identifiers and explicit cleanup/idempotent teardown so repeated runs cannot fail from stale data or uniqueness constraints.",
+        "- Scenario fixtures: Any E2E scenario that depends on pre-existing records MUST establish or idempotently reset those preconditions inside the scenario/fixture before assertions; do not trust mutable shared seed state unless the test recreates it or proves it unchanged.",
+        "- Generation markers: All generated files must include `# @generated-from:` and `# @generated-by: codd propagate` header comments (Python comment syntax). Manual tests marked with `# @manual` must be preserved on regeneration.",
+    ]
+
+
 def _build_test_doc_block(
     capabilities: ProjectCapabilities,
     *,
     node_id: str | None = None,
     output_path: str | None = None,
+    project_language: str | None = None,
 ) -> list[str]:
     """Build the test-document meta-prompt guidance, branched on e2e_modality.
 
@@ -258,11 +320,19 @@ def _build_test_doc_block(
     or legacy callers), default to canonical so a lone test doc still declares
     VBs and back-compat holds. The end-to-end layer adapts:
 
-    * ``browser``  → browser-E2E (Playwright/Cypress, UI flows, server startup) + API split.
+    * ``browser``  → LANGUAGE-AWARE web E2E. A Python project with an HTTP surface
+      and no EXPLICIT browser requirement gets a Python ``pytest`` HTTP E2E
+      harness (live server + HTTP client, ``tests/e2e/test_*.py``); every other
+      browser project keeps the TS Playwright/Cypress UI-flow harness + API split.
     * ``cli``      → end-to-end tests that invoke the built CLI as a subprocess
       and assert exit codes / stdout / stderr / produced files. No browser, no server.
     * ``device``   → on-device / emulator / hardware-in-the-loop E2E. No web server.
     * ``none``     → integration tests only; no end-to-end UI/browser layer applies.
+
+    The web-E2E harness is resolved DETERMINISTICALLY via
+    :func:`codd.e2e_harness.resolve_e2e_harness` (no LLM prose inference). When
+    ``project_language`` is ``None`` (unknown / legacy caller), the browser branch
+    keeps the historical TS Playwright guidance unchanged.
 
     Server-startup language is only emitted when ``long_running_service`` is true.
     """
@@ -277,7 +347,13 @@ def _build_test_doc_block(
     head = _TEST_DOC_CANONICAL_VB_HEAD if is_canonical else _TEST_DOC_REFERENCE_VB_HEAD
     lines = list(head)
 
-    if modality == "browser":
+    harness = resolve_e2e_harness(
+        project_language=project_language, capabilities=capabilities
+    )
+
+    if modality == "browser" and harness.runner == "pytest_http":
+        lines.extend(_python_http_e2e_doc_lines())
+    elif modality == "browser":
         lines.extend(
             [
                 "",
@@ -523,6 +599,7 @@ def generate_wave(
     document_node_paths = build_document_node_path_map(project_root, config)
     body_max_retries = _body_max_retries(config)
     capabilities = _resolve_generation_capabilities(config, project_root)
+    project_language = _resolve_project_language(config)
 
     results: list[GenerationResult] = []
     for artifact in selected:
@@ -547,6 +624,7 @@ def generate_wave(
                 feedback=feedback,
                 max_retries=body_max_retries,
                 capabilities=capabilities,
+                project_language=project_language,
             ),
         )
         output_path.write_text(content, encoding="utf-8")
@@ -930,6 +1008,7 @@ def _generate_document_body(
     feedback: str | None = None,
     max_retries: int = DEFAULT_BODY_MAX_RETRIES,
     capabilities: ProjectCapabilities | None = None,
+    project_language: str | None = None,
 ) -> str:
     """Generate one document body with a bounded validation-feedback retry loop.
 
@@ -946,6 +1025,7 @@ def _generate_document_body(
         prompt = _build_generation_prompt(
             artifact, dependency_documents, conventions,
             feedback=current_feedback, capabilities=capabilities,
+            project_language=project_language,
         )
         prompt = _inject_lexicon(prompt, project_root)
         try:
@@ -987,19 +1067,31 @@ def _is_test_code_output(output_path: str) -> bool:
     ))
 
 
+def _is_e2e_output(output_path: str) -> bool:
+    """Check if the output target is an end-to-end test file (under ``tests/e2e/``)."""
+    parts = PurePosixPath(output_path).parts
+    return len(parts) >= 2 and parts[0] == "tests" and parts[1] == "e2e"
+
+
 def _build_generation_prompt(
     artifact: WaveArtifact,
     dependency_documents: list[DependencyDocument],
     conventions: list[dict[str, Any]],
     feedback: str | None = None,
     capabilities: ProjectCapabilities | None = None,
+    project_language: str | None = None,
 ) -> str:
     if capabilities is None:
         capabilities = WEB_FALLBACK_CAPABILITIES
     # Test code generation mode: output executable test code, not a Markdown document
     if _is_test_code_output(artifact.output):
         return _build_test_code_prompt(
-            artifact, dependency_documents, conventions, feedback=feedback, capabilities=capabilities
+            artifact,
+            dependency_documents,
+            conventions,
+            feedback=feedback,
+            capabilities=capabilities,
+            project_language=project_language,
         )
 
     doc_type = _infer_doc_type(artifact.output)
@@ -1068,6 +1160,7 @@ def _build_generation_prompt(
                 capabilities,
                 node_id=artifact.node_id,
                 output_path=artifact.output,
+                project_language=project_language,
             )
         )
 
@@ -1142,12 +1235,13 @@ def _build_test_code_prompt(
     conventions: list[dict[str, Any]],
     feedback: str | None = None,
     capabilities: ProjectCapabilities | None = None,
+    project_language: str | None = None,
 ) -> str:
     """Build a prompt that generates executable test code (not a Markdown document)."""
     if capabilities is None:
         capabilities = WEB_FALLBACK_CAPABILITIES
-    is_browser_e2e = capabilities.e2e_modality == "browser"
-    # Detect test framework from output filename
+    # Detect test framework from output filename. ``.py`` already maps to pytest,
+    # so a Python HTTP-E2E artifact (``tests/e2e/test_*.py``) gets pytest guidance.
     ext = PurePosixPath(artifact.output).suffix
     if ext in ('.ts', '.js'):
         framework = "Playwright"
@@ -1155,6 +1249,26 @@ def _build_test_code_prompt(
     else:
         framework = "pytest"
         lang = "Python"
+    # Browser-E2E guidance (Playwright @cdp-only tagging, '@playwright/test'
+    # imports) is only correct when the harness is actually the TS Playwright
+    # browser harness. A Python project whose browser modality resolves to the
+    # language-native ``pytest_http`` harness writes ``.py`` files and must NOT
+    # receive Playwright-specific rules — gate ``is_browser_e2e`` on BOTH the
+    # declared modality AND a TS/JS output extension so the deterministic harness
+    # choice (:func:`codd.e2e_harness.resolve_e2e_harness`) governs.
+    is_browser_e2e = capabilities.e2e_modality == "browser" and ext in ('.ts', '.js')
+    # Python HTTP-E2E: a web (HTTP-surface) project whose harness resolves to
+    # ``pytest_http`` and whose artifact is a ``.py`` E2E file. Such a file needs
+    # live-server HTTP-E2E guidance (NOT the "no browser, no server" integration
+    # fallback, which would forbid the server startup these tests require).
+    harness = resolve_e2e_harness(
+        project_language=project_language, capabilities=capabilities
+    )
+    is_python_http_e2e = (
+        harness.runner == "pytest_http"
+        and ext == ".py"
+        and _is_e2e_output(artifact.output)
+    )
 
     conv_text = ""
     for c in conventions:
@@ -1198,6 +1312,16 @@ def _build_test_code_prompt(
             "- If dependency documents declare actor-facing surface/copy obligations, browser tests MUST assert the required visible labels/copy and MUST assert forbidden actions, links, or copy patterns are absent.",
             "- For role-specific surfaces, test the audience-specific wording and available navigation for that actor instead of only checking that the route returns 200.",
             "- Do not accept generic smoke assertions when the design declares concrete visible copy, role labels, or forbidden navigation.",
+            "",
+        ])
+    elif is_python_http_e2e:
+        lines.extend([
+            "Python HTTP end-to-end rules (live server, no browser):",
+            "- This is a Python web project E2E test. Write `pytest` tests that drive the application over HTTP against a live server. Do NOT use Playwright/Cypress, do NOT import '@playwright/test', and do NOT write any TypeScript/JavaScript.",
+            "- Start the application under test (import/build the app, bind a loopback ephemeral port, wait-for-ready via a health probe) in a pytest fixture, hit it with a real HTTP client (`httpx`/`requests`/stdlib `urllib`/`http.client`) or the framework's live-server test client, and tear it down so NO background server process survives.",
+            "- Server health baseline (CRITICAL): Every request MUST assert the response status is < 500 BEFORE any business-logic assertion. 5xx = server broke (unhandled exception, DB down); 4xx = business rejection (auth failure, not found) — categorically different. Without this, a DB failure silently passes when the test only checks for specific success codes.",
+            "- Assert response bodies, not just status: for HTML endpoints assert required server-rendered content/copy is present and forbidden content/links are absent; for JSON APIs assert the response contract (keys, types, values).",
+            "- Cover positive flows, negative/permission-boundary flows, and persistence/readback (write -> read-back over HTTP). Use per-run unique identifiers and explicit teardown so repeated runs cannot fail from stale data.",
             "",
         ])
     elif capabilities.e2e_modality == "cli":

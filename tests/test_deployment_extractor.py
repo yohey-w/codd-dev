@@ -350,6 +350,63 @@ def test_vitest_template_is_registered():
 
 
 # ═══════════════════════════════════════════════════════════
+# B — Python HTTP e2e: discovery + routing (.py → pytest_http);
+#     TS/JS modality routing and .sh → curl UNCHANGED.
+# ═══════════════════════════════════════════════════════════
+
+
+def test_verification_template_ref_python_e2e_routes_to_pytest_http():
+    from codd.deployment.extractor import _verification_template_ref
+
+    assert _verification_template_ref(Path("tests/e2e/test_items.py")) == "pytest_http"
+
+
+def test_verification_template_ref_ts_modality_routing_unchanged():
+    from codd.deployment.extractor import _verification_template_ref
+
+    # Adding the .py branch must not move TS/JS modality routing or .sh → curl.
+    assert _verification_template_ref(Path("x.spec.ts"), e2e_modality="browser") == "playwright"
+    assert _verification_template_ref(Path("x.spec.ts"), e2e_modality="cli") == "vitest"
+    assert _verification_template_ref(Path("x.test.ts")) == "playwright"  # legacy default
+    assert _verification_template_ref(Path("health.sh")) == "curl"
+    assert _verification_template_ref(Path("notes.md")) == "document"
+
+
+def test_python_e2e_test_is_discovered_and_routed(tmp_path):
+    # A generated Python e2e test (pytest convention) must be DISCOVERED by
+    # extract_verification_tests and routed to pytest_http — else verify never
+    # RUNS it (silent drop). Uses a Python project config.
+    _write(tmp_path / "tests" / "e2e" / "test_items.py", "def test_x():\n    assert True\n")
+
+    config = {"project": {"language": "python"}, "required_artifacts": {"project_type": "web"}}
+    tests = extract_verification_tests(tmp_path, config)
+
+    assert len(tests) == 1
+    assert tests[0].kind is VerificationKind.E2E
+    assert tests[0].verification_template_ref == "pytest_http"
+
+
+def test_python_e2e_underscore_test_suffix_discovered(tmp_path):
+    # ``*_test.py`` is the other pytest convention; it must also be discovered.
+    _write(tmp_path / "tests" / "e2e" / "items_test.py", "def test_x():\n    assert True\n")
+
+    tests = extract_verification_tests(tmp_path, {"project": {"language": "python"}})
+
+    assert any(t.verification_template_ref == "pytest_http" for t in tests)
+
+
+def test_python_e2e_init_and_helpers_not_discovered(tmp_path):
+    # Bare ``tests/e2e/*.py`` is intentionally NOT a discovery pattern, so an
+    # __init__.py / helper module is not wrongly treated as an e2e test.
+    _write(tmp_path / "tests" / "e2e" / "__init__.py", "")
+    _write(tmp_path / "tests" / "e2e" / "helpers.py", "def login():\n    pass\n")
+
+    tests = extract_verification_tests(tmp_path, {"project": {"language": "python"}})
+
+    assert tests == []
+
+
+# ═══════════════════════════════════════════════════════════
 # #5 — db_seed:users injection gated by project capability/modality
 # ═══════════════════════════════════════════════════════════
 

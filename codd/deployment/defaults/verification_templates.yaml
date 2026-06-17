@@ -5,3 +5,5 @@ templates:
   playwright:
     headless: true
     timeout: 60000
+  pytest_http:
+    timeout: 120000
