@@ -711,3 +711,22 @@ def test_clean_execution_closes_false_green_for_failing_non_vb_test(tmp_path):
     with pytest.raises(CoherenceError) as exc:
         enforce_campaign_clean_execution(execution, 1)
     assert "smoke.test.ts" in str(exc.value)
+
+
+def test_clean_execution_covers_environment_skipped_tests(tmp_path):
+    """environment.skipped_tests_not_green: a SKIPPED test (e.g. its environment is
+    missing) makes its file UNCLEAN → executed_failed_files → the clean-execution
+    gate reds the run EVEN at exit_code 0 (vitest skips do not fail the exit code).
+    A skipped test proves nothing; the run is not green. This contract is covered by
+    the v2.39 clean-execution gate — the adapter already routes any skipped case to
+    executed_failed_files (see test_vitest_adapter_skipped_case_does_not_make_file_pass)."""
+    project = _ts_project(tmp_path)
+    execution = _vitest_report(
+        project,
+        files={"tests/unit/conversion.test.ts": [("c to f", "passed"), ("rejects nan", "skipped")]},
+    )
+    # The skipped-bearing file is unclean → executed_failed_files (the adapter rule).
+    assert "tests/unit/conversion.test.ts" in execution.executed_failed_files
+    # → RED even though the runner exited 0 (skips do not fail vitest's exit code).
+    with pytest.raises(CoherenceError):
+        enforce_campaign_clean_execution(execution, 0)

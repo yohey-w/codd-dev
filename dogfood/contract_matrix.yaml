@@ -12,9 +12,9 @@
 # ═══════════════════════════════════════════════════════════════════
 generated_from: codd/contracts/registry.py
 coverage_summary:
-  covered: 26
+  covered: 27
   uncertified: 0
-  uncovered: 24
+  uncovered: 23
   total: 50
 families:
   ImplementTask:
@@ -494,6 +494,23 @@ families:
     finding_ids:
     - PC-campaign-clean-execution
     - F-verify-false-green
+  ExecutionEnvironment:
+  - id: environment.skipped_tests_not_green
+    source_node: ExecutionEnvironment
+    target_node: TestCase
+    edge_type: executes
+    dimensions:
+    - execution
+    - observability
+    status: covered
+    enforcement: hard
+    fail_mode: honest_red
+    authority: codd.coverage_execution_coherence.enforce_campaign_clean_execution
+    certification_fixtures:
+    - tests/test_coverage_execution_coherence.py::test_clean_execution_covers_environment_skipped_tests
+    - tests/test_coverage_execution_coherence.py::test_vitest_adapter_skipped_case_does_not_make_file_pass
+    finding_ids:
+    - PC-campaign-clean-execution
   CoverageClaim:
   - id: coverage_claim.requires_executed_passed_evidence
     source_node: CoverageClaim
@@ -814,20 +831,6 @@ families:
     predicted_issue: a new-runner failure has no editable-source set, so repair cannot attribute it (only
       pytest/vitest attribution is certified).
     proposed_gate: a failure-attribution adapter DoD per language.
-  ExecutionEnvironment:
-  - id: environment.skipped_tests_not_green
-    source_node: ExecutionEnvironment
-    target_node: TestCase
-    edge_type: executes
-    dimensions:
-    - execution
-    - observability
-    status: uncovered
-    enforcement: noop
-    fail_mode: honest_red
-    authority: null
-    predicted_issue: tests skip because the environment is missing, yet the run is treated as green.
-    proposed_gate: skip/todo-as-unverified invariant.
   Service:
   - id: e2e_runtime.service_readiness_and_teardown
     source_node: Service.e2e

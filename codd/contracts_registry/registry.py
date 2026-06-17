@@ -513,6 +513,27 @@ _COVERED: tuple[Contract, ...] = (
         ),
         finding_ids=("PC-campaign-clean-execution", "F-verify-false-green"),
     ),
+    # ── environment.skipped_tests_not_green — covered by the clean-execution gate ─
+    # A skipped test (its environment missing) makes its file UNCLEAN: the adapter
+    # routes any skipped case to executed_failed_files, so the v2.39 clean-execution
+    # gate reds the run even at exit_code 0 (vitest skips do not fail the exit code).
+    # skip == unverified, never green. (v2.39 was high-leverage — it closed this
+    # round-1 backlog cell as a side-effect; this records the coverage with a fixture.)
+    Contract(
+        id="environment.skipped_tests_not_green",
+        source_node="ExecutionEnvironment",
+        target_node="TestCase",
+        edge_type="executes",
+        dimensions=("execution", "observability"),
+        authority="codd.coverage_execution_coherence.enforce_campaign_clean_execution",
+        fail_mode="honest_red",
+        status="covered",
+        certification_fixtures=(
+            "tests/test_coverage_execution_coherence.py::test_clean_execution_covers_environment_skipped_tests",
+            "tests/test_coverage_execution_coherence.py::test_vitest_adapter_skipped_case_does_not_make_file_pass",
+        ),
+        finding_ids=("PC-campaign-clean-execution",),
+    ),
     # ── CoverageClaim -> VerifyExecution observability (v2.32) ───────────────
     Contract(
         id="coverage_claim.requires_executed_passed_evidence",
@@ -1051,21 +1072,6 @@ _UNCOVERED_BACKLOG: tuple[Contract, ...] = (
             "pytest-style edits; not for every runner's test shape)."
         ),
         proposed_gate="read-only evidence invariant fixture per runner.",
-    ),
-    Contract(
-        id="environment.skipped_tests_not_green",
-        source_node="ExecutionEnvironment",
-        target_node="TestCase",
-        edge_type="executes",
-        dimensions=("execution", "observability"),
-        authority=None,
-        fail_mode="honest_red",
-        status="uncovered",
-        predicted_issue=(
-            "tests skip because the environment is missing, yet the run is treated as "
-            "green."
-        ),
-        proposed_gate="skip/todo-as-unverified invariant.",
     ),
     Contract(
         id="e2e_runtime.service_readiness_and_teardown",
