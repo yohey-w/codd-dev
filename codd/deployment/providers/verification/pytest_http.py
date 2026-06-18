@@ -130,6 +130,23 @@ class PytestHttpTemplate(VerificationTemplate):
                 duration=duration,
             )
         if completed.returncode == 0:
+            # ANTI-FALSE-GREEN: exit 0 is necessary but NOT sufficient. Require a
+            # POSITIVE execution signal ("collected N items" with N>=1, or an
+            # "N passed/failed/error" summary) so a wrapper / actual_check_command
+            # that swallows pytest's exit-5 and prints nothing cannot pass on zero
+            # executed tests. A genuine ``pytest -q`` green run always prints the
+            # "N passed" summary, so real runs are unaffected.
+            if not _has_positive_execution(combined):
+                return VerificationResult(
+                    passed=False,
+                    output=(
+                        "pytest exited 0 but produced no positive execution evidence "
+                        "(no 'collected N items' / 'N passed|failed|error' summary) — "
+                        "cannot prove >=1 test ran; hard failure (anti-false-green).\n"
+                        + combined
+                    ),
+                    duration=duration,
+                )
             return VerificationResult(passed=True, output=completed.stdout, duration=duration)
         return VerificationResult(
             passed=False,
@@ -165,6 +182,17 @@ def _collected_zero(output: str) -> bool:
     if any(marker in lowered for marker in _NO_TESTS_MARKERS):
         return True
     return False
+
+
+def _has_positive_execution(output: str) -> bool:
+    """True when the pytest output PROVES >=1 test was collected or ran.
+
+    A positive ``collected N items`` (N>=1) or an ``N passed/failed/error``
+    summary is real evidence of execution. Required (in addition to exit 0)
+    before a pytest_http run is credited green, so an exit-0 wrapper that emits
+    no pytest summary cannot pass on nothing (anti-false-green).
+    """
+    return bool(_COLLECTED_RE.search(output) or _RAN_RE.search(output))
 
 
 def _positive_float(value: Any) -> float | None:

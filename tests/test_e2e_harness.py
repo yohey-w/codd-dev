@@ -202,3 +202,13 @@ def test_pytest_http_execute_fails_on_failing_test(tmp_path):
     )
     result = PytestHttpTemplate().execute(_pytest_cmd("tests/e2e/"), cwd=tmp_path)
     assert result.passed is False
+
+
+def test_pytest_http_execute_fails_on_exit0_without_execution_evidence(tmp_path):
+    # ANTI-FALSE-GREEN (v2.47): a wrapper / actual_check_command that EXITS 0 but
+    # emits NO pytest summary (no "collected N items" / "N passed|failed|error")
+    # must NOT pass — exit 0 alone cannot prove >=1 test ran. ``true`` exits 0
+    # with empty output, simulating a wrapper that swallows pytest's exit-5.
+    result = PytestHttpTemplate().execute("true", cwd=tmp_path)
+    assert result.passed is False
+    assert "no positive execution evidence" in result.output
