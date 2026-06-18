@@ -1993,6 +1993,114 @@ _ASSIGN_RE = re.compile(
 #: Derivation hops: ``a = f(param); b = g(a); expect(b…)`` resolves with 2 passes.
 _MAX_DERIVE_PASSES = 2
 
+#: An identifier token (TS/JS ``$``-bearing names and python names alike).
+_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _rhs_reference_idents(rhs: str) -> set[str] | None:
+    """Genuine variable REFERENCES on an assignment RHS — fails CLOSED.
+
+    The naive ``re.findall(IDENT, rhs)`` (pre-2.48) harvested every identifier
+    on the RHS, INCLUDING those inside string literals, comments, and object
+    KEYS — a false-GREEN: ``const body = "response"`` (string), ``const x =
+    { response: 1 }`` (key), or ``const body = compute(); // response`` (comment)
+    all wrongly marked the lhs param-derived, so a constant-only helper that
+    merely *contains* that binding looked anchored to the call's data.
+
+    This is a small DETERMINISTIC char scanner (no LLM, no new deps). It returns
+    only names that are genuine references:
+
+    * identifiers inside ``'…'`` / ``"…"`` / ``\\`…\\``` strings (backslash escapes
+      honoured) and inside ``// line`` / ``/* block */`` comments are EXCLUDED;
+    * an object-literal KEY (``{ key: … }`` — an identifier immediately followed
+      by ``:`` while inside ``{…}``) is NOT a reference (its VALUE still is);
+    * a PROPERTY name after a ``.`` member access (``foo.response``) is NOT an
+      independent reference (the base ``foo`` still is).
+
+    Returns ``None`` when the RHS cannot be confidently scanned (an unterminated
+    string or block comment) — the caller then declines to add the lhs to the
+    derived set (FAIL-CLOSED ⇒ toward false-RED, never false-GREEN).
+    """
+
+    refs: set[str] = set()
+    i = 0
+    n = len(rhs)
+    # Brace-depth of OBJECT LITERALS in this RHS expression: in expression
+    # position ``{`` opens an object literal, so an ``ident :`` at depth > 0 is a
+    # key. Tracking depth keeps a top-level ternary ``cond ? a : b`` (depth 0)
+    # from having its branches mis-read as keys (which would only ever fail
+    # closed, but needlessly).
+    brace_depth = 0
+    while i < n:
+        ch = rhs[i]
+        # ── string literals: skip to the matching unescaped quote ──
+        if ch == "'" or ch == '"' or ch == "`":
+            quote = ch
+            i += 1
+            closed = False
+            while i < n:
+                c = rhs[i]
+                if c == "\\":  # escape — skip the next char
+                    i += 2
+                    continue
+                if c == quote:
+                    i += 1
+                    closed = True
+                    break
+                i += 1
+            if not closed:
+                return None  # unterminated string → cannot scan → fail closed
+            continue
+        # ── comments: ``// …`` to EOL, ``/* … */`` block ──
+        if ch == "/" and i + 1 < n and rhs[i + 1] == "/":
+            while i < n and rhs[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and rhs[i + 1] == "*":
+            end = rhs.find("*/", i + 2)
+            if end == -1:
+                return None  # unterminated block comment → fail closed
+            i = end + 2
+            continue
+        # ── object-literal brace tracking ──
+        if ch == "{":
+            brace_depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            if brace_depth > 0:
+                brace_depth -= 1
+            i += 1
+            continue
+        # ── identifier ──
+        if ch.isalpha() or ch == "_" or ch == "$":
+            m = _IDENT_RE.match(rhs, i)
+            assert m is not None  # ch starts a valid identifier
+            name = m.group(0)
+            start, j = m.start(), m.end()
+            # PROPERTY after a ``.`` member access? walk back over whitespace.
+            k = start - 1
+            while k >= 0 and rhs[k] in " \t":
+                k -= 1
+            is_property = k >= 0 and rhs[k] == "."
+            # OBJECT-LITERAL KEY? immediately followed by ``:`` while inside a
+            # ``{…}`` (and not ``::``, which is not a key separator).
+            p = j
+            while p < n and rhs[p] in " \t":
+                p += 1
+            is_key = (
+                brace_depth > 0
+                and p < n
+                and rhs[p] == ":"
+                and not (p + 1 < n and rhs[p + 1] == ":")
+            )
+            if not is_property and not is_key:
+                refs.add(name)
+            i = j
+            continue
+        i += 1
+    return refs
+
 
 def _params_and_derived_locals(body: str, param_set: set[str]) -> set[str]:
     """``param_set`` plus locals DERIVED from a parameter within ``body`` (≤2 hops).
@@ -2007,6 +2115,13 @@ def _params_and_derived_locals(body: str, param_set: set[str]) -> set[str]:
     Constants never enter the set (``const k = 5`` references no param), so a
     constant-only helper stays unanchored ⇒ FAIL. Destructured bindings
     (``const { error } = body``) add each bound name when the RHS is derived.
+
+    The RHS is scanned by :func:`_rhs_reference_idents`, which counts only
+    genuine variable references: identifiers inside STRING LITERALS, COMMENTS, and
+    object KEYS do NOT flow a param (``const body = "response"`` does not derive
+    ``body`` from a ``response`` param). When an RHS cannot be confidently scanned
+    (unterminated string/comment) the lhs is NOT added — FAIL-CLOSED, never
+    crediting fake coverage.
     """
 
     if not param_set:
@@ -2015,11 +2130,13 @@ def _params_and_derived_locals(body: str, param_set: set[str]) -> set[str]:
     for _ in range(_MAX_DERIVE_PASSES):
         grew = False
         for match in _ASSIGN_RE.finditer(body):
-            rhs_idents = set(re.findall(r"[A-Za-z_$][\w$]*", match.group("rhs")))
+            rhs_idents = _rhs_reference_idents(match.group("rhs"))
+            if rhs_idents is None:
+                continue  # RHS not confidently scannable → fail closed
             if not (rhs_idents & derived):
                 continue
             lhs = match.group("destructure") or match.group("name") or ""
-            for lhs_name in re.findall(r"[A-Za-z_$][\w$]*", lhs):
+            for lhs_name in _IDENT_RE.findall(lhs):
                 if lhs_name not in derived:
                     derived.add(lhs_name)
                     grew = True

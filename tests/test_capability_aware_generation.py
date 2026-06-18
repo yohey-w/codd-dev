@@ -362,15 +362,20 @@ def _canonical_test_doc(language: str | None) -> str:
     )
 
 
-def test_test_doc_python_browser_emits_pytest_http_not_playwright():
+def test_test_doc_python_browser_with_ui_capability_keeps_browser_guidance():
+    # ANTI-FALSE-GREEN: ``WEB`` carries ``user_interface=True`` (a POSITIVE
+    # structured UI-required signal), so a Python browser-modality project routes
+    # to the real browser harness — the doc block emits browser E2E guidance, NOT a
+    # silent HTTP-only ``pytest_http`` doc. (Routing the Python HTTP harness now
+    # requires a POSITIVE http-sufficiency opt-in threaded as a CONSTRAINT; the doc
+    # builder does not yet thread constraints, so a UI-capability browser project
+    # correctly fails CLOSED to the browser harness rather than dropping DOM
+    # evidence — the historical no-flag => pytest_http downgrade was the false-GREEN.)
     text = _canonical_test_doc("python")
-    # Python HTTP E2E guidance present...
-    assert _PYTHON_HTTP_E2E_HEADER in text
-    assert "pytest" in text
-    assert "test_<domain>.py" in text
-    # ...and the affirmative Playwright/.spec.ts naming instruction is absent.
-    assert _PLAYWRIGHT_NAMING_LINE not in text
-    assert "E2E Test Level Separation (CRITICAL):" not in text
+    assert _PLAYWRIGHT_NAMING_LINE in text
+    assert "E2E Test Level Separation (CRITICAL):" in text
+    # The HTTP-only Python E2E doc must be ABSENT for a UI-capability browser app.
+    assert _PYTHON_HTTP_E2E_HEADER not in text
 
 
 def test_test_doc_typescript_browser_keeps_playwright_unchanged():
@@ -395,11 +400,12 @@ def test_test_doc_unknown_language_is_byte_for_byte_legacy():
     assert legacy == typescript
 
 
-def test_test_doc_explicit_browser_python_keeps_playwright():
-    # NOTE: the doc-block resolver call does not pass constraints, so this proves
-    # the DEFAULT python+browser routing is pytest_http (covered above). The
-    # explicit-browser path is proven directly against resolve_e2e_harness in
-    # tests/test_e2e_harness.py. Here we only assert non-python is untouched.
+def test_test_doc_non_python_browser_keeps_playwright():
+    # A non-Python (go) browser project keeps the TS Playwright browser block. The
+    # doc-block resolver call does not thread constraints, and the 3-way
+    # http-sufficiency classification (browser_ui_required / http_contract_sufficient
+    # / unknown) is proven directly against resolve_e2e_harness in
+    # tests/test_e2e_harness.py. Here we only assert non-Python is untouched.
     text = _canonical_test_doc("go")
     assert _PLAYWRIGHT_NAMING_LINE in text
     assert _PYTHON_HTTP_E2E_HEADER not in text
@@ -416,15 +422,29 @@ def _e2e_test_artifact(output: str) -> WaveArtifact:
     )
 
 
+# A Python HTTP-surface service (an API server, no browser UI) whose E2E harness
+# resolves to ``pytest_http`` via the non-browser HTTP branch — the clean,
+# constraint-free way to drive the Python HTTP live-server guidance through the
+# generator (the doc/prompt builders do not thread the http-sufficiency
+# constraint, so a UI-capability ``browser`` project now fails CLOSED to Playwright
+# instead — see test_resolve_python_browser_ui_capability_is_playwright).
+HTTP_SERVICE = ProjectCapabilities(
+    user_interface=False,
+    network_surface="http",
+    e2e_modality="none",
+    long_running_service=True,
+)
+
+
 def test_test_code_python_http_e2e_gets_live_server_not_playwright():
-    # A Python E2E test-code artifact (.test.py under tests/e2e) with browser
-    # capability must get Python HTTP live-server guidance, NOT Playwright and
-    # NOT the "no browser, no server" integration fallback.
+    # A Python E2E test-code artifact (.py under tests/e2e) for an HTTP-surface
+    # service must get Python HTTP live-server guidance, NOT Playwright and NOT the
+    # "no browser, no server" integration fallback.
     prompt = _build_generation_prompt(
         _e2e_test_artifact("tests/e2e/items.test.py"),
         [],
         [],
-        capabilities=WEB,
+        capabilities=HTTP_SERVICE,
         project_language="python",
     )
     assert "Python HTTP end-to-end rules (live server, no browser):" in prompt

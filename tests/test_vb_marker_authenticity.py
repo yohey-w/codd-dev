@@ -1204,6 +1204,90 @@ def test_anchor_rejects_local_derived_from_constant():
     assert _body_references_params(body, anchor, _TS_PRIMITIVE_ASSERT_RE) is False
 
 
+# ── unit: RHS scanner ignores STRING LITERALS / COMMENTS / OBJECT KEYS ──
+# ROOT CAUSE #3 (false-GREEN): the anchor harvested identifiers from a binding's
+# RHS with a naive ``re.findall(IDENT, rhs)`` that swept up names inside string
+# literals, comments, and object KEYS. ``const body = "response"`` then wrongly
+# marked ``body`` param-derived, so a constant-only helper that merely *contains*
+# that binding looked anchored ⇒ false-GREEN. The fix scans the RHS for genuine
+# variable REFERENCES only. The four fixtures below are the mandated guard.
+
+
+def test_anchor_credits_genuine_param_derived_local_repro_positive():
+    """FIXTURE (a) — the repro POSITIVE must NOT regress: ``const body = await
+    readJson(response); expect(body.error)…`` genuinely flows ``response`` →
+    ``body`` (a real call argument), so ``body`` IS param-derived and the helper
+    STAYS credited."""
+    body = (
+        "{\n"
+        "  const body = await readJson(response);\n"
+        '  expect(body.error).toBe("nope");\n'
+        "}"
+    )
+    anchor = _params_and_derived_locals(body, {"response"})
+    assert {"response", "body"} <= anchor
+    assert _body_references_params(body, anchor, _TS_PRIMITIVE_ASSERT_RE) is True
+
+
+def test_anchor_credits_different_genuine_param_derived_chains_positive():
+    """FIXTURE (b) — out-of-repro, SAME bug class, DIFFERENT genuine chains stay
+    credited: a python ``data = parse(resp); assert data.code == …`` and a
+    distinct JS ``payload = decode(req).items`` both anchor on a real reference,
+    proving the scanner credits references regardless of the specific names."""
+    # python chain (the resolver handles python anchors too)
+    py = "def check(resp):\n    data = parse(resp)\n    assert data.code == 200\n"
+    py_anchor = _params_and_derived_locals(py, {"resp"})
+    assert {"resp", "data"} <= py_anchor
+    assert _body_references_params(py, py_anchor, _PY_PRIMITIVE_ASSERT_RE) is True
+    # a DIFFERENT TS chain — value flows through a member access whose BASE is the
+    # param (``decode(req)`` carries ``req``; ``.items`` is a property, not a ref)
+    ts = (
+        "{\n"
+        "  const payload = decode(req).items;\n"
+        "  expect(payload.length).toBe(3);\n"
+        "}"
+    )
+    ts_anchor = _params_and_derived_locals(ts, {"req"})
+    assert {"req", "payload"} <= ts_anchor
+    assert _body_references_params(ts, ts_anchor, _TS_PRIMITIVE_ASSERT_RE) is True
+
+
+def test_anchor_rejects_string_literal_and_object_key_spoofs_negative():
+    """FIXTURE (c) — THE false-GREEN GUARD. Two spoofs must NOT be credited:
+
+    1. STRING LITERAL: ``const body = "response"`` — ``response`` only appears
+       inside a string, so ``body`` is NOT param-derived; a constant-only
+       ``expect(true).toBe(true)`` beside it stays UNANCHORED ⇒ not credited.
+    2. OBJECT KEY: ``const x = { response: 1 }`` — ``response`` is an object key,
+       not a reference, so ``x`` is NOT derived.
+    """
+    spoof_string = '{\n  const body = "response";\n  expect(true).toBe(true);\n}'
+    a1 = _params_and_derived_locals(spoof_string, {"response"})
+    assert "body" not in a1  # the param name only lived inside a string literal
+    assert _body_references_params(spoof_string, a1, _TS_PRIMITIVE_ASSERT_RE) is False
+
+    spoof_objkey = "{\n  const x = { response: 1 };\n  expect(true).toBe(true);\n}"
+    a2 = _params_and_derived_locals(spoof_objkey, {"response"})
+    assert "x" not in a2  # the param name was an OBJECT KEY, not a reference
+    assert _body_references_params(spoof_objkey, a2, _TS_PRIMITIVE_ASSERT_RE) is False
+
+
+def test_anchor_credits_destructured_param_derived_local_false_red_guard():
+    """FIXTURE (d) — FALSE-RED GUARD: a genuine destructured bind
+    ``const { error } = await readJson(response); expect(error)…`` still flows the
+    real ``response`` argument to ``error`` and STAYS credited (the scanner must
+    not over-strip and wrongly fail a real anchor)."""
+    body = (
+        "{\n"
+        "  const { error } = await readJson(response);\n"
+        '  expect(error).toBe("title is required");\n'
+        "}"
+    )
+    anchor = _params_and_derived_locals(body, {"response"})
+    assert "error" in anchor
+    assert _body_references_params(body, anchor, _TS_PRIMITIVE_ASSERT_RE) is True
+
+
 # ── gate-level: the noteapi pattern PASSES, the constant-only sibling FAILS ──
 
 

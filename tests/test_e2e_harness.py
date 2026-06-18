@@ -22,6 +22,15 @@ BROWSER = ProjectCapabilities(
     e2e_modality="browser",
     long_running_service=True,
 )
+# A ``browser`` e2e modality WITHOUT a ``user_interface`` capability — used to
+# exercise the constraint-driven http-sufficiency / unknown arms in isolation
+# (so the positive UI-required capability does not pre-empt the classification).
+BROWSER_NO_UI = ProjectCapabilities(
+    user_interface=False,
+    network_surface="http",
+    e2e_modality="browser",
+    long_running_service=True,
+)
 CLI = ProjectCapabilities(e2e_modality="cli")
 HTTP_NO_UI = ProjectCapabilities(network_surface="http", e2e_modality="none")
 NONE = ProjectCapabilities(network_surface="none", e2e_modality="none")
@@ -32,14 +41,20 @@ NONE = ProjectCapabilities(network_surface="none", e2e_modality="none")
 # --------------------------------------------------------------------------- #
 
 
-def test_resolve_python_browser_no_explicit_browser_is_pytest_http():
+def test_resolve_python_browser_ui_capability_is_playwright():
+    # ANTI-FALSE-GREEN: ``BROWSER`` carries ``user_interface=True`` — a POSITIVE
+    # structured signal that a UI is required. A Python browser-modality project
+    # with a UI capability routes to the real browser harness (Playwright), NOT a
+    # silent HTTP-only ``pytest_http`` downgrade. (The HISTORICAL behaviour — no
+    # explicit browser flag => pytest_http — was itself the false-GREEN: a web app
+    # whose UI/DOM need lived only in prose lost all browser evidence.)
     spec = resolve_e2e_harness(project_language="python", capabilities=BROWSER)
     assert spec == E2EHarnessSpec(
-        runner="pytest_http",
-        language="python",
-        output_ext=".py",
-        template_ref="pytest_http",
-        requires_node_manifest=False,
+        runner="playwright",
+        language="typescript",
+        output_ext=".ts",
+        template_ref="playwright",
+        requires_node_manifest=True,
     )
 
 
@@ -65,15 +80,19 @@ def test_resolve_python_browser_explicit_browser_flag_is_playwright():
     assert spec.requires_node_manifest is True
 
 
-def test_resolve_python_browser_ambiguous_constraints_stay_pytest_http():
-    # A non-selector prose-y key must NOT flip to Playwright (no prose inference).
+def test_resolve_python_browser_prose_constraint_is_not_an_http_sufficiency_signal():
+    # NO-PROSE-INFERENCE (anti-false-green): a prose-y key claiming HTTP testing is
+    # fine must NOT be read as the structured http-sufficiency opt-in. With no
+    # POSITIVE structured signal authorising the downgrade, a UI-capability browser
+    # project stays on the real browser harness (it must never silently become
+    # HTTP-only ``pytest_http`` on the strength of prose).
     spec = resolve_e2e_harness(
         project_language="python",
         capabilities=BROWSER,
-        constraints={"notes": "the team likes browser testing in general"},
+        constraints={"notes": "an http contract test is sufficient for this app"},
     )
-    assert spec.runner == "pytest_http"
-    assert spec.requires_node_manifest is False
+    assert spec.runner == "playwright"
+    assert spec.requires_node_manifest is True
 
 
 def test_resolve_typescript_browser_is_playwright_unchanged():
@@ -121,6 +140,97 @@ def test_resolve_no_surface_is_none_spec():
     spec = resolve_e2e_harness(project_language="python", capabilities=NONE)
     assert spec.runner == "none"
     assert spec.template_ref == "none"
+
+
+# --------------------------------------------------------------------------- #
+# 3-way http-sufficiency classification for a BROWSER-modality project.
+# The Python ``pytest_http`` downgrade is gated on POSITIVE structured evidence;
+# absence of a browser flag is NEVER a downgrade signal (the historical
+# false-GREEN). browser_ui_required / http_contract_sufficient / unknown.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_python_browser_http_sufficiency_flag_is_pytest_http():
+    # (a) DOGFOOD-REPRO POSITIVE: a Python browser-modality project WITH an explicit
+    # http-sufficiency opt-in routes to ``pytest_http`` (the intended HTTP-contract
+    # path still works). The opt-in is a POSITIVE, structured signal — not prose.
+    spec = resolve_e2e_harness(
+        project_language="python",
+        capabilities=BROWSER_NO_UI,
+        constraints={"http_contract_sufficient": True},
+    )
+    assert spec == E2EHarnessSpec(
+        runner="pytest_http",
+        language="python",
+        output_ext=".py",
+        template_ref="pytest_http",
+        requires_node_manifest=False,
+    )
+
+
+def test_resolve_python_browser_http_harness_selector_is_pytest_http():
+    # (a, variant) The harness-selector mirror: ``e2e_harness: pytest_http`` is the
+    # POSITIVE selector form of the http-sufficiency opt-in → ``pytest_http``.
+    spec = resolve_e2e_harness(
+        project_language="python",
+        capabilities=BROWSER_NO_UI,
+        constraints={"e2e_harness": "pytest_http"},
+    )
+    assert spec.runner == "pytest_http"
+    assert spec.output_ext == ".py"
+    assert spec.requires_node_manifest is False
+
+
+def test_resolve_python_browser_explicit_browser_flag_beats_http_sufficiency():
+    # (b) OUT-OF-DOGFOOD POSITIVE: a Python browser-modality project WITH an explicit
+    # browser flag/selector routes to Playwright. The explicit browser flag has the
+    # HIGHEST precedence — it wins even if an http-sufficiency opt-in is also set.
+    spec = resolve_e2e_harness(
+        project_language="python",
+        capabilities=BROWSER_NO_UI,
+        constraints={
+            "browser_automation_required": True,
+            "http_contract_sufficient": True,
+        },
+    )
+    assert spec.runner == "playwright"
+    assert spec.output_ext == ".ts"
+    assert spec.template_ref == "playwright"
+    assert spec.requires_node_manifest is True
+
+
+def test_resolve_python_browser_unknown_fails_closed_to_playwright_not_pytest_http():
+    # (c) SPOOF NEGATIVE = THE FALSE-GREEN GUARD (core regression-prevention): a
+    # Python browser-modality project with NO positive signal whatsoever (no browser
+    # flag, no UI capability, no http-sufficiency opt-in) is ``unknown``. It MUST NOT
+    # silently downgrade to ``pytest_http`` (which would run an HTTP-only test and
+    # never capture real browser/DOM evidence — the false-GREEN). It FAILS CLOSED to
+    # the browser harness (Playwright, node manifest required) — a false-RED /
+    # explicit-toolchain requirement is acceptable; a silent pytest_http is NOT.
+    spec = resolve_e2e_harness(
+        project_language="python",
+        capabilities=BROWSER_NO_UI,
+    )
+    assert spec.runner == "playwright"
+    assert spec.runner != "pytest_http"
+    assert spec.output_ext == ".ts"
+    assert spec.template_ref == "playwright"
+    assert spec.requires_node_manifest is True
+
+
+def test_resolve_python_non_browser_http_surface_still_pytest_http_no_regression():
+    # (d) FALSE-RED GUARD: the non-browser ``network_surface == "http"`` Python case
+    # (an HTTP API service, e2e_modality != browser) still routes to ``pytest_http``.
+    # The 3-way browser classification must NOT bleed into this branch — no false-RED
+    # regression for a legitimately HTTP-only Python service.
+    spec = resolve_e2e_harness(project_language="python", capabilities=HTTP_NO_UI)
+    assert spec == E2EHarnessSpec(
+        runner="pytest_http",
+        language="python",
+        output_ext=".py",
+        template_ref="pytest_http",
+        requires_node_manifest=False,
+    )
 
 
 # --------------------------------------------------------------------------- #
