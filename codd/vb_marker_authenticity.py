@@ -712,7 +712,11 @@ _ASSERTION_HELPER_NAME_RE = re.compile(
 
 
 def _looks_like_assertion_helper(name: str) -> bool:
-    return bool(_ASSERTION_HELPER_NAME_RE.match(name or ""))
+    # Strip a leading underscore so a private helper (``_assert_error``) is a
+    # candidate. Candidacy only chooses WHICH calls to resolve; the helper still
+    # must resolve to a def whose body has a primitive assertion anchored on a
+    # parameter, so this never credits a non-asserting helper.
+    return bool(_ASSERTION_HELPER_NAME_RE.match((name or "").lstrip("_")))
 
 
 def _shared_marker_lines(text: str) -> set[int]:
@@ -757,6 +761,34 @@ _PY_DEF_RE = re.compile(
 )
 
 
+def _python_decorator_start_lines(text: str) -> dict[int, int]:
+    """Map a ``test_*`` def's 1-based line → its FIRST decorator's 1-based line.
+
+    Uses Python's AST so a marker placed immediately above a MULTI-LINE decorator
+    (e.g. a wrapped ``@pytest.mark.parametrize(...)``) still attaches to the test:
+    the block's ``start_line`` becomes the decorator block's first line, so the
+    marker sits directly above the block. An arbitrary non-decorator statement
+    between the marker and the decorator still breaks attachment (the marker would
+    no longer be adjacent to ``start_line``). Falls back to ``{}`` on a parse error
+    so callers keep the def-line behavior.
+    """
+
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return {}
+    starts: dict[int, int] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not str(node.name).startswith("test_"):
+            continue
+        decorators = getattr(node, "decorator_list", ()) or ()
+        if decorators:
+            starts[int(node.lineno)] = min(int(d.lineno) for d in decorators)
+    return starts
+
+
 @dataclass(frozen=True)
 class PythonTestBlockProfile:
     """pytest / unittest structural adapter.
@@ -777,6 +809,7 @@ class PythonTestBlockProfile:
     def parse_test_blocks(self, text: str) -> list[TestBlock]:
         lines = text.splitlines()
         marker_lines = _shared_marker_lines(text)
+        decorator_starts = _python_decorator_start_lines(text)
         blocks: list[TestBlock] = []
         index = 0
         total = len(lines)
@@ -786,6 +819,10 @@ class PythonTestBlockProfile:
                 index += 1
                 continue
             def_line = index + 1  # 1-based
+            # Attach point: the FIRST decorator line (so a marker above a
+            # multi-line decorator still attaches to this test); the def line when
+            # undecorated / unparseable.
+            start_line = decorator_starts.get(def_line, def_line)
             indent = len(match.group("indent").expandtabs())
             name = match.group("name")
             # Body: from the line after the def until dedent to <= indent. A
@@ -814,26 +851,19 @@ class PythonTestBlockProfile:
                     break
                 body_end -= 1
             body_text = "\n".join(lines[def_line:body_end])  # def's body region
-            # Skip via decorator above the def (scan upward over decorator lines).
+            # Skip via the FULL decorator block above the def (start_line..def),
+            # which captures a multi-line ``@pytest.mark.skipif(...)`` the old
+            # line-by-line upward scan could miss; plus an in-body skip call.
             skipped = bool(re.search(r"\bpytest\.skip\s*\(", body_text)) or bool(
                 re.search(r"\bself\.skipTest\s*\(", body_text)
             )
-            up = index - 1
-            while up >= 0:
-                deco = lines[up].strip()
-                if not deco:
-                    up -= 1
-                    continue
-                if deco.startswith("@"):
-                    if _PY_SKIP_DECORATOR_RE.search(deco):
-                        skipped = True
-                    up -= 1
-                    continue
-                break
+            decorator_text = "\n".join(lines[start_line - 1 : index])
+            if _PY_SKIP_DECORATOR_RE.search(decorator_text):
+                skipped = True
             has_assertion = bool(_PY_PRIMITIVE_ASSERT_RE.search(body_text))
             blocks.append(
                 TestBlock(
-                    start_line=def_line,
+                    start_line=start_line,
                     end_line=max(body_end, def_line),
                     is_executable=not skipped,
                     has_assertion=has_assertion,
@@ -1571,16 +1601,16 @@ def _py_reexport_edges(module_text: str, symbol: str) -> list[tuple[str, str]]:
       ``from .x import y``        → forwards ``y`` unchanged when ``y == symbol``
       ``from .x import y as z``   → forwards ``y`` when the LOCAL ``z == symbol``
       ``from .x import *``        → forwards ``symbol`` unchanged (star)
-    Only explicit-relative imports (``from .x`` / ``from ..pkg.x``) are followed —
-    an absolute ``from app.x import y`` re-export is unusual in a test barrel and
-    is conservatively skipped (kept out of the same-dir 1-hop re-export graph).
+    Explicit-relative imports are followed, and ABSOLUTE re-exports are admitted as
+    CANDIDATE edges too (a first-party barrel commonly re-exports via
+    ``from tests.helpers import x``). same-repo-ness is enforced downstream by
+    ``_py_resolve_module``: it returns a file only for a project module, so a
+    stdlib / third-party absolute re-export stays unresolved and cannot pass.
     """
 
     edges: list[tuple[str, str]] = []
     for item in _iter_py_from_imports(module_text):
         mod = item.mod
-        if not mod.startswith("."):
-            continue
         for original, local in item.names:
             if original == "*":
                 edges.append((mod, symbol))  # star re-export forwards the name
@@ -1626,6 +1656,12 @@ def _py_find_function_def(module_text: str, name: str) -> "tuple[str, list[str]]
     for idx, line in enumerate(lines):
         m = _PY_DEF_RE.match(line)
         if not m or m.group("name") != name:
+            continue
+        if m.group("indent"):
+            # Only a TOP-LEVEL (module-bound) def is a helper a test can import or
+            # call. A nested/indented def (inside a function or class body) is not
+            # an importable binding; crediting its assertion would be a false-green
+            # for a helper the test cannot actually reach. Fail closed.
             continue
         params = _split_params(m.group("params"))
         indent = len(m.group("indent").expandtabs())

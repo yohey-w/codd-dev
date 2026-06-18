@@ -1480,3 +1480,118 @@ def test_py_backslash_continuation_import_resolves(tmp_path):
     )
     report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
     assert report.passed is True, [(v.kind, v.message) for v in report.violations]
+
+
+# ---------------------------------------------------------------------------
+# Python marker-authenticity helper-resolution gaps
+# (regression: PC-py-marker-authenticity-helper-resolution-falsered) — three
+# false-REDs a real Codex Python web greenfield hit at the gate. The fix widens
+# helper RESOLUTION (absolute barrel re-export, same-file private helper) and
+# marker ATTACHMENT (multi-line decorator) only; the PROVABLY-asserts-only proof
+# is unchanged, so the anti-false-green fixtures below stay RED.
+# ---------------------------------------------------------------------------
+
+
+def _abs_barrel_project(tmp_path, *, helper_body: str, barrel_import: str):
+    """A project whose e2e test imports `assert_ok` from a tests/e2e/helpers
+    package barrel that re-exports it via an ABSOLUTE import (``barrel_import``)."""
+    project = tmp_path
+    _canonical(project, "| VB-1 | does a thing |\n")
+    _write(project / "tests" / "__init__.py", "")
+    _write(project / "tests" / "helpers.py", helper_body)
+    _write(project / "tests" / "e2e" / "__init__.py", "")
+    _write(project / "tests" / "e2e" / "helpers" / "__init__.py", barrel_import + "\n")
+    _write(
+        project / "tests" / "e2e" / "test_cli.py",
+        "from tests.e2e.helpers import assert_ok\n\n# codd: covers vb=VB-1\n"
+        "def test_cli_ok():\n    result = 0\n    assert_ok(result)\n",
+    )
+    return project
+
+
+def test_py_absolute_barrel_reexport_helper_is_credited(tmp_path):
+    """Gap 1: a barrel that re-exports an asserting helper via an ABSOLUTE import
+    (`from tests.helpers import assert_ok`) resolves to the same-repo def → credited."""
+    project = _abs_barrel_project(
+        tmp_path,
+        helper_body="def assert_ok(result):\n    assert result == 0\n",
+        barrel_import="from tests.helpers import assert_ok",
+    )
+    report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is True, [(v.kind, v.message) for v in report.violations]
+
+
+def test_py_absolute_barrel_nonassert_helper_stays_red(tmp_path):
+    """Anti-false-green: following the ABSOLUTE re-export does NOT credit a helper
+    whose body has no primitive assertion (resolution widened, proof unchanged)."""
+    project = _abs_barrel_project(
+        tmp_path,
+        helper_body="def assert_ok(result):\n    return None\n",
+        barrel_import="from tests.helpers import assert_ok",
+    )
+    report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is False
+    assert any(v.kind == "no_assertion" for v in report.violations), [v.kind for v in report.violations]
+
+
+def test_py_thirdparty_absolute_reexport_not_followed(tmp_path):
+    """Anti-false-green: an ABSOLUTE re-export from a NON-project module (no project
+    file, e.g. `from requests import ...`) stays unresolved and cannot credit the
+    marker — only same-repo modules are followed."""
+    project = _abs_barrel_project(
+        tmp_path,
+        helper_body="def unused():\n    assert True\n",
+        barrel_import="from requests import assert_ok",
+    )
+    report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is False
+    assert any(v.kind == "no_assertion" for v in report.violations), [v.kind for v in report.violations]
+
+
+def test_py_same_file_underscore_helper_is_credited(tmp_path):
+    """Gap 2: a marker on a test that asserts via a same-file PRIVATE helper
+    (`_assert_error`, leading underscore) whose body asserts on its argument is
+    credited — the candidate filter previously dropped leading-underscore names."""
+    project = tmp_path
+    _canonical(project, "| VB-LOCAL-01 | a |\n")
+    _write(
+        project / "tests" / "test_local.py",
+        "def _assert_error(response, status):\n    assert response.status_code == status\n\n"
+        "# codd: covers vb=VB-LOCAL-01\n"
+        "def test_rejects():\n    resp = call()\n    _assert_error(resp, 400)\n",
+    )
+    report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is True, [(v.kind, v.message) for v in report.violations]
+
+
+def test_py_nested_helper_def_is_not_credited(tmp_path):
+    """Anti-false-green (Gap 2 hardening): a helper def NESTED inside another
+    function is not an importable/callable binding (a runtime NameError), so its
+    assertion must not credit the marker — only top-level defs are followed."""
+    project = tmp_path
+    _canonical(project, "| VB-NEST-01 | a |\n")
+    _write(
+        project / "tests" / "test_nested.py",
+        "def outer():\n    def _assert_error(response, status):\n"
+        "        assert response.status_code == status\n\n"
+        "# codd: covers vb=VB-NEST-01\n"
+        "def test_error():\n    resp = call()\n    _assert_error(resp, 400)\n",
+    )
+    report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is False
+    assert any(v.kind == "no_assertion" for v in report.violations), [v.kind for v in report.violations]
+
+
+def test_py_marker_above_multiline_decorator_attaches(tmp_path):
+    """Gap 3: a marker placed above a MULTI-LINE @pytest.mark.parametrize attaches
+    to the decorated test (was reported 'not attached to a test block')."""
+    project = tmp_path
+    _canonical(project, "| VB-DECO-01 | a |\n")
+    _write(
+        project / "tests" / "test_deco.py",
+        "import pytest\n\n# codd: covers vb=VB-DECO-01\n"
+        "@pytest.mark.parametrize(\n    ('status', 'code'),\n    [(400, 'bad_request')],\n)\n"
+        "def test_error(status, code):\n    resp = call()\n    assert resp.status_code == status\n",
+    )
+    report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is True, [(v.kind, v.message) for v in report.violations]
