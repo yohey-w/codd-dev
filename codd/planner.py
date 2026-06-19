@@ -424,6 +424,12 @@ def plan_init(
     wave_config = _invoke_and_parse_wave_config(
         resolved_ai_command, prompt, max_retries=_plan_init_max_retries(config)
     )
+    if requirement_documents:
+        # Greenfield: GUARANTEE the canonical VB registry doc is planned so the VB
+        # coverage/authenticity SSOT is never silently absent (false-GREEN: 0/0 pass).
+        wave_config = _ensure_canonical_vb_doc_planned(
+            config, wave_config, requirement_documents
+        )
 
     from codd.config import find_codd_dir
     config["wave_config"] = wave_config
@@ -489,6 +495,79 @@ def _set_canonical_vb_doc_config(
         section = {}
     section["docs"] = [canonical_output]
     config["test_coverage"] = section
+
+
+def _ensure_canonical_vb_doc_planned(
+    config: dict[str, Any],
+    wave_config: dict[str, Any],
+    requirement_documents: list[RequirementDocument],
+) -> dict[str, Any]:
+    """GUARANTEE the canonical VB registry doc is planned (greenfield VB SSOT).
+
+    The AI's wave_config can omit ``test:test-strategy`` / ``docs/test/test_strategy.md``
+    non-deterministically; without it the VB audit has ZERO declarations and the coverage
+    gate trivially passes 0/0 — a false-GREEN (the requirements' behaviors are never
+    certified). When the canonical doc is absent — and the owner has NOT pinned an explicit
+    ``test_coverage.docs`` — append it as a FINAL wave (so existing wave order/dependencies
+    are untouched) depending on the requirement docs + every already-planned artifact, so it
+    is generated last with full context. ``_set_canonical_vb_doc_config`` then detects+pins
+    it as usual (this stays the force-INJECT step; that one stays detection-only). Generic:
+    keys off the canonical naming, not any project's specifics.
+    """
+
+    from codd.verifiable_behavior_audit import (
+        coverage_gate_enabled,
+        wave_config_plans_canonical_vb_doc,
+    )
+
+    if not coverage_gate_enabled(config):
+        return wave_config  # coverage gate off (owner opt-out) — no VB SSOT needed
+    if wave_config_plans_canonical_vb_doc({"wave_config": wave_config}):
+        return wave_config  # the AI already planned it — nothing to do
+    section = config.get("test_coverage")
+    if isinstance(section, dict) and section.get("docs"):
+        return wave_config  # respect an explicit owner-pinned VB doc
+
+    out = deepcopy(wave_config)
+    new_wave = str(_max_wave_number(out) + 1)
+    existing_node_ids: list[str] = []
+    modules: set[str] = set()
+    for entries in out.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            node_id = entry.get("node_id") or entry.get("id")
+            if isinstance(node_id, str) and node_id.strip():
+                existing_node_ids.append(node_id.strip())
+            for module in entry.get("modules") or []:
+                if isinstance(module, str) and module.strip():
+                    modules.add(module.strip())
+
+    depends_on: list[dict[str, str]] = [
+        {"id": doc.node_id, "relation": "derives_from", "semantic": "governance"}
+        for doc in requirement_documents
+        if getattr(doc, "node_id", None)
+    ]
+    depends_on.extend(
+        {"id": node_id, "relation": "depends_on", "semantic": "verification"}
+        for node_id in existing_node_ids
+    )
+
+    out.setdefault(new_wave, [])
+    if isinstance(out[new_wave], list):
+        out[new_wave].append(
+            {
+                "node_id": "test:test-strategy",
+                "output": "docs/test/test_strategy.md",
+                "title": "Test Strategy and Verifiable Behavior Registry",
+                "depends_on": depends_on,
+                "conventions": [],
+                "modules": sorted(modules),
+            }
+        )
+    return {key: out[key] for key in sorted(out, key=_wave_key_sort_value)}
 
 
 def _ensure_lexicon(project_root: Path) -> None:

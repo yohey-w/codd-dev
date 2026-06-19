@@ -96,11 +96,14 @@ def test_e2e_fresh_directory_initializes_then_builds(tmp_path: Path, stub_ai) ->
     # src-layout (it reasons over declared claims, not the permissive
     # source-root/package-root fallback), so this e2e exercises the full gate.
 
+    # Orchestration/init E2E: the stub AI cannot emit a coherent VB registry, so opt
+    # out of the VB coverage gate (it is certified by the vb-gate tests + unit fixtures).
     pipeline = GreenfieldPipeline(
         project_name="fresh-app",
         language="python",
         requirements=spec,
         ai_command=stub_ai["command"],
+        coverage_gate=False,
     )
     result = pipeline.run(target)
 
@@ -135,12 +138,15 @@ def test_e2e_shared_output_root_repo_root_ci_and_project_type(tmp_path: Path, st
     # the coherent stub output), so this harness exercises CI-rerooting /
     # shared-src-layout / project_type WITH the full gate active.
 
+    # Orchestration E2E: stub AI cannot emit a coherent VB registry → opt out of the
+    # VB coverage gate (certified separately by the vb-gate tests + unit fixtures).
     pipeline = GreenfieldPipeline(
         project_name="fresh-cli-app",
         language="python",
         requirements=spec,
         project_type="cli",
         ai_command=stub_ai["command"],
+        coverage_gate=False,
     )
     result = pipeline.run(target)
 
@@ -675,7 +681,9 @@ _VB_DOC = """# Test Plan
 
 def _vb_project(tmp_path: Path, *, greenfield_config: dict | None = None) -> Path:
     """A stub project that declares two verifiable behaviors in docs/test."""
-    project = make_stub_project(tmp_path, "stub-ai-cli --print", greenfield_config=greenfield_config)
+    project = make_stub_project(
+        tmp_path, "stub-ai-cli --print", greenfield_config=greenfield_config, coverage_gate=True
+    )
     vb_doc = project / "docs" / "test" / "behaviors.md"
     vb_doc.parent.mkdir(parents=True, exist_ok=True)
     vb_doc.write_text(_VB_DOC, encoding="utf-8")
@@ -1757,3 +1765,59 @@ def test_stage_coverage_gate_no_vb_surface_project_passes(tmp_path):
     project = make_stub_project(tmp_path, "stub-ai-cli --print")  # design-only
     # Must NOT raise (no VBs declared, but none expected either).
     _enforce_stage_coverage_gate(project, coverage_gate=True, echo=lambda _m: None)
+
+
+# ═══════════════════════════════════════════════════════════
+# Greenfield VB-plan contract backstop: with the coverage gate ON, a VB SSOT must
+# exist after plan — either the canonical VB doc is planned (planner force-injects it)
+# OR VBs are already declared/discoverable. Otherwise coverage passes 0/0 (false-green).
+# ═══════════════════════════════════════════════════════════
+
+
+def _vb_plan_project(tmp_path: Path, wave_config: dict, *, gate: bool = True, vb_doc: bool = False) -> Path:
+    project = tmp_path / "vbplan"
+    codd_dir = project / "codd"
+    codd_dir.mkdir(parents=True, exist_ok=True)
+    config: dict = {
+        "project": {"name": "vbplan", "language": "python"},
+        "wave_config": wave_config,
+        "test_coverage": {"gate": gate},
+    }
+    (codd_dir / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    if vb_doc:
+        doc = project / "docs" / "test" / "behaviors.md"
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text(_VB_DOC, encoding="utf-8")
+    return project
+
+
+_WC_AC_ONLY = {"1": [{"node_id": "test:acceptance-criteria", "output": "docs/test/acceptance_criteria.md", "title": "AC"}]}
+_WC_WITH_CANONICAL = {"1": [{"node_id": "test:test-strategy", "output": "docs/test/test_strategy.md", "title": "TS"}]}
+
+
+def test_vb_plan_contract_red_when_no_ssot(tmp_path: Path) -> None:
+    """No canonical doc planned AND no discoverable VBs → RED (the false-green hole)."""
+    project = _vb_plan_project(tmp_path, _WC_AC_ONLY)
+    with pytest.raises(StageError, match="verifiable-behavior SSOT"):
+        GreenfieldPipeline()._enforce_greenfield_vb_plan_contract(project, {"coverage_gate": True})
+
+
+def test_vb_plan_contract_ok_with_canonical_doc(tmp_path: Path) -> None:
+    project = _vb_plan_project(tmp_path, _WC_WITH_CANONICAL)
+    GreenfieldPipeline()._enforce_greenfield_vb_plan_contract(project, {"coverage_gate": True})  # no raise
+
+
+def test_vb_plan_contract_ok_when_vbs_already_declared(tmp_path: Path) -> None:
+    """Canonical not planned, but VBs are already declared in a docs/test doc → OK
+    (a VB SSOT exists; this is the shape vb-gate tests use)."""
+    project = _vb_plan_project(tmp_path, _WC_AC_ONLY, vb_doc=True)
+    GreenfieldPipeline()._enforce_greenfield_vb_plan_contract(project, {"coverage_gate": True})  # no raise
+
+
+def test_vb_plan_contract_skipped_when_gate_off(tmp_path: Path) -> None:
+    # option opt-out (--no-coverage-gate)
+    project = _vb_plan_project(tmp_path, _WC_AC_ONLY)
+    GreenfieldPipeline()._enforce_greenfield_vb_plan_contract(project, {"coverage_gate": False})
+    # config opt-out (test_coverage.gate: false)
+    project2 = _vb_plan_project(tmp_path / "off", _WC_AC_ONLY, gate=False)
+    GreenfieldPipeline()._enforce_greenfield_vb_plan_contract(project2, {"coverage_gate": True})

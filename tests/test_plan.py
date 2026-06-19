@@ -458,7 +458,11 @@ def test_plan_command_init_generates_wave_config_from_requirement_docs(tmp_path,
 
     assert result.exit_code == 0
     config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
-    assert sorted(config["wave_config"]) == ["1", "2"]
+    # The AI returned waves 1-2 (no canonical VB doc); the planner GUARANTEES the
+    # canonical VB registry by force-injecting it as a final wave (3).
+    assert sorted(config["wave_config"]) == ["1", "2", "3"]
+    assert config["wave_config"]["3"][0]["node_id"] == "test:test-strategy"
+    assert config["wave_config"]["3"][0]["output"] == "docs/test/test_strategy.md"
     assert config["wave_config"]["1"][0]["node_id"] == "design:acceptance-criteria"
     assert config["wave_config"]["1"][0]["depends_on"][0]["semantic"] == "governance"
     assert config["wave_config"]["1"][0]["conventions"][0]["targets"] == ["db:rls_policies", "module:auth"]
@@ -1049,3 +1053,58 @@ def test_plan_init_max_retries_config_override():
     assert planner_module._plan_init_max_retries({"plan": {"init_retry": {"max_retries": 0}}}) == 0
     # Malformed config falls back to the default (never crashes).
     assert planner_module._plan_init_max_retries({"plan": "nope"}) == planner_module.DEFAULT_PLAN_INIT_MAX_RETRIES
+
+
+# ---------------------------------------------------------------------------
+# Canonical VB doc GUARANTEE (greenfield SSOT): if the AI's wave_config omits
+# test:test-strategy / docs/test/test_strategy.md, the planner force-injects it (when
+# the coverage gate is on) so the VB coverage/authenticity SSOT is never silently
+# absent (a missing registry lets the coverage gate trivially pass 0/0 = false-GREEN).
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from codd.verifiable_behavior_audit import wave_config_plans_canonical_vb_doc  # noqa: E402
+
+_REQ_DOCS = [SimpleNamespace(node_id="req:project-requirements")]
+
+
+def test_ensure_canonical_vb_doc_injected_when_ai_omits_it():
+    wave_config = {
+        "1": [{"node_id": "design:x", "output": "docs/design/x.md", "title": "X", "modules": ["module:x"]}],
+        "2": [{"node_id": "test:acceptance-criteria", "output": "docs/test/acceptance_criteria.md", "title": "AC"}],
+    }
+    out = planner_module._ensure_canonical_vb_doc_planned({}, wave_config, _REQ_DOCS)
+    assert wave_config_plans_canonical_vb_doc({"wave_config": out})
+    injected = [e for ents in out.values() for e in ents if e.get("node_id") == "test:test-strategy"]
+    assert len(injected) == 1
+    assert injected[0]["output"] == "docs/test/test_strategy.md"
+    assert "3" in out  # appended as a NEW final wave (existing waves untouched)
+    dep_ids = {d["id"] for d in injected[0]["depends_on"]}
+    assert "req:project-requirements" in dep_ids
+    assert {"design:x", "test:acceptance-criteria"} <= dep_ids
+
+
+def test_ensure_canonical_vb_doc_no_duplicate_when_ai_includes_it():
+    wave_config = {"1": [{"node_id": "test:test-strategy", "output": "docs/test/test_strategy.md", "title": "TS"}]}
+    out = planner_module._ensure_canonical_vb_doc_planned({}, wave_config, _REQ_DOCS)
+    injected = [e for ents in out.values() for e in ents if e.get("node_id") == "test:test-strategy"]
+    assert len(injected) == 1  # no duplicate
+    assert out == wave_config  # unchanged
+
+
+def test_ensure_canonical_vb_doc_respects_explicit_test_coverage_docs():
+    wave_config = {"1": [{"node_id": "test:acceptance-criteria", "output": "docs/test/acceptance_criteria.md", "title": "AC"}]}
+    config = {"test_coverage": {"docs": ["docs/test/custom_vb.md"]}}
+    out = planner_module._ensure_canonical_vb_doc_planned(config, wave_config, _REQ_DOCS)
+    assert len([e for ents in out.values() for e in ents if e.get("node_id") == "test:test-strategy"]) == 0
+    assert out == wave_config
+
+
+def test_ensure_canonical_vb_doc_skipped_when_coverage_gate_off():
+    """Coverage gate explicitly off (owner opt-out) → no VB SSOT needed → no injection."""
+    wave_config = {"1": [{"node_id": "test:acceptance-criteria", "output": "docs/test/acceptance_criteria.md", "title": "AC"}]}
+    config = {"test_coverage": {"gate": False}}
+    out = planner_module._ensure_canonical_vb_doc_planned(config, wave_config, _REQ_DOCS)
+    assert len([e for ents in out.values() for e in ents if e.get("node_id") == "test:test-strategy"]) == 0
+    assert out == wave_config

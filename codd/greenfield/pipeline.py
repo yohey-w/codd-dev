@@ -633,6 +633,60 @@ class GreenfieldPipeline:
             raise StageError(f"plan --init failed: {exc}") from exc
         record["detail"] = f"{wave_count} wave(s)"
         record["waves"] = wave_count
+        self._enforce_greenfield_vb_plan_contract(project_root, options)
+
+    def _enforce_greenfield_vb_plan_contract(
+        self, project_root: Path, options: dict[str, Any]
+    ) -> None:
+        """Backstop: a greenfield run with the coverage gate ON must PLAN the canonical
+        VB registry doc (``test:test-strategy`` / ``docs/test/test_strategy.md``).
+
+        ``planner._ensure_canonical_vb_doc_planned`` force-injects it on the normal path;
+        this catches a custom ``plan_runner``, a hand-written wave_config, or any future
+        path that bypasses the injection. Deliberately NOT gated on
+        ``project_expects_vb_registry`` — that returns False in exactly the dangerous case
+        (AI omitted the canonical doc, no ``test_coverage.docs``, no file yet), which is the
+        hole this closes. Without the canonical doc the VB audit has zero declarations and
+        coverage trivially passes 0/0 (false-GREEN). Skipped when the coverage gate is
+        explicitly OFF (owner opt-out) or an explicit ``test_coverage.docs`` is pinned."""
+
+        from codd.config import load_project_config
+        from codd.verifiable_behavior_audit import (
+            coverage_gate_enabled,
+            load_verifiable_behaviors,
+            wave_config_plans_canonical_vb_doc,
+        )
+
+        if not bool(options.get("coverage_gate", True)):
+            return
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+        if not coverage_gate_enabled(config):
+            return
+        section = config.get("test_coverage")
+        if isinstance(section, dict) and section.get("docs"):
+            return  # owner pinned an explicit VB doc — respect it
+        if wave_config_plans_canonical_vb_doc(config):
+            return  # the canonical VB doc is planned — SSOT will exist
+        # Not planned — but VBs may ALREADY be declared in a discoverable docs/test
+        # doc. The contract is "a VB SSOT must exist", satisfied by EITHER a planned
+        # canonical doc OR existing declarations. Only RED when NEITHER holds (e.g. a
+        # real greenfield at plan stage with no docs generated and no canonical planned).
+        try:
+            behaviors = load_verifiable_behaviors(project_root, config=config)
+        except Exception:  # noqa: BLE001 — discovery failure ⇒ fall through to the RED below.
+            behaviors = []
+        if behaviors:
+            return  # a VB surface already exists
+        raise StageError(
+            "greenfield coverage gate requires a verifiable-behavior SSOT: plan the canonical "
+            "VB registry document (test:test-strategy / docs/test/test_strategy.md) in wave_config "
+            "or declare VBs in a docs/test doc. Without it the declared-VB set is empty and the "
+            "coverage/authenticity gate can pass WITHOUT certifying any behavior (a false-green). "
+            "Disable the coverage gate explicitly if this build has no behaviors to verify."
+        )
 
     # ── stage: generate ─────────────────────────────────────
 

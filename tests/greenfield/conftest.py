@@ -240,8 +240,16 @@ def make_stub_project(
     *,
     name: str = "stub-app",
     greenfield_config: dict | None = None,
+    coverage_gate: bool = False,
 ) -> Path:
-    """Create a pre-initialized synthetic CoDD project wired to the stub AI."""
+    """Create a pre-initialized synthetic CoDD project wired to the stub AI.
+
+    ``coverage_gate`` defaults to False: a bare stub project models NO verifiable
+    behaviors (its fake runners produce no real code/tests), so the VB
+    coverage/authenticity SSOT contract does not apply — mirroring the existing
+    ``implement_oracle: False`` opt-out. Tests that DO exercise the VB gate use
+    ``_vb_project`` (which declares VBs) and pass ``coverage_gate=True``. The VB gate
+    itself is certified by those tests + tests/test_vb_marker_authenticity.py."""
     project = tmp_path / name
     codd_dir = project / "codd"
     (codd_dir / "scan").mkdir(parents=True)
@@ -278,6 +286,11 @@ def make_stub_project(
             "implement_oracle": False,
         },
     }
+    if not coverage_gate:
+        # Stub project models no VBs → opt out of the VB coverage/authenticity SSOT
+        # contract (the planner force-inject + greenfield backstop). _vb_project sets
+        # this True because it declares VBs and exercises the gate.
+        config["test_coverage"] = {"gate": False}
     if greenfield_config is not None:
         config["greenfield"] = greenfield_config
     (codd_dir / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
