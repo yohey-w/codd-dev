@@ -274,6 +274,9 @@ def test_declared_output_completeness_ignores_symbol_declarations(tmp_path):
     assert _declared_output_is_file_path("Version.__str__") is False
     assert _declared_output_is_file_path("Range.matches(version)") is False
     assert _declared_output_is_file_path("module:range") is False
+    # node-id with a dotted alphanumeric method (a colon marks it a node-id, not a path)
+    assert _declared_output_is_file_path("module:parser.parse") is False
+    assert _declared_output_is_file_path("test:test-strategy") is False
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "version.py").write_text("class Version: ...\n", encoding="utf-8")

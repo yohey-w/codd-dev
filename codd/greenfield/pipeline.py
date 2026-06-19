@@ -2465,6 +2465,8 @@ def _declared_output_is_file_path(raw: str) -> bool:
     s = raw.strip().replace("\\", "/").strip("/")
     if not s:
         return False
+    if ":" in s:
+        return False  # node-id (``module:parser.parse`` / ``design:x``), not a file path
     if "/" in s:
         return True
     ext = PurePosixPath(s).suffix[1:]  # drop the leading dot
