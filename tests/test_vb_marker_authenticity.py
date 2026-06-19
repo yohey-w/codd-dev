@@ -2391,6 +2391,85 @@ def test_ts_library_only_unit_classifier():
 
 
 # ---------------------------------------------------------------------------
+# CROSS-LANGUAGE PARITY: the TS/JS path must credit the TS-equivalents of the
+# recent PYTHON fixes (throw = raise-AssertionError v2.56; expect(()=>).toThrow /
+# assert.throws = with self.assertRaises v2.61; an expect-asserting helper on its
+# data arg = testcase.assert* helper v2.62) AND still REJECT a constant-only helper.
+# Empirically confirmed at parity (PARITY HOLDS) — these lock it so a future
+# refactor cannot silently weaken TS while the Python tests stay green.
+# ---------------------------------------------------------------------------
+
+
+def test_ts_throw_on_sut_condition_is_credited(tmp_path):
+    """``throw new Error(...)`` guarded by a SUT-derived condition proves the SUT
+    (the TS analogue of Python ``raise AssertionError``)."""
+    project = _ts_project(
+        tmp_path,
+        "import { parse } from '../src/calc';\n"
+        "// codd: covers vb=VB-01\n"
+        "it('x', () => { if (parse('2+3') !== 5) throw new Error('bad'); });\n",
+    )
+    report = build_authenticity_report(project, config=_scan_cfg(), profile=TS_PROFILE)
+    assert report.passed, [(v.kind, v.message) for v in report.violations]
+
+
+def test_ts_expect_tothrow_on_sut_is_credited(tmp_path):
+    """``expect(() => sut()).toThrow()`` proves the SUT raises (the TS analogue of
+    ``with self.assertRaises``)."""
+    project = _ts_project(
+        tmp_path,
+        "import { parse } from '../src/calc';\n"
+        "// codd: covers vb=VB-01\n"
+        "it('x', () => { expect(() => parse('bad')).toThrow(); });\n",
+    )
+    report = build_authenticity_report(project, config=_scan_cfg(), profile=TS_PROFILE)
+    assert report.passed, [(v.kind, v.message) for v in report.violations]
+
+
+def test_ts_assert_throws_on_sut_is_credited(tmp_path):
+    """chai/node ``assert.throws(() => sut())`` proves the SUT raises."""
+    project = _ts_project(
+        tmp_path,
+        "import { strict as assert } from 'node:assert';\n"
+        "import { parse } from '../src/calc';\n"
+        "// codd: covers vb=VB-01\n"
+        "it('x', () => { assert.throws(() => parse('bad')); });\n",
+    )
+    report = build_authenticity_report(project, config=_scan_cfg(), profile=TS_PROFILE)
+    assert report.passed, [(v.kind, v.message) for v in report.violations]
+
+
+def test_ts_expect_helper_asserting_on_its_arg_is_credited(tmp_path):
+    """A helper ``function assertTokens(actual, expected){ expect(actual).toEqual(expected) }``
+    asserting on its data arg is credible (TS analogue of the testcase.assert* helper)."""
+    project = _ts_project(
+        tmp_path,
+        "import { tokenize } from '../src/calc';\n"
+        "function assertTokens(actual: number[], expected: number[]) {\n"
+        "  expect(actual).toEqual(expected);\n"
+        "}\n"
+        "// codd: covers vb=VB-01\n"
+        "it('x', () => { assertTokens(tokenize('1 2'), [1, 2]); });\n",
+    )
+    report = build_authenticity_report(project, config=_scan_cfg(), profile=TS_PROFILE)
+    assert report.passed, [(v.kind, v.message) for v in report.violations]
+
+
+def test_ts_constant_only_helper_is_rejected(tmp_path):
+    """A helper that asserts only on a constant (``expect(true).toBe(true)``) is a
+    no-op — crediting the delegating test would be a false-GREEN."""
+    project = _ts_project(
+        tmp_path,
+        "function check() { expect(true).toBe(true); }\n"
+        "// codd: covers vb=VB-01\n"
+        "it('x', () => { check(); });\n",
+    )
+    report = build_authenticity_report(project, config=_scan_cfg(), profile=TS_PROFILE)
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations)
+
+
+# ---------------------------------------------------------------------------
 # unittest `with` context-manager assertions (with self.assertRaises / assertWarns /
 # assertLogs) are primitive assertions — symmetric with `with pytest.raises`. v2.56's
 # AST-first has_assertion regressed these (the old regex matched `self.assertRaises(`);
