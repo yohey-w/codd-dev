@@ -1041,13 +1041,35 @@ def _is_py_assertion_error_raise(node: ast.AST) -> bool:
     return isinstance(exc, ast.Name) and exc.id == "AssertionError"
 
 
+#: Callees that, used as a ``with`` CONTEXT MANAGER, ARE a primitive assertion. An
+#: EXACT whitelist on purpose: at the ``with`` position the broad ``self.assert*``
+#: prefix is unsafe (``with self.assertEqual(x, y):`` is runtime-broken — assertEqual
+#: returns no context manager — yet would wrongly credit). These are the official
+#: context-manager assertions (pytest.raises/warns + unittest assertRaises/Warns/Logs).
+_WITH_ASSERT_CONTEXT_CALLEES = frozenset(
+    {
+        "pytest.raises",
+        "pytest.warns",
+        "self.assertRaises",
+        "self.assertRaisesRegex",
+        "self.assertRaisesRegexp",  # legacy py2 alias; harmless if unused
+        "self.assertWarns",
+        "self.assertWarnsRegex",
+        "self.assertLogs",
+        "self.assertNoLogs",
+    }
+)
+
+
 def _is_py_primitive_assert_node(node: ast.AST) -> bool:
     """Whether ``node`` is a PRIMITIVE python assertion (mirrors ``_PY_PRIMITIVE_ASSERT_RE``).
 
-    An ``assert`` statement, ``raise AssertionError(...)``, a ``with pytest.raises(...)``
-    block, or an expression statement calling ``pytest.fail`` / ``self.fail`` /
-    ``self.assert*`` / ``np.testing.assert*``. A bare call to a NAMED helper is NOT
-    primitive (it is resolved via the evidence graph), so it is not matched here.
+    An ``assert`` statement, ``raise AssertionError(...)``, a ``with`` context-manager
+    assertion (``pytest.raises``/``warns`` or unittest ``self.assertRaises``/``Warns``/
+    ``Logs`` — see :data:`_WITH_ASSERT_CONTEXT_CALLEES`), or an expression statement
+    calling ``pytest.fail`` / ``self.fail`` / ``self.assert*`` / ``np.testing.assert*``.
+    A bare call to a NAMED helper is NOT primitive (it is resolved via the evidence
+    graph), so it is not matched here.
     """
 
     if isinstance(node, ast.Assert):
@@ -1057,7 +1079,7 @@ def _is_py_primitive_assert_node(node: ast.AST) -> bool:
     if isinstance(node, (ast.With, ast.AsyncWith)):
         for item in node.items:
             expr = item.context_expr
-            if isinstance(expr, ast.Call) and _py_callee_name(expr.func) == "pytest.raises":
+            if isinstance(expr, ast.Call) and _py_callee_name(expr.func) in _WITH_ASSERT_CONTEXT_CALLEES:
                 return True
         return False
     if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
@@ -1741,7 +1763,7 @@ _PY_SKIP_DECORATOR_RE = re.compile(
 #: to a named helper (``assert_that(...)``, ``verify(...)``) is NOT primitive — it
 #: is resolved via the evidence graph so a no-op helper cannot pass on its name.
 _PY_PRIMITIVE_ASSERT_RE = re.compile(
-    r"(^|[^A-Za-z0-9_])(assert\b|pytest\.raises\b|pytest\.fail\s*\(|"
+    r"(^|[^A-Za-z0-9_])(assert\b|pytest\.(?:raises|warns)\b|pytest\.fail\s*\(|"
     r"self\.assert[A-Za-z]+\s*\(|self\.fail\s*\(|np\.testing\.assert)"
     # ``raise AssertionError`` (the explicit form of ``assert``) — LINE-ANCHORED so a
     # ``raise AssertionError`` inside a string/comment does not match (the AST-first

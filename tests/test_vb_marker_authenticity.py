@@ -2388,3 +2388,96 @@ def test_ts_library_only_unit_classifier():
     assert _classify_ts_name("aliased", ctx) == "credit"  # alias not in deps -> unknown
     assert _classify_ts_name("r", ctx) == "credit"  # local
     assert _classify_ts_name("unknownName", ctx) == "credit"  # untracked -> unknown
+
+
+# ---------------------------------------------------------------------------
+# unittest `with` context-manager assertions (with self.assertRaises / assertWarns /
+# assertLogs) are primitive assertions — symmetric with `with pytest.raises`. v2.56's
+# AST-first has_assertion regressed these (the old regex matched `self.assertRaises(`);
+# the With-handler must recognize them. EXACT whitelist (not the self.assert* prefix —
+# `with self.assertEqual(...)` is runtime-broken and must NOT be a with-primitive).
+# ---------------------------------------------------------------------------
+
+
+def test_python_parser_detects_unittest_assert_raises_context():
+    text = (
+        "import unittest\n"
+        "class T(unittest.TestCase):\n"
+        "    def test_raises(self):\n"
+        "        with self.assertRaises(DivisionByZeroError):\n"
+        "            evaluate('1 / 0')\n"
+    )
+    blocks = {b.label: b for b in PythonTestBlockProfile().parse_test_blocks(text)}
+    assert blocks["test_raises"].has_assertion is True
+
+
+def test_python_parser_detects_unittest_assertlogs_and_assertwarns_context():
+    text = (
+        "import unittest\n"
+        "class T(unittest.TestCase):\n"
+        "    def test_logs(self):\n"
+        "        with self.assertLogs('app'):\n"
+        "            run()\n"
+        "    def test_warns(self):\n"
+        "        with self.assertWarns(DeprecationWarning):\n"
+        "            run()\n"
+    )
+    blocks = {b.label: b for b in PythonTestBlockProfile().parse_test_blocks(text)}
+    assert blocks["test_logs"].has_assertion is True
+    assert blocks["test_warns"].has_assertion is True
+
+
+def test_python_parser_still_detects_pytest_raises_and_warns_context():
+    text = (
+        "import pytest\n"
+        "def test_raises():\n"
+        "    with pytest.raises(ValueError):\n"
+        "        boom()\n"
+        "def test_warns():\n"
+        "    with pytest.warns(UserWarning):\n"
+        "        warn_it()\n"
+    )
+    blocks = {b.label: b for b in PythonTestBlockProfile().parse_test_blocks(text)}
+    assert blocks["test_raises"].has_assertion is True
+    assert blocks["test_warns"].has_assertion is True
+
+
+def test_python_parser_does_not_treat_non_context_assert_as_with_primitive():
+    """`with self.assertEqual(...)` is runtime-broken (assertEqual returns no context
+    manager) — the With-handler's EXACT whitelist must NOT recognize it (no self.assert*
+    prefix at the with position)."""
+    text = (
+        "import unittest\n"
+        "class T(unittest.TestCase):\n"
+        "    def test_bad_context(self):\n"
+        "        with self.assertEqual(evaluate('1 + 1'), 2):\n"
+        "            pass\n"
+    )
+    blocks = {b.label: b for b in PythonTestBlockProfile().parse_test_blocks(text)}
+    assert blocks["test_bad_context"].has_assertion is False
+
+
+def test_gate_passes_unittest_assert_raises_with_sut_call(tmp_path):
+    """Full gate: a unittest `with self.assertRaises(X): sut()` test is credible (the
+    v2.56 regression that 20-false-RED'd the exprcalc-codex run)."""
+    project = tmp_path
+    _canonical(project, "| VB-DIV0-01 | division by zero |\n")
+    _write(project / "src" / "app" / "__init__.py", "")
+    _write(
+        project / "src" / "app" / "evaluator.py",
+        "class DivisionByZeroError(Exception):\n    pass\n\n\ndef evaluate(expr):\n    raise DivisionByZeroError()\n",
+    )
+    _write(
+        project / "tests" / "test_errors.py",
+        "import unittest\n"
+        "from app.evaluator import DivisionByZeroError, evaluate\n"
+        "class EvaluatorErrors(unittest.TestCase):\n"
+        "    # codd: covers vb=VB-DIV0-01\n"
+        "    def test_direct_zero_denominator_raises(self):\n"
+        "        with self.assertRaises(DivisionByZeroError):\n"
+        "            evaluate('1 / 0')\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE
+    )
+    assert report.passed, [v.message for v in report.violations]
