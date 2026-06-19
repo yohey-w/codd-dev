@@ -1246,8 +1246,10 @@ def _python_manifest_top_dependencies(project_root: Path | None) -> frozenset[st
     if not path.exists():
         return frozenset()
     try:
-        import tomllib
-
+        try:  # tomllib is stdlib from 3.11; tomli is its <3.11 backport (a declared dep)
+            import tomllib  # type: ignore[import-not-found]
+        except ModuleNotFoundError:  # Python < 3.11
+            import tomli as tomllib  # type: ignore[import-not-found, no-redef]
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — no manifest signal ⇒ fail-open (empty set).
         return frozenset()
