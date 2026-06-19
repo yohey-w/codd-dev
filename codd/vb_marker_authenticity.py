@@ -91,7 +91,9 @@ evidence (the design's "unresolved helper = fail" rule).
 from __future__ import annotations
 
 import ast
+import builtins
 import re
+import sys
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -448,25 +450,50 @@ def _helper_evidence(
         return AssertionEvidence(ok=False, reason="no_assertion", detail="resolver error")
 
 
-def _direct_evidence(adapter: TestBlockProfile, block: TestBlock) -> AssertionEvidence:
+def _direct_evidence(
+    adapter: TestBlockProfile,
+    block: TestBlock,
+    *,
+    importer_text: str = "",
+    importer_rel: str = "",
+    project_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+    profile: Any = None,
+) -> AssertionEvidence:
     """Resolve a block's DIRECT (in-body) primitive-assertion evidence.
 
     The built-in Python/TypeScript adapters expose
     ``resolve_direct_assertion_evidence`` which decides whether the direct
-    primitive assertion is constant-only (``constant_direct`` ⇒ not ok) or
-    references a real name (``direct`` ⇒ ok). An EXTERNAL adapter that predates
-    this method has no such hook; for back-compat it keeps the pre-existing
-    behavior (a raw primitive is credited as ``direct``) — only the built-in
-    stacks are tightened here.
+    primitive assertion is constant-only (``constant_direct`` ⇒ not ok),
+    library-only (``library_only_direct`` ⇒ not ok), or references a real name
+    (``direct`` ⇒ ok). The test-file context (``importer_text`` / ``project_root``
+    / ``profile``) is forwarded for origin classification. An EXTERNAL adapter that
+    predates the context kwargs (accepts only ``(block)``) is called the old way
+    (TypeError fallback); one that predates the hook entirely keeps the pre-existing
+    behavior (a raw primitive is credited as ``direct``) — only the built-in stacks
+    are tightened here.
     """
 
     resolver = getattr(adapter, "resolve_direct_assertion_evidence", None)
-    if callable(resolver):
+    if not callable(resolver):
+        return AssertionEvidence(ok=True, reason="direct")
+    try:
+        return resolver(
+            block,
+            importer_text=importer_text,
+            importer_rel=importer_rel,
+            project_root=project_root,
+            config=config,
+            profile=profile,
+        )
+    except TypeError:
+        # Older adapter signature: resolve_direct_assertion_evidence(block) only.
         try:
             return resolver(block)
         except Exception:  # noqa: BLE001 — a resolver that throws ⇒ keep credit (back-compat).
             return AssertionEvidence(ok=True, reason="direct")
-    return AssertionEvidence(ok=True, reason="direct")
+    except Exception:  # noqa: BLE001 — a resolver that throws ⇒ keep credit (back-compat).
+        return AssertionEvidence(ok=True, reason="direct")
 
 
 def build_authenticity_report(
@@ -653,7 +680,15 @@ def build_authenticity_report(
             # the same block may ALSO call a credible helper, so we fall back to
             # the helper resolver and only RED when BOTH paths fail.
             if block.has_assertion:
-                evidence = _direct_evidence(adapter, block)
+                evidence = _direct_evidence(
+                    adapter,
+                    block,
+                    importer_text=text,
+                    importer_rel=rel,
+                    project_root=project_root,
+                    config=config,
+                    profile=profile,
+                )
                 if not evidence.ok:
                     helper_evidence = _helper_evidence(
                         adapter,
@@ -725,6 +760,15 @@ def _no_assertion_message(
             "(`assert True`, `assert 1 == 1`, or `expect(true).toBe(true)`) — "
             "a constant assertion proves nothing. Assert against an observed result, "
             "exception, state, or output that would FAIL if the behavior were broken."
+        )
+    elif evidence.reason == "library_only_direct":
+        detail = f" ({evidence.detail})" if evidence.detail else ""
+        why = (
+            " whose direct primitive assertion observes ONLY library/builtin behavior"
+            f"{detail} (`math.sqrt`, `os.path`, a third-party package, `sorted`, etc.) "
+            "and never references a first-party result, local observation, fixture, or "
+            "unknown runtime value — a library property test does not prove the VB. Call "
+            "the SUT and assert against ITS result, state, or raised error."
         )
     elif evidence.reason == "unresolved_helper":
         why = (
@@ -1001,7 +1045,257 @@ def _is_py_primitive_assert_node(node: ast.AST) -> bool:
     return False
 
 
-def _python_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
+#: Python standard-library top-level module names (PEP-official frozenset; includes
+#: platform-specific and disabled modules). Used to POSITIVELY classify a stdlib
+#: import as a library reference. Absence here never forces a verdict (fail-open).
+_PY_STDLIB_NAMES = frozenset(getattr(sys, "stdlib_module_names", frozenset()))
+#: Python runtime builtins (``sorted``, ``abs``, ``round``, …). Used to classify a
+#: builtin-only assertion as a library reference. NOTE: builtins are classified
+#: here, NOT added to ``_PY_DIRECT_IGNORED_NAMES`` — a first-party import that
+#: SHADOWS a builtin (``from app.sorting import sorted``) must still credit.
+_PY_BUILTIN_NAMES = frozenset(dir(builtins))
+
+
+@dataclass(frozen=True)
+class _PyOriginContext:
+    """Per-test-block context for classifying assertion reference names by ORIGIN.
+
+    The contract is ``direct.library_only_reference.v1`` (GPT-5.5 Pro design,
+    dogfood/gpt_authenticity_sut_ref_design.md): a direct primitive assertion is
+    not credible VB evidence when EVERY non-framework reference is POSITIVELY a
+    library/runtime/builtin reference and none is first-party / local / unknown.
+    ``unknown`` always credits — "not provably first-party" must NEVER be treated
+    as third-party (that would false-RED src-layout / editable / path-alias code).
+    """
+
+    imports: dict[str, tuple[str, bool]]  # bound-name -> (dotted module, is_relative)
+    local_names: frozenset[str]  # body assignment targets + this block's params
+    package_name: str | None
+    source_roots: tuple[Path, ...]
+    third_party: frozenset[str]  # normalized manifest dependency top-names
+
+
+def _python_file_import_table(text: str) -> dict[str, tuple[str, bool]]:
+    """Map each imported BOUND NAME to ``(dotted module, is_relative)``.
+
+    ``import a.b`` binds ``a``; ``import a.b as x`` binds ``x``; ``from a.b import c``
+    binds ``c``; ``from .m import c`` is relative (within the SUT package). Star
+    imports bind no specific name (their names stay UNKNOWN ⇒ credit). Parse
+    failure ⇒ empty table (fail-open). Walks the whole tree so function-level
+    imports are seen too.
+    """
+
+    table: dict[str, tuple[str, bool]] = {}
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return table
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                table[bound] = (alias.name, False)
+        elif isinstance(node, ast.ImportFrom):
+            is_relative = (node.level or 0) > 0
+            module = node.module or ""
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                bound = alias.asname or alias.name
+                table[bound] = (module, is_relative)
+    return table
+
+
+def _python_function_param_names(text: str, func_name: str) -> set[str]:
+    """Parameter names of the top-level ``def func_name`` (incl. fixtures) — or {}."""
+
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return set()
+    for node in getattr(tree, "body", []):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+            a = node.args
+            names: set[str] = set()
+            for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs):
+                names.add(arg.arg)
+            if a.vararg:
+                names.add(a.vararg.arg)
+            if a.kwarg:
+                names.add(a.kwarg.arg)
+            return names
+    return set()
+
+
+def _target_names(target: ast.AST) -> set[str]:
+    """Bound names in an assignment-target node (Name / Tuple / List / Starred)."""
+
+    names: set[str] = set()
+    if isinstance(target, ast.Name):
+        names.add(target.id)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for elt in target.elts:
+            names |= _target_names(elt)
+    elif isinstance(target, ast.Starred):
+        names |= _target_names(target.value)
+    return names
+
+
+def _python_body_assigned_names(body_text: str) -> set[str]:
+    """Names BOUND inside a test body: assignments, with-as, for-targets, walrus,
+    comprehension targets. These are LOCAL observations (a local may hold a SUT
+    result; by policy we do NOT taint-track, so a local always credits)."""
+
+    names: set[str] = set()
+    try:
+        tree = ast.parse(textwrap.dedent(body_text))
+    except (SyntaxError, ValueError):
+        return names
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                names |= _target_names(t)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            names |= _target_names(node.target)
+        elif isinstance(node, ast.NamedExpr):
+            names |= _target_names(node.target)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            names |= _target_names(node.target)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    names |= _target_names(item.optional_vars)
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for gen in node.generators:
+                names |= _target_names(gen.target)
+    return names
+
+
+def _python_manifest_top_dependencies(project_root: Path | None) -> frozenset[str]:
+    """Declared third-party dependency names from ``pyproject.toml`` (PEP 621 +
+    poetry), normalized for top-module matching. Empty when absent/unparseable —
+    an unconfirmable third-party import then stays UNKNOWN (credit), per design."""
+
+    if project_root is None:
+        return frozenset()
+    path = project_root / "pyproject.toml"
+    if not path.exists():
+        return frozenset()
+    try:
+        import tomllib
+
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — no manifest signal ⇒ fail-open (empty set).
+        return frozenset()
+    reqs: list[str] = []
+    project = data.get("project", {})
+    if isinstance(project, dict):
+        deps = project.get("dependencies", [])
+        if isinstance(deps, list):
+            reqs.extend(d for d in deps if isinstance(d, str))
+        optional = project.get("optional-dependencies", {})
+        if isinstance(optional, dict):
+            for group in optional.values():
+                if isinstance(group, list):
+                    reqs.extend(d for d in group if isinstance(d, str))
+    poetry = data.get("tool", {}).get("poetry", {}) if isinstance(data.get("tool"), dict) else {}
+    if isinstance(poetry, dict):
+        pdeps = poetry.get("dependencies", {})
+        if isinstance(pdeps, dict):
+            reqs.extend(k for k in pdeps if isinstance(k, str) and k.lower() != "python")
+    names: set[str] = set()
+    for req in reqs:
+        m = re.match(r"\s*([A-Za-z0-9._-]+)", req)
+        if not m:
+            continue
+        dist = m.group(1).lower()
+        names.add(dist)
+        names.add(dist.replace("-", "_"))
+    return frozenset(names)
+
+
+def _module_resolves_first_party(module: str, top: str, source_roots: tuple[Path, ...]) -> bool:
+    """True when ``module`` (or its top package) resolves to a source file under a
+    configured source root — covers flat AND src/<package> layouts."""
+
+    rel = module.replace(".", "/") if module else ""
+    for root in source_roots:
+        if rel and ((root / f"{rel}.py").exists() or (root / rel / "__init__.py").exists()):
+            return True
+        if top and (
+            (root / f"{top}.py").exists()
+            or (root / top / "__init__.py").exists()
+            or (root / top).is_dir()
+        ):
+            return True
+    return False
+
+
+def _classify_py_name(name: str, ctx: _PyOriginContext) -> str:
+    """Classify one assertion reference name as ``"library"`` or ``"credit"``.
+
+    Order (GPT design): local/param shadowing ▸ first-party import ▸ stdlib ▸
+    confirmed third-party ▸ builtin ▸ UNKNOWN. Only stdlib / confirmed-third-party
+    / builtin are ``"library"``; everything else (incl. UNKNOWN) credits."""
+
+    if name in ctx.local_names:
+        return "credit"  # LOCAL_OR_PARAM
+    entry = ctx.imports.get(name)
+    if entry is not None:
+        module, is_relative = entry
+        if is_relative:
+            return "credit"  # relative import = within the SUT package
+        top = module.split(".")[0] if module else ""
+        if not top:
+            return "credit"
+        if ctx.package_name and top == ctx.package_name:
+            return "credit"  # FIRST_PARTY by package name
+        if _module_resolves_first_party(module, top, ctx.source_roots):
+            return "credit"  # FIRST_PARTY by source-file existence
+        if top in _PY_STDLIB_NAMES:
+            return "library"  # stdlib
+        if top.lower() in ctx.third_party:
+            return "library"  # confirmed external dependency
+        return "credit"  # imported but origin unconfirmable ⇒ UNKNOWN ⇒ fail-open
+    if name in _PY_BUILTIN_NAMES:
+        return "library"  # builtin (only when NOT shadowed by a first-party import/local)
+    return "credit"  # param / fixture / free name / star-imported ⇒ UNKNOWN ⇒ fail-open
+
+
+def _build_py_origin_context(
+    block: TestBlock,
+    *,
+    importer_text: str,
+    project_root: Path | None,
+    profile: Any,
+) -> _PyOriginContext:
+    """Assemble the per-block origin-classification context from the test file."""
+
+    package_name = getattr(profile, "package_name", None) if profile is not None else None
+    source_roots: list[Path] = []
+    if project_root is not None:
+        source_root = getattr(profile, "source_root", None) if profile is not None else None
+        if source_root:
+            source_roots.append(project_root / source_root)
+        package_root = getattr(profile, "package_root", None) if profile is not None else None
+        if package_root:
+            source_roots.append((project_root / package_root).parent)
+        source_roots.append(project_root)
+    local_names = _python_body_assigned_names(block.body_text)
+    if importer_text and block.label:
+        local_names |= _python_function_param_names(importer_text, block.label)
+    return _PyOriginContext(
+        imports=_python_file_import_table(importer_text) if importer_text else {},
+        local_names=frozenset(local_names),
+        package_name=package_name,
+        source_roots=tuple(dict.fromkeys(source_roots)),
+        third_party=_python_manifest_top_dependencies(project_root),
+    )
+
+
+def _python_direct_assertion_evidence(
+    body_text: str, *, origin_ctx: _PyOriginContext | None = None
+) -> AssertionEvidence:
     """AST verdict: does ``body_text`` carry a NON-constant direct primitive assertion?
 
     For each primitive-assert node, collect every ``ast.Name`` id inside it and
@@ -1011,6 +1305,15 @@ def _python_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
     (not ok). Falls back to the lexical scanner on a syntax error so an
     un-parseable body never false-REDs here (it degrades to the line-based path,
     which itself fails OPEN per window).
+
+    When an ``origin_ctx`` is supplied (the gate path), each remaining name is
+    classified by ORIGIN (contract ``direct.library_only_reference.v1``): an
+    assertion whose references are ALL positively library/builtin (``math.sqrt``,
+    ``os.path``, a confirmed third-party dep, ``sorted``) and include no
+    first-party / local / unknown reference proves a LIBRARY, not the SUT ⇒
+    ``library_only_direct`` (not ok). Without a context, classification is skipped
+    (any non-ignored name credits, exactly as before) — "cannot classify" never
+    false-REDs.
     """
 
     try:
@@ -1023,13 +1326,26 @@ def _python_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
         )
 
     saw_primitive = False
+    saw_library_only = False
+    library_detail = ""
     for node in ast.walk(tree):
         if not _is_py_primitive_assert_node(node):
             continue
         saw_primitive = True
-        ids = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-        if ids - _PY_DIRECT_IGNORED_NAMES:
+        ids = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)} - _PY_DIRECT_IGNORED_NAMES
+        if not ids:
+            continue  # constant-only assertion (no observed name)
+        if origin_ctx is None:
+            # No classification context (legacy / direct unit call): any non-ignored
+            # name credits, exactly as before.
             return AssertionEvidence(ok=True, reason="direct")
+        if any(_classify_py_name(name, origin_ctx) != "library" for name in ids):
+            # A first-party / local / unknown reference ⇒ a real observation.
+            return AssertionEvidence(ok=True, reason="direct")
+        # Every reference is POSITIVELY a library/builtin ⇒ a library-only proof.
+        saw_library_only = True
+        if not library_detail:
+            library_detail = ", ".join(sorted(ids))
 
     if not saw_primitive:
         # The raw regex (``has_assertion``) matched but the AST recognized no
@@ -1037,6 +1353,8 @@ def _python_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
         # the AST walker does not classify). Fail OPEN — keep the pre-existing
         # ``direct`` credit rather than inventing a false-RED.
         return AssertionEvidence(ok=True, reason="direct")
+    if saw_library_only:
+        return AssertionEvidence(ok=False, reason="library_only_direct", detail=library_detail)
     return AssertionEvidence(ok=False, reason="constant_direct")
 
 
@@ -1375,14 +1693,36 @@ class PythonTestBlockProfile:
             block, importer_text=importer_text, importer_rel=importer_rel, project_root=project_root
         )
 
-    def resolve_direct_assertion_evidence(self, block: TestBlock) -> AssertionEvidence:
+    def resolve_direct_assertion_evidence(
+        self,
+        block: TestBlock,
+        *,
+        importer_text: str = "",
+        importer_rel: str = "",
+        project_root: Path | None = None,
+        config: dict[str, Any] | None = None,
+        profile: Any = None,
+    ) -> AssertionEvidence:
         """Whether the block's DIRECT primitive assertion references a real name.
 
-        AST-based (``constant_direct`` when the assertion is constant-only). Called
-        by the gate only when ``block.has_assertion`` is True.
+        AST-based: ``constant_direct`` when the assertion is constant-only, and —
+        when the gate supplies the test-file context (``importer_text`` + ``profile``
+        / ``project_root``) — ``library_only_direct`` when every reference is a
+        positively-classified library/builtin (contract
+        ``direct.library_only_reference.v1``). The context kwargs are OPTIONAL so a
+        bare ``resolve_direct_assertion_evidence(block)`` (older callers / unit
+        tests) still works and simply skips origin classification (fail-open).
+        Called by the gate only when ``block.has_assertion`` is True.
         """
 
-        return _python_direct_assertion_evidence(block.body_text)
+        origin_ctx = (
+            _build_py_origin_context(
+                block, importer_text=importer_text, project_root=project_root, profile=profile
+            )
+            if (importer_text or project_root is not None or profile is not None)
+            else None
+        )
+        return _python_direct_assertion_evidence(block.body_text, origin_ctx=origin_ctx)
 
 
 # vitest/jest: it(...) / test(...) blocks; describe(...) groups. Skip via

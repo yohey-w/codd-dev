@@ -2027,3 +2027,163 @@ def test_python_singleline_signature_still_parsed():
         "test_single"
     ]
     assert b.has_assertion is True
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — library-only direct assertion (contract direct.library_only_reference.v1)
+# A marker-attached test whose direct assertion observes ONLY a library (stdlib /
+# confirmed third-party / builtin) and never the SUT proves the LIBRARY, not the VB
+# — a false-GREEN. The fix must REJECT those while NEVER false-RED'ing a real SUT
+# observation (a first-party import, a local, a fixture, or an unknown reference).
+# ---------------------------------------------------------------------------
+
+
+def _scan_cfg() -> dict:
+    return {"scan": {"test_dirs": ["tests/"]}}
+
+
+def _report(project) -> object:
+    return build_authenticity_report(project, config=_scan_cfg(), profile=PY_PROFILE)
+
+
+@pytest.mark.parametrize(
+    "name, body",
+    [
+        ("stdlib_math", "import math\n# codd: covers vb=VB-01\ndef test_x():\n    assert math.sqrt(4) == 2.0\n"),
+        ("stdlib_os", "import os\n# codd: covers vb=VB-01\ndef test_x():\n    assert os.path.join('a', 'b') == 'a/b'\n"),
+        ("builtin_sorted", "# codd: covers vb=VB-01\ndef test_x():\n    assert sorted([3, 1, 2]) == [1, 2, 3]\n"),
+    ],
+)
+def test_library_only_direct_is_rejected(tmp_path, name, body):
+    """stdlib / builtin-only assertions never reference the SUT → library_only_direct."""
+    _canonical(tmp_path, "| VB-01 | demo |\n")
+    _write(tmp_path / "tests" / "test_x.py", body)
+    report = _report(tmp_path)
+    assert not report.passed, name
+    assert any(
+        v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations
+    ), [(v.kind, v.message) for v in report.violations]
+
+
+def test_third_party_only_direct_rejected_with_manifest(tmp_path):
+    """A third-party import is library-only — but only POSITIVELY when a manifest
+    confirms it (an unconfirmable dep stays UNKNOWN ⇒ credit, by design)."""
+    _canonical(tmp_path, "| VB-01 | demo |\n")
+    _write(
+        tmp_path / "pyproject.toml",
+        '[project]\nname = "app"\nversion = "0.0.0"\ndependencies = ["requests>=2.0"]\n',
+    )
+    _write(
+        tmp_path / "tests" / "test_x.py",
+        "import requests\n# codd: covers vb=VB-01\ndef test_x():\n    assert requests.codes.ok == 200\n",
+    )
+    report = _report(tmp_path)
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations)
+
+
+def test_third_party_only_without_manifest_fails_open(tmp_path):
+    """No manifest ⇒ `requests` origin is unconfirmable ⇒ UNKNOWN ⇒ credit (fail-OPEN).
+
+    This is the deliberate false-RED-avoidance trade-off: a residual false-GREEN is
+    accepted rather than risk rejecting a real SUT observation we cannot classify."""
+    _canonical(tmp_path, "| VB-01 | demo |\n")
+    _write(
+        tmp_path / "tests" / "test_x.py",
+        "import requests\n# codd: covers vb=VB-01\ndef test_x():\n    assert requests.codes.ok == 200\n",
+    )
+    assert _report(tmp_path).passed
+
+
+@pytest.mark.parametrize(
+    "name, body, manifest",
+    [
+        (
+            "sut_direct_call",
+            "from app.calc import compute\n# codd: covers vb=VB-01\ndef test_x():\n    assert compute(2, 3) == 5\n",
+            False,
+        ),
+        (
+            "sut_result_via_local",
+            "from app.api import client\n# codd: covers vb=VB-01\n"
+            "def test_x():\n    r = client.get('/health')\n    assert r.status_code == 200\n",
+            False,
+        ),
+        (
+            "sut_wrapped_by_stdlib",
+            "import json\nfrom app.api import sut_payload\n# codd: covers vb=VB-01\n"
+            "def test_x():\n    assert json.loads(sut_payload()) == {'x': 1}\n",
+            False,
+        ),
+        (
+            "sut_local_plus_stdlib",
+            "import json\nfrom app.api import call\n# codd: covers vb=VB-01\n"
+            "def test_x():\n    parsed = json.loads(call())\n    assert parsed['x'] == 1\n",
+            False,
+        ),
+        (
+            "first_party_alias",
+            "from app.calc import compute as c\n# codd: covers vb=VB-01\ndef test_x():\n    assert c(2, 3) == 5\n",
+            False,
+        ),
+        (
+            "star_first_party_fail_open",
+            "from app import *\n# codd: covers vb=VB-01\ndef test_x():\n    assert compute(2, 3) == 5\n",
+            False,
+        ),
+        (
+            "unknown_absolute_import_fail_open",
+            "from unknown_runtime_package import compute\n# codd: covers vb=VB-01\n"
+            "def test_x():\n    assert compute(2, 3) == 5\n",
+            False,
+        ),
+        (
+            "builtin_shadowed_by_first_party",
+            "from app.sorting import sorted\n# codd: covers vb=VB-01\ndef test_x():\n    assert sorted([3, 1, 2]) == [1, 2, 3]\n",
+            False,
+        ),
+        (
+            "builtin_with_sut_arg",
+            "from app.data import sut_list\n# codd: covers vb=VB-01\ndef test_x():\n    assert len(sut_list()) == 3\n",
+            False,
+        ),
+        (
+            "fixture_param_credited",
+            "# codd: covers vb=VB-01\ndef test_x(snapshot):\n    assert snapshot.matches('ok')\n",
+            False,
+        ),
+    ],
+)
+def test_real_sut_observation_is_never_false_red(tmp_path, name, body, manifest):
+    """Every legitimate SUT-observation shape MUST keep passing (no false-RED)."""
+    _canonical(tmp_path, "| VB-01 | demo |\n")
+    if manifest:
+        _write(
+            tmp_path / "pyproject.toml",
+            '[project]\nname = "app"\nversion = "0.0.0"\ndependencies = ["requests>=2.0"]\n',
+        )
+    _write(tmp_path / "tests" / "test_x.py", body)
+    report = _report(tmp_path)
+    assert report.passed, (name, [(v.kind, v.message) for v in report.violations])
+
+
+def test_library_only_direct_falls_back_to_credible_helper(tmp_path):
+    """A library-only direct assertion does NOT RED when the SAME block also calls a
+    credible same-repo helper (library_only_direct flows into the SAME helper-resolver
+    fallback that constant_direct does — the fallback is preserved)."""
+    _canonical(tmp_path, "| VB-01 | demo |\n")
+    _write(tmp_path / "tests" / "helpers" / "__init__.py", "")
+    _write(
+        tmp_path / "tests" / "helpers" / "asserts.py",
+        "def expect_ok(result):\n    assert result.code == 0\n",
+    )
+    _write(
+        tmp_path / "tests" / "test_x.py",
+        "import math\n"
+        "from tests.helpers.asserts import expect_ok\n"
+        "# codd: covers vb=VB-01\n"
+        "def test_x():\n    assert math.sqrt(4) == 2.0\n    result = run()\n    expect_ok(result)\n",
+    )
+    # The direct assert is library-only (math.sqrt), but the block also delegates to
+    # a helper whose body asserts on its argument — credit via the helper path.
+    assert _report(tmp_path).passed
