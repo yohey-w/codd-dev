@@ -969,3 +969,83 @@ def test_load_requirement_documents_accepts_singular_type(tmp_path):
     )
 
     assert [doc.node_id for doc in documents] == ["req:project-requirements"]
+
+
+# ---------------------------------------------------------------------------
+# wave_config bounded parse-feedback retry (weakest-model robustness): a weak
+# model that emits malformed YAML must not kill the plan stage — the parse error
+# is fed back and the AI re-prompted (dogfood finding: Spark failed plan --init on
+# a stray `-> ` arrow while gpt-5.5 passed the same spec).
+# ---------------------------------------------------------------------------
+
+# A YAML body that mirrors the real Spark failure: a stray `-> ` arrow + a key at a
+# bad indent — a hard yaml.YAMLError that no textual sanitization can repair.
+_MALFORMED_WAVE_CONFIG = (
+    '"1":\n'
+    '  - node_id: "design:x"\n'
+    '    output: "docs/x.md"\n'
+    '    title: "X"\n'
+    "      -> \n"
+    '    reason: "bad"\n'
+)
+
+
+def _seq_invoke(monkeypatch, responses):
+    """Monkeypatch _invoke_ai_command to return/raise successive responses; record prompts."""
+    prompts: list[str] = []
+    it = iter(responses)
+
+    def fake_invoke(command, prompt):
+        prompts.append(prompt)
+        item = next(it)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake_invoke)
+    return prompts
+
+
+def test_invoke_and_parse_wave_config_retries_malformed_then_succeeds(monkeypatch):
+    prompts = _seq_invoke(monkeypatch, [_MALFORMED_WAVE_CONFIG, PLAN_INIT_AI_OUTPUT])
+    result = planner_module._invoke_and_parse_wave_config("ai-cmd", "BASE PROMPT", max_retries=2)
+    assert result["1"][0]["node_id"] == "design:acceptance-criteria"
+    assert len(prompts) == 2  # one retry
+    assert prompts[0] == "BASE PROMPT"  # first attempt is the bare prompt
+    assert "REJECTED" in prompts[1] and "valid wave_config" in prompts[1]  # feedback carried
+
+
+def test_invoke_and_parse_wave_config_infra_failure_not_retried(monkeypatch):
+    prompts = _seq_invoke(monkeypatch, [ValueError("AI command failed: boom")])
+    with pytest.raises(ValueError, match="AI command failed"):
+        planner_module._invoke_and_parse_wave_config("ai-cmd", "BASE", max_retries=2)
+    assert len(prompts) == 1  # infra failure short-circuits — no wasted retries
+
+
+def test_invoke_and_parse_wave_config_exhausts_retries(monkeypatch):
+    prompts = _seq_invoke(monkeypatch, [_MALFORMED_WAVE_CONFIG] * 3)
+    with pytest.raises(ValueError, match="invalid wave_config YAML"):
+        planner_module._invoke_and_parse_wave_config("ai-cmd", "BASE", max_retries=2)
+    assert len(prompts) == 3  # initial + 2 retries
+
+
+def test_invoke_and_parse_wave_config_retries_disabled(monkeypatch):
+    prompts = _seq_invoke(monkeypatch, [_MALFORMED_WAVE_CONFIG, PLAN_INIT_AI_OUTPUT])
+    with pytest.raises(ValueError, match="invalid wave_config YAML"):
+        planner_module._invoke_and_parse_wave_config("ai-cmd", "BASE", max_retries=0)
+    assert len(prompts) == 1  # disabled: single attempt
+
+
+def test_invoke_and_parse_wave_config_valid_first_no_retry(monkeypatch):
+    prompts = _seq_invoke(monkeypatch, [PLAN_INIT_AI_OUTPUT])
+    result = planner_module._invoke_and_parse_wave_config("ai-cmd", "BASE", max_retries=2)
+    assert result["1"][0]["node_id"] == "design:acceptance-criteria"
+    assert len(prompts) == 1  # no wasted retry on a good first response
+
+
+def test_plan_init_max_retries_config_override():
+    assert planner_module._plan_init_max_retries({}) == planner_module.DEFAULT_PLAN_INIT_MAX_RETRIES
+    assert planner_module._plan_init_max_retries({"plan": {"init_retry": {"max_retries": 5}}}) == 5
+    assert planner_module._plan_init_max_retries({"plan": {"init_retry": {"max_retries": 0}}}) == 0
+    # Malformed config falls back to the default (never crashes).
+    assert planner_module._plan_init_max_retries({"plan": "nope"}) == planner_module.DEFAULT_PLAN_INIT_MAX_RETRIES

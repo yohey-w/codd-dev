@@ -421,8 +421,9 @@ def plan_init(
         prompt = _build_brownfield_plan_init_prompt(config, extracted_documents, capabilities)
 
     prompt = generator_module._inject_lexicon(prompt, project_root)
-    raw_wave_config = generator_module._invoke_ai_command(resolved_ai_command, prompt)
-    wave_config = _parse_wave_config_output(raw_wave_config)
+    wave_config = _invoke_and_parse_wave_config(
+        resolved_ai_command, prompt, max_retries=_plan_init_max_retries(config)
+    )
 
     from codd.config import find_codd_dir
     config["wave_config"] = wave_config
@@ -1117,6 +1118,68 @@ def _build_brownfield_plan_init_prompt(
         )
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+#: Bounded re-invocations when the AI returns an unparseable wave_config.
+#: Overridable per project via `plan.init_retry.max_retries` in codd.yaml.
+DEFAULT_PLAN_INIT_MAX_RETRIES = 2
+
+
+def _plan_init_max_retries(config: dict[str, Any]) -> int:
+    """Read `plan.init_retry.max_retries` (default 2; 0 disables the retry loop)."""
+
+    plan_cfg = config.get("plan")
+    if isinstance(plan_cfg, dict):
+        retry_cfg = plan_cfg.get("init_retry")
+        if isinstance(retry_cfg, dict):
+            value = retry_cfg.get("max_retries")
+            if isinstance(value, int) and value >= 0:
+                return value
+    return DEFAULT_PLAN_INIT_MAX_RETRIES
+
+
+def _append_wave_config_retry_feedback(prompt: str, error: str) -> str:
+    """Re-state the strict-YAML contract after a parse failure, for the next attempt."""
+
+    note = (
+        "\n\n---\n"
+        "YOUR PREVIOUS RESPONSE WAS REJECTED: it could not be parsed as valid wave_config "
+        f"YAML ({error}). Output ONLY the wave_config mapping as STRICT, valid YAML — no "
+        "prose, no Markdown fences, no arrows (`->`) or annotations. Every key must be "
+        "followed by a colon and a value, and every list item must start with `- `. "
+        "Re-emit the COMPLETE wave_config now."
+    )
+    return prompt + note
+
+
+def _invoke_and_parse_wave_config(
+    ai_command: str, base_prompt: str, *, max_retries: int = DEFAULT_PLAN_INIT_MAX_RETRIES
+) -> dict[str, list[dict[str, Any]]]:
+    """Invoke the AI for a wave_config with a bounded parse-feedback retry loop.
+
+    A weaker model can emit syntactically malformed YAML (a stray ``-> `` arrow, a
+    key with no colon) that no generic textual sanitization can repair. Hard-failing
+    the whole plan stage on a single bad response violates the weakest-model
+    principle — a strong model masks the gap a weak one exposes. So each retry feeds
+    the parse error back to the model (mirrors generator._generate_document_body).
+    Infra failures (``AI command failed``) propagate immediately; exhausted retries
+    re-raise the last parse error unchanged (backward compat).
+    """
+
+    last_error: ValueError | None = None
+    feedback: str | None = None
+    for _attempt in range(max(0, max_retries) + 1):
+        prompt = base_prompt if feedback is None else _append_wave_config_retry_feedback(base_prompt, feedback)
+        try:
+            raw = generator_module._invoke_ai_command(ai_command, prompt)
+            return _parse_wave_config_output(raw)
+        except ValueError as exc:
+            if str(exc).startswith("AI command failed"):
+                raise  # infra failure: retrying the same broken command cannot help
+            last_error = exc
+            feedback = str(exc)
+    assert last_error is not None
+    raise last_error
 
 
 def _parse_wave_config_output(raw_output: str) -> dict[str, list[dict[str, Any]]]:
