@@ -829,6 +829,40 @@ def _python_decorator_start_lines(text: str) -> dict[int, int]:
     return starts
 
 
+def _python_test_function_nodes(
+    text: str,
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Top-level ``test_*`` functions (module- or class-level) via AST.
+
+    AST is signature-layout-agnostic, so a multi-line ``def test_x(\n  a,\n) -> None:``
+    yields the CORRECT body extent — unlike the legacy line-scanner, which read the
+    closing ``)`` line (at the def's own indent) as the body dedent and collapsed
+    the body to the parameter-annotation lines (the ``no_assertion`` FALSE-RED this
+    fixes). A ``test_*`` nested INSIDE another function is excluded (not a
+    pytest-collected unit). Returns [] on syntax error (caller falls back to the
+    line-scanner).
+    """
+
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    nodes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not str(node.name).startswith("test_"):
+            continue
+        if not isinstance(parents.get(node), (ast.Module, ast.ClassDef)):
+            continue
+        nodes.append(node)
+    return sorted(nodes, key=lambda n: int(n.lineno))
+
+
 @dataclass(frozen=True)
 class PythonTestBlockProfile:
     """pytest / unittest structural adapter.
@@ -847,6 +881,48 @@ class PythonTestBlockProfile:
         return rel_path.endswith(".py")
 
     def parse_test_blocks(self, text: str) -> list[TestBlock]:
+        # AST is the authoritative body-extent source. The legacy line-scanner
+        # (kept as a fallback for syntactically-invalid files) mis-reads a
+        # MULTI-LINE def signature: the closing ``) -> None:`` sits at the def's
+        # own indent, so it was taken as the body dedent and the body collapsed to
+        # the parameter-annotation lines (a ``no_assertion`` FALSE-RED on a test
+        # that genuinely asserts). AST yields the true ``body[0]..end_lineno``
+        # extent regardless of signature layout, return annotation, decorators, or
+        # nested defs. has_assertion stays the raw primitive check (unchanged).
+        try:
+            ast.parse(text)
+        except (SyntaxError, ValueError):
+            return self._parse_test_blocks_linescan(text)
+        lines = text.splitlines()
+        blocks: list[TestBlock] = []
+        for node in _python_test_function_nodes(text):
+            def_line = int(node.lineno)
+            start_line = min(
+                [int(d.lineno) for d in node.decorator_list], default=def_line
+            )
+            body_start = int(node.body[0].lineno) if node.body else def_line
+            body_end = int(getattr(node, "end_lineno", body_start) or body_start)
+            body_text = "\n".join(lines[body_start - 1 : body_end])
+            skipped = bool(re.search(r"\bpytest\.skip\s*\(", body_text)) or bool(
+                re.search(r"\bself\.skipTest\s*\(", body_text)
+            )
+            decorator_text = "\n".join(lines[start_line - 1 : def_line - 1])
+            if _PY_SKIP_DECORATOR_RE.search(decorator_text):
+                skipped = True
+            has_assertion = bool(_PY_PRIMITIVE_ASSERT_RE.search(body_text))
+            blocks.append(
+                TestBlock(
+                    start_line=start_line,
+                    end_line=body_end,
+                    is_executable=not skipped,
+                    has_assertion=has_assertion,
+                    label=node.name,
+                    body_text=body_text,
+                )
+            )
+        return blocks
+
+    def _parse_test_blocks_linescan(self, text: str) -> list[TestBlock]:
         lines = text.splitlines()
         marker_lines = _shared_marker_lines(text)
         decorator_starts = _python_decorator_start_lines(text)

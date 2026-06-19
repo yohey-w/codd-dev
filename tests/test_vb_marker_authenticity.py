@@ -1772,3 +1772,91 @@ def test_py_marker_above_multiline_decorator_attaches(tmp_path):
     )
     report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
     assert report.passed is True, [(v.kind, v.message) for v in report.violations]
+
+
+# ---------------------------------------------------------------------------
+# v2.51.0 — multi-line def signature body extraction (no_assertion FALSE-RED).
+# A multi-line signature collapsed the line-scanner body to the parameter-
+# annotation lines (the closing `) -> None:` was misread as the body dedent),
+# yielding a spurious no_assertion on a test that genuinely asserts. AST body
+# extraction fixes it without loosening has_assertion (raw primitive check).
+# ---------------------------------------------------------------------------
+
+
+def test_python_multiline_signature_body_is_fully_extracted():
+    # (A) dogfood-repro (LangGraph Codex): multi-line signature + nested def +
+    # with-block + a param-derived (capsys) assertion. Body must be complete.
+    text = (
+        "import pytest\n"
+        "from app import cli\n"
+        "\n"
+        "def test_missing_text_exits(\n"
+        "    monkeypatch: pytest.MonkeyPatch,\n"
+        "    capsys: pytest.CaptureFixture[str],\n"
+        ") -> None:\n"
+        "    def fail_if_called(*a: object, **k: object) -> int:\n"
+        "        raise AssertionError('should not run')\n"
+        "    monkeypatch.setattr(cli, 'run_command', fail_if_called)\n"
+        "    with pytest.raises(SystemExit) as exc_info:\n"
+        "        cli.main(['run'])\n"
+        "    captured = capsys.readouterr()\n"
+        "    assert exc_info.value.code != 0\n"
+        "    assert captured.out == ''\n"
+        "    assert '--text' in captured.err\n"
+    )
+    b = {x.label: x for x in PythonTestBlockProfile().parse_test_blocks(text)}[
+        "test_missing_text_exits"
+    ]
+    assert b.has_assertion is True
+    assert "assert captured.out == ''" in b.body_text
+    # (D) root-cause guards: signature annotations must NOT leak into the body,
+    # and the nested def MUST be inside the body (not a premature boundary).
+    assert "monkeypatch: pytest.MonkeyPatch" not in b.body_text
+    assert "capsys: pytest.CaptureFixture[str]" not in b.body_text
+    assert "def fail_if_called" in b.body_text
+
+
+def test_python_multiline_signature_simple_positive():
+    # (B) different structure: multi-line signature, NO nested def, assertion
+    # after a with-block. Still credited.
+    text = (
+        "import pytest\n"
+        "from app import cli\n"
+        "\n"
+        "def test_usage_on_missing_arg(\n"
+        "    capsys: pytest.CaptureFixture[str],\n"
+        ") -> None:\n"
+        "    with pytest.raises(SystemExit):\n"
+        "        cli.main(['run'])\n"
+        "    captured = capsys.readouterr()\n"
+        "    assert 'usage' in captured.err\n"
+    )
+    b = {x.label: x for x in PythonTestBlockProfile().parse_test_blocks(text)}[
+        "test_usage_on_missing_arg"
+    ]
+    assert b.has_assertion is True
+
+
+def test_python_multiline_signature_empty_body_stays_no_assertion():
+    # Negative guard: the AST fix must NOT make a genuinely empty multi-line-sig
+    # test look asserted (no new false-GREEN).
+    text = (
+        "def test_empty_multiline(\n"
+        "    a: int,\n"
+        "    b: int,\n"
+        ") -> None:\n"
+        "    pass\n"
+    )
+    b = {x.label: x for x in PythonTestBlockProfile().parse_test_blocks(text)}[
+        "test_empty_multiline"
+    ]
+    assert b.has_assertion is False
+
+
+def test_python_singleline_signature_still_parsed():
+    # Regression guard: single-line signatures (the common case) keep working.
+    text = "def test_single():\n    result = compute(2)\n    assert result == 4\n"
+    b = {x.label: x for x in PythonTestBlockProfile().parse_test_blocks(text)}[
+        "test_single"
+    ]
+    assert b.has_assertion is True
