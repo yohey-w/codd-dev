@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from codd.project_types import LayoutProfile
 from codd.vb_marker_authenticity import (
     PythonTestBlockProfile,
@@ -272,9 +274,16 @@ def test_feedback_is_about_strengthening_not_marking(tmp_path):
     assert "never by silencing the gate" in feedback
 
 
-def test_existing_assert_true_marker_still_passes(tmp_path):
-    """Back-compat: the existing gate tests mark `def t(): assert True` — that has
-    an assertion, so authenticity must keep PASSING it (no over-tightening)."""
+def test_assert_true_constant_only_marker_is_now_rejected(tmp_path):
+    """CONTRACT CHANGE (constant-direct false-green closed): `def t(): assert True`
+    under a `covers vb=` marker used to PASS — a primitive ``assert`` satisfied
+    ``has_assertion`` and Stage 3 credited it ``direct`` unconditionally. That was
+    the exact false-green a padded/fake covering test exploits (the direct-side
+    analogue of the constant-only HELPER the gate already rejects via the argument
+    anchor). It is now a ``constant_direct`` ⇒ ``no_assertion`` VIOLATION: a
+    constant assertion references no observed result/exception/state/output, so it
+    proves nothing. (Was ``test_existing_assert_true_marker_still_passes``, which
+    asserted the now-removed pass.)"""
     project = tmp_path
     _canonical(project, "| VB-01 | a |\n| VB-02 | b |\n")
     _write(
@@ -284,7 +293,159 @@ def test_existing_assert_true_marker_still_passes(tmp_path):
         "def test_app():\n    assert True\n",
     )
     report = build_authenticity_report(project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
-    assert report.passed
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations)
+    assert any("CONSTANT" in v.message or "constant" in v.message for v in report.violations)
+
+
+# ---------------------------------------------------------------------------
+# Constant-direct false-green closure (Stage 3 direct-side argument anchor).
+# A DIRECT primitive assertion is credited only when it references a non-ignored
+# name (a SUT call / exception / Enum / state / output). A constant-only direct
+# assertion proves nothing and is rejected — WITHOUT false-RED'ing a legitimate
+# NO-FIXTURE test (which references a real call/exception/local) and WITHOUT a
+# local-constant/dataflow analysis (``x = True; assert x`` stays a known residual).
+# ---------------------------------------------------------------------------
+
+
+def test_gate_rejects_python_direct_literal_assertion(tmp_path):
+    """(a) A Python ``assert True`` under a marker is constant-only ⇒ REJECTED."""
+    project = tmp_path
+    _canonical(project, "| VB-01 | a |\n")
+    _write(
+        project / "tests" / "test_app.py",
+        "# codd: covers vb=VB-01\n"
+        "def test_app():\n"
+        "    assert True\n",
+    )
+
+    report = build_authenticity_report(
+        project,
+        config={"scan": {"test_dirs": ["tests/"]}},
+        profile=PY_PROFILE,
+    )
+
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations)
+    assert any("CONSTANT" in v.message or "constant" in v.message for v in report.violations)
+
+
+def test_gate_rejects_ts_direct_literal_expect(tmp_path):
+    """(b) A TS ``expect(true).toBe(true)`` under a marker is constant-only ⇒ REJECTED."""
+    project = tmp_path
+    _canonical(project, "| VB-01 | a |\n")
+    _write(
+        project / "tests" / "fake.test.ts",
+        "import { describe, it, expect } from 'vitest';\n"
+        "describe('fake', () => {\n"
+        "  // codd: covers vb=VB-01\n"
+        "  it('pretends', () => { expect(true).toBe(true); });\n"
+        "});\n",
+    )
+
+    report = build_authenticity_report(
+        project,
+        config={"scan": {"test_dirs": ["tests/"]}},
+        profile=TS_PROFILE,
+    )
+
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations)
+
+
+def test_gate_keeps_python_no_fixture_exception_assertion_green(tmp_path):
+    """(c) CRITICAL no-false-RED guard: a NO-FIXTURE exception assertion
+    (``assert exc.value.code == ErrorCode.Y``) references ``exc`` — a non-ignored
+    name — so it is a REAL observation and must stay GREEN. This is the legitimate
+    test shape that a naive "exclude all call/exception names" filter would
+    false-RED; the ignored set deliberately keeps SUT/exception/Enum names."""
+    project = tmp_path
+    _canonical(project, "| VB-ERR-01 | unknown category rejected |\n")
+    _write(
+        project / "tests" / "test_classification.py",
+        "import pytest\n"
+        "\n"
+        "class ValidationFailure(Exception):\n"
+        "    def __init__(self, code):\n"
+        "        self.code = code\n"
+        "\n"
+        "class ErrorCode:\n"
+        "    ERR_UNKNOWN_CATEGORY = 'unknown-category'\n"
+        "\n"
+        "def parse_classification_output(payload):\n"
+        "    raise ValidationFailure(ErrorCode.ERR_UNKNOWN_CATEGORY)\n"
+        "\n"
+        "# codd: covers vb=VB-ERR-01\n"
+        "def test_unknown_category_is_rejected():\n"
+        "    with pytest.raises(ValidationFailure) as exc:\n"
+        "        parse_classification_output({'category': 'invalid'})\n"
+        "    assert exc.value.code == ErrorCode.ERR_UNKNOWN_CATEGORY\n",
+    )
+
+    report = build_authenticity_report(
+        project,
+        config={"scan": {"test_dirs": ["tests/"]}},
+        profile=PY_PROFILE,
+    )
+
+    assert report.passed, [v.message for v in report.violations]
+
+
+def test_gate_keeps_ts_direct_observation_green(tmp_path):
+    """(d) A TS direct observation ``expect(conv()).toBe(1)`` references ``conv``
+    (a SUT call) — a real observation, so it stays GREEN. Only constants are
+    rejected; a call result is not a constant."""
+    project = tmp_path
+    _canonical(project, "| VB-01 | converts |\n")
+    _write(
+        project / "tests" / "conv.test.ts",
+        "import { describe, it, expect } from 'vitest';\n"
+        "function conv(): number { return 1; }\n"
+        "describe('cli', () => {\n"
+        "  // codd: covers vb=VB-01\n"
+        "  it('converts', () => { expect(conv()).toBe(1); });\n"
+        "});\n",
+    )
+
+    report = build_authenticity_report(
+        project,
+        config={"scan": {"test_dirs": ["tests/"]}},
+        profile=TS_PROFILE,
+    )
+
+    assert report.passed, [v.message for v in report.violations]
+
+
+@pytest.mark.xfail(
+    reason="Stage 3 direct-assertion filter intentionally does NOT perform local "
+    "constant/dataflow analysis. ``x = True; assert x`` is a documented residual "
+    "false-green — closing it (subtracting literal-bound locals from the anchor) "
+    "would risk false-RED on legitimate callback/mutation tests "
+    "(``called = False; ...; assert called``).",
+    strict=False,
+)
+def test_gate_rejects_direct_local_constant_alias_future(tmp_path):
+    """Documents the deliberate residual: a constant aliased through a local
+    (``x = True; assert x``) is NOT yet rejected. Marked xfail (non-strict) so it
+    records the known limitation without failing the suite, and would flip to a
+    real pass only if a future stage adds safe dataflow without false-RED risk."""
+    project = tmp_path
+    _canonical(project, "| VB-01 | a |\n")
+    _write(
+        project / "tests" / "test_app.py",
+        "# codd: covers vb=VB-01\n"
+        "def test_app():\n"
+        "    x = True\n"
+        "    assert x\n",
+    )
+
+    report = build_authenticity_report(
+        project,
+        config={"scan": {"test_dirs": ["tests/"]}},
+        profile=PY_PROFILE,
+    )
+
+    assert not report.passed
 
 
 # ===========================================================================
@@ -1587,7 +1748,13 @@ def test_strict_observability_does_not_affect_genuine_covering_test(tmp_path):
         project / "tests" / "ok.test.ts",
         'import { it, expect } from "vitest";\n'
         "// codd: covers vb=VB-1\n"
-        'it("adds", () => { expect(1 + 1).toBe(2); });\n',
+        # A GENUINE observation: ``expect(add(1, 1)).toBe(2)`` references the SUT
+        # call ``add`` (a non-ignored name), so it is real evidence. (A constant
+        # ``expect(1 + 1).toBe(2)`` would now be ``constant_direct`` — correctly,
+        # since 1 + 1 is compile-time-constant and proves no behavior; this test
+        # is about the strict_observability flag, not constant-direct, so it uses
+        # a genuinely-covering assertion.)
+        'it("adds", () => { expect(add(1, 1)).toBe(2); });\n',
     )
     config = {"scan": {"test_dirs": ["tests/"]}}
     strict = build_authenticity_report(

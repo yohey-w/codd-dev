@@ -369,7 +369,12 @@ def test_no_observability_error_when_no_e2e_surface(tmp_path):
         project / "tests" / "unit" / "add.test.ts",
         'import { it, expect } from "vitest";\n'
         "// codd: covers vb=VB-UNIT-01\n"
-        'it("adds", () => { expect(1 + 1).toBe(2); });\n',
+        # GENUINE observation: references the SUT call ``add`` (a non-ignored
+        # name), so the marker-authenticity gate credits it. A constant
+        # ``expect(1 + 1).toBe(2)`` is now ``constant_direct`` (proves no behavior);
+        # this test exercises execution-coherence/observability, not assertion
+        # evidence, so it uses a real covering assertion.
+        'it("adds", () => { expect(add(1, 1)).toBe(2); });\n',
     )
     _write(project / "package.json", json.dumps({"name": "x"}))
     profile = _ts_profile(project)
@@ -615,7 +620,12 @@ def test_blocked_vb_is_exempt_from_execution_coherence(tmp_path):
         project / "tests" / "unit" / "add.test.ts",
         'import { it, expect } from "vitest";\n'
         "// codd: covers vb=VB-UNIT-01\n"
-        'it("adds", () => { expect(1 + 1).toBe(2); });\n'
+        # GENUINE observation: references the SUT call ``add`` (a non-ignored
+        # name), so the marker-authenticity gate credits it. A constant
+        # ``expect(1 + 1).toBe(2)`` is now ``constant_direct`` (proves no behavior);
+        # this test exercises execution-coherence/observability, not assertion
+        # evidence, so it uses a real covering assertion.
+        'it("adds", () => { expect(add(1, 1)).toBe(2); });\n'
         "// codd: blocked vb=VB-BLK-01 reason=external_dependency\n",
     )
     _write(project / "package.json", json.dumps({"name": "b"}))

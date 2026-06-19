@@ -716,11 +716,16 @@ def _vb_runners(calls: list[str], *, task_b_covers: bool):
             )
             return "1 file(s) generated"
         if task_b_covers:
+            # GENUINE covering assertions: each references a SUT call (``add`` /
+            # ``run_cli``), a non-ignored name, so the marker-authenticity gate
+            # credits it. (A constant ``assert True`` is now correctly rejected as
+            # ``constant_direct`` — it proves no behavior — so a real covering test
+            # must assert against an observed result.)
             (tests_dir / "test_behaviors.py").write_text(
                 "# codd: covers vb=VB-add\n"
-                "def test_add():\n    assert True\n\n\n"
+                "def test_add():\n    assert add(2, 3) == 5\n\n\n"
                 "# codd: covers vb=VB-cli\n"
-                "def test_cli():\n    assert True\n",
+                "def test_cli():\n    assert run_cli(['--help']) == 0\n",
                 encoding="utf-8",
             )
         else:

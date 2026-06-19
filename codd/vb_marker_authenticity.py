@@ -39,10 +39,21 @@ each later stage only strengthens, never replaces, the earlier ones:
   helper (``expectSuccessfulRun(result, fixture.stdout)`` whose body runs the
   real ``expect(result.exitCode).toBe(0)``). Evidence is therefore::
 
-      direct primitive assertion in the test body
+      a direct primitive assertion in the test body that is NOT constant-only
       OR
       a call to a RESOLVED helper whose body contains a primitive assertion/fail
       AND references the helper's argument(s) (an "argument anchor")
+
+  A DIRECT primitive assertion is credited only when it references at least one
+  non-ignored name (a SUT call, exception, state, local, or output). A
+  CONSTANT-only direct assertion (``assert True`` / ``assert 1 == 1`` /
+  ``expect(true).toBe(true)``) references nothing but assertion APIs, literals,
+  keywords and obvious builtins — it proves nothing, so it is NOT evidence (the
+  direct-side analogue of the helper-side argument anchor that already rejects a
+  constant-only helper). It is NOT, however, a dataflow analysis: a
+  local-constant alias (``x = True; assert x``) is a deliberate, documented
+  residual — closing it risks false-RED on legitimate callback / mutation tests
+  (``called = False; …; assert called``).
 
   The argument anchor is what keeps this anti-false-green: a no-op helper
   (``function expectSuccess() { expect(true).toBe(true); }``) does not reference
@@ -81,6 +92,7 @@ from __future__ import annotations
 
 import ast
 import re
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
@@ -134,6 +146,9 @@ class TestBlock:
 #: ``ok`` is True iff the block carries credible assertion evidence. ``reason``
 #: is a machine token the gate maps to a violation kind / message:
 #:   ``direct``              — a direct primitive assertion in the body (pass)
+#:   ``constant_direct``     — a direct primitive assertion that is CONSTANT-only
+#:                             (``assert True`` / ``expect(true).toBe(true)``) —
+#:                             references no non-ignored name, so proves nothing
 #:   ``helper_resolved``     — a resolved helper with primitive + arg anchor (pass)
 #:   ``no_assertion``        — neither a primitive nor any assertion-like call
 #:   ``unresolved_helper``   — an assertion-like call not resolvable 1-hop
@@ -407,6 +422,53 @@ def _first_child_block(group: TestBlock, blocks: list[TestBlock]) -> TestBlock |
 # ---------------------------------------------------------------------------
 
 
+def _helper_evidence(
+    adapter: TestBlockProfile,
+    block: TestBlock,
+    *,
+    importer_text: str,
+    importer_rel: str,
+    project_root: Path,
+) -> AssertionEvidence:
+    """Resolve a block's DELEGATED-assertion (helper) evidence, fail-closed.
+
+    Thin wrapper over the per-profile :meth:`TestBlockProfile.resolve_assertion_
+    evidence`: a resolver that raises is treated as NO evidence (toward
+    false-RED, never false-GREEN) rather than crashing the gate.
+    """
+
+    try:
+        return adapter.resolve_assertion_evidence(
+            block,
+            importer_text=importer_text,
+            importer_rel=importer_rel,
+            project_root=project_root,
+        )
+    except Exception:  # noqa: BLE001 — resolver that throws ⇒ no evidence.
+        return AssertionEvidence(ok=False, reason="no_assertion", detail="resolver error")
+
+
+def _direct_evidence(adapter: TestBlockProfile, block: TestBlock) -> AssertionEvidence:
+    """Resolve a block's DIRECT (in-body) primitive-assertion evidence.
+
+    The built-in Python/TypeScript adapters expose
+    ``resolve_direct_assertion_evidence`` which decides whether the direct
+    primitive assertion is constant-only (``constant_direct`` ⇒ not ok) or
+    references a real name (``direct`` ⇒ ok). An EXTERNAL adapter that predates
+    this method has no such hook; for back-compat it keeps the pre-existing
+    behavior (a raw primitive is credited as ``direct``) — only the built-in
+    stacks are tightened here.
+    """
+
+    resolver = getattr(adapter, "resolve_direct_assertion_evidence", None)
+    if callable(resolver):
+        try:
+            return resolver(block)
+        except Exception:  # noqa: BLE001 — a resolver that throws ⇒ keep credit (back-compat).
+            return AssertionEvidence(ok=True, reason="direct")
+    return AssertionEvidence(ok=True, reason="direct")
+
+
 def build_authenticity_report(
     project_root: Path | str,
     *,
@@ -582,20 +644,34 @@ def build_authenticity_report(
                 continue
 
             # ── Stage 3 (assertion EVIDENCE): direct primitive OR resolved helper ──
+            # A DIRECT primitive assertion must not be CONSTANT-only. ``assert
+            # True`` / ``expect(true).toBe(true)`` is a primitive (so
+            # ``has_assertion`` is True) yet proves nothing — the direct-side
+            # analogue of the helper-side argument anchor. We resolve direct
+            # evidence through ``_direct_evidence`` (per-profile, AST for Python /
+            # lexical for TS); if it is constant-only we DO NOT immediately fail —
+            # the same block may ALSO call a credible helper, so we fall back to
+            # the helper resolver and only RED when BOTH paths fail.
             if block.has_assertion:
-                evidence = AssertionEvidence(ok=True, reason="direct")
-            else:
-                try:
-                    evidence = adapter.resolve_assertion_evidence(
+                evidence = _direct_evidence(adapter, block)
+                if not evidence.ok:
+                    helper_evidence = _helper_evidence(
+                        adapter,
                         block,
                         importer_text=text,
                         importer_rel=rel,
                         project_root=project_root,
                     )
-                except Exception:  # noqa: BLE001 — resolver that throws ⇒ no evidence.
-                    evidence = AssertionEvidence(
-                        ok=False, reason="no_assertion", detail="resolver error"
-                    )
+                    if helper_evidence.ok:
+                        evidence = helper_evidence
+            else:
+                evidence = _helper_evidence(
+                    adapter,
+                    block,
+                    importer_text=text,
+                    importer_rel=rel,
+                    project_root=project_root,
+                )
             if not evidence.ok:
                 label = f" ({block.label})" if block.label else ""
                 violations.append(
@@ -643,7 +719,14 @@ def _no_assertion_message(
     """
 
     head = f"{rel}:{marker.line} `codd: covers vb={marker.vb_id}` is attached to a test{label}"
-    if evidence.reason == "unresolved_helper":
+    if evidence.reason == "constant_direct":
+        why = (
+            " whose direct primitive assertion is CONSTANT-only "
+            "(`assert True`, `assert 1 == 1`, or `expect(true).toBe(true)`) — "
+            "a constant assertion proves nothing. Assert against an observed result, "
+            "exception, state, or output that would FAIL if the behavior were broken."
+        )
+    elif evidence.reason == "unresolved_helper":
         why = (
             " whose only assertion is delegated to a helper that could not be resolved "
             f"({evidence.detail or 'no resolvable helper body'}). An unresolved assertion "
@@ -733,6 +816,301 @@ def render_authenticity_markdown(report: AuthenticityReport) -> str:
             lines.append(f"- {path}")
     lines.append("")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# DIRECT-assertion evidence (the direct-side analogue of the helper argument
+# anchor). A primitive assertion IN THE TEST BODY is credited only when it
+# references at least one NON-IGNORED name — a SUT call, exception, Enum, state,
+# local, or output. A CONSTANT-only direct assertion (``assert True`` /
+# ``expect(true).toBe(true)``) references nothing but assertion APIs, literals,
+# keywords and obvious builtins, so it proves nothing and is NOT evidence.
+#
+# GENERALITY GUARDRAILS (do NOT widen the ignored sets):
+#   * Only assertion APIs, literals/keywords, and obvious builtins are ignored.
+#     SUT call names, exception classes, Enum names and local variables are NEVER
+#     ignored — so ``assert validate()`` (validate), ``expect(conv()).toBe(1)``
+#     (conv) and ``assert exc.value.code == ErrorCode.X`` (exc) stay GREEN. This
+#     is what prevents a false-RED on a legitimate NO-FIXTURE test.
+#   * No local-constant / dataflow analysis. ``x = True; assert x`` stays GREEN —
+#     closing it would risk false-RED on callback / mutation tests
+#     (``called = False; …; assert called``). It is a documented residual.
+# ---------------------------------------------------------------------------
+
+
+#: Python names that are NOT credit-worthy references inside a direct primitive
+#: assertion: the assertion APIs themselves plus literals / keywords / obvious
+#: builtins. NOTHING here is a SUT symbol — a function/Enum/exception/local name
+#: is never ignored, so a real observation (``assert validate()`` /
+#: ``assert exc.value.code == ErrorCode.X``) is always credited.
+_PY_DIRECT_IGNORED_NAMES = frozenset(
+    {
+        "assert",
+        "pytest",
+        "self",
+        "cls",
+        "np",
+        "True",
+        "False",
+        "None",
+        "Ellipsis",
+        "bool",
+        "int",
+        "float",
+        "str",
+        "bytes",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "frozenset",
+        "len",
+        "sum",
+        "min",
+        "max",
+        "all",
+        "any",
+        "isinstance",
+        "issubclass",
+        "type",
+        "object",
+        "Exception",
+        "BaseException",
+        "AssertionError",
+        "ValueError",
+        "TypeError",
+        "RuntimeError",
+    }
+)
+
+
+#: TypeScript/JavaScript counterpart of :data:`_PY_DIRECT_IGNORED_NAMES`: the
+#: vitest/jest/chai assertion APIs, the matcher names, plus literals / keywords /
+#: obvious global builtins. A SUT call name / class is never ignored, so
+#: ``expect(conv()).toBe(1)`` (``conv`` remains) stays GREEN while
+#: ``expect(true).toBe(true)`` (only ignored names) becomes RED.
+#:
+#: NOTE (TS inline-block leak — why the test-DECLARATION globals are here too):
+#: unlike a Python ``def test_x():`` whose ``body_text`` starts AFTER the def
+#: line, a TS leaf block's ``body_text`` for an INLINE form
+#: (``it('x', () => { expect(true).toBe(true); });``) is the WHOLE ``it(...)``
+#: line — so the lexical window harvests the block-declaration callee (``it`` /
+#: ``test`` / ``describe``) and the arrow keyword (``async``) as "references".
+#: These are vitest/jest reserved test-framework globals on the same footing as
+#: ``expect`` / ``vi`` / the matchers, so they are ignored too — otherwise an
+#: inline constant-only ``it('x', () => expect(true).toBe(true))`` would leak
+#: ``it`` and be mis-credited ``direct``. A real observation
+#: (``expect(conv()).toBe(1)``) still retains its SUT name (``conv``), so adding
+#: these never false-REDs a genuine test; and were a SUT ever literally named
+#: ``it``/``test``/``describe`` the only effect is a fail-CLOSED RED on that one
+#: assertion (safe direction), never a false-GREEN.
+_TS_DIRECT_IGNORED_NAMES = frozenset(
+    {
+        "expect",
+        "vi",
+        "assert",
+        "throw",
+        "new",
+        "typeof",
+        "instanceof",
+        "async",
+        "await",
+        # vitest/jest block-declaration + lifecycle globals (leak from an inline
+        # block's ``body_text``; see the NOTE above).
+        "it",
+        "test",
+        "describe",
+        "xit",
+        "xtest",
+        "xdescribe",
+        "fit",
+        "fdescribe",
+        "beforeEach",
+        "afterEach",
+        "beforeAll",
+        "afterAll",
+        "true",
+        "false",
+        "null",
+        "undefined",
+        "NaN",
+        "Infinity",
+        "toBe",
+        "toEqual",
+        "toStrictEqual",
+        "toThrow",
+        "toContain",
+        "toMatch",
+        "toHaveLength",
+        "Boolean",
+        "Number",
+        "String",
+        "Object",
+        "Array",
+        "Map",
+        "Set",
+        "Date",
+        "RegExp",
+        "Math",
+        "JSON",
+        "Promise",
+        "Error",
+        "TypeError",
+        "RangeError",
+        "SyntaxError",
+    }
+)
+
+
+def _py_callee_name(node: ast.AST) -> str:
+    """Dotted callee name of a call target (``pytest.raises`` / ``self.assertX``)."""
+
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _py_callee_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def _is_py_primitive_assert_node(node: ast.AST) -> bool:
+    """Whether ``node`` is a PRIMITIVE python assertion (mirrors ``_PY_PRIMITIVE_ASSERT_RE``).
+
+    An ``assert`` statement, a ``with pytest.raises(...)`` block, or an expression
+    statement calling ``pytest.fail`` / ``self.fail`` / ``self.assert*`` /
+    ``np.testing.assert*``. A bare call to a NAMED helper is NOT primitive (it is
+    resolved via the evidence graph), so it is not matched here.
+    """
+
+    if isinstance(node, ast.Assert):
+        return True
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        for item in node.items:
+            expr = item.context_expr
+            if isinstance(expr, ast.Call) and _py_callee_name(expr.func) == "pytest.raises":
+                return True
+        return False
+    if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+        callee = _py_callee_name(node.value.func)
+        return (
+            callee == "pytest.fail"
+            or callee == "self.fail"
+            or callee.startswith("self.assert")
+            or callee.startswith("np.testing.assert")
+        )
+    return False
+
+
+def _python_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
+    """AST verdict: does ``body_text`` carry a NON-constant direct primitive assertion?
+
+    For each primitive-assert node, collect every ``ast.Name`` id inside it and
+    subtract :data:`_PY_DIRECT_IGNORED_NAMES`. If ANY name remains the assertion
+    references a real observation (a SUT call, exception, Enum, local, or state)
+    ⇒ ``direct`` (ok). If every assertion is constant-only ⇒ ``constant_direct``
+    (not ok). Falls back to the lexical scanner on a syntax error so an
+    un-parseable body never false-REDs here (it degrades to the line-based path,
+    which itself fails OPEN per window).
+    """
+
+    try:
+        tree = ast.parse(textwrap.dedent(body_text))
+    except (SyntaxError, ValueError):
+        return _lexical_direct_assertion_evidence(
+            body_text,
+            primitive_re=_PY_PRIMITIVE_ASSERT_RE,
+            ignored_names=_PY_DIRECT_IGNORED_NAMES,
+        )
+
+    saw_primitive = False
+    for node in ast.walk(tree):
+        if not _is_py_primitive_assert_node(node):
+            continue
+        saw_primitive = True
+        ids = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        if ids - _PY_DIRECT_IGNORED_NAMES:
+            return AssertionEvidence(ok=True, reason="direct")
+
+    if not saw_primitive:
+        # The raw regex (``has_assertion``) matched but the AST recognized no
+        # primitive node (e.g. ``assert`` inside a string, or an assertion shape
+        # the AST walker does not classify). Fail OPEN — keep the pre-existing
+        # ``direct`` credit rather than inventing a false-RED.
+        return AssertionEvidence(ok=True, reason="direct")
+    return AssertionEvidence(ok=False, reason="constant_direct")
+
+
+def _primitive_assertion_windows(body: str, primitive_re: re.Pattern[str]) -> list[str]:
+    """Each primitive-assertion line PLUS its more-indented continuation block.
+
+    Mirrors the window walk in :func:`_body_references_params`: an assertion's
+    "window" is the matching line plus every following line indented MORE than it
+    (its block) — so a context-manager assertion (``with pytest.raises(...):\\n
+    fn()``) carries the ``fn()`` call into its window, while a trailing
+    same-indent statement after a constant assertion is not folded in.
+    """
+
+    lines = body.splitlines()
+    windows: list[str] = []
+    total = len(lines)
+    for idx, line in enumerate(lines):
+        if not primitive_re.search(line):
+            continue
+        base_indent = len(line[: len(line) - len(line.lstrip())].expandtabs())
+        window = [line]
+        scan = idx + 1
+        while scan < total:
+            nxt = lines[scan]
+            if not nxt.strip():
+                scan += 1
+                continue
+            nxt_indent = len(nxt[: len(nxt) - len(nxt.lstrip())].expandtabs())
+            if nxt_indent <= base_indent:
+                break
+            window.append(nxt)
+            scan += 1
+        windows.append("\n".join(window))
+    return windows
+
+
+def _lexical_direct_assertion_evidence(
+    body_text: str,
+    *,
+    primitive_re: re.Pattern[str],
+    ignored_names: frozenset[str],
+) -> AssertionEvidence:
+    """Lexical verdict (TS, and Python-on-syntax-error): a non-constant direct assertion.
+
+    For each primitive-assertion window, harvest GENUINE references via
+    :func:`_rhs_reference_idents` (which already drops identifiers inside strings,
+    comments, object keys, and member-property positions) and subtract
+    ``ignored_names``. If any window references a non-ignored name ⇒ ``direct``
+    (ok). A window whose references cannot be confidently scanned (``None`` —
+    unterminated string/comment) is SKIPPED so it can never manufacture a
+    false-RED. Only when EVERY window is constant-only ⇒ ``constant_direct``.
+    """
+
+    saw_primitive = False
+    for window in _primitive_assertion_windows(body_text, primitive_re):
+        saw_primitive = True
+        refs = _rhs_reference_idents(window)
+        if refs is None:
+            return AssertionEvidence(ok=True, reason="direct")  # cannot scan ⇒ keep credit
+        if refs - ignored_names:
+            return AssertionEvidence(ok=True, reason="direct")
+    if not saw_primitive:
+        return AssertionEvidence(ok=True, reason="direct")  # no window ⇒ keep credit
+    return AssertionEvidence(ok=False, reason="constant_direct")
+
+
+def _typescript_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
+    """TS/JS direct-assertion verdict — lexical, reusing the shared window scanner."""
+
+    return _lexical_direct_assertion_evidence(
+        body_text,
+        primitive_re=_TS_PRIMITIVE_ASSERT_RE,
+        ignored_names=_TS_DIRECT_IGNORED_NAMES,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -997,6 +1375,15 @@ class PythonTestBlockProfile:
             block, importer_text=importer_text, importer_rel=importer_rel, project_root=project_root
         )
 
+    def resolve_direct_assertion_evidence(self, block: TestBlock) -> AssertionEvidence:
+        """Whether the block's DIRECT primitive assertion references a real name.
+
+        AST-based (``constant_direct`` when the assertion is constant-only). Called
+        by the gate only when ``block.has_assertion`` is True.
+        """
+
+        return _python_direct_assertion_evidence(block.body_text)
+
 
 # vitest/jest: it(...) / test(...) blocks; describe(...) groups. Skip via
 # ``.skip`` / ``.todo`` / ``xit`` / ``xtest`` / ``it.skipIf`` and a
@@ -1123,6 +1510,15 @@ class TypeScriptTestBlockProfile:
         return _resolve_typescript_evidence(
             block, importer_text=importer_text, importer_rel=importer_rel, project_root=project_root
         )
+
+    def resolve_direct_assertion_evidence(self, block: TestBlock) -> AssertionEvidence:
+        """Whether the block's DIRECT primitive assertion references a real name.
+
+        Lexical (``constant_direct`` when the assertion is constant-only). Called
+        by the gate only when ``block.has_assertion`` is True.
+        """
+
+        return _typescript_direct_assertion_evidence(block.body_text)
 
     @staticmethod
     def _matching_close(lines: list[str], open_index: int) -> int:
