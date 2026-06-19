@@ -1148,6 +1148,7 @@ class _PyFirstPartyIndex:
         #: the namespace root matches the index keys, not the raw project path).
         self.rel_to_key: dict[str, str] = {}
         self._provided_cache: dict[str, Any] = {}
+        self._module_getattr_cache: dict[str, bool] = {}
 
     def register(self, key: str, info: _PyModuleInfo) -> None:
         self.modules.setdefault(key, info)
@@ -1166,6 +1167,31 @@ class _PyFirstPartyIndex:
     def resolves(self, key: str) -> bool:
         """A dotted key resolves when it is a known module OR a known package."""
         return self.has_module(key) or self.has_package(key)
+
+    def has_module_getattr(self, key: str) -> bool:
+        """True when the module file declares a MODULE-LEVEL ``__getattr__`` (PEP 562).
+
+        A module-level ``def __getattr__(name)`` provides attributes dynamically, so
+        ``from mod import X`` for such a module is statically UNDECIDABLE — flagging
+        X missing would be a false-RED. Kept SEPARATE from :meth:`provided_names`
+        (a star/re-export of such a module must NOT become UNKNOWN — that would widen
+        the false-GREEN surface); only a direct named import from the bearer is
+        excused, at the call site. Module-level only (a nested / class ``__getattr__``
+        is not PEP 562). ``__dir__`` does NOT count (it controls ``dir()`` display,
+        not attribute lookup).
+        """
+        cached = self._module_getattr_cache.get(key)
+        if cached is not None:
+            return cached
+        info = self.modules.get(key)
+        result = False
+        if info is not None and info.tree is not None:
+            result = any(
+                isinstance(node, ast.FunctionDef) and node.name == "__getattr__"
+                for node in _module_level_statements(info.tree)
+            )
+        self._module_getattr_cache[key] = result
+        return result
 
     def is_first_party_prefix(self, key: str) -> bool:
         """True when ``key`` is, or is under, a known first-party top-level name."""
@@ -1679,6 +1705,14 @@ def _resolve_python_import_demand(
     submodule_key = f"{module_key}.{demand.symbol}"
     if index.resolves(submodule_key):
         return "ok", module_key, ""  # ``from pkg import submodule``
+    if index.has_module_getattr(module_key):
+        # PEP 562: the target module declares a module-level ``__getattr__`` that
+        # provides attributes dynamically, so this symbol's presence is statically
+        # UNDECIDABLE — do not flag it missing (false-RED avoidance). Module
+        # resolution above is still required (a missing module stays module_missing),
+        # and re-exports do NOT inherit this (provided_names stays precise): only a
+        # DIRECT named import from the ``__getattr__`` bearer is excused.
+        return "ok", module_key, ""
     provided = index.provided_names(module_key)
     if provided is _PY_PROVIDES_UNKNOWN:
         return "ok", module_key, ""  # provider undecidable → never flag (anti-false-RED)

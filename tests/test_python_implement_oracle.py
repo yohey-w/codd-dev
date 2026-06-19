@@ -453,3 +453,61 @@ def test_name_lint_required_without_tool_is_environment_error(tmp_path: Path) ->
     assert any(f.code == "name_lint_unavailable" for f in result.findings), (
         [(f.code, f.message) for f in result.findings]
     )
+
+
+# ═════════════════════════════════════════════════════════════
+# PEP 562 module-level __getattr__: a named import from a module that
+# dynamically provides attributes is statically UNDECIDABLE → not a false-RED.
+# (normal-missing-symbol RED and namespace-package PASS are covered above.)
+# ═════════════════════════════════════════════════════════════
+
+
+def test_module_getattr_named_import_is_not_red(tmp_path: Path) -> None:
+    """``from app.dynamic import compute`` where dynamic.py has module ``__getattr__`` → PASS."""
+    _scaffold(tmp_path, with_path_shim=True)
+    _write(
+        tmp_path,
+        "src/app/dynamic.py",
+        "def __getattr__(name):\n    def _impl(*a, **k):\n        return name\n    return _impl\n",
+    )
+    _write(tmp_path, "src/app/core.py", "from app.dynamic import compute\n\n\ndef run():\n    return compute()\n")
+    _write(
+        tmp_path,
+        "tests/test_core.py",
+        "from app.core import run\n\n\ndef test_run():\n    assert run() == 'compute'\n",
+    )
+
+    result = _run(tmp_path)
+
+    assert result.passed is True, [(f.code, f.message) for f in result.findings]
+
+
+def test_dir_only_does_not_excuse_missing_symbol(tmp_path: Path) -> None:
+    """``__dir__`` controls ``dir()`` display, NOT attribute lookup — a ``__dir__``-only
+    module (no ``__getattr__``) does NOT excuse a missing symbol: stays RED."""
+    _scaffold(tmp_path, with_path_shim=True)
+    _write(tmp_path, "src/app/dyn.py", "def __dir__():\n    return ['compute']\n")
+    _write(tmp_path, "src/app/core.py", "from app.dyn import compute\n")
+    _write(tmp_path, "tests/test_smoke.py", "def test_ok():\n    assert True\n")
+
+    result = _run(tmp_path)
+
+    assert result.passed is False
+    assert "PY_IMPORT_NAME_NOT_FOUND" in _codes(result)
+
+
+def test_getattr_excuse_is_direct_target_only_not_via_reexport(tmp_path: Path) -> None:
+    """The ``__getattr__`` excuse covers ONLY a DIRECT named import from the bearer.
+    A re-exporting facade (no own ``__getattr__``) does NOT inherit it — so a symbol
+    only the bearer provides dynamically, imported from the FACADE, stays RED. This
+    keeps the false-GREEN surface narrow (``provided_names`` is not widened to UNKNOWN)."""
+    _scaffold(tmp_path, with_path_shim=True)
+    _write(tmp_path, "src/app/dynamic.py", "def __getattr__(name):\n    return name\n")
+    _write(tmp_path, "src/app/facade.py", "from app.dynamic import *\n")
+    _write(tmp_path, "src/app/core.py", "from app.facade import gen_thing\n")
+    _write(tmp_path, "tests/test_smoke.py", "def test_ok():\n    assert True\n")
+
+    result = _run(tmp_path)
+
+    assert result.passed is False
+    assert "PY_IMPORT_NAME_NOT_FOUND" in _codes(result)
