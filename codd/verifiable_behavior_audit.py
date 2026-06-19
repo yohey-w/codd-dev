@@ -46,6 +46,17 @@ _DEFAULT_VB_DOC_DIR = "docs/test"
 # VB audit re-scans the matched span with this token regex to recover every id.
 _VB_TOKEN_RE = re.compile(r"vb\s*=\s*(?P<vb>[A-Za-z0-9_.:-]+)", re.IGNORECASE)
 
+# A ``VB-*`` token appearing anywhere in free text / a non-first table cell — a
+# REFERENCE to a canonical id, not a declaration. Anchored by id-boundary
+# look-arounds so it matches a standalone token (``VB-CLI-007``) but not a
+# substring inside a longer identifier. Mirrors the body shape of ``_VB_ID_RE``
+# (which is whole-cell anchored) so a first-cell declaration and a later-column
+# reference recover the SAME id text. Used only by :func:`parse_vb_references`.
+_VB_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])VB-[A-Za-z0-9][A-Za-z0-9_.-]*(?![A-Za-z0-9_.-])",
+    re.IGNORECASE,
+)
+
 # Canonical verifiable-behavior declaration doc. Exactly ONE generated test
 # document owns the VB id namespace (declares every VB once in a first-column
 # ``VB-*`` table); every other test doc references those canonical ids in a
@@ -83,6 +94,77 @@ def is_canonical_vb_doc(node_id: str | None = None, output_path: str | None = No
     return False
 
 
+def wave_config_plans_canonical_vb_doc(config: dict[str, Any] | None) -> bool:
+    """Whether the project's ``wave_config`` plans the canonical VB registry doc.
+
+    Structural signal that this project INTENDS to declare verifiable behaviors:
+    one of its planned generation artifacts is the canonical VB document
+    (``test:test-strategy`` / ``docs/test/test_strategy.md``). Mirrors the
+    detection in ``codd.planner._set_canonical_vb_doc_config`` (which pins the
+    canonical doc into ``test_coverage.docs`` at plan time). Generic — keys off
+    the standard CoDD canonical naming, never any one project's specifics.
+    """
+
+    wave_config = (config or {}).get("wave_config")
+    if not isinstance(wave_config, dict):
+        return False
+    for entries in wave_config.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            node_id = entry.get("node_id") or entry.get("id")
+            output = entry.get("output")
+            if is_canonical_vb_doc(
+                node_id=node_id if isinstance(node_id, str) else None,
+                output_path=output if isinstance(output, str) else None,
+            ):
+                return True
+    return False
+
+
+def project_expects_vb_registry(
+    project_root: Path | str,
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Whether this project is expected to own a canonical VB registry.
+
+    The greenfield VB-registry gates (generate-time completeness gate and the
+    implement-stage empty-registry hard-fail) apply ONLY to projects that have a
+    verifiable-behavior SURFACE — never to a legitimate minimal project that
+    genuinely declares no behaviors. A project "expects" a VB registry when ANY
+    of these structural signals hold:
+
+    1. its ``wave_config`` plans the canonical VB document
+       (:func:`wave_config_plans_canonical_vb_doc`),
+    2. ``test_coverage.docs`` is explicitly configured (the planner pins the
+       canonical doc here, and an owner may set it directly), or
+    3. a canonical VB document already exists among the discovered test docs.
+
+    All three are generic/structural — no project proper-names. A project with
+    none of these (e.g. an app whose plan declares only design docs and no test
+    strategy) is NOT gated: it has no VB surface to certify, exactly as the
+    brownfield "nothing to audit -> pass" rule already allows.
+    """
+
+    project_root = Path(project_root).resolve()
+    if config is None:
+        config = _load_optional_config(project_root)
+
+    if wave_config_plans_canonical_vb_doc(config):
+        return True
+
+    section = (config or {}).get("test_coverage")
+    if isinstance(section, dict) and section.get("docs"):
+        return True
+
+    for doc_path in discover_vb_documents(project_root, config=config):
+        if is_canonical_vb_doc(output_path=_rel_path(doc_path, project_root)):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class VBDeclarationIssue:
     """A VB-declaration coherence problem detected across test documents."""
@@ -92,6 +174,46 @@ class VBDeclarationIssue:
     vb_id: str
     message: str
     docs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class VBReference:
+    """A ``VB-*`` token REFERENCED (not declared) in a doc's later table cells.
+
+    Distinct from :class:`VerifiableBehavior` (a first-column DECLARATION): a
+    reference points AT a canonical id from somewhere else (an acceptance-
+    criteria row, a traceability column). A reference is never a declaration —
+    using one as a declaration source is the structural defect this module
+    guards against (the dogfood failure where AC tables reference ``VB-*`` ids
+    that the canonical registry never declares).
+    """
+
+    vb_id: str
+    source_doc: str
+    row_id: str = ""
+    context: str = ""
+
+
+@dataclass(frozen=True)
+class VBRegistryIssue:
+    """A canonical-VB-registry completeness problem (greenfield generate gate).
+
+    Reported by :func:`validate_vb_registry_completeness`:
+
+    * ``missing_canonical_doc`` — the canonical VB registry doc
+      (``docs/test/test_strategy.md`` / ``test:test-strategy``), the VB
+      namespace owner, is absent.
+    * ``empty_canonical_registry`` — the canonical doc exists but declares zero
+      first-column ``VB-*`` rows.
+    * ``unresolved_reference`` — a ``VB-*`` id referenced in a non-canonical
+      doc's later columns is not declared in the canonical doc.
+    """
+
+    kind: str  # "missing_canonical_doc" | "empty_canonical_registry" | "unresolved_reference"
+    severity: str  # "error" | "warning"
+    vb_id: str = ""
+    source_doc: str = ""
+    message: str = ""
 
 
 # Range-shorthand atomicity: a VB id must name exactly ONE behavior. A
@@ -373,6 +495,216 @@ def parse_vb_table(markdown_text: str, *, source_doc: str = "") -> list[Verifiab
             )
         )
     return behaviors
+
+
+def parse_vb_references(markdown_text: str, *, source_doc: str = "") -> list[VBReference]:
+    """Extract ``VB-*`` REFERENCES from a doc's table rows (not declarations).
+
+    Mirror image of :func:`parse_vb_table`. A table row whose FIRST cell is a
+    ``VB-*`` id is a DECLARATION and is skipped here entirely (it belongs to the
+    declaration parser). For every OTHER row, any ``VB-*`` token found in the
+    non-first cells is recorded as a reference carrying the canonical id, the
+    source doc, the first cell as ``row_id`` (e.g. an ``AC-05`` acceptance-
+    criteria id), and the raw row as ``context``. Fenced code blocks are skipped
+    so examples never count. A reference is NEVER promoted to a declaration —
+    it is only ever a candidate id for repair feedback.
+    """
+
+    refs: list[VBReference] = []
+    in_fence = False
+    for line in markdown_text.splitlines():
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = _TABLE_ROW_RE.match(line)
+        if not match:
+            continue
+        cells = [cell.strip() for cell in match.group("cells").split("|")]
+        if len(cells) < 2:
+            continue
+        first = cells[0].strip("`*_ ").strip()
+        # A first-cell VB-* is a DECLARATION (owned by parse_vb_table), never a
+        # reference — so the same id is not double-counted as both.
+        if _VB_ID_RE.match(first):
+            continue
+        for cell in cells[1:]:
+            for token in _VB_REF_RE.finditer(cell):
+                refs.append(
+                    VBReference(
+                        vb_id=token.group(0),
+                        source_doc=source_doc,
+                        row_id=first,
+                        context=line.strip(),
+                    )
+                )
+    return refs
+
+
+def validate_vb_registry_completeness(
+    project_root: Path | str,
+    config: dict[str, Any] | None = None,
+    *,
+    strict: bool = True,
+) -> list[VBRegistryIssue]:
+    """Validate that the canonical VB registry is present, non-empty, and resolves.
+
+    DECLARATION/REFERENCE coherence only — it never derives declarations from
+    references or markers (that direction is forbidden; see the module docstring
+    and :func:`parse_vb_references`). Returns issues for:
+
+    * ``missing_canonical_doc`` (error) — no discovered test doc is the canonical
+      VB registry (``docs/test/test_strategy.md`` / ``test:test-strategy``).
+    * ``empty_canonical_registry`` (error) — the canonical doc exists but declares
+      zero first-column ``VB-*`` rows.
+    * ``unresolved_reference`` (error when ``strict``, else warning) — a ``VB-*``
+      referenced in a non-canonical doc's later columns is not declared in the
+      canonical doc.
+
+    Reuses :func:`parse_vb_tables_by_doc` (declarations per doc) and
+    :func:`parse_vb_references` (references per doc), and the module's canonical-
+    doc resolution (:func:`is_canonical_vb_doc`). Range/list shorthand, collisions
+    and duplicate semantics remain the job of :func:`validate_vb_declarations` —
+    this function is strictly about registry COMPLETENESS, not id atomicity.
+    """
+
+    project_root = Path(project_root).resolve()
+    if config is None:
+        config = _load_optional_config(project_root)
+
+    # Registry COMPLETENESS scans the WHOLE test-doc tree, NOT just the docs
+    # pinned in ``test_coverage.docs``. That pin names the canonical DECLARER for
+    # the coverage audit; completeness must additionally see every doc that
+    # REFERENCES VB ids (e.g. an acceptance-criteria doc) so an unresolved
+    # reference is caught. So discover docs by the directory tree here, ignoring
+    # the ``test_coverage.docs`` constraint.
+    doc_texts = _iter_doc_texts(project_root, config=_config_without_doc_pin(config))
+    behaviors_by_doc = {
+        doc: parse_vb_table(text, source_doc=doc) for doc, text in doc_texts
+    }
+
+    # Resolve the canonical doc among the discovered docs (path-based, since at
+    # audit time only paths on disk are known). The declared-id universe is read
+    # ONLY from that canonical doc — references never contribute declarations.
+    canonical_docs = [doc for doc in behaviors_by_doc if is_canonical_vb_doc(output_path=doc)]
+    canonical_doc = canonical_docs[0] if canonical_docs else None
+
+    issues: list[VBRegistryIssue] = []
+
+    if canonical_doc is None:
+        issues.append(
+            VBRegistryIssue(
+                kind="missing_canonical_doc",
+                severity="error",
+                source_doc=_CANONICAL_VB_OUTPUT_PATH,
+                message=(
+                    f"No canonical verifiable-behavior registry document "
+                    f"(`{_CANONICAL_VB_OUTPUT_PATH}`) was found. Exactly one document must "
+                    "own the VB id namespace and declare every verifiable behavior once as a "
+                    "first-column `VB-*` row; other docs reference those ids in a later column."
+                ),
+            )
+        )
+        # Without a canonical doc there is no declared universe to resolve
+        # references against; reporting per-reference "unresolved" on top of the
+        # missing-doc error would be noise. The missing-doc error is the signal.
+        return issues
+
+    declared_ids = {
+        _normalize_vb_id(behavior.vb_id) for behavior in behaviors_by_doc.get(canonical_doc, [])
+    }
+
+    if not declared_ids:
+        issues.append(
+            VBRegistryIssue(
+                kind="empty_canonical_registry",
+                severity="error",
+                source_doc=canonical_doc,
+                message=(
+                    f"The canonical verifiable-behavior registry (`{canonical_doc}`) declares "
+                    "zero first-column `VB-*` rows. Declare every real verifiable behavior "
+                    "exactly once as a first-column `VB-*` row so coverage/authenticity can "
+                    "certify the system. (References to VB ids in other docs do not count — "
+                    "only first-column declarations in the canonical doc do.)"
+                ),
+            )
+        )
+
+    # Unresolved references: a VB-* referenced in a NON-canonical doc's later
+    # columns that the canonical registry does not declare. (References inside the
+    # canonical doc itself are ignored — its own first-column rows are the
+    # declarations; a later-column self-reference is not an external obligation.)
+    seen_unresolved: set[tuple[str, str]] = set()
+    for doc, text in doc_texts:
+        if is_canonical_vb_doc(output_path=doc):
+            continue
+        for reference in parse_vb_references(text, source_doc=doc):
+            normalized = _normalize_vb_id(reference.vb_id)
+            if normalized in declared_ids:
+                continue
+            key = (doc, normalized)
+            if key in seen_unresolved:
+                continue
+            seen_unresolved.add(key)
+            issues.append(
+                VBRegistryIssue(
+                    kind="unresolved_reference",
+                    severity="error" if strict else "warning",
+                    vb_id=reference.vb_id,
+                    source_doc=doc,
+                    message=(
+                        f"`{doc}` references verifiable behavior `{reference.vb_id}`"
+                        + (f" (row `{reference.row_id}`)" if reference.row_id else "")
+                        + f", but it is not declared in the canonical registry "
+                        f"(`{canonical_doc}`). Declare it there as a first-column `VB-*` row "
+                        "if it is a real behavior, or fix the reference if the id is wrong."
+                    ),
+                )
+            )
+
+    return issues
+
+
+def _config_without_doc_pin(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A shallow config copy with ``test_coverage.docs`` removed.
+
+    The ``test_coverage.docs`` pin restricts :func:`discover_vb_documents` to the
+    canonical DECLARER (a coverage-audit optimization). Registry COMPLETENESS
+    must scan the whole test-doc tree (also the docs that REFERENCE VB ids), so it
+    discovers by directory instead. Removing only the ``docs`` key preserves every
+    other config setting (doc dirs, etc.).
+    """
+
+    if not isinstance(config, dict):
+        return config
+    section = config.get("test_coverage")
+    if not isinstance(section, dict) or "docs" not in section:
+        return config
+    clone = dict(config)
+    clone_section = dict(section)
+    clone_section.pop("docs", None)
+    clone["test_coverage"] = clone_section
+    return clone
+
+
+def _iter_doc_texts(
+    project_root: Path,
+    *,
+    config: dict[str, Any] | None = None,
+    docs: Iterable[Path | str] | None = None,
+) -> list[tuple[str, str]]:
+    """Read each discovered VB doc as ``(display_path, text)`` (decode-skip safe)."""
+
+    project_root = Path(project_root).resolve()
+    out: list[tuple[str, str]] = []
+    for doc_path in discover_vb_documents(project_root, config=config, docs=docs):
+        try:
+            text = doc_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        out.append((_rel_path(doc_path, project_root), text))
+    return out
 
 
 def discover_vb_documents(

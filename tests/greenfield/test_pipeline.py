@@ -1567,3 +1567,188 @@ def test_verify_hook_passes_on_subprocess_only_e2e(tmp_path: Path) -> None:
     )
     # Must not raise.
     GreenfieldPipeline()._enforce_import_coherence(project)
+
+
+# ═══════════════════════════════════════════════════════════
+# Generate-time canonical VB-registry gate + bounded repair
+# (model-independence: a weak model that references VB ids in AC tables but
+# declares none in the canonical registry must be REPAIRED at generate or fail
+# honestly — NEVER reach implement with a 0-declaration orphan storm.)
+# ═══════════════════════════════════════════════════════════
+
+# A canonical registry doc that declares ZERO VB rows (the weak-model failure),
+# plus an acceptance-criteria doc that REFERENCES VB ids in a later column.
+_EMPTY_CANONICAL = "# Test Strategy\n\nNarrative only; no VB rows declared.\n"
+_AC_WITH_REFS = (
+    "# Acceptance Criteria\n\n"
+    "| AC | Description | Verifies |\n| --- | --- | --- |\n"
+    "| AC-01 | login | VB-CLI-007 |\n| AC-02 | logout | VB-CLI-008 |\n"
+)
+_GOOD_CANONICAL = (
+    "# Test Strategy\n\n"
+    "| VB | Description | Scenario |\n| --- | --- | --- |\n"
+    "| VB-CLI-007 | login works | login() |\n"
+    "| VB-CLI-008 | logout works | logout() |\n"
+)
+
+
+def _registry_project(tmp_path: Path, *, canonical_body: str) -> Path:
+    """A project that EXPECTS a VB registry (test_coverage.docs is configured)
+    and whose docs/test/ already contains a canonical doc + an AC-refs doc."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    # Make the project "expect" a registry without relying on wave_config: pin
+    # the canonical doc in test_coverage.docs (the planner does exactly this).
+    config_path = project / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["test_coverage"] = {"docs": ["docs/test/test_strategy.md"]}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    docs_test = project / "docs" / "test"
+    docs_test.mkdir(parents=True, exist_ok=True)
+    (docs_test / "test_strategy.md").write_text(canonical_body, encoding="utf-8")
+    (docs_test / "acceptance_criteria.md").write_text(_AC_WITH_REFS, encoding="utf-8")
+    return project
+
+
+def test_generate_vb_registry_gate_honest_red_when_repair_cannot_fix(tmp_path, monkeypatch):
+    """Generate gate RAISES (honest-RED) when the canonical registry stays empty
+    after the bounded repair attempts. The repair re-invokes generation SCOPED
+    to the canonical doc; here that regeneration writes nothing useful, so the
+    gate fails honestly instead of letting an empty registry reach implement."""
+    project = _registry_project(tmp_path, canonical_body=_EMPTY_CANONICAL)
+
+    import codd.generator as generator_module
+
+    calls: list[dict] = []
+
+    def fake_regenerate(project_root, *, node_id=None, output_path=None, feedback=None, ai_command=None):
+        # A weak model that still fails to declare any VB rows (registry stays empty).
+        calls.append({"output_path": output_path, "feedback": feedback})
+        from codd.generator import GenerationResult
+
+        return GenerationResult(node_id="test:test-strategy", path=project_root / output_path, status="generated")
+
+    monkeypatch.setattr(generator_module, "regenerate_artifact", fake_regenerate)
+
+    pipeline = GreenfieldPipeline()
+    with pytest.raises(StageError) as excinfo:
+        pipeline._enforce_generate_vb_registry_gate(project, {"coverage_gate": True})
+
+    msg = str(excinfo.value)
+    assert "VB-registry gate FAILED" in msg
+    # The repair was SCOPED to the canonical doc and ran the bounded count (2).
+    assert calls, "repair should have been attempted"
+    assert all(c["output_path"] == "docs/test/test_strategy.md" for c in calls)
+    assert len(calls) == 2  # bounded: 1–2 attempts
+    # The repair feedback carried the unresolved AC references as CANDIDATES only
+    # (never auto-inserted) + the canonical-only repair rules.
+    fb = calls[0]["feedback"]
+    assert "VB-CLI-007" in fb and "VB-CLI-008" in fb
+    assert "Rewrite ONLY docs/test/test_strategy.md" in fb
+    assert "Do NOT add or modify `codd: covers` markers" in fb
+
+
+def test_generate_vb_registry_gate_bounded_repair_succeeds(tmp_path, monkeypatch):
+    """Generate gate PASSES when the canonical-doc-scoped repair declares the
+    missing behaviors. The MODEL writes the declarations (simulated here); the
+    gate re-validates and clears."""
+    project = _registry_project(tmp_path, canonical_body=_EMPTY_CANONICAL)
+
+    import codd.generator as generator_module
+
+    attempts: list[str] = []
+
+    def fake_regenerate(project_root, *, node_id=None, output_path=None, feedback=None, ai_command=None):
+        attempts.append(output_path)
+        # The (simulated) model now declares the referenced behaviors canonically.
+        (project_root / output_path).write_text(_GOOD_CANONICAL, encoding="utf-8")
+        from codd.generator import GenerationResult
+
+        return GenerationResult(node_id="test:test-strategy", path=project_root / output_path, status="generated")
+
+    monkeypatch.setattr(generator_module, "regenerate_artifact", fake_regenerate)
+
+    pipeline = GreenfieldPipeline()
+    # Must NOT raise.
+    pipeline._enforce_generate_vb_registry_gate(project, {"coverage_gate": True})
+    assert attempts == ["docs/test/test_strategy.md"]  # one scoped repair sufficed
+    # Anti-false-green: the repaired registry now declares behaviors, but they are
+    # UNCOVERED (declaration != coverage) — no markers were added by the repair.
+    from codd.verifiable_behavior_audit import build_vb_coverage_audit
+
+    report = build_vb_coverage_audit(project, config=yaml.safe_load((project / "codd" / "codd.yaml").read_text()))
+    assert {r.vb_id for r in report.rows} == {"VB-CLI-007", "VB-CLI-008"}
+    assert all(r.coverage_status == "uncovered" for r in report.rows)
+
+
+def test_generate_vb_registry_gate_passes_clean_registry_without_repair(tmp_path, monkeypatch):
+    """A coherent registry (all AC refs declared) clears the gate with NO repair
+    invocation."""
+    project = _registry_project(tmp_path, canonical_body=_GOOD_CANONICAL)
+
+    import codd.generator as generator_module
+
+    def boom(*a, **k):  # pragma: no cover - must never be called
+        raise AssertionError("repair must not run for a clean registry")
+
+    monkeypatch.setattr(generator_module, "regenerate_artifact", boom)
+    GreenfieldPipeline()._enforce_generate_vb_registry_gate(project, {"coverage_gate": True})
+
+
+def test_generate_vb_registry_gate_skips_project_without_vb_surface(tmp_path, monkeypatch):
+    """Shape 2: a project that neither plans nor declares a canonical registry is
+    NOT gated at generate — no repair, no raise (model-independence ≠ forcing
+    behaviors onto a project that has none)."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")  # design-only, no VB surface
+
+    import codd.generator as generator_module
+
+    monkeypatch.setattr(
+        generator_module,
+        "regenerate_artifact",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not repair")),
+    )
+    # Must NOT raise and must NOT attempt repair.
+    GreenfieldPipeline()._enforce_generate_vb_registry_gate(project, {"coverage_gate": True})
+
+
+def test_generate_vb_registry_gate_skips_when_coverage_gate_off(tmp_path, monkeypatch):
+    """The registry contract tracks the coverage gate: --no-coverage-gate skips
+    the generate registry gate too."""
+    project = _registry_project(tmp_path, canonical_body=_EMPTY_CANONICAL)
+
+    import codd.generator as generator_module
+
+    monkeypatch.setattr(
+        generator_module,
+        "regenerate_artifact",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not repair when gate off")),
+    )
+    GreenfieldPipeline()._enforce_generate_vb_registry_gate(project, {"coverage_gate": False})
+
+
+# ═══════════════════════════════════════════════════════════
+# Greenfield empty-registry coverage hard-fail (rear guard)
+# ═══════════════════════════════════════════════════════════
+
+
+def test_stage_coverage_gate_greenfield_empty_registry_hard_fails(tmp_path):
+    """When a project EXPECTS a VB registry but declares zero behaviors, the
+    implement-stage coverage gate hard-fails (rows == []) — closing the path
+    where verify could certify a build whose VB contract was never generated."""
+    from codd.greenfield.pipeline import _enforce_stage_coverage_gate
+
+    project = _registry_project(tmp_path, canonical_body=_EMPTY_CANONICAL)
+    with pytest.raises(StageError) as excinfo:
+        _enforce_stage_coverage_gate(project, coverage_gate=True, echo=lambda _m: None)
+    assert "non-empty canonical VB registry" in str(excinfo.value)
+
+
+def test_stage_coverage_gate_no_vb_surface_project_passes(tmp_path):
+    """Shape 2: a project with NO VB surface (no canonical artifact/config/doc)
+    must NOT trip the empty-registry hard-fail — the brownfield 'nothing to
+    audit -> pass' spirit holds for a minimal greenfield project too."""
+    from codd.greenfield.pipeline import _enforce_stage_coverage_gate
+
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")  # design-only
+    # Must NOT raise (no VBs declared, but none expected either).
+    _enforce_stage_coverage_gate(project, coverage_gate=True, echo=lambda _m: None)

@@ -657,7 +657,180 @@ class GreenfieldPipeline:
             record["units"][key] = STATUS_DONE
             self._checkpoint(project_root)
             self.echo(f"[greenfield] generate wave {wave}: {detail}")
+
+        # After ALL waves are generated, enforce the canonical VB-registry
+        # completeness contract (model-independence): a weak model can reference
+        # VB ids in acceptance-criteria tables yet declare none in the canonical
+        # registry, which honest-REDs only later at implement with a confusing
+        # orphan message. Catch it HERE and drive a bounded, canonical-doc-scoped
+        # repair so a coherent registry exists before implement — or fail
+        # honestly at generate. Runs BEFORE implement by construction.
+        self._enforce_generate_vb_registry_gate(project_root, options)
         record["detail"] = f"{len(waves)} wave(s) generated"
+
+    def _enforce_generate_vb_registry_gate(
+        self, project_root: Path, options: dict[str, Any]
+    ) -> None:
+        """Generate-time canonical VB-registry completeness gate + bounded repair.
+
+        Adopts the GPT design (B as contract + A as bounded generate repair). On
+        error-level :func:`validate_vb_registry_completeness` issues (empty
+        canonical registry / unresolved AC references / missing canonical doc),
+        re-invoke generation SCOPED TO the canonical VB doc only
+        (:func:`codd.generator.regenerate_artifact`) with repair feedback, then
+        re-validate. After the bounded attempts (1–2), a still-failing registry
+        raises :class:`StageError` (generate honest-RED).
+
+        The MODEL writes the declarations — this is NOT deterministic auto-derive.
+        Acceptance-criteria references are used ONLY as the candidate list in the
+        repair feedback, NEVER auto-inserted into the canonical table (rejecting
+        design option C). Skipped for a project with no verifiable-behavior
+        surface (:func:`project_expects_vb_registry`) and when the owner turned
+        the coverage gate off — the registry contract tracks the coverage gate.
+        """
+        from codd.config import load_project_config
+        from codd.verifiable_behavior_audit import (
+            _CANONICAL_VB_OUTPUT_PATH,
+            coverage_gate_enabled,
+            project_expects_vb_registry,
+            validate_vb_registry_completeness,
+        )
+
+        if not bool(options.get("coverage_gate", True)):
+            return
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+        if not coverage_gate_enabled(config):
+            return
+        if not project_expects_vb_registry(project_root, config):
+            # No VB surface planned/declared — nothing to certify. Mirrors the
+            # brownfield "nothing to audit -> pass" rule; a minimal greenfield
+            # project with only design docs is not forced to invent behaviors.
+            return
+
+        max_attempts = max(1, int(self._option_overrides.get("max_repair_attempts") or 0) or 2)
+        max_attempts = min(max_attempts, 2)  # bounded: 1–2 attempts (design)
+
+        # Reference the seam through the module (not a bound name) so a test's
+        # monkeypatch on ``codd.generator.regenerate_artifact`` is honored.
+        from codd import generator as generator_module
+
+        issues = validate_vb_registry_completeness(project_root, config, strict=True)
+        errors = [issue for issue in issues if issue.severity == "error"]
+        attempt = 0
+        while errors and attempt < max_attempts:
+            attempt += 1
+            feedback = self._build_vb_registry_repair_feedback(project_root, config, errors)
+            self.echo(
+                f"[greenfield] generate VB-registry gate: {len(errors)} issue(s); "
+                f"re-generating {_CANONICAL_VB_OUTPUT_PATH} with repair feedback "
+                f"(attempt {attempt}/{max_attempts})"
+            )
+            try:
+                generator_module.regenerate_artifact(
+                    project_root,
+                    output_path=_CANONICAL_VB_OUTPUT_PATH,
+                    feedback=feedback,
+                    ai_command=self.ai_command,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                # The canonical doc is not a planned artifact, or regeneration
+                # failed — cannot repair. Fail honestly with the original gap.
+                raise StageError(
+                    f"generate VB-registry gate: canonical registry repair could not run "
+                    f"({exc}); the canonical VB document ({_CANONICAL_VB_OUTPUT_PATH}) must "
+                    "declare every verifiable behavior as a first-column VB-* row."
+                ) from exc
+            issues = validate_vb_registry_completeness(project_root, config, strict=True)
+            errors = [issue for issue in issues if issue.severity == "error"]
+
+        if errors:
+            detail = "\n".join(f"  - {issue.message}" for issue in errors)
+            raise StageError(
+                "generate VB-registry gate FAILED: the generated canonical verifiable-behavior "
+                f"registry ({_CANONICAL_VB_OUTPUT_PATH}) is still incomplete after "
+                f"{attempt} repair attempt(s):\n{detail}\n"
+                "Declare every real verifiable behavior exactly once as a first-column VB-* row "
+                "in the canonical doc so coverage/authenticity can certify the system."
+            )
+        if attempt:
+            self.echo(
+                f"[greenfield] generate VB-registry gate: canonical registry repaired "
+                f"after {attempt} attempt(s) — OK"
+            )
+
+    def _build_vb_registry_repair_feedback(
+        self, project_root: Path, config: dict[str, Any], errors: list[Any]
+    ) -> str:
+        """Repair feedback for the canonical-doc-scoped regeneration.
+
+        Lists the canonical-registry declaration count + the unresolved AC
+        references (the CANDIDATE id list, never auto-inserted) + the repair
+        rules in the shape the GPT design specified. The references are a hint
+        about which behaviors likely exist — the model decides which correspond
+        to real behaviors and declares them; nothing is derived deterministically.
+        """
+        from codd.verifiable_behavior_audit import (
+            _CANONICAL_VB_OUTPUT_PATH,
+            _config_without_doc_pin,
+            _iter_doc_texts,
+            _normalize_vb_id,
+            is_canonical_vb_doc,
+            parse_vb_references,
+            parse_vb_table,
+        )
+
+        # Scan the WHOLE test-doc tree (not just test_coverage.docs) so the
+        # candidate-reference list mirrors what validate_vb_registry_completeness
+        # saw (an AC doc that references VB ids is not in test_coverage.docs).
+        doc_texts = _iter_doc_texts(project_root, config=_config_without_doc_pin(config))
+        canonical_count = 0
+        declared: set[str] = set()
+        for doc, text in doc_texts:
+            if not is_canonical_vb_doc(output_path=doc):
+                continue
+            rows = parse_vb_table(text, source_doc=doc)
+            canonical_count += len(rows)
+            declared.update(_normalize_vb_id(row.vb_id) for row in rows)
+
+        # Collect unresolved references (id -> the docs that reference it) as the
+        # CANDIDATE list only — never auto-inserted into the canonical table.
+        candidates: dict[str, set[str]] = {}
+        for doc, text in doc_texts:
+            if is_canonical_vb_doc(output_path=doc):
+                continue
+            for ref in parse_vb_references(text, source_doc=doc):
+                if _normalize_vb_id(ref.vb_id) in declared:
+                    continue
+                candidates.setdefault(ref.vb_id, set()).add(doc)
+
+        lines = [
+            "The generated verifiable-behavior (VB) registry is incomplete.",
+            "",
+            "Canonical registry:",
+            f"- {_CANONICAL_VB_OUTPUT_PATH} declares {canonical_count} canonical VB-* row(s).",
+        ]
+        if candidates:
+            lines.append("")
+            lines.append("Unresolved VB references (candidate ids — NOT yet declared canonically):")
+            for vb_id in sorted(candidates):
+                docs = ", ".join(sorted(candidates[vb_id]))
+                lines.append(f"- {vb_id} (referenced in {docs})")
+        lines.extend(
+            [
+                "",
+                "Repair rules:",
+                f"- Rewrite ONLY {_CANONICAL_VB_OUTPUT_PATH}.",
+                "- Declare every real verifiable behavior exactly once as a first-column VB-* row.",
+                "- Use a referenced id only when it corresponds to a real behavior derived from "
+                "the requirements/design; fix a reference elsewhere only if its id is genuinely wrong.",
+                "- Do NOT add or modify `codd: covers` markers.",
+                "- Do NOT edit source or executable tests.",
+            ]
+        )
+        return "\n".join(lines)
 
     # ── stage: implement ────────────────────────────────────
 
@@ -2522,6 +2695,7 @@ def _enforce_stage_coverage_gate(
         coverage_gate_enabled,
         coverage_gate_max_retries,
         format_gap_feedback,
+        project_expects_vb_registry,
         run_implement_coverage_gate,
     )
 
@@ -2535,6 +2709,24 @@ def _enforce_stage_coverage_gate(
 
     if not coverage_gate_enabled(config):
         return
+
+    # GREENFIELD-ONLY empty-registry hard-fail (rear guard behind the generate
+    # gate). For a project that is EXPECTED to own a canonical VB registry (it
+    # plans/declares one — see project_expects_vb_registry), an empty audit means
+    # NO verifiable behaviors were declared, so orphan never fires and the
+    # marker-authenticity gate has nothing to judge — verify could pass over a
+    # build whose VB-coverage contract was never generated. Fail honestly here.
+    # This does NOT change the brownfield run_implement_coverage_gate
+    # "nothing to audit -> pass" rule (that path is untouched); it gates ONLY the
+    # greenfield autopilot, and ONLY when a VB surface was expected — a minimal
+    # greenfield project with no VB surface still passes.
+    if project_expects_vb_registry(project_root, config):
+        if not build_vb_coverage_audit(project_root, config=config).rows:
+            raise StageError(
+                "greenfield requires a non-empty canonical VB registry in "
+                "docs/test/test_strategy.md; no verifiable behaviors were declared, "
+                "so coverage/authenticity cannot certify the generated system."
+            )
 
     # Pass the configured test dirs as the audited output paths so the gate
     # treats this as a test-related run (it is — every test the build will ever

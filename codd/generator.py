@@ -607,31 +607,142 @@ def generate_wave(
         if output_path.exists() and not force:
             results.append(GenerationResult(node_id=artifact.node_id, path=output_path, status="skipped"))
             continue
-
-        dependency_documents = _load_dependency_documents(project_root, artifact.depends_on, document_node_paths)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        combined_conventions = deepcopy(global_conventions) + deepcopy(artifact.conventions)
-        content = _render_document(
-            artifact=artifact,
-            global_conventions=global_conventions,
-            depended_by=depended_by_map.get(artifact.node_id, []),
-            body=_generate_document_body(
+        results.append(
+            _generate_one_artifact(
                 artifact=artifact,
-                dependency_documents=dependency_documents,
-                conventions=combined_conventions,
-                ai_command=resolved_ai_command,
                 project_root=project_root,
-                feedback=feedback,
-                max_retries=body_max_retries,
+                global_conventions=global_conventions,
+                depended_by_map=depended_by_map,
+                document_node_paths=document_node_paths,
+                resolved_ai_command=resolved_ai_command,
+                body_max_retries=body_max_retries,
                 capabilities=capabilities,
                 project_language=project_language,
-            ),
+                feedback=feedback,
+            )
         )
-        output_path.write_text(content, encoding="utf-8")
-        results.append(GenerationResult(node_id=artifact.node_id, path=output_path, status="generated"))
 
     _enforce_vb_declaration_coherence(project_root, config, results)
     return results
+
+
+def _generate_one_artifact(
+    *,
+    artifact: WaveArtifact,
+    project_root: Path,
+    global_conventions: list[dict[str, Any]],
+    depended_by_map: dict[str, list[dict[str, Any]]],
+    document_node_paths: dict[str, Path],
+    resolved_ai_command: str,
+    body_max_retries: int,
+    capabilities: "ProjectCapabilities | None",
+    project_language: str | None,
+    feedback: str | None,
+) -> GenerationResult:
+    """Render ONE artifact's document and write it (overwriting any prior file).
+
+    The shared per-artifact rendering step used by both :func:`generate_wave`
+    (the wave loop) and :func:`regenerate_artifact` (the single-doc repair seam).
+    Always (re)writes the output; skip-if-exists is the wave loop's decision, not
+    this helper's, so a scoped repair can overwrite exactly one doc.
+    """
+
+    output_path = project_root / artifact.output
+    dependency_documents = _load_dependency_documents(
+        project_root, artifact.depends_on, document_node_paths
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    combined_conventions = deepcopy(global_conventions) + deepcopy(artifact.conventions)
+    content = _render_document(
+        artifact=artifact,
+        global_conventions=global_conventions,
+        depended_by=depended_by_map.get(artifact.node_id, []),
+        body=_generate_document_body(
+            artifact=artifact,
+            dependency_documents=dependency_documents,
+            conventions=combined_conventions,
+            ai_command=resolved_ai_command,
+            project_root=project_root,
+            feedback=feedback,
+            max_retries=body_max_retries,
+            capabilities=capabilities,
+            project_language=project_language,
+        ),
+    )
+    output_path.write_text(content, encoding="utf-8")
+    return GenerationResult(node_id=artifact.node_id, path=output_path, status="generated")
+
+
+def regenerate_artifact(
+    project_root: Path,
+    *,
+    node_id: str | None = None,
+    output_path: str | None = None,
+    feedback: str | None = None,
+    ai_command: str | None = None,
+) -> GenerationResult:
+    """Regenerate a SINGLE wave artifact in place, scoped to one document.
+
+    The thin seam the greenfield generate-time VB-registry repair uses: it
+    rewrites ONLY the canonical VB doc (``docs/test/test_strategy.md``) with
+    repair feedback, WITHOUT re-running the whole wave (which would clobber the
+    sibling governance/design docs already generated). Reuses the exact wave
+    plumbing (:func:`_generate_one_artifact` → ``_load_dependency_documents`` /
+    ``_render_document`` / ``_generate_document_body``); only the artifact
+    selection (by ``node_id`` or ``output``) and the forced overwrite differ.
+
+    Identify the target by ``node_id`` (preferred) or ``output_path`` (the
+    artifact's ``output``). Raises ``ValueError`` if no/!=1 wave artifact matches
+    — an ambiguous or absent target must fail loudly, never silently no-op.
+    """
+
+    from codd.scanner import build_document_node_path_map
+
+    if not node_id and not output_path:
+        raise ValueError("regenerate_artifact requires node_id or output_path")
+
+    config = _load_project_config(project_root)
+    artifacts = _load_wave_artifacts(config)
+
+    def _matches(candidate: WaveArtifact) -> bool:
+        if node_id is not None and candidate.node_id == node_id:
+            return True
+        if output_path is not None:
+            want = output_path.replace("\\", "/").strip("/")
+            have = str(candidate.output).replace("\\", "/").strip("/")
+            if want == have:
+                return True
+        return False
+
+    matched = [artifact for artifact in artifacts if _matches(artifact)]
+    if not matched:
+        target = node_id or output_path
+        raise ValueError(f"wave_config has no artifact matching {target!r}")
+    if len(matched) > 1:
+        target = node_id or output_path
+        raise ValueError(f"wave_config has {len(matched)} artifacts matching {target!r}; ambiguous")
+
+    artifact = matched[0]
+    resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="generate")
+    global_conventions = _normalize_conventions(config.get("conventions", []))
+    depended_by_map = _build_depended_by_map(artifacts)
+    document_node_paths = build_document_node_path_map(project_root, config)
+    body_max_retries = _body_max_retries(config)
+    capabilities = _resolve_generation_capabilities(config, project_root)
+    project_language = _resolve_project_language(config)
+
+    return _generate_one_artifact(
+        artifact=artifact,
+        project_root=project_root,
+        global_conventions=global_conventions,
+        depended_by_map=depended_by_map,
+        document_node_paths=document_node_paths,
+        resolved_ai_command=resolved_ai_command,
+        body_max_retries=body_max_retries,
+        capabilities=capabilities,
+        project_language=project_language,
+        feedback=feedback,
+    )
 
 
 def _enforce_vb_declaration_coherence(

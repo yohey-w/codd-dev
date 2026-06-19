@@ -432,3 +432,187 @@ def test_e2e_ts_recognition_does_not_weaken_gate_on_genuine_omission(tmp_path):
     statuses = {row.vb_id: row.coverage_status for row in report.rows}
     assert statuses["VB-CLI-01"] == "covered"
     assert statuses["VB-VAL-02"] == "uncovered"  # no marker → still RED
+
+
+# ===========================================================================
+# parse_vb_references: a later-column VB-* is a REFERENCE, a first-column
+# VB-* is a DECLARATION (mirror image of parse_vb_table).
+# ===========================================================================
+
+from codd.verifiable_behavior_audit import (  # noqa: E402
+    parse_vb_references,
+    project_expects_vb_registry,
+    validate_vb_registry_completeness,
+)
+
+
+def test_parse_vb_references_extracts_later_column_tokens_with_row_id():
+    text = (
+        "# Acceptance Criteria\n"
+        "| AC | Description | Verifies |\n"
+        "| --- | --- | --- |\n"
+        "| AC-05 | login works | VB-CLI-007, VB-CLI-008 |\n"
+        "| AC-06 | logout works | VB-CLI-009 |\n"
+    )
+    refs = parse_vb_references(text, source_doc="docs/test/acceptance_criteria.md")
+    assert [(r.vb_id, r.row_id) for r in refs] == [
+        ("VB-CLI-007", "AC-05"),
+        ("VB-CLI-008", "AC-05"),
+        ("VB-CLI-009", "AC-06"),
+    ]
+    assert all(r.source_doc == "docs/test/acceptance_criteria.md" for r in refs)
+
+
+def test_parse_vb_references_first_cell_declaration_row_is_skipped_entirely():
+    # A first-column VB-* row is a DECLARATION; parse_vb_references skips the
+    # WHOLE row — even a VB-* token in that declaration row's later "Related"
+    # column is NOT an external reference/obligation. This is what lets the
+    # canonical doc carry a self-referential "Related" column without tripping
+    # the unresolved-reference check (false-RED guard, fixture d).
+    text = "| VB | D | Related |\n| --- | --- | --- |\n| VB-CLI-007 | login | VB-CLI-008 |\n"
+    assert parse_vb_references(text) == []
+    # A reference is only counted from a row whose FIRST cell is NOT a VB-*.
+    ac = "| AC | D | Verifies |\n| --- | --- | --- |\n| AC-01 | login | VB-CLI-008 |\n"
+    assert [r.vb_id for r in parse_vb_references(ac)] == ["VB-CLI-008"]
+
+
+def test_parse_vb_references_skips_fenced_code_blocks():
+    text = "intro\n```\n| VB-X | nope | VB-Y |\n```\nafter\n"
+    assert parse_vb_references(text) == []
+
+
+# ===========================================================================
+# validate_vb_registry_completeness — 4-fixture discipline
+# ===========================================================================
+
+
+def _ac_doc(project: Path, rows: str) -> None:
+    """Write a non-canonical acceptance-criteria doc that REFERENCES VB ids."""
+    _write(
+        project / "docs" / "test" / "acceptance_criteria.md",
+        "| AC | Description | Verifies |\n| --- | --- | --- |\n" + rows,
+    )
+
+
+def test_registry_completeness_fixture_a_dogfood_repro_positive(tmp_path):
+    """(a) Dogfood repro: AC table references VB ids but the canonical registry
+    declares ZERO → empty_canonical_registry + unresolved_reference issues."""
+    project = tmp_path
+    # Canonical doc exists but declares NO first-column VB rows (a reference-only
+    # table — the exact weak-model failure).
+    _write(
+        project / "docs" / "test" / "test_strategy.md",
+        "# Test Strategy\n\nNarrative only; no VB rows declared.\n",
+    )
+    _ac_doc(project, "| AC-01 | login | VB-CLI-007 |\n| AC-02 | logout | VB-CLI-008 |\n")
+
+    issues = validate_vb_registry_completeness(project, {}, strict=True)
+    kinds = {issue.kind for issue in issues}
+    assert "empty_canonical_registry" in kinds
+    assert "unresolved_reference" in kinds
+    unresolved = {issue.vb_id for issue in issues if issue.kind == "unresolved_reference"}
+    assert unresolved == {"VB-CLI-007", "VB-CLI-008"}
+    assert all(issue.severity == "error" for issue in issues)
+
+
+def test_registry_completeness_fixture_b_out_of_dogfood_positive(tmp_path):
+    """(b) Proper canonical test_strategy.md (>=1 VB row) with all AC refs
+    declared → NO issues."""
+    project = tmp_path
+    _canonical_strategy(project, "| VB-CLI-007 | login |\n| VB-CLI-008 | logout |\n")
+    _ac_doc(project, "| AC-01 | login | VB-CLI-007 |\n| AC-02 | logout | VB-CLI-008 |\n")
+
+    issues = validate_vb_registry_completeness(project, {}, strict=True)
+    assert issues == [], [i.message for i in issues]
+
+
+def test_registry_completeness_fixture_c_spoof_negative_refs_are_not_declarations(tmp_path):
+    """(c) Spoof: AC-table VB references ALONE (no canonical first-column rows)
+    must NOT satisfy the registry — references are not declarations."""
+    project = tmp_path
+    # NO canonical doc at all; the only VB-* tokens live in a non-canonical AC
+    # doc's later column. A reference must never be promoted to a declaration.
+    _ac_doc(project, "| AC-01 | login | VB-CLI-007 |\n")
+
+    issues = validate_vb_registry_completeness(project, {}, strict=True)
+    kinds = {issue.kind for issue in issues}
+    # The canonical registry is absent → missing_canonical_doc (an error). The
+    # AC references did NOT silently satisfy the contract.
+    assert "missing_canonical_doc" in kinds
+    assert any(issue.severity == "error" for issue in issues)
+    # And the build audit still sees ZERO declared behaviors (refs are not rows).
+    assert build_vb_coverage_audit(project, config={}).rows == []
+
+
+def test_registry_completeness_fixture_d_false_red_guard_valid_shorthand_format(tmp_path):
+    """(d) False-RED guard: a valid canonical registry using legitimate
+    formatting (hyphenated scheme ids, bold/emphasis markup, a self-reference in
+    a later column) must NOT be flagged incomplete."""
+    project = tmp_path
+    # Hyphenated multi-segment ids (VB-AUTH-1) are atomic and legitimate; the
+    # canonical doc may also reference its own ids in a later "related" column.
+    _write(
+        project / "docs" / "test" / "test_strategy.md",
+        "| VB | Description | Related |\n"
+        "| --- | --- | --- |\n"
+        "| **VB-AUTH-1** | sign in | VB-AUTH-2 |\n"
+        "| VB-AUTH-2 | sign out | VB-AUTH-1 |\n",
+    )
+    _ac_doc(project, "| AC-01 | sign in | VB-AUTH-1 |\n| AC-02 | sign out | VB-AUTH-2 |\n")
+
+    issues = validate_vb_registry_completeness(project, {}, strict=True)
+    assert issues == [], [i.message for i in issues]
+
+
+def test_registry_completeness_unresolved_is_warning_when_not_strict(tmp_path):
+    """Severity respects strict: an unresolved reference is a warning, not an
+    error, under strict=False (the canonical doc still has declarations)."""
+    project = tmp_path
+    _canonical_strategy(project, "| VB-CLI-007 | login |\n")
+    _ac_doc(project, "| AC-02 | logout | VB-CLI-999 |\n")  # 999 undeclared
+
+    strict_issues = validate_vb_registry_completeness(project, {}, strict=True)
+    assert any(i.kind == "unresolved_reference" and i.severity == "error" for i in strict_issues)
+    lax_issues = validate_vb_registry_completeness(project, {}, strict=False)
+    assert any(i.kind == "unresolved_reference" and i.severity == "warning" for i in lax_issues)
+    assert not any(i.severity == "error" for i in lax_issues)
+
+
+# ===========================================================================
+# project_expects_vb_registry — the gate trigger predicate (generic/structural).
+# A project with NO VB surface (Shape 2) must NOT be gated.
+# ===========================================================================
+
+
+def test_project_expects_vb_registry_true_when_wave_config_plans_canonical_doc(tmp_path):
+    config = {
+        "wave_config": {
+            "1": [{"node_id": "test:test-strategy", "output": "docs/test/test_strategy.md"}]
+        }
+    }
+    assert project_expects_vb_registry(tmp_path, config) is True
+
+
+def test_project_expects_vb_registry_true_when_test_coverage_docs_configured(tmp_path):
+    config = {"test_coverage": {"docs": ["docs/test/test_strategy.md"]}}
+    assert project_expects_vb_registry(tmp_path, config) is True
+
+
+def test_project_expects_vb_registry_true_when_canonical_doc_on_disk(tmp_path):
+    _canonical_strategy(tmp_path, "| VB-CLI-007 | login |\n")
+    assert project_expects_vb_registry(tmp_path, {}) is True
+
+
+def test_project_expects_vb_registry_false_for_no_vb_surface_project(tmp_path):
+    # Shape 2: only design docs planned, no canonical artifact, no test_coverage
+    # config, no canonical doc on disk → NOT expected to own a VB registry.
+    config = {
+        "wave_config": {
+            "1": [{"node_id": "design:core", "output": "docs/design/core_design.md"}]
+        }
+    }
+    assert project_expects_vb_registry(tmp_path, config) is False
+    # A non-canonical VB doc on disk (behaviors.md) does NOT flip the predicate —
+    # only the canonical doc / planned canonical artifact / explicit config do.
+    _write(tmp_path / "docs" / "test" / "behaviors.md", "| VB-X | a |\n| --- | --- |\n")
+    assert project_expects_vb_registry(tmp_path, config) is False
