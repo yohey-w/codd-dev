@@ -2307,3 +2307,84 @@ def test_is_py_assertion_error_raise_unit():
     assert _is_py_assertion_error_raise(_raise_node("raise AssertionError"))
     assert not _is_py_assertion_error_raise(_raise_node("raise ValueError('x')"))
     assert not _is_py_assertion_error_raise(_raise_node("try:\n    pass\nexcept Exception:\n    raise"))
+
+
+# ---------------------------------------------------------------------------
+# TS/JS library-only direct assertion (contract direct.library_only_reference.v1,
+# cross-language). A vitest test whose assertion references ONLY a confirmed-external
+# dependency (in package.json deps) proves the LIBRARY, not the SUT → reject. But a
+# relative/alias/workspace/local/unknown reference must NEVER false-RED (fail-open).
+# ---------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+
+def _ts_project(tmp_path: Path, test_body: str, *, package_json: dict | None = None) -> Path:
+    _canonical(tmp_path, "| VB-01 | demo |\n")
+    pkg = package_json if package_json is not None else {
+        "name": "app",
+        "version": "0.0.0",
+        "dependencies": {"lodash": "^4.0.0", "@scope/pkg": "^1.0.0"},
+    }
+    _write(tmp_path / "package.json", _json.dumps(pkg))
+    _write(tmp_path / "tests" / "x.test.ts", test_body)
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "name, body, should_pass",
+    [
+        # --- legitimate SUT observations / fail-open: MUST PASS (no false-RED) ---
+        ("relative_first_party", "import { compute } from '../src/calc';\n// codd: covers vb=VB-01\nit('x', () => { expect(compute(2,3)).toBe(5); });\n", True),
+        ("alias_not_in_deps", "import { compute } from '@/calc';\n// codd: covers vb=VB-01\nit('x', () => { expect(compute(2,3)).toBe(5); });\n", True),
+        ("bare_not_in_deps", "import { compute } from 'mystuff';\n// codd: covers vb=VB-01\nit('x', () => { expect(compute(2,3)).toBe(5); });\n", True),
+        ("local_result", "import { compute } from '../src/calc';\n// codd: covers vb=VB-01\nit('x', () => { const r = compute(); expect(r.value).toBe(1); });\n", True),
+        ("local_shadow_of_library", "import lodash from 'lodash';\n// codd: covers vb=VB-01\nit('x', () => { const lodash = compute(); expect(lodash.value).toBe(1); });\n", True),
+        ("library_plus_sut", "import lodash from 'lodash';\nimport { compute } from '../src/calc';\n// codd: covers vb=VB-01\nit('x', () => { expect(lodash.isEqual(compute(), 1)).toBe(true); });\n", True),
+        # --- library-only proofs: MUST REJECT (the seam) ---
+        ("bare_dep_default", "import lodash from 'lodash';\n// codd: covers vb=VB-01\nit('x', () => { expect(lodash.add(1,2)).toBe(3); });\n", False),
+        ("bare_dep_named", "import { add } from 'lodash';\n// codd: covers vb=VB-01\nit('x', () => { expect(add(1,2)).toBe(3); });\n", False),
+        ("scoped_dep", "import { x } from '@scope/pkg';\n// codd: covers vb=VB-01\nit('x', () => { expect(x.v).toBe(1); });\n", False),
+        ("constant_only", "// codd: covers vb=VB-01\nit('x', () => { expect(2 + 2).toBe(4); });\n", False),
+    ],
+)
+def test_ts_library_only_direct(tmp_path, name, body, should_pass):
+    project = _ts_project(tmp_path, body)
+    report = build_authenticity_report(project, config=_scan_cfg(), profile=TS_PROFILE)
+    if should_pass:
+        assert report.passed, (name, [(v.kind, v.message) for v in report.violations])
+    else:
+        assert not report.passed, name
+        assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations)
+
+
+def test_ts_workspace_protocol_dep_is_not_library(tmp_path):
+    """A workspace/local-protocol dependency (``workspace:*``) is first-party, not a
+    library — it must NOT false-RED even though it appears in package.json deps."""
+    pkg = {"name": "app", "version": "0.0.0", "dependencies": {"@org/shared": "workspace:*"}}
+    project = _ts_project(
+        tmp_path,
+        "import { compute } from '@org/shared';\n// codd: covers vb=VB-01\n"
+        "it('x', () => { expect(compute()).toBe(1); });\n",
+        package_json=pkg,
+    )
+    assert build_authenticity_report(project, config=_scan_cfg(), profile=TS_PROFILE).passed
+
+
+def test_ts_library_only_unit_classifier():
+    """Unit: _classify_ts_name / _ts_package_name boundaries."""
+    from codd.vb_marker_authenticity import _TsOriginContext, _classify_ts_name, _ts_package_name
+
+    assert _ts_package_name("lodash/fp") == "lodash"
+    assert _ts_package_name("@scope/pkg/sub") == "@scope/pkg"
+    assert _ts_package_name("../src/x") == ""
+    ctx = _TsOriginContext(
+        imports={"lodash": "lodash", "compute": "../src/calc", "aliased": "@/calc"},
+        local_names=frozenset({"r"}),
+        external_deps=frozenset({"lodash"}),
+    )
+    assert _classify_ts_name("lodash", ctx) == "library"  # confirmed external
+    assert _classify_ts_name("compute", ctx) == "credit"  # relative first-party
+    assert _classify_ts_name("aliased", ctx) == "credit"  # alias not in deps -> unknown
+    assert _classify_ts_name("r", ctx) == "credit"  # local
+    assert _classify_ts_name("unknownName", ctx) == "credit"  # untracked -> unknown

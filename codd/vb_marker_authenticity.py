@@ -1463,14 +1463,226 @@ def _lexical_direct_assertion_evidence(
     return AssertionEvidence(ok=False, reason="constant_direct")
 
 
-def _typescript_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
-    """TS/JS direct-assertion verdict — lexical, reusing the shared window scanner."""
+#: npm "local" dependency protocols — a dep declared with these is a LOCAL package
+#: (symlinked workspace / on-disk), NOT an external library, so it must NOT be
+#: classified LIBRARY (monorepo false-RED prevention).
+_TS_LOCAL_PROTOCOL_PREFIXES = ("workspace:", "file:", "link:", "portal:")
+_TS_IMPORT_FROM_RE = re.compile(
+    r"""^[ \t]*import\s+(?:type\s+)?(?P<clause>[^;'"]+?)\s+from\s+['"](?P<spec>[^'"]+)['"]""",
+    re.MULTILINE,
+)
+_TS_REQUIRE_RE = re.compile(
+    r"""^[ \t]*(?:const|let|var)\s+(?P<bind>[^=;]+?)\s*=\s*require\(\s*['"](?P<spec>[^'"]+)['"]\s*\)""",
+    re.MULTILINE,
+)
+_TS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
 
-    return _lexical_direct_assertion_evidence(
-        body_text,
-        primitive_re=_TS_PRIMITIVE_ASSERT_RE,
-        ignored_names=_TS_DIRECT_IGNORED_NAMES,
+
+@dataclass(frozen=True)
+class _TsOriginContext:
+    """Per-block origin context for the TS/JS library-only classifier (contract
+    direct.library_only_reference.v1, cross-language). Mirrors :class:`_PyOriginContext`
+    but lexical. ``external_deps`` is the set of package names POSITIVELY confirmed as
+    external (in package.json deps/devDeps, EXCLUDING local-protocol + workspace-local
+    packages) — the ONLY names that can be LIBRARY. Everything else credits (fail-open)."""
+
+    imports: dict[str, str]  # bound name -> module specifier
+    local_names: frozenset[str]  # assertion-body local bindings + params
+    external_deps: frozenset[str]  # POSITIVELY-external package names
+
+
+def _ts_package_name(spec: str) -> str:
+    """npm package name of a bare specifier: ``@scope/pkg/sub`` -> ``@scope/pkg``;
+    ``lodash/fp`` -> ``lodash``. Relative / absolute specifiers return ``""``."""
+
+    s = spec.strip()
+    if not s or s[0] in "./":
+        return ""
+    parts = [p for p in s.split("/") if p]
+    if s.startswith("@"):
+        return "/".join(parts[:2]) if len(parts) >= 2 else ""
+    return parts[0] if parts else ""
+
+
+def _ts_bind_clause(clause: str, spec: str, table: dict[str, str]) -> None:
+    """Record the bound names of an ``import <clause> from '<spec>'`` clause."""
+
+    named = ""
+    if "{" in clause and "}" in clause:
+        named = clause[clause.index("{") + 1 : clause.rindex("}")]
+        clause = clause[: clause.index("{")]
+    for piece in named.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        # ``a`` | ``a as b`` | ``type a`` | ``type a as b`` -> bound name is the alias
+        toks = [t for t in piece.replace(" as ", " ").split() if t and t != "type"]
+        if toks:
+            m = _TS_IDENT_RE.fullmatch(toks[-1])
+            if m:
+                table[toks[-1]] = spec
+    # default + namespace (``X`` / ``* as ns`` / ``X, * as ns``)
+    for part in clause.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith("*"):
+            after = part[1:].strip()
+            if after.startswith("as "):
+                ns = after[3:].strip()
+                if _TS_IDENT_RE.fullmatch(ns):
+                    table[ns] = spec
+        elif _TS_IDENT_RE.fullmatch(part):
+            table[part] = spec
+
+
+def _ts_import_table(text: str) -> dict[str, str]:
+    """Map each imported bound name to its module specifier (lexical, top-of-line
+    import/require only). Strings/comments mid-line do not match (line-anchored)."""
+
+    table: dict[str, str] = {}
+    for m in _TS_IMPORT_FROM_RE.finditer(text):
+        _ts_bind_clause(m.group("clause").strip(), m.group("spec"), table)
+    for m in _TS_REQUIRE_RE.finditer(text):
+        bind = m.group("bind").strip().strip("{}[]")
+        for piece in bind.split(","):
+            name = piece.split(":")[0].strip()
+            if _TS_IDENT_RE.fullmatch(name):
+                table[name] = m.group("spec")
+    return table
+
+
+def _ts_local_bindings(body_text: str) -> set[str]:
+    """Lexically harvest local binding names in a test body: ``const/let/var`` (incl.
+    object/array destructuring), ``for (const x of …)``, ``catch (e)``. Approximate —
+    anything missed falls through to UNKNOWN credit (no false-RED)."""
+
+    names: set[str] = set()
+    decl_re = re.compile(r"\b(?:const|let|var)\s+(?P<bind>[^=;\n]+?)\s*(?:=|of\b|in\b)")
+    for m in decl_re.finditer(body_text):
+        for ident in _TS_IDENT_RE.findall(m.group("bind")):
+            names.add(ident)
+    for m in re.finditer(r"\bcatch\s*\(\s*([A-Za-z_$][\w$]*)", body_text):
+        names.add(m.group(1))
+    return names
+
+
+def _ts_manifest_external_deps(project_root: Path | None, profile: Any) -> frozenset[str]:
+    """Package names POSITIVELY external: in package.json deps/devDeps, EXCLUDING
+    local-protocol (workspace:/file:/link:) deps and workspace-local package names
+    (from ``profile.workspace_manifest_globs``). Absent/unparseable ⇒ empty (fail-open)."""
+
+    if project_root is None:
+        return frozenset()
+    import json
+
+    def _read_json(path: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    pkg = _read_json(project_root / "package.json")
+    if not pkg:
+        return frozenset()
+
+    # Local workspace package NAMES (declared in matched workspace manifests) are
+    # first-party, never library — even when consumed by a normal version range.
+    local_names: set[str] = set()
+    globs = getattr(profile, "workspace_manifest_globs", ()) or () if profile is not None else ()
+    for pattern in globs:
+        for manifest in project_root.glob(pattern):
+            name = _read_json(manifest).get("name")
+            if isinstance(name, str) and name.strip():
+                local_names.add(name.strip())
+
+    external: set[str] = set()
+    for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        deps = pkg.get(key)
+        if not isinstance(deps, dict):
+            continue
+        for name, version in deps.items():
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if isinstance(version, str) and version.strip().startswith(_TS_LOCAL_PROTOCOL_PREFIXES):
+                continue  # local protocol -> not external
+            if name in local_names:
+                continue  # workspace-local package -> not external
+            external.add(name)
+    return frozenset(external)
+
+
+def _build_ts_origin_context(
+    block: TestBlock, *, importer_text: str, project_root: Path | None, profile: Any
+) -> _TsOriginContext:
+    return _TsOriginContext(
+        imports=_ts_import_table(importer_text) if importer_text else {},
+        local_names=frozenset(_ts_local_bindings(block.body_text)),
+        external_deps=_ts_manifest_external_deps(project_root, profile),
     )
+
+
+def _classify_ts_name(name: str, ctx: _TsOriginContext) -> str:
+    """``"library"`` or ``"credit"``. Order (GPT design): local/shadow ▸ relative
+    (first-party) ▸ confirmed-external dep ▸ UNKNOWN. A specifier not POSITIVELY
+    external (alias / not-in-manifest / workspace) credits (fail-open)."""
+
+    if name in ctx.local_names:
+        return "credit"  # local binding / shadow — checked BEFORE imports
+    spec = ctx.imports.get(name)
+    if spec is None:
+        return "credit"  # not an import we tracked -> UNKNOWN
+    if spec.strip()[:1] == "." :
+        return "credit"  # relative import = first-party
+    pkg = _ts_package_name(spec)
+    if pkg and pkg in ctx.external_deps:
+        return "library"  # POSITIVELY-confirmed external dependency
+    return "credit"  # bare-but-unconfirmed (alias / workspace / not-in-manifest) -> fail-open
+
+
+def _typescript_direct_assertion_evidence(
+    body_text: str, *, origin_ctx: _TsOriginContext | None = None
+) -> AssertionEvidence:
+    """TS/JS direct-assertion verdict — lexical, reusing the shared window scanner.
+
+    Without an ``origin_ctx`` (legacy / no gate context): any non-ignored reference
+    credits. With a context (the gate path): a window whose references are ALL
+    positively LIBRARY (a confirmed-external dependency) ⇒ ``library_only_direct``;
+    a first-party / local / unknown reference credits (contract
+    direct.library_only_reference.v1). ``Math``/``JSON``/builtin globals stay handled
+    by the ignored set (constant_direct), so this only adds the imported-library case.
+    """
+
+    if origin_ctx is None:
+        return _lexical_direct_assertion_evidence(
+            body_text,
+            primitive_re=_TS_PRIMITIVE_ASSERT_RE,
+            ignored_names=_TS_DIRECT_IGNORED_NAMES,
+        )
+
+    saw_primitive = False
+    saw_library_only = False
+    library_detail = ""
+    for window in _primitive_assertion_windows(body_text, _TS_PRIMITIVE_ASSERT_RE):
+        saw_primitive = True
+        refs = _rhs_reference_idents(window)
+        if refs is None:
+            return AssertionEvidence(ok=True, reason="direct")  # cannot scan ⇒ credit
+        ids = refs - _TS_DIRECT_IGNORED_NAMES
+        if not ids:
+            continue  # constant-only window
+        if any(_classify_ts_name(name, origin_ctx) != "library" for name in ids):
+            return AssertionEvidence(ok=True, reason="direct")
+        saw_library_only = True
+        if not library_detail:
+            library_detail = ", ".join(sorted(ids))
+
+    if not saw_primitive:
+        return AssertionEvidence(ok=True, reason="direct")
+    if saw_library_only:
+        return AssertionEvidence(ok=False, reason="library_only_direct", detail=library_detail)
+    return AssertionEvidence(ok=False, reason="constant_direct")
 
 
 # ---------------------------------------------------------------------------
@@ -1898,14 +2110,34 @@ class TypeScriptTestBlockProfile:
             block, importer_text=importer_text, importer_rel=importer_rel, project_root=project_root
         )
 
-    def resolve_direct_assertion_evidence(self, block: TestBlock) -> AssertionEvidence:
+    def resolve_direct_assertion_evidence(
+        self,
+        block: TestBlock,
+        *,
+        importer_text: str = "",
+        importer_rel: str = "",
+        project_root: Path | None = None,
+        config: dict[str, Any] | None = None,
+        profile: Any = None,
+    ) -> AssertionEvidence:
         """Whether the block's DIRECT primitive assertion references a real name.
 
-        Lexical (``constant_direct`` when the assertion is constant-only). Called
-        by the gate only when ``block.has_assertion`` is True.
+        Lexical: ``constant_direct`` when constant-only, and — when the gate supplies
+        the test-file context — ``library_only_direct`` when every reference is a
+        positively-confirmed external dependency (contract
+        direct.library_only_reference.v1). Context kwargs are OPTIONAL so a bare
+        ``resolve_direct_assertion_evidence(block)`` still works (skips classification,
+        fail-open). Called by the gate only when ``block.has_assertion`` is True.
         """
 
-        return _typescript_direct_assertion_evidence(block.body_text)
+        origin_ctx = (
+            _build_ts_origin_context(
+                block, importer_text=importer_text, project_root=project_root, profile=profile
+            )
+            if (importer_text or project_root is not None or profile is not None)
+            else None
+        )
+        return _typescript_direct_assertion_evidence(block.body_text, origin_ctx=origin_ctx)
 
     @staticmethod
     def _matching_close(lines: list[str], open_index: int) -> int:
