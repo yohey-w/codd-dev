@@ -921,6 +921,10 @@ _PY_DIRECT_IGNORED_NAMES = frozenset(
         "Exception",
         "BaseException",
         "AssertionError",
+        # the ``raise`` keyword: in the lexical (syntax-error) fallback path, a
+        # ``raise AssertionError("constant")`` must not look like it carries an
+        # observation name — without this it would mis-credit as a non-constant direct.
+        "raise",
         "ValueError",
         "TypeError",
         "RuntimeError",
@@ -1017,16 +1021,38 @@ def _py_callee_name(node: ast.AST) -> str:
     return ""
 
 
+def _is_py_assertion_error_raise(node: ast.AST) -> bool:
+    """Whether ``node`` is ``raise AssertionError`` / ``raise AssertionError(...)``.
+
+    ``assert cond, msg`` IS ``if not cond: raise AssertionError(msg)``, so an explicit
+    ``raise AssertionError(...)`` is a primitive assertion (the same family as the
+    already-recognized ``pytest.fail()``). Restricted to ``AssertionError`` ON PURPOSE:
+    a bare ``raise``/``raise err``/``raise ValueError(...)`` is exception re-raise or
+    error propagation, NOT an assertion — crediting those would widen the false-GREEN
+    surface. Aliased / ``builtins.AssertionError`` forms are intentionally out of scope
+    (alias tracking exceeds this false-RED fix).
+    """
+
+    if not isinstance(node, ast.Raise) or node.exc is None:
+        return False
+    exc = node.exc
+    if isinstance(exc, ast.Call):
+        exc = exc.func
+    return isinstance(exc, ast.Name) and exc.id == "AssertionError"
+
+
 def _is_py_primitive_assert_node(node: ast.AST) -> bool:
     """Whether ``node`` is a PRIMITIVE python assertion (mirrors ``_PY_PRIMITIVE_ASSERT_RE``).
 
-    An ``assert`` statement, a ``with pytest.raises(...)`` block, or an expression
-    statement calling ``pytest.fail`` / ``self.fail`` / ``self.assert*`` /
-    ``np.testing.assert*``. A bare call to a NAMED helper is NOT primitive (it is
-    resolved via the evidence graph), so it is not matched here.
+    An ``assert`` statement, ``raise AssertionError(...)``, a ``with pytest.raises(...)``
+    block, or an expression statement calling ``pytest.fail`` / ``self.fail`` /
+    ``self.assert*`` / ``np.testing.assert*``. A bare call to a NAMED helper is NOT
+    primitive (it is resolved via the evidence graph), so it is not matched here.
     """
 
     if isinstance(node, ast.Assert):
+        return True
+    if _is_py_assertion_error_raise(node):
         return True
     if isinstance(node, (ast.With, ast.AsyncWith)):
         for item in node.items:
@@ -1043,6 +1069,22 @@ def _is_py_primitive_assert_node(node: ast.AST) -> bool:
             or callee.startswith("np.testing.assert")
         )
     return False
+
+
+def _python_body_has_primitive_assertion(body_text: str) -> bool:
+    """AST-first ``has_assertion`` for a python test body.
+
+    Prefer the AST (``_is_py_primitive_assert_node``) so a primitive token sitting in
+    a STRING or COMMENT (e.g. ``x = "raise AssertionError(y)"``) does not spuriously
+    set ``has_assertion`` — which would otherwise reach the fail-open direct-evidence
+    path and become a false-GREEN. Falls back to the regex only when the body is not
+    parseable in isolation (mirrors the line-scanner fallback elsewhere)."""
+
+    try:
+        tree = ast.parse(textwrap.dedent(body_text))
+    except (SyntaxError, ValueError):
+        return bool(_PY_PRIMITIVE_ASSERT_RE.search(body_text))
+    return any(_is_py_primitive_assert_node(node) for node in ast.walk(tree))
 
 
 #: Python standard-library top-level module names (PEP-official frozenset; includes
@@ -1488,7 +1530,12 @@ _PY_SKIP_DECORATOR_RE = re.compile(
 #: is resolved via the evidence graph so a no-op helper cannot pass on its name.
 _PY_PRIMITIVE_ASSERT_RE = re.compile(
     r"(^|[^A-Za-z0-9_])(assert\b|pytest\.raises\b|pytest\.fail\s*\(|"
-    r"self\.assert[A-Za-z]+\s*\(|self\.fail\s*\(|np\.testing\.assert)",
+    r"self\.assert[A-Za-z]+\s*\(|self\.fail\s*\(|np\.testing\.assert)"
+    # ``raise AssertionError`` (the explicit form of ``assert``) — LINE-ANCHORED so a
+    # ``raise AssertionError`` inside a string/comment does not match (the AST-first
+    # ``_python_body_has_primitive_assertion`` is the primary guard; this is fallback).
+    r"|^[ \t]*raise\s+AssertionError\b",
+    re.MULTILINE,
 )
 #: A python ``def helper(...):`` header (captures name + the parameter list so the
 #: argument-anchor check can confirm the helper references its own arguments).
@@ -1605,7 +1652,7 @@ class PythonTestBlockProfile:
             decorator_text = "\n".join(lines[start_line - 1 : def_line - 1])
             if _PY_SKIP_DECORATOR_RE.search(decorator_text):
                 skipped = True
-            has_assertion = bool(_PY_PRIMITIVE_ASSERT_RE.search(body_text))
+            has_assertion = _python_body_has_primitive_assertion(body_text)
             blocks.append(
                 TestBlock(
                     start_line=start_line,
@@ -1672,7 +1719,7 @@ class PythonTestBlockProfile:
             decorator_text = "\n".join(lines[start_line - 1 : index])
             if _PY_SKIP_DECORATOR_RE.search(decorator_text):
                 skipped = True
-            has_assertion = bool(_PY_PRIMITIVE_ASSERT_RE.search(body_text))
+            has_assertion = _python_body_has_primitive_assertion(body_text)
             blocks.append(
                 TestBlock(
                     start_line=start_line,
