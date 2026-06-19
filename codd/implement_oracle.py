@@ -1812,12 +1812,23 @@ def normalize_python_tool_output(
     command: str,
     project_root: Path,
     profile: LayoutProfile,
+    is_first_party: Callable[[str], bool] | None = None,
 ) -> tuple[list[ImplementOracleFinding], list[str]]:
     """Normalize ``pytest --collect-only`` output → (findings, failed paths).
 
     Parses every collection error (ModuleNotFoundError / cannot-import-name /
     SyntaxError / generic ERROR-collecting) into a language-neutral finding. Used
     by the collect layer; also reachable via :func:`normalize_oracle_output`.
+
+    ``is_first_party`` (when supplied) gates module-resolution findings to
+    FIRST-PARTY targets only: a collection ``ModuleNotFoundError`` / cannot-import
+    -name whose target module is third-party / stdlib is an IMPLEMENT-TIME
+    ENVIRONMENT concern (the dependency is simply not installed yet), NOT a
+    coherence failure — first-party importability is already proven by the static
+    first-party import resolver layer. Emitting it would be a false-RED. A
+    first-party target (the SUT genuinely missing a module/symbol) is always
+    reported. When ``is_first_party`` is None the legacy behaviour (emit every
+    parsed error) is preserved for callers without a module index.
     """
     text = output or ""
     findings: list[ImplementOracleFinding] = []
@@ -1838,20 +1849,26 @@ def normalize_python_tool_output(
 
     primary_path = failed_paths[0] if failed_paths else None
     for m in _PYTEST_MOD_NOT_FOUND.finditer(text):
+        module = m.group("module")
+        if is_first_party is not None and not is_first_party(module):
+            continue  # third-party / stdlib not installed at implement time — env, not coherence
         findings.append(
             ImplementOracleFinding(
                 category=EVIDENCE_MODULE_RESOLUTION,
                 code="PY_MODULE_NOT_FOUND",
-                message=f"No module named {m.group('module')!r} (pytest collection)",
+                message=f"No module named {module!r} (pytest collection)",
                 path=primary_path,
             )
         )
     for m in _PYTEST_CANNOT_IMPORT_NAME.finditer(text):
+        source_module = m.group("module")
+        if is_first_party is not None and not is_first_party(source_module):
+            continue  # symbol missing from a third-party module — env/version, not SUT coherence
         findings.append(
             ImplementOracleFinding(
                 category=EVIDENCE_MISSING_SYMBOL,
                 code="PY_IMPORT_NAME_NOT_FOUND",
-                message=f"cannot import name {m.group('symbol')!r} from {m.group('module')!r}",
+                message=f"cannot import name {m.group('symbol')!r} from {source_module!r}",
                 path=primary_path,
             )
         )
@@ -1880,9 +1897,47 @@ def _python_collect_timeout_seconds(config: Mapping[str, Any] | None) -> float:
     return DEFAULT_PYTHON_COLLECT_TIMEOUT_SECONDS
 
 
+def _collection_failure_is_third_party_only(
+    output: str, is_first_party: Callable[[str], bool], errored_file_count: int
+) -> bool:
+    """True iff EVERY pytest collection error is an uninstalled third-party / stdlib
+    import — so the non-zero collect exit is an implement-time ENV concern, not a
+    coherence failure.
+
+    ``errored_file_count`` is the number of DISTINCT errored test files (the
+    deduped, project-relative ``failed_paths`` the normalizer already computed —
+    parsing it here would double-count, since one file surfaces both an
+    ``ERROR collecting <rel>`` header and an absolute ``importing test module`` line).
+
+    Anti-false-green (conservative by construction): returns False — i.e. let the
+    honest ``pytest_collect_exit_N`` failure stand — UNLESS every errored file is
+    accounted for by a non-first-party ``ModuleNotFoundError``, AND there is NO
+    first-party module-not-found, NO cannot-import-name from a first-party module,
+    and NO SyntaxError. First-party importability/coherence is independently proven
+    by the static first-party import-resolver layer (the keystone layer), so a real
+    SUT defect cannot hide behind a benign verdict here.
+    """
+    text = output or ""
+    if errored_file_count <= 0:
+        return False  # non-zero exit with no identifiable errored file — stay honest
+    if _PYTEST_SYNTAX_ERROR.search(text):
+        return False
+    for m in _PYTEST_CANNOT_IMPORT_NAME.finditer(text):
+        if is_first_party(m.group("module")):
+            return False
+    third_party_module_errors = 0
+    for m in _PYTEST_MOD_NOT_FOUND.finditer(text):
+        if is_first_party(m.group("module")):
+            return False
+        third_party_module_errors += 1
+    # every errored file must be accounted for by a third-party module-not-found
+    return third_party_module_errors >= errored_file_count
+
+
 def _run_python_pytest_collect_layer(
     project_root: Path,
     profile: LayoutProfile,
+    scope: PythonOracleScope,
     config: Mapping[str, Any] | None,
 ) -> PythonToolRun:
     """``python -m pytest <test_root> --collect-only -q`` — test importability.
@@ -1891,7 +1946,10 @@ def _run_python_pytest_collect_layer(
     absent / un-spawnable is an ``environment_build_error`` (NEVER a silent skip —
     a generated system whose tests cannot even be collected is not verified).
     Exit 0 ⇒ the test surface imports cleanly. Non-zero ⇒ parse the collection
-    errors; a non-zero exit with no parseable error is still an honest failure.
+    errors; a collection failure caused ONLY by uninstalled third-party imports is
+    an env concern (benign — first-party coherence is proven by the resolver
+    layer); a non-zero exit with no parseable / unattributable error is still an
+    honest failure.
     """
     timeout = _python_collect_timeout_seconds(config)
     test_root = _py_norm(profile.test_root) or "."
@@ -1952,10 +2010,23 @@ def _run_python_pytest_collect_layer(
         )
     if completed.returncode == 0:
         return PythonToolRun(name="pytest_collect", executed=True, output=output)
+    index = _build_python_module_index(project_root, profile, scope)
     findings, failed_paths = normalize_python_tool_output(
-        output, command=command, project_root=project_root, profile=profile
+        output,
+        command=command,
+        project_root=project_root,
+        profile=profile,
+        is_first_party=index.is_first_party_prefix,
     )
     if not findings:
+        if _collection_failure_is_third_party_only(
+            output, index.is_first_party_prefix, len(failed_paths)
+        ):
+            # Collection failed ONLY because a third-party dependency is not
+            # installed at implement time. First-party importability is proven by
+            # the static resolver layer; this is an environment concern, not a
+            # coherence failure → benign (never a false-RED on uninstalled deps).
+            return PythonToolRun(name="pytest_collect", executed=True, output=output)
         findings = [
             ImplementOracleFinding(
                 category=EVIDENCE_TEST_NOT_COLLECTED,
@@ -2161,7 +2232,7 @@ def _run_python_composite_oracle(
     tools: list[PythonToolRun] = [
         _run_python_compile_layer(project_root, all_files),
         _run_python_first_party_import_layer(project_root, profile, scope, all_files),
-        _run_python_pytest_collect_layer(project_root, profile, config),
+        _run_python_pytest_collect_layer(project_root, profile, scope, config),
     ]
     lint_mode = _python_lint_mode(config)
     if lint_mode != "off":

@@ -301,6 +301,72 @@ def test_third_party_import_is_ignored(tmp_path: Path) -> None:
     )
 
 
+def test_uninstalled_third_party_import_is_benign_via_collection(tmp_path: Path) -> None:
+    """A SUT importing a third-party dep that is NOT installed at implement time
+    must NOT false-RED — even though ``pytest --collect-only`` exits non-zero on the
+    ModuleNotFoundError. First-party importability is proven by the resolver layer;
+    the missing dependency is an environment concern. (Reproduces the clean-CI
+    failure that the env-dependent ``import requests`` test could not, by using a
+    module guaranteed absent in every environment.)
+    """
+    _scaffold(tmp_path, with_path_shim=True)
+    _write(
+        tmp_path,
+        "src/app/net.py",
+        "import _codd_absent_dep_xyz  # noqa: F401  (third-party, never installed)\n\n\n"
+        "def use():\n    return _codd_absent_dep_xyz.go()\n",
+    )
+    _write(
+        tmp_path,
+        "tests/test_net.py",
+        "from app.net import use\n\n\ndef test_use():\n    assert use is not None\n",
+    )
+
+    result = _run(tmp_path)
+
+    assert result.passed is True, (
+        "an uninstalled third-party import must be benign (no false-RED); findings: "
+        f"{[(f.code, f.message) for f in result.findings]}"
+    )
+
+
+def test_collection_failure_third_party_only_classifier() -> None:
+    """Unit-lock the benign/honest boundary of ``_collection_failure_is_third_party_only``.
+
+    Anti-false-green: ONLY a collection failure entirely attributable to
+    non-first-party imports is benign; a first-party module-not-found, a
+    cannot-import-name from a first-party module, a SyntaxError, an unattributable
+    non-zero exit, or an under-accounted error set must stay honest (False)."""
+    from codd.implement_oracle import _collection_failure_is_third_party_only as f
+
+    fp = lambda m: m.split(".", 1)[0] == "app"  # noqa: E731  (first-party == package "app")
+
+    third_party = (
+        "src/app/net.py:1: in <module>\n    import requests\n"
+        "E   ModuleNotFoundError: No module named 'requests'\n"
+    )
+    assert f(third_party, fp, 1) is True  # only cause is an uninstalled third-party dep
+
+    first_party_missing = (
+        "tests/test_x.py:1: in <module>\n    from app.missing import y\n"
+        "E   ModuleNotFoundError: No module named 'app.missing'\n"
+    )
+    assert f(first_party_missing, fp, 1) is False  # a real first-party module is absent
+
+    first_party_symbol = "E   ImportError: cannot import name 'gone' from 'app.core'\n"
+    assert f(first_party_symbol, fp, 1) is False  # real first-party symbol error
+
+    syntax = "E   SyntaxError: invalid syntax\n"
+    assert f(syntax, fp, 1) is False  # a syntax error is always real
+
+    assert f("non-zero exit, no parseable error\n", fp, 0) is False  # unattributable → honest
+
+    under_accounted = (
+        "E   ModuleNotFoundError: No module named 'requests'\n"  # explains only ONE of two files
+    )
+    assert f(under_accounted, fp, 2) is False  # 2 errored files, 1 third-party cause → honest
+
+
 # ═════════════════════════════════════════════════════════════
 # 8. A syntax error in a source file → RED (compile layer).
 # ═════════════════════════════════════════════════════════════
@@ -383,7 +449,7 @@ def test_pytest_missing_is_environment_error_not_green(tmp_path: Path, monkeypat
 
     from codd.implement_oracle import PythonToolRun, EVIDENCE_ENVIRONMENT_BUILD, ImplementOracleFinding
 
-    def _fake_collect(project_root, profile, config):
+    def _fake_collect(project_root, profile, scope, config):
         return PythonToolRun(
             name="pytest_collect",
             executed=False,
