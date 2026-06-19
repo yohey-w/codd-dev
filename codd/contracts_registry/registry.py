@@ -231,11 +231,15 @@ _COVERED: tuple[Contract, ...] = (
         finding_ids=("PC-docref-resolution",),
     ),
     # ── authenticity.observable_in_supported_stack.v1 (GPT r2 §3.6) ──────────
-    # The NEW hard gate: a marker-bearing file the adapter RECOGNIZES but parses
-    # ZERO executable test blocks out of was silently degraded to a pass (only an
-    # UNSUPPORTED file should degrade). strict_observability=True (greenfield Gate 2)
-    # makes it an unobservable_test_structure violation — an unparseable test in a
-    # SUPPORTED stack is a false-green, not an unsupported one.
+    # The hard gate, NARROWED to HARNESS-OWNED files: a marker-bearing file the
+    # adapter RECOGNIZES but parses ZERO executable test blocks out of is a
+    # false-green CoDD owns ONLY when CoDD itself generated it (it carries a
+    # ``@generated-by: codd …`` provenance header). strict_observability=True
+    # (greenfield Gate 2) makes THAT an unobservable_test_structure violation. A
+    # USER/CUSTOM recognized-extension file with no provenance header DEGRADES —
+    # our block-parser's incompleteness (a Mocha variant, a decorated/wrapped test
+    # style) must not hard-RED a user's valid-but-unparsed-by-us test. An
+    # UNSUPPORTED file (no adapter) also degrades. Never a false-RED.
     Contract(
         id="authenticity.observable_in_supported_stack.v1",
         source_node="TestFile",
@@ -247,6 +251,8 @@ _COVERED: tuple[Contract, ...] = (
         status="covered",
         certification_fixtures=(
             "tests/test_vb_marker_authenticity.py::test_strict_observability_flags_recognized_file_with_no_parseable_test",
+            "tests/test_vb_marker_authenticity.py::test_strict_observability_user_file_degrades_not_red",
+            "tests/test_vb_marker_authenticity.py::test_strict_observability_harness_owned_spoof_is_red",
             "tests/test_vb_marker_authenticity.py::test_strict_observability_still_degrades_unsupported_stack",
             "tests/test_vb_marker_authenticity.py::test_strict_observability_does_not_affect_genuine_covering_test",
         ),

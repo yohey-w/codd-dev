@@ -236,6 +236,8 @@ families:
     authority: codd.vb_marker_authenticity.build_authenticity_report
     certification_fixtures:
     - tests/test_vb_marker_authenticity.py::test_strict_observability_flags_recognized_file_with_no_parseable_test
+    - tests/test_vb_marker_authenticity.py::test_strict_observability_user_file_degrades_not_red
+    - tests/test_vb_marker_authenticity.py::test_strict_observability_harness_owned_spoof_is_red
     - tests/test_vb_marker_authenticity.py::test_strict_observability_still_degrades_unsupported_stack
     - tests/test_vb_marker_authenticity.py::test_strict_observability_does_not_affect_genuine_covering_test
     finding_ids:

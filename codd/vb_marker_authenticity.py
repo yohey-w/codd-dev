@@ -257,6 +257,32 @@ def _scan_cover_markers_with_lines(text: str, rel_path: str) -> list[_CoverMarke
     return markers
 
 
+#: Provenance header CoDD stamps onto every file it generates. The implementer
+#: writes ``@generated-by: codd implement``, the generator ``@generated-by: codd
+#: generate``, the propagator ``@generated-by: codd propagate`` — all sharing this
+#: language-agnostic substring under the file's own comment prefix (``//`` / ``#``;
+#: see ``codd.implementer.COMMENT_PREFIX_BY_SUFFIX`` and ``_build_traceability_
+#: comment``). The same substring is what ``implementer._root_artifact_overwrite_
+#: blocked`` uses to recognize a CoDD-owned file.
+_HARNESS_PROVENANCE_MARKER = "@generated-by: codd"
+
+
+def _is_harness_generated(text: str) -> bool:
+    """Whether ``text`` is a file CoDD ITSELF generated (deterministic; no LLM).
+
+    True iff the file carries CoDD's generation-provenance header
+    (``@generated-by: codd …``). This is the HARNESS-OWNED vs USER/CUSTOM
+    discriminator for the strict-observability gate: a harness-owned file with no
+    parseable test block is a genuine false-green CoDD produced (hard-RED), while
+    a user-authored file in a recognized extension that our block-parser merely
+    cannot extract must degrade rather than false-RED. Matching the bare
+    ``@generated-by: codd`` substring keeps this language-agnostic — the marker is
+    emitted under each language's own comment prefix but the substring is constant.
+    """
+
+    return _HARNESS_PROVENANCE_MARKER in text
+
+
 def _attached_block(marker_line: int, text: str, blocks: list[TestBlock]) -> TestBlock | None:
     """The executable test block a marker on ``marker_line`` attaches to.
 
@@ -399,11 +425,16 @@ def build_authenticity_report(
     ``strict_observability`` (contract authenticity.observable_in_supported_stack.v1):
     when True, a marker-bearing file the adapter RECOGNIZES (``handles_file``) but
     from which it parses ZERO executable test blocks is an
-    ``unobservable_test_structure`` VIOLATION rather than a silent degrade — a
-    SUPPORTED stack that yields no observable test is a false-green, not an
-    unparseable one. An UNSUPPORTED file (no adapter / not handled) still degrades
-    in either mode (never a false-RED). The greenfield autopilot passes True; the
-    default is False for back-compat with non-autopilot callers.
+    ``unobservable_test_structure`` VIOLATION rather than a silent degrade — BUT
+    ONLY when that file is HARNESS-OWNED (CoDD generated it; it carries a
+    ``@generated-by: codd …`` provenance header). A harness-owned file with no
+    parseable test is a genuine false-green CoDD produced. A USER/CUSTOM file in a
+    recognized extension WITHOUT a provenance header DEGRADES instead: our block-
+    parser's incompleteness (a Mocha variant, a decorated / framework-wrapped test
+    style) must not hard-RED a user's valid-but-unparsed-by-us test. An UNSUPPORTED
+    file (no adapter / not handled) also degrades in either mode (never a
+    false-RED). The greenfield autopilot passes True; the default is False for
+    back-compat with non-autopilot callers.
     """
 
     project_root = Path(project_root).resolve()
@@ -469,14 +500,20 @@ def build_authenticity_report(
             except Exception:  # noqa: BLE001 — a parser that throws degrades, never fails.
                 blocks = []
         if not blocks:
-            if adapter_handles and strict_observability:
-                # OBSERVABILITY (contract authenticity.observable_in_supported_stack.v1):
-                # the adapter RECOGNIZES this file type but extracted ZERO executable
-                # test blocks though live coverage markers are present. That is NOT an
-                # unsupported stack (which legitimately degrades) — it is an
-                # unobservable coverage claim in a SUPPORTED stack, so it honest-fails
-                # instead of silently degrading to a pass (the false-green this
-                # contract closes).
+            if adapter_handles and strict_observability and _is_harness_generated(text):
+                # OBSERVABILITY (contract authenticity.observable_in_supported_stack.v1),
+                # NARROWED to HARNESS-OWNED files. The adapter RECOGNIZES this file
+                # type but extracted ZERO executable test blocks though live coverage
+                # markers are present. We HARD-FAIL this ONLY when CoDD ITSELF
+                # generated the file (it carries a ``@generated-by: codd …``
+                # provenance header): CoDD produced a marker-bearing test with no
+                # parseable assertion, which is a genuine false-green CoDD owns and
+                # must not ship. A USER/CUSTOM file in a recognized extension (NO
+                # provenance header) falls through to the degrade path below: our
+                # block-parser's incompleteness — a Mocha variant, a decorated /
+                # framework-wrapped test style we cannot extract — must NOT hard-RED a
+                # user's valid-but-unparsed-by-us test (that would be a false-RED).
+                # Stage 1 (orphan) already ran for every file regardless.
                 for marker in live_markers:
                     violations.append(
                         AuthenticityViolation(
@@ -486,18 +523,21 @@ def build_authenticity_report(
                             line=marker.line,
                             message=(
                                 f"{rel}:{marker.line} `codd: covers vb={marker.vb_id}` sits in a "
-                                "recognized test file from which the structural parser extracted NO "
-                                "executable test block — the coverage claim is unobservable (a marker "
-                                "with no parseable test proves nothing). Write a real test case the "
-                                "runner executes, or use `codd: blocked vb=… reason=…` if it genuinely "
-                                "cannot run yet."
+                                "CoDD-generated test file (`@generated-by: codd …`) from which the "
+                                "structural parser extracted NO executable test block — the coverage "
+                                "claim is unobservable (a generated marker with no parseable test "
+                                "proves nothing). Generate a real test case the runner executes, or "
+                                "use `codd: blocked vb=… reason=…` if it genuinely cannot run yet."
                             ),
                         )
                     )
                 continue
             # Graceful degradation: an UNSUPPORTED stack/file (no adapter, or the
-            # adapter does not handle this file), or strict observability off.
-            # Stage 1 already ran; skip stages 2-3 with a warning (never false-RED).
+            # adapter does not handle this file), strict observability off, OR a
+            # USER/CUSTOM recognized-extension file (no CoDD provenance header) our
+            # parser could not extract a block from — our parser's incompleteness must
+            # not hard-fail a user's valid test. Stage 1 already ran; skip stages 2-3
+            # with a warning (never false-RED).
             degraded.append(rel)
             continue
 

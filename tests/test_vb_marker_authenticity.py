@@ -1436,21 +1436,39 @@ def test_noteapi_codex_real_project_passes():
 # ---------------------------------------------------------------------------
 # strict observability (contract authenticity.observable_in_supported_stack.v1)
 # A marker-bearing file the adapter RECOGNIZES but parses NO test block out of is
-# a false-green when silently degraded — strict mode honest-fails it; an
-# UNSUPPORTED file still degrades (never a false-RED).
+# a false-green when silently degraded — but ONLY when the file is HARNESS-OWNED
+# (CoDD generated it; it carries a `@generated-by: codd …` provenance header).
+# strict mode honest-fails such a harness-owned file; a USER/CUSTOM recognized-
+# extension file (no provenance header) DEGRADES — our block-parser's
+# incompleteness (a Mocha variant, a decorated/wrapped test style) must not
+# hard-RED a user's valid-but-unparsed-by-us test. An UNSUPPORTED file (no
+# adapter) also degrades. Never a false-RED.
 # ---------------------------------------------------------------------------
 
 
 def test_strict_observability_flags_recognized_file_with_no_parseable_test(tmp_path):
-    """KEYSTONE: a .test.ts file the TS adapter RECOGNIZES but parses ZERO test
-    blocks out of, bearing a live marker. Non-strict (default) degrades to a PASS
-    (the pre-gate false-green); strict makes it an unobservable_test_structure
-    VIOLATION."""
+    """KEYSTONE (fixture (a) — dogfood-repro positive): a HARNESS-OWNED .test.ts
+    file (carries a `@generated-by: codd` header) the TS adapter RECOGNIZES but
+    parses ZERO test blocks out of, bearing a live marker. Non-strict (default)
+    degrades to a PASS (the pre-gate false-green); strict makes it an
+    unobservable_test_structure VIOLATION.
+
+    WHY UPDATED (was: a non-generated user file expecting hard-RED): per the
+    harness-owned/user-custom design, strict observability now hard-fails ONLY a
+    file CoDD itself generated — a user-authored recognized-extension file our
+    parser cannot extract a block from must DEGRADE, not false-RED. So this
+    keystone (which asserts the hard-RED) is made HARNESS-OWNED with a
+    `@generated-by: codd` header; the false-RED path it used to assert is now
+    covered by ``test_strict_observability_user_file_degrades_not_red`` (fixture
+    (d)). Assertions are unchanged — only the fixture became harness-owned."""
     project = tmp_path
     _canonical(project, "| VB-1 | does a thing |\n")
-    # A recognized test file (.test.ts) with a live marker but NO it()/test() block.
+    # A HARNESS-OWNED recognized test file (.test.ts): CoDD generated it (provenance
+    # header present) but it has a live marker and NO it()/test() block.
     _write(
         project / "tests" / "empty.test.ts",
+        "// @generated-by: codd implement\n"
+        "// @generated-from: docs/design/x.md (x)\n"
         "// codd: covers vb=VB-1\nexport const helper = () => 42;\n",
     )
     config = {"scan": {"test_dirs": ["tests/"]}}
@@ -1458,7 +1476,7 @@ def test_strict_observability_flags_recognized_file_with_no_parseable_test(tmp_p
     lax = build_authenticity_report(project, config=config, profile=TS_PROFILE)
     assert "tests/empty.test.ts" in lax.degraded_paths
     assert lax.passed is True
-    # Strict: an unobservable coverage claim in a SUPPORTED stack → hard violation.
+    # Strict + harness-owned: an unobservable coverage claim CoDD produced → hard.
     strict = build_authenticity_report(
         project, config=config, profile=TS_PROFILE, strict_observability=True
     )
@@ -1467,6 +1485,81 @@ def test_strict_observability_flags_recognized_file_with_no_parseable_test(tmp_p
     assert any(v.vb_id == "VB-1" for v in strict.violations)
     # Not double-counted as degraded once it became a violation.
     assert "tests/empty.test.ts" not in strict.degraded_paths
+
+
+def test_strict_observability_user_file_degrades_not_red(tmp_path):
+    """FALSE-RED GUARD (fixture (d) — THE key one): a USER-authored recognized-
+    extension file (NO `@generated-by` header) with a live `covers vb=` marker but
+    ZERO parseable test blocks under strict_observability=True must NOT hard-RED —
+    it DEGRADES. Our block-parser's incompleteness (e.g. a Mocha/decorated/wrapped
+    test style we cannot extract from a valid .test.ts) must never false-RED a
+    user's valid test. Stage-1 orphan checks still apply (the id here is declared,
+    so no orphan)."""
+    project = tmp_path
+    _canonical(project, "| VB-1 | does a thing |\n")
+    # USER-authored (no provenance header): a recognized .test.ts using a style our
+    # block-parser does not extract a leaf it()/test() from (a framework wrapper).
+    _write(
+        project / "tests" / "user_custom.test.ts",
+        "// codd: covers vb=VB-1\n"
+        "import { suite } from './harness';\n"
+        "suite('does a thing', { run: () => mustEqual(actual(), 1) });\n",
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    strict = build_authenticity_report(
+        project, config=config, profile=TS_PROFILE, strict_observability=True
+    )
+    # The key invariant: NOT a hard RED — it degrades and the report passes.
+    assert strict.passed is True, [v.message for v in strict.violations]
+    assert "tests/user_custom.test.ts" in strict.degraded_paths
+    assert all(v.kind != "unobservable_test_structure" for v in strict.violations)
+
+
+def test_strict_observability_harness_owned_spoof_is_red(tmp_path):
+    """SPOOF NEGATIVE (fixture (c)): a HARNESS-OWNED generated file with a marker
+    but an empty / no-assertion structure (0 parseable blocks) → RED. This is the
+    false-green the contract catches: CoDD generated a marker-bearing file with no
+    real, parseable test. The `@generated-from` line uses a python-ish path but the
+    discriminator is purely the `@generated-by: codd` substring (language-agnostic).
+    """
+    project = tmp_path
+    _canonical(project, "| VB-1 | does a thing |\n")
+    # CoDD-generated (.test.ts) but only a stub export — no it()/test() at all.
+    _write(
+        project / "tests" / "spoof.test.ts",
+        "// @generated-by: codd generate\n"
+        "// codd: covers vb=VB-1\n"
+        "export const noop = () => { /* TODO: write the real test */ };\n",
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    strict = build_authenticity_report(
+        project, config=config, profile=TS_PROFILE, strict_observability=True
+    )
+    assert strict.passed is False
+    assert "unobservable_test_structure" in {v.kind for v in strict.violations}
+    assert "tests/spoof.test.ts" not in strict.degraded_paths
+
+
+def test_strict_observability_real_generated_test_is_credited(tmp_path):
+    """OUT-OF-DOGFOOD POSITIVE (fixture (b)): a normal file with a real, parseable,
+    asserting test is credited under strict mode — no regression. Harness-owned or
+    not is irrelevant once a real block with an assertion is present; here it is a
+    plain user test (no provenance header) to show a genuine test is never touched.
+    """
+    project = tmp_path
+    _canonical(project, "| VB-1 | adds |\n")
+    _write(
+        project / "tests" / "real.test.ts",
+        'import { it, expect } from "vitest";\n'
+        "// codd: covers vb=VB-1\n"
+        'it("adds", () => { const out = 1 + 1; expect(out).toBe(2); });\n',
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}}
+    strict = build_authenticity_report(
+        project, config=config, profile=TS_PROFILE, strict_observability=True
+    )
+    assert strict.passed is True, [v.message for v in strict.violations]
+    assert strict.degraded_paths == []
 
 
 def test_strict_observability_still_degrades_unsupported_stack(tmp_path):
