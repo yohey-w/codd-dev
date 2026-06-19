@@ -2481,3 +2481,77 @@ def test_gate_passes_unittest_assert_raises_with_sut_call(tmp_path):
         project, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE
     )
     assert report.passed, [v.message for v in report.violations]
+
+
+# ---------------------------------------------------------------------------
+# unittest assert helpers that take the TestCase as a PARAMETER (testcase.assertEqual)
+# are credible — but the receiver (testcase) must be EXCLUDED from the argument-anchor
+# so a constant-only helper still fails, and a NARROW receiver allowlist keeps a
+# namespace helper (helpers.assert_token_values) from being mis-read as a primitive.
+# ---------------------------------------------------------------------------
+
+
+def test_testcase_assert_receivers_unit():
+    from codd.vb_marker_authenticity import _testcase_assert_receivers_in as f
+
+    assert f("testcase.assertEqual(a, b)") == {"testcase"}
+    assert f("tc.assertRaises(X)") == {"tc"}
+    assert f("self.assertTrue(x)") == {"self"}
+    # namespace helper / snake assert / non-assert method are NOT receivers
+    assert f("helpers.assert_token_values(x)") == set()
+    assert f("obj.process(x)") == set()
+
+
+def test_gate_passes_unittest_helper_asserting_on_its_arg(tmp_path):
+    """A shared helper ``def assert_token_values(testcase, tokens, expected):
+    testcase.assertEqual(...)`` asserting on its data args is credible (the
+    exprcalc-codex remaining-5 false-RED)."""
+    _canonical(tmp_path, "| VB-01 | demo |\n")
+    _write(
+        tmp_path / "tests" / "helpers" / "__init__.py",
+        "def assert_token_values(testcase, tokens, expected):\n"
+        "    actual = list(tokens)\n"
+        "    testcase.assertEqual(expected, actual)\n",
+    )
+    _write(
+        tmp_path / "tests" / "test_tok.py",
+        "import unittest\n"
+        "from tests.helpers import assert_token_values\n"
+        "class T(unittest.TestCase):\n"
+        "    # codd: covers vb=VB-01\n"
+        "    def test_x(self):\n        assert_token_values(self, [1, 2], [1, 2])\n",
+    )
+    report = build_authenticity_report(tmp_path, config=_scan_cfg(), profile=PY_PROFILE)
+    assert report.passed, [(v.kind, v.message) for v in report.violations]
+
+
+def test_gate_rejects_unittest_helper_constant_only(tmp_path):
+    """The receiver must NOT count as an anchor: a helper that only does
+    ``testcase.assertEqual(1, 1)`` (no data arg) is a constant no-op → REJECT."""
+    _canonical(tmp_path, "| VB-01 | demo |\n")
+    _write(
+        tmp_path / "tests" / "helpers" / "__init__.py",
+        "def check(testcase):\n    testcase.assertEqual(1, 1)\n",
+    )
+    _write(
+        tmp_path / "tests" / "test_x.py",
+        "import unittest\n"
+        "from tests.helpers import check\n"
+        "class T(unittest.TestCase):\n"
+        "    # codd: covers vb=VB-01\n"
+        "    def test_x(self):\n        check(self)\n",
+    )
+    report = build_authenticity_report(tmp_path, config=_scan_cfg(), profile=PY_PROFILE)
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations)
+
+
+def test_python_primitive_regex_narrow_receiver():
+    """The primitive regex matches ``testcase.assertEqual(`` (TestCase receiver, CamelCase)
+    but NOT a namespace/snake helper (``helpers.assert_token_values(``) nor ``obj.process(``."""
+    from codd.vb_marker_authenticity import _PY_PRIMITIVE_ASSERT_RE as R
+
+    assert R.search("    testcase.assertEqual(a, b)")
+    assert R.search("    tc.assertRaises(X)")
+    assert not R.search("    helpers.assert_token_values(x)")  # namespace + snake -> not primitive
+    assert not R.search("    obj.process(x)")

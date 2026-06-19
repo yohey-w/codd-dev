@@ -1762,15 +1762,37 @@ _PY_SKIP_DECORATOR_RE = re.compile(
 #: ``self.assert*`` / ``self.fail`` call, or ``np.testing.assert*``. A bare call
 #: to a named helper (``assert_that(...)``, ``verify(...)``) is NOT primitive — it
 #: is resolved via the evidence graph so a no-op helper cannot pass on its name.
+#: unittest assertion can be called on a TestCase reference that is NOT ``self`` — a
+#: shared assert helper takes the TestCase as a parameter and calls ``testcase.assertX``.
+#: A NARROW receiver allowlist (not any ``X.assertY``) keeps a namespace helper
+#: (``helpers.assert_token_values(...)``) from being mis-read as a primitive.
+_PY_TESTCASE_RECEIVER_PATTERN = r"(?:self|cls|testcase|test_case|tc|case)"
+#: A ``<testcase-receiver>.assert<CamelCase>(`` call — the unittest assert-method form.
+#: CamelCase (``assert[A-Z]``) on purpose: a snake helper name (``assert_token_values``)
+#: is NOT a unittest assert method, so it stays helper-resolution-only.
+_PY_TESTCASE_ASSERT_CALL_RE = re.compile(
+    rf"\b(?P<recv>{_PY_TESTCASE_RECEIVER_PATTERN})\.assert[A-Z][A-Za-z0-9_]*\s*\("
+)
 _PY_PRIMITIVE_ASSERT_RE = re.compile(
     r"(^|[^A-Za-z0-9_])(assert\b|pytest\.(?:raises|warns)\b|pytest\.fail\s*\(|"
-    r"self\.assert[A-Za-z]+\s*\(|self\.fail\s*\(|np\.testing\.assert)"
+    rf"{_PY_TESTCASE_RECEIVER_PATTERN}\.assert[A-Z][A-Za-z0-9_]*\s*\(|self\.fail\s*\(|np\.testing\.assert)"
     # ``raise AssertionError`` (the explicit form of ``assert``) — LINE-ANCHORED so a
     # ``raise AssertionError`` inside a string/comment does not match (the AST-first
     # ``_python_body_has_primitive_assertion`` is the primary guard; this is fallback).
     r"|^[ \t]*raise\s+AssertionError\b",
     re.MULTILINE,
 )
+
+
+def _testcase_assert_receivers_in(text: str) -> set[str]:
+    """Receiver names used as ``<recv>.assert<CamelCase>(`` in ``text`` (e.g. ``testcase``).
+
+    These are the assertion API ``器`` (the TestCase), NOT observed values — so they must
+    be EXCLUDED from the argument-anchor (otherwise ``testcase.assertEqual(1, 1)`` would
+    anchor via ``testcase`` and a constant-only helper would falsely pass). A no-op for
+    TS bodies (no ``self|tc|...\\.assertX`` patterns), so it is safe in the shared anchor."""
+
+    return {m.group("recv") for m in _PY_TESTCASE_ASSERT_CALL_RE.finditer(text)}
 #: A python ``def helper(...):`` header (captures name + the parameter list so the
 #: argument-anchor check can confirm the helper references its own arguments).
 _PY_DEF_RE = re.compile(
@@ -3277,6 +3299,14 @@ def _params_and_derived_locals(body: str, param_set: set[str]) -> set[str]:
     crediting fake coverage.
     """
 
+    if not param_set:
+        return set()
+    # A TestCase passed as a parameter (``def helper(testcase, ...): testcase.assertEqual(...)``)
+    # is the assertion API ``器``, NOT an observed value — exclude it from the anchor so a
+    # constant-only helper (``testcase.assertEqual(1, 1)``) stays unanchored ⇒ FAIL. No-op
+    # for TS / non-unittest bodies (no ``<recv>.assertX`` calls). Cross-language: the
+    # detector only matches the unittest assert-method form, so other stacks are untouched.
+    param_set = param_set - _testcase_assert_receivers_in(body)
     if not param_set:
         return set()
     derived = set(param_set)
