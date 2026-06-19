@@ -262,6 +262,37 @@ def test_declared_output_completeness_enforce_raises(tmp_path):
     assert "tests/cli.e2e.test.ts" in str(exc.value)
 
 
+def test_declared_output_completeness_ignores_symbol_declarations(tmp_path):
+    """Symbol-style declared outputs (``Version.__str__`` / ``Range.matches(version)`` /
+    ``module:range``) are NOT file paths — they must produce no spurious warn and, under
+    ``enforce``, no false-RED. Regression: the old ``PurePosixPath(out).suffix``-non-empty
+    test mis-classified a dotted symbol as a file (suffix ``.__str__`` / ``.matches(version)``)."""
+    from codd.greenfield.pipeline import _declared_output_is_file_path
+
+    assert _declared_output_is_file_path("token_bucket.py") is True
+    assert _declared_output_is_file_path("src/app/clock.py") is True
+    assert _declared_output_is_file_path("Version.__str__") is False
+    assert _declared_output_is_file_path("Range.matches(version)") is False
+    assert _declared_output_is_file_path("module:range") is False
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "version.py").write_text("class Version: ...\n", encoding="utf-8")
+    task = ImplementTaskRef(
+        task_id="impl_version",
+        design_node="n",
+        expected_outputs=("Version.__str__", "Range.matches(version)", "module:range"),
+    )
+    results = [_Result(generated_files=[str(tmp_path / "src" / "version.py")])]
+    messages: list[str] = []
+    # enforce mode + only SYMBOL declarations → no StageError and no warn (nothing is a file).
+    _check_declared_output_completeness(
+        task, results, tmp_path,
+        {"implement": {"declared_output_completeness": "enforce"}},
+        echo=messages.append,
+    )
+    assert messages == []
+
+
 def test_declared_output_completeness_satisfied_ok(tmp_path):
     """When every declared EXACT output exists, neither warn nor enforce fires."""
     (tmp_path / "src").mkdir()

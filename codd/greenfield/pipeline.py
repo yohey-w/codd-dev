@@ -2451,6 +2451,26 @@ def _verify_task_contract(
         )
 
 
+def _declared_output_is_file_path(raw: str) -> bool:
+    """Whether a declared ``expected_outputs`` entry is an EXACT FILE PATH.
+
+    Only real file paths participate in declared-output-completeness; a SYMBOL
+    declaration (``Version.__str__``, ``Range.matches(version)``, ``module:range``)
+    is left to the kind check. The old test — ``PurePosixPath(out).suffix`` non-empty
+    — mis-classified symbols as files because a dotted symbol has a "suffix"
+    (``.__str__`` / ``.matches(version)``), producing spurious WARNs (and a latent
+    false-RED under ``enforce``). A real path has a ``/`` OR a plausible file
+    extension (short + alphanumeric, e.g. ``.py`` / ``.yaml``)."""
+
+    s = raw.strip().replace("\\", "/").strip("/")
+    if not s:
+        return False
+    if "/" in s:
+        return True
+    ext = PurePosixPath(s).suffix[1:]  # drop the leading dot
+    return bool(ext) and len(ext) <= 6 and ext.isalnum()
+
+
 def _check_declared_output_completeness(
     task: ImplementTaskRef,
     results: list[Any],
@@ -2478,7 +2498,7 @@ def _check_declared_output_completeness(
     declared_files = [
         str(out).strip().replace("\\", "/").strip("/")
         for out in task.expected_outputs
-        if str(out).strip() and PurePosixPath(str(out).strip()).suffix
+        if _declared_output_is_file_path(str(out))
     ]
     if not declared_files:
         return
