@@ -2964,6 +2964,32 @@ def _enforce_stage_coverage_gate(
     )
 
 
+def _format_verify_failure_lines(failures) -> list[str]:
+    """Inline-loggable summary of verify failures (failure observability).
+
+    One line per failure naming the check + source + first message line, plus any
+    individual failing tests embedded in the message (go/pytest print ``--- FAIL:``
+    / ``FAILED`` lines). The C-Go greenfield dogfood surfaced the need: a bare
+    ``verify failed (1 failure(s))`` forced a dig into ``.codd/repair_history`` to
+    learn it was ``go test`` with three failing tests — and re-observing a dogfood
+    failure means re-running the SUT, which burns budget. Pure + side-effect-free
+    so the caller controls the log prefix; defensive getattr tolerates any failure
+    shape.
+    """
+    out: list[str] = []
+    for f in failures:
+        lines = [ln for ln in (getattr(f, "message", "") or "").splitlines() if ln.strip()]
+        first = lines[0].strip()[:200] if lines else "(no message)"
+        out.append(f"  - {getattr(f, 'check_name', '?')} [{getattr(f, 'source', '?')}]: {first}")
+        embedded = [
+            ln.strip()
+            for ln in lines
+            if "--- FAIL" in ln or ln.strip().startswith("FAILED ")
+        ][:8]
+        out.extend(f"      failing: {ln[:160]}" for ln in embedded)
+    return out
+
+
 def _default_verify_runner(
     project_root: Path,
     *,
@@ -2979,6 +3005,8 @@ def _default_verify_runner(
         return _certify_verify_executed(project_root, result)
 
     echo(f"[greenfield] verify failed ({len(result.failures)} failure(s)); starting automatic repair")
+    for _line in _format_verify_failure_lines(result.failures):
+        echo(f"[greenfield]{_line}")
     from codd.config import load_project_config
     from codd.dag import DAG
     from codd.dag.builder import build_dag
