@@ -1,0 +1,51 @@
+# Prisma AddonProfile (curated core) — a DATA addon, not an application framework.
+# Per dogfood/gpt_composable_profile_design.md §1: Prisma shapes the stack
+# contract (schema, migrations, generated client) but does not own the app build.
+id: prisma
+kind: addon
+display_name: Prisma
+aliases: [prisma-orm]
+capability: orm
+strictness: strict
+
+requires:
+  any_language:
+    - id: typescript
+    - id: javascript
+
+detection:
+  manifests:
+    - file: package.json
+      dependency: prisma
+    - file: package.json
+      dependency: "@prisma/client"
+  files:
+    - prisma/schema.prisma
+
+commands:
+  generate:
+    argv: [npx, prisma, generate]
+  migrate_deploy:
+    argv: [npx, prisma, migrate, deploy]
+  migrate_status:
+    argv: [npx, prisma, migrate, status]
+
+# Anti-false-green: a generated Prisma client that is stale relative to
+# schema.prisma must not be treated as a valid build (the migration/codegen
+# must be reconciled, not assumed).
+obligations:
+  - id: client_in_sync_with_schema
+    description: >-
+      the generated Prisma client and applied migrations must be in sync with
+      prisma/schema.prisma (a drifted client is not valid evidence).
+    checker: prisma_adapter:check_schema_sync
+    severity: warn
+
+artifacts:
+  build_outputs:
+    - node_modules/.prisma/**
+    - node_modules/@prisma/client/**
+
+adapters:
+  discovery: prisma_adapter:discover
+  obligation_checker: prisma_adapter:check

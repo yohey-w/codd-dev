@@ -1,0 +1,151 @@
+# Next.js FrameworkProfile (curated core) — v3.0 composable Profile.
+# Per dogfood/gpt_composable_profile_design.md §3. Next.js is an APPLICATION
+# framework requiring a TypeScript/JavaScript host language; it contributes
+# filesystem-routing layout, route/handler file roles, framework build/e2e
+# commands, and obligations (incl. the ignoreBuildErrors anti-false-green guard).
+id: nextjs
+kind: framework
+display_name: Next.js
+aliases: [next, next.js]
+schema_version: "1"
+profile_version: "0.1.0"
+strictness: strict
+
+requires:
+  any_language:
+    - id: typescript
+      version: ">=5.1"
+    - id: javascript
+  runtime:
+    any: [node]
+
+detection:
+  manifests:
+    - file: package.json
+      dependency: next
+  files:
+    - next.config.js
+    - next.config.mjs
+    - next.config.ts
+    - app/**
+    - pages/**
+
+# App Router and Pages Router are mutually exclusive layout conventions; exactly
+# one is selected (exclusive_variants: true) by detection.
+exclusive_variants: true
+variants:
+  - id: app_router
+    detect:
+      any_files:
+        - "app/**/page.{js,jsx,ts,tsx}"
+        - "app/**/route.{js,ts}"
+  - id: pages_router
+    detect:
+      any_files:
+        - "pages/**/*.{js,jsx,ts,tsx}"
+
+# Framework CONTRIBUTES layout on top of the language's source_sets (it does not
+# replace them). .next/ is framework-generated output, never authored.
+layout:
+  source_sets:
+    - id: app
+      root: app
+      file_globs: ["**/*.{js,jsx,ts,tsx}"]
+      role: routes
+    - id: pages
+      root: pages
+      file_globs: ["**/*.{js,jsx,ts,tsx}"]
+      role: routes
+    - id: components
+      root: components
+      file_globs: ["**/*.{js,jsx,ts,tsx}"]
+      role: ui
+  generated:
+    - .next/**
+    - next-env.d.ts
+  ignored:
+    - .next/**
+
+# Path pattern -> framework file ROLE (consumed by the file_classifier adapter).
+file_roles:
+  - pattern: "app/**/page.{js,jsx,ts,tsx}"
+    role: route_page
+  - pattern: "app/**/route.{js,ts}"
+    role: route_handler
+  - pattern: "app/**/layout.{js,jsx,ts,tsx}"
+    role: layout
+  - pattern: "app/**/loading.{js,jsx,ts,tsx}"
+    role: loading_ui
+  - pattern: "app/**/error.{js,jsx,ts,tsx}"
+    role: error_boundary
+  - pattern: "middleware.{js,ts}"
+    role: middleware
+  - pattern: "pages/api/**/*.{js,ts}"
+    role: api_route
+  - pattern: "pages/**/*.{js,jsx,ts,tsx}"
+    role: route_page
+
+operations:
+  route_discovery:
+    mode: filesystem_routing
+    app_router_segments: [page, route]
+    pages_router_root: pages
+  operation_flow:
+    # An OPERATION is an HTTP route reachable through filesystem routing.
+    unit: route
+    http_methods_from: route_handler_exports
+
+commands:
+  dev:
+    argv: [npx, next, dev]
+  build:
+    argv: [npx, next, build]
+  start:
+    argv: [npx, next, start]
+  typecheck:
+    argv: [npx, tsc, --noEmit]
+  e2e_test:
+    argv: [npx, playwright, test]
+    requires_materialized_deps: true
+
+assertions:
+  idioms:
+    - playwright_expect
+    - testing_library
+    - next_test_route_handler
+
+artifacts:
+  build_outputs:
+    - .next/**
+  reports: []
+
+# Obligations the RESOLVED contract must enforce. The first is the design's
+# anti-false-green guard: next build may NOT count as typecheck evidence when
+# next.config.* sets typescript.ignoreBuildErrors: true (a Next.js setting that
+# lets a production build complete WITH type errors).
+obligations:
+  - id: no_ignore_build_errors_as_typecheck
+    description: >-
+      next build must not substitute for typecheck when next.config.* sets
+      typescript.ignoreBuildErrors: true (the build would pass with type errors).
+    checker: nextjs_adapter:check_ignore_build_errors
+    severity: error
+    config_files: [next.config.js, next.config.mjs, next.config.ts]
+    setting: typescript.ignoreBuildErrors
+  - id: route_handler_must_be_exercised
+    description: >-
+      every discovered route handler (app/**/route.ts, pages/api/**) must be
+      exercised by at least one e2e/integration test (no unreached handler).
+    checker: nextjs_adapter:check_route_coverage
+    severity: warn
+
+adapters:
+  discovery: nextjs_adapter:discover
+  file_classifier: nextjs_adapter:classify_files
+  route_resolver: nextjs_adapter:routes
+  obligation_checker: nextjs_adapter:check
+  runner_report: playwright_json
+
+conformance:
+  adapter: nextjs_adapter:conformance
+  fixtures: []

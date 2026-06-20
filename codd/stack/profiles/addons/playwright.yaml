@@ -1,0 +1,54 @@
+# Playwright AddonProfile (curated core) — an E2E addon (browser harness).
+# Per dogfood/gpt_composable_profile_design.md §1: Playwright contributes the
+# e2e capability + a machine-readable report the runner-report adapter consumes;
+# it is NOT the application framework.
+id: playwright
+kind: addon
+display_name: Playwright
+aliases: [pw]
+capability: e2e
+strictness: strict
+
+requires:
+  any_language:
+    - id: typescript
+    - id: javascript
+
+detection:
+  manifests:
+    - file: package.json
+      dependency: "@playwright/test"
+  files:
+    - playwright.config.ts
+    - playwright.config.js
+
+commands:
+  e2e_test:
+    argv: [npx, playwright, test, --reporter=json]
+    requires_materialized_deps: true
+    report:
+      format: playwright-json
+      adapter: playwright_json
+      capture: stdout
+
+# Anti-false-green: a Playwright run where the suite was skipped / no test
+# executed must not be counted green (mirrors the language runner-report rule).
+obligations:
+  - id: e2e_actually_executed
+    description: >-
+      a green Playwright result requires >=1 test actually executed (a fully
+      skipped or empty run is not e2e evidence).
+    checker: playwright_adapter:check_executed
+    severity: error
+
+artifacts:
+  build_outputs:
+    - playwright-report/**
+    - test-results/**
+  reports:
+    - format: playwright-json
+      adapter: playwright_json
+
+adapters:
+  runner_report: playwright_json
+  obligation_checker: playwright_adapter:check
