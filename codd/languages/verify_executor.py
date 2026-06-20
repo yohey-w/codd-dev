@@ -33,7 +33,12 @@ to classes (the anti-false-green ordering, GPT §5):
 * a SKIPPED test was observed (``observation.skipped_tests == "red"``) → ``FAIL``
   (skip is not an authentic pass; see below for how a skip is detected).
 * ``returncode != 0`` → ``FAIL`` (a nonzero exit beats a green-looking report).
-* else (rc==0, report parsed, collected ≥ floor, no failed/skipped) → ``PASS``.
+* a required test set (``plan.required_test_sets``) had ZERO executed files in the
+  parsed report → ``SCOPE_MISSING`` (Step 5; the "unit-only PASS" hole). Checked
+  LAST, after the zero/failed/rc!=0 branches (so a more fundamental failure always
+  wins) and just before PASS (so a scope miss on an exit-0 clean report is RED).
+* else (rc==0, report parsed, collected ≥ floor, no failed/skipped, every required
+  scope covered) → ``PASS``.
 
 How a SKIP is detected from :class:`RunnerExecution`. The adapters fold a skipped
 case into the FILE-level signal: a file carrying ANY skipped (or failed) case is
@@ -206,6 +211,38 @@ def execute_verify_plan(
     return _classify(plan, returncode, report_path, adapter, project_root)
 
 
+def _norm_rel_posix(path: str) -> str:
+    """Normalize a path to comparable project-relative POSIX form for scope matching.
+
+    Mirrors how :class:`RunnerExecution` already stores executed files (project-
+    relative, POSIX) but is defensive about a stray ``./`` prefix / backslash and a
+    trailing slash so a root and an executed-file path compare on the same footing.
+    Uses PREFIX stripping (not ``lstrip("./")``, which is a character class and would
+    wrongly eat a legitimate leading dot, e.g. ``.codd/x`` → ``codd/x``).
+    """
+    p = str(path or "").replace("\\", "/")
+    if p.startswith("./"):
+        p = p[2:]
+    return p.rstrip("/")
+
+
+def _set_is_covered(root: str, executed: list[str]) -> bool:
+    """True iff some executed file falls under ``root`` (a directory prefix match).
+
+    ``root`` is normalized like the executed paths. A root of ``.`` or ``""`` (a
+    colocated set, whose tests sit anywhere among the sources) is trivially covered
+    by ANY executed file. A specific root such as ``tests/e2e`` is covered only by an
+    executed file equal to it or beneath it (``path == root`` or
+    ``path.startswith(root + "/")``) — so ``tests/unit/...`` never counts as covering
+    ``tests/e2e``.
+    """
+    norm_root = _norm_rel_posix(root)
+    if norm_root in ("", "."):
+        return bool(executed)
+    prefix = norm_root + "/"
+    return any(p == norm_root or p.startswith(prefix) for p in executed)
+
+
 def _classify(
     plan: VerifyRunPlan,
     returncode: int,
@@ -307,13 +344,45 @@ def _classify(
             detail=f"verify command exited {returncode} (nonzero exit beats a green-looking report)",
         )
 
-    # TODO(Step 5 — scope observation): once scope checking lands, also red a run
-    # whose parsed execution does not cover every plan.must_include_test_sets (a
-    # report where, e.g., only the unit set ran while an e2e set was required is a
-    # not-green scope miss). Scope checking is deliberately NOT implemented here.
+    # Step 5 — SCOPE observation. A clean, exit-0, parsed report can still be a
+    # FALSE green if it never ran a test set it was REQUIRED to cover (the
+    # "unit-only PASS" hole: a mutation that only ran unit tests while an e2e set
+    # was required). For each required ``(set_id, root)``, check whether ANY file
+    # the report says it executed falls under that set's root; a required set with
+    # ZERO covering executed files → SCOPE_MISSING (RED).
+    #
+    # Ordering: this runs AFTER the zero/failed/rc!=0 branches above (so a more
+    # fundamental failure always wins — a report with a FAILED file is FAIL even if
+    # e2e is also uncovered, because the failed-file branch returned earlier) and
+    # is the LAST not-green gate BEFORE PASS (so a scope miss on an otherwise
+    # green-looking exit-0 report is correctly RED, never PASS).
+    #
+    # We only have something to check when a report was parsed; the no-report /
+    # failing cases are already classified above. ``execution.executed_files`` are
+    # project-relative, POSIX, normalized test-file paths (see RunnerExecution), so
+    # we match a root the same way: strip leading ``./``, POSIX separators, and
+    # treat ``root`` as a directory PREFIX — a path covers the root iff
+    # ``path == root`` or ``path.startswith(root + "/")``. A root of ``.`` or ``""``
+    # (a colocated set) matches every executed file, so any executed file trivially
+    # covers it.
+    if execution is not None and plan.required_test_sets:
+        executed = [_norm_rel_posix(p) for p in execution.executed_files]
+        for set_id, raw_root in plan.required_test_sets:
+            if not _set_is_covered(raw_root, executed):
+                return VerifyExecutionResult(
+                    verify_class=VerifyClass.SCOPE_MISSING,
+                    returncode=returncode,
+                    execution=execution,
+                    detail=(
+                        f"required test set {set_id!r} (root {raw_root!r}) had zero "
+                        f"executed files in the report — the verify did not run what it "
+                        f"must cover (a report that is green only because it skipped a "
+                        f"required set is not an authentic pass)"
+                    ),
+                )
 
     # All not-green checks passed: rc==0, required report parsed, collected ≥ floor,
-    # no failed/skipped → the only green class.
+    # no failed/skipped, every required scope covered → the only green class.
     return VerifyExecutionResult(
         verify_class=VerifyClass.PASS,
         returncode=returncode,

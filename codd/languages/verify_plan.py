@@ -36,6 +36,14 @@ class VerifyClass(str, Enum):
     observability failure from the report being PRESENT but unparseable (a garbled
     JSON/JSONL, or no adapter able to read it). Both are not-green — only ``PASS``
     is green — but keeping them separate lets the executor report the honest reason.
+
+    ``SCOPE_MISSING`` (Contract Kernel Step 5) is the verify that PARSED a clean,
+    exit-0 report but did NOT cover a test set it was REQUIRED to cover (a
+    ``scope.must_include_test_sets`` entry with zero executed files under its root —
+    e.g. only the unit set ran while an e2e set was required). It closes the
+    "unit-only PASS" hole: a report that looks green only because it never ran the
+    set that matters is not-green, not PASS. Like the others it is NOT green
+    (``is_green`` stays PASS-only).
     """
 
     PASS = "PASS"
@@ -43,6 +51,7 @@ class VerifyClass(str, Enum):
     ZERO_TESTS = "ZERO_TESTS"
     REPORT_MISSING = "REPORT_MISSING"
     REPORT_UNREADABLE = "REPORT_UNREADABLE"
+    SCOPE_MISSING = "SCOPE_MISSING"
     TOOL_MISSING = "TOOL_MISSING"
     CONFIG_ERROR = "CONFIG_ERROR"
 
@@ -63,6 +72,12 @@ class VerifyRunPlan:
     report_adapter: str | None
     report_required: bool
     must_include_test_sets: tuple[str, ...]
+    #: Resolved ``(id, root)`` for each ``must_include_test_sets`` id that names a
+    #: real TestSet in ``contract.profile.layout.test_sets`` — the scope check (Step
+    #: 5) needs the set ROOTS, not just ids, to ask "did any executed file fall under
+    #: this set's root?". Populated by :func:`build_verify_plan`; ids that match no
+    #: TestSet are deliberately dropped here (a profile inconsistency, see there).
+    required_test_sets: tuple[tuple[str, str], ...]
     observation: VerifyObservationPolicy
     #: ``report.capture`` from the verify CommandSpec (e.g. Go's ``stdout``). When
     #: ``"stdout"`` the verify command streams its machine-readable report to stdout
@@ -90,6 +105,20 @@ def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | Non
         return None
     report = cmd.report
     scope = cmd.scope
+    must_include = scope.must_include_test_sets if scope else ()
+    # Resolve each must_include id to its TestSet ROOT (the scope check in the
+    # executor matches executed_files against roots, so it needs roots, not ids).
+    # A must_include id that names NO TestSet in the layout is a PROFILE
+    # INCONSISTENCY (a command requires coverage of a set the topology never
+    # declares): we keep it simple and just don't add a root for it — but we do
+    # NOT drop the id from ``must_include_test_sets`` and we do NOT silently make
+    # scope un-checkable for a REAL set; only the unresolvable id is skipped here.
+    sets_by_id = {ts.id: ts for ts in contract.profile.layout.test_sets}
+    required_test_sets = tuple(
+        (set_id, sets_by_id[set_id].root)
+        for set_id in must_include
+        if set_id in sets_by_id
+    )
     return VerifyRunPlan(
         language_id=contract.language_id,
         argv=tuple(cmd.argv),
@@ -99,7 +128,8 @@ def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | Non
         report_adapter=(report.adapter if report else None),
         report_required=bool(report and report.path),
         report_capture=(report.capture if report else None),
-        must_include_test_sets=(scope.must_include_test_sets if scope else ()),
+        must_include_test_sets=must_include,
+        required_test_sets=required_test_sets,
         # None on the command ⇒ the strict defaults (the invariant), never weaker.
         observation=(cmd.observation or VerifyObservationPolicy()),
     )

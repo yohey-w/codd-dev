@@ -78,6 +78,7 @@ def _plan(
         report_adapter=report_adapter,
         report_required=report_required,
         must_include_test_sets=(),
+        required_test_sets=(),
         observation=observation or VerifyObservationPolicy(),
         report_capture=report_capture,
     )
