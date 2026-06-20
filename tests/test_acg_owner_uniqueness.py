@@ -392,6 +392,33 @@ def test_declared_output_completeness_multisegment_dir_decl_not_flagged(tmp_path
     assert not msgs, f"directory decls falsely flagged absent: {msgs}"
 
 
+def test_declared_output_completeness_glob_decl_not_flagged(tmp_path):
+    """A GLOB declared output (e.g. a Go test task's 'internal/httpapi/*_test.go')
+    is not an exact file path and must not be flagged 'absent on disk' just because
+    the literal glob string is not a file. Regression: surfaced by the C-Go
+    greenfield dogfood (task test_httpapi_handlers)."""
+    from codd.greenfield.pipeline import _declared_output_is_file_path
+
+    # Globs are NOT exact file paths (left to the kind check)...
+    assert _declared_output_is_file_path("internal/httpapi/*_test.go") is False
+    assert _declared_output_is_file_path("**/*.test.ts") is False
+    assert _declared_output_is_file_path("src/*.py") is False
+    # ...while exact files (no glob char) still are.
+    assert _declared_output_is_file_path("src/app/page.tsx") is True
+
+    # End-to-end: declare a glob, produce a matching file -> no warn even under enforce.
+    (tmp_path / "internal" / "httpapi").mkdir(parents=True)
+    (tmp_path / "internal" / "httpapi" / "handlers_test.go").write_text("package httpapi\n")
+    task = ImplementTaskRef(
+        task_id="t", design_node="n", expected_outputs=("internal/httpapi/*_test.go",)
+    )
+    results = [_Result(generated_files=[])]
+    config = {"implement": {"declared_output_completeness": "enforce"}}
+    msgs: list[str] = []
+    _check_declared_output_completeness(task, results, tmp_path, config, echo=msgs.append)
+    assert not msgs, f"glob decl falsely flagged absent: {msgs}"
+
+
 def test_verify_task_contract_runs_completeness_in_warn_without_breaking(tmp_path):
     """The full ``_verify_task_contract`` still no-ops for a task with no required
     KIND, while the warn completeness check runs harmlessly (no raise)."""

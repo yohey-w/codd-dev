@@ -2467,6 +2467,13 @@ def _declared_output_is_file_path(raw: str) -> bool:
         return False
     if ":" in s:
         return False  # node-id (``module:parser.parse`` / ``design:x``), not a file path
+    # A GLOB (e.g. ``internal/httpapi/*_test.go``) is not an EXACT file path — like a
+    # directory, it is left to the kind check. Its trailing segment carries a real
+    # extension (``.go``), so without this guard it would be classed as a file and the
+    # literal ``(root / glob).is_file()`` check below would false-flag a produced-but-
+    # glob output as "absent on disk" (a WARN today, a false-RED under ``enforce``).
+    if any(ch in s for ch in "*?["):
+        return False
     # A file path is identified by a plausible file EXTENSION on its LAST segment.
     # A "/" alone is NOT sufficient: a multi-segment DIRECTORY declaration (e.g.
     # ``internal/httpapi`` / ``test/e2e`` — natural for Go, where a package IS a
