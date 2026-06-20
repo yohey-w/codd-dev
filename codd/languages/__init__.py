@@ -41,6 +41,11 @@ from .registry import (
     UnknownLanguageError,
     default_registry,
 )
+from .compat import (
+    UnsupportedLayoutShape,
+    layout_profile_from_language_profile,
+)
+from .path_planner import OutputPlan, PathPlanError, PathPlanner
 
 __all__ = [
     # model
@@ -70,4 +75,11 @@ __all__ = [
     "LanguageRegistry",
     "UnknownLanguageError",
     "default_registry",
+    # compat shim (LanguageProfile -> legacy LayoutProfile)
+    "UnsupportedLayoutShape",
+    "layout_profile_from_language_profile",
+    # path planner (single declared-output authority)
+    "OutputPlan",
+    "PathPlanError",
+    "PathPlanner",
 ]
