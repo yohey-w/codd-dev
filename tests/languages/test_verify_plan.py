@@ -35,7 +35,7 @@ def test_go_verify_plan_from_profile():
     assert plan is not None
     assert plan.argv == ("go", "test", "-json", "./...")
     assert plan.command_str == "go test -json ./..."
-    assert plan.env.get("GOFLAGS") == "-mod=readonly"
+    assert plan.env.get("GOFLAGS") == "-mod=readonly -buildvcs=false"
     assert plan.report_path == ".codd/verify/go-test.jsonl"
     assert plan.report_adapter == "go-test-json"
     assert plan.report_required is True

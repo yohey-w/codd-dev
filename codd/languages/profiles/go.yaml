@@ -170,7 +170,13 @@ commands:
     argv: ["go", "test", "-json", "./..."]
     cwd: "{module_root}"
     env:
-      GOFLAGS: "-mod=readonly"
+      # -buildvcs=false: a greenfield Go output dir is frequently NOT a clean git
+      # repo, so `go test`/`go build` fail with "error obtaining VCS status / use
+      # -buildvcs=false". The legacy _go_aware_env added this for the legacy path;
+      # the contract executor runs verify with plan.env, so the hardener must be
+      # DECLARED here or the contract path regresses the VCS-stamp failure. ONLY on
+      # verify — build/vet/typecheck env is read by implement_oracle (pinned tests).
+      GOFLAGS: "-mod=readonly -buildvcs=false"
     report:
       capture: stdout
       path: ".codd/verify/go-test.jsonl"

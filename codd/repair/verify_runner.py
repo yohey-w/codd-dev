@@ -9,10 +9,15 @@ import re
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 import subprocess
 import time
 import warnings
+
+if TYPE_CHECKING:  # import-time-free type hints (no cycle, no runtime cost)
+    from codd.languages.registry import AdapterRegistry, LanguageRegistry
+    from codd.languages.verify_executor import VerifyExecutionResult
+    from codd.languages.verify_plan import VerifyRunPlan
 
 import yaml
 
@@ -119,6 +124,20 @@ class VerificationResult:
     #: One-line status of the deterministic parse check over project sources
     #: ("checked N file(s)", "disabled", "N parse error(s)", "not checked").
     source_integrity: str = "not checked"
+    # ── Step 6 contract-switch trace (additive; defaults keep old constructors
+    #    valid). ``verify_path`` records which path produced the test verdict:
+    #    "contract"        — the contract executor ran (its verdict is FINAL),
+    #    "legacy_fallback" — a PRE-execution fallback to the legacy ladder fired,
+    #    "legacy"          — no contract machinery was in play (the default).
+    #: Which path produced the test-command verdict ("contract"/"legacy_fallback"/"legacy").
+    verify_path: str = "legacy"
+    #: True when a PRE-execution legacy fallback fired (never after the contract
+    #: executor ran — there is no post-execution rescue). The v3.0.0 cut gates on
+    #: ``fallback_used == 0``.
+    fallback_used: bool = False
+    #: Why the fallback fired ("no_language"/"no_verify_plan"/
+    #: "missing_adapter_legacy_compatible"), else ``None``.
+    fallback_reason: str | None = None
 
     @property
     def executed_anything(self) -> bool:
@@ -156,10 +175,25 @@ class VerifyRunner:
         project_root: Path,
         codd_yaml: Mapping[str, Any] | None,
         runtime_skip: tuple[str, ...] | list[str] | set[str] | None = None,
+        *,
+        language_registry: "LanguageRegistry | None" = None,
+        adapter_registry: "AdapterRegistry | None" = None,
     ):
         self.project_root = Path(project_root).resolve()
         self.codd_yaml = dict(codd_yaml or {})
         self.runtime_skip = frozenset(str(item) for item in (runtime_skip or ()))
+        # Contract-Kernel registries. ``None`` ⇒ the process-wide defaults
+        # (``default_registry`` / ``default_adapter_registry``); they are
+        # keyword-only injection seams so a hermetic test can drive the
+        # contract-first verify path against a synthetic profile + fake adapter
+        # WITHOUT a real go/pytest toolchain. Production never passes them.
+        self._language_registry = language_registry
+        self._adapter_registry = adapter_registry
+        # fallback_used observability (Step 6 trace). Set by ``_run_test_command``
+        # and read by ``run()`` when it builds the ``VerificationResult``.
+        self._verify_path: str = "legacy"
+        self._fallback_used: bool = False
+        self._fallback_reason: str | None = None
 
     def run(self) -> VerificationResult:
         """Reset DAG state, run C1-C7 checks, then run executable verification tests.
@@ -237,6 +271,9 @@ class VerifyRunner:
             tests_summary=tests_summary,
             typecheck_executed=typecheck_executed,
             source_integrity=source_integrity,
+            verify_path=self._verify_path,
+            fallback_used=self._fallback_used,
+            fallback_reason=self._fallback_reason,
         )
         # The honesty rule. Plain `codd verify` stays pass-WITH-WARNING by
         # default because existing brownfield/CI configurations may be
@@ -488,14 +525,198 @@ class VerifyRunner:
     def _run_test_command(
         self, settings: dict[str, Any]
     ) -> tuple[bool, str | None, str, VerificationFailure | None]:
-        """Resolve and run the project's test command.
+        """Resolve and run the project's test command — CONTRACT-FIRST (Step 6).
 
-        Explicit ``verify.test_command``/``fix.test_command`` wins; otherwise
-        :func:`codd.test_detection.detect_test_command` heuristics apply
-        (pytest config, package.json scripts, cargo, go, bats, Makefile).
-        No command detected → ``tests_executed=False`` — callers MUST treat
-        that as "unverified", never as "tests passed".
+        Returns ``(tests_executed, test_command, tests_summary, test_failure)`` —
+        ``test_failure is not None`` ⇒ a failure (``passed=False``);
+        ``tests_executed`` feeds ``executed_anything`` / the honesty rule.
+
+        This is THE single live point where the Contract Kernel's anti-false-green
+        verify executor enters production verify. Decision tree (in order):
+
+        1. Resolve the language contract. A declared-but-UNKNOWN language is
+           ``UnknownLanguageError`` → RED (never a fallback). A malformed language
+           declaration is a broken contract even when an explicit command exists,
+           so this RED is checked FIRST (before the explicit-command override).
+        2. EXPLICIT author command override. An explicit ``fix.test_command`` /
+           ``verify.test_command`` in codd.yaml is author intent that, in the
+           legacy ladder, beats all detection (test_detection priority 1-2). It
+           designates the command the author wants run AS THEIR verification — so
+           routing a project with an explicit command into the PROFILE's verify
+           pipeline would verify a DIFFERENT command than the author asked for
+           (itself a false-green vector: "pass" the profile command while the
+           author's real suite never ran). The contract's stricter observation is
+           the policy for the profile-DERIVED default, not an override of an
+           explicit author substitution. So an explicit command → pre-execution
+           legacy fallback (reason ``explicit_test_command``); the legacy evidence
+           path runs it and keeps its OWN anti-false-green guards (JS zero-collected
+           hard-fail, pytest exit-5 = no-tests, nonzero/timeout = fail). Marked
+           ``fallback_used=True`` so the v3.0.0 ``fallback_used == 0`` cut surfaces
+           it as migration debt (not a permanent green-washing escape hatch). This
+           is language-AGNOSTIC (gates on "did the author provide a command", never
+           on a language name) and PRE-execution (no post-execution rescue).
+        2b. Structural-only opt-out. ``verify.allow_structural_only: true`` is the
+           author's explicit declaration that there is no executable verification
+           (the honesty rule already honors it). Forcing the contract executor would
+           run a verify command the author declared absent → pre-execution legacy
+           fallback (reason ``structural_only``); like (2), an author opt-out that
+           pre-empts the contract path.
+        3. No ``project.language`` (contract is ``None``) → pre-execution legacy
+           fallback (reason ``no_language``).
+        4. No verify command in the profile (``build_verify_plan`` is ``None``) →
+           pre-execution legacy fallback (reason ``no_verify_plan``).
+        5. Scoped runner_report-adapter gate (NOT full ``require_complete()`` —
+           other adapter kinds are unimplemented and would RED everything): if the
+           plan requires a report and the runner_report adapter is unavailable,
+           a ``strict`` profile → RED; a ``legacy_compatible`` profile →
+           pre-execution legacy fallback (reason
+           ``missing_adapter_legacy_compatible``).
+        6. Otherwise run the contract executor. Its verdict is FINAL — there is
+           NO post-execution legacy rescue (a contract not-green is never turned
+           green by re-running the legacy ladder).
         """
+        from codd.test_detection import _explicit_test_command
+        from codd.languages.contract import resolve_language_contract
+        from codd.languages.registry import (
+            UnknownLanguageError,
+            default_adapter_registry,
+        )
+        from codd.languages.verify_plan import build_verify_plan
+
+        # (1) Resolve the language contract — a declared-unknown language is RED.
+        try:
+            contract = resolve_language_contract(
+                settings,
+                language_registry=self._language_registry,
+                adapter_registry=self._adapter_registry,
+            )
+        except UnknownLanguageError as exc:
+            self._mark_contract_path()
+            return (
+                False,
+                None,
+                "unknown declared language",
+                VerificationFailure(
+                    check_name="test_command",
+                    source="test_command",
+                    message=(
+                        f"project.language is declared but unknown: {exc}. A declared "
+                        "language with no matching profile is RED, never a silent "
+                        "fallback to the legacy test ladder."
+                    ),
+                    details={"failure_class": "unknown_declared_language"},
+                ),
+            )
+
+        # (2) Explicit author command override (checked AFTER the unknown-language
+        # RED, BEFORE all other routing). An explicit fix/verify.test_command is a
+        # deliberate author substitution that the legacy ladder honors over
+        # detection; the contract path would otherwise run the profile's DEFAULT
+        # verify command instead — verifying something the author did not ask for.
+        # Pre-execution legacy fallback; the legacy guards still prevent green-on-
+        # nothing. Language-agnostic + migration debt (fallback_used=True).
+        if _explicit_test_command(settings):
+            return self._legacy_test_command(settings, reason="explicit_test_command")
+
+        # (2b) Structural-only opt-out. ``verify.allow_structural_only: true`` is the
+        # author's EXPLICIT declaration that structural DAG coherence is the whole
+        # contract here and there is no executable verification (doc-only repos, or a
+        # suite that runs in a separate CI stage) — already honored by
+        # ``structural_only_allowed()`` / the honesty rule. Forcing the contract
+        # executor on such a project would run a verify command the author declared
+        # absent (a spurious not-green) and add no anti-false-green value (the honesty
+        # rule is the gate whenever this opt-out is NOT set). So it is a pre-execution
+        # opt-out, like the explicit-command override: route to legacy (which, with no
+        # detected command, yields the structural-only result the author asked for).
+        if structural_only_allowed(settings):
+            return self._legacy_test_command(settings, reason="structural_only")
+
+        # (3) No declared language → legacy fallback (the common existing case).
+        if contract is None:
+            return self._legacy_test_command(settings, reason="no_language")
+
+        # (4) No verify command in the profile → legacy fallback.
+        plan = build_verify_plan(contract)
+        if plan is None:
+            return self._legacy_test_command(settings, reason="no_verify_plan")
+
+        # (5) Scoped runner_report-adapter gate (NOT full require_complete()). The
+        # executor reads the report via ``default_adapter_registry.get("runner_report",
+        # plan.report_adapter)`` — so we gate on exactly that capability, ensuring
+        # builtins are registered first. Only when the plan REQUIRES a report.
+        registry = (
+            self._adapter_registry
+            if self._adapter_registry is not None
+            else default_adapter_registry
+        )
+        if plan.report_required:
+            from codd.languages.builtin_adapters import (
+                ensure_builtin_adapters_registered,
+            )
+
+            ensure_builtin_adapters_registered(registry)
+            adapter = (
+                registry.get("runner_report", plan.report_adapter)
+                if plan.report_adapter is not None
+                else None
+            )
+            if adapter is None:
+                if contract.profile.strictness == "strict":
+                    self._mark_contract_path()
+                    return (
+                        False,
+                        plan.command_str,
+                        "required runner_report adapter unavailable (strict)",
+                        VerificationFailure(
+                            check_name="test_command",
+                            source="test_command",
+                            message=(
+                                f"strict language {contract.language_id!r} declares a "
+                                f"required runner_report adapter "
+                                f"{plan.report_adapter!r} that is not registered — the "
+                                "executor cannot observe the report, so the run cannot "
+                                "be classified green (fail-closed; RED, no fallback)."
+                            ),
+                            details={
+                                "failure_class": "missing_runner_report_adapter",
+                                "report_adapter": plan.report_adapter,
+                                "language": contract.language_id,
+                            },
+                        ),
+                    )
+                # legacy_compatible → pre-execution fallback (NOT a RED).
+                return self._legacy_test_command(
+                    settings, reason="missing_adapter_legacy_compatible"
+                )
+
+        # (6) Run the contract executor. Its verdict is FINAL (no legacy rescue).
+        from codd.languages.verify_executor import execute_verify_plan
+
+        self._mark_contract_path()
+        result = execute_verify_plan(plan, self.project_root, adapter_registry=registry)
+        return self._tuple_from_execution(plan, result)
+
+    def _mark_contract_path(self) -> None:
+        """Record that the live contract executor produced this run's test verdict."""
+        self._verify_path = "contract"
+        self._fallback_used = False
+        self._fallback_reason = None
+
+    def _legacy_test_command(
+        self, settings: dict[str, Any], *, reason: str
+    ) -> tuple[bool, str | None, str, VerificationFailure | None]:
+        """PRE-execution legacy fallback — the original detect+run test ladder.
+
+        Used ONLY before the contract executor runs (an explicit author command /
+        structural-only opt-out / no language / no verify plan / legacy_compatible
+        profile with a missing runner_report adapter). Records the fallback trace so
+        the v3.0.0 cut can gate on ``fallback_used == 0``. There is deliberately NO
+        post-execution variant: once the contract executor has run, its verdict is
+        final.
+        """
+        self._verify_path = "legacy_fallback"
+        self._fallback_used = True
+        self._fallback_reason = reason
         command = detect_test_command(self.project_root, config=settings)
         if not command:
             return False, None, "no test command detected", None
@@ -503,6 +724,46 @@ class VerifyRunner:
             command, settings, check_name="test_command", label="test command"
         )
         return executed, command, summary, failure
+
+    def _tuple_from_execution(
+        self, plan: "VerifyRunPlan", result: "VerifyExecutionResult"
+    ) -> tuple[bool, str | None, str, VerificationFailure | None]:
+        """Map a :class:`VerifyExecutionResult` to the ``_run_test_command`` 4-tuple.
+
+        The anti-false-green mapping — only ``PASS`` is green; every other class is
+        a failure, and ``TOOL_MISSING`` additionally did NOT execute:
+
+        * ``PASS``        → ``(True,  cmd, detail, None)``.
+        * ``TOOL_MISSING``→ ``(False, cmd, detail, FAILURE)`` — never ran AND a
+          failure (so it can never count as green-on-nothing).
+        * any other not-green (FAIL / ZERO_TESTS / REPORT_MISSING /
+          REPORT_UNREADABLE / SCOPE_MISSING) → ``(True, cmd, detail, FAILURE)`` —
+          it executed; it is a failure.
+        """
+        from codd.languages.verify_plan import VerifyClass
+
+        command = plan.command_str
+        if result.verify_class is VerifyClass.PASS:
+            return True, command, result.detail, None
+
+        failure = VerificationFailure(
+            check_name="test_command",
+            source="test_command",
+            message=result.detail,
+            details={
+                "command": command,
+                "verify_class": result.verify_class.value,
+                "verify_path": "contract",
+                "returncode": result.returncode,
+                "failure_class": "verify_contract_not_green",
+            },
+        )
+        if result.verify_class is VerifyClass.TOOL_MISSING:
+            # Did not run AND is a failure — never green.
+            return False, command, result.detail, failure
+        # FAIL / ZERO_TESTS / REPORT_MISSING / REPORT_UNREADABLE / SCOPE_MISSING:
+        # the command executed and the observation is not-green.
+        return True, command, result.detail, failure
 
     def _run_evidence_command(
         self,

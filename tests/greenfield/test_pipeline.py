@@ -1339,20 +1339,26 @@ def test_verify_stage_does_not_clobber_existing_config(tmp_path: Path) -> None:
 
 
 def test_verify_stage_unknown_stack_still_gates_honesty(tmp_path: Path) -> None:
-    """A stack without an ensurer must NOT be certified when nothing executes.
+    """A stack without an ensurer must NOT be certified.
 
-    The scaffold is stack-specific; for an unsupported language the verify
-    honesty gate (FX3) is still the authority and refuses to certify an
-    unexecuted build.
+    The scaffold is stack-specific; for an unsupported/unknown language the verify
+    gate refuses to certify the build. Under the Contract-Kernel switch this is now a
+    STRONGER gate than the old structural-only honesty warning: a DECLARED-UNKNOWN
+    language is a malformed contract → the contract-first ``_run_test_command`` returns
+    RED (``unknown_declared_language``), which the greenfield runner surfaces as a verify
+    failure → automatic repair cannot fix an unknown language → ``StageError`` (the build
+    is not certified). Either way, an unsupported stack is never certified.
     """
     project = make_stub_project(tmp_path, "stub-ai-cli --print")
-    # Override the recorded language to one with no test-runner ensurer.
+    # Override the recorded language to one with no profile / no test-runner ensurer.
     config = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
     config["project"]["language"] = "rust"
     (project / "codd" / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
     record: dict = {"status": "pending", "detail": ""}
-    with pytest.raises(StageError, match="executed nothing"):
+    # The build is NOT certified — the verify stage raises (the unknown-language RED
+    # cannot be auto-repaired, so repair ends non-SUCCESS).
+    with pytest.raises(StageError, match="repair ended with|executed nothing"):
         GreenfieldPipeline()._stage_verify(project, record, {"max_repair_attempts": 1})
     # no pyproject scaffolded for an unsupported stack.
     assert not (project / "pyproject.toml").exists()
