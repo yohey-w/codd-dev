@@ -29,12 +29,20 @@ from .profile import VerifyObservationPolicy
 
 
 class VerifyClass(str, Enum):
-    """Semantic class of a verify outcome (design §v2.69a)."""
+    """Semantic class of a verify outcome (design §v2.69a / §5).
+
+    ``REPORT_MISSING`` vs ``REPORT_UNREADABLE`` are deliberately distinct (GPT §5,
+    "MECE では missing と unreadable は別"): the report being ABSENT is a different
+    observability failure from the report being PRESENT but unparseable (a garbled
+    JSON/JSONL, or no adapter able to read it). Both are not-green — only ``PASS``
+    is green — but keeping them separate lets the executor report the honest reason.
+    """
 
     PASS = "PASS"
     FAIL = "FAIL"
     ZERO_TESTS = "ZERO_TESTS"
     REPORT_MISSING = "REPORT_MISSING"
+    REPORT_UNREADABLE = "REPORT_UNREADABLE"
     TOOL_MISSING = "TOOL_MISSING"
     CONFIG_ERROR = "CONFIG_ERROR"
 
@@ -56,6 +64,12 @@ class VerifyRunPlan:
     report_required: bool
     must_include_test_sets: tuple[str, ...]
     observation: VerifyObservationPolicy
+    #: ``report.capture`` from the verify CommandSpec (e.g. Go's ``stdout``). When
+    #: ``"stdout"`` the verify command streams its machine-readable report to stdout
+    #: and the EXECUTOR must persist that captured stdout to ``report_path`` before
+    #: the adapter reads it (``go test -json`` writes no file of its own). ``None``
+    #: ⇒ the command produces the report file directly (no executor capture).
+    report_capture: str | None = None
 
     @property
     def command_str(self) -> str:
@@ -84,6 +98,7 @@ def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | Non
         report_path=(report.path if report else None),
         report_adapter=(report.adapter if report else None),
         report_required=bool(report and report.path),
+        report_capture=(report.capture if report else None),
         must_include_test_sets=(scope.must_include_test_sets if scope else ()),
         # None on the command ⇒ the strict defaults (the invariant), never weaker.
         observation=(cmd.observation or VerifyObservationPolicy()),
