@@ -1223,10 +1223,18 @@ def _normalize_spec_paths(spec: ImplementSpec) -> ImplementSpec:
 
 
 def _normalize_project_path(path_text: str) -> str:
-    path = PurePosixPath(str(path_text).strip())
+    text = str(path_text).strip()
+    path = PurePosixPath(text)
     if path.is_absolute():
         return path.as_posix()
-    if not path.parts or any(part == ".." for part in path.parts):
+    if any(part == ".." for part in path.parts):
+        raise ValueError(f"output path must stay within the project: {path_text}")
+    if not path.parts:
+        # PurePosixPath(".") and PurePosixPath("") both have empty .parts. "." is the
+        # valid project root (root-module layouts e.g. Go declare repo-root outputs);
+        # an empty string is not a path.
+        if text in (".", "./"):
+            return "."
         raise ValueError(f"output path must stay within the project: {path_text}")
     return path.as_posix().rstrip("/")
 
@@ -1245,9 +1253,15 @@ def _create_output_paths(project_root: Path, output_paths: list[str]) -> None:
 
 
 def _clean_output_paths(project_root: Path, output_paths: list[str]) -> None:
+    root = project_root.resolve(strict=False)
     for output_path in output_paths:
         destination = _resolve_output_path(project_root, output_path)
         _ensure_inside_project(project_root, destination, "output path")
+        if destination.resolve(strict=False) == root:
+            # NEVER delete the project root itself. A root-module layout (e.g. Go)
+            # legitimately declares "." as an output root; cleaning it would wipe the
+            # whole project (go.mod, .codd session, everything).
+            continue
         if destination.is_dir():
             shutil.rmtree(destination)
         elif destination.exists():
