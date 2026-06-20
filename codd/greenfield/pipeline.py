@@ -113,6 +113,7 @@ STAGES: tuple[str, ...] = (
     "generate",
     "implement",
     "verify",
+    "ci_scaffold",
     "propagate",
     "check",
 )
@@ -144,6 +145,7 @@ _INSPECT_COMMANDS: dict[str, str] = {
     "generate": "codd generate --wave {unit}",
     "implement": "codd implement run --task {unit}",
     "verify": "codd verify --auto-repair",
+    "ci_scaffold": "codd greenfield --resume",
     "propagate": "codd propagate --verify",
     "check": "codd check",
 }
@@ -307,6 +309,7 @@ TaskLister = Callable[[Path], list[ImplementTaskRef]]
 TaskDeriver = Callable[..., int]
 ImplementTaskRunner = Callable[..., str]
 VerifyRunner = Callable[..., str]
+CiScaffoldRunner = Callable[..., str]
 PropagateRunner = Callable[..., str]
 CheckRunner = Callable[[Path], str]
 Notifier = Callable[[str, str], bool]
@@ -344,6 +347,7 @@ class GreenfieldPipeline:
         task_deriver: TaskDeriver | None = None,
         implement_task_runner: ImplementTaskRunner | None = None,
         verify_runner: VerifyRunner | None = None,
+        ci_scaffold_runner: CiScaffoldRunner | None = None,
         propagate_runner: PropagateRunner | None = None,
         check_runner: CheckRunner | None = None,
         notifier: Notifier | None = None,
@@ -372,6 +376,7 @@ class GreenfieldPipeline:
         self.task_deriver = task_deriver
         self.implement_task_runner = implement_task_runner
         self.verify_runner = verify_runner
+        self.ci_scaffold_runner = ci_scaffold_runner
         self.propagate_runner = propagate_runner
         self.check_runner = check_runner
         self.notifier = notifier
@@ -442,6 +447,7 @@ class GreenfieldPipeline:
             "generate": self._stage_generate,
             "implement": self._stage_implement,
             "verify": self._stage_verify,
+            "ci_scaffold": self._stage_ci_scaffold,
             "propagate": self._stage_propagate,
             "check": self._stage_check,
         }
@@ -1917,6 +1923,16 @@ class GreenfieldPipeline:
         if e2e_result.detail:
             self.echo(f"[greenfield] verify: {e2e_result.detail}")
 
+    # ── stage: ci_scaffold (make the built system CI-ready) ──
+
+    def _stage_ci_scaffold(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        del options
+        runner = self.ci_scaffold_runner or _default_ci_scaffold_runner
+        detail = str(runner(project_root, ai_command=self.ai_command))
+        record["detail"] = detail
+        if detail.startswith("skipped"):
+            record["status"] = STATUS_SKIPPED
+
     # ── stage: propagate (advisory on a fresh build) ────────
 
     def _stage_propagate(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
@@ -2008,6 +2024,14 @@ class GreenfieldPipeline:
                 STATUS_PENDING,
                 f"codd verify --auto-repair --max-attempts {options.get('max_repair_attempts')} "
                 "--repair-mode automatic",
+            )
+        )
+        outcomes.append(
+            StageOutcome(
+                "ci_scaffold",
+                STATUS_PENDING,
+                "generate .github/workflows/ci.yml running the detected test command "
+                "(skipped if a workflow exists or ci.provider=none)",
             )
         )
         propagate_detail = (
@@ -3098,6 +3122,122 @@ def _certify_verify_executed(project_root: Path, result: Any) -> str:
         "Makefile test target), or set verify.allow_structural_only: true to "
         "accept structural-only verification."
     )
+
+
+# Language ecosystems whose CI needs a toolchain bootstrap before the test
+# command can run. Keyed by a marker file; the value is the GitHub Actions
+# setup steps to prepend. An unrecognised ecosystem still gets checkout + the
+# detected test command (authentic — it runs the real suite — just without a
+# toolchain step). This per-ecosystem dispatch is the v3.0 short-term bridge;
+# v3.1 moves the CI template into the language/stack profile (profile-driven CI).
+_CI_SETUP_STEPS: tuple[tuple[str, list[dict[str, Any]]], ...] = (
+    ("go.mod", [{"uses": "actions/setup-go@v5", "with": {"go-version": "stable"}}]),
+    (
+        "package.json",
+        [
+            {"uses": "actions/setup-node@v4", "with": {"node-version": "lts/*"}},
+            {"run": "npm ci"},
+        ],
+    ),
+    (
+        "pyproject.toml",
+        [
+            {"uses": "actions/setup-python@v5", "with": {"python-version": "3.x"}},
+            {"run": "python -m pip install --upgrade pip && pip install -e ."},
+        ],
+    ),
+    (
+        "setup.py",
+        [
+            {"uses": "actions/setup-python@v5", "with": {"python-version": "3.x"}},
+            {"run": "python -m pip install --upgrade pip && pip install -e ."},
+        ],
+    ),
+    ("Cargo.toml", [{"uses": "dtolnay/rust-toolchain@stable"}]),
+)
+
+
+def _ci_setup_steps(project_root: Path) -> list[dict[str, Any]]:
+    for marker, steps in _CI_SETUP_STEPS:
+        if (project_root / marker).exists():
+            return [dict(step) for step in steps]
+    return []
+
+
+def _ci_opt_out_declared(project_root: Path) -> bool:
+    """True when codd.yaml declares ``ci.provider=none`` — an explicit opt-out
+    that the ci_health gate handles itself; scaffolding a workflow would
+    contradict the author's declaration."""
+    from codd.config import load_project_config
+
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return False
+    ci = config.get("ci")
+    if not isinstance(ci, dict):
+        return False
+    return str(ci.get("provider", "")).strip().lower() == "none"
+
+
+def _default_ci_scaffold_runner(project_root: Path, *, ai_command: str | None = None) -> str:
+    """Author a minimal, authentic CI workflow so a freshly built system is
+    CI-ready and the final ``check`` gate's ci_health requirement is satisfied
+    honestly (surfaced by the C-Go greenfield dogfood, where a clean build
+    failed ``check`` on ``ci_workflow_missing``).
+
+    DETERMINISTIC by design, not AI-freeform (which could emit a hollow
+    ``run: true`` that games ci_health) and not an auto-opt-out (which would
+    silently declare the system needs no CI). The workflow runs the project's
+    REAL test command — :func:`codd.test_detection.detect_test_command`, the
+    SAME source the verify stage uses — so CI authenticity == verify
+    authenticity by construction. A project that reached this stage green
+    necessarily has a detectable test command (verify ran it), so the scaffold
+    succeeds for exactly the projects verify could validate.
+
+    Idempotent: an existing workflow, or an explicit ``ci.provider=none``
+    opt-out, is left untouched.
+    """
+    del ai_command  # signature parity with sibling runners; no AI call needed.
+    from codd.test_detection import detect_test_command
+
+    existing = sorted(project_root.glob(".github/workflows/*.yml")) + sorted(
+        project_root.glob(".github/workflows/*.yaml")
+    )
+    if existing:
+        rel = existing[0].relative_to(project_root).as_posix()
+        return f"skipped — CI workflow already present ({rel})"
+
+    if _ci_opt_out_declared(project_root):
+        return "skipped — ci.provider=none opt-out declared in codd.yaml"
+
+    test_command = detect_test_command(project_root)
+    if not test_command:
+        raise StageError(
+            "ci_scaffold: cannot determine the project's test command, so an "
+            "authentic CI workflow cannot be authored. Declare verify.test_command "
+            "in codd.yaml, or set ci.provider=none with an opt_outs entry to opt out."
+        )
+
+    steps: list[dict[str, Any]] = [{"uses": "actions/checkout@v4"}]
+    steps.extend(_ci_setup_steps(project_root))
+    steps.append({"run": test_command})
+
+    workflow: dict[str, Any] = {
+        "name": "ci",
+        # The trigger key is the string "on"; PyYAML quotes it on dump and
+        # ci_health reads both the quoted-string and the YAML-1.1-bool form.
+        "on": {"push": None, "pull_request": None},
+        "jobs": {"test": {"runs-on": "ubuntu-latest", "steps": steps}},
+    }
+
+    workflow_path = project_root / ".github" / "workflows" / "ci.yml"
+    workflow_path.parent.mkdir(parents=True, exist_ok=True)
+    workflow_path.write_text(
+        yaml.safe_dump(workflow, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+    return f"generated .github/workflows/ci.yml (runs: {test_command})"
 
 
 def _default_propagate_runner(project_root: Path, *, ai_command: str | None) -> str:
