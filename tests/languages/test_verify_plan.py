@@ -35,6 +35,12 @@ def test_go_verify_plan_from_profile():
     assert plan is not None
     assert plan.argv == ("go", "test", "-json", "./...")
     assert plan.command_str == "go test -json ./..."
+    # cwd placeholder {module_root} must be SUBSTITUTED to the layout root ("."),
+    # not passed literally — an unsubstituted cwd makes the executor spawn in a
+    # nonexistent <project>/{module_root} dir (a spurious TOOL_MISSING; v2.75 bug,
+    # caught only by real-go validation, fixed v2.76).
+    assert plan.cwd == "."
+    assert "{module_root}" not in (plan.cwd or "")
     assert plan.env.get("GOFLAGS") == "-mod=readonly -buildvcs=false"
     assert plan.report_path == ".codd/verify/go-test.jsonl"
     assert plan.report_adapter == "go-test-json"

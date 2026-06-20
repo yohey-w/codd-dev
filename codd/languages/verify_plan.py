@@ -91,6 +91,26 @@ class VerifyRunPlan:
         return " ".join(self.argv)
 
 
+def _substitute_layout_placeholders(value: str | None, layout) -> str | None:
+    """Resolve the layout path placeholders a verify command's ``cwd``/``env`` may
+    carry (``{module_root}`` / ``{repo_root}`` / ``{manifest_root}``).
+
+    Profiles keep these as LITERAL template strings (per design — full template
+    substitution is PathPlanner's job, a later phase). But the verify EXECUTOR
+    must run in a real directory: an unsubstituted ``cwd: "{module_root}"`` makes
+    the run spawn in ``<project>/{module_root}`` (a path that does not exist) →
+    a spurious TOOL_MISSING. So the plan resolves exactly the layout roots the
+    verify command needs to be runnable; everything else stays a literal template.
+    """
+    if value is None:
+        return None
+    return (
+        value.replace("{module_root}", layout.module_root)
+        .replace("{repo_root}", layout.repo_root)
+        .replace("{manifest_root}", layout.manifest_root)
+    )
+
+
 def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | None:
     """Derive the verify run plan from ``contract.profile.commands['verify']``.
 
@@ -98,13 +118,15 @@ def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | Non
     stays on the legacy path). A declared ``report.path`` means the command is
     expected to PRODUCE that report — its absence after a run is REPORT_MISSING
     (a not-green outcome), enforced once adapters land (v2.72) / the switch
-    happens (v2.69b).
+    happens (v2.69b). ``cwd``/``env`` layout placeholders are resolved so the
+    executor runs in a real directory.
     """
     cmd = contract.profile.commands.get("verify")
     if cmd is None:
         return None
     report = cmd.report
     scope = cmd.scope
+    layout = contract.profile.layout
     must_include = scope.must_include_test_sets if scope else ()
     # Resolve each must_include id to its TestSet ROOT (the scope check in the
     # executor matches executed_files against roots, so it needs roots, not ids).
@@ -122,8 +144,11 @@ def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | Non
     return VerifyRunPlan(
         language_id=contract.language_id,
         argv=tuple(cmd.argv),
-        cwd=cmd.cwd,
-        env=dict(cmd.env),
+        cwd=_substitute_layout_placeholders(cmd.cwd, layout),
+        env={
+            str(k): _substitute_layout_placeholders(str(v), layout)
+            for k, v in cmd.env.items()
+        },
         report_path=(report.path if report else None),
         report_adapter=(report.adapter if report else None),
         report_required=bool(report and report.path),
