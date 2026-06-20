@@ -2591,9 +2591,62 @@ def _task_project_root(config: dict[str, Any], task: ImplementTaskRef) -> Path |
         return None
 
 
+def _root_module_output_paths(config: dict[str, Any]) -> list[str] | None:
+    """Repo-root accept-list for a ROOT-MODULE language, or ``None``.
+
+    Profile-DRIVEN (design §1.2/§1.6): resolve the project's
+    :class:`~codd.languages.profile.LanguageProfile` via the registry and check
+    ``layout.package_root.kind``. A profile whose ``package_root.kind == "none"``
+    (Go and any other root-module language — go.mod / cmd/ / internal/ live at the
+    repo root, there is NO single ``src/<pkg>`` source root) must NOT have its
+    declared outputs routed under a ``src/`` prefix. For such a language the only
+    coherent accept-list is the REPO ROOT itself (``"."``): an empty-component
+    prefix matches every declared output path, so ``cmd/server/main.go`` /
+    ``internal/store/store.go`` / ``go.mod`` are accepted at their canonical
+    repo-relative paths (the single authority being
+    :class:`~codd.languages.path_planner.PathPlanner`) instead of forced under
+    ``src/`` and dropped/rerooted.
+
+    Returns ``None`` (caller keeps the EXACT legacy ``source_root``→``package_root``
+    behavior, byte-identical) when:
+
+    * the profile has a single source/package root (``named_package`` /
+      ``path_root`` — Python/TS/node), OR
+    * no language is configured / the language has no profile, OR
+    * profile resolution fails for any reason.
+
+    This is the only place the routing diverges for root-module languages, and it
+    diverges off ``package_root.kind`` — NOT a ``language == "go"`` literal — so a
+    future root-module language (declared with ``package_root.kind: none``)
+    inherits the correct repo-root routing with zero pipeline changes.
+    """
+    project_section = config.get("project") if isinstance(config.get("project"), dict) else {}
+    language = project_section.get("language") if isinstance(project_section, dict) else None
+    if not isinstance(language, str) or not language.strip():
+        return None
+    try:
+        from codd.languages.registry import default_registry
+
+        profile = default_registry.resolve(language)
+    except Exception:  # noqa: BLE001 — no/unknown profile ⇒ keep legacy routing.
+        return None
+    if profile.layout.package_root.kind != "none":
+        return None
+    return [profile.layout.repo_root or "."]
+
+
 def _route_source_into_package(
     config: dict[str, Any], explicit: list[str], *, project_root: Path | None = None
 ) -> list[str]:
+    # ROOT-MODULE languages (profile ``package_root.kind == "none"``, e.g. Go)
+    # are routed to the repo root, never under ``src/`` (design §1.6). This is
+    # resolved from the declarative LanguageProfile and takes precedence over the
+    # legacy single-source-root LayoutProfile path below. For every language with
+    # a single source root (Python/TS/node) — and any language without a profile —
+    # this returns None and the behavior below is byte-identical to before.
+    root_module = _root_module_output_paths(config)
+    if root_module is not None:
+        return root_module
     profile = _resolve_layout_profile_from_config(config, project_root=project_root)
     if profile is None:
         return explicit
