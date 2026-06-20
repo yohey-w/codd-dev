@@ -95,18 +95,17 @@ operations:
     unit: route
     http_methods_from: route_handler_exports
 
+# Next.js owns ONLY its framework slots (dev / framework_build / start). typecheck
+# stays the language's (TypeScript: tsc --noEmit) and e2e_test stays the Playwright
+# addon's — a framework must not silently redefine a language/addon verification
+# command (design §1 namespace ownership; the composer flags such a collision).
 commands:
   dev:
     argv: [npx, next, dev]
-  build:
+  framework_build:
     argv: [npx, next, build]
   start:
     argv: [npx, next, start]
-  typecheck:
-    argv: [npx, tsc, --noEmit]
-  e2e_test:
-    argv: [npx, playwright, test]
-    requires_materialized_deps: true
 
 assertions:
   idioms:

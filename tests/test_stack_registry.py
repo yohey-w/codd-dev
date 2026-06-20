@@ -41,7 +41,10 @@ def test_nextjs_profile_parsed_from_taxonomy():
     assert nx.exclusive_variants is True
     assert len(nx.file_roles) >= 6
     assert {r.id for r in nx.requires.any_language} == {"typescript", "javascript"}
-    assert set(nx.commands) >= {"dev", "build", "start", "typecheck", "e2e_test"}
+    # Next.js owns ONLY its framework slots; typecheck is the language's and
+    # e2e_test is the Playwright addon's (namespace ownership, design §1).
+    assert set(nx.commands) == {"dev", "framework_build", "start"}
+    assert "typecheck" not in nx.commands and "e2e_test" not in nx.commands
     assert nx.detection.manifests[0].dependency == "next"
 
 
