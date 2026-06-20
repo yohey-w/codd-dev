@@ -50,6 +50,15 @@ from .contract import (
     resolve_language_contract,
     resolve_language_profile,
 )
+from .verify_plan import (
+    ShadowComparison,
+    VerifyClass,
+    VerifyOutcome,
+    VerifyRunPlan,
+    build_verify_plan,
+    classify_verify_outcome,
+    shadow_compare,
+)
 from .compat import (
     UnsupportedLayoutShape,
     layout_profile_from_language_profile,
@@ -92,6 +101,14 @@ __all__ = [
     "build_language_contract",
     "resolve_language_contract",
     "resolve_language_profile",
+    # verify run plan + semantic classifier (v2.69a, shadow)
+    "ShadowComparison",
+    "VerifyClass",
+    "VerifyOutcome",
+    "VerifyRunPlan",
+    "build_verify_plan",
+    "classify_verify_outcome",
+    "shadow_compare",
     # compat shim (LanguageProfile -> legacy LayoutProfile)
     "UnsupportedLayoutShape",
     "layout_profile_from_language_profile",
