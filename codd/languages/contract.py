@@ -195,7 +195,22 @@ def build_language_contract(
     *,
     adapter_registry: AdapterRegistry | None = None,
 ) -> ResolvedLanguageContract:
-    """Resolve a profile's declared adapters into a contract (no live wiring)."""
+    """Resolve a profile's declared adapters into a contract.
+
+    When the caller passes NO ``adapter_registry`` (so resolution falls back to the
+    process-wide :data:`default_adapter_registry`), the built-in adapters are
+    LAZILY registered first — so a default-registry contract for go/typescript
+    resolves the ``runner_report`` adapter instead of reporting it missing. An
+    EXPLICIT ``adapter_registry`` (e.g. a test's empty ``AdapterRegistry()``) is
+    left untouched: it keeps the prior "names an unregistered adapter ⇒ missing"
+    behavior, so callers can still exercise the incomplete-contract path. The
+    builtin import is done INSIDE the function to avoid an import cycle at module
+    load (registration is lazy by construction).
+    """
+    if adapter_registry is None:
+        from .builtin_adapters import ensure_builtin_adapters_registered
+
+        ensure_builtin_adapters_registered(default_adapter_registry)
     registry = adapter_registry if adapter_registry is not None else default_adapter_registry
     required = _declared_adapter_requirements(profile)
     resolved: list[str] = []

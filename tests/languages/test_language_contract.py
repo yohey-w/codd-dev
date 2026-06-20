@@ -150,3 +150,63 @@ def test_all_bundled_profiles_resolve_through_the_seam(language):
 
 def test_resolve_contract_none_when_no_language():
     assert resolve_language_contract({}) is None
+
+
+# ── default-registry now lazily resolves the runner_report built-ins (v2.71) ──
+#
+# Steps 1+2 of the Contract Kernel relocate the runner-report parsers to a leaf
+# module and LAZILY register them on the default AdapterRegistry. So a contract
+# built with the DEFAULT registry (no adapter_registry arg) now resolves the
+# runner_report adapter — while an EXPLICIT empty registry keeps the prior
+# "missing" behavior unchanged, and python's pytest-junit-xml (no adapter) stays
+# missing either way.
+
+
+def test_default_registry_resolves_go_runner_report_adapter():
+    from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
+
+    ensure_builtin_adapters_registered()  # deterministic regardless of test order
+    contract = build_language_contract(default_registry.resolve("go"))  # DEFAULT registry
+    missing = {r.ref for r in contract.missing_adapters}
+    assert "runner_report:go-test-json" not in missing
+    assert "runner_report:go-test-json" in contract.resolved_adapter_refs
+    # The OTHER declared go adapters have no built-in yet → still missing.
+    assert "test_semantics:go-test-semantics" in missing
+
+
+def test_default_registry_resolves_typescript_runner_report_adapter():
+    from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
+
+    ensure_builtin_adapters_registered()
+    contract = build_language_contract(default_registry.resolve("typescript"))
+    missing = {r.ref for r in contract.missing_adapters}
+    assert "runner_report:vitest-json" not in missing
+    assert "runner_report:vitest-json" in contract.resolved_adapter_refs
+
+
+def test_python_runner_report_adapter_stays_missing_no_builtin():
+    from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
+
+    ensure_builtin_adapters_registered()
+    contract = build_language_contract(default_registry.resolve("python"))  # DEFAULT registry
+    # python declares pytest-junit-xml, which has NO built-in adapter → missing.
+    assert "runner_report:pytest-junit-xml" in {r.ref for r in contract.missing_adapters}
+    assert "runner_report:pytest-junit-xml" not in contract.resolved_adapter_refs
+
+
+def test_explicit_empty_registry_keeps_runner_report_missing():
+    # Passing an explicit empty AdapterRegistry() must NOT auto-register the
+    # built-ins — the incomplete-contract path stays exercisable (unchanged).
+    profile = default_registry.resolve("go")
+    contract = build_language_contract(profile, adapter_registry=AdapterRegistry())
+    assert "runner_report:go-test-json" in {r.ref for r in contract.missing_adapters}
+    assert contract.is_complete is False
+
+
+def test_resolve_language_contract_default_resolves_runner_report():
+    from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
+
+    ensure_builtin_adapters_registered()
+    contract = resolve_language_contract({"project": {"language": "typescript"}})
+    assert contract is not None
+    assert "runner_report:vitest-json" in contract.resolved_adapter_refs
