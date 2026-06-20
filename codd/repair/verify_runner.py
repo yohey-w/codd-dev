@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
@@ -64,6 +65,29 @@ STRUCTURAL_ONLY_WARNING = (
     "test script, Cargo.toml, go.mod, *.bats, Makefile test target), or set "
     "verify.allow_structural_only: true to accept structural-only verification."
 )
+
+
+def _go_aware_env(project_root: Path) -> dict[str, str] | None:
+    """Env for running a Go project's verify commands, or ``None`` for non-Go.
+
+    A greenfield Go output dir is frequently NOT a clean git repo (or sits under
+    one with dubious ownership), so ``go build`` of a binary — including the
+    ``go build`` that SUT-generated tests run as a subprocess during ``go test`` —
+    fails with "error obtaining VCS status: exit status 128 / use -buildvcs=false".
+    Setting ``-buildvcs=false`` (additive to ``-mod=readonly``, preserving any
+    ambient GOFLAGS) makes the generated project build regardless of the harness
+    dir's VCS state. Returning ``None`` for non-Go lets the caller inherit the
+    ambient env unchanged.
+    """
+    if not (project_root / "go.mod").exists():
+        return None
+    env = dict(os.environ)
+    flags = env.get("GOFLAGS", "").split()
+    for needed in ("-mod=readonly", "-buildvcs=false"):
+        if needed not in flags:
+            flags.append(needed)
+    env["GOFLAGS"] = " ".join(flags).strip()
+    return env
 
 
 @dataclass
@@ -381,6 +405,7 @@ class VerifyRunner:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=_go_aware_env(self.project_root),  # None → inherit ambient (non-Go)
             )
         except subprocess.TimeoutExpired:
             return VerificationFailure(
@@ -502,6 +527,7 @@ class VerifyRunner:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=_go_aware_env(self.project_root),  # None → inherit ambient (non-Go)
             )
         except subprocess.TimeoutExpired:
             message = f"[TIMEOUT] {label} exceeded {timeout:g}s: {command}"
