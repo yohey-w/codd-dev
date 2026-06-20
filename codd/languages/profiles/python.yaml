@@ -1,0 +1,155 @@
+# Python language profile (design §1.2, §7).
+#
+# Phase 1: declarative data only — NOT wired into any gate yet. This is the
+# compatibility profile that mirrors CoDD's *existing* Python layout, so the
+# eventual rewire keeps the current snapshot.
+#
+# Invariants (asserted by tests):
+#   * source_sets root  = src/{package_name}  (RETAINS the src/ layout).
+#   * test_sets root    = tests.
+#   * package_root.kind = named_package, path = src/{package_name}.
+#   * strictness        = legacy_compatible (staged migration; do not break).
+#   * manifest          = pyproject.toml.
+#
+# {package_name} is a LITERAL placeholder in Phase 1 (PathPlanner substitutes later).
+
+id: python
+aliases: ["py", "python3"]
+display_name: "Python"
+strictness: legacy_compatible
+file_extensions: [".py"]
+
+layout:
+  repo_root: "."
+  module_root: "."
+  manifest_root: "."
+  default_command_cwd: "{module_root}"
+
+  package_root:
+    kind: named_package
+    path: "src/{package_name}"
+
+  source_sets:
+    - id: package
+      role: first_party
+      root: "src/{package_name}"
+      file_globs:
+        - "src/{package_name}/**/*.py"
+
+  test_sets:
+    - id: tests
+      role: unit
+      root: "tests"
+      file_globs:
+        - "tests/**/*.py"
+
+toolchain:
+  manifest:
+    path: "pyproject.toml"
+    format: pyproject.toml
+    required: true
+
+  module_identity:
+    source: manifest
+    path: "pyproject.toml"
+    field: "project.name"
+
+  dependency_integrity_files:
+    - path: "uv.lock"
+      kind: lock
+      required: false
+    - path: "poetry.lock"
+      kind: lock
+      required: false
+
+  package_manager:
+    id: pip
+    frozen_mode: {}
+
+imports:
+  resolver_adapter: python-package
+
+  first_party:
+    rule: package_name
+    package_name: "{package_name}"
+
+  stdlib:
+    classifier: adapter
+
+commands:
+  test:
+    argv: ["python", "-m", "pytest", "tests"]
+    cwd: "{module_root}"
+
+  verify:
+    argv:
+      - "python"
+      - "-m"
+      - "pytest"
+      - "tests"
+      - "--junitxml=.codd/verify/pytest-junit.xml"
+    cwd: "{module_root}"
+    report:
+      path: ".codd/verify/pytest-junit.xml"
+      format: junit-xml
+      adapter: pytest-junit-xml
+
+# Preserved verbatim (modeled as profile.extra in Phase 1). Python uses a
+# composite oracle, registered as an adapter in a later phase (design §4 Phase 4).
+implement_oracle:
+  kind: adapter
+  adapter: python-composite
+
+tests:
+  semantics_adapter: python-test-semantics
+  runner_report_adapter: pytest-junit-xml
+
+  test_file_globs:
+    - "tests/**/*.py"
+
+  authenticity_policy:
+    marker_must_be_inside_executable_test_block: true
+    skipped_is_not_authentic: true
+    focused_only_is_not_authentic: true
+    assertion_required: true
+
+  assertion_hints:
+    primitive:
+      - assert
+    libraries:
+      - import_path: "pytest"
+        functions:
+          - raises
+          - approx
+
+verify:
+  command: verify
+  report:
+    path: ".codd/verify/pytest-junit.xml"
+    format: junit-xml
+    adapter: pytest-junit-xml
+
+  execution_policy:
+    every_vb_test_block_must_execute: true
+    every_vb_test_block_must_pass: true
+    skipped_is_not_green: true
+    missing_from_report_is_not_green: true
+
+scaffold:
+  adapter: generic-template
+  owned_files:
+    - "pyproject.toml"
+    - "src/{package_name}/__init__.py"
+    - "src/{package_name}/__main__.py"
+    - "tests/__init__.py"
+
+artifacts:
+  harness_root: ".codd"
+
+  harness_owned:
+    - ".codd/**"
+    - "pyproject.toml"
+
+  ignored:
+    - ".pytest_cache/**"
+    - "*.pyc"

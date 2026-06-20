@@ -1,0 +1,277 @@
+# Go language profile (design §1.2–1.9, §5.1).
+#
+# Phase 1: declarative data only — NOT wired into any gate yet.
+#
+# Load-bearing invariants (asserted by tests/languages/test_language_profiles.py):
+#   * module_root = "."   — go.mod lives at the repo root.
+#   * source_sets = cmd/** (entrypoints) + internal/** (first-party private).
+#   * test_sets   = colocated **/*_test.go + optional e2e under tests/**.
+#   * package_root.kind = none — Go has no single package root.
+#   * strictness  = strict — a new language is strict from day one.
+#   * go.sum is a CHECKSUM artifact (dependency_integrity_files), NOT a lock file.
+#   * NOTHING is rooted under src/. (forbidden_generated_prefixes: ["src/"])
+#
+# Placeholders ({module_path}, {go_version}, {command_name}, ...) are LITERAL
+# template strings in Phase 1 — substitution is PathPlanner's job later.
+
+id: go
+aliases: ["golang"]
+display_name: "Go"
+strictness: strict
+file_extensions: [".go"]
+
+layout:
+  repo_root: "."
+  module_root: "."
+  manifest_root: "."
+  default_command_cwd: "{module_root}"
+
+  package_root:
+    kind: none
+
+  source_sets:
+    - id: commands
+      role: entrypoint
+      root: "cmd"
+      file_globs:
+        - "cmd/**/*.go"
+
+    - id: internal
+      role: first_party_private
+      root: "internal"
+      file_globs:
+        - "internal/**/*.go"
+
+  test_sets:
+    - id: colocated
+      role: unit
+      root: "."
+      file_globs:
+        - "**/*_test.go"
+      colocated: true
+
+    - id: e2e
+      role: e2e
+      root: "tests"
+      file_globs:
+        - "tests/**/*_test.go"
+      optional: true
+
+# Preserved verbatim (modeled as profile.extra in Phase 1).
+path_rules:
+  canonical_path_base: repo_root
+  path_separator: "/"
+
+  output_roles:
+    module_manifest:
+      owner: harness
+      path: "go.mod"
+
+    command_entrypoint:
+      owner: sut
+      template: "cmd/{command_name}/main.go"
+
+    internal_package_file:
+      owner: sut
+      template: "internal/{package}/{name}.go"
+
+    colocated_test_file:
+      owner: sut
+      template: "{package_dir}/{name}_test.go"
+
+    e2e_test_file:
+      owner: sut
+      template: "tests/e2e/{name}_test.go"
+
+  forbidden_generated_prefixes:
+    - "src/"
+
+toolchain:
+  manifest:
+    path: "go.mod"
+    format: go.mod
+    required: true
+
+  module_identity:
+    source: manifest
+    path: "go.mod"
+    field: "module"
+    default_template: "example.com/{package_name}"
+
+  dependency_integrity_files:
+    - path: "go.sum"
+      kind: checksum
+      required: false
+      generated_when: external_dependencies_exist
+
+  package_manager:
+    id: go
+    materialize_command:
+      argv: ["go", "mod", "download"]
+      cwd: "{module_root}"
+      network_policy: controlled
+    reconcile_command:
+      argv: ["go", "mod", "tidy"]
+      cwd: "{module_root}"
+      mutates:
+        - "go.mod"
+        - "go.sum"
+    frozen_mode:
+      env:
+        GOFLAGS: "-mod=readonly"
+
+imports:
+  resolver_adapter: go-module
+
+  first_party:
+    rule: module_path_prefix
+    module_path: "{module_path}"
+
+  internal_visibility:
+    enabled: true
+    directory_name: "internal"
+
+  stdlib:
+    classifier: adapter
+
+commands:
+  fmt_check:
+    argv: ["gofmt", "-l", "."]
+    cwd: "{module_root}"
+    pass_condition:
+      stdout_empty: true
+
+  build:
+    argv: ["go", "build", "./..."]
+    cwd: "{module_root}"
+    env:
+      GOFLAGS: "-mod=readonly"
+    requires_materialized_deps: true
+    scope:
+      must_include_source_sets: ["commands", "internal"]
+
+  typecheck:
+    argv: ["go", "test", "-run", "^$", "./..."]
+    cwd: "{module_root}"
+    env:
+      GOFLAGS: "-mod=readonly"
+    requires_materialized_deps: true
+    scope:
+      must_include_source_sets: ["commands", "internal"]
+      must_include_test_sets: ["colocated", "e2e"]
+
+  vet:
+    argv: ["go", "vet", "./..."]
+    cwd: "{module_root}"
+    env:
+      GOFLAGS: "-mod=readonly"
+
+  verify:
+    argv: ["go", "test", "-json", "./..."]
+    cwd: "{module_root}"
+    env:
+      GOFLAGS: "-mod=readonly"
+    report:
+      capture: stdout
+      path: ".codd/verify/go-test.jsonl"
+      format: go-test-json
+      adapter: go-test-json
+    scope:
+      must_include_test_sets: ["colocated", "e2e"]
+
+# Preserved verbatim (modeled as profile.extra in Phase 1).
+implement_oracle:
+  kind: composite
+  steps:
+    - command: typecheck
+    - command: vet
+
+tests:
+  semantics_adapter: go-test-semantics
+  runner_report_adapter: go-test-json
+
+  test_file_globs:
+    - "**/*_test.go"
+
+  authenticity_policy:
+    marker_must_be_inside_executable_test_block: true
+    skipped_is_not_authentic: true
+    focused_only_is_not_authentic: true
+    assertion_required: true
+    accepted_assertion_confidence: ["certain"]
+
+  test_block_kinds:
+    - go_test_func
+    - go_subtest
+
+  assertion_hints:
+    stdlib_testing:
+      failure_methods:
+        - Error
+        - Errorf
+        - Fatal
+        - Fatalf
+        - Fail
+        - FailNow
+      skip_methods:
+        - Skip
+        - Skipf
+        - SkipNow
+
+    libraries:
+      - import_path: "github.com/stretchr/testify/assert"
+        functions:
+          - Equal
+          - NoError
+          - True
+          - False
+          - Contains
+      - import_path: "github.com/stretchr/testify/require"
+        functions:
+          - Equal
+          - NoError
+          - True
+          - False
+          - Contains
+
+verify:
+  command: verify
+  report:
+    path: ".codd/verify/go-test.jsonl"
+    format: go-test-json
+    adapter: go-test-json
+
+  execution_policy:
+    every_vb_test_block_must_execute: true
+    every_vb_test_block_must_pass: true
+    skipped_is_not_green: true
+    missing_from_report_is_not_green: true
+
+scaffold:
+  adapter: generic-template
+  owned_files:
+    - "go.mod"
+    - "go.sum"
+
+  templates:
+    - path: "go.mod"
+      content_template: |
+        module {module_path}
+
+        go {go_version}
+
+artifacts:
+  harness_root: ".codd"
+
+  harness_owned:
+    - ".codd/**"
+    - "go.mod"
+    - "go.sum"
+
+  build_outputs:
+    default_dir: ".codd/build"
+    orphan_policy: harness_owned
+
+  ignored:
+    - "*.test"
+    - "coverage.out"

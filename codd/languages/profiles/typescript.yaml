@@ -1,0 +1,159 @@
+# TypeScript language profile (design §1.2, §7).
+#
+# Phase 1: declarative data only — NOT wired into any gate yet. Compatibility
+# profile mirroring CoDD's existing TS layout.
+#
+# Invariants (asserted by tests):
+#   * source_sets root  = src  (RETAINS the src/ layout).
+#   * test_sets root    = tests, globs **/*.test.ts + **/*.spec.ts.
+#   * package_root.kind = path_root, path = src.
+#   * strictness        = legacy_compatible.
+#   * manifest          = package.json; lock = package-lock.json.
+#
+# {report} / {test_root} are LITERAL placeholders in Phase 1.
+
+id: typescript
+aliases: ["node", "javascript", "ts", "js"]
+display_name: "TypeScript"
+strictness: legacy_compatible
+file_extensions: [".ts", ".tsx", ".js", ".jsx"]
+
+layout:
+  repo_root: "."
+  module_root: "."
+  manifest_root: "."
+  default_command_cwd: "{module_root}"
+
+  package_root:
+    kind: path_root
+    path: "src"
+
+  source_sets:
+    - id: src
+      role: first_party
+      root: "src"
+      file_globs:
+        - "src/**/*.ts"
+
+  test_sets:
+    - id: tests
+      role: unit
+      root: "tests"
+      file_globs:
+        - "tests/**/*.test.ts"
+        - "tests/**/*.spec.ts"
+
+toolchain:
+  manifest:
+    path: "package.json"
+    format: package.json
+    required: true
+
+  module_identity:
+    source: manifest
+    path: "package.json"
+    field: "name"
+
+  dependency_integrity_files:
+    - path: "package-lock.json"
+      kind: lock
+      required: false
+
+  package_manager:
+    id: npm
+    materialize_command:
+      argv: ["npm", "ci"]
+      cwd: "{module_root}"
+    frozen_mode: {}
+
+imports:
+  resolver_adapter: typescript-tsconfig
+
+  first_party:
+    rule: path_alias
+    base: "src"
+
+  stdlib:
+    classifier: adapter
+
+commands:
+  typecheck:
+    argv: ["npx", "--no-install", "tsc", "--noEmit"]
+    cwd: "{module_root}"
+
+  verify:
+    argv:
+      - "npx"
+      - "--no-install"
+      - "vitest"
+      - "run"
+      - "{test_root}"
+      - "--reporter=json"
+      - "--outputFile={report}"
+    cwd: "{module_root}"
+    report:
+      path: ".codd/verify/vitest.json"
+      format: vitest-json
+      adapter: vitest-json
+
+# Preserved verbatim (modeled as profile.extra in Phase 1). tsc --noEmit is a
+# sufficient oracle, so a plain command spec works (design §4 Phase 4).
+implement_oracle:
+  kind: command
+  command: typecheck
+
+tests:
+  semantics_adapter: typescript-test-semantics
+  runner_report_adapter: vitest-json
+
+  test_file_globs:
+    - "tests/**/*.test.ts"
+    - "tests/**/*.spec.ts"
+
+  authenticity_policy:
+    marker_must_be_inside_executable_test_block: true
+    skipped_is_not_authentic: true
+    focused_only_is_not_authentic: true
+    assertion_required: true
+
+  assertion_hints:
+    libraries:
+      - import_path: "vitest"
+        functions:
+          - expect
+      - import_path: "chai"
+        functions:
+          - expect
+          - assert
+
+verify:
+  command: verify
+  report:
+    path: ".codd/verify/vitest.json"
+    format: vitest-json
+    adapter: vitest-json
+
+  execution_policy:
+    every_vb_test_block_must_execute: true
+    every_vb_test_block_must_pass: true
+    skipped_is_not_green: true
+    missing_from_report_is_not_green: true
+
+scaffold:
+  adapter: generic-template
+  owned_files:
+    - "package.json"
+    - "tsconfig.json"
+    - "vitest.config.ts"
+
+artifacts:
+  harness_root: ".codd"
+
+  harness_owned:
+    - ".codd/**"
+    - "package.json"
+    - "tsconfig.json"
+
+  ignored:
+    - "node_modules/**"
+    - "dist/**"
