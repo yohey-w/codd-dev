@@ -86,6 +86,7 @@ from typing import Any
 from codd.project_types import (
     ImplementOracleSpec,
     LayoutProfile,
+    OracleScopeSpec,
     node_install_command,
     resolve_layout_profile,
 )
@@ -100,6 +101,7 @@ __all__ = [
     "PythonOracleScope",
     "PythonToolRun",
     "build_contract_feedback",
+    "certify_go_oracle_scope",
     "certify_oracle_scope",
     "certify_python_oracle_scope",
     "normalize_oracle_output",
@@ -693,10 +695,12 @@ def certify_oracle_scope(
     """
     if profile.language == "python" and spec.kind == "composite":
         return certify_python_oracle_scope(project_root, profile, spec)
+    if profile.language == "go" and spec.kind == "composite":
+        return certify_go_oracle_scope(project_root, profile, spec)
     if profile.language not in ("typescript", "node"):
         # Only TS has a config-scope to certify today; other compiler stacks add
         # their own certifier when they wire an oracle. (Never reached for the
-        # current registry — the resolver only hands us TS.)
+        # current registry — the resolver only hands us TS / the composites above.)
         return f"scope certification not implemented for {profile.language!r}; relying on command"
 
     tsconfig = project_root / "tsconfig.json"
@@ -1114,6 +1118,56 @@ def certify_python_oracle_scope(
         f"{len(scope.source_files)} source .py + {len(scope.test_files)} test .py "
         f"observed under source_root='{profile.source_root}' + "
         f"test_root='{profile.test_root}'"
+    )
+
+
+def certify_go_oracle_scope(
+    project_root: Path,
+    profile: LayoutProfile,
+    spec: ImplementOracleSpec,  # noqa: ARG001 — signature parity with the TS/Python certifiers.
+) -> str:
+    """Certify the Go composite's module covers buildable source, else hard-fail.
+
+    Go's oracle is ``go build ./...`` + ``go vet ./...`` over the WHOLE module —
+    there is no config glob to certify (``./...`` is itself the whole-module
+    scope). The anti-false-green concern is instead an EMPTY module: a green ``go
+    build`` over a module with NO ``.go`` files proves nothing. So we certify (a)
+    a ``go.mod`` exists at the module root (without it ``go build ./...`` is not a
+    module build at all) and (b) at least one ``.go`` file exists under it. A
+    missing go.mod or a ``.go``-less module is a HARD FAIL
+    (:class:`OracleScopeError`) — mirroring the Python certifier's "empty required
+    root is a hard fail". (Colocated ``*_test.go`` builds/vets WITH source under
+    ``./...``, so there is no separate test-root glob to certify — hence the
+    synthesized spec sets ``require_test_root=False``.)
+    """
+    module_root = project_root / _go_norm_module_root(profile)
+    gomod = module_root / "go.mod"
+    if not gomod.is_file():
+        raise OracleScopeError(
+            "go implement-time oracle cannot be certified: no go.mod at the module "
+            f"root ({_go_norm_module_root(profile)!r}), so `go build ./...` is not a "
+            "module build and a green result would prove nothing. Ensure the Go "
+            "module was scaffolded (go.mod present)."
+        )
+    has_go_file = False
+    if module_root.is_dir():
+        for path in module_root.rglob("*.go"):
+            parts = set(path.parts)
+            if ".git" in parts or "vendor" in parts:
+                continue
+            if path.is_file():
+                has_go_file = True
+                break
+    if not has_go_file:
+        raise OracleScopeError(
+            "go implement-time oracle cannot be certified: no .go files under the "
+            f"module root ({_go_norm_module_root(profile)!r}). A green `go build "
+            "./...` over an empty module proves nothing — an empty scope is a HARD "
+            "FAIL (anti-false-green). Ensure the units were generated."
+        )
+    return (
+        "go oracle scope certified: go.mod present + ≥1 .go file under module_root="
+        f"'{_go_norm_module_root(profile)}' (go build ./... + go vet ./... cover the whole module)"
     )
 
 
@@ -2271,6 +2325,427 @@ def _run_python_composite_oracle(
     )
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Go COMPOSITE implement-oracle (the compiler-class equivalent of tsc --noEmit).
+# Design: dogfood/gpt_language_generality_design.md §1.4–1.5 (go.yaml declares the
+# commands; the oracle EXECUTION + tool-output parsing is the unavoidable adapter).
+#
+# WHY GO NEEDS THIS (the false-green it closes): before this, the implement gate
+# NO-OPed for Go (``resolve_layout_profile('go')`` returns None — Go has no single
+# ``source_root``, so the legacy LayoutProfile/compat shim deliberately refuses to
+# build one). A Go package that does NOT compile (undefined symbol, missing
+# first-party import) therefore sailed through implement UNCHECKED. This composite
+# makes Go reachable WITHOUT a legacy LayoutProfile: it is selected by the same
+# ``language``/``kind`` dispatch the Python composite uses (one entry in
+# :func:`_run_oracle_command`), and its (profile, spec) are synthesized in
+# :func:`resolve_implement_oracle` from the declarative ``go`` profile in
+# ``codd.languages.registry`` (the language→oracle map the design calls for).
+#
+# TWO COMMANDS (both from go.yaml, run from the module root):
+#   1. ``go build ./...``  — compile + import resolution across the whole module.
+#   2. ``go vet ./...``    — the typechecker (catches ``undefined: X`` etc.) PLUS
+#                            suspicious-construct analysis. ``go vet`` runs the full
+#                            type-check first, so it is the primary coherence proof;
+#                            ``go build`` adds binary-linking errors vet may miss.
+#
+# ANTI-FALSE-GREEN + THIRD-PARTY TOLERANCE (mirrors the Python oracle):
+#   * ``undefined: X`` (a missing symbol the SUT must define)            → RED.
+#   * ``cannot find module providing package P`` / ``package P is not in
+#     std`` where P is FIRST-PARTY (P == module_path or starts with
+#     module_path + "/")                                                 → RED.
+#   * the SAME "cannot find module providing package" for a THIRD-PARTY P
+#     (not module-path-prefixed) is an implement-time ENVIRONMENT concern
+#     (the dep is simply not downloaded under ``-mod=readonly``), NOT a
+#     coherence failure                                                  → TOLERATED
+#     (no false-RED on uninstalled third-party — exactly the Python oracle's
+#     "first-party provably absent → fail; third-party/unknown → never fail").
+#   * a generic ``path:line:col: message`` compile diagnostic              → other.
+#   * Go's VCS-stamping noise (``error obtaining VCS status`` — emitted by
+#     ``go build`` for a main package when no usable git repo is present) is an
+#     ENVIRONMENT artifact, never a code-coherence signal → it is FILTERED OUT and
+#     does not RED a build (``go vet`` does not stamp VCS, so it stays the clean
+#     authority).
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: A Go tool diagnostic with a file position: ``path:line:col: message`` — the
+#: canonical compiler/vet line. An optional leading ``vet: `` prefix (vet emits
+#: ``vet: ./file.go:..``) and a leading ``./`` on the path are tolerated. The
+#: trailing message is captured so the symbol/module sub-classifier can run.
+_GO_DIAG_LINE = re.compile(
+    r"^(?:vet:\s*)?(?P<path>\.?/?[^\s:][^:\n]*\.go):(?P<line>\d+):(?P<col>\d+):\s*(?P<message>.+?)\s*$"
+)
+
+#: ``go build``/``go vet`` group package diagnostics under a ``# <import-path>``
+#: header (and sometimes a ``# [<import-path>]`` variant). These are context
+#: markers, not diagnostics — skipped.
+_GO_PKG_HEADER = re.compile(r"^#\s")
+
+#: ``undefined: <name>`` — a symbol the package demands that nothing defines. The
+#: Go analogue of TS2304/Python PY_IMPORT_NAME_NOT_FOUND → missing_symbol (RED).
+_GO_UNDEFINED_RE = re.compile(r"\bundefined:\s*(?P<symbol>[\w.]+)")
+
+#: ``cannot find module providing package <P>[: ...]`` and ``package <P> is not in
+#: std (...)`` — the import-not-resolvable family. ``<P>`` is the IMPORT PATH; it
+#: is classified first-party-vs-third-party by the module path (see
+#: ``_go_is_first_party_import``) so an uninstalled THIRD-PARTY dep is tolerated.
+_GO_CANNOT_FIND_PKG_RE = re.compile(
+    r"cannot find (?:module providing )?package\s+(?P<pkg>[^\s:]+)"
+)
+_GO_NOT_IN_STD_RE = re.compile(r"package\s+(?P<pkg>\S+)\s+is not in std\b")
+
+#: ``go build``'s VCS-stamping failure (a main package built outside a usable git
+#: repo). An ENVIRONMENT artifact — filtered out, never a code-coherence RED.
+_GO_VCS_STAMP_RE = re.compile(
+    r"error obtaining VCS status|\buse -buildvcs=false\b", re.IGNORECASE
+)
+
+
+def _go_is_first_party_import(import_path: str, module_path: str) -> bool:
+    """True when ``import_path`` is the module itself or a package under it.
+
+    Go's first-party rule (design §1.5): ``import == module_path`` OR
+    ``import.startswith(module_path + "/")``. Everything else (stdlib, an external
+    ``github.com/...`` dep, a relative ``./x``) is NOT first-party — so a
+    "cannot find module providing package" for it is an uninstalled-dependency
+    ENVIRONMENT concern, not a coherence failure (anti-false-RED). With no known
+    module path (undecidable), NOTHING is first-party — the conservative side that
+    never invents a false-RED.
+    """
+    mod = (module_path or "").strip().strip("/")
+    pkg = (import_path or "").strip()
+    if not mod or not pkg:
+        return False
+    return pkg == mod or pkg.startswith(mod + "/")
+
+
+def _classify_go_diagnostic(
+    message: str, *, module_path: str
+) -> tuple[str, str] | None:
+    """Classify one Go diagnostic message → ``(category, code)`` or ``None``.
+
+    ``None`` ⇒ TOLERATE (an uninstalled third-party import — an env concern, not a
+    coherence failure). Otherwise the language-neutral category + a Go-specific
+    code. Mirrors the Python resolver's "first-party provably absent → fail;
+    third-party/unknown → never fail" policy.
+    """
+    undef = _GO_UNDEFINED_RE.search(message)
+    if undef is not None:
+        return EVIDENCE_MISSING_SYMBOL, "GO_UNDEFINED"
+    cannot_find = _GO_CANNOT_FIND_PKG_RE.search(message)
+    not_in_std = _GO_NOT_IN_STD_RE.search(message)
+    pkg_match = cannot_find or not_in_std
+    if pkg_match is not None:
+        pkg = pkg_match.group("pkg")
+        if _go_is_first_party_import(pkg, module_path):
+            return EVIDENCE_MODULE_RESOLUTION, "GO_PACKAGE_NOT_FOUND"
+        # Third-party / stdlib-shaped import that does not resolve at implement
+        # time → uninstalled dependency (env), not SUT incoherence → tolerate.
+        return None
+    # A real positioned compile diagnostic that is neither of the above (a type
+    # error, redeclaration, …) is still a coherence failure → other.
+    return EVIDENCE_OTHER, "GO_COMPILE_ERROR"
+
+
+def _parse_go_tool_output(
+    output: str, *, tool: str, module_path: str, project_root: Path
+) -> tuple[list[ImplementOracleFinding], list[str]]:
+    """Parse ``go build``/``go vet`` output → (findings, editable failed paths).
+
+    Walks positioned ``path:line:col: message`` lines, skips ``# pkg`` headers and
+    VCS-stamping noise, and classifies each via :func:`_classify_go_diagnostic`
+    (third-party-tolerant). Lines WITHOUT a file position that still name a
+    not-found package are also classified (Go sometimes emits the import error on
+    a bare ``path:col`` form already covered, or — for ``go list`` style — without
+    a column; the positioned form covers the build/vet cases observed).
+    """
+    findings: list[ImplementOracleFinding] = []
+    failed_paths: list[str] = []
+    for raw_line in (output or "").splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        if _GO_PKG_HEADER.match(line):
+            continue
+        if _GO_VCS_STAMP_RE.search(line):
+            continue  # environment noise, never a code-coherence finding
+        m = _GO_DIAG_LINE.match(line)
+        if m is None:
+            continue
+        message = m.group("message").strip()
+        classified = _classify_go_diagnostic(message, module_path=module_path)
+        if classified is None:
+            continue  # tolerated (uninstalled third-party)
+        category, code = classified
+        rel = _go_rel_path(m.group("path"), project_root)
+        findings.append(
+            ImplementOracleFinding(
+                category=category,
+                code=code,
+                message=f"[{tool}] {message}",
+                path=rel,
+            )
+        )
+        if rel and rel not in failed_paths:
+            failed_paths.append(rel)
+    return findings, failed_paths
+
+
+def _go_rel_path(raw: str, project_root: Path) -> str | None:
+    """Normalize a Go diagnostic path (possibly ``./x.go``) → project-relative."""
+    cleaned = (raw or "").strip()
+    if cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    if not cleaned:
+        return None
+    try:
+        resolved = (project_root / cleaned).resolve()
+        return resolved.relative_to(Path(project_root).resolve()).as_posix()
+    except (ValueError, OSError):
+        return PurePosixPath(cleaned.replace("\\", "/")).as_posix()
+
+
+def _go_module_path(project_root: Path) -> str:
+    """Read the ``module`` directive from ``<root>/go.mod`` (the first-party prefix).
+
+    Empty string when go.mod is missing/unreadable or has no module line — the
+    classifier then treats EVERY import as not-first-party (the conservative,
+    never-a-false-RED side; the certifier already hard-fails a missing go.mod).
+    """
+    gomod = project_root / "go.mod"
+    try:
+        text = gomod.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("module "):
+            return stripped[len("module ") :].strip().strip('"')
+    return ""
+
+
+def _go_command_argv(command_id: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Resolve a go.yaml command's ``argv`` from the declarative profile.
+
+    Reads ``commands.<command_id>.argv`` from the registry's ``go`` profile so the
+    oracle stays PROFILE-DRIVEN (the design's "command argv lives in data"). Falls
+    back to ``default`` if the profile/registry is unavailable for any reason —
+    the oracle must run even if profile discovery hiccups (the defaults are the
+    exact go.yaml values).
+    """
+    try:
+        from codd.languages import default_registry
+
+        profile = default_registry.resolve("go")
+        spec = profile.commands.get(command_id)
+        if spec is not None and spec.argv:
+            return tuple(spec.argv)
+    except Exception:  # noqa: BLE001 — profile discovery is best-effort; use defaults.
+        pass
+    return default
+
+
+def _go_command_env(command_id: str) -> dict[str, str]:
+    """Resolve a go.yaml command's ``env`` (e.g. ``GOFLAGS: -mod=readonly``)."""
+    try:
+        from codd.languages import default_registry
+
+        profile = default_registry.resolve("go")
+        spec = profile.commands.get(command_id)
+        if spec is not None and spec.env:
+            return {str(k): str(v) for k, v in spec.env.items()}
+    except Exception:  # noqa: BLE001 — best-effort; the go.yaml default is -mod=readonly.
+        pass
+    return {"GOFLAGS": "-mod=readonly"}
+
+
+def _run_one_go_command(
+    *,
+    command_id: str,
+    default_argv: tuple[str, ...],
+    module_root: Path,
+    module_path: str,
+    config: Mapping[str, Any] | None,
+) -> tuple[bool, list[ImplementOracleFinding], list[str], str]:
+    """Run one go command → ``(spawned, findings, failed_paths, raw_output)``.
+
+    ``spawned`` is False only when the tool could not be executed at all (go
+    missing / spawn error) — surfaced as an ``environment_build_error`` finding,
+    never a silent skip. A non-zero exit whose output yields NO code findings (e.g.
+    ONLY VCS-stamping noise) is benign here: the other command (vet) stays the
+    coherence authority.
+    """
+    argv = _go_command_argv(command_id, default_argv)
+    env_overrides = _go_command_env(command_id)
+    command_str = " ".join(argv)
+    timeout = _go_oracle_timeout_seconds(config)
+    import os
+
+    run_env = dict(os.environ)
+    run_env.update(env_overrides)
+    try:
+        completed = subprocess.run(
+            list(argv),
+            cwd=module_root,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=run_env,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            True,
+            [
+                ImplementOracleFinding(
+                    category=EVIDENCE_ENVIRONMENT_BUILD,
+                    code="go_oracle_timeout",
+                    message=f"`{command_str}` exceeded {timeout:g}s",
+                )
+            ],
+            [],
+            "",
+        )
+    except (OSError, ValueError) as exc:
+        return (
+            False,
+            [
+                ImplementOracleFinding(
+                    category=EVIDENCE_ENVIRONMENT_BUILD,
+                    code="go_spawn_error",
+                    message=f"could not run `{command_str}` (is the Go toolchain on PATH?): {exc}",
+                )
+            ],
+            [],
+            "",
+        )
+    output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+    findings, failed_paths = _parse_go_tool_output(
+        output, tool=command_id, module_path=module_path, project_root=module_root
+    )
+    if completed.returncode != 0 and not findings:
+        # Non-zero exit with no PARSEABLE code finding. A non-zero exit is BENIGN
+        # when every output line is either filtered environment noise (VCS
+        # stamping / pkg header) OR a DELIBERATELY-TOLERATED diagnostic (an
+        # uninstalled third-party import under -mod=readonly — the dep simply is
+        # not downloaded at implement time; vet/build over first-party stays the
+        # authority). Only an UNEXPLAINED non-zero exit with leftover non-noise,
+        # non-tolerated output is an honest opaque environment failure (never a
+        # silent pass). This mirrors the Python collect layer's
+        # ``_collection_failure_is_third_party_only`` benign-verdict.
+        if _go_residual_is_benign(output, module_path=module_path):
+            return True, [], [], output
+        findings = [
+            ImplementOracleFinding(
+                category=EVIDENCE_ENVIRONMENT_BUILD,
+                code=f"go_{command_id}_exit_{completed.returncode}",
+                message=_output_tail(completed.stdout, completed.stderr)
+                or f"`{command_str}` exited {completed.returncode} with no parseable diagnostic",
+            )
+        ]
+    return True, findings, failed_paths, output
+
+
+def _go_residual_is_benign(output: str, *, module_path: str) -> bool:
+    """True iff a non-zero go exit's output is ONLY noise / tolerated diagnostics.
+
+    Returns True (benign — let the non-zero exit pass) when EVERY non-blank line is
+    a ``# pkg`` header, VCS-stamping noise, or a positioned diagnostic that the
+    third-party-tolerant classifier deliberately TOLERATES (an uninstalled
+    third-party import). Returns False — i.e. surface an honest opaque failure — the
+    moment any line is unaccounted-for (a non-noise, non-diagnostic line), so a
+    genuinely opaque toolchain error never hides behind a benign verdict
+    (anti-false-green: conservative by construction).
+    """
+    for raw_line in (output or "").splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        if _GO_PKG_HEADER.match(line) or _GO_VCS_STAMP_RE.search(line):
+            continue
+        m = _GO_DIAG_LINE.match(line)
+        if m is not None and _classify_go_diagnostic(
+            m.group("message").strip(), module_path=module_path
+        ) is None:
+            continue  # a tolerated (uninstalled third-party) diagnostic
+        return False  # an unaccounted-for line → not benign
+    return True
+
+
+def _go_oracle_timeout_seconds(config: Mapping[str, Any] | None) -> float:
+    """Bounded wall-clock for ONE go command (``implement.oracle_timeout_seconds``).
+
+    Reuses the shared oracle-timeout knob (the same one the TS ``tsc`` run uses) so
+    a cold ``go build`` of a large module has the generous-but-bounded budget.
+    """
+    return _oracle_timeout_seconds(config)
+
+
+def _run_go_composite_oracle(
+    project_root: Path,
+    profile: LayoutProfile,
+    spec: ImplementOracleSpec,
+    config: Mapping[str, Any] | None,
+) -> ImplementOracleResult:
+    """Run ``go build ./...`` + ``go vet ./...`` from the module root; union findings.
+
+    ANY real finding ⇒ failed (RED). A clean module (both commands clean, modulo
+    tolerated third-party/VCS noise) ⇒ passed. A spawn failure on EITHER command is
+    an honest ``environment_build_error`` (the gate's retry loop will not burn
+    reruns on it — see :func:`_only_environment`). ``diagnostics=[]`` (no scoped Go
+    rerun yet — the bounded loop falls to a safe broad rerun, exactly like Python).
+    """
+    module_root = project_root / _go_norm_module_root(profile)
+    module_path = _go_module_path(module_root)
+
+    findings: list[ImplementOracleFinding] = []
+    failed_paths: list[str] = []
+    raw_parts: list[str] = []
+    any_spawn_failure = False
+    for command_id, default_argv in (
+        ("build", ("go", "build", "./...")),
+        ("vet", ("go", "vet", "./...")),
+    ):
+        spawned, cmd_findings, cmd_failed, raw = _run_one_go_command(
+            command_id=command_id,
+            default_argv=default_argv,
+            module_root=module_root,
+            module_path=module_path,
+            config=config,
+        )
+        if not spawned:
+            any_spawn_failure = True
+        findings.extend(cmd_findings)
+        for p in cmd_failed:
+            if p not in failed_paths:
+                failed_paths.append(p)
+        raw_parts.append(f"## go {command_id} (spawned={spawned})\n{raw or '(no output)'}")
+
+    passed = not findings and not any_spawn_failure
+    return ImplementOracleResult(
+        passed=passed,
+        executed=True,
+        command="go-composite: go build ./... + go vet ./...",
+        findings=findings,
+        failed_paths=failed_paths,
+        detail=(
+            f"go composite oracle {'passed' if passed else 'failed'}; "
+            f"module_path={module_path or '(unknown)'}, {len(findings)} finding(s)"
+        ),
+        raw_output="\n\n".join(raw_parts),
+        diagnostics=[],
+    )
+
+
+def _go_norm_module_root(profile: LayoutProfile) -> str:
+    """The module root the go commands run from (project-relative, ``.`` default).
+
+    Carried on the synthesized Go ``LayoutProfile`` as ``source_root`` (Go's
+    ``module_root`` from go.yaml — ``.`` for the repo-root go.mod layout). Empty /
+    ``.`` both mean the project root.
+    """
+    root = _norm(getattr(profile, "source_root", "") or "")
+    return root or "."
+
+
 # ── command execution (REUSES the verify stage's run/attribution shape) ──
 
 
@@ -2360,6 +2835,8 @@ def _run_oracle_command(
     """
     if profile.language == "python" and spec.kind == "composite":
         return _run_python_composite_oracle(project_root, profile, spec, config)
+    if profile.language == "go" and spec.kind == "composite":
+        return _run_go_composite_oracle(project_root, profile, spec, config)
     command = spec.command
     timeout = _oracle_timeout_seconds(config)
     try:
@@ -2471,6 +2948,17 @@ def resolve_implement_oracle(
     profile declares no ``implement_oracle`` (Python today), or the gate is
     opted out. The caller treats ``None`` as "this stack has no implement-time
     oracle — skip silently".
+
+    GO (the language→oracle map entry): ``resolve_layout_profile('go')`` returns
+    None — Go has no single ``source_root`` so the legacy LayoutProfile/compat
+    shim deliberately refuses to build one. Rather than NO-OP (a false-green: a
+    non-compiling Go module would pass the implement gate UNCHECKED), we SYNTHESIZE
+    a minimal Go ``(LayoutProfile, ImplementOracleSpec)`` from the declarative
+    ``go`` profile in ``codd.languages.registry``: a ``kind="composite"`` spec the
+    SAME dispatch in :func:`_run_oracle_command` routes to
+    :func:`_run_go_composite_oracle` (``go build ./...`` + ``go vet ./...``). This
+    is the one registration point for Go's oracle — no ``if language=='go'``
+    scattered in the gate.
     """
     if _oracle_opt_out(config):
         return None
@@ -2483,9 +2971,65 @@ def resolve_implement_oracle(
             config=config,
             project_root=project_root,
         )
-    if profile is None or profile.implement_oracle is None:
+    if profile is None:
+        # No legacy LayoutProfile — try the declarative registry (Go: a composite
+        # oracle synthesized from go.yaml, reachable WITHOUT a legacy profile).
+        return _resolve_registry_composite_oracle(language)
+    if profile.implement_oracle is None:
         return None
     return profile, profile.implement_oracle
+
+
+#: Languages whose implement oracle is a COMPOSITE synthesized from the declarative
+#: ``codd.languages.registry`` profile (no legacy ``LayoutProfile`` builder). The
+#: language→oracle map the design calls for; today only Go (Rust later: one entry
+#: here + one ``_run_oracle_command`` dispatch + a ``cargo check`` runner).
+_REGISTRY_COMPOSITE_ORACLE_LANGUAGES = frozenset({"go", "golang"})
+
+
+def _resolve_registry_composite_oracle(
+    language: str | None,
+) -> tuple[LayoutProfile, ImplementOracleSpec] | None:
+    """Synthesize a composite ``(LayoutProfile, spec)`` from the registry, or None.
+
+    For a language whose declarative profile (``codd/languages/profiles/<x>.yaml``)
+    declares a composite ``implement_oracle`` but has NO legacy ``LayoutProfile``
+    builder (Go — ``package_root.kind == none``), build a MINIMAL ``LayoutProfile``
+    carrying just ``language`` + the module root (as ``source_root``) so the
+    existing gate machinery (run/certify/retry) works unchanged, plus a
+    ``kind="composite"`` ``ImplementOracleSpec`` the dispatch routes to the
+    per-language composite executor. ``None`` for any other language (back-compat:
+    a stack with neither a legacy profile nor a registry composite oracle stays a
+    strict NO-OP). Best-effort: a registry/profile error degrades to NO-OP (never a
+    crash; the existing verify-stage gates stay the backstop).
+    """
+    lang = (language or "").strip().lower()
+    if lang not in _REGISTRY_COMPOSITE_ORACLE_LANGUAGES:
+        return None
+    try:
+        from codd.languages import default_registry
+
+        lang_profile = default_registry.resolve(lang)
+    except Exception:  # noqa: BLE001 — no registry profile ⇒ NO-OP, not a crash.
+        return None
+    oracle_decl = lang_profile.extra.get("implement_oracle") if lang_profile.extra else None
+    if not isinstance(oracle_decl, Mapping) or oracle_decl.get("kind") != "composite":
+        return None
+    module_root = _norm(getattr(lang_profile.layout, "module_root", ".") or ".") or "."
+    synthetic = LayoutProfile(
+        language=lang_profile.id,  # canonical id ("go"), so the dispatch matches
+        package_name=lang_profile.id,
+        source_root=module_root,  # carries the module root for the go commands' cwd
+        package_root=module_root,
+        test_root=module_root,
+        implement_oracle=ImplementOracleSpec(
+            command=f"{lang_profile.id}-composite",  # sentinel; kind dispatch runs the executor
+            kind="composite",
+            scope=OracleScopeSpec(require_source_root=True, require_test_root=False),
+            requires_node_install=False,
+        ),
+    )
+    return synthetic, synthetic.implement_oracle
 
 
 #: The rerun callback the gate invokes to re-implement under the oracle feedback.
