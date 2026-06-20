@@ -359,6 +359,39 @@ def test_declared_output_completeness_directory_decl_not_checked(tmp_path):
     _check_declared_output_completeness(task, results, tmp_path, config, echo=lambda _m: None)
 
 
+def test_declared_output_completeness_multisegment_dir_decl_not_flagged(tmp_path):
+    """A MULTI-SEGMENT directory declaration (Go ``internal/httpapi`` / ``test/e2e``,
+    where a package IS a directory) produced as a dir-of-files must NOT be flagged
+    'absent on disk'. Regression: the old ``"/" in s -> file path`` shortcut
+    classified ``internal/httpapi`` as an exact file, then ``.is_file()`` (False for
+    a directory) reported it missing — a WARN today, a false-RED under enforce
+    (surfaced by the C-Go greenfield dogfood, task establish_go_layout)."""
+    from codd.greenfield.pipeline import _declared_output_is_file_path
+
+    # Multi-segment dir paths are NOT exact file paths (left to the kind check)...
+    assert _declared_output_is_file_path("internal/httpapi") is False
+    assert _declared_output_is_file_path("test/e2e") is False
+    # ...while real files (with an extension) still are, dir-qualified or not.
+    assert _declared_output_is_file_path("cmd/server/main.go") is True
+    assert _declared_output_is_file_path("token_bucket.py") is True
+
+    # End-to-end: declare the Go package dirs, produce them as dirs-with-files →
+    # no warn, and no raise even under enforce.
+    (tmp_path / "internal" / "httpapi").mkdir(parents=True)
+    (tmp_path / "internal" / "httpapi" / "httpapi.go").write_text("package httpapi\n")
+    (tmp_path / "test" / "e2e").mkdir(parents=True)
+    (tmp_path / "test" / "e2e" / "http_api_test.go").write_text("package e2e\n")
+    task = ImplementTaskRef(
+        task_id="layout", design_node="n",
+        expected_outputs=("internal/httpapi", "test/e2e"),
+    )
+    results = [_Result(generated_files=[])]
+    config = {"implement": {"declared_output_completeness": "enforce"}}
+    msgs: list[str] = []
+    _check_declared_output_completeness(task, results, tmp_path, config, echo=msgs.append)
+    assert not msgs, f"directory decls falsely flagged absent: {msgs}"
+
+
 def test_verify_task_contract_runs_completeness_in_warn_without_breaking(tmp_path):
     """The full ``_verify_task_contract`` still no-ops for a task with no required
     KIND, while the warn completeness check runs harmlessly (no raise)."""

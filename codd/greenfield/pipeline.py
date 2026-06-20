@@ -2467,9 +2467,14 @@ def _declared_output_is_file_path(raw: str) -> bool:
         return False
     if ":" in s:
         return False  # node-id (``module:parser.parse`` / ``design:x``), not a file path
-    if "/" in s:
-        return True
-    ext = PurePosixPath(s).suffix[1:]  # drop the leading dot
+    # A file path is identified by a plausible file EXTENSION on its LAST segment.
+    # A "/" alone is NOT sufficient: a multi-segment DIRECTORY declaration (e.g.
+    # ``internal/httpapi`` / ``test/e2e`` — natural for Go, where a package IS a
+    # directory) contains "/" but has no extension, and must be left to the kind
+    # check. Treating it as an exact file made ``(root / dir).is_file()`` False and
+    # falsely reported a produced directory as "absent on disk" (a WARN today, a
+    # false-RED under ``enforce``).
+    ext = PurePosixPath(s).suffix[1:]  # extension of the last path segment
     return bool(ext) and len(ext) <= 6 and ext.isalnum()
 
 
