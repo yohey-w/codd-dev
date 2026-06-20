@@ -99,11 +99,14 @@ def test_gate_runs_no_command(tmp_path, monkeypatch):
         raise AssertionError("certify_verify_campaign_observable must not run a command")
 
     monkeypatch.setattr(_sp, "run", _boom)
-    # adapterless → raises CampaignError, but via NO subprocess.
+    # adapterless → raises CampaignError, but via NO subprocess. (pytest-junit-xml
+    # is the remaining documented-but-unimplemented format; go-test-json now HAS an
+    # adapter, so it is exercised on the with-adapter side below.)
     with pytest.raises(CampaignError):
-        certify_verify_campaign_observable(_profile_with_campaign("go-test-json"))
-    # with-adapter → passes, also via no subprocess.
+        certify_verify_campaign_observable(_profile_with_campaign("pytest-junit-xml"))
+    # with-adapter → passes, also via no subprocess (vitest-json AND go-test-json).
     certify_verify_campaign_observable(_profile_with_campaign("vitest-json"))
+    certify_verify_campaign_observable(_profile_with_campaign("go-test-json"))
 
 
 # ─────────────────────────────────────────────────────────────

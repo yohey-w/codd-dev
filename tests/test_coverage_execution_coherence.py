@@ -23,6 +23,7 @@ import pytest
 from codd.coverage_execution_coherence import (
     CampaignError,
     CoherenceError,
+    GoTestJsonReportAdapter,
     RunnerExecution,
     RunnerReportUnsupported,
     VitestJsonReportAdapter,
@@ -427,9 +428,11 @@ def test_python_profile_has_no_campaign_gate_is_noop(tmp_path):
 def test_vitest_json_adapter_is_registered():
     assert "vitest-json" in supported_runner_report_formats()
     assert resolve_runner_report_adapter("vitest-json") is not None
-    # Documented-but-unimplemented formats degrade EXPLICITLY (None, not silent).
+    # go-test-json is now registered (the Go anti-false-green adapter).
+    assert "go-test-json" in supported_runner_report_formats()
+    assert resolve_runner_report_adapter("go-test-json") is not None
+    # The remaining documented-but-unimplemented format degrades EXPLICITLY (None).
     assert resolve_runner_report_adapter("pytest-junit-xml") is None
-    assert resolve_runner_report_adapter("go-test-json") is None
     assert resolve_runner_report_adapter(None) is None
 
 
@@ -740,3 +743,382 @@ def test_clean_execution_covers_environment_skipped_tests(tmp_path):
     # → RED even though the runner exited 0 (skips do not fail vitest's exit code).
     with pytest.raises(CoherenceError):
         enforce_campaign_clean_execution(execution, 0)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# go-test-json adapter (the Go anti-false-green RunnerReportAdapter)
+#
+# The fixtures below are synthetic but BYTE-SHAPE-IDENTICAL to a real
+# ``go test -json ./...`` stream (line-delimited JSON, one ``{"Action":...,
+# "Package":...,"Test":...}`` per line; subtests as ``TestX/sub``; a package-level
+# terminal event with no ``Test``; ``build-fail`` + package ``fail`` with no
+# ``Test`` for a non-compiling package), captured from a real ``go`` run — so the
+# adapter is exercised against the real schema without a ``go`` toolchain in CI.
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def _go_jsonl(events: list[dict]) -> str:
+    """Render runner events as a go-test-json (line-delimited JSON) stream."""
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+def _go_event(action: str, package: str, test: str | None = None, **extra) -> dict:
+    e: dict = {"Time": "2026-06-20T00:00:00Z", "Action": action, "Package": package}
+    if test is not None:
+        e["Test"] = test
+    e.update(extra)
+    return e
+
+
+def _go_project(tmp_path: Path) -> Path:
+    """A Go module: go.mod + a package with two _test.go files (one mixed pass+skip)."""
+    project = tmp_path
+    _write(project / "go.mod", "module example.com/m\n\ngo 1.21\n")
+    _write(
+        project / "docs" / "test" / "test_strategy.md",
+        "| VB | Description |\n| --- | --- |\n"
+        "| VB-CREATE-01 | create increments |\n"
+        "| VB-SKIP-01 | skipped behavior |\n"
+        "| VB-GET-01 | get echoes |\n",
+    )
+    _write(
+        project / "internal" / "store" / "store.go",
+        "package store\n\nfunc Create(x int) int { return x + 1 }\nfunc Get(x int) int { return x }\n",
+    )
+    # create_test.go: a real (passing) TestCreate with a subtest + a SKIPPED test.
+    _write(
+        project / "internal" / "store" / "create_test.go",
+        "package store\n\nimport \"testing\"\n\n"
+        "// codd: covers vb=VB-CREATE-01\n"
+        "func TestCreate(t *testing.T) {\n"
+        "\tif Create(1) != 2 { t.Fatalf(\"want 2 got %d\", Create(1)) }\n"
+        "\tt.Run(\"sub\", func(t *testing.T) { if Create(2) != 3 { t.Fatalf(\"want 3\") } })\n"
+        "}\n\n"
+        "// codd: covers vb=VB-SKIP-01\n"
+        "func TestSkipped(t *testing.T) { t.Skip(\"not yet\") }\n",
+    )
+    # get_test.go: a real (passing) TestGet.
+    _write(
+        project / "internal" / "store" / "get_test.go",
+        "package store\n\nimport \"testing\"\n\n"
+        "// codd: covers vb=VB-GET-01\n"
+        "func TestGet(t *testing.T) { if Get(5) != 5 { t.Fatalf(\"want 5 got %d\", Get(5)) } }\n",
+    )
+    return project
+
+
+def _go_profile(project: Path) -> LayoutProfile:
+    """A Go LayoutProfile declaring the go-test-json verify campaign.
+
+    ``resolve_layout_profile`` does not yet synthesize a Go profile (go.yaml is the
+    declarative source; greenfield Go wiring is staged separately), so the profile
+    is constructed directly — exactly as the vitest tests construct broken/derived
+    profiles. ``language="go"`` makes ``test_block_profile()`` resolve
+    ``GoTestBlockProfile`` and ``runner_report_adapter()`` resolve the go-test-json
+    adapter from the campaign's ``report_format``.
+    """
+    return LayoutProfile(
+        language="go",
+        package_name="m",
+        source_root=".",
+        package_root=".",
+        test_root=".",
+        verify_campaign=VerifyCampaignSpec(
+            command_template="go test -json ./... > {report}",
+            report_relpath=".codd/verify/go-test.jsonl",
+            report_format="go-test-json",
+        ),
+    )
+
+
+def test_go_adapter_parses_passed_tests_as_executed_passed(tmp_path):
+    """A go-test-json stream where TestCreate (+ its subtest) and TestGet pass:
+    their FILES register as executed+passed with per-test cases."""
+    project = _go_project(tmp_path)
+    pkg = "example.com/m/internal/store"
+    stream = _go_jsonl(
+        [
+            _go_event("run", pkg, "TestCreate"),
+            _go_event("run", pkg, "TestCreate/sub"),
+            _go_event("pass", pkg, "TestCreate/sub", Elapsed=0),
+            _go_event("pass", pkg, "TestCreate", Elapsed=0),
+            _go_event("run", pkg, "TestGet"),
+            _go_event("pass", pkg, "TestGet", Elapsed=0),
+            _go_event("pass", pkg, Elapsed=0.01),  # package-level OK (no Test)
+        ]
+    )
+    report = project / ".codd" / "verify" / "go-test.jsonl"
+    _write(report, stream)
+    execution = GoTestJsonReportAdapter().parse(report, project_root=project)
+    # This stream omits TestSkipped entirely, so BOTH files ran clean and passed.
+    assert "internal/store/get_test.go" in execution.executed_passed_files
+    assert "internal/store/create_test.go" in execution.executed_passed_files
+    assert execution.executed_failed_files == frozenset()
+    # subtests fold into the parent func's file; the parent passed-case is recorded.
+    assert "internal/store/create_test.go::TestCreate" in execution.executed_passed_cases
+    assert "internal/store/get_test.go::TestGet" in execution.executed_passed_cases
+    assert execution.test_level_available is True
+    # 3 terminal pass cases (TestCreate, TestCreate/sub, TestGet).
+    assert execution.total_cases == 3 and execution.passed_cases == 3
+
+
+def test_go_adapter_skipped_vb_test_is_not_green(tmp_path):
+    """ANTI-FALSE-GREEN: a VB-marked Go test that is SKIPPED must NOT count green.
+    TestSkipped (covers VB-SKIP-01) is reported ``skip`` → its file is NOT in
+    executed_passed_files, and the coherence gate flags VB-SKIP-01 as unverified."""
+    project = _go_project(tmp_path)
+    profile = _go_profile(project)
+    pkg = "example.com/m/internal/store"
+    stream = _go_jsonl(
+        [
+            _go_event("pass", pkg, "TestCreate/sub", Elapsed=0),
+            _go_event("pass", pkg, "TestCreate", Elapsed=0),
+            _go_event("skip", pkg, "TestSkipped", Elapsed=0),  # the VB-marked SKIP
+            _go_event("pass", pkg, "TestGet", Elapsed=0),
+            _go_event("pass", pkg, Elapsed=0.01),
+        ]
+    )
+    report = project / ".codd" / "verify" / "go-test.jsonl"
+    _write(report, stream)
+    execution = GoTestJsonReportAdapter().parse(report, project_root=project)
+    # PER-CASE authority: TestCreate PASSED → its case key is present EVEN THOUGH its
+    # file is coarse-tainted by TestSkipped's skip (the file-level signal still feeds
+    # clean-execution). TestSkipped is a SKIP → its case key is absent (not a pass).
+    assert "internal/store/create_test.go::TestCreate" in execution.executed_passed_cases
+    assert "internal/store/create_test.go::TestSkipped" not in execution.executed_passed_cases
+    # Coarse file signal: the skip taints the file (for clean-execution), but this does
+    # NOT gate the passed VB below (Option A — per-case reconciliation).
+    assert "internal/store/create_test.go" in execution.executed_failed_files
+    report_obj = build_coherence_report(project, profile=profile, execution=execution)
+    unverified = {v.vb_id for v in report_obj.unverified_vbs}
+    # KEYSTONE (anti-false-RED): VB-CREATE-01 (covered by the PASSED TestCreate) is
+    # VERIFIED despite the sibling TestSkipped skip in the SAME file — file-level taint
+    # would have wrongly failed it (the exact false-RED Option A avoids for Go).
+    assert "VB-CREATE-01" not in unverified
+    # ANTI-FALSE-GREEN: the SKIPPED VB is NOT green (its case key never passed).
+    assert "VB-SKIP-01" in unverified
+    # And the run is still RED overall — a skip anywhere reds the campaign (the coarse
+    # file signal drives the clean-execution gate).
+    with pytest.raises(CoherenceError):
+        enforce_campaign_clean_execution(execution, 0)
+
+
+def test_go_adapter_missing_vb_test_is_flagged(tmp_path):
+    """ANTI-FALSE-GREEN: a VB-marked Go test DECLARED statically but ABSENT from the
+    report (never executed — e.g. filtered by a build tag / -run) is NOT green. The
+    runner stream omits TestGet entirely → its file stays not_executed → VB-GET-01
+    is execution-unverified."""
+    project = _go_project(tmp_path)
+    profile = _go_profile(project)
+    pkg = "example.com/m/internal/store"
+    # TestGet is NEVER emitted (declared in get_test.go but absent from the run).
+    stream = _go_jsonl(
+        [
+            _go_event("pass", pkg, "TestCreate/sub", Elapsed=0),
+            _go_event("pass", pkg, "TestCreate", Elapsed=0),
+            _go_event("pass", pkg, "TestSkipped", Elapsed=0),  # make create file clean here
+            _go_event("pass", pkg, Elapsed=0.01),
+        ]
+    )
+    report = project / ".codd" / "verify" / "go-test.jsonl"
+    _write(report, stream)
+    execution = GoTestJsonReportAdapter().parse(report, project_root=project)
+    # get_test.go is in NEITHER passed nor failed (it never ran) → not_executed.
+    assert "internal/store/get_test.go" not in execution.executed_files
+    inv = build_test_inventory(project, execution=execution)
+    assert inv.get("internal/store/get_test.go").execution_status == "not_executed"
+    report_obj = build_coherence_report(project, profile=profile, execution=execution)
+    vb = {v.vb_id: v for v in report_obj.unverified_vbs}
+    assert "VB-GET-01" in vb
+    assert vb["VB-GET-01"].reason == "no_covering_test_executed"
+
+
+def test_go_adapter_package_build_failure_is_honest_fail(tmp_path):
+    """ANTI-FALSE-GREEN: a package that FAILED TO BUILD (a ``build-fail`` + a
+    package-level ``fail`` with no ``Test``) must NOT be a silent pass — every
+    _test.go in that package's directory is marked failed (nothing in it ran)."""
+    project = _go_project(tmp_path)
+    pkg = "example.com/m/internal/store"
+    stream = _go_jsonl(
+        [
+            # Go emits build-output (often non-Test) then a package-level fail w/ no Test.
+            {"ImportPath": pkg + " [" + pkg + ".test]", "Action": "build-output",
+             "Output": "internal/store/store.go:3:1: undefined: nope\n"},
+            {"ImportPath": pkg + " [" + pkg + ".test]", "Action": "build-fail"},
+            _go_event("output", pkg, Output="FAIL\t" + pkg + " [build failed]\n"),
+            _go_event("fail", pkg, Elapsed=0, FailedBuild=pkg + " [" + pkg + ".test]"),
+        ]
+    )
+    report = project / ".codd" / "verify" / "go-test.jsonl"
+    _write(report, stream)
+    execution = GoTestJsonReportAdapter().parse(report, project_root=project)
+    # Both _test.go in internal/store are failed (the package never compiled).
+    assert execution.executed_passed_files == frozenset()
+    assert "internal/store/create_test.go" in execution.executed_failed_files
+    assert "internal/store/get_test.go" in execution.executed_failed_files
+    # → clean-execution gate reds the run.
+    with pytest.raises(CoherenceError):
+        enforce_campaign_clean_execution(execution, 1)
+
+    # Also honest-fail when ONLY the structured ``build-fail`` event is present (no
+    # package-level ``fail`` summary) — the build-fail carries ImportPath, not Test,
+    # and must still taint every _test.go in the dir.
+    only_build_fail = _go_jsonl(
+        [
+            {"ImportPath": pkg + " [" + pkg + ".test]", "Action": "build-output",
+             "Output": "internal/store/store.go:3:1: undefined: nope\n"},
+            {"ImportPath": pkg + " [" + pkg + ".test]", "Action": "build-fail"},
+        ]
+    )
+    report2 = project / ".codd" / "verify" / "go-test2.jsonl"
+    _write(report2, only_build_fail)
+    execution2 = GoTestJsonReportAdapter().parse(report2, project_root=project)
+    assert "internal/store/create_test.go" in execution2.executed_failed_files
+    assert "internal/store/get_test.go" in execution2.executed_failed_files
+
+
+def test_go_adapter_subtests_parse_and_fold_to_parent_file(tmp_path):
+    """A subtest (``TestX/sub``) is attributed to the SAME file as its parent
+    ``TestX`` (the func-name before the first ``/`` is the join key)."""
+    project = _go_project(tmp_path)
+    pkg = "example.com/m/internal/store"
+    # Only TestCreate (+ subtest) + TestGet; no skip → both files clean.
+    _write(
+        project / "internal" / "store" / "create_test.go",
+        "package store\n\nimport \"testing\"\n\n"
+        "// codd: covers vb=VB-CREATE-01\n"
+        "func TestCreate(t *testing.T) {\n"
+        "\tt.Run(\"sub\", func(t *testing.T) { if Create(2) != 3 { t.Fatalf(\"want 3\") } })\n"
+        "}\n",
+    )
+    stream = _go_jsonl(
+        [
+            _go_event("run", pkg, "TestCreate"),
+            _go_event("run", pkg, "TestCreate/sub"),
+            _go_event("pass", pkg, "TestCreate/sub", Elapsed=0),
+            _go_event("pass", pkg, "TestCreate", Elapsed=0),
+            _go_event("pass", pkg, "TestGet", Elapsed=0),
+            _go_event("pass", pkg, Elapsed=0.01),
+        ]
+    )
+    report = project / ".codd" / "verify" / "go-test.jsonl"
+    _write(report, stream)
+    execution = GoTestJsonReportAdapter().parse(report, project_root=project)
+    assert "internal/store/create_test.go" in execution.executed_passed_files
+    # The parent func case is recorded; the subtest folded into it (no separate key).
+    assert "internal/store/create_test.go::TestCreate" in execution.executed_passed_cases
+
+
+def test_go_adapter_identity_normalization_pairs_with_static_block(tmp_path):
+    """normalize_runner_identity maps a runner (Package, Test) to the SAME key the
+    static GoTestBlockProfile produces for the block carrying the VB marker — so the
+    gate can pair a runner case with the static test that bears the marker."""
+    from codd.vb_marker_authenticity import GoTestBlockProfile
+
+    project = _go_project(tmp_path)
+    pkg = "example.com/m/internal/store"
+    adapter = GoTestJsonReportAdapter()
+    # Runner side: a subtest case folds to its parent func; the dir is module-relative.
+    runner_key = adapter.normalize_runner_identity(pkg, "TestCreate/sub", module_path="example.com/m")
+    assert runner_key == "internal/store::TestCreate"
+    # Static side: GoTestBlockProfile's top-level block label for the same func, made
+    # into the same "<reldir>::<TestFunc>" key the runner identity uses.
+    text = (project / "internal" / "store" / "create_test.go").read_text(encoding="utf-8")
+    blocks = GoTestBlockProfile().parse_test_blocks(text)
+    top_level_labels = {b.label for b in blocks if "/" not in b.label}
+    assert "TestCreate" in top_level_labels
+    static_key = "internal/store::TestCreate"
+    assert runner_key == static_key
+    # An external/std package (not under the module prefix) does NOT relativize — its
+    # identity is keyed by the bare package, never spuriously paired with our files.
+    assert adapter.normalize_runner_identity("fmt", "TestX", module_path="example.com/m") == "fmt::TestX"
+
+
+def test_go_adapter_without_go_mod_fails_closed(tmp_path):
+    """ANTI-FALSE-GREEN (fail-closed): with NO go.mod, the package import-path cannot
+    be relativized to a directory, so NO file is credited as passed — a passing test
+    whose package cannot be mapped is NOT a silent green (it reads as not-executed,
+    and the upstream empty-report CampaignError catches a wholly-unmappable run)."""
+    project = tmp_path
+    # No go.mod written.
+    _write(
+        project / "internal" / "store" / "create_test.go",
+        "package store\n\nimport \"testing\"\n\n"
+        "func TestCreate(t *testing.T) { if 1 != 2 { t.Fatal(\"x\") } }\n",
+    )
+    pkg = "example.com/m/internal/store"
+    stream = _go_jsonl(
+        [_go_event("pass", pkg, "TestCreate", Elapsed=0), _go_event("pass", pkg, Elapsed=0.01)]
+    )
+    report = project / ".codd" / "verify" / "go-test.jsonl"
+    _write(report, stream)
+    execution = GoTestJsonReportAdapter().parse(report, project_root=project)
+    # Cannot map example.com/m/... to a dir → nothing credited (fail-closed).
+    assert execution.executed_passed_files == frozenset()
+    assert execution.total_cases == 0
+
+
+def test_go_adapter_tolerates_nonjson_lines_but_not_empty(tmp_path):
+    """Non-JSON build-noise lines are tolerated (skip-parse); a wholly non-JSON /
+    empty report is unreadable (RunnerReportUnsupported), never an empty pass."""
+    project = _go_project(tmp_path)
+    pkg = "example.com/m/internal/store"
+    noisy = (
+        "# example.com/m/internal/store\n"  # raw build header (non-JSON) — tolerated
+        + json.dumps(_go_event("pass", pkg, "TestGet", Elapsed=0))
+        + "\n"
+        + json.dumps(_go_event("pass", pkg, Elapsed=0.01))
+        + "\n"
+    )
+    report = project / ".codd" / "verify" / "go-test.jsonl"
+    _write(report, noisy)
+    execution = GoTestJsonReportAdapter().parse(report, project_root=project)
+    assert "internal/store/get_test.go" in execution.executed_passed_files
+    # A wholly non-JSON report → unreadable (observability error, not empty pass).
+    bad = project / ".codd" / "verify" / "bad.jsonl"
+    _write(bad, "not json at all\nstill not json\n")
+    with pytest.raises(RunnerReportUnsupported):
+        GoTestJsonReportAdapter().parse(bad, project_root=project)
+    # A missing report file → unreadable too.
+    with pytest.raises(RunnerReportUnsupported):
+        GoTestJsonReportAdapter().parse(project / "nope.jsonl", project_root=project)
+
+
+def test_go_adapter_full_clean_run_verifies_all_vbs(tmp_path):
+    """A go-test-json run where every VB test ran + passed → the coherence gate is
+    GREEN (the positive control mirroring the vitest happy path)."""
+    project = _go_project(tmp_path)
+    # Remove the skip so all three VB tests can pass cleanly.
+    _write(
+        project / "internal" / "store" / "create_test.go",
+        "package store\n\nimport \"testing\"\n\n"
+        "// codd: covers vb=VB-CREATE-01\n"
+        "func TestCreate(t *testing.T) { if Create(1) != 2 { t.Fatalf(\"want 2\") } }\n",
+    )
+    _write(
+        project / "internal" / "store" / "get_test.go",
+        "package store\n\nimport \"testing\"\n\n"
+        "// codd: covers vb=VB-GET-01\n"
+        "func TestGet(t *testing.T) { if Get(5) != 5 { t.Fatalf(\"want 5\") } }\n",
+    )
+    # VB-SKIP-01 no longer has a covering test, so drop it from the VB table too.
+    _write(
+        project / "docs" / "test" / "test_strategy.md",
+        "| VB | Description |\n| --- | --- |\n"
+        "| VB-CREATE-01 | create increments |\n| VB-GET-01 | get echoes |\n",
+    )
+    profile = _go_profile(project)
+    pkg = "example.com/m/internal/store"
+    stream = _go_jsonl(
+        [
+            _go_event("pass", pkg, "TestCreate", Elapsed=0),
+            _go_event("pass", pkg, "TestGet", Elapsed=0),
+            _go_event("pass", pkg, Elapsed=0.01),
+        ]
+    )
+    report = project / ".codd" / "verify" / "go-test.jsonl"
+    _write(report, stream)
+    execution = GoTestJsonReportAdapter().parse(report, project_root=project)
+    report_obj = build_coherence_report(project, profile=profile, execution=execution)
+    assert report_obj.passed is True, [v.message for v in report_obj.unverified_vbs]
+    enforce_campaign_clean_execution(execution, 0)  # no raise

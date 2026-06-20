@@ -43,10 +43,13 @@ THE THREE PIECES (all per-profile; gate logic is language-agnostic)
    to another (the codex14 ``0 e2e scanned`` half of the bug).
 3. **Runner-report adapter** — per-profile normalization of the campaign report
    into the set of executed + passed test FILES (and, when available, cases).
-   ``vitest-json`` is implemented; ``pytest-junit-xml`` / ``go-test-json`` are
-   documented extension points (:func:`resolve_runner_report_adapter`). A report
+   ``vitest-json`` and ``go-test-json`` are implemented; ``pytest-junit-xml`` is a
+   documented extension point (:func:`resolve_runner_report_adapter`). A report
    the gate cannot read is an EXPLICIT degrade/observability error — never a
-   silent green.
+   silent green. A runner that reports per-test-case identity (Go) reconciles each
+   VB at TEST granularity via :class:`RunnerExecution.executed_passed_cases`; a
+   file-level runner (vitest/pytest) reconciles at FILE granularity — both share
+   the same gate, selected by the adapter's ``produces_test_case_identity``.
 
 GENERALITY (see ``feedback_codd_generality_preservation``): the gate logic here
 is language-agnostic. Every language-specific operation — the campaign command,
@@ -251,16 +254,352 @@ class VitestJsonReportAdapter:
         )
 
 
+@dataclass(frozen=True)
+class GoTestJsonReportAdapter:
+    """``go test -json`` (line-delimited JSON) reporter adapter.
+
+    ``go test -json ./...`` streams one JSON object per line, each a *test event*::
+
+        {"Action":"run|pass|fail|skip|output|...","Package":"<import/path>",
+         "Test":"TestXxx","Elapsed":..}
+
+    A test's FINAL outcome is the LAST ``pass``/``fail``/``skip`` ``Action`` for its
+    ``(Package, Test)`` key (Go emits ``run`` then ``output``\\* then exactly one
+    terminal action). Subtests are ``Test":"TestX/sub"``. A line WITHOUT a ``Test``
+    field is a PACKAGE-level event; a package-level ``fail`` with no test is a build/
+    compile/setup failure — an HONEST fail for that whole package, never a silent
+    pass (Go emits ``{"Action":"build-fail",..}`` + ``{"Action":"fail","Package":..}``
+    with no ``Test`` when a ``*_test.go`` does not compile). Non-JSON lines (rare —
+    raw build-error text) are TOLERATED (skip-parse), but a package that compiled
+    yet emitted ZERO test events when test files exist is NOT a silent pass (the
+    upstream empty-report ``CampaignError`` covers a wholly-empty report; per-package
+    "expected tests but ran none" surfaces as those files staying ``not_executed`` in
+    the inventory ⇒ any VB they cover is execution-unverified).
+
+    THE FILE BRIDGE (anti-false-green core). ``go test -json`` reports
+    ``(Package, Test)`` — NOT a file path — while the coherence gate reconciles at
+    FILE granularity (a VB's ``matched_tests`` are the ``_test.go`` FILES its marker
+    sits in). A Go *package* is a *directory* (one package per directory; every
+    ``*_test.go`` in it is the same compiled test binary), so we map
+    ``Package``→``dir`` by stripping the go.mod ``module`` path prefix, then attribute
+    each ``(Package, TestFunc)`` to the ``_test.go`` FILE in that dir that statically
+    declares ``func TestFunc`` — a join that is UNAMBIGUOUS because Go forbids two
+    top-level ``func TestFunc`` with the same name in one package (a compile error).
+    :meth:`normalize_runner_identity` is the pure key used for that join and matches
+    :class:`~codd.vb_marker_authenticity.GoTestBlockProfile`'s static block label
+    (the leading ``TestFunc`` before any ``/subtest``).
+
+    SKIP/FAIL granularity (mirrors vitest's "any non-pass case taints the FILE"):
+    a ``_test.go`` is in ``executed_passed_files`` only when it had ≥1 passed test
+    AND no failed/SKIPPED test attributed to it; ANY failed OR skipped test (a skip
+    proves nothing — the same rule the vitest adapter and the static authenticity
+    gate apply) puts the file in ``executed_failed_files``. A package-level build/
+    setup fail taints EVERY ``_test.go`` in its directory (none could have run).
+    ``executed_passed_cases`` carries the per-test ``"<relfile>::TestFunc"`` keys
+    for the passed tests (finer reconciliation; best-effort, parallel to vitest's
+    ``fullName`` cases).
+    """
+
+    def parse(self, report_path: Path, *, project_root: Path) -> RunnerExecution:
+        try:
+            raw = report_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RunnerReportUnsupported(
+                f"go test -json report unreadable at {report_path}: {exc}"
+            ) from exc
+        events = _parse_go_test_json_lines(raw)
+        if events is None:
+            raise RunnerReportUnsupported(
+                f"go test -json report at {report_path} contained no parseable JSON "
+                "event lines (a wholly non-JSON report is unreadable, not an empty pass)"
+            )
+
+        module_path = _read_go_module_path(project_root)
+        # Static index: dir → {TestFunc → relfile} for every *_test.go in the tree.
+        # Built once; the join that turns (Package, TestFunc) into the FILE the gate
+        # keys on. Lazily limited to dirs the runner actually reports below.
+        dir_func_index = _go_static_test_func_index(project_root)
+
+        # Aggregation at TWO granularities (GPT-5.5 design, dogfood go-test-json):
+        #  * PER-CASE (the VB-verification authority): every PASSED top-level TestFunc
+        #    contributes ``"<relfile>::TestFunc"`` to ``executed_passed_cases`` —
+        #    INDEPENDENT of any sibling's outcome. This is what lets a passed ``TestA``
+        #    prove its VB even when an unrelated ``TestB`` in the SAME file skipped
+        #    (file-level taint would false-RED ``TestA`` — Go puts many independent
+        #    ``func TestXxx`` in one file). A skip is NOT a pass, so a skipped func's
+        #    key never appears ⇒ its VB is correctly unverified.
+        #  * PER-FILE (coarse signals only — inventory, clean-execution, observability):
+        #    a file is in ``executed_passed_files`` iff it had ≥1 pass AND no
+        #    fail/skip/build-fail attributed to it; ANY fail/skip taints it. These
+        #    NEVER gate a Go VB (the per-case keys do) — they keep the file-level
+        #    clean-execution gate honest (a skip anywhere still reds the whole run).
+        file_passed_funcs: dict[str, set[str]] = {}
+        file_tainted: set[str] = set()  # any fail/skip/build-fail ⇒ not a clean file
+        passed_case_keys: set[str] = set()
+        build_failed_dirs: set[str] = set()
+        total_cases = 0
+        passed_count = 0
+
+        for ev in events:
+            action = ev.get("Action")
+            pkg = ev.get("Package")
+            test = ev.get("Test")
+            rel_dir = _go_package_to_dir(pkg, module_path) if pkg else None
+
+            if action == "build-fail":
+                # A ``build-fail`` carries ``ImportPath`` (not ``Package``/``Test``);
+                # recover the dir from it so a non-compiling package taints its dir.
+                # Checked FIRST: it has no ``Test`` so it must not fall into the
+                # package-level branch below (which only inspects ``fail``).
+                bdir = _go_package_to_dir(_go_import_path_base(ev.get("ImportPath")), module_path)
+                if bdir is not None:
+                    build_failed_dirs.add(bdir)
+                continue
+            if not test:
+                # Package-level (no ``Test``) terminal event. A ``fail`` here is EITHER
+                # a build/compile/setup failure OR merely the summary of individual test
+                # failures. Only the BUILD/SETUP variety taints the whole dir (nothing
+                # ran); a summary of per-test failures is already handled by the
+                # individual ``fail`` events (GPT edge ruling #1).
+                if action == "fail" and rel_dir is not None:
+                    failed_build = ev.get("FailedBuild")
+                    output = str(ev.get("Output") or "")
+                    if failed_build or "[build failed]" in output or "[setup failed]" in output:
+                        build_failed_dirs.add(rel_dir)
+                continue
+            if action not in ("pass", "fail", "skip"):
+                continue  # run/output/etc. are not terminal outcomes
+            if rel_dir is None:
+                continue  # external/std package (not under our module) — ignore
+            func = _go_test_func_root(test)  # "TestX/sub" → "TestX"
+            relfile = dir_func_index.get(rel_dir, {}).get(func)
+            total_cases += 1
+            # ``relfile is None`` here = an in-tree package whose TestFunc maps to NO
+            # static _test.go (a parser miss / generated-or-conditional source). It is
+            # NOT credited (fail-closed: it adds to no passed-case key, so it can prove
+            # no VB) — but it is NOT hard-failed either, because the static parser's
+            # incompleteness must never false-RED a legitimately-running test (the same
+            # generality discipline the authenticity gate applies to unparseable user
+            # files; see ``feedback_codd_generality_preservation``). It still counts in
+            # ``total_cases`` so the report is not deemed empty.
+            if action == "pass":
+                passed_count += 1
+                if relfile is not None:
+                    file_passed_funcs.setdefault(relfile, set()).add(func)
+                    passed_case_keys.add(f"{relfile}::{func}")
+            else:
+                # fail OR skip — a skip proves nothing (vitest/authenticity parity), a
+                # fail is honest. Either taints the FILE (the coarse clean-execution
+                # signal; the per-case keys above are the VB-verification authority).
+                if relfile is not None:
+                    file_tainted.add(relfile)
+
+        # Build/setup-failed dirs taint EVERY static _test.go in them (nothing ran).
+        for rel_dir in build_failed_dirs:
+            for relfile in dir_func_index.get(rel_dir, {}).values():
+                file_tainted.add(relfile)
+
+        passed_files: set[str] = set()
+        failed_files: set[str] = set()
+        for relfile, funcs in file_passed_funcs.items():
+            if relfile in file_tainted:
+                failed_files.add(relfile)
+            else:
+                passed_files.add(relfile)
+        failed_files |= file_tainted  # tainted files are failed even with no pass
+
+        return RunnerExecution(
+            executed_passed_files=frozenset(passed_files),
+            executed_failed_files=frozenset(failed_files),
+            executed_passed_cases=frozenset(passed_case_keys),
+            test_level_available=total_cases > 0,
+            total_cases=total_cases,
+            passed_cases=passed_count,
+        )
+
+    @staticmethod
+    def produces_test_case_identity() -> bool:
+        """True: this adapter emits per-test-case identities the gate can reconcile.
+
+        ``go test -json`` reports ``(Package, Test)`` per test, and the static
+        :class:`~codd.vb_marker_authenticity.GoTestBlockProfile` labels each block
+        with its ``TestFunc`` name — so a VB marker can be mapped to the SAME
+        ``"<relfile>::TestFunc"`` runner-case key and reconciled at TEST granularity
+        (not file). The coherence gate keys off this capability to use per-case
+        reconciliation for Go while leaving file-level runners (vitest/pytest, which
+        do NOT define this method ⇒ treated as False) on the file branch unchanged.
+        """
+        return True
+
+    @staticmethod
+    def normalize_runner_identity(package: str, test: str, *, module_path: str | None = None) -> str:
+        """Pure identity key for a runner ``(Package, Test)`` → the static join key.
+
+        Returns ``"<reldir>::<TestFunc>"`` where ``<reldir>`` is the package's repo-
+        root-relative directory (the go.mod ``module`` prefix stripped) and
+        ``<TestFunc>`` is the top-level function name (a ``TestX/sub`` subtest folds
+        to ``TestX``) — the SAME pairing key
+        :class:`~codd.vb_marker_authenticity.GoTestBlockProfile` produces from a
+        ``func TestFunc`` block label, so the gate can pair a runner case with the
+        static test block that carries the VB marker. ``module_path`` (the go.mod
+        ``module`` line) lets the dir be made relative; when absent the package path
+        is used as the dir (still a stable, self-consistent key for pairing two
+        identities computed the same way).
+        """
+
+        rel_dir = _go_package_to_dir(package, module_path)
+        if rel_dir is None:
+            rel_dir = str(package or "").strip().replace("\\", "/")
+        return f"{rel_dir}::{_go_test_func_root(test)}"
+
+
+def _parse_go_test_json_lines(raw: str) -> list[dict[str, Any]] | None:
+    """Parse a ``go test -json`` stream into its JSON event objects (tolerant).
+
+    Each line is one JSON object; NON-JSON lines (raw build-error text Go prints
+    before the JSON stream, or a stray banner) are SKIPPED rather than fatal — a
+    build failure still surfaces through the structured ``build-fail`` / package
+    ``fail`` events. Returns ``None`` ONLY when the report has NO parseable JSON
+    object at all (a wholly unreadable report is an observability error, not an
+    empty pass); an empty/whitespace report also yields ``None``.
+    """
+
+    events: list[dict[str, Any]] = []
+    saw_any_line = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        saw_any_line = True
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue  # non-JSON line (build noise) — tolerate
+        if isinstance(obj, dict):
+            events.append(obj)
+    if not saw_any_line:
+        return None
+    if not events:
+        return None
+    return events
+
+
+def _read_go_module_path(project_root: Path) -> str | None:
+    """The ``module`` path declared on go.mod's ``module`` line, or ``None``.
+
+    go.mod's first meaningful directive is ``module <import/path>``. We read it so a
+    runner ``Package`` import-path can be made repo-root-relative. Missing/unreadable
+    go.mod ⇒ ``None`` (the package→dir mapper then fails-open: it cannot relativize,
+    so it treats the package as external and the file attribution simply finds no
+    match — fail-CLOSED toward "not executed", never a false pass).
+    """
+
+    gomod = project_root / "go.mod"
+    try:
+        text = gomod.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("module "):
+            return stripped[len("module ") :].strip().strip('"')
+    return None
+
+
+def _go_package_to_dir(package: str | None, module_path: str | None) -> str | None:
+    """Map a Go ``Package`` import-path to its repo-root-relative POSIX directory.
+
+    ``example.com/m/internal/store`` with module ``example.com/m`` → ``internal/store``;
+    the module root package itself (``example.com/m``) → ``""`` (the repo root). A
+    package that is NOT under the module prefix (an external / stdlib import that has
+    no ``_test.go`` of ours) → ``None`` (ignored, like vitest's ``_relativize``
+    returning ``None`` for a path outside the project tree). When ``module_path`` is
+    unknown, ``None`` (cannot relativize) so the caller fails-closed.
+    """
+
+    if not package or not module_path:
+        return None
+    pkg = str(package).strip()
+    mod = str(module_path).strip()
+    if pkg == mod:
+        return ""
+    prefix = mod.rstrip("/") + "/"
+    if pkg.startswith(prefix):
+        return pkg[len(prefix) :].replace("\\", "/").strip("/")
+    return None
+
+
+def _go_test_func_root(test: str | None) -> str:
+    """The top-level ``TestFunc`` of a runner ``Test`` field (``TestX/sub`` → ``TestX``)."""
+    return str(test or "").split("/", 1)[0].strip()
+
+
+def _go_import_path_base(import_path: str | None) -> str | None:
+    """The package import-path from a ``build-fail`` event's ``ImportPath`` field.
+
+    ``go test -json`` build-failure events carry ``ImportPath`` shaped like
+    ``"example.com/m/internal/store [example.com/m/internal/store.test]"`` (the test
+    binary's import path with a bracketed variant). We take the leading import path
+    (before the space/bracket) so it can be mapped to a directory like a normal
+    ``Package`` field. ``None``/empty ⇒ ``None``.
+    """
+    if not import_path:
+        return None
+    return str(import_path).split(" ", 1)[0].strip() or None
+
+
+def _go_static_test_func_index(project_root: Path) -> dict[str, dict[str, str]]:
+    """Index ``reldir → {TestFunc → relfile}`` over every ``*_test.go`` in the tree.
+
+    Reuses the SHARED test-file discovery (:func:`_iter_test_files`, the same glob
+    the inventory + VB audit consume) so the files indexed here are EXACTLY the files
+    the gate keys on, then parses each with the Go structural adapter
+    (:class:`~codd.vb_marker_authenticity.GoTestBlockProfile`) to read its top-level
+    ``func TestFunc`` names. This is the static half of the ``(Package, Test)``→FILE
+    join: ``dir = relfile's parent``; ``TestFunc`` is unique within a dir in valid Go
+    (duplicate top-level test funcs in one package do not compile), so the map is
+    well-defined. Files the adapter cannot parse contribute nothing (fail-closed:
+    their tests then read as not-executed, never a false pass).
+    """
+
+    from codd.vb_marker_authenticity import GoTestBlockProfile
+
+    adapter = GoTestBlockProfile()
+    index: dict[str, dict[str, str]] = {}
+    for path in _iter_test_files(project_root, test_dirs=None):
+        rel = _norm_test_path(_rel_path(path, project_root))
+        if not rel.endswith("_test.go"):
+            continue
+        rel_dir = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            blocks = adapter.parse_test_blocks(text)
+        except Exception:  # noqa: BLE001 — a parse failure contributes no funcs.
+            continue
+        bucket = index.setdefault(rel_dir, {})
+        for block in blocks:
+            label = (block.label or "").strip()
+            # Top-level funcs only (subtest blocks carry a ``<Func>/subtest`` label);
+            # the func before any ``/`` is the join key, and the FIRST file that
+            # declares it wins (unique per dir in valid Go, so order is immaterial).
+            func = label.split("/", 1)[0].strip()
+            if func.startswith("Test") and func not in bucket:
+                bucket[func] = rel
+    return index
+
+
 #: report_format → adapter. A new runner registers ONE entry here + sets the
 #: matching ``report_format`` on its profile's :class:`VerifyCampaignSpec`.
-#: ``pytest-junit-xml`` / ``go-test-json`` are documented extension points
-#: (the design's per-language adapter list): pytest JUnit XML parses
-#: ``<testcase classname name>`` + ``<skipped>``/``<failure>``/``<error>``
-#: children; ``go test -json`` parses the streamed ``{Action: "pass"|"fail",
-#: Test, Package}`` events. Until added they resolve to ``None`` and the gate
-#: degrades EXPLICITLY for that stack (never a silent green).
+#: ``pytest-junit-xml`` is the remaining documented extension point (pytest JUnit
+#: XML parses ``<testcase classname name>`` + ``<skipped>``/``<failure>``/``<error>``
+#: children); until added it resolves to ``None`` and the gate degrades EXPLICITLY
+#: for that stack (never a silent green).
 _RUNNER_REPORT_ADAPTERS: dict[str, RunnerReportAdapter] = {
     "vitest-json": VitestJsonReportAdapter(),
+    "go-test-json": GoTestJsonReportAdapter(),
 }
 
 
@@ -534,6 +873,111 @@ def _authentic_cover_files(
     return authentic, True
 
 
+def _norm_vb_key(vb_id: str) -> str:
+    """The audit's canonical VB id (so the per-case map keys match a row's id)."""
+    from codd.verifiable_behavior_audit import _normalize_vb_id
+
+    return _normalize_vb_id(vb_id)
+
+
+def _authentic_cover_case_keys(
+    project_root: Path,
+    *,
+    config: dict[str, Any] | None,
+    profile: Any,
+    vb_audit: VBAuditReport,
+    authenticity: AuthenticityReport,
+) -> dict[str, set[str]] | None:
+    """Per-VB ``{normalized_vb_id → {"<relfile>::TestFunc", ...}}`` covering case keys.
+
+    Returns ``None`` (⇒ the gate uses FILE-level reconciliation, unchanged) UNLESS
+    this stack supports per-test-case reconciliation: its runner adapter declares
+    ``produces_test_case_identity()`` True (Go) AND its test-block profile parses
+    blocks whose label is the runner-case identity (``TestFunc``). For every AUTHENTIC
+    ``codd: covers vb=`` marker, the covering case key is ``"<relfile>::<top-level
+    TestFunc>"`` — the file the marker sits in plus the top-level test function of the
+    block it attaches to, using the SAME ``_attached_block`` attachment the
+    authenticity gate uses (so static coverage and execution reconciliation agree).
+    A marker that does not attach to an executable block, or whose block is
+    inauthentic for this VB, contributes NO key (it is not a credible covering case).
+
+    This is the static half of the ``(Package, Test)``→case-key join the Go runner
+    adapter performs; matching keys on both sides is what lets a passed ``TestA``
+    prove its VB while a sibling ``TestB`` skip in the same file does not drag it down.
+    """
+
+    adapter_getter = getattr(profile, "runner_report_adapter", None) if profile is not None else None
+    adapter = adapter_getter() if callable(adapter_getter) else None
+    if adapter is None or not _adapter_produces_case_identity(adapter):
+        return None
+    block_getter = getattr(profile, "test_block_profile", None)
+    test_block_profile = block_getter() if callable(block_getter) else None
+    if test_block_profile is None:
+        return None
+
+    from codd.vb_marker_authenticity import _attached_block, _scan_cover_markers_with_lines
+
+    # Authentic-marker filter: a (path, vb) flagged inauthentic (skipped/unattached/
+    # no-assertion/orphan) contributes no covering case — same files-drop discipline
+    # as ``_authentic_cover_files`` but at marker granularity.
+    inauthentic: set[tuple[str, str]] = {
+        (_norm_test_path(v.path), _norm_vb_key(v.vb_id))
+        for v in authenticity.violations
+        if v.kind != "hook"
+    }
+
+    keys_by_vb: dict[str, set[str]] = {}
+    for path in _iter_test_files(project_root, test_dirs=_resolve_vb_scan_dirs(project_root, config)):
+        rel = _norm_test_path(_rel_path(path, project_root))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        markers = _scan_cover_markers_with_lines(text, rel)
+        if not markers:
+            continue
+        if not test_block_profile.handles_file(rel):
+            continue
+        try:
+            blocks = test_block_profile.parse_test_blocks(text)
+        except Exception:  # noqa: BLE001 — an unparseable file contributes no keys.
+            blocks = []
+        if not blocks:
+            continue
+        rel_dir = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        for marker in markers:
+            vb_key = _norm_vb_key(marker.vb_id)
+            if (rel, vb_key) in inauthentic:
+                continue  # this VB's marker here is not credible coverage
+            block = _attached_block(marker.line, text, blocks)
+            if block is None or not block.is_executable:
+                continue
+            test_func = (block.label or "").split("/", 1)[0].strip()
+            if not test_func:
+                continue
+            # The runner-case key the Go adapter emits is module-relative-dir + func;
+            # here the relfile already carries the dir, so the key is rel-file based —
+            # we key by ``<relfile>::TestFunc`` (the adapter writes the SAME, having
+            # resolved (Package, Test) back to relfile via the static index).
+            keys_by_vb.setdefault(vb_key, set()).add(f"{rel}::{test_func}")
+    return keys_by_vb
+
+
+def _adapter_produces_case_identity(adapter: Any) -> bool:
+    """Whether ``adapter`` declares per-test-case identity (best-effort, default False).
+
+    A runner adapter opts into per-case reconciliation by defining
+    ``produces_test_case_identity() -> True`` (the Go adapter). vitest/pytest do not
+    define it ⇒ False ⇒ they keep the file-level branch (byte-identical)."""
+    getter = getattr(adapter, "produces_test_case_identity", None)
+    if not callable(getter):
+        return False
+    try:
+        return bool(getter())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def build_coherence_report(
     project_root: Path | str,
     *,
@@ -580,6 +1024,24 @@ def build_coherence_report(
             detail="no verifiable behaviors declared — coverage-execution coherence is N/A",
         )
 
+    # PER-CASE reconciliation capability (GPT-5.5 design, dogfood go-test-json):
+    # a runner whose adapter emits per-test-case identities AND a static profile that
+    # can map a VB marker to the SAME runner-case key reconciles a VB by its covering
+    # (file, test-case) — NOT by file status. This is REQUIRED for Go, where many
+    # independent ``func TestXxx`` share one ``_test.go`` (file-level status would
+    # false-RED a passed VB whose sibling skipped). It is OFF for vitest/pytest (their
+    # adapters expose no per-case identity), which keep the byte-identical file branch
+    # below. The static covering case keys reuse the SAME marker→block attachment the
+    # authenticity gate uses (no re-invented attachment ⇒ coverage + execution agree).
+    case_keys_by_vb = _authentic_cover_case_keys(
+        project_root, config=config, profile=profile, vb_audit=vb_audit, authenticity=authenticity
+    )
+    case_reconciliation = (
+        case_keys_by_vb is not None
+        and execution is not None
+        and execution.test_level_available
+    )
+
     unblocked = [row for row in vb_audit.rows if row.coverage_status != "blocked"]
     unverified: list[UnverifiedVB] = []
     verified_count = 0
@@ -609,6 +1071,39 @@ def build_coherence_report(
                 )
             )
             continue
+
+        if case_reconciliation:
+            # VB verified iff ANY authentic covering (file, top-level TestFunc) case
+            # key passed in the runner report. A skipped/failed/missing covering case
+            # never appears in ``executed_passed_cases`` ⇒ correctly unverified; a
+            # sibling test's outcome in the same file is irrelevant (the false-RED the
+            # file branch would cause for Go is avoided).
+            covering_cases = case_keys_by_vb.get(_norm_vb_key(row.vb_id), set())
+            assert execution is not None  # case_reconciliation implies execution
+            passed = sorted(k for k in covering_cases if k in execution.executed_passed_cases)
+            if passed:
+                verified_count += 1
+                continue
+            # Distinguish "ran but failed/skipped" from "never ran" for the message: a
+            # covering file that the runner included (failed/skipped) → failed; else
+            # never ran. (Falls back to file-level inclusion for the reason only.)
+            ran_files = sorted(
+                f for f in authentic_files
+                if (entry := inventory.get(f)) is not None and entry.runner_inclusion
+            )
+            reason = "covering_test_failed" if ran_files else "no_covering_test_executed"
+            unverified.append(
+                UnverifiedVB(
+                    vb_id=row.vb_id,
+                    description=row.description,
+                    source_doc=row.source_doc,
+                    covering_files=tuple(sorted(covering_cases) or sorted(authentic_files)),
+                    reason=reason,
+                )
+            )
+            continue
+
+        # FILE-level reconciliation (vitest/pytest — UNCHANGED, byte-identical).
         # Verified iff ANY authentic covering file executed AND passed.
         passed_files = sorted(f for f in authentic_files if inventory.passed(f))
         if passed_files:
@@ -1157,6 +1652,7 @@ __all__ = [
     "CoherenceError",
     "CoherenceObservabilityError",
     "CoherenceReport",
+    "GoTestJsonReportAdapter",
     "RunnerExecution",
     "RunnerReportAdapter",
     "RunnerReportUnsupported",
