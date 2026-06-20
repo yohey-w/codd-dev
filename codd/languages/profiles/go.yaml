@@ -275,3 +275,10 @@ artifacts:
   ignored:
     - "*.test"
     - "coverage.out"
+
+# CI scaffold (design §v2.70): toolchain bootstrap for a generated CI workflow.
+ci:
+  setup_steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: stable

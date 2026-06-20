@@ -17,6 +17,7 @@ from __future__ import annotations
 from .profile import (
     AdapterRef,
     ArtifactsSpec,
+    CiSpec,
     CommandSpec,
     DependencyIntegrityFile,
     Identity,
@@ -69,6 +70,7 @@ __all__ = [
     # model
     "AdapterRef",
     "ArtifactsSpec",
+    "CiSpec",
     "CommandSpec",
     "DependencyIntegrityFile",
     "Identity",

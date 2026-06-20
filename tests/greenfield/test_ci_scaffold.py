@@ -37,6 +37,17 @@ def _go_project(root: Path) -> Path:
     return root
 
 
+def _write_codd_yaml(root: Path, language: str) -> None:
+    # A real greenfield project always has codd.yaml with project.language; the
+    # v2.70 contract-driven ci_scaffold reads CI setup steps from that language's
+    # profile (not a marker-file table).
+    codd_dir = root / "codd"
+    codd_dir.mkdir(exist_ok=True)
+    (codd_dir / "codd.yaml").write_text(
+        f"project:\n  name: x\n  language: {language}\n", encoding="utf-8"
+    )
+
+
 def _run_step_commands(workflow_path: Path) -> list[str]:
     payload = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     steps = payload["jobs"]["test"]["steps"]
@@ -90,10 +101,21 @@ def test_generated_ci_has_required_triggers(tmp_path):
     assert set(triggers) == {"push", "pull_request"}
 
 
+def test_go_project_gets_setup_go_from_profile(tmp_path):
+    # Contract-driven: codd.yaml language=go → the go profile's ci.setup_steps
+    # (actions/setup-go) are used. No marker-file table in the pipeline.
+    _go_project(tmp_path)
+    _write_codd_yaml(tmp_path, "go")
+    _default_ci_scaffold_runner(tmp_path)
+    text = (tmp_path / ".github/workflows/ci.yml").read_text()
+    assert "actions/setup-go" in text
+
+
 def test_node_project_gets_setup_node_and_real_test(tmp_path):
     (tmp_path / "package.json").write_text(
         '{"name": "x", "scripts": {"test": "vitest run"}}', encoding="utf-8"
     )
+    _write_codd_yaml(tmp_path, "typescript")  # setup steps come from the profile
     _default_ci_scaffold_runner(tmp_path)
     text = (tmp_path / ".github/workflows/ci.yml").read_text()
     assert "actions/setup-node" in text
@@ -102,10 +124,21 @@ def test_node_project_gets_setup_node_and_real_test(tmp_path):
 
 def test_python_project_gets_setup_python_and_real_test(tmp_path):
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    _write_codd_yaml(tmp_path, "python")  # setup steps come from the profile
     _default_ci_scaffold_runner(tmp_path)
     text = (tmp_path / ".github/workflows/ci.yml").read_text()
     assert "actions/setup-python" in text
     assert "pytest" in text
+
+
+def test_unprofiled_project_gets_no_setup_steps_but_still_authentic(tmp_path):
+    # No codd.yaml / no language profile → no toolchain bootstrap (honest
+    # pluggable default), but the workflow still runs the real test command.
+    _go_project(tmp_path)  # go.mod → detect_test_command works, but no codd.yaml
+    _default_ci_scaffold_runner(tmp_path)
+    text = (tmp_path / ".github/workflows/ci.yml").read_text()
+    assert "actions/setup-go" not in text  # no profile resolved → no setup
+    assert "go test ./..." in text  # still authentic (real test command)
 
 
 # ── honest refusals (no false-green, no silent opt-out) ─────

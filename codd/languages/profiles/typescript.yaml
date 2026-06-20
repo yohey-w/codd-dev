@@ -157,3 +157,11 @@ artifacts:
   ignored:
     - "node_modules/**"
     - "dist/**"
+
+# CI scaffold (design §v2.70): toolchain bootstrap for a generated CI workflow.
+ci:
+  setup_steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: lts/*
+    - run: npm ci

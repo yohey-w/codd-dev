@@ -3124,44 +3124,30 @@ def _certify_verify_executed(project_root: Path, result: Any) -> str:
     )
 
 
-# Language ecosystems whose CI needs a toolchain bootstrap before the test
-# command can run. Keyed by a marker file; the value is the GitHub Actions
-# setup steps to prepend. An unrecognised ecosystem still gets checkout + the
-# detected test command (authentic — it runs the real suite — just without a
-# toolchain step). This per-ecosystem dispatch is the v3.0 short-term bridge;
-# v3.1 moves the CI template into the language/stack profile (profile-driven CI).
-_CI_SETUP_STEPS: tuple[tuple[str, list[dict[str, Any]]], ...] = (
-    ("go.mod", [{"uses": "actions/setup-go@v5", "with": {"go-version": "stable"}}]),
-    (
-        "package.json",
-        [
-            {"uses": "actions/setup-node@v4", "with": {"node-version": "lts/*"}},
-            {"run": "npm ci"},
-        ],
-    ),
-    (
-        "pyproject.toml",
-        [
-            {"uses": "actions/setup-python@v5", "with": {"python-version": "3.x"}},
-            {"run": "python -m pip install --upgrade pip && pip install -e ."},
-        ],
-    ),
-    (
-        "setup.py",
-        [
-            {"uses": "actions/setup-python@v5", "with": {"python-version": "3.x"}},
-            {"run": "python -m pip install --upgrade pip && pip install -e ."},
-        ],
-    ),
-    ("Cargo.toml", [{"uses": "dtolnay/rust-toolchain@stable"}]),
-)
-
-
 def _ci_setup_steps(project_root: Path) -> list[dict[str, Any]]:
-    for marker, steps in _CI_SETUP_STEPS:
-        if (project_root / marker).exists():
-            return [dict(step) for step in steps]
-    return []
+    """CI toolchain setup steps from the resolved language profile (``profile.ci``).
+
+    Contract-driven (Contract Kernel, v2.70): the steps come from the project's
+    language profile — the pipeline core does NOT branch on a language name or a
+    marker file. No CoDD config, no resolvable language, or no ``ci`` section →
+    no setup steps (the workflow still runs checkout + the real test command; an
+    unsupported ecosystem simply gets no toolchain bootstrap, the honest
+    pluggable default). The per-marker hardcoded table (v2.67.0) is gone.
+    """
+    from codd.config import load_project_config
+    from codd.languages import resolve_language_profile
+
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return []
+    try:
+        profile = resolve_language_profile(config)
+    except Exception:  # noqa: BLE001 — unknown/unsupported language → no setup, never a crash.
+        return []
+    if profile is None or profile.ci is None:
+        return []
+    return [dict(step) for step in profile.ci.setup_steps]
 
 
 def _ci_opt_out_declared(project_root: Path) -> bool:

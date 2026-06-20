@@ -21,6 +21,7 @@ import yaml
 
 from .profile import (
     ArtifactsSpec,
+    CiSpec,
     CommandSpec,
     DependencyIntegrityFile,
     Identity,
@@ -338,6 +339,21 @@ def _parse_scaffold(doc: Mapping[str, Any]) -> ScaffoldSpec | None:
     )
 
 
+def _parse_ci(doc: Mapping[str, Any]) -> CiSpec | None:
+    raw = doc.get("ci")
+    if raw is None:
+        return None
+    m = _as_mapping(raw, where="ci")
+    steps = tuple(
+        _as_mapping(s, where=f"ci.setup_steps[{i}]")
+        for i, s in enumerate(_as_tuple(m.get("setup_steps")))
+    )
+    return CiSpec(
+        setup_steps=steps,
+        runs_on=str(m.get("runs_on", "ubuntu-latest")),
+    )
+
+
 # ---------------------------------------------------------------------------
 # public entry point
 # ---------------------------------------------------------------------------
@@ -358,6 +374,7 @@ _KNOWN_TOP_LEVEL = frozenset(
         "verify",
         "artifacts",
         "scaffold",
+        "ci",
     }
 )
 
@@ -400,6 +417,7 @@ def load_language_profile(path: str | Path) -> LanguageProfile:
         verify=_parse_verify(doc),
         artifacts=_parse_artifacts(doc),
         scaffold=_parse_scaffold(doc),
+        ci=_parse_ci(doc),
         extra=extra,
         raw=dict(doc),
     )

@@ -332,6 +332,26 @@ class ScaffoldSpec:
 
 
 # ---------------------------------------------------------------------------
+# ci scaffold (design §v2.70)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CiSpec:
+    """CI scaffold contract — the toolchain bootstrap a generated CI workflow
+    needs before it can run the project's verify/test command.
+
+    Declarative GitHub-Actions step mappings (``{uses: ..., with: {...}}`` /
+    ``{run: ...}``) so greenfield's ``ci_scaffold`` reads them from the language
+    profile instead of a hardcoded per-marker table in the pipeline core (the
+    Contract Kernel: the core never branches on a language name).
+    """
+
+    setup_steps: tuple[Mapping[str, Any], ...] = ()
+    runs_on: str = "ubuntu-latest"
+
+
+# ---------------------------------------------------------------------------
 # generic adapter reference
 # ---------------------------------------------------------------------------
 
@@ -373,6 +393,7 @@ class LanguageProfile:
     verify: VerifySpec | None = None
     artifacts: ArtifactsSpec | None = None
     scaffold: ScaffoldSpec | None = None
+    ci: CiSpec | None = None
     #: ``path_rules``, ``implement_oracle`` etc., preserved but not modeled in Phase 1.
     extra: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     #: The full parsed YAML mapping, for round-trip / debugging.
