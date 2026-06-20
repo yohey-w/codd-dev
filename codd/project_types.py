@@ -742,6 +742,7 @@ class LayoutProfile:
 
         try:
             from codd.vb_marker_authenticity import (
+                GoTestBlockProfile,
                 PythonTestBlockProfile,
                 TypeScriptTestBlockProfile,
             )
@@ -752,6 +753,8 @@ class LayoutProfile:
             return PythonTestBlockProfile()
         if self.language in ("typescript", "node", "javascript"):
             return TypeScriptTestBlockProfile()
+        if self.language in ("go", "golang"):
+            return GoTestBlockProfile()
         return None
 
     def runner_report_adapter(self) -> Any:

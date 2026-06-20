@@ -2235,6 +2235,879 @@ def _net_braces(line: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Go (``go test`` / ``testing`` + optional testify) structural adapter.
+#
+# Mirrors the Python/TS adapters EXACTLY (same ``TestBlockProfile`` interface,
+# same ``has_assertion`` / ``resolve_direct_assertion_evidence`` /
+# ``resolve_assertion_evidence`` contract). The design contract is
+# ``dogfood/gpt_language_generality_design.md`` §1.7 (test_semantics adapter):
+#
+#   * test blocks: ``func TestXxx(t *testing.T) { ... }`` (brace-matched bodies),
+#     plus ``t.Run("name", func(t *testing.T){...})`` SUBTESTS as nested blocks
+#     (the same group→leaf nesting the TS adapter emits for ``describe``→``it``).
+#   * skip: ``t.Skip()`` / ``t.Skipf(...)`` / ``t.SkipNow()`` on the testing
+#     receiver (the ``*testing.T`` parameter), mirroring TS ``.skip`` / py
+#     ``pytest.skip``.
+#   * PRIMITIVE assertion (``has_assertion``): a stdlib testing FAILURE call on
+#     the receiver (``t.Error/Errorf/Fatal/Fatalf/Fail/FailNow``) OR a testify
+#     ``assert.X(...)`` / ``require.X(...)`` call. A bare call to a NAMED helper
+#     (``checkServer(t, got)``) is NOT primitive — it is resolved one hop via
+#     :meth:`resolve_assertion_evidence`, exactly like the Python/TS helper graph.
+#
+# The assertion-AUTHENTICITY rule (the anti-false-green core), mirroring the
+# Python/TS ``constant_direct`` analogue:
+#   (a) a FAILURE call is REAL only when it is REACHED VIA A CONDITION that
+#       references a NON-constant (a variable / SUT-call result / expected var) —
+#       ``if got != want { t.Fatalf(...) }`` is real (``got``/``want``);
+#       ``if 1 != 1 { t.Fatal() }`` (constant condition) and an UNCONDITIONAL
+#       ``t.Fatal("todo")`` with no SUT/expected reference are NOT real.
+#   (b) a testify call is REAL only when its VALUE args (everything after the
+#       leading ``t`` testing-receiver arg, minus a trailing string/format msg)
+#       reference a NON-constant. ``assert.Equal(t, 1, 1)`` is NOT real.
+# When origin is UNKNOWN/uncertain we CREDIT (the same false-RED防波堤 the
+# Python/TS adapters use): only a provably constant-only / no-assertion body is
+# rejected.
+# ---------------------------------------------------------------------------
+
+
+#: ``func TestXxx(t *testing.T) {`` — a top-level Go test function. The receiver
+#: parameter NAME is captured (``t`` by convention, but any identifier is legal —
+#: ``func TestX(tt *testing.T)``) so skip / failure-call / subtest detection
+#: anchors on the ACTUAL receiver, never a hardcoded ``t``. ``*testing.T`` is
+#: required (a ``TestMain(m *testing.M)`` or a benchmark ``*testing.B`` is not a
+#: ``go test`` unit and is intentionally not matched).
+_GO_TEST_FUNC_RE = re.compile(
+    r"^(?P<indent>[ \t]*)func\s+(?P<name>Test[A-Za-z0-9_]*)\s*\(\s*"
+    r"(?P<recv>[A-Za-z_][A-Za-z0-9_]*)\s+\*testing\.T\s*\)\s*\{",
+    re.MULTILINE,
+)
+#: ``<recv>.Run("name", func(<sub> *testing.T) {`` — a subtest. The subtest's OWN
+#: receiver name is captured (it may shadow / rename the parent's, e.g.
+#: ``t.Run("x", func(t *testing.T){...})`` or ``func(st *testing.T)``) so the
+#: subtest body's skip / failure calls anchor on ITS receiver.
+_GO_SUBTEST_RE = re.compile(
+    r"(?P<recv>[A-Za-z_][A-Za-z0-9_]*)\.Run\s*\([^,]*,\s*func\s*\(\s*"
+    r"(?P<sub>[A-Za-z_][A-Za-z0-9_]*)\s+\*testing\.T\s*\)\s*\{",
+)
+#: Stdlib ``testing`` FAILURE methods (a call that, on its own, can fail the test).
+_GO_FAIL_METHODS = ("Error", "Errorf", "Fatal", "Fatalf", "Fail", "FailNow")
+#: Stdlib ``testing`` SKIP methods.
+_GO_SKIP_METHODS = ("Skip", "Skipf", "SkipNow")
+#: testify packages whose ``assert.X`` / ``require.X`` calls are primitive
+#: assertions. The package ALIAS (the import's bound name) is resolved per-file so
+#: ``import tassert "github.com/stretchr/testify/assert"`` (``tassert.Equal``) is
+#: still recognized; these defaults cover the conventional unaliased imports.
+_GO_TESTIFY_RECEIVERS = ("assert", "require")
+
+
+def _go_receiver_call_re(receiver: str, methods: Iterable[str]) -> re.Pattern[str]:
+    """``<receiver>.<Method>(`` for any ``Method`` in ``methods`` (word-bounded)."""
+
+    alt = "|".join(re.escape(m) for m in methods)
+    return re.compile(rf"(?<![A-Za-z0-9_.]){re.escape(receiver)}\.(?:{alt})\b\s*\(")
+
+
+def _go_strip_comments(text: str) -> str:
+    """``text`` with ``//`` line and ``/* */`` block comments blanked to spaces.
+
+    Newlines are PRESERVED (line/offset math is unaffected) and only comment bytes
+    become spaces — string literals and code are untouched. This is the STRUCTURAL
+    SKELETON the assertion/skip scanners run over so a fake assertion written in a
+    COMMENT (``// if got != want { t.Fatalf(...) }``) is never mistaken for a real
+    one (the false-GREEN this closes). String literals are intentionally left
+    intact so testify message-arg trimming still sees real strings; identifiers
+    inside string literals are independently dropped by :func:`_go_reference_idents`
+    at the reference-extraction step, so a call-shaped string is still safe.
+    """
+
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_str: str | None = None
+    prev = ""
+    while i < n:
+        ch = text[i]
+        if in_str is not None:
+            out.append(ch)
+            if ch == in_str and prev != "\\":
+                in_str = None
+            prev = ch
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            in_str = ch
+            out.append(ch)
+            prev = ch
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+            prev = ""
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            # Preserve newlines inside the block comment for line math.
+            out.append("".join(c if c == "\n" else " " for c in text[i:end]))
+            i = end
+            prev = ""
+            continue
+        out.append(ch)
+        prev = ch
+        i += 1
+    return "".join(out)
+
+
+def _go_testify_aliases(text: str) -> dict[str, str]:
+    """Map each bound testify package alias → its package leaf (``assert``/``require``).
+
+    Handles ``import "…/testify/assert"`` (binds ``assert``), an explicit alias
+    ``import tassert "…/testify/assert"`` (binds ``tassert``), and grouped
+    ``import ( … )`` blocks. A package not under ``testify/{assert,require}`` is
+    ignored. Absent/none ⇒ the conventional unaliased ``assert``/``require`` names
+    are still recognized by the caller (these only ADD aliases, never remove).
+    """
+
+    aliases: dict[str, str] = {}
+    # Single or grouped import lines: optional alias then a quoted path.
+    import_line = re.compile(
+        r'^[ \t]*(?:import[ \t]+)?(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*)[ \t]+)?'
+        r'"(?P<path>[^"]*testify/(?P<leaf>assert|require))"',
+        re.MULTILINE,
+    )
+    for m in import_line.finditer(text):
+        leaf = m.group("leaf")
+        alias = m.group("alias") or leaf
+        aliases[alias] = leaf
+    return aliases
+
+
+def _go_testify_call_res(text: str) -> list[tuple[str, re.Pattern[str]]]:
+    """``(alias, regex)`` for every testify package call form active in ``text``.
+
+    The regex matches ``<alias>.<Func>(`` for an UPPER-CamelCase exported function
+    (``Equal`` / ``NoError`` / ``True`` / ``Contains`` / …) — the testify public
+    surface — without enumerating every function name (so ``assert.JSONEq`` etc.
+    are covered). Constant-only-ness is decided later from the ARG text, not the
+    function name, so a permissive function match never false-GREENs.
+    """
+
+    aliases = dict.fromkeys((*_GO_TESTIFY_RECEIVERS,))  # defaults always recognized
+    aliases.update(_go_testify_aliases(text))
+    out: list[tuple[str, re.Pattern[str]]] = []
+    for alias in aliases:
+        out.append(
+            (
+                alias,
+                re.compile(
+                    rf"(?<![A-Za-z0-9_.]){re.escape(alias)}\.[A-Z][A-Za-z0-9_]*\s*\("
+                ),
+            )
+        )
+    return out
+
+
+def _go_body_has_primitive_assertion(
+    body_text: str, receivers: Iterable[str], *, alias_source: str | None = None
+) -> bool:
+    """Whether ``body_text`` contains a Go PRIMITIVE assertion (lexical).
+
+    A primitive is a ``<recv>.<FailMethod>(`` failure call on ANY of the in-scope
+    testing receivers, OR a testify ``<alias>.<Func>(`` call. A bare named-helper
+    call is NOT primitive (resolved via the evidence graph). Receiver-anchored so a
+    SUT method that happens to be named ``Fatal`` (``server.Fatal()``) is not
+    mistaken for ``t.Fatal`` — only the ``*testing.T`` receiver(s) count.
+
+    ``alias_source`` is the text the testify import ALIASES are resolved from — it
+    must be the WHOLE FILE, because an ``import tassert "…/testify/assert"`` lives
+    OUTSIDE the function body. When ``None`` (a body whose file is unknown) it
+    degrades to ``body_text`` and the conventional unaliased ``assert``/``require``
+    names are still recognized (an aliased call in that degraded case is then seen
+    by the helper-resolution path instead — never a silent false-GREEN).
+
+    Comments are stripped before scanning so a ``t.Fatalf`` written in a COMMENT is
+    not counted as an assertion (false-GREEN guard).
+    """
+
+    skeleton = _go_strip_comments(body_text)
+    for recv in receivers:
+        if _go_receiver_call_re(recv, _GO_FAIL_METHODS).search(skeleton):
+            return True
+    for _alias, pattern in _go_testify_call_res(alias_source if alias_source is not None else body_text):
+        if pattern.search(skeleton):
+            return True
+    return False
+
+
+def _go_body_is_skipped(body_text: str, receivers: Iterable[str]) -> bool:
+    """Whether ``body_text`` unconditionally skips via ``<recv>.Skip``/``Skipf``/``SkipNow``.
+
+    Comments stripped first so a ``t.Skip()`` mentioned in a COMMENT does not mark a
+    real test skipped (which would be a false-RED — the opposite hazard)."""
+
+    skeleton = _go_strip_comments(body_text)
+    for recv in receivers:
+        if _go_receiver_call_re(recv, _GO_SKIP_METHODS).search(skeleton):
+            return True
+    return False
+
+
+#: Go reserved words / literals / obvious builtins that are NOT credit-worthy
+#: references inside an assertion condition or testify value arg — the Go analogue
+#: of :data:`_PY_DIRECT_IGNORED_NAMES` / :data:`_TS_DIRECT_IGNORED_NAMES`. A SUT
+#: call name, a local variable, an expected var, an Enum/const NAME a test declares
+#: are NEVER here, so ``if got != want`` (got/want) / ``assert.Equal(t, want, got)``
+#: stay GREEN while ``if true {`` / ``assert.Equal(t, 1, 1)`` (only ignored tokens)
+#: become RED. ``t`` (the testing receiver) is ignored: it is the assertion API
+#: ``器``, not an observed value (``assert.Equal(t, 1, 1)`` must not anchor via ``t``).
+_GO_IGNORED_NAMES = frozenset(
+    {
+        "t",
+        "true",
+        "false",
+        "nil",
+        "iota",
+        "len",
+        "cap",
+        "make",
+        "new",
+        "append",
+        "copy",
+        "delete",
+        "string",
+        "int",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "byte",
+        "rune",
+        "float32",
+        "float64",
+        "bool",
+        "error",
+        "complex64",
+        "complex128",
+        "if",
+        "else",
+        "for",
+        "range",
+        "return",
+        "func",
+        "var",
+        "const",
+        "switch",
+        "case",
+        "default",
+        "select",
+        "go",
+        "defer",
+        "map",
+        "struct",
+        "interface",
+        "chan",
+        "type",
+        "package",
+        "import",
+    }
+)
+#: A Go identifier token (the condition / arg scanner harvests these).
+_GO_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: A Go STRING or rune literal (double-quoted, raw-backtick, or single-quoted
+#: rune) — its inner identifiers are not references. Backslash escapes honoured for
+#: the double/single forms; backtick raw strings have no escapes.
+_GO_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|`[^`]*`' + r"|'(?:\\.|[^'\\])*'")
+
+
+def _go_reference_idents(expr: str) -> set[str]:
+    """Genuine identifier REFERENCES in a Go expression (strings/comments stripped).
+
+    Mirrors :func:`_rhs_reference_idents`: identifiers inside string/rune literals
+    and ``//`` / ``/* */`` comments are EXCLUDED, and a SELECTOR field after ``.``
+    (``got.Code`` → ``got`` references, ``Code`` does not) is dropped so a constant
+    compared to a struct field still anchors on the base var. Best-effort and
+    fail-OPEN: anything ambiguous stays a reference (toward credit, never a
+    false-RED). Returns the harvested non-property identifier set.
+    """
+
+    # Strip block + line comments first (coarse; safe — only removes text).
+    no_block = re.sub(r"/\*.*?\*/", " ", expr, flags=re.DOTALL)
+    no_comments = re.sub(r"//[^\n]*", " ", no_block)
+    # Blank out string/rune literals so their inner words are not harvested.
+    blanked = _GO_STRING_RE.sub(" ", no_comments)
+    refs: set[str] = set()
+    for m in _GO_IDENT_RE.finditer(blanked):
+        start = m.start()
+        # Drop a selector field: an identifier immediately preceded by ``.``.
+        k = start - 1
+        while k >= 0 and blanked[k] in " \t":
+            k -= 1
+        if k >= 0 and blanked[k] == ".":
+            continue
+        refs.add(m.group(0))
+    return refs
+
+
+def _go_condition_is_nonconstant(condition: str) -> bool:
+    """Whether a failure-guard CONDITION references a NON-constant observation.
+
+    ``got != want`` / ``err != nil`` / ``len(out) == 0`` reference ``got``/``want``/
+    ``err``/``out`` (non-ignored) ⇒ real. ``1 != 1`` / ``true`` reference only
+    literals/keywords ⇒ constant. (``nil`` is ignored, so ``err != nil`` is REAL
+    purely on ``err``; ``len`` is ignored, so ``len(out) == 0`` is REAL on ``out``.)
+    """
+
+    return bool(_go_reference_idents(condition) - _GO_IGNORED_NAMES)
+
+
+def _go_testify_value_args(args: str) -> str:
+    """The VALUE-arg slice of a testify call's argument text (drops the ``t`` lead).
+
+    testify's signature is ``assert.Equal(t, expected, actual, msgAndArgs...)``.
+    The FIRST arg is the ``*testing.T`` (the assertion API handle, not an
+    observation), and a TRAILING string-literal message (``"msg"`` / a ``"%s"``
+    format + its args) is human text, not the asserted value. We drop the leading
+    ``t`` arg and any trailing args once a string-literal message arg is seen, then
+    return the remaining value-arg text for the non-constant check. Best-effort: if
+    splitting is ambiguous we keep MORE args (toward credit / fail-open).
+    """
+
+    parts = _go_split_args(args)
+    if not parts:
+        return ""
+    # Drop the leading testing-handle arg (conventionally ``t``); keep it only if
+    # there is exactly one arg (degenerate / non-standard call → fail-open).
+    if len(parts) >= 2:
+        parts = parts[1:]
+    # Drop a trailing message: once an arg is a bare string/format literal, it and
+    # everything after it are msgAndArgs. Scan from the end.
+    while parts:
+        last = parts[-1].strip()
+        if _GO_STRING_RE.fullmatch(last):
+            parts = parts[:-1]
+        else:
+            break
+    return " , ".join(parts)
+
+
+def _go_split_args(args: str) -> list[str]:
+    """Top-level comma split of a Go call's argument text (string/bracket aware)."""
+
+    out: list[str] = []
+    depth = 0
+    in_str: str | None = None
+    prev = ""
+    current = ""
+    for ch in args:
+        if in_str is not None:
+            current += ch
+            if ch == in_str and prev != "\\":
+                in_str = None
+            prev = ch
+            continue
+        if ch in ("'", '"', "`"):
+            in_str = ch
+            current += ch
+        elif ch in "([{":
+            depth += 1
+            current += ch
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+            current += ch
+        elif ch == "," and depth == 0:
+            out.append(current)
+            current = ""
+        else:
+            current += ch
+        prev = ch
+    if current.strip():
+        out.append(current)
+    return [p for p in out if p.strip()]
+
+
+def _go_direct_assertion_evidence(
+    body_text: str, receivers: Iterable[str], *, alias_source: str | None = None
+) -> AssertionEvidence:
+    """Verdict: does ``body_text`` carry a NON-constant Go primitive assertion?
+
+    For each primitive assertion in the body decide REAL vs CONSTANT-only:
+
+    * a FAILURE call (``<recv>.Fatal``/``Errorf``/…) is REAL when it is GUARDED by
+      a condition that references a non-constant (``if got != want { t.Fatalf }``).
+      An UNCONDITIONAL failure call (no enclosing ``if`` whose body holds it) is
+      treated as constant-only here UNLESS the call's OWN args reference a
+      non-constant (``t.Fatalf("got %v", got)`` carries ``got``) — a deliberate
+      fail-open so a legitimate post-computation ``t.Fatalf("...", got)`` credits.
+    * a testify call (``assert.Equal(t, want, got)``) is REAL when its VALUE args
+      (after the ``t`` handle, minus a trailing message) reference a non-constant.
+
+    ``alias_source`` (the WHOLE FILE) resolves testify import aliases for the (b)
+    scan; ``None`` degrades to ``body_text`` (unaliased ``assert``/``require`` still
+    recognized). If ANY primitive in the body is REAL ⇒ ``direct`` (ok). If at least
+    one primitive was seen and ALL are constant-only ⇒ ``constant_direct`` (not ok).
+    If the regex ``has_assertion`` matched but this scanner recognizes no primitive
+    (an assertion shape it cannot classify) ⇒ fail OPEN (``direct``), never a
+    false-RED.
+    """
+
+    receivers = tuple(receivers)
+    saw_primitive = False
+    # Scan a comment-stripped SKELETON so an assertion / condition written in a
+    # COMMENT (``// if got != want { t.Fatalf(...) }``) is never read as real code
+    # (the false-GREEN this closes). Offsets are preserved (comments → spaces), so
+    # ``_balanced_args`` / ``_go_enclosing_if_condition`` positions still align.
+    skeleton = _go_strip_comments(body_text)
+
+    # ── (a) stdlib failure calls, with their enclosing ``if`` guard condition ──
+    for recv in receivers:
+        fail_re = _go_receiver_call_re(recv, _GO_FAIL_METHODS)
+        for m in fail_re.finditer(skeleton):
+            saw_primitive = True
+            # The call's OWN argument text (carries ``got`` in ``t.Fatalf("%v", got)``).
+            call_args = _balanced_args(skeleton, m.end() - 1)
+            if _go_reference_idents(call_args) - _GO_IGNORED_NAMES:
+                return AssertionEvidence(ok=True, reason="direct")
+            # Otherwise look for the GUARD: the nearest enclosing ``if <cond> {``
+            # whose brace-matched body contains this call.
+            cond = _go_enclosing_if_condition(skeleton, m.start())
+            if cond is not None and _go_condition_is_nonconstant(cond):
+                return AssertionEvidence(ok=True, reason="direct")
+
+    # ── (b) testify calls, judged on their VALUE args ──
+    for _alias, pattern in _go_testify_call_res(alias_source if alias_source is not None else body_text):
+        for m in pattern.finditer(skeleton):
+            saw_primitive = True
+            args = _balanced_args(skeleton, m.end() - 1)
+            value_args = _go_testify_value_args(args)
+            if _go_reference_idents(value_args) - _GO_IGNORED_NAMES:
+                return AssertionEvidence(ok=True, reason="direct")
+
+    if not saw_primitive:
+        # ``has_assertion`` matched but no primitive classified here → fail OPEN.
+        return AssertionEvidence(ok=True, reason="direct")
+    return AssertionEvidence(ok=False, reason="constant_direct")
+
+
+def _go_enclosing_if_condition(body_text: str, call_pos: int) -> str | None:
+    """Condition of the nearest ``if <cond> {`` whose body encloses ``call_pos``.
+
+    Scans every ``if ... {`` opener before ``call_pos``; for each, brace-matches
+    its block from the ``{`` and keeps the INNERMOST one whose ``[open, close]``
+    span contains the call. Returns the condition text (between ``if`` and the body
+    ``{``), or ``None`` when the call is not inside any ``if`` (unconditional). The
+    condition may itself contain ``if``-free parens/calls (``if errors.Is(err, X)``)
+    — those are returned verbatim for the reference scan. A ``for <cond> {`` /
+    ``switch`` guard is intentionally NOT treated as an assertion guard (only an
+    ``if`` is the idiomatic failure guard); this stays anti-false-green because the
+    fallback is to look at the call's own args (already done by the caller).
+    """
+
+    best: str | None = None
+    best_open = -1
+    for m in re.finditer(r"(?<![A-Za-z0-9_])if\b", body_text):
+        brace = _go_find_block_brace(body_text, m.end())
+        if brace < 0:
+            continue
+        close = _go_match_brace(body_text, brace)
+        if close < 0:
+            continue
+        if brace < call_pos < close and brace > best_open:
+            # Innermost (latest-opening) enclosing ``if`` wins.
+            best_open = brace
+            best = body_text[m.end():brace]
+    return best.strip() if best is not None else None
+
+
+def _go_find_block_brace(text: str, start: int) -> int:
+    """Index of the ``{`` that opens an ``if`` body starting the scan at ``start``.
+
+    Skips over balanced ``()`` / ``[]`` (a condition's own parens/index exprs) and
+    string/rune literals so the FIRST top-level ``{`` is the block opener, not a
+    composite-literal brace inside the condition (``if x == T{} {`` is rare in a
+    guard; this still returns the block ``{`` by requiring top-level depth). Returns
+    -1 if none found before a statement terminator.
+    """
+
+    depth = 0
+    in_str: str | None = None
+    prev = ""
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str is not None:
+            if ch == in_str and prev != "\\":
+                in_str = None
+            prev = ch
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            in_str = ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        elif ch == "{" and depth == 0:
+            return i
+        elif ch == "\n" and depth == 0 and text[max(0, i - 1)] in ";":
+            return -1
+        prev = ch
+        i += 1
+    return -1
+
+
+def _go_match_brace(text: str, open_idx: int) -> int:
+    """Index of the ``}`` matching the ``{`` at ``open_idx`` (string-aware), or -1."""
+
+    depth = 0
+    in_str: str | None = None
+    prev = ""
+    i = open_idx
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str is not None:
+            if ch == in_str and prev != "\\":
+                in_str = None
+            prev = ch
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            in_str = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        prev = ch
+        i += 1
+    return -1
+
+
+def _go_blank_spans(inner: str, inner_offset: int, spans: list[tuple[int, int]]) -> str:
+    """``inner`` with each absolute ``spans`` region blanked (newlines preserved).
+
+    ``inner`` is a slice of the file that begins at absolute index ``inner_offset``;
+    ``spans`` are absolute ``(start, end)`` char ranges (the subtests). Each char in
+    a span is replaced by a space EXCEPT newlines (kept so any line-based scan over
+    the result still maps to the right lines). Used to compute a GROUP function's OWN
+    skip/assertion facts without seeing its children's content.
+    """
+
+    if not spans:
+        return inner
+    chars = list(inner)
+    n = len(inner)
+    for start, end in spans:
+        lo = max(0, start - inner_offset)
+        hi = min(n, end - inner_offset)
+        for i in range(lo, hi):
+            if chars[i] != "\n":
+                chars[i] = " "
+    return "".join(chars)
+
+
+@dataclass(frozen=True)
+class GoTestBlockProfile:
+    """Go (``testing`` + optional testify) structural adapter.
+
+    A test block is a ``func TestXxx(t *testing.T) { ... }`` function (its body is
+    brace-matched). ``t.Run("name", func(t *testing.T){...})`` SUBTESTS are emitted
+    as NESTED blocks — exactly the group→leaf shape the TS adapter uses for
+    ``describe``→``it`` (the gate's ``_attached_block`` redirects a marker above a
+    group to its first nested test, and a flat ``TestXxx`` with no subtest is a leaf
+    coverage target itself). Skip is ``t.Skip()`` / ``t.Skipf(...)`` / ``t.SkipNow()``
+    on the receiver. A PRIMITIVE assertion is a stdlib failure call
+    (``t.Error/Errorf/Fatal/Fatalf/Fail/FailNow``) or a testify ``assert.X`` /
+    ``require.X`` call; a bare named-helper call is resolved one hop via
+    :meth:`resolve_assertion_evidence`.
+    """
+
+    def handles_file(self, rel_path: str) -> bool:
+        return rel_path.endswith("_test.go")
+
+    def parse_test_blocks(self, text: str) -> list[TestBlock]:
+        def _line_of(pos: int) -> int:
+            return text.count("\n", 0, pos) + 1
+
+        blocks: list[TestBlock] = []
+        for fm in _GO_TEST_FUNC_RE.finditer(text):
+            brace = text.index("{", fm.end() - 1)
+            close = _go_match_brace(text, brace)
+            if close < 0:
+                close = len(text) - 1
+            fn_recv = fm.group("recv")
+            start_line = _line_of(fm.start())
+            # Body extent = the opening-brace line to the close brace; body_text for
+            # assertion scanning is the inside of the braces. ``text`` (the whole
+            # file) is the testify-alias source for both function and subtest scans.
+            end_line = _line_of(close)
+            fn_body_inner = text[brace + 1 : close]
+
+            # Subtests: each ``<recv>.Run("name", func(<sub> *testing.T){...})``
+            # inside this function becomes a nested leaf block. Its receiver is the
+            # subtest's OWN ``*testing.T`` parameter. We also record each subtest's
+            # absolute char span so the FUNCTION-level skip/assertion scan can blank
+            # it out (a group's facts are its OWN, not inherited from a child — the
+            # same discipline as TS ``describe`` skip = its own ``.skip`` modifier,
+            # never a child's).
+            subtests: list[TestBlock] = []
+            sub_spans: list[tuple[int, int]] = []
+            for sm in _GO_SUBTEST_RE.finditer(text, brace + 1, close):
+                sbrace = text.index("{", sm.end() - 1)
+                sclose = _go_match_brace(text, sbrace)
+                if sclose < 0 or sclose > close:
+                    continue
+                sub_recv = sm.group("sub")
+                sub_inner = text[sbrace + 1 : sclose]
+                sub_spans.append((sm.start(), sclose + 1))
+                subtests.append(
+                    TestBlock(
+                        start_line=_line_of(sm.start()),
+                        end_line=_line_of(sclose),
+                        is_executable=not _go_body_is_skipped(sub_inner, (sub_recv,)),
+                        has_assertion=_go_body_has_primitive_assertion(
+                            sub_inner, (sub_recv,), alias_source=text
+                        ),
+                        label=f"{fm.group('name')}/subtest",
+                        body_text=sub_inner,
+                    )
+                )
+
+            # Function-OUTER body: the function's inner text with subtest regions
+            # blanked (newlines preserved so line math is unaffected). This is what
+            # the function-level skip / has_assertion are computed over, so a group
+            # is not falsely marked skipped/asserting because a CHILD skips/asserts.
+            fn_outer = _go_blank_spans(fn_body_inner, brace + 1, sub_spans)
+
+            # The function block itself. A function that ONLY groups subtests is a
+            # group (the gate redirects a marker above it to the first subtest); a
+            # flat function is a leaf coverage target. ``has_assertion`` / skip
+            # reflect the function's OWN body (outside any subtest), which for a flat
+            # test IS the assertion site. Receivers: the function's own receiver
+            # (subtests carry their own).
+            blocks.append(
+                TestBlock(
+                    start_line=start_line,
+                    end_line=end_line,
+                    is_executable=not _go_body_is_skipped(fn_outer, (fn_recv,)),
+                    has_assertion=_go_body_has_primitive_assertion(
+                        fn_outer, (fn_recv,), alias_source=text
+                    ),
+                    label=fm.group("name"),
+                    body_text=fn_outer,
+                )
+            )
+            blocks.extend(subtests)
+        # Keep document order (start_line) so attachment's smallest-containing and
+        # nearest-after scans behave like the TS/PY adapters.
+        return sorted(blocks, key=lambda b: (b.start_line, -b.end_line))
+
+    def resolve_assertion_evidence(
+        self, block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+    ) -> AssertionEvidence:
+        return _resolve_go_evidence(
+            block, importer_text=importer_text, importer_rel=importer_rel, project_root=project_root
+        )
+
+    def resolve_direct_assertion_evidence(
+        self,
+        block: TestBlock,
+        *,
+        importer_text: str = "",
+        importer_rel: str = "",
+        project_root: Path | None = None,
+        config: dict[str, Any] | None = None,
+        profile: Any = None,
+    ) -> AssertionEvidence:
+        """Whether the block's DIRECT Go primitive assertion references a real name.
+
+        ``constant_direct`` when every primitive is constant-only (an unconditional
+        ``t.Fatal()`` / ``if 1 != 1`` guard / ``assert.Equal(t, 1, 1)``); ``direct``
+        when a failure call is guarded by a non-constant condition (or carries a
+        non-constant in its own args) or a testify call's value args reference a
+        non-constant. The body's testing receivers are recovered from ``body_text``
+        so the check works without re-parsing the file; ``importer_text`` (the whole
+        file) resolves testify import aliases. Called by the gate only when
+        ``block.has_assertion`` is True.
+        """
+
+        receivers = _go_block_receivers(block)
+        return _go_direct_assertion_evidence(
+            block.body_text, receivers, alias_source=importer_text or block.body_text
+        )
+
+
+def _go_block_receivers(block: TestBlock) -> tuple[str, ...]:
+    """Testing-receiver names in scope for a Go block's body.
+
+    A flat ``TestXxx`` body is scanned with the conventional ``t`` plus any name
+    that appears as ``<name>.<FailMethod>(`` / ``<name>.Skip(`` in the body (so a
+    renamed receiver ``func TestX(tt *testing.T)`` is honored even though the
+    profile only stores the body text). Always includes ``t`` (the overwhelming
+    convention) so a body using ``t`` is covered even when no fail/skip call is
+    present yet. Failing to recover a receiver only ever makes a primitive look
+    ABSENT (fail-open toward credit at the direct stage), never a false-GREEN.
+    """
+
+    recvs: set[str] = {"t"}
+    for m in re.finditer(
+        r"(?<![A-Za-z0-9_.])(?P<r>[A-Za-z_][A-Za-z0-9_]*)\.(?:"
+        + "|".join((*_GO_FAIL_METHODS, *_GO_SKIP_METHODS))
+        + r")\b\s*\(",
+        block.body_text,
+    ):
+        recvs.add(m.group("r"))
+    return tuple(recvs)
+
+
+def _resolve_go_evidence(
+    block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+) -> AssertionEvidence:
+    """Go DELEGATED-assertion (helper) resolution — mirrors the PY/TS engine.
+
+    A Go test that delegates its check to a same-package / imported helper
+    (``checkServer(t, got)`` whose body runs ``if ... { t.Fatalf(...) }``) is
+    resolved one hop through the shared :func:`_resolve_evidence` engine. The
+    helper-body primitive detector is the Go failure-call / testify regex (a body
+    with a real ``t.Fatalf`` + an argument anchor passes; a no-op / constant helper
+    fails). Import resolution uses the Go module/same-directory rules in
+    :func:`_go_resolve_module`.
+    """
+
+    return _resolve_evidence(
+        block,
+        importer_text=importer_text,
+        importer_rel=importer_rel,
+        project_root=project_root,
+        primitive_re=_GO_HELPER_PRIMITIVE_RE,
+        imported_lookup=_go_imported_module,
+        module_resolver=_go_resolve_module,
+        def_finder=_go_find_function_def,
+        reexport_edges=None,
+    )
+
+
+#: Helper-body primitive detector for Go (used by the shared evidence engine's
+#: ``primitive_re``). A failure call on the CONVENTIONAL ``t`` receiver or a
+#: testify ``assert.``/``require.`` call. (Helper bodies overwhelmingly take the
+#: testing handle as ``t``; a renamed handle in a helper degrades to unresolved,
+#: which is fail-closed — never a false pass.)
+_GO_HELPER_PRIMITIVE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])t\.(?:" + "|".join(_GO_FAIL_METHODS) + r")\b\s*\("
+    r"|(?<![A-Za-z0-9_.])(?:assert|require)\.[A-Z][A-Za-z0-9_]*\s*\("
+)
+
+
+#: A Go helper ``func name(params) {`` / ``func name(params) ret {`` definition —
+#: captures the name + the (possibly multi-line) parameter list (read by paren
+#: matching). A METHOD (``func (r R) name(...)``) is intentionally not matched: a
+#: test calls a bare ``helper(t, x)``, not a method, in the conventional shape.
+_GO_FUNC_DEF_RE = re.compile(r"(?<![A-Za-z0-9_])func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _go_imported_module(importer_text: str, symbol: str) -> str | None:
+    """Binding 'module' for a Go helper symbol — always ``None`` (same-file search).
+
+    Go has NO per-symbol import statement: a same-package helper is callable with
+    no import at all (one package per directory), and a cross-package helper is a
+    ``pkg.Helper`` SELECTOR (which the assertion-helper extractor reduces to its
+    leaf ``Helper``, losing the package qualifier). Returning ``None`` makes the
+    shared evidence engine keep ``module_text = importer_text`` and search the
+    SAME FILE for the helper's ``func`` def — which is where the conventional
+    generated Go test helper lives (a ``func check(t *testing.T, got int){...}``
+    above/below the test in the same ``*_test.go``). A helper that lives in a
+    SEPARATE same-package file is not followed (the def-finder won't find it in the
+    importer text ⇒ ``unresolved_helper`` ⇒ fail-CLOSED in strict, never a false
+    pass) — a deliberate, documented residual matching the PY/TS "1-hop, same-repo"
+    discipline (a future ``go-module`` import-resolver adapter can widen this).
+    """
+
+    return None
+
+
+def _go_resolve_module(importer_rel: str, spec: str, project_root: Path) -> Path | None:
+    """No-op module resolver for Go (same-file helper search only).
+
+    Never called with a real ``spec`` because :func:`_go_imported_module` always
+    returns ``None`` (the engine then searches the importer text in-place and does
+    not invoke a module resolver). Present only to satisfy the shared engine's
+    adapter signature; returns ``None`` defensively.
+    """
+
+    return None
+
+
+def _go_find_function_def(module_text: str, name: str) -> "tuple[str, list[str]] | None":
+    """Find Go ``func name(params...) {``'s body + parameter names in ``module_text``.
+
+    Returns ``(body_text, param_names)`` or ``None``. The body is brace-matched
+    from the function-opening ``{`` after the (possibly multi-line) parameter list
+    and an optional return signature, then COMMENT-STRIPPED (so a ``t.Fatalf`` in a
+    helper COMMENT is not read as a real assertion by the shared engine's
+    ``primitive_re`` / argument-anchor scan — the helper-side analogue of the
+    direct-side comment false-GREEN guard). Parameter names are extracted from the
+    param list, KEEPING the ``*testing.T`` handle's name (the anchor check separately
+    requires a NON-``t`` param reference, so a helper that asserts only ``t``-handle
+    constants stays constant-only). Mirrors :func:`_py_find_function_def` /
+    :func:`_ts_find_function_def`.
+    """
+
+    skeleton = _go_strip_comments(module_text)
+    for m in _GO_FUNC_DEF_RE.finditer(skeleton):
+        if m.group("name") != name:
+            continue
+        params, after = _read_paren_group(skeleton, m.end() - 1)
+        if params is None:
+            continue
+        brace = skeleton.find("{", after)
+        if brace < 0:
+            continue
+        # Guard: the ``{`` must be the body, not a composite literal in the return
+        # type. Accept the first ``{`` at/after ``after`` whose match is balanced —
+        # for the conventional ``func f(...) {`` and ``func f(...) error {`` this is
+        # correct; an exotic return type with a brace degrades (fail-closed). The
+        # body is from the comment-stripped skeleton, so embedded comments are gone.
+        body = _read_brace_group(skeleton, brace)
+        return body, _go_split_param_names(params)
+    return None
+
+
+def _go_split_param_names(params: str) -> list[str]:
+    """Parameter NAMES from a Go parameter list (``got int, want int`` → [got, want]).
+
+    Go groups consecutive same-type params (``a, b int``) and writes ``name type``.
+    We take the leading identifier of each comma-group as a name when the group has
+    two+ tokens (``got int``); a single-token group is a name in a grouped list
+    (``a, b int`` → ``a`` then ``b int``). The ``*testing.T`` handle name (commonly
+    ``t``) is KEPT (the anchor check separately requires a non-``t`` reference).
+    Best-effort: anything ambiguous is included (fail-open at the param level; the
+    primitive + anchor check downstream is the real gate).
+    """
+
+    names: list[str] = []
+    for raw in _go_split_args(params):
+        tokens = raw.split()
+        if not tokens:
+            continue
+        # ``name type`` → name is tokens[0]; ``name`` (grouped) → the token itself.
+        candidate = tokens[0].lstrip("*")
+        m = re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", candidate)
+        if m:
+            names.append(candidate)
+    return names
+
+
+# ---------------------------------------------------------------------------
 # Per-profile 1-hop helper resolution (the assertion EVIDENCE graph).
 #
 # Both implementations follow the SAME shape (mirroring the native implement-

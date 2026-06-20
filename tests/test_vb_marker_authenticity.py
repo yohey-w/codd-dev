@@ -17,6 +17,7 @@ import pytest
 
 from codd.project_types import LayoutProfile
 from codd.vb_marker_authenticity import (
+    GoTestBlockProfile,
     PythonTestBlockProfile,
     TypeScriptTestBlockProfile,
     build_authenticity_report,
@@ -38,6 +39,9 @@ PY_PROFILE = LayoutProfile(
 )
 TS_PROFILE = LayoutProfile(
     language="typescript", package_name="app", source_root="src", package_root="src", test_root="tests"
+)
+GO_PROFILE = LayoutProfile(
+    language="go", package_name="app", source_root=".", package_root=".", test_root="tests"
 )
 
 
@@ -351,6 +355,434 @@ def test_gate_rejects_ts_direct_literal_expect(tmp_path):
 
     assert not report.passed
     assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations)
+
+
+# ---------------------------------------------------------------------------
+# Go (``testing`` + testify) adapter — anti-false-green parity with PY/TS.
+#
+# The C-Go dogfood run reported 60/60 verifiable-behaviors UNCOVERED even though
+# the generated Go tests carried 132 ``// codd: covers vb=…`` markers: ``*_test.go``
+# was not a scanned test suffix AND the marker/authenticity gate had no Go adapter
+# (Go fell through to stage-1-only degrade). These guard BOTH halves: the coverage
+# scan now SEES Go markers, and the authenticity gate rejects a Go marker on a test
+# with no real assertion (or a constant-only one) while crediting a genuine one.
+# ---------------------------------------------------------------------------
+
+
+def test_go_parser_detects_assertion_skip_and_empty():
+    """Unit: the Go adapter resolves has_assertion / skip / empty per function,
+    mirroring ``test_python_parser_detects_assertion_and_skip``."""
+    text = (
+        "package app\n"
+        "import \"testing\"\n"
+        "func TestReal(t *testing.T) {\n"
+        "\tgot := Add(2, 3)\n"
+        "\tif got != 5 {\n"
+        "\t\tt.Fatalf(\"got %d\", got)\n"
+        "\t}\n"
+        "}\n"
+        "func TestSkipped(t *testing.T) {\n"
+        "\tt.Skip(\"later\")\n"
+        "\tif Add(1, 1) != 2 { t.Fatal(\"x\") }\n"
+        "}\n"
+        "func TestEmpty(t *testing.T) {\n"
+        "\t_ = Add(1, 1)\n"
+        "}\n"
+    )
+    blocks = {b.label: b for b in GoTestBlockProfile().parse_test_blocks(text)}
+    assert blocks["TestReal"].is_executable and blocks["TestReal"].has_assertion
+    assert blocks["TestSkipped"].is_executable is False
+    assert blocks["TestEmpty"].has_assertion is False
+
+
+def test_go_parser_detects_testify_and_subtests():
+    """Unit: testify calls count as primitives; ``t.Run`` subtests are nested leaf
+    blocks (the group→leaf shape the TS ``describe``→``it`` adapter uses)."""
+    text = (
+        "package app\n"
+        "import (\n"
+        "\t\"testing\"\n"
+        "\t\"github.com/stretchr/testify/require\"\n"
+        ")\n"
+        "func TestTestify(t *testing.T) {\n"
+        "\tgot := Add(1, 2)\n"
+        "\trequire.Equal(t, 3, got)\n"
+        "}\n"
+        "func TestGroup(t *testing.T) {\n"
+        "\tt.Run(\"adds\", func(t *testing.T) {\n"
+        "\t\tgot := Add(1, 1)\n"
+        "\t\tif got != 2 { t.Fatalf(\"got %d\", got) }\n"
+        "\t})\n"
+        "\tt.Run(\"skipped\", func(t *testing.T) {\n"
+        "\t\tt.Skip()\n"
+        "\t})\n"
+        "}\n"
+    )
+    blocks = GoTestBlockProfile().parse_test_blocks(text)
+    by_label = {b.label: b for b in blocks if b.label == "TestTestify"}
+    assert by_label["TestTestify"].has_assertion is True
+    subtests = [b for b in blocks if b.label == "TestGroup/subtest"]
+    assert len(subtests) == 2
+    adds = min(subtests, key=lambda b: b.start_line)
+    skipped = max(subtests, key=lambda b: b.start_line)
+    assert adds.is_executable and adds.has_assertion
+    assert skipped.is_executable is False  # t.Skip()
+    # The grouping function's OWN facts are NOT inherited from its children: it is
+    # not itself skipped (a child is) and carries no direct assertion of its own.
+    group = next(b for b in blocks if b.label == "TestGroup")
+    assert group.is_executable is True
+    assert group.has_assertion is False
+
+
+def test_go_gate_credits_real_guarded_assertion(tmp_path):
+    """marker + real assertion ``if got != want { t.Fatalf(...) }`` (got from a SUT
+    call) ⇒ CREDITED (report.passed), no degradation."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | add |\n")
+    _write(
+        project / "tests" / "add_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestAdd(t *testing.T) {\n"
+        "\tgot := Add(2, 3)\n"
+        "\twant := 5\n"
+        "\tif got != want {\n"
+        "\t\tt.Fatalf(\"Add(2,3) = %d, want %d\", got, want)\n"
+        "\t}\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert report.passed
+    assert report.degraded_paths == []  # Go file is RECOGNIZED, not degraded
+
+
+def test_go_gate_credits_testify_require(tmp_path):
+    """marker + testify ``require.Equal(t, want, got)`` (non-constant args) ⇒ CREDITED."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | add |\n")
+    _write(
+        project / "tests" / "req_test.go",
+        "package app\n"
+        "import (\n"
+        "\t\"testing\"\n"
+        "\t\"github.com/stretchr/testify/require\"\n"
+        ")\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestAdd(t *testing.T) {\n"
+        "\tgot := Add(2, 3)\n"
+        "\trequire.Equal(t, 5, got)\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert report.passed
+
+
+def test_go_gate_rejects_no_assertion(tmp_path):
+    """marker + NO assertion (``func TestX(t *testing.T){ _ = Sut() }``) ⇒ REJECTED.
+    This is the cardinal anti-false-green case: running code without checking an
+    outcome proves nothing."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | x |\n")
+    _write(
+        project / "tests" / "x_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestX(t *testing.T) {\n"
+        "\t_ = Sut()\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-GO-01" for v in report.violations)
+
+
+def test_go_gate_rejects_constant_only_assertion(tmp_path):
+    """marker + constant-only (``if 1 != 1 { t.Fatal() }``) ⇒ REJECTED. A constant
+    condition can never fail, so the ``t.Fatal`` is unreachable-by-design — it
+    proves nothing (the Go analogue of ``assert True`` / ``expect(true).toBe(true)``)."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | c |\n")
+    _write(
+        project / "tests" / "c_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestC(t *testing.T) {\n"
+        "\tif 1 != 1 {\n"
+        "\t\tt.Fatal(\"never\")\n"
+        "\t}\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-GO-01" for v in report.violations)
+    assert any("CONSTANT" in v.message or "constant" in v.message for v in report.violations)
+
+
+def test_go_gate_rejects_unconditional_fatal_todo(tmp_path):
+    """marker + unconditional ``t.Fatal("todo")`` (no SUT/expected reference) ⇒
+    REJECTED — a stub failure call with no observation is not a real assertion."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | todo |\n")
+    _write(
+        project / "tests" / "todo_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestTodo(t *testing.T) {\n"
+        "\tt.Fatal(\"todo\")\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-GO-01" for v in report.violations)
+
+
+def test_go_gate_rejects_constant_testify(tmp_path):
+    """marker + testify with only constant args (``assert.Equal(t, 1, 1)``) ⇒ REJECTED."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | c |\n")
+    _write(
+        project / "tests" / "ct_test.go",
+        "package app\n"
+        "import (\n"
+        "\t\"testing\"\n"
+        "\t\"github.com/stretchr/testify/assert\"\n"
+        ")\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestConst(t *testing.T) {\n"
+        "\tassert.Equal(t, 1, 1)\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-GO-01" for v in report.violations)
+
+
+def test_go_gate_rejects_marker_on_skipped_test(tmp_path):
+    """marker + ``t.Skip()`` ⇒ handled like other skipped blocks (``skipped`` kind),
+    matching Python ``pytest.skip`` / TS ``it.skip`` semantics — a skipped test
+    asserts nothing even though it contains a real ``t.Fatal`` guard."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | s |\n")
+    _write(
+        project / "tests" / "s_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestSkipped(t *testing.T) {\n"
+        "\tt.Skip(\"wip\")\n"
+        "\tgot := Add(1, 1)\n"
+        "\tif got != 2 { t.Fatalf(\"got %d\", got) }\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "skipped" and v.vb_id == "VB-GO-01" for v in report.violations)
+
+
+def test_go_gate_credits_resolved_assertion_helper(tmp_path):
+    """marker + a bare assertion-helper call whose same-file ``func`` body runs a
+    real ``t.Fatalf`` anchored on the helper's args ⇒ CREDITED via the 1-hop helper
+    graph (the Go analogue of the PY/TS ``expectSuccessfulRun`` delegation)."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | h |\n")
+    _write(
+        project / "tests" / "h_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "func checkEqual(t *testing.T, got int, want int) {\n"
+        "\tif got != want {\n"
+        "\t\tt.Fatalf(\"got %d want %d\", got, want)\n"
+        "\t}\n"
+        "}\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestViaHelper(t *testing.T) {\n"
+        "\tgot := Add(2, 3)\n"
+        "\tcheckEqual(t, got, 5)\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert report.passed
+
+
+def test_go_gate_rejects_noop_assertion_helper(tmp_path):
+    """marker + a bare helper call whose body has NO assertion ⇒ REJECTED — a helper
+    that checks nothing proves nothing (argument-anchor / no-op defense, mirroring
+    the PY/TS helper-no-primitive rejection)."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | h |\n")
+    _write(
+        project / "tests" / "noop_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "func checkNothing(t *testing.T, got int) {\n"
+        "\t_ = got\n"
+        "}\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestNoop(t *testing.T) {\n"
+        "\tgot := Add(1, 1)\n"
+        "\tcheckNothing(t, got)\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-GO-01" for v in report.violations)
+
+
+def test_go_gate_rejects_comment_fake_assertion(tmp_path):
+    """marker + a real assertion written ONLY in a COMMENT
+    (``// if got != want { t.Fatalf(...) }``) while the executable code is
+    constant-only ⇒ REJECTED. A comment proves nothing; the scanner must read a
+    comment-stripped skeleton (false-GREEN guard)."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | c |\n")
+    _write(
+        project / "tests" / "cmt_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestCommentFake(t *testing.T) {\n"
+        "\t// if got != want { t.Fatalf(\"...\") }\n"
+        "\tif 1 != 1 {\n"
+        "\t\tt.Fatal()\n"
+        "\t}\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert not report.passed
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-GO-01" for v in report.violations)
+
+
+def test_go_gate_comment_mentioning_skip_is_not_skip(tmp_path):
+    """NO-FALSE-RED guard: a real, asserting test with a COMMENT that merely
+    mentions ``t.Skip()`` must NOT be treated as skipped (comment-stripped skip
+    detection)."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | add |\n")
+    _write(
+        project / "tests" / "note_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestNote(t *testing.T) {\n"
+        "\t// t.Skip() — TODO note, not an actual skip\n"
+        "\tgot := Add(2, 3)\n"
+        "\tif got != 5 { t.Fatalf(\"got %d\", got) }\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert report.passed
+
+
+def test_go_gate_credits_err_nil_idiom(tmp_path):
+    """NO-FALSE-RED guard: the most common Go assertion idiom
+    ``if err != nil { t.Fatalf(...) }`` references ``err`` (non-constant) and must
+    stay GREEN — the Go analogue of the PY/TS no-fixture-exception guard."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | parse |\n")
+    _write(
+        project / "tests" / "parse_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestParse(t *testing.T) {\n"
+        "\t_, err := Parse(\"x\")\n"
+        "\tif err != nil {\n"
+        "\t\tt.Fatalf(\"unexpected: %v\", err)\n"
+        "\t}\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert report.passed
+
+
+def test_go_gate_credits_aliased_testify(tmp_path):
+    """NO-FALSE-RED guard: a testify package imported under an ALIAS
+    (``treq "…/require"``; ``treq.Equal(t, want, got)``) is still recognized as a
+    real assertion — the alias import lives OUTSIDE the function body, so alias
+    resolution must read the whole file (regression guard for that bug)."""
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | add |\n")
+    _write(
+        project / "tests" / "alias_test.go",
+        "package app\n"
+        "import (\n"
+        "\t\"testing\"\n"
+        "\ttreq \"github.com/stretchr/testify/require\"\n"
+        ")\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestAliased(t *testing.T) {\n"
+        "\tgot := Add(2, 3)\n"
+        "\ttreq.Equal(t, 5, got)\n"
+        "}\n",
+    )
+    report = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert report.passed
+
+
+def test_go_coverage_finds_markers_present(tmp_path):
+    """THE ORIGINAL C-GO 60/60 BUG: markers PRESENT in a Go test must be FOUND.
+
+    Before the fix ``*_test.go`` was not a scanned suffix, so every Go ``covers``
+    marker went unread and declared behaviors read as uncovered. Here two real,
+    correctly-marked Go tests must reconcile their VBs as COVERED (zero uncovered),
+    proving the markers are now scanned/found."""
+    from codd.verifiable_behavior_audit import build_vb_coverage_audit
+
+    project = tmp_path
+    _canonical(project, "| VB-GO-01 | add |\n| VB-GO-02 | sub |\n")
+    _write(
+        project / "tests" / "calc_test.go",
+        "package app\n"
+        "import \"testing\"\n"
+        "// codd: covers vb=VB-GO-01\n"
+        "func TestAdd(t *testing.T) {\n"
+        "\tgot := Add(2, 3)\n"
+        "\tif got != 5 { t.Fatalf(\"got %d\", got) }\n"
+        "}\n"
+        "// codd: covers vb=VB-GO-02\n"
+        "func TestSub(t *testing.T) {\n"
+        "\tgot := Sub(3, 1)\n"
+        "\tif got != 2 { t.Fatalf(\"got %d\", got) }\n"
+        "}\n",
+    )
+    report = build_vb_coverage_audit(project, config={"scan": {"test_dirs": ["tests/"]}})
+    assert report.summary["uncovered"] == 0
+    assert report.summary["covered"] == 2
+    # And the authenticity gate credits both (real guarded assertions).
+    auth = build_authenticity_report(
+        project, config={"scan": {"test_dirs": ["tests/"]}}, profile=GO_PROFILE
+    )
+    assert auth.passed
 
 
 def test_gate_keeps_python_no_fixture_exception_assertion_green(tmp_path):

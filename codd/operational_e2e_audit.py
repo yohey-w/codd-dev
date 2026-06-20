@@ -87,6 +87,15 @@ _TEST_SUFFIXES = (
     ".cy.ts",
     ".cy.js",
     ".py",
+    # Go's mandatory test-file convention: ``go test`` ONLY compiles/runs files
+    # named ``*_test.go``. Without this suffix the VB-coverage scan and this
+    # operational-e2e scan never SEE a Go test file, so every Go ``codd: covers
+    # vb=…`` marker goes unread and all declared behaviors read as uncovered — the
+    # exact C-Go dogfood false-RED (60/60 VBs "uncovered" though 132 markers were
+    # present). Suffix-anchored on ``_test.go`` (not bare ``.go``) so source
+    # modules (``main.go`` / ``server.go``) are still excluded, mirroring how
+    # ``.py`` admits tests without admitting every module via the test-dir scope.
+    "_test.go",
 )
 
 
