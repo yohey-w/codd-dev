@@ -211,6 +211,82 @@ class ScopeSpec:
 
 
 @dataclass(frozen=True)
+class VerifyObservationPolicy:
+    """Unweakenable anti-false-green observation policy for a verify command.
+
+    The DEFAULTS are the invariant: a verify run is green ONLY if it observed at
+    least ``min_collected_tests`` real tests, produced a parseable report, and
+    had no failed/skipped tests. A profile may STRENGTHEN (raise
+    ``min_collected_tests``) but NEVER weaken — every weakening declaration
+    (``allow_zero_tests``, ``zero_tests: warn``, ``report_missing: pass``,
+    ``min_collected_tests: 0``, an unknown key, …) is rejected by
+    :meth:`from_mapping` at load time, so a profile cannot silently turn a
+    not-green verify outcome green (a profile is a contract, not a way to
+    disable the invariant).
+    """
+
+    min_collected_tests: int = 1
+    zero_tests: Literal["red"] = "red"
+    report_missing: Literal["red"] = "red"
+    report_parse_error: Literal["red"] = "red"
+    failed_tests: Literal["red"] = "red"
+    skipped_tests: Literal["red"] = "red"
+
+    #: Fields that may ONLY ever be "red" — they cannot be weakened by a profile.
+    RED_ONLY: ClassVar[tuple[str, ...]] = (
+        "zero_tests",
+        "report_missing",
+        "report_parse_error",
+        "failed_tests",
+        "skipped_tests",
+    )
+
+    @classmethod
+    def from_mapping(
+        cls, raw: Any, *, where: str = "commands.verify.observation"
+    ) -> "VerifyObservationPolicy":
+        """Parse + STRICTLY validate an ``observation:`` block; raise on weakening.
+
+        ``None`` → the strict defaults. Any weakening (a RED_ONLY field set to
+        anything but "red", ``min_collected_tests < 1``, or an unknown key such
+        as ``allow_zero_tests``) raises :class:`ValueError`.
+        """
+        if raw is None:
+            return cls()
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"{where}: expected a mapping, got {type(raw).__name__}")
+        known = {"min_collected_tests", *cls.RED_ONLY}
+        unknown = sorted(k for k in raw if k not in known)
+        if unknown:
+            raise ValueError(
+                f"{where}: unknown observation key(s) {unknown} — the anti-false-green "
+                f"observation policy cannot be extended with weakening flags "
+                f"(e.g. allow_zero_tests). Permitted keys: {sorted(known)}."
+            )
+        for key in cls.RED_ONLY:
+            if key in raw and str(raw[key]).strip().lower() != "red":
+                raise ValueError(
+                    f"{where}: {key}={raw[key]!r} weakens an anti-false-green invariant; "
+                    f"only 'red' is permitted (a profile cannot turn a not-green verify "
+                    f"outcome green)."
+                )
+        mct_raw = raw.get("min_collected_tests", 1)
+        try:
+            mct = int(mct_raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{where}: min_collected_tests must be an integer, got {mct_raw!r}"
+            )
+        if mct < 1:
+            raise ValueError(
+                f"{where}: min_collected_tests={mct} weakens the invariant; it must be "
+                f">= 1 (a verify that observed zero tests is never green). Profiles may "
+                f"raise it (stricter), never lower it."
+            )
+        return cls(min_collected_tests=mct)
+
+
+@dataclass(frozen=True)
 class CommandSpec:
     """A single runnable command (design §1.4).
 
@@ -227,6 +303,9 @@ class CommandSpec:
     requires_materialized_deps: bool = False
     report: ReportSpec | None = None
     scope: ScopeSpec | None = None
+    #: Unweakenable anti-false-green observation policy (verify commands). ``None``
+    #: ⇒ the strict defaults apply (see :meth:`VerifyObservationPolicy.from_mapping`).
+    observation: VerifyObservationPolicy | None = None
     #: Free-form leftover keys (e.g. ``pass_condition``) preserved for later phases.
     extra: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 

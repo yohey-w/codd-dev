@@ -33,6 +33,7 @@ from .profile import (
     TestSet,
     TestsSpec,
     ToolchainSpec,
+    VerifyObservationPolicy,
     VerifySpec,
 )
 from .loader import LanguageProfileError, load_language_profile
@@ -86,6 +87,7 @@ __all__ = [
     "TestSet",
     "TestsSpec",
     "ToolchainSpec",
+    "VerifyObservationPolicy",
     "VerifySpec",
     # loader
     "LanguageProfileError",

@@ -25,6 +25,7 @@ from enum import Enum
 from typing import Mapping
 
 from .contract import ResolvedLanguageContract
+from .profile import VerifyObservationPolicy
 
 
 class VerifyClass(str, Enum):
@@ -54,6 +55,7 @@ class VerifyRunPlan:
     report_adapter: str | None
     report_required: bool
     must_include_test_sets: tuple[str, ...]
+    observation: VerifyObservationPolicy
 
     @property
     def command_str(self) -> str:
@@ -83,6 +85,8 @@ def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | Non
         report_adapter=(report.adapter if report else None),
         report_required=bool(report and report.path),
         must_include_test_sets=(scope.must_include_test_sets if scope else ()),
+        # None on the command ⇒ the strict defaults (the invariant), never weaker.
+        observation=(cmd.observation or VerifyObservationPolicy()),
     )
 
 

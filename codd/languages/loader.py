@@ -37,6 +37,7 @@ from .profile import (
     TestSet,
     TestsSpec,
     ToolchainSpec,
+    VerifyObservationPolicy,
     VerifySpec,
 )
 
@@ -238,8 +239,19 @@ def _parse_command(cmd_id: str, raw: Any) -> CommandSpec:
         "requires_materialized_deps",
         "report",
         "scope",
+        "observation",
     }
     extra = {k: v for k, v in m.items() if k not in known}
+    # An ``observation:`` block is validated STRICTLY at load time: any weakening
+    # of the anti-false-green invariant is a profile error, not a silent green.
+    observation = None
+    if "observation" in m:
+        try:
+            observation = VerifyObservationPolicy.from_mapping(
+                m.get("observation"), where=f"{where}.observation"
+            )
+        except ValueError as exc:
+            raise LanguageProfileError(str(exc)) from exc
     return CommandSpec(
         id=cmd_id,
         argv=argv,
@@ -249,6 +261,7 @@ def _parse_command(cmd_id: str, raw: Any) -> CommandSpec:
         requires_materialized_deps=bool(m.get("requires_materialized_deps", False)),
         report=_parse_report(m.get("report")),
         scope=_parse_scope(m.get("scope")),
+        observation=observation,
         extra=extra,
     )
 
