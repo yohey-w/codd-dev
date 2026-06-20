@@ -141,3 +141,9 @@ class AdapterRegistry:
 
 #: Process-wide default language registry (lazy).
 default_registry = LanguageRegistry()
+
+#: Process-wide default adapter registry. Empty until v2.72 registers the real
+#: test_semantics / runner_report / import_resolver / scaffold adapters; a
+#: language contract that names an unregistered adapter is INCOMPLETE (RED), not
+#: a silent green (see :mod:`codd.languages.contract`).
+default_adapter_registry = AdapterRegistry()

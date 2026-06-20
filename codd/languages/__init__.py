@@ -39,7 +39,16 @@ from .registry import (
     AdapterRegistry,
     LanguageRegistry,
     UnknownLanguageError,
+    default_adapter_registry,
     default_registry,
+)
+from .contract import (
+    AdapterRequirement,
+    IncompleteLanguageContractError,
+    ResolvedLanguageContract,
+    build_language_contract,
+    resolve_language_contract,
+    resolve_language_profile,
 )
 from .compat import (
     UnsupportedLayoutShape,
@@ -74,7 +83,15 @@ __all__ = [
     "AdapterRegistry",
     "LanguageRegistry",
     "UnknownLanguageError",
+    "default_adapter_registry",
     "default_registry",
+    # resolved language contract (the language-free kernel seam, v2.68)
+    "AdapterRequirement",
+    "IncompleteLanguageContractError",
+    "ResolvedLanguageContract",
+    "build_language_contract",
+    "resolve_language_contract",
+    "resolve_language_profile",
     # compat shim (LanguageProfile -> legacy LayoutProfile)
     "UnsupportedLayoutShape",
     "layout_profile_from_language_profile",
