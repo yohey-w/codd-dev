@@ -108,3 +108,45 @@ def test_lock_catches_contract_drift():
     drifted = compose(ts, [FW.resolve("nextjs")])
     ok, diffs = verify_lock(drifted, lock)
     assert not ok and diffs
+
+
+# --- resolve from a stack declaration (the codd.yaml stack: block) -----------
+
+from codd.languages.registry import UnknownLanguageError  # noqa: E402
+from codd.stack.registry import UnknownLayerError  # noqa: E402
+from codd.stack.resolve import resolve_stack, resolve_stack_from_declaration  # noqa: E402
+
+
+def test_resolve_stack_by_ids_matches_direct_compose():
+    by_ids = resolve_stack("typescript", ["nextjs"], ["prisma", "playwright"])
+    assert by_ids.stack_id == _curated().stack_id
+    assert by_ids.content_hash == _curated().content_hash
+    assert by_ids.is_clean
+
+
+def test_resolve_stack_from_declaration():
+    decl = {"language": "typescript", "frameworks": ["next"], "addons": ["prisma", "pw"]}
+    c = resolve_stack_from_declaration(decl)  # aliases resolve
+    assert c.stack_id == "typescript+nextjs+prisma+playwright"
+    assert c.is_clean
+
+
+def test_resolve_stack_from_declaration_language_only():
+    c = resolve_stack_from_declaration({"language": "typescript"})
+    assert c.stack_id == "typescript"
+
+
+def test_resolve_stack_unknown_raises():
+    import pytest
+
+    with pytest.raises(UnknownLanguageError):
+        resolve_stack("cobol")
+    with pytest.raises(UnknownLayerError):
+        resolve_stack("typescript", ["svelte"])
+
+
+def test_resolve_stack_from_declaration_requires_language():
+    import pytest
+
+    with pytest.raises(ValueError):
+        resolve_stack_from_declaration({"frameworks": ["nextjs"]})
