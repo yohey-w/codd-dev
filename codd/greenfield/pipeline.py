@@ -533,6 +533,26 @@ class GreenfieldPipeline:
                 {"status": STATUS_PENDING, "detail": ""}, str(exc),
             )
 
+        # Stack obligation CHECKER gate (Contract Kernel v2.77e) — turn the framework/
+        # addon OBLIGATIONS into a red/green gate, AFTER materialization+authenticity. The
+        # composed commands now run (v2.77c) and are authentic (v2.77d); this CHECKS the
+        # declared obligations (the Next.js ignoreBuildErrors guard reds a build that would
+        # pass with type errors; the Playwright e2e_actually_executed obligation reds a
+        # 0-test run). Anti-false-green: a missing/disabled/faulting checker or an
+        # unenforceable ERROR obligation is RED, never a silent pass. Uses the ALREADY-
+        # RESOLVED contract (no re-resolution from disk — avoids a TOCTOU skip) and the
+        # SAME current-run evidence the authenticity layer blessed. Only for stack-declared
+        # projects (contract is not None) — a non-stack run is byte-identical (no gate).
+        # Routed through _fail like intake/lock/materialization.
+        try:
+            if contract is not None:
+                self._enforce_stack_obligations(project_root, session, contract)
+        except StageError as exc:
+            return self._fail(
+                project_root, session, options, "stack_obligations",
+                {"status": STATUS_PENDING, "detail": ""}, str(exc),
+            )
+
         runners: dict[str, Callable[[Path, dict[str, Any], dict[str, Any]], None]] = {
             "init": self._stage_init,
             "elicit": self._stage_elicit,
@@ -754,6 +774,45 @@ class GreenfieldPipeline:
         self.echo(
             "[greenfield] stack command materialization: "
             f"{len(plan.slots)} slot(s) invoked ({', '.join(plan.command_ids)})"
+        )
+
+    # ── stack obligation checker gate (Contract Kernel v2.77e) ──
+
+    def _enforce_stack_obligations(self, project_root: Path, session: dict[str, Any], contract) -> None:
+        """Run the composed stack obligation checkers as a red/green gate (v2.77e).
+
+        See the call site in :meth:`run`. Only invoked for stack-declared projects
+        (``contract is not None``); non-stack projects never reach here, so they are
+        byte-identical (no obligation gate at all).
+
+        Uses the ALREADY-RESOLVED ``contract`` (passed in from intake/lock/
+        materialization) — NOT a re-resolution from disk — so a stack file that changes
+        or is deleted after materialization cannot make this gate silently skip (a
+        TOCTOU false-green). :func:`enforce_stack_obligation_gate` invokes every
+        obligation's registered checker with ``project_root`` plus the current-run
+        evidence (the SAME e2e report the authenticity layer blessed), and raises
+        :class:`StackObligationGateError` unless every ERROR obligation was genuinely
+        enforced AND satisfied: a blocking violation, an unenforced ERROR obligation
+        (no registered checker — unverifiable), or a checker fault (raised / None /
+        malformed return) is RED. Translated to :class:`StageError` so the autopilot
+        reports it honestly via ``_fail``. The per-obligation verdict counts are
+        recorded in the run trace (observable, like the lock verdict + command plan).
+        """
+        from codd.stack.project import StackObligationGateError, enforce_stack_obligation_gate
+
+        try:
+            result = enforce_stack_obligation_gate(contract, project_root)
+        except StackObligationGateError as exc:
+            self.echo(f"[greenfield] stack obligation gate: {exc}")
+            raise StageError(str(exc)) from exc
+
+        record = session.get("stack_contract")
+        if isinstance(record, dict) and result is not None:
+            record["stack_obligations_checked"] = len(contract.obligations)
+            record["stack_obligations_unenforced"] = [o.id for o in result.unenforced]
+        self.echo(
+            "[greenfield] stack obligation gate: "
+            f"{len(contract.obligations)} obligation(s) checked — all enforced obligations satisfied"
         )
 
     # ── option resolution ───────────────────────────────────

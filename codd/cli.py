@@ -7697,6 +7697,28 @@ def _intake_stack_contract_for_verify(project_root: Path, *, stack_command_execu
         f"({', '.join(plan.command_ids)})"
     )
 
+    # Stack obligation CHECKER gate (Contract Kernel v2.77e) — the verify-path mirror of
+    # the greenfield pipeline's :meth:`GreenfieldPipeline._enforce_stack_obligations`.
+    # AFTER materialization (v2.77c) + authenticity (v2.77d), CHECK the composed
+    # framework/addon OBLIGATIONS as a red/green gate: the Next.js ignoreBuildErrors guard
+    # reds a build that would pass with type errors; the Playwright e2e_actually_executed
+    # obligation reds a 0-test run. Anti-false-green: a missing/disabled/faulting checker
+    # or an unenforceable ERROR obligation is RED (honest non-zero exit), never a silent
+    # pass. Uses the ALREADY-RESOLVED ``contract`` from intake (no re-resolution from disk
+    # — avoids a TOCTOU skip) and the SAME current-run evidence the authenticity layer
+    # blessed. A non-stack project never reaches here (byte-identical).
+    from codd.stack.project import StackObligationGateError, enforce_stack_obligation_gate
+
+    try:
+        enforce_stack_obligation_gate(contract, project_root)
+    except StackObligationGateError as exc:
+        click.echo(f"[verify] stack obligation gate: {exc}", err=True)
+        raise SystemExit(1) from exc
+    click.echo(
+        f"[verify] stack obligation gate: {len(contract.obligations)} obligation(s) checked "
+        "— all enforced obligations satisfied"
+    )
+
 
 def _run_verify_once(
     path: str,

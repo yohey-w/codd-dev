@@ -50,7 +50,14 @@ VERIFICATION_SLOTS = frozenset(
     }
 )
 
-_SEVERITY_RANK = {"warn": 0, "error": 1}
+def _normalize_checker_ref(ref: str | None) -> str:
+    """Canonical form of an obligation ``checker`` ref for redefinition comparison.
+
+    ``None`` / empty / whitespace all normalize to ``""`` (no checker) so a later layer
+    that nulls or blanks the checker compares as a CHANGE vs. a non-empty ref (a real
+    weakening). Surrounding whitespace is stripped; the ref is otherwise compared
+    verbatim (we never claim two distinct refs are "equivalent")."""
+    return (ref or "").strip()
 
 
 @dataclass(frozen=True)
@@ -199,7 +206,28 @@ def compose(
                 )
             )
 
-    # -- obligations (union; an addon must not WEAKEN a framework obligation) ---
+    # -- obligations (union; a later layer may not silently REDEFINE an obligation) -
+    # An obligation id is a SEMANTIC KEY. A later layer may repeat the same id ONLY if
+    # the enforcement-relevant fields (severity + checker ref) are IDENTICAL — an exact
+    # idempotent duplicate (e.g. two layers asserting the same e2e obligation). ANY
+    # enforcement-relevant change is a semantic conflict (Contract Kernel v2.77e,
+    # GPT-5.5 Pro consult 2026-06-21):
+    #
+    #   * severity mismatch (downgrade OR upgrade) — first-wins would SILENTLY pick one,
+    #     hiding the ambiguity. A downgrade weakens; an upgrade silently DROPS a stricter
+    #     later layer (a false-green relative to the intended stricter obligation). With
+    #     no explicit monotone-merge semantics, ANY severity mismatch is RED (strict
+    #     option — less clever, harder to game).
+    #   * checker-ref change (including a redefinition that nulls/empties or points the
+    #     checker at a different/weaker/unknown adapter) — "same severity, gutted checker"
+    #     is real weakening that first-wins hides by luck, not by contract. A later layer
+    #     that means a DIFFERENT check must use a DIFFERENT id; one that means the SAME
+    #     check must use the SAME checker ref. (We do NOT try to prove two different refs
+    #     are "equivalent" — intractable at the contract-kernel level.)
+    #
+    # first-wins is kept for the resolved set (the FIRST declaration stays authoritative),
+    # but a non-idempotent redefinition is RECORDED as a Conflict so the strict gate reds
+    # — silence is forbidden (no silent fallback).
     obligations: list[Obligation] = []
     obligation_owners: dict[str, str] = {}
     obl_by_id: dict[str, Obligation] = {}
@@ -211,14 +239,33 @@ def compose(
                 obligation_owners[obl.id] = f"{kind}:{prof.id}"
                 continue
             existing = obl_by_id[obl.id]
-            if _SEVERITY_RANK[obl.severity] < _SEVERITY_RANK[existing.severity]:
+            if obl.severity != existing.severity:
                 conflicts.append(
                     Conflict(
                         kind="semantic",
                         detail=(
-                            f"obligation {obl.id!r} weakened to {obl.severity!r} by "
-                            f"{kind}:{prof.id} (owner {obligation_owners[obl.id]} "
-                            f"declared {existing.severity!r})"
+                            f"obligation {obl.id!r} severity redefined to {obl.severity!r} "
+                            f"by {kind}:{prof.id} (owner {obligation_owners[obl.id]} "
+                            f"declared {existing.severity!r}) — a severity mismatch is a "
+                            "semantic conflict (a downgrade weakens; an upgrade silently "
+                            "drops a stricter layer); use the same id only for the same "
+                            "obligation at the same severity"
+                        ),
+                        layers=(obligation_owners[obl.id], f"{kind}:{prof.id}"),
+                    )
+                )
+            elif _normalize_checker_ref(obl.checker) != _normalize_checker_ref(existing.checker):
+                conflicts.append(
+                    Conflict(
+                        kind="semantic",
+                        detail=(
+                            f"obligation {obl.id!r} checker redefined to "
+                            f"{obl.checker!r} by {kind}:{prof.id} (owner "
+                            f"{obligation_owners[obl.id]} declared {existing.checker!r}) — "
+                            "a same-id checker-ref change is a semantic conflict (it would "
+                            "silently keep one checker and discard the other); two different "
+                            "checks need two different obligation ids, the same check needs "
+                            "the same checker ref"
                         ),
                         layers=(obligation_owners[obl.id], f"{kind}:{prof.id}"),
                     )
