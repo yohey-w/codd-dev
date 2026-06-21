@@ -78,9 +78,31 @@ class StackCommandMaterializationError(RuntimeError):
     """
 
 
+#: Harness-owned directory (under the project) where a stack command's CURRENT-RUN
+#: report evidence is teed (for ``capture: stdout`` commands — ``npx playwright test
+#: --reporter=json`` streams its report to stdout). A per-slot file under here is the
+#: authenticity layer's "current-run evidence" (v2.77d): the executor writes THIS run's
+#: stdout to it, the authenticity layer reads ONLY it, so a stale report from a prior
+#: run can never be mistaken for this run's output (anti-false-green stale-report rule).
+STACK_COMMAND_EVIDENCE_DIR = ".codd/stack-command-evidence"
+
+
 def _owner_sort_key(owner: str, slot_id: str) -> tuple[int, str, str]:
     kind = owner.split(":", 1)[0] if owner else ""
     return (_OWNER_KIND_ORDER.get(kind, len(_OWNER_KIND_ORDER)), owner, slot_id)
+
+
+def stack_command_evidence_path(slot: "StackCommandSlot", project_root: Path) -> Path:
+    """The deterministic per-slot current-run report evidence file (``capture: stdout``).
+
+    A stable path under :data:`STACK_COMMAND_EVIDENCE_DIR` keyed by the slot's owner +
+    id, so the executor (which tees this run's stdout into it) and the authenticity
+    layer (which parses it) agree on ONE location. Owner/slot are sanitized to a safe
+    filename. Always inside ``project_root`` (the authenticity layer fails closed on an
+    out-of-tree report).
+    """
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in f"{slot.owner}__{slot.slot_id}")
+    return project_root / STACK_COMMAND_EVIDENCE_DIR / f"{safe}.stdout"
 
 
 def assert_stack_contract_clean(contract: ResolvedStackContract) -> None:
@@ -277,12 +299,38 @@ def default_stack_command_executor(
 
     Mirrors :func:`codd.languages.verify_executor.execute_verify_plan`'s spawn
     handling: a missing binary / spawn error → ``spawned=False`` (RED); a timeout →
-    ``timed_out=True`` (RED); otherwise the real exit code. NO report parsing / test
-    observation here — that is v2.77d authenticity.
+    ``timed_out=True`` (RED); otherwise the real exit code.
+
+    It performs the stale-report / capture transport the authenticity layer (v2.77d)
+    depends on — NOT report parsing/observation (that stays in
+    :mod:`codd.stack.command_authenticity`):
+
+    * BEFORE running, for a ``capture: stdout`` slot, unlink any stale current-run
+      evidence file so a leftover green report from a prior run can never be read as
+      this run's output (the canonical stale-report false-green).
+    * AFTER running, tee THIS run's stdout into that evidence file so the authenticity
+      layer parses the current run's report. This is capture TRANSPORT only — the
+      parser/observation lives outside the executor.
     """
     cwd = (project_root / slot.cwd) if slot.cwd else project_root
     env = os.environ.copy()
     env.update(slot.env)
+
+    # Stale-report prevention: for a stdout-captured report, remove the prior run's
+    # evidence BEFORE spawning (mirror verify_executor step b).
+    evidence_path: Path | None = None
+    if (slot.report_capture or "").strip().lower() == "stdout":
+        evidence_path = stack_command_evidence_path(slot, project_root)
+        try:
+            evidence_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # An unremovable stale evidence file is an observability hazard — but the
+            # exit-code executor does not classify; we leave it and let the authenticity
+            # layer fail-closed when it parses (it reads only what we write next).
+            pass
+
     try:
         completed = subprocess.run(  # noqa: S603 — trusted argv from the resolved contract, shell=False.
             list(slot.argv),
@@ -313,6 +361,18 @@ def default_stack_command_executor(
             timed_out=True,
             detail=f"stack command slot timed out after {timeout}s ({slot.command_str!r})",
         )
+
+    # Capture transport: persist THIS run's stdout to the evidence file (mirror
+    # verify_executor step d) so the authenticity layer observes the current report.
+    if evidence_path is not None:
+        try:
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(completed.stdout or "", encoding="utf-8")
+        except OSError:
+            # Could not persist — the authenticity layer will see a missing report and
+            # fail-closed (REPORT_MISSING). The executor still reports the exit code.
+            pass
+
     return StackCommandSlotResult(
         slot_id=slot.slot_id,
         owner=slot.owner,
@@ -382,4 +442,18 @@ def materialize_stack_command_plan(
             "and must run green (anti-false-green: a failing framework_build/e2e_test "
             "is not silently skipped while the language verify greens alone)."
         )
+
+    # AUTHENTICITY (Contract Kernel v2.77d): exit 0 is necessary but NOT sufficient.
+    # Each slot must prove it did its job for its KIND — a no-op / observed-no-tests /
+    # missing-or-unreadable-report / observed-failure command is RED even on exit 0.
+    # Lazy import to avoid a module-load cycle (command_authenticity imports this
+    # module for the slot/result types). Raises StackCommandAuthenticityError on RED.
+    from codd.stack.command_authenticity import assert_stack_commands_authentic
+
+    assert_stack_commands_authentic(
+        plan,
+        result,
+        project_root,
+        contract_policies=contract.command_observation_policies,
+    )
     return plan, result

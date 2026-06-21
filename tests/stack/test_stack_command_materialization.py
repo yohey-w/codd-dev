@@ -33,6 +33,7 @@ still PROVE the declared slots are the ones the run invokes (GPT-5.5 Pro consult
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -71,12 +72,102 @@ _VALID_STACK = {
 
 # ── recording executor (proves the composed slots are the invoked commands) ──
 
+def _write_passing_playwright_report(slot: StackCommandSlot, project_root: Path) -> None:
+    """Write a REAL parseable passing Playwright JSON report to the slot's evidence path.
+
+    An HONEST fake: a fake executor may avoid spawning Playwright, but it must NOT fake
+    classification — it must produce the report artifact the real command would have, so
+    the SAME authenticity path (adapter parse → test-count observation) runs in tests as
+    in production (v2.77d). Only for a stdout-captured TEST slot (e.g. ``e2e_test``).
+    """
+    from codd.stack.command_authenticity import StackCommandObservationKind, resolve_stack_command_observation_policy
+    from codd.stack.command_plan import stack_command_evidence_path
+
+    policy = resolve_stack_command_observation_policy(slot.slot_id)
+    if policy is None or policy.kind is not StackCommandObservationKind.TEST_REPORT:
+        return
+    if (slot.report_capture or "").strip().lower() != "stdout":
+        return
+    path = stack_command_evidence_path(slot, project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "title": "e2e",
+                        "specs": [
+                            {
+                                "title": "home page renders",
+                                "file": "tests/e2e/home.spec.ts",
+                                "tests": [
+                                    {
+                                        "title": "home page renders",
+                                        "status": "expected",
+                                        "results": [{"status": "passed"}],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_failing_playwright_report(slot: StackCommandSlot, project_root: Path) -> None:
+    """Write a REAL parseable FAILING Playwright JSON report (seeded-mutation analogue)."""
+    from codd.stack.command_authenticity import StackCommandObservationKind, resolve_stack_command_observation_policy
+    from codd.stack.command_plan import stack_command_evidence_path
+
+    policy = resolve_stack_command_observation_policy(slot.slot_id)
+    if policy is None or policy.kind is not StackCommandObservationKind.TEST_REPORT:
+        return
+    if (slot.report_capture or "").strip().lower() != "stdout":
+        return
+    path = stack_command_evidence_path(slot, project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "title": "e2e",
+                        "specs": [
+                            {
+                                "title": "home page renders",
+                                "file": "tests/e2e/home.spec.ts",
+                                "tests": [
+                                    {
+                                        "title": "home page renders",
+                                        "status": "unexpected",
+                                        "results": [{"status": "failed"}],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class _RecordingExecutor:
-    """Records every slot it is asked to invoke and passes (exit-code 0).
+    """Records every slot it is asked to invoke and passes (exit-code 0), HONESTLY.
 
     Used to PROVE exit gate 4 (the composed stack command slots are the commands the
     run actually invokes) without running real Next.js/Playwright. ``calls`` holds the
     invoked ``(slot_id, owner, argv)`` in invocation order.
+
+    HONEST under v2.77d authenticity: for a TEST-kind slot (``e2e_test``) it writes a
+    REAL passing report to the slot's evidence path (it does not fake the classifier —
+    the authenticity layer parses that report and observes ≥1 passed test). The non-test
+    slots (``framework_build``/``generate``/``typecheck``) carry honest, non-no-op argv
+    from the curated profiles, so they pass the no-op gate on real data.
     """
 
     def __init__(self) -> None:
@@ -84,6 +175,7 @@ class _RecordingExecutor:
 
     def __call__(self, slot: StackCommandSlot, project_root: Path, *, timeout: float):
         self.calls.append((slot.slot_id, slot.owner, slot.argv))
+        _write_passing_playwright_report(slot, project_root)
         return StackCommandSlotResult(
             slot_id=slot.slot_id,
             owner=slot.owner,
@@ -417,25 +509,25 @@ def test_changing_stack_changes_the_materialized_plan() -> None:
     assert full.content_hash != fewer.content_hash
 
 
-def test_execute_plan_aggregates_exit_codes() -> None:
+def test_execute_plan_aggregates_exit_codes(tmp_path: Path) -> None:
     """``execute_stack_command_plan`` ok iff every slot exited 0; failed slots listed."""
     contract = resolve_stack_from_declaration(_VALID_STACK)
     plan = stack_command_plan(contract)
 
-    ok_res = execute_stack_command_plan(plan, Path("."), executor=_RecordingExecutor())
+    ok_res = execute_stack_command_plan(plan, tmp_path, executor=_RecordingExecutor())
     assert ok_res.ok and not ok_res.failed
     assert set(ok_res.executed_slot_ids) == set(plan.command_ids)
 
-    bad_res = execute_stack_command_plan(plan, Path("."), executor=_failing_executor)
+    bad_res = execute_stack_command_plan(plan, tmp_path, executor=_failing_executor)
     assert not bad_res.ok
     assert {r.slot_id for r in bad_res.failed} == {"framework_build"}
 
 
-def test_materialize_raises_on_failing_slot() -> None:
+def test_materialize_raises_on_failing_slot(tmp_path: Path) -> None:
     """The single materialize entry raises the domain RED on a failing slot."""
     contract = resolve_stack_from_declaration(_VALID_STACK)
     with pytest.raises(StackCommandMaterializationError):
-        materialize_stack_command_plan(contract, Path("."), executor=_failing_executor)
+        materialize_stack_command_plan(contract, tmp_path, executor=_failing_executor)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

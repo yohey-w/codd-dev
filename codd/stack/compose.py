@@ -28,7 +28,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from codd.languages.profile import CommandSpec, LanguageProfile
 from .profile import AddonProfile, FileRole, FrameworkProfile, Obligation, SourceSet
@@ -92,6 +92,18 @@ class ResolvedStackContract:
     variants: Mapping[str, tuple[str, ...]]  # framework_id -> variant ids (exclusive)
     conflicts: tuple[Conflict, ...]
     content_hash: str
+    #: Per-slot-id command AUTHENTICITY observation policy overrides (Contract Kernel
+    #: v2.77d). DECLARATIVE extension point: a custom stack profile may declare the
+    #: required-observation policy for a slot id the built-in default map
+    #: (:data:`codd.stack.command_authenticity.DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES`)
+    #: does not cover, or STRENGTHEN a default. Empty for the curated stacks (they use
+    #: the built-in defaults). Typed loosely (``Any`` value) to keep ``compose`` free of
+    #: an import cycle with the authenticity layer; the values are
+    #: ``StackCommandObservationPolicy``. NOT part of ``content_hash`` (it shapes the
+    #: gate's strictness, not the resolved command set).
+    command_observation_policies: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     @property
     def is_clean(self) -> bool:

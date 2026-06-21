@@ -77,11 +77,17 @@ def ensure_builtin_adapters_registered(registry: AdapterRegistry | None = None) 
     # import time, so codd.languages stays free of an adapter/coverage import cycle.
     from codd.languages.adapters.runner_report import (
         GoTestJsonReportAdapter,
+        PlaywrightJsonReportAdapter,
         VitestJsonReportAdapter,
     )
 
     _register_once(target, "runner_report", "vitest-json", VitestJsonReportAdapter())
     _register_once(target, "runner_report", "go-test-json", GoTestJsonReportAdapter())
+    # Stack e2e: the Playwright addon declares ``report.adapter: playwright_json`` —
+    # register under that EXACT id so a TEST-kind stack command's required report has a
+    # resolvable adapter (an unregistered adapter for a required report is RED, never a
+    # silent skip; v2.77d authenticity). Underscore spelling matches the profile.
+    _register_once(target, "runner_report", "playwright_json", PlaywrightJsonReportAdapter())
 
     # Implement-oracle tool-semantics adapters (Contract Kernel oracle dispatch §3).
     # All three concrete adapters (go-toolchain / python-composite / typescript-tsc)

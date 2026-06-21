@@ -715,15 +715,20 @@ class GreenfieldPipeline:
         2. MATERIALIZE — build a deterministic, contract-driven command plan and
            INVOKE each composed slot by exit code (via the injectable
            ``stack_command_executor`` seam). A failing slot raises
-           :class:`StackCommandMaterializationError`. Both domain errors become a
+           :class:`StackCommandMaterializationError`.
+        3. AUTHENTICITY (v2.77d) — exit 0 is necessary but NOT sufficient: each slot
+           must prove it did its job for its kind (a no-op / observed-no-tests /
+           missing-or-unreadable-report command is RED even on exit 0), raising
+           :class:`StackCommandAuthenticityError`. All three domain errors become a
            :class:`StageError` so the autopilot reports them honestly (the run does
-           NOT advance to the stage loop with a conflicted/failing stack plan).
+           NOT advance to the stage loop with a conflicted/failing/inauthentic plan).
 
         The materialized plan + executed slot ids are recorded in the run trace
         (observable, like the intake hash + lock verdict) so "the declared stack
-        command slots were invoked" is provable. Exit-code only — authenticity is
-        v2.77d, the obligation-checker gate is v2.77e.
+        command slots were invoked AND authentic" is provable. The obligation-checker
+        gate (``verify_project_stack``) is v2.77e (out of lane here).
         """
+        from codd.stack.command_authenticity import StackCommandAuthenticityError
         from codd.stack.command_plan import (
             StackCommandMaterializationError,
             StackContractConflictError,
@@ -734,7 +739,11 @@ class GreenfieldPipeline:
             plan, result = materialize_stack_command_plan(
                 contract, project_root, executor=self.stack_command_executor
             )
-        except (StackContractConflictError, StackCommandMaterializationError) as exc:
+        except (
+            StackContractConflictError,
+            StackCommandMaterializationError,
+            StackCommandAuthenticityError,
+        ) as exc:
             self.echo(f"[greenfield] stack command materialization: {exc}")
             raise StageError(str(exc)) from exc
 

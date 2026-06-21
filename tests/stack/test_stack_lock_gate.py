@@ -25,6 +25,7 @@ lock. A committed lock that drifts goes RED and is not refreshed.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -53,12 +54,57 @@ from codd.stack.resolve import resolve_stack_from_declaration
 
 
 def _passing_stack_executor(slot, project_root, *, timeout):  # noqa: ANN001
-    """A v2.77c materialization executor that records the invoked slot and passes.
+    """A v2.77c/d materialization executor that records the invoked slot and passes.
 
     These v2.77b tests assert LOCK behaviour, not whether the curated framework/addon
     commands actually run (CI has no node/npx). A passing executor isolates the lock
-    gate from the new v2.77c command-execution gate (the same isolation technique the
-    tests already use: stubbing stage bodies, and writing a matching lock)."""
+    gate from the command-execution gate (the same isolation technique the tests
+    already use: stubbing stage bodies, and writing a matching lock).
+
+    HONEST under v2.77d authenticity: for a TEST-kind slot (e.g. ``e2e_test``) it
+    writes a REAL passing report to the slot's evidence path so the authenticity gate
+    observes ≥1 test (a fake may fake process execution, but must NOT fake the
+    classifier — it produces the artifact the real command would have). Non-test slots
+    carry honest non-no-op argv from the curated profiles."""
+    from codd.stack.command_authenticity import (
+        StackCommandObservationKind,
+        resolve_stack_command_observation_policy,
+    )
+    from codd.stack.command_plan import stack_command_evidence_path
+
+    policy = resolve_stack_command_observation_policy(slot.slot_id)
+    if (
+        policy is not None
+        and policy.kind is StackCommandObservationKind.TEST_REPORT
+        and (slot.report_capture or "").strip().lower() == "stdout"
+    ):
+        path = stack_command_evidence_path(slot, project_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "suites": [
+                        {
+                            "title": "e2e",
+                            "specs": [
+                                {
+                                    "title": "smoke",
+                                    "file": "tests/e2e/smoke.spec.ts",
+                                    "tests": [
+                                        {
+                                            "title": "smoke",
+                                            "status": "expected",
+                                            "results": [{"status": "passed"}],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
     return StackCommandSlotResult(
         slot_id=slot.slot_id,
         owner=slot.owner,

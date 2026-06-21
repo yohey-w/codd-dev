@@ -195,6 +195,151 @@ class VitestJsonReportAdapter:
 
 
 @dataclass(frozen=True)
+class PlaywrightJsonReportAdapter:
+    """Playwright ``--reporter=json`` adapter (the stack ``playwright_json`` report).
+
+    ``npx playwright test --reporter=json`` emits a single top-level object whose
+    ``suites`` array is a TREE: each suite has nested ``suites`` and ``specs``; each
+    *spec* carries a ``title``, a ``file`` (project-relative test file), and a
+    ``tests`` array; each *test* carries ``results`` (one per retry/attempt) and an
+    overall ``status`` (Playwright's roll-up: ``expected`` / ``unexpected`` /
+    ``flaky`` / ``skipped``). A test is a clean PASS only when its overall status is
+    ``expected``; ``unexpected`` (a failure), ``flaky`` (passed only on retry — not a
+    clean first-run pass) and ``skipped`` (a skip proves nothing — the SAME rule the
+    vitest/go adapters and the static authenticity gate apply) are NOT clean. A spec's
+    FILE is in ``executed_passed_files`` only when it ran ≥1 test and EVERY test in it
+    was clean; any non-clean test taints the whole file into ``executed_failed_files``.
+
+    Mirrors :class:`VitestJsonReportAdapter`'s contract exactly: it raises
+    :class:`RunnerReportUnsupported` on a structurally-unreadable report (missing /
+    garbled / not an object / no ``suites`` array) so the authenticity gate degrades
+    EXPLICITLY (REPORT_UNREADABLE), never silently treating "nothing parseable" as
+    "nothing ran" (a false-green). ``test_level_available`` is True whenever any test
+    case was observed, so a TEST-kind stack command can require test-level evidence.
+    """
+
+    def parse(self, report_path: Path, *, project_root: Path) -> RunnerExecution:
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RunnerReportUnsupported(
+                f"playwright JSON report unreadable at {report_path}: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RunnerReportUnsupported(
+                f"playwright JSON report at {report_path} is not an object"
+            )
+        suites = payload.get("suites")
+        if not isinstance(suites, list):
+            raise RunnerReportUnsupported(
+                f"playwright JSON report at {report_path} has no suites array"
+            )
+
+        passed_files: set[str] = set()
+        failed_files: set[str] = set()
+        passed_cases: set[str] = set()
+        # Per-file rollup: did the file collect any case, and is every case clean?
+        file_any_case: dict[str, bool] = {}
+        file_clean: dict[str, bool] = {}
+        total_cases = 0
+        passed_count = 0
+
+        for spec in _iter_playwright_specs(suites):
+            rel = _relativize(str(spec.get("file") or ""), project_root)
+            if rel is None:
+                continue
+            spec_title = str(spec.get("title") or "").strip()
+            tests = spec.get("tests")
+            tests = tests if isinstance(tests, list) else []
+            file_any_case.setdefault(rel, False)
+            file_clean.setdefault(rel, True)
+            for test in tests:
+                if not isinstance(test, dict):
+                    continue
+                status = str(test.get("status") or "").strip().lower()
+                if not status:
+                    # No roll-up status: fall back to the worst per-result status so a
+                    # malformed test never sneaks in as a clean pass.
+                    status = _playwright_results_status(test.get("results"))
+                if not status:
+                    continue
+                file_any_case[rel] = True
+                total_cases += 1
+                if status == "expected":
+                    passed_count += 1
+                    name = (test.get("title") or spec_title or "").strip()
+                    key = f"{rel}::{name}" if name else rel
+                    passed_cases.add(key)
+                else:
+                    # unexpected / flaky / skipped / timedOut / interrupted — none is a
+                    # clean pass; the whole file is tainted (a skip proves nothing).
+                    file_clean[rel] = False
+
+        for rel, any_case in file_any_case.items():
+            if not any_case:
+                # A spec file that collected zero cases is not a pass (collected nothing).
+                continue
+            if file_clean.get(rel, False):
+                passed_files.add(rel)
+            else:
+                failed_files.add(rel)
+
+        return RunnerExecution(
+            executed_passed_files=frozenset(passed_files),
+            executed_failed_files=frozenset(failed_files),
+            executed_passed_cases=frozenset(passed_cases),
+            test_level_available=total_cases > 0,
+            total_cases=total_cases,
+            passed_cases=passed_count,
+        )
+
+
+def _iter_playwright_specs(suites: list):
+    """Yield every ``spec`` mapping in a Playwright suite TREE (recursive).
+
+    Playwright nests ``suites`` arbitrarily (file suite → describe blocks → …); each
+    level may carry ``specs`` and further ``suites``. We walk the whole tree so a test
+    nested under any number of ``describe`` blocks is still observed.
+    """
+    stack = list(suites)
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        specs = node.get("specs")
+        if isinstance(specs, list):
+            for spec in specs:
+                if isinstance(spec, dict):
+                    yield spec
+        child_suites = node.get("suites")
+        if isinstance(child_suites, list):
+            stack.extend(child_suites)
+
+
+def _playwright_results_status(results: Any) -> str:
+    """Worst-case status across a test's ``results`` (retries), Playwright vocabulary.
+
+    Used only as a fallback when a test omits its roll-up ``status``. Any non-passed
+    result (``failed`` / ``timedOut`` / ``interrupted``) makes the test non-clean; a
+    ``skipped`` result is non-clean too; all ``passed`` ⇒ ``expected``. Returns ``""``
+    when there is nothing to judge.
+    """
+    if not isinstance(results, list):
+        return ""
+    seen = False
+    for res in results:
+        if not isinstance(res, dict):
+            continue
+        status = str(res.get("status") or "").strip().lower()
+        if not status:
+            continue
+        seen = True
+        if status != "passed":
+            return "unexpected"
+    return "expected" if seen else ""
+
+
+@dataclass(frozen=True)
 class GoTestJsonReportAdapter:
     """``go test -json`` (line-delimited JSON) reporter adapter.
 

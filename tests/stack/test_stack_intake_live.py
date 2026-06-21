@@ -18,6 +18,7 @@ no stack were declared).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -33,15 +34,57 @@ from codd.stack.command_plan import StackCommandSlotResult
 
 
 def _passing_stack_executor(slot, project_root, *, timeout):  # noqa: ANN001
-    """A v2.77c materialization executor that records the invoked slot and passes.
+    """A v2.77c/d materialization executor that records the invoked slot and passes.
 
     These v2.77a/b tests assert INTAKE + LOCK behaviour, not whether the curated
     framework/addon commands (next build / playwright / prisma) actually run — those
-    are not runnable in CI. A passing executor isolates intake/lock from the new
-    v2.77c command-execution gate, exactly as these tests already stub stage bodies
-    to isolate intake from the stage gates (and as v2.77b's tests wrote a matching
-    lock to isolate intake from the lock gate). It still proves the slots are INVOKED.
+    are not runnable in CI. A passing executor isolates intake/lock from the
+    command-execution gate, exactly as these tests already stub stage bodies to
+    isolate intake from the stage gates (and as v2.77b's tests wrote a matching lock).
+
+    HONEST under v2.77d authenticity: for a TEST-kind slot (``e2e_test``) it writes a
+    REAL passing report to the slot's evidence path so the authenticity gate observes
+    ≥1 test (a fake may fake process execution but must NOT fake the classifier).
     """
+    from codd.stack.command_authenticity import (
+        StackCommandObservationKind,
+        resolve_stack_command_observation_policy,
+    )
+    from codd.stack.command_plan import stack_command_evidence_path
+
+    policy = resolve_stack_command_observation_policy(slot.slot_id)
+    if (
+        policy is not None
+        and policy.kind is StackCommandObservationKind.TEST_REPORT
+        and (slot.report_capture or "").strip().lower() == "stdout"
+    ):
+        path = stack_command_evidence_path(slot, project_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "suites": [
+                        {
+                            "title": "e2e",
+                            "specs": [
+                                {
+                                    "title": "smoke",
+                                    "file": "tests/e2e/smoke.spec.ts",
+                                    "tests": [
+                                        {
+                                            "title": "smoke",
+                                            "status": "expected",
+                                            "results": [{"status": "passed"}],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
     return StackCommandSlotResult(
         slot_id=slot.slot_id,
         owner=slot.owner,

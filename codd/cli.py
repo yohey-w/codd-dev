@@ -7663,7 +7663,7 @@ def _intake_stack_contract_for_verify(project_root: Path, *, stack_command_execu
     if gate.red:
         raise SystemExit(1)
 
-    # Stack command MATERIALIZATION (Contract Kernel v2.77c) — the verify-path mirror
+    # Stack command MATERIALIZATION (Contract Kernel v2.77c/d) — the verify-path mirror
     # of the greenfield pipeline's :meth:`_materialize_stack_commands`. (1) CONFLICT
     # GATE: a composition conflict (command collision / unproved replace / weakened
     # obligation / exclusive / deny) is RED (honest non-zero exit) — the composer
@@ -7671,8 +7671,10 @@ def _intake_stack_contract_for_verify(project_root: Path, *, stack_command_execu
     # a gate. (2) PLAN + EXECUTE: build a deterministic, contract-driven command plan
     # (NO framework literal) and INVOKE each composed slot by exit code, so a declared
     # framework_build/e2e_test is genuinely run on verify (not silently skipped while
-    # the language verify greens alone). Exit-code ONLY here; command AUTHENTICITY is
-    # v2.77d and the obligation-checker gate is v2.77e (out of lane).
+    # the language verify greens alone). (3) AUTHENTICITY (v2.77d): exit 0 is necessary
+    # but NOT sufficient — a no-op / observed-no-tests / missing-or-unreadable-report
+    # slot is RED even on exit 0. The obligation-checker gate is v2.77e (out of lane).
+    from codd.stack.command_authenticity import StackCommandAuthenticityError
     from codd.stack.command_plan import (
         StackCommandMaterializationError,
         StackContractConflictError,
@@ -7683,7 +7685,11 @@ def _intake_stack_contract_for_verify(project_root: Path, *, stack_command_execu
         plan, _result = materialize_stack_command_plan(
             contract, project_root, executor=stack_command_executor
         )
-    except (StackContractConflictError, StackCommandMaterializationError) as exc:
+    except (
+        StackContractConflictError,
+        StackCommandMaterializationError,
+        StackCommandAuthenticityError,
+    ) as exc:
         click.echo(f"[verify] stack command materialization: {exc}", err=True)
         raise SystemExit(1) from exc
     click.echo(
