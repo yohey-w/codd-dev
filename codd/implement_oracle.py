@@ -135,6 +135,7 @@ __all__ = [
     "normalize_python_tool_output",
     "resolve_implement_oracle",
     "run_implement_oracle_gate",
+    "synthesize_minimal_layout_view",
 ]
 
 #: Internal-but-tested campaign entry point (the anti-false-green acceptance tests
@@ -1095,13 +1096,16 @@ def resolve_implement_oracle(
     CONTRACT-PATH languages (the language→oracle map entry): a language with no
     legacy ``LayoutProfile`` builder (Go — ``resolve_layout_profile('go')`` returns
     None) but a modeled ``implement_oracle`` whose adapter is REGISTERED resolves
-    via :func:`_resolve_registry_composite_oracle`, which synthesizes a minimal
-    ``(LayoutProfile, ImplementOracleSpec)`` (``kind="composite"``) so the existing
-    gate machinery (certify/run/retry) works unchanged; the SAME dispatch in
-    :func:`_run_oracle_command` then routes it to the Contract-Kernel contract path
-    (:func:`_run_contract_oracle` → ``run_command_sequence`` + the registered
-    adapter). The selection is GENERIC (modeled oracle + registered adapter) — no
-    ``if language=='go'`` literal in the gate.
+    via :func:`_resolve_registry_oracle`, which synthesizes a minimal
+    ``(LayoutProfile, ImplementOracleSpec)`` for ANY oracle ``kind`` (composite /
+    command / adapter) so the existing gate machinery (certify/run/retry) works
+    unchanged; the SAME dispatch in :func:`_run_oracle_command` then routes it to the
+    Contract-Kernel contract path (:func:`_run_contract_oracle` →
+    ``run_command_sequence`` for command/composite, the adapter's ``execute`` for
+    ``adapter``). The selection is GENERIC (modeled oracle + registered adapter) — no
+    ``if language=='go'`` literal in the gate, and NO kind allowlist (a synthetic
+    ``kind="command"``/``"adapter"`` language with no legacy ``LayoutProfile`` runs
+    its oracle too, never silently passes — Contract Kernel oracle dispatch §8).
     """
     if _oracle_opt_out(config):
         return None
@@ -1115,43 +1119,110 @@ def resolve_implement_oracle(
             project_root=project_root,
         )
     if profile is None:
-        # No legacy LayoutProfile — try the declarative registry (Go: a composite
-        # oracle synthesized from go.yaml, reachable WITHOUT a legacy profile).
-        return _resolve_registry_composite_oracle(language)
+        # No legacy LayoutProfile — try the declarative registry. ANY kind resolves
+        # (Go's composite, a synthetic command/adapter language): the generic
+        # synthesizer builds the minimal gate-machinery ``(LayoutProfile, spec)`` and
+        # the kind-routed dispatch runs the registered adapter (no kind allowlist).
+        return _resolve_registry_oracle(language)
     if profile.implement_oracle is None:
         return None
     return profile, profile.implement_oracle
 
 
-def _resolve_registry_composite_oracle(
+def synthesize_minimal_layout_view(lang_profile: Any) -> LayoutProfile:
+    """A minimal :class:`LayoutProfile` COMPAT VIEW from a ``LanguageProfile.layout``.
+
+    GPT §5 "synthesize_minimal_layout_view": a ``kind="adapter"`` oracle (the
+    Python-style in-process composite) reads ``source_root`` / ``test_root`` /
+    ``package_root`` / ``package_name`` off ``OracleContext.layout_profile`` — fields
+    the modeled ``LayoutSpec`` does NOT carry. When such a language has NO legacy
+    ``LayoutProfile`` builder, this synthesizes those fields from the profile's
+    ``layout.source_sets`` / ``layout.test_sets`` (first set's ``root``; defensive
+    ``src`` / ``tests`` defaults) so the adapter still gets the layout view it needs.
+
+    This is a COMPAT VIEW, not the scope AUTHORITY: the real scope authority is the
+    ``LanguageProfile.layout`` + the oracle adapter's ``certify_scope`` (anti-false-
+    green). It carries only what an ``adapter``-kind oracle reads, never a per-language
+    policy. ``package_root`` defaults to ``source_root`` (a Python-style adapter
+    derives the package root from ``package_name`` when one is set; an adapter with no
+    package concept simply reads ``source_root``).
+    """
+    layout = getattr(lang_profile, "layout", None)
+    source_sets = tuple(getattr(layout, "source_sets", ()) or ()) if layout is not None else ()
+    test_sets = tuple(getattr(layout, "test_sets", ()) or ()) if layout is not None else ()
+    source_root = _norm(source_sets[0].root) if source_sets else "src"
+    test_root = _norm(test_sets[0].root) if test_sets else "tests"
+    source_root = source_root or "src"
+    test_root = test_root or "tests"
+    package_id = getattr(lang_profile, "id", "") or "app"
+    return LayoutProfile(
+        language=package_id,  # canonical id — carried for the contract re-resolve
+        package_name=package_id,
+        source_root=source_root,
+        package_root=source_root,
+        test_root=test_root,
+    )
+
+
+def _resolve_registry_oracle(
     language: str | None,
 ) -> tuple[LayoutProfile, ImplementOracleSpec] | None:
-    """Synthesize a composite ``(LayoutProfile, spec)`` from the registry, or None.
+    """Synthesize a gate-machinery ``(LayoutProfile, spec)`` from the registry, or None.
 
-    De-literalized (Contract Kernel oracle dispatch §5): the old hardcoded
-    ``{"go", "golang"}`` allowlist is gone. A language resolves to a synthesized
-    composite IFF :func:`_resolve_contract_oracle` returns a triple AND its oracle is
-    ``kind="composite"`` — i.e. a modeled COMPOSITE ``implement_oracle`` whose adapter
-    is REGISTERED. In practice this is Go (``go-toolchain``): it has NO legacy
-    ``LayoutProfile`` builder (``package_root.kind == none``), so it reaches here, and
-    we build a MINIMAL ``LayoutProfile`` carrying just ``language`` + the module root
-    (as ``source_root``) so the gate machinery (certify/run/retry) works unchanged;
-    the dispatch then routes its ``kind="composite"`` spec to the contract path
-    (:func:`_run_contract_oracle`). TS (``kind="command"``) and Python both HAVE legacy
-    ``LayoutProfile`` builders, so they never reach this synthesis path — and TS would
-    not match (it is ``command``, not ``composite``). ``None`` for any other language
-    (a stack with neither a legacy profile nor a composite contract oracle stays a
-    strict NO-OP). Best-effort: a registry error degrades to NO-OP (never a crash).
+    De-literalized + de-kind-allowlisted (Contract Kernel oracle dispatch §5 + §8):
+    BOTH the old hardcoded ``{"go", "golang"}`` language allowlist AND the old
+    ``kind == "composite"`` ONLY gate are gone. A language resolves to a synthesized
+    ``(LayoutProfile, spec)`` IFF :func:`_resolve_contract_oracle` returns a triple —
+    i.e. a modeled ``implement_oracle`` (ANY kind: composite / command / adapter)
+    whose adapter is REGISTERED — and it has NO legacy ``LayoutProfile`` builder (so it
+    reached here). The synthesized ``spec.kind`` MIRRORS the real declaration so the
+    SAME kind-routed dispatch in :func:`_run_oracle_command` runs the registered
+    adapter (composite/command → ``run_command_sequence``; adapter → the adapter's
+    ``execute``) — no kind allowlist, so a synthetic ``kind="command"``/``"adapter"``
+    language runs its oracle instead of falling to a silent NO-OP (the gap §8 closes).
+
+    LAYOUT VIEW per kind:
+
+    * ``command`` / ``composite`` (Go: ``go-toolchain``) — the command-sequence
+      executor reads cwd/env from ``lang_profile.layout`` (module root etc.), so the
+      synthetic ``LayoutProfile`` only needs to carry the module root (as
+      ``source_root``/etc.) + the canonical ``language`` for the contract re-resolve.
+    * ``adapter`` (a Python-style in-process composite with no legacy profile) — the
+      adapter reads ``source_root``/``test_root``/``package_root``/``package_name`` off
+      the layout VIEW, so we synthesize that view from ``LanguageProfile.layout`` via
+      :func:`synthesize_minimal_layout_view`.
+
+    In practice Go is the only BUILT-IN that reaches here (TS/Python HAVE legacy
+    ``LayoutProfile`` builders); the command/adapter branches exist so a NEW language
+    (the §8 synthetic-language proof) is addable with NO core change. ``None`` for any
+    language with neither a legacy profile nor a contract oracle (a strict NO-OP — step
+    9 will make a profile-present-but-oracle-absent case explicit RED; untouched here).
+    Best-effort: a registry error degrades to NO-OP (never a crash).
     """
     contract = _resolve_contract_oracle(language)
     if contract is None:
         return None
     lang_profile, oracle_decl, _adapter = contract
-    # Only a COMPOSITE oracle is synthesized into a LayoutProfile here (the legacy
-    # gate-machinery spec is composite-shaped); a command/adapter-kind contract
-    # oracle would route differently (none today).
-    if oracle_decl.kind != "composite":
-        return None
+    kind = getattr(oracle_decl, "kind", None)
+    if kind == "adapter":
+        # An in-process ``kind="adapter"`` oracle reads the richer layout view; build
+        # it from the profile's modeled layout (the compat-view synthesis).
+        synthetic = synthesize_minimal_layout_view(lang_profile)
+        synthetic = _with_implement_oracle(
+            synthetic,
+            ImplementOracleSpec(
+                command=f"{lang_profile.id}-adapter",  # sentinel; kind dispatch runs the contract path
+                kind="adapter",
+                # An adapter bakes its own scope policy in certify_scope; the spec scope
+                # is not the authority. Default both-required (the conservative, Python-
+                # composite-matching choice) — the adapter may still strengthen.
+                scope=OracleScopeSpec(require_source_root=True, require_test_root=True),
+                requires_node_install=False,
+            ),
+        )
+        return synthetic, synthetic.implement_oracle
+    # command / composite: a command-sequence oracle. Carry the module root for the
+    # commands' cwd; the executor reads argv/cwd/env from lang_profile.layout.
     module_root = _norm(getattr(lang_profile.layout, "module_root", ".") or ".") or "."
     synthetic = LayoutProfile(
         language=lang_profile.id,  # canonical id ("go") — carried for the contract re-resolve
@@ -1160,13 +1231,22 @@ def _resolve_registry_composite_oracle(
         package_root=module_root,
         test_root=module_root,
         implement_oracle=ImplementOracleSpec(
-            command=f"{lang_profile.id}-composite",  # sentinel; kind dispatch runs the contract path
-            kind="composite",
+            command=f"{lang_profile.id}-{kind}",  # sentinel; kind dispatch runs the contract path
+            kind=str(kind or "composite"),
             scope=OracleScopeSpec(require_source_root=True, require_test_root=False),
             requires_node_install=False,
         ),
     )
     return synthetic, synthetic.implement_oracle
+
+
+def _with_implement_oracle(
+    profile: LayoutProfile, spec: ImplementOracleSpec
+) -> LayoutProfile:
+    """Return ``profile`` with its ``implement_oracle`` set to ``spec`` (frozen-safe)."""
+    from dataclasses import replace
+
+    return replace(profile, implement_oracle=spec)
 
 
 #: The rerun callback the gate invokes to re-implement under the oracle feedback.
