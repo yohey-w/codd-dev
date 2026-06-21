@@ -5023,6 +5023,13 @@ def verify(
         if not runtime:
             return
 
+    # Stack contract intake (Contract Kernel v2.77a) — bring the project's declared
+    # framework-stack contract into the live verify run's trace, mirroring the
+    # greenfield intake. INTAKE ONLY: no obligation is enforced and NO verdict
+    # changes (that is v2.77b-e). A project with no `stack:` block is unaffected; a
+    # declared-but-broken stack fails HONESTLY (anti-false-green), never a silent skip.
+    _intake_stack_contract_for_verify(Path(path).resolve())
+
     verify_kwargs: dict[str, Any] = {"path": path, "prefer_standalone": True}
     if runtime_skip:
         verify_kwargs["runtime_skip"] = runtime_skip
@@ -7589,6 +7596,43 @@ def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
         return load_project_config(project_root)
     except (FileNotFoundError, ValueError):
         return {}
+
+
+def _intake_stack_contract_for_verify(project_root: Path) -> None:
+    """Resolve the project's declared stack contract into the verify run trace.
+
+    Contract Kernel v2.77a (intake only) — the verify-path mirror of the greenfield
+    pipeline's :meth:`GreenfieldPipeline._intake_stack_contract`. Proves the
+    framework-stack contract is LIVE-consumed by the verify path (the hash enters
+    the run trace), WITHOUT enforcing any obligation or changing the verify verdict
+    (obligation enforcement is v2.77b-e).
+
+    * No ``stack:`` block → no-op (the opt-in framework layer is unused; the vast
+      majority of projects — emits a single trace line, no behaviour change).
+    * A declared stack → its ``stack_contract_hash`` is echoed to the run trace.
+    * A declared-but-BROKEN stack → honest failure (``SystemExit`` non-zero), never
+      a silent skip (anti-false-green / no-silent-fallback).
+    """
+    from codd.stack.project import stack_contract_intake, stack_contract_trace
+
+    try:
+        contract = stack_contract_intake(project_root)
+    except Exception as exc:  # noqa: BLE001 — a declared-but-broken stack must fail HONESTLY.
+        click.echo(
+            "stack contract intake failed: the project declares a `stack:` block in "
+            f"codd.yaml but it could not be resolved ({type(exc).__name__}: {exc}). "
+            "A declared-but-unresolvable stack is an honest error, never a silent skip.",
+            err=True,
+        )
+        raise SystemExit(1) from exc
+
+    if contract is None:
+        return
+    trace = stack_contract_trace(contract)
+    click.echo(
+        f"[verify] stack contract intake: {trace['resolved_stack_id']} "
+        f"stack_contract_hash={trace['stack_contract_hash']}"
+    )
 
 
 def _run_verify_once(

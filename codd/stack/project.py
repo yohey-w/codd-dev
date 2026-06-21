@@ -68,3 +68,45 @@ def verify_project_stack(
     if contract is None:
         return None
     return enforce_obligations(contract, project_root=project_root, **checker_inputs)
+
+
+def stack_contract_trace(contract: ResolvedStackContract) -> dict[str, Any]:
+    """Run-trace fields proving a run consumed the resolved stack contract.
+
+    Mirrors :meth:`codd.languages.contract.ResolvedLanguageContract.to_trace`: the
+    minimal, deterministic facts a run record / trace records so the live-consumption
+    of the framework-stack contract is observable (the v2.77a intake exit gate).
+    ``stack_contract_hash`` is the deterministic :attr:`ResolvedStackContract.content_hash`;
+    ``resolved_stack_id`` / ``resolved_stack_layers`` make "changing the profile changes
+    the plan" visible in the record itself.
+    """
+    return {
+        "resolved_stack_id": contract.stack_id,
+        "stack_contract_hash": contract.content_hash,
+        "resolved_stack_layers": [f"{ref.kind}:{ref.id}" for ref in contract.layers],
+    }
+
+
+def stack_contract_intake(project_root: str | Path) -> ResolvedStackContract | None:
+    """Resolve a project's declared stack contract for LIVE consumption (intake only).
+
+    This is the production seam the greenfield/verify pipeline calls EARLY in a run
+    to bring the (previously dormant) framework-stack contract into the live run —
+    *without* enforcing any obligation yet (enforcement is v2.77b-e). It is exactly
+    :func:`resolve_project_stack`, named for the intake call-site so the
+    "no non-test caller = 0 state" is eliminated by an unambiguous production caller.
+
+    Contract:
+
+    * No ``stack:`` block (the opt-in framework layer is unused) → ``None``. The
+      vast majority of projects; behaviour is byte-identical, never an error.
+    * A declared ``stack:`` block → the :class:`ResolvedStackContract` (its
+      ``content_hash`` is the run-trace hash; see :func:`stack_contract_trace`).
+    * A declared-but-BROKEN block (unknown language/framework/addon, malformed
+      mapping) → the resolver RAISES (``ValueError`` / ``UnknownLanguageError`` /
+      ``UnknownLayerError``). The intake NEVER swallows this: anti-false-green
+      forbids a declared-but-unresolvable stack from silently proceeding as if no
+      stack were declared. The pipeline call-site turns the raise into an honest
+      stage/command failure.
+    """
+    return resolve_project_stack(project_root)

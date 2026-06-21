@@ -440,6 +440,26 @@ class GreenfieldPipeline:
 
         self._notify(options, f"greenfield start: {project_root.name}")
 
+        # Stack contract intake (Contract Kernel v2.77a) — bring the project's
+        # declared framework-stack contract into the LIVE run (in the run record +
+        # trace) so the framework layer is consumed by production, not only tests.
+        # INTAKE ONLY: no obligation is enforced here and NO verdict changes (that
+        # is v2.77b-e). A project with no ``stack:`` block is byte-identical (the
+        # opt-in framework layer is unused). A declared-but-broken stack is an
+        # HONEST failure (anti-false-green), never a silent skip. Done once, early,
+        # before the stage loop, so the hash covers the whole run. Routed through
+        # _fail (like every stage) so the autopilot REPORTS the honest error via a
+        # failed GreenfieldResult instead of raising to the caller. Its own
+        # pseudo-stage name (not a real STAGES entry) so the failure is attributed
+        # honestly to intake, not to ``init``.
+        try:
+            self._intake_stack_contract(project_root, session)
+        except StageError as exc:
+            return self._fail(
+                project_root, session, options, "stack_intake",
+                {"status": STATUS_PENDING, "detail": ""}, str(exc),
+            )
+
         runners: dict[str, Callable[[Path, dict[str, Any], dict[str, Any]], None]] = {
             "init": self._stage_init,
             "elicit": self._stage_elicit,
@@ -521,6 +541,51 @@ class GreenfieldPipeline:
         self.echo(f"[greenfield] resume:  {result.resume_command}")
         self._notify(options, f"greenfield {project_root.name}: FAILED at {stage_name} — {error}")
         return result
+
+    # ── stack contract intake (Contract Kernel v2.77a, intake only) ──
+
+    def _intake_stack_contract(self, project_root: Path, session: dict[str, Any]) -> None:
+        """Resolve the project's declared stack contract into the live run record + trace.
+
+        See the call site in :meth:`run`. INTAKE ONLY — proves the framework-stack
+        contract is LIVE-consumed (it enters the run record and the trace); it does
+        NOT enforce any obligation and does NOT change any pass/fail verdict
+        (obligation enforcement is v2.77b-e).
+
+        * No ``stack:`` block → no-op: nothing is added to the record and only a
+          single debug ``self.echo`` is emitted, so a non-stack project (the vast
+          majority) is behaviour-preserving.
+        * A declared stack → its :func:`stack_contract_trace` payload (incl.
+          ``stack_contract_hash``) is written to ``session["stack_contract"]`` and
+          echoed to the run trace.
+        * A declared-but-BROKEN stack → :class:`StageError` (honest error), never a
+          silent skip (anti-false-green / no-silent-fallback).
+        """
+        from codd.stack.project import stack_contract_intake, stack_contract_trace
+
+        try:
+            contract = stack_contract_intake(project_root)
+        except Exception as exc:  # noqa: BLE001 — a declared-but-broken stack must fail HONESTLY.
+            raise StageError(
+                "stack contract intake failed: the project declares a `stack:` block in "
+                f"codd.yaml but it could not be resolved ({type(exc).__name__}: {exc}). "
+                "A declared-but-unresolvable stack is an honest error, never a silent skip "
+                "(check the language / frameworks / addons ids against the curated stack "
+                "profiles, or remove the `stack:` block to opt out of the framework layer)."
+            ) from exc
+
+        if contract is None:
+            # The opt-in framework layer is unused — byte-identical behaviour.
+            self.echo("[greenfield] stack contract intake: no `stack:` block (framework layer opt-out)")
+            return
+
+        trace = stack_contract_trace(contract)
+        session["stack_contract"] = dict(trace)
+        self.echo(
+            "[greenfield] stack contract intake: "
+            f"{trace['resolved_stack_id']} "
+            f"stack_contract_hash={trace['stack_contract_hash']}"
+        )
 
     # ── option resolution ───────────────────────────────────
 
