@@ -107,15 +107,23 @@ def build_obligation_checker_inputs(
     both layers use the canonical ``suites`` parser, a 0-test / fully-skipped e2e run
     reds in BOTH (defense in depth on ONE evidence source, never two parsers).
 
-    Binding rule (anti-false-green): the report is passed ONLY when the current-run
-    evidence was genuinely produced AND readable this run (a stale file the executor
-    did not produce this run is NOT trusted → no report passed → a checker that needs
-    it reds on "missing report", which is the correct RED). If the plan has more than
-    one TEST-report slot the binding is AMBIGUOUS for a single ``report_data`` kwarg;
-    the curated stack has exactly one (Playwright ``e2e_test``), so this is a clean
-    single binding today — a future multi-e2e stack must disambiguate (left to the
-    step that introduces it; until then a second TEST-report slot is surfaced as an
-    error so it can never silently pick the wrong report).
+    Binding rule (anti-false-green): a slot's report is bound ONLY when the current-run
+    evidence was genuinely produced AND readable this run (a stale file the executor did
+    not produce this run is NOT trusted → that slot is NOT bound → a checker that needs it
+    reds on "missing report", the correct RED).
+
+    Contract Kernel v3.x — KEYED evidence (``report_data_by_slot``). With a project
+    ``command_overrides`` a stack can have BOTH a ``verify`` (vitest) TEST-report slot AND
+    an ``e2e_test`` (playwright) TEST-report slot, so a SINGLE ``report_data`` kwarg can no
+    longer carry the evidence unambiguously. Instead, every produced+readable TEST-report
+    slot's normalized counts are bound under ``report_data_by_slot[slot_id]`` (so the
+    Playwright obligation binds to ``report_data_by_slot["e2e_test"]``, NOT "whichever
+    TEST-report slot happens to exist"). For BACKWARD COMPATIBILITY, when there is EXACTLY
+    one bound TEST-report slot the old single ``report_data`` key is ALSO set to that
+    slot's data — so the curated single-e2e stack and every existing checker/test keep
+    working byte-identically. Both layers use the canonical ``suites``/``testResults``
+    parser, so a 0-test / fully-skipped run reds in BOTH (defense in depth on ONE evidence
+    source, never two parsers).
     """
     from codd.stack.command_authenticity import (
         StackCommandObservationKind,
@@ -127,7 +135,7 @@ def build_obligation_checker_inputs(
     root = Path(project_root)
     plan = stack_command_plan(contract)  # conflict gate already passed upstream; pure projection
 
-    test_report_obs: list[Any] = []
+    report_data_by_slot: dict[str, Any] = {}
     for slot in plan.slots:
         policy = resolve_stack_command_observation_policy(
             slot.slot_id, contract_policies=contract.command_observation_policies
@@ -137,34 +145,30 @@ def build_obligation_checker_inputs(
         if not (slot.report_capture or slot.report_path):
             continue
         obs = observe_stack_command_report(slot, root, policy)
-        test_report_obs.append((slot, obs))
+        if not (obs.produced and obs.readable):
+            # Current-run evidence NOT produced/readable this run — do NOT bind a stale or
+            # absent report for this slot. A checker that requires it reds on "missing
+            # report" (correct RED); we never feed it untrusted evidence.
+            continue
+        # Shape the canonical-normalized counts into the report_data the obligation checker
+        # reads. ``expected`` = clean passes; ``unexpected``/``flaky`` = 0 so the checker's
+        # "executed = expected+unexpected+flaky" equals the canonical clean-pass count: a
+        # run with >=1 clean pass is GREEN; a fully-skipped/all-failed run (passed_cases==0)
+        # is RED — agreeing with the canonical parser, no divergent stats read of the file.
+        passed = int(obs.passed_cases or 0)
+        report_data_by_slot[slot.slot_id] = {
+            "stats": {"expected": passed, "unexpected": 0, "flaky": 0, "skipped": 0}
+        }
 
-    if not test_report_obs:
-        return {}
-    if len(test_report_obs) > 1:
-        slots = ", ".join(f"{s.slot_id}({s.owner})" for s, _ in test_report_obs)
-        raise StackObligationGateError(
-            "ambiguous obligation evidence: the resolved stack has more than one "
-            f"TEST-report command slot ({slots}); a single report binding cannot pick "
-            "one unambiguously (anti-false-green: never last-writer-wins across reports). "
-            "A multi-e2e stack must declare per-obligation evidence binding."
-        )
-
-    slot, obs = test_report_obs[0]
-    if not (obs.produced and obs.readable):
-        # The current-run evidence was NOT produced/readable this run — do NOT pass a
-        # stale or absent report. A checker that requires it then reds on "missing
-        # report" (the correct RED); we never feed it untrusted evidence.
+    if not report_data_by_slot:
         return {}
 
-    # Shape the canonical-normalized counts into the report_data the obligation checker
-    # reads. ``expected`` = clean passes; ``unexpected``/``flaky`` = 0 so the checker's
-    # "executed = expected+unexpected+flaky" equals the canonical clean-pass count: a
-    # run with >=1 clean pass is GREEN; a fully-skipped/all-failed run (passed_cases==0)
-    # is RED — agreeing with the canonical parser, no divergent stats read of the file.
-    passed = int(obs.passed_cases or 0)
-    report_data = {"stats": {"expected": passed, "unexpected": 0, "flaky": 0, "skipped": 0}}
-    return {"report_data": report_data}
+    inputs: dict[str, Any] = {"report_data_by_slot": report_data_by_slot}
+    # Backward compat: a single bound report keeps the old ``report_data`` kwarg so every
+    # existing checker / test (which reads ``report_data``) is byte-identical.
+    if len(report_data_by_slot) == 1:
+        inputs["report_data"] = next(iter(report_data_by_slot.values()))
+    return inputs
 
 
 def enforce_stack_obligation_gate(

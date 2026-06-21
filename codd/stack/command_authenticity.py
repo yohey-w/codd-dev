@@ -303,6 +303,54 @@ DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES: Mapping[str, StackCommandObservation
 })
 
 
+#: The kind partial-order for a strictly-stronger UPGRADE (Contract Kernel v3.x). A kind
+#: change is normally NOT a "strengthen" (``is_at_least_as_strict`` requires kind equality —
+#: a DOWNGRADE like ``e2e_test`` TEST→STATIC drops the test-count requirement and is RED).
+#: But two kind changes ADD requirements without removing any, so they ARE strictly
+#: stronger (their floor strictly CONTAINS the baseline's floor):
+#:
+#:   * STATIC_EXECUTION → TEST_REPORT — TEST keeps STATIC's floor (reject no-op + exit 0)
+#:     and ADDS report-required + >=1 test + test-level + fail-on-failure. This is the
+#:     GPT-5.5 Pro consult 2026-06-21 "verify (vitest) is semantically a TEST slot" case:
+#:     a project may STRENGTHEN its STATIC-default ``verify`` to TEST_REPORT so an
+#:     overridden vitest command is judged as a test, not "some static command exited 0".
+#:   * STATIC_EXECUTION → BUILD_EXECUTION — BUILD keeps STATIC's floor and is its
+#:     anti-false-green peer (reject no-op + exit 0), with the build-artifact hook on top.
+#:
+#: The reverse of each (TEST→STATIC, BUILD→STATIC, TEST→BUILD, BUILD→TEST) is NOT here —
+#: those drop or swap requirements and remain forbidden. This is a NARROW, explicitly
+#: enumerated allowance, NOT a general kind reordering: it never permits dropping the
+#: test-count/report floor of an already-TEST slot (the e2e-downgrade attack stays RED).
+_STRICT_KIND_UPGRADES: frozenset = frozenset(
+    {
+        (StackCommandObservationKind.STATIC_EXECUTION, StackCommandObservationKind.TEST_REPORT),
+        (StackCommandObservationKind.STATIC_EXECUTION, StackCommandObservationKind.BUILD_EXECUTION),
+    }
+)
+
+
+def _is_strict_kind_upgrade(
+    candidate: "StackCommandObservationPolicy",
+    baseline: "StackCommandObservationPolicy",
+) -> bool:
+    """True iff ``candidate``'s kind is a strictly-stronger UPGRADE of ``baseline``'s kind.
+
+    Provably anti-false-green-safe: an upgrade in :data:`_STRICT_KIND_UPGRADES` only ADDS
+    failure conditions (the candidate's intrinsic floor strictly CONTAINS the baseline
+    kind's floor), so accepting it can never turn a not-green outcome green — only a green
+    outcome red (stricter). The candidate must ALSO meet its OWN kind's intrinsic floor
+    (guaranteed for a TEST candidate by ``__post_init__``, which refuses to construct a
+    below-floor test policy). Used ONLY by :func:`resolve_stack_command_observation_policy`
+    as an alternative to the same-kind :func:`is_at_least_as_strict` — it never relaxes the
+    same-kind predicate the conformance partial-order test verifies."""
+    if (baseline.kind, candidate.kind) not in _STRICT_KIND_UPGRADES:
+        return False
+    # The candidate must be at least as strict as its OWN kind's intrinsic floor (a TEST
+    # candidate must be a real TEST policy, not a degenerate one — defense in depth under
+    # __post_init__).
+    return is_at_least_as_strict(candidate, _intrinsic_floor_for_kind(candidate.kind))
+
+
 def resolve_stack_command_observation_policy(
     slot_id: str,
     *,
@@ -322,6 +370,13 @@ def resolve_stack_command_observation_policy(
     downgrading the gate. This mirrors the language ``observation`` block, where
     :meth:`VerifyObservationPolicy.from_mapping` rejects every weakening at load: a profile
     may parameterize the invariant but may never disable it.
+
+    Contract Kernel v3.x — a strictly-stronger kind UPGRADE is also honored
+    (:func:`_is_strict_kind_upgrade`): a STATIC-default slot (e.g. the TypeScript
+    ``verify``/vitest slot) may be STRENGTHENED to TEST_REPORT so a project's overridden
+    vitest command is judged as a test (GPT-5.5 Pro consult 2026-06-21). This is a NARROW,
+    provably-safe allowance (the upgrade only ADDS requirements); a kind DOWNGRADE (the
+    e2e-downgrade attack) stays RED.
     """
     default = DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES.get(slot_id)
     if contract_policies and slot_id in contract_policies:
@@ -331,7 +386,13 @@ def resolve_stack_command_observation_policy(
         # still meet its kind's anti-false-green floor — a "test" slot cannot accept zero
         # tests / no report just because it has a novel id).
         baseline = default if default is not None else _intrinsic_floor_for_kind(override.kind)
-        if not is_at_least_as_strict(override, baseline):
+        # Honored iff (a) same-kind-at-least-as-strict, OR (b) a strictly-stronger kind
+        # upgrade (STATIC -> TEST_REPORT/BUILD). Both can only ADD strictness — neither can
+        # turn a not-green outcome green.
+        if not (
+            is_at_least_as_strict(override, baseline)
+            or _is_strict_kind_upgrade(override, baseline)
+        ):
             raise StackObservationPolicyWeakeningError(
                 f"stack contract command_observation_policies[{slot_id!r}] is WEAKER than "
                 f"its baseline ({'slot default' if default is not None else 'intrinsic ' + override.kind.value + ' floor'}): "
@@ -875,6 +936,7 @@ __all__ = [
     "DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES",
     "is_at_least_as_strict",
     "resolve_stack_command_observation_policy",
+    "_is_strict_kind_upgrade",
     "is_static_noop_command",
     "is_noop_shell_fragment",
     "StackCommandReportObservation",

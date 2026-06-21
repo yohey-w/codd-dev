@@ -257,6 +257,20 @@ class ResolvedStackContract:
     command_observation_policies: Mapping[str, Any] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    #: Project-level TRANSPORT-ONLY command overrides applied to this contract (Contract
+    #: Kernel v3.x ``stack.command_overrides``). Maps an overridden slot id to its parsed
+    #: :class:`~codd.stack.command_override.ProjectCommandOverride` record (kept for the run
+    #: trace / observability — the actual transport change is already baked into
+    #: ``commands[slot_id]``). Empty for a no-override contract (the common case), so a
+    #: stack with no ``command_overrides`` block is byte-identical. Typed loosely (``Any``
+    #: value) to keep ``compose`` free of an import cycle with the override module; the
+    #: values are ``ProjectCommandOverride``. NOT separately part of ``content_hash`` — the
+    #: override's EFFECT (the changed argv/cwd/env/report) is hashed via the expanded
+    #: command canonicalization (:func:`_content_hash` ``include_command_transport=True``),
+    #: which is what drifts the lock.
+    command_override_records: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     #: Proof-backed replacements (Contract Kernel v2.77f). A command/obligation that
     #: REPLACES another layer's via a well-formed ``codd.replace_with_proof`` is recorded
     #: here as a :class:`~codd.stack.replacement_proof.PendingReplacementProof` INSTEAD of
@@ -303,6 +317,42 @@ def _jsonable(value):
     return value
 
 
+def _command_hash_record(cid: str, c: CommandSpec) -> dict[str, Any]:
+    """The FULL canonical record of a command for the content hash (Contract Kernel v3.x).
+
+    Used ONLY when a project ``command_overrides`` is present (the expanded
+    canonicalization, ``include_command_transport=True`` in :func:`_content_hash`). It
+    covers every field a transport override can change — ``argv`` / ``cwd`` / ``env`` /
+    ``report`` (path/format/adapter/capture) / ``requires_materialized_deps`` — PLUS the
+    base-owned ``scope`` (so a lock pins the scope an overridden slot must cover too). A
+    change to ANY of these drifts the lock and is re-reviewed (GPT-5.5 Pro consult
+    2026-06-21 — "the override must be part of the locked contract hash"). Deterministic:
+    env is sorted; ``None`` sub-objects are emitted as ``None``."""
+    report = c.report
+    scope = c.scope
+    return {
+        "id": cid,
+        "argv": list(c.argv),
+        "cwd": c.cwd,
+        "env": sorted((str(k), str(v)) for k, v in c.env.items()),
+        "requires_materialized_deps": bool(c.requires_materialized_deps),
+        "report": None
+        if report is None
+        else {
+            "path": report.path,
+            "format": report.format,
+            "adapter": report.adapter,
+            "capture": report.capture,
+        },
+        "scope": None
+        if scope is None
+        else {
+            "must_include_source_sets": list(scope.must_include_source_sets),
+            "must_include_test_sets": list(scope.must_include_test_sets),
+        },
+    }
+
+
 def _content_hash(
     layers: Sequence[ResolvedLayerRef],
     commands: Mapping[str, CommandSpec],
@@ -310,10 +360,34 @@ def _content_hash(
     file_roles: Sequence[FileRole],
     source_sets: Sequence[SourceSet],
     pending_proofs: Sequence[Any] = (),
+    *,
+    include_command_transport: bool = False,
 ) -> str:
+    """Deterministic digest of the resolved contract (design §決定性).
+
+    ``include_command_transport`` controls the command canonicalization, and is the
+    knob that keeps EXISTING locks valid for the no-override case while letting a project
+    command override DRIFT the lock (Contract Kernel v3.x):
+
+    * ``False`` (the DEFAULT — used by :func:`compose` and every no-override resolve):
+      commands canonicalize as ``[id, argv]`` ONLY — byte-identical to the pre-override
+      hash, so every committed ``stack.lock`` from a no-override stack stays valid.
+    * ``True`` (used by :func:`codd.stack.command_override.apply_project_command_overrides`
+      WHEN a project declares ``command_overrides``): commands canonicalize as the FULL
+      :func:`_command_hash_record` (argv + cwd + env + report + scope +
+      requires_materialized_deps), so a transport override (argv/cwd/env/report) changes
+      the digest and forces a lock re-review. This expanded form is used ONLY on the
+      override path, so a no-override contract NEVER takes it (no spurious lock breakage)."""
+    if include_command_transport:
+        commands_canonical: Any = sorted(
+            (_command_hash_record(cid, c) for cid, c in commands.items()),
+            key=lambda rec: rec["id"],
+        )
+    else:
+        commands_canonical = sorted([cid, list(c.argv)] for cid, c in commands.items())
     canonical = {
         "layers": [[l.kind, l.id, l.profile_version] for l in layers],
-        "commands": sorted([cid, list(c.argv)] for cid, c in commands.items()),
+        "commands": commands_canonical,
         "obligations": sorted([o.id, o.severity] for o in obligations),
         "file_roles": sorted([r.pattern, r.role] for r in file_roles),
         "source_sets": sorted([s.id, s.root] for s in source_sets),

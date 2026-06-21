@@ -524,14 +524,47 @@ def default_stack_command_executor(
             ),
         )
 
+    # cwd CONTAINMENT (Contract Kernel v3.x — project command override hardening): the
+    # resolved cwd MUST stay inside the project root. A project ``command_overrides`` may
+    # set ``cwd``; an override that points cwd OUTSIDE the tree (to dodge the real tests, or
+    # to run an unrelated dummy suite) is RED here, fail-closed (defense in depth UNDER the
+    # override resolver's static containment check — the executor re-checks the RESOLVED
+    # absolute path against the real root). A no-override slot's cwd is the profile's, which
+    # is always inside the root, so this never reds an existing stack.
     cwd = (project_root / slot.cwd) if slot.cwd else project_root
+    try:
+        cwd.resolve().relative_to(project_root.resolve())
+    except (ValueError, OSError):
+        return StackCommandSlotResult(
+            slot_id=slot.slot_id,
+            owner=slot.owner,
+            command_str=slot.command_str,
+            spawned=False,
+            returncode=None,
+            timed_out=False,
+            detail=(
+                f"stack command slot {slot.slot_id!r} cwd {slot.cwd!r} resolves OUTSIDE the "
+                f"project root {str(project_root)!r} — refusing to spawn (anti-false-green: an "
+                "override may not run the check from outside the project/module root to dodge "
+                "the real tests). RED."
+            ),
+        )
     env = os.environ.copy()
     env.update(slot.env)
 
-    # Stale-report prevention: for a stdout-captured report, remove the prior run's
-    # evidence BEFORE spawning (mirror verify_executor step b).
+    # Stale-report prevention: remove the prior run's report evidence BEFORE spawning so a
+    # leftover green report can never be read as THIS run's output (the canonical stale-report
+    # false-green). Two transports:
+    #   * ``capture: stdout`` — the per-slot stdout evidence file (mirror verify_executor
+    #     step b); the executor re-tees this run's stdout after the process completes.
+    #   * ``capture: file`` (or unset, with a declared report_path) — the command writes the
+    #     report FILE directly (vitest ``--outputFile``). Contract Kernel v3.x: a project
+    #     ``command_overrides`` can point ``report.path`` at a committed file, so we MUST
+    #     unlink that declared file too (else a stale committed vitest.json would be read as
+    #     this run). If the command does not recreate it, authenticity sees REPORT_MISSING.
     evidence_path: Path | None = None
-    if (slot.report_capture or "").strip().lower() == "stdout":
+    capture = (slot.report_capture or "").strip().lower()
+    if capture == "stdout":
         evidence_path = stack_command_evidence_path(slot, project_root)
         try:
             evidence_path.unlink()
@@ -542,6 +575,50 @@ def default_stack_command_executor(
             # exit-code executor does not classify; we leave it and let the authenticity
             # layer fail-closed when it parses (it reads only what we write next).
             pass
+    elif slot.report_path:
+        # File-capture report: unlink the declared report file (inside the project root
+        # only — never delete an out-of-tree file). Path resolution mirrors the authenticity
+        # reader (:func:`codd.stack.command_authenticity._resolve_report_evidence_path`) so
+        # writer/unlinker/reader all name the SAME file.
+        base = (project_root / slot.cwd) if slot.cwd else project_root
+        candidate = base / slot.report_path
+        try:
+            resolved_report = candidate.resolve()
+            resolved_report.relative_to(project_root.resolve())
+        except (ValueError, OSError):
+            return StackCommandSlotResult(
+                slot_id=slot.slot_id,
+                owner=slot.owner,
+                command_str=slot.command_str,
+                spawned=False,
+                returncode=None,
+                timed_out=False,
+                detail=(
+                    f"stack command slot {slot.slot_id!r} report path {slot.report_path!r} "
+                    f"resolves OUTSIDE the project root {str(project_root)!r} — refusing to "
+                    "spawn (an override may not write/clear a report outside the tree). RED."
+                ),
+            )
+        try:
+            resolved_report.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Cannot clear the stale file-report. Do NOT silently proceed — a surviving
+            # stale green report is the exact false-green this unlink exists to kill. RED.
+            return StackCommandSlotResult(
+                slot_id=slot.slot_id,
+                owner=slot.owner,
+                command_str=slot.command_str,
+                spawned=False,
+                returncode=None,
+                timed_out=False,
+                detail=(
+                    f"stack command slot {slot.slot_id!r} could not clear the stale report "
+                    f"file {resolved_report} before running — refusing to spawn (a surviving "
+                    "stale report could be read as this run's evidence; anti-false-green). RED."
+                ),
+            )
 
     try:
         completed = subprocess.run(  # noqa: S603 — trusted argv from the resolved contract, shell=False.
