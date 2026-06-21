@@ -155,7 +155,15 @@ commands:
     cwd: "{module_root}"
     env:
       GOFLAGS: "-mod=readonly"
-    requires_materialized_deps: true
+    # The Go implement-oracle DELIBERATELY tolerates uninstalled third-party deps
+    # under -mod=readonly (the go-toolchain adapter classifies a missing THIRD-PARTY
+    # package as an env concern, not a coherence failure) — so the oracle's typecheck
+    # does NOT require materialization and must opt OUT of the contract install
+    # preflight (no ``go mod download`` before the oracle). false here, not true:
+    # the contract oracle consumes this flag (the legacy gate did not), so a stale
+    # ``true`` would wrongly trigger the preflight for Go. (build/verify keep their
+    # own ``requires_materialized_deps`` — those are NOT oracle commands.)
+    requires_materialized_deps: false
     scope:
       must_include_source_sets: ["commands", "internal"]
       must_include_test_sets: ["colocated", "e2e"]

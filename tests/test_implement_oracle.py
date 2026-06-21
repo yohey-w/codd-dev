@@ -243,15 +243,26 @@ def test_certify_scope_parses_jsonc_with_comments(tmp_path: Path) -> None:
     assert "certified" in certify_oracle_scope(tmp_path, profile, profile.implement_oracle)
 
 
-def test_certify_scope_respects_relaxed_test_requirement(tmp_path: Path) -> None:
-    """A spec that does not require the test root certifies on src-only include."""
+def test_certify_scope_requires_test_root_unconditionally(tmp_path: Path) -> None:
+    """The TS oracle (contract path) ALWAYS requires the test root — src-only is RED.
+
+    Intentional stricter RED after the Contract-Kernel TS switch (design §7): the
+    ``typescript-tsc`` adapter's scope requirement is FIXED (source + tests both
+    required), not driven by the legacy ``OracleScopeSpec.require_test_root`` knob.
+    The whole point of the implement-time typecheck is to catch test/helper symbol
+    incoherence, so a tsconfig that excludes the test tree is never certifiable — a
+    green ``tsc`` over an uncovered test surface would be a false-green. (The legacy
+    spec-driven relaxation is gone; this asserts the stronger anti-false-green
+    invariant the contract path enforces.)
+    """
     profile = _ts_profile()
     spec = ImplementOracleSpec(
         command="npx --no-install tsc --noEmit",
         scope=OracleScopeSpec(require_source_root=True, require_test_root=False),
     )
-    _write_tsconfig(tmp_path, ["src/**/*"])
-    assert "certified" in certify_oracle_scope(tmp_path, profile, spec)
+    _write_tsconfig(tmp_path, ["src/**/*"])  # tests excluded
+    with pytest.raises(OracleScopeError):
+        certify_oracle_scope(tmp_path, profile, spec)
 
 
 # ════════════════════════════════════════════════════════════

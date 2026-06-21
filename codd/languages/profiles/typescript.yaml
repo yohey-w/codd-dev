@@ -80,6 +80,13 @@ commands:
   typecheck:
     argv: ["npx", "--no-install", "tsc", "--noEmit"]
     cwd: "{module_root}"
+    # tsc needs node_modules (it resolves real imports). The contract oracle's
+    # install preflight runs ``toolchain.package_manager.materialize_command``
+    # (``npm ci``) BLOCKING before tsc when this flag is true — the language-free
+    # generalization of the legacy node-install preflight. ``--no-install`` keeps tsc
+    # itself offline-honest: a missing install surfaces as an environment error, never
+    # an implicit network fetch.
+    requires_materialized_deps: true
 
   verify:
     argv:

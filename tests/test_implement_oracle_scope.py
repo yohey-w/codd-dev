@@ -584,10 +584,15 @@ def _pass_result() -> ImplementOracleResult:
 
 @pytest.fixture
 def _patched_gate(tmp_path: Path, monkeypatch):
-    """Patch the gate's heavy bits (install/certify/run) so only the loop runs."""
+    """Patch the gate's heavy bits (certify/run) so only the rerun loop runs.
+
+    The dependency-install preflight is no longer a gate-level step (it moved INTO
+    the contract path, :func:`codd.implement_oracle._run_contract_oracle`); these
+    tests stub ``_run_oracle_command`` wholesale, so the contract path — and its
+    install — never runs. Only ``certify_oracle_scope`` still needs stubbing.
+    """
     import codd.implement_oracle as mod
 
-    monkeypatch.setattr(mod, "_run_node_install", lambda *a, **k: None)
     monkeypatch.setattr(mod, "certify_oracle_scope", lambda *a, **k: "certified (test)")
     return mod
 

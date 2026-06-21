@@ -51,39 +51,50 @@ and fed back to the SUT via a bounded ``rerun(feedback)`` loop (the same shape a
 ``run_implement_coverage_gate``). Implement does not "succeed" until the oracle
 passes or the bounded budget is spent — then it fails HONESTLY.
 
-PROFILE-DRIVEN (not hardcoded)
-==============================
-The oracle command + scope come from
-:class:`codd.project_types.ImplementOracleSpec` on the stack's
-:class:`~codd.project_types.LayoutProfile`. A stack WITHOUT a declared oracle
-(Python's composite is DEFERRED; bash; …) makes the gate a strict NO-OP — its
-coherence backstop stays the existing verify-stage gates. A new compiler stack is
-one profile entry + one evidence-normalizer entry here, never a core edit.
+CONTRACT-DRIVEN (Contract Kernel oracle dispatch — not hardcoded)
+=================================================================
+EVERY supported language runs on the Contract-Kernel contract path: its
+:class:`~codd.languages.profile.LanguageProfile` declares a modeled
+``implement_oracle`` (kind + command-ids + adapter id) and the named oracle adapter
+is REGISTERED. The dispatch resolves ``(profile, oracle decl, adapter)`` generically
+(:func:`_resolve_contract_oracle`) and routes by the declaration's ``kind`` — Go
+(``go-toolchain``, composite: ``typecheck`` + ``vet``) and TS (``typescript-tsc``,
+command: ``tsc --noEmit``) through the generic command-sequence executor
+(:func:`codd.languages.oracle_executor.run_command_sequence`), Python
+(``python-composite``, adapter) through its in-process ``execute``. There is NO
+hardcoded language-name comparison in this gate (Cut Condition A) — a new compiler
+stack is one profile entry + one leaf oracle adapter, never a core edit here. A
+stack with no modeled oracle + registered adapter makes the gate a strict NO-OP
+(the verify-stage gates stay the backstop).
 
 REUSE
 =====
-The oracle is RUN and ATTRIBUTED through the existing infrastructure:
+The tool semantics live behind the per-language oracle adapters
+(:mod:`codd.languages.adapters.oracle_go` / ``oracle_python`` / ``oracle_typescript``);
+the TS adapter ATTRIBUTES through the existing
 ``codd.repair.test_failure_attribution.attribute_command_failure`` (the same tsc
-diagnostic parser verify uses), and the node-install preflight mirrors
-``codd.project_types.node_install_command``. This module adds the implement-time
-PLACEMENT, the SCOPE CERTIFICATION, the finer EVIDENCE CATEGORIES, and the
-STAGE-level bounded-retry orchestration — it does not re-implement tsc running.
+diagnostic parser verify uses). The dependency-install preflight is now LANGUAGE-FREE
+(:func:`_run_materialize_preflight`): when an oracle command declares
+``requires_materialized_deps`` it runs the profile's
+``toolchain.package_manager.materialize_command`` (TS: ``npm ci``) BLOCKING before
+the oracle — the generalization of the old node-install preflight (it no longer
+hardwires ``codd.project_types.node_install_command``). This module owns the
+implement-time PLACEMENT, the SCOPE-CERTIFICATION orchestration, and the STAGE-level
+bounded-retry loop — it does not re-implement tsc running or normalization.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from collections.abc import Callable, Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from codd.project_types import (
     ImplementOracleSpec,
     LayoutProfile,
     OracleScopeSpec,
-    node_install_command,
     resolve_layout_profile,
 )
 
@@ -135,48 +146,16 @@ __test_exports__ = ["_execute_broad_campaign"]
 # NOTE: the language-neutral evidence categories (``EVIDENCE_*`` +
 # ``EVIDENCE_CATEGORIES``) now live in ``codd.implement_oracle_types`` (the leaf
 # module the oracle adapters share) and are re-imported at the top of this module —
-# see that import for the rationale (cycle-free adapter access). The TS-specific
-# code→category MAPS below stay here (they are TS normalizer internals, not shared
-# value-objects).
-
-
-#: TypeScript diagnostic codes → evidence category. The src↔src / test↔helper
-#: symbol-coherence bugs the gate targets are exactly the "missing member /
-#: cannot find name" family. ``module_resolution`` is the "cannot find module"
-#: family. Mapping is conservative: an unmapped ``TSxxxx`` is a real type error
-#: (``type_error``) — still a HARD failure, just not one of the named buckets.
-_TS_MISSING_SYMBOL_CODES = frozenset(
-    {
-        "TS2305",  # Module '"X"' has no exported member 'Y'.
-        "TS2724",  # '"X"' has no exported member named 'Y'. Did you mean 'Z'?
-        "TS2459",  # Module '"X"' declares 'Y' locally, but it is not exported.
-        "TS2614",  # Module '"X"' has no exported member 'Y'. (no default vs named)
-        "TS2552",  # Cannot find name 'Y'. Did you mean 'Z'?
-        "TS2304",  # Cannot find name 'Y'.
-        "TS2339",  # Property 'Y' does not exist on type 'X'.
-    }
-)
-_TS_MODULE_RESOLUTION_CODES = frozenset(
-    {
-        "TS2307",  # Cannot find module 'X' or its corresponding type declarations.
-        "TS2792",  # Cannot find module 'X'. Did you mean to set 'moduleResolution'?
-        "TS6053",  # File 'X' not found.
-        "TS5083",  # Cannot read file 'X'.
-    }
-)
-
-#: A tsc diagnostic line: ``path(line,col): error TSxxxx: message`` (pretty) or
-#: ``path:line:col - error TSxxxx: message`` (``--pretty false``). Captures the
-#: code + the trailing message so the per-error category + a compact SUT-facing
-#: summary can be built without re-parsing.
-_TS_DIAG_LINE = re.compile(
-    r"error\s+(?P<code>TS\d+)\s*:\s*(?P<message>.+?)\s*$",
-    re.MULTILINE,
-)
-
-#: ``tsc`` emits this when its include/files resolve to nothing — a config-scope
-#: failure that must NEVER read as "0 errors → coherent" (it typechecked nothing).
-_TS_NO_INPUTS_RE = re.compile(r"TS18003|No inputs were found in config file", re.IGNORECASE)
+# see that import for the rationale (cycle-free adapter access).
+#
+# The TS-specific code→category MAPS, the tsc diagnostic regex, and the TS18003
+# "no inputs" false-green guard regex were RELOCATED to the TS oracle adapter
+# (:mod:`codd.languages.adapters.oracle_typescript`) with the Contract-Kernel TS
+# switch (Contract Kernel oracle dispatch §7) — the gate no longer normalizes tsc
+# output itself (TS routes through the generic command-sequence executor + the
+# ``typescript-tsc`` adapter). The public ``normalize_oracle_output`` name below is
+# kept as a DELEGATING SHIM to that adapter's parser (back-compat for existing
+# importers + tests).
 
 
 # NOTE: ``OracleScopeError`` / ``ImplementOracleFinding`` / ``ImplementOracleResult``
@@ -356,22 +335,16 @@ def _orphan_artifact_gate_mode(config: Mapping[str, Any] | None) -> str:
     return DEFAULT_ORPHAN_ARTIFACT_GATE
 
 
-def _oracle_timeout_seconds(config: Mapping[str, Any] | None) -> float:
-    """Bounded wall-clock for the oracle command (``implement.oracle_timeout_seconds``)."""
-    section = (config or {}).get("implement") if isinstance(config, Mapping) else None
-    if isinstance(section, Mapping):
-        raw = section.get("oracle_timeout_seconds")
-        try:
-            value = float(raw)
-            if value > 0:
-                return value
-        except (TypeError, ValueError):
-            pass
-    return DEFAULT_ORACLE_TIMEOUT_SECONDS
-
+# NOTE: the per-command oracle timeout knob (``implement.oracle_timeout_seconds``)
+# is now read by the generic command-sequence executor
+# (:func:`codd.languages.oracle_executor._oracle_timeout_seconds`) — the gate no
+# longer spawns the oracle command itself (TS/Go/Python all run on the contract
+# path), so its local timeout helper was removed with the legacy ``_run_oracle_
+# command`` body. The default constant is kept for documentation + back-compat.
 
 #: tsc on a fresh build is fast, but a cold first run can compile a large graph;
 #: a generous-but-bounded budget. Override via ``implement.oracle_timeout_seconds``.
+#: (Consumed by the generic executor; the executor declares the same default.)
 DEFAULT_ORACLE_TIMEOUT_SECONDS = 600.0
 
 #: Install can pull a tree on a cold cache. Bounded; the verify preflight uses the
@@ -532,318 +505,112 @@ def _norm(rel: str) -> str:
     return str(rel).strip().replace("\\", "/").strip("/")
 
 
-def _glob_covers_root(patterns: list[str], root: str) -> bool:
-    """Does any tsconfig include/files glob cover everything under ``root``/?
-
-    Conservative TEXTUAL test (we do not run tsc's resolver): a pattern covers
-    ``root`` when it starts at (or above) ``root`` and is recursive enough to
-    reach nested files — i.e. ``root`` itself, ``root/**``, ``root/**/*`` and
-    ``**/*`` (the catch-all). A pattern restricted to a sub-path of ``root`` (a
-    single file, or ``root/sub/**``) does NOT certify the whole ``root`` (e2e /
-    helpers under another sub-dir would be unseen). Anything we cannot prove
-    covers ``root`` returns False → the caller HARD-FAILS rather than guessing.
-    """
-    root = _norm(root)
-    if not root:
-        return False
-    for raw in patterns:
-        pat = _norm(raw)
-        if not pat:
-            continue
-        # The universal recursive catch-all.
-        if pat in {"**", "**/*"} or pat.startswith("**/"):
-            # ``**/*`` and ``**/<x>`` reach into every dir incl. root.
-            if pat in {"**", "**/*"}:
-                return True
-            # ``**/*.ts`` etc. — recursive over all dirs, covers root's files.
-            if pat.startswith("**/*"):
-                return True
-        # ``root`` exactly, or a recursive glob anchored at root.
-        if pat == root:
-            return True
-        if pat.startswith(root + "/"):
-            tail = pat[len(root) + 1 :]
-            # Recursive from root: ``root/**`` / ``root/**/*`` / ``root/**/*.ts``.
-            if tail.startswith("**"):
-                return True
-            # A single-level ``root/*`` does NOT reach nested e2e/helpers; only a
-            # ``**`` recursive glob certifies the whole subtree.
-    return False
+# NOTE: ``_glob_covers_root`` (the tsconfig include/files coverage test) was
+# relocated to the TS oracle adapter (Contract Kernel oracle dispatch §7) — the
+# gate's ``certify_oracle_scope`` now delegates scope certification to the registered
+# adapter, so the gate no longer parses tsconfig globs itself.
 
 
 def certify_oracle_scope(
     project_root: Path,
     profile: LayoutProfile,
-    spec: ImplementOracleSpec,
+    spec: ImplementOracleSpec,  # noqa: ARG001 — kept for the stable gate signature.
 ) -> str:
-    """Certify the oracle's config covers source + tests, else raise OracleScopeError.
+    """Certify the oracle's scope covers source + tests, else raise OracleScopeError.
 
-    TS today: parse ``tsconfig.json`` and prove its ``include`` (or ``files``)
-    covers the ``source_root`` and ``test_root`` subtrees (which contain e2e +
-    helpers). Returns a human-readable certification detail on success.
+    Returns a human-readable certification detail on success; raises
+    :class:`OracleScopeError` when the scope cannot be proven to cover source +
+    tests — a green oracle over an unknown / partial / empty scope is a false-green
+    (the #1 design failure mode: "tests outside compile scope = false green").
 
-    A missing/unparseable tsconfig, or one whose scope provably excludes the test
-    tree, is a HARD FAIL (``OracleScopeError``) — a green oracle over an unknown
-    or partial scope would be a false-green. This is the #1 design failure mode
-    ("profile-less native oracle: tests outside compile scope = false green").
+    CONTRACT PATH (Contract Kernel oracle dispatch §5–§7): EVERY supported language
+    certifies through its registered oracle adapter's ``certify_scope`` — Go
+    (``go-toolchain``: missing go.mod / undecidable module path / empty module → RED),
+    Python (``python-composite``: an empty required source/test root → RED), and TS
+    (``typescript-tsc``: missing tsconfig.json / test root excluded → RED). The
+    selection is GENERIC — modeled oracle + registered adapter via
+    :func:`_resolve_contract_oracle` — with NO hardcoded language-name comparison
+    (Cut Condition A; the legacy in-gate tsc certifier moved to the TS adapter).
 
-    CONTRACT PATH (Contract Kernel oracle dispatch §5–§6): a contract-path language
-    (modeled oracle + registered adapter — Go via ``go-toolchain``, Python via
-    ``python-composite``) certifies through its adapter's ``certify_scope``: Go
-    raises ``OracleScopeError`` on a missing go.mod / undecidable module path / empty
-    module; Python certifies a CONCRETE file-list (an empty required source/test root
-    is a HARD FAIL — a green oracle over an empty scope proves nothing). Generic
-    predicate — no hardcoded language-name comparison here. For a ``kind="adapter"``
-    language (Python) the legacy ``LayoutProfile`` is handed to the adapter as the
-    layout VIEW (it reads source_root/test_root from it; the ``LayoutSpec`` does not
-    carry those); Go reads ``module_root`` from the ``LayoutSpec`` (no override).
+    For a ``kind="adapter"`` language (Python) the legacy ``LayoutProfile`` is handed
+    to the adapter as the layout VIEW (it reads ``source_root``/``test_root`` from it;
+    the ``LayoutSpec`` does not carry those). A command-sequence oracle (Go reads
+    ``module_root``; TS reads ``source_sets``/``test_sets``) reads from the resolved
+    ``LanguageProfile.layout`` (no override).
     """
-    if spec.kind == "composite":
-        contract = _resolve_contract_oracle(profile.language)
-        if contract is not None:
-            lang_profile, oracle_decl, adapter = contract
-            from codd.languages.adapters.implement_oracle import OracleContext
-
-            layout_view = (
-                profile if getattr(oracle_decl, "kind", None) == "adapter" else lang_profile.layout
-            )
-            ctx = OracleContext(
-                project_root=project_root,
-                layout_profile=layout_view,
-                language_profile=lang_profile,
-                oracle=oracle_decl,
-                config=None,
-            )
-            return adapter.certify_scope(ctx)
-    if profile.language not in ("typescript", "node"):
-        # Only TS has a config-scope to certify today; other compiler stacks add
-        # their own certifier when they wire an oracle. (Never reached for the
-        # current registry — the resolver only hands us TS / the composites above.)
-        return f"scope certification not implemented for {profile.language!r}; relying on command"
-
-    tsconfig = project_root / "tsconfig.json"
-    if not tsconfig.is_file():
+    contract = _resolve_contract_oracle(profile.language)
+    if contract is None:
+        # No modeled oracle + registered adapter for this language. The gate only
+        # reaches certification for a resolved oracle spec, so this is an unsupported
+        # stack reaching the certifier — RED, never a silent "certified" (anti-false-
+        # green: a green over an uncertifiable/unknown scope proves nothing).
         raise OracleScopeError(
-            "implement-time oracle cannot be certified: no tsconfig.json at the project "
-            "root, so tsc's typecheck scope is unknown — a green typecheck would prove "
-            "nothing about src/tests. The greenfield scaffold creates a tsconfig with "
-            "include=[<src>/**/*, <tests>/**/*]; ensure the layout was scaffolded."
+            f"implement-time oracle cannot be certified for language {profile.language!r}: "
+            "no registered oracle adapter to certify its scope. A green oracle over an "
+            "uncertified scope would be a false-green (HARD FAIL)."
         )
-    try:
-        payload = json.loads(_strip_jsonc(tsconfig.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise OracleScopeError(
-            f"implement-time oracle cannot be certified: tsconfig.json is unreadable/"
-            f"invalid JSON ({exc}); tsc's scope is undecidable, so a green typecheck "
-            f"cannot be trusted to cover src/tests."
-        ) from exc
+    lang_profile, oracle_decl, adapter = contract
+    from codd.languages.adapters.implement_oracle import OracleContext
 
-    if not isinstance(payload, dict):
-        raise OracleScopeError(
-            "implement-time oracle cannot be certified: tsconfig.json is not a JSON object."
-        )
-
-    include = payload.get("include")
-    files = payload.get("files")
-    patterns: list[str] = []
-    if isinstance(include, list):
-        patterns.extend(str(item) for item in include)
-    if isinstance(files, list):
-        patterns.extend(str(item) for item in files)
-
-    # A tsconfig with neither ``include`` nor ``files`` defaults to "every .ts
-    # under the config dir" — which DOES cover src + tests. But ``exclude`` or a
-    # narrow project layout could still hide the test tree; rather than reason
-    # about tsc's full default-resolution, we REQUIRE an explicit include that we
-    # can prove covers the test root. This is intentionally strict: the scaffold
-    # always emits one, so a missing include means a hand-authored config we will
-    # not certify blind.
-    if not patterns:
-        raise OracleScopeError(
-            "implement-time oracle cannot be certified: tsconfig.json declares no "
-            "`include` or `files`, so it is not provable that tsc's scope covers the "
-            "test tree (where test/helper symbol incoherence lives). Declare "
-            f'include: ["{profile.source_root}/**/*", "{profile.test_root}/**/*"].'
-        )
-
-    missing: list[str] = []
-    if spec.scope.require_source_root and not _glob_covers_root(patterns, profile.source_root):
-        missing.append(profile.source_root)
-    if spec.scope.require_test_root and not _glob_covers_root(patterns, profile.test_root):
-        missing.append(profile.test_root)
-    if missing:
-        raise OracleScopeError(
-            "implement-time oracle cannot be certified: tsconfig.json `include`/`files` "
-            f"({patterns}) does not provably cover the required root(s) {missing}. The "
-            "whole point of the implement-time typecheck is to catch test/helper symbol "
-            "incoherence, so an uncovered test tree is a HARD FAIL (anti-false-green). "
-            f'Add a recursive glob, e.g. "{missing[0]}/**/*", to include.'
-        )
-
-    return (
-        f"oracle scope certified: tsconfig include/files {patterns} cover "
-        f"source_root='{profile.source_root}' + test_root='{profile.test_root}'"
+    layout_view = (
+        profile if getattr(oracle_decl, "kind", None) == "adapter" else lang_profile.layout
     )
+    ctx = OracleContext(
+        project_root=project_root,
+        layout_profile=layout_view,
+        language_profile=lang_profile,
+        oracle=oracle_decl,
+        config=None,
+    )
+    return adapter.certify_scope(ctx)
 
 
 def _strip_jsonc(text: str) -> str:
     """Strip ``//`` and ``/* */`` comments so a JSONC tsconfig parses as JSON.
 
-    Conservative: removes line comments not inside a string and block comments.
-    tsconfig is JSONC; our own scaffold uses a ``"//"`` KEY (valid JSON) but a
-    hand-authored config may use real comments, and JSON's parser would choke.
+    DELEGATING SHIM → :func:`codd.languages.adapters.oracle_typescript._strip_jsonc`
+    (the body relocated to the TS adapter with the Contract-Kernel TS switch). Kept
+    here because :mod:`codd.implement_oracle_scope` still imports
+    ``from codd.implement_oracle import _strip_jsonc`` (its tsconfig path-scope
+    reader). Same byte-for-byte behaviour; only the home moved.
     """
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    in_string = False
-    in_line_comment = False
-    in_block_comment = False
-    while i < n:
-        ch = text[i]
-        nxt = text[i + 1] if i + 1 < n else ""
-        if in_line_comment:
-            if ch == "\n":
-                in_line_comment = False
-                out.append(ch)
-            i += 1
-            continue
-        if in_block_comment:
-            if ch == "*" and nxt == "/":
-                in_block_comment = False
-                i += 2
-                continue
-            i += 1
-            continue
-        if in_string:
-            out.append(ch)
-            if ch == "\\" and nxt:
-                out.append(nxt)
-                i += 2
-                continue
-            if ch == '"':
-                in_string = False
-            i += 1
-            continue
-        # not in string/comment
-        if ch == '"':
-            in_string = True
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "/" and nxt == "/":
-            in_line_comment = True
-            i += 2
-            continue
-        if ch == "/" and nxt == "*":
-            in_block_comment = True
-            i += 2
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
+    from codd.languages.adapters.oracle_typescript import _strip_jsonc as _impl
+
+    return _impl(text)
 
 
-# ── evidence normalization (tsc diagnostics → language-neutral categories) ──
-
-
-def _categorize_ts_code(code: str) -> str:
-    if code in _TS_MISSING_SYMBOL_CODES:
-        return EVIDENCE_MISSING_SYMBOL
-    if code in _TS_MODULE_RESOLUTION_CODES:
-        return EVIDENCE_MODULE_RESOLUTION
-    return EVIDENCE_OTHER
+# ── evidence normalization — RELOCATED to the TS oracle adapter ──
+#
+# The tsc diagnostic normalizer (the ``_TS_*`` code maps + the per-line parser + the
+# TS18003 "no inputs" guard + ``_diag_path``) moved to
+# :mod:`codd.languages.adapters.oracle_typescript` with the Contract-Kernel TS switch
+# (Contract Kernel oracle dispatch §7). TS now normalizes through that adapter's
+# ``normalize_command_result`` on the generic command-sequence path. The public
+# ``normalize_oracle_output`` name is kept as a DELEGATING SHIM (back-compat for
+# existing importers + the TS unit tests).
 
 
 def normalize_oracle_output(
     output: str,
     *,
-    command: str,
+    command: str,  # noqa: ARG001 — kept for the stable signature (attribution is path-based).
     project_root: Path,
-    profile: LayoutProfile,
+    profile: LayoutProfile = None,  # noqa: ARG001 — kept for the stable signature; unused.
 ) -> tuple[list[ImplementOracleFinding], list[str]]:
-    """Normalize raw oracle output → (findings, editable failed paths).
+    """Normalize raw tsc output → (findings, editable failed paths).
 
-    For TS this parses every ``error TSxxxx: message`` line into an
-    :class:`ImplementOracleFinding` with a language-neutral category, and REUSES
-    the existing tsc attribution
-    (:func:`codd.repair.test_failure_attribution.attribute_command_failure`) to
-    resolve the editable source/test targets — the same parser the verify stage
-    uses, so attribution stays consistent across stages.
-
-    A ``No inputs were found`` (TS18003) result is surfaced as a single
-    ``environment_build_error`` finding: tsc ran but typechecked nothing, which
-    must never be mistaken for coherence (the scope certifier should have caught
-    it first; this is the belt-and-suspenders).
-
-    This is the TS-path normalizer (the only language still on the legacy
-    ``_run_oracle_command`` path). Python normalizes its ``pytest --collect-only``
-    output via :func:`normalize_python_tool_output` (the public shim, called by the
-    relocated ``python-composite`` adapter) — the composite oracle's compile +
-    import-resolver layers build their findings in-process (no text to normalize), so
-    a Python oracle never reaches this function.
+    DELEGATING SHIM → the relocated TS parser
+    (:func:`codd.languages.adapters.oracle_typescript._parse_ts_diagnostics`). Same
+    semantics: every ``error TSxxxx: message`` line → an
+    :class:`ImplementOracleFinding` with a language-neutral category; a ``No inputs
+    were found`` (TS18003) → an ``environment_build_error`` finding; the editable
+    ``failed_paths`` resolved through the SAME tsc attribution the verify stage uses.
+    The bodies moved to the adapter with the Contract-Kernel TS switch; the behaviour
+    did not.
     """
-    text = output or ""
-    findings: list[ImplementOracleFinding] = []
+    from codd.languages.adapters.oracle_typescript import _parse_ts_diagnostics
 
-    if _TS_NO_INPUTS_RE.search(text):
-        findings.append(
-            ImplementOracleFinding(
-                category=EVIDENCE_ENVIRONMENT_BUILD,
-                code="TS18003",
-                message="tsc found no inputs — the typecheck covered zero files (scope error).",
-            )
-        )
-
-    # Attribute diagnostic lines to their files using the same regexes tsc uses,
-    # pairing each error code/message with the file on the SAME line.
-    for line in text.splitlines():
-        m = _TS_DIAG_LINE.search(line)
-        if m is None:
-            continue
-        code = m.group("code")
-        message = m.group("message").strip()
-        path = _diag_path(line, project_root)
-        findings.append(
-            ImplementOracleFinding(
-                category=_categorize_ts_code(code),
-                code=code,
-                message=message,
-                path=path,
-            )
-        )
-
-    failed_paths: list[str] = []
-    try:
-        from codd.repair.test_failure_attribution import attribute_command_failure
-
-        attribution = attribute_command_failure(
-            command=command,
-            output=text,
-            project_root=project_root,
-            check_name="implement_oracle",
-        )
-        if attribution is not None:
-            failed_paths = list(attribution.failed_nodes)
-    except Exception:  # noqa: BLE001 — attribution is best-effort enrichment.
-        failed_paths = []
-
-    return findings, failed_paths
-
-
-def _diag_path(line: str, project_root: Path) -> str | None:
-    """Extract the file path from a tsc diagnostic line, project-relative."""
-    paren = re.match(r"^\s*(?P<path>[^\s(][^(\n]*\.(?:ts|tsx|mts|cts))\(\d+,\d+\)", line)
-    colon = re.match(r"^\s*(?P<path>[^\s:][^:\n]*\.(?:ts|tsx|mts|cts)):\d+:\d+", line)
-    match = paren or colon
-    if match is None:
-        return None
-    raw = match.group("path").strip()
-    try:
-        resolved = (project_root / raw).resolve()
-        return resolved.relative_to(Path(project_root).resolve()).as_posix()
-    except (ValueError, OSError):
-        return PurePosixPath(raw.replace("\\", "/")).as_posix()
+    return _parse_ts_diagnostics(output or "", project_root)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -914,20 +681,22 @@ def certify_go_oracle_scope(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Contract-path oracle dispatch (Contract Kernel oracle dispatch §3–§5).
+# Contract-path oracle dispatch (Contract Kernel oracle dispatch §3–§7).
 #
 # A language whose resolved ``LanguageProfile`` declares a modeled
 # ``implement_oracle`` AND whose oracle adapter is REGISTERED runs on the
 # Contract-Kernel contract path instead of a hand-written per-language executor:
 # the generic :func:`codd.languages.oracle_executor.run_command_sequence` spawns
-# the profile's command sequence (Go: ``typecheck`` + ``vet``) and an
-# :class:`~codd.languages.adapters.implement_oracle.ImplementOracleAdapter`
-# (Go: ``go-toolchain``) certifies scope + normalizes each command's output.
+# the profile's command sequence (Go: ``typecheck`` + ``vet``; TS: ``typecheck``)
+# and an :class:`~codd.languages.adapters.implement_oracle.ImplementOracleAdapter`
+# (Go: ``go-toolchain``; TS: ``typescript-tsc``) certifies scope + normalizes each
+# command's output. Python (``python-composite``) runs in-process via the adapter's
+# ``execute`` instead of a command sequence.
 #
-# Step 5 registers ONLY ``go-toolchain``, so Go takes this path; Python/TS keep
-# their legacy ``LayoutProfile``-builder path until their adapters register
-# (steps 6–7). The selection predicate is GENERIC — "modeled oracle + registered
-# adapter" — never a hardcoded language-name comparison (Cut Condition A).
+# ALL THREE built-in stacks (Go / Python / TS) are now registered, so every one
+# takes this path — there is NO per-language executor left in the gate. The
+# selection predicate is GENERIC — "modeled oracle + registered adapter" — never a
+# hardcoded language-name comparison (Cut Condition A; the oracle's finish line).
 # ═════════════════════════════════════════════════════════════════════════════
 
 
@@ -939,15 +708,16 @@ def _resolve_contract_oracle(
     Returns the contract-path triple when ``language`` resolves to a
     :class:`~codd.languages.profile.LanguageProfile` that declares a modeled
     ``implement_oracle`` whose ``adapter`` is REGISTERED under
-    ``("implement_oracle", adapter_id)``; otherwise ``None`` (the caller stays on
-    the legacy path). The registered-adapter gate is what makes ONLY Go migrate
-    today — Python/TS resolve a profile but their oracle adapters are not yet
-    registered, so this returns ``None`` for them.
+    ``("implement_oracle", adapter_id)``; otherwise ``None`` (no contract oracle —
+    an unsupported stack the gate treats as a NO-OP / RED depending on the caller).
+    ALL THREE built-in stacks now resolve: Go (``go-toolchain``), Python
+    (``python-composite``), TS (``typescript-tsc``) — the registered-adapter gate is
+    the GENERIC selection predicate (Cut Condition A: no language-name comparison).
 
     ``language`` is the RUNTIME-provided stack language (an alias like ``golang``
     resolves via the registry's case-insensitive id/alias lookup). Best-effort: a
-    registry/profile error degrades to ``None`` (never a crash; the legacy path /
-    verify-stage gates stay the backstop).
+    registry/profile error degrades to ``None`` (never a crash; the verify-stage
+    gates stay the backstop).
     """
     lang = (language or "").strip()
     if not lang:
@@ -959,14 +729,14 @@ def _resolve_contract_oracle(
         from codd.languages.registry import default_adapter_registry
 
         lang_profile = default_registry.resolve(lang)
-    except Exception:  # noqa: BLE001 — no registry profile ⇒ legacy path, not a crash.
+    except Exception:  # noqa: BLE001 — no registry profile ⇒ no contract oracle, not a crash.
         return None
     oracle_decl = getattr(lang_profile, "implement_oracle", None)
     if oracle_decl is None:
         return None
-    # Gate on the REGISTERED adapter: a modeled oracle whose adapter is not yet
-    # registered (Python/TS until steps 6–7) stays on legacy. ``ensure_builtin_…``
-    # is idempotent; it registers the built-ins (incl. go-toolchain) on first use.
+    # Gate on the REGISTERED adapter. ``ensure_builtin_…`` is idempotent; it registers
+    # all three built-in oracle adapters (go-toolchain / python-composite /
+    # typescript-tsc) on first use, so every built-in stack resolves to its contract.
     try:
         ensure_builtin_adapters_registered(default_adapter_registry)
         adapter = default_adapter_registry.get(KIND_IMPLEMENT_ORACLE, oracle_decl.adapter)
@@ -990,6 +760,147 @@ def _contract_oracle_command_ids(oracle_decl: Any) -> list[str]:
     if kind == "command" and oracle_decl.command:
         return [oracle_decl.command]
     return []
+
+
+def _oracle_requires_materialized_deps(lang_profile: Any, oracle_decl: Any) -> bool:
+    """True iff ANY of the oracle's command steps declares ``requires_materialized_deps``.
+
+    Reads the resolved :class:`CommandSpec` for each oracle command id from
+    ``lang_profile.commands``. Language-free: the flag (not a language name) decides
+    whether the install preflight runs. Go's ``typecheck`` sets it False (the Go
+    oracle tolerates uninstalled third-party deps under ``-mod=readonly``) → Go skips
+    the preflight; TS's ``typecheck`` sets it True (tsc needs ``node_modules``) → TS
+    runs it. An ``adapter``-kind oracle (Python) has no command ids → False (its
+    in-process composite tolerates uninstalled third-party deps too).
+    """
+    commands = getattr(lang_profile, "commands", {}) or {}
+    for command_id in _contract_oracle_command_ids(oracle_decl):
+        spec = commands.get(command_id)
+        if spec is not None and bool(getattr(spec, "requires_materialized_deps", False)):
+            return True
+    return False
+
+
+def _materialize_command(lang_profile: Any) -> tuple[list[str], str | None] | None:
+    """The profile's ``toolchain.package_manager.materialize_command`` → (argv, cwd).
+
+    Returns ``None`` when the profile declares no materialize command (then there is
+    nothing to install — the caller proceeds without a preflight). The command lives
+    in the loose ``package_manager`` mapping as ``{argv: [...], cwd: "{module_root}"}``
+    (TS: ``npm ci``). ``cwd`` may carry layout placeholders (resolved by the caller).
+    """
+    toolchain = getattr(lang_profile, "toolchain", None)
+    if toolchain is None:
+        return None
+    pm = getattr(toolchain, "package_manager", None) or {}
+    raw = pm.get("materialize_command") if hasattr(pm, "get") else None
+    if not raw or not hasattr(raw, "get"):
+        return None
+    argv = list(raw.get("argv") or [])
+    if not argv:
+        return None
+    cwd = raw.get("cwd")
+    return [str(a) for a in argv], (str(cwd) if cwd is not None else None)
+
+
+def _run_materialize_preflight(
+    project_root: Path,
+    lang_profile: Any,
+    oracle_decl: Any,
+    config: Mapping[str, Any] | None,
+) -> ImplementOracleResult | None:
+    """Blocking dependency install before a contract oracle whose steps need deps.
+
+    The language-free generalization of the legacy ``_run_node_install`` (which was
+    hardwired to ``node_install_command``): when an oracle command declares
+    ``requires_materialized_deps`` AND the profile declares a materialize command,
+    run it BLOCKING so the oracle tool (tsc) has its ``node_modules`` before it runs.
+    Returns ``None`` when no preflight is needed (no requiring step, or no declared
+    materialize command). An install FAILURE / TIMEOUT is an honest
+    ``environment_build_error`` :class:`ImplementOracleResult` (passed=False,
+    executed=True, NOT retryable) — exactly like the legacy node-install preflight, so
+    a build/toolchain failure is never handed to the SUT to "fix" in source.
+
+    Reuses the legacy install's timeout knob (``implement.oracle_install_timeout_
+    seconds`` via :func:`_install_timeout`) and spawns through this module's
+    ``subprocess.run`` (the SAME seam the legacy preflight + the existing TS tests
+    mock). ``argv`` comes from the trusted language profile; run ``shell=False``.
+    """
+    if not _oracle_requires_materialized_deps(lang_profile, oracle_decl):
+        return None
+    resolved = _materialize_command(lang_profile)
+    if resolved is None:
+        # A step needs deps but the profile declares no installer: there is nothing to
+        # run as a preflight. The oracle tool's own ``--no-install`` / readonly mode
+        # then surfaces a missing dependency as an honest finding (never a silent green
+        # synthesized here).
+        return None
+    argv, cwd_template = resolved
+    from codd.languages.verify_plan import _substitute_layout_placeholders
+
+    layout = getattr(lang_profile, "layout", None)
+    cwd_value = (
+        _substitute_layout_placeholders(cwd_template, layout)
+        if (cwd_template and layout is not None)
+        else cwd_template
+    )
+    run_cwd = (project_root / cwd_value) if cwd_value and cwd_value not in (".", "") else project_root
+    command_str = " ".join(argv)
+    timeout = _install_timeout(config)
+    try:
+        completed = subprocess.run(  # noqa: S603 — trusted argv from the profile, shell=False
+            argv,
+            shell=False,
+            cwd=str(run_cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return ImplementOracleResult(
+            passed=False,
+            executed=True,
+            command=command_str,
+            findings=[
+                ImplementOracleFinding(
+                    category=EVIDENCE_ENVIRONMENT_BUILD,
+                    code="install_timeout",
+                    message=f"dependency install exceeded {timeout:g}s",
+                )
+            ],
+            detail=f"dependency install timed out after {timeout:g}s: {command_str}",
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return ImplementOracleResult(
+            passed=False,
+            executed=True,
+            command=command_str,
+            findings=[
+                ImplementOracleFinding(
+                    category=EVIDENCE_ENVIRONMENT_BUILD,
+                    code="install_spawn_error",
+                    message=f"could not run dependency install ({exc}): {command_str}",
+                )
+            ],
+            detail=f"could not run dependency install ({exc}): {command_str}",
+        )
+    if completed.returncode != 0:
+        tail = _output_tail(completed.stdout, completed.stderr)
+        return ImplementOracleResult(
+            passed=False,
+            executed=True,
+            command=command_str,
+            findings=[
+                ImplementOracleFinding(
+                    category=EVIDENCE_ENVIRONMENT_BUILD,
+                    code="install_failed",
+                    message=f"dependency install failed (exit {completed.returncode})",
+                )
+            ],
+            detail=f"dependency install failed (exit {completed.returncode}): {command_str}\n{tail}",
+            raw_output=tail,
+        )
+    return None
 
 
 def _run_contract_oracle(
@@ -1039,6 +950,16 @@ def _run_contract_oracle(
         config=config,
     )
 
+    # Install preflight (language-free, BEFORE dispatch so run_command_sequence stays
+    # pure): if ANY oracle step's resolved CommandSpec requires materialized deps AND
+    # the profile declares a materialize command, run it BLOCKING (the generalization
+    # of the legacy node-install preflight). An install FAILURE is a non-retryable
+    # environment_build_error. Go opts out (requires_materialized_deps=False on its
+    # typecheck) so it never runs ``go mod download`` here — no regression.
+    install_failure = _run_materialize_preflight(project_root, lang_profile, oracle_decl, config)
+    if install_failure is not None:
+        return install_failure
+
     if getattr(oracle_decl, "kind", None) == "adapter":
         if not adapter_supports_execute(adapter):
             return ImplementOracleResult(
@@ -1064,60 +985,7 @@ def _run_contract_oracle(
     return run_command_sequence(ctx, command_ids, adapter)
 
 
-# ── command execution (REUSES the verify stage's run/attribution shape) ──
-
-
-def _run_node_install(project_root: Path, config: Mapping[str, Any] | None) -> ImplementOracleResult | None:
-    """Blocking dependency install so ``tsc`` + deps are materialized.
-
-    Mirrors the verify stage's install preflight
-    (:func:`codd.project_types.node_install_command`): an install FAILURE is an
-    honest ``environment_build_error`` — NOT a code-repair target — so it is
-    returned as a failed (non-retryable) result the caller turns into a hard
-    stage error, never handed to the SUT to "fix" in source.
-    """
-    command = node_install_command(project_root)
-    timeout = _install_timeout(config)
-    try:
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return ImplementOracleResult(
-            passed=False,
-            executed=True,
-            command=command,
-            findings=[
-                ImplementOracleFinding(
-                    category=EVIDENCE_ENVIRONMENT_BUILD,
-                    code="install_timeout",
-                    message=f"dependency install exceeded {timeout:g}s",
-                )
-            ],
-            detail=f"dependency install timed out after {timeout:g}s",
-        )
-    if completed.returncode != 0:
-        tail = _output_tail(completed.stdout, completed.stderr)
-        return ImplementOracleResult(
-            passed=False,
-            executed=True,
-            command=command,
-            findings=[
-                ImplementOracleFinding(
-                    category=EVIDENCE_ENVIRONMENT_BUILD,
-                    code="install_failed",
-                    message=f"dependency install failed (exit {completed.returncode})",
-                )
-            ],
-            detail=f"dependency install failed (exit {completed.returncode}): {command}\n{tail}",
-            raw_output=tail,
-        )
-    return None
+# ── command execution (the Contract-Kernel contract path) ──
 
 
 def _install_timeout(config: Mapping[str, Any] | None) -> float:
@@ -1136,130 +1004,64 @@ def _install_timeout(config: Mapping[str, Any] | None) -> float:
 def _run_oracle_command(
     project_root: Path,
     profile: LayoutProfile,
-    spec: ImplementOracleSpec,
+    spec: ImplementOracleSpec,  # noqa: ARG001 — kept for the stable gate signature.
     config: Mapping[str, Any] | None,
 ) -> ImplementOracleResult:
-    """Run the native oracle ONCE and normalize the result.
+    """Run the native oracle ONCE on the Contract-Kernel contract path.
 
-    The command is the profile's (TS: ``npx --no-install tsc --noEmit``), run
-    from the project root with a bounded timeout. Exit 0 → passed (the scope was
-    already certified by the caller, so this is a TRUE green). Non-zero → parse +
-    normalize the diagnostics.
+    CONTRACT PATH (Contract Kernel oracle dispatch §3–§7): EVERY supported language
+    runs through the generic contract path — its resolved ``LanguageProfile`` declares
+    a modeled ``implement_oracle`` whose adapter is REGISTERED, and the dispatch routes
+    by the declaration's ``kind`` (no hardcoded language-name comparison — Cut
+    Condition A):
 
-    CONTRACT PATH (Contract Kernel oracle dispatch §3–§6): a language whose
-    resolved ``LanguageProfile`` declares a modeled ``implement_oracle`` with a
-    REGISTERED adapter runs on the contract path instead of a hand-written
-    executor. Go (``go-toolchain``, ``kind="composite"``) and Python
-    (``python-composite``, ``kind="adapter"``) both qualify, so their legacy
-    ``kind="composite"`` gate spec routes here: Go to
-    :func:`run_command_sequence` over its ``typecheck`` + ``vet`` commands, Python
-    to the registered adapter's in-process ``execute`` (compile + first-party
-    import resolver + ``pytest --collect-only``). TS (``kind="compiler"``) keeps the
-    legacy ``tsc`` path below (its adapter is not yet registered). The predicate is
-    GENERIC (modeled oracle + registered adapter via :func:`_resolve_contract_oracle`)
-    — there is no hardcoded language-name comparison in this dispatch.
+    * Go (``go-toolchain``, ``kind="composite"``) → :func:`run_command_sequence` over
+      its ``typecheck`` + ``vet`` commands.
+    * TS (``typescript-tsc``, ``kind="command"``) → :func:`run_command_sequence` over
+      the single ``typecheck`` command (``tsc --noEmit``). The install preflight
+      (``npm ci``) runs inside :func:`_run_contract_oracle` first (tsc needs deps).
+    * Python (``python-composite``, ``kind="adapter"``) → the registered adapter's
+      in-process ``execute`` (compile + first-party import resolver + ``pytest
+      --collect-only``).
 
     For a ``kind="adapter"`` contract (Python) the legacy ``LayoutProfile`` is handed
     to the adapter as the layout VIEW (``layout_override``): the Python adapter reads
-    ``source_root`` / ``test_root`` / ``package_root`` / ``package_name`` from it
-    (the profile's ``LayoutSpec`` does not carry those). Go's command-sequence path
-    needs no override (its adapter reads ``module_root`` from the ``LayoutSpec``).
+    ``source_root`` / ``test_root`` / ``package_root`` / ``package_name`` from it (the
+    profile's ``LayoutSpec`` does not carry those). A command-sequence oracle (Go reads
+    ``module_root``; TS reads ``source_sets``/``test_sets``) needs no override — it
+    reads from the resolved ``LanguageProfile.layout``.
+
+    No contract resolves (an unsupported stack reaching here) → an honest
+    ``environment_build_error`` RED, never a silent pass (anti-false-green).
     """
-    if spec.kind == "composite":
-        contract = _resolve_contract_oracle(profile.language)
-        if contract is not None:
-            lang_profile, oracle_decl, adapter = contract
-            # A kind="adapter" oracle (Python) runs in-process and needs the richer
-            # legacy layout (source_root/test_root/package_root); hand it the gate's
-            # LayoutProfile as the layout view. A command-sequence oracle (Go) reads
-            # only module_root from the profile's LayoutSpec → no override.
-            layout_override = profile if getattr(oracle_decl, "kind", None) == "adapter" else None
-            return _run_contract_oracle(
-                project_root, lang_profile, oracle_decl, adapter, config,
-                layout_override=layout_override,
-            )
-    command = spec.command
-    timeout = _oracle_timeout_seconds(config)
-    try:
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return ImplementOracleResult(
-            passed=False,
-            executed=True,
-            command=command,
-            findings=[
-                ImplementOracleFinding(
-                    category=EVIDENCE_ENVIRONMENT_BUILD,
-                    code="oracle_timeout",
-                    message=f"native oracle exceeded {timeout:g}s",
-                )
-            ],
-            detail=f"native oracle timed out after {timeout:g}s: {command}",
-        )
-    except (OSError, ValueError) as exc:
+    contract = _resolve_contract_oracle(profile.language)
+    if contract is None:
         return ImplementOracleResult(
             passed=False,
             executed=False,
-            command=command,
+            command=f"{profile.language}-oracle",
             findings=[
                 ImplementOracleFinding(
                     category=EVIDENCE_ENVIRONMENT_BUILD,
-                    code="oracle_spawn_error",
-                    message=f"could not run native oracle: {exc}",
+                    code="oracle_unsupported",
+                    message=(
+                        f"no registered implement-oracle adapter for language "
+                        f"{profile.language!r}; cannot run the oracle (RED, never a "
+                        "silent pass)."
+                    ),
                 )
             ],
-            detail=f"could not run native oracle ({exc}): {command}",
+            detail=f"no contract oracle for language {profile.language!r}",
         )
-
-    full_output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
-    if completed.returncode == 0 and not _TS_NO_INPUTS_RE.search(full_output):
-        return ImplementOracleResult(
-            passed=True,
-            executed=True,
-            command=command,
-            detail="native oracle passed (typecheck clean)",
-            raw_output=full_output,
-        )
-
-    findings, failed_paths = normalize_oracle_output(
-        full_output, command=command, project_root=project_root, profile=profile
-    )
-    if not findings:
-        # Non-zero exit but no parseable diagnostic — treat as an honest opaque
-        # failure (environment/toolchain), never a silent pass.
-        findings = [
-            ImplementOracleFinding(
-                category=EVIDENCE_ENVIRONMENT_BUILD,
-                code=f"exit_{completed.returncode}",
-                message=(_output_tail(completed.stdout, completed.stderr) or "non-zero exit, no diagnostics"),
-            )
-        ]
-    # Structured diagnostics for the scoped rerun + the loop-breaking signature.
-    # Best-effort: a parser failure must never abort the gate (the scope layer
-    # degrades to broad on empty diagnostics).
-    diagnostics: list[Any] = []
-    try:
-        from codd.implement_oracle_scope import _parse_ts_diagnostics
-
-        diagnostics = _parse_ts_diagnostics(full_output, project_root)
-    except Exception:  # noqa: BLE001 — structured-diag parsing is enrichment only.
-        diagnostics = []
-    return ImplementOracleResult(
-        passed=False,
-        executed=True,
-        command=command,
-        findings=findings,
-        failed_paths=failed_paths,
-        detail=f"native oracle failed (exit {completed.returncode}); {len(findings)} diagnostic(s)",
-        raw_output=full_output,
-        diagnostics=diagnostics,
+    lang_profile, oracle_decl, adapter = contract
+    # A kind="adapter" oracle (Python) runs in-process and needs the richer legacy
+    # layout (source_root/test_root/package_root); hand it the gate's LayoutProfile as
+    # the layout view. A command-sequence oracle (Go/TS) reads from the profile's
+    # LayoutSpec → no override.
+    layout_override = profile if getattr(oracle_decl, "kind", None) == "adapter" else None
+    return _run_contract_oracle(
+        project_root, lang_profile, oracle_decl, adapter, config,
+        layout_override=layout_override,
     )
 
 
@@ -1328,18 +1130,18 @@ def _resolve_registry_composite_oracle(
 
     De-literalized (Contract Kernel oracle dispatch §5): the old hardcoded
     ``{"go", "golang"}`` allowlist is gone. A language resolves to a synthesized
-    composite IFF :func:`_resolve_contract_oracle` returns a triple — i.e. its
-    resolved ``LanguageProfile`` declares a modeled COMPOSITE ``implement_oracle``
-    whose adapter is REGISTERED (today only Go via ``go-toolchain``; Python/TS
-    profiles resolve but their adapters are not yet registered → ``None`` → they
-    stay on their legacy paths). For such a language with NO legacy
-    ``LayoutProfile`` builder (Go — ``package_root.kind == none``), build a MINIMAL
-    ``LayoutProfile`` carrying just ``language`` + the module root (as
-    ``source_root``) so the existing gate machinery (run/certify/retry) works
-    unchanged; the dispatch then routes its ``kind="composite"`` spec to the
-    contract path (:func:`_run_contract_oracle`). ``None`` for any other language
-    (a stack with neither a legacy profile nor a contract oracle stays a strict
-    NO-OP). Best-effort: a registry error degrades to NO-OP (never a crash).
+    composite IFF :func:`_resolve_contract_oracle` returns a triple AND its oracle is
+    ``kind="composite"`` — i.e. a modeled COMPOSITE ``implement_oracle`` whose adapter
+    is REGISTERED. In practice this is Go (``go-toolchain``): it has NO legacy
+    ``LayoutProfile`` builder (``package_root.kind == none``), so it reaches here, and
+    we build a MINIMAL ``LayoutProfile`` carrying just ``language`` + the module root
+    (as ``source_root``) so the gate machinery (certify/run/retry) works unchanged;
+    the dispatch then routes its ``kind="composite"`` spec to the contract path
+    (:func:`_run_contract_oracle`). TS (``kind="command"``) and Python both HAVE legacy
+    ``LayoutProfile`` builders, so they never reach this synthesis path — and TS would
+    not match (it is ``command``, not ``composite``). ``None`` for any other language
+    (a stack with neither a legacy profile nor a composite contract oracle stays a
+    strict NO-OP). Best-effort: a registry error degrades to NO-OP (never a crash).
     """
     contract = _resolve_contract_oracle(language)
     if contract is None:
@@ -1445,19 +1247,18 @@ def run_implement_oracle_gate(
         )
     profile, spec = resolved
 
-    # 2. Blocking dependency install (node stacks) — must precede certification +
-    # run so ``tsc`` is materialized; an install failure is non-retryable.
-    if spec.requires_node_install:
-        install_failure = _run_node_install(root, config)
-        if install_failure is not None:
-            echo(f"[greenfield] implement-oracle: {install_failure.detail}")
-            return install_failure
-
-    # 3. Certify scope — HARD FAIL on an uncertifiable scope (raises).
+    # 2. Certify scope — HARD FAIL on an uncertifiable scope (raises). Scope
+    # certification reads files from disk (tsconfig.json / go.mod / the .py list); it
+    # never needs materialized deps, so it precedes the install. The BLOCKING
+    # dependency install (for a contract oracle whose steps require materialized deps —
+    # TS's ``tsc`` needs ``node_modules``) now runs INSIDE the contract path
+    # (:func:`_run_contract_oracle` → :func:`_run_materialize_preflight`), the
+    # language-free generalization of the legacy node-install preflight. An install
+    # failure surfaces there as a non-retryable ``environment_build_error``.
     certification = certify_oracle_scope(root, profile, spec)
     echo(f"[greenfield] implement-oracle: {certification}")
 
-    # 4. Run + bounded retry-with-feedback, escalating the rerun scope.
+    # 3. Run + bounded retry-with-feedback, escalating the rerun scope.
     max_attempts = _oracle_max_attempts(config)
     result = _run_oracle_command(root, profile, spec, config)
     attempt = 1

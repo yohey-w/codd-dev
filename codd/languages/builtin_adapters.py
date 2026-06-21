@@ -84,9 +84,9 @@ def ensure_builtin_adapters_registered(registry: AdapterRegistry | None = None) 
     _register_once(target, "runner_report", "go-test-json", GoTestJsonReportAdapter())
 
     # Implement-oracle tool-semantics adapters (Contract Kernel oracle dispatch §3).
-    # The plumbing is wired now; the concrete oracle_go / oracle_python /
-    # oracle_typescript adapters register inside register_oracle_adapters WITH their
-    # dispatch switch steps. Today it registers NOTHING (additive scaffolding only).
+    # All three concrete adapters (go-toolchain / python-composite / typescript-tsc)
+    # register inside register_oracle_adapters — every compiler/composite stack is now
+    # on the contract path (no language-name dispatch left in the oracle gate).
     register_oracle_adapters(target)
 
     if target is default_adapter_registry:
@@ -104,20 +104,23 @@ def register_oracle_adapters(registry: AdapterRegistry) -> None:
     ``(kind, id)`` raises — a silent oracle override is exactly the false-green this
     kernel forbids).
 
-    Step 5 registers the ``go-toolchain`` adapter (Go migrates to the contract
-    path); step 6 registers ``python-composite`` (Python's in-process ``kind=adapter``
-    composite); ``typescript-tsc`` lands with step 7 (until then TS stays on the
-    legacy gate path, because the dispatch routes to the contract path ONLY when the
-    resolved profile's oracle adapter is REGISTERED here — an unregistered adapter id
-    keeps a language on legacy). The adapter classes are imported INSIDE this function
-    (lazy), never at module load, preserving the leaf rule.
+    Step 5 registered the ``go-toolchain`` adapter (Go on the contract path); step 6
+    ``python-composite`` (Python's in-process ``kind=adapter`` composite); step 7
+    ``typescript-tsc`` (tsc ``kind=command``). ALL THREE are now registered, so every
+    compiler/composite stack routes to the contract path — the dispatch selection is
+    GENERIC (modeled oracle + registered adapter), never a language-name comparison
+    (Cut Condition A). The adapter classes are imported INSIDE this function (lazy),
+    never at module load, preserving the leaf rule.
     """
     from codd.languages.adapters.oracle_go import GoToolchainOracleAdapter
     from codd.languages.adapters.oracle_python import PythonCompositeOracleAdapter
+    from codd.languages.adapters.oracle_typescript import TypeScriptTscOracleAdapter
     from codd.languages.contract import KIND_IMPLEMENT_ORACLE
 
     _register_once(registry, KIND_IMPLEMENT_ORACLE, "go-toolchain", GoToolchainOracleAdapter())
     _register_once(
         registry, KIND_IMPLEMENT_ORACLE, "python-composite", PythonCompositeOracleAdapter()
     )
-    # typescript-tsc registers here with step 7.
+    _register_once(
+        registry, KIND_IMPLEMENT_ORACLE, "typescript-tsc", TypeScriptTscOracleAdapter()
+    )
