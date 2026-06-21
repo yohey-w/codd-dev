@@ -1345,13 +1345,20 @@ def _certify_python_tool_observability(
 # ═════════════════════════════════════════════════════════════════════════════
 # Layout reading (the Python-specific scope knowledge baked into the adapter).
 #
-# The OracleContext carries the legacy Python ``LayoutProfile`` as ``layout_profile``
-# (the gate passes it — it has ``source_root`` / ``test_root`` / ``package_root`` /
-# ``package_name``; ``LayoutSpec`` does not). Python's scope policy (require source_
-# root; test_root for the collect layer) is Python-specific knowledge → baked here,
-# not depending on a legacy OracleScopeSpec. ``require_test_root`` is True for the
-# Python composite (matches the legacy spec, ``OracleScopeSpec(require_source_root=
-# True, require_test_root=True)``).
+# Cut A.3: the adapter derives ``(source_root, package_root, test_root)`` from the
+# resolved ``LayoutSpec`` (``ctx.language_profile.layout`` — ``source_sets`` /
+# ``test_sets`` / ``package_root`` template) + the gate-resolved ``ctx.package_name``,
+# NOT from a legacy ``LayoutProfile.source_root`` layout VIEW (that bridge is gone).
+# This MIRRORS the TS adapter's ``_ts_layout_roots`` (reads ``layout.source_sets`` /
+# ``test_sets``), but with Python's named-package nuance: Python's single source-set
+# root is ``src/{package_name}`` (the PACKAGE dir), so the bare ``source_root`` is
+# the PARENT of the substituted ``package_root`` (``src/app`` → ``src``) — the import
+# index keys a module under ``package_root`` as ``<pkg>.mod`` and a flat module under
+# ``source_root`` outside it as a bare name, so the two roots are NOT interchangeable.
+#
+# Python's scope policy (require source root; require test root for the collect
+# layer) is Python-specific knowledge → baked here, not depending on a legacy
+# OracleScopeSpec.
 # ═════════════════════════════════════════════════════════════════════════════
 
 #: Python's composite oracle requires BOTH a source scope (the keystone resolver +
@@ -1361,20 +1368,126 @@ _REQUIRE_SOURCE_ROOT = True
 _REQUIRE_TEST_ROOT = True
 
 
-def _layout_roots(ctx: OracleContext) -> tuple[str, str, str]:
-    """``(source_root, package_root, test_root)`` from ctx's legacy Python layout.
+def _py_parent_dir(path: str) -> str:
+    """Parent directory of a POSIX relative path (``src/app`` → ``src``).
 
-    The gate builds the context with the legacy ``LayoutProfile`` (which carries
-    these). Defensive defaults mirror the Python profile's standard src-layout so a
-    minimal/synthetic layout view still anchors first-party classification.
+    Returns ``"."`` when there is no parent segment. Mirrors
+    :func:`codd.languages.compat._parent_dir` (the proven-byte-identical derivation):
+    a ``named_package`` layout always nests ``<src>/<pkg>``, so the legacy
+    ``source_root`` is the package_root's parent.
     """
-    layout = ctx.layout_profile
-    source_root = _py_norm(getattr(layout, "source_root", "") or "src") or "src"
-    package_root = _py_norm(getattr(layout, "package_root", "") or "")
-    test_root = _py_norm(getattr(layout, "test_root", "") or "tests") or "tests"
-    if not package_root:
-        package_name = getattr(layout, "package_name", "") or ""
-        package_root = f"{source_root}/{package_name}".strip("/") if package_name else source_root
+    norm = _py_norm(path)
+    if "/" not in norm:
+        return "."
+    return norm.rsplit("/", 1)[0]
+
+
+def _py_layout_from_layout_spec(ctx: OracleContext) -> tuple[str, str, str]:
+    """``(source_root, package_root, test_root)`` derived from the resolved ``LayoutSpec``.
+
+    Cut A.3 (the Python oracle's layout AUTHORITY): the adapter reads the v3
+    ``LayoutSpec`` (``ctx.language_profile.layout``) + the gate-resolved
+    ``ctx.package_name``, NOT a legacy ``LayoutProfile.source_root``. Anti-false-green
+    is paramount — a silent wrong layout here is a false-green — so this is strict:
+
+    * **Multi-source-set / multi-(required-)test-set → HARD FAIL** (RED via
+      :class:`OracleScopeError`). Python declares exactly ONE source-set + ONE unit
+      test-set today; the import index + collect scope are single-root. Reading only
+      ``source_sets[0]`` would SILENTLY drop the v3 set-semantics (a dropped root =
+      unproven code = false-green), so >1 is an explicit unsupported RED, never a
+      silent first-root collapse. (Multi-root observe-all is a later increment +
+      Stage-5 poison test; this increment is behavior-preserving on single-root.)
+    * **package_root** = the ``package_root`` template with ``{package_name}``
+      SUBSTITUTED from ``ctx.package_name`` (``named_package`` → ``src/app``).
+    * **source_root** = the PARENT of ``package_root`` for ``named_package``
+      (``src/app`` → ``src``); the bare set root for ``path_root``.
+    * **test_root** = the single test-set's root (``tests``).
+    * **Unresolved ``{package_name}`` → HARD FAIL** (no ``src`` fallback): a leftover
+      ``{package_name}`` (gate did not resolve a name) means the package_root is
+      UNKNOWN; a ``src`` fallback would point the oracle at the wrong tree (the
+      biggest drift risk Cut A.3 flags) → RED, never a silent wrong package_root.
+    """
+    layout = ctx.language_profile.layout
+    source_sets = tuple(getattr(layout, "source_sets", ()) or ())
+    test_sets = tuple(getattr(layout, "test_sets", ()) or ())
+
+    # Multi-set → hard-fail (never a silent first-root collapse — anti-false-green).
+    if len(source_sets) > 1:
+        raise OracleScopeError(
+            "python implement-time oracle cannot be certified: the resolved layout "
+            f"declares {len(source_sets)} source_sets "
+            f"({[s.id for s in source_sets]}), but the Python composite oracle is "
+            "single-source-root (its first-party import index + compile + collect "
+            "scope are rooted at ONE source tree). Observing only the first set would "
+            "SILENTLY drop the others (unproven code = false-green); a multi-source-set "
+            "Python layout is UNSUPPORTED by this oracle today (RED, never a silent "
+            "first-root collapse)."
+        )
+    # A REQUIRED (non-optional) test-set count > 1 is the same hazard for the collect
+    # scope. ``optional``/``colocated`` sets are not REQUIRED roots, so they do not
+    # trigger the hard-fail (the collect layer runs over the single required test root).
+    required_test_sets = tuple(s for s in test_sets if not getattr(s, "optional", False))
+    if len(required_test_sets) > 1:
+        raise OracleScopeError(
+            "python implement-time oracle cannot be certified: the resolved layout "
+            f"declares {len(required_test_sets)} required test_sets "
+            f"({[s.id for s in required_test_sets]}), but the Python composite oracle "
+            "collects a SINGLE test root. A multi-required-test-set Python layout is "
+            "UNSUPPORTED by this oracle today (RED, never a silent first-root collapse)."
+        )
+
+    pkg_spec = getattr(layout, "package_root", None)
+    pkg_kind = getattr(pkg_spec, "kind", "none")
+    pkg_path = getattr(pkg_spec, "path", None) or ""
+    package_name = ctx.package_name
+
+    def _subst(template: str) -> str:
+        """Substitute ``{package_name}``; a leftover placeholder is a HARD FAIL."""
+        rendered = template
+        if "{package_name}" in template:
+            if not package_name:
+                raise OracleScopeError(
+                    "python implement-time oracle cannot be certified: the layout "
+                    f"template {template!r} carries an UNRESOLVED '{{package_name}}' "
+                    "(the gate did not resolve a canonical package name), so the "
+                    "package_root is UNKNOWN. A 'src' fallback would point the oracle "
+                    "at the WRONG package tree (silent wrong layout = false-green) — "
+                    "this is a HARD FAIL, not a fallback. Ensure the project's package "
+                    "name resolves (project.package_name / a single top-level package "
+                    "on disk / the project name)."
+                )
+            rendered = template.replace("{package_name}", package_name)
+        if "{" in rendered and "}" in rendered:
+            # Any OTHER leftover placeholder ({module_path}, …) is equally undecidable.
+            raise OracleScopeError(
+                "python implement-time oracle cannot be certified: the layout template "
+                f"{template!r} has an unresolved placeholder after substitution "
+                f"({rendered!r}); the scope is undecidable (HARD FAIL, never a guess)."
+            )
+        return _py_norm(rendered)
+
+    if pkg_kind == "named_package":
+        if not pkg_path:
+            raise OracleScopeError(
+                "python implement-time oracle cannot be certified: package_root.kind="
+                "named_package but no path (the layout is incomplete; HARD FAIL)."
+            )
+        package_root = _subst(pkg_path)
+        source_root = _py_parent_dir(package_root)
+    elif pkg_kind == "path_root":
+        package_root = _subst(pkg_path) if pkg_path else ""
+        source_root = package_root
+    else:
+        # ``none`` (no single package root — Go) or unknown: derive the source root
+        # from the single source-set, package_root == source_root (no named package).
+        source_root = _subst(source_sets[0].root) if source_sets else "src"
+        package_root = source_root
+
+    if not source_root:
+        source_root = "src"
+    test_root = _subst(test_sets[0].root) if test_sets else "tests"
+    if not test_root:
+        test_root = "tests"
     return source_root, package_root, test_root
 
 
@@ -1449,10 +1562,11 @@ class PythonCompositeOracleAdapter:
         """Certify the Python oracle's concrete file-list covers the required root(s).
 
         Anti-false-green: a required source/test root with ZERO ``.py`` is a HARD
-        FAIL (:class:`OracleScopeError`, never a silent pass). Reads source_root /
-        test_root from ``ctx.layout_profile`` (the legacy Python LayoutProfile).
+        FAIL (:class:`OracleScopeError`, never a silent pass). Derives source_root /
+        test_root from the resolved ``LayoutSpec`` (``ctx.language_profile.layout`` +
+        ``ctx.package_name``) — Cut A.3: NO legacy ``LayoutProfile.source_root`` read.
         """
-        source_root, _package_root, test_root = _layout_roots(ctx)
+        source_root, _package_root, test_root = _py_layout_from_layout_spec(ctx)
         scope = _python_oracle_scope(ctx.project_root, source_root, test_root)
         missing_roots: list[str] = []
         if _REQUIRE_SOURCE_ROOT and not scope.source_files:
@@ -1485,9 +1599,11 @@ class PythonCompositeOracleAdapter:
         ``diagnostics=[]`` (no scoped Python rerun — the bounded loop falls to broad
         rerun, which is safe). Preserves EVERY tolerance precisely (third-party
         import tolerate, third-party-only collection tolerate, pytest-missing →
-        environment_build_error).
+        environment_build_error). Derives its roots from the resolved ``LayoutSpec``
+        (``ctx.language_profile.layout`` + ``ctx.package_name``) — Cut A.3: NO legacy
+        ``LayoutProfile.source_root`` read.
         """
-        source_root, package_root, test_root = _layout_roots(ctx)
+        source_root, package_root, test_root = _py_layout_from_layout_spec(ctx)
         project_root = ctx.project_root
         config = ctx.config
         scope = _python_oracle_scope(project_root, source_root, test_root)

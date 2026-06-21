@@ -140,7 +140,6 @@ __all__ = [
     "normalize_python_tool_output",
     "resolve_implement_oracle",
     "run_implement_oracle_gate",
-    "synthesize_minimal_layout_view",
 ]
 
 #: Internal-but-tested campaign entry point (the anti-false-green acceptance tests
@@ -617,11 +616,12 @@ def certify_oracle_scope(
     :func:`_resolve_contract_oracle` — with NO hardcoded language-name comparison
     (Cut Condition A; the legacy in-gate tsc certifier moved to the TS adapter).
 
-    For a ``kind="adapter"`` language (Python) the legacy ``LayoutProfile`` is handed
-    to the adapter as the layout VIEW (it reads ``source_root``/``test_root`` from it;
-    the ``LayoutSpec`` does not carry those). A command-sequence oracle (Go reads
-    ``module_root``; TS reads ``source_sets``/``test_sets``) reads from the resolved
-    ``LanguageProfile.layout`` (no override).
+    Cut A.3: the ``OracleContext.layout_profile`` is ALWAYS the resolved ``LayoutSpec``
+    (``lang_profile.layout``) — NO legacy ``LayoutProfile`` layout-VIEW override. A
+    ``kind="adapter"`` language (Python) derives its ``source_root``/``test_root`` from
+    the ``LayoutSpec`` (``source_sets``/``package_root`` template) + the gate-resolved
+    ``package_name`` carried on the context. A command-sequence oracle (Go reads
+    ``module_root``; TS reads ``source_sets``/``test_sets``) reads the SAME ``LayoutSpec``.
     """
     contract = _resolve_contract_oracle(profile.language)
     if contract is None:
@@ -637,15 +637,13 @@ def certify_oracle_scope(
     lang_profile, oracle_decl, adapter = contract
     from codd.languages.adapters.implement_oracle import OracleContext
 
-    layout_view = (
-        profile if getattr(oracle_decl, "kind", None) == "adapter" else lang_profile.layout
-    )
     ctx = OracleContext(
         project_root=project_root,
-        layout_profile=layout_view,
+        layout_profile=lang_profile.layout,
         language_profile=lang_profile,
         oracle=oracle_decl,
         config=None,
+        package_name=getattr(profile, "package_name", None),
     )
     return adapter.certify_scope(ctx)
 
@@ -995,7 +993,7 @@ def _run_contract_oracle(
     adapter: Any,
     config: Mapping[str, Any] | None,
     *,
-    layout_override: Any = None,
+    package_name: str | None = None,
 ) -> ImplementOracleResult:
     """Run a modeled oracle on the contract path (certify already done by caller).
 
@@ -1012,14 +1010,12 @@ def _run_contract_oracle(
       declared ``kind="adapter"`` with no ``execute`` is an incomplete contract →
       RED, never a silent pass).
 
-    ``layout_override`` lets a ``kind="adapter"`` language hand the adapter a RICHER
-    layout VIEW than the profile's ``LayoutSpec``: Python's ``python-composite``
-    reads ``source_root`` / ``test_root`` / ``package_root`` / ``package_name`` (the
-    legacy Python ``LayoutProfile`` carries them; ``LayoutSpec`` does not). Go's
-    command-sequence adapter still reads ``module_root`` from ``lang_profile.layout``
-    (``layout_override`` is ``None`` for it). The ``OracleContext.layout_profile``
-    field is duck-typed (the generic executor only reads ``module_root``/cwd/env from
-    it on the command-sequence path, which the adapter path does not take).
+    Cut A.3: ``OracleContext.layout_profile`` is ALWAYS ``lang_profile.layout`` (the
+    resolved ``LayoutSpec``) — there is NO legacy ``LayoutProfile`` layout-VIEW
+    override. A ``kind="adapter"`` language whose layout template carries
+    ``{package_name}`` (Python's ``src/{package_name}``) SUBSTITUTES the gate-resolved
+    ``package_name`` carried on the context; Go's command-sequence adapter reads
+    ``module_root`` from the same ``LayoutSpec`` (``package_name`` is ``None`` for it).
     """
     from codd.languages.adapters.implement_oracle import (
         OracleContext,
@@ -1029,10 +1025,11 @@ def _run_contract_oracle(
 
     ctx = OracleContext(
         project_root=project_root,
-        layout_profile=layout_override if layout_override is not None else lang_profile.layout,
+        layout_profile=lang_profile.layout,
         language_profile=lang_profile,
         oracle=oracle_decl,
         config=config,
+        package_name=package_name,
     )
 
     # Install preflight (language-free, BEFORE dispatch so run_command_sequence stays
@@ -1109,12 +1106,13 @@ def _run_oracle_command(
       in-process ``execute`` (compile + first-party import resolver + ``pytest
       --collect-only``).
 
-    For a ``kind="adapter"`` contract (Python) the legacy ``LayoutProfile`` is handed
-    to the adapter as the layout VIEW (``layout_override``): the Python adapter reads
-    ``source_root`` / ``test_root`` / ``package_root`` / ``package_name`` from it (the
-    profile's ``LayoutSpec`` does not carry those). A command-sequence oracle (Go reads
-    ``module_root``; TS reads ``source_sets``/``test_sets``) needs no override — it
-    reads from the resolved ``LanguageProfile.layout``.
+    Cut A.3: the ``OracleContext.layout_profile`` is ALWAYS the resolved ``LayoutSpec``
+    (``lang_profile.layout``) — the legacy ``LayoutProfile`` layout-VIEW override is
+    retired. The Python adapter derives its ``source_root`` / ``test_root`` /
+    ``package_root`` from the ``LayoutSpec`` (``source_sets`` / ``test_sets`` /
+    ``package_root`` template) + the gate-resolved ``package_name`` (carried on the
+    context, not a synthesized legacy profile). A command-sequence oracle (Go reads
+    ``module_root``; TS reads ``source_sets``/``test_sets``) reads the SAME ``LayoutSpec``.
 
     No contract resolves (an unsupported stack reaching here) → an honest
     ``environment_build_error`` RED, never a silent pass (anti-false-green).
@@ -1139,14 +1137,14 @@ def _run_oracle_command(
             detail=f"no contract oracle for language {profile.language!r}",
         )
     lang_profile, oracle_decl, adapter = contract
-    # A kind="adapter" oracle (Python) runs in-process and needs the richer legacy
-    # layout (source_root/test_root/package_root); hand it the gate's LayoutProfile as
-    # the layout view. A command-sequence oracle (Go/TS) reads from the profile's
-    # LayoutSpec → no override.
-    layout_override = profile if getattr(oracle_decl, "kind", None) == "adapter" else None
+    # Cut A.3: carry the gate-resolved canonical ``package_name`` (the legacy profile
+    # resolved it via ``resolve_canonical_package_name``) so a ``kind="adapter"`` oracle
+    # whose layout template carries ``{package_name}`` (Python's ``src/{package_name}``)
+    # can SUBSTITUTE it — instead of handing the adapter a legacy LayoutProfile layout
+    # view. No override mechanism; the layout authority is the LayoutSpec.
     return _run_contract_oracle(
         project_root, lang_profile, oracle_decl, adapter, config,
-        layout_override=layout_override,
+        package_name=getattr(profile, "package_name", None),
     )
 
 
@@ -1213,41 +1211,6 @@ def resolve_implement_oracle(
     return profile, profile.implement_oracle
 
 
-def synthesize_minimal_layout_view(lang_profile: Any) -> LayoutProfile:
-    """A minimal :class:`LayoutProfile` COMPAT VIEW from a ``LanguageProfile.layout``.
-
-    GPT §5 "synthesize_minimal_layout_view": a ``kind="adapter"`` oracle (the
-    Python-style in-process composite) reads ``source_root`` / ``test_root`` /
-    ``package_root`` / ``package_name`` off ``OracleContext.layout_profile`` — fields
-    the modeled ``LayoutSpec`` does NOT carry. When such a language has NO legacy
-    ``LayoutProfile`` builder, this synthesizes those fields from the profile's
-    ``layout.source_sets`` / ``layout.test_sets`` (first set's ``root``; defensive
-    ``src`` / ``tests`` defaults) so the adapter still gets the layout view it needs.
-
-    This is a COMPAT VIEW, not the scope AUTHORITY: the real scope authority is the
-    ``LanguageProfile.layout`` + the oracle adapter's ``certify_scope`` (anti-false-
-    green). It carries only what an ``adapter``-kind oracle reads, never a per-language
-    policy. ``package_root`` defaults to ``source_root`` (a Python-style adapter
-    derives the package root from ``package_name`` when one is set; an adapter with no
-    package concept simply reads ``source_root``).
-    """
-    layout = getattr(lang_profile, "layout", None)
-    source_sets = tuple(getattr(layout, "source_sets", ()) or ()) if layout is not None else ()
-    test_sets = tuple(getattr(layout, "test_sets", ()) or ()) if layout is not None else ()
-    source_root = _norm(source_sets[0].root) if source_sets else "src"
-    test_root = _norm(test_sets[0].root) if test_sets else "tests"
-    source_root = source_root or "src"
-    test_root = test_root or "tests"
-    package_id = getattr(lang_profile, "id", "") or "app"
-    return LayoutProfile(
-        language=package_id,  # canonical id — carried for the contract re-resolve
-        package_name=package_id,
-        source_root=source_root,
-        package_root=source_root,
-        test_root=test_root,
-    )
-
-
 def _resolve_registry_oracle(
     language: str | None,
 ) -> tuple[LayoutProfile, ImplementOracleSpec] | None:
@@ -1265,16 +1228,21 @@ def _resolve_registry_oracle(
     ``execute``) — no kind allowlist, so a synthetic ``kind="command"``/``"adapter"``
     language runs its oracle instead of falling to a silent NO-OP (the gap §8 closes).
 
-    LAYOUT VIEW per kind:
+    Cut A.3: the synthetic ``LayoutProfile`` is ONLY the gate's SPEC CARRIER (it
+    carries ``language`` for the contract re-resolve, ``package_name`` for the
+    context's ``{package_name}`` substitution, and the ``implement_oracle`` spec the
+    certify/run/retry machinery reads) — it is NEVER a layout AUTHORITY. The adapter
+    reads the real ``LayoutSpec`` off ``ctx.language_profile.layout`` (the
+    ``synthesize_minimal_layout_view`` compat-view bridge is retired):
 
     * ``command`` / ``composite`` (Go: ``go-toolchain``) — the command-sequence
-      executor reads cwd/env from ``lang_profile.layout`` (module root etc.), so the
-      synthetic ``LayoutProfile`` only needs to carry the module root (as
-      ``source_root``/etc.) + the canonical ``language`` for the contract re-resolve.
+      executor reads cwd/env from ``lang_profile.layout`` (module root etc.); the
+      synthetic ``LayoutProfile``'s ``source_root`` field is a vestigial carrier the
+      adapter does not read.
     * ``adapter`` (a Python-style in-process composite with no legacy profile) — the
-      adapter reads ``source_root``/``test_root``/``package_root``/``package_name`` off
-      the layout VIEW, so we synthesize that view from ``LanguageProfile.layout`` via
-      :func:`synthesize_minimal_layout_view`.
+      adapter derives its source/test/package roots from ``ctx.language_profile.layout``
+      (``source_sets``/``test_sets``/``package_root``) + ``ctx.package_name``; the
+      synthetic profile only carries ``package_name`` + the spec.
 
     In practice Go is the only BUILT-IN that reaches here (TS/Python HAVE legacy
     ``LayoutProfile`` builders); the command/adapter branches exist so a NEW language
@@ -1289,12 +1257,22 @@ def _resolve_registry_oracle(
     lang_profile, oracle_decl, _adapter = contract
     kind = getattr(oracle_decl, "kind", None)
     if kind == "adapter":
-        # An in-process ``kind="adapter"`` oracle reads the richer layout view; build
-        # it from the profile's modeled layout (the compat-view synthesis).
-        synthetic = synthesize_minimal_layout_view(lang_profile)
-        synthetic = _with_implement_oracle(
-            synthetic,
-            ImplementOracleSpec(
+        # An in-process ``kind="adapter"`` oracle reads the LayoutSpec off the resolved
+        # LanguageProfile (Cut A.3 — no synthesized layout view). The synthetic profile
+        # is only the gate's spec carrier: ``language`` (contract re-resolve) +
+        # ``package_name`` (the context's ``{package_name}`` substitution) + the spec.
+        # The topology fields are required by the dataclass but VESTIGIAL here (the
+        # adapter never reads them — it uses ``ctx.language_profile.layout``); fill them
+        # from the LayoutSpec's first source-set so the carrier stays well-formed.
+        _src_sets = tuple(getattr(lang_profile.layout, "source_sets", ()) or ())
+        _carrier_root = _norm(_src_sets[0].root) if _src_sets else "src"
+        synthetic = LayoutProfile(
+            language=lang_profile.id,
+            package_name=lang_profile.id,
+            source_root=_carrier_root,
+            package_root=_carrier_root,
+            test_root="tests",
+            implement_oracle=ImplementOracleSpec(
                 command=f"{lang_profile.id}-adapter",  # sentinel; kind dispatch runs the contract path
                 kind="adapter",
                 # An adapter bakes its own scope policy in certify_scope; the spec scope

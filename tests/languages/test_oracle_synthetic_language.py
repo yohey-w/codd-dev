@@ -114,10 +114,11 @@ def _synth_command_profile() -> LanguageProfile:
 def _synth_adapter_profile() -> LanguageProfile:
     """``kind="adapter"`` synthlang2: an in-process composite (no shell command).
 
-    This is the path that exercises ``synthesize_minimal_layout_view`` — a
-    legacy-profile-less ``kind="adapter"`` language whose adapter reads
-    ``source_root`` / ``test_root`` off the synthesized layout VIEW. No ``commands``
-    are needed (the adapter's ``execute`` does all the work).
+    Cut A.3: a legacy-profile-less ``kind="adapter"`` language whose adapter derives
+    its source root from the resolved ``LayoutSpec`` (``ctx.language_profile.layout.
+    source_sets``) — the v3-correct pattern, NOT a synthesized legacy ``source_root``
+    layout VIEW (that bridge was retired). No ``commands`` are needed (the adapter's
+    ``execute`` does all the work).
     """
     return LanguageProfile(
         identity=Identity(id="synthlang2", display_name="SynthLang2", aliases=("synth2",)),
@@ -188,22 +189,26 @@ class _SynthCommandAdapter:
 class _SynthInProcessAdapter:
     """A ``kind="adapter"`` oracle adapter: an in-process composite with ``execute``.
 
-    Reads ``source_root`` / ``test_root`` off the SYNTHESIZED layout view (the proof
-    that ``synthesize_minimal_layout_view`` fed the adapter a usable view), certifies
-    the source tree is non-empty, then returns GREEN/RED from the coherence marker.
+    Cut A.3: reads the source root off the resolved ``LayoutSpec``
+    (``ctx.language_profile.layout.source_sets``) — the v3-correct pattern (mirrors
+    the TS adapter's ``_ts_layout_roots``), NOT a synthesized legacy ``source_root``
+    layout VIEW (that bridge — ``synthesize_minimal_layout_view`` /
+    ``layout_override`` — was retired). ``ctx.layout_profile`` is now ALWAYS the
+    ``LayoutSpec``. Certifies the source tree is non-empty, then returns GREEN/RED
+    from the coherence marker.
     """
 
     executed: list[str] = field(default_factory=list)
 
+    @staticmethod
+    def _source_root(ctx: OracleContext) -> str:
+        # The v3-correct read: the first declared source-set root off the LayoutSpec
+        # (Cut A.3 — the in-process adapter no longer gets a synthesized source_root).
+        source_sets = tuple(getattr(ctx.language_profile.layout, "source_sets", ()) or ())
+        return source_sets[0].root if source_sets else "src"
+
     def certify_scope(self, ctx: OracleContext) -> str:
-        # Reads source_root off the layout VIEW the gate synthesized for this
-        # legacy-profile-less kind="adapter" language (the §5 minimal-layout-view).
-        source_root = getattr(ctx.layout_profile, "source_root", None)
-        if source_root is None:
-            raise OracleScopeError(
-                "synthlang2 got no layout view (source_root missing) — the minimal "
-                "layout-view synthesis did not run."
-            )
+        source_root = self._source_root(ctx)
         src = ctx.project_root / source_root
         if not src.is_dir() or not any(src.rglob("*.synth")):
             raise OracleScopeError(
@@ -216,7 +221,7 @@ class _SynthInProcessAdapter:
 
     def execute(self, ctx: OracleContext) -> ImplementOracleResult:
         self.executed.append(ctx.language_profile.id)
-        source_root = getattr(ctx.layout_profile, "source_root", "src")
+        source_root = self._source_root(ctx)
         coherent = (ctx.project_root / _COHERENCE_MARKER).exists()
         if coherent:
             return ImplementOracleResult(
@@ -336,15 +341,17 @@ def test_synthetic_command_language_alias_resolves(monkeypatch: pytest.MonkeyPat
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# kind="adapter" — exercises synthesize_minimal_layout_view (the §5 new path)
+# kind="adapter" — a legacy-profile-less in-process composite (Cut A.3: the adapter
+# reads the LayoutSpec off ctx.language_profile.layout, NOT a synthesized layout view)
 # ════════════════════════════════════════════════════════════════════════════
 
 
 def test_synthetic_adapter_language_coherent_is_green(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A coherent legacy-profile-less ``kind="adapter"`` language → GREEN, and RAN.
 
-    Proves ``synthesize_minimal_layout_view`` handed the in-process adapter a usable
-    layout view (its ``execute`` read ``source_root`` off it) and the gate ran it.
+    Cut A.3: proves the in-process adapter derived a usable source root from the
+    resolved ``LayoutSpec`` (its ``execute`` read ``source_sets`` off
+    ``ctx.language_profile.layout``) and the gate ran it — no synthesized layout VIEW.
     """
     adapter = _SynthInProcessAdapter()
     _inject(monkeypatch, _synth_adapter_profile(), "synth-inprocess", adapter)

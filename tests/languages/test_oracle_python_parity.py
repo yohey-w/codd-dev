@@ -348,3 +348,169 @@ def test_parity_third_party_only_collection_classifier() -> None:
     assert f("E   SyntaxError: invalid syntax\n", fp, 1) is False
     assert f("non-zero exit, no parseable error\n", fp, 0) is False
     assert f("E   ModuleNotFoundError: No module named 'requests'\n", fp, 2) is False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 9. Cut A.3 — the adapter derives its layout from the resolved LayoutSpec +
+#    ctx.package_name (NOT a legacy LayoutProfile.source_root). These PIN the
+#    anti-false-green nuances: byte-identical single-root derivation, multi-set
+#    HARD-FAIL (no silent first-root collapse), unresolved {package_name} HARD-FAIL
+#    (no src fallback — a wrong package_root is a false-green).
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _python_oracle_ctx(project_root: Path, *, package_name, layout=None):
+    """Build an OracleContext for the python-composite adapter (Cut A.3 shape).
+
+    ``layout`` overrides ``language_profile.layout`` (for the multi-set fixtures);
+    by default the real resolved Python LayoutSpec is used.
+    """
+    from codd.languages import default_registry
+    from codd.languages.adapters.implement_oracle import OracleContext
+
+    lang_profile = default_registry.resolve("python")
+    layout_spec = layout if layout is not None else lang_profile.layout
+
+    class _ProfView:
+        # A tiny view exposing only what the adapter reads off language_profile.
+        layout = layout_spec
+        id = lang_profile.id
+
+    return OracleContext(
+        project_root=project_root,
+        layout_profile=layout_spec,
+        language_profile=_ProfView(),
+        oracle=lang_profile.implement_oracle,
+        config=None,
+        package_name=package_name,
+    )
+
+
+def test_cut_a3_layout_roots_single_root_byte_identical(tmp_path: Path) -> None:
+    """The LayoutSpec-derived roots equal the legacy ``_layout_roots`` triple.
+
+    Legacy resolved ``source_root='src'`` / ``package_root='src/app'`` /
+    ``test_root='tests'`` for a standard src-layout package ``app``; the Cut A.3
+    helper derives the SAME triple from ``LayoutSpec`` (``package_root`` template
+    ``src/{package_name}`` substituted → ``src/app``; ``source_root`` = its parent
+    ``src``) + ``ctx.package_name='app'``. Byte-identical on the common case is the
+    behavior-preserving guarantee the switch must hold.
+    """
+    from codd.languages.adapters.oracle_python import _py_layout_from_layout_spec
+
+    _scaffold(tmp_path)
+    ctx = _python_oracle_ctx(tmp_path, package_name="app")
+    assert _py_layout_from_layout_spec(ctx) == ("src", "src/app", "tests")
+
+
+def test_cut_a3_multi_source_set_hard_fails(tmp_path: Path) -> None:
+    """A multi-source-set layout HARD-FAILS — never a silent first-root collapse.
+
+    The Python composite oracle is single-source-root (its first-party import index
+    + compile + collect scope are rooted at ONE source tree). Reading only
+    ``source_sets[0]`` would SILENTLY drop the others (unproven code = false-green),
+    so >1 source_set is an explicit RED.
+    """
+    from codd.languages.profile import LayoutSpec, PackageRoot, SourceSet, TestSet
+    from codd.languages.adapters.oracle_python import _py_layout_from_layout_spec
+
+    multi = LayoutSpec(
+        source_sets=(SourceSet(id="a", root="src/a"), SourceSet(id="b", root="src/b")),
+        test_sets=(TestSet(id="t", root="tests"),),
+        package_root=PackageRoot(kind="named_package", path="src/{package_name}"),
+    )
+    ctx = _python_oracle_ctx(tmp_path, package_name="app", layout=multi)
+    with pytest.raises(OracleScopeError, match="source_sets"):
+        _py_layout_from_layout_spec(ctx)
+
+
+def test_cut_a3_multi_required_test_set_hard_fails(tmp_path: Path) -> None:
+    """A multi-REQUIRED-test-set layout HARD-FAILS (the collect scope is single-root).
+
+    ``optional`` test-sets do NOT count toward the limit (only required roots drive
+    the single-root collect); two REQUIRED test-sets is an explicit RED.
+    """
+    from codd.languages.profile import LayoutSpec, PackageRoot, SourceSet, TestSet
+    from codd.languages.adapters.oracle_python import _py_layout_from_layout_spec
+
+    multi_tests = LayoutSpec(
+        source_sets=(SourceSet(id="package", root="src/{package_name}"),),
+        test_sets=(TestSet(id="unit", root="tests"), TestSet(id="integ", root="itests")),
+        package_root=PackageRoot(kind="named_package", path="src/{package_name}"),
+    )
+    ctx = _python_oracle_ctx(tmp_path, package_name="app", layout=multi_tests)
+    with pytest.raises(OracleScopeError, match="test_sets"):
+        _py_layout_from_layout_spec(ctx)
+
+
+def test_cut_a3_optional_extra_test_set_does_not_hard_fail(tmp_path: Path) -> None:
+    """An ``optional`` second test-set is allowed (it is not a REQUIRED root)."""
+    from codd.languages.profile import LayoutSpec, PackageRoot, SourceSet, TestSet
+    from codd.languages.adapters.oracle_python import _py_layout_from_layout_spec
+
+    with_optional = LayoutSpec(
+        source_sets=(SourceSet(id="package", root="src/{package_name}"),),
+        test_sets=(
+            TestSet(id="unit", root="tests"),
+            TestSet(id="extra", root="extra_tests", optional=True),
+        ),
+        package_root=PackageRoot(kind="named_package", path="src/{package_name}"),
+    )
+    ctx = _python_oracle_ctx(tmp_path, package_name="app", layout=with_optional)
+    # The single REQUIRED test-set ('tests') drives the root; no hard-fail.
+    assert _py_layout_from_layout_spec(ctx) == ("src", "src/app", "tests")
+
+
+def test_cut_a3_unresolved_package_name_hard_fails_no_src_fallback(tmp_path: Path) -> None:
+    """An unresolved ``{package_name}`` HARD-FAILS — never a silent ``src`` fallback.
+
+    THE biggest drift risk: the LayoutSpec carries an UNSUBSTITUTED template
+    ``src/{package_name}``. If the gate did not resolve a package name
+    (``ctx.package_name is None``) the package_root is UNKNOWN; a ``src`` fallback
+    would point the oracle at the WRONG tree (a wrong package_root = false-green), so
+    it is a HARD FAIL, not a fallback.
+    """
+    from codd.languages.adapters.oracle_python import _py_layout_from_layout_spec
+
+    _scaffold(tmp_path)
+    ctx = _python_oracle_ctx(tmp_path, package_name=None)
+    with pytest.raises(OracleScopeError, match="package_name"):
+        _py_layout_from_layout_spec(ctx)
+
+
+def test_cut_a3_oracle_path_does_not_read_legacy_source_root(tmp_path: Path) -> None:
+    """The adapter must NOT read a legacy ``source_root`` off ``ctx.layout_profile``.
+
+    Dynamic guard (a lightweight precursor to Stage-5's poison test): a poison
+    layout_profile that RAISES on any ``source_root`` access still lets the full gate
+    PASS a coherent package — proving the v3 oracle path derives its layout from the
+    LayoutSpec (``ctx.language_profile.layout``) + ``ctx.package_name``, not the
+    legacy field. (The gate builds the real OracleContext internally; this asserts at
+    the helper boundary that ``layout_profile.source_root`` is never touched.)
+    """
+    from codd.languages.adapters.oracle_python import _py_layout_from_layout_spec
+
+    class _PoisonLayout:
+        def __getattr__(self, name):
+            if name == "source_root":
+                raise AssertionError(
+                    "Cut A.3 violation: the v3 oracle path read layout_profile.source_root"
+                )
+            raise AttributeError(name)
+
+    _scaffold(tmp_path)
+    from codd.languages import default_registry
+    from codd.languages.adapters.implement_oracle import OracleContext
+
+    lang_profile = default_registry.resolve("python")
+    ctx = OracleContext(
+        project_root=tmp_path,
+        layout_profile=_PoisonLayout(),  # reading .source_root off this would raise
+        language_profile=lang_profile,
+        oracle=lang_profile.implement_oracle,
+        config=None,
+        package_name="app",
+    )
+    # The helper derives from ctx.language_profile.layout + ctx.package_name; it must
+    # NOT touch ctx.layout_profile.source_root (the poison object proves it).
+    assert _py_layout_from_layout_spec(ctx) == ("src", "src/app", "tests")

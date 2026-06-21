@@ -55,9 +55,12 @@ class OracleContext:
 
     project_root: Path
     #: The resolved layout topology (``module_root`` / ``repo_root`` / ``manifest_root``
-    #: etc.). The generic executor substitutes these into a command's ``cwd``/``env``
-    #: placeholders before spawning. Held separately from ``language_profile`` (though
-    #: it is ``language_profile.layout``) so a caller can pass a layout VIEW.
+    #: / ``source_sets`` / ``test_sets`` / ``package_root``). It is ALWAYS the resolved
+    #: :class:`LayoutSpec` (``language_profile.layout``) — Cut A.3 retired the legacy
+    #: ``LayoutProfile`` layout-VIEW override: NO adapter reads a legacy
+    #: ``source_root``/``package_root`` off this field anymore (the Python adapter
+    #: derives its source/package/test roots from ``source_sets``/``package_root`` +
+    #: :attr:`package_name`, like the TS/Go adapters read ``source_sets``/``module_root``).
     layout_profile: LayoutSpec
     #: The resolved language contract the dispatch already produced — the adapter
     #: reads ``commands[command_id]`` from it; it NEVER re-resolves a language.
@@ -66,6 +69,15 @@ class OracleContext:
     oracle: ImplementOracleProfileSpec
     #: The run config (``implement.*`` knobs: timeouts, etc.). ``None`` ⇒ defaults.
     config: Mapping[str, Any] | None = None
+    #: The harness-owned RESOLVED package name (``resolve_canonical_package_name``:
+    #: config override → single top-level package on disk → project-name default).
+    #: The gate resolves it (it has ``project_name``); an adapter whose layout
+    #: template carries ``{package_name}`` (Python's ``src/{package_name}``)
+    #: SUBSTITUTES this — it is NOT the adapter's job to re-resolve a name. ``None``
+    #: when the stack's layout has no package-name placeholder (Go/TS): substituting
+    #: an absent ``{package_name}`` is a HARD FAIL, never a silent ``src`` fallback
+    #: (a wrong package_root is a false-green — Cut A.3 nuance).
+    package_name: str | None = None
 
 
 @dataclass(frozen=True)
