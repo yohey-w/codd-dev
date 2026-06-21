@@ -76,6 +76,8 @@ codd greenfield --requirements docs/requirements/requirements.md
 
 各ステップごとに途中経過を保存するので、`codd greenfield --resume` で止まったところから再開できます。先に計画だけ見たいなら `--dry-run`、スマホに進捗通知を飛ばすなら `--ntfy-topic <topic>` を付けてください。
 
+この同じワンコマンドのパイプライン(`codd greenfield --requirements FILE`)は、中身を読んで手を加えられる3つの形でも用意しています — シェルスクリプト([`examples/greenfield_autopilot.sh`](examples/greenfield_autopilot.sh))、Claude Code ワークフロー([`examples/claude_workflows/codd-greenfield.js`](examples/claude_workflows/codd-greenfield.js))、そしてスキル(`codd skills install codd-greenfield --target both`)。
+
 ### 2. すでにあるコードベースで使う — `codd init` + `codd scan`
 
 CoDD が既存コードを読み取り、その裏にある設計を起こし、そこから先は両者のズレを直し続けてくれます。
@@ -135,6 +137,7 @@ CoDD は、その依頼が関係する設計書を見つけて更新し、変更
 - **Claude Code の `PostToolUse` フック** — ファイルを編集するたびに CoDD のチェックを走らせる。
 - **Git の `pre-commit` フック** — つじつまが壊れるコミットを止める。
 - **Git の `post-commit` フック**と **Codex CLI 用フック** — コミットのたびに地図を最新に保つ。
+- **要件変更リマインダーのレシピ**(`claude_requirements_nudge.json`)— 要件が変わったら `codd greenfield --resume` の再実行を促す(表示のみ。勝手にパイプラインは走らせない)。
 
 使いたいレシピを `codd/hooks/recipes/` からエディタや Git の設定にコピーすれば、有効になります。
 

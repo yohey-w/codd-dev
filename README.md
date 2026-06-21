@@ -76,6 +76,8 @@ codd greenfield --requirements docs/requirements/requirements.md
 
 It saves a checkpoint after every step, so `codd greenfield --resume` continues where it left off. Add `--dry-run` to preview the plan first, or `--ntfy-topic <topic>` to get progress pings on your phone.
 
+The same one-command pipeline (`codd greenfield --requirements FILE`) also ships as three transparent, adaptable vehicles you can read and tweak: a shell script ([`examples/greenfield_autopilot.sh`](examples/greenfield_autopilot.sh)), a Claude Code workflow ([`examples/claude_workflows/codd-greenfield.js`](examples/claude_workflows/codd-greenfield.js)), and a skill (`codd skills install codd-greenfield --target both`).
+
 ### 2. Work on an existing codebase — `codd init` + `codd scan`
 
 CoDD reads your existing code, works out the design behind it, and keeps the two in sync from then on:
@@ -135,6 +137,7 @@ CoDD ships ready-made hook recipes (under `codd/hooks/recipes/`) so coherence ch
 - **Claude Code `PostToolUse` hook** — runs CoDD checks right after each file edit.
 - **Git `pre-commit` hook** — blocks a commit when it would break coherence.
 - **Git `post-commit` hook** and a **Codex CLI hook** — keep the connection map fresh as you commit.
+- **A requirements-nudge recipe** (`claude_requirements_nudge.json`) — reminds you to re-run `codd greenfield --resume` when your requirements change (print-only; it never runs a pipeline on its own).
 
 Copy the recipe you want from `codd/hooks/recipes/` into your editor or Git config to turn it on.
 
