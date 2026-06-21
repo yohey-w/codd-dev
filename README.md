@@ -104,7 +104,7 @@ v3.0 makes CoDD's core **language- and framework-agnostic**. The harness no long
 
 - **Language-free core** — Go, Python, and TypeScript are described entirely by declarative `LanguageProfile`s. Adding a new language is a profile + adapter, with **no core change** (proven by a synthetic language the core has never seen).
 - **Framework-pluggable stack** — a framework (e.g. Next.js) and addons (Playwright, Prisma) *compose* with the language into one resolved stack contract that `greenfield` and `verify` consume live. A new framework plugs in the same way.
-- **Anti-false-green, owned by the core** — the no-fake-pass invariant lives in the core; profiles can configure parameters but can **never weaken** it. (Verified end-to-end on a real Next.js app — see [`dogfood/v3_nextjs_live_e2e.md`](dogfood/v3_nextjs_live_e2e.md).)
+- **Anti-false-green, owned by the core** — the no-fake-pass invariant lives in the core; profiles can configure parameters but can **never weaken** it. (Verified end-to-end on a real Next.js app, on the actual toolchain, with negative controls for each false-green vector.)
 
 This is what lets one core serve Next.js, Django, FastAPI, Rails, Go services, and more — and lets contributors add support without touching the core.
 
