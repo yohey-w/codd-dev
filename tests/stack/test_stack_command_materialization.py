@@ -439,12 +439,20 @@ def test_replace_with_proof_identical_argv_merge_is_green() -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_composed_slots_are_the_invoked_commands(tmp_path: Path) -> None:
-    """The composed framework/addon command slots are the commands the run INVOKES.
+    """The composed VERIFICATION command slots are the commands the run INVOKES.
 
-    This is the crux of v2.77c: a declared ``framework_build``/``e2e_test``/prisma
-    slot is genuinely part of the run's command plan (not silently ignored while the
-    language verify greens alone). The recording executor proves each was invoked,
-    WITH its owning namespace.
+    This is the crux of v2.77c: a declared ``framework_build``/``e2e_test`` slot is
+    genuinely part of the run's command plan (not silently ignored while the language
+    verify greens alone). The recording executor proves each was invoked, WITH its owning
+    namespace.
+
+    Contract Kernel v2.77g — the plan materializes ONLY verification slots. The prisma
+    ``generate`` (codegen) / ``migrate_deploy`` (mutating) slots are KNOWN
+    non-verification: they are EXCLUDED from the plan (a verify run must not run codegen
+    or apply migrations). The earlier version of this test asserted ``generate`` was
+    invoked — that asserted the over-execution BUG (a non-verification slot running during
+    verify, the sibling of the ``dev``/``start`` server hang); it is corrected here to
+    assert the right behavior: verification slots run, non-verification slots do not.
     """
     project = _make_project(tmp_path, stack=_VALID_STACK)
     _write_lock_for(project, _VALID_STACK)
@@ -454,12 +462,18 @@ def test_composed_slots_are_the_invoked_commands(tmp_path: Path) -> None:
     assert result.status == "success"
 
     invoked = {slot_id: owner for slot_id, owner, _argv in rec.calls}
-    # The framework/addon slots the run previously ignored are now invoked, owned:
+    # The framework/addon VERIFICATION slots the run previously ignored are now invoked,
+    # owned:
     assert invoked.get("framework_build") == "framework:nextjs"
     assert invoked.get("e2e_test") == "addon:playwright"
-    assert invoked.get("generate") == "addon:prisma"
     # ...alongside the language-owned slots (namespace ownership preserved).
     assert invoked.get("typecheck") == "language:typescript"
+    assert invoked.get("verify") == "language:typescript"
+    # NON-verification slots are NOT executed by a verify run (codegen / mutating
+    # migration / dev+start servers): silently running them is the over-execution bug.
+    assert "generate" not in invoked, "prisma generate (codegen) is not a verify-time slot"
+    assert "migrate_deploy" not in invoked, "a mutating migration must not run during verify"
+    assert "dev" not in invoked and "start" not in invoked, "server slots must not run"
     # The exact next-build argv was the one materialized from the contract.
     fb_argv = next(argv for sid, _o, argv in rec.calls if sid == "framework_build")
     assert fb_argv == ("npx", "next", "build")
@@ -467,7 +481,7 @@ def test_composed_slots_are_the_invoked_commands(tmp_path: Path) -> None:
     # The executed slot ids are recorded in the run trace (observable).
     session = load_session(project)
     executed = session["stack_contract"]["stack_commands_executed"]
-    assert {"framework_build", "e2e_test", "generate", "typecheck"} <= set(executed)
+    assert {"framework_build", "e2e_test", "verify", "typecheck"} == set(executed)
 
 
 def test_a_failing_stack_command_slot_is_red(tmp_path: Path) -> None:
@@ -559,3 +573,149 @@ def test_no_stack_block_has_no_materialization_verify(tmp_path: Path) -> None:
     rec = _RecordingExecutor()
     _intake_stack_contract_for_verify(project, stack_command_executor=rec)  # must NOT raise
     assert rec.calls == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Contract Kernel v2.77g — verification-slots-only filtering + placeholder
+# substitution (the two REAL bugs the live Next.js dogfood found).
+# ═══════════════════════════════════════════════════════════════════════════
+
+_NEXTJS_PLAYWRIGHT = {
+    "language": "typescript",
+    "frameworks": ["nextjs"],
+    "addons": ["playwright"],
+}
+
+
+def test_plan_excludes_server_and_convenience_slots(tmp_path: Path) -> None:
+    """BUG 1: the plan materializes ONLY verification slots — the ``dev`` / ``start``
+    SERVER slots (which never exit → would hang the gate) and the ``generate`` /
+    ``migrate`` convenience slots are NOT in the plan, so they are never spawned."""
+    contract = resolve_stack_from_declaration(_VALID_STACK)
+    # The composed contract still DECLARES all the slots...
+    assert {"dev", "start", "generate", "migrate_deploy"} <= set(contract.commands)
+    # ...but the PLAN (what gets executed) excludes the non-verification ones.
+    plan = stack_command_plan(contract)
+    ids = set(plan.command_ids)
+    assert "dev" not in ids and "start" not in ids, "server slots would hang the gate"
+    assert "generate" not in ids, "codegen is not a verify-time slot"
+    assert "migrate_deploy" not in ids, "a mutating migration must not run during verify"
+    # The genuine verification slots ARE present (none silently dropped).
+    assert {"typecheck", "verify", "framework_build", "e2e_test"} <= ids
+
+
+def test_framework_build_is_a_verification_slot(tmp_path: Path) -> None:
+    """ANTI-FALSE-GREEN: ``framework_build`` (the production build the
+    ignoreBuildErrors obligation is enforced against) MUST be executed — dropping it
+    would let a stack green without proving the build gate ran."""
+    from codd.stack.compose import VERIFICATION_SLOTS
+
+    assert "framework_build" in VERIFICATION_SLOTS
+    assert "build" in VERIFICATION_SLOTS
+    plan = stack_command_plan(resolve_stack_from_declaration(_VALID_STACK))
+    assert "framework_build" in plan.command_ids
+
+
+def test_unknown_slot_is_red_at_plan_build() -> None:
+    """THREE-STATE classification: a slot id in NEITHER the verification set NOR the
+    known non-verification set is RED at plan build (the harness never guesses — a
+    silently-dropped unknown slot could be a real check = false-green)."""
+    from codd.languages.registry import default_registry as _LANG
+    from codd.stack.command_plan import StackCommandClassificationError
+    from codd.stack.compose import compose
+    from codd.stack.profile import CommandSpec as _CS
+    from codd.stack.profile import FrameworkProfile as _FP
+    from codd.stack.profile import LayerIdentity as _LI
+
+    ts = _LANG.resolve("typescript")
+    weird = _FP(
+        identity=_LI(id="weirdfw", kind="framework"),
+        commands={"frobnicate": _CS(id="frobnicate", argv=("npx", "frob"))},
+    )
+    contract = compose(ts, [weird])
+    with pytest.raises(StackCommandClassificationError) as exc:
+        stack_command_plan(contract)
+    assert "frobnicate" in str(exc.value)
+
+
+def test_layout_placeholders_substituted_at_plan_build() -> None:
+    """BUG 2: a slot's ``{module_root}`` / ``{test_root}`` / ``{report}`` are resolved at
+    plan build, so the executor spawns in a real dir and writes to a real path."""
+    plan = stack_command_plan(resolve_stack_from_declaration(_NEXTJS_PLAYWRIGHT))
+    typecheck = next(s for s in plan.slots if s.slot_id == "typecheck")
+    assert typecheck.cwd == ".", "{module_root} must be resolved, not literal"
+    verify = next(s for s in plan.slots if s.slot_id == "verify")
+    assert verify.cwd == "."
+    assert "{test_root}" not in verify.argv and "tests" in verify.argv
+    # No slot carries a leftover {placeholder} in cwd/argv/env.
+    for slot in plan.slots:
+        assert "{" not in (slot.cwd or ""), f"{slot.slot_id} cwd unresolved: {slot.cwd!r}"
+        for arg in slot.argv:
+            # A leftover layout placeholder is a bug; JSON-ish braces in argv are NOT
+            # (the guard only matches the known layout tokens).
+            for tok in ("{module_root}", "{repo_root}", "{manifest_root}", "{test_root}", "{report}"):
+                assert tok not in arg, f"{slot.slot_id} argv unresolved: {arg!r}"
+
+
+def test_report_placeholder_aligns_with_report_path() -> None:
+    """ANTI-FALSE-GREEN: ``--outputFile={report}`` must resolve to EXACTLY the slot's
+    ``report_path`` (the path the authenticity/obligation reader reads) — else the writer
+    and reader disagree (false-RED, or a stale-file false-green)."""
+    plan = stack_command_plan(resolve_stack_from_declaration(_NEXTJS_PLAYWRIGHT))
+    verify = next(s for s in plan.slots if s.slot_id == "verify")
+    assert verify.report_path == ".codd/verify/vitest.json"
+    # The argv writes to the SAME path the reader reads.
+    assert f"--outputFile={verify.report_path}" in verify.argv
+
+
+def test_unsubstituted_placeholder_refuses_to_spawn() -> None:
+    """ANTI-FALSE-GREEN (v2.75 cwd-bug class): a slot still carrying a literal
+    ``{module_root}`` / ``{test_root}`` does NOT spawn in a literal dir — it is RED
+    (spawned=False), never a silent pass or a spawn in a wrong dir."""
+    from codd.stack.command_plan import default_stack_command_executor
+
+    bad = StackCommandSlot(
+        slot_id="verify",
+        owner="language:typescript",
+        argv=("npx", "vitest", "run", "{test_root}"),
+        cwd="{module_root}",
+    )
+    res = default_stack_command_executor(bad, Path("/tmp"), timeout=5)
+    assert res.spawned is False
+    assert "unsubstituted" in res.detail.lower()
+
+
+def test_json_argv_is_not_a_false_unsubstituted_placeholder(tmp_path: Path) -> None:
+    """A legitimate argv carrying JSON braces (``printf '%s' '{"k":1}'``) is NOT flagged
+    as an unsubstituted placeholder — the guard matches only the KNOWN layout tokens."""
+    from codd.stack.command_plan import default_stack_command_executor
+
+    slot = StackCommandSlot(
+        slot_id="framework_build",
+        owner="framework:nextjs",
+        argv=("printf", "%s", '{"built": true, "mode": "production"}'),
+        cwd=".",
+    )
+    res = default_stack_command_executor(slot, tmp_path, timeout=10)
+    assert res.spawned is True, f"JSON argv wrongly refused: {res.detail}"
+    assert res.returncode == 0
+
+
+def test_ambiguous_test_root_leaves_placeholder_for_red(tmp_path: Path) -> None:
+    """``{test_root}`` is resolved only when EXACTLY one test root is declared; zero or
+    multiple make it ambiguous → the placeholder is left literal so the executor reds
+    (never a silent guess)."""
+    from codd.stack.compose import StackLayout
+
+    assert StackLayout(test_roots=()).test_root == ""  # zero → ambiguous
+    assert StackLayout(test_roots=("a", "b")).test_root == ""  # multiple → ambiguous
+    assert StackLayout(test_roots=("tests",)).test_root == "tests"  # exactly one → ok
+
+
+def test_build_precedes_e2e_in_the_plan() -> None:
+    """ORDERING: ``framework_build`` must come BEFORE ``e2e_test`` (an e2e drives a built
+    app). The owner-kind sort (language → framework → addon) yields this for the curated
+    stack; pin it so a future reorder cannot silently run e2e before the build."""
+    plan = stack_command_plan(resolve_stack_from_declaration(_NEXTJS_PLAYWRIGHT))
+    ids = list(plan.command_ids)
+    assert ids.index("framework_build") < ids.index("e2e_test")

@@ -39,14 +39,33 @@ non-stack runs are byte-identical (no plan, no new trace keys, no execution).
 from __future__ import annotations
 
 import os
+import re
 import subprocess  # noqa: S404 — argv comes from the trusted resolved stack contract, shell=False.
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 from codd.languages.profile import CommandSpec
+from codd.languages.verify_plan import _substitute_layout_placeholders
 
-from .compose import ResolvedStackContract
+from .compose import (
+    NON_VERIFICATION_SLOTS,
+    VERIFICATION_SLOTS,
+    ResolvedStackContract,
+    StackLayout,
+)
+
+#: The layout placeholder tokens the plan substitutes. The unsubstituted-guard matches
+#: ONLY these KNOWN tokens (not an arbitrary ``\{...\}``) so a legitimate argv that
+#: happens to carry braces — a JSON ``--define={...}`` flag, or a ``printf '%s'
+#: '{"suites":...}'`` that streams a report — is NOT a false positive (the v2.75 oracle
+#: path can use the broad regex because oracle argv is never JSON; stack e2e argv can be).
+#: A remaining KNOWN token means the layout did not resolve it → the executor must NOT
+#: spawn in a literal ``{module_root}`` dir / write to a literal ``{report}`` path.
+_KNOWN_LAYOUT_PLACEHOLDERS = ("{module_root}", "{repo_root}", "{manifest_root}", "{test_root}", "{report}")
+_UNSUBSTITUTED_PLACEHOLDER_RE = re.compile(
+    "|".join(re.escape(tok) for tok in _KNOWN_LAYOUT_PLACEHOLDERS)
+)
 
 #: Default wall-clock cap for a single stack command slot. A slot that exceeds it is
 #: RED (a timeout is never green), never a hang that blocks the gate forever. Mirrors
@@ -78,6 +97,21 @@ class StackCommandMaterializationError(RuntimeError):
     """
 
 
+class StackCommandClassificationError(StackContractConflictError):
+    """A composed command slot has NO execution classification (Contract Kernel v2.77g).
+
+    Raised by :func:`stack_command_plan` when ``contract.commands`` carries a slot id that
+    is in NEITHER :data:`codd.stack.compose.VERIFICATION_SLOTS` (executed as a release
+    check) NOR :data:`codd.stack.compose.NON_VERIFICATION_SLOTS` (a known lifecycle/
+    convenience slot deliberately excluded). The harness does NOT guess: an unknown slot
+    could be a genuine verification the plan would otherwise SILENTLY DROP (a false-green)
+    or a long-running server it would HANG on. So an unclassified slot is RED at plan
+    build, forcing the profile to classify every command it declares. Subclasses
+    :class:`StackContractConflictError` so the existing call-sites (greenfield pipeline +
+    verify CLI), which already translate that to their context's RED, catch it unchanged.
+    """
+
+
 #: Harness-owned directory (under the project) where a stack command's CURRENT-RUN
 #: report evidence is teed (for ``capture: stdout`` commands — ``npx playwright test
 #: --reporter=json`` streams its report to stdout). A per-slot file under here is the
@@ -90,6 +124,28 @@ STACK_COMMAND_EVIDENCE_DIR = ".codd/stack-command-evidence"
 def _owner_sort_key(owner: str, slot_id: str) -> tuple[int, str, str]:
     kind = owner.split(":", 1)[0] if owner else ""
     return (_OWNER_KIND_ORDER.get(kind, len(_OWNER_KIND_ORDER)), owner, slot_id)
+
+
+def _unsubstituted_placeholders(slot: "StackCommandSlot") -> list[str]:
+    """Human labels for any ``{placeholder}`` the plan-build substitution did not resolve.
+
+    Empty ⇒ every cwd/argv/env value is concrete (safe to spawn). A non-empty list means
+    a slot still carries a literal ``{...}`` (the resolved stack layout had no value for
+    it) — the executor fails closed rather than spawn in an unresolved path. ``report_path``
+    is the slot's resolved evidence target and is checked too (a literal ``{report}`` there
+    would desync writer/reader)."""
+    problems: list[str] = []
+    if _UNSUBSTITUTED_PLACEHOLDER_RE.search(slot.cwd or ""):
+        problems.append(f"cwd={slot.cwd!r}")
+    for arg in slot.argv:
+        if _UNSUBSTITUTED_PLACEHOLDER_RE.search(arg or ""):
+            problems.append(f"argv:{arg!r}")
+    for key, value in slot.env.items():
+        if _UNSUBSTITUTED_PLACEHOLDER_RE.search(str(value)):
+            problems.append(f"env[{key}]={value!r}")
+    if _UNSUBSTITUTED_PLACEHOLDER_RE.search(slot.report_path or ""):
+        problems.append(f"report_path={slot.report_path!r}")
+    return problems
 
 
 def stack_command_evidence_path(slot: "StackCommandSlot", project_root: Path) -> Path:
@@ -235,16 +291,69 @@ class StackCommandPlan:
         }
 
 
-def _slot_from_command(slot_id: str, owner: str, spec: CommandSpec) -> StackCommandSlot:
+def _substitute_stack_placeholders(
+    value: str | None, layout: StackLayout, *, report_path: str | None
+) -> str | None:
+    """Resolve a stack command's layout placeholders (cwd/argv/env), report-aware.
+
+    Reuses :func:`codd.languages.verify_plan._substitute_layout_placeholders` for the
+    shared roots (``{module_root}`` / ``{repo_root}`` / ``{manifest_root}``) — the SAME
+    helper the language verify executor + the oracle install-preflight use (the v2.75/
+    v2.76 fix) — then resolves the two stack-command extras the language helper does not:
+
+    * ``{test_root}`` — the resolved test tree root (a ``verify`` slot runs
+      ``vitest run {test_root}``); from :attr:`StackLayout.test_root`.
+    * ``{report}`` — the slot's OWN declared ``report_path`` (a ``verify`` slot writes
+      ``--outputFile={report}``). It MUST resolve to exactly ``report_path`` so the
+      command's ``--outputFile`` and the authenticity/obligation reader (which reads
+      ``slot.report_path``) name the SAME file — a mismatch would make the reader see a
+      missing report (false-RED) or read a stale one (false-green). Both are resolved
+      relative to the run cwd, which is ``module_root`` for both writer and reader, so a
+      relative ``report_path`` lands at one absolute path. ``{report}`` with no declared
+      ``report_path`` is left literal → the unsubstituted→RED guard fires (a command
+      that writes a report MUST declare where, or it cannot be observed).
+    """
+    if value is None:
+        return None
+    resolved = _substitute_layout_placeholders(value, layout)
+    assert resolved is not None  # value was not None
+    resolved = resolved.replace("{test_root}", layout.test_root)
+    if report_path is not None:
+        resolved = resolved.replace("{report}", report_path)
+    return resolved
+
+
+def _slot_from_command(
+    slot_id: str, owner: str, spec: CommandSpec, layout: StackLayout
+) -> StackCommandSlot:
+    """Build a slot, SUBSTITUTING its layout placeholders at plan-build time.
+
+    Substitution happens HERE (build time), not in the executor, because the plan is a
+    shared artifact: the authenticity gate and the obligation gate ALSO rebuild the plan
+    (:func:`stack_command_plan`) and read ``slot.cwd`` (``project_root / slot.cwd``) +
+    ``slot.report_path`` to locate the report. If substitution lived only in the
+    executor, those READERS would still see a literal ``{module_root}`` and resolve the
+    wrong path — re-introducing the bug on the read side. Baking the resolved values into
+    the slot makes ALL THREE consumers agree on one resolved truth. A placeholder the
+    layout could not resolve is LEFT literal here and fails closed at execution (the
+    executor refuses to spawn in a literal ``{...}`` dir — RED, never a silent pass).
+    """
     report = spec.report
+    report_path = report.path if report else None
     return StackCommandSlot(
         slot_id=slot_id,
         owner=owner,
-        argv=tuple(spec.argv),
-        cwd=spec.cwd,
-        env={str(k): str(v) for k, v in spec.env.items()},
+        argv=tuple(
+            _substitute_stack_placeholders(a, layout, report_path=report_path) or ""
+            for a in spec.argv
+        ),
+        cwd=_substitute_stack_placeholders(spec.cwd, layout, report_path=report_path),
+        env={
+            str(k): (_substitute_stack_placeholders(str(v), layout, report_path=report_path) or "")
+            for k, v in spec.env.items()
+        },
         requires_materialized_deps=bool(spec.requires_materialized_deps),
-        report_path=(report.path if report else None),
+        report_path=report_path,
         report_adapter=(report.adapter if report else None),
         report_capture=(report.capture if report else None),
     )
@@ -258,12 +367,52 @@ def stack_command_plan(contract: ResolvedStackContract) -> StackCommandPlan:
     :class:`StackCommandSlot` carrying its owning namespace, ordered deterministically
     by owner kind (language → framework → addon) then owner then slot id. No
     framework-name literal: the plan is a pure projection of the resolved contract.
+
+    Contract Kernel v2.77g — THREE-STATE slot classification (GPT-5.5 Pro consult
+    2026-06-21). Every composed command slot is EITHER:
+
+    * a VERIFICATION slot (:data:`codd.stack.compose.VERIFICATION_SLOTS`) → materialized +
+      executed as a release check (build / typecheck / unit/integration/e2e test / lint /
+      coverage / read-only migration check). The set is audited to contain
+      ``framework_build``/``build`` so the framework production build the ignoreBuildErrors
+      obligation is enforced against is never silently dropped.
+    * a KNOWN non-verification slot (:data:`codd.stack.compose.NON_VERIFICATION_SLOTS`) →
+      EXCLUDED from the plan: ``dev`` / ``start`` (a long-running SERVER that never exits →
+      would HANG the gate at the per-slot timeout), ``generate`` / ``migrate`` (codegen /
+      mutating convenience, not a proof). Never spawned by ``codd verify`` / the greenfield
+      verify stage.
+    * UNKNOWN (in neither set) → RED (:class:`StackCommandClassificationError`). The
+      harness does NOT guess: silently dropping an unknown slot could hide a genuine
+      verification (a false-green), and blindly executing one could hang on a server. An
+      unclassified slot forces the profile to declare its intent.
+
+    Slot ``cwd``/``argv``/``env`` layout placeholders are substituted at plan build (see
+    :func:`_slot_from_command`).
     """
     assert_stack_contract_clean(contract)
     owners = contract.command_owners
+    layout = contract.layout
+
+    unclassified = sorted(
+        slot_id
+        for slot_id in contract.commands
+        if slot_id not in VERIFICATION_SLOTS and slot_id not in NON_VERIFICATION_SLOTS
+    )
+    if unclassified:
+        raise StackCommandClassificationError(
+            f"stack command classification ({contract.stack_id}): command slot(s) "
+            f"{unclassified} are in neither the verification-execution allowlist nor the "
+            "known non-verification (lifecycle/convenience) set — the harness will not "
+            "guess. An unclassified slot is RED at plan build: executing it could hang "
+            "(a server), and silently excluding it could drop a real verification (a "
+            "false-green). Classify the slot in codd.stack.compose (VERIFICATION_SLOTS or "
+            "NON_VERIFICATION_SLOTS)."
+        )
+
     slots = [
-        _slot_from_command(slot_id, owners.get(slot_id, ""), spec)
+        _slot_from_command(slot_id, owners.get(slot_id, ""), spec, layout)
         for slot_id, spec in contract.commands.items()
+        if slot_id in VERIFICATION_SLOTS
     ]
     slots.sort(key=lambda s: _owner_sort_key(s.owner, s.slot_id))
     return StackCommandPlan(
@@ -352,6 +501,29 @@ def default_stack_command_executor(
       layer parses the current run's report. This is capture TRANSPORT only — the
       parser/observation lives outside the executor.
     """
+    # Unsubstituted-placeholder guard (Contract Kernel v2.77g; the v2.75 cwd-bug class):
+    # the plan substitutes layout placeholders at build time, but a placeholder the layout
+    # could not resolve is left literal. Refuse to spawn in a literal ``{...}`` dir / with
+    # a literal ``{...}`` argv or env value — that is RED (spawn-refused), never a silent
+    # pass and never a spawn in a wrong dir. Mirrors
+    # :func:`codd.languages.oracle_executor.run_command_sequence` step (3).
+    unresolved = _unsubstituted_placeholders(slot)
+    if unresolved:
+        return StackCommandSlotResult(
+            slot_id=slot.slot_id,
+            owner=slot.owner,
+            command_str=slot.command_str,
+            spawned=False,
+            returncode=None,
+            timed_out=False,
+            detail=(
+                f"stack command slot {slot.slot_id!r} has unsubstituted layout "
+                f"placeholder(s) {unresolved}; refusing to spawn in an unresolved path "
+                "(a literal '{...}' cwd/argv/env is the v2.75 cwd-bug class — RED, not a "
+                "benign miss). The resolved stack layout did not provide a value for it."
+            ),
+        )
+
     cwd = (project_root / slot.cwd) if slot.cwd else project_root
     env = os.environ.copy()
     env.update(slot.env)

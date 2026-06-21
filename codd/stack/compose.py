@@ -33,8 +33,64 @@ from typing import Any, Literal, Mapping, Sequence
 from codd.languages.profile import CommandSpec, LanguageProfile
 from .profile import AddonProfile, FileRole, FrameworkProfile, Obligation, SourceSet
 
+
+@dataclass(frozen=True)
+class StackLayout:
+    """The resolved layout roots the harness needs to RUN a composed command.
+
+    Contract Kernel v2.77g. A composed command slot's ``cwd``/``argv``/``env`` may
+    carry LITERAL layout placeholders (``{module_root}`` / ``{repo_root}`` /
+    ``{manifest_root}`` / ``{test_root}``) exactly like a language verify command — the
+    profile keeps them as templates (full template substitution is PathPlanner's job).
+    But the executor must spawn in a REAL directory and write its report to a REAL path,
+    so the resolved contract carries the layout roots the plan substitutes at build time
+    (the stack twin of :class:`codd.languages.profile.LayoutSpec` +
+    :func:`codd.languages.verify_plan._substitute_layout_placeholders`).
+
+    Sourced from the LANGUAGE profile's layout in :func:`compose` (the language owns
+    repo topology + test sets; a framework CONTRIBUTES source sets but not the module/
+    repo roots). ``test_roots`` carries EVERY declared test set's root so the plan can
+    resolve ``{test_root}`` deterministically — a stack's ``verify`` runs the whole test
+    tree from ONE root, so a profile with zero OR multiple test roots makes ``{test_root}``
+    AMBIGUOUS and the plan reds (rather than guessing — GPT-5.5 Pro consult 2026-06-21).
+    The convenience :attr:`test_root` is the single root when exactly one is declared (the
+    common case), else ``""`` (the substitution then leaves ``{test_root}`` unresolved →
+    the unsubstituted→RED guard fires). NOT part of
+    :attr:`ResolvedStackContract.content_hash`: it is fully DERIVED from the already-pinned
+    language layer (whose digest is in ``layers``), so it cannot drift independently of a
+    pinned stack — folding it into the hash would only spuriously break a committed lock
+    when nothing the lock protects changed.
+    """
+
+    module_root: str = "."
+    repo_root: str = "."
+    manifest_root: str = "."
+    test_roots: tuple[str, ...] = ()
+
+    @property
+    def test_root(self) -> str:
+        """The single unambiguous test root, or ``""`` when zero/multiple are declared.
+
+        ``{test_root}`` substitution uses this; ``""`` deliberately leaves the placeholder
+        unresolved so the executor's unsubstituted→RED guard fires (an ambiguous test root
+        must not be silently guessed — anti-false-green)."""
+        return self.test_roots[0] if len(self.test_roots) == 1 else ""
+
 #: Verification command slots — a green in one NEVER implies another (design §207).
 #: A cross-layer redefinition of one of these with different argv is a conflict.
+#:
+#: This is ALSO the materialization allowlist (Contract Kernel v2.77g): the command
+#: plan executes ONLY these slots, so a non-verification convenience slot a framework
+#: declares (``dev`` / ``start`` — a long-running SERVER that never exits, ``generate``
+#: / ``migrate`` — a mutating convenience) is NEVER spawned by ``codd verify`` (running
+#: a server slot would hang the gate forever). Every slot that GENUINELY verifies must
+#: be in this set or it would be dropped — and a dropped verification = "not verified" =
+#: a false-green. So this set is the SINGLE source of truth for "which composed slot is
+#: a release check", and it MUST contain every build/test/static check: ``framework_build``
+#: / ``build`` (a framework's production build — the ``no_ignore_build_errors_as_typecheck``
+#: obligation is enforced AGAINST it being run, so dropping it would be the exact
+#: false-green the obligation exists to kill). ``migration_check`` / ``migration_status``
+#: (READ-ONLY drift checks) stay verification.
 VERIFICATION_SLOTS = frozenset(
     {
         "typecheck",
@@ -44,9 +100,39 @@ VERIFICATION_SLOTS = frozenset(
         "coverage",
         "lint",
         "e2e_test",
+        "build",
+        "framework_build",
         "migration_check",
         "migration_status",
         "eval",
+    }
+)
+
+#: KNOWN non-verification command slots — a framework/addon legitimately declares these
+#: (a dev/start SERVER, a codegen/migration convenience) but they are NOT release checks,
+#: so the command plan EXCLUDES them (a server would hang the gate; a mutating migration
+#: must never run during verify). This is the OTHER half of the three-state slot model
+#: (GPT-5.5 Pro consult 2026-06-21): a slot id is EITHER a verification slot (executed),
+#: OR a known non-verification slot (excluded), OR UNKNOWN. An UNKNOWN slot id (in neither
+#: set) is NOT silently dropped — that would be a false-green if it were a real check the
+#: harness did not recognize — it is RED at plan build (``stack_command_plan`` raises),
+#: forcing a profile to CLASSIFY every command it declares. ``generate`` (codegen) and
+#: ``migrate_deploy`` (mutating apply) / ``migrate`` are non-proof-bearing convenience;
+#: ``dev`` / ``start`` are servers. Mirrors the authenticity layer's own classification
+#: of these ids as non-verification (``DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES``).
+NON_VERIFICATION_SLOTS = frozenset(
+    {
+        "dev",
+        "start",
+        "serve",
+        "preview",
+        "generate",
+        "migrate",
+        "migrate_deploy",
+        "migrate_status",
+        "install",
+        "format",
+        "clean",
     }
 )
 
@@ -182,6 +268,16 @@ class ResolvedStackContract:
     #: (``Any``) to keep ``compose`` import-cycle-free at the dataclass level. Empty for the
     #: curated stacks (no profile declares a replacement yet).
     pending_replacement_proofs: tuple[Any, ...] = ()
+    #: Resolved layout roots (Contract Kernel v2.77g) — the real directories/paths the
+    #: command plan substitutes for a slot's ``{module_root}`` / ``{repo_root}`` /
+    #: ``{manifest_root}`` / ``{test_root}`` placeholders so a composed command spawns in
+    #: a real dir and writes its report to a real path (the stack twin of the language
+    #: verify executor's layout substitution). Sourced from the LANGUAGE profile's layout
+    #: in :func:`compose`. NOT part of ``content_hash`` (see :class:`StackLayout`): it is
+    #: derived from the already-pinned language layer, so it cannot drift independently of
+    #: a pinned stack. Defaulted so an unparameterized contract (and every existing test
+    #: constructing a contract directly) is unaffected.
+    layout: StackLayout = field(default_factory=StackLayout)
 
     @property
     def is_clean(self) -> bool:
@@ -427,6 +523,20 @@ def compose(
         fw.id: tuple(v.id for v in fw.variants) for fw in frameworks if fw.variants
     }
 
+    # -- resolved layout (Contract Kernel v2.77g) ------------------------------
+    # The LANGUAGE owns repo topology + test sets; copy the roots the command plan
+    # needs to substitute a slot's {module_root}/{repo_root}/{manifest_root}/{test_root}.
+    # Carry ALL test roots so the plan can detect an ambiguous {test_root} (zero/multiple)
+    # and RED rather than guess. Derived from the language layer, NOT hashed.
+    lang_layout = language.layout
+    test_sets = getattr(lang_layout, "test_sets", ()) or ()
+    stack_layout = StackLayout(
+        module_root=lang_layout.module_root,
+        repo_root=lang_layout.repo_root,
+        manifest_root=lang_layout.manifest_root,
+        test_roots=tuple(ts.root for ts in test_sets),
+    )
+
     stack_id = "+".join(l.id for l in layers)
     content_hash = _content_hash(
         layers, commands, obligations, file_roles, source_sets, pending_proofs
@@ -447,4 +557,5 @@ def compose(
         conflicts=tuple(conflicts),
         content_hash=content_hash,
         pending_replacement_proofs=tuple(pending_proofs),
+        layout=stack_layout,
     )
