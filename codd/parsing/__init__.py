@@ -166,30 +166,18 @@ from codd.parsing.filesystem_routes import (
 
 
 def get_extractor(language: str, category: str = "source") -> LanguageExtractor:
-    """Select the best available extractor for a language/category pair."""
-    normalized_language = language.lower()
-    normalized_category = category.lower()
+    """Select the best available extractor for a language/category pair.
 
-    if normalized_category == "schema":
-        if normalized_language == "sql":
-            if SqlDdlExtractor.is_available():
-                return SqlDdlExtractor()
-            return RegexExtractor(normalized_language, normalized_category)
-        if normalized_language == "prisma":
-            return PrismaSchemaExtractor()
-        return RegexExtractor(normalized_language, normalized_category)
+    Contract Kernel Cut Condition A: selection is REGISTRY-DATA-driven (see
+    :mod:`codd.parsing.extractor_registry`) — the language NAMES live in a data
+    table, the core dispatches by a table lookup, NOT a ``if language ==``
+    ladder. Falls through to :class:`RegexExtractor` (best-effort analysis) for
+    any unknown/unsupported language. Behaviour is byte-identical to the former
+    inline ladder.
+    """
+    from codd.parsing.extractor_registry import select_extractor
 
-    if normalized_category == "source" and normalized_language == "python":
-        return PythonAstExtractor(normalized_language, normalized_category)
-
-    if (
-        normalized_category == "source"
-        and normalized_language in _TREE_SITTER_LANGUAGE_PACKAGES
-        and TreeSitterExtractor.is_available(normalized_language)
-    ):
-        return TreeSitterExtractor(normalized_language, normalized_category)
-
-    return RegexExtractor(normalized_language, normalized_category)
+    return select_extractor(language, category)
 
 
 __all__ = [

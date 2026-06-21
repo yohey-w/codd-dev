@@ -365,13 +365,14 @@ def _detect_test_dirs(project_root: Path) -> list[str]:
 
 
 def _language_extensions(language: str) -> set[str]:
-    return {
-        "python": {".py"},
-        "typescript": {".ts", ".tsx"},
-        "javascript": {".js", ".jsx"},
-        "java": {".java"},
-        "go": {".go"},
-    }.get(language, set())
+    """Source-file extensions for ``language`` (registry-data lookup).
+
+    Contract Kernel Cut Condition A: no language-name keyed dict in core — the
+    extension table lives in the registry-DATA strategy. Byte-identical.
+    """
+    from codd.parsing.regex_strategies import language_extensions
+
+    return language_extensions(language)
 
 
 def _discover_modules(facts: ProjectFacts, project_root: Path, src_dir: Path,
@@ -473,92 +474,36 @@ def _schema_has_data(schema_info: Any) -> bool:
 
 def _file_to_module(rel_path: str, project_root: Path, src_dir: Path,
                     language: str) -> str:
-    """Map a file path to its module name."""
+    """Map a file path to its module name.
+
+    Contract Kernel Cut Condition A: dispatches through the registry-DATA
+    strategy's ``file_to_module`` rule (no ``if language ==`` branch). The
+    generic strategy reproduces the former trailing ``return parts[0]``
+    default; behaviour is byte-identical.
+    """
+    from codd.parsing.regex_strategies import strategy_for
+
     rel_to_src = Path(rel_path).relative_to(src_dir.relative_to(project_root))
-
-    if language == "python":
-        parts = list(rel_to_src.parts)
-        # Remove .py extension from last part
-        if parts and parts[-1].endswith(".py"):
-            parts[-1] = parts[-1][:-3]
-        # If file is __init__.py, module is the parent directory
-        if parts and parts[-1] == "__init__":
-            parts.pop()
-        # Top-level module name
-        if parts:
-            return parts[0]
-        return rel_to_src.parent.name or "root"
-
-    elif language in ("typescript", "javascript"):
-        parts = list(rel_to_src.parts)
-        if parts:
-            return parts[0]
-        return "root"
-
-    elif language == "java":
-        # Use top-level directory under src
-        parts = list(rel_to_src.parts)
-        # Skip standard layout dirs (main/java, main/kotlin)
-        skip = {"main", "java", "kotlin", "scala"}
-        parts = [p for p in parts if p not in skip]
-        if parts:
-            return parts[0]
-        return "root"
-
-    elif language == "go":
-        parts = list(rel_to_src.parts)
-        if parts:
-            return parts[0]
-        return "root"
-
+    rule = strategy_for(language).file_to_module
+    if rule is not None:
+        result = rule(rel_to_src)
+        if result is not None:
+            return result
     return rel_to_src.parts[0] if rel_to_src.parts else "root"
 
 
 def _extract_symbols(content: str, rel_path: str, language: str) -> list[Symbol]:
-    """Extract classes and functions from source code (regex-based MVP)."""
-    symbols = []
+    """Extract classes and functions from source code (regex-based MVP).
 
-    if language == "python":
-        for i, line in enumerate(content.splitlines(), 1):
-            m = re.match(r'^\s*class\s+(\w+)', line)
-            if m:
-                symbols.append(Symbol(m.group(1), "class", rel_path, i))
-            m = re.match(r'^\s*(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)', line)
-            if m and not m.group(1).startswith("_"):
-                symbols.append(Symbol(m.group(1), "function", rel_path, i, m.group(2).strip()))
+    Contract Kernel Cut Condition A: this core function no longer branches on a
+    language name — it dispatches through the registry-DATA strategy for
+    ``language`` (see :mod:`codd.parsing.regex_strategies`). The per-language
+    regex bodies live in that strategy table (the allowed extractor-impl zone);
+    behaviour is byte-identical to the former inline ladder.
+    """
+    from codd.parsing.regex_strategies import strategy_for
 
-    elif language in ("typescript", "javascript"):
-        for i, line in enumerate(content.splitlines(), 1):
-            m = re.match(r'^(?:export\s+)?class\s+(\w+)', line)
-            if m:
-                symbols.append(Symbol(m.group(1), "class", rel_path, i))
-            m = re.match(r'^(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)', line)
-            if m:
-                symbols.append(Symbol(m.group(1), "function", rel_path, i, m.group(2).strip()))
-            # Arrow function exports
-            m = re.match(r'^export\s+const\s+(\w+)\s*=\s*(?:async\s+)?\(', line)
-            if m:
-                symbols.append(Symbol(m.group(1), "function", rel_path, i))
-
-    elif language == "java":
-        for i, line in enumerate(content.splitlines(), 1):
-            m = re.match(r'^\s*(?:public|protected|private)?\s*(?:static\s+)?(?:abstract\s+)?class\s+(\w+)', line)
-            if m:
-                symbols.append(Symbol(m.group(1), "class", rel_path, i))
-            m = re.match(r'^\s*(?:public|protected)\s+(?:static\s+)?[\w<>\[\],\s]+\s+(\w+)\s*\(([^)]*)\)', line)
-            if m and m.group(1)[0].islower():
-                symbols.append(Symbol(m.group(1), "function", rel_path, i, m.group(2).strip()))
-
-    elif language == "go":
-        for i, line in enumerate(content.splitlines(), 1):
-            m = re.match(r'^type\s+(\w+)\s+struct\s*\{', line)
-            if m:
-                symbols.append(Symbol(m.group(1), "class", rel_path, i))
-            m = re.match(r'^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(([^)]*)\)', line)
-            if m and m.group(1)[0].isupper():
-                symbols.append(Symbol(m.group(1), "function", rel_path, i, m.group(2).strip()))
-
-    return symbols
+    return strategy_for(language).symbols(content, rel_path)
 
 
 def _extract_imports(content: str, language: str, project_root: Path,
@@ -566,105 +511,26 @@ def _extract_imports(content: str, language: str, project_root: Path,
     """Extract imports, classified as internal or external.
 
     Returns (internal_imports: {module_name: [import_lines]}, external_imports: set)
+
+    Contract Kernel Cut Condition A: dispatches through the registry-DATA
+    strategy for ``language`` (no ``if language ==`` branch here). The strategy
+    also applies the per-language stdlib subtraction, byte-identical to the
+    former inline ``external -= _common_stdlib(language)`` tail.
     """
-    internal: dict[str, list[str]] = {}
-    external: set[str] = set()
+    from codd.parsing.regex_strategies import strategy_for
 
-    if language == "python":
-        # Determine package name of the source dir itself
-        src_pkg_name = src_dir.name if (src_dir / "__init__.py").exists() else None
-
-        for line in content.splitlines():
-            m = re.match(r'^(?:from|import)\s+([\w.]+)', line.strip())
-            if not m:
-                continue
-            module = m.group(1)
-            parts = module.split(".")
-            top_level = parts[0]
-
-            # Check if it's an internal module
-            is_internal = False
-            internal_key = top_level
-
-            # Case 1: import references the source package itself (e.g., from codd.graph)
-            if src_pkg_name and top_level == src_pkg_name and len(parts) >= 2:
-                is_internal = True
-                internal_key = parts[1]  # Use sub-module as the key
-            else:
-                # Case 2: import references a sibling directory/file
-                for sd in [src_dir] + [project_root / d for d in ("src", "lib", "app") if (project_root / d).is_dir()]:
-                    if (sd / top_level).is_dir() or (sd / f"{top_level}.py").is_file():
-                        is_internal = True
-                        break
-
-            if is_internal:
-                internal.setdefault(internal_key, []).append(line.strip())
-            else:
-                external.add(top_level)
-
-    elif language in ("typescript", "javascript"):
-        for line in content.splitlines():
-            m = re.search(r'''(?:import|from)\s+['"]([^'"]+)['"]''', line)
-            if not m:
-                continue
-            import_path = m.group(1)
-            if import_path.startswith("."):
-                # Relative import → internal
-                resolved = (file_path.parent / import_path).resolve()
-                try:
-                    rel = resolved.relative_to(src_dir)
-                    top_level = rel.parts[0] if rel.parts else "root"
-                    internal.setdefault(top_level, []).append(line.strip())
-                except ValueError:
-                    external.add(import_path)
-            elif import_path.startswith("@"):
-                # Scoped package
-                parts = import_path.split("/")
-                pkg = "/".join(parts[:2]) if len(parts) >= 2 else import_path
-                external.add(pkg)
-            else:
-                external.add(import_path.split("/")[0])
-
-    elif language == "go":
-        in_import = False
-        for line in content.splitlines():
-            if re.match(r'^import\s*\(', line):
-                in_import = True
-                continue
-            if in_import and line.strip() == ")":
-                in_import = False
-                continue
-            if in_import or re.match(r'^import\s+"', line):
-                m = re.search(r'"([^"]+)"', line)
-                if m:
-                    pkg = m.group(1)
-                    external.add(pkg.split("/")[-1])
-
-    # Remove stdlib-like imports from external
-    external -= _common_stdlib(language)
-
-    return internal, external
+    return strategy_for(language).imports(content, project_root, src_dir, file_path)
 
 
 def _common_stdlib(language: str) -> set[str]:
-    """Return common stdlib modules to exclude from external imports."""
-    if language == "python":
-        return {
-            "os", "sys", "re", "json", "math", "time", "datetime", "pathlib",
-            "typing", "collections", "itertools", "functools", "copy", "io",
-            "subprocess", "shutil", "tempfile", "hashlib", "uuid", "logging",
-            "unittest", "dataclasses", "enum", "abc", "contextlib", "textwrap",
-            "argparse", "configparser", "csv", "sqlite3", "http", "urllib",
-            "threading", "multiprocessing", "socket", "email", "html", "xml",
-            "importlib", "inspect", "ast", "dis", "warnings", "traceback",
-            "pprint", "string", "struct", "array", "queue", "heapq", "bisect",
-            "statistics", "random", "secrets", "base64", "binascii", "codecs",
-            "locale", "gettext", "calendar", "zlib", "gzip", "tarfile", "zipfile",
-            "__future__", "builtins", "types", "operator", "fnmatch", "glob",
-            "signal", "mmap", "ctypes", "platform", "sysconfig", "site",
-            "concurrent", "asyncio", "selectors", "ssl", "ftplib", "smtplib",
-        }
-    return set()
+    """Return common stdlib modules to exclude from external imports.
+
+    Registry-data lookup (no language-name branch); empty for languages with no
+    declared stdlib set, byte-identical to the former python-only ladder.
+    """
+    from codd.parsing.regex_strategies import common_stdlib
+
+    return common_stdlib(language)
 
 
 def _map_tests_to_modules(facts: ProjectFacts, project_root: Path,
@@ -706,19 +572,19 @@ def _map_tests_to_modules(facts: ProjectFacts, project_root: Path,
 
 
 def _guess_test_target(test_filename: str, language: str) -> str | None:
-    """Guess which module a test file targets from its name."""
+    """Guess which module a test file targets from its name.
+
+    Contract Kernel Cut Condition A: dispatches through the registry-DATA
+    strategy's ``guess_test_target`` rule (no ``if language ==`` branch);
+    languages without a rule return ``None``, byte-identical to the former
+    ladder.
+    """
+    from codd.parsing.regex_strategies import strategy_for
+
     name = Path(test_filename).stem
-
-    if language == "python":
-        # test_foo.py → foo
-        if name.startswith("test_"):
-            return name[5:]
-    elif language in ("typescript", "javascript"):
-        # foo.test.ts → foo, foo.spec.ts → foo
-        for suffix in (".test", ".spec"):
-            if name.endswith(suffix):
-                return name[: -len(suffix)]
-
+    rule = strategy_for(language).guess_test_target
+    if rule is not None:
+        return rule(name)
     return None
 
 
@@ -818,54 +684,28 @@ def _detect_go_patterns(facts: ProjectFacts, content: str):
 
 
 def _detect_code_patterns(mod: ModuleInfo, content: str, language: str):
-    """Detect API routes, DB models, page routes, auth redirects from source code."""
-    if language == "python":
-        if re.search(r'@(?:app|router)\.(get|post|put|delete|patch)\s*\(', content):
-            mod.patterns["api_routes"] = "HTTP route handlers"
-        if re.search(r'class\s+\w+\(.*(?:Base|Model|db\.Model)\)', content):
-            mod.patterns["db_models"] = "ORM models"
-        if re.search(r'@(?:celery_app|app)\.task', content):
-            mod.patterns["background_tasks"] = "Async task handlers"
-        if re.search(r'(?:redirect|RedirectResponse|HttpResponseRedirect)\s*\(', content):
-            mod.patterns["auth_redirects"] = "Server-side redirects"
-        if re.search(r'@login_required|@permission_required|LoginRequiredMixin', content):
-            mod.patterns["auth_guards"] = "Authentication guards"
+    """Detect API routes, DB models, page routes, auth redirects from source code.
 
-    elif language in ("typescript", "javascript"):
-        if re.search(r'(?:app|router)\.(get|post|put|delete|patch)\s*\(', content):
-            mod.patterns["api_routes"] = "HTTP route handlers"
-        if re.search(r'@(?:Controller|Get|Post|Put|Delete|Patch)\s*\(', content):
-            mod.patterns["api_routes"] = "NestJS controller"
-        if re.search(r'(?:schema|model)\s*\(', content, re.IGNORECASE):
-            mod.patterns["db_models"] = "Database models"
-        # Page routes: Next.js/Remix/SvelteKit page components with server-side logic
-        if re.search(r'export\s+default\s+(?:async\s+)?function\s+\w*Page', content):
-            mod.patterns["page_routes"] = "Page route components"
-        # Auth redirects: server-side redirect after auth checks
-        if re.search(r'(?:redirect|NextResponse\.redirect|Response\.redirect)\s*\(', content):
-            mod.patterns["auth_redirects"] = "Server-side redirects"
-        # Middleware with auth/redirect logic
-        if re.search(r'export\s+(?:async\s+)?function\s+middleware', content):
-            mod.patterns["middleware"] = "Request middleware"
-        # Client-side navigation: programmatic redirects after form submission
-        if re.search(r'(?:router\.push|router\.replace|window\.location\.assign|window\.location\.href\s*=)', content):
-            mod.patterns["client_redirects"] = "Client-side navigation"
-        # Auth provider configuration (NextAuth, Auth.js, etc.)
-        if re.search(r'(?:NextAuth|CredentialsProvider|signIn|signOut|useSession|getServerSession)', content):
-            mod.patterns["auth_provider"] = "Authentication provider"
+    Contract Kernel Cut Condition A: dispatches through the registry-DATA
+    strategy for ``language`` (no ``if language ==`` branch here). The
+    per-language detection bodies live in the strategy table; behaviour is
+    byte-identical to the former inline ladder.
+    """
+    from codd.parsing.regex_strategies import strategy_for
+
+    strategy_for(language).code_patterns(mod, content)
 
 
 def _detect_entry_points(facts: ProjectFacts, project_root: Path, language: str):
-    """Find likely entry points (main files)."""
-    candidates = {
-        "python": ["main.py", "app.py", "manage.py", "wsgi.py", "asgi.py", "__main__.py"],
-        "typescript": ["index.ts", "main.ts", "app.ts", "server.ts"],
-        "javascript": ["index.js", "main.js", "app.js", "server.js"],
-        "java": ["Application.java", "Main.java", "App.java"],
-        "go": ["main.go", "cmd/main.go"],
-    }
+    """Find likely entry points (main files).
 
-    for candidate in candidates.get(language, []):
+    Contract Kernel Cut Condition A: the per-language candidate list comes from
+    the registry-DATA strategy (no language-name keyed dict in core).
+    Byte-identical.
+    """
+    from codd.parsing.regex_strategies import entry_point_candidates
+
+    for candidate in entry_point_candidates(language):
         for src_dir in facts.source_dirs:
             path = project_root / src_dir / candidate
             if path.exists():

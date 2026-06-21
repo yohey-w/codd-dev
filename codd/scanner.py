@@ -7,7 +7,6 @@ Human knowledge (manual annotations, overrides) is NEVER deleted.
 """
 
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -470,14 +469,11 @@ def _load_legacy_data_dependency(ceg: CEG, dep: dict):
 def _scan_source_directory(ceg: CEG, project_root: Path, src_dir: Path,
                            language: str, exclude_patterns: list):
     """Scan source files for import/call dependencies."""
-    extensions = {
-        "python": [".py"],
-        "typescript": [".ts", ".tsx"],
-        "javascript": [".js", ".jsx"],
-        "java": [".java"],
-        "go": [".go"],
-    }
-    exts = extensions.get(language, [])
+    # Contract Kernel Cut Condition A: source extensions come from the
+    # registry-DATA strategy (single source of truth, no language-keyed dict).
+    from codd.parsing.regex_strategies import language_extensions
+
+    exts = language_extensions(language)
 
     file_count = 0
     for root, dirs, files in os.walk(src_dir):
@@ -510,37 +506,16 @@ def _extract_imports_basic(ceg: CEG, project_root: Path, src_dir: Path, file_pat
     extractor = get_extractor(language, "source")
     internal, _ = extractor.extract_imports(content, file_path, project_root, src_dir)
 
-    if language in ("typescript", "javascript"):
-        for import_lines in internal.values():
-            for line in import_lines:
-                match = re.search(r'''(?:import|from)\s+['"]([^'"]+)['"]''', line)
-                if not match:
-                    continue
-                target_module = match.group(1)
-                if not target_module.startswith("."):
-                    continue
-                resolved = (file_path.parent / target_module).resolve()
-                extensions = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", "/index.ts", "/index.tsx", "/index.js", "/index.jsx"]
-                for ext in [""] + extensions:
-                    candidate = Path(f"{resolved}{ext}")
-                    if not candidate.exists():
-                        continue
-                    try:
-                        target_rel = candidate.relative_to(project_root).as_posix()
-                    except ValueError:
-                        continue
-                    target_id = f"file:{target_rel}"
-                    ceg.upsert_node(target_id, "file", path=target_rel)
-                    edge_id = ceg.add_edge(source_id, target_id, "imports", "structural")
-                    ceg.add_evidence(edge_id, "static", "ast_import", 0.95)
-                    break
+    # Contract Kernel Cut Condition A: the per-language relative-import resolution
+    # is a registry-DATA capability (see :func:`ceg_import_targets`), so this
+    # scanner core builds the graph WITHOUT a ``if language in (...)`` branch.
+    # Byte-identical to the former inline python / typescript-javascript block.
+    from codd.parsing.regex_strategies import ceg_import_targets
 
-    elif language == "python":
-        for target_module in internal:
-            target_id = f"module:{target_module}"
-            ceg.upsert_node(target_id, "module", name=target_module)
-            edge_id = ceg.add_edge(source_id, target_id, "imports", "structural")
-            ceg.add_evidence(edge_id, "static", "ast_import", 0.90)
+    for target in ceg_import_targets(language, internal, project_root, file_path):
+        ceg.upsert_node(target.target_id, target.node_type, **target.node_kwargs)
+        edge_id = ceg.add_edge(source_id, target.target_id, "imports", "structural")
+        ceg.add_evidence(edge_id, "static", target.evidence_method, target.confidence)
 
 
 # ═══════════════════════════════════════════════════════════
