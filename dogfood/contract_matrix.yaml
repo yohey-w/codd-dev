@@ -275,7 +275,7 @@ families:
     status: covered
     enforcement: hard
     fail_mode: honest_red
-    authority: codd.implement_oracle._run_python_composite_oracle
+    authority: codd.languages.adapters.oracle_python.PythonCompositeOracleAdapter
     certification_fixtures:
     - tests/test_python_implement_oracle.py::test_hidden_missing_module_is_red_keystone
     - tests/test_python_implement_oracle.py::test_missing_imported_symbol_is_red
@@ -350,7 +350,7 @@ families:
     status: covered
     enforcement: hard
     fail_mode: honest_red
-    authority: codd.implement_oracle._run_python_pytest_collect_layer
+    authority: codd.languages.adapters.oracle_python._run_python_pytest_collect_layer
     certification_fixtures:
     - tests/test_python_implement_oracle.py::test_pytest_collection_error_is_red
     - tests/test_python_implement_oracle.py::test_clean_project_passes

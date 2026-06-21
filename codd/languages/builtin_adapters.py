@@ -105,15 +105,19 @@ def register_oracle_adapters(registry: AdapterRegistry) -> None:
     kernel forbids).
 
     Step 5 registers the ``go-toolchain`` adapter (Go migrates to the contract
-    path); ``typescript-tsc`` / ``python-composite`` land with steps 6–7 (until
-    then those languages stay on the legacy gate path, because the dispatch routes
-    to the contract path ONLY when the resolved profile's oracle adapter is
-    REGISTERED here — an unregistered adapter id keeps a language on legacy). The
-    adapter classes are imported INSIDE this function (lazy), never at module load,
-    preserving the leaf rule.
+    path); step 6 registers ``python-composite`` (Python's in-process ``kind=adapter``
+    composite); ``typescript-tsc`` lands with step 7 (until then TS stays on the
+    legacy gate path, because the dispatch routes to the contract path ONLY when the
+    resolved profile's oracle adapter is REGISTERED here — an unregistered adapter id
+    keeps a language on legacy). The adapter classes are imported INSIDE this function
+    (lazy), never at module load, preserving the leaf rule.
     """
     from codd.languages.adapters.oracle_go import GoToolchainOracleAdapter
+    from codd.languages.adapters.oracle_python import PythonCompositeOracleAdapter
     from codd.languages.contract import KIND_IMPLEMENT_ORACLE
 
     _register_once(registry, KIND_IMPLEMENT_ORACLE, "go-toolchain", GoToolchainOracleAdapter())
-    # typescript-tsc / python-composite register here with steps 6–7.
+    _register_once(
+        registry, KIND_IMPLEMENT_ORACLE, "python-composite", PythonCompositeOracleAdapter()
+    )
+    # typescript-tsc registers here with step 7.

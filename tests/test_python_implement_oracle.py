@@ -437,7 +437,12 @@ def test_pytest_missing_is_environment_error_not_green(tmp_path: Path, monkeypat
     running a stub). We assert the gate does NOT pass and records an
     environment_build_error — skip == unverified, never green.
     """
-    import codd.implement_oracle as mod
+    # The composite oracle (compile + first-party imports + pytest collect) was
+    # RELOCATED to the Contract-Kernel ``python-composite`` adapter (Contract Kernel
+    # oracle dispatch §6). The collect layer now lives on the adapter module, so the
+    # pytest-absent seam is patched THERE (the gate re-exports the name for back-compat
+    # but the adapter calls its own module-local function). Verdict semantics unchanged.
+    import codd.languages.adapters.oracle_python as oracle_python
 
     _scaffold(tmp_path, with_path_shim=True)
     _write(tmp_path, "src/app/core.py", "def ok():\n    return 1\n")
@@ -449,7 +454,7 @@ def test_pytest_missing_is_environment_error_not_green(tmp_path: Path, monkeypat
 
     from codd.implement_oracle import PythonToolRun, EVIDENCE_ENVIRONMENT_BUILD, ImplementOracleFinding
 
-    def _fake_collect(project_root, profile, scope, config):
+    def _fake_collect(*args, **kwargs):
         return PythonToolRun(
             name="pytest_collect",
             executed=False,
@@ -462,7 +467,7 @@ def test_pytest_missing_is_environment_error_not_green(tmp_path: Path, monkeypat
             ),
         )
 
-    monkeypatch.setattr(mod, "_run_python_pytest_collect_layer", _fake_collect)
+    monkeypatch.setattr(oracle_python, "_run_python_pytest_collect_layer", _fake_collect)
 
     result = _run(tmp_path)
 
