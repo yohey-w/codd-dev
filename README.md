@@ -13,190 +13,137 @@
   <a href="README_ja.md">日本語</a> | English | <a href="README_zh.md">中文</a>
 </p>
 
-> Write only functional requirements and constraints. CoDD generates the code, repairs the coherence, and verifies the result.
+<p align="center">
+  <em>Treat requirements, design, code, and tests as <strong>one connected graph</strong> — so AI can build from it, every change propagates across it, and verification can never fake "green."</em>
+</p>
 
 ---
 
-## 🌟 Why CoDD
+## What is CoDD?
 
-> **"Write only functional requirements and constraints. Code is generated, repaired, and verified automatically."**
+Software has a coherence problem. Requirements, design docs, code, and tests are supposed to say the same thing — but they drift apart. A change in one place silently breaks another. Documents rot. And when an AI (or a tired human) writes the code, the tests often pass while proving *nothing*.
 
-Most "AI-assisted dev" tools focus on the **generation** side. CoDD focuses on the **constraint** side: the LLM is most useful when it has a precise picture of what *must* be true. CoDD ties every artifact (requirements → design → lexicon → source → tests → runtime) into a single DAG, drives an LLM repair loop against it, and surfaces what is structurally unrepairable — honestly.
+**CoDD makes that coherence explicit and machine-checked.** It models your project as a single graph whose nodes are *every* artifact — a requirement, a design section, a source file, a config key, a DB table, a test — and whose edges are the dependencies between them (`implements`, `calls`, `reads_config`, `tested_by`, …). With that graph in place, CoDD does three things:
 
-With an enabled artifact contract, `codd plan/generate/implement/verify` judge completion by the artifacts actually produced, not by the command merely returning — a harness-level mechanism that lets even a weaker model stay on the north star.
+1. **Generate** — turn requirements into design, code, and tests (greenfield autopilot, or one document at a time).
+2. **Propagate** — when *anything* changes, walk the graph to find everything affected, upstream and downstream, and reconcile it.
+3. **Verify** — run the real build and tests through an **anti-false-green** harness: a run cannot be reported as passing unless it actually proved it.
+
+```mermaid
+flowchart LR
+    R["Requirements"] <--> D["Design"]
+    D <--> C["Code"]
+    C <--> T["Tests"]
+    R -. "one coherence graph" .- T
+```
+
+The arrows go **both ways**. Edit the code and the affected design and requirements light up; add a requirement and the design, code, and tests that must change light up. That bidirectional coherence is the "Co" in CoDD.
+
+### Why it's different
+
+Most AI dev tools make *the model* smarter (better autocomplete, bigger context). CoDD makes *the data you feed the model* smarter: it precomputes the dependency graph so the AI sees exactly what a change touches — with evidence — instead of guessing from whatever files happen to be open. And its verification is built to **refuse false positives**: empty test suites, no-op build scripts (`"build": "true"`), missing reports, disabled checkers, and seeded source mutations all come back **RED**, never a silent pass.
 
 ---
 
-## 🚀 Get started in 60 seconds
+## Install
 
 ```bash
-pip install codd-dev
+pip install codd-dev          # Python 3.10+   ·   the command is `codd`
+codd version
+```
 
-# Greenfield: write requirements, walk away
+---
+
+## Quick start
+
+### Greenfield — requirements in, working system out
+
+Write what you want as a Markdown requirements doc, then let the unattended autopilot run the whole pipeline (init → elicit → plan → generate → implement → verify with auto-repair → propagate → check):
+
+```bash
 codd greenfield --requirements docs/requirements/requirements.md
 ```
 
-One command runs the whole unattended pipeline — init → elicit → plan → generate → implement → verify (auto-repair) → propagate → check — checkpointing after every unit (`codd greenfield --resume` picks up where it stopped, `--ntfy-topic` sends progress pings, `--dry-run` previews). The same pipeline ships as three vehicles so any setup can use it: a transparent shell composition ([examples/greenfield_autopilot.sh](examples/greenfield_autopilot.sh)), a Claude Code Agent Workflow template ([examples/claude_workflows/codd-greenfield.js](examples/claude_workflows/codd-greenfield.js)), and the `codd-greenfield` skill (`codd skills install codd-greenfield --target both` — works in Claude Code and Codex CLI).
+It checkpoints after every unit, so `codd greenfield --resume` picks up where it stopped; `--dry-run` previews the plan, and `--ntfy-topic <topic>` pings you with progress.
 
-Working inside an existing project instead:
+### Brownfield — point it at an existing codebase
 
-```bash
-codd init --suggest-lexicons --llm-enhanced    # AI picks the lexicons that fit
-codd elicit                                    # AI finds gaps in your requirements
-codd dag verify --auto-repair --max-attempts 10  # AI fixes coherence violations
-```
-
-Already shipping? Describe what you want fixed:
+CoDD reverse-engineers design intent from code, then keeps the two in sync:
 
 ```bash
-codd fix "login error messages are hard to understand"   # natural-language phenomenon mode
+codd init                 # set up CoDD in the repo
+codd scan                 # build the dependency graph from the source
+codd brownfield           # extract design docs → diff vs. reality → elicit the gaps
 ```
 
-`codd fix [PHENOMENON]` is CoDD's second entry-point: state the desired change in plain words, CoDD locates the affected design docs via lexicon + semantic scoring and updates them with an LLM. From there the change flows **design → implementation → tests → verify**: Stage 4 deterministically resolves the affected implementation + test files from the DAG, makes an allowlist-confined LLM patch, and runs a verify gate (no new red DAG check + local tests pass) with targeted rollback (only files this run wrote are reverted) on failure. Opt out with `--no-propagate-impl`; add `--propagate` to also reconcile dependent design docs. `--dry-run` previews, `--non-interactive` runs in CI.
+### Already shipping? Describe the change in plain words
 
----
-
-## 🎨 Visual flow
-
-```mermaid
-flowchart LR
-    R["Requirements (.md)"] --> E["codd elicit"]
-    E -->|gap findings| H{HITL: approve / reject}
-    H -->|approve| L["project_lexicon.yaml + requirements TODOs"]
-    H -->|reject| I["ignored_findings.yaml"]
-    L --> V["codd dag verify --auto-repair"]
-    V -->|violation| AR["LLM patch propose → apply"]
-    AR --> V
-    V -->|SUCCESS| D["✅ deploy gate passes"]
-    AR -->|max attempts| P["PARTIAL_SUCCESS: unrepairable surfaced honestly"]
+```bash
+codd fix "login error messages are confusing"
 ```
 
-Brownfield path:
-
-```mermaid
-flowchart LR
-    Code["Existing codebase"] --> X["codd extract"]
-    X --> DIFF["codd diff (drift)"]
-    DIFF --> EL["codd elicit (coverage gaps)"]
-    EL --> H{HITL gate}
-    H --> Apply["codd elicit apply"]
-    Apply --> V["codd dag verify"]
-```
+`codd fix [PHENOMENON]` locates the affected design docs, updates them, then flows the change **design → implementation → tests → verify** — patching only the files the graph says are involved, and rolling back exactly those files if the verify gate fails.
 
 ---
 
-## ✨ What it does
+## How it works — the three pillars
 
-CoDD is one CLI organised in four layers. Pick what you need; the rest stays out of your way.
-
-### Core commands
-
-| Command | One-line summary |
-| --- | --- |
-| 🚀 **`codd greenfield --requirements FILE`** | Unattended autopilot: requirements in, system out. All gates auto-approved, checkpoint/resume via `--resume`, ntfy notify-only. Its building blocks (`generate --all-waves`, `implement list-tasks`, `verify --repair-mode`) also work standalone. |
-| 🎯 **`codd init --suggest-lexicons --llm-enhanced`** | LLM scans code/docs, picks the right lexicon plug-ins. |
-| 🔍 **`codd elicit`** | Finds *specification holes* against industry-standard lexicons. |
-| 🔄 **`codd diff`** | Detects drift between requirements and actual implementation. |
-| 🛠️ **`codd dag verify --auto-repair`** | Validates the full DAG; LLM proposes patches; loop until SUCCESS or MAX_ATTEMPTS. |
-| 🎯 **`codd fix`** / **`codd fix [PHENOMENON]`** | Two modes — auto-detect CI failures, or describe a desired change in natural language; phenomenon mode flows design → implementation → tests → verify (opt out via `--no-propagate-impl`). |
-| 🧭 **`codd operations {derive,show,approve,apply}`** | Detects requirement units anchored to no declared operation, has the AI propose `operation_flow` entries, and writes a proposal for human review — nothing reaches `codd.yaml` until `approve` + `apply`. Opt-in, non-destructive. (Legacy `merge` still works as a deprecated alias of `apply`.) |
-| 📜 **`codd contract {derive,show,apply,verify}`** | V-model artifact contract. `derive`/`apply` are requirement-driven selection of *which* catalog artifacts a project declares per stage (`derive` detects the project's signals — requirement docs, design docs, lexicon, declared `operation_flow`, source dirs, test/e2e suites — and writes a reviewable proposal, never touching `codd.yaml`; `apply` merges it non-destructively and idempotently, `--enable` to turn the gate on). `verify`/gate are the completion side: with the contract enabled, a stage can't claim completion until its declared artifacts are produced/validate. `show` renders the catalog + this project's contract. Opt-in; absent/disabled contract = no-op. (Legacy `suggest`/`adopt` still work as deprecated aliases.) |
-| 🌐 **`codd brownfield`** | Extract → diff → elicit pipeline for existing codebases. |
-
-### Quality gates
-
-| Gate | Purpose |
-| --- | --- |
-| 🧪 **`codd verify --runtime`** | Step 8 runtime smoke (DB up + dev server reachable + smoke HTTP + real-browser E2E + opt-in CRUD reflection via `runtime.crud_flow_targets` + action outcome coverage via `runtime.action_outcome_targets`). `--runtime-skip` opts out per category and records the reason. |
-| 📊 **`codd lexicon list/install/diff` + `codd coverage report`** | Plug-in management + JSON / Markdown / self-contained HTML coverage matrices. |
-| 🛡️ **CI gate** | `.github/workflows/codd_coverage.yml` template + `codd coverage check` exit code blocks coverage regressions on merge. |
-
-### Skills & backends
-
-| Capability | What it gives you |
-| --- | --- |
-| 🔁 **`codd skills {install,list,remove}`** | Distributes bundled skills (e.g. `codd-evolve`) to `~/.claude/skills/` and `~/.agents/skills/`. `--target {claude,codex,both}`, `--mode {symlink,copy}`, idempotent + `--force`. |
-| 🪡 **codd-evolve skill** | Brownfield conversational evolution. Walks requirements → design → lexicon → source → tests → verify → propagate → Step 8 runtime smoke from a single natural-language intent. Stop-and-ask gates for new lexicon terms, breaking changes, and 1:N UI topology. |
-| ⚡ **Codex App Server backend** (v2.20.0) | Set `codex_app_server.enabled: true` in `codd.yaml` to route AI calls through a persistent JSON-RPC thread instead of subprocess. `thread_strategy: per_session` amortises codex cold-start across `codd implement` / `codd verify --auto-repair` / `codd fix`. Automatic `subprocess` fallback when the binary or socket is missing. |
-
-### Lexicon plug-ins
-
-38 industry-standard lexicons ship as opt-in coverage axes — Web (WCAG / OWASP / Web Vitals / WebAuthn / forms / SEO / PWA), Mobile (HIG / Material 3 / a11y / MASVS), Backend (REST / GraphQL / gRPC / events), Data (SQL / JSON Schema / event sourcing / governance), Ops (CI/CD / Kubernetes / Terraform / observability / DORA), Compliance (ISO 27001 / HIPAA / PCI DSS / GDPR / EU AI Act), Process (ISO 25010 / 29119 / DDD / 12-factor / i18n / model cards / API rate-limit), and Methodology (BABOK).
-
----
-
-## 📊 Case study
-
-Dogfooded against a Next.js + Prisma + PostgreSQL multi-tenant LMS (~30 design docs, 12 DB tables, RLS-enforced isolation): `codd init --suggest-lexicons` matched 9 of 10 manually-chosen lexicons, `codd elicit` surfaced 70 spec holes, `codd dag verify --auto-repair` drove 16 unrepairable violations down to **PASS or amber-WARN with deploy allowed** — without a single line of CoDD core change per project. Project-specific concerns live entirely in `project_lexicon.yaml` and `codd_plugins/`.
-
----
-
-## 🧱 Generality Gate (three-layer architecture)
-
-| Layer | Where stack-specific names live | Examples |
+| Pillar | What it does | Key commands |
 | --- | --- | --- |
-| **A — Core** | **Nowhere.** Zero `react`, `django`, `Stripe`, `LMS` literals. | `codd/elicit/`, `codd/dag/`, `codd/lexicon_cli/` |
-| **B — Templates** | Generic placeholders only. | `codd/templates/*.j2`, `codd/templates/lexicon_schema.yaml` |
-| **C — Plug-ins** | Free to name anything. | `codd_plugins/lexicons/*/`, `codd_plugins/stack_map.yaml` |
+| **1 · Generate from intent** | Requirements → design candidates → code & test scaffolds. The AI proposes; a human chooses (Human-in-the-Loop). | `greenfield`, `generate`, `implement`, `plan` |
+| **2 · Propagate change** *(the heart)* | A typed dependency graph across requirements/design/code/config/data/tests. Change anything and CoDD traces the blast radius — classified **Green** (auto-fix), **Amber** (review), **Gray** (FYI) — with the evidence for each edge. | `scan`, `impact`, `propagate`, `diff`, `dag verify` |
+| **3 · Verify coherence** | The real build + tests, run so they can't lie. Failures are traced back to the artifacts that caused them. | `verify`, `check`, `coverage`, `contract verify` |
 
-This is what lets one core work for Next.js, Django, FastAPI, Rails, Go services, mobile apps, ML model cards — and lets contributors add a lexicon without touching the core.
-
----
-
-## 🧭 Roadmap
-
-Up next:
-
-- App-Server-driven benchmark publication (P50 / P95 / P99 for subprocess vs JSON-RPC)
-- Lexicon plug-in marketplace
-
-Past releases (v2.11.0 → v2.20.0) live in [CHANGELOG.md](CHANGELOG.md) with quality metrics.
+The pillars form a loop: generation decides *what* changes, propagation finds *where* it lands, verification proves it holds — and every commit feeds the graph so the next pass is sharper. (Full concept walk-through: [`docs/explainer.md`](docs/explainer.md).)
 
 ---
 
-## 🤝 Contributing
+## What's new in v3.0 — the Contract Kernel
 
-CoDD is shaped by:
+v3.0 makes CoDD's core **language- and framework-agnostic**. The harness no longer hard-codes `go`, `python`, `next`, or any other name — it drives everything from declarative contracts + adapters:
 
-- **[@yohey-w](https://github.com/yohey-w)** — Maintainer / Architect
-- **[@Seika86](https://github.com/Seika86)** — Sprint regex insight (PR #11)
-- **[@v-kato](https://github.com/v-kato)** — Brownfield reproduction reports (Issues #17 / #18 / #19 / #20 / #21 / #22)
-- **[@dev-komenzar](https://github.com/dev-komenzar)** — `source_dirs` bug reproduction (Issue #13)
+- **Language-free core** — Go, Python, and TypeScript are described entirely by declarative `LanguageProfile`s. Adding a new language is a profile + adapter, with **no core change** (proven by a synthetic language the core has never seen).
+- **Framework-pluggable stack** — a framework (e.g. Next.js) and addons (Playwright, Prisma) *compose* with the language into one resolved stack contract that `greenfield` and `verify` consume live. A new framework plugs in the same way.
+- **Anti-false-green, owned by the core** — the no-fake-pass invariant lives in the core; profiles can configure parameters but can **never weaken** it. (Verified end-to-end on a real Next.js app — see [`dogfood/v3_nextjs_live_e2e.md`](dogfood/v3_nextjs_live_e2e.md).)
 
-Issues, PRs, and lexicon proposals are welcome — see [Issues](https://github.com/yohey-w/codd-dev/issues).
-
----
-
-## 📚 Documentation
-
-- [CHANGELOG.md](CHANGELOG.md) — every release with quality metrics
-- [docs/](docs/) — architecture notes
-- `codd --help` — full CLI reference
+This is what lets one core serve Next.js, Django, FastAPI, Rails, Go services, and more — and lets contributors add support without touching the core.
 
 ---
 
-## 📦 Hook Integration
+## Works with your AI tools
 
-CoDD ships hook recipes for editor and Git workflows:
-
-- Claude Code `PostToolUse` hook recipe for running CoDD checks after file edits
-- Claude Code requirements-nudge recipe (`claude_requirements_nudge.json`) — prints an advisory "requirements changed → run `codd greenfield --resume` or `codd check`" when files under `docs/requirements/` are edited (print-only; never auto-runs expensive pipelines)
-- Git `pre-commit` hook recipe for blocking commits when coherence checks fail
-
-Recipes live under `codd/hooks/recipes/`.
+- **MCP server** — `codd mcp-server` exposes CoDD to any MCP-compatible client (e.g. Claude Code) over stdio.
+- **Skills for Claude Code & Codex CLI** — `codd skills install <name> --target both` distributes bundled skills (e.g. greenfield autopilot, brownfield evolution) to `~/.claude/skills/` and `~/.agents/skills/`.
+- **Git & editor hooks** — recipes under `codd/hooks/recipes/` run coherence checks after edits or block commits that break coherence.
+- **Codex App Server backend** — route AI calls through a persistent JSON-RPC thread instead of per-call subprocess (`codex_app_server.enabled: true` in `codd.yaml`), with automatic subprocess fallback.
 
 ---
 
-## License
+## Coverage lexicons
+
+CoDD ships **39 industry-standard lexicons** as opt-in coverage axes, so `codd elicit` can find specification holes against real standards — Web (WCAG, OWASP, Web Vitals), Mobile (HIG, Material 3, MASVS), Backend (REST, GraphQL, gRPC), Data (SQL, JSON Schema), Ops (Kubernetes, Terraform, DORA), Compliance (ISO 27001, HIPAA, PCI DSS, GDPR, EU AI Act), and more. They're plug-ins: enable what fits, add your own without touching the core.
+
+---
+
+## Documentation
+
+- [`docs/explainer.md`](docs/explainer.md) — the full concept, from the dependency graph to AI-driven evolution
+- [`CHANGELOG.md`](CHANGELOG.md) — every release with quality metrics
+- `codd --help` — full CLI reference (`codd check` is the best place to start in any project)
+- [`docs/`](docs/) — architecture notes, setup guides, cookbook
+
+---
+
+## Contributing
+
+Issues, PRs, and lexicon proposals are welcome — see [Issues](https://github.com/yohey-w/codd-dev/issues). CoDD is maintained by [@yohey-w](https://github.com/yohey-w), with thanks to the contributors who reported the bugs and insights that shaped it.
+
+---
+
+## License & links
 
 MIT — see [LICENSE](LICENSE).
-
-## Links
 
 - [PyPI](https://pypi.org/project/codd-dev/)
 - [GitHub Sponsors](https://github.com/sponsors/yohey-w) — support development
 - [Issues](https://github.com/yohey-w/codd-dev/issues)
-
----
-
-> When code changes, CoDD traces the impact, detects violations, and produces evidence for merge decisions.
