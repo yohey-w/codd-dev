@@ -1235,6 +1235,18 @@ def _python_body_assigned_names(body_text: str) -> set[str]:
     return names
 
 
+#: Poetry MANIFEST-FORMAT reserved keys that appear under
+#: ``[tool.poetry.dependencies]`` but are NOT third-party packages. Poetry stores
+#: the interpreter version constraint as a pseudo-dependency named ``python``
+#: (``python = "^3.11"``); it is the interpreter pin, not a distribution to
+#: import. This is a poetry FILE-FORMAT fact (the analogue of registry/profile
+#: DATA), NOT a target-language gate dispatch — the surrounding parser is already
+#: unconditionally Python-specific. Excluding it keeps the third-party set exact;
+#: membership here is byte-identical to the former inline ``k.lower() != "python"``
+#: filter (Contract Kernel Cut Condition A — vb_marker_authenticity.py).
+_POETRY_RESERVED_NON_DEPENDENCY_KEYS = frozenset({"python"})
+
+
 def _python_manifest_top_dependencies(project_root: Path | None) -> frozenset[str]:
     """Declared third-party dependency names from ``pyproject.toml`` (PEP 621 +
     poetry), normalized for top-module matching. Empty when absent/unparseable —
@@ -1268,7 +1280,11 @@ def _python_manifest_top_dependencies(project_root: Path | None) -> frozenset[st
     if isinstance(poetry, dict):
         pdeps = poetry.get("dependencies", {})
         if isinstance(pdeps, dict):
-            reqs.extend(k for k in pdeps if isinstance(k, str) and k.lower() != "python")
+            reqs.extend(
+                k
+                for k in pdeps
+                if isinstance(k, str) and k.lower() not in _POETRY_RESERVED_NON_DEPENDENCY_KEYS
+            )
     names: set[str] = set()
     for req in reqs:
         m = re.match(r"\s*([A-Za-z0-9._-]+)", req)

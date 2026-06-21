@@ -529,6 +529,99 @@ def strategy_for(language: str) -> RegexLanguageStrategy:
     return _STRATEGIES.get((language or "").lower(), GENERIC_STRATEGY)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Repair-slice analyzer registry DATA (Contract Kernel Cut Condition A —
+# repair_slice.py de-literalization). ``codd/repair_slice.py``'s function
+# line-range + raises analyzer used to branch on ``language in
+# ("typescript","javascript")`` (tree-sitter func node-type set) and
+# ``language == "python"`` (regex def-vs-function pattern + group index, and the
+# python-only raises regex). Those per-language facts live HERE as registry DATA
+# (the analogue of a profile/adapter — an analyzer impl legitimately names its
+# own language), so the core analyzer dispatches by a data lookup, NOT a
+# language-name branch. Byte-identical to the former inline ladders; the
+# ``tests/languages/test_contract_kernel_cut_a_parity.py`` oracle pins this.
+#
+# Repair-slice extraction (like all extraction) is ANALYSIS input for patch
+# context, never a green/red GATE verdict — so an unknown language degrading to
+# the GENERIC profile (empty func-node set, the function-keyword regex, no raises)
+# is legitimate best-effort analysis, not a false-green.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class RepairSliceLanguageProfile:
+    """Per-language repair-slice analyzer DATA (one language; not dispatch).
+
+    * ``function_node_types`` — the tree-sitter named-node types that are a
+      function/method definition for this language (walked for line ranges).
+    * ``line_range_pattern`` — the regex (with ``re.MULTILINE``) that matches a
+      function definition in the regex FALLBACK path.
+    * ``line_range_name_group`` — which regex group holds the function name.
+    * ``raises_def_pattern`` / ``raises_stmt_pattern`` — the regex pair for the
+      regex-fallback raises analyzer; ``None`` (the GENERIC default) means this
+      language contributes NO raises in the fallback (byte-identical to the
+      former ``if language != "python": return {}``).
+    """
+
+    function_node_types: frozenset[str] = frozenset({"function_definition"})
+    line_range_pattern: re.Pattern[str] = field(
+        default_factory=lambda: re.compile(
+            r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(", re.MULTILINE
+        )
+    )
+    line_range_name_group: int = 1
+    raises_def_pattern: re.Pattern[str] | None = None
+    raises_stmt_pattern: re.Pattern[str] | None = None
+
+
+#: The python repair-slice profile: tree-sitter walks only ``function_definition``
+#: (methods are ``function_definition`` inside a class in the python grammar); the
+#: regex fallback uses the ``def`` pattern with the NAME in group 2; and python is
+#: the ONLY language with a regex raises analyzer.
+_REPAIR_PYTHON = RepairSliceLanguageProfile(
+    function_node_types=frozenset({"function_definition"}),
+    line_range_pattern=re.compile(r"^(\s*)(?:async\s+)?def\s+(\w+)\s*\(", re.MULTILINE),
+    line_range_name_group=2,
+    raises_def_pattern=re.compile(r"\s*(?:async\s+)?def\s+(\w+)\s*\("),
+    raises_stmt_pattern=re.compile(r"\s+raise\s+(\w+)"),
+)
+
+#: The ts/js repair-slice profile: tree-sitter additionally walks
+#: ``method_definition`` + ``function_declaration`` (the former ``language in
+#: ("typescript","javascript")`` set); the regex fallback uses the
+#: ``function`` pattern with the NAME in group 1; no regex raises analyzer.
+_REPAIR_TS_JS = RepairSliceLanguageProfile(
+    function_node_types=frozenset(
+        {"function_definition", "method_definition", "function_declaration"}
+    ),
+    line_range_pattern=re.compile(
+        r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(", re.MULTILINE
+    ),
+    line_range_name_group=1,
+)
+
+#: The GENERIC repair-slice profile for any other/unknown language — byte-identical
+#: to the former ``else`` branches: tree-sitter walks only ``function_definition``;
+#: the regex fallback uses the ``function`` pattern with the name in group 1; and
+#: no raises (the former ``if language != "python": return {}``).
+GENERIC_REPAIR_PROFILE = RepairSliceLanguageProfile()
+
+_REPAIR_PROFILES: dict[str, RepairSliceLanguageProfile] = {
+    "python": _REPAIR_PYTHON,
+    "typescript": _REPAIR_TS_JS,
+    "javascript": _REPAIR_TS_JS,
+}
+
+
+def repair_slice_profile_for(language: str) -> RepairSliceLanguageProfile:
+    """Repair-slice analyzer profile for *language* (registry-data lookup).
+
+    Unknown languages resolve to :data:`GENERIC_REPAIR_PROFILE` (the former
+    non-python / non-ts-js ``else`` behavior); analysis input, never a gate.
+    """
+    return _REPAIR_PROFILES.get((language or "").lower(), GENERIC_REPAIR_PROFILE)
+
+
 def language_extensions(language: str) -> set[str]:
     """Source-file extensions for *language* (registry-data lookup)."""
     return set(strategy_for(language).extensions)

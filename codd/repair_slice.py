@@ -60,9 +60,8 @@ def extract_function_line_ranges(
         ext = get_extractor(language)
         if not isinstance(ext, TreeSitterExtractor):
             return _extract_line_ranges_regex(content, language)
-        parser = ext._get_parser()
-        tree = parser.parse(content.encode("utf-8", errors="ignore"))
-        return _walk_functions_for_ranges(tree.root_node, content, language)
+        root = ext._parse(content)
+        return _walk_functions_for_ranges(root, content, language)
     except Exception:
         return _extract_line_ranges_regex(content, language)
 
@@ -72,12 +71,14 @@ def _walk_functions_for_ranges(
 ) -> dict[str, tuple[int, int]]:
     """Walk AST to find all function definitions with their line ranges."""
     from codd.parsing import _iter_named_nodes, _field_text
+    from codd.parsing.regex_strategies import repair_slice_profile_for
     content_bytes = content.encode("utf-8", errors="ignore")
     ranges: dict[str, tuple[int, int]] = {}
 
-    func_types = {"function_definition"}
-    if language in ("typescript", "javascript"):
-        func_types.update({"method_definition", "function_declaration"})
+    # The set of tree-sitter function/method node types for this language is
+    # registry DATA (the analogue of a profile/adapter), not a language-name
+    # branch in core. ts/js add method_definition + function_declaration.
+    func_types = repair_slice_profile_for(language).function_node_types
 
     for node in _iter_named_nodes(root):
         if node.type not in func_types:
@@ -105,18 +106,24 @@ def _parent_class_name(content_bytes: bytes, node: Any) -> str:
 
 
 def _extract_line_ranges_regex(content: str, language: str) -> dict[str, tuple[int, int]]:
-    """Fallback: regex-based line range extraction."""
-    ranges: dict[str, tuple[int, int]] = {}
-    if language == "python":
-        pattern = re.compile(r'^(\s*)(?:async\s+)?def\s+(\w+)\s*\(', re.MULTILINE)
-    else:
-        pattern = re.compile(r'^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(', re.MULTILINE)
+    """Fallback: regex-based line range extraction.
 
+    The def-vs-function regex and the name-capture group are registry DATA per
+    language (python uses ``def`` with name in group 2; every other language uses
+    ``function`` with name in group 1), so this core fallback dispatches by a
+    data lookup, not a ``language == "python"`` branch.
+    """
+    from codd.parsing.regex_strategies import repair_slice_profile_for
+    profile = repair_slice_profile_for(language)
+    pattern = profile.line_range_pattern
+    name_group = profile.line_range_name_group
+
+    ranges: dict[str, tuple[int, int]] = {}
     lines = content.split("\n")
     matches = list(pattern.finditer(content))
     for i, m in enumerate(matches):
         line_no = content[:m.start()].count("\n") + 1
-        name = m.group(2) if language == "python" else m.group(1)
+        name = m.group(name_group)
         # Estimate end: next function or end of file
         if i + 1 < len(matches):
             end_line = content[:matches[i + 1].start()].count("\n")
@@ -137,9 +144,8 @@ def extract_raises(content: str, file_path: str, language: str) -> dict[str, lis
         ext = get_extractor(language)
         if not isinstance(ext, TreeSitterExtractor):
             return _extract_raises_regex(content, language)
-        parser = ext._get_parser()
-        tree = parser.parse(content.encode("utf-8", errors="ignore"))
-        return _walk_raises(tree.root_node, content, language)
+        root = ext._parse(content)
+        return _walk_raises(root, content, language)
     except Exception:
         return _extract_raises_regex(content, language)
 
@@ -193,17 +199,27 @@ def _enclosing_function(content_bytes: bytes, node: Any) -> str:
 
 
 def _extract_raises_regex(content: str, language: str) -> dict[str, list[str]]:
-    """Fallback regex for raises extraction."""
+    """Fallback regex for raises extraction.
+
+    The def/raise regex pair is registry DATA per language; a language without a
+    declared raises analyzer (every language except python today) yields no
+    raises — a data lookup, not a ``language != "python"`` branch.
+    """
+    from codd.parsing.regex_strategies import repair_slice_profile_for
+    profile = repair_slice_profile_for(language)
+    def_pattern = profile.raises_def_pattern
+    stmt_pattern = profile.raises_stmt_pattern
+
     result: dict[str, list[str]] = {}
-    if language != "python":
+    if def_pattern is None or stmt_pattern is None:
         return result
     current_func = ""
     for line in content.split("\n"):
-        m = re.match(r'\s*(?:async\s+)?def\s+(\w+)\s*\(', line)
+        m = def_pattern.match(line)
         if m:
             current_func = m.group(1)
         if current_func:
-            rm = re.match(r'\s+raise\s+(\w+)', line)
+            rm = stmt_pattern.match(line)
             if rm:
                 exc = rm.group(1)
                 result.setdefault(current_func, [])

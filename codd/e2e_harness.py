@@ -40,6 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from codd.parsing.regex_strategies import language_extensions
 from codd.project_types import ProjectCapabilities
 
 
@@ -234,7 +235,11 @@ def resolve_e2e_harness(
     """
 
     lang = (project_language or "").strip().lower()
-    is_python = lang == "python"
+    # "host language is Python" is driven from the language's declared source
+    # extensions (registry DATA: ``regex_strategies.language_extensions`` is
+    # canonical-keyed — it does NOT resolve aliases — so this is byte-identical
+    # to the former ``lang == "python"``), not a language-name branch in core.
+    is_python = ".py" in language_extensions(lang)
     modality = capabilities.e2e_modality
 
     if modality == "cli":

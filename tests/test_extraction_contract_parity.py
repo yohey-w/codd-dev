@@ -457,11 +457,26 @@ def test_get_extractor_selection_identity():
         TreeSitterExtractor,
     )
 
+    # PythonAst (stdlib ast) + Prisma are ALWAYS available; tree-sitter (ts/js)
+    # + SqlDdl are OPTIONAL deps — the selector gracefully DEGRADES to RegexExtractor
+    # when they are absent (e.g. a CI matrix job without the [scan]/[tree-sitter]
+    # extras). Assert the preferred extractor IFF available, else the regex fallback,
+    # so the test verifies the degradation CONTRACT instead of assuming an environment
+    # (the v2.87 regression: CI py3.11 lacked the SqlDdl dep and got RegexExtractor).
     assert isinstance(get_extractor("python", "source"), PythonAstExtractor)
-    assert isinstance(get_extractor("typescript", "source"), TreeSitterExtractor)
-    assert isinstance(get_extractor("javascript", "source"), TreeSitterExtractor)
-    assert isinstance(get_extractor("sql", "schema"), SqlDdlExtractor)
     assert isinstance(get_extractor("prisma", "schema"), PrismaSchemaExtractor)
+
+    def _assert_selected(language: str, category: str, preferred: type, available: bool) -> None:
+        got = get_extractor(language, category)
+        expected = preferred if available else RegexExtractor
+        assert isinstance(got, expected), (
+            f"{language}/{category}: got {type(got).__name__}, "
+            f"expected {expected.__name__} (available={available})"
+        )
+
+    _assert_selected("typescript", "source", TreeSitterExtractor, TreeSitterExtractor.is_available("typescript"))
+    _assert_selected("javascript", "source", TreeSitterExtractor, TreeSitterExtractor.is_available("javascript"))
+    _assert_selected("sql", "schema", SqlDdlExtractor, SqlDdlExtractor.is_available())
     # unknown language / category → regex fallback (best-effort analysis)
     assert isinstance(get_extractor("ruby", "source"), RegexExtractor)
     assert isinstance(get_extractor("go", "source"), RegexExtractor)

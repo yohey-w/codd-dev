@@ -50,13 +50,27 @@ knows its OWN language (like an adapter), so language NAMES live there as
 registry DATA. Extraction here is ANALYSIS input (it populates the
 CEG/ProjectFacts), never a green/red GATE verdict.
 
-NOT YET locked (Cut Condition A still pending for these zones — listed so the
-coverage gap is EXPLICIT, never silently uncovered; each graduates into
-LOCKED_MODULES when it is made contract-driven). Each is a SEPARATE concern from
-the CEG extraction core:
-  * codd/repair_slice.py (repair line-range/raises analyzer language dispatch),
-    codd/implementer.py (generation extension choice), codd/e2e_harness.py,
-    codd/vb_marker_authenticity.py (v2.72 adapter-migration zone).
+Cut Condition A is now COMPLETE for the static language-literal gate: the LAST
+four pending zones have graduated into LOCKED_MODULES (so PENDING_ZONES is empty
+— see ``test_cut_a_static_language_gate_is_complete``). Their de-literalization:
+  * codd/repair_slice.py          — the repair line-range/raises analyzer is
+    REGISTRY-DATA driven (``regex_strategies.repair_slice_profile_for`` →
+    ``RepairSliceLanguageProfile``: the tree-sitter func-node-type SET, the
+    regex def-vs-function pattern + name group, the python-only raises regex), no
+    ``language in ("typescript",…)`` / ``language == "python"`` branch. (A latent
+    ``ext._get_parser()`` bug — no such method; ``TreeSitterExtractor`` exposes
+    ``_parse`` — was fixed in the same pass, activating the ts/js tree-sitter walk.)
+  * codd/implementer.py           — generation ``is_python`` is driven from the
+    declared extensions (``.py`` in ``_implementation_language_extensions``); the
+    UI/JSX-variant extension decision is a capability-DATA flag
+    (``_ui_variant_extension``), no ``language in {"typescript","javascript"}``.
+  * codd/e2e_harness.py           — the ``is_python`` modality routing reads the
+    canonical-keyed extension registry (``.py`` in ``language_extensions``).
+  * codd/vb_marker_authenticity.py — the poetry-manifest reserved-key filter (a
+    GATE input) keys on a named DATA constant
+    (``_POETRY_RESERVED_NON_DEPENDENCY_KEYS``): ``python`` under
+    ``[tool.poetry.dependencies]`` is the interpreter pin (a poetry FILE-FORMAT
+    fact), not a target-language dispatch — byte-identical to ``!= "python"``.
 
 Dynamic escape coverage (a SEEDED incoherence must reach RED — escape == 0) is
 asserted by the per-language anti-false-green suites, which TOGETHER guarantee no
@@ -107,6 +121,38 @@ LOCKED_MODULES = (
     # extractor-implementation zone (``codd/parsing/**``, see ALLOWED_IMPL_ZONES).
     "extractor.py",
     "scanner.py",
+    # graduated (Contract Kernel — Cut Condition A FINAL increment): the LAST
+    # four forbidden-zone files, now language-free. With these locked the Cut A
+    # static language-literal gate is COMPLETE — no core/forbidden zone carries a
+    # language-name literal dispatch anymore (PENDING_ZONES is empty; see
+    # ``test_cut_a_static_language_gate_is_complete``).
+    #   * repair_slice.py          — the repair-slice function line-range + raises
+    #     analyzer. The tree-sitter func-node-type SET, the regex def-vs-function
+    #     pattern + name group, and the python-only raises regex are now
+    #     REGISTRY-DATA driven (``regex_strategies.repair_slice_profile_for`` →
+    #     ``RepairSliceLanguageProfile``), no ``language in ("typescript",…)`` /
+    #     ``language == "python"`` branch. (A latent ``ext._get_parser()`` bug —
+    #     the method never existed; ``TreeSitterExtractor`` exposes ``_parse`` —
+    #     was fixed in the same pass, activating the tree-sitter walk for ts/js.)
+    #   * implementer.py           — generation-time ``is_python`` (confusable
+    #     check) is driven from the language's declared extensions (``.py`` in
+    #     ``_implementation_language_extensions``); the UI-facing / JSX-variant
+    #     extension decision is driven from a capability-DATA flag
+    #     (``_ui_variant_extension`` ⇒ ``.tsx``/``.jsx`` or ``None``), no
+    #     ``language in {"typescript","javascript"}`` branch.
+    #   * e2e_harness.py           — the ``is_python`` modality routing is driven
+    #     from the canonical-keyed extension registry (``.py`` in
+    #     ``regex_strategies.language_extensions``), no ``lang == "python"``.
+    #   * vb_marker_authenticity.py — the poetry-manifest reserved-key filter (a
+    #     GATE input) keys on a named DATA constant
+    #     (``_POETRY_RESERVED_NON_DEPENDENCY_KEYS``) documenting that ``python`` in
+    #     ``[tool.poetry.dependencies]`` is the interpreter pin (a poetry
+    #     FILE-FORMAT fact), not a target-language dispatch — byte-identical to
+    #     the former ``k.lower() != "python"``.
+    "repair_slice.py",
+    "implementer.py",
+    "e2e_harness.py",
+    "vb_marker_authenticity.py",
 )
 
 # Extractor-IMPLEMENTATION zones (the parsing/** analogue of
@@ -124,26 +170,19 @@ ALLOWED_IMPL_ZONES = (
     "parsing",  # codd/parsing/** — the per-language extractor implementations
 )
 
-# Known-pending Cut Condition A zones — documented so the gap is explicit (NOT
-# asserted clean; they still contain language literals by design-debt).
-# ``scanner.py`` + ``extractor.py`` graduated into LOCKED_MODULES once the CEG
-# source-extraction dispatch became REGISTRY-DATA driven (Contract Kernel
-# PARSING/EXTRACTION zone). The remaining pending files each carry a real
-# language literal today (verified by the graduation test below); they are
-# SEPARATE concerns from the CEG extraction core and graduate in their own
-# follow-up increments:
-#   * repair_slice.py          — repair-slice line-range/raises analyzer still
-#                                keys on ``language in ("typescript","javascript")``
-#                                in its tree-sitter/regex fallback (7 literals).
-#   * implementer.py           — generation extension choice ``language=="python"``.
-#   * e2e_harness.py           — e2e harness ``lang=="python"`` branch.
-#   * vb_marker_authenticity.py — belongs to the v2.72 adapter-migration zone.
-PENDING_ZONES = (
-    "repair_slice.py",
-    "implementer.py",
-    "e2e_harness.py",
-    "vb_marker_authenticity.py",
-)
+# Known-pending Cut Condition A zones. This is now EMPTY: the Cut A static
+# language-literal gate is COMPLETE. Every former pending file
+# (``repair_slice.py``, ``implementer.py``, ``e2e_harness.py``,
+# ``vb_marker_authenticity.py``) graduated into LOCKED_MODULES once its
+# language-name DISPATCH was driven from registry/profile DATA (the CEG core —
+# ``scanner.py`` + ``extractor.py`` — and ``project_types.py`` graduated in
+# earlier increments). No core/forbidden zone carries a language-name literal
+# dispatch anymore. ``test_cut_a_static_language_gate_is_complete`` asserts this
+# emptiness AND re-verifies the four final files stay clean, so a regression that
+# reintroduces a literal into any of them fails loudly. (Cut Condition B — the
+# framework-pluggable STACK literal gate — is a SEPARATE concern tracked by its
+# own goal section / tests, not this language-gate list.)
+PENDING_ZONES: tuple[str, ...] = ()
 
 _PKG_ROOT = Path(codd.__file__).resolve().parent
 
@@ -197,50 +236,77 @@ def test_oracle_core_modules_are_language_free() -> None:
     )
 
 
-def test_pending_zones_are_documented_not_silently_uncovered() -> None:
-    """The not-yet-locked Cut Condition A zones are explicitly listed.
+#: The four FINAL Cut Condition A files that graduated in the closing increment.
+#: They must stay LOCKED + clean forever (never regress back to "pending").
+_CUT_A_FINAL_GRADUATES = (
+    "repair_slice.py",
+    "implementer.py",
+    "e2e_harness.py",
+    "vb_marker_authenticity.py",
+)
 
-    A guard against silent scope-narrowing: if the headline pending zone's language
-    literal is ever cleaned, it should GRADUATE into LOCKED_MODULES (and drop from
-    PENDING_ZONES) — this asserts the pending list is non-empty until Cut Condition
-    A is fully done, so the coverage gap is never quietly forgotten.
 
-    The headline pending zone is now ``repair_slice.py`` (the CEG extraction
-    core — ``extractor.py`` + ``scanner.py`` — graduated into LOCKED_MODULES once
-    its dispatch became REGISTRY-DATA driven; ``project_types.py`` graduated at
-    v2.71). ``repair_slice.py`` really does still carry
-    ``language in ("typescript", "javascript")`` dispatch in its line-range /
-    raises analyzer — keeping the documentation honest: if someone cleans it
-    without updating this file, this fails and prompts the next graduation.
+def test_cut_a_static_language_gate_is_complete() -> None:
+    """Cut Condition A's static language-literal gate is COMPLETE.
+
+    Replaces the old "pending list must be non-empty" guard: every former pending
+    zone has graduated, so ``PENDING_ZONES`` is now empty and there is no
+    coverage gap left to document. This test keeps that completion HONEST and
+    REGRESSION-PROOF:
+
+    1. ``PENDING_ZONES`` is empty (Cut A static gate done; if you ever re-add a
+       pending zone you must also re-add a guard like the old one).
+    2. Every file that has graduated (the CEG core, ``project_types.py``, the
+       verify-runner, and the four FINAL graduates) is in ``LOCKED_MODULES`` and
+       NOT in ``PENDING_ZONES`` — none may silently regress.
+    3. The four final graduates re-pass the language-literal scan RIGHT HERE
+       (belt-and-suspenders over ``test_oracle_core_modules_are_language_free``):
+       if anyone reintroduces a ``language ==`` / ``language in (...)`` /
+       ``== "<lang>"`` dispatch into them, this fails loudly and names the file.
+
+    (Cut Condition B — the framework-pluggable STACK literal gate — is a SEPARATE
+    concern with its own goal section / tests; this list is the LANGUAGE gate.)
     """
-    assert PENDING_ZONES, "if Cut Condition A is fully done, lock all zones + remove this test"
-    # verify_runner.py must NOT regress back into PENDING_ZONES — it is locked now.
-    assert "repair/verify_runner.py" not in PENDING_ZONES, (
-        "repair/verify_runner.py is graduated (profile-driven); it must stay in "
-        "LOCKED_MODULES, never back in PENDING_ZONES."
+
+    assert PENDING_ZONES == (), (
+        "Cut Condition A static language gate is COMPLETE — PENDING_ZONES must be "
+        "empty. If you intentionally re-open a pending zone, restore a "
+        "documented-gap guard (the old test) so the coverage gap is never silent."
     )
-    # project_types.py must NOT regress back into PENDING_ZONES — it is locked now
-    # (Contract Kernel v2.71 de-literalization).
-    assert "project_types.py" not in PENDING_ZONES, (
-        "project_types.py is graduated (profile-driven scaffold/layout/test-block "
-        "dispatch); it must stay in LOCKED_MODULES, never back in PENDING_ZONES."
+
+    must_stay_locked = (
+        "repair/verify_runner.py",
+        "project_types.py",
+        "extractor.py",
+        "scanner.py",
+        *_CUT_A_FINAL_GRADUATES,
     )
-    # extractor.py / scanner.py must NOT regress back into PENDING_ZONES — the
-    # CEG extraction engine is locked now (registry-data-driven dispatch).
-    for graduated in ("extractor.py", "scanner.py"):
+    for graduated in must_stay_locked:
+        assert graduated in LOCKED_MODULES, (
+            f"{graduated} graduated (registry/profile-data-driven); it must stay in "
+            "LOCKED_MODULES."
+        )
         assert graduated not in PENDING_ZONES, (
-            f"{graduated} is graduated (registry-data-driven extraction); it must "
-            "stay in LOCKED_MODULES, never back in PENDING_ZONES."
+            f"{graduated} is graduated; it must never regress back into PENDING_ZONES."
         )
-    # The headline pending zone's literal really still exists (documentation
-    # honesty): if it is cleaned, graduate it and repoint this assertion.
-    repair_slice = _PKG_ROOT / "repair_slice.py"
-    if repair_slice.is_file():
-        assert re.search(r"""\blanguage\b\s+in\s*\(""", _code_only(repair_slice)), (
-            "repair_slice.py no longer keys on a language literal — graduate it "
-            "into LOCKED_MODULES and drop it from PENDING_ZONES (repoint this "
-            "assertion to the next pending file: implementer.py / e2e_harness.py)."
-        )
+
+    # Re-verify the four FINAL graduates are genuinely language-literal-free here,
+    # so a regression in any of them is caught by THIS completion test too.
+    residual: list[str] = []
+    for rel in _CUT_A_FINAL_GRADUATES:
+        path = _PKG_ROOT / rel
+        assert path.is_file(), f"final graduate missing: {rel}"
+        code = _code_only(path)
+        for pattern, label in _FORBIDDEN:
+            for m in pattern.finditer(code):
+                line = code.count("\n", 0, m.start()) + 1
+                residual.append(f"{rel}:{line}: {label}")
+    assert not residual, (
+        "A FINAL Cut Condition A graduate regressed — a language-name literal "
+        "dispatch was reintroduced. Drive the decision from the resolved "
+        "LanguageProfile / registry DATA, never a language name:\n  "
+        + "\n  ".join(residual)
+    )
 
 
 def test_parsing_is_an_allowed_extractor_impl_zone_not_locked() -> None:

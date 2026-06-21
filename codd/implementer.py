@@ -747,7 +747,10 @@ def _confusable_code_error(relative_path: str, content: str, *, language: str) -
     deterministic, no LLM calls.
     """
     suffix = PurePosixPath(relative_path).suffix.lower()
-    is_python = suffix == ".py" or (suffix == "" and language == "python")
+    # "is this a Python payload" is driven from the language's declared
+    # extensions (DATA), not a ``language == "python"`` branch: a .py suffix, or
+    # an extensionless payload whose language declares .py as a source extension.
+    is_python = suffix == ".py" or (suffix == "" and ".py" in _implementation_language_extensions(language))
     if not is_python:
         return None
     findings = _confusable_findings(content)
@@ -1754,7 +1757,7 @@ def _candidate_generated_paths(spec: ImplementSpec, language: Any, design_conten
         candidates.append(PurePosixPath(output_path) / f"index{default_extension}")
 
     normalized_language = _normalize_implementation_language(language)
-    if normalized_language in {"typescript", "javascript"} and _spec_looks_ui_facing(spec, design_content):
+    if _ui_variant_extension(normalized_language) is not None and _spec_looks_ui_facing(spec, design_content):
         extensions = _implementation_language_extensions(normalized_language)
         if len(extensions) > 1:
             for output_path in spec.output_paths:
@@ -1883,7 +1886,7 @@ def _build_implementation_prompt(
     else:
         framework_guidance = f"- Use idiomatic {language_name} patterns for the target project."
 
-    if language in {"typescript", "javascript"} and len(preferred_extensions) > 1:
+    if _ui_variant_extension(language) is not None and len(preferred_extensions) > 1:
         jsx_extension = preferred_extensions[1]
         extension_guidance = (
             f"- If the work needs JSX-style UI components, emit {jsx_extension} files. "
@@ -2581,10 +2584,41 @@ def _implementation_language_extensions(language: Any) -> tuple[str, ...]:
     return LANGUAGE_EXT_MAP.get(normalized, LANGUAGE_EXT_MAP["typescript"])
 
 
+#: Registry DATA (Contract Kernel Cut Condition A — implementer.py): the SECOND
+#: extension some language families carry is a JSX/UI-COMPONENT variant
+#: (TypeScript's ``.tsx``, JavaScript's ``.jsx``) rather than just "another file
+#: type" (e.g. C++'s ``.cc``/``.h``). Only a family whose alt extension is a UI
+#: variant should route UI-facing work to ``extensions[1]``. This is a
+#: language→capability DATA table (the analogue of a profile/registry entry — a
+#: declared capability, NOT a core ``language in (...)`` branch); core code asks
+#: ``_ui_variant_extension(language) is not None`` (a capability flag), never a
+#: language name. Byte-identical to the former ``in {"typescript","javascript"}``
+#: guards: those two families are exactly the ones whose ``extensions[1]`` is the
+#: UI/JSX variant.
+_UI_VARIANT_EXTENSION_BY_LANGUAGE: dict[str, str] = {
+    "typescript": ".tsx",
+    "javascript": ".jsx",
+}
+
+
+def _ui_variant_extension(language: Any) -> str | None:
+    """The language's JSX/UI-component variant extension, or ``None`` (data lookup).
+
+    A capability flag in DATA form: a language family declares whether it has a
+    dedicated UI-component extension (``.tsx``/``.jsx``). ``None`` means the
+    family has no UI variant (its ``extensions[1]``, if any, is just another file
+    type), so UI-facing routing must NOT use the alternate extension. Replaces
+    the former ``language in {"typescript","javascript"}`` dispatch.
+    """
+    normalized = _normalize_implementation_language(language)
+    return _UI_VARIANT_EXTENSION_BY_LANGUAGE.get(normalized)
+
+
 def _default_generated_extension(language: Any, content: str | None = None) -> str:
     normalized = _normalize_implementation_language(language)
     extensions = _implementation_language_extensions(normalized)
-    if normalized in {"typescript", "javascript"} and len(extensions) > 1 and content and _looks_like_tsx(content):
+    ui_variant = _ui_variant_extension(normalized)
+    if ui_variant is not None and len(extensions) > 1 and content and _looks_like_tsx(content):
         return extensions[1]
     return extensions[0]
 
