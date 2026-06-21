@@ -104,16 +104,16 @@ def register_oracle_adapters(registry: AdapterRegistry) -> None:
     ``(kind, id)`` raises — a silent oracle override is exactly the false-green this
     kernel forbids).
 
-    Currently registers NOTHING: the concrete adapters are still in the per-language
-    gate (:mod:`codd.implement_oracle`) and only relocate here with their dispatch
-    switch steps (5–7). This is the additive seam — wired, idempotent, collision-safe
-    — so those adapters drop in as one ``_register_once`` call each, no new plumbing.
-    The adapter classes will be imported INSIDE this function (lazy), never at module
-    load, preserving the leaf rule.
+    Step 5 registers the ``go-toolchain`` adapter (Go migrates to the contract
+    path); ``typescript-tsc`` / ``python-composite`` land with steps 6–7 (until
+    then those languages stay on the legacy gate path, because the dispatch routes
+    to the contract path ONLY when the resolved profile's oracle adapter is
+    REGISTERED here — an unregistered adapter id keeps a language on legacy). The
+    adapter classes are imported INSIDE this function (lazy), never at module load,
+    preserving the leaf rule.
     """
-    # No concrete implement_oracle adapters yet. When they land:
-    #   from codd.languages.adapters.oracle_go import GoToolchainOracleAdapter
-    #   from codd.languages.contract import KIND_IMPLEMENT_ORACLE
-    #   _register_once(registry, KIND_IMPLEMENT_ORACLE, "go-toolchain", GoToolchainOracleAdapter())
-    #   ... (typescript-tsc, python-composite)
-    return
+    from codd.languages.adapters.oracle_go import GoToolchainOracleAdapter
+    from codd.languages.contract import KIND_IMPLEMENT_ORACLE
+
+    _register_once(registry, KIND_IMPLEMENT_ORACLE, "go-toolchain", GoToolchainOracleAdapter())
+    # typescript-tsc / python-composite register here with steps 6–7.
