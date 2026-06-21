@@ -14,129 +14,150 @@
 </p>
 
 <p align="center">
-  <em>Treat requirements, design, code, and tests as <strong>one connected graph</strong> — so AI can build from it, every change propagates across it, and verification can never fake "green."</em>
+  <em>Write what you want. CoDD builds it from your requirements, keeps the docs and code in sync as things change, and runs the tests so they can't fake a "pass."</em>
 </p>
 
 ---
 
 ## What is CoDD?
 
-Software has a coherence problem. Requirements, design docs, code, and tests are supposed to say the same thing — but they drift apart. A change in one place silently breaks another. Documents rot. And when an AI (or a tired human) writes the code, the tests often pass while proving *nothing*.
+Picture a normal day on a real codebase:
 
-**CoDD makes that coherence explicit and machine-checked.** It models your project as a single graph whose nodes are *every* artifact — a requirement, a design section, a source file, a config key, a DB table, a test — and whose edges are the dependencies between them (`implements`, `calls`, `reads_config`, `tested_by`, …). With that graph in place, CoDD does three things:
+- You change one function — and three other places that quietly depended on it break, because nobody remembered they were connected.
+- The test suite goes green — but it never actually ran the code you just changed.
+- The design doc still describes how the feature worked last month.
 
-1. **Generate** — turn requirements into design, code, and tests (greenfield autopilot, or one document at a time).
-2. **Propagate** — when *anything* changes, walk the graph to find everything affected, upstream and downstream, and reconcile it.
-3. **Verify** — run the real build and tests through an **anti-false-green** harness: a run cannot be reported as passing unless it actually proved it.
+On a large project — or on code an AI wrote for you — this kind of drift is everywhere, and *"is everything still consistent?"* becomes impossible to answer by hand.
+
+**CoDD turns that question into something a machine can answer.**
+
+It builds a **map of how everything in your project connects** — which requirement is implemented by which code, which code is covered by which test, which config value switches which behavior. Once CoDD has that map, it can do three things for you:
+
+1. **Build** — turn your requirements into design, code, and tests.
+2. **Trace** — when you change anything, show everything the change affects, so nothing breaks silently.
+3. **Verify** — run the real build and tests through a check that **refuses to report a fake pass**.
 
 ```mermaid
 flowchart LR
     R["Requirements"] <--> D["Design"]
     D <--> C["Code"]
     C <--> T["Tests"]
-    R -. "one coherence graph" .- T
+    R -. "one connected map" .- T
 ```
 
-The arrows go **both ways**. Edit the code and the affected design and requirements light up; add a requirement and the design, code, and tests that must change light up. That bidirectional coherence is the "Co" in CoDD.
+The map works **both ways**: edit the code, and CoDD points to the design docs and requirements that are now out of date; add a requirement, and it points to the code and tests that need to change. That two-way consistency is the "Co" (coherence) in CoDD.
 
-### Why it's different
+### How is this different from Copilot or Cursor?
 
-Most AI dev tools make *the model* smarter (better autocomplete, bigger context). CoDD makes *the data you feed the model* smarter: it precomputes the dependency graph so the AI sees exactly what a change touches — with evidence — instead of guessing from whatever files happen to be open. And its verification is built to **refuse false positives**: empty test suites, no-op build scripts (`"build": "true"`), missing reports, disabled checkers, and seeded source mutations all come back **RED**, never a silent pass.
+Those tools make the *AI* smarter. CoDD makes the AI's *input* smarter. It hands the AI the exact map of what a change touches — with evidence for each connection — instead of letting it guess from whatever files happen to be open. And CoDD's verification is built so it **can't lie**: an empty test suite, a build script that's secretly just `true`, a missing test report — all come back **red**, never a quiet green.
 
 ---
 
 ## Install
 
 ```bash
-pip install codd-dev          # Python 3.10+   ·   the command is `codd`
+pip install codd-dev          # needs Python 3.10+   ·   the command is `codd`
 codd version
 ```
 
 ---
 
-## Quick start
+## Try it
 
-### Greenfield — requirements in, working system out
+There are three ways to start, depending on where you are.
 
-Write what you want as a Markdown requirements doc, then let the unattended autopilot run the whole pipeline (init → elicit → plan → generate → implement → verify with auto-repair → propagate → check):
+### 1. Start a brand-new project — `codd greenfield`
+
+Write what you want as a plain Markdown file, then let CoDD build the whole thing unattended (design → code → tests → verify, fixing problems as it goes):
 
 ```bash
 codd greenfield --requirements docs/requirements/requirements.md
 ```
 
-It checkpoints after every unit, so `codd greenfield --resume` picks up where it stopped; `--dry-run` previews the plan, and `--ntfy-topic <topic>` pings you with progress.
+It saves a checkpoint after every step, so `codd greenfield --resume` continues where it left off. Add `--dry-run` to preview the plan first, or `--ntfy-topic <topic>` to get progress pings on your phone.
 
-### Brownfield — point it at an existing codebase
+### 2. Work on an existing codebase — `codd init` + `codd scan`
 
-CoDD reverse-engineers design intent from code, then keeps the two in sync:
-
-```bash
-codd init                 # set up CoDD in the repo
-codd scan                 # build the dependency graph from the source
-codd brownfield           # extract design docs → diff vs. reality → elicit the gaps
-```
-
-### Already shipping? Describe the change in plain words
+CoDD reads your existing code, works out the design behind it, and keeps the two in sync from then on:
 
 ```bash
-codd fix "login error messages are confusing"
+codd init                 # set CoDD up in your repo
+codd scan                 # build the connection map from your code
+codd brownfield           # recover design docs, compare them to reality, list the gaps
 ```
 
-`codd fix [PHENOMENON]` locates the affected design docs, updates them, then flows the change **design → implementation → tests → verify** — patching only the files the graph says are involved, and rolling back exactly those files if the verify gate fails.
+### 3. Already shipping? Just describe the change — `codd fix`
+
+```bash
+codd fix "the login error messages are confusing"
+```
+
+CoDD finds the design docs your request touches, updates them, then carries the change through **design → code → tests → verify**. It only edits the files the map says are involved, and if the final check fails, it rolls back exactly those files — nothing else.
 
 ---
 
-## How it works — the three pillars
+## How it works — three jobs, one map
 
-| Pillar | What it does | Key commands |
+| Job | What it does | Main commands |
 | --- | --- | --- |
-| **1 · Generate from intent** | Requirements → design candidates → code & test scaffolds. The AI proposes; a human chooses (Human-in-the-Loop). | `greenfield`, `generate`, `implement`, `plan` |
-| **2 · Propagate change** *(the heart)* | A typed dependency graph across requirements/design/code/config/data/tests. Change anything and CoDD traces the blast radius — classified **Green** (auto-fix), **Amber** (review), **Gray** (FYI) — with the evidence for each edge. | `scan`, `impact`, `propagate`, `diff`, `dag verify` |
-| **3 · Verify coherence** | The real build + tests, run so they can't lie. Failures are traced back to the artifacts that caused them. | `verify`, `check`, `coverage`, `contract verify` |
+| **1. Build from intent** | Turns requirements into design options, then code and test scaffolding. The AI proposes; you choose (you stay in control). | `greenfield`, `generate`, `implement`, `plan` |
+| **2. Trace every change** *(the core)* | A connection map across requirements, design, code, config, data, and tests. Change one thing and CoDD shows the ripple — sorted into **Green** (safe to auto-fix), **Amber** (please review), **Gray** (just so you know) — with the reason for each link. | `scan`, `impact`, `propagate`, `diff` |
+| **3. Verify for real** | Runs your actual build and tests so they can't fake a pass, and traces any failure back to the artifact that caused it. | `verify`, `check`, `coverage` |
 
-The pillars form a loop: generation decides *what* changes, propagation finds *where* it lands, verification proves it holds — and every commit feeds the graph so the next pass is sharper. (Full concept walk-through: [`docs/explainer.md`](docs/explainer.md).)
-
----
-
-## What's new in v3.0 — the Contract Kernel
-
-v3.0 makes CoDD's core **language- and framework-agnostic**. The harness no longer hard-codes `go`, `python`, `next`, or any other name — it drives everything from declarative contracts + adapters:
-
-- **Language-free core** — Go, Python, and TypeScript are described entirely by declarative `LanguageProfile`s. Adding a new language is a profile + adapter, with **no core change** (proven by a synthetic language the core has never seen).
-- **Framework-pluggable stack** — a framework (e.g. Next.js) and addons (Playwright, Prisma) *compose* with the language into one resolved stack contract that `greenfield` and `verify` consume live. A new framework plugs in the same way.
-- **Anti-false-green, owned by the core** — the no-fake-pass invariant lives in the core; profiles can configure parameters but can **never weaken** it. (Verified end-to-end on a real Next.js app, on the actual toolchain, with negative controls for each false-green vector.)
-
-This is what lets one core serve Next.js, Django, FastAPI, Rails, Go services, and more — and lets contributors add support without touching the core.
+These three feed each other in a loop: building decides *what* changes, tracing finds *where* it lands, verifying proves it holds — and every commit you make sharpens the map for next time. (Want the full story? See [`docs/explainer.md`](docs/explainer.md).)
 
 ---
 
-## Works with your AI tools
+## New in v3.0 — the Contract Kernel
 
-- **MCP server** — `codd mcp-server` exposes CoDD to any MCP-compatible client (e.g. Claude Code) over stdio.
-- **Skills for Claude Code & Codex CLI** — `codd skills install <name> --target both` distributes bundled skills (e.g. greenfield autopilot, brownfield evolution) to `~/.claude/skills/` and `~/.agents/skills/`.
-- **Git & editor hooks** — recipes under `codd/hooks/recipes/` run coherence checks after edits or block commits that break coherence.
-- **Codex App Server backend** — route AI calls through a persistent JSON-RPC thread instead of per-call subprocess (`codex_app_server.enabled: true` in `codd.yaml`), with automatic subprocess fallback.
+Older CoDD had knowledge of specific languages and frameworks (Go, Python, Next.js…) baked into its core. **v3.0 takes all of that out of the core** and moves it into swappable description files ("profiles") plus small adapters:
+
+- **The core no longer knows any language or framework by name.** It just reads the profiles. So adding support for a new language or framework is a new profile + adapter — **no change to the core**.
+- **Frameworks compose.** Next.js + TypeScript + Playwright + Prisma combine into one resolved description that `codd verify` runs against your project, live.
+- **The "no fake green" rule belongs to the core.** A profile can adjust settings, but it can **never weaken** the anti-fake-pass guarantee. (Proven end-to-end on a real Next.js app, on the actual toolchain, with deliberate breakages that each correctly come back red.)
+
+In short: one core now serves Next.js, Django, FastAPI, Rails, Go services, and more — and anyone can add support without touching it.
+
+---
+
+## Use it with your AI tools
+
+- **MCP server** — `codd mcp-server` exposes CoDD to any MCP client (such as Claude Code) over stdio.
+- **Skills for Claude Code & Codex CLI** — `codd skills install <name> --target both` drops ready-made skills (e.g. the greenfield autopilot) into `~/.claude/skills/` and `~/.agents/skills/`.
+- **Codex App Server** — route AI calls through a persistent connection instead of a fresh subprocess each time (`codex_app_server.enabled: true` in `codd.yaml`), with automatic fallback.
+
+---
+
+## Hook Integration
+
+CoDD ships ready-made hook recipes (under `codd/hooks/recipes/`) so coherence checks run automatically as you work:
+
+- **Claude Code `PostToolUse` hook** — runs CoDD checks right after each file edit.
+- **Git `pre-commit` hook** — blocks a commit when it would break coherence.
+- **Git `post-commit` hook** and a **Codex CLI hook** — keep the connection map fresh as you commit.
+
+Copy the recipe you want from `codd/hooks/recipes/` into your editor or Git config to turn it on.
 
 ---
 
 ## Coverage lexicons
 
-CoDD ships **39 industry-standard lexicons** as opt-in coverage axes, so `codd elicit` can find specification holes against real standards — Web (WCAG, OWASP, Web Vitals), Mobile (HIG, Material 3, MASVS), Backend (REST, GraphQL, gRPC), Data (SQL, JSON Schema), Ops (Kubernetes, Terraform, DORA), Compliance (ISO 27001, HIPAA, PCI DSS, GDPR, EU AI Act), and more. They're plug-ins: enable what fits, add your own without touching the core.
+CoDD ships **39 ready-made "lexicons"** — checklists drawn from real industry standards — that you can switch on so `codd elicit` finds the gaps in your spec. They span Web (WCAG, OWASP, Web Vitals), Mobile (HIG, Material 3, MASVS), Backend (REST, GraphQL, gRPC), Data (SQL, JSON Schema), Ops (Kubernetes, Terraform, DORA), Compliance (ISO 27001, HIPAA, PCI DSS, GDPR, EU AI Act), and more. Turn on the ones that fit; add your own without touching the core.
 
 ---
 
 ## Documentation
 
-- [`docs/explainer.md`](docs/explainer.md) — the full concept, from the dependency graph to AI-driven evolution
-- [`CHANGELOG.md`](CHANGELOG.md) — every release with quality metrics
-- `codd --help` — full CLI reference (`codd check` is the best place to start in any project)
-- [`docs/`](docs/) — architecture notes, setup guides, cookbook
+- [`docs/explainer.md`](docs/explainer.md) — the full idea, from the connection map to AI-driven development
+- [`CHANGELOG.md`](CHANGELOG.md) — every release
+- `codd --help` — the full command reference (in any project, `codd check` is the best place to start)
+- [`docs/`](docs/) — architecture notes, setup guides, and a cookbook
 
 ---
 
 ## Contributing
 
-Issues, PRs, and lexicon proposals are welcome — see [Issues](https://github.com/yohey-w/codd-dev/issues). CoDD is maintained by [@yohey-w](https://github.com/yohey-w), with thanks to the contributors who reported the bugs and insights that shaped it.
+Issues, pull requests, and lexicon proposals are all welcome — see [Issues](https://github.com/yohey-w/codd-dev/issues). CoDD is maintained by [@yohey-w](https://github.com/yohey-w), with thanks to everyone who reported the bugs and ideas that shaped it.
 
 ---
 

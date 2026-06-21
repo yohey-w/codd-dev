@@ -28,4 +28,5 @@ codd/codd.yaml.bak
 .codd/codd.yaml.bak
 
 # Internal CoDD dogfood (dev process, GPT consults, ledger, fixtures) — kept LOCAL, not published
-dogfood/
+dogfood/*
+!dogfood/contract_matrix.yaml
