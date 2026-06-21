@@ -1457,7 +1457,15 @@ def _build_test_code_prompt(
         "",
     ])
 
-    if framework == "Playwright" and is_browser_e2e:
+    # Cut Condition B (framework-pluggable): the browser-e2e harness decision —
+    # NOT a framework NAME — gates these codegen rules. ``framework == "Playwright"``
+    # was an algebraically REDUNDANT conjunct: ``framework`` is the ext-derived
+    # display string ("Playwright" iff ext in .ts/.js) and ``is_browser_e2e`` already
+    # requires ext in .ts/.js, so ``framework == "Playwright" and is_browser_e2e``
+    # is byte-identical to ``is_browser_e2e`` alone. Collapsed to the harness gate so
+    # the generation core branches on NO framework name (the framework label survives
+    # only as prompt-display content below).
+    if is_browser_e2e:
         lines.extend([
             "Playwright-specific rules:",
             "- Import from '@playwright/test': test, expect, Page",
