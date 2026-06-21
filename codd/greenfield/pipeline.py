@@ -452,11 +452,51 @@ class GreenfieldPipeline:
         # failed GreenfieldResult instead of raising to the caller. Its own
         # pseudo-stage name (not a real STAGES entry) so the failure is attributed
         # honestly to intake, not to ``init``.
+        # Whether THIS run is a genuine first generation (the project is being
+        # created now) vs a re-run/resume of an already-progressed project. This is
+        # the ONLY context in which the stack-lock gate may bootstrap a missing lock
+        # (anti-gaming). It is read from the ON-DISK session INDEPENDENTLY of the
+        # ``resume`` flag — because a re-run WITHOUT ``--resume`` builds a fresh
+        # in-memory ``session`` (all-pending), which must NOT be mistaken for a first
+        # generation on an already-built project (GPT-consult leak: "absence of
+        # session ≠ first generation"). Fail-closed: any persisted completed stage ⇒
+        # not first-gen, so a deleted lock on a built project is RED, never silently
+        # re-bootstrapped to green.
+        on_disk = load_session(project_root)
+        first_generation = on_disk is None or not any(
+            rec.get("status") in _COMPLETE_STATUSES
+            for rec in on_disk.get("stages", {}).values()
+        )
+
         try:
-            self._intake_stack_contract(project_root, session)
+            contract = self._intake_stack_contract(project_root, session)
         except StageError as exc:
             return self._fail(
                 project_root, session, options, "stack_intake",
+                {"status": STATUS_PENDING, "detail": ""}, str(exc),
+            )
+
+        # Stack lock ENFORCEMENT (Contract Kernel v2.77b) — turn the already-live
+        # stack contract into a red/green GATE. For stack-declared projects
+        # (contract is not None): drift / missing-in-resume = RED (anti-false-green);
+        # a first-generation missing lock is bootstrapped once (never overwritten —
+        # anti-gaming). For projects with NO stack block: byte-identical UNLESS a
+        # committed lock still exists (a removed declaration on a still-pinned
+        # project = RED, closing the "drop stack: to dodge the gate" bypass).
+        # Routed through _fail like intake so the autopilot reports it honestly.
+        try:
+            if contract is not None:
+                self._enforce_stack_lock(project_root, session, contract, first_generation)
+            else:
+                from codd.stack.lock import orphan_stack_lock
+
+                orphan = orphan_stack_lock(project_root)
+                if orphan is not None and orphan.red:
+                    self.echo(f"[greenfield] stack lock gate: {orphan.message}")
+                    raise StageError(orphan.message)
+        except StageError as exc:
+            return self._fail(
+                project_root, session, options, "stack_lock",
                 {"status": STATUS_PENDING, "detail": ""}, str(exc),
             )
 
@@ -544,7 +584,7 @@ class GreenfieldPipeline:
 
     # ── stack contract intake (Contract Kernel v2.77a, intake only) ──
 
-    def _intake_stack_contract(self, project_root: Path, session: dict[str, Any]) -> None:
+    def _intake_stack_contract(self, project_root: Path, session: dict[str, Any]):
         """Resolve the project's declared stack contract into the live run record + trace.
 
         See the call site in :meth:`run`. INTAKE ONLY — proves the framework-stack
@@ -554,10 +594,11 @@ class GreenfieldPipeline:
 
         * No ``stack:`` block → no-op: nothing is added to the record and only a
           single debug ``self.echo`` is emitted, so a non-stack project (the vast
-          majority) is behaviour-preserving.
+          majority) is behaviour-preserving. Returns ``None``.
         * A declared stack → its :func:`stack_contract_trace` payload (incl.
           ``stack_contract_hash``) is written to ``session["stack_contract"]`` and
-          echoed to the run trace.
+          echoed to the run trace. Returns the resolved ``ResolvedStackContract`` so
+          the v2.77b lock-enforcement gate (run after intake) can pin it.
         * A declared-but-BROKEN stack → :class:`StageError` (honest error), never a
           silent skip (anti-false-green / no-silent-fallback).
         """
@@ -577,7 +618,7 @@ class GreenfieldPipeline:
         if contract is None:
             # The opt-in framework layer is unused — byte-identical behaviour.
             self.echo("[greenfield] stack contract intake: no `stack:` block (framework layer opt-out)")
-            return
+            return None
 
         trace = stack_contract_trace(contract)
         session["stack_contract"] = dict(trace)
@@ -586,6 +627,45 @@ class GreenfieldPipeline:
             f"{trace['resolved_stack_id']} "
             f"stack_contract_hash={trace['stack_contract_hash']}"
         )
+        return contract
+
+    # ── stack lock enforcement (Contract Kernel v2.77b) ──
+
+    def _enforce_stack_lock(self, project_root: Path, session: dict[str, Any], contract, first_generation: bool) -> None:
+        """Enforce the project's stack lock as a red/green gate (v2.77b).
+
+        Only called for stack-declared projects (``contract is not None``); non-stack
+        projects never reach here, so they are byte-identical (no lock gate at all).
+
+        Design B′ (split read-only gate vs. creation-path bootstrap):
+
+        * genuine FIRST GENERATION (``first_generation`` True — no prior completed
+          stage) → :func:`bootstrap_stack_lock` writes the first lock (exclusive
+          create) and immediately enforces it read-only; ``generated`` is traced.
+        * otherwise (RESUME / already-progressed project) → read-only
+          :func:`enforce_stack_lock`: a missing lock is RED (an already-progressed
+          stack project with no committed pin is unverifiable; a deleted lock cannot
+          be silently regenerated), drift is RED, a valid lock is GREEN.
+
+        Anti-gaming (exit gate 3): the read-only gate NEVER writes/refreshes a lock;
+        ``bootstrap_stack_lock`` writes only when the lock is ABSENT (exclusive
+        create) on this creation path, so a drift cannot be silenced by regenerating
+        the lock. See :func:`enforce_stack_lock` / :func:`bootstrap_stack_lock`.
+        """
+        from codd.stack.lock import bootstrap_stack_lock, enforce_stack_lock
+
+        if first_generation:
+            gate = bootstrap_stack_lock(contract, project_root)
+        else:
+            gate = enforce_stack_lock(contract, project_root)
+        # Record the lock verdict in the run trace (observable, like the intake hash).
+        record = session.get("stack_contract")
+        if isinstance(record, dict):
+            record["stack_lock_status"] = gate.status
+            record["stack_lock_path"] = gate.lock_path
+        self.echo(f"[greenfield] stack lock gate: {gate.message}")
+        if gate.red:
+            raise StageError(gate.message)
 
     # ── option resolution ───────────────────────────────────
 

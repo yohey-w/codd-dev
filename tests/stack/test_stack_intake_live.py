@@ -235,9 +235,20 @@ def test_malformed_stack_block_is_honest_error(tmp_path: Path) -> None:
 
 def test_verify_path_emits_stack_hash_and_reds_on_broken_stack(tmp_path: Path) -> None:
     from codd.cli import _intake_stack_contract_for_verify
+    from codd.stack.lock import build_lock, dump_lock, stack_lock_path
+    from codd.stack.resolve import resolve_stack_from_declaration
 
-    # Valid stack → the verify-path intake emits the hash to the trace.
+    # Valid stack → the verify-path intake emits the hash to the trace. v2.77b adds
+    # a stack-lock gate to this same path, so a verifiable stack project must have a
+    # committed lock matching its contract (an unpinned stack is RED — see
+    # test_stack_lock_gate.py); write the matching lock so this v2.77a-intake
+    # assertion exercises the GREEN path.
     proj_ok = _make_project(tmp_path / "ok", stack=_VALID_STACK)
+    _lock_path = stack_lock_path(proj_ok)
+    _lock_path.parent.mkdir(parents=True, exist_ok=True)
+    _lock_path.write_text(
+        dump_lock(build_lock(resolve_stack_from_declaration(_VALID_STACK))), encoding="utf-8"
+    )
     captured: list[str] = []
     import click
 

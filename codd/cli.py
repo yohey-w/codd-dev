@@ -5023,11 +5023,13 @@ def verify(
         if not runtime:
             return
 
-    # Stack contract intake (Contract Kernel v2.77a) — bring the project's declared
-    # framework-stack contract into the live verify run's trace, mirroring the
-    # greenfield intake. INTAKE ONLY: no obligation is enforced and NO verdict
-    # changes (that is v2.77b-e). A project with no `stack:` block is unaffected; a
-    # declared-but-broken stack fails HONESTLY (anti-false-green), never a silent skip.
+    # Stack contract intake + lock enforcement (Contract Kernel v2.77a/v2.77b) —
+    # bring the project's declared framework-stack contract into the live verify
+    # run's trace (v2.77a, mirroring the greenfield intake), then ENFORCE the stack
+    # lock as a gate (v2.77b): a stack project whose committed lock has drifted from
+    # the resolved contract — or that has no committed lock at all — is RED. A
+    # project with no `stack:` block is unaffected; a declared-but-broken stack
+    # fails HONESTLY (anti-false-green), never a silent skip.
     _intake_stack_contract_for_verify(Path(path).resolve())
 
     verify_kwargs: dict[str, Any] = {"path": path, "prefer_standalone": True}
@@ -7627,12 +7629,34 @@ def _intake_stack_contract_for_verify(project_root: Path) -> None:
         raise SystemExit(1) from exc
 
     if contract is None:
+        # No `stack:` block → byte-identical, UNLESS a committed lock still exists
+        # (a removed stack declaration on a still-pinned project = RED; closes the
+        # "drop stack: to dodge the gate" bypass — v2.77b anti-false-green).
+        from codd.stack.lock import orphan_stack_lock
+
+        orphan = orphan_stack_lock(project_root)
+        if orphan is not None and orphan.red:
+            click.echo(f"[verify] stack lock gate: {orphan.message}", err=True)
+            raise SystemExit(1)
         return
     trace = stack_contract_trace(contract)
     click.echo(
         f"[verify] stack contract intake: {trace['resolved_stack_id']} "
         f"stack_contract_hash={trace['stack_contract_hash']}"
     )
+
+    # Stack lock ENFORCEMENT (Contract Kernel v2.77b) — verify is always an
+    # enforcement context (it never CREATES a project), so it uses the strictly
+    # READ-ONLY gate: a stack project with no committed lock, or a lock that has
+    # drifted from (or cannot be parsed against) the resolved contract, is RED
+    # (honest non-zero exit). The gate never writes or refreshes the lock, so a
+    # drift cannot be silenced on the verify path.
+    from codd.stack.lock import enforce_stack_lock
+
+    gate = enforce_stack_lock(contract, project_root)
+    click.echo(f"[verify] stack lock gate: {gate.message}", err=gate.red)
+    if gate.red:
+        raise SystemExit(1)
 
 
 def _run_verify_once(
