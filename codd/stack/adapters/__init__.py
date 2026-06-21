@@ -10,13 +10,15 @@ checker, so an unenforced release-blocker fails CI.
 
 from __future__ import annotations
 
-from . import nextjs, playwright
+from . import nextjs, playwright, prisma
 from ._base import ObligationFinding
 
 #: obligation.checker ref (as written in a profile YAML) -> enforcing callable.
 OBLIGATION_CHECKERS = {
     "nextjs_adapter:check_ignore_build_errors": nextjs.check_ignore_build_errors,
+    "nextjs_adapter:check_route_coverage": nextjs.check_route_coverage,
     "playwright_adapter:check_executed": playwright.check_executed,
+    "prisma_adapter:check_schema_sync": prisma.check_schema_sync,
 }
 
 
@@ -33,4 +35,5 @@ __all__ = [
     "resolve_checker",
     "nextjs",
     "playwright",
+    "prisma",
 ]

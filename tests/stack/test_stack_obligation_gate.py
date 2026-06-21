@@ -261,9 +261,12 @@ def test_greenfield_valid_stack_obligations_green(tmp_path: Path) -> None:
     session = load_session(project)
     rec_trace = session["stack_contract"]
     assert rec_trace["stack_obligations_checked"] >= 3  # nextjs(2) + prisma(1) + playwright(1)
-    # The two warn obligations with no checker are surfaced as unenforced but did NOT block.
-    assert "route_handler_must_be_exercised" in rec_trace["stack_obligations_unenforced"]
-    assert "client_in_sync_with_schema" in rec_trace["stack_obligations_unenforced"]
+    # These two warn obligations now have real checkers (nextjs_adapter:check_route_coverage,
+    # prisma_adapter:check_schema_sync), so they are ENFORCED — no longer in the unenforced
+    # set — and satisfied here (the fixture has no route handlers / prisma schema to flag),
+    # which never blocks the green gate.
+    assert "route_handler_must_be_exercised" not in rec_trace["stack_obligations_unenforced"]
+    assert "client_in_sync_with_schema" not in rec_trace["stack_obligations_unenforced"]
 
 
 def test_verify_valid_stack_obligations_green(tmp_path: Path) -> None:
