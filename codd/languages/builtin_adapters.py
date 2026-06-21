@@ -83,5 +83,37 @@ def ensure_builtin_adapters_registered(registry: AdapterRegistry | None = None) 
     _register_once(target, "runner_report", "vitest-json", VitestJsonReportAdapter())
     _register_once(target, "runner_report", "go-test-json", GoTestJsonReportAdapter())
 
+    # Implement-oracle tool-semantics adapters (Contract Kernel oracle dispatch §3).
+    # The plumbing is wired now; the concrete oracle_go / oracle_python /
+    # oracle_typescript adapters register inside register_oracle_adapters WITH their
+    # dispatch switch steps. Today it registers NOTHING (additive scaffolding only).
+    register_oracle_adapters(target)
+
     if target is default_adapter_registry:
         _BUILTINS_REGISTERED = True
+
+
+def register_oracle_adapters(registry: AdapterRegistry) -> None:
+    """Register the built-in ``implement_oracle`` adapters on ``registry`` (lazy/idempotent).
+
+    The registry plumbing for the Contract Kernel oracle dispatch (§3): the concrete
+    per-language oracle adapters (``go-toolchain`` / ``typescript-tsc`` /
+    ``python-composite``) register HERE under kind
+    :data:`codd.languages.contract.KIND_IMPLEMENT_ORACLE`, each via the SAME
+    fail-closed :func:`_register_once` (a different adapter at an occupied
+    ``(kind, id)`` raises — a silent oracle override is exactly the false-green this
+    kernel forbids).
+
+    Currently registers NOTHING: the concrete adapters are still in the per-language
+    gate (:mod:`codd.implement_oracle`) and only relocate here with their dispatch
+    switch steps (5–7). This is the additive seam — wired, idempotent, collision-safe
+    — so those adapters drop in as one ``_register_once`` call each, no new plumbing.
+    The adapter classes will be imported INSIDE this function (lazy), never at module
+    load, preserving the leaf rule.
+    """
+    # No concrete implement_oracle adapters yet. When they land:
+    #   from codd.languages.adapters.oracle_go import GoToolchainOracleAdapter
+    #   from codd.languages.contract import KIND_IMPLEMENT_ORACLE
+    #   _register_once(registry, KIND_IMPLEMENT_ORACLE, "go-toolchain", GoToolchainOracleAdapter())
+    #   ... (typescript-tsc, python-composite)
+    return

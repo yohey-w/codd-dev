@@ -42,6 +42,12 @@ KIND_TEST_SEMANTICS = "test_semantics"
 KIND_RUNNER_REPORT = "runner_report"
 KIND_IMPORT_RESOLVER = "import_resolver"
 KIND_SCAFFOLD = "scaffold"
+#: The implement-time oracle tool-semantics adapter kind (Contract Kernel oracle
+#: dispatch §3). A profile names its oracle adapter id in
+#: ``implement_oracle.adapter``; the registry keys it under this kind. The concrete
+#: oracle_go / oracle_python / oracle_typescript adapters register under it WITH
+#: their dispatch switch steps — none is registered yet (the plumbing is additive).
+KIND_IMPLEMENT_ORACLE = "implement_oracle"
 
 
 @dataclass(frozen=True)
