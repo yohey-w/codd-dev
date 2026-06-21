@@ -673,6 +673,10 @@ families:
     certification_fixtures:
     - tests/repair/test_auto_repair_optin_and_scope.py (scope rejects failing-test edit / codd.yaml weaken
       / spec-doc edit; harness_contract_violation scaffold-fix allowed; max-files valve escalates)
+    - 'tests/stack/test_stack_repair_governance.py (Contract Kernel v2.77f: scope-fence rejects stack.lock
+      / .codd/stack / declared codd/stack profile / codd.yaml stack-block edits unconditionally, but allows
+      real codd/stack source when CoDD is the SUT; satisfy-source GREEN; defense-in-depth weaken/checker-delete/lock-refresh;
+      replace_with_proof GREEN only with executable behavioral-subsumption proof)'
     finding_ids:
     - F-greenfield-autorepair-optin-and-scope
     - F-autorepair-test-command-unrepairable

@@ -136,6 +136,53 @@ _SPEC_DIR_MARKERS: frozenset[str] = frozenset(
     {"docs", "doc", "design", "designs", "specs", "spec", "requirements"}
 )
 
+# ── Stack contract artefacts (Contract Kernel v2.77f — Repair Governance) ────
+#
+# The STACK contract — the resolved framework/addon obligations, their checkers,
+# the composed command plan, the replace_with_proof witnesses, and the pinned
+# ``stack.lock`` — is the "definition of pass" for the framework layer. A repair MAY
+# fix SUT SOURCE to *satisfy* a stack obligation, but it must NEVER edit the stack
+# CONTRACT itself: weakening an obligation, deleting/unregistering a checker,
+# inserting a no-op command, refreshing the lock, or mutating a proof witness are
+# exactly how a repair would silence a red stack gate (false-green). These artefacts
+# are therefore OFF-LIMITS to ANY auto-repair edit — UNCONDITIONALLY (unlike the
+# oracle/doc fence above, which is gated on a code-addressable failure). Rationale: a
+# stack profile/obligation/checker/proof is the contract, never SUT source; the lock
+# is (re)generated ONLY on the explicit ``bootstrap_stack_lock`` first-generation
+# creation path, never by an unattended repair. There is no failure class for which an
+# auto-repair legitimately rewrites a stack contract artefact (a drift is cleared by
+# reverting the contract change or by an explicit proof-backed update, not by repair)
+# — so this fence does not carry the harness-contract exception the oracle fence does.
+#
+# Recognition (GPT-5.5 Pro consult 2026-06-21) is deliberately CONSERVATIVE about
+# false-positives, because CoDD ITSELF is a frequent SUT under repair (dogfood):
+#   * the ``stack.lock`` basename anywhere — unconditional. (A rare unrelated app file
+#     literally named ``stack.lock`` is an acceptable false-positive for this kernel
+#     layer: preventing an unattended lock refresh outweighs it; manual repair still
+#     works.)
+#   * any path under a ``.codd/stack/`` directory — unconditional, ~zero false-positive
+#     risk: anything under ``.codd`` is harness/contract STATE, never SUT source.
+#   * a path under ``codd/stack/`` is fenced ONLY when it is PROVENANCED as a
+#     project-local stack-contract file by the project's ``stack:`` declaration (a
+#     ``profiles:`` / ``proofs:`` / ``checkers:`` / ``obligations:`` / ``root:`` path it
+#     references) — NOT by a blind directory rule. A blind ``codd/stack/`` rule would
+#     wrongly fence real CoDD framework SOURCE (``codd/stack/compose.py``, ``lock.py``,
+#     ``command_plan.py``, …) whenever CoDD is the SUT, a genuine false-RED.
+#   * the ``stack:`` block of ``codd.yaml`` — fenced UNCONDITIONALLY when a patch to
+#     ``codd.yaml`` touches the ``stack:`` key (the existing whole-file oracle fence is
+#     gated on a code-addressable failure, leaving a non-code-addressable hole through
+#     which a repair could weaken the stack declaration; this closes it without
+#     disturbing the existing non-stack codd.yaml behaviour).
+_STACK_LOCK_BASENAME = "stack.lock"
+#: Canonical project-local stack-contract STATE root — always harness, never SUT.
+_STACK_STATE_DIR_MARKER: tuple[str, ...] = (".codd", "stack")
+#: ``codd.yaml`` keys whose declarations point at project-local stack-contract files
+#: (profiles / proof witnesses / checker / obligation sources / a contract root). A
+#: ``codd/stack/`` path is fenced only when it matches one of these declared paths.
+_STACK_DECL_PATH_KEYS: frozenset[str] = frozenset(
+    {"profiles", "proofs", "checkers", "obligations", "root", "roots", "profile_root", "proof_root"}
+)
+
 #: Test-file recognition (mirrors common conventions across stacks). Used to
 #: flag a patch that edits a TEST for a non-harness failure (B0 keeps those
 #: read-only; we enforce it against the actual proposal path even when the
@@ -167,15 +214,19 @@ def evaluate_auto_patch_scope(
     caller (the repair loop, in auto mode only) escalates/rejects on
     ``allowed=False``.
     """
-    patch_paths = [_normalize(patch.file_path) for patch in proposal.patches]
-    patch_paths = [path for path in patch_paths if path]
-    if not patch_paths:
+    patches = [p for p in proposal.patches if _normalize(p.file_path)]
+    if not patches:
         # An empty proposal is rejected upstream; nothing to scope-check.
         return AutoScopeDecision(allowed=True, reason="no patch paths to validate")
 
     failure_class = str(getattr(failure, "failure_class", "") or "")
     code_addressable = bool(getattr(failure, "code_addressable", False))
     allowlist = _editable_allowlist(failure, rca)
+    # Stack-contract path provenance from the project's ``stack:`` declaration (so a
+    # ``codd/stack/`` path is fenced only when the project actually declares it as a
+    # contract file — never a blind directory rule that would wrongly fence real CoDD
+    # framework source when CoDD is the SUT). Empty for a non-stack project.
+    declared_stack_paths = _declared_stack_contract_paths(codd_yaml)
     # Containment is enforced strictly ONLY when the primary failure resolved a
     # CONCRETE editable path set (B0 attribution of an executed test/typecheck
     # failure). A purely structural DAG failure carries logical node IDs
@@ -187,13 +238,16 @@ def evaluate_auto_patch_scope(
 
     offending: list[str] = []
     reasons: list[str] = []
-    for path in patch_paths:
+    for patch in patches:
+        path = _normalize(patch.file_path)
         verdict = _classify_path(
             path,
             failure_class=failure_class,
             code_addressable=code_addressable,
             allowlist=allowlist,
             enforce_containment=has_resolved_targets,
+            declared_stack_paths=declared_stack_paths,
+            patch_content=getattr(patch, "content", "") or "",
         )
         if verdict is not None:
             offending.append(path)
@@ -285,11 +339,20 @@ def _classify_path(
     code_addressable: bool,
     allowlist: set[str],
     enforce_containment: bool,
+    declared_stack_paths: frozenset[str] = frozenset(),
+    patch_content: str = "",
 ) -> str | None:
     """Return a rejection reason for *path*, or ``None`` when it is in-scope.
 
     Role precedence (most-protected first):
 
+    0. Stack contract artefact (``stack.lock`` / a ``codd/stack/`` profile /
+       obligation / checker) → reject UNCONDITIONALLY (Contract Kernel v2.77f).
+       A repair fixes SUT source to *satisfy* a stack obligation; it never edits
+       the stack contract (weaken / delete checker / no-op / refresh lock = a
+       silenced gate = false-green). No failure-class exception (unlike the oracle
+       fence): a stack artefact is never the thing an auto-repair legitimately
+       rewrites.
     1. Oracle / spec / gate-control artefact + a code-addressable failure →
        reject, UNLESS the failure class explicitly identifies THIS artefact as
        the defect (a harness-contract violation whose attribution named it).
@@ -302,6 +365,38 @@ def _classify_path(
        since the oracle/test protections above already block the false-green
        vector and structural source/doc drift repair is legitimate.
     """
+    # (0) Stack contract artefact protection — UNCONDITIONAL (Contract Kernel v2.77f).
+    # Checked FIRST and independent of failure_class / code_addressable: a repair must
+    # never edit the framework-stack contract (the definition of "pass" for the stack
+    # layer). The SUT-source fix path (satisfy/strengthen) stays open; only the
+    # contract artefacts themselves are fenced. Recognition is provenance-aware so it
+    # does NOT false-RED real CoDD framework source when CoDD is the SUT.
+    if _is_stack_contract_artifact(path, declared_stack_paths=declared_stack_paths):
+        return (
+            f"'{path}' is a STACK CONTRACT artefact (stack.lock / a .codd/stack or "
+            "declared project-local stack profile, obligation, checker, or proof witness); "
+            "auto-repair may fix SUT source to SATISFY a stack obligation but must NEVER "
+            "edit the stack contract itself — weakening an obligation, deleting a checker, "
+            "inserting a no-op command, refreshing the lock, or mutating a proof witness "
+            "would silence a stack gate (false-green). A stack drift is cleared by reverting "
+            "the contract change or an explicit proof-backed update, never by an unattended "
+            "repair (Contract Kernel v2.77f)."
+        )
+
+    # (0b) The ``stack:`` block of codd.yaml — fenced UNCONDITIONALLY when a patch to
+    # codd.yaml touches it. The whole-file oracle fence (rule 1) only engages for a
+    # code-addressable failure; this closes the non-code-addressable hole through which
+    # a repair could weaken the stack declaration, WITHOUT changing the existing
+    # non-stack codd.yaml behaviour (a codd.yaml patch that does not touch ``stack:`` is
+    # still handled by the oracle fence exactly as before).
+    if _is_codd_yaml(path) and _patch_touches_stack_block(patch_content):
+        return (
+            f"'{path}' patch modifies the codd.yaml `stack:` block (the project's stack "
+            "contract declaration); auto-repair must not alter the declared stack contract "
+            "(language/frameworks/addons/obligations) to clear a failure — that is the "
+            "weaken-the-contract false-green vector (Contract Kernel v2.77f)."
+        )
+
     is_oracle = _is_oracle_artifact(path)
     is_test = _is_test_file(path)
     harness_contract = failure_class == "harness_contract_violation"
@@ -344,6 +439,92 @@ def _classify_path(
         "failure + RCA target; auto-repair may only touch attributed implementation/"
         "config files"
     )
+
+
+def _is_stack_contract_artifact(
+    path: str, *, declared_stack_paths: frozenset[str] = frozenset()
+) -> bool:
+    """True for a framework-stack CONTRACT artefact (Contract Kernel v2.77f).
+
+    Provenance-aware (GPT-5.5 Pro consult 2026-06-21) to avoid false-REDs:
+
+    * the ``stack.lock`` basename anywhere — unconditional;
+    * any path under a ``.codd/stack/`` directory — unconditional (harness state);
+    * a path under ``codd/stack/`` ONLY when it matches a stack-contract file the
+      project's ``stack:`` declaration references (``declared_stack_paths``) — NOT a
+      blind directory rule (which would wrongly fence real CoDD framework source when
+      CoDD is the SUT).
+
+    The curated profiles ship INSIDE the codd PACKAGE (never in a project's working
+    tree). The ``stack:`` block of ``codd.yaml`` is fenced separately (a hunk-aware
+    check on a codd.yaml patch), not here.
+    """
+    pure = PurePosixPath(path)
+    if pure.name.lower() == _STACK_LOCK_BASENAME:
+        return True
+    parts_lower = tuple(part.lower() for part in pure.parts)
+    if _contains_subsequence(parts_lower, _STACK_STATE_DIR_MARKER):
+        return True
+    # Provenanced project-local stack-contract file (declared in codd.yaml's stack:).
+    return path in declared_stack_paths
+
+
+def _declared_stack_contract_paths(codd_yaml: Mapping[str, Any] | None) -> frozenset[str]:
+    """Project-local stack-contract file/dir paths declared in codd.yaml's ``stack:``.
+
+    Reads the ``stack:`` block and collects any path-valued entries under the
+    contract-source keys (:data:`_STACK_DECL_PATH_KEYS` — ``profiles`` / ``proofs`` /
+    ``checkers`` / ``obligations`` / ``root`` …). These are the project's OWN
+    stack-contract files; a ``codd/stack/`` patch path is fenced only when it matches
+    one (so real CoDD framework source is never fenced). A directory entry fences
+    everything under it. Empty for a non-stack project (the fence then keys only on the
+    ``stack.lock`` basename + ``.codd/stack/`` — neither of which affects a non-stack
+    repair). Best-effort + defensive: any malformed shape yields no extra paths.
+    """
+    if not isinstance(codd_yaml, Mapping):
+        return frozenset()
+    stack = codd_yaml.get("stack")
+    if not isinstance(stack, Mapping):
+        return frozenset()
+    collected: set[str] = set()
+
+    def _add_path_values(value: Any) -> None:
+        if isinstance(value, str):
+            norm = _normalize(value)
+            if norm:
+                collected.add(norm)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                _add_path_values(item)
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                _add_path_values(item)
+
+    for key in _STACK_DECL_PATH_KEYS:
+        if key in stack:
+            _add_path_values(stack[key])
+    return frozenset(collected)
+
+
+def _is_codd_yaml(path: str) -> bool:
+    name = PurePosixPath(path).name.lower()
+    return name in {"codd.yaml", "codd.yml"}
+
+
+def _patch_touches_stack_block(patch_content: str) -> bool:
+    """True when a codd.yaml patch references the ``stack:`` mapping key.
+
+    Conservative + content-based (works for both a full-file replacement and a unified
+    diff): a top-level or diff-added ``stack:`` line means the patch is shaping the
+    stack declaration. Matching ``(^|\\n)\\s*[+]?\\s*stack:`` catches a YAML key at any
+    indentation and a diff ``+stack:`` line. False-positives (a codd.yaml that merely
+    keeps an unrelated ``stack:`` line) are acceptable — auto-repair editing codd.yaml is
+    already the discouraged path, and a stack-declaring project's codd.yaml edit is far
+    better escalated to a human than silently applied.
+    """
+    if not patch_content:
+        return False
+    return bool(re.search(r"(^|\n)\s*\+?\s*stack\s*:", patch_content))
 
 
 def _is_oracle_artifact(path: str) -> bool:

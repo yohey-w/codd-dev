@@ -70,11 +70,71 @@ class ResolvedLayerRef:
 
 @dataclass(frozen=True)
 class Conflict:
-    """A composition conflict the strict gate must red on (design §衝突解決)."""
+    """A composition conflict the strict gate must red on (design §衝突解決).
 
-    kind: Literal["exclusive", "command", "semantic"]
+    ``replace_with_proof`` is the Contract Kernel v2.77f kind: a layer DECLARED a
+    proof-backed replacement but the declaration is MALFORMED (bad schema / kind /
+    missing witness / cross-id). A WELL-FORMED declaration is NOT a conflict — it is a
+    pending proof (:attr:`ResolvedStackContract.pending_replacement_proofs`).
+    """
+
+    kind: Literal["exclusive", "command", "semantic", "replace_with_proof"]
     detail: str
     layers: tuple[str, ...] = ()
+
+
+#: Sentinel returned by :func:`_classify_replacement` when a well-formed
+#: ``replace_with_proof`` was recorded as a pending proof (so the caller records neither a
+#: command nor a semantic conflict for it).
+_REPLACEMENT_PENDING = object()
+
+
+def _classify_replacement(
+    *,
+    kind: str,
+    cid: str,
+    original: Any,
+    replacement: Any,
+    owner: str,
+    replacer: str,
+    pending_proofs: list[Any],
+) -> Any:
+    """Classify a same-id redefinition that carries (or lacks) a ``replace_with_proof``.
+
+    Returns one of:
+    * :data:`_REPLACEMENT_PENDING` — a WELL-FORMED declaration was found and appended to
+      ``pending_proofs`` (the caller records NO conflict; the proof gate decides clean).
+    * a :class:`Conflict` (``kind="replace_with_proof"``) — a declaration was present but
+      MALFORMED (anti-false-green: a broken proof declaration is RED, never accepted).
+    * ``None`` — no declaration; the caller falls back to its ordinary conflict.
+
+    Imported lazily to keep the dataclass/module load free of an import cycle (the
+    replacement_proof module imports profile types from this package).
+    """
+    from .replacement_proof import (
+        PendingReplacementProof,
+        ReplacementProofError,
+        extract_proof_declaration,
+    )
+
+    try:
+        decl = extract_proof_declaration(replacement, kind=kind)
+    except ReplacementProofError as exc:
+        return Conflict(
+            kind="replace_with_proof",
+            detail=(
+                f"{kind} {cid!r} declares a malformed replace_with_proof on {replacer} "
+                f"(owner {owner}): {exc}. A proof-backed replacement is RED unless its "
+                "declaration is well-formed AND its behavioral proof passes."
+            ),
+            layers=(owner, replacer),
+        )
+    if decl is None:
+        return None
+    pending_proofs.append(
+        PendingReplacementProof.build(kind, original, replacement, decl)
+    )
+    return _REPLACEMENT_PENDING
 
 
 @dataclass(frozen=True)
@@ -111,6 +171,17 @@ class ResolvedStackContract:
     command_observation_policies: Mapping[str, Any] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    #: Proof-backed replacements (Contract Kernel v2.77f). A command/obligation that
+    #: REPLACES another layer's via a well-formed ``codd.replace_with_proof`` is recorded
+    #: here as a :class:`~codd.stack.replacement_proof.PendingReplacementProof` INSTEAD of
+    #: an ordinary command/semantic Conflict — the replacement is NOT clean-by-syntax: it
+    #: is pending an EXECUTED behavioral-subsumption proof. ``is_clean``/``strict_ok`` are
+    #: about ordinary conflicts only; the proof gate
+    #: (``codd.stack.command_plan.assert_stack_contract_clean`` with a
+    #: ``ReplacementProofGateResult``) is what turns a pending proof GREEN. Typed loosely
+    #: (``Any``) to keep ``compose`` import-cycle-free at the dataclass level. Empty for the
+    #: curated stacks (no profile declares a replacement yet).
+    pending_replacement_proofs: tuple[Any, ...] = ()
 
     @property
     def is_clean(self) -> bool:
@@ -142,6 +213,7 @@ def _content_hash(
     obligations: Sequence[Obligation],
     file_roles: Sequence[FileRole],
     source_sets: Sequence[SourceSet],
+    pending_proofs: Sequence[Any] = (),
 ) -> str:
     canonical = {
         "layers": [[l.kind, l.id, l.profile_version] for l in layers],
@@ -149,6 +221,13 @@ def _content_hash(
         "obligations": sorted([o.id, o.severity] for o in obligations),
         "file_roles": sorted([r.pattern, r.role] for r in file_roles),
         "source_sets": sorted([s.id, s.root] for s in source_sets),
+        # Proof-backed replacements (Contract Kernel v2.77f gaming-vector #5): the proof
+        # DECLARATION must affect the content hash, so a changed witness/proof drifts the
+        # lock (a proof cannot silently change under a stable lock). Each pending proof's
+        # fingerprint already hashes (original, replacement, declaration).
+        "replacement_proofs": sorted(
+            getattr(p, "fingerprint", "") for p in (pending_proofs or ())
+        ),
     }
     payload = json.dumps(canonical, sort_keys=True, ensure_ascii=False)
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -177,6 +256,7 @@ def compose(
         )
 
     conflicts: list[Conflict] = []
+    pending_proofs: list[Any] = []
 
     # -- commands (language base; frameworks/addons add their own slots) --------
     commands: dict[str, CommandSpec] = dict(language.commands)
@@ -189,10 +269,27 @@ def compose(
                 command_owners[cid] = f"{kind}:{prof.id}"
                 continue
             # Collision. Identical argv → harmless (same command). Different argv →
-            # a layer is replacing another's command. For a verification slot this
-            # is a hard conflict (no silent weakening); elsewhere too (must be an
-            # explicit replace_with_proof, which no profile declares yet).
+            # a layer is replacing another's command.
             if tuple(commands[cid].argv) == tuple(spec.argv):
+                continue
+            # A different-argv redefinition is a hard conflict UNLESS the replacing layer
+            # carries a well-formed ``replace_with_proof`` (Contract Kernel v2.77f). Then
+            # it is recorded as a PendingReplacementProof — NOT clean-by-syntax: the proof
+            # gate must execute the behavioral subsumption before the contract is clean. A
+            # MALFORMED declaration is its own RED (``replace_with_proof`` conflict kind).
+            proof_conflict = _classify_replacement(
+                kind="command",
+                cid=cid,
+                original=commands[cid],
+                replacement=spec,
+                owner=command_owners[cid],
+                replacer=f"{kind}:{prof.id}",
+                pending_proofs=pending_proofs,
+            )
+            if proof_conflict is _REPLACEMENT_PENDING:
+                continue  # recorded as a pending proof; do NOT also record a conflict
+            if proof_conflict is not None:
+                conflicts.append(proof_conflict)
                 continue
             conflicts.append(
                 Conflict(
@@ -255,6 +352,28 @@ def compose(
                     )
                 )
             elif _normalize_checker_ref(obl.checker) != _normalize_checker_ref(existing.checker):
+                # A same-severity, different-CHECKER redefinition. This may be a legitimate
+                # proof-backed replacement (a stronger/equivalent checker) IFF the new
+                # checker is REAL (non-empty) AND a well-formed replace_with_proof is
+                # declared. A null/empty new checker can NEVER be proof-rescued (you cannot
+                # prove subsumption with no checker — it would be an unenforced RED anyway),
+                # so that path stays a hard semantic conflict.
+                proof_outcome = None
+                if _normalize_checker_ref(obl.checker):  # new checker is non-empty
+                    proof_outcome = _classify_replacement(
+                        kind="obligation",
+                        cid=obl.id,
+                        original=existing,
+                        replacement=obl,
+                        owner=obligation_owners[obl.id],
+                        replacer=f"{kind}:{prof.id}",
+                        pending_proofs=pending_proofs,
+                    )
+                if proof_outcome is _REPLACEMENT_PENDING:
+                    continue  # recorded as a pending proof; no conflict
+                if proof_outcome is not None:
+                    conflicts.append(proof_outcome)
+                    continue
                 conflicts.append(
                     Conflict(
                         kind="semantic",
@@ -265,7 +384,8 @@ def compose(
                             "a same-id checker-ref change is a semantic conflict (it would "
                             "silently keep one checker and discard the other); two different "
                             "checks need two different obligation ids, the same check needs "
-                            "the same checker ref"
+                            "the same checker ref (or an explicit, proof-backed "
+                            "replace_with_proof)"
                         ),
                         layers=(obligation_owners[obl.id], f"{kind}:{prof.id}"),
                     )
@@ -308,7 +428,9 @@ def compose(
     }
 
     stack_id = "+".join(l.id for l in layers)
-    content_hash = _content_hash(layers, commands, obligations, file_roles, source_sets)
+    content_hash = _content_hash(
+        layers, commands, obligations, file_roles, source_sets, pending_proofs
+    )
 
     return ResolvedStackContract(
         stack_id=stack_id,
@@ -324,4 +446,5 @@ def compose(
         variants=MappingProxyType(dict(variants)),
         conflicts=tuple(conflicts),
         content_hash=content_hash,
+        pending_replacement_proofs=tuple(pending_proofs),
     )

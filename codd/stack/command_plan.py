@@ -42,7 +42,7 @@ import os
 import subprocess  # noqa: S404 — argv comes from the trusted resolved stack contract, shell=False.
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from codd.languages.profile import CommandSpec
 
@@ -105,17 +105,32 @@ def stack_command_evidence_path(slot: "StackCommandSlot", project_root: Path) ->
     return project_root / STACK_COMMAND_EVIDENCE_DIR / f"{safe}.stdout"
 
 
-def assert_stack_contract_clean(contract: ResolvedStackContract) -> None:
-    """Conflict gate (v2.77c): red on ANY composition conflict / unclean state.
+def assert_stack_contract_clean(
+    contract: ResolvedStackContract,
+    *,
+    replacement_proofs: Any = None,
+) -> None:
+    """Conflict gate (v2.77c) + proof gate (v2.77f): red on ANY unclean state.
 
-    Anti-false-green: a command collision, an unproved replace (a layer replacing
-    another's command with different argv and no ``replace_with_proof`` — exactly a
-    command conflict today), a semantic weaken (an addon lowering a framework
-    obligation's severity), an exclusive conflict, a deny, or any future conflict
-    kind makes the contract NOT clean → :class:`StackContractConflictError`. The
-    composer already records these as ``Conflict`` entries (it refuses last-wins);
-    this turns that record into a gate. Defensive triple-check (``conflicts`` /
-    ``is_clean`` / ``strict_ok``) so a flag desync can never sneak to green.
+    Anti-false-green: a command collision, an unproved/malformed replace, a semantic
+    weaken (an addon lowering a framework obligation's severity), an exclusive conflict,
+    a deny, or any future conflict kind makes the contract NOT clean →
+    :class:`StackContractConflictError`. The composer records these as ``Conflict``
+    entries (it refuses last-wins); this turns that record into a gate. Defensive
+    triple-check (``conflicts`` / ``is_clean`` / ``strict_ok``) so a flag desync can never
+    sneak to green.
+
+    Contract Kernel v2.77f — proof-backed replacements: a WELL-FORMED ``replace_with_proof``
+    is NOT a conflict; the composer records it as a
+    :class:`~codd.stack.replacement_proof.PendingReplacementProof`. Such a contract is NOT
+    clean until its behavioral proof has been EXECUTED and PASSED. So:
+
+    * ``contract.pending_replacement_proofs`` is non-empty AND ``replacement_proofs is
+      None`` → RED ("proof not executed"): a call-site that skips the proof gate can never
+      accidentally treat a pending replacement as clean (declaration-only is RED).
+    * ``replacement_proofs`` present but does not approve EVERY pending proof (matched by
+      *fingerprint*, not id) → RED ("proof failed / not approved").
+    * every pending proof approved by a passing result → the replacement is clean.
     """
     if contract.conflicts or not contract.is_clean or not contract.strict_ok:
         reasons = (
@@ -124,12 +139,37 @@ def assert_stack_contract_clean(contract: ResolvedStackContract) -> None:
         )
         raise StackContractConflictError(
             f"stack composition conflict ({contract.stack_id}): {reasons}. "
-            "A command collision / unproved replace / weakened obligation / exclusive "
-            "conflict is RED — the composer does NOT silently last-wins-merge a "
+            "A command collision / unproved-or-malformed replace / weakened obligation / "
+            "exclusive conflict is RED — the composer does NOT silently last-wins-merge a "
             "collision, and the run will not materialize a command plan from a "
-            "conflicted contract. Resolve the conflict in the stack profiles (or "
-            "declare an explicit replace_with_proof once that mechanism exists)."
+            "conflicted contract. Resolve the conflict in the stack profiles, or declare a "
+            "well-formed, proof-backed replace_with_proof."
         )
+
+    pending = tuple(getattr(contract, "pending_replacement_proofs", ()) or ())
+    if pending:
+        if replacement_proofs is None:
+            raise StackContractConflictError(
+                f"stack replacement proof not executed ({contract.stack_id}): the contract "
+                f"declares {len(pending)} proof-backed replacement(s) "
+                f"({', '.join(p.id for p in pending)}) but the behavioral proof gate was not "
+                "run. A replace_with_proof is NOT clean by declaration alone — RED until the "
+                "proof is executed and passes (anti-false-green: never accept a replacement on "
+                "syntax)."
+            )
+        if not replacement_proofs.approves_all(pending):
+            unapproved = [
+                p.id for p in pending if p.fingerprint not in replacement_proofs.approved
+            ]
+            viol = "; ".join(
+                f"{v.id}: {v.reason}" for v in getattr(replacement_proofs, "violations", ())
+            )
+            raise StackContractConflictError(
+                f"stack replacement proof failed ({contract.stack_id}): proof did not approve "
+                f"replacement(s) {unapproved} [{viol}]. A proof-backed replacement is GREEN "
+                "ONLY when its behavioral subsumption proof passes (the replacement catches "
+                "what the original caught) — RED otherwise."
+            )
 
 
 @dataclass(frozen=True)
