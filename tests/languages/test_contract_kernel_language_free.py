@@ -15,19 +15,19 @@ into a LOCKED core module, so the Cut Condition A achievement for the oracle zon
 cannot silently regress (steps 5-9 removed every such literal; this keeps them out).
 
 LOCKED zones (asserted language-free here — the oracle dispatch + verify contract
-kernel, all cleaned by Contract Kernel steps 5-9):
+kernel, all cleaned by Contract Kernel steps 5-9; plus the verify-stage
+node-install + default-tsc heuristic, made profile-driven and graduated here):
   * codd/implement_oracle.py          — the implement-oracle gate + dispatch
   * codd/languages/oracle_executor.py — the generic command-sequence executor
   * codd/languages/verify_executor.py — the verify contract executor
   * codd/languages/verify_plan.py     — the verify plan builder
+  * codd/repair/verify_runner.py      — ``_is_node_project`` / the install-preflight
+    + default-typecheck gate, now PROFILE-DRIVEN (the profile's ``typecheck``
+    ``requires_materialized_deps`` + ``materialize_command``), no language-name literal.
 
 NOT YET locked (Cut Condition A still pending for these zones — listed so the
 coverage gap is EXPLICIT, never silently uncovered; each graduates into
 LOCKED_MODULES when it is made contract-driven):
-  * codd/repair/verify_runner.py  — ``_is_node_project`` still keys on
-    ``language in ("typescript", "node")`` (the verify-stage node-install +
-    default-tsc heuristic; a verify-zone refactor, parallel to the oracle's
-    install preflight).
   * codd/project_types.py, codd/detection/* (stack_detector / import_coherence),
     the PathPlanner / path_rules zone.
 
@@ -60,13 +60,13 @@ LOCKED_MODULES = (
     "languages/oracle_executor.py",
     "languages/verify_executor.py",
     "languages/verify_plan.py",
+    "repair/verify_runner.py",  # graduated: _is_node_project is now profile-driven
 )
 
 # Known-pending Cut Condition A zones — documented so the gap is explicit (NOT
 # asserted clean; they still contain language literals by design-debt).
 PENDING_ZONES = (
-    "repair/verify_runner.py",  # _is_node_project: language in ("typescript","node")
-    "project_types.py",
+    "project_types.py",  # _LAYOUT_PROFILE_BUILDERS keys + language == "python"/... dispatch
     "detection",
     "path_rules / PathPlanner",
 )
@@ -126,19 +126,28 @@ def test_oracle_core_modules_are_language_free() -> None:
 def test_pending_zones_are_documented_not_silently_uncovered() -> None:
     """The not-yet-locked Cut Condition A zones are explicitly listed.
 
-    A guard against silent scope-narrowing: if verify_runner's language literal is
-    ever cleaned, it should GRADUATE into LOCKED_MODULES (and drop from
+    A guard against silent scope-narrowing: if the headline pending zone's language
+    literal is ever cleaned, it should GRADUATE into LOCKED_MODULES (and drop from
     PENDING_ZONES) — this asserts the pending list is non-empty until Cut Condition
     A is fully done, so the coverage gap is never quietly forgotten.
+
+    The headline pending zone is now ``project_types.py`` (``verify_runner.py``
+    graduated into LOCKED_MODULES once ``_is_node_project`` became profile-driven). It
+    really does still carry ``language == "python"`` / ``language in (...)`` dispatch in
+    its ``_LAYOUT_PROFILE_BUILDERS`` / ``test_block_profile`` / scaffold paths — keeping
+    the documentation honest: if someone cleans it without updating this file, this
+    fails and prompts the next graduation.
     """
     assert PENDING_ZONES, "if Cut Condition A is fully done, lock all zones + remove this test"
-    # The headline pending zone really does still carry the literal (keeps the
-    # documentation honest — if someone cleans it without updating this file, this
-    # fails and prompts the graduation).
-    runner = _PKG_ROOT / "repair" / "verify_runner.py"
-    if runner.is_file():
-        assert re.search(r"""\blanguage\b\s+in\s*\(""", _code_only(runner)), (
-            "verify_runner._is_node_project no longer keys on a language literal — "
-            "graduate repair/verify_runner.py into LOCKED_MODULES and drop it from "
-            "PENDING_ZONES."
+    # verify_runner.py must NOT regress back into PENDING_ZONES — it is locked now.
+    assert "repair/verify_runner.py" not in PENDING_ZONES, (
+        "repair/verify_runner.py is graduated (profile-driven); it must stay in "
+        "LOCKED_MODULES, never back in PENDING_ZONES."
+    )
+    project_types = _PKG_ROOT / "project_types.py"
+    if project_types.is_file():
+        assert re.search(r"""\blanguage\b\s+in\s*\(""", _code_only(project_types)), (
+            "project_types.py no longer keys on a language literal — graduate "
+            "project_types.py into LOCKED_MODULES and drop it from PENDING_ZONES "
+            "(repoint this assertion to the next pending file: detection / path_rules)."
         )

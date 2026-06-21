@@ -15,6 +15,7 @@ import time
 import warnings
 
 if TYPE_CHECKING:  # import-time-free type hints (no cycle, no runtime cost)
+    from codd.languages.profile import LanguageProfile
     from codd.languages.registry import AdapterRegistry, LanguageRegistry
     from codd.languages.verify_executor import VerifyExecutionResult
     from codd.languages.verify_plan import VerifyRunPlan
@@ -476,21 +477,49 @@ class VerifyRunner:
         )
 
     def _is_node_project(self, settings: dict[str, Any]) -> bool:
-        """Whether this project is a node/TS stack (drives the install preflight).
+        """Whether this verify stage needs the node-style dependency install + tsc.
 
-        True when ``project.language`` is ``typescript``/``node``, OR — when no
-        language is declared — a ``package.json`` exists at the project root.
-        A declared NON-node language (e.g. ``python``) is respected as a no.
+        PROFILE-DRIVEN (Contract Kernel Cut Condition A — no language NAME literal):
+        the predicate is "the DECLARED language's resolved profile needs a
+        dependency-install before its static checker can run", read as the profile's
+        ``typecheck`` command declaring ``requires_materialized_deps`` AND the profile
+        declaring a ``toolchain.package_manager.materialize_command`` — the exact
+        language-free signal the oracle's install preflight uses (v2.81:
+        ``_oracle_requires_materialized_deps`` + ``_materialize_command``). This is True
+        for TypeScript (``tsc`` needs ``node_modules`` → ``npm ci``) and False for
+        Go/Python (Go's ``go test -run ^$`` opts OUT; Python declares no ``typecheck``
+        command), so the install preflight + default ``tsc`` stay TS-effective without a
+        hardcoded typescript/node language-name comparison.
+
+        When no language is declared, fall back to the ``package.json`` FILE heuristic so
+        an UN-declared node project still gets node treatment (a declared NON-matching
+        language — python — is respected as a no, and contributes no package.json
+        fallback).
         """
-        project = settings.get("project") if isinstance(settings.get("project"), Mapping) else {}
-        language = ""
-        if isinstance(project, Mapping):
-            language = str(project.get("language") or "").strip().lower()
-        if language in ("typescript", "node"):
-            return True
-        if language:
-            return False
+        profile = self._declared_language_profile(settings)
+        if profile is not None:
+            return _profile_needs_dependency_install(profile)
+        # detection-zone: pragmatic manifest heuristic (Cut A = no language NAME
+        # literal; this is a filename, graduates with the detection zone).
         return (self.project_root / "package.json").is_file()
+
+    def _declared_language_profile(self, settings: dict[str, Any]) -> "LanguageProfile | None":
+        """The resolved profile for ``project.language``, or ``None`` if undeclared.
+
+        Uses the injected ``self._language_registry`` when present (hermetic tests
+        drive a synthetic registry) else the process-wide default. A declared-but-
+        UNKNOWN language is NOT this predicate's place to RED (``_run_test_command``
+        owns that anti-false-green RED) — here it degrades to ``None`` so the node
+        heuristics simply do not engage (no install preflight / no default tsc), which
+        is the conservative non-node behaviour and never a silent green.
+        """
+        from codd.languages.contract import resolve_language_profile
+        from codd.languages.registry import UnknownLanguageError
+
+        try:
+            return resolve_language_profile(settings, registry=self._language_registry)
+        except UnknownLanguageError:
+            return None
 
     def _run_typecheck_command(self, settings: dict[str, Any]) -> tuple[bool, VerificationFailure | None]:
         """Run ``verify.typecheck_command`` (or ``typecheck.command`` when
@@ -505,21 +534,29 @@ class VerifyRunner:
         return executed, failure
 
     def _resolve_typecheck_command(self, settings: dict[str, Any]) -> str | None:
-        """Explicit config first, else the node-stack default ``tsc --noEmit``.
+        """Explicit config first, else the node-stack default typecheck command.
 
-        #4 — for a TypeScript/node project (and absent an explicit
-        ``verify.typecheck_command`` / ``typecheck.command``), the default
-        typecheck is ``npx tsc --noEmit``: a nonzero ``tsc`` is a HARD verify
-        failure (it runs as a normal evidence command, so the existing
-        exit-code path classifies + attributes it). Non-node stacks keep
-        today's behaviour (no implicit typecheck)."""
+        #4 — for a node-style project (and absent an explicit
+        ``verify.typecheck_command`` / ``typecheck.command``), the default typecheck
+        is the resolved profile's own ``typecheck`` command (TS → ``npx --no-install
+        tsc --noEmit``, read from ``profile.commands['typecheck'].argv`` — NOT a
+        hardcoded ``tsc`` string): a nonzero exit is a HARD verify failure (it runs as
+        a normal evidence command, so the existing exit-code path classifies +
+        attributes it). Gated on the PROFILE-DRIVEN node predicate + ``tsconfig.json``
+        presence (its config), never a language name. Non-node stacks (Go/Python) keep
+        today's behaviour (no implicit typecheck) because the predicate is False for
+        them."""
         explicit = _resolve_typecheck_command(settings)
         if explicit:
             return explicit
         if _verify_setting(settings, "typecheck", None) is False:
             return None
         if self._is_node_project(settings) and (self.project_root / "tsconfig.json").is_file():
-            return "npx --no-install tsc --noEmit"
+            profile = self._declared_language_profile(settings)
+            command = _profile_typecheck_command(profile) if profile is not None else None
+            # Undeclared node project (package.json heuristic, no profile): keep the
+            # established default. A declared node profile contributes its own argv.
+            return command or "npx --no-install tsc --noEmit"
         return None
 
     def _run_test_command(
@@ -1032,6 +1069,71 @@ def _resolve_typecheck_command(settings: dict[str, Any]) -> str | None:
         if isinstance(command, str) and command.strip():
             return command.strip()
     return None
+
+
+def _profile_needs_dependency_install(profile: "LanguageProfile") -> bool:
+    """PROFILE-DRIVEN "this verify stage needs a node-style dependency install".
+
+    The language-free signal that replaces the old typescript/node language-name
+    comparison (Contract Kernel Cut Condition A): True iff the profile's ``typecheck`` command
+    declares ``requires_materialized_deps`` AND the profile declares a
+    ``toolchain.package_manager.materialize_command``. This mirrors the oracle's
+    install-preflight predicate (v2.81 ``_oracle_requires_materialized_deps`` +
+    ``_materialize_command``) scoped to the verify stage's static checker:
+
+    * TypeScript — ``typecheck`` (tsc) sets ``requires_materialized_deps: true`` and
+      the profile declares ``npm ci`` → True (tsc needs ``node_modules``).
+    * Go — ``typecheck`` (``go test -run ^$``) opts OUT
+      (``requires_materialized_deps: false``) → False (preserves "Go skips the
+      preflight + default typecheck"), even though Go DOES declare a materialize
+      command (``go mod download``) for its build/verify.
+    * Python — declares no ``typecheck`` command → False.
+
+    A profile with no ``typecheck`` command, no ``requires_materialized_deps`` on it,
+    or no ``materialize_command`` is not a node-style verify stack here (False).
+    """
+    commands = getattr(profile, "commands", {}) or {}
+    typecheck = commands.get("typecheck")
+    if typecheck is None or not bool(getattr(typecheck, "requires_materialized_deps", False)):
+        return False
+    return _profile_materialize_command_argv(profile) is not None
+
+
+def _profile_typecheck_command(profile: "LanguageProfile") -> str | None:
+    """The profile's ``typecheck`` command as a shell string, or ``None``.
+
+    Reads ``profile.commands['typecheck'].argv`` and joins it (TS → ``npx --no-install
+    tsc --noEmit``) so the default typecheck is resolved FROM THE PROFILE, never a
+    hardcoded ``tsc`` literal here. ``None`` when the profile declares no typecheck
+    command / no argv (the caller then keeps its established default for an undeclared
+    node project).
+    """
+    commands = getattr(profile, "commands", {}) or {}
+    typecheck = commands.get("typecheck")
+    argv = list(getattr(typecheck, "argv", ()) or ()) if typecheck is not None else []
+    if not argv:
+        return None
+    return " ".join(str(part) for part in argv)
+
+
+def _profile_materialize_command_argv(profile: "LanguageProfile") -> list[str] | None:
+    """The profile's ``toolchain.package_manager.materialize_command`` argv, or ``None``.
+
+    The language-free "this stack has a dependency installer" signal — mirrors the
+    oracle's :func:`codd.implement_oracle._materialize_command` (argv portion only;
+    verify_runner's install command itself stays :func:`node_install_command`, which is
+    smarter about the package manager + lockfile, and is the seam the existing tests
+    mock).
+    """
+    toolchain = getattr(profile, "toolchain", None)
+    if toolchain is None:
+        return None
+    pm = getattr(toolchain, "package_manager", None) or {}
+    raw = pm.get("materialize_command") if hasattr(pm, "get") else None
+    if not raw or not hasattr(raw, "get"):
+        return None
+    argv = list(raw.get("argv") or [])
+    return [str(part) for part in argv] if argv else None
 
 
 try:  # tomllib is stdlib from Python 3.11; tomli is its 3.10 backport.
