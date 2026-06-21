@@ -29,6 +29,27 @@ from codd.greenfield.pipeline import (
     StageError,
     load_session,
 )
+from codd.stack.command_plan import StackCommandSlotResult
+
+
+def _passing_stack_executor(slot, project_root, *, timeout):  # noqa: ANN001
+    """A v2.77c materialization executor that records the invoked slot and passes.
+
+    These v2.77a/b tests assert INTAKE + LOCK behaviour, not whether the curated
+    framework/addon commands (next build / playwright / prisma) actually run — those
+    are not runnable in CI. A passing executor isolates intake/lock from the new
+    v2.77c command-execution gate, exactly as these tests already stub stage bodies
+    to isolate intake from the stage gates (and as v2.77b's tests wrote a matching
+    lock to isolate intake from the lock gate). It still proves the slots are INVOKED.
+    """
+    return StackCommandSlotResult(
+        slot_id=slot.slot_id,
+        owner=slot.owner,
+        command_str=slot.command_str,
+        spawned=True,
+        returncode=0,
+        timed_out=False,
+    )
 
 
 # A valid stack uses the curated Next.js/Prisma/Playwright profiles already in
@@ -112,8 +133,13 @@ class _StageStubPipeline(GreenfieldPipeline):
 
 def _noop_pipeline(echo) -> GreenfieldPipeline:
     """A pipeline that runs the REAL ``run()`` entry (and real intake) to completion
-    WITHOUT any AI or real stage work — see :class:`_StageStubPipeline`."""
-    return _StageStubPipeline(echo=echo)
+    WITHOUT any AI or real stage work — see :class:`_StageStubPipeline`.
+
+    Injects a passing v2.77c stack-command executor so the curated framework/addon
+    commands are not really run (CI has no node/npx); the intake + lock behaviour
+    under test is unaffected. For a NO-STACK project the executor is never invoked
+    (the pipeline hard-branches on ``contract is not None``)."""
+    return _StageStubPipeline(echo=echo, stack_command_executor=_passing_stack_executor)
 
 
 def _run_capturing(project: Path) -> tuple[object, list[str]]:
@@ -256,7 +282,9 @@ def test_verify_path_emits_stack_hash_and_reds_on_broken_stack(tmp_path: Path) -
     orig_echo = click.echo
     try:
         click.echo = lambda *a, **k: captured.append(a[0] if a else "")
-        _intake_stack_contract_for_verify(proj_ok)
+        # v2.77c adds a stack-command materialization gate to this same path; inject a
+        # passing executor so the curated commands are not really run (CI has no node).
+        _intake_stack_contract_for_verify(proj_ok, stack_command_executor=_passing_stack_executor)
     finally:
         click.echo = orig_echo
     assert any("stack contract intake" in line and "stack_contract_hash=" in line for line in captured)

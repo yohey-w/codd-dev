@@ -7600,7 +7600,7 @@ def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
         return {}
 
 
-def _intake_stack_contract_for_verify(project_root: Path) -> None:
+def _intake_stack_contract_for_verify(project_root: Path, *, stack_command_executor=None) -> None:
     """Resolve the project's declared stack contract into the verify run trace.
 
     Contract Kernel v2.77a (intake only) — the verify-path mirror of the greenfield
@@ -7608,6 +7608,11 @@ def _intake_stack_contract_for_verify(project_root: Path) -> None:
     framework-stack contract is LIVE-consumed by the verify path (the hash enters
     the run trace), WITHOUT enforcing any obligation or changing the verify verdict
     (obligation enforcement is v2.77b-e).
+
+    ``stack_command_executor`` is the v2.77c materialization seam (default: the real
+    subprocess executor): an injectable executor that invokes each composed stack
+    command slot (exit-code only). Tests pass a recording/sentinel executor so the
+    declared slots are provably invoked without real Next.js/Playwright.
 
     * No ``stack:`` block → no-op (the opt-in framework layer is unused; the vast
       majority of projects — emits a single trace line, no behaviour change).
@@ -7657,6 +7662,34 @@ def _intake_stack_contract_for_verify(project_root: Path) -> None:
     click.echo(f"[verify] stack lock gate: {gate.message}", err=gate.red)
     if gate.red:
         raise SystemExit(1)
+
+    # Stack command MATERIALIZATION (Contract Kernel v2.77c) — the verify-path mirror
+    # of the greenfield pipeline's :meth:`_materialize_stack_commands`. (1) CONFLICT
+    # GATE: a composition conflict (command collision / unproved replace / weakened
+    # obligation / exclusive / deny) is RED (honest non-zero exit) — the composer
+    # already refuses a silent last-wins merge by recording a Conflict; this makes it
+    # a gate. (2) PLAN + EXECUTE: build a deterministic, contract-driven command plan
+    # (NO framework literal) and INVOKE each composed slot by exit code, so a declared
+    # framework_build/e2e_test is genuinely run on verify (not silently skipped while
+    # the language verify greens alone). Exit-code ONLY here; command AUTHENTICITY is
+    # v2.77d and the obligation-checker gate is v2.77e (out of lane).
+    from codd.stack.command_plan import (
+        StackCommandMaterializationError,
+        StackContractConflictError,
+        materialize_stack_command_plan,
+    )
+
+    try:
+        plan, _result = materialize_stack_command_plan(
+            contract, project_root, executor=stack_command_executor
+        )
+    except (StackContractConflictError, StackCommandMaterializationError) as exc:
+        click.echo(f"[verify] stack command materialization: {exc}", err=True)
+        raise SystemExit(1) from exc
+    click.echo(
+        f"[verify] stack command materialization: {len(plan.slots)} slot(s) invoked "
+        f"({', '.join(plan.command_ids)})"
+    )
 
 
 def _run_verify_once(

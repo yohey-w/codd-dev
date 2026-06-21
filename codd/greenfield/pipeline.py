@@ -313,6 +313,11 @@ CiScaffoldRunner = Callable[..., str]
 PropagateRunner = Callable[..., str]
 CheckRunner = Callable[[Path], str]
 Notifier = Callable[[str, str], bool]
+#: Injectable seam for the v2.77c stack-command materialization executor (a slot →
+#: exit-code outcome). Default (None) uses the real subprocess executor in
+#: ``codd.stack.command_plan``; tests inject a recording/sentinel executor so the
+#: declared stack command slots are provably invoked without real Next.js/Playwright.
+StackCommandExecutor = Callable[..., Any]
 
 
 class GreenfieldPipeline:
@@ -351,6 +356,7 @@ class GreenfieldPipeline:
         propagate_runner: PropagateRunner | None = None,
         check_runner: CheckRunner | None = None,
         notifier: Notifier | None = None,
+        stack_command_executor: StackCommandExecutor | None = None,
         echo: Callable[[str], None] = print,
     ) -> None:
         self.project_name = project_name
@@ -380,6 +386,7 @@ class GreenfieldPipeline:
         self.propagate_runner = propagate_runner
         self.check_runner = check_runner
         self.notifier = notifier
+        self.stack_command_executor = stack_command_executor
         self.echo = echo
 
     def _restore_session_options(self, session: dict[str, Any]) -> None:
@@ -497,6 +504,32 @@ class GreenfieldPipeline:
         except StageError as exc:
             return self._fail(
                 project_root, session, options, "stack_lock",
+                {"status": STATUS_PENDING, "detail": ""}, str(exc),
+            )
+
+        # Stack command MATERIALIZATION (Contract Kernel v2.77c) — connect the
+        # composed stack commands (and thus the stack obligations) to the run's
+        # ACTUAL verify/build/test command plan. Two parts (both RED-routed through
+        # _fail, like intake/lock):
+        #   1. CONFLICT GATE — a composition conflict (command collision / unproved
+        #      replace / weakened obligation / exclusive / deny) is RED. The composer
+        #      already records these (it refuses last-wins); this makes that a gate.
+        #   2. PLAN + EXECUTE — build a deterministic, contract-driven command plan
+        #      from contract.commands (NO framework literal) and INVOKE each slot by
+        #      exit code, so a declared framework_build/e2e_test is genuinely run (not
+        #      silently skipped while the language verify greens alone — the false
+        #      green this step closes). Exit-code ONLY here; command AUTHENTICITY
+        #      (no-op/"build":"true"/observed-no-tests) is v2.77d and the obligation-
+        #      checker gate is v2.77e — both deliberately out of lane.
+        # Only for stack-declared projects (contract is not None) — a non-stack run
+        # never reaches here, so it is byte-identical (no plan, no execution, no new
+        # trace keys).
+        try:
+            if contract is not None:
+                self._materialize_stack_commands(project_root, session, contract)
+        except StageError as exc:
+            return self._fail(
+                project_root, session, options, "stack_commands",
                 {"status": STATUS_PENDING, "detail": ""}, str(exc),
             )
 
@@ -666,6 +699,53 @@ class GreenfieldPipeline:
         self.echo(f"[greenfield] stack lock gate: {gate.message}")
         if gate.red:
             raise StageError(gate.message)
+
+    # ── stack command materialization (Contract Kernel v2.77c) ──
+
+    def _materialize_stack_commands(self, project_root: Path, session: dict[str, Any], contract) -> None:
+        """Conflict-gate + materialize the composed stack commands into the run plan (v2.77c).
+
+        See the call site in :meth:`run`. Only invoked for stack-declared projects.
+
+        1. CONFLICT GATE — :func:`assert_stack_contract_clean` (inside
+           :func:`stack_command_plan`) raises :class:`StackContractConflictError` on
+           ANY composition conflict (command collision / unproved replace / weakened
+           obligation / exclusive / deny). That is RED — the composer already refuses
+           a silent last-wins merge by recording a ``Conflict``; this makes it a gate.
+        2. MATERIALIZE — build a deterministic, contract-driven command plan and
+           INVOKE each composed slot by exit code (via the injectable
+           ``stack_command_executor`` seam). A failing slot raises
+           :class:`StackCommandMaterializationError`. Both domain errors become a
+           :class:`StageError` so the autopilot reports them honestly (the run does
+           NOT advance to the stage loop with a conflicted/failing stack plan).
+
+        The materialized plan + executed slot ids are recorded in the run trace
+        (observable, like the intake hash + lock verdict) so "the declared stack
+        command slots were invoked" is provable. Exit-code only — authenticity is
+        v2.77d, the obligation-checker gate is v2.77e.
+        """
+        from codd.stack.command_plan import (
+            StackCommandMaterializationError,
+            StackContractConflictError,
+            materialize_stack_command_plan,
+        )
+
+        try:
+            plan, result = materialize_stack_command_plan(
+                contract, project_root, executor=self.stack_command_executor
+            )
+        except (StackContractConflictError, StackCommandMaterializationError) as exc:
+            self.echo(f"[greenfield] stack command materialization: {exc}")
+            raise StageError(str(exc)) from exc
+
+        record = session.get("stack_contract")
+        if isinstance(record, dict):
+            record["stack_command_plan"] = plan.to_record()
+            record["stack_commands_executed"] = list(result.executed_slot_ids)
+        self.echo(
+            "[greenfield] stack command materialization: "
+            f"{len(plan.slots)} slot(s) invoked ({', '.join(plan.command_ids)})"
+        )
 
     # ── option resolution ───────────────────────────────────
 

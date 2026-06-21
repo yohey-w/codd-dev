@@ -47,8 +47,26 @@ from codd.stack.lock import (
     enforce_stack_lock,
     stack_lock_path,
 )
+from codd.stack.command_plan import StackCommandSlotResult
 from codd.stack.project import resolve_project_stack
 from codd.stack.resolve import resolve_stack_from_declaration
+
+
+def _passing_stack_executor(slot, project_root, *, timeout):  # noqa: ANN001
+    """A v2.77c materialization executor that records the invoked slot and passes.
+
+    These v2.77b tests assert LOCK behaviour, not whether the curated framework/addon
+    commands actually run (CI has no node/npx). A passing executor isolates the lock
+    gate from the new v2.77c command-execution gate (the same isolation technique the
+    tests already use: stubbing stage bodies, and writing a matching lock)."""
+    return StackCommandSlotResult(
+        slot_id=slot.slot_id,
+        owner=slot.owner,
+        command_str=slot.command_str,
+        spawned=True,
+        returncode=0,
+        timed_out=False,
+    )
 
 # Reuse the curated profiles already in codd/stack/profiles/ (the 42-test
 # subsystem), exactly as the v2.77a intake tests do.
@@ -126,7 +144,12 @@ class _StageStubPipeline(GreenfieldPipeline):
 
 def _run_capturing(project: Path, *, resume: bool = False) -> tuple[object, list[str]]:
     lines: list[str] = []
-    result = _StageStubPipeline(echo=lines.append).run(project, resume=resume)
+    # Inject a passing v2.77c stack-command executor so the curated framework/addon
+    # commands are not really run (CI has no node/npx) — the lock behaviour under test
+    # is unaffected. A no-stack project never invokes it (hard branch on contract).
+    result = _StageStubPipeline(
+        echo=lines.append, stack_command_executor=_passing_stack_executor
+    ).run(project, resume=resume)
     return result, lines
 
 
@@ -201,8 +224,9 @@ def test_verify_valid_lock_is_green(tmp_path: Path) -> None:
     project = _make_project(tmp_path, stack=_VALID_STACK)
     _write_lock_for(project, _VALID_STACK)
 
-    # Must not raise SystemExit.
-    _intake_stack_contract_for_verify(project)
+    # Must not raise SystemExit. Inject a passing v2.77c executor (curated commands
+    # are not runnable in CI) so this asserts the lock GREEN path, not command exec.
+    _intake_stack_contract_for_verify(project, stack_command_executor=_passing_stack_executor)
 
 
 def test_valid_unit_verdict(tmp_path: Path) -> None:
