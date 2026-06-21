@@ -25,6 +25,8 @@ from .profile import (
     CommandSpec,
     DependencyIntegrityFile,
     Identity,
+    ImplementOracleProfileSpec,
+    ImplementOracleStepSpec,
     ImportsSpec,
     LanguageProfile,
     LayoutSpec,
@@ -367,6 +369,94 @@ def _parse_ci(doc: Mapping[str, Any]) -> CiSpec | None:
     )
 
 
+_IMPLEMENT_ORACLE_KINDS = frozenset({"command", "composite", "adapter"})
+
+
+def _parse_implement_oracle(
+    doc: Mapping[str, Any], commands: Mapping[str, Any]
+) -> ImplementOracleProfileSpec | None:
+    """Parse + FAIL-CLOSED validate the ``implement_oracle:`` block.
+
+    Contract Kernel §1: the oracle declaration references command ids / an
+    adapter id; it never carries argv/cwd/env. Every malformed shape is a hard
+    :class:`LanguageProfileError` (a profile is a contract, not a way to slip a
+    broken / silent-green oracle past the gate).
+    """
+    raw = doc.get("implement_oracle")
+    if raw is None:
+        return None
+    where = "implement_oracle"
+    m = _as_mapping(raw, where=where)
+
+    kind = m.get("kind")
+    if kind not in _IMPLEMENT_ORACLE_KINDS:
+        raise LanguageProfileError(
+            f"{where}: unknown kind {kind!r}; expected one of "
+            f"{sorted(_IMPLEMENT_ORACLE_KINDS)}"
+        )
+
+    # Every kind needs an adapter id (never inferred from the language id).
+    adapter = m.get("adapter")
+    if adapter is None or not str(adapter).strip():
+        raise LanguageProfileError(f"{where}: missing required key 'adapter'")
+    adapter = str(adapter)
+
+    command = m.get("command")
+    command = str(command) if command is not None else None
+    raw_steps = _as_tuple(m.get("steps"))
+
+    if kind == "command":
+        if command is None:
+            raise LanguageProfileError(
+                f"{where}: kind 'command' requires a 'command' id"
+            )
+        if raw_steps:
+            raise LanguageProfileError(
+                f"{where}: kind 'command' must not declare 'steps'"
+            )
+        if command not in commands:
+            raise LanguageProfileError(
+                f"{where}: command {command!r} is not declared in 'commands'"
+            )
+        return ImplementOracleProfileSpec(kind="command", adapter=adapter, command=command)
+
+    if kind == "composite":
+        if command is not None:
+            raise LanguageProfileError(
+                f"{where}: kind 'composite' must not declare 'command' "
+                f"(use 'steps')"
+            )
+        if not raw_steps:
+            raise LanguageProfileError(
+                f"{where}: kind 'composite' requires a non-empty 'steps' list"
+            )
+        steps: list[ImplementOracleStepSpec] = []
+        for i, raw_step in enumerate(raw_steps):
+            sm = _as_mapping(raw_step, where=f"{where}.steps[{i}]")
+            step_cmd = _require(sm, "command", where=f"{where}.steps[{i}]")
+            step_cmd = str(step_cmd)
+            if step_cmd not in commands:
+                raise LanguageProfileError(
+                    f"{where}.steps[{i}]: command {step_cmd!r} is not declared "
+                    f"in 'commands'"
+                )
+            steps.append(ImplementOracleStepSpec(command=step_cmd))
+        return ImplementOracleProfileSpec(
+            kind="composite", adapter=adapter, steps=tuple(steps)
+        )
+
+    # kind == "adapter": the adapter does everything; no command/steps.
+    if command is not None:
+        raise LanguageProfileError(
+            f"{where}: kind 'adapter' must not declare 'command'"
+        )
+    if raw_steps:
+        raise LanguageProfileError(
+            f"{where}: kind 'adapter' must not declare 'steps'"
+        )
+    return ImplementOracleProfileSpec(kind="adapter", adapter=adapter)
+
+
 # ---------------------------------------------------------------------------
 # public entry point
 # ---------------------------------------------------------------------------
@@ -388,6 +478,7 @@ _KNOWN_TOP_LEVEL = frozenset(
         "artifacts",
         "scaffold",
         "ci",
+        "implement_oracle",
     }
 )
 
@@ -420,17 +511,19 @@ def load_language_profile(path: str | Path) -> LanguageProfile:
 
     extra = {k: v for k, v in doc.items() if k not in _KNOWN_TOP_LEVEL}
 
+    commands = _parse_commands(doc)
     return LanguageProfile(
         identity=_parse_identity(doc),
         layout=_parse_layout(doc),
         toolchain=_parse_toolchain(doc),
-        commands=_parse_commands(doc),
+        commands=commands,
         imports=_parse_imports(doc),
         tests=_parse_tests(doc),
         verify=_parse_verify(doc),
         artifacts=_parse_artifacts(doc),
         scaffold=_parse_scaffold(doc),
         ci=_parse_ci(doc),
+        implement_oracle=_parse_implement_oracle(doc, commands),
         extra=extra,
         raw=dict(doc),
     )

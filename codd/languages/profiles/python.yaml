@@ -94,8 +94,8 @@ commands:
       format: junit-xml
       adapter: pytest-junit-xml
 
-# Preserved verbatim (modeled as profile.extra in Phase 1). Python uses a
-# composite oracle, registered as an adapter in a later phase (design §4 Phase 4).
+# Implement-time oracle (Contract Kernel §1): Python's compile + import-resolver
+# + collect-only composite is an in-process custom executor, so kind=adapter.
 implement_oracle:
   kind: adapter
   adapter: python-composite

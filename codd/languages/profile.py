@@ -447,6 +447,57 @@ class AdapterRef:
 
 
 # ---------------------------------------------------------------------------
+# implement_oracle declaration (Contract Kernel oracle dispatch §1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ImplementOracleStepSpec:
+    """One step of a composite implement-oracle (Contract Kernel §1).
+
+    ``command`` is an id that MUST reference an entry in
+    ``LanguageProfile.commands`` — the step carries NO argv/cwd/env of its own
+    (those live on the referenced :class:`CommandSpec`). The loader fail-closes
+    if the referenced command id is not declared.
+    """
+
+    command: str
+
+
+@dataclass(frozen=True)
+class ImplementOracleProfileSpec:
+    """The PROFILE's declaration of its implement-time oracle (Contract Kernel §1).
+
+    This is the *declaration* the language profile carries in YAML — NOT the
+    gate's runtime spec (:class:`codd.project_types.ImplementOracleSpec`, which
+    the dispatch still synthesizes). Distinct on purpose: this model only names
+    *what kind* of oracle the language has and *which command ids / adapter* it
+    references; it never duplicates argv/cwd/env.
+
+    * ``kind`` — one of:
+        - ``"command"``   — a single static checker (TS: ``tsc --noEmit``),
+          named by ``command`` (a command id). ``steps`` MUST be empty.
+        - ``"composite"`` — a sequence of weaker checkers unioned (Go:
+          ``typecheck`` + ``vet``), named by ``steps``. ``command`` MUST be
+          unset.
+        - ``"adapter"``   — an in-process custom executor (Python's compile +
+          import-resolver + collect-only composite). Neither ``command`` nor
+          ``steps`` is set; the ``adapter`` id does all the work.
+    * ``adapter`` — the (always-required) adapter id that resolves the oracle's
+      tool semantics (scope certify / output normalize, and execute for the
+      ``adapter`` kind). The profile declares it EXPLICITLY — it is never
+      inferred from the language id (an implicit naming convention would create
+      silent-green on a declaration typo).
+    * ``command`` / ``steps`` — command-id references only (see above).
+    """
+
+    kind: Literal["command", "composite", "adapter"]
+    adapter: str
+    command: str | None = None
+    steps: tuple[ImplementOracleStepSpec, ...] = ()
+
+
+# ---------------------------------------------------------------------------
 # top-level profile
 # ---------------------------------------------------------------------------
 
@@ -456,9 +507,10 @@ class LanguageProfile:
     """The full declarative language contract (design §1).
 
     Sub-structures that are not yet load-bearing for Phase 1 are optional.
-    ``path_rules``, ``implement_oracle`` and any unknown top-level keys are
-    preserved verbatim in ``raw`` / ``extra`` so a later phase can consume
-    them without re-parsing the YAML.
+    ``path_rules`` and any unknown top-level keys are preserved verbatim in
+    ``raw`` / ``extra`` so a later phase can consume them without re-parsing the
+    YAML. ``implement_oracle`` is now modeled as a first-class field (Contract
+    Kernel §1) — no longer left in ``extra``.
     """
 
     identity: Identity
@@ -473,7 +525,10 @@ class LanguageProfile:
     artifacts: ArtifactsSpec | None = None
     scaffold: ScaffoldSpec | None = None
     ci: CiSpec | None = None
-    #: ``path_rules``, ``implement_oracle`` etc., preserved but not modeled in Phase 1.
+    #: The implement-time oracle declaration (Contract Kernel §1). ``None`` when
+    #: the profile declares no ``implement_oracle:`` block.
+    implement_oracle: "ImplementOracleProfileSpec | None" = None
+    #: ``path_rules`` etc., preserved but not modeled in Phase 1.
     extra: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     #: The full parsed YAML mapping, for round-trip / debugging.
     raw: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))

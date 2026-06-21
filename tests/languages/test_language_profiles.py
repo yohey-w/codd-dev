@@ -291,12 +291,16 @@ def test_placeholders_left_literal() -> None:
 
 def test_raw_and_extra_preserve_unmodeled_sections() -> None:
     go = load_language_profile(PROFILES_DIR / "go.yaml")
-    # path_rules / implement_oracle are not modeled in Phase 1 -> kept in .extra
+    # path_rules is still not modeled -> kept in .extra.
     assert "path_rules" in go.extra
-    assert "implement_oracle" in go.extra
-    assert go.extra["implement_oracle"]["kind"] == "composite"
-    # .raw is the whole document
+    # implement_oracle is now a first-class field (Contract Kernel §1), so it is
+    # NO LONGER left in .extra; it parses into the modeled spec instead.
+    assert "implement_oracle" not in go.extra
+    assert go.implement_oracle is not None
+    assert go.implement_oracle.kind == "composite"
+    # .raw is the whole document (the raw block is still present there).
     assert go.raw["id"] == "go"
+    assert go.raw["implement_oracle"]["kind"] == "composite"
 
 
 # ---------------------------------------------------------------------------

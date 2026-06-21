@@ -3012,8 +3012,11 @@ def _resolve_registry_composite_oracle(
         lang_profile = default_registry.resolve(lang)
     except Exception:  # noqa: BLE001 — no registry profile ⇒ NO-OP, not a crash.
         return None
-    oracle_decl = lang_profile.extra.get("implement_oracle") if lang_profile.extra else None
-    if not isinstance(oracle_decl, Mapping) or oracle_decl.get("kind") != "composite":
+    # implement_oracle is now a modeled first-class field (Contract Kernel §1),
+    # no longer a raw mapping in ``.extra``. Behaviour is preserved: only a Go
+    # profile declaring kind="composite" synthesizes the composite spec below.
+    oracle_decl = lang_profile.implement_oracle
+    if oracle_decl is None or oracle_decl.kind != "composite":
         return None
     module_root = _norm(getattr(lang_profile.layout, "module_root", ".") or ".") or "."
     synthetic = LayoutProfile(

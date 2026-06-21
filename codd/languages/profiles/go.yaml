@@ -185,9 +185,11 @@ commands:
     scope:
       must_include_test_sets: ["colocated", "e2e"]
 
-# Preserved verbatim (modeled as profile.extra in Phase 1).
+# Implement-time oracle (Contract Kernel §1): a composite of typecheck + vet,
+# resolved by the go-toolchain adapter. References command ids only.
 implement_oracle:
   kind: composite
+  adapter: go-toolchain
   steps:
     - command: typecheck
     - command: vet

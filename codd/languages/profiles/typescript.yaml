@@ -96,10 +96,11 @@ commands:
       format: vitest-json
       adapter: vitest-json
 
-# Preserved verbatim (modeled as profile.extra in Phase 1). tsc --noEmit is a
-# sufficient oracle, so a plain command spec works (design §4 Phase 4).
+# Implement-time oracle (Contract Kernel §1): tsc --noEmit is a sufficient static
+# checker, so kind=command (the typecheck command id), resolved by typescript-tsc.
 implement_oracle:
   kind: command
+  adapter: typescript-tsc
   command: typecheck
 
 tests:
