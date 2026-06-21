@@ -24,12 +24,17 @@ node-install + default-tsc heuristic, made profile-driven and graduated here):
   * codd/repair/verify_runner.py      — ``_is_node_project`` / the install-preflight
     + default-typecheck gate, now PROFILE-DRIVEN (the profile's ``typecheck``
     ``requires_materialized_deps`` + ``materialize_command``), no language-name literal.
+  * codd/project_types.py             — the scaffold/layout/test-block/ensurer
+    dispatch, now PROFILE-DRIVEN (Contract Kernel v2.71): routed by the resolved
+    ``LanguageProfile``'s ``layout.package_root.kind`` SHAPE + the
+    ``tests.semantics_adapter`` capability id, no ``self.language == ...`` /
+    language-name-keyed builder dict.
 
 NOT YET locked (Cut Condition A still pending for these zones — listed so the
 coverage gap is EXPLICIT, never silently uncovered; each graduates into
 LOCKED_MODULES when it is made contract-driven):
-  * codd/project_types.py, codd/detection/* (stack_detector / import_coherence),
-    the PathPlanner / path_rules zone.
+  * codd/scanner.py (source-extraction language dispatch), the stack-detection
+    zone (import_coherence / extractor), the PathPlanner / path_rules zone.
 
 Dynamic escape coverage (a SEEDED incoherence must reach RED — escape == 0) is
 asserted by the per-language anti-false-green suites, which TOGETHER guarantee no
@@ -61,12 +66,17 @@ LOCKED_MODULES = (
     "languages/verify_executor.py",
     "languages/verify_plan.py",
     "repair/verify_runner.py",  # graduated: _is_node_project is now profile-driven
+    # graduated (Contract Kernel v2.71): the scaffold/layout/test-block/ensurer
+    # dispatch is now PROFILE-DRIVEN (resolved LanguageProfile's
+    # ``layout.package_root.kind`` SHAPE + ``tests.semantics_adapter`` capability
+    # id), no ``self.language == ...`` / language-name-keyed builder dict.
+    "project_types.py",
 )
 
 # Known-pending Cut Condition A zones — documented so the gap is explicit (NOT
 # asserted clean; they still contain language literals by design-debt).
 PENDING_ZONES = (
-    "project_types.py",  # _LAYOUT_PROFILE_BUILDERS keys + language == "python"/... dispatch
+    "scanner.py",  # source-extraction dispatch still keys on language in ("typescript","javascript")
     "detection",
     "path_rules / PathPlanner",
 )
@@ -131,12 +141,12 @@ def test_pending_zones_are_documented_not_silently_uncovered() -> None:
     PENDING_ZONES) — this asserts the pending list is non-empty until Cut Condition
     A is fully done, so the coverage gap is never quietly forgotten.
 
-    The headline pending zone is now ``project_types.py`` (``verify_runner.py``
-    graduated into LOCKED_MODULES once ``_is_node_project`` became profile-driven). It
-    really does still carry ``language == "python"`` / ``language in (...)`` dispatch in
-    its ``_LAYOUT_PROFILE_BUILDERS`` / ``test_block_profile`` / scaffold paths — keeping
-    the documentation honest: if someone cleans it without updating this file, this
-    fails and prompts the next graduation.
+    The headline pending zone is now ``scanner.py`` (``project_types.py`` graduated
+    into LOCKED_MODULES once its scaffold/layout/test-block/ensurer dispatch became
+    PROFILE-DRIVEN — Contract Kernel v2.71). ``scanner.py`` really does still carry
+    ``language in ("typescript", "javascript")`` dispatch in its source-extraction
+    path — keeping the documentation honest: if someone cleans it without updating
+    this file, this fails and prompts the next graduation.
     """
     assert PENDING_ZONES, "if Cut Condition A is fully done, lock all zones + remove this test"
     # verify_runner.py must NOT regress back into PENDING_ZONES — it is locked now.
@@ -144,10 +154,16 @@ def test_pending_zones_are_documented_not_silently_uncovered() -> None:
         "repair/verify_runner.py is graduated (profile-driven); it must stay in "
         "LOCKED_MODULES, never back in PENDING_ZONES."
     )
-    project_types = _PKG_ROOT / "project_types.py"
-    if project_types.is_file():
-        assert re.search(r"""\blanguage\b\s+in\s*\(""", _code_only(project_types)), (
-            "project_types.py no longer keys on a language literal — graduate "
-            "project_types.py into LOCKED_MODULES and drop it from PENDING_ZONES "
+    # project_types.py must NOT regress back into PENDING_ZONES — it is locked now
+    # (Contract Kernel v2.71 de-literalization).
+    assert "project_types.py" not in PENDING_ZONES, (
+        "project_types.py is graduated (profile-driven scaffold/layout/test-block "
+        "dispatch); it must stay in LOCKED_MODULES, never back in PENDING_ZONES."
+    )
+    scanner = _PKG_ROOT / "scanner.py"
+    if scanner.is_file():
+        assert re.search(r"""\blanguage\b\s+in\s*\(""", _code_only(scanner)), (
+            "scanner.py no longer keys on a language literal — graduate "
+            "scanner.py into LOCKED_MODULES and drop it from PENDING_ZONES "
             "(repoint this assertion to the next pending file: detection / path_rules)."
         )

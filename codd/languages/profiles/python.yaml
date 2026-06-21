@@ -143,6 +143,25 @@ scaffold:
     - "src/{package_name}/__main__.py"
     - "tests/__init__.py"
 
+# Legacy project-types bridge (Contract Kernel v2.71): the declarative seam that
+# lets the language-free core route the LEGACY codd.project_types builders /
+# scaffolder / test-runner ensurer WITHOUT a language-name literal in core code.
+#   * accepted_names — the EXACT set of runtime language names the legacy
+#     ``resolve_layout_profile`` / ``ensure_test_runner_config`` accept for this
+#     stack (preserves byte-identical support: Python accepts only ``python``,
+#     NOT every registry alias like ``py``/``python3``). Language names live in
+#     the PROFILE (an allowed zone), never in core .py.
+#   * realizer ids — HARNESS-POLICY capability names (not language names) the core
+#     maps to the concrete legacy builder/scaffolder/ensurer. They carry the
+#     runner/install/oracle/toolchain/verify POLICY the YAML does not yet model
+#     (that full externalization is the v3.0.0 gate; this increment only removes
+#     the language-name DISPATCH).
+legacy_project_types:
+  accepted_names: ["python"]
+  layout_builder: "src-package-pytest-editable-layout-v1"
+  scaffolder: "pyproject-src-package-scaffold-v1"
+  test_runner_ensurer: "pyproject-pytest-runner-v1"
+
 artifacts:
   harness_root: ".codd"
 

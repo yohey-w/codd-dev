@@ -154,6 +154,17 @@ scaffold:
     - "tsconfig.json"
     - "vitest.config.ts"
 
+# Legacy project-types bridge (Contract Kernel v2.71) — see python.yaml for the
+# rationale. TypeScript accepts EXACTLY ``typescript`` + ``node`` (the historical
+# legacy-dict keys), NOT the wider registry aliases ``ts``/``js``/``javascript`` —
+# preserving byte-identical support. The realizer ids are harness-policy capability
+# names (npm/vitest/tsc), not language names.
+legacy_project_types:
+  accepted_names: ["typescript", "node"]
+  layout_builder: "npm-vitest-tsc-layout-v1"
+  scaffolder: "npm-tsconfig-vitest-scaffold-v1"
+  test_runner_ensurer: "npm-vitest-runner-v1"
+
 artifacts:
   harness_root: ".codd"
 

@@ -263,6 +263,113 @@ _VALID_TEST_IMPORT_POLICIES = {"package_absolute", "flat", "relative"}
 
 
 # ═══════════════════════════════════════════════════════════
+# Contract-Kernel language resolution seam (v2.71: de-literalize the dispatch)
+# ═══════════════════════════════════════════════════════════
+#
+# The Contract Kernel rule (Cut Condition A): the core branches on a RESOLVED
+# language contract + registered adapter capability, NEVER on a language-NAME
+# literal. The functions below resolve a runtime language VALUE (a string the
+# caller already holds — allowed) to the declarative ``LanguageProfile`` (loaded
+# from ``codd/languages/profiles/*.yaml``) so layout/scaffold/test-block
+# decisions read profile DATA instead of ``self.language == "python"`` dispatch.
+#
+# Anti-false-green: a declared-but-UNKNOWN language degrades to ``None`` (the
+# conservative non-stack behaviour — no scaffolder engages, no stack paths are
+# declared), mirroring ``codd.repair.verify_runner._declared_language_profile``.
+# It is NEVER coerced to a wrong-layout default (that would be a silent green).
+
+
+def _resolve_kernel_language_profile(language: str | None) -> Any:
+    """Resolve a runtime language value to its declarative ``LanguageProfile``.
+
+    Returns the loaded profile (matched by id OR alias, case-insensitively
+    through :data:`codd.languages.registry.default_registry`) or ``None`` when
+    the language is blank/unknown. The language string is a RUNTIME VALUE the
+    caller already holds (not a hardcoded literal), so this is the language-free
+    resolution seam — it replaces the removed ``self.language == "<name>"`` /
+    language-name-keyed builder-dict dispatch. Import is lazy so the language
+    package is not pulled in at ``project_types`` import time / on the hot path.
+    """
+    if not language or not str(language).strip():
+        return None
+    try:
+        from codd.languages.registry import UnknownLanguageError, default_registry
+    except Exception:  # noqa: BLE001 — registry optional; degrade (never crash).
+        return None
+    try:
+        return default_registry.resolve(str(language))
+    except UnknownLanguageError:
+        return None
+    except Exception:  # noqa: BLE001 — a malformed profile is the loader's gate; degrade here.
+        return None
+
+
+# ── Legacy project-types bridge (the byte-identical, language-name-free seam) ──
+#
+# The LEGACY ``codd.project_types`` builders / scaffolders / test-runner ensurers
+# still carry HARNESS POLICY (runner / install_mode / oracle / toolchain / verify
+# campaign) the declarative ``LanguageProfile`` does NOT yet model — full policy
+# externalization is the v3.0.0 gate. THIS increment removes the language-NAME
+# DISPATCH only. The seam: a profile declares a ``legacy_project_types:`` block
+# (preserved in ``profile.extra``) with
+#   * ``accepted_names``       — the EXACT runtime names the legacy path accepts
+#     for this stack (so support stays byte-identical: ``python`` accepts only
+#     ``python``, NOT every registry alias like ``py``/``python3``; ``typescript``
+#     accepts only ``typescript``+``node``, NOT ``ts``/``js``/``javascript``).
+#   * realizer ids            — HARNESS-POLICY capability names (``layout_builder``
+#     / ``scaffolder`` / ``test_runner_ensurer``) the core maps to the concrete
+#     legacy function via the registries at the bottom of this module. The keys are
+#     policy capability ids, NEVER language names — so the core stays language-free.
+#
+# A profile WITHOUT this block (Go) is not bridged to the legacy path at all (Go's
+# coherence is owned by the contract/implement-oracle path). Anti-false-green: an
+# unknown / unaccepted name resolves to NO realizer (the conservative degradation —
+# the caller stays on its no-profile path, never a wrong builder writing a wrong
+# layout). Language names live in the PROFILE YAML (an allowed zone), never here.
+
+_LEGACY_BRIDGE_KEY = "legacy_project_types"
+
+
+def _legacy_bridge_block(language: str | None) -> Mapping[str, Any] | None:
+    """The profile's ``legacy_project_types`` block IFF ``language`` is accepted.
+
+    Resolves the runtime ``language`` to its :class:`LanguageProfile`, then returns
+    the declared ``legacy_project_types`` mapping ONLY when ``language`` (case-
+    insensitively) is in that block's ``accepted_names``. ``None`` otherwise — a
+    blank/unknown language, an alias the legacy path historically did NOT accept,
+    or a profile that declares no bridge (Go). This is the byte-identical support
+    gate: it restores the legacy dict's EXACT accepted-name set without a
+    language-name literal in core code.
+    """
+    profile = _resolve_kernel_language_profile(language)
+    extra = getattr(profile, "extra", None) if profile is not None else None
+    block = extra.get(_LEGACY_BRIDGE_KEY) if isinstance(extra, Mapping) else None
+    if not isinstance(block, Mapping):
+        return None
+    accepted = block.get("accepted_names")
+    accepted_set = {
+        str(n).strip().lower() for n in (accepted or ()) if str(n).strip()
+    } if isinstance(accepted, (list, tuple)) else set()
+    if (language or "").strip().lower() not in accepted_set:
+        return None
+    return block
+
+
+def _legacy_realizer_id(language: str | None, field: str) -> str | None:
+    """The realizer capability id for ``field`` from an ACCEPTED legacy bridge.
+
+    ``field`` is one of ``layout_builder`` / ``scaffolder`` / ``test_runner_ensurer``.
+    ``None`` when the language is not bridged/accepted or the field is undeclared —
+    the conservative degradation (no legacy realizer engages).
+    """
+    block = _legacy_bridge_block(language)
+    if block is None:
+        return None
+    value = block.get(field)
+    return str(value) if value else None
+
+
+# ═══════════════════════════════════════════════════════════
 # Implement-time native-oracle spec (the "first head" of the Artifact Contract
 # Graph → Native Oracle Adapter: see memory/project_codd_language_generality_acg)
 # ═══════════════════════════════════════════════════════════
@@ -688,12 +795,20 @@ class LayoutProfile:
         (e.g. TS ``vitest.config.ts`` / ``tsconfig.json``) is never mis-flagged as
         an unowned orphan and never reverted by the fence.
 
-        Language-agnostic: each path is DERIVED from this profile's own fields
-        (the same values the scaffolder uses) + the toolchain manifest/lock
-        filenames, so a new stack inherits the contract by populating its profile,
-        with no per-language logic in the gate. The list is a STATIC declaration of
-        what the scaffolder *can* create (not what is present on disk); callers
-        that need only existing files filter by ``is_file()``.
+        PROFILE-DRIVEN (Contract Kernel v2.71): the stack-specific scaffold files
+        are selected by the resolved :class:`LanguageProfile`'s legacy-bridge
+        ``scaffolder`` realizer id (a harness-policy capability name — Python's
+        package-topology scaffolder vs TS's config scaffolder), NOT a
+        ``self.language ==`` literal. Each path is still DERIVED from this
+        ``LayoutProfile``'s own fields (``package_root`` / ``test_root`` /
+        ``requires_*`` — the same values the scaffolder uses) + the toolchain
+        manifest/lock filenames, so a new stack inherits the contract by declaring
+        its ``legacy_project_types`` bridge, with no language-name logic in the gate.
+        A stack with no legacy bridge (Go) or an unknown/unaccepted language declares
+        no stack-specific scaffold files (only the toolchain manifest/lock, if any).
+        The list is a STATIC declaration of what the scaffolder *can* create (not
+        what is present on disk); callers that need only existing files filter by
+        ``is_file()``.
         """
         paths: list[str] = []
 
@@ -710,7 +825,10 @@ class LayoutProfile:
             for lock in toolchain.lock_filenames:
                 _add(lock)
 
-        if self.language == "python":
+        # Route the stack-scaffold files by the legacy-bridge scaffolder realizer id
+        # (a harness-policy capability name from the profile), never a language name.
+        scaffolder_id = _legacy_realizer_id(self.language, "scaffolder")
+        if scaffolder_id == _SCAFFOLDER_PY_SRC_PACKAGE:
             # _scaffold_python: pyproject + package <__init__>/<__main__> + test <__init__>.
             _add(_PYPROJECT_FILENAME)
             if self.requires_package_init:
@@ -718,7 +836,7 @@ class LayoutProfile:
                 _add(f"{self.package_root}/__main__.py")
             if self.requires_test_init:
                 _add(f"{self.test_root}/__init__.py")
-        elif self.language in ("typescript", "node"):
+        elif scaffolder_id == _SCAFFOLDER_TS_NPM:
             # _scaffold_typescript: tsconfig + vitest config + package.json.
             _add(_TSCONFIG_FILENAME)
             _add(_VITEST_CONFIG_FILENAME)
@@ -733,12 +851,26 @@ class LayoutProfile:
         parser that locates executable test blocks and resolves skip/assertion
         facts) or ``None`` for a stack with no adapter — in which case the
         authenticity gate gracefully degrades to its language-agnostic stage 1
-        (orphan-marker) check only. This is the SINGLE registration point for a
-        new stack's test parser, mirroring :meth:`harness_owned_scaffold_paths`
-        (dispatch on ``self.language``, no per-language logic in the gate). The
-        import is lazy so the authenticity module (which imports the VB audit) is
-        never pulled in at ``project_types`` import time.
+        (orphan-marker) check only.
+
+        PROFILE-DRIVEN (Contract Kernel v2.71): the parser is selected by the
+        resolved :class:`LanguageProfile`'s ``tests.semantics_adapter`` CAPABILITY
+        ID (``python-test-semantics`` / ``typescript-test-semantics`` /
+        ``go-test-semantics``), NOT a ``self.language ==`` literal. The id is a
+        capability name declared in the language YAML, so a new stack registers its
+        parser by declaring its semantics adapter id + adding one entry to the
+        adapter-id→parser table below — no language-name logic in the gate. An
+        unknown language / a profile with no semantics adapter ⇒ ``None`` (the
+        authenticity gate degrades to its stage-1 check). Imports are lazy so the
+        authenticity module (which imports the VB audit) is never pulled in at
+        ``project_types`` import time.
         """
+
+        profile = _resolve_kernel_language_profile(self.language)
+        tests = getattr(profile, "tests", None) if profile is not None else None
+        adapter_id = getattr(tests, "semantics_adapter", None) if tests is not None else None
+        if not adapter_id:
+            return None
 
         try:
             from codd.vb_marker_authenticity import (
@@ -749,13 +881,15 @@ class LayoutProfile:
         except Exception:  # noqa: BLE001 — adapter is optional; degrade if unavailable.
             return None
 
-        if self.language == "python":
-            return PythonTestBlockProfile()
-        if self.language in ("typescript", "node", "javascript"):
-            return TypeScriptTestBlockProfile()
-        if self.language in ("go", "golang"):
-            return GoTestBlockProfile()
-        return None
+        # adapter-id → test-block parser. The keys are CAPABILITY ids from the
+        # language profiles (never language names), so this is language-free.
+        builders = {
+            "python-test-semantics": PythonTestBlockProfile,
+            "typescript-test-semantics": TypeScriptTestBlockProfile,
+            "go-test-semantics": GoTestBlockProfile,
+        }
+        builder = builders.get(str(adapter_id))
+        return builder() if builder is not None else None
 
     def runner_report_adapter(self) -> Any:
         """Resolve this stack's runner-report adapter for the coherence gate.
@@ -1096,19 +1230,66 @@ def _typescript_layout_profile(
     )
 
 
-# Language → layout-profile builder. ONE entry per stack (the only place a stack
-# registers its topology). go/rust extend here with a single function each.
+# Realizer capability id → legacy layout-profile builder (Contract Kernel v2.71).
+# The dispatch key is the HARNESS-POLICY capability id a profile declares in its
+# ``legacy_project_types.layout_builder`` — NOT a language name. The builder carries
+# the runner/install/oracle/toolchain/verify POLICY the declarative profile does not
+# yet model (full externalization = the v3.0.0 gate; this increment removes only the
+# language-name DISPATCH). A new stack maps to an existing builder by declaring that
+# realizer id, or registers a new builder here under a new id.
 _LayoutProfileBuilder = Callable[..., LayoutProfile]
-_LAYOUT_PROFILE_BUILDERS: dict[str, _LayoutProfileBuilder] = {
-    "python": _python_layout_profile,
-    "typescript": _typescript_layout_profile,
-    "node": _typescript_layout_profile,
+#: Realizer capability ids (must match the profile YAML ``legacy_project_types``).
+_LAYOUT_BUILDER_PY_SRC_PACKAGE = "src-package-pytest-editable-layout-v1"
+_LAYOUT_BUILDER_TS_NPM = "npm-vitest-tsc-layout-v1"
+_LAYOUT_BUILDERS_BY_REALIZER: dict[str, _LayoutProfileBuilder] = {
+    _LAYOUT_BUILDER_PY_SRC_PACKAGE: _python_layout_profile,
+    _LAYOUT_BUILDER_TS_NPM: _typescript_layout_profile,
 }
 
 
+def _legacy_bridged_names(field: str) -> list[str]:
+    """Sorted runtime names whose profile bridges ``field`` to a known realizer.
+
+    Walks the language registry and, for every profile declaring a
+    ``legacy_project_types`` block whose ``field`` realizer id is registered,
+    contributes that block's ``accepted_names`` (the EXACT historical names — NOT
+    the wider registry aliases). This is the PROFILE-DRIVEN, byte-identical
+    replacement for the old hardcoded ``sorted(_DICT)`` over language-name keys.
+    """
+    realizers = {
+        "layout_builder": _LAYOUT_BUILDERS_BY_REALIZER,
+        "test_runner_ensurer": _TEST_RUNNER_ENSURERS_BY_REALIZER,
+    }.get(field, {})
+    names: set[str] = set()
+    try:
+        from codd.languages.registry import default_registry
+
+        for profile in default_registry.all_profiles():
+            extra = getattr(profile, "extra", None)
+            block = extra.get(_LEGACY_BRIDGE_KEY) if isinstance(extra, Mapping) else None
+            if not isinstance(block, Mapping):
+                continue
+            realizer = block.get(field)
+            if not realizer or str(realizer) not in realizers:
+                continue
+            for n in block.get("accepted_names") or ():
+                if str(n).strip():
+                    names.add(str(n).strip().lower())
+    except Exception:  # noqa: BLE001 — registry optional; empty list is the safe degrade.
+        return []
+    return sorted(names)
+
+
 def supported_layout_profile_languages() -> list[str]:
-    """Languages with a harness-owned layout profile (deterministic topology)."""
-    return sorted(_LAYOUT_PROFILE_BUILDERS)
+    """Runtime names with a harness-owned layout profile (deterministic topology).
+
+    PROFILE-DRIVEN (Contract Kernel v2.71): the union of every profile's
+    ``legacy_project_types.accepted_names`` whose ``layout_builder`` realizer is
+    registered — never a hardcoded language-name table. Byte-identical to the legacy
+    dict's key set (``node``/``python``/``typescript``): only the EXPLICITLY accepted
+    names, not the wider registry aliases, and not Go (no legacy bridge).
+    """
+    return _legacy_bridged_names("layout_builder")
 
 
 def resolve_layout_profile(
@@ -1122,18 +1303,28 @@ def resolve_layout_profile(
 ) -> LayoutProfile | None:
     """Resolve the :class:`LayoutProfile` for a stack, or ``None`` if unsupported.
 
-    Stack-general dispatch through :data:`_LAYOUT_PROFILE_BUILDERS`. Every path
-    is derived from ``project_name`` + the configured ``scan.*_dirs`` — there
-    are NO hardcoded ``src``/``tests``/``<package>`` literals outside the
-    per-stack builder's documented defaults.
+    PROFILE-DRIVEN dispatch (Contract Kernel v2.71): the runtime ``language`` value is
+    resolved to its :class:`LanguageProfile`, the profile's ``legacy_project_types``
+    bridge gates it (``language`` must be in ``accepted_names`` — so support stays
+    byte-identical: ``node`` resolves to the canonical TypeScript profile, but the
+    wider aliases ``ts``/``js``/``py`` do NOT), then the builder is selected by the
+    bridge's ``layout_builder`` realizer id — NOT a ``language ==``/dict-keyed-by-name
+    literal. A blank/unknown/unaccepted language, or a profile with no bridge (Go),
+    resolves to ``None`` (the conservative degradation — the caller stays on its
+    no-profile path, never a wrong-layout default).
 
-    ``config`` (the loaded project config) and ``project_root`` are optional and
-    feed the harness-owned CANONICAL package-name resolution (config override >
-    derive-from-actual single package > project-name default) for stacks that use
-    a named package (Python). Stacks that resolve by path (TypeScript) ignore
-    them. Omitting both preserves the pure project-name default (back-compat).
+    Every path the builder produces is derived from ``project_name`` + the configured
+    ``scan.*_dirs`` — there are NO hardcoded ``src``/``tests``/``<package>`` literals
+    outside the per-stack builder's documented defaults.
+
+    ``config`` (the loaded project config) and ``project_root`` are optional and feed
+    the harness-owned CANONICAL package-name resolution (config override >
+    derive-from-actual single package > project-name default) for stacks that use a
+    named package (Python). Stacks that resolve by path (TypeScript) ignore them.
+    Omitting both preserves the pure project-name default (back-compat).
     """
-    builder = _LAYOUT_PROFILE_BUILDERS.get((language or "").strip().lower())
+    realizer_id = _legacy_realizer_id(language, "layout_builder")
+    builder = _LAYOUT_BUILDERS_BY_REALIZER.get(realizer_id) if realizer_id else None
     if builder is None:
         return None
     return builder(
@@ -1177,18 +1368,32 @@ class ScaffoldResult:
     detail: str = ""
 
 
+#: Scaffolder realizer capability ids (Contract Kernel v2.71 — must match the
+#: profile YAML ``legacy_project_types.scaffolder``). Harness-policy names, NOT
+#: language names: the dispatch key for which legacy scaffolder realizes a profile.
+_SCAFFOLDER_PY_SRC_PACKAGE = "pyproject-src-package-scaffold-v1"
+_SCAFFOLDER_TS_NPM = "npm-tsconfig-vitest-scaffold-v1"
+
+
 def scaffold_layout(
     project_root: Path | str,
     profile: LayoutProfile,
 ) -> ScaffoldResult:
     """Create the profile's topology (create-only, idempotent, non-clobbering).
 
-    Returns the relative paths created vs. skipped (already present). Only the
-    Python profile is realized today; an unknown ``profile.language`` is a no-op.
+    Returns the relative paths created vs. skipped (already present).
+
+    PROFILE-DRIVEN (Contract Kernel v2.71): the scaffolder is selected by the
+    resolved :class:`LanguageProfile`'s legacy-bridge ``scaffolder`` realizer id (a
+    harness-policy capability name — Python package-topology vs TS config), NOT a
+    ``profile.language ==`` literal. A stack with no legacy bridge (Go) or an
+    unknown/unaccepted language is a strict no-op (the conservative degradation —
+    never a wrong scaffolder writing a wrong layout).
     """
-    if profile.language == "python":
+    scaffolder_id = _legacy_realizer_id(profile.language, "scaffolder")
+    if scaffolder_id == _SCAFFOLDER_PY_SRC_PACKAGE:
         return _scaffold_python(Path(project_root), profile)
-    if profile.language in ("typescript", "node"):
+    if scaffolder_id == _SCAFFOLDER_TS_NPM:
         return _scaffold_typescript(Path(project_root), profile)
     return ScaffoldResult(language=profile.language, detail="no scaffolder for stack")
 
@@ -1893,21 +2098,32 @@ def _ensure_typescript_test_runner(
     )
 
 
-# Language → ensurer. Add a stack here (and only here) to make its greenfield
-# builds deterministically verifiable: node → a package.json test script, go →
-# go.mod, rust → Cargo.toml, etc. Each ensurer drives off the resolved
-# :class:`LayoutProfile` for its stack, so topology lives in ONE place.
+# Realizer capability id → legacy test-runner ensurer (Contract Kernel v2.71). The
+# dispatch key is the profile's ``legacy_project_types.test_runner_ensurer`` realizer
+# id — a harness-policy capability name, NOT a language name. A stack with no legacy
+# bridge (Go's profile declares none) or an unknown/unaccepted language is the
+# "unsupported" advisory no-op in :func:`ensure_test_runner_config`. Each ensurer
+# drives off the resolved :class:`LayoutProfile`, so topology lives in ONE place.
 _TestRunnerEnsurer = Callable[..., EnsureTestRunnerResult]
-_TEST_RUNNER_ENSURERS: dict[str, _TestRunnerEnsurer] = {
-    "python": _ensure_python_test_runner,
-    "typescript": _ensure_typescript_test_runner,
-    "node": _ensure_typescript_test_runner,
+#: Realizer capability ids (must match the profile YAML ``legacy_project_types``).
+_ENSURER_PY_PYPROJECT = "pyproject-pytest-runner-v1"
+_ENSURER_TS_NPM = "npm-vitest-runner-v1"
+_TEST_RUNNER_ENSURERS_BY_REALIZER: dict[str, _TestRunnerEnsurer] = {
+    _ENSURER_PY_PYPROJECT: _ensure_python_test_runner,
+    _ENSURER_TS_NPM: _ensure_typescript_test_runner,
 }
 
 
 def supported_test_runner_languages() -> list[str]:
-    """Languages for which greenfield can deterministically ensure a test runner."""
-    return sorted(_TEST_RUNNER_ENSURERS)
+    """Runtime names for which greenfield can deterministically ensure a test runner.
+
+    PROFILE-DRIVEN (Contract Kernel v2.71): the union of every profile's
+    ``legacy_project_types.accepted_names`` whose ``test_runner_ensurer`` realizer is
+    registered — never a hardcoded language-name table. Byte-identical to the legacy
+    dict's key set (``node``/``python``/``typescript``): only the explicitly accepted
+    names, not the wider registry aliases, and not Go (no legacy bridge).
+    """
+    return _legacy_bridged_names("test_runner_ensurer")
 
 
 def ensure_test_runner_config(
@@ -1920,13 +2136,17 @@ def ensure_test_runner_config(
 ) -> EnsureTestRunnerResult:
     """Guarantee a RUNNABLE, detectable test setup for ``language``'s stack.
 
-    Stack-general entry point. For a language WITH a registered ensurer, the
-    ensurer owns the present/augment/create decision (it checks its own STRONG
-    marker — e.g. a ``[tool.pytest`` section, not mere ``pyproject.toml``
-    presence — so it can upgrade a bare config that is detectable but not
-    runnable). For a language WITHOUT an ensurer, this returns an
-    ``"unsupported"`` no-op UNLESS a test command is already detectable, in which
-    case a provided (possibly non-native) setup is respected.
+    Stack-general entry point. PROFILE-DRIVEN dispatch (Contract Kernel v2.71): the
+    runtime ``language`` is resolved to its :class:`LanguageProfile`, gated by the
+    profile's ``legacy_project_types`` bridge (``accepted_names`` — so support stays
+    byte-identical), and the ensurer is selected by the bridge's ``test_runner_ensurer``
+    realizer id — NOT a ``language ==``/dict-keyed-by-name literal. For a stack WITH a
+    registered ensurer, the ensurer owns the present/augment/create decision (it checks
+    its own STRONG marker — e.g. a ``[tool.pytest`` section, not mere ``pyproject.toml``
+    presence — so it can upgrade a bare config that is detectable but not runnable). For
+    a stack WITHOUT an ensurer (Go's profile declares no bridge, or an unknown/unaccepted
+    language), this returns an ``"unsupported"`` no-op UNLESS a test command is already
+    detectable, in which case a provided (possibly non-native) setup is respected.
 
     Either way an AI/user-provided setup is never clobbered, and the verify layer
     remains the authority that refuses to certify an unexecuted build. All paths
@@ -1936,7 +2156,8 @@ def ensure_test_runner_config(
     root = Path(project_root)
     lang = (language or "").strip().lower()
 
-    ensurer = _TEST_RUNNER_ENSURERS.get(lang)
+    ensurer_id = _legacy_realizer_id(lang, "test_runner_ensurer")
+    ensurer = _TEST_RUNNER_ENSURERS_BY_REALIZER.get(ensurer_id) if ensurer_id else None
     if ensurer is None:
         # No native ensurer for this stack. Respect any test command an AI/user
         # already wired up (stack-agnostic), otherwise it is an advisory no-op:
@@ -1967,8 +2188,8 @@ def ensure_test_runner_config(
     if profile is not None:
         return ensurer(root, profile=profile)
 
-    # Fallback (no profile builder for an ensurer-having stack — shouldn't
-    # happen, but keep the path total): synthesize a minimal profile from dirs.
+    # Fallback (no LayoutProfile for an ensurer-having shape — shouldn't happen, but
+    # keep the path total): synthesize a minimal profile from dirs.
     source_root = _first_clean_dir(source_dirs, "src")
     test_root = _first_clean_dir(test_dirs, "tests")
     package_name = normalize_package_name(project_name)
