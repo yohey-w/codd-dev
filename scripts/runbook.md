@@ -1,12 +1,12 @@
-# cmd_358 - Codex App Server Benchmark Runbook
+# Codex App Server Benchmark Runbook
 
 This runbook explains how to prepare and run `scripts/bench_app_server.py` without changing project state during dry runs.
 
 ## Preconditions
 
-- Use a CoDD-initialized target project such as `example-app`.
+- Use any CoDD-initialized target project.
 - Confirm `codex --version`, `codd --version`, and ChatGPT authentication before real measurements.
-- Do not run real measurements until Lord approval. Use `--dry-run` for script validation.
+- Do not run real measurements without explicit approval. Use `--dry-run` for script validation.
 
 ## Codex App Server Configuration
 
@@ -50,7 +50,7 @@ python3 scripts/bench_app_server.py \
   --concurrency 1 \
   --rounds 1 \
   --warmup 0 \
-  --project-root /home/tono/example-app
+  --project-root /path/to/your-project
 ```
 
 ## Baseline Subprocess Run
@@ -63,7 +63,7 @@ python3 scripts/bench_app_server.py \
   --backend subprocess \
   --concurrency 1,10,50 \
   --rounds 5 \
-  --project-root /home/tono/example-app
+  --project-root /path/to/your-project
 ```
 
 ## Subprocess vs App Server
@@ -77,7 +77,7 @@ python3 scripts/bench_app_server.py \
   --concurrency 1,10,50 \
   --rounds 5 \
   --transport auto \
-  --project-root /home/tono/example-app
+  --project-root /path/to/your-project
 ```
 
 Concurrency 100 requires an explicit guardrail:
@@ -89,7 +89,7 @@ python3 scripts/bench_app_server.py \
   --concurrency 100 \
   --rounds 1 \
   --allow-high-concurrency \
-  --project-root /home/tono/example-app
+  --project-root /path/to/your-project
 ```
 
 ## Outputs

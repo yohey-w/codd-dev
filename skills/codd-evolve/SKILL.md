@@ -332,7 +332,7 @@ But the CLI form has a cost in Brownfield modification: the user must remember w
 
 This is not a replacement for the CLI. Both are first-class:
 
-- **CLI** for Greenfield, CI, automation, education, third-party orchestrators (e.g. orchestrator ashigaru)
+- **CLI** for Greenfield, CI, automation, education, and third-party orchestrators
 - **Skill** for Brownfield, conversational modification, daily evolution within Claude Code
 
 Use the right tool for the right phase.

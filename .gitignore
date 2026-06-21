@@ -30,3 +30,6 @@ codd/codd.yaml.bak
 # Internal CoDD dogfood (dev process, GPT consults, ledger, fixtures) — kept LOCAL, not published
 dogfood/*
 !dogfood/contract_matrix.yaml
+
+# Internal task reports (cmd_* process records) — kept LOCAL, not published
+reports/
