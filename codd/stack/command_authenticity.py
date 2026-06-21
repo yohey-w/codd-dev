@@ -51,6 +51,7 @@ import json
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from codd.stack.command_plan import (
@@ -93,8 +94,9 @@ class StackCommandObservationPolicy:
     """What a command of a given kind must OBSERVE to be authentic (unweakenable here).
 
     The DEFAULTS for each kind are the invariant; a stack profile may STRENGTHEN via
-    the contract's ``command_observation_policies`` but the classifier never lets a
-    not-green observation become green.
+    the contract's ``command_observation_policies`` but never WEAKEN it — strengthen-only
+    is enforced by :func:`resolve_stack_command_observation_policy` (a weakening override is
+    fail-closed RED), so the classifier never lets a not-green observation become green.
     """
 
     kind: StackCommandObservationKind
@@ -119,6 +121,46 @@ class StackCommandObservationPolicy:
     #: required in v2.77d (artifact freshness is a stricter later step) — the field
     #: exists so the data model is ready without quietly broadening this release.
     require_build_outputs: bool = False
+
+    def __post_init__(self) -> None:
+        # Intrinsic validity (Cut C, GPT-5.5 Pro consult 2026-06-21): a policy may not
+        # exist in a state that is unsound FOR ITS KIND — you cannot even CONSTRUCT a
+        # no-op-accepting policy or a "test" policy that accepts zero tests / no report.
+        # This is defense-in-depth UNDER the resolver's strengthen-only check: a policy
+        # object handed around (or fed through the contract override for a custom slot)
+        # is invalid-by-construction if it falls below its kind's anti-false-green floor.
+        if not self.reject_static_noop:
+            raise ValueError(
+                "StackCommandObservationPolicy.reject_static_noop must be True for every "
+                "kind — a command that cannot fail (true / : / echo / no-op script) is not "
+                "a check (anti-false-green: a no-op-accepting policy is forbidden)"
+            )
+        if self.min_collected_tests < 0:
+            raise ValueError("StackCommandObservationPolicy.min_collected_tests must be >= 0")
+        if self.kind is StackCommandObservationKind.TEST_REPORT:
+            if not self.report_required:
+                raise ValueError(
+                    "a TEST_REPORT policy must require a report (report_required=True) — a "
+                    "test slot without a required machine-readable report is not proof-bearing"
+                )
+            if self.min_collected_tests < 1:
+                raise ValueError(
+                    "a TEST_REPORT policy must require >= 1 collected/executed test "
+                    "(min_collected_tests >= 1) — a test run that observed zero tests is the "
+                    "canonical exit-0-no-tests false-green"
+                )
+            if not self.require_test_level_available:
+                raise ValueError(
+                    "a TEST_REPORT policy must require test-level evidence "
+                    "(require_test_level_available=True) — a summary-only report cannot prove "
+                    "which tests ran"
+                )
+            if not self.fail_on_observed_failures:
+                raise ValueError(
+                    "a TEST_REPORT policy must fail on observed failures "
+                    "(fail_on_observed_failures=True) — an observed failure/skip is "
+                    "incompatible with a green test command"
+                )
 
 
 #: TEST-kind: must observe >=1 executed test via a parseable, test-level report, with
@@ -148,11 +190,93 @@ STATIC_EXECUTION_POLICY = StackCommandObservationPolicy(
     report_required=False,
 )
 
+
+# ── strengthen-only ownership (Cut C: a profile may parameterize, never weaken) ──
+#
+# The contract override path (``command_observation_policies``) is a DECLARATIVE
+# extension point: a stack profile may declare a policy for a NEW slot id, or
+# STRENGTHEN a default. But "strengthen-only" must be OWNED BY THE CORE, not delegated
+# to a docstring — an unconditional override could otherwise silently downgrade a known
+# test slot to accept zero tests (the exact false-green the language ``observation``
+# block forbids via :meth:`VerifyObservationPolicy.from_mapping`). These two predicates +
+# the resolver's fail-closed check are the stack twin of that load-time rejection.
+
+
+class StackObservationPolicyWeakeningError(ValueError):
+    """A contract override would WEAKEN a command's anti-false-green observation policy.
+
+    Raised by :func:`resolve_stack_command_observation_policy` when a stack contract
+    declares a ``command_observation_policies`` entry that is LESS strict than the slot's
+    built-in default (or, for a custom TEST slot, below the intrinsic test floor). A
+    profile may give the invariant's PARAMETERS (raise ``min_collected_tests``) or add a
+    policy for a new slot, but it may NEVER disable the invariant — that ownership lives in
+    the core, fail-closed (mirrors the language ``observation`` block's load-time
+    rejection).
+    """
+
+
+def _intrinsic_floor_for_kind(
+    kind: StackCommandObservationKind,
+) -> "StackCommandObservationPolicy":
+    """The minimum a policy of ``kind`` must satisfy to be anti-false-green, regardless of
+    any slot default.
+
+    A TEST_REPORT policy of ANY slot (default or custom) must require a report, observe
+    ``>= 1`` test, have per-test granularity, and fail on observed failures — a "test"
+    command that accepts zero tests / no report is a false-green by construction. BUILD /
+    STATIC floors only reject a static no-op (v2.77d minimum)."""
+    if kind is StackCommandObservationKind.TEST_REPORT:
+        return TEST_REPORT_POLICY
+    if kind is StackCommandObservationKind.BUILD_EXECUTION:
+        return BUILD_EXECUTION_POLICY
+    return STATIC_EXECUTION_POLICY
+
+
+def is_at_least_as_strict(
+    candidate: "StackCommandObservationPolicy",
+    baseline: "StackCommandObservationPolicy",
+) -> bool:
+    """True iff ``candidate`` is AT LEAST as anti-false-green-strict as ``baseline``.
+
+    The strictness partial order (a profile may move each axis only in the STRICTER
+    direction):
+
+    * ``kind`` must be IDENTICAL — a kind change is never a "strengthen" (downgrading
+      ``e2e_test`` to STATIC drops the whole test-count requirement; even a notional
+      "upgrade" would silently change the contract's meaning, so we require equality and
+      let a genuinely-different slot use a different id).
+    * every boolean gate (``reject_static_noop``, ``report_required``,
+      ``require_test_level_available``, ``fail_on_observed_failures``,
+      ``require_build_outputs``) may only go ``False -> True`` or stay — never ``True ->
+      False`` (turning a gate OFF is weakening).
+    * ``min_collected_tests`` may only RISE or stay (a lower threshold accepts fewer
+      tests — weaker).
+    """
+    if candidate.kind is not baseline.kind:
+        return False
+    bool_axes = (
+        "reject_static_noop",
+        "report_required",
+        "require_test_level_available",
+        "fail_on_observed_failures",
+        "require_build_outputs",
+    )
+    for axis in bool_axes:
+        if getattr(baseline, axis) and not getattr(candidate, axis):
+            return False  # baseline had the gate ON; candidate turned it OFF — weaker.
+    if candidate.min_collected_tests < baseline.min_collected_tests:
+        return False
+    return True
+
 #: Slot id → required observation policy. DECLARATIVE; slot ids are the contract's
 #: semantic API (composer's ``VERIFICATION_SLOTS`` vocabulary + the curated build/
 #: codegen slots). NOT framework names. A slot id absent here AND not declared by the
 #: contract → fail-closed RED (the harness never guesses an unknown slot's kind).
-DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES: Mapping[str, StackCommandObservationPolicy] = {
+#: ``MappingProxyType`` (Cut C): the shared default map is IMMUTABLE so imported profile
+#: code cannot mutate a default policy in place (e.g. flip ``e2e_test``'s policy to a
+#: permissive one) after the core defined it — the strengthen-only ownership would be
+#: meaningless if the baseline itself could be rewritten.
+DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES: Mapping[str, StackCommandObservationPolicy] = MappingProxyType({
     # TEST-kind — must observe real tests via a report.
     "unit_test": TEST_REPORT_POLICY,
     "integration_test": TEST_REPORT_POLICY,
@@ -176,7 +300,7 @@ DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES: Mapping[str, StackCommandObservation
     # carry no observation requirement — STATIC_EXECUTION (reject no-op + exit 0).
     "dev": STATIC_EXECUTION_POLICY,
     "start": STATIC_EXECUTION_POLICY,
-}
+})
 
 
 def resolve_stack_command_observation_policy(
@@ -186,14 +310,39 @@ def resolve_stack_command_observation_policy(
 ) -> StackCommandObservationPolicy | None:
     """Resolve a slot's observation policy: contract override > default > None (RED).
 
-    A contract may DECLARE a policy for a custom slot id (or strengthen a default);
-    that wins. Otherwise the built-in default map. An unknown slot with neither →
-    ``None`` (the classifier turns that into ``AUTHENTICITY_POLICY_MISSING`` RED — the
-    harness never defaults an unknown slot to a permissive kind).
+    A contract may DECLARE a policy for a custom slot id (or STRENGTHEN a default); that
+    wins. Otherwise the built-in default map. An unknown slot with neither → ``None`` (the
+    classifier turns that into ``AUTHENTICITY_POLICY_MISSING`` RED — the harness never
+    defaults an unknown slot to a permissive kind).
+
+    Cut C (strengthen-only is CORE-OWNED): a contract override is honored ONLY if it is at
+    least as strict as its baseline — the slot's built-in default when one exists, or the
+    intrinsic floor for the override's kind for a custom slot. A WEAKENING override raises
+    :class:`StackObservationPolicyWeakeningError` (fail-closed) rather than silently
+    downgrading the gate. This mirrors the language ``observation`` block, where
+    :meth:`VerifyObservationPolicy.from_mapping` rejects every weakening at load: a profile
+    may parameterize the invariant but may never disable it.
     """
+    default = DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES.get(slot_id)
     if contract_policies and slot_id in contract_policies:
-        return contract_policies[slot_id]
-    return DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES.get(slot_id)
+        override = contract_policies[slot_id]
+        # Baseline to compare against: the slot default if the core already protects this
+        # slot, else the intrinsic floor for the override's OWN kind (a custom slot must
+        # still meet its kind's anti-false-green floor — a "test" slot cannot accept zero
+        # tests / no report just because it has a novel id).
+        baseline = default if default is not None else _intrinsic_floor_for_kind(override.kind)
+        if not is_at_least_as_strict(override, baseline):
+            raise StackObservationPolicyWeakeningError(
+                f"stack contract command_observation_policies[{slot_id!r}] is WEAKER than "
+                f"its baseline ({'slot default' if default is not None else 'intrinsic ' + override.kind.value + ' floor'}): "
+                f"override={override!r} baseline={baseline!r}. A profile may STRENGTHEN a "
+                "policy (raise min_collected_tests, turn a gate on) or add a policy for a "
+                "new slot, but it may NEVER weaken the anti-false-green invariant "
+                "(strengthen-only is owned by the core, fail-closed — like the language "
+                "observation block's load-time rejection)."
+            )
+        return override
+    return default
 
 
 # ── static no-op detection (kind-independent; always RED) ──
@@ -715,6 +864,7 @@ def assert_stack_commands_authentic(
 
 __all__ = [
     "StackCommandAuthenticityError",
+    "StackObservationPolicyWeakeningError",
     "classify_plan_authenticity",
     "assert_stack_commands_authentic",
     "StackCommandObservationKind",
@@ -723,6 +873,7 @@ __all__ = [
     "BUILD_EXECUTION_POLICY",
     "STATIC_EXECUTION_POLICY",
     "DEFAULT_STACK_COMMAND_OBSERVATION_POLICIES",
+    "is_at_least_as_strict",
     "resolve_stack_command_observation_policy",
     "is_static_noop_command",
     "is_noop_shell_fragment",
