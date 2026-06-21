@@ -589,6 +589,235 @@ def _norm(rel: str) -> str:
     return str(rel).strip().replace("\\", "/").strip("/")
 
 
+# ── configured-root unify (Cut A.3 integration boundary — the source_root DIMENSION) ──
+#
+# THE INVARIANT (anti-false-green, cardinal): the strict v3 oracle must observe the
+# SAME resolved tree that GENERATION routes to. Generation routes by the resolved
+# ``LayoutProfile`` (``codd.project_types.resolve_layout_profile`` →
+# ``source_root`` / ``package_root`` / ``test_root`` from ``scan.source_dirs`` /
+# ``scan.test_dirs``; ``greenfield.pipeline._route_source_into_package`` writes the
+# generated tree there). With ``scan: {source_dirs: ["lib"], test_dirs: ["spec"]}``
+# the code lands in ``lib/<pkg>`` + ``spec``. The v3 oracle adapter, however, reads
+# its roots from ``ctx.language_profile.layout`` (the registry ``LayoutSpec`` — for
+# Python the FIXED ``src/{package_name}`` + ``tests``), so WITHOUT this unify it would
+# certify + execute against ``src/<pkg>`` + ``tests`` while the actually-generated
+# ``lib/<pkg>`` + ``spec`` is unverified — a "proved the wrong tree" false-green (the
+# GPT-5.5 round-2 cross-check blocker for v3.0.0).
+#
+# THE FIX (Option A — project-resolve, drift impossible BY CONSTRUCTION): rebase the
+# registry ``LayoutSpec`` to the SAME resolved ``LayoutProfile`` generation used, so
+# the oracle's source/test/package roots are a FUNCTION of the same resolved roots —
+# they cannot diverge. The adapter stays a pure ``LayoutSpec`` + ``package_name``
+# reader (NO legacy ``source_root``, NO bridge revival — the Cut A.3 lock holds): only
+# the LayoutSpec it reads is now derived from the configured layout instead of the
+# fixed default. The rebase KEEPS the ``{package_name}`` template (the adapter still
+# substitutes + hard-fails on an unresolved name). The COMMON case (scan unset, or
+# scan == the default ``src``/``tests``) rebases to a LayoutSpec that is byte-identical
+# to the registry one (behavior-preserving — no false-RED). A BELT cross-check then
+# asserts the rebased oracle roots equal the generation-routed roots, hard-failing
+# (never silently) if a future change reintroduced drift.
+
+
+def _rebase_layout_spec_to_profile(layout: Any, profile: "LayoutProfile") -> Any:
+    """Rebase a ``LayoutSpec`` so its template roots reflect the resolved ``LayoutProfile``.
+
+    ``profile`` is the SAME ``LayoutProfile`` generation routing uses (resolved from
+    ``scan.source_dirs`` / ``scan.test_dirs`` via :func:`resolve_layout_profile`): its
+    ``source_root`` / ``package_root`` / ``test_root`` are the (substituted) roots the
+    generated tree lands in. This returns a ``LayoutSpec`` whose single source-set
+    root, ``package_root.path``, and single (first) test-set root reflect those roots —
+    while PRESERVING the ``{package_name}`` template (so the adapter's substitution +
+    unresolved-name HARD FAIL are unchanged) and every other set/field.
+
+    Mapping by ``package_root.kind``:
+      * ``named_package`` (Python ``src/{package_name}``): the source-set + package_root
+        path become ``<profile.source_root>/{package_name}`` — the adapter then derives
+        ``source_root`` = its parent (``profile.source_root``) and ``package_root`` =
+        ``<profile.source_root>/<package_name>`` = ``profile.package_root``. The test
+        root becomes ``profile.test_root``.
+      * ``path_root`` (TS ``src``, ``package_root == source_root``): the source-set +
+        package_root path become ``profile.source_root``; the test root becomes
+        ``profile.test_root``.
+      * ``none`` (Go — no single package root, no scan-driven src layout): returned
+        UNCHANGED (Go routes to the repo root; ``scan.*_dirs`` does not relocate it).
+
+    Single-root only by intent: only ``source_sets[0]`` / ``test_sets[0]`` are rebased
+    (the legacy ``LayoutProfile`` is single-root, and Python/TS declare exactly one
+    source-set + one unit test-set). Any extra sets are carried verbatim — the
+    single-source / single-required-test HARD FAIL in the adapter still fires for >1.
+    """
+    from dataclasses import replace
+
+    pkg = getattr(layout, "package_root", None)
+    pkg_kind = getattr(pkg, "kind", "none")
+    if pkg_kind == "none":
+        # Root-module language (Go): no single package root, no scan-driven relocation.
+        return layout
+
+    source_root = _norm(getattr(profile, "source_root", "") or "")
+    test_root = _norm(getattr(profile, "test_root", "") or "")
+    if not source_root or not test_root:
+        # An incomplete legacy profile — leave the registry LayoutSpec untouched and let
+        # the adapter's own scope certification decide (never guess a relocated root).
+        return layout
+
+    if pkg_kind == "named_package":
+        new_pkg_path = f"{source_root}/{{package_name}}"
+        new_source_root_template = f"{source_root}/{{package_name}}"
+    else:  # path_root
+        new_pkg_path = source_root
+        new_source_root_template = source_root
+
+    source_sets = tuple(getattr(layout, "source_sets", ()) or ())
+    test_sets = tuple(getattr(layout, "test_sets", ()) or ())
+
+    def _rebase_globs(old_root: str, new_root: str, globs: tuple[str, ...]) -> tuple[str, ...]:
+        """Re-anchor each glob from the old root prefix to the new one (keep the tail).
+
+        ``src/{package_name}/**/*.py`` rebased ``src/{package_name}`` → ``lib/{package_name}``
+        becomes ``lib/{package_name}/**/*.py``. A glob not under the old root is carried
+        verbatim (defensive — only the leading topology changed). The adapter reads
+        ``root`` (not globs) for Python, but keeping globs consistent matters for other
+        consumers (TS/coverage) and avoids a stale-prefix glob surviving a rebase.
+        """
+        out: list[str] = []
+        old_n = _norm(old_root)
+        new_n = _norm(new_root)
+        for g in globs:
+            g_n = str(g).replace("\\", "/")
+            if old_n and (g_n == old_n or g_n.startswith(old_n + "/")):
+                out.append(new_n + g_n[len(old_n):])
+            else:
+                out.append(g)
+        return tuple(out)
+
+    new_source_sets = source_sets
+    if source_sets:
+        s0 = source_sets[0]
+        new_source_sets = (
+            replace(
+                s0,
+                root=new_source_root_template,
+                file_globs=_rebase_globs(
+                    s0.root, new_source_root_template, tuple(getattr(s0, "file_globs", ()) or ())
+                ),
+            ),
+        ) + source_sets[1:]
+    new_test_sets = test_sets
+    if test_sets:
+        t0 = test_sets[0]
+        new_test_sets = (
+            replace(
+                t0,
+                root=test_root,
+                file_globs=_rebase_globs(
+                    t0.root, test_root, tuple(getattr(t0, "file_globs", ()) or ())
+                ),
+            ),
+        ) + test_sets[1:]
+
+    return replace(
+        layout,
+        source_sets=new_source_sets,
+        test_sets=new_test_sets,
+        package_root=replace(pkg, path=new_pkg_path),
+    )
+
+
+def _oracle_language_profile(lang_profile: Any, profile: "LayoutProfile | None") -> Any:
+    """The resolved ``LanguageProfile`` whose ``.layout`` the oracle adapter observes.
+
+    Returns ``lang_profile`` with its ``LayoutSpec`` rebased to the SAME resolved
+    ``LayoutProfile`` generation routed to (so the oracle certifies + executes against
+    the SAME tree — anti-false-green: never a different tree than generation). When
+    ``profile`` is ``None`` (a synthetic carrier from :func:`_resolve_registry_oracle`
+    for a language with no legacy ``LayoutProfile`` — Go) the registry LayoutSpec is
+    returned unchanged (nothing to rebase; the scan knob does not relocate it).
+
+    The COMMON case rebases to a byte-identical LayoutSpec (scan unset / == default →
+    the same template roots), so the adapter's derivation is unchanged there.
+    """
+    if profile is None:
+        return lang_profile
+    from dataclasses import replace
+
+    rebased = _rebase_layout_spec_to_profile(lang_profile.layout, profile)
+    if rebased is lang_profile.layout:
+        return lang_profile
+    return replace(lang_profile, layout=rebased)
+
+
+def _certify_oracle_observes_generation_tree(
+    ctx: Any, oracle_decl: Any, profile: "LayoutProfile | None"
+) -> None:
+    """BELT (defense in depth): hard-fail if the tree the oracle will observe differs
+    from the tree generation routes to.
+
+    Option A rebases the oracle's ``LayoutSpec`` FROM the same resolved ``LayoutProfile``
+    generation used, so the two agree BY CONSTRUCTION; this tripwire converts ANY future
+    reintroduction of drift into a HARD FAIL (``OracleScopeError``) — never a silent
+    "proved the wrong tree" green. It compares the roots the adapter would derive from
+    ``ctx`` against the generation-routed ``profile`` roots.
+
+    ``None`` profile (the synthetic carrier for a no-legacy-LayoutProfile language — Go)
+    has nothing to cross-check (Go routes to the repo root; the scan knob does not
+    relocate it). A non-named-package (``path_root``/``none``) layout has no single
+    ``package_root`` to compare, so only source/test roots are checked. An incomplete
+    legacy profile (missing a root) defers to the adapter's own scope certification.
+    """
+    if profile is None:
+        return
+    gen_source = _norm(getattr(profile, "source_root", "") or "")
+    gen_test = _norm(getattr(profile, "test_root", "") or "")
+    gen_package = _norm(getattr(profile, "package_root", "") or "")
+    if not (gen_source and gen_test):
+        return  # incomplete legacy profile — the adapter's own certification governs
+
+    layout = getattr(getattr(ctx, "language_profile", None), "layout", None)
+    if layout is None:
+        return
+    pkg = getattr(layout, "package_root", None)
+    pkg_kind = getattr(pkg, "kind", "none")
+    if pkg_kind == "none":
+        return  # root-module language (Go) — no scan-driven relocation to cross-check
+
+    source_sets = tuple(getattr(layout, "source_sets", ()) or ())
+    test_sets = tuple(getattr(layout, "test_sets", ()) or ())
+    if not source_sets or not test_sets:
+        return  # the adapter's scope certification will hard-fail an empty required set
+
+    package_name = getattr(ctx, "package_name", None)
+
+    def _subst(template: str) -> str:
+        rendered = str(template)
+        if "{package_name}" in rendered and package_name:
+            rendered = rendered.replace("{package_name}", str(package_name))
+        return _norm(rendered)
+
+    obs_package = _subst(getattr(pkg, "path", "") or "")
+    # Python's ``named_package`` source root is the PARENT of the package dir; a
+    # ``path_root`` (TS) has source_root == package_root.
+    if pkg_kind == "named_package":
+        obs_source = _norm(obs_package.rsplit("/", 1)[0]) if "/" in obs_package else "."
+    else:
+        obs_source = _subst(source_sets[0].root)
+    obs_test = _subst(test_sets[0].root)
+
+    mismatch = obs_source != gen_source or obs_test != gen_test
+    if pkg_kind == "named_package" and gen_package:
+        mismatch = mismatch or obs_package != gen_package
+    if mismatch:
+        raise OracleScopeError(
+            "implement-time oracle ABORTED to avoid a false-green: the tree the oracle "
+            f"would observe (source={obs_source!r}, package={obs_package!r}, "
+            f"test={obs_test!r}) DIFFERS from the tree generation routes to "
+            f"(source={gen_source!r}, package={gen_package!r}, test={gen_test!r}). The "
+            "strict v3 oracle must observe the SAME resolved tree generation/scaffold "
+            "routes to (a green over a different tree proves nothing — the cardinal "
+            "anti-false-green rule). This is a HARD FAIL, never a silent pass."
+        )
+
+
 # NOTE: ``_glob_covers_root`` (the tsconfig include/files coverage test) was
 # relocated to the TS oracle adapter (Contract Kernel oracle dispatch §7) — the
 # gate's ``certify_oracle_scope`` now delegates scope certification to the registered
@@ -637,14 +866,23 @@ def certify_oracle_scope(
     lang_profile, oracle_decl, adapter = contract
     from codd.languages.adapters.implement_oracle import OracleContext
 
+    # Cut A.3 integration boundary (the source_root DIMENSION): rebase the registry
+    # LayoutSpec to the SAME resolved LayoutProfile generation routed to, so the oracle
+    # certifies the tree the generated code actually lands in (configured layout =
+    # lib/<pkg> + spec, not the fixed src/<pkg> + tests) — never a different tree
+    # (anti-false-green). Common case (scan unset / == default) rebases byte-identically.
+    oracle_lang_profile = _oracle_language_profile(lang_profile, profile)
     ctx = OracleContext(
         project_root=project_root,
-        layout_profile=lang_profile.layout,
-        language_profile=lang_profile,
+        layout_profile=oracle_lang_profile.layout,
+        language_profile=oracle_lang_profile,
         oracle=oracle_decl,
         config=None,
         package_name=getattr(profile, "package_name", None),
     )
+    # BELT: the tree the oracle will observe MUST equal the generation-routed tree
+    # (Option A makes them agree by construction; this hard-fails on any future drift).
+    _certify_oracle_observes_generation_tree(ctx, oracle_decl, profile)
     return adapter.certify_scope(ctx)
 
 
@@ -994,6 +1232,7 @@ def _run_contract_oracle(
     config: Mapping[str, Any] | None,
     *,
     package_name: str | None = None,
+    layout_profile: "LayoutProfile | None" = None,
 ) -> ImplementOracleResult:
     """Run a modeled oracle on the contract path (certify already done by caller).
 
@@ -1023,14 +1262,22 @@ def _run_contract_oracle(
     )
     from codd.languages.oracle_executor import run_command_sequence
 
+    # Cut A.3 integration boundary (the source_root DIMENSION): rebase the registry
+    # LayoutSpec to the SAME resolved LayoutProfile generation routed to, so the oracle
+    # EXECUTES against the tree the generated code actually lands in (anti-false-green:
+    # never a different tree than generation). Common case rebases byte-identically.
+    oracle_lang_profile = _oracle_language_profile(lang_profile, layout_profile)
     ctx = OracleContext(
         project_root=project_root,
-        layout_profile=lang_profile.layout,
-        language_profile=lang_profile,
+        layout_profile=oracle_lang_profile.layout,
+        language_profile=oracle_lang_profile,
         oracle=oracle_decl,
         config=config,
         package_name=package_name,
     )
+    # BELT: the tree the oracle will observe MUST equal the generation-routed tree
+    # (Option A makes them agree by construction; this hard-fails on any future drift).
+    _certify_oracle_observes_generation_tree(ctx, oracle_decl, layout_profile)
 
     # Install preflight (language-free, BEFORE dispatch so run_command_sequence stays
     # pure): if ANY oracle step's resolved CommandSpec requires materialized deps AND
@@ -1145,6 +1392,7 @@ def _run_oracle_command(
     return _run_contract_oracle(
         project_root, lang_profile, oracle_decl, adapter, config,
         package_name=getattr(profile, "package_name", None),
+        layout_profile=profile,
     )
 
 

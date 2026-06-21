@@ -1411,29 +1411,39 @@ def _py_layout_from_layout_spec(ctx: OracleContext) -> tuple[str, str, str]:
     source_sets = tuple(getattr(layout, "source_sets", ()) or ())
     test_sets = tuple(getattr(layout, "test_sets", ()) or ())
 
-    # Multi-set → hard-fail (never a silent first-root collapse — anti-false-green).
-    if len(source_sets) > 1:
+    # EXACTLY one source-set is required (anti-false-green, both directions):
+    #   * >1  → reading only ``source_sets[0]`` would SILENTLY drop the others
+    #     (unproven code = false-green); a multi-source-set Python layout is
+    #     UNSUPPORTED today (RED, never a silent first-root collapse).
+    #   * ==0 → there is NO source root to derive; a silent ``src`` fallback would point
+    #     the oracle at a GUESSED tree (a wrong/empty source root = false-green). The
+    #     Cut A.3 posture is "if reached, hard-fail" — never a silent default.
+    if len(source_sets) != 1:
         raise OracleScopeError(
             "python implement-time oracle cannot be certified: the resolved layout "
             f"declares {len(source_sets)} source_sets "
-            f"({[s.id for s in source_sets]}), but the Python composite oracle is "
-            "single-source-root (its first-party import index + compile + collect "
-            "scope are rooted at ONE source tree). Observing only the first set would "
-            "SILENTLY drop the others (unproven code = false-green); a multi-source-set "
-            "Python layout is UNSUPPORTED by this oracle today (RED, never a silent "
-            "first-root collapse)."
+            f"({[s.id for s in source_sets]}), but the Python composite oracle requires "
+            "EXACTLY ONE source-set (its first-party import index + compile + collect "
+            "scope are rooted at ONE source tree). >1 would SILENTLY drop the others "
+            "(unproven code = false-green); 0 would force a GUESSED 'src' fallback "
+            "(a wrong source root = false-green). Either is a HARD FAIL — never a silent "
+            "first-root collapse, never a silent default."
         )
-    # A REQUIRED (non-optional) test-set count > 1 is the same hazard for the collect
-    # scope. ``optional``/``colocated`` sets are not REQUIRED roots, so they do not
-    # trigger the hard-fail (the collect layer runs over the single required test root).
+    # EXACTLY one REQUIRED (non-optional) test-set: the collect scope is single-root.
+    # ``optional``/``colocated`` sets are not REQUIRED roots, so they do not count.
+    #   * >1  → a multi-required-test-set layout is UNSUPPORTED (RED).
+    #   * ==0 → no required test root to collect; a silent ``tests`` fallback would point
+    #     the collect layer at a GUESSED tree (false-green). HARD FAIL.
     required_test_sets = tuple(s for s in test_sets if not getattr(s, "optional", False))
-    if len(required_test_sets) > 1:
+    if len(required_test_sets) != 1:
         raise OracleScopeError(
             "python implement-time oracle cannot be certified: the resolved layout "
             f"declares {len(required_test_sets)} required test_sets "
             f"({[s.id for s in required_test_sets]}), but the Python composite oracle "
-            "collects a SINGLE test root. A multi-required-test-set Python layout is "
-            "UNSUPPORTED by this oracle today (RED, never a silent first-root collapse)."
+            "collects a SINGLE test root and requires EXACTLY ONE required test-set. >1 "
+            "is UNSUPPORTED; 0 would force a GUESSED 'tests' fallback (a wrong test root "
+            "= false-green). Either is a HARD FAIL — never a silent first-root collapse, "
+            "never a silent default."
         )
 
     pkg_spec = getattr(layout, "package_root", None)
@@ -1474,20 +1484,52 @@ def _py_layout_from_layout_spec(ctx: OracleContext) -> tuple[str, str, str]:
             )
         package_root = _subst(pkg_path)
         source_root = _py_parent_dir(package_root)
+        # Internal consistency (anti-false-green): for a named_package layout the single
+        # source-set root IS the package dir. A LayoutSpec that says the package root is
+        # ``lib/{package_name}`` but the source-set is ``src/{package_name}`` is
+        # self-contradictory — the oracle would not know which tree to observe. HARD FAIL
+        # rather than silently trust one over the other (a wrong root = false-green).
+        src_set_root = _subst(source_sets[0].root)
+        if src_set_root != package_root:
+            raise OracleScopeError(
+                "python implement-time oracle cannot be certified: the resolved layout is "
+                f"internally contradictory — source_sets[0].root resolves to "
+                f"{src_set_root!r} but package_root resolves to {package_root!r} (for a "
+                "named_package layout the single source-set IS the package dir; they must "
+                "be identical). The oracle cannot decide which tree to observe — HARD FAIL "
+                "(never a silent pick, which would risk proving the wrong tree)."
+            )
     elif pkg_kind == "path_root":
-        package_root = _subst(pkg_path) if pkg_path else ""
+        if not pkg_path:
+            raise OracleScopeError(
+                "python implement-time oracle cannot be certified: package_root.kind="
+                "path_root but no path (the layout is incomplete; HARD FAIL — never a "
+                "silent 'src' fallback, which would point the oracle at a guessed tree)."
+            )
+        package_root = _subst(pkg_path)
         source_root = package_root
     else:
-        # ``none`` (no single package root — Go) or unknown: derive the source root
-        # from the single source-set, package_root == source_root (no named package).
-        source_root = _subst(source_sets[0].root) if source_sets else "src"
+        # ``none`` (no single package root) or unknown: derive the source root from the
+        # single (guaranteed-present) source-set; package_root == source_root.
+        source_root = _subst(source_sets[0].root)
         package_root = source_root
 
+    # No silent ``src``/``tests`` fallback: the exactly-one source/test-set checks above
+    # guarantee a set is present, and an empty DERIVED root after substitution is a real
+    # layout defect (a guessed default would be a false-green). HARD FAIL instead.
     if not source_root:
-        source_root = "src"
-    test_root = _subst(test_sets[0].root) if test_sets else "tests"
+        raise OracleScopeError(
+            "python implement-time oracle cannot be certified: the resolved source root "
+            "is empty after substitution (the layout is incomplete; HARD FAIL — never a "
+            "silent 'src' default that would point the oracle at a guessed tree)."
+        )
+    test_root = _subst(required_test_sets[0].root)
     if not test_root:
-        test_root = "tests"
+        raise OracleScopeError(
+            "python implement-time oracle cannot be certified: the resolved test root is "
+            "empty after substitution (the layout is incomplete; HARD FAIL — never a "
+            "silent 'tests' default that would point the collect layer at a guessed tree)."
+        )
     return source_root, package_root, test_root
 
 
