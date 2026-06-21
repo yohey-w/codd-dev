@@ -1133,7 +1133,9 @@ class GreenfieldPipeline:
         declared implement-time oracle.
         """
         from codd.implement_oracle import (
+            ORACLE_STATE_UNSUPPORTED_EXPLICIT,
             OracleScopeError,
+            classify_implement_oracle_state,
             resolve_implement_oracle,
             run_implement_oracle_gate,
         )
@@ -1141,17 +1143,51 @@ class GreenfieldPipeline:
         config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
         project_name = self._layout_project_name(project_root, config)
 
-        # Cheap NO-OP short-circuit: if the stack declares no implement-time
-        # oracle (Python today), do not even scaffold/echo — skip silently.
-        if resolve_implement_oracle(
+        # NO-OP short-circuit — but the 4-state model decides WHICH "no oracle" this is
+        # (Contract Kernel oracle dispatch §9). ``_stage_implement`` is strict by
+        # construction: it GENERATED the code and must PROVE it. So a DECLARED-but-
+        # UNSUPPORTED stack must NOT be silently skipped here — that is the very false-
+        # green §9 closes. Only a NON-DECLARED stack (LEGACY_ABSENT) or an explicit
+        # opt-out (OPT_OUT) is genuinely skippable (the gate's visible trace covers the
+        # observability; here the short-circuit avoids needless scaffolding).
+        resolved = resolve_implement_oracle(
             project_root,
             language=language,
             project_name=project_name,
             source_dirs=source_dirs,
             test_dirs=test_dirs,
             config=config,
-        ) is None:
+        )
+        if resolved is None:
+            state = classify_implement_oracle_state(language, config, resolved=resolved)
+            if state == ORACLE_STATE_UNSUPPORTED_EXPLICIT:
+                # A declared stack CoDD cannot prove (no registered oracle adapter) —
+                # the strict greenfield implement stage RED. Mirror the gate's verdict
+                # as a StageError instead of silently advancing to verify (where the
+                # incoherence would surface later, or not at all).
+                raise StageError(
+                    f"implement-time native-oracle gate: language {language!r} is declared "
+                    "but UNSUPPORTED — no registered implement-oracle adapter, so the "
+                    "generated code's cross-artifact coherence is UNPROVEN. A declared-but-"
+                    "unsupported stack is RED, never a silent pass (add a LanguageProfile + "
+                    "oracle adapter for this stack, or opt out via implement.implement_oracle:"
+                    " false)."
+                )
+            # LEGACY_ABSENT / OPT_OUT — genuinely skippable (visible-trace cases). Run the
+            # gate once anyway so its (now VISIBLE) NO-OP trace is emitted, then return —
+            # cheap, and it keeps the observability promise (§9: NO-OP is never silent).
+            run_implement_oracle_gate(
+                project_root,
+                language=language,
+                project_name=project_name,
+                source_dirs=source_dirs,
+                test_dirs=test_dirs,
+                config=config,
+                echo=self.echo,
+            )
             return
+        # A supported oracle resolved (resolved is not None) — fall through to
+        # certify + run it below.
 
         # The oracle needs the scaffolded config (tsconfig) present NOW, at
         # implement-time — verify's scaffold runs later. Idempotent + non-

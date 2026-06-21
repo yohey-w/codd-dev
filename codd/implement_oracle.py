@@ -121,6 +121,10 @@ from codd.implement_oracle_types import (  # noqa: F401 — re-exported for back
 
 __all__ = [
     "EVIDENCE_CATEGORIES",
+    "ORACLE_STATE_LEGACY_ABSENT",
+    "ORACLE_STATE_OPT_OUT",
+    "ORACLE_STATE_SUPPORTED",
+    "ORACLE_STATE_UNSUPPORTED_EXPLICIT",
     "ImplementOracleFinding",
     "ImplementOracleResult",
     "OracleRerunCallback",
@@ -131,6 +135,7 @@ __all__ = [
     "certify_go_oracle_scope",
     "certify_oracle_scope",
     "certify_python_oracle_scope",
+    "classify_implement_oracle_state",
     "normalize_oracle_output",
     "normalize_python_tool_output",
     "resolve_implement_oracle",
@@ -206,6 +211,85 @@ def _oracle_opt_out(config: Mapping[str, Any] | None) -> bool:
     if isinstance(section, Mapping) and "implement_oracle" in section:
         return section["implement_oracle"] is False
     return False
+
+
+# ── the 4-state oracle dispatch model (Contract Kernel oracle dispatch §6, §9) ──
+#
+# When :func:`resolve_implement_oracle` returns ``None`` it means ONLY "no runnable
+# oracle resolved" — it COLLAPSES four very different reasons into one signal. §9
+# closes the false-green that collapse hid: a DECLARED-but-UNSUPPORTED stack (a
+# non-empty language CoDD was told to build, with NO registered oracle adapter) was
+# waved through as a silent NO-OP PASS. The gate must distinguish:
+#
+#   SUPPORTED            — a contract oracle resolved (run it; GREEN only if it
+#                          actually passes). [resolved is not None]
+#   UNSUPPORTED_EXPLICIT — a NON-EMPTY language is declared but NO oracle resolves
+#                          AND not opted out → RED (passed=False, executed=False,
+#                          code="implement_oracle_unsupported"). The §9 closure: a
+#                          declared stack CoDD cannot prove must NOT pass.
+#   LEGACY_ABSENT        — language is None/empty (NO declared stack) → NO-OP, but
+#                          a VISIBLE fallback trace; NON-RED (nothing to be
+#                          "unsupported" about — there is no declared stack).
+#   OPT_OUT              — ``implement.implement_oracle: false`` → NO-OP-WITH-TRACE
+#                          (``unsupported_oracle_allowed_by_config``), excluded from
+#                          the green-gate; NON-RED by default (preserves the
+#                          documented opt-out contract), never silent.
+#
+# Cardinal rule: false-GREEN is forbidden, but do NOT over-RED a legitimate
+# no-oracle case (no language at all, or an explicit opt-out) — those are
+# NO-OP-WITH-TRACE (visible), never silent, never RED.
+#
+# Language-FREE: the classification keys on "did a contract oracle resolve?" + "is
+# a non-empty language declared?" + "is it opted out?" — NEVER on a specific
+# language name (Cut Condition A). Adding a new compiler stack is still one profile
+# entry + one leaf adapter; it then resolves SUPPORTED with no edit here.
+ORACLE_STATE_SUPPORTED = "supported"
+ORACLE_STATE_UNSUPPORTED_EXPLICIT = "unsupported_explicit"
+ORACLE_STATE_LEGACY_ABSENT = "legacy_absent"
+ORACLE_STATE_OPT_OUT = "opt_out"
+
+
+def classify_implement_oracle_state(
+    language: str | None,
+    config: Mapping[str, Any] | None,
+    *,
+    resolved: object,
+) -> str:
+    """Classify the oracle dispatch state for ``language`` (the 4-state model, §9).
+
+    ``resolved`` is the :func:`resolve_implement_oracle` result (a ``(profile, spec)``
+    tuple, or ``None``). The classification is language-FREE — it keys on whether a
+    runnable oracle resolved, whether a NON-EMPTY language is declared, and whether
+    the gate is opted out — never on a language name (Cut Condition A):
+
+    * ``resolved is not None``                → ``SUPPORTED``.
+    * opted out                               → ``OPT_OUT`` (NO-OP-with-trace).
+    * empty/None language                     → ``LEGACY_ABSENT`` (NO-OP-with-trace).
+    * a SUPPORTED contract resolves anyway    → ``LEGACY_ABSENT`` (defensive: the
+      resolver returned ``None`` for some OTHER reason than "unsupported"; never
+      RED a stack that genuinely HAS an adapter — bound the blast radius).
+    * otherwise (non-empty language, no contract, not opted out)
+                                              → ``UNSUPPORTED_EXPLICIT`` (RED).
+
+    The OPT_OUT check precedes the language-emptiness/contract checks because an
+    opt-out on a SUPPORTED language must read as the (visible, non-RED) opt-out, not
+    as supported — :func:`resolve_implement_oracle` already short-circuits opt-out to
+    ``None`` before it ever looks at the profile.
+    """
+    if resolved is not None:
+        return ORACLE_STATE_SUPPORTED
+    if _oracle_opt_out(config):
+        return ORACLE_STATE_OPT_OUT
+    if (language or "").strip() == "":
+        return ORACLE_STATE_LEGACY_ABSENT
+    # A non-empty language with no resolved (profile, spec). If a contract oracle
+    # nonetheless resolves (a registered adapter exists), the resolver returned None
+    # for an unrelated reason — do NOT RED a stack CoDD CAN actually prove; treat it
+    # as a (visible) legacy-absent NO-OP. Only a TRULY unsupported stack (no contract)
+    # is the §9 RED.
+    if _resolve_contract_oracle(language) is not None:
+        return ORACLE_STATE_LEGACY_ABSENT
+    return ORACLE_STATE_UNSUPPORTED_EXPLICIT
 
 
 # ── broad-repair campaign config (the budgeted residual coherence campaign) ──
@@ -1319,11 +1403,76 @@ def run_implement_oracle_gate(
         profile=profile,
     )
     if resolved is None:
+        # No runnable oracle resolved — but WHY decides the verdict (§9). The 4-state
+        # model: a DECLARED-but-UNSUPPORTED stack is RED (never a silent pass); no
+        # declared stack OR an explicit opt-out is a NO-OP-WITH-TRACE (visible, non-RED).
+        state = classify_implement_oracle_state(language, config, resolved=resolved)
+        if state == ORACLE_STATE_UNSUPPORTED_EXPLICIT:
+            # The §9 closure: a non-empty language CoDD was told to build, with NO
+            # registered oracle adapter. CoDD cannot prove this stack's coherence, so it
+            # must NOT pass — an explicit unsupported RED, never a silent NO-OP.
+            echo(
+                f"[greenfield] implement-oracle: language {language!r} is declared but "
+                "UNSUPPORTED (no registered oracle adapter) — RED (a declared stack CoDD "
+                "cannot prove must not silently pass)."
+            )
+            return ImplementOracleResult(
+                passed=False,
+                executed=False,
+                command=f"{language}-oracle",
+                findings=[
+                    ImplementOracleFinding(
+                        category=EVIDENCE_ENVIRONMENT_BUILD,
+                        code="implement_oracle_unsupported",
+                        message=(
+                            f"no registered implement-oracle adapter for declared language "
+                            f"{language!r}; the implement-time coherence oracle cannot run, so "
+                            "the generated code's cross-artifact coherence is UNPROVEN. A "
+                            "declared-but-unsupported stack is RED, never a silent pass "
+                            "(add a LanguageProfile + oracle adapter for this stack, or opt "
+                            "out explicitly via implement.implement_oracle: false)."
+                        ),
+                    )
+                ],
+                detail=(
+                    f"declared-but-unsupported language {language!r}: no implement-time "
+                    "oracle adapter (unsupported → RED)"
+                ),
+            )
+        if state == ORACLE_STATE_OPT_OUT:
+            # The user explicitly opted out (implement.implement_oracle: false). NOT RED
+            # by default (preserves the documented opt-out contract; bounds blast radius),
+            # but the NO-OP is now VISIBLE + excluded from the release green-gate.
+            # [GPT §6 notes a stricter "RED in strict/greenfield" reading; we default to
+            # NO-OP-with-trace so opt-out is never silently broken. To make opt-out RED in
+            # strict mode instead, this branch would emit the unsupported RED above.]
+            echo(
+                "[greenfield] implement-oracle: opted out by config "
+                "(implement.implement_oracle=false) — skipped, excluded from the green-gate "
+                "(unsupported_oracle_allowed_by_config=true). NOT a proof."
+            )
+            return ImplementOracleResult(
+                passed=True,
+                executed=False,
+                command="",
+                detail=(
+                    "implement-time oracle opted out by config "
+                    "(implement.implement_oracle=false) — skipped, excluded from the "
+                    "green-gate (unsupported_oracle_allowed_by_config=true)"
+                ),
+            )
+        # LEGACY_ABSENT: no declared stack (language None/empty). Nothing to be
+        # "unsupported" about — a passing NO-OP, but VISIBLE (a fallback, not a proof),
+        # never silent.
+        echo(
+            "[greenfield] implement-oracle: no language declared — oracle skipped "
+            "(fallback, not a proof)."
+        )
         return ImplementOracleResult(
             passed=True,
             executed=False,
             command="",
-            detail=f"no implement-time oracle for language {language!r} (skipped)",
+            detail=f"no language declared — implement-time oracle skipped (fallback) [{language!r}]",
         )
     profile, spec = resolved
 
