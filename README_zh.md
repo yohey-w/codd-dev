@@ -13,190 +13,137 @@
   <a href="README_ja.md">日本語</a> | <a href="README.md">English</a> | 中文
 </p>
 
-> 只写功能需求与约束。代码生成、整合修复、验证都交给 CoDD。
+<p align="center">
+  <em>将需求、设计、代码和测试视为<strong>同一张相互关联的图</strong>——这样 AI 就能据此构建系统，每一次改动都会在图上传播，而验证也永远无法伪造「绿色通过」。</em>
+</p>
 
 ---
 
-## 🌟 为何 CoDD
+## CoDD 是什么？
 
-> **「只写功能需求与约束，代码就会自动生成、自动修复、自动验证。」**
+软件存在一个一致性问题。需求、设计文档、代码和测试本应表达同一件事——但它们会逐渐分歧。一处的改动会悄无声息地破坏另一处。文档会腐烂。而当 AI（或一个疲惫的人类）编写代码时，测试往往通过了，却*什么都没有证明*。
 
-大多数「AI 辅助开发」工具关注 **生成** 侧，CoDD 关注 **约束** 侧。LLM 在「什么必须为真」被精确给出时最有用 —— CoDD 把这种精确图景以连接 requirements → design → lexicon → source → tests → runtime 的单一 DAG 形式提供，驱动 LLM 修复循环来消除违规，并把结构上无法修复的部分诚实地暴露出来。
+**CoDD 让这种一致性变得显式、且可被机器检查。** 它把你的项目建模成一张图，图中的节点是*每一个*工件——一条需求、一个设计章节、一个源文件、一个配置键、一张数据库表、一个测试——而图中的边则是它们之间的依赖关系（`implements`、`calls`、`reads_config`、`tested_by` 等）。有了这张图之后，CoDD 会做三件事：
 
-启用 artifact contract 后，`codd plan/generate/implement/verify` 以实际产出的 artifact 来判定完成，而非以命令是否返回 —— 这一 harness 层机制让较弱的模型也能保持在北极星上。
+1. **生成（Generate）**——把需求转化为设计、代码和测试（绿地项目自动驾驶，或一次处理一份文档）。
+2. **传播（Propagate）**——当*任何东西*发生改变时，遍历这张图，找出所有受影响的部分（上游与下游），并让它们重新保持一致。
+3. **验证（Verify）**——通过一套**拒绝虚假通过（anti-false-green）**的检验框架运行真实的构建与测试：一次运行除非真正证明了自己通过，否则不会被报告为通过。
+
+```mermaid
+flowchart LR
+    R["需求"] <--> D["设计"]
+    D <--> C["代码"]
+    C <--> T["测试"]
+    R -. "同一张一致性图" .- T
+```
+
+箭头是**双向的**。改动代码，受影响的设计和需求就会亮起；新增一条需求，那些必须随之改变的设计、代码和测试就会亮起。这种双向一致性（Coherence）就是 CoDD 中的「Co」。
+
+### 它有何不同
+
+大多数 AI 开发工具让*模型*变得更聪明（更好的自动补全、更大的上下文）。CoDD 则让*你喂给模型的数据*变得更聪明：它预先算好依赖图，让 AI 能够准确看到一处改动会触及什么——并附带证据——而不是仅凭恰好打开的那些文件去猜测。而它的验证机制天生就被设计成**拒绝误报**：空的测试套件、空操作的构建脚本（`"build": "true"`）、缺失的报告、被禁用的检查器，以及被植入的源码变异，统统会返回**红色（RED）**，绝不会悄无声息地通过。
 
 ---
 
-## 🚀 60 秒上手
+## 安装
 
 ```bash
-pip install codd-dev
+pip install codd-dev          # Python 3.10+   ·   the command is `codd`
+codd version
+```
 
-# Greenfield: 写好需求，转身走人
+---
+
+## 快速上手
+
+### 绿地项目——输入需求，产出可运行的系统
+
+把你想要的东西写成一份 Markdown 需求文档，然后让无人值守的自动驾驶运行整条流水线（init → elicit → plan → generate → implement → verify 并自动修复 → propagate → check）：
+
+```bash
 codd greenfield --requirements docs/requirements/requirements.md
 ```
 
-这一条命令运行整条无人值守流水线 — init → elicit → plan → generate → implement → verify (auto-repair) → propagate → check — 每完成一个单元就写入检查点 (`codd greenfield --resume` 从中断处继续，`--ntfy-topic` 推送进度通知，`--dry-run` 预览)。同一条流水线还以三种形态提供，确保任何环境都能使用: 透明的 shell 组合 ([examples/greenfield_autopilot.sh](examples/greenfield_autopilot.sh))、Claude Code Agent Workflow 模板 ([examples/claude_workflows/codd-greenfield.js](examples/claude_workflows/codd-greenfield.js))，以及 `codd-greenfield` skill (`codd skills install codd-greenfield --target both` — Claude Code 与 Codex CLI 均可用)。
+它会在每个单元之后建立检查点，因此 `codd greenfield --resume` 会从中断处接着跑；`--dry-run` 会预览计划，而 `--ntfy-topic <topic>` 会向你推送进度通知。
 
-如果是在已有项目中工作:
+### 棕地项目——把它指向一个已有的代码库
 
-```bash
-codd init --suggest-lexicons --llm-enhanced    # AI 选定合适的 lexicon
-codd elicit                                    # AI 发现需求中的漏洞
-codd dag verify --auto-repair --max-attempts 10  # AI 自动修复一致性违规
-```
-
-如果项目已经在跑，用自然语言描述「想修的现象」即可:
+CoDD 会从代码中逆向工程出设计意图，然后让两者保持同步：
 
 ```bash
-codd fix "登录的错误信息不够清晰"   # PHENOMENON 模式
+codd init                 # set up CoDD in the repo
+codd scan                 # build the dependency graph from the source
+codd brownfield           # extract design docs → diff vs. reality → elicit the gaps
 ```
 
-`codd fix [PHENOMENON]` 是 CoDD 的第二个入口。用自然语言陈述想做的变更，CoDD 通过 lexicon + 语义评分定位受影响的设计文档，由 LLM 更新。随后变更会波及 **设计 → 实现 → 测试 → 验证**: Stage 4 从 DAG 决定性地解析出受影响的实现文件与测试文件，打一个限定在 allowlist 内的 LLM patch，并跑 verify 网关 (无新增 red 的 DAG 检查 + 本地测试通过)。失败时执行 targeted rollback (仅回退本次运行写过的文件)。用 `--no-propagate-impl` 退出该行为，加 `--propagate` 还会一并整合依赖的设计文档。`--dry-run` 预览，`--non-interactive` 适配 CI。
+### 已经在持续交付了？用大白话描述改动
 
----
-
-## 🎨 可视化流程
-
-```mermaid
-flowchart LR
-    R["Requirements (.md)"] --> E["codd elicit"]
-    E -->|gap findings| H{HITL: approve / reject}
-    H -->|approve| L["project_lexicon.yaml + requirements TODOs"]
-    H -->|reject| I["ignored_findings.yaml"]
-    L --> V["codd dag verify --auto-repair"]
-    V -->|violation| AR["LLM patch propose → apply"]
-    AR --> V
-    V -->|SUCCESS| D["✅ deploy gate passes"]
-    AR -->|max attempts| P["PARTIAL_SUCCESS: unrepairable surfaced honestly"]
+```bash
+codd fix "login error messages are confusing"
 ```
 
-Brownfield (从现有代码起步) 路径:
-
-```mermaid
-flowchart LR
-    Code["Existing codebase"] --> X["codd extract"]
-    X --> DIFF["codd diff (drift)"]
-    DIFF --> EL["codd elicit (coverage gaps)"]
-    EL --> H{HITL gate}
-    H --> Apply["codd elicit apply"]
-    Apply --> V["codd dag verify"]
-```
+`codd fix [PHENOMENON]` 会定位受影响的设计文档、更新它们，然后让改动沿着**设计 → 实现 → 测试 → 验证**的路径流动——只修补图所认定涉及的那些文件，并且在验证关卡失败时，精确地回滚那些文件。
 
 ---
 
-## ✨ 能做什么
+## 工作原理——三大支柱
 
-CoDD 是一根 CLI，整理在 4 个层级里。需要哪一层就用哪一层，其余的不会出现在视野里。
-
-### 核心命令
-
-| 命令 | 一句话 |
-| --- | --- |
-| 🚀 **`codd greenfield --requirements FILE`** | 无人值守 autopilot: 需求 in，系统 out。所有 gate 自动批准，`--resume` 检查点续跑，ntfy 仅通知。其构件 (`generate --all-waves` / `implement list-tasks` / `verify --repair-mode`) 也可单独使用。 |
-| 🎯 **`codd init --suggest-lexicons --llm-enhanced`** | LLM 扫描代码/文档，选定合适的 lexicon 插件。 |
-| 🔍 **`codd elicit`** | 针对行业标准 lexicon 发现 *规格漏洞*。 |
-| 🔄 **`codd diff`** | 检测需求与实现之间的 **drift** (兼容 brownfield)。 |
-| 🛠️ **`codd dag verify --auto-repair`** | 校验整张 DAG，LLM 提交 patch 提案，循环至 SUCCESS 或 MAX_ATTEMPTS。 |
-| 🎯 **`codd fix`** / **`codd fix [PHENOMENON]`** | 两种模式 —— 自动检测 CI 失败，或用自然语言描述想做的变更；PHENOMENON 模式会波及 设计 → 实现 → 测试 → 验证 (用 `--no-propagate-impl` 退出)。 |
-| 🧭 **`codd operations {derive,show,approve,apply}`** | 检测未挂接到任何已声明 operation 的需求单元，由 AI 提出 `operation_flow` 条目，并写出供人工审阅的 proposal —— 在 `approve` + `apply` 之前不会向 `codd.yaml` 写入任何东西。opt-in、非破坏性。（旧 `merge` 作为 `apply` 的已弃用别名继续可用。） |
-| 📜 **`codd contract {derive,show,apply,verify}`** | V 模型 artifact contract。`derive`/`apply` 以需求驱动的方式选择「项目在每个 stage *声明哪些* 目录 artifact」（`derive` 检测项目的信号 —— 需求文档、设计文档、lexicon、已声明的 `operation_flow`、源码目录、test/e2e 套件 —— 并写出一份可审阅的提案，绝不触碰 `codd.yaml`；`apply` 将其非破坏性且幂等地合并，`--enable` 用于开启该 gate）。`verify`/gate 是完成侧: 启用 contract 后，每个 stage 在其声明的 artifact 产出/有效之前无法宣称完成。`show` 渲染目录 + 本项目的 contract。opt-in，contract 缺失/禁用则为 no-op。（旧 `suggest`/`adopt` 作为已弃用别名继续可用。） |
-| 🌐 **`codd brownfield`** | 面向现有代码库的 Extract → diff → elicit 流水线。 |
-
-### 质量网关
-
-| 网关 | 作用 |
-| --- | --- |
-| 🧪 **`codd verify --runtime`** | Step 8 运行时 smoke (DB 启动 + dev server 可达 + smoke HTTP + 真实浏览器 E2E + 通过 `runtime.crud_flow_targets` opt-in 的 CRUD 反映验证 + 通过 `runtime.action_outcome_targets` 的 action outcome coverage)。`--runtime-skip` 按类别 opt-out 并把原因记录到 report。 |
-| 📊 **`codd lexicon list/install/diff` + `codd coverage report`** | 插件管理 + JSON / Markdown / 自包含 HTML 的覆盖矩阵。 |
-| 🛡️ **CI 网关** | `.github/workflows/codd_coverage.yml` 模板 + `codd coverage check` 退出码使覆盖率回退在 merge 时被阻挡。 |
-
-### Skill 与后端
-
-| 能力 | 提供什么 |
-| --- | --- |
-| 🔁 **`codd skills {install,list,remove}`** | 将内置 skill (例 `codd-evolve`) 分发至 `~/.claude/skills/` 与 `~/.agents/skills/`。`--target {claude,codex,both}` / `--mode {symlink,copy}`，幂等 + `--force`。 |
-| 🪡 **codd-evolve skill** | Brownfield 对话式演进。从自然语言意图一次走完 requirements → design → lexicon → source → tests → verify → propagate → Step 8 runtime smoke。内置新词条 / breaking change / 1:N UI 拓扑等 stop-and-ask 网关。 |
-| ⚡ **Codex App Server 后端** (v2.20.0) | `codd.yaml` 中 `codex_app_server.enabled: true` 时把 AI 调用经由持久 JSON-RPC thread 转发 (替代 subprocess)。`thread_strategy: per_session` 在 `codd implement` / `codd verify --auto-repair` / `codd fix` 间摊销 codex 冷启动。当二进制或 socket 缺失时自动回退到 subprocess。 |
-
-### Lexicon 插件
-
-38 个行业标准 lexicon 作为 opt-in 覆盖轴附带 —— Web (WCAG / OWASP / Web Vitals / WebAuthn / forms / SEO / PWA)、Mobile (HIG / Material 3 / a11y / MASVS)、Backend (REST / GraphQL / gRPC / events)、Data (SQL / JSON Schema / event sourcing / governance)、Ops (CI/CD / Kubernetes / Terraform / observability / DORA)、Compliance (ISO 27001 / HIPAA / PCI DSS / GDPR / EU AI Act)、Process (ISO 25010 / 29119 / DDD / 12-factor / i18n / model cards / API rate-limit)、Methodology (BABOK)。
-
----
-
-## 📊 案例研究
-
-在 Next.js + Prisma + PostgreSQL 多租户 LMS (设计文档约 30 份 / DB 表 12 张 / RLS 强制隔离) 上 dogfood: `codd init --suggest-lexicons` 在人工选择的 10 个 lexicon 中命中 9 个，`codd elicit` 抽出 70 个规格漏洞，`codd dag verify --auto-repair` 把最初的 16 件不可修复违规压缩到 **PASS 或 amber-WARN (deploy 允许)** —— 整条流水线中针对 CoDD core 的项目专属修改是 **0 行**。项目特有事项完整地封闭在 `project_lexicon.yaml` 与 `codd_plugins/` 中。
-
----
-
-## 🧱 Generality Gate (三层架构)
-
-| Layer | 栈固有名出现在哪里 | 例 |
+| 支柱 | 它做什么 | 关键命令 |
 | --- | --- | --- |
-| **A — Core** | **不在任何地方。** 零 `react` / `django` / `Stripe` / `LMS` 字面量。 | `codd/elicit/`, `codd/dag/`, `codd/lexicon_cli/` |
-| **B — Templates** | 仅通用占位符。 | `codd/templates/*.j2`, `codd/templates/lexicon_schema.yaml` |
-| **C — Plug-ins** | 可自由命名。 | `codd_plugins/lexicons/*/`, `codd_plugins/stack_map.yaml` |
+| **1 · 从意图生成** | 需求 → 设计候选方案 → 代码与测试脚手架。AI 提出方案；由人类抉择（Human-in-the-Loop，人在回路）。 | `greenfield`、`generate`、`implement`、`plan` |
+| **2 · 传播改动** *(核心所在)* | 一张横跨需求／设计／代码／配置／数据／测试的带类型依赖图。改动任何东西，CoDD 都会追踪其影响半径——分类为**绿（Green，自动修复）**、**黄（Amber，需审查）**、**灰（Gray，仅供参考）**——并为每条边附上证据。 | `scan`、`impact`、`propagate`、`diff`、`dag verify` |
+| **3 · 验证一致性** | 真实的构建 + 测试，以无法撒谎的方式运行。失败会被追溯回导致它的那些工件。 | `verify`、`check`、`coverage`、`contract verify` |
 
-正因如此，同一个 core 能跑 Next.js / Django / FastAPI / Rails / Go service / 移动应用 / ML 模型卡，贡献者无需触碰 core 即可新增 lexicon。
-
----
-
-## 🧭 Roadmap
-
-下一步:
-
-- App Server 基准测试公开 (subprocess vs JSON-RPC 的 P50 / P95 / P99)
-- lexicon 插件市场
-
-历次 release (v2.11.0 → v2.20.0) 连同质量指标记录在 [CHANGELOG.md](CHANGELOG.md) 中。
+这些支柱构成一个闭环：生成决定*改什么*，传播找出它*落在何处*，验证则证明它依然成立——而每一次提交都会反哺这张图，让下一轮处理更加精准。（完整的概念讲解：[`docs/explainer.md`](docs/explainer.md)。）
 
 ---
 
-## 🤝 贡献者
+## v3.0 有何新意——Contract Kernel（契约内核）
 
-CoDD 由以下成员塑造:
+v3.0 让 CoDD 的核心做到**与语言和框架无关**。检验框架不再硬编码 `go`、`python`、`next` 或任何其他名称——它完全由声明式契约 + 适配器来驱动一切：
 
-- **[@yohey-w](https://github.com/yohey-w)** — Maintainer / Architect
-- **[@Seika86](https://github.com/Seika86)** — Sprint regex 见解 (PR #11)
-- **[@v-kato](https://github.com/v-kato)** — Brownfield 复现报告 (Issues #17 / #18 / #19 / #20 / #21 / #22)
-- **[@dev-komenzar](https://github.com/dev-komenzar)** — `source_dirs` bug 复现 (Issue #13)
+- **无语言核心**——Go、Python 和 TypeScript 完全由声明式的 `LanguageProfile` 来描述。新增一门语言只需一份 profile + 一个适配器，**无需改动核心**（这一点已由一门核心从未见过的合成语言所验证）。
+- **可插拔框架技术栈**——一个框架（例如 Next.js）与若干插件（Playwright、Prisma）会与语言*组合*成一份解析后的技术栈契约，供 `greenfield` 和 `verify` 实时消费。新增一个框架也以同样的方式接入。
+- **拒绝虚假通过（anti-false-green），由核心掌控**——「不许伪造通过」这一不变式存在于核心之中；profile 可以配置参数，但**永远无法削弱**它。（已在一个真实的 Next.js 应用上端到端验证——参见 [`dogfood/v3_nextjs_live_e2e.md`](dogfood/v3_nextjs_live_e2e.md)。）
 
-欢迎 issue / PR / lexicon 提议 —— 详见 [Issues](https://github.com/yohey-w/codd-dev/issues)。
-
----
-
-## 📚 文档
-
-- [CHANGELOG.md](CHANGELOG.md) — 各 release 的质量指标
-- [docs/](docs/) — 架构笔记
-- `codd --help` — CLI 完整参考
+正是这一点，让同一个核心能够服务于 Next.js、Django、FastAPI、Rails、Go 服务等等——并让贡献者无需触碰核心即可添加支持。
 
 ---
 
-## 📦 Hook integration
+## 与你的 AI 工具协同
 
-CoDD 同捆 editor / Git 工作流的 hook recipe:
-
-- Claude Code `PostToolUse` hook recipe (文件编辑后运行 CoDD 检查)
-- Claude Code 需求变更提示 recipe (`claude_requirements_nudge.json`) — 当 `docs/requirements/` 下的文件被编辑时，仅打印一条建议「需求已变更 → 运行 `codd greenfield --resume` 或 `codd check`」(纯打印，绝不自动运行高开销流水线)
-- Git `pre-commit` hook recipe (一致性检查违规时阻挡 commit)
-
-Recipe 位于 `codd/hooks/recipes/`。
+- **MCP 服务器**——`codd mcp-server` 通过 stdio 将 CoDD 暴露给任何兼容 MCP 的客户端（例如 Claude Code）。
+- **面向 Claude Code 与 Codex CLI 的 Skills**——`codd skills install <name> --target both` 会把打包好的 skills（例如绿地自动驾驶、棕地演进）分发到 `~/.claude/skills/` 和 `~/.agents/skills/`。
+- **Git 与编辑器钩子**——`codd/hooks/recipes/` 下的配方会在编辑后运行一致性检查，或拦截那些破坏一致性的提交。
+- **Codex App Server 后端**——让 AI 调用通过一个持久的 JSON-RPC 线程，而非每次调用都起一个子进程（在 `codd.yaml` 中设置 `codex_app_server.enabled: true`），并带有自动回退到子进程的机制。
 
 ---
 
-## 许可证
+## 覆盖词典（Coverage lexicons）
 
-MIT — 详见 [LICENSE](LICENSE)。
+CoDD 内置 **39 部行业标准词典**，作为可选启用的覆盖维度，让 `codd elicit` 能够对照真实标准找出规格中的漏洞——Web（WCAG、OWASP、Web Vitals）、移动端（HIG、Material 3、MASVS）、后端（REST、GraphQL、gRPC）、数据（SQL、JSON Schema）、运维（Kubernetes、Terraform、DORA）、合规（ISO 27001、HIPAA、PCI DSS、GDPR、EU AI Act）等等。它们都是插件：按需启用合适的部分，也可以在不触碰核心的情况下添加你自己的词典。
 
-## 链接
+---
+
+## 文档
+
+- [`docs/explainer.md`](docs/explainer.md) ——完整的概念，从依赖图一直讲到 AI 驱动的演进
+- [`CHANGELOG.md`](CHANGELOG.md) ——每一个版本及其质量指标
+- `codd --help` ——完整的 CLI 参考（在任何项目里，`codd check` 都是最佳的起点）
+- [`docs/`](docs/) ——架构笔记、安装指南、操作手册
+
+---
+
+## 参与贡献
+
+欢迎提交 Issue、PR 以及词典提案——参见 [Issues](https://github.com/yohey-w/codd-dev/issues)。CoDD 由 [@yohey-w](https://github.com/yohey-w) 维护，并衷心感谢那些报告了缺陷与洞见、从而塑造了本项目的贡献者们。
+
+---
+
+## 许可证与链接
+
+MIT——参见 [LICENSE](LICENSE)。
 
 - [PyPI](https://pypi.org/project/codd-dev/)
-- [GitHub Sponsors](https://github.com/sponsors/yohey-w) — 开发支援
+- [GitHub Sponsors](https://github.com/sponsors/yohey-w) ——支持本项目的开发
 - [Issues](https://github.com/yohey-w/codd-dev/issues)
-
----
-
-> 代码一旦发生变化，CoDD 就追踪影响范围、检测违规，并为 merge 判断生成证据。
