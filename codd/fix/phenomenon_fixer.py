@@ -28,6 +28,7 @@ from codd.fix.design_updater import (
     apply_update,
     update_design_doc,
 )
+from codd.fix.impact_planner import ImpactPlan, resolve_impact_plan
 from codd.fix.impl_propagation import (
     CheckRunner,
     ImplPropagationResult,
@@ -91,6 +92,10 @@ class PhenomenonFixResult:
     affected_test_paths: list[str] = field(default_factory=list)
     impl_target_sources: dict[str, str] = field(default_factory=dict)
     propagation: ImplPropagationResult | None = None
+    # Stage 4 impact plan (obligation-driven target resolution + coverage).
+    impact_plan: ImpactPlan | None = None
+    covered_obligations: dict[str, list[str]] = field(default_factory=dict)
+    unresolved_obligations: list[str] = field(default_factory=list)
     # Stage 5: optional design propagation (codd propagate, Path B)
     design_propagation: Any = None
     design_propagation_error: str = ""
@@ -124,6 +129,19 @@ def _config_propagate_impl(config: dict[str, Any]) -> bool:
     if not isinstance(phenom_cfg, dict):
         return True
     return bool(phenom_cfg.get("propagate_impl", True))
+
+
+def _is_design_target(target: Candidate) -> bool:
+    """True only when the chosen candidate is a markdown design document.
+
+    Defense-in-depth against the ``common`` type confusion: ``candidate_selector``
+    already excludes common *code* nodes, but Stage 3 must never run
+    ``update_design_doc`` on an implementation file even if a code node reaches
+    here — that would patch code "as a design document" and break the
+    design→impl→test north star (it produced the v3.1.0 "Attempt 1 on
+    route.ts" symptom). Non-markdown targets are recorded and skipped.
+    """
+    return str(target.path or target.node_id or "").endswith(".md")
 
 
 def run_phenomenon_fix(
@@ -283,6 +301,22 @@ def run_phenomenon_fix(
     applied_updates: list[tuple[str, DesignUpdate]] = []
     proposed_updates: list[tuple[str, DesignUpdate]] = []
     for target in targets:
+        if not _is_design_target(target):
+            result.attempts.append(
+                PhenomenonFixAttempt(
+                    attempt=1,
+                    target=target,
+                    update=None,
+                    risk=None,
+                    applied=False,
+                    aborted_reason=(
+                        f"refusing design update on non-design target "
+                        f"(kind={target.kind}, path={target.path}): only "
+                        f"markdown design documents are valid Stage-3 targets"
+                    ),
+                )
+            )
+            continue
         target_path = project_root / target.path
         if not target_path.exists():
             result.attempts.append(
@@ -367,39 +401,135 @@ def _run_stage4_propagation(
 ) -> None:
     """Stage 4: propagate the applied design update into impl + tests.
 
-    Dry-run only previews the affected files (deterministic DAG impact); a
-    real run drives the narrow LLM patch slot wrapped by the verify gate.
+    When the analysis carries a change-surface decomposition (entities /
+    fields / operations / surfaces, OR explicit LLM obligations), targets are
+    resolved by the obligation-driven
+    :func:`codd.fix.impact_planner.resolve_impact_plan` and obligation coverage
+    is ENFORCED. Dry-run previews the affected files plus the obligation→file
+    coverage; a real run drives the narrow LLM patch slot wrapped by the verify
+    gate, using the plan as the write allowlist.
+
+    anti-false-green: when obligations exist and the plan's status is not
+    ``complete`` (an obligation is unresolved, or too many candidates are
+    ambiguous), the run ABORTS with an explicit reason. A partial set of impl
+    files is NEVER applied — that is exactly the semantic false green this stage
+    exists to prevent.
+
+    Back-compat: when NO obligations can be derived (no change-surface signal —
+    e.g. a pure design-doc clarification), the planner has nothing to verify
+    against, so the stage falls back to the legacy DAG-exact resolution. That
+    path still fail-fasts via its own deterministic gates and never widens the
+    write allowlist beyond hard ``expects``/module evidence.
     """
+    analysis = result.analysis
+    if analysis is None:  # pragma: no cover — analysis is always set by Step 1
+        return
+
     if dry_run:
         if not proposed_updates:
             return
         node_ids = [node_id for node_id, _update in proposed_updates]
-        impl_paths, test_paths, sources = collect_propagation_targets(
-            dag, node_ids, project_root
+        plan = resolve_impact_plan(
+            dag=dag,
+            project_root=project_root,
+            design_node_ids=node_ids,
+            phenomenon_text=phenomenon_text,
+            analysis=analysis,
+            design_updates=[u for _node_id, u in proposed_updates],
+            config=config,
         )
-        result.affected_impl_paths = impl_paths
-        result.affected_test_paths = test_paths
-        result.impl_target_sources = sources
+        if not plan.obligations:
+            # No change surface to verify — preview via legacy resolution.
+            impl_paths, test_paths, sources = collect_propagation_targets(
+                dag, node_ids, project_root
+            )
+            result.affected_impl_paths = impl_paths
+            result.affected_test_paths = test_paths
+            result.impl_target_sources = sources
+            return
+        _record_plan(result, plan)
+        if plan.status != "complete":
+            result.aborted = True
+            result.abort_reason = _impact_abort_reason(plan)
         return
 
     if not applied_updates:
         return
 
-    propagation = run_impl_propagation(
-        project_root,
+    node_ids = [node_id for node_id, _update in applied_updates]
+    plan = resolve_impact_plan(
+        dag=dag,
+        project_root=project_root,
+        design_node_ids=node_ids,
         phenomenon_text=phenomenon_text,
-        applied=applied_updates,
-        ai_invoke=ai,
+        analysis=analysis,
+        design_updates=[u for _node_id, u in applied_updates],
         config=config,
-        max_attempts=max_attempts,
-        check_runner=check_runner,
-        test_runner=test_runner,
-        baseline_red_checks=baseline_red,
     )
+
+    if plan.obligations:
+        _record_plan(result, plan)
+        if plan.status != "complete":
+            # Fail-fast: never apply a partial/ambiguous impact set.
+            result.aborted = True
+            result.abort_reason = _impact_abort_reason(plan)
+            return
+        propagation = run_impl_propagation(
+            project_root,
+            phenomenon_text=phenomenon_text,
+            applied=applied_updates,
+            ai_invoke=ai,
+            config=config,
+            max_attempts=max_attempts,
+            check_runner=check_runner,
+            test_runner=test_runner,
+            baseline_red_checks=baseline_red,
+            impl_paths=plan.impl_paths,
+            test_paths=plan.test_paths,
+            target_sources={nid: "impact_plan" for nid in node_ids},
+            intent=analysis.intent,
+        )
+    else:
+        # No change-surface signal: legacy DAG-exact propagation (back-compat).
+        propagation = run_impl_propagation(
+            project_root,
+            phenomenon_text=phenomenon_text,
+            applied=applied_updates,
+            ai_invoke=ai,
+            config=config,
+            max_attempts=max_attempts,
+            check_runner=check_runner,
+            test_runner=test_runner,
+            baseline_red_checks=baseline_red,
+            intent=analysis.intent,
+        )
+
     result.propagation = propagation
     result.affected_impl_paths = propagation.impl_paths
     result.affected_test_paths = propagation.test_paths
     result.impl_target_sources = propagation.target_sources
+
+
+def _record_plan(result: PhenomenonFixResult, plan: ImpactPlan) -> None:
+    """Mirror the impact plan onto the fix result (preview + audit fields)."""
+    result.impact_plan = plan
+    result.affected_impl_paths = list(plan.impl_paths)
+    result.affected_test_paths = list(plan.test_paths)
+    result.covered_obligations = dict(plan.covered_obligations)
+    result.unresolved_obligations = list(plan.unresolved_obligations)
+
+
+def _impact_abort_reason(plan: ImpactPlan) -> str:
+    """Explicit, non-false-green abort message for an incomplete impact plan."""
+    detail = "; ".join(plan.diagnostics) if plan.diagnostics else plan.status
+    base = f"impact resolution {plan.status}: {detail}"
+    if plan.unresolved_obligations:
+        base += (
+            " — refusing to apply a partial fix (unresolved: "
+            + ", ".join(plan.unresolved_obligations)
+            + ")"
+        )
+    return base
 
 
 def _run_stage5_design_propagation(
@@ -696,6 +826,11 @@ def _build_design_summaries(dag, project_root: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     for node in dag.nodes.values():
         if node.kind not in {"design_doc", "common"}:
+            continue
+        # `common` is overloaded (design docs AND code files); only markdown
+        # docs are design context — mirror of _collect_design_nodes so the
+        # parser is never seeded with implementation files as "design".
+        if not str(node.path or "").endswith(".md"):
             continue
         fm = (node.attributes or {}).get("frontmatter") or {}
         description = ""

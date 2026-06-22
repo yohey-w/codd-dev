@@ -128,11 +128,28 @@ def select_candidates(
     )
 
 
+def _is_markdown_doc_node(node: Node) -> bool:
+    """True only for markdown design documents.
+
+    ``kind="common"`` is overloaded: the DAG builder marks BOTH common design
+    *documents* and common *code* files (those matching ``common_node_patterns``)
+    as ``common``. Only markdown docs are valid Stage-3 design-update targets —
+    admitting common *code* here lets a phenomenon fix rewrite an implementation
+    file as if it were a design document, collapsing the design→impl→test north
+    star into a single ad-hoc code edit.
+    """
+    path = str(node.path or node.id or "")
+    return path.endswith(".md")
+
+
 def _collect_design_nodes(dag: DAG, *, include_common: bool) -> list[Node]:
-    kinds = {"design_doc"}
-    if include_common:
-        kinds.add("common")
-    return [node for node in dag.nodes.values() if node.kind in kinds]
+    out: list[Node] = []
+    for node in dag.nodes.values():
+        if node.kind == "design_doc":
+            out.append(node)
+        elif include_common and node.kind == "common" and _is_markdown_doc_node(node):
+            out.append(node)
+    return out
 
 
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]+|[぀-ヿ一-鿿]+")

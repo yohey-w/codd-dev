@@ -80,6 +80,14 @@ class ImplPropagationResult:
     rolled_back: bool = False
     rolled_back_paths: list[str] = field(default_factory=list)
     skipped_reason: str = ""
+    # Red-green witness (anti-false-green): proves the patched tests actually
+    # DETECT this run's change. ``witness_applicable`` is True only for
+    # behaviour-changing intents (new_feature / bugfix); ``witness_passed`` is
+    # True when the patched tests fail against the baseline impl (so they would
+    # have caught the missing behaviour) and pass against the patched impl.
+    witness_applicable: bool = False
+    witness_passed: bool = False
+    witness_reason: str = ""
 
     @property
     def changed(self) -> bool:
@@ -182,6 +190,10 @@ def run_impl_propagation(
     check_runner: CheckRunner | None = None,
     test_runner: TestRunner | None = None,
     baseline_red_checks: set[str] | None = None,
+    impl_paths: list[str] | None = None,
+    test_paths: list[str] | None = None,
+    target_sources: dict[str, str] | None = None,
+    intent: str = "",
 ) -> ImplPropagationResult:
     """Propagate applied design updates into implementation and test files.
 
@@ -197,6 +209,19 @@ def run_impl_propagation(
         baseline_red_checks: red check names captured BEFORE the design update
             was applied (the gate passes only when no *new* red appears).
             When None, the baseline is captured now (post design update).
+        impl_paths / test_paths / target_sources: pre-resolved impact targets
+            (from :func:`codd.fix.impact_planner.resolve_impact_plan`). When
+            provided, they are the SOURCE OF TRUTH and the legacy
+            ``collect_propagation_targets`` DAG re-resolution is skipped — the
+            planner has already proven obligation coverage, so re-deriving here
+            would only risk reintroducing the under-reach this design fixes.
+        intent: the phenomenon intent (``analysis.intent``). For
+            behaviour-changing intents (``new_feature`` / ``bugfix``) a
+            red-green witness runs after the gate goes green: it proves the
+            patched tests actually DETECT this run's change (they fail against
+            the baseline impl). A failed witness blocks the verified success and
+            triggers the targeted rollback — a green that no test would have
+            caught is a semantic false green. Other intents skip the witness.
     """
     result = ImplPropagationResult()
     project_root = Path(project_root).resolve()
@@ -208,24 +233,33 @@ def run_impl_propagation(
         return result
 
     # ------------------------------------------------------------------
-    # Impact: deterministic DAG-based target resolution
+    # Impact: use the pre-resolved plan when given, else fall back to the
+    # legacy DAG-based resolution (back-compat for callers without a plan).
     # ------------------------------------------------------------------
-    if dag is None:
-        try:
-            from codd.dag.builder import build_dag
+    if impl_paths is not None:
+        result.impl_paths = list(impl_paths)
+        result.test_paths = list(test_paths or [])
+        result.target_sources = dict(target_sources or {})
+    else:
+        if dag is None:
+            try:
+                from codd.dag.builder import build_dag
 
-            dag = build_dag(project_root)
-        except Exception as exc:  # noqa: BLE001
-            result.skipped_reason = f"DAG build failed: {exc}"
-            return result
+                dag = build_dag(project_root)
+            except Exception as exc:  # noqa: BLE001
+                result.skipped_reason = f"DAG build failed: {exc}"
+                return result
 
-    design_node_ids = [node_id for node_id, _update in applied]
-    impl_paths, test_paths, sources = collect_propagation_targets(
-        dag, design_node_ids, project_root
-    )
-    result.impl_paths = impl_paths
-    result.test_paths = test_paths
-    result.target_sources = sources
+        design_node_ids = [node_id for node_id, _update in applied]
+        resolved_impl, resolved_test, sources = collect_propagation_targets(
+            dag, design_node_ids, project_root
+        )
+        result.impl_paths = resolved_impl
+        result.test_paths = resolved_test
+        result.target_sources = sources
+
+    impl_paths = result.impl_paths
+    test_paths = result.test_paths
 
     if not impl_paths:
         result.skipped_reason = (
@@ -308,9 +342,25 @@ def run_impl_propagation(
         result.attempts.append(attempt)
 
         if gate.verified:
-            result.verified = True
-            result.written_paths = sorted(all_written)
-            return result
+            # Anti-false-green: before claiming a verified fix, prove the
+            # patched tests actually DETECT this run's change. A green that no
+            # test would have caught is a semantic false green.
+            witness = _run_red_green_witness(
+                result,
+                project_root=project_root,
+                snapshot=snapshot,
+                written_paths=all_written,
+                tests=tests,
+                intent=intent,
+            )
+            if witness.passed:
+                result.verified = True
+                result.written_paths = sorted(all_written)
+                return result
+            # Witness FAILED — roll back this run's writes and do NOT return a
+            # verified success. Fall through to the targeted-rollback tail so no
+            # partial/unwitnessed change is left applied.
+            break
 
         session.record_attempt(
             attempt=attempt_num,
@@ -328,6 +378,139 @@ def run_impl_propagation(
     result.rolled_back = bool(snapshot)
     result.written_paths = []
     return result
+
+
+# ---------------------------------------------------------------------------
+# Red-green witness (anti-false-green)
+# ---------------------------------------------------------------------------
+
+_WITNESS_INTENTS = frozenset({"new_feature", "bugfix"})
+
+
+@dataclass
+class _WitnessOutcome:
+    """Result of the red-green witness check."""
+
+    passed: bool
+    reason: str = ""
+
+
+def _write_or_remove(project_root: Path, rel_path: str, content: str | None) -> None:
+    """Set ``rel_path`` to ``content``; ``None`` removes the file (created this run)."""
+    target = project_root / rel_path
+    if content is None:
+        if target.exists():
+            target.unlink()
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+
+
+def _run_red_green_witness(
+    result: ImplPropagationResult,
+    *,
+    project_root: Path,
+    snapshot: dict[str, str | None],
+    written_paths: list[str],
+    tests: TestRunner,
+    intent: str,
+) -> _WitnessOutcome:
+    """Prove the patched tests DETECT this run's change (anti-false-green).
+
+    Runs only after the deterministic gate is already green. Procedure
+    (snapshot-based, generic — no language/framework/project literals):
+
+    1. Identify the impl files (non-test) and test files this run wrote.
+    2. Capture the PATCHED impl content now on disk.
+    3. Restore those impl files to their PRE-RUN baseline (from ``snapshot``;
+       ``None`` baseline means the file was created this run → remove it).
+       LEAVE the patched test files in place.
+    4. Run the local tests. The result MUST be RED — the patched tests should
+       fail without the new behaviour. GREEN means the tests do not exercise
+       the change → semantic false green → witness FAILS.
+    5. ALWAYS restore the patched impl content (``finally``), so a witness
+       failure leaves the patched state intact for the caller's normal
+       targeted rollback.
+
+    A test command that cannot run (returns ``None``) is INCONCLUSIVE and
+    treated as a FAIL — the module refuses to claim a verified fix it cannot
+    witness. Behaviour-changing intents with no changed/created test file fail
+    for the same reason: a behaviour change with no behaviour test is not
+    provably covered.
+
+    Non behaviour-changing intents (anything outside ``new_feature`` /
+    ``bugfix``) are NOT APPLICABLE: the witness is skipped and the run proceeds
+    as a normal success.
+    """
+    normalized_intent = (intent or "").strip().lower()
+    if normalized_intent not in _WITNESS_INTENTS:
+        result.witness_applicable = False
+        result.witness_passed = True
+        result.witness_reason = (
+            f"not applicable for intent {normalized_intent or 'unknown'!r} "
+            "(witness runs only for new_feature / bugfix)"
+        )
+        return _WitnessOutcome(passed=True, reason=result.witness_reason)
+
+    result.witness_applicable = True
+
+    test_written = [p for p in written_paths if is_test_path(p)]
+    impl_written = [p for p in written_paths if not is_test_path(p)]
+
+    if not test_written:
+        result.witness_passed = False
+        result.witness_reason = (
+            "no behaviour-witness test was created or changed — a behaviour "
+            "change with no test cannot be proven to detect the change"
+        )
+        return _WitnessOutcome(passed=False, reason=result.witness_reason)
+
+    # Capture the verified-green PATCHED impl content before perturbing it.
+    patched_impl: dict[str, str | None] = {}
+    for rel_path in impl_written:
+        target = project_root / rel_path
+        if target.is_file():
+            try:
+                patched_impl[rel_path] = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                patched_impl[rel_path] = None
+        else:
+            patched_impl[rel_path] = None
+
+    try:
+        # Restore impl to PRE-RUN baseline; leave patched tests in place.
+        for rel_path in impl_written:
+            _write_or_remove(project_root, rel_path, snapshot.get(rel_path))
+
+        baseline_failures = _safe_run_tests(tests, project_root)
+        if baseline_failures is None:
+            result.witness_passed = False
+            result.witness_reason = (
+                "red-green witness inconclusive — the test command is "
+                "unavailable, so the patched tests cannot be witnessed; "
+                "refusing to claim a verified fix that cannot be proven"
+            )
+            return _WitnessOutcome(passed=False, reason=result.witness_reason)
+        if not baseline_failures:
+            result.witness_passed = False
+            result.witness_reason = (
+                "red-green witness failed — the patched tests still pass "
+                "against the baseline implementation, so they do not detect "
+                "this change (semantic false green)"
+            )
+            return _WitnessOutcome(passed=False, reason=result.witness_reason)
+
+        result.witness_passed = True
+        result.witness_reason = (
+            "red-green witness passed — patched tests fail against the "
+            "baseline implementation and pass against the patched one"
+        )
+        return _WitnessOutcome(passed=True, reason=result.witness_reason)
+    finally:
+        # ALWAYS restore the patched impl so the caller's rollback (or success)
+        # sees the post-patch state, never the perturbed baseline.
+        for rel_path in impl_written:
+            _write_or_remove(project_root, rel_path, patched_impl.get(rel_path))
 
 
 # ---------------------------------------------------------------------------
