@@ -74,6 +74,10 @@ _SKIP_DIR_NAMES = frozenset(
         ".vscode",
         "target",
         "vendor",
+        "reports",
+        "tmp",
+        "logs",
+        "__snapshots__",
     }
 )
 
@@ -388,7 +392,14 @@ def iter_source_files(
         if path.suffix.lower() not in allowed:
             continue
         rel_parts = path.relative_to(root).parts
-        if any(part in _SKIP_DIR_NAMES for part in rel_parts[:-1]):
+        # Skip named build/cache/VCS dirs AND any dotdir (e.g. .next, .next-e2e,
+        # .nuxt, .svelte-kit, .turbo, .cache): generated build output and tool
+        # caches live under dotdirs and are never hand-edited source. A bare
+        # ``part in _SKIP_DIR_NAMES`` misses sibling build dirs like ``.next-e2e``.
+        if any(
+            part in _SKIP_DIR_NAMES or (part.startswith(".") and part not in (".", ".."))
+            for part in rel_parts[:-1]
+        ):
             continue
         rel = "/".join(rel_parts)
         if is_test_path(rel):
@@ -463,6 +474,7 @@ def find_impl_candidates_v2(
     terms: set[str],
     *,
     suffixes: Iterable[str] | None = None,
+    candidate_paths: Iterable[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Search every source file for ``terms`` in both path and content.
 
@@ -471,13 +483,43 @@ def find_impl_candidates_v2(
     which of these become write targets, based on evidence scoring. Keeping
     discovery (broad) separate from acceptance (strict) is what lets recall be
     high without sacrificing precision.
+
+    The candidate universe is general:
+
+    * ``candidate_paths`` (explicit rel-path list) takes precedence when given —
+      the caller has already chosen the source universe (e.g. DAG nodes);
+    * otherwise :func:`iter_source_files` walks the tree filtered by
+      ``suffixes`` (defaulting to :data:`_SOURCE_SUFFIXES`), skipping
+      VCS/build/cache dirs and test files.
+
+    Passing a non-default ``suffixes`` (e.g. the set of text-like extensions a
+    repo actually contains) makes stylesheet/text-config/copy files discoverable
+    WITHOUT this function hardcoding any framework suffix — generality is kept by
+    deriving the universe from the repo, not from a baked-in list.
     """
     root = Path(project_root)
     norm = {t for t in terms if t}
     out: dict[str, dict[str, Any]] = {}
     if not norm:
         return out
-    for path in iter_source_files(root, suffixes):
+
+    if candidate_paths is not None:
+        paths_iter: Iterable[Path] = []
+        seen: set[str] = set()
+        resolved: list[Path] = []
+        for rel in candidate_paths:
+            rel_posix = Path(rel).as_posix()
+            if rel_posix in seen:
+                continue
+            seen.add(rel_posix)
+            full = root / rel
+            if full.is_file():
+                resolved.append(full)
+        paths_iter = resolved
+    else:
+        paths_iter = iter_source_files(root, suffixes)
+
+    for path in paths_iter:
         rel = _rel(path, root)
         p_hits = path_segment_hits(rel, norm)
         text = _safe_read(path)
