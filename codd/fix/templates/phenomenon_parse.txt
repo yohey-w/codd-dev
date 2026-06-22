@@ -8,7 +8,12 @@ Return ONLY a JSON object with this exact shape:
   "subject_terms": ["natural-language keyword", "..."],
   "lexicon_hits": ["normalized lexicon id", "..."],
   "ambiguity_score": 0.0,
-  "acceptance_signal": "short natural-language description of done"
+  "acceptance_signal": "short natural-language description of done",
+  "entities": ["domain object the change acts on (code-identifier form)", "..."],
+  "fields": ["specific data field / attribute / column name involved", "..."],
+  "operations": ["generic action verbs: create, update, delete, display, input, list, get", "..."],
+  "surfaces": ["architectural surface (code-identifier form): api, admin, learner, ...", "..."],
+  "obligations": [{"id": "api.create", "description": "one distinct change facet", "terms": ["covering term", "..."]}]
 }
 
 Rules:
@@ -21,6 +26,30 @@ Rules:
   1.0 = the phenomenon is so vague that any fix could be wrong.
   Be honest. 0.4+ means a clarification question is warranted.
 - acceptance_signal: at most 140 chars. "" if cannot be inferred.
+
+The remaining fields decompose WHERE the change must land so completeness can
+be verified. Use the likely CODE-IDENTIFIER form (usually English) of each word,
+even when the phenomenon is written in another language (e.g. an admin/管理 screen
+=> "admin", a learner/受講者 screen => "learner", an endpoint => "api"). [] when
+a field does not apply.
+- entities: the domain object(s) the change acts on (the noun being created /
+  edited / shown), as the codebase would name them.
+- fields: specific data field / attribute / column names the change involves.
+- operations: every generic action the phenomenon implies — from create/add,
+  update/edit, delete, display, input, list, get. Be complete: a "create AND
+  show" feature lists BOTH "create" and "display".
+- surfaces: the architectural places the change must reach, as generic
+  code-identifier tokens (e.g. "api"/"server" for backend endpoints, "admin"
+  for the authoring/management UI, "learner"/end-user role for the consumer
+  screen). NEVER framework or library names.
+- obligations: enumerate EVERY distinct change facet that must ALL hold for the
+  fix to be complete — typically one per (surface x operation) the phenomenon
+  requires. Be exhaustive: a feature created via api, updated via api, shown on
+  the learner UI, and authored on the admin UI has FOUR obligations. Each is
+  {id: short dotted id like "api.create", description, terms: the surface /
+  operation / entity / field words a covering file would contain}. This is the
+  completeness contract: a missing facet makes the fix incomplete and rejected,
+  so list them all. [] only for a genuine single-surface change.
 
 PHENOMENON_TEXT:
 {phenomenon_text}

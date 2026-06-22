@@ -63,6 +63,40 @@ def test_common_kind_included_by_default(tmp_path):
     assert any(c.node_id == "shared/errors.md" for c in result.candidates)
 
 
+def test_common_code_file_excluded_from_design_candidates(tmp_path):
+    """Regression (v3.1.0 'Attempt 1 on route.ts'): kind='common' is overloaded
+    for common design *docs* and common *code* files. Only markdown docs may be
+    Stage-3 design-update candidates — a common code file must never be selected
+    as a design target even when it matches the phenomenon terms."""
+    dag = _make_dag(
+        tmp_path,
+        {
+            "docs/design/courses.md": (
+                "design_doc",
+                "# Courses\nvideo lesson contentBody handling",
+            ),
+            # overloaded common: an implementation file matching common_node_patterns
+            "src/app/api/v1/lessons/route.ts": (
+                "common",
+                "video lesson contentBody create handler",
+            ),
+        },
+    )
+    analysis = PhenomenonAnalysis(
+        intent="new_feature",
+        subject_terms=["video", "lesson", "contentBody"],
+        lexicon_hits=["contentBody"],
+    )
+    result = select_candidates(
+        analysis, dag=dag, project_root=tmp_path, include_common=True
+    )
+    paths = {c.path for c in result.candidates}
+    assert "src/app/api/v1/lessons/route.ts" not in paths
+    assert all(c.path.endswith(".md") for c in result.candidates)
+    # the genuine markdown design doc remains selectable
+    assert "docs/design/courses.md" in paths
+
+
 def test_common_kind_excluded_when_disabled(tmp_path):
     dag = _make_dag(
         tmp_path,

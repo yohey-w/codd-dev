@@ -15,7 +15,16 @@ AiInvoke = Callable[[str], str]
 
 @dataclass
 class PhenomenonAnalysis:
-    """Structured interpretation of a phenomenon string."""
+    """Structured interpretation of a phenomenon string.
+
+    The first block of fields is the long-standing contract. The second block
+    (``entities`` .. ``obligations``) is an *optional, backward-compatible*
+    decomposition of the change surface used by the impact planner. All default
+    to empty, so an LLM (or an old caller) that supplies none keeps working —
+    the planner derives a deterministic baseline obligation set when these are
+    absent. The LLM only *proposes* this decomposition; deterministic evidence
+    decides the final impact plan.
+    """
 
     intent: str = "unknown"
     subject_terms: list[str] = field(default_factory=list)
@@ -23,6 +32,13 @@ class PhenomenonAnalysis:
     ambiguity_score: float = 1.0
     acceptance_signal: str = ""
     raw_response: str = ""
+
+    # Optional change-surface decomposition (for impact planning).
+    entities: list[str] = field(default_factory=list)
+    fields: list[str] = field(default_factory=list)
+    operations: list[str] = field(default_factory=list)
+    surfaces: list[str] = field(default_factory=list)
+    obligations: list[dict[str, Any]] = field(default_factory=list)
 
     def is_ambiguous(self, threshold: float = 0.6) -> bool:
         return self.ambiguity_score >= threshold
@@ -34,6 +50,11 @@ class PhenomenonAnalysis:
             "lexicon_hits": list(self.lexicon_hits),
             "ambiguity_score": self.ambiguity_score,
             "acceptance_signal": self.acceptance_signal,
+            "entities": list(self.entities),
+            "fields": list(self.fields),
+            "operations": list(self.operations),
+            "surfaces": list(self.surfaces),
+            "obligations": list(self.obligations),
         }
 
 
@@ -113,7 +134,37 @@ def _coerce_analysis(raw: str) -> PhenomenonAnalysis:
         ambiguity_score=score,
         acceptance_signal=acceptance,
         raw_response=raw,
+        entities=_string_list(payload.get("entities")),
+        fields=_string_list(payload.get("fields")),
+        operations=_string_list(payload.get("operations")),
+        surfaces=_string_list(payload.get("surfaces")),
+        obligations=_obligation_list(payload.get("obligations")),
     )
+
+
+def _obligation_list(value: Any) -> list[dict[str, Any]]:
+    """Coerce the LLM's proposed obligations into ``[{id, description, terms}]``.
+
+    Tolerant: drops malformed entries rather than failing. The planner treats
+    these as *proposals only* — coverage is decided by deterministic evidence.
+    """
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        oid = str(item.get("id", "") or "").strip()
+        if not oid:
+            continue
+        out.append(
+            {
+                "id": oid,
+                "description": str(item.get("description", "") or "").strip(),
+                "terms": _string_list(item.get("terms")),
+            }
+        )
+    return out
 
 
 def _string_list(value: Any) -> list[str]:
