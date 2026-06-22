@@ -78,8 +78,40 @@ _SKIP_DIR_NAMES = frozenset(
         "tmp",
         "logs",
         "__snapshots__",
+        # Installed third-party packages (any Python virtualenv, regardless of
+        # the venv dir's name — ``.venv``/``venv`` are caught above, but a repo
+        # may hold a venv under an arbitrary name). ``site-packages`` is the
+        # universal install location; skipping it removes the bulk of a venv's
+        # files so a stray in-repo virtualenv cannot pollute candidates or
+        # exhaust the document-frequency scan budget. Generic Python convention,
+        # not a project/framework name.
+        "site-packages",
     }
 )
+
+# Cross-ecosystem dependency LOCK files: machine-generated, hash-dense, never a
+# hand-edited target (like generated code). The ``.lock`` suffix catches
+# yarn.lock/poetry.lock/Cargo.lock/Gemfile.lock/Pipfile.lock/flake.lock; these
+# remaining names use other suffixes. Naming these is file-KIND knowledge (a
+# tooling convention, like a test-file name), not a project/framework feature —
+# consistent with :func:`is_test_path`. A short hex anchor can substring-match a
+# hash inside such a file and fake a content certificate, so they must be
+# excluded from the search/frequency universe.
+_DEPENDENCY_LOCK_NAMES = frozenset(
+    {
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "bun.lockb",
+        "go.sum",
+        "composer.lock",
+    }
+)
+
+
+def is_dependency_lock(basename: str) -> bool:
+    """True for a machine-generated dependency lock file (never a patch target)."""
+    return basename.lower() in _DEPENDENCY_LOCK_NAMES
 
 # Cap content reads so a pathological file cannot blow up the search.
 _MAX_CONTENT_CHARS = 200_000
@@ -400,6 +432,8 @@ def iter_source_files(
             part in _SKIP_DIR_NAMES or (part.startswith(".") and part not in (".", ".."))
             for part in rel_parts[:-1]
         ):
+            continue
+        if is_dependency_lock(rel_parts[-1]):
             continue
         rel = "/".join(rel_parts)
         if is_test_path(rel):

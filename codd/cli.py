@@ -6393,6 +6393,11 @@ def _run_phenomenon_fix_cli(
             f"   intent={a.intent}, ambiguity={a.ambiguity_score:.2f}, "
             f"subject_terms={a.subject_terms[:4]}"
         )
+        click.echo(
+            f"   decomposition: entities={a.entities} fields={a.fields} "
+            f"operations={a.operations} surfaces={a.surfaces} "
+            f"obligations={[o.get('id') for o in (a.obligations or []) if isinstance(o, dict)]}"
+        )
 
     if result.aborted:
         click.echo(f"❌ Aborted: {result.abort_reason}")
@@ -6425,6 +6430,15 @@ def _run_phenomenon_fix_cli(
             applied_any = True
 
     if dry_run:
+        if result.impact_plan is not None:
+            plan = result.impact_plan
+            click.echo(f"\n🧭 Impact plan: status={plan.status}")
+            for d in plan.diagnostics:
+                click.echo(f"   · {d}")
+            if plan.covered_obligations:
+                click.echo("   coverage:")
+                for oid, paths in sorted(plan.covered_obligations.items()):
+                    click.echo(f"     {oid} <- {', '.join(paths)}")
         if result.propagate_impl_enabled and (
             result.affected_impl_paths or result.affected_test_paths
         ):

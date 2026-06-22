@@ -71,6 +71,7 @@ from codd.dag.impact import (
     affected_impl_targets,
     find_impl_candidates,
     find_impl_candidates_v2,
+    is_dependency_lock,
     is_test_path,
     iter_source_files,
     normalize_terms,
@@ -86,10 +87,33 @@ from codd.fix.phenomenon_parser import PhenomenonAnalysis
 # false-green fallback.
 HARD_SOURCES = frozenset({"expects", "expected_extraction"})
 
-# ``content_token`` is the weakest evidence (a single bare term appears in the
-# file) and must NEVER count toward the "independent corroboration" requirement
-# on its own — otherwise one common word would admit half the repo.
-_NON_INDEPENDENT_SOURCES = frozenset({"content_token"})
+# Evidence sources that must NEVER, on their own, satisfy the "independent
+# corroboration" requirement:
+# * ``content_token`` — a single bare term appears in the file (one common word
+#   would otherwise admit half the repo);
+# * ``import_neighbor`` — import-graph proximity to another candidate. This is
+#   CORROBORATION (it can push a borderline file with its OWN direct evidence
+#   over the line), never admission: a file reachable in the import graph from a
+#   seed but carrying no direct path/content-pair/anchor signal of its own must
+#   not be admitted as a write target. Counting graph proximity as independent
+#   let unrelated neighbours (e.g. shared util/template files imported widely)
+#   reach the 2-source bar via ``content_pair`` + ``import_neighbor`` and be
+#   patched — a false-green. Demoting it keeps the import graph as a tie-breaker,
+#   not an admission key (anti-false-green; matches its sub-threshold weight).
+_NON_INDEPENDENT_SOURCES = frozenset({"content_token", "import_neighbor"})
+
+# Content-certificate sources. A content-ONLY file (no path signal, no cross-
+# category content pair) is normally rejected by the independent-2-sources rule.
+# But a *rare, literal, non-target* anchor (or a co-occurring cluster of rare
+# anchors) in the file body is the field-less analogue of a field discriminator:
+# it singles out the change surface as strongly as a path hit. These sources
+# open a SEPARATE acceptance route (``_score_and_accept``) — they do NOT relax
+# the independent-sources rule for ordinary content tokens, so the historical
+# broad over-match (a common word admitting half the repo) cannot recur: a
+# common/high-frequency word never earns a certificate.
+_CONTENT_CERTIFYING_SOURCES = frozenset(
+    {"content_unique_anchor", "content_anchor_cluster"}
+)
 
 # Default soft-acceptance thresholds (overridable by the caller).
 _DEFAULT_MIN_SCORE = 0.55
@@ -107,6 +131,13 @@ _WEIGHTS = {
     "path_substring": 0.15,
     "content_pair": 0.35,
     "content_token": 0.12,
+    # A content certificate (rare/literal anchor or rare-anchor cluster) is a
+    # strong INDEPENDENT discriminator — weighted just above the soft-acceptance
+    # floor so a content-only file with a certificate clears the score gate, but
+    # acceptance is still gated by the dedicated certificate route, not by score
+    # alone.
+    "content_unique_anchor": 0.56,
+    "content_anchor_cluster": 0.56,
     "import_neighbor": 0.30,
     "test_map": 0.20,
 }
@@ -260,8 +291,50 @@ _MIN_SPECIFIC_TOKEN_LEN = 3
 # many source files is treated as generic (it cannot single out the change
 # surface). Kept small and absolute — generality forbids any project tuning.
 _MAX_SPECIFIC_DOCUMENT_FREQUENCY = 6
+# Ubiquity cap for FIELD anchors. A declared field is forced specific (it bypasses
+# the small cap above and the facet filter), because a real data field is a
+# strong discriminator. But the LLM sometimes mislabels a generic word ("body",
+# "background", "data") as a field; such a token appears in far more files than a
+# focused fix would ever patch and would explode the candidate set. A field whose
+# document frequency exceeds this bound is therefore demoted to generic. The
+# bound is the cardinality cap (the most files we would ever patch in one fix),
+# not a tuned magic number: a discriminator matching many more files than we
+# could ever write is, by definition, not discriminating. A genuinely focused
+# field (a specific entity attribute) stays well under it.
+_MAX_FIELD_DOCUMENT_FREQUENCY = _DEFAULT_MAX_IMPL_CANDIDATES
 # Cap how many source files the document-frequency probe scans (cheap, bounded).
 _DOC_FREQUENCY_SCAN_LIMIT = 2000
+
+# --- Content-certificate thresholds (field-less discriminator route) ---------
+# A content-only file earns a certificate via one of two routes, both keyed on
+# CONTENT document-frequency (how many file BODIES contain the anchor), which is
+# strictly rarer evidence than the path-or-content frequency used for the
+# specific/generic split. Two independent constraints — rarity AND literal shape
+# — guard against the historical broad over-match: low frequency alone is NOT
+# enough (a stray rare word must not certify), and a bare short word (no
+# delimiter/digit, low literal strength) is NOT enough either.
+#
+# Route A (unique literal): a SINGLE anchor that is value-like (hex/digit-
+# bearing, high literal strength) and appears in exactly one file body. This is
+# the "lone exact literal" case (a unique color/id/constant).
+_MAX_CONTENT_UNIQUE_DF = 1
+_MIN_SINGLE_LITERAL_STRENGTH = 4
+# Route B (rare cluster): TWO OR MORE rare identifier-shaped anchors co-occur in
+# the same file body. Co-occurrence of multiple change-related rare anchors is a
+# precise signal even when each is an alphabetic construct name (e.g. a CSS
+# ``linear-gradient`` + ``background-image`` pair) rather than a value literal —
+# the discriminating construct vocabulary a styling change touches is present in
+# the target file BEFORE the new value is written, whereas the new value literal
+# is not yet there. Each cluster member must still be identifier-shaped
+# (strength >= membership floor) and rare (content_df within the cap); a cluster
+# of bare common words never forms.
+_MAX_CONTENT_RARE_DF = 2
+_MIN_CONTENT_CLUSTER_SIZE = 2
+_MIN_CLUSTER_MEMBER_STRENGTH = 2
+
+# A hex-color-shaped literal (with or without a leading ``#``). Generic value
+# shape — names no project/framework/language; a 6–8 digit hex id matches too.
+_HEXISH_RE = _re.compile(r"#?[0-9a-fA-F]{6,8}")
 
 # Machine-generated code must NEVER be a patch target: it is reproduced from a
 # spec/source, so a hand patch is futile (overwritten on regeneration) and only
@@ -363,6 +436,15 @@ class ImpactObligation:
     # Whether this is an api-surface write that demands the operation literal
     # and is NOT bridge-coverable.
     concrete_write: bool = False
+    # Whether ``required_surface`` is a HARD locator (the obligation is "the
+    # feature must REACH surface S", so a candidate must literally match S) vs a
+    # soft facet label (an abstract LLM facet whose "surface" need not appear in
+    # code). Baseline ``surface.<S>`` obligations set this True so a missing
+    # surface stays UNRESOLVED (anti-false-green: a non-S file must not vacuously
+    # satisfy "reach S"); LLM facet obligations leave it False so a vague label
+    # imposes no literal requirement (the candidate's own anchor discriminator
+    # covers it).
+    hard_surface: bool = False
 
 
 @dataclass(frozen=True)
@@ -408,6 +490,31 @@ class AnchorSets:
     generic: set[str] = field(default_factory=set)
     search_terms: set[str] = field(default_factory=set)
     facet_terms: set[str] = field(default_factory=set)
+    # Repo-local document frequencies, kept for the coverage/certificate routes.
+    # ``df`` is path-OR-content frequency (used for the specific/generic split
+    # and for "is this required term observed in the repo at all"); ``content_df``
+    # counts file BODIES only (strictly rarer; used for content certificates so a
+    # token that is common in PATHS but rare in BODIES is judged on its body
+    # rarity). ``path_df`` is kept for symmetry/diagnostics.
+    df: dict[str, int] = field(default_factory=dict)
+    path_df: dict[str, int] = field(default_factory=dict)
+    content_df: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _AnchorFrequency:
+    """Three repo-local document-frequency views over a token set.
+
+    ``any_df`` counts files where the token appears in the path OR the content;
+    ``path_df`` only the path; ``content_df`` only the content. The split lets
+    the specific/generic classifier use the broad (any) frequency while the
+    content-certificate route uses the strictly-rarer content frequency.
+    """
+
+    any_df: dict[str, int]
+    path_df: dict[str, int]
+    content_df: dict[str, int]
+    scanned: int
 
 
 @dataclass
@@ -667,18 +774,22 @@ def _path_tokens(path: str) -> list[str]:
 
 def _document_frequency(
     project_root: Path, tokens: set[str]
-) -> dict[str, int]:
-    """Count, per token, how many source files contain it (path or content).
+) -> _AnchorFrequency:
+    """Count, per token, how many source files contain it — three views.
 
     Cheap and bounded: scans the same generic source universe as the candidate
-    search, capped at :data:`_DOC_FREQUENCY_SCAN_LIMIT` files. Used only to
-    DEMOTE ubiquitous tokens to generic — it never promotes anything, so an
-    empty/odd repo just yields zeros (everything long-enough stays specific).
+    search, capped at :data:`_DOC_FREQUENCY_SCAN_LIMIT` files. Returns path-only,
+    content-only, and path-or-content frequencies. Used to DEMOTE ubiquitous
+    tokens to generic (``any_df``) and to gate content certificates on body
+    rarity (``content_df``). It never promotes anything, so an empty/odd repo
+    just yields zeros (everything long-enough stays specific, nothing certifies).
     """
-    df: dict[str, int] = {t: 0 for t in tokens}
-    if not tokens:
-        return df
+    any_df: dict[str, int] = {t: 0 for t in tokens}
+    path_df: dict[str, int] = {t: 0 for t in tokens}
+    content_df: dict[str, int] = {t: 0 for t in tokens}
     scanned = 0
+    if not tokens:
+        return _AnchorFrequency(any_df, path_df, content_df, scanned)
     for path in _iter_text_like_files(project_root):
         if scanned >= _DOC_FREQUENCY_SCAN_LIMIT:
             break
@@ -688,11 +799,44 @@ def _document_frequency(
             text = path.read_text(encoding="utf-8").lower()
         except (OSError, UnicodeDecodeError):
             text = ""
-        haystack = rel + "\n" + text
         for tok in tokens:
-            if tok and tok in haystack:
-                df[tok] += 1
-    return df
+            if not tok:
+                continue
+            in_path = tok in rel
+            in_content = tok in text
+            if in_path:
+                path_df[tok] += 1
+            if in_content:
+                content_df[tok] += 1
+            if in_path or in_content:
+                any_df[tok] += 1
+    return _AnchorFrequency(any_df, path_df, content_df, scanned)
+
+
+def _literal_strength(token: str) -> int:
+    """How "value/identifier-like" a token is (syntax-generic, 0..6).
+
+    Higher means more clearly a code value or compound identifier rather than a
+    bare prose word: length, digit content, mixed alpha+digit, delimiter chars,
+    and an exact hex shape each contribute. Names no project/framework/language —
+    a hex color, a kebab CSS construct, a snake config key and a function name
+    all score by the same rule; a plain English word scores low.
+    """
+    t = token.lower()
+    score = 0
+    if len(t) >= 6:
+        score += 1
+    if any(c.isdigit() for c in t):
+        score += 1
+    if any(c.isalpha() for c in t) and any(c.isdigit() for c in t):
+        score += 1
+    if any(c in t for c in "_-:#@./"):
+        score += 1
+    if _HEXISH_RE.fullmatch(t):
+        score += 2
+    if not t.isalpha():
+        score += 1
+    return score
 
 
 def _is_specific_anchor(token: str, *, df: dict[str, int]) -> bool:
@@ -777,7 +921,7 @@ def _derive_anchor_sets(
             expanded.append((tok, is_field, from_target))
             all_variants.add(tok)
 
-    df = _document_frequency(project_root, all_variants - generic_facets)
+    freq = _document_frequency(project_root, all_variants - generic_facets)
 
     specific: set[str] = set()
     specific_nontarget: set[str] = set()
@@ -786,7 +930,14 @@ def _derive_anchor_sets(
         if tok in generic_facets:
             generic_terms.add(tok)
             continue
-        if is_field or _is_specific_anchor(tok, df=df):
+        # A field is forced specific (bypasses the small DF cap + facet filter)
+        # UNLESS it is ubiquitous — a field token in more files than we would
+        # ever patch is the LLM mislabeling a generic word ("body"/"background")
+        # as a field; demote it so it cannot explode the candidate set.
+        field_ok = is_field and (
+            freq.any_df.get(tok, 0) <= _MAX_FIELD_DOCUMENT_FREQUENCY
+        )
+        if field_ok or _is_specific_anchor(tok, df=freq.any_df):
             specific.add(tok)
             if not from_target:
                 specific_nontarget.add(tok)
@@ -802,6 +953,9 @@ def _derive_anchor_sets(
         generic=generic_terms,
         search_terms=specific | generic_terms | generic_facets,
         facet_terms=generic_facets,
+        df=freq.any_df,
+        path_df=freq.path_df,
+        content_df=freq.content_df,
     )
 
 
@@ -893,6 +1047,7 @@ def _derive_baseline_obligations(
                 description=f"feature must reach the '{surface_canon}' surface",
                 required_surface=variants,
                 allow_expected_bridge=True,
+                hard_surface=True,
             )
         )
 
@@ -927,29 +1082,45 @@ def _stable_path_id(path: str) -> str:
 
 def _derive_expected_target_obligations(
     expected: dict[str, ExpectedEnvelope],
-) -> list[ImpactObligation]:
-    """One obligation per exact expected target path.
+    accepted_by_path: dict[str, ImplCandidate],
+    ctx: CoverageContext,
+) -> tuple[list[ImpactObligation], list[str]]:
+    """Obligations for ANCHOR-ALIGNED exact expected targets only.
 
-    These guarantee that a design-declared (``expects``) implementation file is
-    not silently dropped from the write allowlist. They are bridge-coverable
-    (an exact expects target trivially satisfies its own expected-bridge, given
-    a specific anchor exists) and never concrete writes. Too-broad envelopes
-    are skipped here because the plan already forces ``ambiguous`` for them.
+    An exact ``expects`` target becomes a hard obligation (so it is not silently
+    dropped) ONLY when the target file itself carries a non-``expects``
+    discriminator — i.e. the design's prior is corroborated by a concrete change
+    signal in that file. An ``expects`` edge to a file with NO such signal is
+    treated as a stale/imprecise prior: it is NOT turned into an obligation
+    (which would force a false negative / spurious bridge), and the path is
+    reported in the returned ``ignored`` list for diagnostics (anti-false-green
+    visibility — we surface what the design pointed at but we did not select).
+    Too-broad envelopes are skipped (the plan already forces ``ambiguous``).
+
+    Returns ``(obligations, ignored_paths)``.
     """
     out: list[ImpactObligation] = []
+    ignored: list[str] = []
     for design_id, env in sorted(expected.items()):
         if env.too_broad or not env.exact:
             continue
         for path in sorted(env.paths):
-            out.append(
-                ImpactObligation(
-                    id=f"expected.{_stable_path_id(path)}",
-                    description=f"expected target from {design_id}: {path}",
-                    allow_expected_bridge=True,
-                    concrete_write=False,
+            cand = accepted_by_path.get(path)
+            if cand is not None and _candidate_has_non_expected_discriminator(
+                cand, ctx
+            ):
+                out.append(
+                    ImpactObligation(
+                        id=f"expected.{_stable_path_id(path)}",
+                        description=f"anchor-aligned expected target from "
+                        f"{design_id}: {path}",
+                        allow_expected_bridge=True,
+                        concrete_write=False,
+                    )
                 )
-            )
-    return out
+            else:
+                ignored.append(path)
+    return out, sorted(set(ignored))
 
 
 def _api_surface_variants() -> set[str]:
@@ -1104,6 +1275,51 @@ def _categorize_term(term: str, terms: _TermSets, anchors: AnchorSets) -> str:
     return category
 
 
+def _content_certificate_label(
+    content_terms: set[str], anchors: AnchorSets
+) -> tuple[str, str] | None:
+    """Decide whether a file's body anchors earn a content certificate.
+
+    ``content_terms`` are the normalized terms matched in THIS file's body. Only
+    *specific non-target* anchors that actually occur in some body (content_df >
+    0) are eligible — a target-slot path token or a never-observed term cannot
+    certify. Returns ``(source, detail)`` for the strongest applicable route, or
+    ``None``. Two independent guards (rarity via ``content_df`` AND literal shape
+    via :func:`_literal_strength`) keep this from re-introducing broad
+    over-match: a common word (high ``content_df``) and a bare short word (low
+    strength) both fail.
+    """
+    concrete = {
+        t
+        for t in content_terms
+        if t in anchors.specific_nontarget and anchors.content_df.get(t, 0) > 0
+    }
+    if not concrete:
+        return None
+
+    # Route A: a single value-like literal unique to one file body.
+    unique_literals = sorted(
+        t
+        for t in concrete
+        if anchors.content_df.get(t, 0) <= _MAX_CONTENT_UNIQUE_DF
+        and _literal_strength(t) >= _MIN_SINGLE_LITERAL_STRENGTH
+    )
+    if unique_literals:
+        return ("content_unique_anchor", "+".join(unique_literals[:3]))
+
+    # Route B: a cluster of rare, identifier-shaped anchors co-occurring here.
+    rare = sorted(
+        t
+        for t in concrete
+        if anchors.content_df.get(t, 0) <= _MAX_CONTENT_RARE_DF
+        and _literal_strength(t) >= _MIN_CLUSTER_MEMBER_STRENGTH
+    )
+    if len(rare) >= _MIN_CONTENT_CLUSTER_SIZE:
+        return ("content_anchor_cluster", "+".join(rare[:5]))
+
+    return None
+
+
 def _gather_code_search(
     candidates: dict[str, ImplCandidate],
     project_root: Path,
@@ -1166,6 +1382,24 @@ def _gather_code_search(
                     source="content_pair",
                     detail=label,
                     weight=_WEIGHTS["content_pair"],
+                ),
+            )
+
+        # Content certificate: a rare/literal anchor (or rare-anchor cluster) in
+        # the body self-certifies a content-only file (no path signal needed) —
+        # the field-less analogue of a field discriminator. Emitted as an
+        # ``anchor``-category evidence so it counts as a discriminator downstream.
+        cert = _content_certificate_label(set(content_terms), anchors)
+        if cert is not None:
+            source, detail = cert
+            _add_evidence(
+                candidates,
+                rel,
+                ImpactEvidence(
+                    source=source,
+                    detail=detail,
+                    weight=_WEIGHTS[source],
+                    category="anchor",
                 ),
             )
 
@@ -1300,6 +1534,9 @@ _NON_TEXT_SUFFIXES = frozenset(
         ".class",
         ".o",
         ".a",
+        # Build caches / generated artifacts (never hand-edited source).
+        ".tsbuildinfo",
+        ".map",
     }
 )
 
@@ -1328,6 +1565,8 @@ def _iter_text_like_files(project_root: Path) -> Iterable[Path]:
     for path in _iter_repo_files(project_root):
         suf = path.suffix.lower()
         if not suf or suf in _NON_TEXT_SUFFIXES or suf == ".md":
+            continue
+        if is_dependency_lock(path.name):
             continue
         rel = path.relative_to(project_root).as_posix()
         if is_test_path(rel):
@@ -1366,6 +1605,23 @@ def _score_and_accept(
 
     # Exact expects is target-admission hard evidence (NOT semantic coverage).
     if sources & HARD_SOURCES:
+        candidate.accepted = True
+        return
+
+    # Content-certificate route (field-less discriminator). A content-only file
+    # bearing a rare/literal anchor (or rare-anchor cluster) is accepted WITHOUT
+    # the independent-2-sources rule: the certificate is itself a strong specific
+    # anchor (it is only issued for low-content-DF, identifier-shaped,
+    # non-target anchors), so it discriminates as well as a path hit. This does
+    # NOT loosen the rule for ordinary content tokens — only a genuine
+    # certificate takes this route, so a common word still cannot self-admit.
+    if sources & _CONTENT_CERTIFYING_SOURCES:
+        if candidate.score < min_score:
+            candidate.accepted = False
+            candidate.reject_reason = (
+                f"score {candidate.score:.2f} < threshold {min_score:.2f}"
+            )
+            return
         candidate.accepted = True
         return
 
@@ -1423,6 +1679,49 @@ def _score_and_accept(
 # ---------------------------------------------------------------------------
 
 
+def _candidate_has_non_expected_discriminator(
+    candidate: ImplCandidate, ctx: CoverageContext
+) -> bool:
+    """True when the candidate carries a discriminator INDEPENDENT of ``expects``.
+
+    A discriminator is a field/entity-category match, a content certificate, or
+    a non-target specific anchor among the candidate's OWN evidence. Hard
+    ``expects``/extraction evidence is explicitly ignored: an expects edge is a
+    *prior* (it admits the candidate), not proof the candidate is involved in
+    THIS change. This is the anti-false-green pivot for the coverage/selection
+    routes — a stale ``expects`` edge to a file that shows no concrete change
+    signal must not let that file bridge-cover obligations or be selected as a
+    write target.
+    """
+    for e in candidate.evidences:
+        if e.source in HARD_SOURCES:
+            continue
+        if e.source in _CONTENT_CERTIFYING_SOURCES:
+            return True
+        if e.category in {"field", "entity"}:
+            return True
+        if e.detail in ctx.anchors.specific_nontarget:
+            return True
+    return False
+
+
+def _binding_required_terms(required: Iterable[str], ctx: CoverageContext) -> set[str]:
+    """Required facet terms that are ALSO repo-observed concrete anchors.
+
+    An abstract facet label (``shared_ui``, ``theme`` ...) need not appear
+    literally in code — requiring it as a hard match is what makes field-less
+    obligations un-coverable. So an abstract obligation only HARD-binds the
+    required terms that are themselves observed specific non-target anchors
+    (present in the repo, ``df > 0``). A concrete write keeps its strict literal
+    requirement separately; this relaxation is for abstract facets only.
+    """
+    return {
+        t
+        for t in required
+        if t in ctx.anchors.specific_nontarget and ctx.anchors.df.get(t, 0) > 0
+    }
+
+
 def _covers_direct(
     candidate: ImplCandidate,
     obligation: ImpactObligation,
@@ -1430,37 +1729,47 @@ def _covers_direct(
 ) -> bool:
     """Direct (lexical/anchor) coverage.
 
-    Requires a CONCRETE discriminator AND, when the obligation names a surface,
-    a surface-literal match. A ``concrete_write`` obligation additionally
-    requires the operation literal; abstract operations
-    (display/render/theme/config/copy) do not.
-
-    The discriminator must be a field, an entity, or a NON-target specific
-    anchor (a real change signal from the phenomenon/diff/analysis). An expected
-    target's own path basename (a target-slot anchor) does NOT by itself confer
-    coverage — otherwise any expects-declared file containing the surface word
-    would be "covered" and a stale ``expects`` edge could fake green
-    (anti-false-green). Target-slot anchors still drive admission/discovery.
+    Requires a candidate-owned, non-``expects`` discriminator (field/entity,
+    content certificate, or non-target specific anchor). A ``concrete_write``
+    obligation keeps its strict literal requirement: a surface-literal match
+    (when named) AND the operation literal — an update handler must not silently
+    "cover" the create facet (anti-false-green). An ABSTRACT facet
+    (display/render/theme/config/copy/shared-ui) leaves no literal code verb, so
+    it only HARD-binds those required terms that are repo-observed concrete
+    anchors (:func:`_binding_required_terms`); a pure facet label imposes no
+    lexical requirement and is covered by the candidate's own discriminator.
     """
-    cats = candidate.categories()
+    if not _candidate_has_non_expected_discriminator(candidate, ctx):
+        return False
+
     terms = candidate.terms()
 
-    has_discriminator = bool(
-        (cats & {"field", "entity"}) or (terms & ctx.anchors.specific_nontarget)
-    )
-    if not has_discriminator:
-        return False
-
-    if obligation.required_surface and not (set(obligation.required_surface) & terms):
-        return False
-
     if obligation.concrete_write:
-        # The write verb must be present as a literal (anti-false-green: an
-        # update handler must not silently "cover" the create facet).
+        if obligation.required_surface and not (set(obligation.required_surface) & terms):
+            return False
+        # The write verb must be present as a literal (anti-false-green).
         return bool(set(obligation.required_operation) & terms)
 
-    # Abstract operation facets leave no literal code verb; field/anchor-on-
-    # surface evidence handles them.
+    if obligation.hard_surface:
+        # Surface-reach obligation: the surface token is a HARD locator. A
+        # candidate must literally match the surface, else "reach surface S" is
+        # not satisfied — a missing surface must stay unresolved (anti-false-
+        # green), never vacuously covered by an unrelated discriminator file.
+        if obligation.required_surface and not (
+            set(obligation.required_surface) & terms
+        ):
+            return False
+    else:
+        # Abstract facet: bind only those required surface terms that are
+        # repo-observed concrete anchors; a pure label imposes no requirement.
+        binding_surface = _binding_required_terms(obligation.required_surface, ctx)
+        if binding_surface and not (binding_surface & terms):
+            return False
+
+    binding_anchors = _binding_required_terms(obligation.required_anchors, ctx)
+    if binding_anchors and not (binding_anchors & terms):
+        return False
+
     return True
 
 
@@ -1469,16 +1778,16 @@ def _covers_via_expected_bridge(
     obligation: ImpactObligation,
     ctx: CoverageContext,
 ) -> bool:
-    """Expected-bridge coverage (authoritative design→impl route).
+    """Expected-bridge coverage (design→impl prior route, candidate-aligned).
 
     Allowed only when: the candidate is an EXACT (not too-broad) ``expects``
-    target of a design node, ``anchors.specific_nontarget`` is non-empty (a
-    concrete anchor from the phenomenon/diff/analysis exists — NOT merely the
-    target path's own basename), the obligation opted into the bridge and is NOT
-    a concrete write. This is the anti-false-green core: an expects-only change
-    with no concrete signal beyond the declared target paths CANNOT be bridged
-    (a stale ``expects`` edge must not fake semantic coverage), and an api-write
-    facet cannot be hand-waved by "the design points here".
+    target of a design node, the obligation opted into the bridge and is NOT a
+    concrete write, AND the candidate itself carries a non-``expects``
+    discriminator. The candidate-alignment requirement is the anti-false-green
+    core: an ``expects`` edge to a file that shows NO concrete change signal of
+    its own (a stale/imprecise edge) must NOT bridge-cover an obligation — the
+    coverage is then deferred to anchor-discovered targets. An api-write facet is
+    never bridge-coverable (it needs the operation literal).
     """
     if not obligation.allow_expected_bridge:
         return False
@@ -1486,8 +1795,8 @@ def _covers_via_expected_bridge(
         return False
     if "expects" not in candidate.sources():
         return False
-    # No concrete (non-target) anchor anywhere => refuse semantic coverage.
-    if not ctx.anchors.specific_nontarget:
+    # Candidate must prove its own involvement — not rely on the expects edge.
+    if not _candidate_has_non_expected_discriminator(candidate, ctx):
         return False
 
     design_ids = ctx.expected_by_path.get(candidate.path, set())
@@ -1547,6 +1856,30 @@ def _cover_obligations(
         unresolved.append(o.id)
 
     return covered, unresolved, bridged_only
+
+
+def _select_impl_paths(
+    accepted: list[ImplCandidate],
+    covered: dict[str, list[str]],
+    ctx: CoverageContext,
+) -> list[str]:
+    """Choose the actual write targets from accepted candidates.
+
+    Admission (``accepted``) is NOT selection. A file is selected when it either
+    COVERS an obligation, or carries its own non-``expects`` discriminator (an
+    anchor-discovered target that the abstract LLM facets may not name a specific
+    obligation for, yet clearly belongs to the change). Crucially, an
+    ``expects``-only admitted file with no concrete signal of its own is NOT
+    selected — that is what stops a stale ``expects`` edge from leaking into the
+    final patch set (anti-false-green).
+    """
+    selected: set[str] = set()
+    for paths in covered.values():
+        selected.update(paths)
+    for cand in accepted:
+        if _candidate_has_non_expected_discriminator(cand, ctx):
+            selected.add(cand.path)
+    return sorted(selected)
 
 
 # ---------------------------------------------------------------------------
@@ -1636,8 +1969,9 @@ def resolve_impact_plan(
     )
 
     # ------------------------------------------------------------------
-    # 3. Obligations: LLM facets if present, else deterministic baseline;
-    #    plus expected-target obligations for exact expects.
+    # 3. Semantic obligations: LLM facets if present, else deterministic
+    #    baseline. (Expected-target obligations are derived AFTER acceptance —
+    #    they depend on whether each expected file is anchor-aligned.)
     # ------------------------------------------------------------------
     semantic_obligations = _coerce_llm_obligations(analysis, terms, anchors)
     if semantic_obligations:
@@ -1649,13 +1983,6 @@ def resolve_impact_plan(
         diagnostics.append(
             f"obligations: {len(semantic_obligations)} from deterministic baseline"
         )
-
-    target_obligations = _derive_expected_target_obligations(expected)
-    if target_obligations:
-        diagnostics.append(
-            f"expected-target obligations: {len(target_obligations)}"
-        )
-    obligations = semantic_obligations + target_obligations
 
     # ------------------------------------------------------------------
     # 4. Soft discovery (anchor-aware): module fallback, code search, graph.
@@ -1695,21 +2022,36 @@ def resolve_impact_plan(
         (c for c in candidates.values() if c.accepted),
         key=lambda c: (-c.score, c.path),
     )
-
-    # ------------------------------------------------------------------
-    # 6. Cardinality guard: too broad => ambiguous (refuse a sweeping patch).
-    # ------------------------------------------------------------------
-    if len(accepted) > max_impl_candidates:
+    accepted_by_path = {c.path: c for c in accepted}
+    if accepted:
         diagnostics.append(
-            f"too many implementation candidates: {len(accepted)} > "
-            f"{max_impl_candidates}; refusing to apply a broad AI patch"
-        )
-        return _ambiguous_plan(
-            design_node_ids, accepted, candidates, obligations, diagnostics
+            "accepted: "
+            + ", ".join(
+                f"{c.path}[{','.join(sorted(c.sources()))}]" for c in accepted
+            )
         )
 
     # ------------------------------------------------------------------
-    # 7. Too-broad expected envelope => ambiguous (anti-false-green).
+    # 5b. Expected-target obligations for ANCHOR-ALIGNED exact expects only.
+    #     A stale/imprecise expects edge (target shows no concrete signal) is
+    #     not turned into an obligation; it is surfaced as a diagnostic.
+    # ------------------------------------------------------------------
+    target_obligations, ignored_expected = _derive_expected_target_obligations(
+        expected, accepted_by_path, ctx
+    )
+    if target_obligations:
+        diagnostics.append(
+            f"expected-target obligations: {len(target_obligations)}"
+        )
+    if ignored_expected:
+        diagnostics.append(
+            "ignored expected target(s) without a concrete anchor: "
+            + ", ".join(ignored_expected)
+        )
+    obligations = semantic_obligations + target_obligations
+
+    # ------------------------------------------------------------------
+    # 6. Too-broad expected envelope => ambiguous (anti-false-green).
     # ------------------------------------------------------------------
     if any(env.too_broad for env in expected.values()):
         diagnostics.append(
@@ -1720,20 +2062,13 @@ def resolve_impact_plan(
             design_node_ids, accepted, candidates, obligations, diagnostics
         )
 
-    impl_paths = [c.path for c in accepted]
-
     # ------------------------------------------------------------------
-    # Resolve tests for accepted impls (DAG tested_by edges + name heuristics).
-    # ------------------------------------------------------------------
-    test_paths = _resolve_tests(dag, impl_paths, project_root)
-
-    # ------------------------------------------------------------------
-    # 8. Obligation coverage (direct, then expected-bridge).
+    # 7. Obligation coverage (direct, then candidate-aligned expected-bridge).
     # ------------------------------------------------------------------
     covered, unresolved, bridged_only = _cover_obligations(accepted, obligations, ctx)
 
     # ------------------------------------------------------------------
-    # 9. Bridge-capacity guard: one expected file must not silently bridge
+    # 8. Bridge-capacity guard: one expected file must not silently bridge
     #    many abstract obligations.
     # ------------------------------------------------------------------
     if not _bridge_capacity_ok(bridged_only):
@@ -1742,14 +2077,73 @@ def resolve_impact_plan(
             "sole bridge for multiple abstract obligations; refusing (ambiguous)"
         )
         return _ambiguous_plan(
+            design_node_ids, accepted, candidates, obligations, diagnostics
+        )
+
+    # ------------------------------------------------------------------
+    # 9. Selection: admission is not selection. Pick obligation-covering
+    #    candidates + anchor-discovered targets; drop expects-only stale edges.
+    # ------------------------------------------------------------------
+    impl_paths = _select_impl_paths(accepted, covered, ctx)
+
+    # ------------------------------------------------------------------
+    # 10. Cardinality guard on the SELECTED write set (refuse a sweeping patch).
+    # ------------------------------------------------------------------
+    if len(impl_paths) > max_impl_candidates:
+        diagnostics.append(
+            f"too many implementation targets: {len(impl_paths)} > "
+            f"{max_impl_candidates}; refusing to apply a broad AI patch"
+        )
+        return _ambiguous_plan(
             design_node_ids,
             accepted,
             candidates,
             obligations,
             diagnostics,
             impl_paths=impl_paths,
-            test_paths=test_paths,
         )
+
+    # ------------------------------------------------------------------
+    # 11. Pure-abstract-facet guard (anti-false-green).
+    #     When EVERY obligation is an abstract facet (no concrete write, no
+    #     concrete surface-reach) there is no deterministic completeness
+    #     contract: an abstract facet is coverable by ANY discriminator-bearing
+    #     file, so a generic field/token mismatch (e.g. the LLM mislabeling a
+    #     common word as a field) can let unrelated files fake green. Trust such
+    #     a plan ONLY when at least one SELECTED target is pinned by a content
+    #     certificate (a rare/literal anchor or rare-anchor cluster) — the strong
+    #     field-less discriminator. Otherwise refuse (ambiguous): a styling/theme
+    #     change with no concretely-pinned target is exactly the case that must
+    #     fail safe rather than apply a confident-looking wrong patch.
+    # ------------------------------------------------------------------
+    if obligations and all(
+        not o.concrete_write and not o.hard_surface for o in obligations
+    ):
+        selected_set = set(impl_paths)
+        certified = any(
+            (c.sources() & _CONTENT_CERTIFYING_SOURCES)
+            for c in accepted
+            if c.path in selected_set
+        )
+        if not certified:
+            diagnostics.append(
+                "all obligations are abstract facets and no selected target is "
+                "pinned by a content certificate (rare/literal anchor); cannot "
+                "verify completeness — refusing (anti-false-green)"
+            )
+            return _ambiguous_plan(
+                design_node_ids,
+                accepted,
+                candidates,
+                obligations,
+                diagnostics,
+                impl_paths=impl_paths,
+            )
+
+    # ------------------------------------------------------------------
+    # Resolve tests for the selected impls (DAG tested_by + name heuristics).
+    # ------------------------------------------------------------------
+    test_paths = _resolve_tests(dag, impl_paths, project_root)
 
     # ------------------------------------------------------------------
     # Status.
@@ -1766,7 +2160,7 @@ def resolve_impact_plan(
         diagnostics.append("unresolved obligation(s): " + ", ".join(unresolved))
     elif not impl_paths:
         status = "incomplete"
-        diagnostics.append("no implementation candidates accepted")
+        diagnostics.append("no implementation candidates selected")
     else:
         status = "complete"
 

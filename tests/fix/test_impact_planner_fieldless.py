@@ -38,8 +38,11 @@ from codd.fix.impact_planner import (
     ImpactObligation,
     ImpactEvidence,
     ImplCandidate,
+    _bridge_capacity_ok,
+    _content_certificate_label,
     _covers_direct,
     _covers_via_expected_bridge,
+    _literal_strength,
     _score_and_accept,
     resolve_impact_plan,
 )
@@ -403,21 +406,24 @@ def test_guard_too_broad_expected_envelope_is_ambiguous(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_guard_bridge_capacity_one_file_many_abstract_obligations(tmp_path):
-    """A single expected file that is the SOLE bridge for multiple abstract
-    obligations trips the capacity guard => ambiguous. (One file silently
-    'satisfying' several distinct facets with no direct evidence is exactly the
-    over-cover the guard exists to refuse.)"""
+def test_styling_file_with_rare_literal_anchor_resolves_complete_via_direct(tmp_path):
+    """A content-only styling file bearing a rare/literal anchor (a unique hex)
+    is DIRECTLY anchor-discovered and covers the abstract styling facets — no
+    expects bridge needed. This is the field-less success case: the discriminator
+    is a specific anchor in the body, not a declared data field. (Previously such
+    a file could only be reached via the expects bridge; now its own content
+    certificate makes it a first-class direct target.)"""
     only = "src/styles/globals.css"
     dag = _styling_dag_with_expects(tmp_path, targets=[only])
-    # One stylesheet, carrying an anchor so the bridge is even eligible.
+    # One stylesheet whose body carries a unique hex literal (the change value).
     _make_file(
         tmp_path,
         only,
         ":root { --color-primary-gradient: linear-gradient(#1d4ed8); }\n",
     )
 
-    # Three abstract obligations, all bridge-coverable, all reaching the one file.
+    # Three abstract styling facets — all covered directly by the one file's
+    # anchor discriminator (no surface literal required for abstract facets).
     analysis = PhenomenonAnalysis(
         intent="improvement",
         subject_terms=["gradient"],
@@ -449,12 +455,27 @@ def test_guard_bridge_capacity_one_file_many_abstract_obligations(tmp_path):
         ],
     )
 
-    assert plan.status == "ambiguous", (
-        f"one file as sole bridge for many obligations must be ambiguous; "
-        f"status={plan.status!r}, covered={plan.covered_obligations!r}, "
+    assert plan.status == "complete", (
+        f"a rare-literal-anchored styling file must resolve complete via direct "
+        f"coverage; status={plan.status!r}, covered={plan.covered_obligations!r}, "
         f"diagnostics={plan.diagnostics!r}"
     )
-    assert any("capacity" in d for d in plan.diagnostics), plan.diagnostics
+    assert only in plan.impl_paths, plan.impl_paths
+    # Coverage is DIRECT, not bridge — no capacity refusal.
+    assert not any("capacity" in d for d in plan.diagnostics), plan.diagnostics
+
+
+def test_bridge_capacity_guard_refuses_one_file_sole_bridge_for_many():
+    """Unit: the capacity guard refuses when one path is the sole bridge for
+    more than one obligation (anti-false-green over-cover)."""
+    # One file is the sole bridge for two distinct obligations => refuse.
+    assert _bridge_capacity_ok({"o1": ["a.tsx"], "o2": ["a.tsx"]}) is False
+    # One file bridging a single obligation is fine.
+    assert _bridge_capacity_ok({"o1": ["a.tsx"]}) is True
+    # Multiply-bridged obligations (>1 path each) don't pin any single file.
+    assert _bridge_capacity_ok({"o1": ["a.tsx", "b.tsx"], "o2": ["a.tsx", "c.tsx"]}) is True
+    # Distinct sole bridges for distinct obligations are fine.
+    assert _bridge_capacity_ok({"o1": ["a.tsx"], "o2": ["b.tsx"]}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -547,12 +568,8 @@ def test_covers_direct_requires_discriminator_and_handles_concrete_write():
     assert _covers_direct(cand2, concrete, ctx) is False
 
 
-def test_covers_via_expected_bridge_requires_anchor_and_exact_target():
+def test_covers_via_expected_bridge_requires_candidate_alignment_and_exact_target():
     ctx = _anchor_ctx({"gradient"}, "a.tsx", "d")
-    cand = ImplCandidate(path="a.tsx")
-    cand.evidences.append(
-        ImpactEvidence(source="expects", detail="d", weight=1.0, category="expected")
-    )
     abstract = ImpactObligation(
         id="theme.update",
         description="",
@@ -561,13 +578,33 @@ def test_covers_via_expected_bridge_requires_anchor_and_exact_target():
         allow_expected_bridge=True,
         concrete_write=False,
     )
+
+    # An exact expects target that ALSO carries its own non-target anchor
+    # ("gradient") aligns the bridge => covered.
+    cand = ImplCandidate(path="a.tsx")
+    cand.evidences.append(
+        ImpactEvidence(source="expects", detail="d", weight=1.0, category="expected")
+    )
+    cand.evidences.append(
+        ImpactEvidence(source="content_token", detail="gradient", weight=0.12, category="anchor")
+    )
     assert _covers_via_expected_bridge(cand, abstract, ctx) is True
 
-    # No specific anchor => bridge refuses.
+    # A BARE expects target (no concrete signal of its own) must NOT bridge —
+    # a stale/imprecise expects edge cannot fake semantic coverage
+    # (anti-false-green: this is the candidate-alignment requirement).
+    bare = ImplCandidate(path="a.tsx")
+    bare.evidences.append(
+        ImpactEvidence(source="expects", detail="d", weight=1.0, category="expected")
+    )
+    assert _covers_via_expected_bridge(bare, abstract, ctx) is False
+
+    # No specific anchor in context => even an anchor-bearing candidate cannot
+    # align (its detail is not a recognized non-target anchor).
     ctx_no_anchor = _anchor_ctx(set(), "a.tsx", "d")
     assert _covers_via_expected_bridge(cand, abstract, ctx_no_anchor) is False
 
-    # concrete_write obligation => bridge refuses even with anchor + exact target.
+    # concrete_write obligation => bridge refuses even when aligned.
     concrete = ImpactObligation(
         id="api.create",
         description="",
@@ -576,3 +613,196 @@ def test_covers_via_expected_bridge_requires_anchor_and_exact_target():
         concrete_write=True,
     )
     assert _covers_via_expected_bridge(cand, concrete, ctx) is False
+
+
+# ---------------------------------------------------------------------------
+# Content-certificate route (field-less discriminator) + selection separation
+# ---------------------------------------------------------------------------
+
+
+def _cert_anchors(specific_nontarget: set[str], content_df: dict[str, int]) -> AnchorSets:
+    return AnchorSets(
+        specific=set(specific_nontarget),
+        specific_nontarget=set(specific_nontarget),
+        content_df=dict(content_df),
+        df=dict(content_df),
+    )
+
+
+def test_literal_strength_separates_values_from_plain_words():
+    # A hex value is strongly literal; a kebab construct is moderately literal;
+    # a bare alphabetic word is weak. No project/framework names involved.
+    assert _literal_strength("0f9ed3") >= 4
+    assert 2 <= _literal_strength("linear-gradient") < 4
+    assert _literal_strength("button") < 2
+    assert _literal_strength("primary") < 2
+
+
+def test_content_certificate_unique_literal_route():
+    # A single value-like literal unique to one body certifies (route A).
+    anchors = _cert_anchors({"0f9ed3", "linear-gradient"}, {"0f9ed3": 1, "linear-gradient": 2})
+    assert _content_certificate_label({"0f9ed3"}, anchors) == ("content_unique_anchor", "0f9ed3")
+
+
+def test_content_certificate_rare_cluster_route():
+    # Two rare identifier-shaped anchors co-occurring certify (route B), even
+    # though neither is a value literal (this is the styling-construct case).
+    anchors = _cert_anchors(
+        {"linear-gradient", "background-image"},
+        {"linear-gradient": 2, "background-image": 2},
+    )
+    result = _content_certificate_label({"linear-gradient", "background-image"}, anchors)
+    assert result is not None and result[0] == "content_anchor_cluster"
+
+
+def test_content_certificate_rejects_single_rare_nonliteral():
+    # A LONE rare non-value token must NOT certify (a stray rare word must not
+    # admit a file) — route A needs literal strength, route B needs a cluster.
+    anchors = _cert_anchors({"linear-gradient"}, {"linear-gradient": 2})
+    assert _content_certificate_label({"linear-gradient"}, anchors) is None
+
+
+def test_content_certificate_rejects_high_frequency_anchor():
+    # A high-content-frequency token (appears in many bodies) never certifies —
+    # this is the guard against the historical broad over-match.
+    anchors = _cert_anchors({"0f9ed3"}, {"0f9ed3": 9})
+    assert _content_certificate_label({"0f9ed3"}, anchors) is None
+
+
+def test_content_certificate_requires_specific_nontarget_membership():
+    # A token that is not a recognized specific non-target anchor cannot certify
+    # even if rare (it is not a change signal, just noise).
+    anchors = _cert_anchors(set(), {"0f9ed3": 1})
+    assert _content_certificate_label({"0f9ed3"}, anchors) is None
+
+
+def test_score_and_accept_content_only_file_via_certificate():
+    # A content-only file (no path hit, no cross-category pair) is accepted via
+    # the certificate route WITHOUT the independent-2-sources rule.
+    cand = ImplCandidate(path="src/app/globals.css")
+    cand.evidences.append(
+        ImpactEvidence(source="content_token", detail="0f9ed3", weight=0.12, category="anchor")
+    )
+    cand.evidences.append(
+        ImpactEvidence(
+            source="content_unique_anchor", detail="0f9ed3", weight=0.56, category="anchor"
+        )
+    )
+    _score_and_accept(
+        cand,
+        min_score=0.55,
+        min_independent_sources=2,
+        anchor_policy=AnchorPolicy(
+            field_terms_present=True, specific_terms=frozenset({"0f9ed3"})
+        ),
+    )
+    assert cand.accepted is True
+
+    # A content-only file with only a lone content token (no certificate) is
+    # still rejected — the certificate route does NOT loosen the ordinary rule.
+    bare = ImplCandidate(path="src/app/other.css")
+    bare.evidences.append(
+        ImpactEvidence(source="content_token", detail="primary", weight=0.12, category="anchor")
+    )
+    _score_and_accept(
+        bare,
+        min_score=0.55,
+        min_independent_sources=2,
+        anchor_policy=AnchorPolicy(field_terms_present=True, specific_terms=frozenset()),
+    )
+    assert bare.accepted is False
+
+
+def test_stale_expects_dropped_anchor_discovered_target_selected(tmp_path):
+    """A stale/imprecise ``expects`` edge (target with no concrete anchor of its
+    own) is NOT selected as a write target; the real anchor-discovered file (a
+    rare hex literal in its body) IS — and the plan still completes. The dropped
+    target is surfaced as a diagnostic (anti-false-green visibility)."""
+    layout = "src/app/(dashboard)/layout.tsx"
+    css = "src/app/globals.css"
+    # The design expects ONLY the layout file — the imprecise prior.
+    dag = _styling_dag_with_expects(tmp_path, targets=[layout])
+    # The expected target carries NO change anchor (just unrelated structure).
+    _make_file(
+        tmp_path, layout, "export default function Layout() { return null; }\n"
+    )
+    # The real target: a content-only stylesheet bearing the unique hex literal.
+    _make_file(
+        tmp_path,
+        css,
+        ":root { --primary: 221 83% 53%; "
+        "background-image: linear-gradient(#0f9ed3, #0b71b9); }\n",
+    )
+
+    analysis = PhenomenonAnalysis(
+        intent="improvement",
+        subject_terms=["gradient"],
+        entities=[],
+        fields=[],
+        operations=["update", "display"],
+        surfaces=["theme", "ui"],
+        obligations=[
+            {"id": "theme.update", "description": "update theme", "terms": ["theme", "update"]},
+            {"id": "ui.display", "description": "display ui", "terms": ["ui", "display"]},
+        ],
+    )
+    plan = resolve_impact_plan(
+        dag=dag,
+        project_root=tmp_path,
+        design_node_ids=[_DESIGN],
+        phenomenon_text="change the primary button to a gradient #0f9ed3 to #0b71b9",
+        analysis=analysis,
+        design_updates=[
+            DesignUpdate(
+                target_path=Path(_DESIGN),
+                original_content="# UX\n",
+                proposed_content="# UX\ngradient #0f9ed3 #0b71b9\n",
+                diff="+gradient #0f9ed3 #0b71b9\n+primary-gradient",
+                changed=True,
+            )
+        ],
+    )
+    assert plan.status == "complete", (plan.status, plan.diagnostics)
+    assert css in plan.impl_paths, plan.impl_paths
+    # The stale expects target must NOT be a write target.
+    assert layout not in plan.impl_paths, plan.impl_paths
+    assert any("ignored expected target" in d for d in plan.diagnostics), plan.diagnostics
+
+
+def test_pure_abstract_facets_without_certificate_refuse(tmp_path):
+    """A purely-abstract-facet change (no concrete write, no concrete surface-
+    reach) whose candidate is matched only by a GENERIC discriminator — no
+    rare/literal content certificate — must REFUSE (ambiguous), not fake green.
+    This is the anti-false-green guard for styling/theme changes that the LLM
+    decomposed with common words (so unrelated files could otherwise 'cover' the
+    abstract facets)."""
+    f = "src/components/panel.tsx"
+    dag = _styling_dag_with_expects(tmp_path, targets=[])  # design node, no expects
+    _make_file(
+        tmp_path,
+        f,
+        "export function Panel() {\n"
+        "  return <div className=\"panel label\">x</div>;\n}\n",
+    )
+    analysis = PhenomenonAnalysis(
+        intent="improvement",
+        subject_terms=["panel"],
+        entities=["panel"],
+        fields=["label"],
+        operations=["update", "display"],
+        surfaces=["ui"],
+        obligations=[
+            {"id": "ui.update", "description": "", "terms": ["ui", "update"]},
+            {"id": "ui.display", "description": "", "terms": ["ui", "display"]},
+        ],
+    )
+    plan = resolve_impact_plan(
+        dag=dag,
+        project_root=tmp_path,
+        design_node_ids=[_DESIGN],
+        phenomenon_text="update the panel label",
+        analysis=analysis,
+        design_updates=[],
+    )
+    assert plan.status == "ambiguous", (plan.status, plan.diagnostics)
+    assert any("abstract facet" in d for d in plan.diagnostics), plan.diagnostics
