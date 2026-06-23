@@ -151,7 +151,8 @@ CoDD ships **39 ready-made "lexicons"** — checklists drawn from real industry 
 
 ## Documentation
 
-- [`docs/explainer.md`](docs/explainer.md) — the full idea, from the connection map to AI-driven development
+- [`docs/explainer.md`](docs/explainer.md) — the full idea, from the connection map to AI-driven development ([English](docs/explainer.en.md) · [简体中文](docs/explainer.zh.md))
+- [`docs/positioning.md`](docs/positioning.md) — where CoDD sits vs Spec Kit / coding agents / Copilot, on the false-green axis
 - [`CHANGELOG.md`](CHANGELOG.md) — every release
 - `codd --help` — the full command reference (in any project, `codd check` is the best place to start)
 - [`docs/`](docs/) — architecture notes, setup guides, and a cookbook
