@@ -13,6 +13,18 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.5.0] - 2026-06-24 — Skip visibility
+
+### Fixed
+
+- **`codd dag verify` now shows skipped checks as `SKIP`, never `PASS`** (both the
+  default and the detailed summaries). A check that skips — because it is dormant,
+  unconfigured, or missing its input — verified nothing, yet was previously
+  rendered as `PASS`, making a run riddled with silent skips indistinguishable
+  from a genuinely clean green run. The change is visibility-only: gate logic and
+  exit codes are unchanged. Surfaced by the false-green hardening loop
+  (`quality/false_green_vectors.yaml`, vector `silent_skip_shown_as_pass`).
+
 ## [3.4.0] - 2026-06-23 — Dead-resource detection
 
 ### Added
