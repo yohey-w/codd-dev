@@ -1,0 +1,216 @@
+# CoDD V3 false-green vector taxonomy
+#
+# Machine-readable corpus driving the verifier-hardening loop (see /goal).
+# Each vector is a class of "the verifier passes green when it should not".
+# The loop: for each vector → 4-fixture (green_control / false_green_candidate /
+# false_red_guard / legacy_backcompat) → inject mutation → record detection in
+# the matrix → fix highest priority_score missed_green that is derivable from
+# existing contract semantics (others → owner-gated decision memo).
+#
+# priority_score = false_green_impact × reachability × likelihood
+#                  × diagnostic_confidence ÷ false_red_risk   (1=low … 5=high)
+#
+# status: shipped | fixtures_only | candidate | owner_gated | planned
+# detection: caught_red | caught_amber | missed_green | n/a
+#
+# INVARIANTS (never violate): anti-false-green, anti-false-red, Contract Kernel
+# generality (no project/FW/language literals in core), model-independence,
+# backward-compat. GPT Pro consult precedes any verifier code change.
+
+meta:
+  version: 1
+  created: "2026-06-23"
+  owner_gated_boundary: >
+    Autonomous if a red is logically derivable from existing contract semantics.
+    Owner-gated if deciding red/green requires NEW meaning (new concept, schema/
+    DSL field, severity change, new red for existing users, absence guarantees).
+
+vectors:
+  # ---- P0 -----------------------------------------------------------------
+  - id: resource_supply_use_dangling
+    class: supply_use_asymmetry
+    priority: P0
+    summary: required capability consumes a contract resource with no producer
+    invariant: every required consumed resource has a producer/provider
+    mutation: delete the producer obligation for a consumed resource
+    expected_detection: caught_red
+    severity: red
+    owner_gate: false
+    false_red_risk: 2
+    status: shipped            # resource_flow_coherence, v3.3.0
+    detection: caught_red
+    check: resource_flow_coherence
+    fixtures: tests/dag/test_resource_flow_coherence.py
+
+  - id: resource_order_explicit_flow
+    class: temporal_ordering
+    priority: P0
+    summary: producer exists but is ordered AFTER the consumer (explicit flow only)
+    invariant: when an explicit operation flow orders steps, a producer must
+      precede its required consumer
+    mutation: move the producer to a step after the consumer
+    expected_detection: caught_red   # only when explicit ordering exists
+    severity: red
+    owner_gate: false        # red only with explicit order; no-order → skip (no inference)
+    false_red_risk: 3
+    status: planned
+    detection: missed_green
+    check: resource_flow_coherence   # extend has_satisfying_producer
+
+  - id: assertion_abuse
+    class: evidence_thinness
+    priority: P0
+    summary: a journey/test exists but does not actually assert the outcome
+    invariant: a covering test asserts the journey's expected outcome, not mere
+      presence/render
+    mutation: replace an outcome assertion with an existence/render-only check
+    expected_detection: caught_amber   # corpus/observe first; red needs new meaning
+    severity: amber
+    owner_gate: true         # "sufficient assertion" semantics = owner-gated
+    false_red_risk: 5
+    status: planned
+    detection: missed_green
+    check: user_journey_coherence
+
+  - id: extractor_silent_noop
+    class: extraction_blindness
+    priority: P0
+    summary: broken pattern / invalid frontmatter / unsupported construct passes
+      as green because extraction silently warns or skips
+    invariant: if a declared contract cannot be extracted, that is surfaced as a
+      diagnostic, never silently green
+    mutation: break a capability regex / supply an unsupported file extension /
+      malform a resource_contract entry
+    expected_detection: caught_amber
+    severity: amber
+    owner_gate: false        # making invisible→visible; strict-default = owner-gated
+    false_red_risk: 2
+    status: planned
+    detection: missed_green
+
+  - id: check_selection_drift
+    class: gate_coverage
+    priority: P0
+    summary: a registered check is absent from enabled_checks allowlist and
+      silently never runs
+    invariant: a registered-but-unselected check is visible, not silently absent
+    mutation: pin enabled_checks to a list that omits a registered check
+    expected_detection: caught_amber   # notice exists (unselected_check_names)
+    severity: amber
+    owner_gate: false        # making drift visible; blocking = owner-gated
+    false_red_risk: 1
+    status: planned
+    detection: caught_amber  # unselected_check_names notice; confirm via fixture
+
+  - id: cross_artifact_partial_coverage
+    class: coverage_drift
+    priority: P0
+    summary: only part of design/impl/test is present yet the set passes green
+    invariant: declared expected nodes are all implemented + verified, not a subset
+    mutation: implement/assert only a subset of the declared expected nodes
+    expected_detection: caught_red
+    severity: red
+    owner_gate: true         # touches existing implementation_coverage quirk/compat
+    false_red_risk: 4
+    status: planned
+    detection: missed_green
+    check: implementation_coverage
+
+  # ---- P1 -----------------------------------------------------------------
+  - id: cardinality_partial
+    class: cardinality
+    priority: P1
+    summary: a 1:N relation is satisfied/asserted for only one member
+    invariant: a declared 1:N obligation is checked for the declared multiplicity
+    mutation: implement/assert one of N required members
+    expected_detection: caught_amber
+    severity: amber
+    owner_gate: true         # "all / at-least-one / representative" = owner meaning
+    false_red_risk: 4
+    status: planned
+    detection: missed_green
+
+  - id: produced_never_consumed
+    class: supply_use_asymmetry
+    priority: P1
+    summary: a resource/artifact is produced but no obligation consumes it (dead)
+    invariant: produced resources are consumed (or explicitly staged/external)
+    mutation: declare a producer with no consumer
+    expected_detection: caught_amber
+    severity: amber          # default amber; red would false-red staged/future work
+    owner_gate: false        # amber advisory is autonomous (GPT autonomy table)
+    false_red_risk: 4
+    status: shipped          # v3.4.0 (Claude+Codex parallel, Codex impl adopted)
+    detection: caught_amber
+    check: resource_flow_coherence
+    fixtures: tests/dag/test_resource_flow_coherence.py
+
+  - id: identity_alias_drift
+    class: identity
+    priority: P1
+    summary: same resource/capability written under different names, treated as
+      distinct (or wrongly unified)
+    invariant: declared aliases resolve to one canonical id; unresolved aliases
+      are flagged
+    mutation: reference a resource via an undeclared alias spelling
+    expected_detection: caught_amber
+    severity: amber
+    owner_gate: false        # red only when an explicit alias is declared-but-unresolved
+    false_red_risk: 3
+    status: planned
+    detection: missed_green
+
+  - id: semantic_conflict
+    class: policy_conflict
+    priority: P1
+    summary: two obligations impose contradictory constraints on one resource
+    invariant: obligations on a resource are mutually consistent
+    mutation: declare conflicting policies on the same resource
+    expected_detection: n/a
+    severity: amber
+    owner_gate: true         # conflict semantics must be defined
+    false_red_risk: 5
+    status: owner_gated
+    detection: n/a
+
+  - id: negative_space
+    class: absence_guarantee
+    priority: P1
+    summary: required ABSENCE (no PII in logs, deleted data not re-exposed, no
+      access without permission) is uncheckable
+    invariant: declared forbidden states are observably absent
+    mutation: introduce a forbidden-state evidence into a fixture
+    expected_detection: n/a
+    severity: amber
+    owner_gate: true         # absence observation model = new concept
+    false_red_risk: 5
+    status: owner_gated
+    detection: n/a
+
+  # ---- P2 -----------------------------------------------------------------
+  - id: stale_evidence
+    class: freshness
+    priority: P2
+    summary: old test/extraction results pass as current green
+    invariant: evidence used for green is fresh relative to its sources
+    mutation: reuse stale evidence after sources change
+    expected_detection: caught_amber
+    severity: amber
+    owner_gate: true         # freshness model (mtime/hash) is environment-sensitive
+    false_red_risk: 4
+    status: planned
+    detection: missed_green
+
+  - id: diagnostic_incompleteness
+    class: self_repair
+    priority: P2
+    summary: a violation is detected but the message is not actionable, stalling
+      autonomous repair
+    invariant: every red carries a repairable diagnostic
+    mutation: emit a red with no remediation hint
+    expected_detection: caught_amber
+    severity: amber
+    owner_gate: false
+    false_red_risk: 1
+    status: planned
+    detection: missed_green

@@ -21,6 +21,10 @@ def _run(dag: DAG):
     return ResourceFlowCoherenceCheck(dag).run()
 
 
+def _warnings_of_type(result, warning_type: str) -> list[dict]:
+    return [warning for warning in result.warnings if warning["type"] == warning_type]
+
+
 CRITICAL_JOURNEY = {
     "name": "line_individual_nudge_to_inactive_learners",
     "criticality": "critical",
@@ -37,6 +41,97 @@ def test_no_contracts_skips():
     assert result.skipped is True
     assert result.passed is True
     assert result.status == "skip"
+    assert result.warnings == []
+
+
+# Fixture 1 — green control: produced and consumed resources are not dead.
+def test_dead_resource_green_control_produced_and_consumed_has_no_warning():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[CRITICAL_JOURNEY],
+            capability_contracts=[
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "data:users.lstep_friend_id",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                },
+                {
+                    "capability": "bind_line_friend_to_user",
+                    "produces": [{"resource": "data:users.lstep_friend_id"}],
+                },
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert _warnings_of_type(result, "dead_resource") == []
+
+
+# Fixture 2 — false-green candidate: produced with no consumers is amber only.
+def test_dead_resource_false_green_candidate_warns_amber_only():
+    dag = _dag(
+        _design_doc(
+            capability_contracts=[
+                {
+                    "capability": "build_unused_export",
+                    "produces": [{"resource": "data:exports.unused"}],
+                }
+            ],
+        )
+    )
+    result = _run(dag)
+    dead_resource_warnings = _warnings_of_type(result, "dead_resource")
+    assert result.passed is True
+    assert result.violations == []
+    assert len(dead_resource_warnings) == 1
+    assert dead_resource_warnings[0]["severity"] == "amber"
+    assert dead_resource_warnings[0]["resource"] == "data:exports.unused"
+
+
+# Fixture 3 — false-red guard: consumed-only and external resources are not dead.
+def test_dead_resource_false_red_guard_ignores_consumed_only_and_external():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[CRITICAL_JOURNEY],
+            capability_contracts=[
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "data:users.lstep_friend_id",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                }
+            ],
+            resource_contracts=[
+                {
+                    "resource": "data:vendor.seed_payload",
+                    "externally_provided_by": [{"provider": "vendor_seed_file"}],
+                }
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is False
+    assert any(v["type"] == "dangling_required_consumer" for v in result.violations)
+    assert _warnings_of_type(result, "dead_resource") == []
+
+
+# Fixture 4 — legacy backcompat: no contracts remain a clean skip.
+def test_dead_resource_legacy_backcompat_no_contracts_stays_quiet():
+    dag = _dag(_design_doc(user_journeys=[CRITICAL_JOURNEY]))
+    result = _run(dag)
+    assert result.skipped is True
+    assert result.passed is True
+    assert result.status == "skip"
+    assert result.warnings == []
 
 
 # Fixture 2 — required consumer in a critical journey with no producer → RED.

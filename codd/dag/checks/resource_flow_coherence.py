@@ -1,4 +1,4 @@
-"""DAG check: resource flow coherence (consumed-but-never-produced).
+"""DAG check: resource flow coherence.
 
 The data-field sibling of the enablement axis. The enablement axis asks "is a
 *capability* that gets exercised also granted/enabled?"; this check asks the
@@ -6,6 +6,9 @@ same question for *data resources*: a required capability that CONSUMES a
 contract resource cannot function unless some obligation PRODUCES that resource.
 A resource that is read by a required capability but written by no obligation is
 a "dangling required consumer" — a real incompleteness that must not pass green.
+A resource that is written by an obligation but read by no declared consumer is
+a "dead resource" — an amber-only ambiguity that must be surfaced without
+blocking deploy.
 
 Design notes (kept deliberately conservative to preserve generality and avoid
 false reds):
@@ -124,7 +127,7 @@ class ResourceFlowCoherenceCheck(DagCheck):
                 consumers.append(use)
 
         violations: list[dict[str, Any]] = []
-        warnings: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = self._dead_resource_warnings(producers, consumers)
         for consumer in sorted(consumers, key=lambda c: (c.resource, c.capability or "", c.owner_node_id)):
             if not self._is_required(consumer):
                 continue
@@ -295,6 +298,40 @@ class ResourceFlowCoherenceCheck(DagCheck):
         # is intentionally not enforced here to avoid false reds on graphs without
         # explicit operation flow.
         return bool(producers.get(resource))
+
+    def _dead_resource_warnings(
+        self, producers: dict[str, list[ResourceUse]], consumers: list[ResourceUse]
+    ) -> list[dict[str, Any]]:
+        consumer_resources = {consumer.resource for consumer in consumers}
+        warnings: list[dict[str, Any]] = []
+        for resource, resource_producers in sorted(producers.items()):
+            if resource in consumer_resources:
+                continue
+            if any(producer.external for producer in resource_producers):
+                continue
+            producer_refs = sorted(
+                {
+                    ref
+                    for producer in resource_producers
+                    for ref in [producer.obligation or producer.capability]
+                    if ref
+                }
+            )
+            warnings.append(
+                {
+                    "type": "dead_resource",
+                    "severity": "amber",
+                    "resource": resource,
+                    "producer_refs": producer_refs,
+                    "producer_owner_node_ids": sorted(
+                        {producer.owner_node_id for producer in resource_producers}
+                    ),
+                    "message": (
+                        f"Resource {resource} has producer obligation(s) but no declared consumers."
+                    ),
+                }
+            )
+        return warnings
 
     # ---------------------------------------------------------- canonical/parse
     def _canonical(self, resource: str, alias_map: dict[str, str]) -> str:

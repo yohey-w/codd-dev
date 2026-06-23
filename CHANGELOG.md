@@ -13,6 +13,18 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.4.0] - 2026-06-23 — Dead-resource detection
+
+### Added
+
+- **`dead_resource` amber warning** in `resource_flow_coherence` — the mirror of
+  `dangling_required_consumer`. A contract resource that has a producer obligation
+  but **no consumer** (produced-but-never-consumed) is now surfaced as an amber
+  advisory instead of passing silently. Amber only: never red, never blocks
+  deploy; externally-provided resources are exempt; dormant when no contracts are
+  declared. First vector closed by the false-green hardening loop
+  (`quality/false_green_vectors.yaml`), implemented Claude+Codex in parallel.
+
 ## [3.3.0] - 2026-06-23 — Resource-flow coherence
 
 ### Added
