@@ -14,6 +14,7 @@ Detection legend: `caught_red` / `caught_amber` / `missed_green` / `n/a`.
 | resource_supply_use_dangling | P0 | no | shipped v3.3.0 | caught_red | ✅ | resource_flow_coherence / test_resource_flow_coherence.py |
 | produced_never_consumed | P1 | no | shipped v3.4.0 | caught_amber | ✅ | resource_flow_coherence / test_resource_flow_coherence.py |
 | check_selection_drift | P0 | no | covered | caught_amber | ✅ | unselected_check_names / test_dag_verify_cli.py |
+| silent_skip_shown_as_pass | P0 | no | shipped | caught_amber | ✅ | dag verify summary / test_dag_verify_cli.py (discovery round 1) |
 | resource_order_explicit_flow | P0 | consult | memo | missed_green | — | decision_memos |
 | extractor_silent_noop | P0 | consult | memo | missed_green | — | decision_memos |
 | identity_alias_drift | P1 | consult | memo | missed_green | — | decision_memos |

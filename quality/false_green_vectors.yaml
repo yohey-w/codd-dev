@@ -104,6 +104,22 @@ vectors:
     check: unselected_check_names
     fixtures: tests/test_dag_verify_cli.py
 
+  - id: silent_skip_shown_as_pass
+    class: gate_coverage
+    priority: P0
+    summary: a check that skips (dormant / missing input) is displayed as PASS in
+      the verify summary, so silent skips look identical to a clean green run
+    invariant: a skipped check is shown distinctly (SKIP), never as PASS
+    mutation: inject a check result with status=skip; assert the summary shows SKIP
+    expected_detection: caught_amber
+    severity: amber
+    owner_gate: false        # display visibility only; gating is unchanged
+    false_red_risk: 1
+    status: shipped          # discovery round 1; cli.py verify summary shows SKIP
+    detection: caught_amber
+    check: dag verify summary (cli.py)
+    fixtures: tests/test_dag_verify_cli.py::test_verify_shows_skip_distinctly_not_pass
+
   - id: cross_artifact_partial_coverage
     class: coverage_drift
     priority: P0

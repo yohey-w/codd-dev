@@ -30,6 +30,7 @@ class _CheckResult:
     check_name: str
     severity: str = "red"
     passed: bool = True
+    status: str = ""
     missing_impl_files: list[str] = field(default_factory=list)
     unreachable_nodes: list[str] = field(default_factory=list)
 
@@ -233,6 +234,18 @@ def test_verify_no_notice_without_allowlist(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "not selected by enabled_checks" not in result.output
+
+
+def test_verify_shows_skip_distinctly_not_pass(tmp_path, monkeypatch):
+    # A skipped check verified nothing — it must show as SKIP, never PASS, so a
+    # run with silent skips is not indistinguishable from a clean green run.
+    _patch_results(monkeypatch, [_CheckResult("dependency_freshness", status="skip")])
+
+    result = CliRunner().invoke(main, ["dag", "verify", "--project-path", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "SKIP  dependency_freshness" in result.output
+    assert "PASS  dependency_freshness" not in result.output
 
 
 def test_verify_json_stdout_stays_parseable_with_notice(tmp_path, monkeypatch):

@@ -742,6 +742,10 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
         status_value = _dag_result_status(result)
         if status_value == "opt_out":
             status = "OPT_OUT"
+        elif status_value in {"skip", "skipped"} or getattr(result, "skipped", False):
+            # A skipped check verified nothing — show it distinctly, never as PASS,
+            # so a run with silent skips is not indistinguishable from a clean one.
+            status = "SKIP"
         elif _dag_result_passed(result):
             status = "PASS"
         else:
@@ -8436,6 +8440,10 @@ def dag_verify(
             status_value = _dag_result_status(result)
             if status_value == "opt_out":
                 status = "OPT_OUT"
+            elif status_value in {"skip", "skipped"} or getattr(result, "skipped", False):
+                # A skipped check verified nothing — show it distinctly, never as
+                # PASS, so silent skips are not indistinguishable from a clean run.
+                status = "SKIP"
             elif _dag_result_passed(result):
                 status = "PASS"
             else:
