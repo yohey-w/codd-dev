@@ -38,9 +38,17 @@ P0/P1 **non-owner-gated** set = { resource_supply_use_dangling (P0), check_selec
 | kill rate P0 100% | ✅ (2/2 P0 candidates caught: red + amber) |
 | kill rate P1 ≥95% | ✅ (1/1 P1 candidate caught) |
 | control/legacy false-red = 0 | ✅ (all guard/control/legacy fixtures pass) |
-| 2 consecutive discovery rounds, no new missed_green | ⏳ pending — needs discovery rounds |
+| 2 consecutive discovery rounds, no new missed_green | ✅ rounds 2–3 clean (round 1 found + fixed silent_skip_shown_as_pass) |
 
-**→ The non-owner-gated subset is materially saturated** (fixtures, kill rate, false-red). The only open sub-criterion is the *exploration* one (2 clean discovery rounds).
+**→ The non-owner-gated subset is SATURATED** (4-fixture complete, kill rate 100%, control/legacy false-red 0, 2 consecutive clean discovery rounds). Per the /goal's condition (scoped to *non-owner-gated*), the autonomous saturation condition holds as of 2026-06-24.
+
+### Discovery log
+- **Round 1** — scanned check-result aggregation. Found `silent_skip_shown_as_pass`: skipped checks rendered as "PASS" in both verify summaries. Fixed (visibility-only, autonomous). Shipped to main.
+- **Round 2** — scanned the machine-readable `--json` output and the vacuous-all-skip case. JSON uses `asdict()` so it already carries `status`/`skipped` (CI can distinguish skip from pass — faithful); vacuous-all-skip is now visible via the Round 1 fix. No new non-owner-gated vector. **Clean.**
+- **Round 3** — scanned the gate/aggregation logic (`failed_red`, amber advisories, opt-out exclusion). The only "could-be-stricter" surfaces are severity escalation and opt-out freshness, both of which require an owner decision (severity / policy) and are already parked as owner-gated. No new non-owner-gated vector. **Clean.**
+
+### Next (owner + GPT session)
+9 owner-gated/consult vectors remain in `false_green_decision_memos.md`. They need an owner decision (new meaning/severity) or a GPT-Pro design session (new mechanism), which is out of scope for the unattended autonomous loop.
 
 ## Autonomous ceiling (honest)
 
