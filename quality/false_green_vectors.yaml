@@ -99,8 +99,10 @@ vectors:
     severity: amber
     owner_gate: false        # making drift visible; blocking = owner-gated
     false_red_risk: 1
-    status: planned
-    detection: caught_amber  # unselected_check_names notice; confirm via fixture
+    status: covered          # behaviour + tests exist (test_dag_verify_cli.py)
+    detection: caught_amber
+    check: unselected_check_names
+    fixtures: tests/test_dag_verify_cli.py
 
   - id: cross_artifact_partial_coverage
     class: coverage_drift
