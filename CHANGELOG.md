@@ -13,6 +13,36 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.3.0] - 2026-06-23 — Resource-flow coherence
+
+### Added
+
+- **`resource_flow_coherence` DAG check** — the data-field sibling of the
+  enablement axis. Where the enablement axis asks "is a *capability* that gets
+  exercised also granted?", this check asks the same of *data resources*: a
+  required capability that **consumes** a contract resource is now flagged when
+  no obligation **produces** that resource ("dangling required consumer"). This
+  closes a false-green class where a data slot is read by a required capability
+  but written by nothing — e.g. a per-person notification that resolves a
+  recipient id no flow ever populates would previously verify green yet never
+  reach anyone.
+  - Contract-declaration driven via new design-doc frontmatter attributes
+    `capability_contracts` (`consumes` / `produces`) and `resource_contracts`
+    (`consumers` / `producers` / `externally_provided_by` / `aliases`). The core
+    reasons only over canonical resource ids and produce/consume relations —
+    **no implementation literal scanning**, so it stays language / framework /
+    project agnostic.
+  - **RED only when all hold:** the consumer is required (`required: true` or
+    `on_missing: fail`), its capability is a required capability of a
+    `critical`/`high` user journey, and no producer / external provider / seed
+    exists for that resource. Weaker reads (optional, `on_missing: skip|degrade`,
+    capability not on a critical journey) are advisory, not gated.
+  - **Dormant by default:** projects that declare no resource/capability
+    contracts get `skip`, so existing projects keep passing unchanged.
+  - Kept deliberately separate from the enablement axis (`enables`/`exercises`
+    is the capability supply relation; `produces`/`consumes` is the resource
+    supply relation) to keep severity and diagnostics clean.
+
 ## [3.0.0] - 2026-06-21 — Contract Kernel
 
 **CoDD's core no longer hard-codes any language or framework.** The kernel

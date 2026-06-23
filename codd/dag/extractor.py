@@ -36,6 +36,12 @@ PRESENTATION_SPEC_REQUIRED_FIELDS = ("field_id",)
 PRESENTATION_SPEC_LIST_FIELDS = ("lexicon_refs", "evidence_signals", "expected_presentation_signals")
 AGGREGATION_POLICY_REQUIRED_FIELDS = ("field_id",)
 AGGREGATION_POLICY_LIST_FIELDS = ("evidence_signals", "expected_aggregation_signals", "allowed_policies")
+# Resource-flow contracts: a capability that CONSUMES a contract resource needs an
+# obligation that PRODUCES it (the data-field sibling of the enablement axis).
+RESOURCE_CONTRACT_REQUIRED_FIELDS = ("resource",)
+RESOURCE_CONTRACT_LIST_FIELDS = ("aliases", "consumers", "producers", "externally_provided_by")
+CAPABILITY_CONTRACT_REQUIRED_FIELDS = ("capability",)
+CAPABILITY_CONTRACT_LIST_FIELDS = ("consumes", "produces", "requires", "required_by_journeys")
 DESIGN_DOC_ATTRIBUTE_SCHEMAS = {
     "runtime_constraints": {
         "required_fields": RUNTIME_CONSTRAINT_REQUIRED_FIELDS,
@@ -60,6 +66,14 @@ DESIGN_DOC_ATTRIBUTE_SCHEMAS = {
     "aggregation_policies": {
         "required_fields": AGGREGATION_POLICY_REQUIRED_FIELDS,
         "list_fields": AGGREGATION_POLICY_LIST_FIELDS,
+    },
+    "resource_contracts": {
+        "required_fields": RESOURCE_CONTRACT_REQUIRED_FIELDS,
+        "list_fields": RESOURCE_CONTRACT_LIST_FIELDS,
+    },
+    "capability_contracts": {
+        "required_fields": CAPABILITY_CONTRACT_REQUIRED_FIELDS,
+        "list_fields": CAPABILITY_CONTRACT_LIST_FIELDS,
     },
 }
 DESIGN_DOC_ATTRIBUTE_KEYS = tuple(DESIGN_DOC_ATTRIBUTE_SCHEMAS)
