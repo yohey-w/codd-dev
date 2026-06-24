@@ -181,6 +181,12 @@ class ResourceFlowCoherenceCheck(DagCheck):
                         f"Required consumer reads {consumer.resource}, but no producer / "
                         "provided-by obligation exists in the contract graph."
                     ),
+                    "remediation": (
+                        f"Declare a producer / provided-by obligation for {consumer.resource} "
+                        "(e.g. a capability that produces it, or externally_provided_by), or "
+                        "relax the consumer (required: false / on_missing: skip) if it is not "
+                        "truly required."
+                    ),
                 }
             )
 

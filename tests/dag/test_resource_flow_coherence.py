@@ -368,3 +368,27 @@ def test_malformed_contract_skip_no_contracts():
     result = _run(dag)
     assert result.skipped is True
     assert not any(w["type"] == "malformed_contract" for w in result.warnings)
+
+
+# ── diagnostic_incompleteness: every red carries an actionable remediation ──
+def test_dangling_consumer_violation_has_remediation():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[CRITICAL_JOURNEY],
+            capability_contracts=[
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "data:users.lstep_friend_id",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                }
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.violations
+    assert all(v.get("remediation") for v in result.violations)

@@ -42,6 +42,21 @@ findings are genuine coherence debt in CoDD's own docs/graph.
 | — | verifier | (baseline) CoDD dag verify on codd-dev | 3 SKIP + 2 amber surfaced | n/a | recorded |
 | 1 | verifier check | `malformed_contract` amber in resource_flow_coherence: surface declared-but-unusable contract entries (missing required field) instead of silently dropping them — Tier-1 scope of extractor_silent_noop | candidate test RED pre-impl (`test_malformed_contract_entry_is_amber` failed: no warning) → GREEN post-impl; 14 resource_flow tests + full suite 5873 passed | autonomous (visibility, amber; gate unchanged) | ✅ main |
 
+| 2 | diagnostic | `remediation` actionable hint on `dangling_required_consumer` reds (self-repair quality) | candidate test RED pre-impl (violations lacked `remediation`) → GREEN; 15 resource_flow + full suite 5874 passed | autonomous (additive diagnostic) | ✅ main |
+
+## Saturation tracker (2026-06-24)
+
+| requirement | status |
+|---|---|
+| ≥5 real codd-dev changes, each red-before-green | **2/5** (#1 malformed_contract, #2 remediation hint) |
+| false-green corpus regression gate (4 vectors) | ✅ 33 fixtures pass (`test_resource_flow_coherence.py` + `test_dag_verify_cli.py`) |
+| control/legacy false-red = 0 | ✅ (all guard/control/legacy fixtures pass) |
+| Contract Kernel generality preserved | ✅ (no project/FW/lang literal in resource_flow_coherence core) |
+| 2 consecutive clean discovery rounds (self-host) | ⏳ |
+| 9 owner-gated vectors resolved / fixture-locked / deferred | ⏳ partial — Tier-3 (semantic_conflict, negative_space) explicitly deferred; Tier-1/2 resolve as changes #2–5 land |
+
+Re-run the corpus gate: `python3 -m pytest tests/dag/test_resource_flow_coherence.py tests/test_dag_verify_cli.py -q`
+
 > Deferred: the `dependency_freshness` doc-drift amber (2 edges, missing
 > `.codd/reconciliation_ledger.json`). `codd propagate --verify` is source→doc
 > impact only ("no affected docs"); the doc-to-doc reconciliation ledger is a
