@@ -24,7 +24,7 @@ explicit contracts; otherwise amber diagnostic / item-count visibility.
 | # | vector | default | severity | score | status |
 |---|---|---|---|---|---|
 | 1 | vacuous_pass | 0-item PASS shown as vacuous (materiality overlay) | amber | 250 | ✅ shipped-to-main |
-| 2 | extractor_silent_noop broader | broken regex / malformed extraction → verify | amber | 160 | ⏳ next |
+| 2 | extractor_silent_noop broader | invalid capability_pattern regex → verify (self-contained re-validate) | amber | 160 | ✅ shipped-to-main |
 | 3 | resource_order_explicit_flow | producer-after-consumer red **only** w/ explicit op order | red(cond) | 80 | ⏳ |
 | 4 | assertion_abuse | weak outcome assertion → amber (red needs owner) | amber | 75 | ⏳ |
 | 5 | identity_alias_drift | explicit alias collision / shadow only | amber | 48 | ⏳ |
@@ -51,3 +51,16 @@ beyond exact scalar. Default (amber) impls proceed autonomously.
 - Remaining count-wiring (resource_flow / implementation_coverage /
   user_journey / dependency_freshness) is additive follow-up — overlay already
   generic over any check that reports `checked_count`.
+
+### #2 extractor_silent_noop broader ✅ (2026-06-24)
+- `codd/dag/checks/extraction_diagnostics.py` (new): re-validates declared
+  `coherence.capability_patterns` regexes; any that fail `re.compile` → amber
+  `invalid_regex` (with remediation). Self-contained — does **not** touch the
+  extractor's silent `except re.error: continue`; mirrors `_pattern_match_specs`
+  + the builder's config accessor so the inspected set matches the extractor's.
+- **amber only / never red** (a config regex typo is advisory); **skip** when no
+  patterns declared (dormant — legacy projects unaffected); `checked_count` for
+  materiality. No project/FW/lang literal.
+- Registered in `runner.py` CHECK_MODULES.
+- red-before-green: `test_extraction_diagnostics.py` (4-fixture + registration)
+  RED pre-module → GREEN (5 passed); full suite **5888**.
