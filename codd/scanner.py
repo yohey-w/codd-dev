@@ -17,6 +17,7 @@ from codd.discovery import scan_exclude_patterns
 from codd.frontmatter import read_frontmatter
 from codd.graph import CEG
 from codd.parsing import get_extractor
+from codd.path_safety import resolve_project_path
 
 
 def run_scan(project_root: Path, codd_dir: Path):
@@ -48,8 +49,12 @@ def run_scan(project_root: Path, codd_dir: Path):
     frontmatter_count = 0
     warnings = []
     for doc_dir in doc_dirs:
-        full_path = project_root / doc_dir
-        if full_path.exists():
+        # RC-1 path-escape jail: ``scan.doc_dirs`` is user-controllable
+        # (codd.yaml). Confine the configured dir to the project root (resolve +
+        # symlink-follow); an absolute/``../`` out-of-root dir resolves to None
+        # → silently skipped (no walk/read of an external tree, no crash).
+        full_path = resolve_project_path(project_root, doc_dir)
+        if full_path is not None and full_path.exists():
             count, doc_warnings = _scan_frontmatter(ceg, project_root, full_path)
             frontmatter_count += count
             warnings.extend(doc_warnings)
@@ -65,8 +70,10 @@ def run_scan(project_root: Path, codd_dir: Path):
     exclude_patterns = scan_exclude_patterns(config)
 
     for src_dir in source_dirs:
-        full_path = project_root / src_dir
-        if full_path.exists():
+        # RC-1 path-escape jail (see doc_dirs above): confine the configured
+        # ``scan.source_dirs`` root to the project tree before walking/reading.
+        full_path = resolve_project_path(project_root, src_dir)
+        if full_path is not None and full_path.exists():
             _scan_source_directory(ceg, project_root, full_path, language, exclude_patterns)
 
     # Phase 3: Extract endpoints from filesystem-based routing conventions.
@@ -99,6 +106,13 @@ def _scan_frontmatter(ceg: CEG, project_root: Path, doc_dir: Path) -> tuple[int,
             if not fname.endswith(".md"):
                 continue
             full = Path(root) / fname
+            # Re-confine each walked file: an in-root symlink (or a path that
+            # otherwise resolves outside the tree) must not be read as a project
+            # doc. Used purely as an escape GATE — the project-relative ``rel``
+            # below keeps its original (unresolved-root) derivation so in-root
+            # paths/warnings are byte-identical to before (anti-false-red).
+            if resolve_project_path(project_root, full) is None:
+                continue
             rel = full.relative_to(project_root).as_posix()
             codd_data = _extract_frontmatter(full)
             if codd_data:
@@ -226,8 +240,13 @@ def build_document_reference_index(
                 )
 
     for raw_root in raw_doc_roots:
-        full_path = project_root / raw_root
-        if not full_path.exists():
+        # RC-1 path-escape jail: this index IS the document node→path map the
+        # implementer / generator / assembler consume. ``scan.doc_dirs`` is
+        # user-controllable, so confine the configured root (resolve +
+        # symlink-follow) before walking; an out-of-root root → skip (no
+        # out-of-root node enters the DAG map, no crash).
+        full_path = resolve_project_path(project_root, raw_root)
+        if full_path is None or not full_path.exists():
             continue
         doc_root_posix = Path(raw_root).as_posix().rstrip("/")
 
@@ -237,6 +256,11 @@ def build_document_reference_index(
                     continue
 
                 full = Path(root) / fname
+                # Re-confine each walked file (in-root symlink escape gate);
+                # ``rel`` keeps its original derivation for in-root files so the
+                # node ids/paths are byte-identical (anti-false-red).
+                if resolve_project_path(project_root, full) is None:
+                    continue
                 rel = full.relative_to(project_root)
                 codd_data = _extract_frontmatter(full)
                 if not codd_data:
@@ -481,6 +505,11 @@ def _scan_source_directory(ceg: CEG, project_root: Path, src_dir: Path,
             if not any(fname.endswith(ext) for ext in exts):
                 continue
             full = Path(root) / fname
+            # Re-confine each walked source file (escape GATE for in-root
+            # symlinks whose target leaves the tree); ``rel`` keeps its original
+            # derivation so in-root nodes are byte-identical (anti-false-red).
+            if resolve_project_path(project_root, full) is None:
+                continue
             rel = full.relative_to(project_root).as_posix()
 
             if any(_match_glob(rel, pat) for pat in exclude_patterns):

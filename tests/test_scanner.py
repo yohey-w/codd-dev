@@ -1,11 +1,16 @@
 """Tests for frontmatter-based document scanning."""
 
+import os
 import pytest
 import yaml
 from pathlib import Path
 
 from codd.graph import CEG
-from codd.scanner import _extract_frontmatter, _load_frontmatter
+from codd.scanner import (
+    _extract_frontmatter,
+    _load_frontmatter,
+    build_document_reference_index,
+)
 
 
 @pytest.fixture
@@ -295,3 +300,199 @@ def test_scan_warns_when_wave_config_output_is_missing(tmp_path, capsys):
         "WARNING: docs/test/acceptance_criteria.md: wave_config defines design:acceptance-criteria "
         "but the file has not been generated"
     ) in output
+
+
+# ═══════════════════════════════════════════════════════════
+# Path-escape jail: scan.doc_dirs / scan.source_dirs (RC-1)
+# ═══════════════════════════════════════════════════════════
+#
+# ``scan.doc_dirs`` / ``scan.source_dirs`` are user-controllable (codd.yaml). A
+# ``../`` traversal, an absolute out-of-root path, or an in-root symlink whose
+# target escapes the tree must NOT cause the scanner to walk/read files outside
+# the project root, and must NOT inject out-of-root paths into the graph or the
+# DAG document node→path map (``build_document_reference_index``) that the
+# implementer / generator / assembler consume. Escapes are silently skipped
+# (no crash, no false-green from an out-of-root file "satisfying" a node).
+
+
+def _write_doc(path: Path, node_id: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        "codd:\n"
+        f'  node_id: "{node_id}"\n'
+        "  type: requirement\n"
+        "  depends_on:\n"
+        '    - id: "file:src/x.py"\n'
+        "      relation: implements\n"
+        "---\n\n# doc\n"
+    )
+
+
+def _set_scan_dirs(codd_dir: Path, *, doc_dirs=None, source_dirs=None) -> dict:
+    config_path = codd_dir / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    scan = config.setdefault("scan", {})
+    if doc_dirs is not None:
+        scan["doc_dirs"] = doc_dirs
+    if source_dirs is not None:
+        scan["source_dirs"] = source_dirs
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True))
+    return config
+
+
+def test_run_scan_does_not_walk_doc_dirs_parent_escape(tmp_path):
+    """``doc_dirs: ['../outside']`` must not read frontmatter from outside root."""
+    from codd.scanner import run_scan
+
+    project, codd_dir = _setup_project(tmp_path)
+    # A planted secret doc OUTSIDE the project tree.
+    outside = tmp_path / "outside"
+    _write_doc(outside / "secret.md", "req:OUTSIDE-ESCAPE")
+    _set_scan_dirs(codd_dir, doc_dirs=["../outside"])
+
+    run_scan(project, codd_dir)
+
+    ceg = CEG(codd_dir / "scan")
+    assert ceg.get_node("req:OUTSIDE-ESCAPE") is None
+    ceg.close()
+
+
+def test_run_scan_does_not_walk_doc_dirs_absolute_escape(tmp_path):
+    """An absolute out-of-root ``doc_dirs`` entry must be skipped, not walked."""
+    from codd.scanner import run_scan
+
+    project, codd_dir = _setup_project(tmp_path)
+    outside = tmp_path / "abs_outside"
+    _write_doc(outside / "secret.md", "req:ABS-ESCAPE")
+    _set_scan_dirs(codd_dir, doc_dirs=[str(outside)])
+
+    run_scan(project, codd_dir)
+
+    ceg = CEG(codd_dir / "scan")
+    assert ceg.get_node("req:ABS-ESCAPE") is None
+    ceg.close()
+
+
+def test_run_scan_does_not_follow_in_root_symlink_escaping_root(tmp_path):
+    """An in-root .md symlink whose target is OUTSIDE the root must not be read.
+
+    ``os.walk`` does not descend a symlinked *directory* (followlinks=False), so
+    the escape vector that the per-file re-confine actually guards is a symlinked
+    *file* sitting inside a real in-root dir but pointing outside the tree —
+    ``os.walk`` lists it, and only the resolve-and-confine gate rejects it.
+    """
+    from codd.scanner import run_scan
+
+    project, codd_dir = _setup_project(tmp_path)
+    outside = tmp_path / "linktarget"
+    _write_doc(outside / "secret.md", "req:SYMLINK-ESCAPE")
+    link = project / "docs" / "secret.md"
+    try:
+        link.symlink_to(outside / "secret.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    run_scan(project, codd_dir)
+
+    ceg = CEG(codd_dir / "scan")
+    assert ceg.get_node("req:SYMLINK-ESCAPE") is None
+    ceg.close()
+
+
+def test_run_scan_does_not_walk_source_dirs_parent_escape(tmp_path):
+    """``source_dirs: ['../src_out']`` must not register out-of-root file nodes."""
+    from codd.scanner import run_scan
+
+    project, codd_dir = _setup_project(tmp_path)
+    outside = tmp_path / "src_out"
+    outside.mkdir()
+    (outside / "leak.py").write_text("import os\n")
+    _set_scan_dirs(codd_dir, source_dirs=["../src_out"])
+
+    run_scan(project, codd_dir)
+
+    ceg = CEG(codd_dir / "scan")
+    nodes = ceg.all_nodes() if hasattr(ceg, "all_nodes") else []
+    # No file node may point outside the project root.
+    for node in nodes:
+        path = node.get("path") or ""
+        assert ".." not in str(path), f"out-of-root source node leaked: {node}"
+    assert ceg.get_node("file:../src_out/leak.py") is None
+    assert ceg.get_node("file:src_out/leak.py") is None
+    ceg.close()
+
+
+def test_build_document_reference_index_skips_doc_dirs_parent_escape(tmp_path):
+    """The DAG node→path map must not include out-of-root docs via ``../``."""
+    project, codd_dir = _setup_project(tmp_path)
+    outside = tmp_path / "outside"
+    _write_doc(outside / "secret.md", "req:IDX-ESCAPE")
+    config = _set_scan_dirs(codd_dir, doc_dirs=["../outside"])
+
+    index = build_document_reference_index(project, config)
+
+    assert "req:IDX-ESCAPE" not in index.by_node_id
+    for rel_posix in index.by_path:
+        assert ".." not in rel_posix, f"out-of-root path in index: {rel_posix}"
+
+
+def test_build_document_reference_index_skips_absolute_escape(tmp_path):
+    project, codd_dir = _setup_project(tmp_path)
+    outside = tmp_path / "abs_outside"
+    _write_doc(outside / "secret.md", "req:IDX-ABS-ESCAPE")
+    config = _set_scan_dirs(codd_dir, doc_dirs=[str(outside)])
+
+    index = build_document_reference_index(project, config)
+
+    assert "req:IDX-ABS-ESCAPE" not in index.by_node_id
+
+
+def test_build_document_reference_index_skips_symlink_escape(tmp_path):
+    project, codd_dir = _setup_project(tmp_path)
+    outside = tmp_path / "linktarget"
+    _write_doc(outside / "secret.md", "req:IDX-SYMLINK-ESCAPE")
+    # Symlinked FILE inside the real in-root docs/ dir (os.walk lists it; only
+    # the resolve-and-confine gate rejects the out-of-root target).
+    link = project / "docs" / "secret.md"
+    try:
+        link.symlink_to(outside / "secret.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+    config = yaml.safe_load((codd_dir / "codd.yaml").read_text(encoding="utf-8"))
+
+    index = build_document_reference_index(project, config)
+
+    assert "req:IDX-SYMLINK-ESCAPE" not in index.by_node_id
+
+
+# --- ANTI-FALSE-RED: in-root doc/source scanning is unchanged ------------------
+
+
+def test_run_scan_in_root_docs_still_scanned(tmp_path):
+    """Regression guard: ordinary in-root ``docs/`` frontmatter is still read."""
+    from codd.scanner import run_scan
+
+    project, codd_dir = _setup_project(tmp_path)
+    _write_doc(project / "docs" / "req.md", "req:IN-ROOT-OK")
+
+    run_scan(project, codd_dir)
+
+    ceg = CEG(codd_dir / "scan")
+    assert ceg.get_node("req:IN-ROOT-OK") is not None
+    ceg.close()
+
+
+def test_build_document_reference_index_in_root_doc_present(tmp_path):
+    """Regression guard: in-root docs ARE in the DAG node→path map."""
+    project, codd_dir = _setup_project(tmp_path)
+    _write_doc(project / "docs" / "req.md", "req:IN-ROOT-IDX-OK")
+    config = yaml.safe_load((codd_dir / "codd.yaml").read_text(encoding="utf-8"))
+
+    index = build_document_reference_index(project, config)
+
+    assert "req:IN-ROOT-IDX-OK" in index.by_node_id
+    assert any(
+        entry.path.as_posix() == "docs/req.md"
+        for entry in index.by_node_id["req:IN-ROOT-IDX-OK"]
+    )

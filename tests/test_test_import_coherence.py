@@ -366,3 +366,68 @@ class TestOptOut:
         (tmp_path / "tests" / "test_x.py").write_text("from helpers import absent\n")
         result = _check(tmp_path, config={})
         assert not result.passed
+
+
+# ═══════════════════════════════════════════════════════════
+# Path-escape jail — scan.test_dirs is user-controllable (codd.yaml).
+# A ``../`` traversal or an in-root symlink whose target escapes the
+# tree must NEVER walk/read test files OUTSIDE the project root.
+# ═══════════════════════════════════════════════════════════
+
+
+class TestPathEscapeJail:
+    def _outside_test_tree(self, tmp_path: Path) -> Path:
+        """A SIBLING dir holding a 'test' that, if read, would flag a missing symbol."""
+        outside = tmp_path.parent / (tmp_path.name + "_outside")
+        outside.mkdir()
+        (outside / "__init__.py").write_text("")
+        (outside / "helpers.py").write_text("X = 1\n")
+        # if read as a project test, this would flag 'absent_symbol' (missing).
+        (outside / "test_evil.py").write_text("from helpers import absent_symbol\n")
+        return outside
+
+    def test_parent_traversal_test_dir_is_not_read(self, tmp_path):
+        _base(tmp_path)
+        outside = self._outside_test_tree(tmp_path)
+        result = check_test_import_coherence(
+            tmp_path,
+            language="python",
+            project_name="todo-cli",
+            source_dirs=["src/"],
+            test_dirs=[f"../{outside.name}"],  # escapes the project root
+        )
+        assert not any("test_evil" in f.path for f in result.findings), result.summary()
+
+    def test_symlinked_test_dir_escaping_root_is_not_read(self, tmp_path):
+        _base(tmp_path)
+        outside = self._outside_test_tree(tmp_path)
+        link = tmp_path / "linked_tests"
+        link.symlink_to(outside, target_is_directory=True)
+        result = check_test_import_coherence(
+            tmp_path,
+            language="python",
+            project_name="todo-cli",
+            source_dirs=["src/"],
+            test_dirs=["linked_tests"],
+        )
+        assert not any("test_evil" in f.path for f in result.findings), result.summary()
+
+    def test_symlinked_test_file_inside_tree_escaping_root_is_dropped(self, tmp_path):
+        # An in-root test tree may hold a symlink FILE whose target escapes the
+        # root; the re-confinement must drop it (not read it as a project test).
+        _base(tmp_path)
+        outside = self._outside_test_tree(tmp_path)
+        (tmp_path / "tests" / "test_leak.py").symlink_to(outside / "test_evil.py")
+        result = _check(tmp_path)
+        assert not any("test_leak" in f.path for f in result.findings), result.summary()
+
+    def test_in_root_layout_unchanged(self, tmp_path):
+        # ANTI-FALSE-RED: a genuine in-root missing-symbol violation is still flagged.
+        _base(tmp_path)
+        (tmp_path / "tests" / "helpers.py").write_text("def present():\n    return 1\n")
+        (tmp_path / "tests" / "test_x.py").write_text(
+            "from helpers import present, gone\n\n\ndef test_a():\n    assert present() == 1\n"
+        )
+        result = _check(tmp_path)
+        assert not result.passed
+        assert _symbols(result) == ["gone"]

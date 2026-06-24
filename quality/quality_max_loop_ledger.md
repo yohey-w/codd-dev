@@ -440,3 +440,19 @@ Finding count rose because the sweep widened to all of codd/; the user-path surf
 larger than the dag/builder/cli/propagator core. Next: a GLOBAL audit to enumerate the
 COMPLETE remaining surface (brownfield / languages / stack / assembler / extractors) in
 one pass, fix, then 2 clean rounds — instead of discovering it round-by-round.
+
+## Global audit result + scope decision (2026-06-25)
+The global READ-ONLY audit enumerated **~87 user-path FS readers across ~41 files** — the
+whole codebase reads config/doc/node paths. Two clusters: (A) check/verify/audit
+EVIDENCE readers (scanner→DAG, discovery→coherence, the coherence gates, project_types
+layout, measure/policy/requirement) ≈20-30; (B) NON-check-evidence — generation
+(implementer/generator), fix (fixer/repair), deploy (deployer/providers), lexicon
+management (lexicon_cli/elicit), and explicit CLI inputs ≈50+. GPT's prior rule said
+"counts as artifact evidence", so a scope consult (TAB 0C2CE72E) is deciding whether the
+N-gate path-escape scope is (A)-only [(B)→Axis-N backlog] or all 87, plus 6 sub-questions
+(CLI explicit inputs / cache_dir / sockets / package.json / shared read sinks / bespoke
+jails). Cluster (A) is check-evidence regardless, so it was fixed autonomously now:
+- scanner.py (RC-1, the DAG node→path map feeder), project_types._normalize_dirs (RC-6,
+  strip `..`/absolute), discovery.py iter_source_files (RC-2), and the 3 coherence gates'
+  _iter_py_files — all via path_safety. full suite 6259.
+Awaiting GPT's scope ruling to bound cluster (B); then fix in-scope (B) + 2 clean rounds.

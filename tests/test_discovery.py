@@ -239,6 +239,67 @@ class TestIterSourceFiles:
 
 
 # ═══════════════════════════════════════════════════════════
+# Path-escape jail — source_dirs (scan.source_dirs, user-controllable)
+# must never walk/read OUTSIDE the project root (RC-2: the shared walker
+# feeds env_refs/schema_refs/wiring/contracts/traceability transitively).
+# ═══════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def escape_project(tmp_path):
+    """A project dir with a SIBLING ``outside`` dir holding a stray source file."""
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("SECRET = 1\n", encoding="utf-8")
+    return proj, outside
+
+
+class TestIterSourceFilesPathEscapeJail:
+    def test_parent_traversal_source_dir_is_not_walked(self, escape_project):
+        # ``../outside`` survives scan.*_dirs normalization (only slashes are
+        # stripped); the walker must NOT escape the project to read it.
+        proj, outside = escape_project
+        found = [p.resolve() for p in iter_source_files(proj, source_dirs=["../outside"])]
+        assert (outside / "secret.py").resolve() not in found
+        assert all(str(p).startswith(str(proj.resolve())) for p in found), found
+
+    def test_absolute_out_of_root_source_dir_is_not_walked(self, escape_project):
+        # An absolute dir pointing OUTSIDE the root must be dropped, not read.
+        proj, outside = escape_project
+        found = [p.resolve() for p in iter_source_files(proj, source_dirs=[str(outside)])]
+        assert (outside / "secret.py").resolve() not in found
+        assert all(str(p).startswith(str(proj.resolve())) for p in found), found
+
+    def test_symlinked_source_dir_escaping_root_is_not_walked(self, escape_project):
+        # An IN-ROOT source dir that is a symlink whose target escapes the tree
+        # must not smuggle an off-root file into the walk.
+        proj, outside = escape_project
+        link = proj / "linked_src"
+        link.symlink_to(outside, target_is_directory=True)
+        found = [p.resolve() for p in iter_source_files(proj, source_dirs=["linked_src"])]
+        assert (outside / "secret.py").resolve() not in found
+
+    def test_symlinked_file_inside_walk_escaping_root_is_dropped(self, escape_project):
+        # An in-root walked tree may contain a symlink FILE whose target escapes;
+        # the re-confinement of walk results must drop it.
+        proj, outside = escape_project
+        (proj / "src" / "leak.py").symlink_to(outside / "secret.py")
+        found = [p.resolve() for p in iter_source_files(proj, source_dirs=["src"])]
+        assert (outside / "secret.py").resolve() not in found
+        # the genuine in-root source file is still discovered (anti-false-RED).
+        assert (proj / "src" / "app.py").resolve() in found
+
+    def test_in_root_source_dirs_unchanged(self, escape_project):
+        # ANTI-FALSE-RED: a normal in-root source dir is walked exactly as before.
+        proj, _outside = escape_project
+        found = {p.relative_to(proj).as_posix() for p in iter_source_files(proj, source_dirs=["src"])}
+        assert found == {"src/app.py"}
+
+
+# ═══════════════════════════════════════════════════════════
 # Crash regression — scanner with a config missing the scan section
 # ═══════════════════════════════════════════════════════════
 

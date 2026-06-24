@@ -10,6 +10,7 @@ from codd.project_types import (
     GENERIC_PROJECT_TYPE,
     ProjectCapabilities,
     SHIPPED_DEFAULTS_DIR,
+    _normalize_dirs,
     is_known_project_type,
     load_capabilities,
     resolve_project_type,
@@ -209,3 +210,55 @@ def test_all_shipped_profiles_have_valid_capabilities():
         assert caps.e2e_modality in {"browser", "cli", "device", "none"}
         assert isinstance(caps.user_interface, bool)
         assert isinstance(caps.long_running_service, bool)
+
+
+# --- scan dir normalization is a path-escape jail (RC-6) -----------------------
+#
+# ``_normalize_dirs`` feeds ``scan.source_dirs`` / ``scan.test_dirs`` (and, via
+# ``_first_clean_dir``, the layout ``source_root`` / ``test_root``). Those values
+# are user-controllable (codd.yaml). A ``../`` segment or an absolute path that
+# escapes the project root must NOT survive into a layout root — otherwise the
+# generated package / pytest pythonpath / scaffold writes resolve OUTSIDE the
+# project tree (RC-1/2/3 upstream root cause).
+
+
+def test_normalize_dirs_drops_leading_parent_escape():
+    # ``../x`` escapes the root → dropped entirely (not normalized to ``x``,
+    # which would silently retarget a sibling directory).
+    assert _normalize_dirs(["../x"]) == []
+
+
+def test_normalize_dirs_drops_bare_parent():
+    assert _normalize_dirs([".."]) == []
+
+
+def test_normalize_dirs_drops_mid_path_parent_escape():
+    # ``a/../../b`` resolves above the root → dropped.
+    assert _normalize_dirs(["a/../../b"]) == []
+
+
+def test_normalize_dirs_drops_absolute_out_of_root():
+    # An absolute path that is not inside the (relative) layout root escapes.
+    assert _normalize_dirs(["/etc"]) == []
+    assert _normalize_dirs(["/etc/passwd"]) == []
+
+
+def test_normalize_dirs_keeps_in_root_dirs_unchanged():
+    # ANTI-FALSE-RED: ordinary in-root roots are unchanged (existing behavior).
+    assert _normalize_dirs(["docs/", "src"]) == ["docs", "src"]
+    assert _normalize_dirs(["./docs"]) == ["docs"]
+    assert _normalize_dirs(["a/b/c"]) == ["a/b/c"]
+
+
+def test_normalize_dirs_keeps_in_root_dir_with_interior_parent():
+    # ``a/b/../c`` stays inside the root (resolves to ``a/c``) → kept, normalized.
+    assert _normalize_dirs(["a/b/../c"]) == ["a/c"]
+
+
+def test_normalize_dirs_preserves_order_and_dedupes():
+    assert _normalize_dirs(["src", "docs", "src"]) == ["src", "docs"]
+
+
+def test_normalize_dirs_non_list_returns_empty():
+    assert _normalize_dirs(None) == []
+    assert _normalize_dirs("src") == []

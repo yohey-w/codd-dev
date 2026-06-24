@@ -1628,15 +1628,66 @@ class EnsureTestRunnerResult:
 
 
 def _normalize_dirs(dirs: Any) -> list[str]:
-    """Normalize a ``scan.*_dirs`` value to clean, slash-free relative roots."""
+    """Normalize a ``scan.*_dirs`` value to clean, in-root relative roots.
+
+    RC-6 path-escape jail: ``scan.source_dirs`` / ``scan.test_dirs`` are
+    user-controllable (codd.yaml) and feed the layout ``source_root`` /
+    ``test_root`` (via :func:`_first_clean_dir`). A ``..`` segment or an absolute
+    path that escapes the (relative) layout root must NOT survive — otherwise the
+    generated package, the pytest ``pythonpath``, and the scaffold writes resolve
+    OUTSIDE the project tree (the upstream root cause behind RC-1/2/3).
+
+    Each entry is resolved *purely* (lexical ``..`` collapse against a virtual
+    root — no filesystem touch, so this stays a pure-path normalizer usable
+    without a real project_root) and kept only when it stays at or below that
+    virtual root. ``.`` / ``./x`` and interior ``a/b/../c`` that stay in-root are
+    normalized to their clean relative form; ``../x``, ``..``, ``a/../../b`` and
+    absolute out-of-root paths are dropped (silently excluded, never crash).
+    """
     if not isinstance(dirs, (list, tuple)):
         return []
     roots: list[str] = []
     for item in dirs:
-        text = str(item).strip().replace("\\", "/").strip("/")
-        if text and text not in roots:
-            roots.append(text)
+        text = str(item).strip().replace("\\", "/")
+        if not text:
+            continue
+        normalized = _confine_relative_dir(text)
+        if normalized and normalized not in roots:
+            roots.append(normalized)
     return roots
+
+
+def _confine_relative_dir(text: str) -> str | None:
+    """Lexically resolve ``text`` and return it only if it stays in-root.
+
+    Pure path logic (no filesystem access): collapses ``.``/``..`` segments and
+    returns the clean POSIX relative path, or ``None`` when the path is absolute
+    out-of-root or climbs above the root via ``..``. ``"."``/empty collapse to
+    ``None`` (no usable root). Mirrors the resolve-and-confine rule of
+    ``path_safety.resolve_project_path`` but without needing a concrete root on
+    disk (these values name layout roots, not yet-existing files).
+    """
+    is_absolute = text.startswith("/")
+    parts: list[str] = []
+    for segment in text.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            if not parts:
+                # Climbs above the virtual root → escape.
+                return None
+            parts.pop()
+            continue
+        parts.append(segment)
+    if not parts:
+        return None
+    rel = "/".join(parts)
+    if is_absolute:
+        # An absolute path is in-root only if, treated as root-relative, it does
+        # not escape — but an absolute ``scan.*_dirs`` root names a location
+        # OUTSIDE the (relative) layout tree, so it is never a valid layout root.
+        return None
+    return rel
 
 
 def _toml_str_array(values: list[str]) -> str:

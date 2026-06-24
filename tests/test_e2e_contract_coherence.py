@@ -386,3 +386,73 @@ class TestConservativeNonFlagging:
         )
         assert result.passed
         assert result.findings == []
+
+
+# ═══════════════════════════════════════════════════════════
+# Path-escape jail — scan.test_dirs is user-controllable (codd.yaml).
+# A ``../`` traversal or an in-root symlink whose target escapes the
+# tree must NEVER scan e2e files OUTSIDE the project root (no out-of-root
+# file read as e2e content; escape must not crash and must not false-flag).
+# ═══════════════════════════════════════════════════════════
+
+
+class TestPathEscapeJail:
+    def _outside_e2e_tree(self, tmp_path: Path) -> Path:
+        """A SIBLING ``<x>/e2e`` tree whose file, if read, would flag a runtime import."""
+        outside = tmp_path.parent / (tmp_path.name + "_outside")
+        e2e = outside / "e2e"
+        e2e.mkdir(parents=True)
+        (e2e / "__init__.py").write_text("")
+        (e2e / "test_evil.py").write_text(f"from {PKG} import cli\n")
+        return outside
+
+    def test_parent_traversal_test_dir_is_not_scanned(self, tmp_path):
+        _base(tmp_path)
+        outside = self._outside_e2e_tree(tmp_path)
+        result = check_e2e_contract_coherence(
+            tmp_path,
+            language="python",
+            project_name="todo-cli",
+            source_dirs=["src/"],
+            test_dirs=[f"../{outside.name}"],  # escapes the project root
+            config=_cli_config(),
+        )
+        assert not any("test_evil" in f.path for f in result.findings), result.summary()
+
+    def test_symlinked_test_dir_escaping_root_is_not_scanned(self, tmp_path):
+        # An in-root test_root that is a symlink whose target escapes the tree
+        # must not let the gate scan the off-root <test_root>/e2e for runtime imports.
+        _base(tmp_path)
+        outside = self._outside_e2e_tree(tmp_path)
+        link = tmp_path / "linked_tests"
+        link.symlink_to(outside, target_is_directory=True)
+        result = check_e2e_contract_coherence(
+            tmp_path,
+            language="python",
+            project_name="todo-cli",
+            source_dirs=["src/"],
+            test_dirs=["linked_tests"],
+            config=_cli_config(),
+        )
+        assert not any("test_evil" in f.path for f in result.findings), result.summary()
+
+    def test_symlinked_e2e_file_inside_tree_escaping_root_is_dropped(self, tmp_path):
+        # An in-root e2e tree may hold a symlink FILE whose target escapes the
+        # root; re-confinement must drop it (not scan it as an e2e file).
+        _base(tmp_path)
+        outside = self._outside_e2e_tree(tmp_path)
+        (tmp_path / "tests" / "e2e" / "test_leak.py").symlink_to(
+            outside / "e2e" / "test_evil.py"
+        )
+        result = _check(tmp_path, config=_cli_config())
+        assert not any("test_leak" in f.path for f in result.findings), result.summary()
+
+    def test_in_root_e2e_tree_unchanged(self, tmp_path):
+        # ANTI-FALSE-RED: a genuine in-root runtime import is still flagged.
+        _base(tmp_path)
+        (tmp_path / "tests" / "e2e" / "test_flow.py").write_text(
+            f"from {PKG} import cli\n\n\ndef test_run():\n    assert True\n"
+        )
+        result = _check(tmp_path, config=_cli_config())
+        assert not result.passed
+        assert _roots(result) == [PKG]

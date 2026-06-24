@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
+from codd.path_safety import resolve_project_path
 from codd.project_types import LayoutProfile, resolve_layout_profile
 
 
@@ -117,13 +118,33 @@ def _under(rel_path: str, root: str) -> bool:
     return norm == root or norm.startswith(root + "/")
 
 
-def _iter_py_files(base: Path, exclude_names: tuple[str, ...] = ("__pycache__",)) -> list[Path]:
+def _iter_py_files(
+    base: Path,
+    project_root: Path,
+    exclude_names: tuple[str, ...] = ("__pycache__",),
+) -> list[Path]:
+    """Python files under ``base``, confined to ``project_root`` (path-escape jail).
+
+    ``base`` is ``project_root`` joined with a PROFILE root (``source_root`` /
+    ``test_root`` / ``package_root``) that derives from user-controllable
+    ``scan.source_dirs`` / ``scan.test_dirs``. Even though the profile layer
+    drops ``../`` / absolute-out-of-root entries, an IN-ROOT root (or a file
+    inside the walked tree) may be a SYMLINK whose target escapes the project —
+    reading it would consume an out-of-root file as project content (a path-escape
+    false-green/false-red). Confine ``base`` through the shared jail, then
+    re-confine every ``rglob`` match (an in-root tree can hold an escaping
+    symlink). ``None`` ⇒ outside root ⇒ skipped.
+    """
+    if resolve_project_path(project_root, base) is None:
+        return []
     if not base.is_dir():
         return []
     out: list[Path] = []
     for path in sorted(base.rglob("*.py")):
         if any(part in exclude_names for part in path.parts):
             continue
+        if resolve_project_path(project_root, path) is None:
+            continue  # in-root tree may contain a symlink escaping the root
         out.append(path)
     return out
 
@@ -156,7 +177,7 @@ def _source_module_basenames(
     """
     source_dir = project_root / profile.source_root
     names: set[str] = set()
-    for path in _iter_py_files(source_dir):
+    for path in _iter_py_files(source_dir, project_root):
         stem = path.stem
         if stem in {"__init__", "__main__", "setup", "conftest"}:
             continue
@@ -232,7 +253,7 @@ def _check_bare_basename_imports(
         return []
     findings: list[ImportCoherenceFinding] = []
     test_dir = project_root / profile.test_root
-    for path in _iter_py_files(test_dir):
+    for path in _iter_py_files(test_dir, project_root):
         rel = _rel(path, project_root)
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
@@ -268,7 +289,7 @@ def _check_source_outside_package(
         return []
     source_dir = project_root / profile.source_root
     findings: list[ImportCoherenceFinding] = []
-    for path in _iter_py_files(source_dir):
+    for path in _iter_py_files(source_dir, project_root):
         rel = _rel(path, project_root)
         if _under(rel, profile.package_root):
             continue
@@ -298,6 +319,12 @@ def _check_missing_init(
     """Flag a missing ``__init__.py`` where the profile requires a package."""
     findings: list[ImportCoherenceFinding] = []
     package_dir = project_root / profile.package_root
+    # Path-escape jail: ``package_root`` derives from user-controllable
+    # ``scan.source_dirs``; an in-root package dir may be a symlink whose target
+    # escapes the tree. Confine before the FS probes (``is_dir`` / ``exists``) so
+    # an out-of-root dir is treated as "not a package here", never read.
+    if resolve_project_path(project_root, package_dir) is None:
+        return findings
     if profile.requires_package_init and package_dir.is_dir():
         if not (package_dir / "__init__.py").exists():
             findings.append(
@@ -328,11 +355,11 @@ def _check_shadowing(
     package_dir = project_root / profile.package_root
     package_names: set[str] = {
         path.stem
-        for path in _iter_py_files(package_dir)
+        for path in _iter_py_files(package_dir, project_root)
         if path.stem not in {"__init__", "__main__"}
     }
     flat_names: dict[str, str] = {}
-    for path in _iter_py_files(source_dir):
+    for path in _iter_py_files(source_dir, project_root):
         rel = _rel(path, project_root)
         if _under(rel, profile.package_root):
             continue

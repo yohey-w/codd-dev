@@ -242,3 +242,87 @@ class TestCodex3Reproduction:
         # both the structural violation and the import-policy violation surface.
         assert "source_outside_package" in kinds
         assert "bare_basename_import" in kinds
+
+
+# ═══════════════════════════════════════════════════════════
+# Path-escape jail — scan.source_dirs / scan.test_dirs are user-
+# controllable (codd.yaml). A ``../`` traversal or an in-root symlink
+# whose target escapes must NEVER walk/read files OUTSIDE the project
+# (no out-of-root content read as source modules or as test files).
+# ═══════════════════════════════════════════════════════════
+
+
+class TestPathEscapeJail:
+    def _outside_with_violation(self, tmp_path: Path) -> Path:
+        """A SIBLING dir holding a 'test' that, if read, would flag bare-basename."""
+        outside = tmp_path.parent / (tmp_path.name + "_outside")
+        outside.mkdir()
+        # if this external file were read as a project test, it would flag
+        # 'todo_store' (a real in-root source module) by bare basename.
+        (outside / "test_evil.py").write_text("import todo_store\n", encoding="utf-8")
+        return outside
+
+    def test_parent_traversal_test_dir_is_not_read(self, tmp_path):
+        _coherent_project(tmp_path)
+        outside = self._outside_with_violation(tmp_path)
+        result = check_import_coherence(
+            tmp_path,
+            language="python",
+            project_name="todo-cli",
+            source_dirs=["src/"],
+            test_dirs=[f"../{outside.name}"],  # escapes the project root
+        )
+        # The escaping external test must NOT be read → no bare_basename finding.
+        assert not any("test_evil" in f.path for f in result.findings), result.summary()
+
+    def test_parent_traversal_source_dir_is_not_read(self, tmp_path):
+        # An escaping source_dir must not pull external modules into the source set
+        # (which could then false-flag an in-root test). External 'ext_mod.py' must
+        # not become a known source module.
+        _coherent_project(tmp_path)
+        outside = tmp_path.parent / (tmp_path.name + "_src_outside")
+        outside.mkdir()
+        (outside / "ext_mod.py").write_text("X = 1\n", encoding="utf-8")
+        (tmp_path / "tests" / "test_uses_ext.py").write_text(
+            "import ext_mod\n", encoding="utf-8"
+        )
+        result = check_import_coherence(
+            tmp_path,
+            language="python",
+            project_name="todo-cli",
+            source_dirs=[f"../{outside.name}"],  # escapes the project root
+            test_dirs=["tests/"],
+        )
+        # 'ext_mod' must NOT be a recognized source module (it lives outside root),
+        # so the in-root test importing it is not flagged as a bare-basename of a
+        # generated module.
+        assert not any(
+            f.kind == "bare_basename_import" and "ext_mod" in f.message
+            for f in result.findings
+        ), result.summary()
+
+    def test_symlinked_test_dir_escaping_root_is_not_read(self, tmp_path):
+        _coherent_project(tmp_path)
+        outside = self._outside_with_violation(tmp_path)
+        link = tmp_path / "linked_tests"
+        link.symlink_to(outside, target_is_directory=True)
+        result = check_import_coherence(
+            tmp_path,
+            language="python",
+            project_name="todo-cli",
+            source_dirs=["src/"],
+            test_dirs=["linked_tests"],
+        )
+        assert not any("test_evil" in f.path for f in result.findings), result.summary()
+
+    def test_in_root_layout_unchanged(self, tmp_path):
+        # ANTI-FALSE-RED: a normal in-root coherent project still passes, and a
+        # genuine in-root bare-basename violation is still flagged.
+        _coherent_project(tmp_path)
+        assert _check(tmp_path).passed
+        (tmp_path / "tests" / "test_bad.py").write_text(
+            "import todo_store\n", encoding="utf-8"
+        )
+        result = _check(tmp_path)
+        assert not result.passed
+        assert any(f.kind == "bare_basename_import" for f in result.findings)

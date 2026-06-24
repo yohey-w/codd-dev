@@ -33,6 +33,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from codd.path_safety import resolve_project_path
+
 # ═══════════════════════════════════════════════════════════
 # Unified constants
 # ═══════════════════════════════════════════════════════════
@@ -195,7 +197,24 @@ def iter_source_files(
     ignored = frozenset(ignored_dirs) if ignored_dirs is not None else DEFAULT_IGNORED_DIRS
     exts = frozenset(extensions) if extensions is not None else SOURCE_EXTENSIONS
     excludes = [str(p) for p in extra_excludes if str(p).strip()]
-    bases = [root / d for d in source_dirs] if source_dirs else [root]
+
+    # Path-escape jail (RC-2): ``source_dirs`` comes from ``scan.source_dirs`` in
+    # codd.yaml (user-controllable). A ``../`` traversal survives the dir
+    # normalization (only slashes are stripped) and an in-root dir may be a
+    # symlink whose target escapes the tree — either would walk/read files from
+    # OUTSIDE the project. Confine each base dir through the shared jail (drop the
+    # ones that resolve outside), so this single shared walker is transitively
+    # safe for every consumer (env_refs/schema_refs/wiring/contracts/
+    # traceability). ``None`` source_dirs ⇒ the whole root, which is in-root by
+    # construction but still re-confined below to catch escaping symlinks.
+    if source_dirs:
+        bases: list[Path] = []
+        for d in source_dirs:
+            confined = resolve_project_path(root, d)
+            if confined is not None:
+                bases.append(confined)
+    else:
+        bases = [root]
 
     seen: set[str] = set()
     for base in bases:
@@ -212,6 +231,10 @@ def iter_source_files(
                 if exts and path.suffix not in exts:
                     continue
                 if should_skip_path(path, root, ignored_dirs=ignored, exclude_patterns=excludes):
+                    continue
+                # Re-confine the walk result: an in-root tree may contain a symlink
+                # whose target escapes the root — drop it (escape → not yielded).
+                if resolve_project_path(root, path) is None:
                     continue
                 key = str(path)
                 if key in seen:

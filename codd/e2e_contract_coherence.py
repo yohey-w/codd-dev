@@ -52,6 +52,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from codd.import_coherence import import_coherence_opt_out
+from codd.path_safety import resolve_project_path
 from codd.project_types import (
     LayoutProfile,
     load_capabilities,
@@ -120,13 +121,27 @@ def _norm(rel: str) -> str:
     return str(rel).strip().replace("\\", "/").strip("/")
 
 
-def _iter_py_files(base: Path) -> list[Path]:
+def _iter_py_files(base: Path, project_root: Path) -> list[Path]:
+    """Python files under ``base``, confined to ``project_root`` (path-escape jail).
+
+    ``base`` is the ``<test_root>/e2e`` tree; ``test_root`` derives from
+    user-controllable ``scan.test_dirs``. The profile layer drops ``../`` /
+    absolute-out-of-root entries, but an IN-ROOT ``test_root`` / ``e2e`` dir (or a
+    file inside the tree) may be a SYMLINK whose target escapes the project —
+    scanning it would read an out-of-root file as e2e content (a path-escape
+    false-green/false-red). Confine ``base`` through the shared jail, then
+    re-confine every ``rglob`` match. ``None`` ⇒ outside root ⇒ skipped.
+    """
+    if resolve_project_path(project_root, base) is None:
+        return []
     if not base.is_dir():
         return []
     out: list[Path] = []
     for path in sorted(base.rglob("*.py")):
         if any(part == "__pycache__" for part in path.parts):
             continue
+        if resolve_project_path(project_root, path) is None:
+            continue  # in-root tree may contain a symlink escaping the root
         out.append(path)
     return out
 
@@ -346,7 +361,11 @@ def check_e2e_contract_coherence(
         )
 
     e2e_dir = root / profile.test_root / "e2e"
-    if not e2e_dir.is_dir():
+    # Path-escape jail: ``test_root`` derives from user-controllable
+    # ``scan.test_dirs``; an in-root ``test_root`` / ``e2e`` dir may be a symlink
+    # whose target escapes the tree. Confine before the FS probe (``is_dir``) so an
+    # out-of-root e2e tree is treated as "no e2e tree", never scanned.
+    if resolve_project_path(root, e2e_dir) is None or not e2e_dir.is_dir():
         return E2EContractResult(
             passed=True,
             profile=profile,
@@ -355,7 +374,7 @@ def check_e2e_contract_coherence(
 
     findings: list[E2EContractFinding] = []
     scanned = 0
-    for path in _iter_py_files(e2e_dir):
+    for path in _iter_py_files(e2e_dir, root):
         tree = _parse(path)
         if tree is None:
             continue

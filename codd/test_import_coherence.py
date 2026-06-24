@@ -56,6 +56,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from codd.import_coherence import import_coherence_opt_out
+from codd.path_safety import resolve_project_path
 from codd.project_types import LayoutProfile, resolve_layout_profile
 
 
@@ -119,13 +120,27 @@ def _norm(rel: str) -> str:
     return str(rel).strip().replace("\\", "/").strip("/")
 
 
-def _iter_py_files(base: Path) -> list[Path]:
+def _iter_py_files(base: Path, project_root: Path) -> list[Path]:
+    """Python files under ``base``, confined to ``project_root`` (path-escape jail).
+
+    ``base`` is ``project_root`` joined with the PROFILE ``test_root`` (derived
+    from user-controllable ``scan.test_dirs``). The profile layer drops ``../`` /
+    absolute-out-of-root entries, but an IN-ROOT ``test_root`` (or a file inside
+    the tree) may be a SYMLINK whose target escapes the project — reading it would
+    consume an out-of-root file as a project test (a path-escape false-green/
+    false-red). Confine ``base`` through the shared jail, then re-confine every
+    ``rglob`` match. ``None`` ⇒ outside root ⇒ skipped.
+    """
+    if resolve_project_path(project_root, base) is None:
+        return []
     if not base.is_dir():
         return []
     out: list[Path] = []
     for path in sorted(base.rglob("*.py")):
         if any(part == "__pycache__" for part in path.parts):
             continue
+        if resolve_project_path(project_root, path) is None:
+            continue  # in-root tree may contain a symlink escaping the root
         out.append(path)
     return out
 
@@ -378,9 +393,9 @@ def _string_list(value: ast.AST | None) -> list[str] | None:
     return out
 
 
-def _build_test_tree(test_dir: Path, test_root_name: str) -> _TestTree:
+def _build_test_tree(test_dir: Path, test_root_name: str, project_root: Path) -> _TestTree:
     tree = _TestTree()
-    for path in _iter_py_files(test_dir):
+    for path in _iter_py_files(test_dir, project_root):
         parsed = _parse(path)
         if parsed is None:
             continue
@@ -461,17 +476,21 @@ def check_test_import_coherence(
         )
 
     test_dir = root / profile.test_root
-    if not test_dir.is_dir():
+    # Path-escape jail: ``test_root`` derives from user-controllable
+    # ``scan.test_dirs``; an in-root ``test_root`` may be a symlink whose target
+    # escapes the tree. Confine before the FS probe (``is_dir``) so an out-of-root
+    # test root is treated as "no test root", never walked/read.
+    if resolve_project_path(root, test_dir) is None or not test_dir.is_dir():
         return TestImportCoherenceResult(
             passed=True, detail=f"test-import coherence: no test root '{profile.test_root}' (skipped)"
         )
 
     test_root_name = _norm(profile.test_root).split("/")[-1] if profile.test_root else ""
-    index = _build_test_tree(test_dir, test_root_name)
+    index = _build_test_tree(test_dir, test_root_name, root)
 
     findings: list[TestImportCoherenceFinding] = []
     checked_imports = 0
-    for path in _iter_py_files(test_dir):
+    for path in _iter_py_files(test_dir, root):
         try:
             rel_test = path.resolve().relative_to(test_dir.resolve()).as_posix()
         except (ValueError, OSError):
