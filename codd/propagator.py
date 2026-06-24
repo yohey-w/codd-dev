@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -144,6 +145,11 @@ VERIFY_OUTCOME_DOCS_CLASSIFIED = "docs_classified"
 _EMPTY_VERIFY_OUTCOMES = frozenset(
     {VERIFY_OUTCOME_NO_CHANGED_FILES, VERIFY_OUTCOME_NO_AFFECTED_DOCS}
 )
+
+# Sentinel a fingerprint takes when the upstream document does not exist on disk
+# at the time it is sampled (so "absent then present", and "present then absent",
+# are both detected as drift rather than silently treated as equal).
+_FINGERPRINT_MISSING = "<missing>"
 
 # Sentinel diff target for the greenfield/fresh-build window. A freshly built
 # project commonly has NO commits and ALL generated files untracked, so a plain
@@ -361,10 +367,21 @@ def run_verify(
             _write_updated_doc(doc_path, current_content, body)
             updated.append(doc.node_id)
 
-    # Step 4: Save state for --commit
+    # Step 4: Save state for --commit.
+    #
+    # Pin a fingerprint of every doc-to-doc upstream path that --commit will ack.
+    # The reviewer evaluates the reconciliation against the upstream content as it
+    # is NOW; if an upstream changes before --commit, the ledger ack (which records
+    # the upstream's then-current commit) would falsely mark a state the reviewer
+    # never saw as reconciled. Capturing the fingerprint here lets run_commit
+    # detect that drift and refuse (anti-false-green TOCTOU guard).
+    upstream_fingerprints = _upstream_fingerprints(
+        project_root, _collect_upstream_doc_paths(auto_apply, hitl)
+    )
     _save_verify_state(
         project_root, auto_apply, hitl, updated, diff_target,
         verify_outcome=VERIFY_OUTCOME_DOCS_CLASSIFIED, changed_files=changed_files,
+        upstream_fingerprints=upstream_fingerprints,
     )
 
     return VerifyResult(changed_files, file_module_map, auto_apply, hitl, updated)
@@ -407,18 +424,43 @@ def run_commit(
     auto_node_ids = set(state.get("auto_node_ids", []))
     diff_target = state.get("diff_target", "HEAD")
 
-    # Anti-false-green stale guard: an EMPTY "verify found nothing" state must not
-    # be reused to commit after new drift appeared. Re-derive the current changed
+    # Anti-false-green stale guards (run BEFORE any commit/ack). NOT wall-clock
+    # checks — HITL review can take hours; the signal is "did the reconciled state
+    # change", not elapsed time.
+    verify_outcome = state.get("verify_outcome")
+
+    # (1) EMPTY-outcome guard: an empty "verify found nothing" state must not be
+    # reused to commit after new drift appeared. Re-derive the current changed
     # files (same window the state recorded) and compare signatures; a mismatch
     # means the working tree changed since that empty verify, so refuse and force
-    # a fresh verify. NOT a wall-clock check — HITL review can take hours; the
-    # signal is the changed-files set, not elapsed time.
-    if state.get("verify_outcome") in _EMPTY_VERIFY_OUTCOMES:
+    # a fresh verify.
+    if verify_outcome in _EMPTY_VERIFY_OUTCOMES:
         current_changed = _get_changed_files(project_root, diff_target)
         if sorted(current_changed) != sorted(state.get("changed_files", [])):
             raise ValueError(
                 "Verify state is stale: changed files differ from the last "
                 "'codd propagate --verify' run. Run 'codd propagate --verify' again."
+            )
+
+    # (2) DOCS_CLASSIFIED upstream-fingerprint guard (TOCTOU): the human reviewed
+    # each downstream doc against its upstream doc(s) as they were AT --verify. If
+    # an upstream changed (uncommitted edit OR a new commit) before --commit, the
+    # reconciliation ledger would record the upstream's now-current commit and
+    # falsely ack a state the reviewer never saw. Compare each recorded upstream
+    # fingerprint with its current value; any drift refuses the commit/ack and
+    # demands a fresh verify. Applies to ALL docs_classified commits — empty *and*
+    # non-empty — closing the hole the empty-only guard left open.
+    if verify_outcome == VERIFY_OUTCOME_DOCS_CLASSIFIED:
+        stale = _stale_upstream_fingerprints(
+            project_root, state.get("upstream_fingerprints", {})
+        )
+        if stale:
+            listed = ", ".join(stale)
+            raise ValueError(
+                "Verify state is stale: upstream document(s) changed since the "
+                f"last 'codd propagate --verify' run ({listed}). The reviewed "
+                "reconciliation no longer matches the working tree. "
+                "Run 'codd propagate --verify' again."
             )
 
     # Find which HITL docs were actually modified
@@ -1162,12 +1204,16 @@ def _save_verify_state(
     *,
     verify_outcome: str,
     changed_files: list[str],
+    upstream_fingerprints: dict[str, dict[str, str]] | None = None,
 ) -> None:
     """Save verify state for subsequent --commit.
 
     The state carries the contract sentinel (:data:`VERIFY_STATE_TYPE`), a
-    ``verify_outcome``, and the ``changed_files`` signature so ``run_commit``
-    can validate provenance and detect stale empty states (anti-false-green).
+    ``verify_outcome``, the ``changed_files`` signature, and (for the
+    ``docs_classified`` outcome) a per-upstream-path ``upstream_fingerprints``
+    map so ``run_commit`` can validate provenance, detect stale empty states, and
+    refuse a stale doc-to-doc ack if an upstream changed between verify and commit
+    (anti-false-green).
     """
     codd_dir = find_codd_dir(project_root)
     if codd_dir is None:
@@ -1180,6 +1226,7 @@ def _save_verify_state(
         "diff_target": diff_target,
         "verify_outcome": verify_outcome,
         "changed_files": sorted(changed_files),
+        "upstream_fingerprints": upstream_fingerprints or {},
         "auto_node_ids": updated,
         "hitl_node_ids": [v.doc.node_id for v in hitl],
         "auto_docs": [
@@ -1223,6 +1270,87 @@ def _clear_verify_state(project_root: Path) -> None:
     state_path = codd_dir / VERIFY_STATE_FILE
     if state_path.exists():
         state_path.unlink()
+
+
+def _collect_upstream_doc_paths(
+    auto_applied: list[VerifiedDoc], hitl: list[VerifiedDoc]
+) -> list[str]:
+    """Upstream design-doc paths the reconciliation will ack (doc-to-doc only).
+
+    Mirrors the filter in :func:`_record_reconciliation_acks`: only ``.md``
+    upstream paths (Path B doc->doc edges) are ledger-acked, so only those need a
+    TOCTOU fingerprint. Source-file upstreams (Path A) are never acked and are
+    excluded. Returned sorted+deduplicated for a stable fingerprint set.
+    """
+    paths: set[str] = set()
+    for vdoc in list(auto_applied) + list(hitl):
+        downstream = vdoc.doc.path
+        for upstream in vdoc.doc.changed_files or []:
+            upstream_path = str(upstream)
+            if upstream_path.endswith(".md") and upstream_path != downstream:
+                paths.add(upstream_path)
+    return sorted(paths)
+
+
+def _upstream_fingerprints(
+    project_root: Path, upstream_paths: list[str]
+) -> dict[str, dict[str, str]]:
+    """Fingerprint each upstream doc path: working-tree content hash + last commit.
+
+    The fingerprint pins the upstream state the reviewer actually saw at
+    ``--verify`` time so ``--commit`` can detect a between-the-two change (TOCTOU)
+    before writing a reconciliation ack:
+
+    * ``content_hash`` — SHA-256 of the upstream file's current working-tree
+      bytes. This catches an uncommitted edit AND a post-verify commit that
+      alters content (the bytes the human reviewed against).
+    * ``commit`` — the last commit touching the path (the value the ledger ack
+      records). Storing it lets the ack record the *reviewed* commit and lets the
+      guard notice a same-content-but-different-commit move.
+
+    Generic by design: only file bytes and git commit hashes, no project,
+    framework, or domain vocabulary. Missing files map to a sentinel so
+    appear/disappear transitions register as drift instead of comparing equal.
+    """
+    from codd.reconciliation_ledger import last_commit_for_path
+
+    fingerprints: dict[str, dict[str, str]] = {}
+    for rel_path in upstream_paths:
+        abs_path = project_root / rel_path
+        try:
+            content_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()
+        except OSError:
+            content_hash = _FINGERPRINT_MISSING
+        commit = last_commit_for_path(project_root, rel_path) or _FINGERPRINT_MISSING
+        fingerprints[rel_path] = {"content_hash": content_hash, "commit": commit}
+    return fingerprints
+
+
+def _stale_upstream_fingerprints(
+    project_root: Path, recorded: dict[str, Any]
+) -> list[str]:
+    """Return upstream paths whose current fingerprint differs from ``recorded``.
+
+    Re-samples each recorded upstream path and compares against the value stored
+    at verify time. Any path whose content hash OR commit moved is stale: the
+    reconciliation the human reviewed no longer matches the tree, so acking it
+    would be a false-green. Empty list means every upstream is unchanged.
+    """
+    if not isinstance(recorded, dict) or not recorded:
+        return []
+    current = _upstream_fingerprints(project_root, sorted(recorded.keys()))
+    stale: list[str] = []
+    for rel_path, recorded_fp in recorded.items():
+        if not isinstance(recorded_fp, dict):
+            stale.append(rel_path)
+            continue
+        now = current.get(rel_path, {})
+        if (
+            now.get("content_hash") != recorded_fp.get("content_hash")
+            or now.get("commit") != recorded_fp.get("commit")
+        ):
+            stale.append(rel_path)
+    return sorted(stale)
 
 
 def _record_reconciliation_acks(project_root: Path, state: dict) -> int:

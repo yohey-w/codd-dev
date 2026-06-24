@@ -265,3 +265,23 @@ crash (low). **Two are regressions from my own round-1 fixes** — the verificat
 catching my fixes' side-effects. Round-2 union (Codex 5 + Sonnet 3, mostly disjoint)
 ≈ 7-8 → the negative axis is clearly NOT converging; this is the input to the
 pending GPT-Pro strategic decision (negative vs positive axis).
+
+## New /goal (2026-06-25): N-liveness gate → Axis-P coverage (GPT-decided)
+GPT-Pro decided: pivot to **Axis-P** (coverage = *meaningful* green) as the main
+axis, but FIRST pass a short **Axis-N operational-liveness gate** (the checker must
+reliably run / read canonical metadata / surface findings — round 1 showed it was
+dormant). Do NOT chase CSUMR full saturation. **Axis-M** (reachability) folded into
+the N-gate. Stop line = **2 consecutive 3-engine rounds with no new P0/P1
+foundational**. Then Axis-P (AI proposes gaps → decider = GPT/strong-model + harness,
+**not the owner per-gap** → contract → deterministic check). Owner is not a loop step.
+
+### Round-2 foundational fixes ✅ (N-gate work; full suite 6003)
+All 6 P0/P1 findings internalized, red-before-green, generality preserved, runner.py
+unchanged: cardinality dedup by full identity (keeps the stricter red); dependency_
+freshness amber-when-warnings; the 3rd cli summary now uses a shared `_dag_pass_is_warn`
+(all 3 summaries consistent); resource_flow `_entries` no longer double-counts
+top-level keys; implementation_coverage passes the raw hint to the root-jail
+(absolute-in-root only); propagator fingerprints the upstream at verify and rejects
+stale acks at commit across all outcomes. (Low-severity advisories — e.g. propagator
+corrupt-state robustness — deferred per the stop line.)
+**N-gate progress: rounds 1-2 done. Need 2 consecutive clean rounds → round 3 next.**

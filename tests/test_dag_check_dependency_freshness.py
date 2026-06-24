@@ -133,6 +133,43 @@ def test_no_ledger_no_upstream_change_explicit_baseline_note(tmp_path):
     assert "checked" in result.message
 
 
+def test_no_violation_with_warnings_surfaces_amber(tmp_path):
+    """No-violation but warning-bearing path is amber/warn, not a green info/pass.
+
+    Ledger absent + nothing stale → zero violations but a 'baseline not created'
+    warning. Returning severity=info/status=pass hid that amber warning behind a
+    green PASS row (the CLI only renders WARN + counts the finding when
+    severity=='amber'). Deploy stays allowed (passed=True, block_deploy=False).
+    Mirrors the resource_flow_coherence round-1 #2 false-green fix.
+    """
+    repo = _init_repo(tmp_path)
+    result = DependencyFreshnessCheck(_doc_dag(), repo, {}).run()
+    assert result.violations == []
+    assert result.warnings  # the missing-baseline advisory is present
+    assert result.severity == "amber"  # was "info"
+    assert result.status == "warn"  # was "pass"
+    # Deploy remains allowed: amber advisory, not a red gate.
+    assert result.passed is True
+    assert result.block_deploy is False
+
+
+def test_no_violation_no_warnings_stays_info_pass(tmp_path):
+    """Regression: zero violations AND zero warnings → unchanged info/pass.
+
+    Acknowledging the edge via the ledger clears both the violation and the
+    missing-baseline warning, so the clean path must still be a green info/pass.
+    """
+    repo = _init_repo(tmp_path)
+    assert record_reconciliation(repo, DOWNSTREAM, UPSTREAM) is True
+    result = DependencyFreshnessCheck(_doc_dag(), repo, {}).run()
+    assert result.violations == []
+    assert result.warnings == []
+    assert result.severity == "info"
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.block_deploy is False
+
+
 def test_unacked_upstream_change_is_amber(tmp_path):
     """② upstream commit newer than downstream, never reconciled → amber warning."""
     repo = _init_repo(tmp_path)

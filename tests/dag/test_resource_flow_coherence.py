@@ -978,3 +978,185 @@ def test_no_violation_without_warnings_stays_info_pass():
     assert result.warnings == []
     assert result.severity == "info"
     assert result.status == "pass"
+
+
+# ── Fix 3: top-level frontmatter declaration must not be double-counted ─────────
+#
+# Regression introduced by Fix 1 (reading frontmatter / frontmatter.codd). The
+# real builder lifts a TOP-LEVEL frontmatter key into BOTH ``attrs[key]`` (the
+# extractor's normalized copy) AND keeps the raw copy at ``attrs["frontmatter"]
+# [key]``. Reading both made ``_entries`` return the same logical declaration
+# twice, so a single top-level declaration inflated its findings 2x (verdict
+# unchanged, but counts doubled). These fixtures pin the counts to 1.
+
+
+def _builder_attrs(**top_level):
+    """Mimic the real builder's design-doc node attributes.
+
+    The extractor lifts every top-level frontmatter key into ``attrs[key]`` AND
+    the builder stores the raw frontmatter alongside at ``attrs['frontmatter']``,
+    so the same top-level declaration is reachable from two locations (the cause
+    of the double-count this fix removes).
+    """
+
+    attrs = dict(top_level)
+    attrs["frontmatter"] = dict(top_level)
+    return attrs
+
+
+# Fix 3a — a top-level dangling consumer yields exactly ONE violation (was: 2).
+def test_top_level_declaration_not_double_counted_dangling():
+    dag = _dag(
+        _design_doc(
+            **_builder_attrs(
+                user_journeys=[CRITICAL_JOURNEY],
+                capability_contracts=[
+                    {
+                        "capability": "line_individual_nudge",
+                        "consumes": [
+                            {
+                                "resource": "data:users.lstep_friend_id",
+                                "required": True,
+                                "on_missing": "fail",
+                            }
+                        ],
+                    }
+                ],
+            )
+        )
+    )
+    result = _run(dag)
+    assert result.passed is False
+    assert result.severity == "red"
+    dangling = [
+        v for v in result.violations if v["type"] == "dangling_required_consumer"
+    ]
+    assert len(dangling) == 1
+    assert dangling[0]["resource"] == "data:users.lstep_friend_id"
+
+
+# Fix 3b — a top-level malformed entry yields exactly ONE malformed warning (was: 2).
+def test_top_level_declaration_not_double_counted_malformed():
+    dag = _dag(
+        _design_doc(
+            **_builder_attrs(
+                capability_contracts=[
+                    {"capability": "line_individual_nudge", "consumes": [{"required": True}]},
+                ],
+            )
+        )
+    )
+    result = _run(dag)
+    malformed = _warnings_of_type(result, "malformed_contract")
+    assert len(malformed) == 1
+    assert malformed[0]["location"] == "capability_contracts[0].consumes[0]"
+
+
+# Fix 3c — round-1 regression guard: a declaration nested ONLY under
+# frontmatter.codd is still detected (the dedup must not kill the codd read).
+def test_frontmatter_codd_only_declaration_still_detected_after_dedup():
+    dag = _dag(
+        _design_doc(
+            frontmatter={
+                "codd": {
+                    "user_journeys": [CRITICAL_JOURNEY],
+                    "capability_contracts": [
+                        {
+                            "capability": "line_individual_nudge",
+                            "consumes": [
+                                {
+                                    "resource": "data:users.lstep_friend_id",
+                                    "required": True,
+                                    "on_missing": "fail",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    result = _run(dag)
+    assert result.passed is False
+    assert result.severity == "red"
+    dangling = [
+        v for v in result.violations if v["type"] == "dangling_required_consumer"
+    ]
+    assert len(dangling) == 1
+    assert dangling[0]["resource"] == "data:users.lstep_friend_id"
+
+
+# Fix 3d — union: a top-level declaration AND a DIFFERENT frontmatter.codd
+# declaration are both picked up (union, not deduped away). One dangling
+# consumer per distinct resource → two distinct violations, not collapsed.
+def test_top_level_and_frontmatter_codd_distinct_declarations_union():
+    attrs = {
+        # top-level (extractor-lifted) declaration: consumer of resource A.
+        "user_journeys": [CRITICAL_JOURNEY],
+        "capability_contracts": [
+            {
+                "capability": "line_individual_nudge",
+                "consumes": [
+                    {
+                        "resource": "data:users.resource_a",
+                        "required": True,
+                        "on_missing": "fail",
+                    }
+                ],
+            }
+        ],
+        "frontmatter": {
+            # raw duplicate of the top-level declaration (must be deduped) ...
+            "user_journeys": [CRITICAL_JOURNEY],
+            "capability_contracts": [
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "data:users.resource_a",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                }
+            ],
+            # ... plus a genuinely DIFFERENT declaration nested under codd:
+            # consumer of resource B (must still be read = union).
+            "codd": {
+                "user_journeys": [
+                    {
+                        "name": "second_journey",
+                        "criticality": "critical",
+                        "steps": [{"action": "use_b"}],
+                        "required_capabilities": ["lstep_tag_reflection"],
+                        "expected_outcome_refs": [],
+                    }
+                ],
+                "capability_contracts": [
+                    {
+                        "capability": "lstep_tag_reflection",
+                        "consumes": [
+                            {
+                                "resource": "data:users.resource_b",
+                                "required": True,
+                                "on_missing": "fail",
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+    }
+    dag = _dag(_design_doc(**attrs))
+    result = _run(dag)
+    assert result.passed is False
+    assert result.severity == "red"
+    dangling = [
+        v for v in result.violations if v["type"] == "dangling_required_consumer"
+    ]
+    # Union of the two distinct resources, with the top-level one NOT doubled.
+    assert {v["resource"] for v in dangling} == {
+        "data:users.resource_a",
+        "data:users.resource_b",
+    }
+    assert len(dangling) == 2

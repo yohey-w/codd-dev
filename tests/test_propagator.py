@@ -1453,3 +1453,236 @@ def test_baseline_leaves_existing_verify_commit_ack_path_unchanged(tmp_path):
     # Unchanged default method — baseline work did not alter this path.
     assert entry["method"] == "propagate_commit"
     assert "reason" not in entry  # default record shape unchanged
+
+
+# ---------------------------------------------------------------------------
+# TOCTOU stale-upstream guard for the docs_classified outcome.
+#
+# Before this fix the changed-files stale guard only fired for the EMPTY verify
+# outcomes. In the docs_classified path, an upstream design doc could change
+# AFTER ``--verify`` (which the human reviewed) but BEFORE ``--commit``, and
+# ``run_commit`` -> ``_record_reconciliation_acks`` -> ``record_reconciliation``
+# would record the upstream's CURRENT commit as "reconciled" — a false ack of a
+# state the reviewer never saw (HIGH false-green). The verify state now carries
+# a per-upstream-path fingerprint (working-tree content hash + last commit), and
+# ``run_commit`` refuses the commit/ack when any upstream fingerprint drifted.
+# ---------------------------------------------------------------------------
+
+
+def _setup_doc_to_doc_classified_project(tmp_path: Path) -> Path:
+    """A real-git project whose verify produces a ``docs_classified`` outcome.
+
+    Downstream design doc ``depends_on`` an upstream design doc (green-band edge
+    in the graph). The upstream doc is committed, then edited in the working tree
+    so a plain ``git diff HEAD`` surfaces it — driving Path B (doc->doc) and a
+    ``docs_classified`` verify outcome with the downstream doc as the affected,
+    auto-applied doc.
+    """
+    project = tmp_path / "toctou"
+    project.mkdir()
+    codd_dir = project / "codd"
+    (codd_dir / "scan").mkdir(parents=True)
+    config = {
+        "version": "0.1.0",
+        "project": {"name": "toctou", "language": "python"},
+        "ai_command": "mock-ai --print",
+        "scan": {
+            "source_dirs": ["src"],
+            "test_dirs": ["tests"],
+            "doc_dirs": ["docs/"],
+            "config_files": [],
+            "exclude": [],
+        },
+        "graph": {"store": "jsonl", "path": "codd/scan"},
+        "bands": {"green": {"min_confidence": 0.90, "min_evidence_count": 2}},
+    }
+    (codd_dir / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+    )
+
+    up = project / "docs" / "upstream.md"
+    up.parent.mkdir(parents=True, exist_ok=True)
+    up.write_text(
+        "---\n"
+        + yaml.safe_dump(
+            {"codd": {"node_id": "doc:upstream", "type": "design",
+                      "title": "Upstream", "modules": []}},
+            sort_keys=False,
+        )
+        + "---\n\n# Upstream\n\n## 1. Overview\n\nThreshold is 100.\n",
+        encoding="utf-8",
+    )
+    down = project / "docs" / "downstream.md"
+    down.write_text(
+        "---\n"
+        + yaml.safe_dump(
+            {"codd": {"node_id": "doc:downstream", "type": "design",
+                      "title": "Downstream", "modules": [],
+                      "depends_on": ["doc:upstream"]}},
+            sort_keys=False,
+        )
+        + "---\n\n# Downstream\n\n## 1. Overview\n\nUses threshold 100.\n",
+        encoding="utf-8",
+    )
+
+    from codd.graph import CEG
+
+    graph = CEG(codd_dir / "scan")
+    graph.upsert_node("doc:upstream", "design", path="docs/upstream.md")
+    graph.upsert_node("doc:downstream", "design", path="docs/downstream.md")
+    eid = graph.add_edge("doc:downstream", "doc:upstream", "depends_on", "technical")
+    graph.add_evidence(eid, "frontmatter", "frontmatter", 0.95, "depends_on")
+    graph.add_evidence(eid, "human", "review", 0.90, "confirmed")
+    graph.close()
+
+    _init_git_repo(project)
+    _git_commit_all(project, "initial design docs")
+    # Edit upstream in the working tree (uncommitted) so verify's HEAD diff
+    # surfaces it and Path B reconciles downstream against this reviewed content.
+    up.write_text(
+        "---\n"
+        + yaml.safe_dump(
+            {"codd": {"node_id": "doc:upstream", "type": "design",
+                      "title": "Upstream", "modules": []}},
+            sort_keys=False,
+        )
+        + "---\n\n# Upstream\n\n## 1. Overview\n\nThreshold is 200.\n",
+        encoding="utf-8",
+    )
+    return project
+
+
+def _toctou_ai_patch():
+    """Patch only the generator's AI call; every ``git`` call hits the real binary."""
+    import codd.generator as _gen
+    import unittest.mock as _mock
+
+    _real_run = subprocess.run
+
+    def patched_subprocess(command, *a, **kw):
+        if command and command[0] == "git":
+            return _real_run(command, *a, **kw)
+        return subprocess.CompletedProcess(
+            args=command, returncode=0,
+            stdout="## 1. Overview\n\nUses threshold 200.\n", stderr="",
+        )
+
+    return _mock.patch.object(_gen.subprocess, "run", patched_subprocess)
+
+
+def test_docs_classified_commit_rejects_stale_upstream_change(tmp_path):
+    """RED: upstream changes between verify and commit → ack must be refused.
+
+    The reviewer verified downstream against upstream@verify-time. If upstream is
+    then changed (committed) before ``--commit``, recording the upstream's NEW
+    commit as the reconciled state is a false ack. ``run_commit`` must refuse and
+    demand a fresh verify instead of writing a stale reconciliation.
+    """
+    from codd.reconciliation_ledger import edge_key, load_ledger
+
+    project = _setup_doc_to_doc_classified_project(tmp_path)
+
+    with _toctou_ai_patch():
+        result = run_verify(project, diff_target="HEAD")
+        # Sanity: a docs_classified outcome with the downstream as affected doc.
+        assert result.auto_applied or result.needs_hitl
+        state = _load_verify_state(project)
+        assert state is not None
+        assert state["verify_outcome"] == "docs_classified"
+
+        # TOCTOU: upstream is changed AND committed AFTER the reviewed verify.
+        (project / "docs" / "upstream.md").write_text(
+            "---\n"
+            + yaml.safe_dump(
+                {"codd": {"node_id": "doc:upstream", "type": "design",
+                          "title": "Upstream", "modules": []}},
+                sort_keys=False,
+            )
+            + "---\n\n# Upstream\n\n## 1. Overview\n\nThreshold is 999 (changed!).\n",
+            encoding="utf-8",
+        )
+        _git_commit_all(project, "upstream changed after verify")
+
+        with pytest.raises(ValueError, match="stale"):
+            run_commit(project, reason="should be refused — upstream drifted")
+
+    # No false ack was written for the stale upstream.
+    ledger = load_ledger(project)
+    edges = (ledger or {}).get("edges", {})
+    assert edge_key("docs/downstream.md", "docs/upstream.md") not in edges
+
+
+def test_docs_classified_commit_acks_when_upstream_unchanged(tmp_path):
+    """Regression: upstream unchanged between verify and commit → ack succeeds.
+
+    The normal flow must still reconcile and record the downstream->upstream ack.
+    Proves the new fingerprint guard is scoped to genuine drift and does not
+    break the happy path.
+    """
+    from codd.reconciliation_ledger import edge_key, load_ledger
+
+    project = _setup_doc_to_doc_classified_project(tmp_path)
+
+    with _toctou_ai_patch():
+        result = run_verify(project, diff_target="HEAD")
+        assert result.auto_applied or result.needs_hitl
+        state = _load_verify_state(project)
+        assert state["verify_outcome"] == "docs_classified"
+        # No upstream change — commit proceeds and acks honestly.
+        commit = run_commit(project, reason="codd propagate commit")
+
+    assert isinstance(commit, CommitResult)
+    ledger = load_ledger(project)
+    assert ledger is not None
+    edges = ledger.get("edges", {})
+    assert edge_key("docs/downstream.md", "docs/upstream.md") in edges
+
+
+def test_docs_classified_ack_records_reviewed_commit_not_current(tmp_path):
+    """The recorded ack commit matches the upstream state reviewed at verify time.
+
+    Even when the upstream's working-tree edit is committed in the SAME commit as
+    the downstream propagation (content unchanged since verify), the ledger must
+    record the commit that reflects the reviewed upstream content — not some later
+    unrelated commit. Guards the "record the reviewed commit" half of the fix.
+    """
+    from codd.reconciliation_ledger import (
+        edge_key,
+        last_commit_for_path,
+        load_ledger,
+    )
+
+    project = _setup_doc_to_doc_classified_project(tmp_path)
+
+    with _toctou_ai_patch():
+        run_verify(project, diff_target="HEAD")
+        run_commit(project, reason="codd propagate commit")
+
+    reviewed_commit = last_commit_for_path(project, "docs/upstream.md")
+    ledger = load_ledger(project)
+    entry = ledger["edges"][edge_key("docs/downstream.md", "docs/upstream.md")]
+    assert entry["upstream_commit"] == reviewed_commit
+
+
+def test_empty_outcome_stale_guard_still_enforced(tmp_path):
+    """The pre-existing empty-outcome changed-files stale guard is preserved.
+
+    Integration with the new per-upstream fingerprint guard must NOT regress the
+    original empty-state protection: a clean verify (no_changed_files) followed by
+    real drift before commit still raises ``stale``.
+    """
+    project = _setup_project(tmp_path)
+    _init_git_repo(project)
+    _git_commit_all(project, "baseline")
+
+    result = run_verify(project, diff_target="HEAD")
+    assert result.changed_files == []
+    state = _load_verify_state(project)
+    assert state["verify_outcome"] == "no_changed_files"
+
+    (project / "src" / "auth" / "service.py").write_text(
+        "class AuthService:\n    def login(self):\n        ...\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="stale"):
+        run_commit(project, reason="should be refused — drift after empty verify")

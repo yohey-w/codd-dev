@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import fnmatch
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
@@ -252,7 +252,7 @@ def _matches_any_artifact(
     for candidate in _candidate_nodes(dag, expected_node.kind):
         if _hint_matches_node(expected_node.path_hint, candidate, settings):
             return True
-    return _fs_fallback_match(_normalize_hint(expected_node.path_hint), project_root)
+    return _fs_fallback_match(expected_node.path_hint, project_root)
 
 
 def _candidate_nodes(dag: DAG, expected_kind: str) -> list[Node]:
@@ -302,7 +302,7 @@ def _matches_any_impl(
     if any(_soft_path_match(hint, candidate) for candidate in candidates):
         return True
 
-    return _fs_fallback_match(hint, project_root)
+    return _fs_fallback_match(path_hint, project_root)
 
 
 def _hint_matches_node(
@@ -328,7 +328,7 @@ def _hint_matches_node(
     return False
 
 
-def _fs_fallback_match(hint: str, project_root: Path | None) -> bool:
+def _fs_fallback_match(raw_hint: str, project_root: Path | None) -> bool:
     """Match a hint against the file system when no DAG node satisfies it.
 
     Glob hints are matched with fnmatch; the literal-bracket-escaped form of
@@ -344,15 +344,23 @@ def _fs_fallback_match(hint: str, project_root: Path | None) -> bool:
     that lives outside the project — that would be a false-green. The glob branch
     is already root-confined because ``_project_files`` only enumerates files
     under the root, so it is left unchanged.
+
+    The *raw* hint is taken here (not the ``_normalize_hint`` form). Globbing and
+    bracket escaping run on the normalized hint as before, but the literal lookup
+    forwards the raw hint to ``_resolve_in_root`` so the leading-slash distinction
+    (absolute vs root-relative) survives the jail. See ``_resolve_in_root``.
     """
-    if project_root is None or not hint:
+    if project_root is None:
         return False
-    if any(char in hint for char in "*?[]"):
+    normalized = _normalize_hint(raw_hint)
+    if not normalized:
+        return False
+    if any(char in normalized for char in "*?[]"):
         files = _project_files(project_root)
-        for pattern in (hint, _escape_literal_brackets(hint)):
+        for pattern in (normalized, _escape_literal_brackets(normalized)):
             if fnmatch.filter(files, pattern):
                 return True
-    resolved = _resolve_in_root(hint, project_root)
+    resolved = _resolve_in_root(raw_hint, project_root)
     if resolved is None:
         return False
     try:
@@ -361,13 +369,44 @@ def _fs_fallback_match(hint: str, project_root: Path | None) -> bool:
         return False
 
 
-def _resolve_in_root(hint: str, project_root: Path) -> Path | None:
-    """Resolve ``hint`` under ``project_root``, returning it only when the
-    resolved path stays inside the root. Parent-traversal / absolute hints that
-    escape the root resolve to ``None`` (no match)."""
+def _resolve_in_root(raw_hint: str, project_root: Path) -> Path | None:
+    """Resolve ``raw_hint`` under ``project_root``, returning it only when the
+    resolved path stays inside the root. Parent-traversal hints, and absolute
+    hints that point outside the root, resolve to ``None`` (no match).
+
+    The *raw* hint is taken on purpose (not the ``_normalize_hint`` form): that
+    normalization strips the leading ``/`` before the jail can see it, which both
+    lets an FS-absolute hint (``/src/service.py``) collapse onto the in-root
+    relative file ``src/service.py`` (false-green) and turns a genuine in-root
+    absolute hint into a root-appended relative path that escapes the jail
+    (false-red). To tell the two apart the leading-slash distinction must survive
+    until here.
+
+    Absolute hints are accepted only when they live under ``project_root`` (then
+    converted to a project-relative lookup); an absolute hint resolving outside
+    the root is rejected even if its target exists on the real filesystem. An
+    "absolute-looking but root-relative" hint such as ``/src/...`` denotes the
+    filesystem root, so it is treated as absolute and only matches if that
+    absolute location happens to fall inside the project root (safe side: it
+    will not).
+    """
+    cleaned = str(raw_hint or "").strip().replace("\\", "/")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    if not cleaned:
+        return None
+
+    root_resolved = project_root.resolve()
+    pure = PurePosixPath(cleaned)
     try:
-        resolved = (project_root / hint).resolve()
-        resolved.relative_to(project_root.resolve())
+        if pure.is_absolute():
+            # Absolute hint: only accept when it is genuinely inside the root.
+            absolute = Path(cleaned).resolve()
+            absolute.relative_to(root_resolved)
+            resolved = absolute
+        else:
+            resolved = (project_root / cleaned).resolve()
+            resolved.relative_to(root_resolved)
     except (OSError, ValueError):
         return None
     return resolved

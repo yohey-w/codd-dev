@@ -750,11 +750,7 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
             # An amber check that carries findings (e.g. advisory warnings) is shown
             # as WARN, not PASS, so the row matches the WARN count and the finding is
             # not hidden behind a green-looking PASS.
-            status = (
-                "WARN"
-                if severity == "amber" and _dag_result_has_findings(result)
-                else "PASS"
-            )
+            status = "WARN" if _dag_pass_is_warn(result) else "PASS"
         else:
             status = "WARN" if severity == "amber" else "FAIL"
         _line(f"  {status}  {_dag_result_name(result)} [{severity}]")
@@ -7894,9 +7890,19 @@ def _emit_verify_summary(result: _CliVerificationResult) -> None:
     check_results = list(result.check_results or [])
     runtime_results = list(result.runtime_results or [])
 
-    dag_pass = sum(1 for item in check_results if _summary_passed(item))
+    # An amber check carrying findings reports passed=True but is surfaced as
+    # WARN (same rule as 'dag verify' and the 'check' summary), so an advisory is
+    # never counted as a clean PASS. A finding-free amber pass stays PASS.
+    dag_pass = sum(
+        1 for item in check_results if _summary_passed(item) and not _dag_pass_is_warn(item)
+    )
     dag_fail = sum(1 for item in check_results if not _summary_passed(item) and _summary_severity(item) == "red")
-    dag_warn = sum(1 for item in check_results if not _summary_passed(item) and _summary_severity(item) != "red")
+    dag_warn = sum(
+        1
+        for item in check_results
+        if (not _summary_passed(item) and _summary_severity(item) != "red")
+        or (_summary_passed(item) and _dag_pass_is_warn(item))
+    )
 
     runtime_pass = sum(1 for item in runtime_results if _summary_passed(item) and not _summary_skipped(item))
     runtime_fail = sum(1 for item in runtime_results if _summary_value(item, "passed") is False and not _summary_skipped(item))
@@ -8540,11 +8546,7 @@ def dag_verify(
                 # An amber check carrying findings (advisory warnings) shows as WARN,
                 # not PASS, so the row matches the WARN count and the finding is not
                 # hidden behind a green-looking PASS.
-                status = (
-                    "WARN"
-                    if severity == "amber" and _dag_result_has_findings(result)
-                    else "PASS"
-                )
+                status = "WARN" if _dag_pass_is_warn(result) else "PASS"
             else:
                 status = "WARN" if severity == "amber" else "FAIL"
             click.echo(f"  {status}  {_dag_result_name(result)} [{severity}]")
@@ -8876,6 +8878,17 @@ def _dag_result_has_findings(result: Any) -> bool:
         if value:
             return True
     return False
+
+
+def _dag_pass_is_warn(result: Any) -> bool:
+    """A passed amber check that carries findings must be surfaced as WARN.
+
+    Shared by all three verify summaries ('dag verify', the embedded summary in
+    'check', and '_emit_verify_summary') so an amber-with-findings result that
+    reports passed=True is never hidden behind a green-looking PASS in any of
+    them. Backward compatible: a finding-free amber pass stays PASS.
+    """
+    return _dag_result_severity(result) == "amber" and _dag_result_has_findings(result)
 
 
 def _dag_result_details(result: Any) -> list[str]:

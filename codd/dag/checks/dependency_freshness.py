@@ -197,6 +197,27 @@ class DependencyFreshnessCheck(DagCheck):
                 edges_checked=checked,
             )
 
+        # No violations. If advisory warnings were collected (currently the
+        # missing-baseline note when the reconciliation ledger is absent), surface
+        # them as amber/warn — the CLI only renders WARN (and counts the finding)
+        # when severity == "amber". Returning info/pass here hid those findings
+        # behind a green PASS row (a false-green). Deploy stays allowed either way
+        # (passed=True, block_deploy=False); with no warnings it is a clean
+        # info/pass (unchanged). Mirrors resource_flow_coherence's round-1 #2 fix.
+        if warnings:
+            return DependencyFreshnessResult(
+                severity="amber",
+                status="warn",
+                message=(
+                    f"dependency_freshness found {len(warnings)} advisory warning(s) "
+                    f"({checked} doc-to-doc depends_on edge(s) checked, no violations)"
+                ),
+                warnings=warnings,
+                passed=True,
+                block_deploy=False,
+                edges_checked=checked,
+            )
+
         return DependencyFreshnessResult(
             severity="info",
             status="pass",

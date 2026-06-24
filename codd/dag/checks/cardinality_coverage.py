@@ -120,7 +120,15 @@ class CardinalityCoverageCheck(DagCheck):
         # nor suppress that relation's own amber (false-green). Matching is exact
         # on normalized identity (never substring/pluralization) so a loose bind
         # cannot re-introduce a false-red.
-        evaluated_field_ids: set[str] = set()
+        #
+        # Dedup is by FULL assertion identity (field_id + policy + member_signals
+        # + design_doc), not field_id alone. A field_id-only key let a softer
+        # policy that happened to come first (e.g. ``representative``) mask a
+        # later stricter ``all`` on the *same* field, swallowing a real red
+        # (false-green). Keying on the whole declaration evaluates every distinct
+        # assertion exactly once while still collapsing an identical assertion
+        # that matches several relations to a single evaluation (no fan-out).
+        evaluated_identities: set[tuple] = set()
         for relation in relations:
             matched = [a for a in assertions if _assertion_matches_relation(a, relation)]
             if not matched:
@@ -131,11 +139,10 @@ class CardinalityCoverageCheck(DagCheck):
                     warnings.append(_unspecified_policy_warning(relation))
                 continue
             for assertion in matched:
-                # Dedupe so an assertion matching multiple relations is evaluated
-                # (and any red counted) once.
-                if assertion["field_id"] in evaluated_field_ids:
+                identity = _assertion_identity(assertion)
+                if identity in evaluated_identities:
                     continue
-                evaluated_field_ids.add(assertion["field_id"])
+                evaluated_identities.add(identity)
                 self._evaluate_assertion(
                     assertion, asserted_signals, summaries, warnings, red_violations
                 )
@@ -187,7 +194,7 @@ class CardinalityCoverageCheck(DagCheck):
             warnings=warnings,
             message=(
                 f"cardinality_coverage examined {len(relations)} one-to-many "
-                f"relation(s); {len(evaluated_field_ids)} cardinality_assertion(s) "
+                f"relation(s); {len(evaluated_identities)} cardinality_assertion(s) "
                 f"evaluated (matched to a detected relation)"
             ),
         )
@@ -311,6 +318,25 @@ def _norm(value: str) -> str:
     """
 
     return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _assertion_identity(assertion: Mapping[str, Any]) -> tuple:
+    """A hashable identity for one assertion: its full declaration content.
+
+    Two assertions share an identity only when field_id, policy, member_signals
+    (order-sensitive — the declaration's own order) AND originating design_doc all
+    match. This collapses a single assertion seen across multiple matched
+    relations to one evaluation (no fan-out duplicate red), while keeping two
+    *different* policies on the same field_id distinct so a softer one cannot mask
+    a stricter one's red.
+    """
+
+    return (
+        str(assertion.get("field_id") or ""),
+        str(assertion.get("policy") or ""),
+        tuple(assertion.get("member_signals") or []),
+        str(assertion.get("design_doc") or ""),
+    )
 
 
 def _cardinality_assertions(dag: DAG) -> list[dict[str, Any]]:

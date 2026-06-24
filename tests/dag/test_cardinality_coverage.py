@@ -334,6 +334,139 @@ def test_matched_policy_all_missing_is_still_red():
     assert violations[0]["missing_signals"] == ["line_item:B_visible"]
 
 
+# --- Multiple assertions on the SAME field_id: a softer policy must not mask a
+# stricter one's red (regression for a field_id-only dedup false-green) ---
+# When two assertions share a field_id, the run must evaluate BOTH. A field_id
+# keyed dedup let whichever assertion came first win, so a leading softer policy
+# (representative) swallowed a trailing stricter ``all`` with a missing member —
+# a HIGH false-green. Full-identity dedup keeps both distinct.
+
+
+def _aggregation_policy_full(
+    policy: str, member_signals: list[str], field_id: str = "line_items"
+) -> dict:
+    # Same shape as _aggregation_policy; named locally for the ordering tests.
+    return {
+        "field_id": field_id,
+        "cardinality": "1:N",
+        "cardinality_assertion": {
+            "policy": policy,
+            "member_signals": list(member_signals),
+        },
+    }
+
+
+# red-before-green: representative (softer) FIRST, then all(missing) SECOND on the
+# same field_id ⇒ red must survive. Under the old field_id-only dedup this PASSED.
+def test_same_field_representative_then_all_missing_stays_red():
+    dag = _dag(
+        _design_doc(
+            data_dependencies=[ONE_TO_MANY_DEP],
+            aggregation_policies=[
+                _aggregation_policy_full("representative", ["line_item:A_visible"]),
+                _aggregation_policy_full(
+                    "all", ["line_item:A_visible", "line_item:B_visible"]
+                ),
+            ],
+        ),
+        _test_node(assertions=["line_item:A_visible"]),
+    )
+    result = _run(dag)
+    assert result.status == "fail"
+    assert result.severity == "red"
+    assert result.passed is False
+    assert result.block_deploy is True
+    violations = _warnings_of_type(result, "cardinality_members_not_all_asserted")
+    assert len(violations) == 1
+    assert violations[0]["field_id"] == "line_items"
+    assert violations[0]["missing_signals"] == ["line_item:B_visible"]
+
+
+# Order independence: all(missing) FIRST, then representative SECOND ⇒ still red.
+def test_same_field_all_missing_then_representative_stays_red():
+    dag = _dag(
+        _design_doc(
+            data_dependencies=[ONE_TO_MANY_DEP],
+            aggregation_policies=[
+                _aggregation_policy_full(
+                    "all", ["line_item:A_visible", "line_item:B_visible"]
+                ),
+                _aggregation_policy_full("representative", ["line_item:A_visible"]),
+            ],
+        ),
+        _test_node(assertions=["line_item:A_visible"]),
+    )
+    result = _run(dag)
+    assert result.status == "fail"
+    assert result.severity == "red"
+    assert result.passed is False
+    assert result.block_deploy is True
+    violations = _warnings_of_type(result, "cardinality_members_not_all_asserted")
+    assert len(violations) == 1
+    assert violations[0]["missing_signals"] == ["line_item:B_visible"]
+
+
+# anti-false-red: two assertions on the same field where the stricter ``all`` is
+# FULLY asserted (no missing) ⇒ pass. The trailing representative must not add a
+# spurious red, and the satisfied ``all`` must not be reported red.
+def test_same_field_all_complete_then_representative_passes():
+    dag = _dag(
+        _design_doc(
+            data_dependencies=[ONE_TO_MANY_DEP],
+            aggregation_policies=[
+                _aggregation_policy_full(
+                    "all", ["line_item:A_visible", "line_item:B_visible"]
+                ),
+                _aggregation_policy_full("representative", ["line_item:A_visible"]),
+            ],
+        ),
+        _test_node(assertions=["line_item:A_visible", "line_item:B_visible"]),
+    )
+    result = _run(dag)
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert result.severity != "red"
+    assert _warnings_of_type(result, "cardinality_members_not_all_asserted") == []
+    # Both distinct policies are evaluated and recorded.
+    statuses = {s["status"] for s in result.summaries if s["field_id"] == "line_items"}
+    assert "complete_all" in statuses
+    assert "representative" in statuses
+
+
+# fan-out guard: a single ``all`` assertion that matches MORE THAN ONE detected
+# relation (its child prefix names one, its field_id names another) must raise its
+# red exactly ONCE, not once per matched relation. Full-identity dedup collapses
+# the repeat; a per-relation evaluation would double-count.
+def test_single_assertion_matching_two_relations_reds_once():
+    # Two 1:N relations the detector will surface. The assertion's member_signal
+    # prefix binds to "line_item"; its field_id "shipment" binds to the second.
+    rel_a = {"parent": "order", "child": "line_item", "cardinality": "1:N"}
+    rel_b = {"parent": "order", "child": "shipment", "cardinality": "1:N"}
+    dag = _dag(
+        _design_doc(
+            data_dependencies=[rel_a, rel_b],
+            aggregation_policies=[
+                {
+                    "field_id": "shipment",
+                    "cardinality": "1:N",
+                    "cardinality_assertion": {
+                        "policy": "all",
+                        "member_signals": ["line_item:A_visible", "line_item:B_visible"],
+                    },
+                },
+            ],
+        ),
+        _test_node(assertions=["line_item:A_visible"]),
+    )
+    result = _run(dag)
+    assert result.status == "fail"
+    assert result.severity == "red"
+    violations = _warnings_of_type(result, "cardinality_members_not_all_asserted")
+    # Exactly one red despite matching both relations (no fan-out duplication).
+    assert len(violations) == 1
+
+
 # Binding-evidence boundary: a PLURAL field_id ("line_items") with NO
 # member_signals carries no exact-norm identity match to the singular child
 # ("line_item"), so it stays UNBOUND. It must produce neither unverifiable_all

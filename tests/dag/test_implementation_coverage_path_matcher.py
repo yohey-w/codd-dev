@@ -592,3 +592,90 @@ def test_fs_fallback_match_unit_rejects_parent_traversal(tmp_path):
 
     assert implementation_module._fs_fallback_match("../outside.py", root) is False
     assert implementation_module._fs_fallback_match("inside.py", root) is True
+
+
+# --- absolute path_hint handling (root-jail before normalization) -------------
+
+
+def test_absolute_looking_hint_does_not_false_green_on_relative_file(tmp_path):
+    """false-green guard: ``/src/service.py`` is an FS-absolute hint. It must NOT
+    be satisfied by the project-relative file ``src/service.py``. Before the fix,
+    ``_normalize_hint`` stripped the leading slash *before* the root-jail, so the
+    absolute hint silently collapsed onto the in-root file (false-green)."""
+
+    root = tmp_path / "project"
+    _write(root / "src" / "service.py", "print('svc')\n")
+    dag = DAG()
+    dag.add_node(_expected_doc("impl_file", "/src/service.py"))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is False
+    assert result.violations[0]["type"] == "missing_implementation"
+    assert result.violations[0]["path_hint"] == "/src/service.py"
+
+
+def test_true_in_root_absolute_hint_matches_existing_file(tmp_path):
+    """false-red guard: a genuine in-root absolute hint
+    (``<project_root>/src/service.py``) must match the file it points at. Before
+    the fix, ``_normalize_hint`` stripped the leading slash, turning the absolute
+    path into ``<project_root>/src/service.py`` *appended* under the root, which
+    escaped the jail and failed (false-red)."""
+
+    root = tmp_path / "project"
+    _write(root / "src" / "service.py", "print('svc')\n")
+    absolute_hint = (root / "src" / "service.py").as_posix()
+    dag = DAG()
+    dag.add_node(_expected_doc("impl_file", absolute_hint))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is True
+    assert result.violations == []
+
+
+def test_in_root_relative_hint_still_matches_after_absolute_fix(tmp_path):
+    """Regression: a plain in-root relative hint keeps matching after the
+    absolute-path handling is added."""
+
+    root = tmp_path / "project"
+    _write(root / "src" / "service.py", "print('svc')\n")
+    dag = DAG()
+    dag.add_node(_expected_doc("impl_file", "src/service.py"))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is True
+    assert result.violations == []
+
+
+def test_fs_fallback_match_unit_handles_absolute_hints(tmp_path):
+    """Unit-level guard: the helper rejects an FS-absolute hint that resolves
+    outside the root, accepts a true in-root absolute hint, and keeps the
+    relative in-root and parent-traversal behavior intact."""
+
+    root = tmp_path / "project"
+    _write(root / "src" / "service.py", "print('svc')\n")
+    absolute_in_root = (root / "src" / "service.py").as_posix()
+
+    # FS-absolute hint pointing outside the root -> reject (no false-green).
+    assert implementation_module._fs_fallback_match("/src/service.py", root) is False
+    # Genuine in-root absolute hint -> accept (no false-red).
+    assert implementation_module._fs_fallback_match(absolute_in_root, root) is True
+    # Relative in-root hint -> accept (regression).
+    assert implementation_module._fs_fallback_match("src/service.py", root) is True
+    # Parent traversal -> reject (regression).
+    assert implementation_module._fs_fallback_match("../service.py", root) is False
+
+
+def test_absolute_hint_outside_root_rejected_even_when_target_exists(tmp_path):
+    """false-green guard: an absolute hint whose target genuinely exists on the
+    real filesystem outside the project root must still be rejected."""
+
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "elsewhere"
+    _write(outside / "service.py", "print('out')\n")
+    absolute_outside = (outside / "service.py").as_posix()
+
+    assert implementation_module._fs_fallback_match(absolute_outside, root) is False

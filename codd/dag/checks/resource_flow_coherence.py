@@ -790,18 +790,33 @@ class ResourceFlowCoherenceCheck(DagCheck):
         ``semantic_contract_conflict._section_entries`` so that contract /
         journey metadata stashed at the canonical ``frontmatter.codd`` position
         (or one level up at ``frontmatter``) by the generator is read, not
-        silently skipped (a false-green). Lists from all three locations are
-        concatenated in the order top-level → frontmatter → frontmatter.codd, so
-        a later location's entries are appended after (not overwriting) earlier
-        ones, matching the union semantics of the sibling check.
+        silently skipped (a false-green).
+
+        De-dup of the top-level declaration (avoids double-count). The builder
+        lifts a TOP-LEVEL frontmatter ``key`` into BOTH ``attrs[key]`` (the
+        extractor's normalized copy) AND keeps the raw copy at
+        ``attrs['frontmatter'][key]`` — the *same* logical declaration in two
+        places. Reading both would count it twice (verdict unchanged, but
+        violation/warning counts doubled). So ``attrs['frontmatter'][key]`` (the
+        raw top-level duplicate) is read ONLY when the extractor did not already
+        populate ``attrs[key]``; that still covers builder shapes that store only
+        the raw frontmatter without lifting it. ``frontmatter.codd[key]`` is a
+        genuinely separate location the extractor never lifts to ``attrs[key]``,
+        so it is ALWAYS read — preserving the union semantics of the sibling
+        check (a top-level decl plus a *different* ``frontmatter.codd`` decl are
+        merged, not deduped away).
         """
 
         if not isinstance(attrs, dict):
             return []
-        values: list[Any] = [attrs.get(key)]
+        top_level = attrs.get(key)
+        values: list[Any] = [top_level]
         frontmatter = attrs.get("frontmatter")
         if isinstance(frontmatter, dict):
-            values.append(frontmatter.get(key))
+            # Skip the raw top-level duplicate when the extractor already lifted
+            # it to attrs[key]; otherwise read it (frontmatter-only builders).
+            if not (isinstance(top_level, list) and top_level):
+                values.append(frontmatter.get(key))
             codd_meta = frontmatter.get("codd")
             if isinstance(codd_meta, dict):
                 values.append(codd_meta.get(key))
