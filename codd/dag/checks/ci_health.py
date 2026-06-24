@@ -158,8 +158,23 @@ class CiHealthCheck(DagCheck):
                 self.opt_out_policy.lookup(self.check_name) if self.opt_out_policy else None
             )
             return self._make_opt_out_result(declaration)
-        workflow_files = self._locate_workflows(project_root, config.workflow_glob)
+        workflow_files, out_of_root = self._locate_workflows(project_root, config.workflow_glob)
+        # Out-of-root workflow paths are surfaced as a structured red finding,
+        # never a crash. The escape can only come from a configured absolute
+        # ``ci.workflow_glob`` that points outside ``project_root``; reading or
+        # serializing such a path would either raise ``ValueError`` (relative_to)
+        # or read files outside the project. We refuse to read them and report.
+        out_of_root_finding = self._out_of_root_finding(out_of_root, project_root)
         if not workflow_files:
+            if out_of_root_finding is not None:
+                return CiHealthResult(
+                    status="fail",
+                    severity="red",
+                    block_deploy=True,
+                    message=out_of_root_finding.message,
+                    findings=[out_of_root_finding],
+                    passed=False,
+                )
             finding = CiHealthFinding(
                 violation_type="ci_workflow_missing",
                 severity="red",
@@ -177,6 +192,7 @@ class CiHealthCheck(DagCheck):
             )
 
         findings = [
+            *([out_of_root_finding] if out_of_root_finding is not None else []),
             *self._check_triggers(workflow_files, config.required_triggers, config.trigger_key),
             *self._check_verification_coverage(workflow_files, project_root),
         ]
@@ -194,22 +210,61 @@ class CiHealthCheck(DagCheck):
             block_deploy=block_deploy,
             message=message,
             findings=findings,
-            workflow_files=[path.relative_to(project_root).as_posix() for path in workflow_files],
+            workflow_files=[_relative_to_root(path, project_root) for path in workflow_files],
             passed=not block_deploy,
+        )
+
+    @staticmethod
+    def _out_of_root_finding(
+        out_of_root: list[Path],
+        project_root: Path,
+    ) -> CiHealthFinding | None:
+        if not out_of_root:
+            return None
+        return CiHealthFinding(
+            violation_type="ci_workflow_out_of_root",
+            severity="red",
+            block_deploy=True,
+            message=(
+                "CI workflow_glob resolved to path(s) outside the project root; "
+                "out-of-root workflows are not read."
+            ),
+            details=[path.as_posix() for path in out_of_root],
         )
 
     def format_report(self, result: CiHealthResult) -> str:
         return json.dumps({"ci_health_report": asdict(result)}, ensure_ascii=False, indent=2)
 
-    def _locate_workflows(self, project_root: Path, workflow_glob: str) -> list[Path]:
+    def _locate_workflows(
+        self,
+        project_root: Path,
+        workflow_glob: str,
+    ) -> tuple[list[Path], list[Path]]:
+        """Resolve workflow files, partitioned into in-root and out-of-root.
+
+        Root-jail is applied here, *before* any file is read or serialized, so
+        a configured absolute ``workflow_glob`` pointing outside the project can
+        never reach :meth:`Path.relative_to` (``ValueError``) or cause reads of
+        files outside the project. Out-of-root matches are returned separately
+        for the caller to surface as a structured red finding.
+        """
+
         pattern = workflow_glob.strip()
         if not pattern:
-            return []
+            return [], []
         if Path(pattern).is_absolute():
             paths = [Path(path) for path in glob(pattern)]
         else:
             paths = list(project_root.glob(pattern))
-        return sorted(path for path in paths if path.is_file())
+        files = sorted(path for path in paths if path.is_file())
+        in_root: list[Path] = []
+        out_of_root: list[Path] = []
+        for path in files:
+            if _is_within_root(path, project_root):
+                in_root.append(path)
+            else:
+                out_of_root.append(path)
+        return in_root, out_of_root
 
     def _check_triggers(
         self,
@@ -300,6 +355,37 @@ class CiHealthCheck(DagCheck):
     @staticmethod
     def _command_appears_in_workflow(command: str, workflow_commands: set[str]) -> bool:
         return any(command == candidate or command in candidate for candidate in workflow_commands)
+
+
+def _relative_to_root(path: Path, project_root: Path) -> str:
+    """Serialize ``path`` relative to ``project_root`` without raising.
+
+    Workflow paths reaching this helper are already root-jailed by
+    :func:`_is_within_root`, but an absolute-glob match may be lexically outside
+    the (unresolved) root while still resolving inside it (e.g. via a symlink).
+    Falling back to the resolved relative form keeps serialization total and
+    never re-raises the ``ValueError`` this fix removed.
+    """
+
+    try:
+        return path.relative_to(project_root).as_posix()
+    except ValueError:
+        return path.resolve().relative_to(project_root.resolve()).as_posix()
+
+
+def _is_within_root(path: Path, project_root: Path) -> bool:
+    """True when ``path`` is inside ``project_root`` (root-jail predicate).
+
+    Both sides are resolved so that ``..`` segments and symlinks cannot smuggle
+    an out-of-root target past the check. Used before any read/serialize of a
+    configured ``workflow_glob`` match.
+    """
+
+    try:
+        path.resolve().relative_to(project_root.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _read_yaml_mapping(path: Path) -> dict[str, Any]:

@@ -320,3 +320,18 @@ regression (not Opus's say-so); 3-engine consensus = amber confidence, not red;
 deferred new-semantics shown as **amber-residue=N, not pure green**. Revised pass:
 "all explicit invariant checks red-before-green proven + no P0/P1 operational-liveness
 remains; deferred new semantics visible as amber residue, not counted as pure green."
+
+## Round 4 (2026-06-25): NOT clean → 3 stragglers fixed + the convergence path
+3 P1 stragglers of known classes fixed (full suite 6041): env_coverage journeys
+dormancy → shared `collect_structured_entries`; depends_on_consistency
+records_compared=0 → skip + checked_count exposed; ci_health workflow_glob root-jail
+(out-of-root → structured red, not a crash). The subagent audits revealed the
+**convergence path**: the dormancy class is closed (all 22 checks audited), but the
+**VACUOUS and PATH-ESCAPE classes have ~12 more stragglers** — fixing 1-2 per round
+won't converge, so both classes are being closed COMPREHENSIVELY next:
+- vacuous (expose checked_count + skip-when-0): deployment_completeness, edge_validity,
+  implementation_coverage, task_completion, artifact_contract_check,
+  user_journey_coherence, ui_coherence, environment_coverage(empty-axes).
+- path-escape (root-jail config FS reads): e2e_extractor, builder `_project_path`,
+  deployment/extractor, depends_on_consistency propagation_output.
+Then rounds 5-6 should be clean → N-gate passes.

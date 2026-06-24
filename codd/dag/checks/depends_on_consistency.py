@@ -24,11 +24,17 @@ class ConsistencyViolation:
 class DependsOnConsistencyResult:
     check_name: str = "depends_on_consistency"
     severity: str = "red"
+    status: str = "pass"
     violations: list[ConsistencyViolation] = field(default_factory=list)
     passed: bool = True
     skipped: bool = False
     warnings: list[str] = field(default_factory=list)
     records_compared: int = 0
+    # Mirror of ``records_compared`` under the name the materiality overlay
+    # reads (``codd.dag.materiality.is_vacuous_pass``). Exposing it lets a pass
+    # that compared zero values be separated from a pass that actually verified
+    # something, instead of both rendering as an indistinguishable green PASS.
+    checked_count: int = 0
     message: str = ""
 
 
@@ -82,21 +88,67 @@ class DependsOnConsistencyCheck:
             ]
         )
         records_compared = _count_comparison_records(payload, edge_lookup, dag)
-        # Visibility only — behaviour is unchanged. An empty propagation
-        # output (e.g. a baseline placeholder with no comparison records)
-        # previously produced an indistinguishable green PASS; now the
-        # summary states explicitly that nothing was exercised.
-        message = ""
+
+        # Anti-false-green: a pass that compared zero values is NOT a clean
+        # green PASS. Two zero-comparison cases are distinguished, neither of
+        # which renders as a finding-free PASS:
+        #
+        #   1. The propagation output carried no comparable material at all
+        #      (e.g. an empty ``{}`` placeholder, or records/values that
+        #      reference no node — nothing the check could even attempt). The
+        #      check verified nothing, so it SKIPs: ``status="skip"``,
+        #      ``skipped=True``. checked_count==0 + skipped means the
+        #      materiality overlay leaves it alone (a skip is not vacuous).
+        #
+        #   2. Comparable material WAS produced, but none of it landed on a
+        #      ``depends_on`` edge (all values referenced unrelated nodes). The
+        #      run was exercised yet verified nothing on the edges it owns: a
+        #      *vacuous* pass — amber with a warning so it surfaces as WARN, and
+        #      checked_count==0 so the overlay flags it vacuous.
+        #
+        # When records_compared > 0 the original behaviour is unchanged: red
+        # severity, ``passed`` iff no violations.
         if records_compared == 0:
-            message = (
-                "0 records compared — propagation output contains no comparable "
-                "depends_on values; consistency was not exercised"
+            if _has_comparable_material(payload):
+                return DependsOnConsistencyResult(
+                    severity="amber",
+                    status="pass",
+                    passed=True,
+                    skipped=False,
+                    checked_count=0,
+                    records_compared=0,
+                    warnings=[
+                        "WARN: propagation output produced comparable values but "
+                        "none on a depends_on edge; consistency was not exercised "
+                        "(vacuous)"
+                    ],
+                    message=(
+                        "0 records compared on depends_on edges — propagation "
+                        "output produced values but none span a depends_on edge; "
+                        "consistency was not exercised"
+                    ),
+                )
+            return DependsOnConsistencyResult(
+                status="skip",
+                skipped=True,
+                passed=True,
+                checked_count=0,
+                records_compared=0,
+                warnings=[
+                    "WARN: propagation output empty (no comparable records); "
+                    "depends_on_consistency skipped — nothing was exercised"
+                ],
+                message=(
+                    "depends_on_consistency SKIP (propagation output contains no "
+                    "comparable records; consistency was not exercised)"
+                ),
             )
+
         return DependsOnConsistencyResult(
             violations=violations,
             passed=len(violations) == 0,
             records_compared=records_compared,
-            message=message,
+            checked_count=records_compared,
         )
 
 
@@ -134,6 +186,24 @@ def _configured_output_path(settings: dict[str, Any]) -> str | None:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return None
+
+
+def _has_comparable_material(payload: Any) -> bool:
+    """Did the propagation output carry any structured comparison material?
+
+    Distinguishes an *empty* output (no records and no node values at all — a
+    placeholder/uninitialised file → SKIP) from one that produced material the
+    check simply could not match onto a ``depends_on`` edge (→ vacuous amber).
+
+    Reuses the same generic record/value iterators the comparison uses, so it
+    carries no per-project, framework, or schema literal: any payload shape the
+    check understands well enough to compare is also recognised here.
+    """
+    for _ in _iter_records(payload):
+        return True
+    for _ in _iter_value_records(payload):
+        return True
+    return False
 
 
 def _count_comparison_records(

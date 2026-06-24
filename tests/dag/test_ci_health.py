@@ -189,6 +189,78 @@ def test_c8_labeled_endpoint_verification_is_not_collected_as_command(tmp_path: 
     assert result.findings == []
 
 
+# --- root-jail: out-of-root workflow_glob ----------------------------------
+
+
+def test_c8_out_of_root_glob_does_not_crash_and_reds(tmp_path: Path) -> None:
+    """An absolute ``ci.workflow_glob`` pointing outside the project root must
+    NOT crash (historically ``ValueError: ... not in the subpath ...``). It is
+    surfaced as a structured red ``ci_workflow_out_of_root`` finding instead."""
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside = tmp_path / "outside" / ".github" / "workflows"
+    outside.mkdir(parents=True)
+    (outside / "ci.yml").write_text(
+        "name: ci\non: [push, pull_request]\njobs:\n  test:\n    steps:\n      - run: pytest\n",
+        encoding="utf-8",
+    )
+    abs_glob = str(outside / "*.yml")
+
+    result = _run(project_root, {"provider": "github_actions", "workflow_glob": abs_glob})
+
+    assert result.status == "fail"
+    assert result.severity == "red"
+    assert result.block_deploy is True
+    assert result.passed is False
+    assert result.findings[0].violation_type == "ci_workflow_out_of_root"
+    assert any(str(outside) in detail for detail in result.findings[0].details)
+    # The out-of-root workflow file must not be read into workflow_files.
+    assert result.workflow_files == []
+
+
+def test_c8_out_of_root_glob_serializes_in_json_mode(tmp_path: Path) -> None:
+    """JSON mode must emit valid JSON for the out-of-root case (no non-JSON
+    error leaking from a propagated ``ValueError``)."""
+
+    import json
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside = tmp_path / "outside" / ".github" / "workflows"
+    outside.mkdir(parents=True)
+    (outside / "ci.yml").write_text("name: ci\non: [push]\n", encoding="utf-8")
+    abs_glob = str(outside / "*.yml")
+
+    result = _run(project_root, {"provider": "github_actions", "workflow_glob": abs_glob})
+    report = CiHealthCheck().format_report(result)
+
+    payload = json.loads(report)  # raises if not valid JSON
+    finding = payload["ci_health_report"]["findings"][0]
+    assert finding["violation_type"] == "ci_workflow_out_of_root"
+    assert finding["block_deploy"] is True
+
+
+def test_c8_in_root_absolute_glob_unchanged(tmp_path: Path) -> None:
+    """An absolute glob that resolves INSIDE the project root keeps working
+    exactly as before (regression guard for the root-jail change)."""
+
+    workflow_dir = tmp_path / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "ci.yml").write_text(
+        "name: ci\non: [push, pull_request]\njobs:\n  test:\n    steps:\n      - run: pytest\n",
+        encoding="utf-8",
+    )
+    abs_glob = str(workflow_dir / "*.yml")
+
+    result = _run(tmp_path, {"provider": "github_actions", "workflow_glob": abs_glob})
+
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.findings == []
+    assert result.workflow_files == [".github/workflows/ci.yml"]
+
+
 def test_c8_bare_verification_string_is_still_a_command(tmp_path: Path) -> None:
     """Without a sibling spec key, a string ``verification:`` value keeps its
     historical meaning: it is the verification command itself."""

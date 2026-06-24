@@ -394,8 +394,13 @@ def test_corrupt_ledger_treated_as_missing(tmp_path):
 
 
 def test_depends_on_consistency_empty_input_visibility(tmp_path):
-    """T2: empty propagation output is reported as '0 records compared'."""
+    """T2 (P1 false-green fix): an empty propagation output (baseline placeholder
+    with no comparable records) while real depends_on edges exist must SKIP, not
+    return a green PASS. Compared nothing => status='skip', skipped=True, and
+    checked_count==0 so the materiality overlay never mis-reads it as a clean
+    verification."""
     from codd.dag.checks.depends_on_consistency import DependsOnConsistencyCheck
+    from codd.dag.materiality import is_vacuous_pass
 
     repo = _init_repo(tmp_path)
     output = repo / ".codd"
@@ -405,12 +410,14 @@ def test_depends_on_consistency_empty_input_visibility(tmp_path):
         encoding="utf-8",
     )
     result = DependsOnConsistencyCheck(_doc_dag(), repo, {}).run()
-    # Behaviour unchanged: still a pass, not skipped.
-    assert result.passed is True
-    assert result.skipped is False
-    # Visibility added: the empty comparison is now explicit.
+    # No comparable material -> SKIP (previously a vacuous green PASS).
+    assert result.skipped is True
+    assert result.status == "skip"
+    assert result.passed is True  # no violations, but a skip not a green PASS
     assert result.records_compared == 0
-    assert "0 records compared" in result.message
+    assert result.checked_count == 0
+    # A skip verified nothing on purpose -> not flagged vacuous by the overlay.
+    assert is_vacuous_pass(result) is False
 
 
 def test_depends_on_consistency_counts_real_records(tmp_path):

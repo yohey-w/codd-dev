@@ -163,6 +163,44 @@ def test_journey_not_executed_under_variant_is_reported(tmp_path: Path):
     assert any(item["type"] == "journey_not_executed_under_variant" for item in result.violations)
 
 
+def _add_journey_under_codd(dag: DAG, name: str = "happy_path", doc_id: str = "docs/design/spec.md") -> None:
+    dag.add_node(
+        Node(
+            id=doc_id,
+            kind="design_doc",
+            path=doc_id,
+            attributes={
+                "frontmatter": {
+                    "codd": {
+                        "user_journeys": [
+                            {
+                                "name": name,
+                                "criticality": "critical",
+                                "steps": [],
+                                "required_capabilities": [],
+                                "expected_outcome_refs": [],
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+    )
+
+
+def test_journey_under_frontmatter_codd_is_not_dormant(tmp_path: Path):
+    # C9 must read user_journeys nested under the canonical frontmatter.codd location
+    # (via the shared collector), not just top-level attrs — else a journey authored
+    # there is dormant and journey_not_executed_under_variant never fires (false-green).
+    dag = _dag_with_axis()
+    _add_journey_under_codd(dag, "happy_path")
+    _add_test(dag, {"coverage_axes": [{"axis_type": "runtime_shape", "variant_id": "shape_a"}]})
+
+    result = _run(dag, tmp_path)
+
+    assert any(item["type"] == "journey_not_executed_under_variant" for item in result.violations)
+
+
 def test_journey_execution_attribute_satisfies_variant(tmp_path: Path):
     dag = _dag_with_axis()
     _add_journey(dag, "happy_path")

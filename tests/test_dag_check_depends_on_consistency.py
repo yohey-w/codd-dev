@@ -219,3 +219,89 @@ def test_propagation_output_consumed_not_duplicated(tmp_path, monkeypatch):
 
     assert result.passed is False
     assert result.violations[0].from_value == "/api/users"
+
+
+def test_empty_propagation_output_with_real_edges_skips_not_vacuous_pass(tmp_path):
+    """P1 false-green: an empty ({}) propagation output while real depends_on
+    edges exist used to return a clean PASS with records_compared=0. Nothing was
+    exercised, so it must be a SKIP (status='skip', skipped=True), not a green
+    PASS, and it must expose checked_count==0 for the materiality overlay."""
+    result = _run(tmp_path, {}, _dag_with_depends_on())
+
+    assert result.skipped is True
+    assert result.status == "skip"
+    assert result.checked_count == 0
+    assert result.records_compared == 0
+    # Still 'passed' in the boolean sense (no violations), but a skip, not a
+    # finding-free green PASS that hides the fact nothing was compared.
+    assert result.passed is True
+
+
+def test_present_but_noncomparable_propagation_is_vacuous_amber(tmp_path):
+    """Propagation output IS present (records exist) but none are comparable
+    against a depends_on edge: not a clean SKIP (material was produced), but a
+    vacuous pass — amber with a warning, checked_count==0 so the materiality
+    overlay flags it. Never a green PASS [red]."""
+    from codd.dag.materiality import is_vacuous_pass
+
+    result = _run(
+        tmp_path,
+        {
+            "values": [
+                # node not on any depends_on edge -> nothing comparable
+                {"node_id": "docs/design/unrelated.md", "value_type": "url", "name": "x", "value": "/x"},
+            ]
+        },
+        _dag_with_depends_on(),
+    )
+
+    assert result.checked_count == 0
+    assert result.records_compared == 0
+    assert result.skipped is False
+    assert result.severity == "amber"
+    assert result.warnings
+    assert is_vacuous_pass(result) is True
+
+
+def test_real_comparison_pass_exposes_checked_count_unchanged(tmp_path):
+    """Regression: when a real comparison happens and matches, behaviour is
+    unchanged (passed, severity red, no warnings) and checked_count is now
+    exposed (>0) so the overlay never mis-flags it as vacuous."""
+    from codd.dag.materiality import is_vacuous_pass
+
+    result = _run(
+        tmp_path,
+        {
+            "values": [
+                {"node_id": "docs/design/ux.md", "value_type": "url", "name": "dashboard", "value": "/tenant/dashboard"},
+                {"node_id": "docs/design/api.md", "value_type": "url", "name": "dashboard", "value": "/tenant/dashboard"},
+            ]
+        },
+    )
+
+    assert result.passed is True
+    assert result.violations == []
+    assert result.severity == "red"
+    assert result.skipped is False
+    assert result.checked_count == 1
+    assert result.records_compared == 1
+    assert is_vacuous_pass(result) is False
+
+
+def test_real_comparison_fail_unchanged_with_checked_count(tmp_path):
+    """Regression: a real inconsistency still fails (red), now also exposing
+    checked_count>0."""
+    result = _run(
+        tmp_path,
+        {
+            "values": [
+                {"node_id": "docs/design/ux.md", "value_type": "url", "name": "dashboard", "value": "/tenant/dashboard"},
+                {"node_id": "docs/design/api.md", "value_type": "url", "name": "dashboard", "value": "/tenant-admin"},
+            ]
+        },
+    )
+
+    assert result.passed is False
+    assert result.severity == "red"
+    assert result.skipped is False
+    assert result.checked_count == 1

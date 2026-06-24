@@ -10,6 +10,7 @@ from typing import Any
 from codd.dag import DAG, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.dag.coverage_axes import CoverageAxis, CoverageVariant
+from codd.dag.metadata_access import collect_structured_entries
 
 
 @dataclass
@@ -126,7 +127,7 @@ class EnvironmentCoverageCheck(DagCheck):
         for node in sorted(dag.nodes.values(), key=lambda item: item.id):
             if node.kind != "design_doc":
                 continue
-            for item in self._as_list(node.attributes.get("user_journeys")):
+            for item in collect_structured_entries(node.attributes, "user_journeys"):
                 if not isinstance(item, dict):
                     continue
                 if axis.source == "lexicon" or axis.owner_section == node.id or self._journey_mentions_axis(item, axis):
