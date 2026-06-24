@@ -79,6 +79,34 @@ findings are genuine coherence debt in CoDD's own docs/graph.
 - `vacuous_pass` (discovery round 1) — **explicitly deferred** (owner-gated; needs
   per-check item-count semantics).
 
+## Change #4 attempt (doc-drift reconcile) — blocked → self-host finding
+
+`codd propagate --commit` reports "No HITL changes detected" and does **not**
+create `.codd/reconciliation_ledger.json`: the doc-to-doc baseline for
+*pre-existing* `depends_on` edges cannot be established without a source/doc
+change to propagate. So the `dependency_freshness` amber (2 never_reconciled
+edges in codd-dev's own docs) is currently **unreconcilable via the shipped
+tooling** — a genuine CoDD usability gap. Classified **owner-gated** (the fix is
+a new mechanism — a way to baseline-acknowledge pre-existing edges — which needs
+a GPT consult). This is the 3rd self-host finding (with `vacuous_pass` and the
+baseline amber/unreachable).
+
+## Honest saturation assessment (2026-06-24)
+
+The clean **autonomous** change supply for this milestone is **~3** (changes
+#1–#3). The remaining candidates are blocked or owner-gated: doc-reconcile is
+blocked by the gap above; the 9 owner-gated false-green vectors need owner
+meaning / a new mechanism (decision memos). Reaching the literal "≥5 changes"
+cleanly **and** autonomously is not feasible without padding — which would
+violate this goal's own anti-false-green / owner-gated principles.
+
+**Delivered:** the CoDD-verifies-CoDD demonstration; 5/6 saturation requirements
+(corpus gate, control/legacy false-red 0, generality, 2 clean discovery rounds,
+owner-gated classification); 3 genuine red-before-green changes; 3 self-host
+findings (`vacuous_pass`, the reconcile-baseline gap, the baseline
+amber/unreachable). **The high-value remaining work is the owner+GPT session on
+the owner-gated vectors** — out of scope for the unattended autonomous loop.
+
 Re-run the corpus gate: `python3 -m pytest tests/dag/test_resource_flow_coherence.py tests/test_dag_verify_cli.py -q`
 
 > Deferred: the `dependency_freshness` doc-drift amber (2 edges, missing
