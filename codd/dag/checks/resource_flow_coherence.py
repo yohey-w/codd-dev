@@ -105,7 +105,23 @@ class ResourceFlowCoherenceCheck(DagCheck):
             uses.extend(node_uses)
             alias_map.update(node_aliases)
 
+        malformed_warnings = self._malformed_contract_warnings(design_docs)
+
         if not uses:
+            if malformed_warnings:
+                # Contracts were declared but every entry is unusable (missing a
+                # required field). Surface that as amber — never a silent clean skip.
+                return ResourceFlowCoherenceResult(
+                    severity="amber",
+                    status="pass",
+                    passed=True,
+                    block_deploy=False,
+                    message=(
+                        f"resource_flow_coherence: {len(malformed_warnings)} declared "
+                        "contract entry(ies) unusable (malformed)"
+                    ),
+                    warnings=malformed_warnings,
+                )
             return ResourceFlowCoherenceResult(
                 severity="info",
                 status="skip",
@@ -127,7 +143,9 @@ class ResourceFlowCoherenceCheck(DagCheck):
                 consumers.append(use)
 
         violations: list[dict[str, Any]] = []
-        warnings: list[dict[str, Any]] = self._dead_resource_warnings(producers, consumers)
+        warnings: list[dict[str, Any]] = (
+            self._dead_resource_warnings(producers, consumers) + malformed_warnings
+        )
         for consumer in sorted(consumers, key=lambda c: (c.resource, c.capability or "", c.owner_node_id)):
             if not self._is_required(consumer):
                 continue
@@ -332,6 +350,48 @@ class ResourceFlowCoherenceCheck(DagCheck):
                 }
             )
         return warnings
+
+    def _malformed_contract_warnings(self, design_docs: list[Any]) -> list[dict[str, Any]]:
+        # A declared contract entry missing its required key field is unusable: the
+        # collectors above drop it silently. Surface it as amber so a malformed
+        # declaration is never an invisible no-op.
+        warnings: list[dict[str, Any]] = []
+        for node in design_docs:
+            attrs = getattr(node, "attributes", None) or {}
+            for index, entry in enumerate(self._entries(attrs, "capability_contracts")):
+                if not self._str(entry.get("capability")):
+                    warnings.append(
+                        self._malformed(node.id, f"capability_contracts[{index}]", "missing 'capability'")
+                    )
+                for sub_key in ("consumes", "produces"):
+                    for j, sub in enumerate(self._dict_list(entry.get(sub_key))):
+                        if not self._str(sub.get("resource")):
+                            warnings.append(
+                                self._malformed(
+                                    node.id,
+                                    f"capability_contracts[{index}].{sub_key}[{j}]",
+                                    "missing 'resource'",
+                                )
+                            )
+            for index, entry in enumerate(self._entries(attrs, "resource_contracts")):
+                if not self._str(entry.get("resource")):
+                    warnings.append(
+                        self._malformed(node.id, f"resource_contracts[{index}]", "missing 'resource'")
+                    )
+        return warnings
+
+    @staticmethod
+    def _malformed(owner_node_id: str, location: str, detail: str) -> dict[str, Any]:
+        return {
+            "type": "malformed_contract",
+            "severity": "amber",
+            "owner_node_id": owner_node_id,
+            "location": location,
+            "message": (
+                f"Declared contract entry at {location} is unusable ({detail}); "
+                "it would otherwise be dropped silently."
+            ),
+        }
 
     # ---------------------------------------------------------- canonical/parse
     def _canonical(self, resource: str, alias_map: dict[str, str]) -> str:

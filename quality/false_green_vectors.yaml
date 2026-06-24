@@ -85,8 +85,10 @@ vectors:
     severity: amber
     owner_gate: false        # making invisible→visible; strict-default = owner-gated
     false_red_risk: 2
-    status: planned
-    detection: missed_green
+    status: partial          # Tier-1 (declared-but-malformed contract entries) shipped; broader scope (broken regex / unsupported ext) still consult
+    detection: caught_amber  # for malformed contract entries (malformed_contract)
+    check: resource_flow_coherence
+    fixtures: tests/dag/test_resource_flow_coherence.py::test_malformed_contract_entry_is_amber
 
   - id: check_selection_drift
     class: gate_coverage

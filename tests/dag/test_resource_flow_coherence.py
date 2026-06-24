@@ -318,3 +318,53 @@ def test_osato_lstep_friend_id_regression():
         "line_individual_nudge",
         "lstep_tag_reflection",
     }
+
+
+# ── malformed_contract (Tier-1 of extractor_silent_noop): declared-but-unusable ──
+
+# candidate: a consume declared without its required `resource` is surfaced, not dropped.
+def test_malformed_contract_entry_is_amber():
+    dag = _dag(
+        _design_doc(
+            capability_contracts=[
+                {"capability": "line_individual_nudge", "consumes": [{"required": True}]},
+            ],
+        )
+    )
+    result = _run(dag)
+    assert any(w["type"] == "malformed_contract" for w in result.warnings)
+
+
+# guard: a well-formed contract emits no malformed_contract warning.
+def test_wellformed_contract_no_malformed_warning():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[CRITICAL_JOURNEY],
+            capability_contracts=[
+                {
+                    "capability": "bind_line_friend_to_user",
+                    "produces": [{"resource": "data:users.lstep_friend_id"}],
+                },
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "data:users.lstep_friend_id",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                },
+            ],
+        )
+    )
+    result = _run(dag)
+    assert not any(w["type"] == "malformed_contract" for w in result.warnings)
+
+
+# legacy: no contracts at all → skip, no malformed_contract warning.
+def test_malformed_contract_skip_no_contracts():
+    dag = _dag(_design_doc(user_journeys=[CRITICAL_JOURNEY]))
+    result = _run(dag)
+    assert result.skipped is True
+    assert not any(w["type"] == "malformed_contract" for w in result.warnings)
