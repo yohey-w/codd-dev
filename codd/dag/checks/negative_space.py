@@ -37,8 +37,14 @@ Severity model:
   pass: a declaration that forbids nothing has verified nothing).
 * scope resolves to 0 files -> amber ``vacuous`` (never a clean pass: a scope
   that matches nothing has verified nothing).
-* no declaration at all -> ``skip`` (checked_count=0, skipped=True): dormant by
-  default, legacy/unrelated projects keep passing unchanged.
+* the ``forbidden_evidence`` key is declared but malformed (a mapping instead
+  of a list, or a list with no usable declaration — empty list, or non-mapping
+  entries) -> amber ``malformed_negative_space``. The project opted in yet
+  nothing is checked; this is never a silent skip (a vacuous false-green).
+* the ``forbidden_evidence`` key is absent altogether -> ``skip``
+  (checked_count=0, skipped=True): dormant by default, legacy/unrelated
+  projects keep passing unchanged. "Key absent" is deliberately distinct from
+  "declared but malformed".
 
 Guards (none of these are silently swallowed):
 
@@ -106,9 +112,25 @@ class NegativeSpaceCheck(DagCheck):
             self.settings = settings
 
         config = codd_config if codd_config is not None else self.settings
+        declared = _forbidden_evidence_declared(config)
         declarations = _forbidden_evidence(config)
 
         if not declarations:
+            if declared:
+                # The forbidden_evidence key IS present but yields no usable
+                # declaration: it is a mapping instead of a list of declarations,
+                # or a list with zero mapping entries (empty list, or scalars
+                # only). The project explicitly opted in, so this is a malformed
+                # declaration — never a silent SKIP (which would be a vacuous
+                # false-green: declared yet nothing checked, no diagnostic).
+                return _finalize(
+                    warnings=[_malformed_container_diagnostic()],
+                    checked_count=0,
+                    declarations_total=0,
+                    has_fail_hit=False,
+                )
+            # The key itself is absent (legacy / unrelated projects never opted
+            # in): dormant by default, keep passing unchanged.
             return NegativeSpaceResult(
                 status="skip",
                 skipped=True,
@@ -201,13 +223,32 @@ class NegativeSpaceCheck(DagCheck):
 # --- config resolution ------------------------------------------------------
 
 
+_FORBIDDEN_EVIDENCE_KEY = "forbidden_evidence"
+
+
+def _forbidden_evidence_declared(config: Any) -> bool:
+    """Whether the project opted in by declaring the forbidden_evidence key.
+
+    This is independent of whether the value is well-formed: it answers "did the
+    project write the key at all?", which lets the caller tell "no declaration"
+    (key absent -> skip) apart from "declared but malformed" (key present but the
+    value is not a usable list of declarations -> amber).
+    """
+    if not isinstance(config, Mapping):
+        return False
+    section = config.get("negative_space")
+    if not isinstance(section, Mapping):
+        return False
+    return _FORBIDDEN_EVIDENCE_KEY in section
+
+
 def _forbidden_evidence(config: Any) -> list[Mapping[str, Any]]:
     if not isinstance(config, Mapping):
         return []
     section = config.get("negative_space")
     if not isinstance(section, Mapping):
         return []
-    declarations = section.get("forbidden_evidence")
+    declarations = section.get(_FORBIDDEN_EVIDENCE_KEY)
     if not isinstance(declarations, Sequence) or isinstance(declarations, (str, bytes)):
         return []
     return [d for d in declarations if isinstance(d, Mapping)]
@@ -421,6 +462,23 @@ def _malformed_diagnostic(decl_id: str) -> dict[str, Any]:
         "remediation": (
             f"negative_space declaration '{decl_id}' has no scope.paths; "
             "declare at least one glob under scope.paths or remove the entry."
+        ),
+    }
+
+
+def _malformed_container_diagnostic() -> dict[str, Any]:
+    return {
+        "type": "malformed_negative_space",
+        "declaration_id": None,
+        "severity": "amber",
+        "remediation": (
+            "negative_space.forbidden_evidence is declared but malformed: it "
+            "must be a list of declaration mappings. It is either a mapping "
+            "(wrap the single declaration in a list) or a list with no usable "
+            "declaration (empty list, or non-mapping entries). Declare at least "
+            "one declaration, or remove the forbidden_evidence key entirely "
+            "(this is not a clean skip — the key was declared but checks "
+            "nothing)."
         ),
     }
 

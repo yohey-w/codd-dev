@@ -112,15 +112,36 @@ class CardinalityCoverageCheck(DagCheck):
 
         warnings: list[dict[str, Any]] = []
         summaries: list[dict[str, Any]] = []
+        red_violations: list[dict[str, Any]] = []
+
+        # Bind each assertion to the detected relation it actually describes. An
+        # assertion is evaluated ONLY against a relation it matches: a policy for
+        # an unrelated field can neither block a different relation (false-red)
+        # nor suppress that relation's own amber (false-green). Matching is exact
+        # on normalized identity (never substring/pluralization) so a loose bind
+        # cannot re-introduce a false-red.
+        evaluated_field_ids: set[str] = set()
+        for relation in relations:
+            matched = [a for a in assertions if _assertion_matches_relation(a, relation)]
+            if not matched:
+                # No policy describes THIS relation. amber visibility — but only
+                # when verification exists (otherwise a separate "no tests"
+                # concern owns it; we never invent a member universe).
+                if verification_exists:
+                    warnings.append(_unspecified_policy_warning(relation))
+                continue
+            for assertion in matched:
+                # Dedupe so an assertion matching multiple relations is evaluated
+                # (and any red counted) once.
+                if assertion["field_id"] in evaluated_field_ids:
+                    continue
+                evaluated_field_ids.add(assertion["field_id"])
+                self._evaluate_assertion(
+                    assertion, asserted_signals, summaries, warnings, red_violations
+                )
 
         if not assertions:
             # 1:N relation(s) detected, no explicit policy anywhere.
-            # amber visibility — but ONLY when verification exists (otherwise a
-            # separate "no tests" concern owns it; we never invent a member
-            # universe nor block deploy).
-            if verification_exists:
-                for relation in relations:
-                    warnings.append(_unspecified_policy_warning(relation))
             message = (
                 f"cardinality_coverage examined {len(relations)} one-to-many "
                 f"relation(s); no cardinality_assertion policy declared"
@@ -137,69 +158,6 @@ class CardinalityCoverageCheck(DagCheck):
                 warnings=warnings,
                 message=message,
             )
-
-        red_violations: list[dict[str, Any]] = []
-        for assertion in assertions:
-            # Normalize so "All"/"ALL" behave like "all" — a case-sensitive compare
-            # would let a capitalized policy bypass the red path (a false-green).
-            policy = str(assertion["policy"] or "").strip().lower()
-            member_signals = assertion["member_signals"]
-            summary = {
-                "field_id": assertion["field_id"],
-                "policy": policy,
-                "member_signals_total": len(member_signals),
-            }
-
-            if policy == _POLICY_ALL:
-                if not member_signals:
-                    # policy=all with no members: cannot verify "all" — amber,
-                    # never red (no logical miss is derivable).
-                    summary["status"] = "unverifiable_all"
-                    warnings.append(_unverifiable_all_warning(assertion["field_id"]))
-                    summaries.append(summary)
-                    continue
-                missing = [s for s in member_signals if not _signal_asserted(s, asserted_signals)]
-                summary["asserted"] = len(member_signals) - len(missing)
-                if missing:
-                    # The only red path: project declared every member must be
-                    # asserted; at least one provably is not.
-                    summary["status"] = "incomplete_all"
-                    summary["missing_signals"] = missing
-                    red_violations.append(_missing_member_violation(assertion["field_id"], missing))
-                else:
-                    summary["status"] = "complete_all"
-                summaries.append(summary)
-                continue
-
-            if policy == _POLICY_AT_LEAST_ONE:
-                # Passes as soon as one declared member is asserted; we never
-                # require the full (unknown) universe.
-                if not member_signals:
-                    summary["status"] = "at_least_one_no_members"
-                    warnings.append(_at_least_one_no_members_warning(assertion["field_id"]))
-                elif any(_signal_asserted(s, asserted_signals) for s in member_signals):
-                    summary["status"] = "satisfied_at_least_one"
-                else:
-                    summary["status"] = "at_least_one_unsatisfied"
-                    warnings.append(_at_least_one_unsatisfied_warning(assertion["field_id"], member_signals))
-                summaries.append(summary)
-                continue
-
-            if policy == _POLICY_REPRESENTATIVE:
-                # Representative coverage is an explicit acceptance of partial
-                # coverage: pass, but record the limitation in the summary.
-                summary["status"] = "representative"
-                summary["limitation"] = (
-                    "representative coverage only — non-representative members are "
-                    "intentionally not asserted"
-                )
-                summaries.append(summary)
-                continue
-
-            # Unknown policy value: treat as unspecified — amber, never red.
-            summary["status"] = "unknown_policy"
-            warnings.append(_unknown_policy_warning(assertion["field_id"], policy))
-            summaries.append(summary)
 
         if red_violations:
             return CardinalityCoverageResult(
@@ -229,9 +187,130 @@ class CardinalityCoverageCheck(DagCheck):
             warnings=warnings,
             message=(
                 f"cardinality_coverage examined {len(relations)} one-to-many "
-                f"relation(s); {len(assertions)} cardinality_assertion(s) evaluated"
+                f"relation(s); {len(evaluated_field_ids)} cardinality_assertion(s) "
+                f"evaluated (matched to a detected relation)"
             ),
         )
+
+    @staticmethod
+    def _evaluate_assertion(
+        assertion: dict[str, Any],
+        asserted_signals: set[str],
+        summaries: list[dict[str, Any]],
+        warnings: list[dict[str, Any]],
+        red_violations: list[dict[str, Any]],
+    ) -> None:
+        """Evaluate one relation-matched assertion, appending to result buckets.
+
+        Only ever called for an assertion already bound to a detected 1:N
+        relation, so a red here is a logical miss against the project's own
+        declaration — never a guess about an unrelated field.
+        """
+
+        # Normalize so "All"/"ALL" behave like "all" — a case-sensitive compare
+        # would let a capitalized policy bypass the red path (a false-green).
+        policy = str(assertion["policy"] or "").strip().lower()
+        member_signals = assertion["member_signals"]
+        summary = {
+            "field_id": assertion["field_id"],
+            "policy": policy,
+            "member_signals_total": len(member_signals),
+        }
+
+        if policy == _POLICY_ALL:
+            if not member_signals:
+                # policy=all with no members: cannot verify "all" — amber,
+                # never red (no logical miss is derivable).
+                summary["status"] = "unverifiable_all"
+                warnings.append(_unverifiable_all_warning(assertion["field_id"]))
+                summaries.append(summary)
+                return
+            missing = [s for s in member_signals if not _signal_asserted(s, asserted_signals)]
+            summary["asserted"] = len(member_signals) - len(missing)
+            if missing:
+                # The only red path: project declared every member must be
+                # asserted; at least one provably is not.
+                summary["status"] = "incomplete_all"
+                summary["missing_signals"] = missing
+                red_violations.append(_missing_member_violation(assertion["field_id"], missing))
+            else:
+                summary["status"] = "complete_all"
+            summaries.append(summary)
+            return
+
+        if policy == _POLICY_AT_LEAST_ONE:
+            # Passes as soon as one declared member is asserted; we never
+            # require the full (unknown) universe.
+            if not member_signals:
+                summary["status"] = "at_least_one_no_members"
+                warnings.append(_at_least_one_no_members_warning(assertion["field_id"]))
+            elif any(_signal_asserted(s, asserted_signals) for s in member_signals):
+                summary["status"] = "satisfied_at_least_one"
+            else:
+                summary["status"] = "at_least_one_unsatisfied"
+                warnings.append(_at_least_one_unsatisfied_warning(assertion["field_id"], member_signals))
+            summaries.append(summary)
+            return
+
+        if policy == _POLICY_REPRESENTATIVE:
+            # Representative coverage is an explicit acceptance of partial
+            # coverage: pass, but record the limitation in the summary.
+            summary["status"] = "representative"
+            summary["limitation"] = (
+                "representative coverage only — non-representative members are "
+                "intentionally not asserted"
+            )
+            summaries.append(summary)
+            return
+
+        # Unknown policy value: treat as unspecified — amber, never red.
+        summary["status"] = "unknown_policy"
+        warnings.append(_unknown_policy_warning(assertion["field_id"], policy))
+        summaries.append(summary)
+
+
+def _assertion_matches_relation(
+    assertion: Mapping[str, Any], relation: Mapping[str, Any]
+) -> bool:
+    """Return True iff this assertion describes this detected 1:N relation.
+
+    Binding is by *identity*, exact on normalized form — never substring or
+    pluralization (both are generality traps and a loose bind would re-introduce
+    a false-red). An assertion is bound when either:
+
+    * its ``field_id`` normalizes to the relation's child or parent, or
+    * any ``member_signal``'s entity prefix (the token before ``:``) normalizes to
+      the relation's child or parent.
+
+    The member-signal prefix is the precise, convention-driven key (signals read
+    ``<child>:<token>``); ``field_id`` equality is a secondary key for projects
+    that name the policy after the relation entity. A relation whose identity
+    appears nowhere in the assertion stays unbound (amber), which is the safe,
+    anti-false-red outcome.
+    """
+
+    targets = {_norm(str(relation.get("child") or "")), _norm(str(relation.get("parent") or ""))}
+    targets.discard("")
+    if not targets:
+        return False
+
+    if _norm(str(assertion.get("field_id") or "")) in targets:
+        return True
+    for signal in assertion.get("member_signals") or []:
+        prefix = str(signal).split(":", 1)[0]
+        if _norm(prefix) in targets:
+            return True
+    return False
+
+
+def _norm(value: str) -> str:
+    """Normalize an identity token: lowercase, strip non-alphanumerics.
+
+    Mirrors ``_one_to_many_detection._norm`` so relation identities compare on the
+    same footing the detector deduped them with.
+    """
+
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
 def _cardinality_assertions(dag: DAG) -> list[dict[str, Any]]:

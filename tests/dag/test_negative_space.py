@@ -294,7 +294,8 @@ def test_invalid_regex_only_does_not_also_emit_no_usable_patterns(tmp_path: Path
 
 
 def test_no_declaration_skips(tmp_path: Path):
-    # no negative_space section at all
+    # no negative_space section at all -> skip (the forbidden_evidence key is
+    # absent, so the project never opted in).
     result = _run(None, project_root=tmp_path)
     assert result.skipped is True
     assert result.status == "skip"
@@ -302,17 +303,110 @@ def test_no_declaration_skips(tmp_path: Path):
     assert result.checked_count == 0
     assert result.warnings == []
 
-    # empty forbidden_evidence list
-    empty = _run([], project_root=tmp_path)
-    assert empty.skipped is True
-    assert empty.status == "skip"
+    # Note: an *empty* forbidden_evidence list ([]) is NOT a skip — the key is
+    # present (the project opted in) but declares nothing, which is a malformed
+    # declaration (amber). That distinct case is covered by
+    # test_forbidden_evidence_empty_list_is_malformed_amber.
 
-    # None config entirely
+    # None config entirely -> skip (no key present).
     none_result = NegativeSpaceCheck(
         dag=_dag(), project_root=tmp_path, settings=None
     ).run(codd_config=None)
     assert none_result.skipped is True
     assert none_result.status == "skip"
+
+
+def test_forbidden_evidence_mapping_is_malformed_amber(tmp_path: Path):
+    # forbidden_evidence declared as a mapping (not a list of declarations).
+    # Pre-fix this fell through to SKIP (treated as "no declaration") — a
+    # vacuous false-green: the project explicitly declared the key yet nothing
+    # was checked and no diagnostic was raised. It must surface amber.
+    config = {
+        "negative_space": {
+            "forbidden_evidence": {
+                "id": "single",
+                "scope": {"paths": ["src/**/*.py"]},
+                "patterns": [{"name": "secret", "regex": r"SECRET_[A-Z]+"}],
+            }
+        }
+    }
+    result = NegativeSpaceCheck(
+        dag=_dag(), project_root=tmp_path, settings=config
+    ).run(codd_config=config)
+
+    # NOT a skip, NOT a clean pass: a malformed-but-declared container.
+    assert result.skipped is False
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert result.checked_count == 0
+    malformed = _warnings_of_type(result, "malformed_negative_space")
+    assert len(malformed) == 1
+
+
+def test_forbidden_evidence_empty_list_is_malformed_amber(tmp_path: Path):
+    # forbidden_evidence declared as an empty list. The key IS present (the
+    # project opted in) but contains zero usable declarations. Pre-fix this fell
+    # through to SKIP — a vacuous false-green. It must surface amber, distinct
+    # from "no declaration (key absent)".
+    config = {"negative_space": {"forbidden_evidence": []}}
+    result = NegativeSpaceCheck(
+        dag=_dag(), project_root=tmp_path, settings=config
+    ).run(codd_config=config)
+
+    assert result.skipped is False
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert result.checked_count == 0
+    malformed = _warnings_of_type(result, "malformed_negative_space")
+    assert len(malformed) == 1
+
+
+def test_forbidden_evidence_list_without_mapping_entries_is_malformed_amber(
+    tmp_path: Path,
+):
+    # forbidden_evidence is a list, but contains no mapping entry (e.g. scalars).
+    # The key is present yet no usable declaration exists. Pre-fix this fell
+    # through to SKIP — vacuous false-green. Must surface amber.
+    config = {
+        "negative_space": {"forbidden_evidence": ["not_a_mapping", 42, None]}
+    }
+    result = NegativeSpaceCheck(
+        dag=_dag(), project_root=tmp_path, settings=config
+    ).run(codd_config=config)
+
+    assert result.skipped is False
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert result.checked_count == 0
+    malformed = _warnings_of_type(result, "malformed_negative_space")
+    assert len(malformed) == 1
+
+
+def test_forbidden_evidence_key_absent_still_skips(tmp_path: Path):
+    # Regression: the key itself is absent (negative_space present but no
+    # forbidden_evidence key, and negative_space absent entirely). Both remain
+    # skip — "no declaration" must stay distinct from "declared but malformed".
+    no_key = {"negative_space": {"something_else": 1}}
+    result = NegativeSpaceCheck(
+        dag=_dag(), project_root=tmp_path, settings=no_key
+    ).run(codd_config=no_key)
+    assert result.skipped is True
+    assert result.status == "skip"
+    assert result.passed is True
+    assert result.checked_count == 0
+    assert result.warnings == []
+
+    # negative_space section absent entirely -> still skip.
+    empty_cfg = _run(None, project_root=tmp_path)
+    assert empty_cfg.skipped is True
+    assert empty_cfg.status == "skip"
+    assert empty_cfg.warnings == []
 
 
 def test_scope_without_paths_is_malformed_amber(tmp_path: Path):

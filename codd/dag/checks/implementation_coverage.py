@@ -336,6 +336,14 @@ def _fs_fallback_match(hint: str, project_root: Path | None) -> bool:
     as character classes. Literal hints are resolved directly: an existing
     file satisfies the hint (the artifact exists even when the scanner did not
     register a node for it).
+
+    Root-jail: the literal lookup resolves the hint against ``project_root`` and
+    only consults the file system when the result stays inside the project root
+    (mirrors ``stale_evidence._resolve_source``). A parent-traversal or absolute
+    hint that escapes the root must not satisfy an expected artifact with a file
+    that lives outside the project — that would be a false-green. The glob branch
+    is already root-confined because ``_project_files`` only enumerates files
+    under the root, so it is left unchanged.
     """
     if project_root is None or not hint:
         return False
@@ -344,10 +352,25 @@ def _fs_fallback_match(hint: str, project_root: Path | None) -> bool:
         for pattern in (hint, _escape_literal_brackets(hint)):
             if fnmatch.filter(files, pattern):
                 return True
+    resolved = _resolve_in_root(hint, project_root)
+    if resolved is None:
+        return False
     try:
-        return (project_root / hint).is_file()
+        return resolved.is_file()
     except OSError:
         return False
+
+
+def _resolve_in_root(hint: str, project_root: Path) -> Path | None:
+    """Resolve ``hint`` under ``project_root``, returning it only when the
+    resolved path stays inside the root. Parent-traversal / absolute hints that
+    escape the root resolve to ``None`` (no match)."""
+    try:
+        resolved = (project_root / hint).resolve()
+        resolved.relative_to(project_root.resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved
 
 
 def _fs_glob_match(hint: str, project_root: Path | None) -> bool:

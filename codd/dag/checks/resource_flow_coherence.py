@@ -322,6 +322,28 @@ class ResourceFlowCoherenceCheck(DagCheck):
                 warnings=warnings,
             )
 
+        # No violations. If amber findings were collected (dead_resource,
+        # unscoped_resource_consumer, ambiguous_alias_unresolved, alias drift,
+        # malformed_contract, ambiguous_operation_mapping), surface them as
+        # amber/warn — the CLI only renders WARN (and counts the finding) when
+        # severity == "amber". Returning info/pass here hid those findings behind
+        # a green PASS row (a false-green). Deploy stays allowed either way
+        # (passed=True, block_deploy=False); with no warnings it is a clean
+        # info/pass (unchanged).
+        if warnings:
+            return ResourceFlowCoherenceResult(
+                severity="amber",
+                status="warn",
+                passed=True,
+                block_deploy=False,
+                message=(
+                    f"resource_flow_coherence found {len(warnings)} advisory "
+                    f"warning(s) ({len(consumers)} consumer(s), "
+                    f"{len(producers)} producer(s) checked, no violations)"
+                ),
+                warnings=warnings,
+            )
+
         return ResourceFlowCoherenceResult(
             severity="info",
             status="pass",
@@ -761,10 +783,33 @@ class ResourceFlowCoherenceCheck(DagCheck):
 
     @staticmethod
     def _entries(attrs: Any, key: str) -> list[dict[str, Any]]:
-        value = attrs.get(key, []) if isinstance(attrs, dict) else []
-        if not isinstance(value, list):
+        """Collect ``key`` entries from a node's attributes.
+
+        Reads the top-level attribute plus the nested ``frontmatter`` and
+        ``frontmatter.codd`` locations, mirroring
+        ``semantic_contract_conflict._section_entries`` so that contract /
+        journey metadata stashed at the canonical ``frontmatter.codd`` position
+        (or one level up at ``frontmatter``) by the generator is read, not
+        silently skipped (a false-green). Lists from all three locations are
+        concatenated in the order top-level → frontmatter → frontmatter.codd, so
+        a later location's entries are appended after (not overwriting) earlier
+        ones, matching the union semantics of the sibling check.
+        """
+
+        if not isinstance(attrs, dict):
             return []
-        return [entry for entry in value if isinstance(entry, dict)]
+        values: list[Any] = [attrs.get(key)]
+        frontmatter = attrs.get("frontmatter")
+        if isinstance(frontmatter, dict):
+            values.append(frontmatter.get(key))
+            codd_meta = frontmatter.get("codd")
+            if isinstance(codd_meta, dict):
+                values.append(codd_meta.get(key))
+        entries: list[dict[str, Any]] = []
+        for value in values:
+            if isinstance(value, list):
+                entries.extend(entry for entry in value if isinstance(entry, dict))
+        return entries
 
     @staticmethod
     def _dict_list(value: Any) -> list[dict[str, Any]]:

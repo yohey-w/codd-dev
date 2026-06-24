@@ -766,6 +766,20 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
     )
     if skipped_count:
         _line(f"  {skipped_count} check(s) SKIP — verified nothing (dormant / unconfigured)")
+    # Same materiality overlay the standalone 'dag verify' applies: a pass that
+    # verified zero items is shown as vacuous here too, so the embedded summary
+    # in 'check' (the "start here" command) does not hide a vacuous pass that
+    # 'dag verify' would surface for the very same run. Backward compatible: a
+    # result without checked_count is never flagged, so nothing is shown.
+    from codd.dag.materiality import vacuous_pass_results
+
+    vacuous = vacuous_pass_results(dag_results)
+    payload["dag_vacuous"] = [_dag_result_name(result) for result in vacuous]
+    if vacuous:
+        _line(
+            f"  {len(vacuous)} check(s) PASS but verified nothing (vacuous): "
+            + ", ".join(_dag_result_name(result) for result in vacuous)
+        )
     if failed_red or amber_findings:
         _line("  Run 'codd dag verify' for details.")
 
@@ -916,7 +930,11 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
 
     if errors:
         payload["errors"] = errors
-    payload["summary"] = {"gates_failed": gates_failed, "advisories": advisories}
+    payload["summary"] = {
+        "gates_failed": gates_failed,
+        "advisories": advisories,
+        "vacuous": len(payload.get("dag_vacuous", [])),
+    }
 
     if as_text:
         click.echo(f"\nSummary: {gates_failed} gate(s) failed, {advisories} advisory finding(s)")

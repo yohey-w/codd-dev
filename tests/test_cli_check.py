@@ -30,6 +30,8 @@ class _CheckResult:
     check_name: str
     severity: str = "red"
     passed: bool = True
+    status: str = ""
+    checked_count: int | None = None
     missing_impl_files: list[str] = field(default_factory=list)
     unreachable_nodes: list[str] = field(default_factory=list)
 
@@ -124,7 +126,75 @@ def test_check_format_json_parses(project: Path, monkeypatch) -> None:
     assert payload["doctor"] == ["one advisory"]
     assert payload["dag"][0]["check_name"] == "edge_validity"
     assert payload["contract"]["status"] == "skipped"
-    assert payload["summary"] == {"gates_failed": 0, "advisories": 1}
+    assert payload["summary"] == {"gates_failed": 0, "advisories": 1, "vacuous": 0}
+
+
+def test_check_summary_flags_vacuous_pass(project: Path, monkeypatch) -> None:
+    # A check that PASSED having verified 0 items must be surfaced as vacuous in
+    # the embedded dag-verify summary too — the same materiality overlay that the
+    # standalone 'dag verify' applies. Otherwise the same run hides the vacuous
+    # pass under 'check' (the "start here" command) while showing it under
+    # 'dag verify' — a diagnostic gap.
+    _patch_doctor(monkeypatch, [])
+    _patch_dag(
+        monkeypatch,
+        [
+            _CheckResult(
+                "ui_coherence_for_one_to_many",
+                severity="amber",
+                status="pass",
+                checked_count=0,
+            )
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["check", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "verified nothing (vacuous)" in result.output
+    assert "ui_coherence_for_one_to_many" in result.output
+
+
+def test_check_no_vacuous_note_when_checks_did_work(project: Path, monkeypatch) -> None:
+    # Regression: a pass that actually verified items (checked_count > 0) and a
+    # legacy result that reports no checked_count at all must NOT be flagged.
+    _patch_doctor(monkeypatch, [])
+    _patch_dag(
+        monkeypatch,
+        [
+            _CheckResult("node_completeness", status="pass", checked_count=3),
+            _CheckResult("edge_validity"),  # legacy: checked_count is None
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["check", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "verified nothing (vacuous)" not in result.output
+
+
+def test_check_json_summary_includes_vacuous_count(project: Path, monkeypatch) -> None:
+    # The JSON payload mirrors the text overlay: a machine consumer can read the
+    # vacuous accounting off summary, not only by recomputing it from checked_count.
+    _patch_doctor(monkeypatch, [])
+    _patch_dag(
+        monkeypatch,
+        [
+            _CheckResult(
+                "ui_coherence_for_one_to_many",
+                severity="amber",
+                status="pass",
+                checked_count=0,
+            )
+        ],
+    )
+    runner = _split_stream_runner()
+
+    result = runner.invoke(main, ["check", "--path", str(project), "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["summary"]["vacuous"] == 1
 
 
 def test_check_format_json_red_failure_reported_in_summary(project: Path, monkeypatch) -> None:

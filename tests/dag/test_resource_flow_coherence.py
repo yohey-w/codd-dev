@@ -776,3 +776,205 @@ def test_pass_message_reports_checked_count():
     result = _run(dag)
     assert result.passed is True
     assert "checked" in result.message
+
+
+# ── Fix 1: contracts/journeys nested under frontmatter / frontmatter.codd ───────
+#
+# The generator stashes contract + journey metadata at the canonical
+# ``frontmatter.codd`` location; some builders surface it at ``frontmatter`` or
+# the top level. resource_flow_coherence must read all three (mirroring
+# semantic_contract_conflict._section_entries) or it silently skips real
+# incompleteness declared in the canonical place (a false-green).
+
+
+# Fix 1a — dangling required consumer declared under frontmatter.codd → RED (was: skip).
+def test_frontmatter_codd_dangling_required_consumer_is_red():
+    dag = _dag(
+        _design_doc(
+            frontmatter={
+                "codd": {
+                    "user_journeys": [CRITICAL_JOURNEY],
+                    "capability_contracts": [
+                        {
+                            "capability": "line_individual_nudge",
+                            "consumes": [
+                                {
+                                    "resource": "data:users.lstep_friend_id",
+                                    "required": True,
+                                    "on_missing": "fail",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    result = _run(dag)
+    assert result.skipped is False
+    assert result.passed is False
+    assert result.severity == "red"
+    assert any(
+        v["type"] == "dangling_required_consumer"
+        and v["resource"] == "data:users.lstep_friend_id"
+        and v["consumer_capability"] == "line_individual_nudge"
+        for v in result.violations
+    )
+
+
+# Fix 1b — same shape declared one level up at frontmatter (not under codd) → RED.
+def test_frontmatter_direct_dangling_required_consumer_is_red():
+    dag = _dag(
+        _design_doc(
+            frontmatter={
+                "user_journeys": [CRITICAL_JOURNEY],
+                "capability_contracts": [
+                    {
+                        "capability": "line_individual_nudge",
+                        "consumes": [
+                            {
+                                "resource": "data:users.lstep_friend_id",
+                                "required": True,
+                                "on_missing": "fail",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    result = _run(dag)
+    assert result.skipped is False
+    assert result.passed is False
+    assert result.severity == "red"
+    assert any(
+        v["type"] == "dangling_required_consumer"
+        and v["resource"] == "data:users.lstep_friend_id"
+        for v in result.violations
+    )
+
+
+# Fix 1c — regression: top-level declaration still detects exactly as before.
+def test_top_level_dangling_required_consumer_still_red_regression():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[CRITICAL_JOURNEY],
+            capability_contracts=[
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "data:users.lstep_friend_id",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                }
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is False
+    assert result.severity == "red"
+    assert any(
+        v["type"] == "dangling_required_consumer"
+        and v["resource"] == "data:users.lstep_friend_id"
+        for v in result.violations
+    )
+
+
+# Fix 1 — journey criticality must also be read from frontmatter.codd: a producer
+# declared top-level but the critical journey + required consumer under
+# frontmatter.codd must still gate (journey read from the same three locations).
+def test_frontmatter_codd_journey_scopes_consumer_red():
+    dag = _dag(
+        _design_doc(
+            # journey lives under frontmatter.codd; consumer lives top-level.
+            frontmatter={"codd": {"user_journeys": [CRITICAL_JOURNEY]}},
+            capability_contracts=[
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "data:users.lstep_friend_id",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                }
+            ],
+        )
+    )
+    result = _run(dag)
+    # If the journey were NOT read from frontmatter.codd, line_individual_nudge
+    # would not be a critical-journey capability and this would be an amber
+    # unscoped_resource_consumer (false-green) instead of a red.
+    assert result.passed is False
+    assert result.severity == "red"
+    assert any(
+        v["type"] == "dangling_required_consumer"
+        and v["consumer_capability"] == "line_individual_nudge"
+        for v in result.violations
+    )
+
+
+# ── Fix 2: no-violation return must be amber/warn when warnings are present ─────
+#
+# A producer-only contract emits a dead_resource amber warning. The no-violation
+# branch previously returned severity="info"/status="pass", so the CLI (which
+# only renders WARN for severity=="amber") hid the finding behind a PASS row and
+# never counted it. With warnings present the result must be amber/warn (deploy
+# still allowed: passed=True, block_deploy=False).
+
+
+# Fix 2a — producer-only (dead_resource warning) → amber/warn, deploy still allowed.
+def test_no_violation_with_warnings_is_amber_warn():
+    dag = _dag(
+        _design_doc(
+            capability_contracts=[
+                {
+                    "capability": "build_unused_export",
+                    "produces": [{"resource": "data:exports.unused"}],
+                }
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert result.violations == []
+    assert _warnings_of_type(result, "dead_resource")
+    # the bug: these were "info"/"pass" with a finding present.
+    assert result.severity == "amber"
+    assert result.status == "warn"
+    assert result.block_deploy is False
+
+
+# Fix 2b — guard: a clean pass with NO warnings stays info/pass (unchanged).
+def test_no_violation_without_warnings_stays_info_pass():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[CRITICAL_JOURNEY],
+            capability_contracts=[
+                {
+                    "capability": "bind_line_friend_to_user",
+                    "produces": [{"resource": "data:users.lstep_friend_id"}],
+                },
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "data:users.lstep_friend_id",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                },
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert result.violations == []
+    assert result.warnings == []
+    assert result.severity == "info"
+    assert result.status == "pass"

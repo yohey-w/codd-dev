@@ -212,11 +212,14 @@ def test_policy_at_least_one_single_member_passes():
 
 
 # Guard: policy=all but member_signals empty ⇒ amber (unverifiable all), NOT red.
+# field_id="line_item" binds this assertion to the order->line_item relation
+# (relation-identity match) so the unverifiable_all amber is emitted; with empty
+# members there is no logical miss, so it can never be red.
 def test_policy_all_empty_members_is_amber_not_red():
     dag = _dag(
         _design_doc(
             data_dependencies=[ONE_TO_MANY_DEP],
-            aggregation_policies=[_aggregation_policy("all", [])],
+            aggregation_policies=[_aggregation_policy("all", [], field_id="line_item")],
         ),
         _test_node(assertions=["something"]),
     )
@@ -227,7 +230,7 @@ def test_policy_all_empty_members_is_amber_not_red():
     assert result.block_deploy is False
     warnings = _warnings_of_type(result, "cardinality_unverifiable_all")
     assert len(warnings) == 1
-    assert warnings[0]["field_id"] == "line_items"
+    assert warnings[0]["field_id"] == "line_item"
 
 
 # Guard: heuristic relation hit with NO verification present ⇒ no red, no amount
@@ -240,3 +243,120 @@ def test_relation_without_verification_does_not_block():
     assert result.status == "pass"
     # No verification => the unspecified-policy amber is suppressed entirely.
     assert _warnings_of_type(result, "cardinality_policy_unspecified") == []
+
+
+# --- Relation-identity binding: assertions must bind to the detected relation ---
+# An assertion is bound to a detected 1:N relation only when its field_id OR a
+# member_signal entity-prefix norm-equals the relation's child (or parent). An
+# assertion that corresponds to no detected relation is out of scope: it can
+# neither produce red (anti-false-red) nor suppress the relation's own amber.
+
+
+def _unrelated_policy(policy: str, member_signals: list[str]) -> dict:
+    # field_id and member_signal entity-prefixes deliberately do NOT correspond to
+    # the detected order->line_item relation (no "line_item"/"order" anywhere).
+    return {
+        "field_id": "unrelated_totals",
+        "cardinality": "1:N",
+        "cardinality_assertion": {
+            "policy": policy,
+            "member_signals": list(member_signals),
+        },
+    }
+
+
+# anti-false-red regression: a 1:N relation (order->line_item) plus an UNRELATED
+# field's policy=all with a missing member must NOT turn the run red. The
+# unrelated assertion binds to no detected relation, so it is out of red scope.
+def test_unrelated_policy_all_missing_does_not_make_relation_red():
+    dag = _dag(
+        _design_doc(
+            data_dependencies=[ONE_TO_MANY_DEP],
+            aggregation_policies=[
+                _unrelated_policy("all", ["unrelated:X", "unrelated:Y"]),
+            ],
+        ),
+        _test_node(assertions=["order:created"]),
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert result.severity != "red"
+    assert result.status != "fail"
+    # No red violation may be raised for the unrelated, unbound assertion.
+    assert _warnings_of_type(result, "cardinality_members_not_all_asserted") == []
+
+
+# anti-false-green regression: an unrelated field declaring ANY policy must not
+# suppress the detected relation's own cardinality_policy_unspecified amber. The
+# order->line_item relation has no matching assertion, so it stays amber.
+def test_unrelated_representative_does_not_suppress_relation_amber():
+    dag = _dag(
+        _design_doc(
+            data_dependencies=[ONE_TO_MANY_DEP],
+            aggregation_policies=[
+                _unrelated_policy("representative", ["unrelated:X"]),
+            ],
+        ),
+        _test_node(assertions=["unrelated:X"]),
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert result.block_deploy is False
+    warnings = _warnings_of_type(result, "cardinality_policy_unspecified")
+    assert len(warnings) >= 1
+    assert any(
+        w.get("parent") == "order" and w.get("child") == "line_item" for w in warnings
+    )
+
+
+# regression: a MATCHED field (member_signals carry the child prefix) with
+# policy=all + a missing member is still red — relation-identity binding must not
+# weaken the legitimate red path.
+def test_matched_policy_all_missing_is_still_red():
+    dag = _dag(
+        _design_doc(
+            data_dependencies=[ONE_TO_MANY_DEP],
+            aggregation_policies=[
+                _aggregation_policy("all", ["line_item:A_visible", "line_item:B_visible"]),
+            ],
+        ),
+        _test_node(assertions=["line_item:A_visible"]),
+    )
+    result = _run(dag)
+    assert result.status == "fail"
+    assert result.severity == "red"
+    assert result.passed is False
+    assert result.block_deploy is True
+    violations = _warnings_of_type(result, "cardinality_members_not_all_asserted")
+    assert len(violations) == 1
+    assert violations[0]["field_id"] == "line_items"
+    assert violations[0]["missing_signals"] == ["line_item:B_visible"]
+
+
+# Binding-evidence boundary: a PLURAL field_id ("line_items") with NO
+# member_signals carries no exact-norm identity match to the singular child
+# ("line_item"), so it stays UNBOUND. It must produce neither unverifiable_all
+# nor red; the relation instead surfaces its own amber-by-omission. (Strict
+# exact-norm matching — never substring/pluralization — keeps a loose bind from
+# re-introducing a false-red.)
+def test_plural_field_id_empty_members_stays_unbound():
+    dag = _dag(
+        _design_doc(
+            data_dependencies=[ONE_TO_MANY_DEP],
+            aggregation_policies=[_aggregation_policy("all", [], field_id="line_items")],
+        ),
+        _test_node(assertions=["order:created"]),
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert result.severity != "red"
+    # Unbound: no per-field unverifiable_all amber, no red violation.
+    assert _warnings_of_type(result, "cardinality_unverifiable_all") == []
+    assert _warnings_of_type(result, "cardinality_members_not_all_asserted") == []
+    # The relation itself is still surfaced as amber-by-omission.
+    unspecified = _warnings_of_type(result, "cardinality_policy_unspecified")
+    assert any(
+        w.get("parent") == "order" and w.get("child") == "line_item" for w in unspecified
+    )

@@ -524,3 +524,71 @@ def test_glob_quirk_unaffected_by_summary_additions(tmp_path):
     summary = _summary_for(result, "docs/design/spec.md")
     assert summary is not None
     assert summary["expected_total"] == 1
+
+
+# --- file-system fallback root-jail (path traversal hardening) ----------------
+
+
+def test_parent_traversal_hint_does_not_match_file_outside_root(tmp_path):
+    """Security: a parent-traversal path_hint must NOT be satisfied by a real
+    file living outside the project root. Before the root-jail, the literal FS
+    fallback resolved ``project_root / '../outside.py'`` and reported a match
+    (false-green); the expected artifact must instead stay missing."""
+
+    root = tmp_path / "project"
+    root.mkdir()
+    # Real file one level above the project root, reachable only via ``..``.
+    _write(tmp_path / "outside.py", "print('out')\n")
+    dag = DAG()
+    dag.add_node(_expected_doc("impl_file", "../outside.py"))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is False
+    assert result.violations[0]["type"] == "missing_implementation"
+    assert result.violations[0]["path_hint"] == "../outside.py"
+
+
+def test_deep_parent_traversal_hint_does_not_match_outside_root(tmp_path):
+    """Security: multi-level ``../../`` traversal is likewise jailed out."""
+
+    outer = tmp_path / "outer"
+    root = outer / "inner" / "project"
+    root.mkdir(parents=True)
+    _write(outer / "secret.py", "print('secret')\n")
+    dag = DAG()
+    dag.add_node(_expected_doc("impl_file", "../../secret.py"))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is False
+    assert result.violations[0]["type"] == "missing_implementation"
+
+
+def test_in_root_literal_hint_still_matches_after_jail(tmp_path):
+    """Regression: a normal in-root literal path_hint that exists on disk must
+    keep matching exactly as before the root-jail was added."""
+
+    root = tmp_path / "project"
+    _write(root / "src" / "extra" / "helper.ts", "export {}\n")
+    dag = DAG()
+    dag.add_node(_expected_doc("impl_file", "src/extra/helper.ts"))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is True
+    assert result.violations == []
+
+
+def test_fs_fallback_match_unit_rejects_parent_traversal(tmp_path):
+    """Unit-level guard on the helper itself: an out-of-root traversal hint is
+    rejected even though the target file exists, while the in-root sibling is
+    still accepted."""
+
+    root = tmp_path / "project"
+    root.mkdir()
+    _write(tmp_path / "outside.py", "print('out')\n")
+    _write(root / "inside.py", "print('in')\n")
+
+    assert implementation_module._fs_fallback_match("../outside.py", root) is False
+    assert implementation_module._fs_fallback_match("inside.py", root) is True

@@ -220,3 +220,23 @@ false-red, ambiguous-alias false-red, amber visibility) are now fixed.
 **All 3-engine-review findings are now internalized** (classes #1–#3 + minors #4–#7).
 Next: the CSUMR validation rounds (3-engine re-review showing harness-Sonnet's
 detection ⊇ harness-Codex/Opus union on the classed issues) → then v3.7.0 release.
+
+## CSUMR validation — Round 1 (2026-06-25): NOT clean → 6 new classes internalized
+The first 3-engine re-review (Codex + Sonnet + Opus) on the post-#1–7 code found **6
+NEW strong-union issues** the harness was missing — the loop working (strong models
+surface the next layer). All fixed red-before-green; full suite **5982**:
+- **resource_flow `_entries` now reads `frontmatter` / `frontmatter.codd`** — it was
+  blind to the canonical generated metadata location and silently skipped real
+  contracts. Highest-leverage fix: the resource_flow checks were effectively dormant
+  on real projects (this is why the zoo's resource_flow kept skipping).
+- **resource_flow no-violation return is amber/warn when warnings exist** (was
+  severity=info → CLI rendered PASS; the check-side complement of class #3).
+- **cardinality binds assertions to detected 1:N relations** (was global → an
+  unrelated policy could false-red the run or suppress a relation's amber).
+- **negative_space distinguishes missing vs malformed declaration** (a malformed
+  forbidden_evidence was a silent skip → now amber).
+- **implementation_coverage jails path_hint under project_root** (`../outside.py`
+  could satisfy an artifact — a path-traversal false-green).
+- **`codd check` shows vacuous passes too** (parity with `dag verify`).
+Plus a low Sonnet-only finding (negative_space double-diagnostic) noted for later.
+**Round 1 = NOT clean (6 found) → saturation streak resets to 0. Rounds 2–3 pending.**
