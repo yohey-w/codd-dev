@@ -240,3 +240,28 @@ surface the next layer). All fixed red-before-green; full suite **5982**:
 - **`codd check` shows vacuous passes too** (parity with `dag verify`).
 Plus a low Sonnet-only finding (negative_space double-diagnostic) noted for later.
 **Round 1 = NOT clean (6 found) → saturation streak resets to 0. Rounds 2–3 pending.**
+
+## CSUMR validation — Round 2 (2026-06-25): NOT clean → 5 more found (fixes HELD)
+Codex round-2 re-review: the 13 prior fixes hold, but **5 new/remaining classed
+issues** surfaced — notably `propagator.py` stale-ack (high: a `docs_classified`
+upstream can change between `--verify` and `--commit`; the ledger records the
+current commit, not the reviewed one → false-green), an `implementation_coverage`
+path-jail edge (the round-1 fix was incomplete — `_normalize_hint` strips a leading
+`/` before the jail), a cli DAG-WARN parity gap, + 2 others.
+**Round 1 found 6, round 2 found 5 → the negative axis is not converging quickly;
+3-clean-round saturation is many rounds away.** This convergence data is the input
+to a GPT-Pro strategic decision (negative axis = harden the checker vs positive axis
+= spec/contract/test completeness). Per owner directive, the strategic call is made
+by GPT on MECE context, not by default — **round-2 fixes are HELD pending it.**
+
+**Sonnet round-2** (complementary — found DIFFERENT issues than Codex, so the
+strong-union > either alone): (a) cardinality `evaluated_field_ids` dedup **drops a
+legit red** when two same-`field_id` policies exist softer-first — a **regression
+from the round-1 relation-binding fix** (medium false-green); (b) resource_flow
+`_entries` **double-counts** top-level keys (read from both `attrs[key]` and
+`attrs.frontmatter[key]`) — a **double-count from the round-1 frontmatter.codd
+merge** (low; inflates counts, verdict unchanged); (c) propagator corrupt-state
+crash (low). **Two are regressions from my own round-1 fixes** — the verification
+catching my fixes' side-effects. Round-2 union (Codex 5 + Sonnet 3, mostly disjoint)
+≈ 7-8 → the negative axis is clearly NOT converging; this is the input to the
+pending GPT-Pro strategic decision (negative vs positive axis).
