@@ -333,6 +333,29 @@ def _config_path(value: object) -> str | None:
     return None
 
 
+def _resolve_cli_project_file(project_root: Path, raw_path: Path | str) -> Path | None:
+    """Jail a CLI ``--design-doc`` / project-file path before it is READ as evidence.
+
+    CLI path arguments are user-path-controllable: an absolute path, a ``../``
+    traversal, or an in-root symlink whose target escapes the tree would otherwise
+    let an out-of-root file be hashed/extracted/read as project design evidence (a
+    path-escape false-green). This is the single shared resolver every cli.py
+    design-doc / project-file *reader* funnels through: it expands ``~`` then defers
+    to :func:`codd.path_safety.resolve_project_path`, returning the in-root resolved
+    path or ``None`` when the path escapes the root (caller rejects — never crashes).
+
+    Note ``Path.expanduser`` is applied first (CLI ergonomics: ``--design-doc
+    ~/x.md``); the expanded form is still confined to the project root, so ``~`` to
+    a home-dir file outside the project is correctly rejected.
+    """
+    from codd.path_safety import resolve_project_path
+
+    if raw_path is None:
+        return None
+    expanded = Path(raw_path).expanduser()
+    return resolve_project_path(project_root, expanded)
+
+
 def _read_optional_context_file(project_root: Path, path_text: str) -> str | None:
     # User-path-controllable (codd.yaml lexicon_path / design_md_path) → must go
     # through the shared root-jail so an absolute or symlink-escaping config value
@@ -1185,20 +1208,25 @@ def _configured_doc_files(project_root: Path, config: dict[str, Any]) -> list[Pa
     scan = config.get("scan", {})
     raw_dirs = scan.get("doc_dirs", ["docs/"]) if isinstance(scan, dict) else ["docs/"]
     dirs = raw_dirs if isinstance(raw_dirs, list) else ["docs/"]
+    # scan.doc_dirs is user-path-controllable (codd.yaml) and its files are read as
+    # doc evidence — jail through the shared root-jail so an absolute / symlink-escaping
+    # doc_dir cannot read out-of-root files as project doc evidence.
+    from codd.path_safety import resolve_project_path
+
     files: list[Path] = []
     for raw_dir in dirs:
         if not isinstance(raw_dir, str) or not raw_dir.strip():
             continue
-        root = Path(raw_dir).expanduser()
-        if not root.is_absolute():
-            root = project_root / root
-        if not root.exists():
+        root = resolve_project_path(project_root, raw_dir)
+        if root is None or not root.exists():
             continue
         if root.is_file():
             if root.suffix in _DOC_SUFFIXES:
                 files.append(root)
             continue
         for path in root.rglob("*"):
+            if resolve_project_path(project_root, path) is None:
+                continue
             if path.is_file() and path.suffix in _DOC_SUFFIXES:
                 files.append(path)
     return files
@@ -5766,13 +5794,13 @@ def extract_design(project_path: str, design_doc: Path, force: bool):
     )
 
     project_root = Path(project_path).resolve()
-    doc_path = design_doc.expanduser()
-    if not doc_path.is_absolute():
-        doc_path = project_root / doc_path
-    doc_path = doc_path.resolve()
+    # CLI --design-doc is user-path-controllable: jail through the shared CLI
+    # resolver BEFORE is_file/read_text/extract/cache so an absolute / ``../`` /
+    # symlink-escaping doc is never hashed or extracted as expected-artifact evidence.
+    doc_path = _resolve_cli_project_file(project_root, design_doc)
 
-    if not doc_path.is_file():
-        click.echo(f"Error: design document not found: {doc_path}")
+    if doc_path is None or not doc_path.is_file():
+        click.echo(f"Error: design document not found: {design_doc}")
         raise SystemExit(1)
 
     try:
@@ -7289,10 +7317,11 @@ def _plan_design_doc_nodes(project_root: Path, design_docs: tuple[str, ...]):
 
     nodes = []
     for design_doc in design_docs:
-        path = Path(design_doc).expanduser()
-        if not path.is_absolute():
-            path = project_root / path
-        if not path.is_file():
+        # CLI --design-doc is user-path-controllable: jail through the shared CLI
+        # resolver so an absolute / ``../`` / symlink-escaping doc is never turned
+        # into a design_doc node whose frontmatter+body is read as design evidence.
+        path = _resolve_cli_project_file(project_root, design_doc)
+        if path is None or not path.is_file():
             raise FileNotFoundError(f"design document not found: {design_doc}")
         rel_path = path.relative_to(project_root).as_posix()
         metadata = extract_design_doc_metadata(path)
@@ -7507,6 +7536,13 @@ def llm_derive(design_doc: Path, project_path: str, ai_cmd: str | None, model: s
     from codd.llm.approval import notify_pending_considerations
 
     project_root = Path(project_path).resolve()
+    # CLI design_doc is user-path-controllable: jail through the shared CLI resolver
+    # before read_text so an absolute / ``../`` / symlink-escaping doc is never read
+    # as the source text for derived considerations (path-escape false-green).
+    doc_path = _resolve_cli_project_file(project_root, design_doc)
+    if doc_path is None or not doc_path.is_file():
+        click.echo(f"Error: design document not found: {design_doc}")
+        raise SystemExit(1)
     config = _load_optional_project_config(project_root)
     provider = LlmConsiderationProvider(
         SubprocessAiCommand(command=ai_cmd, project_root=project_root, config=config),
@@ -7515,7 +7551,7 @@ def llm_derive(design_doc: Path, project_path: str, ai_cmd: str | None, model: s
         model=model,
         use_cache=not force,
     )
-    result = provider.provide(design_doc.read_text(encoding="utf-8"), {"model": model} if model else {})
+    result = provider.provide(doc_path.read_text(encoding="utf-8"), {"model": model} if model else {})
     notify_pending_considerations(result.considerations, config)
     click.echo(f"Derived considerations: {len(result.considerations)}")
 

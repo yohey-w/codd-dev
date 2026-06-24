@@ -496,8 +496,12 @@ def run_commit(
     all_paths = []
     for item in state.get("auto_docs", []) + state.get("hitl_docs", []):
         path = item["path"]
-        full = project_root / path
-        if full.exists():
+        # Defense-in-depth root-jail: ``path`` comes from on-disk verify state
+        # (JSON that a misconfigured/hand-edited project could point out-of-root,
+        # or that carried a wave_config ``output`` value). Don't probe/stage a
+        # path that resolves outside the project tree.
+        full = resolve_project_path(project_root, path)
+        if full is not None and full.exists():
             all_paths.append(path)
 
     commit_reason = _format_commit_reason(effective_reasons, reason)
@@ -1161,8 +1165,14 @@ def _load_graph(project_root: Path, config: dict[str, Any]):
     if codd_dir is None:
         return None
 
-    scan_dir = project_root / graph_path
-    if not scan_dir.exists() or not (scan_dir / "nodes.jsonl").exists():
+    # Root-jail the configured graph dir (a codd.yaml ``graph.path`` value):
+    # an absolute out-of-root path or a ``../`` traversal — or an in-root symlink
+    # whose target escapes the tree — must not be loaded as the CEG, or its
+    # nodes/edges would feed ``_get_doc_confidence`` (out-of-root confidence
+    # evidence: a path-escape false-green). Out-of-root → no graph (same as "no
+    # graph found": amber/HITL, never a green auto-apply on smuggled evidence).
+    scan_dir = resolve_project_path(project_root, graph_path)
+    if scan_dir is None or not scan_dir.exists() or not (scan_dir / "nodes.jsonl").exists():
         return None
 
     return CEG(scan_dir)
@@ -1322,11 +1332,22 @@ def _upstream_fingerprints(
 
     fingerprints: dict[str, dict[str, str]] = {}
     for rel_path in upstream_paths:
-        abs_path = project_root / rel_path
-        try:
-            content_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()
-        except OSError:
+        # Root-jail the upstream path before hashing. ``rel_path`` originates from
+        # recorded verify state / changed-files (user/diff-controllable) and may be
+        # an absolute out-of-root path, a ``../`` traversal, or an in-root symlink
+        # escaping the tree. Reading such a file would hash off-root bytes and let
+        # the TOCTOU guard "verify" against a foreign file (a path-escape that
+        # could mask drift = false-green). Out-of-root → sentinel hash, exactly as
+        # a missing file: the fingerprint compares unequal so the upstream reads as
+        # stale/changed and is never silently acked.
+        abs_path = resolve_project_path(project_root, rel_path)
+        if abs_path is None:
             content_hash = _FINGERPRINT_MISSING
+        else:
+            try:
+                content_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()
+            except OSError:
+                content_hash = _FINGERPRINT_MISSING
         commit = last_commit_for_path(project_root, rel_path) or _FINGERPRINT_MISSING
         fingerprints[rel_path] = {"content_hash": content_hash, "commit": commit}
     return fingerprints
@@ -1660,9 +1681,13 @@ def _find_changed_docs(
     doc_dirs = config.get("scan", {}).get("doc_dirs", [])
 
     for f in changed_files:
-        # Check if the file is under a doc_dir and has frontmatter
-        md_path = project_root / f
-        if not md_path.exists() or not f.endswith(".md"):
+        # Check if the file is under a doc_dir and has frontmatter.
+        # Defense-in-depth root-jail: ``f`` is normally a git-relative changed
+        # path (cannot traverse out), but jail before reading frontmatter so an
+        # in-root tracked path that is a symlink to an out-of-root target is not
+        # consumed as a changed design doc (path-escape false-green).
+        md_path = resolve_project_path(project_root, f)
+        if md_path is None or not md_path.exists() or not f.endswith(".md"):
             continue
 
         # Verify it's under a recognized doc_dir

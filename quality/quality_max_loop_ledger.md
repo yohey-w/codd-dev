@@ -411,3 +411,16 @@ user_journey, stale_evidence, negative_space, impl_coverage, depends_on, ci_heal
 fixed-pattern (deployment_completeness deploy.yaml candidates). full suite 6135.
 Round 8 next; the user-path FS surface (config + builder + node.path + doctor + cli) is
 now comprehensively jailed, so convergence expected.
+
+## Round 8 (2026-06-25, scoped): NOT clean → 5 fixed (propagator + cli deep surface)
+Finding count is dropping (6→7→6→5; Sonnet found just 1). Remaining stragglers were in
+the propagator and cli layers' deeper readers:
+- propagator/propagation_common: graph.path (CEG load), scan.doc_dirs (iter_design_docs
+  used by _find_design_docs_by_modules), _upstream_fingerprints (verify-state paths);
+  the audit proactively added _find_changed_docs + run_commit git-add jails. wave_config
+  jail confirmed intact.
+- cli design-doc readers: _plan_design_doc_nodes, extract_design, llm_derive — now via a
+  shared _resolve_cli_project_file → path_safety; _configured_doc_files (the cli copy of
+  the e2e function) jailed.
+All via path_safety; anti-false-red; escaped → not read / stale / not-evidence. full
+suite 6162. Round 9 next; propagator + cli now comprehensively jailed too.

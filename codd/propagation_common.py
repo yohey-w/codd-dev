@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
 from codd.frontmatter import parse_frontmatter, read_frontmatter
+from codd.path_safety import resolve_project_path
 
 __all__ = [
     "doc_modules",
@@ -107,10 +108,28 @@ def iter_design_docs(
     """
     doc_dirs = config.get("scan", {}).get("doc_dirs", [])
     for doc_dir in doc_dirs:
+        # Root-jail the configured doc_dir (a codd.yaml ``scan.doc_dirs`` value):
+        # an absolute path or ``../`` traversal — or an in-root symlink whose
+        # target escapes the tree — must not be walked, or its ``*.md`` files
+        # would be read for frontmatter and yielded as AffectedDocs (a
+        # path-escape false-green: an out-of-root design doc "satisfies" an
+        # affected artifact). Out-of-root → skip the dir entirely.
+        #
+        # The jail only *gates* the dir; the yielded ``md_file`` is still anchored
+        # to the original (un-resolved) ``project_root / doc_dir`` so callers'
+        # ``md_file.relative_to(project_root)`` keeps working unchanged
+        # (anti-false-red: an in-root doc_dir with a symlinked path component
+        # still produces the same project-relative path it did before).
         full_path = project_root / doc_dir
-        if not full_path.exists():
+        if resolve_project_path(project_root, doc_dir) is None or not full_path.exists():
             continue
         for md_file in full_path.rglob("*.md"):
+            # Per-file jail: rglob follows symlinks, so an in-root doc_dir can
+            # still surface a ``*.md`` symlinked to an out-of-root target. Resolve
+            # each hit and drop any whose real path escapes the root before its
+            # frontmatter is read or it is yielded as an affected doc.
+            if resolve_project_path(project_root, md_file) is None:
+                continue
             codd_data = read_codd_frontmatter(md_file)
             if not codd_data or "node_id" not in codd_data:
                 continue
