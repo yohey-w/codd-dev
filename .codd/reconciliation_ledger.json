@@ -1,0 +1,390 @@
+{
+  "edges": {
+    "docs/design/coverage-obligation-driven-e2e-v0.md -> docs/design/verify-architecture.md": {
+      "acked_at": "2026-06-24T06:19:33.881865+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "eeae327f0c05a3938d297a0a91475add417045b7"
+    },
+    "docs/design/extract-architecture.md -> docs/requirements/extract-verify-requirements.md": {
+      "acked_at": "2026-06-24T06:19:33.887755+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "eeae327f0c05a3938d297a0a91475add417045b7"
+    },
+    "docs/design/verify-architecture.md -> docs/design/extract-architecture.md": {
+      "acked_at": "2026-06-24T06:19:33.894750+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/design/verify-architecture.md -> docs/requirements/extract-verify-requirements.md": {
+      "acked_at": "2026-06-24T06:19:33.900185+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "eeae327f0c05a3938d297a0a91475add417045b7"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/cli.md": {
+      "acked_at": "2026-06-24T06:19:33.906948+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/clustering.md": {
+      "acked_at": "2026-06-24T06:19:33.913135+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/config.md": {
+      "acked_at": "2026-06-24T06:19:33.919658+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/contracts.md": {
+      "acked_at": "2026-06-24T06:19:33.925908+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/env-refs.md": {
+      "acked_at": "2026-06-24T06:19:33.932447+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:33.939775+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/generator.md": {
+      "acked_at": "2026-06-24T06:19:33.946179+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/graph.md": {
+      "acked_at": "2026-06-24T06:19:33.953523+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/hooks.md": {
+      "acked_at": "2026-06-24T06:19:33.960292+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/implementer.md": {
+      "acked_at": "2026-06-24T06:19:33.966615+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/inheritance.md": {
+      "acked_at": "2026-06-24T06:19:33.972896+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/parsing.md": {
+      "acked_at": "2026-06-24T06:19:33.979651+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/planner.md": {
+      "acked_at": "2026-06-24T06:19:33.985858+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/propagate.md": {
+      "acked_at": "2026-06-24T06:19:33.992640+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/risk.md": {
+      "acked_at": "2026-06-24T06:19:33.999292+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/root.md": {
+      "acked_at": "2026-06-24T06:19:34.005501+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/scanner.md": {
+      "acked_at": "2026-06-24T06:19:34.012712+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/schema-refs.md": {
+      "acked_at": "2026-06-24T06:19:34.020051+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/synth.md": {
+      "acked_at": "2026-06-24T06:19:34.027561+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/traceability.md": {
+      "acked_at": "2026-06-24T06:19:34.034050+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/validator.md": {
+      "acked_at": "2026-06-24T06:19:34.042035+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/verifier.md": {
+      "acked_at": "2026-06-24T06:19:34.050929+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/modules/wiring.md": {
+      "acked_at": "2026-06-24T06:19:34.057256+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/architecture-overview.md -> docs/extracted/system-context.md": {
+      "acked_at": "2026-06-24T06:19:34.063657+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/config.md": {
+      "acked_at": "2026-06-24T06:19:34.070262+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.077065+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/generator.md": {
+      "acked_at": "2026-06-24T06:19:34.083766+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/hooks.md": {
+      "acked_at": "2026-06-24T06:19:34.090156+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/implementer.md": {
+      "acked_at": "2026-06-24T06:19:34.096692+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/planner.md": {
+      "acked_at": "2026-06-24T06:19:34.103321+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/propagate.md": {
+      "acked_at": "2026-06-24T06:19:34.109767+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/scanner.md": {
+      "acked_at": "2026-06-24T06:19:34.116338+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/validator.md": {
+      "acked_at": "2026-06-24T06:19:34.123004+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/cli.md -> docs/extracted/modules/verifier.md": {
+      "acked_at": "2026-06-24T06:19:34.130017+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/clustering.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.136631+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/contracts.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.142753+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/env-refs.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.149249+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/clustering.md": {
+      "acked_at": "2026-06-24T06:19:34.155831+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/config.md": {
+      "acked_at": "2026-06-24T06:19:34.162206+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/contracts.md": {
+      "acked_at": "2026-06-24T06:19:34.169024+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/env-refs.md": {
+      "acked_at": "2026-06-24T06:19:34.175523+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/inheritance.md": {
+      "acked_at": "2026-06-24T06:19:34.181721+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/parsing.md": {
+      "acked_at": "2026-06-24T06:19:34.188386+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/risk.md": {
+      "acked_at": "2026-06-24T06:19:34.194821+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/schema-refs.md": {
+      "acked_at": "2026-06-24T06:19:34.201064+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/synth.md": {
+      "acked_at": "2026-06-24T06:19:34.207866+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/traceability.md": {
+      "acked_at": "2026-06-24T06:19:34.214328+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/extractor.md -> docs/extracted/modules/wiring.md": {
+      "acked_at": "2026-06-24T06:19:34.220726+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/generator.md -> docs/extracted/modules/config.md": {
+      "acked_at": "2026-06-24T06:19:34.227452+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/generator.md -> docs/extracted/modules/scanner.md": {
+      "acked_at": "2026-06-24T06:19:34.233935+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/hooks.md -> docs/extracted/modules/config.md": {
+      "acked_at": "2026-06-24T06:19:34.241267+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/hooks.md -> docs/extracted/modules/scanner.md": {
+      "acked_at": "2026-06-24T06:19:34.247786+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/hooks.md -> docs/extracted/modules/validator.md": {
+      "acked_at": "2026-06-24T06:19:34.254633+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/implementer.md -> docs/extracted/modules/generator.md": {
+      "acked_at": "2026-06-24T06:19:34.261298+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/implementer.md -> docs/extracted/modules/scanner.md": {
+      "acked_at": "2026-06-24T06:19:34.268240+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/inheritance.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.274360+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/parsing.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.280895+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/planner.md -> docs/extracted/modules/config.md": {
+      "acked_at": "2026-06-24T06:19:34.287216+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/planner.md -> docs/extracted/modules/generator.md": {
+      "acked_at": "2026-06-24T06:19:34.294650+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/planner.md -> docs/extracted/modules/validator.md": {
+      "acked_at": "2026-06-24T06:19:34.301644+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/propagate.md -> docs/extracted/modules/graph.md": {
+      "acked_at": "2026-06-24T06:19:34.308124+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/propagate.md -> docs/extracted/modules/scanner.md": {
+      "acked_at": "2026-06-24T06:19:34.315253+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/risk.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.321618+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/scanner.md -> docs/extracted/modules/generator.md": {
+      "acked_at": "2026-06-24T06:19:34.327921+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/scanner.md -> docs/extracted/modules/graph.md": {
+      "acked_at": "2026-06-24T06:19:34.335318+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/scanner.md -> docs/extracted/modules/parsing.md": {
+      "acked_at": "2026-06-24T06:19:34.342407+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/schema-refs.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.349123+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/synth.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.356683+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/synth.md -> docs/extracted/modules/inheritance.md": {
+      "acked_at": "2026-06-24T06:19:34.364133+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/traceability.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.371424+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/verifier.md -> docs/extracted/modules/config.md": {
+      "acked_at": "2026-06-24T06:19:34.378098+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/extracted/modules/wiring.md -> docs/extracted/modules/extractor.md": {
+      "acked_at": "2026-06-24T06:19:34.386059+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "44adbcfd6ebe4b8378d291dc714488a601d06a48"
+    },
+    "docs/requirements/require-command-requirements.md -> docs/requirements/extract-verify-requirements.md": {
+      "acked_at": "2026-06-24T06:19:34.391775+00:00",
+      "method": "baseline_ack",
+      "upstream_commit": "eeae327f0c05a3938d297a0a91475add417045b7"
+    }
+  },
+  "version": 1
+}

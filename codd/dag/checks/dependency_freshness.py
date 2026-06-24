@@ -100,7 +100,7 @@ class DependencyFreshnessCheck(DagCheck):
                 message="dependency_freshness disabled via config",
             )
 
-        edges = _doc_to_doc_edges(target_dag)
+        edges = doc_to_doc_edges(target_dag)
         if not edges:
             return DependencyFreshnessResult(
                 status="skip",
@@ -302,8 +302,15 @@ def _cached_history(
     return cache[rel_path]
 
 
-def _doc_to_doc_edges(dag: Any) -> list[tuple[str, str]]:
-    """Return (downstream_path, upstream_path) pairs for doc->doc depends_on edges."""
+def doc_to_doc_edges(dag: Any) -> list[tuple[str, str]]:
+    """Return (downstream_path, upstream_path) pairs for doc->doc depends_on edges.
+
+    Public helper: the single source of truth for "which document depends_on
+    which document" used both by this freshness check and by
+    ``codd propagate --baseline`` (so the baseline-ack set is exactly the set
+    this check would later evaluate). Source->doc edges are deliberately
+    excluded — only ``.md`` document endpoints qualify (see :func:`_is_doc_node`).
+    """
 
     nodes = getattr(dag, "nodes", {}) or {}
     pairs: list[tuple[str, str]] = []
@@ -324,6 +331,11 @@ def _doc_to_doc_edges(dag: Any) -> list[tuple[str, str]]:
             continue
         pairs.append((downstream, upstream))
     return sorted(set(pairs))
+
+
+# Backward-compatible alias: the original private name is kept so any existing
+# import (internal or external) keeps resolving to the same implementation.
+_doc_to_doc_edges = doc_to_doc_edges
 
 
 def _is_doc_node(node: Any, path: str) -> bool:

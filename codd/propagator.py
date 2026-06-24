@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -94,6 +94,26 @@ class CommitResult:
 
     committed_files: list[str]
     knowledge_recorded: int  # number of HITL evidence entries added
+
+
+@dataclass(frozen=True)
+class BaselineAckResult:
+    """Result of ``propagate --baseline``.
+
+    ``edges_seen`` is the count of doc-to-doc ``depends_on`` edges discovered;
+    ``edges_acked`` how many were recorded in the reconciliation ledger;
+    ``skipped`` carries ``{"downstream", "upstream", "reason"}`` dicts for edges
+    that could not be acked (e.g. no upstream git history). ``acked_pairs``
+    lists the ``(downstream, upstream)`` edges that were acked (in dry-run, the
+    edges that *would* be acked). ``dry_run`` reflects whether this was a
+    preview (no ledger writes).
+    """
+
+    edges_seen: int
+    edges_acked: int
+    skipped: list[dict[str, str]]
+    dry_run: bool
+    acked_pairs: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -446,6 +466,143 @@ def run_commit(
     _clear_verify_state(project_root)
 
     return CommitResult(committed_files=committed_files, knowledge_recorded=knowledge_count)
+
+
+def run_baseline_ack(
+    project_root: Path,
+    *,
+    reason: str | None = None,
+    dry_run: bool = False,
+    allow_dirty: bool = False,
+) -> BaselineAckResult:
+    """Acknowledge the *current* doc-to-doc ``depends_on`` edges as a baseline.
+
+    Self-host / onboarding gap: a repo can contain pre-existing doc-to-doc
+    ``depends_on`` edges that were never run through ``propagate --verify`` /
+    ``--commit``, so ``dependency_freshness`` keeps reporting them as
+    ``never_reconciled`` amber with no way to say "these are reviewed as-is".
+    This explicit, opt-in operation records, for every such edge, the upstream
+    document's current commit as the acknowledged reconciliation — exactly the
+    state ``propagate --commit`` would have written, but for the existing graph
+    rather than a diff window.
+
+    Scope & guards (deliberately narrow — never silently mutates state):
+
+    * Only doc-to-doc ``depends_on`` edges (``.md`` -> ``.md``) are acked; the
+      edge set is :func:`doc_to_doc_edges`, the same set the freshness check
+      evaluates. Source->doc edges are never touched.
+    * If any edge-endpoint document is git-dirty (uncommitted working-tree
+      changes), the whole operation refuses — acking a dirty doc would baseline
+      a half-edited state. ``allow_dirty=True`` overrides explicitly.
+    * Edges whose upstream has no git history are reported in ``skipped`` (the
+      ledger cannot record a commit that does not exist) — never acked, never an
+      error: this mirrors ``record_reconciliation`` returning ``False``.
+    * ``dry_run=True`` discovers and reports the target pairs without writing.
+    """
+    from codd.dag.builder import build_dag, load_dag_settings
+    from codd.dag.checks.dependency_freshness import doc_to_doc_edges
+    from codd.reconciliation_ledger import (
+        last_commit_for_path,
+        record_reconciliation,
+    )
+
+    root = Path(project_root).resolve()
+    dag = build_dag(root, load_dag_settings(root))
+    edges = doc_to_doc_edges(dag)
+
+    if not allow_dirty:
+        dirty = _dirty_doc_endpoints(root, edges)
+        if dirty:
+            listed = ", ".join(sorted(dirty))
+            raise ValueError(
+                "baseline target documents have uncommitted changes: "
+                f"{listed}. Commit (or stash) them first, or pass --allow-dirty "
+                "to baseline the working-tree state as-is."
+            )
+
+    skipped: list[dict[str, str]] = []
+    acked_pairs: list[tuple[str, str]] = []
+    for downstream, upstream in edges:
+        # Upstream with no committed history cannot be acked (nothing to record
+        # a commit against). Surface it as skipped rather than failing the run.
+        if last_commit_for_path(root, upstream) is None:
+            skipped.append(
+                {
+                    "downstream": downstream,
+                    "upstream": upstream,
+                    "reason": "no upstream git history",
+                }
+            )
+            continue
+        if dry_run:
+            acked_pairs.append((downstream, upstream))
+            continue
+        if record_reconciliation(
+            root, downstream, upstream, method="baseline_ack", reason=reason
+        ):
+            acked_pairs.append((downstream, upstream))
+        else:
+            # Defensive: a TOCTOU change between the history probe and the write
+            # could still yield False. Treat as skipped, never as an ack.
+            skipped.append(
+                {
+                    "downstream": downstream,
+                    "upstream": upstream,
+                    "reason": "no upstream git history",
+                }
+            )
+
+    return BaselineAckResult(
+        edges_seen=len(edges),
+        edges_acked=len(acked_pairs),
+        skipped=skipped,
+        dry_run=dry_run,
+        acked_pairs=acked_pairs,
+    )
+
+
+def _dirty_doc_endpoints(
+    project_root: Path, edges: list[tuple[str, str]]
+) -> set[str]:
+    """Return edge-endpoint document paths with uncommitted git changes.
+
+    Uses ``git status --porcelain`` scoped to the endpoint paths so the probe is
+    independent of any diff target. A path is dirty when it appears with a
+    non-empty status code (modified, staged, deleted, untracked). Endpoints are
+    project-root-relative; ``--`` pathspecs keep the scope exact.
+    """
+    paths: set[str] = set()
+    for downstream, upstream in edges:
+        paths.add(downstream)
+        paths.add(upstream)
+    if not paths:
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "-c", "core.quotePath=false", "status", "--porcelain", "--", *sorted(paths)],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except FileNotFoundError:
+        return set()
+    if result.returncode != 0:
+        return set()
+    dirty: set[str] = set()
+    tracked = {str(Path(p)) for p in paths}
+    for line in result.stdout.splitlines():
+        # Porcelain v1: "XY <path>" (XY = two status columns, then a space).
+        entry = line[3:].strip() if len(line) > 3 else ""
+        if not entry:
+            continue
+        # Rename entries render as "old -> new"; keep the current (new) path.
+        if " -> " in entry:
+            entry = entry.split(" -> ", 1)[1]
+        normalized = str(Path(entry.strip('"')))
+        if normalized in tracked:
+            dirty.add(normalized)
+    return dirty
 
 
 def _detect_design_md_changes(project_root: Path, base_ref: str) -> list[dict[str, str]]:

@@ -71,11 +71,18 @@ def record_reconciliation(
     upstream_path: str,
     *,
     method: str = "propagate_commit",
+    reason: str | None = None,
 ) -> bool:
     """Acknowledge that ``downstream_path`` was reconciled with ``upstream_path``.
 
     Records the upstream document's current last commit hash. Returns ``True``
     when an entry was written, ``False`` when git history was unavailable.
+
+    ``method`` records *how* the edge was acknowledged (e.g.
+    ``"propagate_commit"``, ``"baseline_ack"``). ``reason``, when provided,
+    stores an operator-supplied note alongside the entry. Both are optional and
+    backward compatible: existing callers and the on-disk shape are unchanged
+    when neither is passed (``reason`` is only added to the entry when given).
     """
 
     upstream_commit = last_commit_for_path(project_root, upstream_path)
@@ -85,11 +92,14 @@ def record_reconciliation(
     ledger = load_ledger(project_root) or {"version": LEDGER_VERSION, "edges": {}}
     ledger.setdefault("version", LEDGER_VERSION)
     edges = ledger.setdefault("edges", {})
-    edges[edge_key(downstream_path, upstream_path)] = {
+    entry: dict[str, Any] = {
         "upstream_commit": upstream_commit,
         "acked_at": datetime.now(timezone.utc).isoformat(),
         "method": method,
     }
+    if reason is not None:
+        entry["reason"] = reason
+    edges[edge_key(downstream_path, upstream_path)] = entry
 
     path = ledger_path(project_root)
     try:

@@ -1257,3 +1257,199 @@ def test_greenfield_build_window_reconciles_real_doc_to_doc_drift(tmp_path):
     assert ledger is not None
     assert edge_key("docs/downstream.md", "docs/upstream.md") in ledger.get("edges", {})
     assert commit.committed_files is not None
+
+
+# ---------------------------------------------------------------------------
+# propagate --baseline: acknowledge pre-existing doc-to-doc depends_on edges
+# (self-host gap — a repo with un-reconciled doc-to-doc edges had no way to
+# baseline-ack them, so dependency_freshness reported never_reconciled forever).
+# ---------------------------------------------------------------------------
+
+
+def _doc_frontmatter(node_id: str, *, depends_on: list[str] | None = None) -> str:
+    meta: dict[str, object] = {
+        "node_id": node_id,
+        "type": "design",
+        "title": node_id,
+        "modules": [],
+    }
+    if depends_on is not None:
+        meta["depends_on"] = depends_on
+    return yaml.safe_dump({"codd": meta}, sort_keys=False)
+
+
+def _write_doc(path: Path, node_id: str, *, depends_on: list[str] | None = None, body: str = "Body.\n") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fm = _doc_frontmatter(node_id, depends_on=depends_on)
+    path.write_text(f"---\n{fm}---\n\n# {node_id}\n\n## 1. Overview\n\n{body}", encoding="utf-8")
+
+
+def _setup_baseline_project(tmp_path: Path) -> Path:
+    """Project with a downstream doc depends_on TWO upstream docs (2 edges)."""
+    project = tmp_path / "baseline_project"
+    project.mkdir()
+    codd_dir = project / "codd"
+    (codd_dir / "scan").mkdir(parents=True)
+    config = {
+        "version": "0.1.0",
+        "project": {"name": "baseline", "language": "python"},
+        "ai_command": "mock-ai --print",
+        "scan": {
+            "source_dirs": ["src"],
+            "test_dirs": ["tests"],
+            "doc_dirs": ["docs/"],
+            "config_files": [],
+            "exclude": [],
+        },
+        "graph": {"store": "jsonl", "path": "codd/scan"},
+        "bands": {"green": {"min_confidence": 0.90, "min_evidence_count": 2}},
+    }
+    (codd_dir / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    _write_doc(project / "docs" / "upstream_a.md", "doc:upstream-a")
+    _write_doc(project / "docs" / "upstream_b.md", "doc:upstream-b")
+    _write_doc(
+        project / "docs" / "downstream.md",
+        "doc:downstream",
+        depends_on=["doc:upstream-a", "doc:upstream-b"],
+    )
+    return project
+
+
+def test_baseline_acks_pre_existing_doc_to_doc_edges(tmp_path):
+    """No ledger + 2 doc-to-doc edges → baseline acks both (edges_acked == 2)."""
+    from codd.propagator import run_baseline_ack
+    from codd.reconciliation_ledger import edge_key, load_ledger
+
+    project = _setup_baseline_project(tmp_path)
+    _init_git_repo(project)
+    _git_commit_all(project, "baseline docs")
+
+    # No ledger yet.
+    assert load_ledger(project) is None
+
+    result = run_baseline_ack(project)
+
+    assert result.edges_seen == 2
+    assert result.edges_acked == 2
+    assert result.skipped == []
+    assert result.dry_run is False
+
+    ledger = load_ledger(project)
+    assert ledger is not None
+    edges = ledger.get("edges", {})
+    assert edge_key("docs/downstream.md", "docs/upstream_a.md") in edges
+    assert edge_key("docs/downstream.md", "docs/upstream_b.md") in edges
+    # method recorded as baseline_ack (not propagate_commit).
+    for entry in edges.values():
+        assert entry["method"] == "baseline_ack"
+
+
+def test_baseline_dry_run_does_not_write_ledger(tmp_path):
+    """--dry-run reports target pairs but writes no ledger entries."""
+    from codd.propagator import run_baseline_ack
+    from codd.reconciliation_ledger import load_ledger
+
+    project = _setup_baseline_project(tmp_path)
+    _init_git_repo(project)
+    _git_commit_all(project, "baseline docs")
+
+    result = run_baseline_ack(project, dry_run=True)
+
+    assert result.edges_seen == 2
+    assert result.edges_acked == 2  # would-ack count
+    assert result.dry_run is True
+    assert len(result.acked_pairs) == 2
+    # Nothing was persisted.
+    assert load_ledger(project) is None
+
+
+def test_baseline_refuses_dirty_doc_unless_allowed(tmp_path):
+    """A dirty edge-endpoint doc → error; --allow-dirty acks anyway."""
+    from codd.propagator import run_baseline_ack
+    from codd.reconciliation_ledger import load_ledger
+
+    project = _setup_baseline_project(tmp_path)
+    _init_git_repo(project)
+    _git_commit_all(project, "baseline docs")
+
+    # Make the downstream doc dirty (uncommitted working-tree change).
+    (project / "docs" / "downstream.md").write_text(
+        "---\n"
+        + _doc_frontmatter("doc:downstream", depends_on=["doc:upstream-a", "doc:upstream-b"])
+        + "---\n\n# doc:downstream\n\n## 1. Overview\n\nEdited but not committed.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="uncommitted changes"):
+        run_baseline_ack(project)
+    # Refusal must not have written anything.
+    assert load_ledger(project) is None
+
+    # --allow-dirty overrides explicitly.
+    result = run_baseline_ack(project, allow_dirty=True)
+    assert result.edges_acked == 2
+    assert load_ledger(project) is not None
+
+
+def test_baseline_skips_upstream_without_git_history(tmp_path):
+    """An upstream doc with no git history is skipped, not acked, not an error."""
+    from codd.propagator import run_baseline_ack
+    from codd.reconciliation_ledger import edge_key, load_ledger
+
+    project = _setup_baseline_project(tmp_path)
+    _init_git_repo(project)
+    # Commit only upstream_a + downstream; upstream_b is added to the index later
+    # so it has NO commit (no history) at baseline time. Use --allow-dirty so the
+    # uncommitted upstream_b does not trip the dirty guard (we are isolating the
+    # "no history" path, not the dirty path).
+    subprocess.run(["git", "add", "docs/upstream_a.md", "docs/downstream.md"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "partial"], cwd=project, check=True)
+
+    result = run_baseline_ack(project, allow_dirty=True)
+
+    assert result.edges_seen == 2
+    assert result.edges_acked == 1  # only the upstream_a edge
+    assert len(result.skipped) == 1
+    assert result.skipped[0]["upstream"] == "docs/upstream_b.md"
+    assert "history" in result.skipped[0]["reason"]
+
+    ledger = load_ledger(project)
+    edges = ledger.get("edges", {})
+    assert edge_key("docs/downstream.md", "docs/upstream_a.md") in edges
+    assert edge_key("docs/downstream.md", "docs/upstream_b.md") not in edges
+
+
+def test_baseline_leaves_existing_verify_commit_ack_path_unchanged(tmp_path):
+    """The existing --verify && --commit ack path is unaffected by --baseline.
+
+    Backward-compat guard: run_commit's reconciliation ack still records its
+    edge with the original ``propagate_commit`` method, independent of the new
+    baseline machinery.
+    """
+    from codd.propagator import _record_reconciliation_acks
+    from codd.reconciliation_ledger import edge_key, load_ledger
+
+    project = _setup_baseline_project(tmp_path)
+    _init_git_repo(project)
+    _git_commit_all(project, "baseline docs")
+
+    # Simulate the verify→commit ack path directly (run_commit calls this).
+    state = {
+        "auto_docs": [
+            {
+                "node_id": "doc:downstream",
+                "path": "docs/downstream.md",
+                "upstream_paths": ["docs/upstream_a.md"],
+            }
+        ],
+        "hitl_docs": [],
+    }
+    count = _record_reconciliation_acks(project, state)
+
+    assert count == 1
+    ledger = load_ledger(project)
+    entry = ledger["edges"][edge_key("docs/downstream.md", "docs/upstream_a.md")]
+    # Unchanged default method — baseline work did not alter this path.
+    assert entry["method"] == "propagate_commit"
+    assert "reason" not in entry  # default record shape unchanged

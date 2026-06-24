@@ -29,6 +29,7 @@ CHECK_MODULES = (
     "codd.dag.checks.artifact_contract_check",
     "codd.dag.checks.resource_flow_coherence",
     "codd.dag.checks.extraction_diagnostics",
+    "codd.dag.checks.cardinality_coverage",
 )
 
 

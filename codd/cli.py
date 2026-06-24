@@ -3900,6 +3900,21 @@ def _run_diff_engine(
 @click.option("--update", is_flag=True, help="Actually update affected design docs via AI")
 @click.option("--verify", is_flag=True, help="Auto-apply green band, list amber/gray for HITL review")
 @click.option("--commit", "do_commit", is_flag=True, help="Commit HITL changes and record knowledge")
+@click.option(
+    "--baseline",
+    is_flag=True,
+    help="Acknowledge current doc-to-doc depends_on edges as a reviewed baseline",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="With --baseline: show edges that would be acked without writing",
+)
+@click.option(
+    "--allow-dirty",
+    is_flag=True,
+    help="With --baseline: acknowledge even when edge-endpoint docs are git-dirty",
+)
 @click.option("--reason", default=None, help="Default reason for all HITL corrections (recorded as knowledge)")
 @click.option("--reason-file", default=None, type=click.Path(exists=True),
               help="JSON file with per-file reasons: {\"path\": \"reason\", ...}")
@@ -3942,6 +3957,7 @@ def _run_diff_engine(
     help="Apply safe reverse propagation replacements (default is dry-run)",
 )
 def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
+              baseline: bool, dry_run: bool, allow_dirty: bool,
               reason: str | None, reason_file: str | None,
               ai_cmd: str | None, feedback: str | None, coherence: bool,
               reverse: bool, source: str, base_ref: str | None, apply_reverse: bool):
@@ -3956,6 +3972,7 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
       --update     update ALL affected docs via AI (no band filtering)
       --verify     auto-apply green band via AI, list amber/gray for HITL
       --commit     after HITL review, commit changes and record knowledge
+      --baseline   ack current doc-to-doc depends_on edges as reviewed baseline
     """
     project_root = Path(path).resolve()
     _require_codd_dir(project_root)
@@ -3983,10 +4000,52 @@ def propagate(diff: str, path: str, update: bool, verify: bool, do_commit: bool,
         raise SystemExit(1)
 
     # Mutual exclusivity check
-    mode_count = sum([update, verify, do_commit])
+    mode_count = sum([update, verify, do_commit, baseline])
     if mode_count > 1:
-        click.echo("Error: --update, --verify, and --commit are mutually exclusive.")
+        click.echo("Error: --update, --verify, --commit, and --baseline are mutually exclusive.")
         raise SystemExit(1)
+
+    if (dry_run or allow_dirty) and not baseline:
+        click.echo("Error: --dry-run and --allow-dirty are only valid with --baseline.")
+        raise SystemExit(1)
+
+    # --baseline mode
+    if baseline:
+        from codd.propagator import run_baseline_ack
+
+        try:
+            result = run_baseline_ack(
+                project_root,
+                reason=reason,
+                dry_run=dry_run,
+                allow_dirty=allow_dirty,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+
+        if result.edges_seen == 0:
+            click.echo("No doc-to-doc depends_on edges found; nothing to baseline.")
+            return
+
+        verb = "Would acknowledge" if result.dry_run else "Acknowledged"
+        click.echo(
+            f"{verb} {result.edges_acked} of {result.edges_seen} "
+            "doc-to-doc depends_on edge(s) as baseline:"
+        )
+        for downstream, upstream in result.acked_pairs:
+            click.echo(f"  {downstream} -> {upstream}")
+
+        if result.skipped:
+            click.echo(f"\nSkipped {len(result.skipped)} edge(s):")
+            for item in result.skipped:
+                click.echo(
+                    f"  {item['downstream']} -> {item['upstream']} ({item['reason']})"
+                )
+
+        if result.dry_run:
+            click.echo("\nDry run — no ledger entries written. Re-run without --dry-run to ack.")
+        return
 
     # --commit mode
     if do_commit:

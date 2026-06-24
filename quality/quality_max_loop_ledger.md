@@ -28,9 +28,9 @@ explicit contracts; otherwise amber diagnostic / item-count visibility.
 | 3 | resource_order_explicit_flow | producer-after-consumer red **only** w/ explicit op order | red(cond) | 80 | ✅ shipped-to-main |
 | 4 | assertion_abuse | weak outcome assertion → amber (red needs owner) | amber | 75 | ✅ shipped-to-main |
 | 5 | identity_alias_drift | explicit alias collision / shadow only | amber | 48 | ✅ shipped-to-main |
-| 6 | reconcile-baseline gap | `propagate --baseline` acks current doc-to-doc edges | n/a | 48 | ⏳ |
+| 6 | reconcile-baseline gap | `propagate --baseline` acks current doc-to-doc edges | n/a | 48 | ✅ shipped-to-main (self-host amber→PASS) |
 | 7 | cross_artifact_partial_coverage | expected_extraction group diagnostic (no quirk touch) | amber | 45 | ✅ shipped-to-main |
-| 8 | cardinality_partial | default representative/unknown; all→red only if declared | amber/red | 27 | ⏳ |
+| 8 | cardinality_partial | default representative/unknown; all→red only if declared | amber/red | 27 | ✅ shipped-to-main |
 | 9 | stale_evidence | fingerprint-based only (never wall-clock) | amber | 27 | ⏳ |
 | 10 | negative_space | explicit forbidden-evidence only (no absence guarantee) | amber/red | 8 | ⏳ |
 | 11 | semantic_conflict | exact scalar-key contradiction only | amber | 6.4 | ⏳ |
@@ -104,3 +104,20 @@ Both verified together: full suite **5896**, corpus gate 52.
   **defers to the existing red** (count-based partial ⊇ red set → amber suppressed
   whenever red fires; zero duplication, proven); historical glob quirk untouched.
 - Both red-before-green; generality preserved. Full suite **5907**.
+
+### #6 reconcile-baseline gap ✅ + #8 cardinality_partial ✅ (2026-06-24)
+- **#6** `propagate --baseline [--dry-run|--allow-dirty|--reason]` (propagator.py
+  `run_baseline_ack` + cli.py + reconciliation_ledger.py optional reason +
+  dependency_freshness.py `doc_to_doc_edges` public). Acks current doc-to-doc edges
+  as the reconciliation baseline; mutex with verify/commit; refuses dirty docs
+  (unless --allow-dirty); doc-to-doc only; no-git-history → skipped; backward-compat
+  preserved. **Dogfood closes the self-host finding**: codd-dev's
+  `dependency_freshness` amber (2 never-reconciled edges) → **PASS** (77 edges
+  checked); `.codd/reconciliation_ledger.json` committed = codd-dev's baseline.
+- **#8** `cardinality_coverage` (new check): 1:N relations. **red only** when
+  policy=all + member_signals declared + a signal unasserted (logically derived);
+  default amber (`cardinality_policy_unspecified` / unverifiable-all). **Member
+  universe is never inferred** (no detector-hit→red); representative / at-least-one
+  pass; skip when no relations. Minimal schema (nested in existing
+  aggregation_policies). 9 tests.
+- Both red-before-green; generality preserved. Full suite **5921**, corpus 55.
