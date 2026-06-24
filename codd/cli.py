@@ -747,7 +747,14 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
             # so a run with silent skips is not indistinguishable from a clean one.
             status = "SKIP"
         elif _dag_result_passed(result):
-            status = "PASS"
+            # An amber check that carries findings (e.g. advisory warnings) is shown
+            # as WARN, not PASS, so the row matches the WARN count and the finding is
+            # not hidden behind a green-looking PASS.
+            status = (
+                "WARN"
+                if severity == "amber" and _dag_result_has_findings(result)
+                else "PASS"
+            )
         else:
             status = "WARN" if severity == "amber" else "FAIL"
         _line(f"  {status}  {_dag_result_name(result)} [{severity}]")
@@ -8512,7 +8519,14 @@ def dag_verify(
                 # PASS, so silent skips are not indistinguishable from a clean run.
                 status = "SKIP"
             elif _dag_result_passed(result):
-                status = "PASS"
+                # An amber check carrying findings (advisory warnings) shows as WARN,
+                # not PASS, so the row matches the WARN count and the finding is not
+                # hidden behind a green-looking PASS.
+                status = (
+                    "WARN"
+                    if severity == "amber" and _dag_result_has_findings(result)
+                    else "PASS"
+                )
             else:
                 status = "WARN" if severity == "amber" else "FAIL"
             click.echo(f"  {status}  {_dag_result_name(result)} [{severity}]")
@@ -8832,6 +8846,8 @@ def _dag_result_message(result: Any) -> str:
 def _dag_result_has_findings(result: Any) -> bool:
     for key in (
         "violations",
+        "warnings",  # amber checks report advisories here — they ARE findings,
+        # so an amber-via-warnings check is counted/shown, not rendered as PASS.
         "missing_impl_files",
         "orphan_edges",
         "dangling_refs",

@@ -185,3 +185,20 @@ held-out) → deterministic check / corpus / structured protocol. Origin: the
 - **Corpus**: red-before-green test (`user_id` → `users.id` + `accounts.id`, a
   producer for one target → no dangling red, amber instead). RED pre-fix → GREEN;
   full suite **5949**.
+
+### Class #3: amber_findings_visibility_gap ✅ (diagnostic-gap)
+- **Strong-union miss**: Codex caught that `_dag_result_has_findings` ignored
+  `warnings`, so amber checks reporting via warnings (extraction_diagnostics,
+  dead_resource, identity_alias, ambiguous_alias, cross_artifact, …) rendered as
+  "PASS [amber]" and the summary undercounted WARN — the amber findings those
+  cycle-1 checks compute were effectively **invisible**.
+- **Fix**: `_dag_result_has_findings` now counts `warnings`; both verify summaries
+  render an amber check carrying findings as WARN (not PASS), matching the count.
+- **Corpus**: red-before-green unit test (`has_findings` counts warnings). full
+  suite **5950**. This retroactively makes several earlier cycle-1 amber checks
+  actually visible (computed but previously hidden) — a high-leverage visibility fix.
+
+**v3.7.0 unblock status**: the 3 Codex blocker/major findings (operation-scope
+false-red, ambiguous-alias false-red, amber visibility) are now fixed. Remaining
+before release: minors (cardinality policy normalization, negative_space
+no-usable-patterns, semantic nested-key, extraction vacuous).

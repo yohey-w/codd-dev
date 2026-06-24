@@ -40,3 +40,20 @@ def test_resolve_source_jails_absolute_path_outside_root(tmp_path):
     assert _resolve_source(root, str(inside)) == inside.resolve()
     # Relative path → joined under root.
     assert _resolve_source(root, "in.txt") == inside.resolve()
+
+
+def test_dag_result_has_findings_counts_warnings():
+    # Finding #3 (visibility): an amber check that reports via `warnings` (not
+    # `violations`) must register as having findings, else it renders as PASS and
+    # the verify summary undercounts it.
+    from dataclasses import dataclass, field as dfield
+
+    from codd.cli import _dag_result_has_findings
+
+    @dataclass
+    class _R:
+        warnings: list = dfield(default_factory=list)
+        violations: list = dfield(default_factory=list)
+
+    assert _dag_result_has_findings(_R(warnings=[{"type": "dead_resource"}])) is True
+    assert _dag_result_has_findings(_R()) is False
