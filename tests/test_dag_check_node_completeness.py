@@ -32,13 +32,51 @@ def test_node_completeness_registered(monkeypatch):
     assert dag_checks.get_registry()["node_completeness"] is module.NodeCompletenessCheck
 
 
-def test_no_expects_edges_pass(tmp_path):
+def test_no_expects_edges_skips(tmp_path):
+    """No ``expects`` edge means nothing was verified — a SKIP, not a clean PASS.
+
+    This is a severity=red gate. Previously it returned a green ``PASS [red]``
+    having checked zero edges (a vacuous false-green). With no input it must now
+    SKIP (verified nothing on purpose), and ``checked_count`` is 0 so the
+    materiality overlay does not even need to flag it.
+    """
+    from codd.dag.materiality import is_vacuous_pass
+
     dag = _dag_with_design()
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is True  # no missing files, deploy still allowed
+    assert result.missing_impl_files == []
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
+    # A skip verified nothing on purpose → not flagged vacuous by the overlay.
+    assert is_vacuous_pass(result) is False
+
+
+def test_expects_existing_node_pass_counts_checked(tmp_path):
+    """A real verification (>=1 expects edge satisfied) is a genuine PASS.
+
+    Behaviour unchanged from before the vacuous-pass fix EXCEPT it now reports
+    ``status='pass'`` and ``checked_count`` so the overlay can tell it apart
+    from a vacuous one.
+    """
+    from codd.dag.materiality import is_vacuous_pass
+
+    _write(tmp_path / "app" / "page.tsx")
+    dag = _dag_with_design()
+    dag.add_node(Node(id="app/page.tsx", kind="impl_file", path="app/page.tsx"))
+    dag.add_edge(Edge(from_id="docs/design/ux_design.md", to_id="app/page.tsx", kind="expects"))
 
     result = _run(dag, tmp_path)
 
     assert result.passed is True
     assert result.missing_impl_files == []
+    assert result.status == "pass"
+    assert result.skipped is False
+    assert result.checked_count == 1
+    assert is_vacuous_pass(result) is False
 
 
 def test_expects_existing_node_pass(tmp_path):
@@ -121,8 +159,30 @@ def test_passed_flag_false_on_missing(tmp_path):
     assert _run(dag, tmp_path).passed is False
 
 
-def test_empty_dag_pass(tmp_path):
+def test_empty_dag_skips(tmp_path):
+    """Empty DAG = zero expects edges = nothing verified → SKIP, not vacuous PASS."""
     result = _run(DAG(), tmp_path)
 
     assert result.passed is True
     assert result.missing_impl_files == []
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
+
+
+def test_expects_missing_node_fail_reports_status_and_count(tmp_path):
+    """A real failure (expects edge unsatisfied) is FAIL, with checked_count>=1.
+
+    Locks in that a check that actually ran an edge is never a skip even when it
+    fails — only no-input skips.
+    """
+    dag = _dag_with_design()
+    dag.add_edge(Edge(from_id="docs/design/ux_design.md", to_id="app/missing/page.tsx", kind="expects"))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is False
+    assert result.missing_impl_files == ["app/missing/page.tsx"]
+    assert result.status == "fail"
+    assert result.skipped is False
+    assert result.checked_count == 1

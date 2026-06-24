@@ -92,7 +92,10 @@ class CardinalityCoverageCheck(DagCheck):
             self.settings = settings
 
         root = self.project_root
-        relations = detect_one_to_many_relations(target_dag, root)
+        # Thread the flattened DAG settings so a configured ``dag.lexicon_file``
+        # (canonical to the builder) is honored; otherwise a custom lexicon path
+        # is silently missed and this check goes dormant (SKIP, checked_count=0).
+        relations = detect_one_to_many_relations(target_dag, root, settings=self.settings)
 
         if not relations:
             # Dormant: no 1:N shape means there is nothing to reason about.

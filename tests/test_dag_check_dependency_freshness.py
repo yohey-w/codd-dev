@@ -240,6 +240,82 @@ def test_disabled_via_config_skips(tmp_path):
     assert result.violations == []
 
 
+def test_edges_present_but_zero_checked_skips_not_vacuous_pass(tmp_path):
+    """Real doc->doc edge(s) exist, but none had a comparable (committed) upstream
+    → ``checked == 0``. Previously this fell through to a green ``status='pass'``
+    with ``edges_checked=0`` (and, with a ledger present, no warning to surface
+    it) — a vacuous false-green the materiality overlay could not catch because
+    the result exposed no ``checked_count``. Now: verified nothing → SKIP, and
+    ``checked_count == 0`` so the overlay treats it correctly.
+    """
+    from codd.dag.materiality import is_vacuous_pass
+
+    repo = _init_repo(tmp_path)
+    # A second committed doc so a ledger can be created (no missing-baseline note).
+    other = "docs/design/other.md"
+    (repo / other).write_text("---\nnode_id: other\n---\n# Other\nz\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add other doc")
+    assert record_reconciliation(repo, DOWNSTREAM, other) is True
+
+    # Upstream of the depends_on edge exists on disk but is NEVER committed, so
+    # last_commit_for_path() is None and the edge is skipped → checked stays 0.
+    uncommitted_upstream = "docs/design/uncommitted.md"
+    (repo / uncommitted_upstream).write_text(
+        "---\nnode_id: uncommitted\n---\n# Uncommitted\nq\n", encoding="utf-8"
+    )
+    dag = DAG()
+    dag.add_node(Node(id=DOWNSTREAM, kind="design_doc", path=DOWNSTREAM, attributes={}))
+    dag.add_node(
+        Node(
+            id=uncommitted_upstream,
+            kind="design_doc",
+            path=uncommitted_upstream,
+            attributes={},
+        )
+    )
+    dag.add_edge(Edge(from_id=DOWNSTREAM, to_id=uncommitted_upstream, kind="depends_on"))
+
+    result = DependencyFreshnessCheck(dag, repo, {}).run()
+
+    assert result.violations == []
+    assert result.edges_checked == 0
+    assert result.checked_count == 0
+    assert result.skipped is True
+    assert result.status == "skip"  # was "pass" (vacuous green)
+    assert result.passed is True  # deploy still allowed; just nothing verified
+    assert is_vacuous_pass(result) is False
+
+
+def test_real_pass_exposes_checked_count(tmp_path):
+    """A genuine PASS (>=1 edge actually compared) exposes ``checked_count`` so the
+    materiality overlay can confirm it is NOT vacuous."""
+    from codd.dag.materiality import is_vacuous_pass
+
+    repo = _init_repo(tmp_path)
+    assert record_reconciliation(repo, DOWNSTREAM, UPSTREAM) is True
+    result = DependencyFreshnessCheck(_doc_dag(), repo, {}).run()
+    assert result.status == "pass"
+    assert result.skipped is False
+    assert result.edges_checked == 1
+    assert result.checked_count == 1
+    assert is_vacuous_pass(result) is False
+
+
+def test_skip_paths_expose_zero_checked_count(tmp_path):
+    """The existing no-input skips also carry ``checked_count == 0`` so the overlay
+    treats them consistently (skip, never vacuous)."""
+    from codd.dag.materiality import is_vacuous_pass
+
+    repo = _init_repo(tmp_path)
+    no_edges = DAG()
+    no_edges.add_node(Node(id="src/a.py", kind="impl_file", path="src/a.py", attributes={}))
+    result = DependencyFreshnessCheck(no_edges, repo, {}).run()
+    assert result.skipped is True
+    assert result.checked_count == 0
+    assert is_vacuous_pass(result) is False
+
+
 def test_no_doc_edges_skips_explicitly(tmp_path):
     repo = _init_repo(tmp_path)
     dag = DAG()

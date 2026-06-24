@@ -75,13 +75,66 @@ def test_passed_always_true():
 
     assert result.unreachable_nodes == ["src/orphan.ts"]
     assert result.passed is True
+    # One non-common node WAS examined (and found unreachable), so this is a real
+    # finding, not a no-input skip.
+    assert result.skipped is False
+    assert result.checked_count == 1
 
 
-def test_empty_dag_pass():
+def test_empty_dag_skips():
+    """Empty DAG = no nodes to check reachability for → SKIP, not vacuous PASS."""
+    from codd.dag.materiality import is_vacuous_pass
+
     result = _run(_dag())
 
     assert result.unreachable_nodes == []
     assert result.passed is True
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
+    assert is_vacuous_pass(result) is False
+
+
+def test_all_common_nodes_skips():
+    """A DAG of only ``common`` nodes exempts every node from reachability.
+
+    Zero nodes are actually examined for reachability, so it must SKIP rather
+    than return a green PASS that verified nothing (vacuous false-green).
+    """
+    from codd.dag.materiality import is_vacuous_pass
+
+    dag = _dag()
+    _node(dag, "src/shared.ts", "common")
+    _node(dag, "src/util.ts", "common")
+
+    result = _run(dag)
+
+    assert result.unreachable_nodes == []
+    assert result.passed is True
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
+    assert result.common_node_count == 2
+    assert is_vacuous_pass(result) is False
+
+
+def test_reachable_pass_counts_checked_nodes():
+    """A real reachability verification reports status='pass' + checked_count>0."""
+    from codd.dag.materiality import is_vacuous_pass
+
+    dag = _dag()
+    _node(dag, "docs/design/system.md")
+    _node(dag, "src/app.ts", "impl_file")
+    _edge(dag, "docs/design/system.md", "src/app.ts")
+
+    result = _run(dag)
+
+    assert result.unreachable_nodes == []
+    assert result.passed is True
+    assert result.status == "pass"
+    assert result.skipped is False
+    assert result.checked_count == 2  # both non-common nodes examined
+    assert is_vacuous_pass(result) is False
 
 
 def test_single_root_traversal():

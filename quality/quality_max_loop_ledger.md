@@ -346,3 +346,17 @@ Then rounds 5-6 should be clean → N-gate passes.
   coverage-axes reads via `_jailed_project_path`), deployment/extractor documents,
   depends_on_consistency propagation_output — all root-jailed (out-of-root not read).
 Round 5 (re-review) next; expect convergence toward 2 consecutive clean rounds.
+
+## Round 5 (2026-06-25): NOT clean → 5 fixed; the 3 classes now definitively closed
+- vacuous (FINAL): node_completeness (red gate), transitive_closure (amber),
+  dependency_freshness (a real no-upstream-history hole) — the last legacy result
+  classes lacking checked_count; now skip / expose. (ci_health fails-at-0 = N/A;
+  opt_out is not a registered check; resource_flow already skips.) Every registered
+  check now exposes checked_count or skips.
+- dormancy (straggler): _one_to_many_detection ignored dag.lexicon_file → threaded the
+  config (root-jailed) + updated ui_coherence / cardinality_coverage callers.
+- visibility (straggler): _emit_verify_summary (the 3rd summary) counted skip/vacuous
+  as PASS → now SKIP/VACUOUS columns (empty project now: 0 PASS / 6 SKIP / 2 VACUOUS,
+  matching the N-gate refinement: vacuous/skip visible, never pure green).
+full suite 6076. Round 6 next; the 3 foundational classes are now comprehensively
+closed across all checks + the 3 summaries + json, so convergence is expected.

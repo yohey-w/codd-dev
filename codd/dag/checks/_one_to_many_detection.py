@@ -34,12 +34,19 @@ MANY_TO_ONE_WITH_RE = re.compile(
 def detect_one_to_many_relations(
     dag: Any | None = None,
     project_root: str | Path | None = None,
+    settings: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Return detected ``parent``/``child`` relation records.
 
     The detector is intentionally schema-light: it reads lexicon descriptions,
     db_table relation metadata, and data_dependencies frontmatter without
     requiring a project-specific ORM or UI stack.
+
+    ``settings`` carries the (flattened) DAG settings so the configured
+    ``lexicon_file`` — which the builder treats as canonical — is honored. The
+    configured lexicon is read before the legacy ``project_lexicon.yaml`` /
+    ``lexicon.yaml`` filenames, using the same root-jail resolution the builder
+    applies: a ``lexicon_file`` resolving outside ``project_root`` is never read.
     """
 
     relations: list[dict[str, str]] = []
@@ -48,7 +55,7 @@ def detect_one_to_many_relations(
         relations.extend(_relations_from_dag_nodes(nodes))
 
     if project_root is not None:
-        relations.extend(_relations_from_project_lexicon(Path(project_root)))
+        relations.extend(_relations_from_project_lexicon(Path(project_root), settings))
 
     return _dedupe_relations(relations)
 
@@ -67,9 +74,18 @@ def _relations_from_dag_nodes(nodes: Iterable[Any]) -> list[dict[str, str]]:
     return relations
 
 
-def _relations_from_project_lexicon(project_root: Path) -> list[dict[str, str]]:
+def _relations_from_project_lexicon(
+    project_root: Path, settings: Mapping[str, Any] | None = None
+) -> list[dict[str, str]]:
     relations: list[dict[str, str]] = []
-    for path in _unique_paths([project_root / "project_lexicon.yaml", project_root / "lexicon.yaml"]):
+    candidates: list[Path] = []
+    # The builder treats the configured ``lexicon_file`` as canonical, so resolve
+    # it first (root-jailed) and read it before the legacy default filenames.
+    configured = _configured_lexicon_path(project_root, settings)
+    if configured is not None:
+        candidates.append(configured)
+    candidates.extend([project_root / "project_lexicon.yaml", project_root / "lexicon.yaml"])
+    for path in _unique_paths(candidates):
         if not path.is_file():
             continue
         try:
@@ -294,6 +310,38 @@ def _same_term(left: str, right: str) -> bool:
 
 def _norm(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _configured_lexicon_path(
+    project_root: Path, settings: Mapping[str, Any] | None
+) -> Path | None:
+    """Resolve ``settings['lexicon_file']`` with builder-equivalent root-jail.
+
+    Mirrors ``codd.dag.builder._jailed_project_path``: an empty value, or a path
+    (relative traversal or absolute) that resolves outside ``project_root``, is
+    rejected (returns ``None``) so a configured lexicon can never leak file
+    contents from outside the project tree.
+    """
+
+    if not isinstance(settings, Mapping):
+        return None
+    raw = settings.get("lexicon_file")
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    resolved = _project_relative_path(project_root, text)
+    try:
+        resolved.relative_to(project_root.resolve())
+    except (ValueError, OSError):
+        return None
+    return resolved
+
+
+def _project_relative_path(project_root: Path, path_text: str) -> Path:
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (project_root / path).resolve()
 
 
 def _unique_paths(paths: list[Path]) -> list[Path]:

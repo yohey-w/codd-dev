@@ -71,6 +71,11 @@ class DependencyFreshnessResult:
     passed: bool = True
     skipped: bool = False
     edges_checked: int = 0
+    # Mirror of ``edges_checked`` under the name the materiality overlay reads.
+    # The overlay flags ``checked_count==0 + pass`` as a vacuous pass; exposing it
+    # here (defaulting to 0, so the existing no-input skip paths are covered too)
+    # lets the overlay reason about this check consistently with the others.
+    checked_count: int = 0
 
 
 @register_dag_check("dependency_freshness")
@@ -172,6 +177,29 @@ class DependencyFreshnessCheck(DagCheck):
                 if joint_violation is not None:
                     violations.append(joint_violation)
 
+        if checked == 0:
+            # Doc->doc edge(s) existed, but none had a comparable (committed)
+            # upstream history to be stale against → this check examined nothing.
+            # Returning a green ``status='pass'`` here (the old fall-through, with a
+            # ledger present it carried no warning either) was a vacuous false-green
+            # the materiality overlay could not catch — the result exposed no
+            # ``checked_count``. A no-material run is a SKIP (deploy still allowed),
+            # not a clean pass. The missing-baseline warning is intentionally not
+            # raised: with zero comparable edges there is nothing to acknowledge.
+            return DependencyFreshnessResult(
+                severity="info",
+                status="skip",
+                skipped=True,
+                message=(
+                    "dependency_freshness SKIP: doc-to-doc depends_on edge(s) found but "
+                    "none had a comparable committed upstream to check freshness against"
+                ),
+                passed=True,
+                block_deploy=False,
+                edges_checked=0,
+                checked_count=0,
+            )
+
         if ledger is None:
             warnings.append(
                 f"reconciliation ledger not found at {ledger_path(root)} — baseline not created: "
@@ -195,6 +223,7 @@ class DependencyFreshnessCheck(DagCheck):
                 warnings=warnings,
                 passed=severity != "red",
                 edges_checked=checked,
+                checked_count=checked,
             )
 
         # No violations. If advisory warnings were collected (currently the
@@ -216,6 +245,7 @@ class DependencyFreshnessCheck(DagCheck):
                 passed=True,
                 block_deploy=False,
                 edges_checked=checked,
+                checked_count=checked,
             )
 
         return DependencyFreshnessResult(
@@ -224,6 +254,7 @@ class DependencyFreshnessCheck(DagCheck):
             message=f"dependency_freshness PASS ({checked} doc-to-doc depends_on edge(s) checked)",
             warnings=warnings,
             edges_checked=checked,
+            checked_count=checked,
         )
 
 

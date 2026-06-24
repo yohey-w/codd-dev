@@ -17,6 +17,14 @@ class TransitiveClosureResult:
     unreachable_nodes: list[str] = field(default_factory=list)
     common_node_count: int = 0
     passed: bool = True
+    # ``status``/``skipped``/``checked_count`` close a vacuous-pass hole: an empty
+    # DAG (or one whose every node is ``common`` and therefore exempt from
+    # reachability) used to return a green PASS having examined zero nodes.
+    # ``checked_count`` is the number of non-common nodes whose reachability was
+    # actually evaluated; when it is 0 the run is a SKIP, not a clean pass.
+    status: str = "pass"
+    skipped: bool = False
+    checked_count: int = 0
 
 
 @register_dag_check("transitive_closure")
@@ -43,7 +51,13 @@ class TransitiveClosureCheck:
     ) -> TransitiveClosureResult:
         dag = dag or self.dag
         if dag is None or not dag.nodes:
-            return TransitiveClosureResult()
+            # No nodes at all → reachability examined nothing → SKIP (not a
+            # vacuous green PASS).
+            return TransitiveClosureResult(
+                status="skip",
+                skipped=True,
+                checked_count=0,
+            )
 
         to_ids = {edge.to_id for edge in dag.edges}
         roots = [
@@ -56,15 +70,34 @@ class TransitiveClosureCheck:
         common_count = sum(
             1 for node in dag.nodes.values() if node.kind == "common"
         )
+        # Common nodes are exempt from unreachable detection, so the number of
+        # nodes whose reachability is actually evaluated is the non-common set.
+        checked = sum(1 for node in dag.nodes.values() if node.kind != "common")
         unreachable = [
             node_id
             for node_id, node in dag.nodes.items()
             if node_id not in visited and node.kind != "common"
         ]
+
+        if checked == 0:
+            # Every node is exempt (all ``common``): reachability examined nothing.
+            # A clean PASS here is a vacuous false-green → SKIP instead.
+            return TransitiveClosureResult(
+                unreachable_nodes=[],
+                common_node_count=common_count,
+                passed=True,
+                status="skip",
+                skipped=True,
+                checked_count=0,
+            )
+
         return TransitiveClosureResult(
             unreachable_nodes=unreachable,
             common_node_count=common_count,
             passed=True,
+            status="pass",
+            skipped=False,
+            checked_count=checked,
         )
 
     def _reachable_from(self, dag, roots: list[str]) -> set[str]:

@@ -7887,21 +7887,55 @@ def _echo_verification_warnings(result: Any) -> None:
 
 
 def _emit_verify_summary(result: _CliVerificationResult) -> None:
+    from codd.dag.materiality import is_vacuous_pass, vacuous_pass_results
+
     check_results = list(result.check_results or [])
     runtime_results = list(result.runtime_results or [])
 
-    # An amber check carrying findings reports passed=True but is surfaced as
-    # WARN (same rule as 'dag verify' and the 'check' summary), so an advisory is
-    # never counted as a clean PASS. A finding-free amber pass stays PASS.
-    dag_pass = sum(
-        1 for item in check_results if _summary_passed(item) and not _dag_pass_is_warn(item)
+    # Same SKIP > WARN > vacuous > PASS precedence the other two verify summaries
+    # ('dag verify' and the embedded 'check' summary) apply, reusing their
+    # helpers so there is one source of truth:
+    #   - a *skipped* check verified nothing on purpose -> SKIP (never PASS), so
+    #     silent skips are not indistinguishable from a clean run;
+    #   - an amber check carrying findings reports passed=True but is surfaced as
+    #     WARN (_dag_pass_is_warn), so an advisory is never a clean PASS;
+    #   - a *vacuous* pass (checked_count==0, the materiality overlay) is shown as
+    #     vacuous, not a clean PASS, so a run riddled with vacuous passes is
+    #     visibly not a full verification;
+    #   - only the remaining genuine passes count as PASS.
+    # Backward compatible: a finding-free, non-skipped, non-vacuous pass stays PASS.
+    dag_skip = sum(1 for item in check_results if _summary_skipped(item))
+    dag_fail = sum(
+        1
+        for item in check_results
+        if not _summary_skipped(item)
+        and not _summary_passed(item)
+        and _summary_severity(item) == "red"
     )
-    dag_fail = sum(1 for item in check_results if not _summary_passed(item) and _summary_severity(item) == "red")
     dag_warn = sum(
         1
         for item in check_results
-        if (not _summary_passed(item) and _summary_severity(item) != "red")
-        or (_summary_passed(item) and _dag_pass_is_warn(item))
+        if not _summary_skipped(item)
+        and (
+            (not _summary_passed(item) and _summary_severity(item) != "red")
+            or (_summary_passed(item) and _dag_pass_is_warn(item))
+        )
+    )
+    dag_vacuous = sum(
+        1
+        for item in check_results
+        if not _summary_skipped(item)
+        and _summary_passed(item)
+        and not _dag_pass_is_warn(item)
+        and is_vacuous_pass(item)
+    )
+    dag_pass = sum(
+        1
+        for item in check_results
+        if not _summary_skipped(item)
+        and _summary_passed(item)
+        and not _dag_pass_is_warn(item)
+        and not is_vacuous_pass(item)
     )
 
     runtime_pass = sum(1 for item in runtime_results if _summary_passed(item) and not _summary_skipped(item))
@@ -7910,7 +7944,21 @@ def _emit_verify_summary(result: _CliVerificationResult) -> None:
     runtime_total = len(runtime_results)
 
     click.echo("[VERIFY SUMMARY]")
-    click.echo(f"  DAG checks: {dag_pass} PASS / {dag_fail} FAIL (red) / {dag_warn} WARN (amber)")
+    click.echo(
+        "  DAG checks: "
+        f"{dag_pass} PASS / {dag_fail} FAIL (red) / {dag_warn} WARN (amber)"
+        f" / {dag_skip} SKIP / {dag_vacuous} VACUOUS"
+    )
+    if dag_skip:
+        click.echo(f"  {dag_skip} check(s) SKIP — verified nothing (dormant / unconfigured)")
+    vacuous = vacuous_pass_results(
+        [item for item in check_results if not _summary_skipped(item)]
+    )
+    if vacuous:
+        click.echo(
+            f"  {len(vacuous)} check(s) PASS but verified nothing (vacuous): "
+            + ", ".join(_dag_result_name(item) for item in vacuous)
+        )
     click.echo(
         "  Verification tests: "
         f"{runtime_pass} PASS / {runtime_fail} FAIL / {runtime_skip} SKIP"

@@ -65,7 +65,9 @@ class UiCoherenceCheck(DagCheck):
 
         root = self.project_root
         config = codd_config if codd_config is not None else self.settings
-        relations = detect_one_to_many_relations(target_dag, root)
+        # Pass the flattened DAG settings (which carry the canonical
+        # ``lexicon_file``), so a configured custom lexicon path is honored.
+        relations = detect_one_to_many_relations(target_dag, root, settings=self.settings)
         if not relations:
             # No one-to-many data shape exists, so there is no master-detail UI
             # obligation to verify. Report skip (not a clean PASS) so a verify

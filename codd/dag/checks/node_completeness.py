@@ -15,6 +15,14 @@ class NodeCompletenessResult:
     severity: str = "red"
     missing_impl_files: list[str] = field(default_factory=list)
     passed: bool = True
+    # ``status``/``skipped``/``checked_count`` close a vacuous-pass hole: with no
+    # ``expects`` edge this gate used to return a green ``PASS [red]`` having
+    # verified nothing. ``checked_count`` is the number of ``expects`` edges
+    # actually examined; when it is 0 the run is a SKIP (verified nothing on
+    # purpose), not a clean pass. The materiality overlay reads ``checked_count``.
+    status: str = "pass"
+    skipped: bool = False
+    checked_count: int = 0
 
 
 @register_dag_check("node_completeness")
@@ -37,10 +45,12 @@ class NodeCompletenessCheck:
 
         missing: list[str] = []
         seen: set[str] = set()
+        checked = 0
 
         for edge in dag.edges:
             if edge.kind != "expects":
                 continue
+            checked += 1
 
             node = dag.nodes.get(edge.to_id)
             if node is None or node.kind != "impl_file":
@@ -56,9 +66,24 @@ class NodeCompletenessCheck:
             if node.path and not (root / node.path).exists():
                 _append_once(missing, seen, edge.to_id)
 
+        if checked == 0:
+            # No ``expects`` edge to verify against → this gate examined nothing.
+            # Returning a clean PASS here was a vacuous false-green; a no-input run
+            # is a SKIP (deploy still allowed, but nothing was verified).
+            return NodeCompletenessResult(
+                missing_impl_files=[],
+                passed=True,
+                status="skip",
+                skipped=True,
+                checked_count=0,
+            )
+
         return NodeCompletenessResult(
             missing_impl_files=missing,
             passed=not missing,
+            status="pass" if not missing else "fail",
+            skipped=False,
+            checked_count=checked,
         )
 
 
