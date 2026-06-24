@@ -128,6 +128,23 @@ def test_policy_all_one_member_missing_is_red():
     assert violation["block_deploy"] is True
 
 
+# Normalization guard — a capitalized policy ("All") must behave like "all"; a
+# case-sensitive compare would let it bypass the red path (a false-green).
+def test_policy_all_is_case_insensitive():
+    dag = _dag(
+        _design_doc(
+            data_dependencies=[ONE_TO_MANY_DEP],
+            aggregation_policies=[
+                _aggregation_policy("All", ["line_item:A_visible", "line_item:B_visible"]),
+            ],
+        ),
+        _test_node(assertions=["line_item:A_visible"]),
+    )
+    result = _run(dag)
+    assert result.severity == "red"
+    assert _warnings_of_type(result, "cardinality_members_not_all_asserted")
+
+
 # Fixture 3 — policy=representative, 1 member asserted ⇒ pass + limitation summary.
 def test_policy_representative_passes_with_summary():
     dag = _dag(

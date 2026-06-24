@@ -199,6 +199,24 @@ held-out) → deterministic check / corpus / structured protocol. Origin: the
   actually visible (computed but previously hidden) — a high-leverage visibility fix.
 
 **v3.7.0 unblock status**: the 3 Codex blocker/major findings (operation-scope
-false-red, ambiguous-alias false-red, amber visibility) are now fixed. Remaining
-before release: minors (cardinality policy normalization, negative_space
-no-usable-patterns, semantic nested-key, extraction vacuous).
+false-red, ambiguous-alias false-red, amber visibility) are now fixed.
+
+### Minor classes #4–#7 ✅ — the smaller Codex findings (all false-green, amber-only)
+- **cardinality policy normalization**: `"All"/"ALL"` bypassed the `policy == "all"`
+  red path; policy is now lower-cased before comparison.
+- **negative_space `no_usable_patterns`**: a `forbidden_evidence` declaration with a
+  valid scope but no compilable pattern was a vacuous PASS; now amber (distinct from
+  `invalid_regex`).
+- **semantic_contract_conflict nested scalars**: conflicts in the nested
+  `aggregation_policies[].cardinality_assertion.policy` were missed (top-level-only);
+  now compared via a known nested scalar-path list (in lockstep with what
+  cardinality_coverage reads).
+- **extraction_diagnostics `no_usable_pattern`**: `capability_patterns` declared but
+  with no usable regex was a vacuous PASS; now amber (distinguished from skip and
+  `invalid_regex` via usable_count/checked_count).
+- All red-before-green, amber-only, generality preserved, existing behavior unchanged.
+  full suite **5961**.
+
+**All 3-engine-review findings are now internalized** (classes #1–#3 + minors #4–#7).
+Next: the CSUMR validation rounds (3-engine re-review showing harness-Sonnet's
+detection ⊇ harness-Codex/Opus union on the classed issues) → then v3.7.0 release.

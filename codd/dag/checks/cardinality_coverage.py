@@ -140,7 +140,9 @@ class CardinalityCoverageCheck(DagCheck):
 
         red_violations: list[dict[str, Any]] = []
         for assertion in assertions:
-            policy = assertion["policy"]
+            # Normalize so "All"/"ALL" behave like "all" — a case-sensitive compare
+            # would let a capitalized policy bypass the red path (a false-green).
+            policy = str(assertion["policy"] or "").strip().lower()
             member_signals = assertion["member_signals"]
             summary = {
                 "field_id": assertion["field_id"],

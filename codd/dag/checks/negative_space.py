@@ -32,6 +32,9 @@ Severity model:
   (a deploy blocker the project itself logically declared). Otherwise hit(s)
   with the default or ``warn`` -> **amber** (visibility, not a blocker).
 * scope declares no usable paths -> amber ``malformed_negative_space``.
+* scope is usable but no usable pattern is declared (``patterns: []`` or every
+  pattern missing/empty regex) -> amber ``no_usable_patterns`` (never a clean
+  pass: a declaration that forbids nothing has verified nothing).
 * scope resolves to 0 files -> amber ``vacuous`` (never a clean pass: a scope
   that matches nothing has verified nothing).
 * no declaration at all -> ``skip`` (checked_count=0, skipped=True): dormant by
@@ -139,9 +142,16 @@ class NegativeSpaceCheck(DagCheck):
             warnings.extend(scope_warnings)
 
             if not compiled:
-                # Nothing scannable: a declaration whose only pattern(s) failed
-                # to compile has verified nothing — already surfaced as amber
-                # invalid_regex above; do not also count its files as checked.
+                # Nothing scannable. Two distinct causes, both vacuous:
+                #   * the declared pattern(s) failed to compile -> already
+                #     surfaced as amber invalid_regex above; do not double-report.
+                #   * NO usable pattern was declared at all (patterns: [] or every
+                #     entry missing/empty regex) -> the declaration claims to
+                #     forbid evidence yet checks nothing; surface a dedicated
+                #     amber so it is never a clean pass (malformed declaration).
+                if not regex_errors:
+                    warnings.append(_no_usable_patterns_diagnostic(decl_id))
+                # Either way nothing was scanned; do not count files as checked.
                 continue
 
             decl_checked = 0
@@ -411,6 +421,20 @@ def _malformed_diagnostic(decl_id: str) -> dict[str, Any]:
         "remediation": (
             f"negative_space declaration '{decl_id}' has no scope.paths; "
             "declare at least one glob under scope.paths or remove the entry."
+        ),
+    }
+
+
+def _no_usable_patterns_diagnostic(decl_id: str) -> dict[str, Any]:
+    return {
+        "type": "no_usable_patterns",
+        "declaration_id": decl_id,
+        "severity": "amber",
+        "remediation": (
+            f"negative_space declaration '{decl_id}' has a scope but no usable "
+            "pattern (patterns is empty, or every pattern is missing a non-empty "
+            "regex), so nothing was scanned. Declare at least one pattern with a "
+            "regex, or remove the entry (this is not a clean pass)."
         ),
     }
 

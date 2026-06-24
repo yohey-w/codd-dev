@@ -137,3 +137,74 @@ def test_mixed_valid_and_invalid_surfaces_all_invalid():
         assert entry["error"]
         assert entry["remediation"]
         assert entry["capability"] in {"bad_dict", "bad_in_matches", "bad_list_shape"}
+
+
+# Fixture 5 — capability_patterns declared but NO usable regex anywhere:
+# vacuous false-green guard. Declaring a capability with no compilable regex
+# means "I claim to verify X" while nothing is actually checked (checked_count
+# would be 0 -> old code returned pass). Must amber, never pass, never red.
+def test_declared_but_no_usable_regex_warns_amber():
+    result = _run(
+        {
+            # regex key missing entirely
+            "no_regex_key": {"value": True},
+            # regex present but empty string -> dropped like the extractor does
+            "empty_regex": {"regex": ""},
+            # regex present but non-string -> dropped like the extractor does
+            "non_string_regex": {"regex": 123},
+            # matches list whose every entry lacks a usable regex
+            "empty_matches": {"matches": [{"value": 1}, {"regex": ""}]},
+        }
+    )
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.skipped is False  # distinct from "no patterns declared" skip
+    assert result.block_deploy is False
+    # No usable regex was compilable.
+    assert result.checked_count == 0
+    # invalid_regex must NOT fire (these regexes never reached re.compile).
+    assert _diagnostics_of_type(result, "invalid_regex") == []
+    no_usable = _diagnostics_of_type(result, "no_usable_pattern")
+    assert len(no_usable) == 1
+    entry = no_usable[0]
+    assert entry["severity"] == "amber"
+    assert entry["remediation"]
+
+
+# Fixture 6 — at least one usable regex among unusable siblings: pass unchanged.
+# A single compilable regex means the check is non-vacuous, so no no_usable_pattern.
+def test_one_usable_regex_among_unusable_passes():
+    result = _run(
+        {
+            "no_regex_key": {"value": True},
+            "empty_regex": {"regex": ""},
+            "has_regex": {"regex": r"do_thing\("},
+        }
+    )
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.skipped is False
+    assert result.block_deploy is False
+    assert result.checked_count == 1
+    assert _diagnostics_of_type(result, "no_usable_pattern") == []
+    assert _diagnostics_of_type(result, "invalid_regex") == []
+
+
+# Fixture 7 — declared with an INVALID regex only (no usable one): the existing
+# invalid_regex amber must still fire; this is NOT downgraded to no_usable_pattern
+# and is NOT escalated to red. (A bad regex was attempted -> already diagnosed.)
+def test_invalid_regex_only_keeps_invalid_regex_amber():
+    result = _run(
+        {
+            "broken_only": {"regex": "["},
+        }
+    )
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert result.checked_count == 1  # the invalid regex WAS a compile attempt
+    invalid = _diagnostics_of_type(result, "invalid_regex")
+    assert len(invalid) == 1
+    assert invalid[0]["regex"] == "["

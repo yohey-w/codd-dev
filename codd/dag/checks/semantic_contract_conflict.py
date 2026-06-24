@@ -69,6 +69,22 @@ _CONFLICT_KEYS: tuple[str, ...] = (
     "cardinality",
 )
 
+# Nested scalar contract paths compared in addition to the top-level keys above.
+# Each is a dotted path *inside* a single section entry that resolves (via plain
+# Mapping descent) to a scalar leaf carrying a declared contract value. These
+# behave exactly like the top-level keys — same (section, identity, path) cell,
+# scalar-only, declared-only, amber-only — but reach one level of nesting so a
+# contradiction buried in a nested block is not silently green.
+#
+# Generality: a path is a generic contract *schema* path, never a project /
+# framework / language literal. ``cardinality_assertion.policy`` is the same leaf
+# ``cardinality_coverage`` reads at ``aggregation_policies[].cardinality_assertion
+# .policy``; keeping the two in lockstep means the conflict surfaced here is the
+# very value that check later consumes.
+_NESTED_CONFLICT_PATHS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "aggregation_policies": (("cardinality_assertion", "policy"),),
+}
+
 
 @dataclass
 class SemanticContractConflictResult:
@@ -136,15 +152,26 @@ class SemanticContractConflictCheck(DagCheck):
                         continue
                     if section == "resource_contracts":
                         identity = alias_map.get(identity, identity)
-                    for key in _CONFLICT_KEYS:
-                        if key not in entry:
+                    # Keys to compare: top-level scalar keys plus any nested
+                    # scalar contract paths configured for this section. A nested
+                    # path is keyed by its dotted form (e.g.
+                    # ``cardinality_assertion.policy``) so it never collides with a
+                    # top-level key of the same leaf name.
+                    nested_paths = _NESTED_CONFLICT_PATHS.get(section, ())
+                    comparisons: list[tuple[str, Any, bool]] = [
+                        (key, entry.get(key), key in entry) for key in _CONFLICT_KEYS
+                    ]
+                    for path in nested_paths:
+                        present, nested_value = self._nested_scalar(entry, path)
+                        comparisons.append((".".join(path), nested_value, present))
+                    for cell_key, value, present in comparisons:
+                        if not present:
                             continue  # declared values only — no default backfill.
-                        value = entry.get(key)
                         if not self._is_scalar(value):
                             continue  # scalar only — list/dict/free-text skipped.
                         checked_count += 1
                         location = f"{section}[{index}]"
-                        cell = (section, identity, key)
+                        cell = (section, identity, cell_key)
                         previous = seen.get(cell)
                         if previous is None:
                             seen[cell] = (value, node_id, location)
@@ -156,7 +183,7 @@ class SemanticContractConflictCheck(DagCheck):
                             _conflict(
                                 section=section,
                                 identity=identity,
-                                key=key,
+                                key=cell_key,
                                 values=[prev_value, value],
                                 owner_node_ids=[prev_owner, node_id],
                                 locations=[prev_location, location],
@@ -263,6 +290,31 @@ class SemanticContractConflictCheck(DagCheck):
             if value:
                 return value
         return None
+
+    @classmethod
+    def _nested_scalar(
+        cls, entry: Mapping[str, Any], path: tuple[str, ...]
+    ) -> tuple[bool, Any]:
+        """Resolve a dotted contract path inside one entry to a declared leaf.
+
+        Descends ``path`` through plain Mappings only. Returns ``(True, value)``
+        only when *every* segment is present and the leaf key is explicitly
+        declared — a missing intermediate or leaf yields ``(False, None)`` so no
+        value is ever manufactured from default backfill. The leaf is returned
+        verbatim (scalar-ness is judged by the caller, identically to top-level
+        keys), so a nested ``list``/``dict``/free-text leaf is skipped, not
+        compared.
+        """
+
+        cursor: Any = entry
+        for segment in path[:-1]:
+            if not isinstance(cursor, Mapping) or segment not in cursor:
+                return False, None
+            cursor = cursor.get(segment)
+        leaf = path[-1]
+        if not isinstance(cursor, Mapping) or leaf not in cursor:
+            return False, None
+        return True, cursor.get(leaf)
 
     @staticmethod
     def _is_scalar(value: Any) -> bool:

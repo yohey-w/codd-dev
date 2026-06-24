@@ -6,6 +6,13 @@ does ``except re.error: continue`` — the bad pattern is *silently* dropped and
 that capability's detector never fires again. The capability then appears to be
 verified while in reality nothing is checked: a false-green source.
 
+A second, subtler false-green: a project may *declare* ``capability_patterns``
+yet provide no usable (compilable, non-empty) ``regex`` for any of them. The
+extractor then compiles nothing, the detectors never fire, and the capabilities
+appear verified while nothing is checked — a vacuous declaration. This check
+surfaces that as an **amber** ``no_usable_pattern`` diagnostic, kept distinct
+from the "declared no patterns at all" ``skip`` case.
+
 This check re-validates the declared patterns itself (it does not touch the
 extractor) and surfaces any regex that fails to compile as an **amber**
 diagnostic. It is advisory only:
@@ -86,6 +93,7 @@ class ExtractionDiagnosticsCheck(DagCheck):
 
         diagnostics: list[dict[str, Any]] = []
         checked_count = 0
+        usable_count = 0  # regexes that actually compiled; 0 => nothing verified
         for capability_kind, pattern_spec in capability_patterns.items():
             kind = str(capability_kind)
             for match_spec in _pattern_match_specs(pattern_spec):
@@ -97,6 +105,19 @@ class ExtractionDiagnosticsCheck(DagCheck):
                     re.compile(regex_text)
                 except re.error as exc:
                     diagnostics.append(_invalid_regex_diagnostic(kind, regex_text, exc))
+                else:
+                    usable_count += 1
+
+        # Vacuous declaration: capability_patterns were declared (not skip), yet
+        # not a single usable regex spec exists across them — the project claims
+        # to verify capabilities while the extractor would compile nothing, so
+        # the detectors never fire. Surface this as amber (advisory, never red),
+        # distinct from the "no patterns declared at all" skip above. When a
+        # regex *was* attempted but failed to compile, the existing
+        # ``invalid_regex`` diagnostic already covers it (non-vacuous), so we
+        # only add ``no_usable_pattern`` when no compile was even attempted.
+        if usable_count == 0 and checked_count == 0:
+            diagnostics.append(_no_usable_pattern_diagnostic(len(capability_patterns)))
 
         if diagnostics:
             return ExtractionDiagnosticsResult(
@@ -151,6 +172,20 @@ def _pattern_match_specs(pattern_spec: Any) -> list[dict[str, Any]]:
     if isinstance(pattern_spec, list):
         return [match for match in pattern_spec if isinstance(match, dict)]
     return []
+
+
+def _no_usable_pattern_diagnostic(declared_count: int) -> dict[str, Any]:
+    return {
+        "type": "no_usable_pattern",
+        "declared_capabilities": declared_count,
+        "severity": "amber",
+        "remediation": (
+            f"coherence.capability_patterns declares {declared_count} "
+            "capability(ies) but none provides a usable (non-empty string) "
+            "'regex' spec, so nothing is actually checked. Add a 'regex' to "
+            "each capability's match spec, or remove the empty declaration."
+        ),
+    }
 
 
 def _invalid_regex_diagnostic(kind: str, regex_text: str, exc: re.error) -> dict[str, Any]:

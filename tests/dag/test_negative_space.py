@@ -171,6 +171,125 @@ def test_scope_resolves_zero_files_is_vacuous_amber(tmp_path: Path):
     assert vacuous[0]["declaration_id"] == "no_secret_in_missing_dir"
 
 
+# --- no_usable_patterns: scope is valid but nothing is scannable -----------
+# A declaration that resolves real files but declares no compilable pattern has
+# verified nothing, yet pre-fix it fell through to a clean PASS (checked_count=0
+# with no diagnostic) — a vacuous false-green. It must surface amber, never pass.
+
+
+def test_scope_valid_but_empty_patterns_is_no_usable_patterns_amber(tmp_path: Path):
+    # scope matches a real file, but patterns: [] (no usable pattern at all).
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text("ok = True\n")
+
+    result = _run(
+        [
+            {
+                "id": "declared_but_no_patterns",
+                "scope": {"paths": ["src/**/*.py"]},
+                "patterns": [],
+                "on_violation": "fail",
+            }
+        ],
+        project_root=tmp_path,
+    )
+
+    # Must NOT be a clean pass: a scope with no usable pattern verified nothing.
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert result.checked_count == 0
+    nup = _warnings_of_type(result, "no_usable_patterns")
+    assert len(nup) == 1
+    assert nup[0]["declaration_id"] == "declared_but_no_patterns"
+    # The vacuous diagnostic is NOT also emitted (the cause is missing patterns,
+    # not an empty scope), and nothing was scanned.
+    assert _warnings_of_type(result, "vacuous") == []
+
+
+def test_scope_valid_but_pattern_regex_missing_is_no_usable_patterns_amber(
+    tmp_path: Path,
+):
+    # scope matches a real file; a pattern entry exists but its regex is absent.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text("ok = True\n")
+
+    result = _run(
+        [
+            {
+                "id": "pattern_without_regex",
+                "scope": {"paths": ["src/**/*.py"]},
+                "patterns": [{"name": "secret"}],  # regex key missing entirely
+                "on_violation": "fail",
+            }
+        ],
+        project_root=tmp_path,
+    )
+
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert result.checked_count == 0
+    nup = _warnings_of_type(result, "no_usable_patterns")
+    assert len(nup) == 1
+    assert nup[0]["declaration_id"] == "pattern_without_regex"
+    assert _warnings_of_type(result, "vacuous") == []
+
+
+def test_normal_pattern_still_passes_unchanged(tmp_path: Path):
+    # Regression guard: a well-formed declaration with a usable pattern and no
+    # hit is still a clean PASS (no no_usable_patterns diagnostic introduced).
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "clean.py").write_text("value = 42\n")
+
+    result = _run(
+        [
+            {
+                "id": "normal_decl",
+                "scope": {"paths": ["src/**/*.py"]},
+                "patterns": [{"name": "secret", "regex": r"SECRET_[A-Z]+"}],
+                "on_violation": "fail",
+            }
+        ],
+        project_root=tmp_path,
+    )
+
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.checked_count == 1
+    assert result.warnings == []
+    assert _warnings_of_type(result, "no_usable_patterns") == []
+
+
+def test_invalid_regex_only_does_not_also_emit_no_usable_patterns(tmp_path: Path):
+    # When the sole pattern is present but fails to compile, the existing
+    # invalid_regex diagnostic already covers it. no_usable_patterns must NOT
+    # double-report the same declaration.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "f.py").write_text("hello\n")
+
+    result = _run(
+        [
+            {
+                "id": "only_bad_regex",
+                "scope": {"paths": ["src/**/*.py"]},
+                "patterns": [{"name": "broken", "regex": "["}],
+                "on_violation": "fail",
+            }
+        ],
+        project_root=tmp_path,
+    )
+
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.block_deploy is False
+    assert len(_warnings_of_type(result, "invalid_regex")) == 1
+    assert _warnings_of_type(result, "no_usable_patterns") == []
+
+
 # --- Guard / edge coverage (beyond the 4 mandated fixtures) ----------------
 
 

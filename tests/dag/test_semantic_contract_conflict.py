@@ -154,3 +154,92 @@ def test_no_target_sections_skips():
     assert result.status == "skip"
     assert result.passed is True
     assert result.warnings == []
+
+
+# Fixture 5 — nested scalar conflict: same field_id, two aggregation_policies
+# entries whose nested ``cardinality_assertion.policy`` disagree (all vs
+# representative). This is the contradiction cardinality_coverage reads at
+# ``aggregation_policies[].cardinality_assertion.policy`` — it must surface as the
+# same amber conflict the top-level scalar path produces (was a false-green:
+# nested scalars were never compared).
+def test_nested_cardinality_assertion_policy_conflict_warns_amber():
+    result = _run(
+        _doc(
+            "design.md",
+            {
+                "aggregation_policies": [
+                    {
+                        "field_id": "items",
+                        "cardinality_assertion": {"policy": "all"},
+                    },
+                    {
+                        "field_id": "items",
+                        "cardinality_assertion": {"policy": "representative"},
+                    },
+                ]
+            },
+        )
+    )
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.block_deploy is False
+
+    conflicts = _conflicts_of_type(result, "scalar_contract_conflict")
+    assert len(conflicts) == 1
+    entry = conflicts[0]
+    assert entry["section"] == "aggregation_policies"
+    assert entry["identity"] == "items"
+    assert entry["key"] == "cardinality_assertion.policy"
+    assert set(entry["values"]) == {"all", "representative"}
+    assert entry["severity"] == "amber"
+    assert entry["remediation"]
+
+
+# Fixture 6 — same nested value is not a conflict (no false positive).
+def test_nested_cardinality_assertion_policy_same_value_passes():
+    result = _run(
+        _doc(
+            "design.md",
+            {
+                "aggregation_policies": [
+                    {
+                        "field_id": "items",
+                        "cardinality_assertion": {"policy": "all"},
+                    },
+                    {
+                        "field_id": "items",
+                        "cardinality_assertion": {"policy": "all"},
+                    },
+                ]
+            },
+        )
+    )
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.warnings == []
+    assert result.checked_count >= 1
+
+
+# Fixture 7 — different field_id with different nested policy: no conflict.
+def test_nested_cardinality_assertion_policy_different_field_passes():
+    result = _run(
+        _doc(
+            "design.md",
+            {
+                "aggregation_policies": [
+                    {
+                        "field_id": "items",
+                        "cardinality_assertion": {"policy": "all"},
+                    },
+                    {
+                        "field_id": "totals",
+                        "cardinality_assertion": {"policy": "representative"},
+                    },
+                ]
+            },
+        )
+    )
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.warnings == []
