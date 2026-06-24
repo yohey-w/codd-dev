@@ -202,7 +202,11 @@ def _iter_source_files(project_root: Path, src_dirs: list[str] | None):
                 file_path = Path(root) / filename
                 if file_path.suffix not in _SOURCE_EXTENSIONS:
                     continue
-                resolved = file_path.resolve()
+                # Re-confine each walked file: an in-root dir can contain a symlink
+                # whose target escapes the root (root-jail alone is insufficient).
+                resolved = resolve_project_path(project_root, file_path)
+                if resolved is None:
+                    continue
                 if resolved in seen:
                     continue
                 seen.add(resolved)

@@ -11,7 +11,7 @@ from typing import Any, Iterable
 from codd.claude_cli import DEFAULT_CLAUDE_EFFORT, DEFAULT_CLAUDE_MODEL
 from codd.e2e_extractor import DodObligation, ScenarioCollection, ScenarioExtractor, UserScenario
 from codd.e2e_generator import load_scenarios_from_markdown
-from codd.path_safety import resolve_project_path
+from codd.path_safety import require_project_path, resolve_project_path
 
 
 SUPPORTED_RUNNER_BACKENDS = (
@@ -512,9 +512,16 @@ def _load_or_extract_operational_scenarios(
     scenarios_path: Path | str | None,
 ) -> ScenarioCollection:
     if scenarios_path is not None:
-        path = Path(scenarios_path)
-        if not path.is_absolute():
-            path = project_root / path
+        # ``--scenarios`` (codd e2e audit / workflow-plan) is an operator-DECLARED
+        # operational E2E audit evidence catalog: it defines the scenario universe
+        # the audit reconciles tests against. If it escapes the project root
+        # (absolute/``../`` path or an in-root symlink leaving the tree), fail
+        # CLOSED — silently routing an out-of-root file to
+        # ``load_scenarios_from_markdown`` would parse a smuggled file as the
+        # declared universe (a path-escape false-green). Raise instead.
+        path = require_project_path(
+            project_root, scenarios_path, context="--scenarios catalog"
+        )
         return load_scenarios_from_markdown(path)
 
     default_path = project_root / "docs" / "e2e" / "operational-scenarios.md"
@@ -952,18 +959,22 @@ def _iter_test_files(project_root: Path, *, test_dirs: Iterable[Path | str] | No
     else:
         dirs = list(test_dirs)
     for item in dirs:
-        # ``scan.test_dirs`` is user-controllable (codd.yaml); jail each entry so an
-        # absolute/``../`` dir or an in-root symlink escaping the tree is dropped
-        # (escape → skip, never read as test evidence). ``None`` ⇒ out-of-root.
-        root = resolve_project_path(project_root, item)
-        if root is None:
-            continue
+        # ``scan.test_dirs`` (and the ``source_dirs`` merged in by
+        # ``_resolve_vb_scan_dirs``) is an operator-DECLARED evidence ROOT
+        # (codd.yaml). If a declared root escapes the project tree
+        # (absolute/``../`` dir or an in-root symlink whose target leaves the
+        # tree), fail CLOSED: a silent skip would leave the evidence scan with
+        # zero markers so a coverage gate "passes" having seen no tests — a
+        # path-escape false-green. Raise instead (scan not valid). The
+        # ``[str(project_root)]`` fallback is in-root and never trips this.
+        root = require_project_path(project_root, item, context="scan.test_dirs entry")
         if root.is_file() and _is_test_file(root):
             yield root
         elif root.is_dir():
             for path in sorted(root.rglob("*")):
-                # Re-confine each match: an in-root dir may contain a symlink whose
-                # target escapes the root.
+                # Per-file skip: the declared ROOT is in-root and valid; only drop
+                # an individual smuggled match (e.g. a symlink inside the tree whose
+                # target escapes), keeping the rest of the in-root test evidence.
                 confined = resolve_project_path(project_root, path)
                 if confined is None:
                     continue

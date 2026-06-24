@@ -175,6 +175,33 @@ def test_screen_transition_src_dirs_symlink_escape_not_walked(tmp_path, monkeypa
     )
 
 
+def test_screen_transition_src_dirs_per_file_symlink_escape_not_read(tmp_path, monkeypatch):
+    # A real in-root src dir containing a symlink FILE whose target escapes the root:
+    # the root is jailed, but each walked file must also be re-confined.
+    project_root = tmp_path / "project"
+    src = project_root / "src"
+    src.mkdir(parents=True)
+    (src / "real.tsx").write_text(_TRANSITION_SRC, encoding="utf-8")
+    outside = _seed_outside_source(tmp_path)
+    (src / "evil.tsx").symlink_to(outside / "leak.tsx")
+
+    read_paths: list[Path] = []
+    real_read_text = Path.read_text
+
+    def _spy(self, *args, **kwargs):
+        read_paths.append(Path(self).resolve())
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _spy)
+    extract_transitions(project_root, src_dirs=["src"])
+    assert all("leak.tsx" not in str(p) for p in read_paths), (
+        "per-file symlink inside an in-root src dir escaped the root and was read"
+    )
+    assert any("real.tsx" in str(p) for p in read_paths), (
+        "in-root source file must still be read (anti-false-red)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # e2e_extractor._configured_doc_files — scan.doc_dirs (per-file symlink gap)
 # ---------------------------------------------------------------------------

@@ -510,3 +510,17 @@ PathEscapeError, never silent-read/silent-empty). full suite 6352. The two engin
 on whether drift is "evidence" (Codex in / Sonnet out); fixing it is correct either way
 (anti-false-green hardening, no false-red). Streak reset (round 10 had a finding);
 round 11 + 12 must both be clean.
+
+## Round 11 (2026-06-25, evidence-scoped): NOT clean → 4 fixed (per-file + fail-closed tails)
+Sonnet 1 + Codex 3, all evidence-scope:
+- screen_transition_extractor._iter_source_files: root jailed but each walked file not
+  re-confined → an in-root dir's symlink FILE escaped (screen-flow drift evidence). Added
+  per-file resolve_project_path (mirrors _iter_test_files).
+- operational_e2e_audit + verifiable_behavior_audit: round-9 jailed config evidence paths
+  but SILENT-SKIPPED escapes → an out-of-root test_coverage.docs / scan.test_dirs left
+  the gate passing "no VB table / no tests" (false-green). Revised to FAIL CLOSED
+  (declared evidence ROOT/DOC escape → PathEscapeError; per-file symlink inside an
+  in-root tree still skips). --scenarios (operational E2E evidence) jailed at the
+  _load_or_extract chokepoint.
+full suite 6360. These closed the per-file-reconfine + audit-fail-closed sub-patterns.
+Streak still 0 (round 11 had findings); round 12 + 13 must both be clean.

@@ -1,24 +1,35 @@
 """Path-escape jail coverage for the four coverage/audit-layer readers.
 
 Each reader here consumes a *user-controllable* path (a ``codd.yaml`` config
-value) and reaches a filesystem read / ``is_file`` / ``rglob`` sink that either
-reads the file as **test evidence** or credits its existence as a **PASS
-witness**. An absolute path, a ``../`` parent traversal, or an in-root symlink
-whose target escapes the project root must NOT be read or credited — otherwise an
-out-of-root file becomes a path-escape false-green.
+value or a ``--scenarios`` CLI argument) and reaches a filesystem read /
+``is_file`` / ``rglob`` sink that either reads the file as **test evidence** or
+credits its existence as a **PASS witness**. An absolute path, a ``../`` parent
+traversal, or an in-root symlink whose target escapes the project root must NOT
+be read or credited — otherwise an out-of-root file becomes a path-escape
+false-green.
 
-Sinks pinned here (round-9 confirmed fixes):
+Fail-closed vs skip — the distinction this file pins (round-11):
+
+* A **declared evidence ROOT / DOC** (the ``scan.test_dirs`` /
+  ``test_coverage.docs`` / ``--scenarios`` entry the operator declared) that
+  escapes the project root makes the audit **NOT VALID**: it raises
+  :class:`codd.path_safety.PathEscapeError` (fail-closed) rather than being
+  silently dropped. A silent skip there is a false-green in another form — the
+  gate "passes" because it never saw the smuggled tree / had zero VB tables.
+* A **per-file symlink encountered while walking a legitimate in-root tree** is
+  still skipped (not raised): the declared root is correct, only one smuggled
+  file inside it is dropped, and the rest of the in-root evidence is honoured.
+
+Sinks pinned here:
 
 * ``operational_e2e_audit._iter_test_files`` — ``scan.test_dirs`` (test evidence)
 * ``verifiable_behavior_audit.discover_vb_documents`` — ``test_coverage.docs``
+* ``operational_e2e_audit._load_or_extract_operational_scenarios`` —
+  ``--scenarios`` operational scenario catalog (operational E2E audit evidence)
 * ``coverage_execution_coherence._test_case_keys_by_vb`` — reuses
   ``_iter_test_files`` (``scan.test_dirs``) to read covering test files
 * ``coverage_auditor._discover_existing_artifacts`` — ``artifact_discovery.paths``
   and ``artifact_paths`` overrides (artifact-existence PASS credit)
-
-Each block pins the three escape fixtures (parent traversal, absolute-outside,
-in-root symlink escape) plus an in-root regression (anti-false-red: a legitimate
-in-root path is still read / credited).
 """
 
 from __future__ import annotations
@@ -28,7 +39,11 @@ from pathlib import Path
 import pytest
 
 from codd.coverage_auditor import CoverageAuditor
-from codd.operational_e2e_audit import _iter_test_files
+from codd.operational_e2e_audit import (
+    _iter_test_files,
+    _load_or_extract_operational_scenarios,
+)
+from codd.path_safety import PathEscapeError
 from codd.verifiable_behavior_audit import discover_vb_documents
 
 
@@ -58,30 +73,56 @@ def _seed_in_root_test(project_root: Path) -> Path:
 
 
 @pytest.mark.parametrize("kind", ["parent", "absolute"])
-def test_iter_test_files_outside_root_not_yielded(tmp_path, kind):
+def test_iter_test_files_declared_root_outside_fails_closed(tmp_path, kind):
+    """A declared ``scan.test_dirs`` ROOT that escapes is fail-closed, not skipped.
+
+    Silent-skip here means the evidence scan finds zero markers and the gate
+    "passes" with no test evidence — a false-green. The declared evidence root
+    escaping the project must raise instead.
+    """
     project_root = tmp_path / "project"
     project_root.mkdir()
     leak = _seed_outside_test(tmp_path)
     raw = "../outside" if kind == "parent" else str(leak.parent)
 
-    yielded = list(_iter_test_files(project_root, test_dirs=[raw]))
-    resolved = {p.resolve() for p in yielded}
-    assert leak.resolve() not in resolved, (
-        f"{kind} out-of-root test_dir yielded an external test file as evidence"
-    )
+    with pytest.raises(PathEscapeError):
+        list(_iter_test_files(project_root, test_dirs=[raw]))
 
 
-def test_iter_test_files_in_root_symlink_escape_not_yielded(tmp_path):
+def test_iter_test_files_declared_root_symlink_escape_fails_closed(tmp_path):
+    """A declared ROOT that is itself a symlink escaping the tree is fail-closed."""
     project_root = tmp_path / "project"
     project_root.mkdir()
     leak = _seed_outside_test(tmp_path)
     link = project_root / "linked_tests"
     link.symlink_to(leak.parent)
 
-    yielded = list(_iter_test_files(project_root, test_dirs=["linked_tests"]))
+    with pytest.raises(PathEscapeError):
+        list(_iter_test_files(project_root, test_dirs=["linked_tests"]))
+
+
+def test_iter_test_files_per_file_symlink_escape_skipped_not_raised(tmp_path):
+    """Per-file symlink escape INSIDE a valid in-root root is skipped, not raised.
+
+    The declared root (``tests``) is in-root and correct; only one smuggled
+    symlink file inside it points outside. That single file is dropped, the
+    in-root sibling is still yielded, and NO PathEscapeError is raised
+    (declared-root fail-closed vs per-file skip distinction).
+    """
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    real = _seed_in_root_test(project_root)  # tests/real.test.ts (in-root)
+    leak = _seed_outside_test(tmp_path)
+    # A symlinked test FILE inside the legitimate in-root tests/ dir.
+    (project_root / "tests" / "smuggled.test.ts").symlink_to(leak)
+
+    yielded = list(_iter_test_files(project_root, test_dirs=["tests"]))
     resolved = {p.resolve() for p in yielded}
     assert leak.resolve() not in resolved, (
-        "in-root symlink escaping the root yielded an external test file"
+        "per-file symlink escaping the root must be skipped (false-green guard)"
+    )
+    assert real.resolve() in resolved, (
+        "in-root sibling test file must still be yielded (anti-false-red)"
     )
 
 
@@ -118,29 +159,55 @@ def _config_docs(raw: str) -> dict:
 
 
 @pytest.mark.parametrize("kind", ["parent", "absolute"])
-def test_discover_vb_documents_outside_root_not_returned(tmp_path, kind):
+def test_discover_vb_documents_declared_doc_outside_fails_closed(tmp_path, kind):
+    """A declared ``test_coverage.docs`` DOC that escapes is fail-closed.
+
+    Silent-skip here drops the only declared VB-table source → ``vb_count=0`` →
+    the gate announces "no VB table found" and PASSES (false-green). The escape
+    must raise instead.
+    """
     project_root = tmp_path / "project"
     project_root.mkdir()
     doc = _seed_outside_vb_doc(tmp_path)
     raw = "../outside/secret_vb.md" if kind == "parent" else str(doc)
 
-    docs = discover_vb_documents(project_root, config=_config_docs(raw))
-    resolved = {p.resolve() for p in docs}
-    assert doc.resolve() not in resolved, (
-        f"{kind} out-of-root test_coverage.docs entry returned an external VB doc"
-    )
+    with pytest.raises(PathEscapeError):
+        discover_vb_documents(project_root, config=_config_docs(raw))
 
 
-def test_discover_vb_documents_in_root_symlink_escape_not_returned(tmp_path):
+def test_discover_vb_documents_declared_doc_symlink_escape_fails_closed(tmp_path):
+    """A declared DOC that is itself a symlink escaping the tree is fail-closed."""
     project_root = tmp_path / "project"
     project_root.mkdir()
     doc = _seed_outside_vb_doc(tmp_path)
     (project_root / "alias.md").symlink_to(doc)
 
-    docs = discover_vb_documents(project_root, config=_config_docs("alias.md"))
+    with pytest.raises(PathEscapeError):
+        discover_vb_documents(project_root, config=_config_docs("alias.md"))
+
+
+def test_discover_vb_documents_per_file_symlink_escape_skipped_not_raised(tmp_path):
+    """Per-file symlink escape inside a declared in-root DIR is skipped, not raised.
+
+    The declared ``test_coverage.docs`` entry is an in-root directory; the walk
+    of its ``*.md`` finds a real in-root doc plus a smuggled symlink pointing
+    outside. The symlink is dropped, the real doc is returned, no raise.
+    """
+    project_root = tmp_path / "project"
+    docs_dir = project_root / "docs" / "test"
+    docs_dir.mkdir(parents=True)
+    real = docs_dir / "vb.md"
+    real.write_text("| VB-OK | ok behaviour | tests/x |\n", encoding="utf-8")
+    leak = _seed_outside_vb_doc(tmp_path)
+    (docs_dir / "smuggled.md").symlink_to(leak)
+
+    docs = discover_vb_documents(project_root, config=_config_docs("docs/test"))
     resolved = {p.resolve() for p in docs}
-    assert doc.resolve() not in resolved, (
-        "in-root symlink escaping the root returned an external VB doc"
+    assert leak.resolve() not in resolved, (
+        "per-file symlink escaping the root must be skipped (false-green guard)"
+    )
+    assert real.resolve() in resolved, (
+        "in-root sibling VB doc must still be returned (anti-false-red)"
     )
 
 
@@ -162,21 +229,90 @@ def test_discover_vb_documents_in_root_still_returned(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# operational_e2e_audit._load_or_extract_operational_scenarios — --scenarios
+# ---------------------------------------------------------------------------
+#
+# The operational scenario catalog supplied via ``codd e2e audit --scenarios``
+# (and ``e2e workflow-plan --scenarios``) is operational E2E audit evidence: it
+# defines the declared scenario universe the audit reconciles tests against. A
+# declared ``--scenarios`` path that escapes the project root must be fail-closed
+# (audit not valid), not silently routed to ``load_scenarios_from_markdown``
+# where an out-of-root file would be parsed as the declared universe.
+
+
+def _seed_outside_scenarios(tmp_path: Path) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir(exist_ok=True)
+    cat = outside / "scenarios.md"
+    cat.write_text("# Operational scenarios\n", encoding="utf-8")
+    return cat
+
+
+@pytest.mark.parametrize("kind", ["parent", "absolute"])
+def test_load_scenarios_declared_path_outside_fails_closed(tmp_path, kind):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    cat = _seed_outside_scenarios(tmp_path)
+    raw = "../outside/scenarios.md" if kind == "parent" else str(cat)
+
+    with pytest.raises(PathEscapeError):
+        _load_or_extract_operational_scenarios(project_root, scenarios_path=raw)
+
+
+def test_load_scenarios_declared_symlink_escape_fails_closed(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    cat = _seed_outside_scenarios(tmp_path)
+    (project_root / "scenarios.md").symlink_to(cat)
+
+    with pytest.raises(PathEscapeError):
+        _load_or_extract_operational_scenarios(
+            project_root, scenarios_path="scenarios.md"
+        )
+
+
+def test_load_scenarios_in_root_path_still_loaded(tmp_path):
+    """Anti-false-red: an in-root --scenarios catalog is still loaded."""
+    project_root = tmp_path / "project"
+    e2e_dir = project_root / "docs" / "e2e"
+    e2e_dir.mkdir(parents=True)
+    cat = e2e_dir / "custom-scenarios.md"
+    cat.write_text("# Operational scenarios\n", encoding="utf-8")
+
+    # Must not raise; returns a (possibly empty) collection, not an error.
+    collection = _load_or_extract_operational_scenarios(
+        project_root, scenarios_path="docs/e2e/custom-scenarios.md"
+    )
+    assert collection is not None
+
+
+def test_load_scenarios_default_path_unaffected(tmp_path):
+    """Anti-false-red: with no --scenarios, the in-root default path is used."""
+    project_root = tmp_path / "project"
+    e2e_dir = project_root / "docs" / "e2e"
+    e2e_dir.mkdir(parents=True)
+    (e2e_dir / "operational-scenarios.md").write_text(
+        "# Operational scenarios\n", encoding="utf-8"
+    )
+
+    collection = _load_or_extract_operational_scenarios(
+        project_root, scenarios_path=None
+    )
+    assert collection is not None
+
+
+# ---------------------------------------------------------------------------
 # coverage_execution_coherence._test_case_keys_by_vb — reuses _iter_test_files
 # ---------------------------------------------------------------------------
 #
 # This module reads covering test files via the SAME _iter_test_files /
-# _resolve_vb_scan_dirs it imports from operational_e2e_audit. Driving the
-# coherence covering-file read with a Path.read_text spy proves the out-of-root
-# test is never read as covering evidence at THIS layer too.
+# _resolve_vb_scan_dirs it imports from operational_e2e_audit. A declared
+# scan.test_dirs root pointing out-of-root must now fail-closed at THIS layer
+# too (the shared _iter_test_files raise propagates), never silently reading an
+# external test as covering evidence.
 
 
-def test_coherence_covering_files_outside_root_never_read(tmp_path, monkeypatch):
-    # coverage_execution_coherence._authentic_cover_case_keys reads covering test
-    # files via _iter_test_files(project_root, test_dirs=_resolve_vb_scan_dirs(...))
-    # (the line-456 read). Replicate that exact call with scan.test_dirs pointed at
-    # an absolute out-of-root dir and a read_text spy: the external test must never
-    # be read as covering evidence.
+def test_coherence_covering_files_declared_root_outside_fails_closed(tmp_path):
     from codd.coverage_execution_coherence import (
         _iter_test_files as coherence_iter_test_files,
         _resolve_vb_scan_dirs as coherence_resolve_scan_dirs,
@@ -187,27 +323,13 @@ def test_coherence_covering_files_outside_root_never_read(tmp_path, monkeypatch)
     leak = _seed_outside_test(tmp_path)
     config = {"scan": {"test_dirs": [str(leak.parent)]}}
 
-    read_paths: list[Path] = []
-    real_read_text = Path.read_text
-
-    def _spy(self, *args, **kwargs):
-        read_paths.append(Path(self).resolve())
-        return real_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", _spy)
-    for path in coherence_iter_test_files(
-        project_root,
-        test_dirs=coherence_resolve_scan_dirs(project_root, config),
-    ):
-        # mirror line 459: the covering-file scan reads each yielded file
-        try:
-            path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-
-    assert leak.resolve() not in read_paths, (
-        "coherence covering-file scan read an out-of-root test file as evidence"
-    )
+    with pytest.raises(PathEscapeError):
+        list(
+            coherence_iter_test_files(
+                project_root,
+                test_dirs=coherence_resolve_scan_dirs(project_root, config),
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

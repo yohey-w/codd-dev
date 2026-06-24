@@ -31,7 +31,7 @@ from codd.operational_e2e_audit import (
     _rel_path,
     _resolve_vb_scan_dirs,
 )
-from codd.path_safety import resolve_project_path
+from codd.path_safety import require_project_path, resolve_project_path
 
 VB_AUDIT_CONTRACT_VERSION = "verifiable-behavior-audit/v1"
 
@@ -730,18 +730,22 @@ def discover_vb_documents(
     resolved: list[Path] = []
     if candidates:
         for item in candidates:
-            # ``test_coverage.docs`` is user-controllable (codd.yaml); jail each entry
-            # so an absolute/``../`` path or an in-root symlink escaping the tree is
-            # dropped (escape → skip, never read/parsed as a VB-table source).
-            path = resolve_project_path(project_root, item)
-            if path is None:
-                continue
+            # ``test_coverage.docs`` is an operator-DECLARED evidence DOC/ROOT
+            # (codd.yaml). If it escapes the project root (absolute/``../`` path or
+            # an in-root symlink whose target leaves the tree), fail CLOSED: a
+            # silent skip would drop the only declared VB-table source, leaving
+            # ``vb_count=0`` so the gate announces "no VB table found" and PASSES
+            # — a path-escape false-green. Raise instead (audit not valid).
+            path = require_project_path(
+                project_root, item, context="test_coverage.docs entry"
+            )
             if path.is_file():
                 resolved.append(path)
             elif path.is_dir():
                 for match in sorted(path.rglob("*.md")):
-                    # Re-confine each match: an in-root dir may hold a symlink whose
-                    # target escapes the root.
+                    # Per-file skip: the declared ROOT is in-root and valid; only
+                    # drop an individual smuggled match (e.g. a symlink inside the
+                    # tree whose target escapes), keeping the rest of the evidence.
                     confined = resolve_project_path(project_root, match)
                     if confined is not None:
                         resolved.append(confined)
