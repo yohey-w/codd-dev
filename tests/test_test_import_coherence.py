@@ -398,7 +398,10 @@ class TestPathEscapeJail:
         )
         assert not any("test_evil" in f.path for f in result.findings), result.summary()
 
-    def test_symlinked_test_dir_escaping_root_is_not_read(self, tmp_path):
+    def test_symlinked_test_dir_escaping_root_fails_closed(self, tmp_path):
+        # An IN-ROOT test_root that is a SYMLINK whose target escapes the tree is
+        # an invalid evidence root → fail-closed (red), not a silent skip that
+        # "passes" by reading nothing off-root.
         _base(tmp_path)
         outside = self._outside_test_tree(tmp_path)
         link = tmp_path / "linked_tests"
@@ -410,7 +413,8 @@ class TestPathEscapeJail:
             source_dirs=["src/"],
             test_dirs=["linked_tests"],
         )
-        assert not any("test_evil" in f.path for f in result.findings), result.summary()
+        assert not result.passed, result.summary()
+        assert any(f.kind == "evidence_root_escape" for f in result.findings), result.summary()
 
     def test_symlinked_test_file_inside_tree_escaping_root_is_dropped(self, tmp_path):
         # An in-root test tree may hold a symlink FILE whose target escapes the

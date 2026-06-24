@@ -52,7 +52,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from codd.import_coherence import import_coherence_opt_out
-from codd.path_safety import resolve_project_path
+from codd.path_safety import PathEscapeError, require_project_path, resolve_project_path
 from codd.project_types import (
     LayoutProfile,
     load_capabilities,
@@ -126,14 +126,17 @@ def _iter_py_files(base: Path, project_root: Path) -> list[Path]:
 
     ``base`` is the ``<test_root>/e2e`` tree; ``test_root`` derives from
     user-controllable ``scan.test_dirs``. The profile layer drops ``../`` /
-    absolute-out-of-root entries, but an IN-ROOT ``test_root`` / ``e2e`` dir (or a
-    file inside the tree) may be a SYMLINK whose target escapes the project —
-    scanning it would read an out-of-root file as e2e content (a path-escape
-    false-green/false-red). Confine ``base`` through the shared jail, then
-    re-confine every ``rglob`` match. ``None`` ⇒ outside root ⇒ skipped.
+    absolute-out-of-root entries, so the surviving ROOT escape is an IN-ROOT
+    ``test_root`` / ``e2e`` dir that is a SYMLINK whose target escapes the
+    project. That is an INVALID evidence root — FAIL-CLOSED
+    (``require_project_path`` raises :class:`PathEscapeError`) rather than
+    silently returning ``[]`` (a silent empty scan would let the gate pass over a
+    smuggled off-root tree: a false-green in another form). The caller turns the
+    error into an honest RED. A non-existent in-root root is benign (empty list).
+    Each ``rglob`` match is re-confined and an escaping symlink FILE inside a
+    valid in-root tree is DROPPED (skip) — that finer case stays anti-false-red.
     """
-    if resolve_project_path(project_root, base) is None:
-        return []
+    require_project_path(project_root, base, context="e2e test root")
     if not base.is_dir():
         return []
     out: list[Path] = []
@@ -363,46 +366,67 @@ def check_e2e_contract_coherence(
     e2e_dir = root / profile.test_root / "e2e"
     # Path-escape jail: ``test_root`` derives from user-controllable
     # ``scan.test_dirs``; an in-root ``test_root`` / ``e2e`` dir may be a symlink
-    # whose target escapes the tree. Confine before the FS probe (``is_dir``) so an
-    # out-of-root e2e tree is treated as "no e2e tree", never scanned.
-    if resolve_project_path(root, e2e_dir) is None or not e2e_dir.is_dir():
-        return E2EContractResult(
-            passed=True,
-            profile=profile,
-            detail=f"e2e-contract coherence: no e2e tree '{_norm(profile.test_root)}/e2e' (skipped)",
-        )
-
-    findings: list[E2EContractFinding] = []
-    scanned = 0
-    for path in _iter_py_files(e2e_dir, root):
-        tree = _parse(path)
-        if tree is None:
-            continue
-        scanned += 1
-        rel_proj = _rel(path, root)
-        for import_root, lineno, scoped in _e2e_runtime_imports(tree, source_roots):
-            where = "function-scoped" if scoped else "module-level"
-            findings.append(
-                E2EContractFinding(
-                    kind="e2e_runtime_import",
-                    path=rel_proj,
-                    message=(
-                        f"e2e file imports the runtime/source package '{import_root}' "
-                        f"({where}, line {lineno}), violating the e2e-subprocess "
-                        f"(no-runtime-import) contract. An e2e test or shared e2e "
-                        f"helper must invoke the built/installed entrypoint as a "
-                        f"SUBPROCESS; an in-process helper that imports the runtime "
-                        f"belongs in the UNIT test tree, not under the e2e helper "
-                        f"package."
-                    ),
-                    details={
-                        "import_root": import_root,
-                        "lineno": lineno,
-                        "scoped": scoped,
-                        "package_name": profile.package_name,
-                    },
-                )
+    # whose target escapes the tree. An e2e ROOT that escapes is INVALID evidence
+    # — FAIL-CLOSED (raise → caught below → honest RED), NOT treated as "no e2e
+    # tree" (a silent skip would pass over a smuggled off-root tree). A
+    # non-existent in-root e2e tree is benign → passing no-op.
+    try:
+        require_project_path(root, e2e_dir, context="e2e test root")
+        if not e2e_dir.is_dir():
+            return E2EContractResult(
+                passed=True,
+                profile=profile,
+                detail=f"e2e-contract coherence: no e2e tree '{_norm(profile.test_root)}/e2e' (skipped)",
             )
+
+        findings: list[E2EContractFinding] = []
+        scanned = 0
+        for path in _iter_py_files(e2e_dir, root):
+            tree = _parse(path)
+            if tree is None:
+                continue
+            scanned += 1
+            rel_proj = _rel(path, root)
+            for import_root, lineno, scoped in _e2e_runtime_imports(tree, source_roots):
+                where = "function-scoped" if scoped else "module-level"
+                findings.append(
+                    E2EContractFinding(
+                        kind="e2e_runtime_import",
+                        path=rel_proj,
+                        message=(
+                            f"e2e file imports the runtime/source package '{import_root}' "
+                            f"({where}, line {lineno}), violating the e2e-subprocess "
+                            f"(no-runtime-import) contract. An e2e test or shared e2e "
+                            f"helper must invoke the built/installed entrypoint as a "
+                            f"SUBPROCESS; an in-process helper that imports the runtime "
+                            f"belongs in the UNIT test tree, not under the e2e helper "
+                            f"package."
+                        ),
+                        details={
+                            "import_root": import_root,
+                            "lineno": lineno,
+                            "scoped": scoped,
+                            "package_name": profile.package_name,
+                        },
+                    )
+                )
+    except PathEscapeError as exc:
+        return E2EContractResult(
+            passed=False,
+            findings=[
+                E2EContractFinding(
+                    kind="evidence_root_escape",
+                    path=str(getattr(exc, "path", "") or ""),
+                    message=(
+                        f"the e2e evidence root escapes the project tree: {exc}. "
+                        f"The e2e-contract gate cannot validate a smuggled "
+                        f"out-of-root e2e tree — fix the escaping test root."
+                    ),
+                )
+            ],
+            profile=profile,
+            detail="e2e-contract coherence: evidence root escapes project root",
+        )
 
     passed = not findings
     detail = (

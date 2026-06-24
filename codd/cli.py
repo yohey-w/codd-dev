@@ -3797,7 +3797,7 @@ def diff_cmd(
 
     project_root = Path(project_path).resolve()
     extract_path = _resolve_diff_extract_input(project_root, extract_input)
-    req_path = _project_file(project_root, requirements_path, "docs/requirements/requirements.md")
+    req_path = _resolve_diff_requirements_path(project_root, requirements_path)
     output_path = _project_file(project_root, output, "drift_findings.md") if output is not None or output_format == "md" else None
 
     try:
@@ -3889,6 +3889,14 @@ def _project_file(project_root: Path, value: Path | None, default: str) -> Path:
     return project_root / path
 
 
+def _resolve_diff_requirements_path(project_root: Path, value: Path | None) -> Path:
+    raw_path = Path("docs/requirements/requirements.md") if value is None else value.expanduser()
+    path = _resolve_cli_project_file(project_root, raw_path)
+    if path is None:
+        raise ValueError(f"requirements resolves outside the project root: {raw_path}")
+    return path
+
+
 def _resolve_diff_extract_input(project_root: Path, value: Path | None) -> Path:
     """Locate the extract-input file, preferring isolated `.codd/extract/` output.
 
@@ -3900,8 +3908,12 @@ def _resolve_diff_extract_input(project_root: Path, value: Path | None) -> Path:
     5. Legacy fallback ``codd/extracted.md`` (preserved for older projects).
     """
     if value is not None:
-        candidate = value.expanduser()
-        return candidate if candidate.is_absolute() else project_root / candidate
+        candidate = _resolve_cli_project_file(project_root, value)
+        if candidate is None:
+            raise ValueError(f"extract-input resolves outside the project root: {value}")
+        if not candidate.is_file():
+            raise FileNotFoundError(f"extract-input not found: {value}")
+        return candidate
 
     candidates: list[Path] = [
         project_root / ".codd" / "extract" / "extracted.md",
@@ -3914,9 +3926,17 @@ def _resolve_diff_extract_input(project_root: Path, value: Path | None) -> Path:
             candidates.append(module_files[0])
     candidates.append(project_root / "codd" / "extracted.md")
 
+    escaped_candidate: Path | None = None
     for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        if not candidate.is_file():
+            continue
+        resolved = _resolve_cli_project_file(project_root, candidate)
+        if resolved is None:
+            escaped_candidate = candidate
+            continue
+        return resolved
+    if escaped_candidate is not None:
+        raise ValueError(f"extract-input resolves outside the project root: {escaped_candidate}")
     return candidates[0]
 
 
@@ -6162,8 +6182,14 @@ def coverage_check_cmd(
 
     project_root = Path(project_path).resolve()
     try:
+        threshold_path = threshold_file or _default_threshold_path(project_root)
+        if threshold_path is not None:
+            threshold_path = _resolve_cli_project_file(project_root, threshold_path)
+            if threshold_path is None:
+                raw = threshold_file or _default_threshold_path(project_root)
+                raise ValueError(f"threshold-file resolves outside the project root: {raw}")
         report = CoverageReporter(project_root).build(lexicons, with_ai=with_ai, ai_command=ai_cmd)
-        config = load_thresholds(threshold_file or _default_threshold_path(project_root))
+        config = load_thresholds(threshold_path)
         if global_threshold is not None:
             config = ThresholdConfig(default_pct=global_threshold)
         violations = evaluate(report, config)

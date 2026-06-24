@@ -32,10 +32,31 @@ from pathlib import Path
 from typing import Union
 
 __all__ = [
+    "PathEscapeError",
     "resolve_project_path",
+    "require_project_path",
     "iter_project_glob",
     "project_relative_path",
 ]
+
+
+class PathEscapeError(Exception):
+    """A configured/declared evidence path resolved OUTSIDE the project root.
+
+    Raised by :func:`require_project_path` (the fail-closed twin of
+    :func:`resolve_project_path`). It is the explicit "scan/check not valid"
+    signal for the case where an OPERATOR pointed CoDD at an evidence ROOT
+    (``scan.doc_dirs`` / ``scan.source_dirs`` / a layout-profile root) that
+    escapes the project tree — a silent skip there is a false-green in another
+    form (the gate "passes" because it could not see the smuggled tree). It does
+    NOT subclass ``ValueError``/``OSError`` on purpose: those are caught broadly
+    across CoDD (including inside this module), and an escape must propagate as a
+    distinct, honest failure rather than be swallowed back into a silent skip.
+    """
+
+    def __init__(self, message: str, *, path: str | None = None) -> None:
+        self.path = path
+        super().__init__(message)
 
 
 def resolve_project_path(project_root: Union[str, Path], raw_path: Union[str, Path]) -> Path | None:
@@ -61,6 +82,32 @@ def resolve_project_path(project_root: Union[str, Path], raw_path: Union[str, Pa
         resolved.relative_to(root)
     except (ValueError, OSError):
         return None
+    return resolved
+
+
+def require_project_path(
+    project_root: Union[str, Path],
+    raw_path: Union[str, Path],
+    *,
+    context: str = "path",
+) -> Path:
+    """Resolve ``raw_path`` inside ``project_root`` or raise :class:`PathEscapeError`.
+
+    Fail-closed counterpart to :func:`resolve_project_path`: identical resolve +
+    symlink-follow + confine logic, but an out-of-root (or empty) ``raw_path``
+    raises instead of returning ``None``. Use this where a configured evidence
+    ROOT escaping the project must make the operation NOT-VALID (an honest
+    failure), rather than being silently dropped. ``context`` names the offending
+    site in the message (e.g. ``"scan.doc_dirs"``).
+    """
+    resolved = resolve_project_path(project_root, raw_path)
+    if resolved is None:
+        raw_text = "" if raw_path is None else str(raw_path)
+        raise PathEscapeError(
+            f"{context} resolves outside the project root and is not valid "
+            f"evidence: {raw_text!r}",
+            path=raw_text,
+        )
     return resolved
 
 

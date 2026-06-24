@@ -326,6 +326,69 @@ def test_escapes_project_fails(project_with_api_doc: Path):
     assert exc.value.reason == "reference_escapes_project"
 
 
+def test_in_root_symlink_file_escaping_root_fails(tmp_path: Path):
+    """An IN-ROOT relative ref whose file is a SYMLINK escaping the tree must fail.
+
+    The old string-only ``_escapes_project`` jail (no ``..``, no leading ``/``)
+    let an in-root symlink (``docs/leak.md`` → an off-root file) sail through and
+    bind as a real, existing exact path — consuming an OUT-OF-ROOT file as
+    evidence (a path-escape false-green). Unifying on the symlink-resolving
+    ``path_safety`` closure must reject it.
+    """
+    project = tmp_path / "project"
+    (project / "docs").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.md"
+    secret.write_text("# off-root secret\n", encoding="utf-8")
+    link = project / "docs" / "leak.md"
+    try:
+        link.symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    index = build_document_reference_index(project, _config())
+    with pytest.raises(ReferenceResolutionError) as exc:
+        resolve_document_ref(
+            "docs/leak.md",  # in-root path string, but the file escapes via symlink
+            project_root=project,
+            index=index,
+            producer="t1",
+            ref_kind="source_design_doc",
+        )
+    assert exc.value.reason == "reference_escapes_project"
+
+
+def test_absolute_in_root_symlink_escaping_root_fails(tmp_path: Path):
+    """An ABSOLUTE in-root ref that is a symlink escaping the tree must fail too.
+
+    Guards the absolute-path branch's confinement on the SAME unified resolver
+    (resolve + symlink-follow), not just the relative branch.
+    """
+    project = tmp_path / "project"
+    (project / "docs").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.md"
+    secret.write_text("# off-root secret\n", encoding="utf-8")
+    link = project / "docs" / "leak.md"
+    try:
+        link.symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    index = build_document_reference_index(project, _config())
+    with pytest.raises(ReferenceResolutionError) as exc:
+        resolve_document_ref(
+            str(link),  # absolute path to the in-root symlink that escapes
+            project_root=project,
+            index=index,
+            producer="t1",
+            ref_kind="source_design_doc",
+        )
+    assert exc.value.reason == "reference_escapes_project"
+
+
 # ── audit sink ───────────────────────────────────────────────────────
 
 

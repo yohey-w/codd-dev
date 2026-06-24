@@ -56,7 +56,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from codd.import_coherence import import_coherence_opt_out
-from codd.path_safety import resolve_project_path
+from codd.path_safety import PathEscapeError, require_project_path, resolve_project_path
 from codd.project_types import LayoutProfile, resolve_layout_profile
 
 
@@ -125,14 +125,17 @@ def _iter_py_files(base: Path, project_root: Path) -> list[Path]:
 
     ``base`` is ``project_root`` joined with the PROFILE ``test_root`` (derived
     from user-controllable ``scan.test_dirs``). The profile layer drops ``../`` /
-    absolute-out-of-root entries, but an IN-ROOT ``test_root`` (or a file inside
-    the tree) may be a SYMLINK whose target escapes the project — reading it would
-    consume an out-of-root file as a project test (a path-escape false-green/
-    false-red). Confine ``base`` through the shared jail, then re-confine every
-    ``rglob`` match. ``None`` ⇒ outside root ⇒ skipped.
+    absolute-out-of-root entries, so the surviving ROOT escape is an IN-ROOT
+    ``test_root`` that is a SYMLINK whose target escapes the project. That is an
+    INVALID evidence root — FAIL-CLOSED (``require_project_path`` raises
+    :class:`PathEscapeError`) rather than silently returning ``[]`` (a silent
+    empty walk would let the gate pass over a smuggled off-root tree: a
+    false-green in another form). The caller turns the error into an honest RED.
+    A non-existent in-root root is benign (empty list). Each ``rglob`` match is
+    re-confined and an escaping symlink FILE inside a valid in-root tree is
+    DROPPED (skip) — that finer case stays anti-false-red.
     """
-    if resolve_project_path(project_root, base) is None:
-        return []
+    require_project_path(project_root, base, context="test_root")
     if not base.is_dir():
         return []
     out: list[Path] = []
@@ -478,60 +481,81 @@ def check_test_import_coherence(
     test_dir = root / profile.test_root
     # Path-escape jail: ``test_root`` derives from user-controllable
     # ``scan.test_dirs``; an in-root ``test_root`` may be a symlink whose target
-    # escapes the tree. Confine before the FS probe (``is_dir``) so an out-of-root
-    # test root is treated as "no test root", never walked/read.
-    if resolve_project_path(root, test_dir) is None or not test_dir.is_dir():
-        return TestImportCoherenceResult(
-            passed=True, detail=f"test-import coherence: no test root '{profile.test_root}' (skipped)"
-        )
+    # escapes the tree. A test ROOT that escapes is INVALID evidence —
+    # FAIL-CLOSED (raise → caught below → honest RED), NOT treated as "no test
+    # root" (a silent skip would pass over a smuggled off-root tree). A
+    # non-existent in-root test root is benign → passing no-op.
+    try:
+        require_project_path(root, test_dir, context="test_root")
+        if not test_dir.is_dir():
+            return TestImportCoherenceResult(
+                passed=True, detail=f"test-import coherence: no test root '{profile.test_root}' (skipped)"
+            )
 
-    test_root_name = _norm(profile.test_root).split("/")[-1] if profile.test_root else ""
-    index = _build_test_tree(test_dir, test_root_name, root)
+        test_root_name = _norm(profile.test_root).split("/")[-1] if profile.test_root else ""
+        index = _build_test_tree(test_dir, test_root_name, root)
 
-    findings: list[TestImportCoherenceFinding] = []
-    checked_imports = 0
-    for path in _iter_py_files(test_dir, root):
-        try:
-            rel_test = path.resolve().relative_to(test_dir.resolve()).as_posix()
-        except (ValueError, OSError):
-            continue
-        if not _is_test_file(rel_test):
-            continue  # only pytest-collected TEST modules import helpers
-        tree = _parse(path)
-        if tree is None:
-            continue
-        rel_proj = _rel(path, root)
-        info = _ModuleInfo(rel=rel_test, tree=tree, is_package_init=False)
-        for module, level, names, lineno in _imports_from_intree(tree):
-            target_key = index._import_target_key(info, _FakeImportFrom(module, level))
-            if target_key is None or not index.resolves(target_key):
-                continue  # not an in-test-tree target → out of this gate's scope
-            provided = index.provided_names(target_key)
-            checked_imports += 1
-            if provided is _UNKNOWN:
-                continue  # undecidable target → conservatively do not flag
-            missing = [n for n in names if n not in provided]
-            for symbol in missing:
-                findings.append(
-                    TestImportCoherenceFinding(
-                        kind="missing_test_helper_symbol",
-                        path=rel_proj,
-                        message=(
-                            f"imports '{symbol}' from in-test-tree module "
-                            f"'{module or ('.' * level)}' (line {lineno}), but that "
-                            f"module does not define or re-export '{symbol}'. The "
-                            f"shared test helper must define/re-export every symbol "
-                            f"the tests import; a missing helper symbol crashes "
-                            f"pytest at collection."
-                        ),
-                        details={
-                            "symbol": symbol,
-                            "target": module or ("." * level),
-                            "target_key": target_key,
-                            "lineno": lineno,
-                        },
+        findings: list[TestImportCoherenceFinding] = []
+        checked_imports = 0
+        for path in _iter_py_files(test_dir, root):
+            try:
+                rel_test = path.resolve().relative_to(test_dir.resolve()).as_posix()
+            except (ValueError, OSError):
+                continue
+            if not _is_test_file(rel_test):
+                continue  # only pytest-collected TEST modules import helpers
+            tree = _parse(path)
+            if tree is None:
+                continue
+            rel_proj = _rel(path, root)
+            info = _ModuleInfo(rel=rel_test, tree=tree, is_package_init=False)
+            for module, level, names, lineno in _imports_from_intree(tree):
+                target_key = index._import_target_key(info, _FakeImportFrom(module, level))
+                if target_key is None or not index.resolves(target_key):
+                    continue  # not an in-test-tree target → out of this gate's scope
+                provided = index.provided_names(target_key)
+                checked_imports += 1
+                if provided is _UNKNOWN:
+                    continue  # undecidable target → conservatively do not flag
+                missing = [n for n in names if n not in provided]
+                for symbol in missing:
+                    findings.append(
+                        TestImportCoherenceFinding(
+                            kind="missing_test_helper_symbol",
+                            path=rel_proj,
+                            message=(
+                                f"imports '{symbol}' from in-test-tree module "
+                                f"'{module or ('.' * level)}' (line {lineno}), but that "
+                                f"module does not define or re-export '{symbol}'. The "
+                                f"shared test helper must define/re-export every symbol "
+                                f"the tests import; a missing helper symbol crashes "
+                                f"pytest at collection."
+                            ),
+                            details={
+                                "symbol": symbol,
+                                "target": module or ("." * level),
+                                "target_key": target_key,
+                                "lineno": lineno,
+                            },
+                        )
                     )
+    except PathEscapeError as exc:
+        return TestImportCoherenceResult(
+            passed=False,
+            findings=[
+                TestImportCoherenceFinding(
+                    kind="evidence_root_escape",
+                    path=str(getattr(exc, "path", "") or ""),
+                    message=(
+                        f"the test evidence root escapes the project tree: {exc}. "
+                        f"The test-import-coherence gate cannot validate a smuggled "
+                        f"out-of-root test tree — fix the escaping test root."
+                    ),
                 )
+            ],
+            profile=profile,
+            detail="test-import coherence: evidence root escapes project root",
+        )
 
     passed = not findings
     detail = (

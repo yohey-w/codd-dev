@@ -301,7 +301,10 @@ class TestPathEscapeJail:
             for f in result.findings
         ), result.summary()
 
-    def test_symlinked_test_dir_escaping_root_is_not_read(self, tmp_path):
+    def test_symlinked_test_dir_escaping_root_fails_closed(self, tmp_path):
+        # An IN-ROOT test_root that is a SYMLINK whose target escapes the tree is
+        # an invalid evidence root: the gate must FAIL (red), not silently skip
+        # the off-root tree and "pass" by checking nothing (a false-green).
         _coherent_project(tmp_path)
         outside = self._outside_with_violation(tmp_path)
         link = tmp_path / "linked_tests"
@@ -313,7 +316,8 @@ class TestPathEscapeJail:
             source_dirs=["src/"],
             test_dirs=["linked_tests"],
         )
-        assert not any("test_evil" in f.path for f in result.findings), result.summary()
+        assert not result.passed, result.summary()
+        assert any(f.kind == "evidence_root_escape" for f in result.findings), result.summary()
 
     def test_in_root_layout_unchanged(self, tmp_path):
         # ANTI-FALSE-RED: a normal in-root coherent project still passes, and a

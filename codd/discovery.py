@@ -33,7 +33,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from codd.path_safety import resolve_project_path
+from codd.path_safety import require_project_path, resolve_project_path
 
 # ═══════════════════════════════════════════════════════════
 # Unified constants
@@ -202,17 +202,18 @@ def iter_source_files(
     # codd.yaml (user-controllable). A ``../`` traversal survives the dir
     # normalization (only slashes are stripped) and an in-root dir may be a
     # symlink whose target escapes the tree — either would walk/read files from
-    # OUTSIDE the project. Confine each base dir through the shared jail (drop the
-    # ones that resolve outside), so this single shared walker is transitively
-    # safe for every consumer (env_refs/schema_refs/wiring/contracts/
-    # traceability). ``None`` source_dirs ⇒ the whole root, which is in-root by
-    # construction but still re-confined below to catch escaping symlinks.
+    # OUTSIDE the project. A configured source ROOT that escapes is an INVALID
+    # evidence root, so this is FAIL-CLOSED (``require_project_path`` raises
+    # ``PathEscapeError``) rather than silently dropped: a silent skip would let
+    # the walker "succeed" by yielding nothing while the operator believes the
+    # off-root tree was scanned — a false-green in another form (GPT). This
+    # single shared walker thereby fails honestly for every consumer
+    # (env_refs/schema_refs/wiring/contracts/traceability). ``None`` source_dirs
+    # ⇒ the whole root, which is in-root by construction but still re-confined per
+    # walk-result below to DROP an escaping symlink FILE inside a valid in-root
+    # tree (that finer case stays a skip — anti-false-red).
     if source_dirs:
-        bases: list[Path] = []
-        for d in source_dirs:
-            confined = resolve_project_path(root, d)
-            if confined is not None:
-                bases.append(confined)
+        bases = [require_project_path(root, d, context="scan.source_dirs") for d in source_dirs]
     else:
         bases = [root]
 

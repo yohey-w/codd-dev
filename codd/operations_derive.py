@@ -45,6 +45,7 @@ from typing import Any, Callable, Mapping, Sequence
 import yaml
 
 from codd.action_outcome import _normalize_token
+from codd.path_safety import resolve_project_path
 from codd.requirement_reconciliation import (
     RequirementUnit,
     UnreconciledUnit,
@@ -201,7 +202,9 @@ def uncovered_requirement_units(
         # against an empty universe is out of scope for this opt-in flow.
         return []
 
-    doc_texts = _read_doc_texts(discover_requirement_docs(Path(project_root), config))
+    doc_texts = _read_doc_texts(
+        discover_requirement_docs(Path(project_root), config), Path(project_root)
+    )
     return list(
         detect_unreconciled_units(
             doc_texts,
@@ -498,9 +501,18 @@ def _declared_ids(config: Mapping[str, Any]) -> set[str]:
     return ids
 
 
-def _read_doc_texts(paths: Sequence[Path]) -> list[tuple[str, str]]:
+def _read_doc_texts(
+    paths: Sequence[Path], project_root: Path
+) -> list[tuple[str, str]]:
+    # Requirement-doc contents become the reconciliation/derivation evidence text.
+    # ``discover_requirement_docs`` already jails its output, but re-confine here
+    # too (defense-in-depth in this module's own layer): a path resolving outside
+    # the project root — absolute, ``../``, or an in-root symlink escaping the
+    # tree — is skipped so an out-of-root file is never read as evidence.
     texts: list[tuple[str, str]] = []
     for path in paths:
+        if resolve_project_path(project_root, path) is None:
+            continue
         try:
             content = Path(path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):

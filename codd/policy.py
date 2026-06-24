@@ -8,6 +8,7 @@ file-level constraints.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,23 @@ import yaml
 from codd.bridge import load_bridge_registry
 from codd.config import load_project_config
 from codd.discovery import scan_exclude_patterns
+from codd.path_safety import resolve_project_path
+
+
+def _warn_excluded_path(kind: str, raw: str) -> None:
+    """Surface a path-escape exclusion (visibility, not silent swallow).
+
+    Policy results are counts of files checked / violations, not a binary gate
+    keyed on a single path, so an out-of-root configured/changed path is
+    *excluded* from scanning (its contents cannot be read as policy evidence)
+    rather than crashed on. The exclusion is reported on stderr so it is never a
+    pure-green silent drop. ``PolicyResult`` keeps its public shape (back-compat).
+    """
+    print(
+        f"warning: policy: {kind} '{raw}' resolves outside the project root; "
+        f"excluded from policy scan (out-of-root paths are not read as evidence).",
+        file=sys.stderr,
+    )
 
 
 @dataclass(frozen=True)
@@ -124,10 +142,19 @@ def _run_policy_oss(
 
     # Collect files to check
     if changed_files:
-        files_to_check = [
-            project_root / f for f in changed_files
-            if (project_root / f).is_file()
-        ]
+        # ``changed_files`` is user-controllable; jail each entry so an absolute/
+        # ``../`` path or an in-root symlink escaping the tree is dropped (its
+        # contents would otherwise be scanned as policy evidence). ``None`` ⇒
+        # out-of-root. Keep only files that resolve inside the project root; the
+        # escape is reported (visibility) rather than silently swallowed.
+        files_to_check = []
+        for f in changed_files:
+            confined = resolve_project_path(project_root, f)
+            if confined is None:
+                _warn_excluded_path("changed_file", str(f))
+                continue
+            if confined.is_file():
+                files_to_check.append(confined)
     else:
         files_to_check = _collect_source_files(project_root, source_dirs, exclude_patterns)
 
@@ -211,10 +238,21 @@ def _collect_source_files(
     """Collect all source files under configured source dirs."""
     files: list[Path] = []
     for src_dir in source_dirs:
-        full_path = project_root / src_dir
+        # ``scan.source_dirs`` is user-controllable (codd.yaml); jail each entry so
+        # an absolute/``../`` dir or an in-root symlink escaping the tree is dropped
+        # (its files would otherwise be scanned as policy evidence). ``None`` ⇒
+        # out-of-root.
+        full_path = resolve_project_path(project_root, src_dir)
+        if full_path is None:
+            _warn_excluded_path("source_dir", str(src_dir))
+            continue
         if not full_path.exists():
             continue
         for file_path in sorted(full_path.rglob("*")):
+            # Re-confine each match: rglob follows symlinks, so an in-root dir may
+            # hold a symlink whose target escapes the root.
+            if resolve_project_path(project_root, file_path) is None:
+                continue
             if not file_path.is_file():
                 continue
             relative = file_path.relative_to(project_root).as_posix()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import click
 import pytest
@@ -55,6 +56,34 @@ def _patch_doctor(monkeypatch, warnings):
     monkeypatch.setattr(cli_module, "_doctor_warnings", lambda project_root: list(warnings))
 
 
+def _write_codd_project(root: Path) -> Path:
+    root.mkdir()
+    (root / "codd").mkdir()
+    (root / "codd" / "codd.yaml").write_text("project_name: demo\n", encoding="utf-8")
+    return root
+
+
+def _patch_coverage_check_dependencies(monkeypatch) -> list[Path]:
+    from codd.lexicon_cli.threshold import ThresholdConfig
+
+    loaded_paths: list[Path] = []
+
+    monkeypatch.setattr(
+        "codd.lexicon_cli.reporter.CoverageReporter.build",
+        lambda self, lexicons, with_ai=False, ai_command=None: SimpleNamespace(
+            totals={"covered": 0, "axes": 0, "covered_pct": 0.0}
+        ),
+    )
+    monkeypatch.setattr("codd.lexicon_cli.threshold.evaluate", lambda report, config: [])
+
+    def fake_load_thresholds(path: Path | None) -> ThresholdConfig:
+        loaded_paths.append(path)
+        return ThresholdConfig()
+
+    monkeypatch.setattr("codd.lexicon_cli.threshold.load_thresholds", fake_load_thresholds)
+    return loaded_paths
+
+
 def test_check_green_project_exits_zero(project: Path, monkeypatch) -> None:
     _patch_doctor(monkeypatch, [])
     _patch_dag(monkeypatch, [_CheckResult("node_completeness"), _CheckResult("edge_validity")])
@@ -65,6 +94,81 @@ def test_check_green_project_exits_zero(project: Path, monkeypatch) -> None:
     assert "PASS — no warnings" in result.output
     assert "PASS  node_completeness [red]" in result.output
     assert "Summary: 0 gate(s) failed, 0 advisory finding(s)" in result.output
+
+
+@pytest.mark.parametrize("escape_kind", ["absolute", "dotdot", "symlink"])
+def test_coverage_threshold_file_rejects_escaping_evidence(
+    tmp_path: Path, monkeypatch, escape_kind: str
+) -> None:
+    project_root = _write_codd_project(tmp_path / "project")
+    outside = tmp_path / "outside-thresholds.yaml"
+    outside.write_text("coverage:\n  thresholds:\n    default:\n      covered_text_match_pct: 100\n", encoding="utf-8")
+    if escape_kind == "absolute":
+        raw_threshold = outside
+    elif escape_kind == "dotdot":
+        raw_threshold = project_root / ".." / outside.name
+    else:
+        raw_threshold = project_root / "thresholds.yaml"
+        raw_threshold.symlink_to(outside)
+
+    loaded_paths = _patch_coverage_check_dependencies(monkeypatch)
+
+    result = CliRunner().invoke(
+        main,
+        ["coverage", "check", "--path", str(project_root), "--threshold-file", str(raw_threshold)],
+    )
+
+    assert result.exit_code == 2
+    assert "outside the project root" in result.output
+    assert loaded_paths == []
+
+
+def test_coverage_threshold_file_accepts_in_root_evidence(tmp_path: Path, monkeypatch) -> None:
+    project_root = _write_codd_project(tmp_path / "project")
+    threshold_file = project_root / "thresholds.yaml"
+    threshold_file.write_text(
+        "coverage:\n  thresholds:\n    default:\n      covered_text_match_pct: 0\n",
+        encoding="utf-8",
+    )
+    loaded_paths = _patch_coverage_check_dependencies(monkeypatch)
+
+    result = CliRunner().invoke(
+        main,
+        ["coverage", "check", "--path", str(project_root), "--threshold-file", str(threshold_file)],
+    )
+
+    assert result.exit_code == 0
+    assert loaded_paths == [threshold_file.resolve()]
+
+
+def test_diff_extract_input_rejects_absolute_outside_evidence(tmp_path: Path) -> None:
+    project_root = _write_codd_project(tmp_path / "project")
+    outside = tmp_path / "outside-extracted.md"
+    outside.write_text("# extracted from another project\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="extract-input.*outside the project root"):
+        cli_module._resolve_diff_extract_input(project_root, outside)
+
+
+def test_diff_extract_input_rejects_default_symlink_escape(tmp_path: Path) -> None:
+    project_root = _write_codd_project(tmp_path / "project")
+    outside = tmp_path / "outside-extracted.md"
+    outside.write_text("# extracted from another project\n", encoding="utf-8")
+    default_extract = project_root / ".codd" / "extract" / "extracted.md"
+    default_extract.parent.mkdir(parents=True)
+    default_extract.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="extract-input.*outside the project root"):
+        cli_module._resolve_diff_extract_input(project_root, None)
+
+
+def test_diff_extract_input_accepts_in_root_default_evidence(tmp_path: Path) -> None:
+    project_root = _write_codd_project(tmp_path / "project")
+    default_extract = project_root / ".codd" / "extract" / "extracted.md"
+    default_extract.parent.mkdir(parents=True)
+    default_extract.write_text("# extracted facts\n", encoding="utf-8")
+
+    assert cli_module._resolve_diff_extract_input(project_root, None) == default_extract.resolve()
 
 
 def test_check_red_dag_failure_exits_nonzero(project: Path, monkeypatch) -> None:

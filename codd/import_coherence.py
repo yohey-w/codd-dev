@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from codd.path_safety import resolve_project_path
+from codd.path_safety import PathEscapeError, require_project_path, resolve_project_path
 from codd.project_types import LayoutProfile, resolve_layout_profile
 
 
@@ -127,16 +127,19 @@ def _iter_py_files(
 
     ``base`` is ``project_root`` joined with a PROFILE root (``source_root`` /
     ``test_root`` / ``package_root``) that derives from user-controllable
-    ``scan.source_dirs`` / ``scan.test_dirs``. Even though the profile layer
-    drops ``../`` / absolute-out-of-root entries, an IN-ROOT root (or a file
-    inside the walked tree) may be a SYMLINK whose target escapes the project —
-    reading it would consume an out-of-root file as project content (a path-escape
-    false-green/false-red). Confine ``base`` through the shared jail, then
-    re-confine every ``rglob`` match (an in-root tree can hold an escaping
-    symlink). ``None`` ⇒ outside root ⇒ skipped.
+    ``scan.source_dirs`` / ``scan.test_dirs``. The profile layer drops ``../`` /
+    absolute-out-of-root entries, so the surviving escape vector for the ROOT is
+    an IN-ROOT root that is a SYMLINK whose target escapes the project. That is
+    an INVALID evidence root — FAIL-CLOSED (``require_project_path`` raises
+    :class:`PathEscapeError`) rather than silently returning ``[]``, because a
+    silent empty walk lets the coherence gate "pass" while a smuggled off-root
+    tree goes unchecked (a false-green in another form: GPT). The caller catches
+    the error and turns it into an honest RED. A non-existent in-root root is NOT
+    an escape (benign empty list). Every ``rglob`` match is still re-confined and
+    an escaping symlink FILE inside a valid in-root tree is DROPPED (skip) — that
+    finer case stays anti-false-red.
     """
-    if resolve_project_path(project_root, base) is None:
-        return []
+    require_project_path(project_root, base, context="layout root")
     if not base.is_dir():
         return []
     out: list[Path] = []
@@ -321,10 +324,10 @@ def _check_missing_init(
     package_dir = project_root / profile.package_root
     # Path-escape jail: ``package_root`` derives from user-controllable
     # ``scan.source_dirs``; an in-root package dir may be a symlink whose target
-    # escapes the tree. Confine before the FS probes (``is_dir`` / ``exists``) so
-    # an out-of-root dir is treated as "not a package here", never read.
-    if resolve_project_path(project_root, package_dir) is None:
-        return findings
+    # escapes the tree. A package ROOT that escapes is INVALID evidence —
+    # FAIL-CLOSED (raise) rather than treated as "not a package here" (a silent
+    # skip would let the missing-init check pass over a smuggled off-root dir).
+    require_project_path(project_root, package_dir, context="package_root")
     if profile.requires_package_init and package_dir.is_dir():
         if not (package_dir / "__init__.py").exists():
             findings.append(
@@ -533,14 +536,36 @@ def check_import_coherence(
             detail=f"import coherence: no layout profile for language {language!r} (skipped)",
         )
 
-    source_modules = _source_module_basenames(root, profile)
+    try:
+        source_modules = _source_module_basenames(root, profile)
 
-    findings: list[ImportCoherenceFinding] = []
-    findings.extend(_check_source_outside_package(root, profile))
-    findings.extend(_check_missing_init(root, profile))
-    findings.extend(_check_shadowing(root, profile))
-    findings.extend(_check_bare_basename_imports(root, profile, source_modules))
-    findings.extend(_check_manifest_agreement(root, profile))
+        findings: list[ImportCoherenceFinding] = []
+        findings.extend(_check_source_outside_package(root, profile))
+        findings.extend(_check_missing_init(root, profile))
+        findings.extend(_check_shadowing(root, profile))
+        findings.extend(_check_bare_basename_imports(root, profile, source_modules))
+        findings.extend(_check_manifest_agreement(root, profile))
+    except PathEscapeError as exc:
+        # A configured/profile evidence ROOT (source_root / test_root /
+        # package_root) resolved OUTSIDE the project (e.g. an in-root symlink
+        # whose target escapes). Fail-closed: an honest RED, never a silent skip
+        # that "passes" by checking a smuggled off-root tree as if it were empty.
+        return ImportCoherenceResult(
+            passed=False,
+            findings=[
+                ImportCoherenceFinding(
+                    kind="evidence_root_escape",
+                    path=str(getattr(exc, "path", "") or ""),
+                    message=(
+                        f"a layout evidence root escapes the project tree: {exc}. "
+                        f"The import-coherence gate cannot validate a smuggled "
+                        f"out-of-root tree — fix the escaping source/test root."
+                    ),
+                )
+            ],
+            profile=profile,
+            detail="import coherence: evidence root escapes project root",
+        )
 
     passed = not findings
     detail = (

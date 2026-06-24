@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from codd.action_outcome import _normalize_token, canonical_action_verb
+from codd.path_safety import resolve_project_path
 from codd.requirements_meta import operation_flow_operations
 
 
@@ -236,20 +237,36 @@ def discover_requirement_docs(project_root: Path, config: Mapping[str, Any]) -> 
     candidates: list[Path] = []
     if settings.docs:
         for raw in settings.docs:
-            path = Path(raw)
-            path = path if path.is_absolute() else root / path
+            # ``requirement_reconciliation.docs`` is user-controllable (codd.yaml);
+            # an absolute/``../`` value or an in-root symlink whose target escapes
+            # the tree must not surface a doc whose contents become reconciliation
+            # evidence. Jail the configured path, then re-confine each rglob match
+            # (rglob follows symlinks, so an in-root *.md may point outside root).
+            path = resolve_project_path(root, raw)
+            if path is None:
+                continue
             if path.is_dir():
-                candidates.extend(sorted(path.rglob("*.md")))
+                candidates.extend(
+                    confined
+                    for md_path in sorted(path.rglob("*.md"))
+                    if (confined := resolve_project_path(root, md_path)) is not None
+                )
             elif path.is_file():
                 candidates.append(path)
         return _unique_paths(candidates)
 
     req_dir = root / "docs" / "requirements"
     if req_dir.exists():
-        candidates.extend(sorted(req_dir.rglob("*.md")))
+        # rglob follows symlinks: re-confine each match so an in-root *.md
+        # symlinked outside the root is not surfaced as a requirement doc.
+        candidates.extend(
+            confined
+            for md_path in sorted(req_dir.rglob("*.md"))
+            if (confined := resolve_project_path(root, md_path)) is not None
+        )
     for filename in ("docs/requirements.md", "REQUIREMENTS.md", "requirements.md"):
         path = root / filename
-        if path.is_file():
+        if resolve_project_path(root, path) is not None and path.is_file():
             candidates.append(path)
     return _unique_paths(candidates)
 

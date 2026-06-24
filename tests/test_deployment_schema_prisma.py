@@ -70,6 +70,44 @@ def test_detect_seed_files_finds_package_json_prisma_seed(tmp_path):
     assert PrismaSchemaProvider().detect_seed_files(tmp_path) == [seed]
 
 
+def test_detect_seed_files_rejects_package_json_absolute_outside_seed(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside_seed = tmp_path / "outside-seed.mjs"
+    outside_seed.write_text("export default async function seed() {}\n", encoding="utf-8")
+    (project / "package.json").write_text(
+        json.dumps({"prisma": {"seed": f"node {outside_seed}"}}),
+        encoding="utf-8",
+    )
+
+    assert PrismaSchemaProvider().detect_seed_files(project) == []
+
+
+def test_detect_seed_files_rejects_package_json_dotdot_outside_seed(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside_seed = tmp_path / "outside-seed.mjs"
+    outside_seed.write_text("export default async function seed() {}\n", encoding="utf-8")
+    (project / "package.json").write_text(
+        json.dumps({"prisma": {"seed": "node ../outside-seed.mjs"}}),
+        encoding="utf-8",
+    )
+
+    assert PrismaSchemaProvider().detect_seed_files(project) == []
+
+
+def test_detect_seed_files_rejects_symlink_escaping_default_seed(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside_seed = tmp_path / "outside-seed.ts"
+    outside_seed.write_text("export async function seed() {}\n", encoding="utf-8")
+    seed = project / "prisma" / "seed.ts"
+    seed.parent.mkdir(parents=True)
+    seed.symlink_to(outside_seed)
+
+    assert PrismaSchemaProvider().detect_seed_files(project) == []
+
+
 def test_detect_seed_files_missing_returns_empty_list(tmp_path):
     assert PrismaSchemaProvider().detect_seed_files(tmp_path) == []
 

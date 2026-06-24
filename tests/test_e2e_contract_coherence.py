@@ -419,9 +419,10 @@ class TestPathEscapeJail:
         )
         assert not any("test_evil" in f.path for f in result.findings), result.summary()
 
-    def test_symlinked_test_dir_escaping_root_is_not_scanned(self, tmp_path):
-        # An in-root test_root that is a symlink whose target escapes the tree
-        # must not let the gate scan the off-root <test_root>/e2e for runtime imports.
+    def test_symlinked_test_dir_escaping_root_fails_closed(self, tmp_path):
+        # An in-root test_root that is a SYMLINK whose target escapes the tree is
+        # an invalid evidence root → fail-closed (red): the gate must not silently
+        # skip the off-root <test_root>/e2e and "pass" by scanning nothing.
         _base(tmp_path)
         outside = self._outside_e2e_tree(tmp_path)
         link = tmp_path / "linked_tests"
@@ -434,7 +435,8 @@ class TestPathEscapeJail:
             test_dirs=["linked_tests"],
             config=_cli_config(),
         )
-        assert not any("test_evil" in f.path for f in result.findings), result.summary()
+        assert not result.passed, result.summary()
+        assert any(f.kind == "evidence_root_escape" for f in result.findings), result.summary()
 
     def test_symlinked_e2e_file_inside_tree_escaping_root_is_dropped(self, tmp_path):
         # An in-root e2e tree may hold a symlink FILE whose target escapes the

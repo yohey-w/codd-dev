@@ -10,6 +10,7 @@ from typing import Any, Callable, Literal, Mapping
 
 from codd.config import load_project_config
 from codd.dag import DAG
+from codd.path_safety import resolve_project_path
 from codd.repair.approval_repair import (
     RepairApprovalError,
     RepairApprovalMode,
@@ -524,22 +525,16 @@ class RepairLoop:
         return paths
 
     def _resolve_project_file(self, raw_path: str) -> Path | None:
-        text = str(raw_path or "").strip()
-        if not text:
-            return None
-        root = self.project_root.resolve(strict=False)
-        candidate = Path(text)
-        if candidate.is_absolute():
-            resolved = candidate.resolve(strict=False)
-        else:
-            if any(part == ".." for part in candidate.parts):
-                return None
-            resolved = (root / candidate).resolve(strict=False)
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            return None
-        return resolved
+        """Resolve an RCA file path inside the project (unified path-escape jail).
+
+        These contents are fed to the repair engine's RCA / propose-fix
+        (check-adjacent), so confinement is unified on the one symlink-resolving
+        ``path_safety`` closure (:func:`resolve_project_path`) instead of an
+        independent string ``..`` + ``resolve`` reimplementation. An absolute /
+        ``../`` / in-root-symlink path that escapes the tree resolves to ``None``
+        and is dropped, so no out-of-root file enters the repair context.
+        """
+        return resolve_project_path(self.project_root, raw_path)
 
     def _capture_current_head(self) -> str:
         completed = subprocess.run(

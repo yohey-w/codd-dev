@@ -11,6 +11,7 @@ from typing import Any
 from codd.deployment import RuntimeStateKind, RuntimeStateNode
 from codd.deployment.providers import SchemaProvider, register_schema_provider
 from codd.parsing import PrismaSchemaExtractor, PrismaSchemaInfo
+from codd.path_safety import resolve_project_path
 
 
 _DEFAULT_SEED_FILES = (
@@ -47,7 +48,7 @@ class PrismaSchemaProvider(SchemaProvider):
         root = Path(project_root)
         candidates = [root / relative_path for relative_path in _DEFAULT_SEED_FILES]
         candidates.extend(_seed_candidates_from_package_json(root))
-        return _existing_unique_paths(candidates)
+        return _existing_unique_paths(root, candidates)
 
     def detect_migrations(self, project_root: Path) -> list[Path]:
         """Return Prisma migration SQL files under prisma/migrations."""
@@ -176,15 +177,15 @@ def _split_seed_command(command: str) -> list[str]:
         return command.split()
 
 
-def _existing_unique_paths(paths: list[Path]) -> list[Path]:
+def _existing_unique_paths(project_root: Path, paths: list[Path]) -> list[Path]:
     unique: list[Path] = []
     seen: set[Path] = set()
     for path in paths:
-        normalized = path.resolve()
-        if normalized in seen or not path.is_file():
+        normalized = resolve_project_path(project_root, path)
+        if normalized is None or normalized in seen or not normalized.is_file():
             continue
         seen.add(normalized)
-        unique.append(path)
+        unique.append(normalized)
     return sorted(unique)
 
 

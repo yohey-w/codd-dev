@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from codd.frontmatter import apply_aliases, as_list as _as_list, parse_frontmatter
+from codd.path_safety import resolve_project_path
 from codd.requirements_meta import normalize_operation_flow
 
 
@@ -88,31 +89,70 @@ LANGUAGE_SUFFIXES = {
 }
 
 
-def extract_imports(file_path: Path) -> list[str]:
+def _confine_or_none(path: Path, project_root: Path | str | None) -> Path | None:
+    """Confine ``path`` to ``project_root`` for sink-level defense-in-depth.
+
+    Pure path logic via the shared :func:`codd.path_safety.resolve_project_path`
+    closure (resolve → follow symlinks → root containment). Returns the resolved
+    in-root path, ``None`` when it escapes the root, or — when ``project_root``
+    is ``None`` — the path unchanged (legacy: no jail, no resolution).
+    """
+
+    if project_root is None:
+        return Path(path)
+    return resolve_project_path(project_root, path)
+
+
+def extract_imports(file_path: Path, *, project_root: Path | str | None = None) -> list[str]:
     """Return import specifiers from a source file.
 
     The existing source extractor classifies imports for scan output. The DAG
     builder needs raw specifiers so it can resolve them against the final node
     set, including aliases from project configuration.
+
+    ``file_path`` is a user-path-controllable source path. When ``project_root``
+    is supplied it is resolved+confined via the shared path_safety closure
+    before the read (sink-level defense-in-depth); an escaping path reads no
+    evidence and returns ``[]`` (fail-closed). Omitting ``project_root``
+    preserves the legacy behavior.
     """
 
-    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    read_target = _confine_or_none(file_path, project_root)
+    if read_target is None:
+        return []
+    content = read_target.read_text(encoding="utf-8", errors="ignore")
     return [match.group(1) for match in _IMPORT_SPECIFIER_RE.finditer(content)]
 
 
-def scan_capability_evidence(impl_file_path: Path, capability_patterns: dict) -> list[dict]:
-    """Scan an implementation file using project-declared capability patterns."""
+def scan_capability_evidence(
+    impl_file_path: Path,
+    capability_patterns: dict,
+    *,
+    project_root: Path | str | None = None,
+) -> list[dict]:
+    """Scan an implementation file using project-declared capability patterns.
+
+    ``impl_file_path`` is a user-path-controllable impl path. When
+    ``project_root`` is supplied it is resolved+confined via the shared
+    path_safety closure before the read (sink-level defense-in-depth); an
+    escaping path yields no evidence and returns ``[]`` (fail-closed). Omitting
+    ``project_root`` preserves the legacy behavior.
+    """
 
     if not isinstance(capability_patterns, dict) or not capability_patterns:
         return []
 
-    matchers = _capability_matchers(capability_patterns, impl_file_path)
+    read_target = _confine_or_none(impl_file_path, project_root)
+    if read_target is None:
+        return []
+
+    matchers = _capability_matchers(capability_patterns, read_target)
     if not matchers:
         return []
 
     evidence: list[dict] = []
-    content = impl_file_path.read_text(encoding="utf-8", errors="ignore")
-    display_path = impl_file_path.as_posix()
+    content = read_target.read_text(encoding="utf-8", errors="ignore")
+    display_path = read_target.as_posix()
     for line_number, line in enumerate(content.splitlines(), start=1):
         for capability_kind, regex, value in matchers:
             if regex.search(line):
@@ -131,9 +171,24 @@ def extract_design_doc_metadata(
     md_path: Path,
     *,
     frontmatter_alias: dict[str, str] | None = None,
+    project_root: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Return Markdown frontmatter and normalized ``depends_on`` entries."""
+    """Return Markdown frontmatter and normalized ``depends_on`` entries.
 
+    ``md_path`` is a user-path-controllable design-doc path. When
+    ``project_root`` is supplied it is resolved+confined via the shared
+    path_safety closure before the read (sink-level defense-in-depth). An
+    escaping path is fail-closed by *raising* ``ValueError`` — consistent with
+    this function's existing contract of failing loudly on malformed frontmatter
+    (DAG construction must never silently consume / drop an out-of-root doc).
+    Omitting ``project_root`` preserves the legacy behavior.
+    """
+
+    if project_root is not None:
+        confined = resolve_project_path(project_root, md_path)
+        if confined is None:
+            raise ValueError(f"design doc path escapes project root: {md_path}")
+        md_path = confined
     content = md_path.read_text(encoding="utf-8", errors="ignore")
     parsed = parse_frontmatter(content)
     if parsed.exception is not None:
@@ -172,12 +227,25 @@ def extract_design_doc_metadata(
     }
 
 
-def extract_verification_means_catalog(project_lexicon_path: Path) -> dict[str, Any] | None:
-    """Return a project lexicon catalog override for LLM prompt resolution."""
+def extract_verification_means_catalog(
+    project_lexicon_path: Path,
+    *,
+    project_root: Path | str | None = None,
+) -> dict[str, Any] | None:
+    """Return a project lexicon catalog override for LLM prompt resolution.
 
-    if not project_lexicon_path.is_file():
+    ``project_lexicon_path`` is a user-path-controllable lexicon path. When
+    ``project_root`` is supplied it is resolved+confined via the shared
+    path_safety closure before the read (sink-level defense-in-depth); an
+    escaping path is fail-closed and returns ``None`` (already the sentinel for
+    "no catalog available"). Omitting ``project_root`` preserves the legacy
+    behavior.
+    """
+
+    read_target = _confine_or_none(project_lexicon_path, project_root)
+    if read_target is None or not read_target.is_file():
         return None
-    payload = yaml.safe_load(project_lexicon_path.read_text(encoding="utf-8")) or {}
+    payload = yaml.safe_load(read_target.read_text(encoding="utf-8")) or {}
     if not isinstance(payload, dict):
         return None
     catalog = payload.get("verification_means_catalog")

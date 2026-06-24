@@ -451,6 +451,33 @@ def test_affected_file_contents_fall_back_to_node_id_when_it_is_a_file_path(tmp_
     assert contents == {"project_lexicon.yaml": "coverage_axes: []\n"}
 
 
+def test_affected_file_contents_drops_in_root_symlink_escaping_root(tmp_path: Path):
+    """An RCA path that is an in-root SYMLINK escaping the tree must NOT be read.
+
+    The repair engine reasons over these contents (check-adjacent), so the path
+    jail is unified on the symlink-resolving ``path_safety`` closure: an in-root
+    ``src/leak.py`` whose target is an off-root secret resolves outside and is
+    dropped (no out-of-root file enters the repair context).
+    """
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("SECRET = 1\n", encoding="utf-8")
+    link = project / "src" / "leak.py"
+    try:
+        link.symlink_to(outside / "secret.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+    dag = DAG()
+    dag.add_node(Node("impl:leak", "implementation", path="src/leak.py"))
+    loop = RepairLoop(RepairLoopConfig(), project)
+
+    contents = loop._load_affected_file_contents(_rca(["impl:leak"]), dag)
+
+    assert contents == {}, contents
+
+
 def test_auto_approval_max_files_zero_escalates_to_required():
     with pytest.warns(RuntimeWarning, match="max_files_per_proposal"):
         approved = approve_repair_proposal(

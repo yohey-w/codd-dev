@@ -341,8 +341,14 @@ def _set_scan_dirs(codd_dir: Path, *, doc_dirs=None, source_dirs=None) -> dict:
     return config
 
 
-def test_run_scan_does_not_walk_doc_dirs_parent_escape(tmp_path):
-    """``doc_dirs: ['../outside']`` must not read frontmatter from outside root."""
+def test_run_scan_doc_dirs_parent_escape_fails_closed(tmp_path):
+    """``doc_dirs: ['../outside']`` is an invalid evidence root → fail-closed.
+
+    A configured ``scan.doc_dirs`` entry that escapes the project root must make
+    the scan NOT-VALID (raise), not silently skip the entry and "succeed" by
+    reading nothing — a silent skip is a false-green in another form.
+    """
+    from codd.path_safety import PathEscapeError
     from codd.scanner import run_scan
 
     project, codd_dir = _setup_project(tmp_path)
@@ -351,15 +357,13 @@ def test_run_scan_does_not_walk_doc_dirs_parent_escape(tmp_path):
     _write_doc(outside / "secret.md", "req:OUTSIDE-ESCAPE")
     _set_scan_dirs(codd_dir, doc_dirs=["../outside"])
 
-    run_scan(project, codd_dir)
-
-    ceg = CEG(codd_dir / "scan")
-    assert ceg.get_node("req:OUTSIDE-ESCAPE") is None
-    ceg.close()
+    with pytest.raises(PathEscapeError):
+        run_scan(project, codd_dir)
 
 
-def test_run_scan_does_not_walk_doc_dirs_absolute_escape(tmp_path):
-    """An absolute out-of-root ``doc_dirs`` entry must be skipped, not walked."""
+def test_run_scan_doc_dirs_absolute_escape_fails_closed(tmp_path):
+    """An absolute out-of-root ``doc_dirs`` entry must fail-closed, not be skipped."""
+    from codd.path_safety import PathEscapeError
     from codd.scanner import run_scan
 
     project, codd_dir = _setup_project(tmp_path)
@@ -367,11 +371,8 @@ def test_run_scan_does_not_walk_doc_dirs_absolute_escape(tmp_path):
     _write_doc(outside / "secret.md", "req:ABS-ESCAPE")
     _set_scan_dirs(codd_dir, doc_dirs=[str(outside)])
 
-    run_scan(project, codd_dir)
-
-    ceg = CEG(codd_dir / "scan")
-    assert ceg.get_node("req:ABS-ESCAPE") is None
-    ceg.close()
+    with pytest.raises(PathEscapeError):
+        run_scan(project, codd_dir)
 
 
 def test_run_scan_does_not_follow_in_root_symlink_escaping_root(tmp_path):
@@ -400,8 +401,13 @@ def test_run_scan_does_not_follow_in_root_symlink_escaping_root(tmp_path):
     ceg.close()
 
 
-def test_run_scan_does_not_walk_source_dirs_parent_escape(tmp_path):
-    """``source_dirs: ['../src_out']`` must not register out-of-root file nodes."""
+def test_run_scan_source_dirs_parent_escape_fails_closed(tmp_path):
+    """``source_dirs: ['../src_out']`` is an invalid evidence root → fail-closed.
+
+    A configured ``scan.source_dirs`` entry that escapes the project root must
+    raise rather than silently skip and "succeed" registering nothing.
+    """
+    from codd.path_safety import PathEscapeError
     from codd.scanner import run_scan
 
     project, codd_dir = _setup_project(tmp_path)
@@ -410,45 +416,43 @@ def test_run_scan_does_not_walk_source_dirs_parent_escape(tmp_path):
     (outside / "leak.py").write_text("import os\n")
     _set_scan_dirs(codd_dir, source_dirs=["../src_out"])
 
-    run_scan(project, codd_dir)
-
-    ceg = CEG(codd_dir / "scan")
-    nodes = ceg.all_nodes() if hasattr(ceg, "all_nodes") else []
-    # No file node may point outside the project root.
-    for node in nodes:
-        path = node.get("path") or ""
-        assert ".." not in str(path), f"out-of-root source node leaked: {node}"
-    assert ceg.get_node("file:../src_out/leak.py") is None
-    assert ceg.get_node("file:src_out/leak.py") is None
-    ceg.close()
+    with pytest.raises(PathEscapeError):
+        run_scan(project, codd_dir)
 
 
-def test_build_document_reference_index_skips_doc_dirs_parent_escape(tmp_path):
-    """The DAG node→path map must not include out-of-root docs via ``../``."""
+def test_build_document_reference_index_doc_dirs_parent_escape_fails_closed(tmp_path):
+    """The DAG node→path map builder must fail-closed on an out-of-root ``../`` root."""
+    from codd.path_safety import PathEscapeError
+
     project, codd_dir = _setup_project(tmp_path)
     outside = tmp_path / "outside"
     _write_doc(outside / "secret.md", "req:IDX-ESCAPE")
     config = _set_scan_dirs(codd_dir, doc_dirs=["../outside"])
 
-    index = build_document_reference_index(project, config)
-
-    assert "req:IDX-ESCAPE" not in index.by_node_id
-    for rel_posix in index.by_path:
-        assert ".." not in rel_posix, f"out-of-root path in index: {rel_posix}"
+    with pytest.raises(PathEscapeError):
+        build_document_reference_index(project, config)
 
 
-def test_build_document_reference_index_skips_absolute_escape(tmp_path):
+def test_build_document_reference_index_absolute_escape_fails_closed(tmp_path):
+    from codd.path_safety import PathEscapeError
+
     project, codd_dir = _setup_project(tmp_path)
     outside = tmp_path / "abs_outside"
     _write_doc(outside / "secret.md", "req:IDX-ABS-ESCAPE")
     config = _set_scan_dirs(codd_dir, doc_dirs=[str(outside)])
 
-    index = build_document_reference_index(project, config)
+    with pytest.raises(PathEscapeError):
+        build_document_reference_index(project, config)
 
-    assert "req:IDX-ABS-ESCAPE" not in index.by_node_id
 
+def test_build_document_reference_index_skips_symlink_file_escape(tmp_path):
+    """A symlinked FILE inside a VALID in-root docs/ dir is dropped (anti-false-red).
 
-def test_build_document_reference_index_skips_symlink_escape(tmp_path):
+    The in-root doc ROOT is legitimate; only one walked FILE is a symlink whose
+    target escapes. Dropping that single file (skip) — NOT failing the whole
+    index build — is the correct anti-false-red behavior; fail-closed is reserved
+    for an escaping configured ROOT.
+    """
     project, codd_dir = _setup_project(tmp_path)
     outside = tmp_path / "linktarget"
     _write_doc(outside / "secret.md", "req:IDX-SYMLINK-ESCAPE")

@@ -152,3 +152,68 @@ def test_missing_file(tmp_path):
     assert result.body_md == ""
     assert result.metadata == {}
     assert "not found" in result.error
+
+
+# ── sink-level path jail (project_root) ────────────────────────
+#
+# DESIGN.md tokens drive drift/coherence evidence. When ``project_root`` is
+# supplied the extractor must resolve+confine the path so an out-of-root
+# DESIGN.md is never parsed. Fail-closed is expressed through the existing
+# ``error`` field (distinguishable from ``error=""`` success / "not found").
+
+
+def _outside_design(tmp_path: Path) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    doc = outside / "DESIGN.md"
+    doc.write_text('---\ncolors:\n  Primary: "#1A73E8"\n---\n# secret\n', encoding="utf-8")
+    return doc
+
+
+def test_extract_parent_traversal_with_root_errors(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _outside_design(tmp_path)
+    result = DesignMdExtractor().extract("../outside/DESIGN.md", project_root=project_root)
+    assert result.tokens == []
+    assert result.metadata == {}
+    assert result.error != ""
+
+
+def test_extract_absolute_outside_with_root_errors(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    doc = _outside_design(tmp_path)
+    result = DesignMdExtractor().extract(str(doc), project_root=project_root)
+    assert result.tokens == []
+    assert result.error != ""
+
+
+def test_extract_in_root_symlink_escape_with_root_errors(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    doc = _outside_design(tmp_path)
+    (project_root / "alias.md").symlink_to(doc)
+    result = DesignMdExtractor().extract("alias.md", project_root=project_root)
+    assert result.tokens == []
+    assert result.error != ""
+
+
+def test_extract_in_root_with_root_still_parses(tmp_path):
+    """Anti-false-red: an in-root DESIGN.md with project_root parses normally."""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "DESIGN.md").write_text(
+        '---\ncolors:\n  Primary: "#1A73E8"\n---\n# Design\n', encoding="utf-8"
+    )
+    result = DesignMdExtractor().extract("DESIGN.md", project_root=project_root)
+    assert result.error == ""
+    assert _token_by_id(result, "colors.Primary").value == "#1A73E8"
+
+
+def test_extract_without_root_unchanged(tmp_path):
+    """Anti-false-red: omitting project_root preserves legacy behavior."""
+    doc = _outside_design(tmp_path)
+    result = DesignMdExtractor().extract(doc)
+    assert result.error == ""
+    assert _token_by_id(result, "colors.Primary").value == "#1A73E8"

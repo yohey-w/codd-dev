@@ -17,7 +17,7 @@ from codd.discovery import scan_exclude_patterns
 from codd.frontmatter import read_frontmatter
 from codd.graph import CEG
 from codd.parsing import get_extractor
-from codd.path_safety import resolve_project_path
+from codd.path_safety import require_project_path, resolve_project_path
 
 
 def run_scan(project_root: Path, codd_dir: Path):
@@ -50,11 +50,14 @@ def run_scan(project_root: Path, codd_dir: Path):
     warnings = []
     for doc_dir in doc_dirs:
         # RC-1 path-escape jail: ``scan.doc_dirs`` is user-controllable
-        # (codd.yaml). Confine the configured dir to the project root (resolve +
-        # symlink-follow); an absolute/``../`` out-of-root dir resolves to None
-        # → silently skipped (no walk/read of an external tree, no crash).
-        full_path = resolve_project_path(project_root, doc_dir)
-        if full_path is not None and full_path.exists():
+        # (codd.yaml). A configured doc ROOT that escapes the project (absolute /
+        # ``../`` / an in-root symlink whose target leaves the tree) is INVALID
+        # evidence — FAIL-CLOSED (``require_project_path`` raises PathEscapeError)
+        # rather than silently skip the entry and let the scan "succeed" reading
+        # nothing (a silent skip is a false-green in another form: GPT). A
+        # NON-EXISTENT in-root dir is NOT an escape — it stays a benign skip.
+        full_path = require_project_path(project_root, doc_dir, context="scan.doc_dirs")
+        if full_path.exists():
             count, doc_warnings = _scan_frontmatter(ceg, project_root, full_path)
             frontmatter_count += count
             warnings.extend(doc_warnings)
@@ -70,10 +73,11 @@ def run_scan(project_root: Path, codd_dir: Path):
     exclude_patterns = scan_exclude_patterns(config)
 
     for src_dir in source_dirs:
-        # RC-1 path-escape jail (see doc_dirs above): confine the configured
-        # ``scan.source_dirs`` root to the project tree before walking/reading.
-        full_path = resolve_project_path(project_root, src_dir)
-        if full_path is not None and full_path.exists():
+        # RC-1 path-escape jail (see doc_dirs above): a configured
+        # ``scan.source_dirs`` root that escapes the project is INVALID evidence —
+        # FAIL-CLOSED (raise) rather than silently skipped, before any walk/read.
+        full_path = require_project_path(project_root, src_dir, context="scan.source_dirs")
+        if full_path.exists():
             _scan_source_directory(ceg, project_root, full_path, language, exclude_patterns)
 
     # Phase 3: Extract endpoints from filesystem-based routing conventions.
@@ -242,11 +246,14 @@ def build_document_reference_index(
     for raw_root in raw_doc_roots:
         # RC-1 path-escape jail: this index IS the document node→path map the
         # implementer / generator / assembler consume. ``scan.doc_dirs`` is
-        # user-controllable, so confine the configured root (resolve +
-        # symlink-follow) before walking; an out-of-root root → skip (no
-        # out-of-root node enters the DAG map, no crash).
-        full_path = resolve_project_path(project_root, raw_root)
-        if full_path is None or not full_path.exists():
+        # user-controllable, so a configured doc ROOT that escapes the project
+        # (absolute / ``../`` / in-root symlink leaving the tree) is INVALID
+        # evidence — FAIL-CLOSED (raise) rather than silently skipped, so a
+        # smuggled off-root tree can never be passed off as "no docs found" while
+        # the reference map is built as if valid. A non-existent in-root root
+        # stays a benign skip.
+        full_path = require_project_path(project_root, raw_root, context="scan.doc_dirs")
+        if not full_path.exists():
             continue
         doc_root_posix = Path(raw_root).as_posix().rstrip("/")
 

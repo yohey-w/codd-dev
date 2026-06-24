@@ -258,29 +258,37 @@ def escape_project(tmp_path):
 
 
 class TestIterSourceFilesPathEscapeJail:
-    def test_parent_traversal_source_dir_is_not_walked(self, escape_project):
+    def test_parent_traversal_source_dir_fails_closed(self, escape_project):
         # ``../outside`` survives scan.*_dirs normalization (only slashes are
-        # stripped); the walker must NOT escape the project to read it.
-        proj, outside = escape_project
-        found = [p.resolve() for p in iter_source_files(proj, source_dirs=["../outside"])]
-        assert (outside / "secret.py").resolve() not in found
-        assert all(str(p).startswith(str(proj.resolve())) for p in found), found
+        # stripped); a configured source ROOT escaping the project is an invalid
+        # config — fail-closed (raise), never a silent skip that "passes" by
+        # reading nothing. (GPT: silent-skip is a false-green in another form.)
+        from codd.path_safety import PathEscapeError
 
-    def test_absolute_out_of_root_source_dir_is_not_walked(self, escape_project):
-        # An absolute dir pointing OUTSIDE the root must be dropped, not read.
         proj, outside = escape_project
-        found = [p.resolve() for p in iter_source_files(proj, source_dirs=[str(outside)])]
-        assert (outside / "secret.py").resolve() not in found
-        assert all(str(p).startswith(str(proj.resolve())) for p in found), found
+        with pytest.raises(PathEscapeError):
+            list(iter_source_files(proj, source_dirs=["../outside"]))
 
-    def test_symlinked_source_dir_escaping_root_is_not_walked(self, escape_project):
-        # An IN-ROOT source dir that is a symlink whose target escapes the tree
-        # must not smuggle an off-root file into the walk.
+    def test_absolute_out_of_root_source_dir_fails_closed(self, escape_project):
+        # An absolute dir pointing OUTSIDE the root is an invalid evidence root →
+        # fail-closed (raise), not silently dropped.
+        from codd.path_safety import PathEscapeError
+
+        proj, outside = escape_project
+        with pytest.raises(PathEscapeError):
+            list(iter_source_files(proj, source_dirs=[str(outside)]))
+
+    def test_symlinked_source_dir_escaping_root_fails_closed(self, escape_project):
+        # An IN-ROOT source dir that is a SYMLINK whose target escapes the tree
+        # is the same invalid-evidence-root class → fail-closed (raise), never a
+        # silent skip smuggling an off-root tree past the walker as "no files".
+        from codd.path_safety import PathEscapeError
+
         proj, outside = escape_project
         link = proj / "linked_src"
         link.symlink_to(outside, target_is_directory=True)
-        found = [p.resolve() for p in iter_source_files(proj, source_dirs=["linked_src"])]
-        assert (outside / "secret.py").resolve() not in found
+        with pytest.raises(PathEscapeError):
+            list(iter_source_files(proj, source_dirs=["linked_src"]))
 
     def test_symlinked_file_inside_walk_escaping_root_is_dropped(self, escape_project):
         # An in-root walked tree may contain a symlink FILE whose target escapes;

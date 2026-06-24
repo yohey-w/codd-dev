@@ -30,6 +30,8 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
+from codd.path_safety import resolve_project_path
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from codd.scanner import DocumentEntry, DocumentReferenceIndex
 
@@ -99,7 +101,18 @@ def _normalize_posix(raw: str) -> str:
 
 
 def _escapes_project(norm: str, raw: str) -> bool:
-    """True when the (relative) reference tries to leave the project tree."""
+    """True when the (relative) reference LEXICALLY tries to leave the project tree.
+
+    Fast, pure-string pre-check (Windows drive prefix / absolute / ``..``). It is
+    NOT the whole jail: a path that is lexically in-root may still escape via an
+    in-root SYMLINK whose target leaves the tree. That symlink-resolving
+    confinement is enforced separately by :func:`resolve_project_path`
+    (``path_safety``) wherever this resolver actually binds a file — at the
+    exact project-relative path step (inline, in :func:`resolve_document_ref`)
+    and in :func:`_ensure_inside_project` (the absolute-path step) — so the
+    resolver is unified on the one symlink-aware closure rather than trusting
+    strings.
+    """
     if not norm:
         return False
     # Windows drive prefix e.g. "C:/..." or "C:\\...".
@@ -222,6 +235,13 @@ def resolve_document_ref(
     if path_like:
         project_relative = project_root / norm
         if project_relative.is_file():
+            # Symlink-aware confinement (unified on path_safety): a lexically
+            # in-root ref whose FILE is an in-root symlink pointing OUTSIDE the
+            # tree must not bind (it would consume an off-root file as evidence —
+            # a path-escape false-green the string-only ``_escapes_project``
+            # cannot see).
+            if resolve_project_path(project_root, project_relative) is None:
+                raise _fail("reference_escapes_project")
             entry = index.by_path.get(norm)
             if entry is not None:
                 return _bind_entry(
@@ -284,12 +304,16 @@ def resolve_document_ref(
 
 
 def _ensure_inside_project(project_root: Path, path: Path) -> None:
-    root = project_root.resolve(strict=False)
-    resolved = path.resolve(strict=False)
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise _fail("reference_escapes_project") from exc
+    """Confine an ABSOLUTE reference to the project tree (symlink-aware, unified).
+
+    Delegates to the one shared ``path_safety`` closure
+    (:func:`resolve_project_path`) instead of an independent
+    ``resolve()`` + ``relative_to`` reimplementation, so absolute-path
+    confinement (including in-root symlinks whose target escapes) is identical to
+    every other CoDD jail. ``None`` ⇒ outside root ⇒ honest fail.
+    """
+    if resolve_project_path(project_root, path) is None:
+        raise _fail("reference_escapes_project")
 
 
 def _candidate_paths(entries: list["DocumentEntry"]) -> tuple[str, ...]:

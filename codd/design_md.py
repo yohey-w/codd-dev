@@ -42,7 +42,24 @@ class DesignMdResult:
 class DesignMdExtractor:
     """Extract design tokens from a DESIGN.md YAML front matter block."""
 
-    def extract(self, path: Path) -> DesignMdResult:
+    def extract(
+        self, path: Path, *, project_root: Path | str | None = None
+    ) -> DesignMdResult:
+        # ``path`` is a user-path-controllable DESIGN.md location (config /
+        # project layout). When ``project_root`` is supplied, resolve+confine it
+        # via the shared path_safety closure *before* any read so an out-of-root
+        # DESIGN.md (``../``, absolute, or in-root symlink escaping the tree) is
+        # never parsed into drift/coherence evidence. Fail-closed is expressed
+        # through the existing ``error`` field — distinguishable from ``error=""``
+        # success and from "not found". Omitting ``project_root`` preserves the
+        # legacy behavior (no jail).
+        if project_root is not None:
+            from codd.path_safety import resolve_project_path
+
+            confined = resolve_project_path(project_root, path)
+            if confined is None:
+                return DesignMdResult(error=f"path escapes project root: {path}")
+            path = confined
         path = Path(path)
         if not path.exists():
             return DesignMdResult(error=f"not found: {path}")

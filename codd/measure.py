@@ -15,13 +15,31 @@ These metrics help stakeholders understand:
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from codd.config import find_codd_dir, load_project_config
 from codd.discovery import scan_exclude_patterns, should_skip_path
+from codd.path_safety import resolve_project_path
 from codd.policy import run_policy
 from codd.validator import validate_project
+
+
+def _warn_excluded_path(kind: str, raw: str) -> None:
+    """Surface a path-escape exclusion (visibility, not silent swallow).
+
+    Coverage metrics are counts, not a binary gate, so an out-of-root configured
+    path is *excluded* from the walk (its files/docs cannot be credited as
+    in-project evidence) rather than crashed on. We still emit the fact on stderr
+    so the exclusion is never a pure-green silent drop. ``MeasureResult`` keeps
+    its public shape (back-compat); only a diagnostic line is added.
+    """
+    print(
+        f"warning: measure: {kind} '{raw}' resolves outside the project root; "
+        f"excluded from coverage (out-of-root paths are not counted as evidence).",
+        file=sys.stderr,
+    )
 
 
 @dataclass
@@ -214,11 +232,19 @@ def _collect_coverage_metrics(
     # artifacts and vendored dependencies inflated the count)
     source_files = 0
     for src_dir in source_dirs:
-        full_path = project_root / src_dir
+        # ``scan.source_dirs`` is user-controllable (codd.yaml); jail each entry so
+        # an absolute/``../`` dir or an in-root symlink escaping the tree is dropped
+        # — an out-of-root file must not be counted as covered source. ``None`` ⇒
+        # out-of-root. rglob follows symlinks, so re-confine each match too.
+        full_path = resolve_project_path(project_root, src_dir)
+        if full_path is None:
+            _warn_excluded_path("source_dir", str(src_dir))
+            continue
         if full_path.exists():
             source_files += sum(
                 1 for f in full_path.rglob("*")
-                if f.is_file()
+                if resolve_project_path(project_root, f) is not None
+                and f.is_file()
                 and not should_skip_path(f, project_root, exclude_patterns=exclude_patterns)
             )
 
@@ -228,10 +254,21 @@ def _collect_coverage_metrics(
     tracked_files: set[str] = set()
 
     for doc_dir in doc_dirs:
-        full_path = project_root / doc_dir
+        # ``scan.doc_dirs`` is user-controllable (codd.yaml); jail each entry so an
+        # absolute/``../`` dir or an in-root symlink escaping the tree is dropped —
+        # an out-of-root design doc must not be counted or have its frontmatter
+        # source_refs folded into coverage evidence. ``None`` ⇒ out-of-root.
+        full_path = resolve_project_path(project_root, doc_dir)
+        if full_path is None:
+            _warn_excluded_path("doc_dir", str(doc_dir))
+            continue
         if not full_path.exists():
             continue
         for f in full_path.rglob("*.md"):
+            # Re-confine each match: rglob follows symlinks, so an in-root *.md may
+            # point outside the root.
+            if resolve_project_path(project_root, f) is None:
+                continue
             if f.is_file():
                 design_docs += 1
                 # Parse frontmatter for source_refs

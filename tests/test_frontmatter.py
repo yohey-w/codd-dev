@@ -159,6 +159,75 @@ def test_read_frontmatter_malformed_lenient_none_strict_raises(tmp_path):
         read_frontmatter(doc, strict=True)
 
 
+# ── read_frontmatter sink-level path jail (project_root) ───────
+#
+# read_frontmatter is the shared read sink for many user-path-controllable
+# callers. When ``project_root`` is supplied it must resolve+confine the path
+# (defense-in-depth) so an external doc's frontmatter is never consumed as
+# evidence. Lenient escape -> None (indistinguishable from unreadable, which is
+# the correct semantics: an escaped path is not a readable in-root file).
+# Strict escape -> FrontmatterError(code="read_error") (explicit fail-closed).
+
+
+def _outside_frontmatter_doc(tmp_path: Path) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    doc = outside / "secret.md"
+    doc.write_text("---\ncodd:\n  node_id: leaked\n---\n# secret\n", encoding="utf-8")
+    return doc
+
+
+def test_read_frontmatter_parent_traversal_with_root_is_none(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _outside_frontmatter_doc(tmp_path)
+    assert read_frontmatter("../outside/secret.md", project_root=project_root) is None
+
+
+def test_read_frontmatter_absolute_outside_with_root_is_none(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    doc = _outside_frontmatter_doc(tmp_path)
+    assert read_frontmatter(str(doc), project_root=project_root) is None
+
+
+def test_read_frontmatter_in_root_symlink_escape_with_root_is_none(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    doc = _outside_frontmatter_doc(tmp_path)
+    (project_root / "alias.md").symlink_to(doc)
+    assert read_frontmatter("alias.md", project_root=project_root) is None
+
+
+def test_read_frontmatter_escape_strict_raises_read_error(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    doc = _outside_frontmatter_doc(tmp_path)
+    with pytest.raises(FrontmatterError) as exc_info:
+        read_frontmatter(str(doc), project_root=project_root, strict=True)
+    assert exc_info.value.code == "read_error"
+
+
+def test_read_frontmatter_in_root_with_root_still_read(tmp_path):
+    """Anti-false-red: an in-root doc with project_root still reads normally."""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "doc.md").write_text(NESTED_DOC, encoding="utf-8")
+    front = read_frontmatter("doc.md", project_root=project_root)
+    assert front["codd"]["node_id"] == "req:FR-01"
+
+
+def test_read_frontmatter_without_root_unchanged(tmp_path):
+    """Anti-false-red: omitting project_root preserves legacy behavior — even an
+    absolute path outside any project is read (no jail applied)."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    doc = outside / "secret.md"
+    doc.write_text(NESTED_DOC, encoding="utf-8")
+    front = read_frontmatter(doc)
+    assert front["codd"]["node_id"] == "req:FR-01"
+
+
 # ── codd_block ─────────────────────────────────────────────────
 
 

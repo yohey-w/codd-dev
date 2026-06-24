@@ -141,16 +141,47 @@ def split_frontmatter(text: str, *, strict: bool = False) -> tuple[dict[str, Any
     return result.mapping, result.body
 
 
-def read_frontmatter(path: Path | str, *, strict: bool = False) -> dict[str, Any] | None:
+def read_frontmatter(
+    path: Path | str,
+    *,
+    strict: bool = False,
+    project_root: Path | str | None = None,
+) -> dict[str, Any] | None:
     """Read ``path`` and return its frontmatter mapping.
 
     Lenient (default): returns ``None`` when the file is unreadable, carries
     no complete frontmatter block, or the block is malformed. Strict: raises
     :class:`FrontmatterError` on read failure or a malformed block (absence
     of a block still returns ``None``).
+
+    ``path`` is the read sink shared by many callers that pass *user-path-
+    controllable* paths (config values, design-doc/DAG node paths, CLI args).
+    When ``project_root`` is supplied, the path is resolved (symlinks followed)
+    and confined to the root via :func:`codd.path_safety.resolve_project_path`
+    *before* any read — defense-in-depth so an out-of-root file's frontmatter
+    is never consumed as evidence even if the caller forgot to jail it. An
+    escaping path is fail-closed: lenient → ``None`` (semantically identical to
+    "not a readable in-root file"); strict → :class:`FrontmatterError` with
+    ``code=read_error`` (an explicit signal callers can distinguish). When
+    ``project_root`` is omitted the legacy behavior is preserved (no jail).
     """
+    read_target: Path | str = path
+    if project_root is not None:
+        # Local import keeps codd.path_safety dependency-free (no codd imports)
+        # and avoids any import cycle at module load time.
+        from codd.path_safety import resolve_project_path
+
+        confined = resolve_project_path(project_root, path)
+        if confined is None:
+            if strict:
+                raise FrontmatterError(
+                    f"path escapes project root: {path}", code=ERROR_READ
+                )
+            return None
+        read_target = confined
+
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+        text = Path(read_target).read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
         if strict:
             raise FrontmatterError(f"failed to read file: {exc}", code=ERROR_READ) from exc

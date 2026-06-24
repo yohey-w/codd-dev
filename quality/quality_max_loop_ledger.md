@@ -456,3 +456,44 @@ jails). Cluster (A) is check-evidence regardless, so it was fixed autonomously n
   strip `..`/absolute), discovery.py iter_source_files (RC-2), and the 3 coherence gates'
   _iter_py_files — all via path_safety. full suite 6259.
 Awaiting GPT's scope ruling to bound cluster (B); then fix in-scope (B) + 2 clean rounds.
+
+### GPT scope ruling (2026-06-25) — full: /tmp/gpt_ngate_scope_answer.md
+N-gate path-escape = **artifact-evidence path only** (A + evidence-adjacent, ≈20-30), NOT
+all 87. In-scope test: path is user/config/CLI/generated-controllable AND its
+content/existence/enumeration/metadata affects check/verify/audit/coverage/policy/DAG/
+coherence/gate evidence (or evidence-set selection). B (generation / fix / deploy /
+lexicon-mgmt / cache / socket) is Axis-N backlog, auto-promoted to in if it later feeds
+evidence.
+**In-scope to close:** scanner (done), discovery (done), coherence gates (done),
+project_types._normalize_dirs (done) + measure / policy / coverage /
+requirement_reconciliation / operations_derive; the shared public artifact reader sinks
+frontmatter.read_frontmatter / design_md / dag/extractor (jail INTERNALLY at the sink —
+caller-jailed is insufficient); evidence-context CLI/config/package paths (--files /
+--test-results / --ci-log / --threshold-file / --input / --history / package.json
+prisma.seed) jailed when evidence-forming.
+**Refinements:** (1) escaped EVIDENCE paths must FAIL CLOSED, not silent-skip (silent
+exclusion is another false-green) — revise scanner/discovery/coherence accordingly;
+(2) shared artifact readers jail internally; (3) bespoke / string-based jails
+(reference_resolution._escapes_project, repair/loop, design_token_drift) don't count as
+clean — unify onto path_safety; (4) CLI/config/package paths judged by evidence-use, not
+flag name. **2-clean is judged against the evidence scope only** (B not-yet-fixed ≠ dirty
+unless it connects to evidence). This converges the N-gate realistically.
+
+### In-scope evidence-reader closure done (full suite 6332)
+Closed the entire in-scope set per the ruling, in 4 groups:
+- shared artifact reader sinks jail INTERNALLY (optional project_root): frontmatter.
+  read_frontmatter, design_md, dag/extractor public readers — fail-closed on escape
+  (FrontmatterError / error-field / ValueError / [] / None), caller-jailed kept as
+  defense-in-depth.
+- audit/coverage/policy evidence readers: measure, policy (escape excluded + stderr
+  warning, not silent), requirement_reconciliation, operations_derive.
+- fail-closed for EVIDENCE escapes: added path_safety.PathEscapeError + require_project_
+  path; scanner / discovery / coherence gates now RAISE / red on an escaped evidence
+  path (was silent-skip = a false-green form). bespoke jails unified: reference_
+  resolution (was string-only, no symlink resolve) + repair/loop → path_safety;
+  design_token_drift left (write-side auto-fix, not evidence).
+- evidence-context CLI/config: --threshold-file (gate) jailed fail-closed; prisma.seed
+  (package.json) jailed. (This group was implemented by a parallel tmux ashigaru after a
+  subagent role-confusion wrote a stray cmd_522; verified correct and folded in; Karo
+  told to close cmd_522 and stop concurrent codd-dev edits.)
+Round 10 next, review SCOPED to the evidence set (B is backlog, not a reset).
