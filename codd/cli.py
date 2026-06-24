@@ -8470,6 +8470,14 @@ def dag_verify(
             click.echo(
                 f"\n{skipped_count} check(s) SKIP — verified nothing (dormant / unconfigured)"
             )
+        from codd.dag.materiality import vacuous_pass_results
+
+        vacuous = vacuous_pass_results(results)
+        if vacuous:
+            click.echo(
+                f"\n{len(vacuous)} check(s) PASS but verified nothing (vacuous): "
+                + ", ".join(_dag_result_name(result) for result in vacuous)
+            )
         if failed_red:
             click.echo(f"\n{len(failed_red)} check(s) FAILED (severity=red)")
         elif amber_findings:

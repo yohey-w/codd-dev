@@ -31,6 +31,7 @@ class _CheckResult:
     severity: str = "red"
     passed: bool = True
     status: str = ""
+    checked_count: int | None = None
     missing_impl_files: list[str] = field(default_factory=list)
     unreachable_nodes: list[str] = field(default_factory=list)
 
@@ -257,6 +258,27 @@ def test_verify_summary_shows_skip_count(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "1 check(s) SKIP" in result.output
+
+
+def test_verify_summary_flags_vacuous_pass(tmp_path, monkeypatch):
+    # A check that PASSED having verified 0 items is shown as vacuous, never as a
+    # plain pass — so a green run that actually checked nothing is visible.
+    _patch_results(
+        monkeypatch,
+        [
+            _CheckResult(
+                "ui_coherence_for_one_to_many",
+                severity="amber",
+                status="pass",
+                checked_count=0,
+            )
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["dag", "verify", "--project-path", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "verified nothing (vacuous)" in result.output
 
 
 def test_verify_json_stdout_stays_parseable_with_notice(tmp_path, monkeypatch):

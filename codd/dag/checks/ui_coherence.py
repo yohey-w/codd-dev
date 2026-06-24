@@ -29,6 +29,7 @@ class UiCoherenceResult:
     message: str = ""
     block_deploy: bool = False
     passed: bool = True
+    checked_count: int = 0  # one-to-many relations actually verified; 0 on a pass = vacuous
     one_to_many_relations_total: int = 0
     relations_with_master_detail_ui: int = 0
     relations_missing_master_detail: list[dict[str, Any]] = field(default_factory=list)
@@ -101,6 +102,7 @@ class UiCoherenceCheck(DagCheck):
         return UiCoherenceResult(
             status="warn" if missing else "pass",
             message=message,
+            checked_count=len(relations),
             one_to_many_relations_total=len(relations),
             relations_with_master_detail_ui=covered,
             relations_missing_master_detail=missing,
