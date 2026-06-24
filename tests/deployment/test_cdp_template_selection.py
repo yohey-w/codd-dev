@@ -40,6 +40,15 @@ def _write_design_doc(project_root: Path, name: str, journeys: list[dict] | None
     _write(project_root / "docs" / "design" / name, content)
 
 
+def _write_design_doc_codd_block(project_root: Path, name: str, journeys: list[dict]) -> None:
+    # user_journeys authored under the canonical ``codd:`` frontmatter block
+    # (the position the CoDD generator emits). The extractor never lifts this
+    # into the top-level ``attributes`` copy.
+    frontmatter = {"codd": {"user_journeys": journeys}}
+    content = yaml.safe_dump(frontmatter, explicit_start=True, sort_keys=False) + "---\n# Design\n"
+    _write(project_root / "docs" / "design" / name, content)
+
+
 def _journey(name: str | None, target: str = "/login") -> dict:
     journey = {
         "criticality": "critical",
@@ -185,3 +194,46 @@ def test_build_dag_does_not_add_cdp_browser_node_without_config(tmp_path):
     dag = build_dag(tmp_path, _settings())
 
     assert "verification:cdp_browser:login_to_dashboard" not in dag.nodes
+
+
+def test_cdp_browser_config_with_codd_block_user_journey_synthesizes_test(tmp_path):
+    # Dormancy: user_journeys authored under frontmatter.codd (the canonical
+    # generator position) previously produced NO cdp_browser node, because the
+    # extractor read only attributes[user_journeys] (empty default) and
+    # frontmatter[user_journeys] (absent — it is nested under codd). Now the
+    # frontmatter.codd location is read, so the node is synthesized.
+    _write_codd_config(tmp_path, cdp_browser=True)
+    _write_design_doc_codd_block(tmp_path, "auth.md", [_journey("login_to_dashboard")])
+
+    tests = _cdp_tests(tmp_path)
+
+    assert len(tests) == 1
+    assert tests[0].identifier == "verification:cdp_browser:login_to_dashboard"
+    assert tests[0].kind is VerificationKind.E2E
+    assert tests[0].target == "/login"
+    assert tests[0].expected_outcome["source"] == "docs/design/auth.md"
+    assert tests[0].expected_outcome["journey_name"] == "login_to_dashboard"
+
+
+def test_build_dag_includes_cdp_browser_node_from_codd_block_journey(tmp_path):
+    _write_codd_config(tmp_path, cdp_browser=True)
+    _write_design_doc_codd_block(tmp_path, "auth.md", [_journey("login_to_dashboard")])
+
+    dag = build_dag(tmp_path, _settings())
+
+    assert "verification:cdp_browser:login_to_dashboard" in dag.nodes
+    node = dag.nodes["verification:cdp_browser:login_to_dashboard"]
+    assert node.attributes["verification_template_ref"] == "cdp_browser"
+    assert node.attributes["journey_name"] == "login_to_dashboard"
+
+
+def test_top_level_user_journey_not_double_counted_with_codd_read(tmp_path):
+    # Dedup regression: a TOP-LEVEL user_journeys declaration must yield exactly
+    # ONE cdp_browser node, not two. The extractor lifts it into attributes AND
+    # keeps it in raw frontmatter; reading both naively would double-count.
+    _write_codd_config(tmp_path, cdp_browser=True)
+    _write_design_doc(tmp_path, "auth.md", [_journey("login_to_dashboard")])
+
+    identifiers = [test.identifier for test in _cdp_tests(tmp_path)]
+
+    assert identifiers == ["verification:cdp_browser:login_to_dashboard"]

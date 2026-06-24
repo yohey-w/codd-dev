@@ -252,9 +252,16 @@ def _matches_any_artifact(
     settings: dict[str, Any] | None = None,
 ) -> bool:
     if expected_node.kind == "config_file":
-        hint_path = project_root / _normalize_hint(expected_node.path_hint)
-        if hint_path.is_file():
-            return True
+        # Route through the root-jail (resolve + in-root check) so a hint naming
+        # an in-root symlink whose target escapes the project root cannot
+        # false-green via a raw ``project_root / hint`` stat.
+        resolved = _resolve_in_root(expected_node.path_hint, project_root)
+        if resolved is not None:
+            try:
+                if resolved.is_file():
+                    return True
+            except OSError:
+                pass
     if expected_node.kind == "impl_file":
         return _matches_any_impl(dag, expected_node.path_hint, project_root, settings)
     for candidate in _candidate_nodes(dag, expected_node.kind):
@@ -560,13 +567,24 @@ def _project_files(project_root: Path) -> list[str]:
         "dist",
         "node_modules",
     }
+    root_resolved = project_root.resolve()
     files: list[str] = []
     for path in project_root.rglob("*"):
         relative = path.relative_to(project_root)
         if excluded_parts.intersection(relative.parts):
             continue
-        if path.is_file():
-            files.append(relative.as_posix())
+        if not path.is_file():
+            continue
+        # Symlink-aware jail: ``rglob`` enumerates an in-root symlink entry even
+        # when its target escapes the root. Resolve each candidate and keep it
+        # only when the resolved target stays inside the project root, so glob
+        # matching (``_fs_glob_match`` / ``_fs_fallback_match``) cannot be
+        # satisfied by an off-root file reached through an in-root symlink.
+        try:
+            path.resolve().relative_to(root_resolved)
+        except (OSError, ValueError):
+            continue
+        files.append(relative.as_posix())
     return files
 
 

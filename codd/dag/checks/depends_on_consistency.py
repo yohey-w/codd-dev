@@ -145,6 +145,13 @@ class DependsOnConsistencyCheck:
             )
 
         return DependsOnConsistencyResult(
+            # Mirror the boolean ``passed`` into the declared ``status`` so the
+            # JSON serialisation (``--format json`` reads the raw ``status``)
+            # agrees with the text path. Without this the field defaults to
+            # 'pass' even when violations exist, so a CI reading ``status`` saw
+            # green next to severity:red + violations:[...] (JSON false-green).
+            # Matches deployment_completeness.py, which sets this explicitly.
+            status="fail" if violations else "pass",
             violations=violations,
             passed=len(violations) == 0,
             records_compared=records_compared,

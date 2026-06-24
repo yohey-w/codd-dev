@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from codd.dag.builder import build_dag
@@ -175,6 +176,49 @@ def test_verification_template_ref_from_extension(tmp_path):
     refs = {test.verification_template_ref for test in extract_verification_tests(tmp_path)}
 
     assert refs == {"curl", "playwright"}
+
+
+def test_e2e_symlink_escaping_root_is_not_synthesized_or_read(tmp_path):
+    # Path-escape leak: an e2e spec that is a symlink to a file OUTSIDE the
+    # project root must not become a verification node, and the out-of-root
+    # target must not be read. Previously _glob_paths resolved the symlink to
+    # its out-of-root target, so a verification:e2e:/abs/outside.spec.ts node
+    # was synthesized and the external file was read by _verification_target.
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    target = outside / "outside.spec.ts"
+    target.write_text("test('/secret/admin/panel')\n", encoding="utf-8")
+
+    e2e_dir = project / "tests" / "e2e"
+    e2e_dir.mkdir(parents=True)
+    link = e2e_dir / "spoof.spec.ts"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported on this platform")
+
+    tests = extract_verification_tests(project)
+
+    resolved_target = target.resolve().as_posix()
+    for test in tests:
+        assert resolved_target not in test.identifier
+        assert test.expected_outcome.get("source") != resolved_target
+        # The out-of-root URL must never be lifted as a target (would mean read).
+        assert test.target != "/secret/admin/panel"
+    assert all("outside.spec.ts" not in test.identifier for test in tests)
+
+
+def test_in_root_e2e_spec_is_unchanged_by_symlink_jail(tmp_path):
+    # Regression: a normal in-root spec (even when it physically lives behind an
+    # in-root symlink) still resolves inside the root and stays discoverable.
+    _write(tmp_path / "tests" / "e2e" / "login.spec.ts", "test('login')\n")
+
+    tests = extract_verification_tests(tmp_path)
+
+    assert [t.identifier for t in tests] == ["verification:e2e:tests/e2e/login.spec.ts"]
+    assert tests[0].target == "login"
 
 
 def test_requires_deployment_step_from_design_acceptance_criteria(tmp_path):

@@ -149,6 +149,58 @@ def test_emit_verify_summary_true_pass_still_counts_as_pass():
     assert "verified nothing" not in output
 
 
+def test_emit_verify_summary_vacuous_and_warn_not_double_counted():
+    """P1 double-count: a result that is BOTH vacuous (checked_count==0) AND an
+    amber-with-findings WARN (severity=amber + warnings) must appear ONLY in the
+    WARN tally / per-row, never also in the 'verified nothing (vacuous)' list.
+
+    The count logic (dag_vacuous) already excludes ``_dag_pass_is_warn`` results,
+    but the displayed vacuous list (``vacuous_pass_results``) did not apply the
+    same filter — so the same check was counted as WARN *and* listed as vacuous.
+    """
+    output = _summary_output_for(
+        [
+            _check(
+                check_name="depends_on_consistency",
+                passed=True,
+                severity="amber",
+                status="pass",
+                checked_count=0,
+                warnings=["WARN: produced values but none on a depends_on edge (vacuous)"],
+            )
+        ]
+    )
+
+    summary_line = output.split("DAG checks: ")[1].splitlines()[0]
+    # It is a WARN, not a VACUOUS, in the tally (count side was already correct).
+    assert "1 WARN (amber)" in summary_line
+    assert "0 VACUOUS" in summary_line
+    # And it must NOT be named in the vacuous list (the display side, the bug).
+    assert "verified nothing (vacuous)" not in output
+
+
+def test_emit_verify_summary_pure_vacuous_still_listed():
+    """Regression: a vacuous pass that is NOT a WARN (red severity, no findings)
+    still appears in the vacuous list — the P1 filter must only drop the
+    overlap, not silence genuine vacuous passes."""
+    output = _summary_output_for(
+        [
+            _check(
+                check_name="ui_coherence_for_one_to_many",
+                passed=True,
+                severity="red",
+                status="pass",
+                checked_count=0,
+            )
+        ]
+    )
+
+    summary_line = output.split("DAG checks: ")[1].splitlines()[0]
+    assert "1 VACUOUS" in summary_line
+    assert "verified nothing (vacuous)" in output
+    assert "ui_coherence_for_one_to_many" in output
+
+
 def test_verify_help_no_pro_gate_message():
     """codd verify --help does not reference the legacy Pro package."""
     runner = CliRunner()

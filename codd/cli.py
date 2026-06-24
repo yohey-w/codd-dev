@@ -769,7 +769,10 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
     # result without checked_count is never flagged, so nothing is shown.
     from codd.dag.materiality import vacuous_pass_results
 
-    vacuous = vacuous_pass_results(dag_results)
+    # Exclude amber-with-findings passes: those already render as WARN (per-row and
+    # in the counts), so listing them here too would double-count — same filter the
+    # other two verify summaries apply.
+    vacuous = [r for r in vacuous_pass_results(dag_results) if not _dag_pass_is_warn(r)]
     payload["dag_vacuous"] = [_dag_result_name(result) for result in vacuous]
     if vacuous:
         _line(
@@ -7951,9 +7954,16 @@ def _emit_verify_summary(result: _CliVerificationResult) -> None:
     )
     if dag_skip:
         click.echo(f"  {dag_skip} check(s) SKIP — verified nothing (dormant / unconfigured)")
-    vacuous = vacuous_pass_results(
-        [item for item in check_results if not _summary_skipped(item)]
-    )
+    vacuous = [
+        item
+        for item in vacuous_pass_results(
+            [item for item in check_results if not _summary_skipped(item)]
+        )
+        # A vacuous pass that is ALSO an amber-with-findings WARN is already
+        # counted/shown as WARN (matching the dag_vacuous tally, which excludes
+        # _dag_pass_is_warn) — exclude it here so it is not double-listed.
+        if not _dag_pass_is_warn(item)
+    ]
     if vacuous:
         click.echo(
             f"  {len(vacuous)} check(s) PASS but verified nothing (vacuous): "
@@ -8613,7 +8623,15 @@ def dag_verify(
             )
         from codd.dag.materiality import vacuous_pass_results
 
-        vacuous = vacuous_pass_results(results)
+        # A vacuous pass that is ALSO an amber-with-findings WARN is already
+        # rendered as WARN (per-row above + the amber WARN summary line) — drop
+        # it from the vacuous list so it is not double-listed (same
+        # _dag_pass_is_warn exclusion the per-row status uses).
+        vacuous = [
+            result
+            for result in vacuous_pass_results(results)
+            if not _dag_pass_is_warn(result)
+        ]
         if vacuous:
             click.echo(
                 f"\n{len(vacuous)} check(s) PASS but verified nothing (vacuous): "

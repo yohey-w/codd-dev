@@ -689,3 +689,78 @@ def test_render_adopt_smoke():
         {"artifact_contract": {"enabled": True, "stages": {"plan": ["requirements"]}}},
     )
     assert "No changes" in render_adopt(no_change)
+
+
+# ---------------------------------------------------------------------------
+# Path-escape hardening — required artifacts via in-root symlink to off-root
+# ---------------------------------------------------------------------------
+def test_verify_required_artifact_rejects_in_root_symlink_escape(tmp_path):
+    """false-green guard: a required artifact must NOT be satisfied by an in-root
+    file that is a symlink whose *target* lives outside the project root. The
+    symlink entry is in-root, but its resolved target escapes — accepting it lets
+    the validator stat/read an off-root file and report PASS (path-escape
+    false-green). The expected artifact must stay ``missing``."""
+
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    outside = tmp_path / "outside" / "main.py"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("print('out')\n", encoding="utf-8")
+    # In-root symlink `src/main.py` -> /outside/main.py (escapes the root).
+    (root / "src" / "main.py").symlink_to(outside)
+
+    catalog = _tiny_catalog()
+    contract = load_contract(
+        {"artifact_contract": {"enabled": True, "stages": {"implement": ["source"]}}}
+    )
+    report = verify_contract(catalog, contract, root)
+
+    assert report.has_failures is True
+    assert report.stages[0].checks[0].status == "missing"
+    assert report.stages[0].checks[0].matched_paths == ()
+
+
+def test_verify_required_design_doc_rejects_symlink_escape(tmp_path):
+    """false-green guard (validator path): a required design doc satisfied only by
+    an in-root symlink whose target (with valid frontmatter) lives outside the
+    root must NOT pass. Before the jail the frontmatter validator followed the
+    link off-root and returned PASS."""
+
+    root = tmp_path / "project"
+    (root / "docs" / "design").mkdir(parents=True)
+    outside = tmp_path / "outside" / "spec.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("---\nnode_id: x\n---\n# Body\n", encoding="utf-8")
+    # In-root symlink `docs/design/spec.md` -> /outside/spec.md (escapes root).
+    (root / "docs" / "design" / "spec.md").symlink_to(outside)
+
+    catalog = _tiny_catalog()
+    contract = load_contract(
+        {"artifact_contract": {"enabled": True, "stages": {"design": ["design_spec"]}}}
+    )
+    report = verify_contract(catalog, contract, root)
+
+    assert report.has_failures is True
+    assert report.stages[0].checks[0].status == "missing"
+
+
+def test_verify_required_artifact_in_root_symlink_still_passes(tmp_path):
+    """anti-false-red: a required artifact satisfied by an in-root symlink whose
+    target ALSO stays inside the root must keep passing. A legitimate in-root
+    symlink is a real artifact and must not regress to ``missing``."""
+
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    real = root / "src" / "real.py"
+    real.write_text("print('ok')\n", encoding="utf-8")
+    # In-root symlink `src/main.py` -> in-root `src/real.py`.
+    (root / "src" / "main.py").symlink_to(real)
+
+    catalog = _tiny_catalog()
+    contract = load_contract(
+        {"artifact_contract": {"enabled": True, "stages": {"implement": ["source"]}}}
+    )
+    report = verify_contract(catalog, contract, root)
+
+    assert report.passed is True
+    assert report.stages[0].checks[0].status == "pass"

@@ -386,6 +386,7 @@ def _glob_to_caseless_regex(pattern: str) -> re.Pattern[str]:
 def _match_paths(project_root: Path, globs: tuple[str, ...]) -> list[Path]:
     matched: list[Path] = []
     seen: set[Path] = set()
+    root_resolved = project_root.resolve()
 
     def _add(path: Path) -> None:
         # Dedup by resolved path so the case-sensitive and caseless passes never
@@ -394,6 +395,16 @@ def _match_paths(project_root: Path, globs: tuple[str, ...]) -> list[Path]:
             key = path.resolve()
         except OSError:
             key = path
+        # Symlink-aware root-jail: ``glob``/``rglob`` enumerate an in-root symlink
+        # entry even when its target escapes the project root. Reject any match
+        # whose resolved target leaves the root so a required artifact cannot be
+        # satisfied (and its validator made to stat/read off-root) through an
+        # in-root symlink. In-root paths (incl. legitimate in-root symlinks) are
+        # unaffected.
+        try:
+            key.relative_to(root_resolved)
+        except ValueError:
+            return
         if key in seen:
             return
         seen.add(key)

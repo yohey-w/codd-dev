@@ -714,3 +714,145 @@ def test_absolute_hint_outside_root_rejected_even_when_target_exists(tmp_path):
     absolute_outside = (outside / "service.py").as_posix()
 
     assert implementation_module._fs_fallback_match(absolute_outside, root) is False
+
+
+# --- symlink-resolve escape root-jail (path traversal hardening) --------------
+
+
+def _symlink_into(root: Path, link_rel: str, real_target: Path) -> Path:
+    """Create an in-root symlink at ``link_rel`` whose target lives anywhere on
+    disk (typically outside ``root``). Returns the link path."""
+
+    link = root / link_rel
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(real_target)
+    return link
+
+
+def test_config_file_hint_does_not_match_via_in_root_symlink_escape(tmp_path):
+    """false-green guard (config_file branch): an in-root path_hint that names a
+    symlink whose *target* lives outside the project root must NOT satisfy the
+    expected config_file. The symlink entry is in-root, but its resolved target
+    escapes — that is a path-escape false-green."""
+
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "outside.yaml"
+    _write(outside, "secret: true\n")
+    # In-root symlink `config/app.yaml` -> /outside.yaml (escapes the root).
+    _symlink_into(root, "config/app.yaml", outside)
+
+    dag = DAG()
+    dag.add_node(_expected_doc("config_file", "config/app.yaml"))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is False
+    assert result.violations[0]["type"] == "missing_implementation"
+    assert result.violations[0]["path_hint"] == "config/app.yaml"
+
+
+def test_config_file_hint_in_root_symlink_still_matches(tmp_path):
+    """anti-false-red (config_file branch): an in-root path_hint naming a symlink
+    whose target also stays inside the root must keep matching (a normal in-root
+    symlink is legitimate and must not regress to RED)."""
+
+    root = tmp_path / "project"
+    real = root / "config" / "real.yaml"
+    _write(real, "ok: true\n")
+    # In-root symlink `config/app.yaml` -> in-root `config/real.yaml`.
+    _symlink_into(root, "config/app.yaml", real)
+
+    dag = DAG()
+    dag.add_node(_expected_doc("config_file", "config/app.yaml"))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is True
+    assert result.violations == []
+
+
+def test_glob_hint_does_not_match_via_in_root_symlink_escape(tmp_path):
+    """false-green guard (glob FS fallback / _project_files): a glob path_hint
+    must not be satisfied by an in-root symlink whose target escapes the root.
+    Before the jail, ``_project_files`` enumerated the in-root symlink entry and
+    fnmatch matched it (the validator then followed the link off-root)."""
+
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "outside" / "spoof.py"
+    _write(outside, "print('out')\n")
+    # In-root symlink `src/spoof.py` -> /outside/spoof.py (escapes the root).
+    _symlink_into(root, "src/spoof.py", outside)
+
+    dag = DAG()
+    dag.add_node(_expected_doc("impl_file", "src/*.py"))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is False
+    assert result.violations[0]["type"] == "missing_implementation"
+
+
+def test_glob_hint_in_root_symlink_still_matches(tmp_path):
+    """anti-false-red (glob FS fallback / _project_files): an in-root symlink
+    whose target is also in-root must keep being globbable — a legitimate in-root
+    symlink must not regress to RED."""
+
+    root = tmp_path / "project"
+    real = root / "src" / "real.py"
+    _write(real, "print('ok')\n")
+    # In-root symlink `src/alias.py` -> in-root `src/real.py`.
+    _symlink_into(root, "src/alias.py", real)
+
+    dag = DAG()
+    dag.add_node(_expected_doc("impl_file", "src/alias.py"))
+
+    result = ImplementationCoverageCheck().run(dag, root, {})
+
+    assert result.passed is True
+    assert result.violations == []
+
+
+def test_project_files_excludes_symlink_escaping_root(tmp_path):
+    """Unit-level guard on ``_project_files``: an in-root symlink whose resolved
+    target escapes the root is NOT enumerated, while an in-root symlink whose
+    target stays inside the root IS enumerated (regression)."""
+
+    implementation_module._project_files.cache_clear()
+
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "outside" / "spoof.py"
+    _write(outside, "print('out')\n")
+    real = root / "src" / "real.py"
+    _write(real, "print('ok')\n")
+    _symlink_into(root, "src/escape.py", outside)
+    _symlink_into(root, "src/alias.py", real)
+
+    files = implementation_module._project_files(root)
+
+    assert "src/escape.py" not in files  # escaping symlink dropped
+    assert "src/alias.py" in files  # in-root symlink kept
+    assert "src/real.py" in files  # regular file kept
+
+
+def test_fs_glob_match_unit_rejects_symlink_escape(tmp_path):
+    """Unit-level guard on ``_fs_glob_match`` (glob-only FS lookup): a glob that
+    would only match an escaping in-root symlink is rejected; an in-root real
+    file still matches its glob (regression). Non-glob hints are out of scope for
+    this helper, so both probes use glob patterns."""
+
+    implementation_module._project_files.cache_clear()
+
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "outside" / "spoof.py"
+    _write(outside, "print('out')\n")
+    _symlink_into(root, "escape/spoof.py", outside)
+    _write(root / "real" / "inside.py", "print('in')\n")
+
+    # Glob that resolves only to the escaping symlink -> reject.
+    assert implementation_module._fs_glob_match("escape/*.py", root) is False
+    # Glob that resolves to an in-root real file -> accept (regression).
+    assert implementation_module._fs_glob_match("real/*.py", root) is True

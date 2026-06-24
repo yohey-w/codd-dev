@@ -377,6 +377,34 @@ def test_verify_summary_flags_vacuous_pass(tmp_path, monkeypatch):
     assert "verified nothing (vacuous)" in result.output
 
 
+def test_verify_summary_vacuous_and_warn_not_double_listed(tmp_path, monkeypatch):
+    # P1 double-count: a check that is BOTH a WARN (amber + findings) AND vacuous
+    # (checked_count==0) is already rendered as WARN per-row. It must NOT also be
+    # named in the 'verified nothing (vacuous)' list — the displayed vacuous list
+    # must apply the same _dag_pass_is_warn exclusion the WARN tally uses.
+    _patch_results(
+        monkeypatch,
+        [
+            _CheckResult(
+                "transitive_closure",
+                severity="amber",
+                status="pass",
+                checked_count=0,
+                unreachable_nodes=["src/orphan.ts"],
+            )
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["dag", "verify", "--project-path", str(tmp_path)])
+
+    assert result.exit_code == 0
+    # Surfaced as a WARN (amber advisory), not hidden.
+    assert "WARN  transitive_closure" in result.output
+    assert "WARN (severity=amber, deploy allowed)" in result.output
+    # But NOT also double-counted in the vacuous list.
+    assert "verified nothing (vacuous)" not in result.output
+
+
 def test_verify_json_stdout_stays_parseable_with_notice(tmp_path, monkeypatch):
     _write_pinned_project(tmp_path)
     _patch_results(monkeypatch, [_CheckResult("node_completeness")])

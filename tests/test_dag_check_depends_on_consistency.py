@@ -305,3 +305,46 @@ def test_real_comparison_fail_unchanged_with_checked_count(tmp_path):
     assert result.severity == "red"
     assert result.skipped is False
     assert result.checked_count == 1
+
+
+def test_violation_result_status_is_fail_not_default_pass(tmp_path):
+    """P0 JSON false-green: a real comparison that finds violations must set
+    status='fail'. The default ``status='pass'`` leaked through to ``--format
+    json`` (which serialises the raw ``status``) so a CI reading ``status`` saw
+    green next to ``severity:red`` + ``violations:[...]``. ``passed`` and the
+    text path were already correct; only the JSON-facing ``status`` was wrong."""
+    from codd.cli import _dag_result_to_dict
+
+    result = _run(
+        tmp_path,
+        {
+            "values": [
+                {"node_id": "docs/design/ux.md", "value_type": "url", "name": "dashboard", "value": "/tenant/dashboard"},
+                {"node_id": "docs/design/api.md", "value_type": "url", "name": "dashboard", "value": "/tenant-admin"},
+            ]
+        },
+    )
+
+    assert result.passed is False
+    assert result.violations
+    assert result.status == "fail"
+    # The JSON consumers (CI) read the serialised status — it must agree.
+    assert _dag_result_to_dict(result)["status"] == "fail"
+
+
+def test_real_comparison_pass_status_is_pass(tmp_path):
+    """Regression for the P0 fix: a real comparison with NO violations keeps
+    status='pass' (the fix must not flip a genuine pass to fail)."""
+    result = _run(
+        tmp_path,
+        {
+            "values": [
+                {"node_id": "docs/design/ux.md", "value_type": "url", "name": "dashboard", "value": "/tenant/dashboard"},
+                {"node_id": "docs/design/api.md", "value_type": "url", "name": "dashboard", "value": "/tenant/dashboard"},
+            ]
+        },
+    )
+
+    assert result.passed is True
+    assert result.violations == []
+    assert result.status == "pass"

@@ -10,6 +10,7 @@ from typing import Any, Iterable
 import yaml
 
 from codd.config import find_codd_dir, load_project_config
+from codd.dag.metadata_access import collect_structured_entries
 from codd.deployment import (
     EDGE_EXECUTES_IN_ORDER,
     EDGE_PRODUCES_STATE,
@@ -1006,19 +1007,35 @@ def _design_doc_source_id(key: Any, metadata: dict[str, Any]) -> str:
 
 
 def _design_doc_user_journey_entries(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect ``user_journeys`` from all three frontmatter positions.
+
+    Previously only ``attributes["user_journeys"]`` (the extractor's lifted
+    top-level copy) and ``frontmatter["user_journeys"]`` were read. A journey
+    authored under the canonical ``frontmatter.codd.user_journeys`` block (the
+    position the generator emits) is never lifted into ``attributes`` and is not
+    a top-level frontmatter key, so it produced NO ``verification:cdp_browser``
+    node — a dormant declaration.
+
+    :func:`codd.dag.metadata_access.collect_structured_entries` reads the union
+    of ``attrs[key]`` + ``attrs["frontmatter"][key]`` + ``attrs["frontmatter"]
+    ["codd"][key]`` with the proven top-level de-dup (the raw top-level
+    frontmatter copy is read only when the lifted copy is absent, so a top-level
+    journey is not counted twice; the ``frontmatter.codd`` copy is always read).
+
+    Build a view that places the lifted copy at the top level (``user_journeys``)
+    and forwards the raw ``frontmatter`` so the shared helper handles both the
+    builder-supplied metadata (which has ``attributes``) and the
+    :func:`_load_design_doc_records` shape (frontmatter-only).
+    """
+
+    view: dict[str, Any] = {}
     attributes = metadata.get("attributes")
     if isinstance(attributes, dict):
-        journeys = attributes.get("user_journeys")
-        if isinstance(journeys, list):
-            return [journey for journey in journeys if isinstance(journey, dict)]
-
+        view["user_journeys"] = attributes.get("user_journeys")
     frontmatter = metadata.get("frontmatter")
     if isinstance(frontmatter, dict):
-        journeys = frontmatter.get("user_journeys")
-        if isinstance(journeys, list):
-            return [journey for journey in journeys if isinstance(journey, dict)]
-
-    return []
+        view["frontmatter"] = frontmatter
+    return collect_structured_entries(view, "user_journeys")
 
 
 def _journey_name(journey: dict[str, Any]) -> str | None:
@@ -1182,7 +1199,30 @@ def _glob_paths(project_root: Path, patterns: Iterable[str]) -> list[Path]:
     paths: list[Path] = []
     for pattern in patterns:
         paths.extend(project_root.glob(pattern))
-    return _dedupe_paths(paths)
+    return _jail_paths(project_root, _dedupe_paths(paths))
+
+
+def _jail_paths(project_root: Path, paths: Iterable[Path]) -> list[Path]:
+    """Drop globbed paths whose resolved location escapes ``project_root``.
+
+    ``_dedupe_paths`` resolves each match, which *follows symlinks*. A matched
+    ``tests/e2e/*.spec.ts`` that is a symlink to a file outside the project tree
+    would otherwise resolve to its out-of-root target, get synthesized into a
+    ``verification:e2e:/abs/outside`` node, and have the external file read
+    (path-escape leak). Jail the resolved (symlink-followed) path to the root —
+    same approach as the builder's :func:`codd.dag.builder._jailed_project_path`.
+    An in-root match is unchanged.
+    """
+    root = Path(project_root).resolve()
+    jailed: list[Path] = []
+    for path in paths:
+        resolved = Path(path).resolve()
+        try:
+            resolved.relative_to(root)
+        except (ValueError, OSError):
+            continue
+        jailed.append(resolved)
+    return jailed
 
 
 def _existing_files(paths: Iterable[Path]) -> list[Path]:
