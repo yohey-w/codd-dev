@@ -42,12 +42,34 @@ def test_task_completion_registered(monkeypatch):
     assert dag_checks.get_registry()["task_completion"] is module.TaskCompletionCheck
 
 
-def test_no_plan_tasks_pass(tmp_path):
+def test_no_plan_tasks_pass_is_vacuous_checked_count_zero(tmp_path):
+    # No plan tasks → completion_rate defaults to 1.0 and the check passes having
+    # verified nothing. checked_count==0 lets the materiality overlay flag the
+    # vacuous pass instead of it reading as a verified clean run (false-green).
+    from codd.dag.materiality import is_vacuous_pass
+
     result = _run(DAG(), tmp_path)
 
     assert result.passed is True
     assert result.total_tasks == 0
     assert result.completion_rate == 1.0
+    assert result.checked_count == 0
+    assert is_vacuous_pass(result) is True
+
+
+def test_all_outputs_exist_pass_is_not_vacuous(tmp_path):
+    # A real verification evaluates each plan task, so checked_count is non-zero
+    # and the pass is materially distinct from the empty (vacuous) case.
+    from codd.dag.materiality import is_vacuous_pass
+
+    dag, task_id = _dag_with_plan_task()
+    _add_output(dag, task_id, "src/feature.py", project_root=tmp_path)
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is True
+    assert result.checked_count == 1
+    assert is_vacuous_pass(result) is False
 
 
 def test_all_outputs_exist_pass(tmp_path):

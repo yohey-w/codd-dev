@@ -151,14 +151,29 @@ def _violation(result, violation_type: str) -> dict:
 
 
 def test_user_journeys_undeclared_design_doc_skips_gracefully(tmp_path):
+    # No user_journeys and no actors = C7 has no input to verify. It must report a
+    # real SKIP (status/skipped), not a clean PASS that a verify summary cannot
+    # distinguish from a real verification (false-green).
     dag = DAG()
     dag.add_node(Node(id="docs/design/auth.md", kind="design_doc", attributes={}))
 
     result = _run(dag, tmp_path)
 
     assert result.passed is True
-    assert result.status == "pass"
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
     assert "SKIP" in result.message
+
+
+def test_declared_journey_reports_checked_count(tmp_path):
+    # A declared journey is actually verified, so checked_count is non-zero — the
+    # verdict is materially distinct from the no-input (skip) case above, whether
+    # the journey ultimately passes or fails.
+    result = _run(_dag(plan_outputs=["lexicon:e2e_login_journey"], runtime_caps=[]), tmp_path)
+
+    assert result.skipped is False
+    assert result.checked_count >= 1
 
 
 def test_actor_without_any_user_journey_is_amber_warning(tmp_path):

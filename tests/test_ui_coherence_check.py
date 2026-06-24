@@ -106,12 +106,18 @@ def test_t04_ignore_relations_config_suppresses_warning():
     assert result.ignored_relations == 1
 
 
-def test_t05_no_one_to_many_relations_is_noop_pass():
+def test_t05_no_one_to_many_relations_skips_not_vacuous_pass():
+    # No one-to-many relation = no master-detail obligation to verify. The check
+    # must SKIP (checked nothing on purpose), not emit a clean PASS over 0 relations
+    # that a verify summary cannot tell apart from a real verification (false-green).
     result = _run(_dag(_design("docs/design/ux_design.md", "plain UI design")))
 
     assert result.one_to_many_relations_total == 0
     assert result.relations_missing_master_detail == []
     assert result.passed is True
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
 
 
 def test_t06_db_table_relation_with_drilldown_ui_passes():

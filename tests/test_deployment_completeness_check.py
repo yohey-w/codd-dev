@@ -94,7 +94,10 @@ def test_deployment_completeness_registered():
     assert deployment_module.DeploymentCompletenessCheck is get_registry()["deployment_completeness"]
 
 
-def test_no_deployment_doc_or_edges_is_backward_compatible(tmp_path):
+def test_no_deployment_doc_or_edges_skips_not_vacuous_pass(tmp_path):
+    # No deployment_doc and no deploy edges = the C6 chain is not declared. The
+    # check must SKIP (verified nothing on purpose), not emit a clean PASS that a
+    # verify summary cannot distinguish from a real verification (false-green).
     dag = DAG()
     dag.add_node(Node(id="docs/design/api.md", kind="design_doc"))
 
@@ -102,6 +105,20 @@ def test_no_deployment_doc_or_edges_is_backward_compatible(tmp_path):
 
     assert result.passed is True
     assert result.violations == []
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
+
+
+def test_complete_chain_reports_checked_count(tmp_path):
+    # A real verification walks the declared chain — checked_count is non-zero so
+    # the pass is materially distinct from the vacuous (skip) case above.
+    result = _run(_complete_seed_dag(), tmp_path)
+
+    assert result.passed is True
+    assert result.skipped is False
+    assert result.status == "pass"
+    assert result.checked_count >= 1
 
 
 def test_complete_chain_passes(tmp_path):
@@ -296,13 +313,15 @@ def test_expected_chain_marks_broken_stage(tmp_path):
 
 
 def test_dag_verify_cli_runs_deployment_completeness_check(tmp_path):
+    # An empty project declares no deploy chain, so the check SKIPs (verified
+    # nothing) instead of rendering a clean PASS over zero design docs.
     result = CliRunner().invoke(
         main,
         ["dag", "verify", "--project-path", str(tmp_path), "--check", "deployment_completeness"],
     )
 
     assert result.exit_code == 0
-    assert "PASS  deployment_completeness [red]" in result.output
+    assert "SKIP  deployment_completeness [red]" in result.output
 
 
 def test_design_acceptance_criteria_can_supply_required_steps(tmp_path):

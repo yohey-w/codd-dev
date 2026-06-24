@@ -397,8 +397,8 @@ def _add_tested_by_edges(
 
 
 def _add_plan_tasks(dag: DAG, project_root: Path, settings: dict[str, Any]) -> None:
-    plan_path = _project_path(project_root, str(settings.get("plan_task_file", "")))
-    if not plan_path.is_file():
+    plan_path = _jailed_project_path(project_root, str(settings.get("plan_task_file", "")))
+    if plan_path is None or not plan_path.is_file():
         return
 
     content = plan_path.read_text(encoding="utf-8", errors="ignore")
@@ -440,8 +440,8 @@ def _add_expected_nodes(
     settings: dict[str, Any],
     impl_nodes: dict[str, Path],
 ) -> None:
-    lexicon_path = _project_path(project_root, str(settings.get("lexicon_file", "project_lexicon.yaml")))
-    if not lexicon_path.is_file():
+    lexicon_path = _jailed_project_path(project_root, str(settings.get("lexicon_file", "project_lexicon.yaml")))
+    if lexicon_path is None or not lexicon_path.is_file():
         return
 
     payload = yaml.safe_load(lexicon_path.read_text(encoding="utf-8")) or {}
@@ -738,8 +738,8 @@ def _add_deployment_graph(
 
 
 def _attach_coverage_axes(dag: DAG, project_root: Path, settings: dict[str, Any]) -> None:
-    lexicon_path = _project_path(project_root, str(settings.get("lexicon_file", "project_lexicon.yaml")))
-    axes = extract_coverage_axes_from_lexicon(lexicon_path)
+    lexicon_path = _jailed_project_path(project_root, str(settings.get("lexicon_file", "project_lexicon.yaml")))
+    axes = extract_coverage_axes_from_lexicon(lexicon_path) if lexicon_path is not None else []
     for node in sorted(dag.nodes.values(), key=lambda item: item.id):
         if node.kind == "design_doc":
             axes.extend(extract_coverage_axes_from_design_doc(node))
@@ -1621,6 +1621,24 @@ def _project_path(project_root: Path, path_text: str) -> Path:
     if path.is_absolute():
         return path.resolve()
     return (project_root / path).resolve()
+
+
+def _jailed_project_path(project_root: Path, path_text: str) -> Path | None:
+    """Resolve a config path, returning ``None`` when it escapes the project root.
+
+    Use at *read* sites (the path is handed to ``read_text``): an absolute config
+    path pointing outside the project must not leak file contents. ID-resolution
+    sites keep using :func:`_project_path` directly — they only compute a relative
+    id and fail to match, never read.
+    """
+    if not str(path_text).strip():
+        return None
+    resolved = _project_path(project_root, path_text)
+    try:
+        resolved.relative_to(project_root.resolve())
+    except (ValueError, OSError):
+        return None
+    return resolved
 
 
 def _normalize_output_path(path_text: str) -> str:

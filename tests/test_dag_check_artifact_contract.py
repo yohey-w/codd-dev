@@ -53,6 +53,36 @@ def test_pass_when_required_artifacts_present(tmp_path):
     assert result.violations == []
 
 
+def test_active_pass_exposes_checked_count_and_is_not_vacuous(tmp_path):
+    # An active contract PASS reports how many stages it verified. checked_count is
+    # non-zero (an active contract always declares >=1 stage), so the materiality
+    # overlay does not flag it — and a hypothetical 0-stage report would be caught.
+    from codd.dag.materiality import is_vacuous_pass
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    config = {
+        "artifact_contract": {
+            "enabled": True,
+            "stages": {"implement": ["source"]},
+        }
+    }
+    result = _run(tmp_path, config)
+    assert result.checked_count == 1
+    assert is_vacuous_pass(result) is False
+
+
+def test_dormant_skip_is_not_vacuous(tmp_path):
+    # The opt-out (disabled) path reports skip; a skip is never a vacuous pass, so
+    # an unconfigured project is not flagged by the materiality overlay.
+    from codd.dag.materiality import is_vacuous_pass
+
+    result = _run(tmp_path, {"artifact_contract": {"enabled": False}})
+    assert result.skipped is True
+    assert result.checked_count == 0
+    assert is_vacuous_pass(result) is False
+
+
 def test_missing_artifact_is_amber_by_default(tmp_path):
     """Default severity is amber (advisory): deploy allowed, finding reported."""
     config = {

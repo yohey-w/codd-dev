@@ -70,7 +70,10 @@ def _run(dag: DAG, root: Path | None = None):
     return EnvironmentCoverageCheck().run(dag, root or Path.cwd(), {})
 
 
-def test_no_declared_axes_passes(tmp_path: Path):
+def test_no_declared_axes_skips_not_vacuous_pass(tmp_path: Path):
+    # No coverage axes = no environment matrix to verify. The check must SKIP
+    # (verified nothing on purpose), not emit a clean PASS over 0 axes that a
+    # verify summary cannot distinguish from a real verification (false-green).
     dag = DAG()
 
     result = _run(dag, tmp_path)
@@ -78,6 +81,17 @@ def test_no_declared_axes_passes(tmp_path: Path):
     assert result.passed is True
     assert result.severity == "info"
     assert result.block_deploy is True
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
+
+
+def test_declared_axis_reports_checked_count(tmp_path: Path):
+    # A real run evaluates each axis variant — checked_count is non-zero so the
+    # verdict is materially distinct from the vacuous (skip) case.
+    result = _run(_dag_with_axis(), tmp_path)
+
+    assert result.checked_count == 1
 
 
 def test_missing_test_for_critical_variant_is_red(tmp_path: Path):
@@ -271,13 +285,15 @@ def test_run_checks_recognizes_environment_coverage(tmp_path: Path):
 
 
 def test_dag_verify_environment_coverage_check_runs_gracefully(tmp_path: Path):
+    # An empty project declares no coverage axes, so the check SKIPs (verified
+    # nothing) rather than rendering a clean PASS over zero axes.
     result = CliRunner().invoke(
         main,
         ["dag", "verify", "--project-path", str(tmp_path), "--check", "environment_coverage"],
     )
 
     assert result.exit_code == 0
-    assert "PASS  environment_coverage" in result.output
+    assert "SKIP  environment_coverage" in result.output
 
 
 def test_builder_attaches_lexicon_axes(tmp_path: Path):

@@ -42,9 +42,17 @@ class DeploymentChainViolation:
 class DeploymentCompletenessResult:
     check_name: str = "deployment_completeness"
     severity: str = "red"
+    status: str = "pass"
+    message: str = ""
     block_deploy: bool = True
     violations: list[DeploymentChainViolation] = field(default_factory=list)
     passed: bool = True
+    skipped: bool = False
+    # design_doc deploy chains actually walked. No deployment signal at all
+    # (no deployment_doc and no deploy edges) means the C6 chain is not declared
+    # for this project, so the check reports skip rather than a clean PASS that
+    # verified nothing.
+    checked_count: int = 0
 
 
 @register_dag_check("deployment_completeness")
@@ -86,17 +94,25 @@ class DeploymentCompletenessCheck:
             self.settings = codd_config
 
         if not self._has_deployment_signal(target_dag):
-            return DeploymentCompletenessResult()
+            return DeploymentCompletenessResult(
+                status="skip",
+                skipped=True,
+                message=(
+                    "deployment_completeness skipped: no deployment_doc or deploy edges "
+                    "(C6 deploy chain not declared)"
+                ),
+            )
 
         violations: list[DeploymentChainViolation] = []
-        for node in sorted(target_dag.nodes.values(), key=lambda item: item.id):
-            if node.kind != "design_doc":
-                continue
+        design_docs = [node for node in sorted(target_dag.nodes.values(), key=lambda item: item.id) if node.kind == "design_doc"]
+        for node in design_docs:
             violations.extend(self._check_design_doc(target_dag, node))
 
         return DeploymentCompletenessResult(
+            status="fail" if violations else "pass",
             violations=violations,
             passed=not violations,
+            checked_count=len(design_docs),
         )
 
     def _check_design_doc(self, dag: DAG, design_doc_node: Node) -> list[DeploymentChainViolation]:

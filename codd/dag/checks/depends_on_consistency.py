@@ -168,10 +168,20 @@ def _find_propagation_output(project_root: Path, settings: dict[str, Any] | None
         ]
     )
 
+    try:
+        root_anchor = Path(project_root).resolve()
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        root_anchor = Path(project_root)
     for candidate in candidates:
         path = Path(candidate).expanduser()
         if not path.is_absolute():
             path = project_root / path
+        # Root-jail: a configured propagation_output_path may be absolute; never
+        # read one resolving outside the project root (path-escape leak).
+        try:
+            path.resolve().relative_to(root_anchor)
+        except (ValueError, OSError):
+            continue
         if path.is_file():
             return path
     return None

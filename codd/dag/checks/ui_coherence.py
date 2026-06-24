@@ -29,7 +29,8 @@ class UiCoherenceResult:
     message: str = ""
     block_deploy: bool = False
     passed: bool = True
-    checked_count: int = 0  # one-to-many relations actually verified; 0 on a pass = vacuous
+    skipped: bool = False
+    checked_count: int = 0  # one-to-many relations actually verified; 0 ⇒ skip (no applicable input)
     one_to_many_relations_total: int = 0
     relations_with_master_detail_ui: int = 0
     relations_missing_master_detail: list[dict[str, Any]] = field(default_factory=list)
@@ -65,6 +66,18 @@ class UiCoherenceCheck(DagCheck):
         root = self.project_root
         config = codd_config if codd_config is not None else self.settings
         relations = detect_one_to_many_relations(target_dag, root)
+        if not relations:
+            # No one-to-many data shape exists, so there is no master-detail UI
+            # obligation to verify. Report skip (not a clean PASS) so a verify
+            # summary does not read "ran and verified" when nothing was applicable.
+            return UiCoherenceResult(
+                status="skip",
+                skipped=True,
+                message="ui_coherence_for_one_to_many skipped: no one-to-many relations detected",
+                checked_count=0,
+                one_to_many_relations_total=0,
+                passed=True,
+            )
         missing: list[dict[str, Any]] = []
         covered = 0
         ignored = 0

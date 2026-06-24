@@ -136,14 +136,18 @@ def test_user_journey_coherence_check_is_registered():
     assert get_registry()["user_journey_coherence"] is UserJourneyCoherenceCheck
 
 
-def test_user_journey_coherence_without_declared_journeys_returns_skip_pass():
+def test_user_journey_coherence_without_declared_journeys_returns_skip():
+    # No journeys and no actors = no input to verify → real SKIP (status/skipped),
+    # not a clean PASS over nothing (false-green).
     dag = DAG()
     dag.add_node(Node(id="docs/design/auth.md", kind="design_doc", attributes={}))
 
     result = UserJourneyCoherenceCheck().run(dag)
 
     assert result.passed is True
-    assert result.status == "pass"
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
     assert "SKIP" in result.message
 
 
@@ -196,13 +200,15 @@ def test_codd_yaml_coherence_capability_patterns_default_to_empty_dict(tmp_path)
 
 
 def test_dag_verify_user_journey_coherence_check_runs_gracefully(tmp_path):
+    # An empty project declares no actors/journeys, so the check SKIPs (verified
+    # nothing) rather than rendering a clean PASS over nothing.
     result = CliRunner().invoke(
         main,
         ["dag", "verify", "--project-path", str(tmp_path), "--check", "user_journey_coherence"],
     )
 
     assert result.exit_code == 0
-    assert "PASS  user_journey_coherence" in result.output
+    assert "SKIP  user_journey_coherence" in result.output
 
 
 def test_default_dag_verify_keeps_existing_checks_and_adds_user_journey_coherence(tmp_path):

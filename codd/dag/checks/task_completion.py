@@ -20,10 +20,18 @@ class IncompleteTask:
 class TaskCompletionResult:
     check_name: str = "task_completion"
     severity: str = "red"
+    # ``status`` is what the materiality overlay keys off (pass-family status with
+    # checked_count==0 ⇒ vacuous). Without it a zero-task pass cannot be surfaced.
+    status: str = "pass"
     incomplete_tasks: list[IncompleteTask] = field(default_factory=list)
     total_tasks: int = 0
     completed_tasks: int = 0
     completion_rate: float = 1.0
+    # Plan tasks actually evaluated. With zero plan tasks the completion_rate
+    # defaults to 1.0 and the check passes having verified nothing; exposing
+    # checked_count==0 lets the materiality overlay flag that vacuous pass instead
+    # of letting "no tasks" masquerade as a verified clean run.
+    checked_count: int = 0
     passed: bool = True
 
 
@@ -101,12 +109,15 @@ class TaskCompletionCheck:
         completion_rate = completed / total if total else 1.0
         threshold = self._threshold(active_settings)
 
+        passed = completion_rate >= threshold
         return TaskCompletionResult(
+            status="pass" if passed else "fail",
             incomplete_tasks=incomplete,
             total_tasks=total,
             completed_tasks=completed,
             completion_rate=completion_rate,
-            passed=completion_rate >= threshold,
+            checked_count=total,
+            passed=passed,
         )
 
     def _project_root(self, project_root: str | Path | None) -> Path | None:

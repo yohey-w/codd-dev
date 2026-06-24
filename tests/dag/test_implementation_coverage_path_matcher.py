@@ -405,6 +405,41 @@ def test_coverage_summary_full_impl_and_test_present_passes(tmp_path):
     assert summary["by_kind"]["test_file"] == {"expected": 1, "matched": 1}
 
 
+def test_no_design_doc_expected_extraction_pass_is_vacuous(tmp_path):
+    # No design doc declares an expected_extraction, so the coverage loop never
+    # runs and the check passes having verified nothing. checked_count==0 lets the
+    # materiality overlay flag the vacuous pass instead of a verified clean run.
+    from codd.dag.materiality import is_vacuous_pass
+
+    result = ImplementationCoverageCheck().run(DAG(), tmp_path, {})
+
+    assert result.passed is True
+    assert result.checked_count == 0
+    assert is_vacuous_pass(result) is True
+
+
+def test_full_coverage_pass_is_not_vacuous(tmp_path):
+    # A real verification evaluates each expected artifact, so checked_count is
+    # non-zero and the pass is materially distinct from the empty (vacuous) case.
+    from codd.dag.materiality import is_vacuous_pass
+
+    dag = DAG()
+    dag.add_node(Node(id="src/auth/login.ts", kind="impl_file", path="src/auth/login.ts"))
+    dag.add_node(Node(id="tests/auth/login.test.ts", kind="test_file", path="tests/auth/login.test.ts"))
+    dag.add_node(
+        _multi_kind_doc(
+            ("impl_file", "src/auth/login.ts"),
+            ("test_file", "tests/auth/login.test.ts"),
+        )
+    )
+
+    result = ImplementationCoverageCheck().run(dag, tmp_path, {})
+
+    assert result.passed is True
+    assert result.checked_count == 2
+    assert is_vacuous_pass(result) is False
+
+
 def test_missing_test_keeps_existing_red_and_emits_summary(tmp_path):
     dag = DAG()
     dag.add_node(Node(id="src/auth/login.ts", kind="impl_file", path="src/auth/login.ts"))

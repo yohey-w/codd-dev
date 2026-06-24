@@ -335,3 +335,14 @@ won't converge, so both classes are being closed COMPREHENSIVELY next:
 - path-escape (root-jail config FS reads): e2e_extractor, builder `_project_path`,
   deployment/extractor, depends_on_consistency propagation_output.
 Then rounds 5-6 should be clean → N-gate passes.
+
+### Closure done (full suite 6060): vacuous + path-escape classes comprehensively closed
+- vacuous: all 8 checks expose checked_count + return skip (no applicable input) or a
+  checked_count=0 vacuous-pass (ran but 0 targets) — no clean PASS over 0 items
+  remains. skip: deployment_completeness, ui_coherence, environment_coverage,
+  user_journey_coherence, artifact_contract. vacuous-pass: edge_validity,
+  task_completion, implementation_coverage.
+- path-escape: e2e_extractor doc_dirs, builder `_project_path` (plan_task / lexicon /
+  coverage-axes reads via `_jailed_project_path`), deployment/extractor documents,
+  depends_on_consistency propagation_output — all root-jailed (out-of-root not read).
+Round 5 (re-review) next; expect convergence toward 2 consecutive clean rounds.

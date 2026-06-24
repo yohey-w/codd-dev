@@ -37,6 +37,11 @@ class UserJourneyCoherenceResult:
     violations: list[dict[str, Any]] = field(default_factory=list)
     journey_reports: list[dict[str, Any]] = field(default_factory=list)
     passed: bool = True
+    skipped: bool = False
+    # User journeys actually checked. No journeys and no actors means C7 has no
+    # input to verify, so it reports skip rather than a clean PASS over nothing.
+    # (The actors-without-journeys branch is an amber finding, not a vacuous pass.)
+    checked_count: int = 0
 
 
 @register_dag_check("user_journey_coherence")
@@ -103,15 +108,19 @@ class UserJourneyCoherenceCheck(DagCheck):
                 )
             return UserJourneyCoherenceResult(
                 severity="info",
-                status="pass",
+                status="skip",
+                skipped=True,
                 message="No actors and no user_journeys declared, C7 SKIP",
                 block_deploy=self.block_deploy,
+                checked_count=0,
             )
 
         journey_reports: list[dict[str, Any]] = []
         violations: list[dict[str, Any]] = []
+        checked_count = 0
         for design_doc in journey_docs:
             for index, journey in enumerate(self._journey_entries(design_doc)):
+                checked_count += 1
                 report = self._check_journey(target_dag, design_doc, index, journey)
                 journey_reports.append(report)
                 violations.extend(report["violations"])
@@ -134,6 +143,7 @@ class UserJourneyCoherenceCheck(DagCheck):
             violations=violations,
             journey_reports=journey_reports,
             passed=passed,
+            checked_count=checked_count,
         )
 
     def format_report(self, result: UserJourneyCoherenceResult | list[dict[str, Any]]) -> str:

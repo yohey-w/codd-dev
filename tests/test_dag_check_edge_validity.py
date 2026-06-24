@@ -112,7 +112,46 @@ def test_passed_flag_false_on_orphan(tmp_path):
 def test_result_fields_present(tmp_path):
     result = EdgeValidityCheck().run(DAG(), tmp_path, {})
 
-    assert set(result.__dict__) == {"check_name", "severity", "orphan_edges", "dangling_refs", "passed"}
+    assert set(result.__dict__) == {
+        "check_name",
+        "severity",
+        "status",
+        "orphan_edges",
+        "dangling_refs",
+        "checked_count",
+        "passed",
+    }
+
+
+def test_empty_dag_pass_is_vacuous_checked_count_zero(tmp_path):
+    # An empty DAG has no edges and no path-bearing nodes, so edge_validity passes
+    # having verified nothing. checked_count==0 lets the materiality overlay flag
+    # the vacuous pass instead of it reading as a verified clean run.
+    from codd.dag.materiality import is_vacuous_pass
+
+    result = EdgeValidityCheck().run(DAG(), tmp_path, {})
+
+    assert result.passed is True
+    assert result.checked_count == 0
+    assert is_vacuous_pass(result) is True
+
+
+def test_valid_dag_pass_is_not_vacuous(tmp_path):
+    # A real verification inspects edges + path nodes, so checked_count is non-zero
+    # and the pass is materially distinct from the empty (vacuous) case.
+    from codd.dag.materiality import is_vacuous_pass
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "index.ts").write_text("export const ok = true;\n", encoding="utf-8")
+    dag = _dag_with_node("src/index.ts", "src/index.ts")
+    dag.add_node(Node(id="src/feature.ts", kind="impl_file"))
+    dag.add_edge(Edge(from_id="src/index.ts", to_id="src/feature.ts", kind="imports"))
+
+    result = EdgeValidityCheck().run(dag, tmp_path, {})
+
+    assert result.passed is True
+    assert result.checked_count >= 1
+    assert is_vacuous_pass(result) is False
 
 
 def test_node_without_path_no_dangling(tmp_path):

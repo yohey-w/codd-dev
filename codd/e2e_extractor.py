@@ -1099,6 +1099,10 @@ def _configured_doc_files(project_root: Path, config: Mapping[str, Any]) -> list
     scan = config.get("scan", {})
     raw_dirs = scan.get("doc_dirs", ["docs/"]) if isinstance(scan, Mapping) else ["docs/"]
     dirs = raw_dirs if isinstance(raw_dirs, list) else ["docs/"]
+    try:
+        root_anchor = project_root.resolve()
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        root_anchor = project_root
     files: list[Path] = []
     for raw_dir in dirs:
         if not isinstance(raw_dir, str) or not raw_dir.strip():
@@ -1106,6 +1110,12 @@ def _configured_doc_files(project_root: Path, config: Mapping[str, Any]) -> list
         root = Path(raw_dir).expanduser()
         if not root.is_absolute():
             root = project_root / root
+        # Root-jail: an absolute (or expanded-user) doc_dir outside the project
+        # root must never be walked/read — that would enumerate arbitrary files.
+        try:
+            root.resolve().relative_to(root_anchor)
+        except (ValueError, OSError):
+            continue
         if not root.exists():
             continue
         if root.is_file():

@@ -156,7 +156,13 @@ def extract_deployment_docs(
 
     configured_documents = _configured_document_paths(deployment_config)
     if configured_documents:
-        markdown_paths = [_project_path(root, document) for document in configured_documents]
+        # Root-jail: a configured document path may be absolute; one resolving
+        # outside the project root must not be read (path-escape leak). Drop it.
+        markdown_paths = [
+            path
+            for document in configured_documents
+            if (path := _jailed_project_path(root, document)) is not None
+        ]
     else:
         markdown_paths = _glob_paths(root, DEPLOYMENT_DOC_PATTERNS)
 
@@ -1233,6 +1239,23 @@ def _project_path(project_root: Path, path_text: str) -> Path:
     if path.is_absolute():
         return path.resolve()
     return (project_root / path).resolve()
+
+
+def _jailed_project_path(project_root: Path, path_text: str) -> Path | None:
+    """Resolve a config document path, returning ``None`` when it escapes the root.
+
+    A configured ``deployment.documents[*].path`` may be absolute; one pointing
+    outside the project root must not be read (path-escape leak). In-root paths
+    keep their existing behaviour.
+    """
+    if not str(path_text).strip():
+        return None
+    resolved = _project_path(project_root, path_text)
+    try:
+        resolved.relative_to(Path(project_root).resolve())
+    except (ValueError, OSError):
+        return None
+    return resolved
 
 
 def _relative_id(path: Path, project_root: Path) -> str:

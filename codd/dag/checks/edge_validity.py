@@ -14,8 +14,17 @@ from codd.dag.checks import register_dag_check
 class EdgeValidityResult:
     check_name: str = "edge_validity"
     severity: str = "red"
+    # ``status`` is what the materiality overlay keys off (it flags a pass-family
+    # status with checked_count==0). Without it an empty-DAG pass could not be
+    # surfaced as vacuous.
+    status: str = "pass"
     orphan_edges: list[dict[str, str]] = field(default_factory=list)
     dangling_refs: list[str] = field(default_factory=list)
+    # Endpoints actually inspected = every edge + every node carrying a path.
+    # A pass with checked_count==0 means there was nothing structural to validate
+    # (empty DAG) — the materiality overlay surfaces that as a vacuous pass rather
+    # than letting it read as a verified clean run.
+    checked_count: int = 0
     passed: bool = True
 
 
@@ -52,16 +61,20 @@ class EdgeValidityCheck:
             for edge in target_dag.edges
             if edge.from_id not in target_dag.nodes or edge.to_id not in target_dag.nodes
         ]
+        path_nodes = [node for node in target_dag.nodes.values() if node.path]
         dangling_refs = [
             node_id
             for node_id, node in sorted(target_dag.nodes.items())
             if node.path and not _node_path_exists(root, node.path)
         ]
 
+        passed = not orphan_edges and not dangling_refs
         return EdgeValidityResult(
+            status="pass" if passed else "fail",
             orphan_edges=orphan_edges,
             dangling_refs=dangling_refs,
-            passed=not orphan_edges and not dangling_refs,
+            checked_count=len(target_dag.edges) + len(path_nodes),
+            passed=passed,
         )
 
 

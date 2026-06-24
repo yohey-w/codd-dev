@@ -22,6 +22,11 @@ class EnvironmentCoverageResult:
     block_deploy: bool = True
     violations: list[dict[str, Any]] = field(default_factory=list)
     passed: bool = True
+    skipped: bool = False
+    # Axis variants actually evaluated. With no coverage axes declared there is no
+    # environment matrix to verify, so the check reports skip instead of a clean
+    # PASS that verified nothing.
+    checked_count: int = 0
 
 
 @register_dag_check("environment_coverage")
@@ -48,15 +53,19 @@ class EnvironmentCoverageCheck(DagCheck):
         if not axes:
             return EnvironmentCoverageResult(
                 severity="info",
-                status="pass",
-                message="C9 environment_coverage PASS",
+                status="skip",
+                skipped=True,
+                message="C9 environment_coverage skipped: no coverage axes declared",
                 block_deploy=self.block_deploy,
+                checked_count=0,
             )
 
+        checked_count = 0
         violations: list[dict[str, Any]] = []
         for axis in axes:
             related_journeys = self._related_journeys(target_dag, axis)
             for variant in axis.variants:
+                checked_count += 1
                 related_tests = self._find_tests_for_axis_variant(target_dag, axis, variant)
                 if variant.criticality is None:
                     violations.append(self._criticality_unclear(axis, variant))
@@ -88,6 +97,7 @@ class EnvironmentCoverageCheck(DagCheck):
             block_deploy=self.block_deploy,
             violations=violations,
             passed=red_count == 0,
+            checked_count=checked_count,
         )
 
     def format_report(self, result: EnvironmentCoverageResult | list[dict[str, Any]]) -> str:

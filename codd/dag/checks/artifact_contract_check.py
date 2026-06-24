@@ -53,6 +53,11 @@ class ArtifactContractResult:
     warnings: list[str] = field(default_factory=list)
     passed: bool = True
     skipped: bool = False
+    # Contract stages actually verified. An active contract that declares zero
+    # stages (or whose stages resolve to nothing) passes having checked nothing;
+    # checked_count==0 lets the materiality overlay flag that vacuous pass. The
+    # dormant (opt-out) case already reports skip and is not vacuous.
+    checked_count: int = 0
 
 
 @register_dag_check("artifact_contract")
@@ -112,6 +117,7 @@ class ArtifactContractCheck(DagCheck):
                 severity="info",
                 status="pass",
                 message=f"artifact_contract PASS ({stages_checked} stage(s) checked)",
+                checked_count=stages_checked,
             )
 
         severity = _resolve_severity(full_config)

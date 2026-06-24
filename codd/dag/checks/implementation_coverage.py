@@ -36,6 +36,11 @@ class ImplementationCoverageResult:
     violations: list[dict[str, Any]] = field(default_factory=list)
     passed: bool = True
     coverage_summaries: list[dict[str, Any]] = field(default_factory=list)
+    # Expected artifacts actually evaluated across all design docs. When no design
+    # doc declares an expected_extraction the loop never runs and the check passes
+    # having verified nothing; checked_count==0 lets the materiality overlay flag
+    # that as a vacuous pass rather than a verified clean run.
+    checked_count: int = 0
 
 
 @register_dag_check("implementation_coverage")
@@ -64,6 +69,7 @@ class ImplementationCoverageCheck(DagCheck):
         violations: list[dict[str, Any]] = []
         coverage_summaries: list[dict[str, Any]] = []
         expected_impl_nodes: list[ExpectedNode] = []
+        checked_count = 0
         for design_doc in _design_doc_nodes(target_dag):
             expected = _expected_extraction(design_doc)
             if expected is None:
@@ -100,6 +106,7 @@ class ImplementationCoverageCheck(DagCheck):
                     }
                 )
 
+            checked_count += expected_total
             coverage_summaries.append(
                 {
                     "design_doc": design_doc.id,
@@ -159,6 +166,7 @@ class ImplementationCoverageCheck(DagCheck):
             violations=violations,
             passed=red_count == 0,
             coverage_summaries=coverage_summaries,
+            checked_count=checked_count,
         )
 
 

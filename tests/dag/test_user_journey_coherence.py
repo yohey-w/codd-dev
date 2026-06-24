@@ -24,12 +24,16 @@ def test_c7_amber_when_actor_present_no_journey(tmp_path: Path) -> None:
 
 
 def test_c7_skip_when_no_actors_no_journeys(tmp_path: Path) -> None:
+    # No actors and no journeys = C7 has no input to verify. It must report a real
+    # SKIP (status/skipped), not a clean PASS over nothing (false-green).
     dag = DAG()
     dag.add_node(Node(id="docs/design/system.md", kind="design_doc", attributes={}))
 
     result = _run(dag, tmp_path)
 
-    assert result.status == "pass"
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
     assert result.passed is True
     assert result.violations == []
     assert "SKIP" in result.message
