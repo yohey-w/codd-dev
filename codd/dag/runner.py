@@ -30,6 +30,9 @@ CHECK_MODULES = (
     "codd.dag.checks.resource_flow_coherence",
     "codd.dag.checks.extraction_diagnostics",
     "codd.dag.checks.cardinality_coverage",
+    "codd.dag.checks.stale_evidence",
+    "codd.dag.checks.negative_space",
+    "codd.dag.checks.semantic_contract_conflict",
 )
 
 

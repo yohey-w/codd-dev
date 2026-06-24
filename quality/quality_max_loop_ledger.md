@@ -31,9 +31,13 @@ explicit contracts; otherwise amber diagnostic / item-count visibility.
 | 6 | reconcile-baseline gap | `propagate --baseline` acks current doc-to-doc edges | n/a | 48 | ✅ shipped-to-main (self-host amber→PASS) |
 | 7 | cross_artifact_partial_coverage | expected_extraction group diagnostic (no quirk touch) | amber | 45 | ✅ shipped-to-main |
 | 8 | cardinality_partial | default representative/unknown; all→red only if declared | amber/red | 27 | ✅ shipped-to-main |
-| 9 | stale_evidence | fingerprint-based only (never wall-clock) | amber | 27 | ⏳ |
-| 10 | negative_space | explicit forbidden-evidence only (no absence guarantee) | amber/red | 8 | ⏳ |
-| 11 | semantic_conflict | exact scalar-key contradiction only | amber | 6.4 | ⏳ |
+| 9 | stale_evidence | fingerprint-based only (never wall-clock) | amber | 27 | ✅ shipped-to-main (forward-guard) |
+| 10 | negative_space | explicit forbidden-evidence only (no absence guarantee) | amber/red | 8 | ✅ shipped-to-main |
+| 11 | semantic_conflict | exact scalar-key contradiction only | amber | 6.4 | ✅ shipped-to-main |
+
+**Cycle-1 implementation COMPLETE: 11/11 vectors shipped to main** (none deferred).
+Verification going forward also uses Codex (gpt-5.5 xhigh) as an independent
+parallel reviewer (owner directive 2026-06-24).
 
 Owner-glance flags (per GPT): assertion_abuse amber→red promotion; cardinality
 "default all"; negative_space "absence guarantee" wording; semantic_conflict
@@ -121,3 +125,20 @@ Both verified together: full suite **5896**, corpus gate 52.
   pass; skip when no relations. Minimal schema (nested in existing
   aggregation_policies). 9 tests.
 - Both red-before-green; generality preserved. Full suite **5921**, corpus 55.
+
+### #9 stale_evidence ✅ + #10 negative_space ✅ + #11 semantic_contract_conflict ✅ (2026-06-24)
+- **#9** `stale_evidence` (new check): amber when a recorded `source_sha256` ≠ the
+  current file hash. Fingerprint-only — never reads mtime/generated_at (env diff =
+  false-red). file-missing → `source_missing` amber (not red); no recorded hash →
+  silent; 0 checkable → skip. Forward-guard: nothing carries `source_sha256` today,
+  so it is currently dormant (activates when a writer records fingerprints).
+- **#10** `negative_space` (new check): scans project-declared `forbidden_evidence`
+  (scope globs + regex patterns). hit + explicit `on_violation: fail` → **red**;
+  otherwise amber. Path-traversal rejected (out-of-root → amber, never red);
+  0 files scanned → vacuous amber (not a clean pass); regex error → amber;
+  binary → skipped. No PII/domain literal in core (patterns are project-declared).
+- **#11** `semantic_contract_conflict` (new check): amber when the same
+  (section, identity, scalar-key) is declared with conflicting values. scalar-only,
+  declared-values-only (no default backfill), exact alias; skip when no entries.
+- All red-before-green; registered in runner.py; generality preserved. Full suite
+  **5944** (+23 tests), corpus green.
