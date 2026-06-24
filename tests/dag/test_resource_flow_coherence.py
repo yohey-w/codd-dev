@@ -406,3 +406,31 @@ def test_dead_resource_warning_has_remediation():
     result = _run(dag)
     dead = [w for w in result.warnings if w["type"] == "dead_resource"]
     assert dead and all(w.get("remediation") for w in dead)
+
+
+# transparency: a PASS reports how many resource uses it actually checked.
+def test_pass_message_reports_checked_count():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[CRITICAL_JOURNEY],
+            capability_contracts=[
+                {
+                    "capability": "bind_line_friend_to_user",
+                    "produces": [{"resource": "data:users.lstep_friend_id"}],
+                },
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "data:users.lstep_friend_id",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                },
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert "checked" in result.message

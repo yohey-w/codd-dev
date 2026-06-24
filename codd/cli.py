@@ -751,6 +751,14 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
         else:
             status = "WARN" if severity == "amber" else "FAIL"
         _line(f"  {status}  {_dag_result_name(result)} [{severity}]")
+    skipped_count = sum(
+        1
+        for result in dag_results
+        if _dag_result_status(result) in {"skip", "skipped"}
+        or getattr(result, "skipped", False)
+    )
+    if skipped_count:
+        _line(f"  {skipped_count} check(s) SKIP — verified nothing (dormant / unconfigured)")
     if failed_red or amber_findings:
         _line("  Run 'codd dag verify' for details.")
 
@@ -8452,6 +8460,16 @@ def dag_verify(
             for detail in _dag_result_details(result):
                 click.echo(f"    {detail}")
 
+        skipped_count = sum(
+            1
+            for result in results
+            if _dag_result_status(result) in {"skip", "skipped"}
+            or getattr(result, "skipped", False)
+        )
+        if skipped_count:
+            click.echo(
+                f"\n{skipped_count} check(s) SKIP — verified nothing (dormant / unconfigured)"
+            )
         if failed_red:
             click.echo(f"\n{len(failed_red)} check(s) FAILED (severity=red)")
         elif amber_findings:

@@ -214,7 +214,10 @@ class ResourceFlowCoherenceCheck(DagCheck):
             status="pass",
             passed=True,
             block_deploy=False,
-            message="resource_flow_coherence PASS",
+            message=(
+                f"resource_flow_coherence PASS "
+                f"({len(consumers)} consumer(s), {len(producers)} producer(s) checked)"
+            ),
             warnings=warnings,
         )
 

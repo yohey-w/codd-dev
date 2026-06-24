@@ -248,6 +248,17 @@ def test_verify_shows_skip_distinctly_not_pass(tmp_path, monkeypatch):
     assert "PASS  dependency_freshness" not in result.output
 
 
+def test_verify_summary_shows_skip_count(tmp_path, monkeypatch):
+    # The summary surfaces how many checks verified nothing (the skip count),
+    # so a run riddled with silent skips is visibly not a full verification.
+    _patch_results(monkeypatch, [_CheckResult("dependency_freshness", status="skip")])
+
+    result = CliRunner().invoke(main, ["dag", "verify", "--project-path", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "1 check(s) SKIP" in result.output
+
+
 def test_verify_json_stdout_stays_parseable_with_notice(tmp_path, monkeypatch):
     _write_pinned_project(tmp_path)
     _patch_results(monkeypatch, [_CheckResult("node_completeness")])
