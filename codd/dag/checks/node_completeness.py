@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from codd.dag.checks import register_dag_check
+from codd.path_safety import resolve_project_path
 
 
 @dataclass
@@ -57,13 +58,13 @@ class NodeCompletenessCheck:
                 if node is not None and node.kind == "expected":
                     continue
                 if node is not None and node.kind == "common":
-                    if node.path and not (root / node.path).exists():
+                    if node.path and not _node_path_exists(root, node.path):
                         _append_once(missing, seen, edge.to_id)
                     continue
                 _append_once(missing, seen, edge.to_id)
                 continue
 
-            if node.path and not (root / node.path).exists():
+            if node.path and not _node_path_exists(root, node.path):
                 _append_once(missing, seen, edge.to_id)
 
         if checked == 0:
@@ -85,6 +86,24 @@ class NodeCompletenessCheck:
             skipped=False,
             checked_count=checked,
         )
+
+
+def _node_path_exists(project_root: Path, node_path: str) -> bool:
+    """Root-jailed existence check for a user-controllable ``node.path``.
+
+    ``node.path`` originates from DAG data the user authors, so it can be an
+    out-of-root absolute path (``/etc/hosts``), a ``../`` traversal, or an in-root
+    symlink whose target escapes the tree. Such a path may exist on the real
+    filesystem yet is never the project's own impl/common artifact; counting it as
+    "exists" is a path-escape false-green. ``resolve_project_path`` returns ``None``
+    for any escaped path, so an out-of-root file is treated as missing (red),
+    matching the existing severity. An in-root path (relative or absolute) is
+    resolved and its actual existence is checked, exactly as before.
+    """
+    resolved = resolve_project_path(project_root, node_path)
+    if resolved is None:
+        return False
+    return resolved.exists()
 
 
 def _append_once(items: list[str], seen: set[str], value: str) -> None:

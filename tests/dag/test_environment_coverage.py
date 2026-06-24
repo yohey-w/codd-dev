@@ -167,6 +167,61 @@ def test_test_file_text_satisfies_variant(tmp_path: Path):
     assert result.violations == []
 
 
+def test_verification_test_path_out_of_root_does_not_satisfy_variant(tmp_path: Path):
+    # A verification_test node.path pointing OUT OF ROOT must not satisfy the
+    # axis variant via its file text. An absolute out-of-root path is a real file
+    # but is not the project's test; reading it to credit C9 coverage is a
+    # path-escape false-green. The jail refuses the read, so the variant is
+    # uncovered → missing_test_for_variant (red).
+    outside = tmp_path.parent / "outside_test.py"
+    outside.write_text("# runtime_shape=shape_a\n", encoding="utf-8")
+
+    dag = _dag_with_axis()
+    dag.add_node(Node(id="vt:outside", kind="verification_test", path=str(outside), attributes={}))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is False
+    assert any(item["type"] == "missing_test_for_variant" for item in result.violations)
+
+
+def test_verification_test_path_symlink_escape_does_not_satisfy_variant(tmp_path: Path):
+    # In-root symlink whose target escapes the tree: same path-escape class. The
+    # symlinked file's text must not credit the variant.
+    import os
+
+    outside = tmp_path.parent / "outside_test2.py"
+    outside.write_text("# runtime_shape=shape_a\n", encoding="utf-8")
+    link = tmp_path / "tests" / "check_shape.py"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(outside, link)
+
+    dag = _dag_with_axis()
+    dag.add_node(
+        Node(id="tests/check_shape.py", kind="verification_test", path="tests/check_shape.py", attributes={})
+    )
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is False
+    assert any(item["type"] == "missing_test_for_variant" for item in result.violations)
+
+
+def test_in_root_verification_test_text_still_satisfies_variant(tmp_path: Path):
+    # Anti-false-red: an in-root verification_test file is read and still satisfies
+    # the variant. Confirms the jail does not break the legitimate read path.
+    _write(tmp_path / "tests" / "check_shape.py", "# runtime_shape=shape_a\n")
+
+    dag = _dag_with_axis()
+    dag.add_node(
+        Node(id="tests/check_shape.py", kind="verification_test", path="tests/check_shape.py", attributes={})
+    )
+
+    result = _run(dag, tmp_path)
+
+    assert result.violations == []
+
+
 def test_journey_not_executed_under_variant_is_reported(tmp_path: Path):
     dag = _dag_with_axis()
     _add_journey(dag, "happy_path")

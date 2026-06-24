@@ -396,3 +396,18 @@ wave_config.output (→ read_text/write) and screen_transition_extractor src_dir
 propagation_output, negative_space forbidden-scope (kept its amber diagnostic).
 Out-of-scope → Axis-N backlog: code-constant globs (deployment patterns, artifact
 catalog globs), Path(__file__) bundled resources. Round 7 next, scoped to user-path.
+
+## Round 7 (2026-06-25, scoped): NOT clean → 6 fixed (node.path-read sub-vector + doctor)
+Scoped review (user-path-controllable only) found a new sub-vector: checks reading a
+DAG **node.path** for FS access without jailing (node.path is user-controllable — e.g.
+an impl_file node with path=/etc/hosts passed node_completeness; a design_doc node with
+an out-of-root master-detail file gave ui_coherence credit). Fixed via path_safety:
+- node_completeness (exists), task_completion (is_file), ui_coherence (_node_text),
+  environment_coverage (_node_text) — escaped node.path → missing / uncredited.
+- cli _read_optional_context_file (lexicon_path/design_md_path) + cli
+  _configured_text_files (doctor scan.source_dirs/test_dirs) → path_safety jailed.
+Audit confirmed the other node.path readers already jailed (edge_validity, cardinality,
+user_journey, stale_evidence, negative_space, impl_coverage, depends_on, ci_health) or
+fixed-pattern (deployment_completeness deploy.yaml candidates). full suite 6135.
+Round 8 next; the user-path FS surface (config + builder + node.path + doctor + cli) is
+now comprehensively jailed, so convergence expected.

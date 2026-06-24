@@ -9,11 +9,12 @@ Each test pins: a config path pointing OUTSIDE the project root must NOT be
 read/enumerated (the out-of-root file's content must never appear in the result),
 and must not crash. In-root config paths keep their existing behaviour (regression).
 
-Four closure sites:
+Five closure sites:
   * codd/e2e_extractor.py  _configured_doc_files (scan.doc_dirs rglob+read)
   * codd/dag/builder.py    _project_path read sites (plan_task_file / lexicon_file)
   * codd/deployment/extractor.py  extract_deployment_docs (deployment.documents[*].path)
   * codd/dag/checks/depends_on_consistency.py  propagation_output_path read
+  * codd/cli.py  _configured_text_files (doctor scan.source_dirs / scan.test_dirs rglob+read)
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from pathlib import Path
 
 import yaml
 
+from codd.cli import _configured_text_files
 from codd.dag import DAG, Edge, Node
 from codd.dag.builder import build_dag
 from codd.dag.checks.depends_on_consistency import DependsOnConsistencyCheck
@@ -237,3 +239,94 @@ def test_propagation_output_inside_root_still_read(tmp_path):
 
     # In-root mismatch must still be detected (anti-false-red).
     assert result.violations, "in-root propagation output must still be read/compared"
+
+
+# ---------------------------------------------------------------------------
+# 5. cli._configured_text_files — doctor scan.source_dirs / scan.test_dirs
+# ---------------------------------------------------------------------------
+
+# Marker filename whose presence in the returned paths proves the dir was walked.
+_LEAK_MARKER = "leaked_source.py"
+
+
+def test_source_dirs_outside_root_not_enumerated(tmp_path):
+    """An absolute scan.source_dir outside the project root must not be walked."""
+    project_root = tmp_path / "project"
+    (project_root / "src").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / _LEAK_MARKER).write_text("app.post('/x')\n", encoding="utf-8")
+
+    config = {"scan": {"source_dirs": [str(outside)]}}
+    files = _configured_text_files(project_root, config, "source_dirs", ["src/"])
+
+    assert all(_LEAK_MARKER not in p.name for p in files), (
+        "scan.source_dir outside project root was enumerated/read"
+    )
+
+
+def test_source_dirs_inside_root_still_enumerated(tmp_path):
+    """Regression: an in-root scan.source_dir is still walked (anti-false-red)."""
+    project_root = tmp_path / "project"
+    src = project_root / "src"
+    src.mkdir(parents=True)
+    (src / "real.py").write_text("app.post('/x')\n", encoding="utf-8")
+
+    config = {"scan": {"source_dirs": ["src/"]}}
+    files = _configured_text_files(project_root, config, "source_dirs", ["src/"])
+
+    assert any(p.name == "real.py" for p in files), "in-root source dir must still be enumerated"
+
+
+def test_test_dirs_outside_root_not_enumerated(tmp_path):
+    """An absolute scan.test_dir outside the project root must not be walked."""
+    project_root = tmp_path / "project"
+    (project_root / "tests").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / _LEAK_MARKER).write_text("page.reload()\n", encoding="utf-8")
+
+    config = {"scan": {"test_dirs": [str(outside)]}}
+    files = _configured_text_files(project_root, config, "test_dirs", ["tests/"])
+
+    assert all(_LEAK_MARKER not in p.name for p in files), (
+        "scan.test_dir outside project root was enumerated/read"
+    )
+
+
+def test_source_dirs_outside_root_direct_file_not_read(tmp_path):
+    """An absolute scan.source_dir naming a single out-of-root file is excluded."""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    leak = outside / _LEAK_MARKER
+    leak.write_text("app.post('/x')\n", encoding="utf-8")
+
+    config = {"scan": {"source_dirs": [str(leak)]}}
+    files = _configured_text_files(project_root, config, "source_dirs", ["src/"])
+
+    assert all(_LEAK_MARKER not in p.name for p in files), (
+        "out-of-root single source file was read"
+    )
+
+
+def test_source_dirs_in_root_symlink_escaping_not_enumerated(tmp_path):
+    """An in-root symlink whose target escapes the root must not smuggle files."""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / _LEAK_MARKER).write_text("app.post('/x')\n", encoding="utf-8")
+    link = project_root / "linked_src"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        return  # platform without symlink support — nothing to assert
+
+    config = {"scan": {"source_dirs": ["linked_src"]}}
+    files = _configured_text_files(project_root, config, "source_dirs", ["src/"])
+
+    assert all(_LEAK_MARKER not in p.name for p in files), (
+        "in-root symlink escaping the root smuggled an out-of-root file"
+    )

@@ -187,3 +187,67 @@ def test_threshold_override_via_settings(tmp_path):
     result = _run(dag, tmp_path, {"task_completion_threshold": 0.5})
 
     assert result.passed is True
+
+
+def test_output_node_path_out_of_root_counts_as_missing(tmp_path):
+    """A produces-output node.path OUT OF ROOT must not count the task complete.
+
+    A user-controllable absolute path (``/etc/hosts``) is a real file but is not
+    the task's produced artifact. Counting ``is_file()`` on it marks the task done
+    — a path-escape false-green. The jail treats it as missing (file_missing).
+    """
+    dag, task_id = _dag_with_plan_task()
+    dag.add_node(Node(id="out:hosts", kind="impl_file", path="/etc/hosts"))
+    dag.add_edge(Edge(from_id=task_id, to_id="out:hosts", kind="produces"))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is False
+    assert result.incomplete_tasks[0].task_id == task_id
+    assert result.incomplete_tasks[0].missing_outputs == ["out:hosts"]
+    assert result.incomplete_tasks[0].reason == "file_missing"
+
+
+def test_output_node_attribute_path_out_of_root_counts_as_missing(tmp_path):
+    """The attribute-path candidate is jailed too, not just node.path.
+
+    ``_impl_file_exists`` falls back to ``attributes['path']``; an out-of-root
+    value there is the same path-escape class and must be treated as missing.
+    """
+    dag, task_id = _dag_with_plan_task()
+    dag.add_node(
+        Node(id="out:attr", kind="impl_file", path=None, attributes={"path": "/etc/hosts"})
+    )
+    dag.add_edge(Edge(from_id=task_id, to_id="out:attr", kind="produces"))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is False
+    assert result.incomplete_tasks[0].missing_outputs == ["out:attr"]
+    assert result.incomplete_tasks[0].reason == "file_missing"
+
+
+def test_output_node_path_symlink_escape_counts_as_missing(tmp_path):
+    """An in-root symlink whose target escapes the tree must count as missing.
+
+    The output lives inside the project but resolves outside, so it cannot be the
+    task's own artifact. The jail rejects it (file_missing), closing the
+    symlink-escape false-green.
+    """
+    import os
+
+    outside = tmp_path.parent / "outside_out.py"
+    outside.write_text("ok\n", encoding="utf-8")
+    link = tmp_path / "src" / "feature.py"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(outside, link)
+
+    dag, task_id = _dag_with_plan_task()
+    dag.add_node(Node(id="src/feature.py", kind="impl_file", path="src/feature.py"))
+    dag.add_edge(Edge(from_id=task_id, to_id="src/feature.py", kind="produces"))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is False
+    assert result.incomplete_tasks[0].missing_outputs == ["src/feature.py"]
+    assert result.incomplete_tasks[0].reason == "file_missing"

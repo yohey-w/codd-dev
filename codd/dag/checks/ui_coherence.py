@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from codd.dag import DAG, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.dag.checks._one_to_many_detection import detect_one_to_many_relations
+from codd.path_safety import resolve_project_path
 from codd.requirements_meta import operation_flow_operations
 
 
@@ -218,12 +219,16 @@ def _node_text(node: Node, project_root: Path | None) -> str:
     if isinstance(frontmatter, Mapping):
         parts.append(str(frontmatter))
     if node.path and project_root is not None:
-        candidate = Path(node.path)
-        if not candidate.is_absolute():
-            candidate = project_root / candidate
-        if candidate.is_file():
+        # ``node.path`` is user-controllable design-doc DAG data. An out-of-root
+        # absolute path, a ``../`` traversal, or an in-root symlink that escapes the
+        # tree could make an off-root file's master-detail wording PASS-credit a
+        # one-to-many relation — a path-escape false-green. ``resolve_project_path``
+        # returns ``None`` for any escaped path, so it is simply not read (the
+        # relation stays uncredited). In-root files are resolved and read as before.
+        resolved = resolve_project_path(project_root, node.path)
+        if resolved is not None and resolved.is_file():
             try:
-                parts.append(candidate.read_text(encoding="utf-8"))
+                parts.append(resolved.read_text(encoding="utf-8"))
             except OSError:
                 pass
     return "\n".join(parts)

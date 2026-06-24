@@ -211,3 +211,25 @@ def test_doc_dirs_absolute_outside_not_enumerated(tmp_path):
     assert all("secret" not in p.name for p in files), (
         "absolute out-of-root doc_dir was enumerated"
     )
+
+
+def test_read_optional_context_file_rejects_out_of_root(tmp_path):
+    # codd.yaml lexicon_path / design_md_path -> _read_optional_context_file must jail
+    # via path_safety, so an absolute or symlink-escaping config value is not read.
+    from codd.cli import _read_optional_context_file
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.yaml"
+    secret.write_text("secret: leaked\n", encoding="utf-8")
+
+    # absolute out-of-root config path is not read
+    assert _read_optional_context_file(project_root, str(secret)) is None
+    # an in-root symlink whose target escapes the root is not read
+    (project_root / "link.yaml").symlink_to(secret)
+    assert _read_optional_context_file(project_root, "link.yaml") is None
+    # a legitimate in-root file is still read (anti-false-red)
+    (project_root / "ctx.md").write_text("# context\n", encoding="utf-8")
+    assert _read_optional_context_file(project_root, "ctx.md") == "# context\n"

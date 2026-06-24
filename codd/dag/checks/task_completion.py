@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from codd.dag.checks import register_dag_check
+from codd.path_safety import resolve_project_path
 
 
 @dataclass
@@ -136,10 +137,17 @@ class TaskCompletionCheck:
         attributes = getattr(impl_node, "attributes", {}) or {}
         attribute_path = attributes.get("path") if isinstance(attributes, dict) else None
         node_path = getattr(impl_node, "path", None) or attribute_path or fallback_path
-        candidate = Path(node_path)
-        if not candidate.is_absolute():
-            candidate = project_root / candidate
-        return candidate.is_file()
+        # ``node_path`` is user-controllable DAG data (node.path / attributes['path']
+        # / the fallback id). An out-of-root absolute path, a ``../`` traversal, or
+        # an in-root symlink that escapes the tree may resolve to a real file that
+        # is not this task's produced artifact; counting it as a completed output is
+        # a path-escape false-green. ``resolve_project_path`` returns ``None`` for
+        # any escaped path, so it is treated as missing (file_missing). An in-root
+        # path is resolved and checked with ``is_file()`` exactly as before.
+        resolved = resolve_project_path(project_root, node_path)
+        if resolved is None:
+            return False
+        return resolved.is_file()
 
     def _has_drift(self, impl_node: Any) -> bool:
         attributes = getattr(impl_node, "attributes", {}) or {}

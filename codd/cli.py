@@ -334,10 +334,13 @@ def _config_path(value: object) -> str | None:
 
 
 def _read_optional_context_file(project_root: Path, path_text: str) -> str | None:
-    path = Path(path_text).expanduser()
-    if not path.is_absolute():
-        path = project_root / path
-    if not path.is_file():
+    # User-path-controllable (codd.yaml lexicon_path / design_md_path) → must go
+    # through the shared root-jail so an absolute or symlink-escaping config value
+    # cannot read an out-of-root file into the coherence prompt.
+    from codd.path_safety import resolve_project_path
+
+    path = resolve_project_path(project_root, path_text)
+    if path is None or not path.is_file():
         return None
     return path.read_text(encoding="utf-8")
 
@@ -2009,6 +2012,14 @@ def _has_reflection_e2e(project_root: Path, config: dict[str, Any]) -> bool:
 
 
 def _configured_text_files(project_root: Path, config: dict[str, Any], key: str, default: list[str]) -> list[Path]:
+    # ``scan.source_dirs`` / ``scan.test_dirs`` are user-controllable: an absolute
+    # out-of-root path (or an in-root symlink whose target escapes) would otherwise
+    # let this doctor helper walk/read files outside the project tree. Jail each
+    # configured dir through ``resolve_project_path`` and confine every rglob match
+    # the same way (path-escape closure — see codd/path_safety.py). Out-of-root
+    # entries are silently dropped; in-root scanning is unchanged.
+    from codd.path_safety import resolve_project_path
+
     scan = config.get("scan", {})
     raw_dirs = scan.get(key, default) if isinstance(scan, dict) else default
     dirs = raw_dirs if isinstance(raw_dirs, list) else default
@@ -2016,18 +2027,19 @@ def _configured_text_files(project_root: Path, config: dict[str, Any], key: str,
     for raw_dir in dirs:
         if not isinstance(raw_dir, str) or not raw_dir.strip():
             continue
-        root = Path(raw_dir).expanduser()
-        if not root.is_absolute():
-            root = project_root / root
-        if not root.exists():
+        root = resolve_project_path(project_root, raw_dir)
+        if root is None or not root.exists():
             continue
         if root.is_file():
             if root.suffix in _TEXT_SUFFIXES:
                 files.append(root)
             continue
         for path in root.rglob("*"):
-            if path.is_file() and path.suffix in _TEXT_SUFFIXES:
-                files.append(path)
+            if not (path.is_file() and path.suffix in _TEXT_SUFFIXES):
+                continue
+            if resolve_project_path(project_root, path) is None:
+                continue  # in-root symlink whose target escapes the tree
+            files.append(path)
     return files
 
 

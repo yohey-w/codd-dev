@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from codd.dag import DAG, Node
 from codd.dag.checks import get_registry
 from codd.dag.checks.ui_coherence import UiCoherenceCheck
@@ -148,5 +151,89 @@ def test_t07_japanese_drilldown_literal_counts_as_master_detail_ui():
 
     result = _run(dag)
 
+    assert result.relations_with_master_detail_ui == 1
+    assert result.relations_missing_master_detail == []
+
+
+def _run_rooted(dag: DAG, root: Path):
+    return UiCoherenceCheck(dag=dag, project_root=root, settings={}).run(codd_config={})
+
+
+def test_t08_design_doc_node_path_out_of_root_not_credited(tmp_path):
+    """A design_doc node.path OUT OF ROOT must not PASS-credit master-detail UI.
+
+    The one-to-many relation needs master-detail evidence. A node whose only
+    in-attribute text is absent but whose ``path`` points to an out-of-root file
+    containing the master-detail wording would, unjailed, have its file read and
+    credit the relation — a path-escape false-green. The jail refuses to read it,
+    so the relation stays missing.
+    """
+    outside = tmp_path.parent / "outside_ux.md"
+    outside.write_text(
+        "course delivery_target master-detail page at /courses/[id]/delivery-targets\n",
+        encoding="utf-8",
+    )
+
+    dag = _dag(
+        _lexicon("delivery_target", "delivery_target is many-to-one with course"),
+        # node.path is absolute + out of root; no in-attribute content provided.
+        Node(id="ux_design", kind="design_doc", path=str(outside), attributes={}),
+    )
+
+    result = _run_rooted(dag, tmp_path)
+
+    assert result.one_to_many_relations_total == 1
+    assert result.relations_with_master_detail_ui == 0
+    assert result.relations_missing_master_detail
+    assert result.relations_missing_master_detail[0]["parent"] == "course"
+    assert result.relations_missing_master_detail[0]["child"] == "delivery_target"
+
+
+def test_t09_design_doc_node_path_symlink_escape_not_credited(tmp_path):
+    """An in-root design_doc symlink whose target escapes must not PASS-credit UI.
+
+    Same path-escape class via an in-root symlink resolving outside the tree.
+    """
+    outside = tmp_path.parent / "outside_ux2.md"
+    outside.write_text(
+        "course delivery_target drilldown at /courses/[id]/delivery-targets\n",
+        encoding="utf-8",
+    )
+    link = tmp_path / "docs" / "design" / "ux_design.md"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(outside, link)
+
+    dag = _dag(
+        _lexicon("delivery_target", "delivery_target is many-to-one with course"),
+        Node(id="docs/design/ux_design.md", kind="design_doc", path="docs/design/ux_design.md", attributes={}),
+    )
+
+    result = _run_rooted(dag, tmp_path)
+
+    assert result.one_to_many_relations_total == 1
+    assert result.relations_with_master_detail_ui == 0
+    assert result.relations_missing_master_detail
+
+
+def test_t10_in_root_design_doc_file_still_credited(tmp_path):
+    """Anti-false-red: an in-root design_doc file is read and still credits UI.
+
+    Confirms the jail does not break the legitimate on-disk read path.
+    """
+    doc = tmp_path / "docs" / "design" / "ux_design.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(
+        "course delivery_target master-detail page at /courses/[id]/delivery-targets\n",
+        encoding="utf-8",
+    )
+
+    dag = _dag(
+        _lexicon("delivery_target", "delivery_target is many-to-one with course"),
+        Node(id="docs/design/ux_design.md", kind="design_doc", path="docs/design/ux_design.md", attributes={}),
+    )
+
+    result = _run_rooted(dag, tmp_path)
+
+    assert result.one_to_many_relations_total == 1
     assert result.relations_with_master_detail_ui == 1
     assert result.relations_missing_master_detail == []

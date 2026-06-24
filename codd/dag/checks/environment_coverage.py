@@ -11,6 +11,7 @@ from codd.dag import DAG, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.dag.coverage_axes import CoverageAxis, CoverageVariant
 from codd.dag.metadata_access import collect_structured_entries
+from codd.path_safety import resolve_project_path
 
 
 @dataclass
@@ -210,8 +211,15 @@ class EnvironmentCoverageCheck(DagCheck):
     def _node_text(self, node: Node) -> str:
         if self.project_root is None or not node.path:
             return ""
-        path = self.project_root / node.path
-        if not path.is_file():
+        # ``node.path`` is user-controllable DAG data (test_file / verification_test
+        # / design_doc). An out-of-root absolute path, a ``../`` traversal, or an
+        # in-root symlink that escapes the tree could make an off-root file's text
+        # satisfy an axis variant (C9 coverage) or a journey mention — a path-escape
+        # false-green. ``resolve_project_path`` returns ``None`` for any escaped
+        # path, so it is not read (the variant stays uncovered). In-root files are
+        # resolved and read as before.
+        path = resolve_project_path(self.project_root, node.path)
+        if path is None or not path.is_file():
             return ""
         return path.read_text(encoding="utf-8", errors="ignore")
 

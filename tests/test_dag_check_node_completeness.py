@@ -186,3 +186,62 @@ def test_expects_missing_node_fail_reports_status_and_count(tmp_path):
     assert result.status == "fail"
     assert result.skipped is False
     assert result.checked_count == 1
+
+
+def test_expects_impl_node_path_out_of_root_is_missing(tmp_path):
+    """An impl_file node.path pointing OUT OF ROOT must not satisfy ``expects``.
+
+    A user-controllable absolute node.path (e.g. ``/etc/hosts``) happens to exist
+    on the real filesystem, but no out-of-root file is the project's impl artifact.
+    Counting it as "exists" is a path-escape false-green: a spoofed expected file
+    silently passes. After the path_safety jail it is treated as missing (red).
+    """
+    dag = _dag_with_design()
+    dag.add_node(Node(id="impl:hosts", kind="impl_file", path="/etc/hosts"))
+    dag.add_edge(Edge(from_id="docs/design/ux_design.md", to_id="impl:hosts", kind="expects"))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is False
+    assert result.missing_impl_files == ["impl:hosts"]
+
+
+def test_expects_impl_node_path_symlink_escape_is_missing(tmp_path):
+    """An in-root symlink whose target escapes the tree must not satisfy ``expects``.
+
+    The symlink lives inside the project, but resolves to an out-of-root file, so
+    it cannot be the project's own impl artifact. The jail rejects it (missing/red),
+    closing the symlink-escape false-green.
+    """
+    import os
+
+    outside = tmp_path.parent / "outside_impl.tsx"
+    outside.write_text("ok\n", encoding="utf-8")
+    link = tmp_path / "app" / "page.tsx"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(outside, link)
+
+    dag = _dag_with_design()
+    dag.add_node(Node(id="app/page.tsx", kind="impl_file", path="app/page.tsx"))
+    dag.add_edge(Edge(from_id="docs/design/ux_design.md", to_id="app/page.tsx", kind="expects"))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is False
+    assert result.missing_impl_files == ["app/page.tsx"]
+
+
+def test_expects_common_node_path_out_of_root_is_missing(tmp_path):
+    """A ``common`` node.path pointing out of root must not satisfy ``expects``.
+
+    Same path-escape class as the impl_file branch but on the ``common`` node path
+    (node_completeness.py:60). An absolute out-of-root path is treated as missing.
+    """
+    dag = _dag_with_design()
+    dag.add_node(Node(id="common:hosts", kind="common", path="/etc/hosts"))
+    dag.add_edge(Edge(from_id="docs/design/ux_design.md", to_id="common:hosts", kind="expects"))
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is False
+    assert result.missing_impl_files == ["common:hosts"]
