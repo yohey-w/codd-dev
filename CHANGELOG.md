@@ -13,6 +13,29 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.6.0] - 2026-06-24 — Self-hosted coherence gate
+
+Shipped via the **Self-hosted Coherence Gate** milestone — codd-dev's own changes
+run through CoDD's design → test → implement → verify loop (CoDD verified by CoDD).
+See `quality/self_hosting_ledger.md`.
+
+### Added
+
+- **`malformed_contract` amber** in `resource_flow_coherence` — a declared contract
+  entry missing its required field (a `consumes`/`produces` without `resource`, a
+  `capability_contracts` entry without `capability`) is now surfaced instead of
+  being silently dropped.
+
+### Changed
+
+- **Every `resource_flow_coherence` finding carries an actionable `remediation`** —
+  `dangling_required_consumer` reds and the `dead_resource` / `malformed_contract` /
+  `unscoped_resource_consumer` ambers are now self-repairable, not just diagnosed.
+- **`codd dag verify` prints a SKIP count** ("N check(s) SKIP — verified nothing")
+  so a run riddled with silent skips is visibly not a full verification.
+- **`resource_flow_coherence` PASS reports how many resource uses it checked**, so a
+  pass is transparent about its coverage.
+
 ## [3.5.0] - 2026-06-24 — Skip visibility
 
 ### Fixed
