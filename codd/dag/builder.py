@@ -16,6 +16,7 @@ import yaml
 
 from codd.config import load_project_config
 from codd.discovery import scan_exclude_patterns as shared_scan_exclude_patterns
+from codd.path_safety import iter_project_glob, resolve_project_path
 from codd.dag import DAG, Edge, Node
 from codd.dag.coverage_axes import CoverageAxis, extract_coverage_axes_from_design_doc, extract_coverage_axes_from_lexicon
 from codd.dag.extractor import extract_design_doc_metadata, extract_imports, scan_capability_evidence
@@ -1119,15 +1120,14 @@ def _glob_project_paths(
         if not isinstance(pattern, str) or not pattern:
             continue
         for expanded in _expand_braces(pattern):
-            for path in project_root.glob(expanded):
-                resolved = path.resolve()
-                # Root-jail: a pattern such as ``../outside/*.py`` can glob files
-                # outside the project tree. Drop anything whose resolved location
-                # escapes ``project_root`` so it never becomes a DAG node (which
-                # would otherwise let an out-of-root file satisfy coverage and
-                # produce a false-green). In-root paths are unaffected.
-                if not resolved.is_relative_to(project_root_resolved):
-                    continue
+            # Root-jail via the shared path_safety closure: a pattern such as
+            # ``../outside/*.py`` (or an in-root symlink whose target escapes the
+            # tree) can glob files outside the project. ``iter_project_glob``
+            # resolves each match (following symlinks) and keeps only in-root
+            # ones, so an out-of-root file never becomes a DAG node (which would
+            # otherwise let it satisfy coverage → false-green). In-root paths are
+            # unaffected.
+            for resolved in iter_project_glob(project_root, expanded):
                 paths[str(resolved)] = resolved
     excludes = [
         str(pattern)
@@ -1630,15 +1630,11 @@ def _jailed_project_path(project_root: Path, path_text: str) -> Path | None:
     path pointing outside the project must not leak file contents. ID-resolution
     sites keep using :func:`_project_path` directly — they only compute a relative
     id and fail to match, never read.
+
+    Delegates to the shared :func:`codd.path_safety.resolve_project_path` jail so
+    every config-path read site rejects/accepts the same raw path identically.
     """
-    if not str(path_text).strip():
-        return None
-    resolved = _project_path(project_root, path_text)
-    try:
-        resolved.relative_to(project_root.resolve())
-    except (ValueError, OSError):
-        return None
-    return resolved
+    return resolve_project_path(project_root, path_text)
 
 
 def _normalize_output_path(path_text: str) -> str:

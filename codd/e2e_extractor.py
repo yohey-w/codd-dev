@@ -11,6 +11,7 @@ import yaml
 
 from codd.action_outcome import canonical_action_verb
 from codd.frontmatter import frontmatter_or_yaml_payload as _frontmatter_or_yaml_payload
+from codd.path_safety import resolve_project_path
 from codd.requirements_meta import (
     normalize_operation_flow,
     operation_enables,
@@ -1099,32 +1100,31 @@ def _configured_doc_files(project_root: Path, config: Mapping[str, Any]) -> list
     scan = config.get("scan", {})
     raw_dirs = scan.get("doc_dirs", ["docs/"]) if isinstance(scan, Mapping) else ["docs/"]
     dirs = raw_dirs if isinstance(raw_dirs, list) else ["docs/"]
-    try:
-        root_anchor = project_root.resolve()
-    except (OSError, ValueError):  # pragma: no cover - defensive
-        root_anchor = project_root
     files: list[Path] = []
     for raw_dir in dirs:
         if not isinstance(raw_dir, str) or not raw_dir.strip():
             continue
-        root = Path(raw_dir).expanduser()
-        if not root.is_absolute():
-            root = project_root / root
-        # Root-jail: an absolute (or expanded-user) doc_dir outside the project
-        # root must never be walked/read — that would enumerate arbitrary files.
-        try:
-            root.resolve().relative_to(root_anchor)
-        except (ValueError, OSError):
-            continue
-        if not root.exists():
+        # Root-jail the configured doc_dir (a codd.yaml ``scan.doc_dirs`` value) via
+        # the shared path_safety closure: an absolute (or expanded-user) doc_dir
+        # outside the project root must never be walked/read — that would enumerate
+        # arbitrary files. Routed through the same jail as every other config path.
+        root = resolve_project_path(project_root, raw_dir)
+        if root is None or not root.exists():
             continue
         if root.is_file():
             if root.suffix in _DOC_SUFFIXES:
                 files.append(root)
             continue
         for path in root.rglob("*"):
-            if path.is_file() and path.suffix in _DOC_SUFFIXES:
-                files.append(path)
+            if not (path.is_file() and path.suffix in _DOC_SUFFIXES):
+                continue
+            # Per-file symlink jail: ``rglob`` enumerates an in-root symlink entry
+            # even when its target escapes the (in-root) doc_dir; resolve each match
+            # and keep only those staying inside the project root, so a doc-dir
+            # symlink cannot leak an off-root file's contents.
+            if resolve_project_path(project_root, path) is None:
+                continue
+            files.append(path)
     deduped: list[Path] = []
     seen: set[Path] = set()
     for path in files:

@@ -5,13 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import fnmatch
 from functools import lru_cache
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 from typing import Any
 
 from codd.dag import DAG, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.llm.design_doc_extractor import ExpectedExtraction, ExpectedNode
+from codd.path_safety import resolve_project_path
 
 
 DEFAULT_PATH_PREFIX_TOLERANT = ("src/", "lib/", "app/")
@@ -404,27 +405,21 @@ def _resolve_in_root(raw_hint: str, project_root: Path) -> Path | None:
     filesystem root, so it is treated as absolute and only matches if that
     absolute location happens to fall inside the project root (safe side: it
     will not).
+
+    The hint-specific preprocessing (``\\`` → ``/`` and leading-``./`` strip) stays
+    here — it is path_hint normalization, not jail logic — and the resulting
+    cleaned hint is handed to the shared
+    :func:`codd.path_safety.resolve_project_path` jail, whose leading-slash
+    semantics match (a cleaned ``/src/...`` is filesystem-absolute and confined,
+    a relative hint is resolved under the root). This keeps every config-path read
+    site rejecting/accepting the same raw path identically.
     """
     cleaned = str(raw_hint or "").strip().replace("\\", "/")
     while cleaned.startswith("./"):
         cleaned = cleaned[2:]
     if not cleaned:
         return None
-
-    root_resolved = project_root.resolve()
-    pure = PurePosixPath(cleaned)
-    try:
-        if pure.is_absolute():
-            # Absolute hint: only accept when it is genuinely inside the root.
-            absolute = Path(cleaned).resolve()
-            absolute.relative_to(root_resolved)
-            resolved = absolute
-        else:
-            resolved = (project_root / cleaned).resolve()
-            resolved.relative_to(root_resolved)
-    except (OSError, ValueError):
-        return None
-    return resolved
+    return resolve_project_path(project_root, cleaned)
 
 
 def _fs_glob_match(hint: str, project_root: Path | None) -> bool:
@@ -567,7 +562,6 @@ def _project_files(project_root: Path) -> list[str]:
         "dist",
         "node_modules",
     }
-    root_resolved = project_root.resolve()
     files: list[str] = []
     for path in project_root.rglob("*"):
         relative = path.relative_to(project_root)
@@ -575,14 +569,14 @@ def _project_files(project_root: Path) -> list[str]:
             continue
         if not path.is_file():
             continue
-        # Symlink-aware jail: ``rglob`` enumerates an in-root symlink entry even
-        # when its target escapes the root. Resolve each candidate and keep it
-        # only when the resolved target stays inside the project root, so glob
-        # matching (``_fs_glob_match`` / ``_fs_fallback_match``) cannot be
-        # satisfied by an off-root file reached through an in-root symlink.
-        try:
-            path.resolve().relative_to(root_resolved)
-        except (OSError, ValueError):
+        # Symlink-aware jail (shared closure): ``rglob`` enumerates an in-root
+        # symlink entry even when its target escapes the root. ``resolve_project_path``
+        # resolves each candidate and keeps it only when the resolved target stays
+        # inside the project root, so glob matching (``_fs_glob_match`` /
+        # ``_fs_fallback_match``) cannot be satisfied by an off-root file reached
+        # through an in-root symlink. The relative path string itself is preserved
+        # (the matcher keys off the in-root relative form, not the resolved target).
+        if resolve_project_path(project_root, path) is None:
             continue
         files.append(relative.as_posix())
     return files

@@ -13,6 +13,7 @@ from typing import Any
 
 from codd._git_helper import _diff_files, _resolve_base_ref
 from codd.config import find_codd_dir, load_project_config
+from codd.path_safety import resolve_project_path
 from codd.coherence_engine import DriftEvent, EventBus, Orchestrator, use_coherence_bus
 from codd.confidence import classify_band as _confidence_classify_band
 from codd.confidence import thresholds_from_config
@@ -247,8 +248,11 @@ def run_propagate(
         resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="propagate")
 
         for doc in affected_docs:
-            doc_path = project_root / doc.path
-            if not doc_path.exists():
+            # Defense-in-depth root-jail: ``doc.path`` is normally an in-root
+            # relative path, but it can originate from a wave_config ``output``
+            # value; never read/write one resolving outside the project root.
+            doc_path = resolve_project_path(project_root, doc.path)
+            if doc_path is None or not doc_path.exists():
                 continue
             current_content = doc_path.read_text(encoding="utf-8")
             prompt = _build_update_prompt(
@@ -351,8 +355,10 @@ def run_verify(
 
         for vdoc in auto_apply:
             doc = vdoc.doc
-            doc_path = project_root / doc.path
-            if not doc_path.exists():
+            # Defense-in-depth root-jail (same rationale as the update loop above):
+            # ``doc.path`` may carry a wave_config-supplied ``output`` value.
+            doc_path = resolve_project_path(project_root, doc.path)
+            if doc_path is None or not doc_path.exists():
                 continue
             current_content = doc_path.read_text(encoding="utf-8")
             prompt = _build_update_prompt(
@@ -1619,8 +1625,13 @@ def _find_design_docs_by_modules(
                 node_id = art["node_id"]
                 if node_id in seen_node_ids:
                     continue
-                output_path = project_root / art["output"]
-                if not output_path.exists():
+                # Root-jail the wave_config-supplied output path (a codd.yaml config
+                # value): an absolute path or ``../`` traversal must not be probed
+                # with ``.exists()`` here, nor flow into ``AffectedDoc.path`` where
+                # it would later be read/written by the propagation step. Out-of-root
+                # → skip (the artifact is simply not treated as affected).
+                output_path = resolve_project_path(project_root, art["output"])
+                if output_path is None or not output_path.exists():
                     continue
                 seen_node_ids.add(node_id)
                 matched_files = [f for f, m in file_module_map.items() if m in matched]

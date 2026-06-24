@@ -70,6 +70,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from codd.dag.checks import DagCheck, register_dag_check
+from codd.path_safety import resolve_project_path
 
 
 _ON_VIOLATION_FAIL = "fail"
@@ -313,16 +314,21 @@ def _resolve_scope_files(
     flagged_escape = False
     for raw in paths:
         for match in _glob(root, raw):
-            try:
-                resolved = match.resolve()
-            except OSError:
-                continue
-            if not resolved.is_file():
-                continue
-            if not _within_root(resolved, root):
+            # Confinement decision via the shared path_safety jail (a scope glob may
+            # match an in-root symlink whose target escapes the root). The
+            # out-of-root *visibility* (an amber diagnostic) is preserved here — the
+            # shared closure silently drops escapes, but negative_space must surface
+            # them, so we keep emitting the diagnostic on the first escape.
+            resolved = resolve_project_path(root, match)
+            if resolved is None:
                 if not flagged_escape:
                     warnings.append(_path_outside_root_diagnostic(raw, root))
                     flagged_escape = True
+                continue
+            try:
+                if not resolved.is_file():
+                    continue
+            except OSError:
                 continue
             files[resolved] = None
     return list(files), warnings
@@ -339,14 +345,6 @@ def _glob(root: Path, raw: str) -> list[Path]:
         return list(root.glob(pattern))
     except (ValueError, OSError):
         return []
-
-
-def _within_root(resolved: Path, root: Path) -> bool:
-    try:
-        resolved.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 def _read_text(path: Path) -> str | None:

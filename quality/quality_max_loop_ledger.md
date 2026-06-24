@@ -360,3 +360,39 @@ Round 5 (re-review) next; expect convergence toward 2 consecutive clean rounds.
   matching the N-gate refinement: vacuous/skip visible, never pure green).
 full suite 6076. Round 6 next; the 3 foundational classes are now comprehensively
 closed across all checks + the 3 summaries + json, so convergence is expected.
+
+## Round 6 (2026-06-25): NOT clean → 7 fixed (P0 regression + symlink sub-vector)
+- P0 (regression from round-5): depends_on_consistency violations-return omitted
+  status= → JSON false-green (status:pass + severity:red). Fixed.
+- visibility (3 sites): the vacuous DISPLAY list (dag verify, _emit_verify_summary,
+  embedded check payload) didn't apply the _dag_pass_is_warn filter the counts use →
+  amber-warn vacuous double-counted. Filtered at all 3.
+- path-escape SYMLINK sub-vector (4) + dormancy (1): a repo-internal symlink resolving
+  out-of-root escaped the jails — impl_coverage, artifact_contract, deployment/extractor;
+  deployment/extractor journey dormancy. Fixed symlink-aware. full suite 6095 (3fadf4c).
+
+## N-gate path-escape TERMINAL CONDITION (GPT-decided 2026-06-25) — full: /tmp/gpt_ngate_answer.md
+The symlink sub-vector exposed a large FS-glob surface (102 sites). GPT decided: scope
+the N-gate's path-escape to **user-path-controllable FS readers ONLY**; hardcoded
+project_root fixed-pattern globs (code/catalog/profile patterns, bundled resources) are
+OUT of N-gate scope → Axis-N adversarial-hardening backlog (don't reset the streak).
+Machine rule: `source=external_path_like (config / frontmatter / node.path / path_hint /
+lexicon_file / documents / propagation_output / coverage-axis / CLI path) AND
+sink=FS read/exists/glob AND not first through the shared jail ⇒ P0/P1 candidate`.
+**N-gate path-escape clean** = every user-path FS sink goes through the shared jail;
+the 3 fixtures (../ , absolute out-of-root, repo-internal symlink→out) don't read the
+external file or count it as PASS evidence; out-of-root → skip/warn (optional) or
+missing/red (required), never pure green; 2 consecutive 3-engine rounds find no new
+P0/P1 in core liveness + this user-path scope.
+
+### path_safety closure done (full suite 6117): unified jail
+New `codd/path_safety.py` (resolve_project_path / iter_project_glob /
+project_relative_path: resolve → follow symlinks → relative_to(root)). Unified the 3
+named jails (builder _jailed_project_path, impl_coverage _resolve_in_root,
+deployment/extractor _jail_paths) onto it (same raw path → same reject/accept). Audit
+routed all user-path sinks through it and found 2 NEW unjailed: propagator
+wave_config.output (→ read_text/write) and screen_transition_extractor src_dirs
+(→ os.walk/read_text); plus e2e doc_dirs per-file symlink gap, depends_on
+propagation_output, negative_space forbidden-scope (kept its amber diagnostic).
+Out-of-scope → Axis-N backlog: code-constant globs (deployment patterns, artifact
+catalog globs), Path(__file__) bundled resources. Round 7 next, scoped to user-path.

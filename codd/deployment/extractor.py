@@ -11,6 +11,7 @@ import yaml
 
 from codd.config import find_codd_dir, load_project_config
 from codd.dag.metadata_access import collect_structured_entries
+from codd.path_safety import iter_project_glob, resolve_project_path
 from codd.deployment import (
     EDGE_EXECUTES_IN_ORDER,
     EDGE_PRODUCES_STATE,
@@ -1196,33 +1197,20 @@ def _impl_file_id(impl_file: Any) -> str:
 
 
 def _glob_paths(project_root: Path, patterns: Iterable[str]) -> list[Path]:
-    paths: list[Path] = []
-    for pattern in patterns:
-        paths.extend(project_root.glob(pattern))
-    return _jail_paths(project_root, _dedupe_paths(paths))
+    """Glob ``patterns`` under the root, dropping out-of-root (symlink) matches.
 
-
-def _jail_paths(project_root: Path, paths: Iterable[Path]) -> list[Path]:
-    """Drop globbed paths whose resolved location escapes ``project_root``.
-
-    ``_dedupe_paths`` resolves each match, which *follows symlinks*. A matched
-    ``tests/e2e/*.spec.ts`` that is a symlink to a file outside the project tree
-    would otherwise resolve to its out-of-root target, get synthesized into a
-    ``verification:e2e:/abs/outside`` node, and have the external file read
-    (path-escape leak). Jail the resolved (symlink-followed) path to the root —
-    same approach as the builder's :func:`codd.dag.builder._jailed_project_path`.
-    An in-root match is unchanged.
+    Routes each pattern through the shared :func:`codd.path_safety.iter_project_glob`
+    jail: a matched ``tests/e2e/*.spec.ts`` that is a symlink to a file outside the
+    project tree would otherwise resolve to its out-of-root target, get synthesized
+    into a ``verification:e2e:/abs/outside`` node, and have the external file read
+    (path-escape leak). The shared closure resolves each match (following symlinks)
+    and keeps only in-root ones. In-root matches are unchanged.
     """
-    root = Path(project_root).resolve()
-    jailed: list[Path] = []
-    for path in paths:
-        resolved = Path(path).resolve()
-        try:
-            resolved.relative_to(root)
-        except (ValueError, OSError):
-            continue
-        jailed.append(resolved)
-    return jailed
+    paths: dict[str, Path] = {}
+    for pattern in patterns:
+        for resolved in iter_project_glob(project_root, pattern):
+            paths[str(resolved)] = resolved
+    return [paths[key] for key in sorted(paths)]
 
 
 def _existing_files(paths: Iterable[Path]) -> list[Path]:
@@ -1274,28 +1262,16 @@ def _load_project_config_or_empty(project_root: Path) -> dict[str, Any]:
         return {}
 
 
-def _project_path(project_root: Path, path_text: str) -> Path:
-    path = Path(path_text).expanduser()
-    if path.is_absolute():
-        return path.resolve()
-    return (project_root / path).resolve()
-
-
 def _jailed_project_path(project_root: Path, path_text: str) -> Path | None:
     """Resolve a config document path, returning ``None`` when it escapes the root.
 
     A configured ``deployment.documents[*].path`` may be absolute; one pointing
     outside the project root must not be read (path-escape leak). In-root paths
-    keep their existing behaviour.
+    keep their existing behaviour. Delegates to the shared
+    :func:`codd.path_safety.resolve_project_path` jail so the same raw document
+    path is rejected/accepted identically across every reader.
     """
-    if not str(path_text).strip():
-        return None
-    resolved = _project_path(project_root, path_text)
-    try:
-        resolved.relative_to(Path(project_root).resolve())
-    except (ValueError, OSError):
-        return None
-    return resolved
+    return resolve_project_path(project_root, path_text)
 
 
 def _relative_id(path: Path, project_root: Path) -> str:

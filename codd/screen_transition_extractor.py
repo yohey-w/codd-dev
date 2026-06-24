@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from codd.path_safety import resolve_project_path
+
 
 @dataclass
 class ScreenTransition:
@@ -209,7 +211,11 @@ def _iter_source_files(project_root: Path, src_dirs: list[str] | None):
 
 def _source_roots(project_root: Path, src_dirs: list[str] | None) -> list[Path]:
     if src_dirs:
-        return [_resolve_project_path(project_root, item) for item in src_dirs if item]
+        # Root-jail each requested source dir via the shared path_safety closure:
+        # ``src_dirs`` is a CLI/config-supplied list, so an absolute path or a
+        # ``../`` traversal would otherwise let ``_iter_source_files`` walk and
+        # read files outside the project tree. Out-of-root entries are dropped.
+        return [resolved for item in src_dirs if item and (resolved := resolve_project_path(project_root, item))]
 
     config = _load_project_codd_yaml(project_root)
     candidates: list[str] = []
@@ -226,13 +232,9 @@ def _source_roots(project_root: Path, src_dirs: list[str] | None) -> list[Path]:
     if not candidates:
         candidates = ["src", "app", "pages"]
 
-    roots = [_resolve_project_path(project_root, candidate) for candidate in candidates]
+    # Same jail for codd.yaml-derived source_dirs / filesystem_routes base_dir.
+    roots = [resolved for candidate in candidates if (resolved := resolve_project_path(project_root, candidate))]
     return roots if any(root.exists() for root in roots) else [project_root]
-
-
-def _resolve_project_path(project_root: Path, value: str) -> Path:
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else project_root / path
 
 
 def _parse_source_file(source_file: Path, content: str):
