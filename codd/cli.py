@@ -31,6 +31,7 @@ from codd.capability_completeness import (
     enablement_declaration_nudges,
 )
 from codd.config import find_codd_dir, load_project_config
+from codd.dag import result_status as _result_status
 from codd.frontmatter import frontmatter_or_yaml_payload as _frontmatter_or_yaml_payload
 from codd.requirement_reconciliation import (
     discover_requirement_docs,
@@ -9019,55 +9020,19 @@ def _dag_result_name(result: Any) -> str:
     return str(_dag_result_value(result, "check_name") or result.__class__.__name__)
 
 
-def _dag_result_severity(result: Any) -> str:
-    return str(_dag_result_value(result, "severity") or "red")
-
-
-def _dag_result_passed(result: Any) -> bool:
-    return _dag_result_value(result, "passed") is not False
-
-
-def _dag_result_status(result: Any) -> str:
-    return str(_dag_result_value(result, "status") or "")
+# Status / findings predicates live in codd.dag.result_status so the three
+# summaries that consume DAG results (this CLI, codd.coverage_metrics and
+# codd.deployer) share one status-aware implementation and count findings
+# (incl. warn-bearing amber results) byte-for-byte identically.
+_dag_result_severity = _result_status.result_severity
+_dag_result_passed = _result_status.result_passed
+_dag_result_status = _result_status.result_status
+_dag_result_has_findings = _result_status.result_has_findings
+_dag_pass_is_warn = _result_status.pass_is_warn
 
 
 def _dag_result_message(result: Any) -> str:
     return str(_dag_result_value(result, "message") or "")
-
-
-def _dag_result_has_findings(result: Any) -> bool:
-    # A check's own declared non-pass status is the most robust signal — it does not
-    # depend on which field name the check uses for its findings (violations /
-    # warnings / findings / …). A WARN/FAIL status means there is something to
-    # surface, so it must never render as a clean PASS.
-    if _dag_result_status(result) in {"warn", "warning", "fail", "failed"}:
-        return True
-    for key in (
-        "violations",
-        "warnings",  # amber checks report advisories here — they ARE findings,
-        "findings",  # some checks (e.g. ci_health) report advisories under this name,
-        # so an amber-via-warnings/findings check is counted/shown, not rendered PASS.
-        "missing_impl_files",
-        "orphan_edges",
-        "dangling_refs",
-        "incomplete_tasks",
-        "unreachable_nodes",
-    ):
-        value = _dag_result_value(result, key)
-        if value:
-            return True
-    return False
-
-
-def _dag_pass_is_warn(result: Any) -> bool:
-    """A passed amber check that carries findings must be surfaced as WARN.
-
-    Shared by all three verify summaries ('dag verify', the embedded summary in
-    'check', and '_emit_verify_summary') so an amber-with-findings result that
-    reports passed=True is never hidden behind a green-looking PASS in any of
-    them. Backward compatible: a finding-free amber pass stays PASS.
-    """
-    return _dag_result_severity(result) == "amber" and _dag_result_has_findings(result)
 
 
 def _dag_result_details(result: Any) -> list[str]:
@@ -9098,10 +9063,7 @@ def _dag_result_details(result: Any) -> list[str]:
     return details
 
 
-def _dag_result_value(result: Any, key: str) -> Any:
-    if isinstance(result, dict):
-        return result.get(key)
-    return getattr(result, key, None)
+_dag_result_value = _result_status.result_value
 
 
 @main.group()

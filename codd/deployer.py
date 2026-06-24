@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 import yaml
 
 from codd.cli import CoddCLIError
+from codd.dag import result_status as _result_status
 from codd.deploy_targets import get_target
 
 _coherence_bus: Any | None = None
@@ -611,10 +612,7 @@ def _screen_flow_strict_edges(settings: dict[str, Any]) -> bool:
     return bool(screen_flow_config.get("strict_edges", True))
 
 
-def _result_value(value: Any, key: str) -> Any:
-    if isinstance(value, dict):
-        return value.get(key)
-    return getattr(value, key, None)
+_result_value = _result_status.result_value
 
 
 def _format_mapping_detail(value: dict[str, Any]) -> str:
@@ -651,26 +649,15 @@ def _format_coverage_metric(metric: Any) -> str:
     )
 
 
-def _dag_result_severity(check_result: Any) -> str:
-    return str(_result_value(check_result, "severity") or "red")
+# Canonical, status-aware predicate shared with codd.cli and
+# codd.coverage_metrics so the deploy gate counts findings (incl. warn-bearing
+# amber results) identically to the other summaries — see codd.dag.result_status.
+_dag_result_severity = _result_status.result_severity
+_dag_result_has_findings = _result_status.result_has_findings
 
 
 def _dag_result_name(check_result: Any) -> str:
     return str(_result_value(check_result, "check_name") or check_result.__class__.__name__)
-
-
-def _dag_result_has_findings(check_result: Any) -> bool:
-    for key in (
-        "violations",
-        "missing_impl_files",
-        "orphan_edges",
-        "dangling_refs",
-        "incomplete_tasks",
-        "unreachable_nodes",
-    ):
-        if _result_value(check_result, key):
-            return True
-    return False
 
 
 def _format_dag_check_result(check_result: Any) -> str:

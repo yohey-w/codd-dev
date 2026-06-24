@@ -550,3 +550,22 @@ unified onto path_safety. full suite 6375. (lstrip("/") confirmed isolated to
 negative_space; other lstrip uses are ./-normalize / URL / already-jailed.) Streak still
 0; **round 14 onward uses 3 engines (Codex + Sonnet + Opus)** per the /goal's "3-engine
 review"; need 2 consecutive clean.
+
+## Round 14 (2026-06-25, 3-engine, evidence-scoped): NOT clean → 6 fixed
+Adding the 3rd engine (Opus) surfaced more niche edges (6 total, all fixed, full suite
+6399):
+- Codex: (1) FALSE-RED — iter_project_glob's lstrip("/") excluded a legit absolute
+  in-root pattern → fixed by rebasing absolute-in-root to project-relative (out-of-root
+  still rejected); (2) coverage_metrics + deployer had their OWN status-blind
+  _dag_result_has_findings copies → centralized into new codd/dag/result_status.py (one
+  canonical, cli/coverage/deployer bind the same function).
+- Opus: 3 fixed-filename per-file-symlink gaps (legacy lexicon defaults, deploy.yaml in
+  deployment_completeness + ci_health) → reconfine each candidate via resolve_project_path
+  (escape dropped; absence still a legit skip; configured lexicon stays fail-closed).
+- Sonnet: vb_marker_authenticity TS/Python import-specifier escape (../../.. / ....) read
+  off-root as helper source → jail both resolvers, None → unresolved_helper (fail-closed).
+**Convergence concern**: 14 rounds, 3 engines still find 3-6 niche adversarial-symlink/
+specifier edges/round; the per-reader tail is long vs the owner's "short gate / don't
+chase saturation". GPT exit-line consult (TAB 63E64E94) pending — to decide
+systematic-class-closed exit (with niche adversarial-symlink residual → Axis-N) vs literal
+2-clean. Apply its ruling for round 15+.

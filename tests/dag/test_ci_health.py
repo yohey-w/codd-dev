@@ -325,6 +325,80 @@ def test_c8_in_root_absolute_glob_unchanged(tmp_path: Path) -> None:
     assert result.workflow_files == [".github/workflows/ci.yml"]
 
 
+def test_c8_deploy_yaml_symlink_escaping_root_is_not_read(tmp_path: Path) -> None:
+    """A fixed-name ``deploy.yaml`` that is an in-root symlink whose target
+    escapes the project tree must not contribute its post_deploy verification
+    commands.
+
+    RED-before-GREEN: ``_deploy_verification_commands`` read the fixed-name
+    ``deploy.yaml`` candidate via ``is_file()`` / ``read_text()`` after
+    ``Path.resolve()`` followed the symlink off-root, so an off-root post_deploy
+    command drove ``ci_verification_not_in_workflow`` (an amber finding sourced
+    from a file outside the project = a path-escape leak)."""
+
+    import os
+
+    project_root = tmp_path / "project"
+    workflow_dir = project_root / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "ci.yml").write_text(
+        "name: ci\non: [push, pull_request]\njobs:\n  test:\n    steps:\n      - run: pytest tests/unit\n",
+        encoding="utf-8",
+    )
+    # An off-root deploy.yaml whose post_deploy command is absent from the CI
+    # workflow; reading it would raise an amber ci_verification_not_in_workflow.
+    outside = tmp_path / "outside_deploy.yaml"
+    outside.write_text("post_deploy: pytest tests/e2e\n", encoding="utf-8")
+    link = project_root / "deploy.yaml"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        import pytest
+
+        pytest.skip("symlinks not supported on this platform")
+
+    result = _run(project_root, {"provider": "github_actions"})
+
+    # Old behavior: off-root command read => amber ci_verification_not_in_workflow
+    # (path-escape leak). Now: the escaping candidate is dropped => clean pass.
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.findings == []
+
+
+def test_c8_deploy_yaml_in_root_symlink_still_read(tmp_path: Path) -> None:
+    """Anti-false-red: an in-root ``deploy.yaml`` symlink whose target ALSO
+    stays inside the project root keeps contributing its verification command
+    (in-root -> in-root is valid)."""
+
+    import os
+
+    project_root = tmp_path / "project"
+    workflow_dir = project_root / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "ci.yml").write_text(
+        "name: ci\non: [push, pull_request]\njobs:\n  test:\n    steps:\n      - run: pytest tests/unit\n",
+        encoding="utf-8",
+    )
+    real = project_root / "config" / "real_deploy.yaml"
+    real.parent.mkdir(parents=True)
+    real.write_text("post_deploy: pytest tests/e2e\n", encoding="utf-8")
+    link = project_root / "deploy.yaml"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        import pytest
+
+        pytest.skip("symlinks not supported on this platform")
+
+    result = _run(project_root, {"provider": "github_actions"})
+
+    # The in-root command is still read and is missing from the workflow => amber.
+    assert result.status == "warn"
+    assert result.findings[0].violation_type == "ci_verification_not_in_workflow"
+    assert result.findings[0].details == ["pytest tests/e2e"]
+
+
 def test_c8_bare_verification_string_is_still_a_command(tmp_path: Path) -> None:
     """Without a sibling spec key, a string ``verification:`` value keeps its
     historical meaning: it is the verification command itself."""

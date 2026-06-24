@@ -93,10 +93,46 @@ def test_glob_in_root_match(project: Path):
 
 
 def test_glob_leading_slash_is_root_relative(project: Path):
-    # An absolute-looking pattern is treated as root-relative (Path.glob rejects
-    # absolute patterns); it must NOT escape to the filesystem root.
+    # An absolute-looking pattern that does NOT correspond to a real in-root
+    # location falls back to root-relative interpretation (legacy compat); it
+    # must NOT escape to the filesystem root.
     matches = iter_project_glob(project, "/src/*.py")
     assert (project / "src" / "feature.py").resolve() in matches
+
+
+def test_glob_absolute_in_root_pattern_matches(project: Path):
+    # anti-false-RED: an *absolute* pattern that genuinely lives under the
+    # project root must match its in-root files (previously the blind
+    # ``lstrip("/")`` rebased it onto the wrong place → ``[]`` → false-RED).
+    abs_pattern = str(project / "src" / "*.py")
+    matches = iter_project_glob(project, abs_pattern)
+    assert (project / "src" / "feature.py").resolve() in matches
+
+
+def test_glob_absolute_in_root_recursive_pattern_matches(project: Path):
+    # The recursive ``**`` form of an absolute in-root pattern must also match.
+    (project / "src" / "pkg").mkdir()
+    nested = project / "src" / "pkg" / "deep.py"
+    nested.write_text("z = 3\n", encoding="utf-8")
+    abs_pattern = str(project / "src" / "**" / "*.py")
+    matches = iter_project_glob(project, abs_pattern)
+    assert (project / "src" / "feature.py").resolve() in matches
+    assert nested.resolve() in matches
+
+
+def test_glob_absolute_out_of_root_pattern_no_match(project: Path):
+    # escape prevention: an absolute pattern whose static base escapes the
+    # project root must yield no matches (never enumerate the outside tree).
+    abs_pattern = str(project.parent / "outside" / "*.txt")
+    matches = iter_project_glob(project, abs_pattern)
+    assert matches == []
+    assert all("secret.txt" not in str(match) for match in matches)
+
+
+def test_glob_relative_pattern_unchanged_regression(project: Path):
+    # regression: a plain relative pattern keeps matching exactly as before.
+    matches = iter_project_glob(project, "src/*.py")
+    assert matches == [(project / "src" / "feature.py").resolve()]
 
 
 def test_glob_symlink_to_outside_dropped(project: Path):

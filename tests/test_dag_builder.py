@@ -324,6 +324,59 @@ def test_build_dag_test_pattern_escaping_root_excluded(tmp_path):
     assert str(escapee.resolve()) not in dag.nodes
 
 
+def test_build_dag_absolute_in_root_impl_pattern_nodeized(tmp_path):
+    """anti-false-RED: an *absolute* in-root ``impl_file_patterns`` glob must node-ize.
+
+    Previously the blind ``lstrip("/")`` rebased the absolute pattern onto a
+    wrong (non-existent) relative path → ``[]`` → the legitimate in-root source
+    never entered the DAG (false-RED).
+    """
+    project_root = tmp_path / "proj"
+    _write(project_root / "src" / "app.py", "y = 2\n")
+
+    abs_pattern = str(project_root / "src" / "**" / "*.py")
+    dag = build_dag(project_root, _settings(impl_file_patterns=[abs_pattern]))
+
+    assert "src/app.py" in dag.nodes
+
+
+def test_build_dag_absolute_in_root_source_dir_nodeized(tmp_path):
+    """anti-false-RED: an *absolute* in-root ``scan.source_dirs`` entry must node-ize.
+
+    ``_file_patterns_for_dirs`` previously did ``strip("/")`` on the directory,
+    breaking absolute in-root source roots the same way.
+    """
+    project_root = tmp_path / "proj"
+    _write(project_root / "src" / "app.py", "y = 3\n")
+
+    abs_dir = str(project_root / "src")
+    dag = build_dag(
+        project_root,
+        _settings(impl_file_patterns=[], scan={"source_dirs": [abs_dir]}),
+    )
+
+    assert "src/app.py" in dag.nodes
+
+
+def test_build_dag_absolute_out_of_root_impl_pattern_excluded(tmp_path):
+    """escape stays prevented: an absolute *out-of-root* pattern node-izes nothing."""
+    project_root = tmp_path / "proj"
+    outside = tmp_path / "outside"
+    _write(project_root / "src" / "good.py", "y = 2\n")
+    escapee = _write(outside / "evil.py", "x = 1\n")
+    assert escapee.exists()
+
+    abs_outside = str(outside / "**" / "*.py")
+    dag = build_dag(
+        project_root,
+        _settings(impl_file_patterns=["src/**/*.py", abs_outside]),
+    )
+
+    assert "src/good.py" in dag.nodes
+    assert not any("outside/evil.py" in node_id for node_id in dag.nodes)
+    assert str(escapee.resolve()) not in dag.nodes
+
+
 def test_build_dag_in_root_patterns_unchanged(tmp_path):
     """Regression: normal in-root design/impl/test patterns still node-ize (anti-false-red)."""
     project_root = tmp_path / "proj"

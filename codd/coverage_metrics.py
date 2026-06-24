@@ -8,6 +8,7 @@ import re
 from typing import Any
 import warnings
 
+from codd.dag import result_status as _result_status
 from codd.path_safety import resolve_project_path
 from codd.screen_flow_validator import EdgeCoverageResult
 
@@ -380,34 +381,17 @@ def _exception_result(metric: str, threshold: float, exc: Exception) -> Coverage
     )
 
 
-def _dag_result_severity(result: Any) -> str:
-    return str(_dag_result_value(result, "severity") or "red")
-
-
-def _dag_result_passed(result: Any) -> bool:
-    return _dag_result_value(result, "passed") is not False
-
-
-def _dag_result_status(result: Any) -> str:
-    return str(_dag_result_value(result, "status") or "")
+# Status / findings predicates are the canonical, status-aware versions shared
+# with codd.cli and codd.deployer so all three summaries count findings (incl.
+# warn-bearing amber results) identically — see codd.dag.result_status.
+_dag_result_severity = _result_status.result_severity
+_dag_result_passed = _result_status.result_passed
+_dag_result_status = _result_status.result_status
+_dag_result_has_findings = _result_status.result_has_findings
 
 
 def _dag_result_name(result: Any) -> str:
     return str(_dag_result_value(result, "check_name") or result.__class__.__name__)
-
-
-def _dag_result_has_findings(result: Any) -> bool:
-    for key in (
-        "violations",
-        "missing_impl_files",
-        "orphan_edges",
-        "dangling_refs",
-        "incomplete_tasks",
-        "unreachable_nodes",
-    ):
-        if _dag_result_value(result, key):
-            return True
-    return False
 
 
 def _format_dag_result(result: Any) -> str:
@@ -428,7 +412,4 @@ def _format_dag_result(result: Any) -> str:
     return f"{_dag_result_name(result)} ({'; '.join(details)})" if details else _dag_result_name(result)
 
 
-def _dag_result_value(result: Any, key: str) -> Any:
-    if isinstance(result, dict):
-        return result.get(key)
-    return getattr(result, key, None)
+_dag_result_value = _result_status.result_value

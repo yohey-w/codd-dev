@@ -297,3 +297,56 @@ def test_in_root_configured_lexicon_unaffected(tmp_path: Path) -> None:
     assert any(
         r["parent"] == "order" and r["child"] == "line_item" for r in relations
     ), relations
+
+
+# --- Legacy-default symlink escape: a per-file symlink at the LEGACY default
+# filename whose target leaves the tree must be dropped, not read as evidence.
+#
+# RED-before-GREEN: ``_relations_from_project_lexicon`` appends the legacy
+# ``project_lexicon.yaml`` / ``lexicon.yaml`` filenames and read them via
+# ``is_file()`` / ``read_text()`` after ``Path.resolve()`` followed the symlink
+# off-root — so an in-root ``lexicon.yaml`` symlink pointing at an off-root file
+# leaked its one-to-many relations into the gate (path-escape false-green). The
+# configured ``lexicon_file`` was already jailed (require_project_path); only the
+# legacy default fell through. The fix re-confines every candidate before reading
+# while keeping legacy *absence* a legitimate skip (not fail-closed).
+
+
+def test_legacy_default_symlink_escaping_root_is_dropped(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    # An off-root lexicon with a one-to-many relation, reachable only via an
+    # in-root symlink at the LEGACY default filename (no lexicon_file configured).
+    outside = tmp_path / "secret_lexicon.yaml"
+    _write_lexicon(outside, _MANY_TO_ONE_LEXICON)
+    link = project_root / "lexicon.yaml"
+    try:
+        os.symlink(outside, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    # No settings => legacy defaults are the only source. Old behavior: the
+    # symlink resolved off-root and its relation was read (false-green). Now: the
+    # escaping candidate is dropped, so no relation is reported. Legacy default is
+    # an absence-style candidate, so this is a silent drop, NOT a raise.
+    relations = detect_one_to_many_relations(None, project_root, settings={})
+    assert relations == [], relations
+
+
+def test_legacy_default_in_root_symlink_still_read(tmp_path: Path) -> None:
+    # Anti-false-red: an in-root ``lexicon.yaml`` symlink whose target ALSO stays
+    # inside the project root keeps being read (in-root -> in-root is valid).
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    real = project_root / "docs" / "real_lexicon.yaml"
+    _write_lexicon(real, _MANY_TO_ONE_LEXICON)
+    link = project_root / "lexicon.yaml"
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    relations = detect_one_to_many_relations(None, project_root, settings={})
+    assert any(
+        r["parent"] == "order" and r["child"] == "line_item" for r in relations
+    ), relations

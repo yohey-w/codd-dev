@@ -28,6 +28,7 @@ apart.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Union
 
@@ -38,6 +39,31 @@ __all__ = [
     "iter_project_glob",
     "project_relative_path",
 ]
+
+# A path component is "magic" (a glob wildcard) when it contains one of these.
+# ``Path.glob`` itself uses the same notion to decide where literal matching
+# stops and wildcard expansion begins.
+_GLOB_MAGIC = re.compile(r"[*?\[]")
+
+
+def _glob_static_base(pattern: Path) -> tuple[Path, list[str]]:
+    """Split a glob ``pattern`` into its literal prefix dir and the wildcard tail.
+
+    Walks the path components left-to-right; everything up to (but not including)
+    the first component containing a glob wildcard is the *static base* (a real
+    directory we can ``resolve()``), and the remainder is the relative glob tail.
+    For a pattern with no wildcard at all the whole path is the static base and
+    the tail is empty.
+    """
+    static: list[str] = []
+    rest: list[str] = []
+    hit = False
+    for part in pattern.parts:
+        if not hit and _GLOB_MAGIC.search(part):
+            hit = True
+        (rest if hit else static).append(part)
+    base = Path(*static) if static else Path(pattern.anchor or ".")
+    return base, rest
 
 
 class PathEscapeError(Exception):
@@ -114,24 +140,45 @@ def require_project_path(
 def iter_project_glob(project_root: Union[str, Path], raw_glob: str) -> list[Path]:
     """Glob ``raw_glob`` under ``project_root`` and return only in-root matches.
 
-    The pattern is anchored to the project root: ``Path.glob`` rejects absolute
-    patterns, so a leading slash is stripped and the pattern is treated as
-    root-relative. Each match is resolved (symlinks followed) and kept only when it
-    stays inside ``project_root.resolve()`` — so an in-root symlink whose target
-    escapes the tree cannot smuggle an off-root file into the results. Resolved,
-    de-duplicated matches are returned sorted for determinism.
+    The pattern is anchored to the project root, and the leading-slash semantics
+    mirror :func:`resolve_project_path` (matters for anti-false-RED):
+
+    * A *relative* pattern (``src/**/*.py``) is globbed root-relative — unchanged.
+    * An *absolute* pattern (``/abs/proj/src/**/*.py``, e.g. a config that spells
+      ``dag.impl_file_patterns`` / ``scan.source_dirs`` with absolute in-root
+      paths) is taken as a real filesystem location: its static (non-wildcard)
+      base is resolved and, when it lives under the project root, the pattern is
+      rebased to project-relative so the in-root files genuinely match. Blindly
+      stripping the leading slash (the old behaviour) rebased it onto the wrong
+      place and matched nothing — a false-RED, dropping legitimate in-root files
+      from the DAG. An absolute base that escapes the root is *not* globbed there
+      (escape prevention); it falls back to a root-relative read of the
+      slash-stripped pattern, which yields only in-root matches (legacy compat),
+      never the outside tree.
+
+    Whatever the pattern shape, every match is then resolved (symlinks followed)
+    and kept only when it stays inside ``project_root.resolve()`` — this final
+    confinement is the real security boundary, so an in-root symlink whose target
+    escapes the tree (or an absolute base reached through such a symlink) can
+    never smuggle an off-root file into the results. Resolved, de-duplicated
+    matches are returned sorted for determinism.
     """
-    pattern = str(raw_glob or "").strip().lstrip("/")
-    if not pattern:
+    raw_text = str(raw_glob or "").strip()
+    if not raw_text:
         return []
     try:
         root = Path(project_root).resolve()
     except (ValueError, OSError):
         return []
+
+    pattern = _project_relative_glob(root, raw_text)
+    if not pattern:
+        return []
+
     matches: dict[str, Path] = {}
     try:
         globbed = list(Path(project_root).glob(pattern))
-    except (ValueError, OSError):
+    except (ValueError, OSError, NotImplementedError):
         return []
     for match in globbed:
         try:
@@ -141,6 +188,39 @@ def iter_project_glob(project_root: Union[str, Path], raw_glob: str) -> list[Pat
             continue
         matches[str(resolved)] = resolved
     return [matches[key] for key in sorted(matches)]
+
+
+def _project_relative_glob(root: Path, raw_text: str) -> str:
+    """Rebase ``raw_text`` to a root-relative glob, preserving absolute semantics.
+
+    ``root`` must already be ``resolve()``-d. Returns a root-relative glob string
+    (possibly empty when nothing can be globbed in-root). See
+    :func:`iter_project_glob` for the leading-slash contract this implements.
+    """
+    pattern_path = Path(raw_text)
+    if not pattern_path.is_absolute():
+        # Relative pattern: globbed root-relative, exactly as before.
+        return raw_text.lstrip("/")
+
+    base, rest = _glob_static_base(pattern_path)
+    try:
+        base_resolved = base.resolve()
+        base_rel = base_resolved.relative_to(root)
+    except (ValueError, OSError):
+        # Absolute base escapes the root (or cannot be resolved): do NOT glob the
+        # outside location. Fall back to a root-relative read of the
+        # slash-stripped pattern — legacy compat for absolute-looking patterns
+        # that were only ever meant as root-relative; the per-match confinement
+        # still guarantees only in-root files come back.
+        return raw_text.lstrip("/")
+
+    rebased = base_rel.joinpath(*rest) if rest else base_rel
+    rebased_text = rebased.as_posix()
+    # ``relative_to`` of the root itself yields "."; an empty/dot base with no
+    # wildcard tail has nothing meaningful to glob.
+    if rebased_text in ("", "."):
+        return ""
+    return rebased_text
 
 
 def project_relative_path(project_root: Union[str, Path], path: Union[str, Path]) -> str | None:

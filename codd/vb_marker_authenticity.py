@@ -106,6 +106,7 @@ from codd.operational_e2e_audit import (
     _rel_path,
     _resolve_vb_scan_dirs,
 )
+from codd.path_safety import resolve_project_path
 from codd.verifiable_behavior_audit import (
     VBAuditReport,
     _VB_TOKEN_RE,
@@ -3269,6 +3270,14 @@ def _ts_resolve_specifier(importer_rel: str, spec: str, project_root: Path) -> P
     raw = (base / spec).resolve()
     for candidate in _ts_candidates(raw):
         if candidate.is_file():
+            # JAIL: a test's import specifier is attacker-shaped data — a relative
+            # specifier (``../../../etc/passwd``) can resolve OUTSIDE the project
+            # root, and the caller would then read the off-root file as a helper
+            # body (a path-escape false-green into the VB authenticity gate). Confine
+            # the resolved candidate to the root; an escape yields None (helper
+            # unresolved ⇒ fail-CLOSED). In-root resolution is unchanged.
+            if resolve_project_path(project_root, candidate) is None:
+                return None
             return candidate
     return None
 
@@ -3710,6 +3719,14 @@ def _py_resolve_module(importer_rel: str, mod: str, project_root: Path) -> Path 
         target = target / part
     for candidate in (target.with_suffix(".py"), target / "__init__.py"):
         if candidate.is_file():
+            # JAIL: a test's ``from ....mod import`` specifier is attacker-shaped data
+            # — a deep relative module (``....evil``) can resolve OUTSIDE the project
+            # root, and the caller would then read the off-root module as a helper
+            # body (a path-escape false-green into the VB authenticity gate). Confine
+            # the resolved candidate to the root; an escape yields None (helper
+            # unresolved ⇒ fail-CLOSED). In-root resolution is unchanged.
+            if resolve_project_path(project_root, candidate) is None:
+                return None
             return candidate
     return None
 

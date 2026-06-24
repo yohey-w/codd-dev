@@ -12,6 +12,7 @@ import yaml
 
 from codd.dag import DAG, Edge, Node
 from codd.dag.checks import register_dag_check
+from codd.path_safety import resolve_project_path
 from codd.deployment import (
     EDGE_EXECUTES_IN_ORDER,
     EDGE_PRODUCES_STATE,
@@ -472,6 +473,14 @@ class DeploymentCompletenessCheck:
         root = self.project_root
         if root is not None:
             for path in self._deploy_yaml_candidates(Path(root)):
+                # Re-confine each fixed-name candidate before reading: an in-root
+                # ``deploy.yaml`` (or ``.codd``/``codd`` variant) that is a
+                # symlink whose target escapes the project tree would otherwise
+                # have its off-root post_deploy hooks credited into the C6 chain
+                # (path-escape false-green). The escaping candidate is dropped;
+                # an in-root → in-root symlink and plain absence are unaffected.
+                if resolve_project_path(root, path) is None:
+                    continue
                 if not path.is_file():
                     continue
                 payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}

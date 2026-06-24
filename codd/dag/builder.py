@@ -1588,9 +1588,18 @@ def _file_patterns_for_dirs(dirs: list[Any], suffixes: tuple[str, ...]) -> list[
     for directory in dirs:
         if not isinstance(directory, str) or not directory.strip():
             continue
-        base = directory.strip().strip("/")
-        if not base or base == ".":
-            base = "**"
+        stripped = directory.strip()
+        # Preserve an absolute in-root dir (e.g. ``/home/tono/proj/src``) as
+        # absolute so the shared glob jail (``iter_project_glob``) can rebase it
+        # to project-relative and match its files. Blindly stripping the leading
+        # slash rebased it onto a wrong relative path → no match → false-RED.
+        # Out-of-root absolute dirs are rejected downstream by the jail.
+        if Path(stripped).is_absolute():
+            base = stripped.rstrip("/")
+        else:
+            base = stripped.strip("/")
+            if not base or base == ".":
+                base = "**"
         for suffix in suffixes:
             patterns.append(f"{base}/**/*{suffix}")
     return patterns

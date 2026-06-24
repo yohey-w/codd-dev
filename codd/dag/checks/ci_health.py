@@ -360,6 +360,15 @@ class CiHealthCheck(DagCheck):
     def _deploy_verification_commands(self, project_root: Path) -> list[str]:
         commands: list[str] = []
         for path in self._deploy_yaml_candidates(project_root):
+            # Re-confine each fixed-name candidate before reading: an in-root
+            # ``deploy.yaml`` (or ``.codd``/``codd`` variant) that is a symlink
+            # whose target escapes the project tree would otherwise leak its
+            # off-root post_deploy commands into ``ci_verification_not_in_workflow``
+            # (a path-escape false amber). The escaping candidate is dropped; an
+            # in-root → in-root symlink and plain absence are unaffected. The
+            # workflow files were already re-confined in ``_locate_workflows``.
+            if resolve_project_path(project_root, path) is None:
+                continue
             if not path.is_file():
                 continue
             payload = _read_yaml_mapping(path)

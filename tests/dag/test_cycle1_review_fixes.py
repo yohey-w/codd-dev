@@ -79,3 +79,99 @@ def test_dag_result_has_findings_robust_to_field_name_and_status():
     ) is True
     assert _dag_result_has_findings(_R(status="warn")) is True
     assert _dag_result_has_findings(_R(status="pass")) is False
+
+
+def _warn_amber_result():
+    """An amber result that reports a finding via both ``status`` and the
+    ``warnings``/``findings`` fields — the case round-3 fixed in the CLI but that
+    the coverage/deploy copies missed (status-blind, no warnings/findings keys)."""
+    from dataclasses import dataclass, field as dfield
+
+    @dataclass
+    class _R:
+        check_name: str = "ci_health"
+        severity: str = "amber"
+        status: str = "warn"
+        passed: bool = True
+        warnings: list = dfield(default_factory=lambda: [{"type": "ci_trigger_incomplete"}])
+        findings: list = dfield(default_factory=lambda: [{"type": "ci_trigger_incomplete"}])
+
+    return _R()
+
+
+def _clean_pass_result():
+    """A true clean pass — no non-pass status, no findings. Must stay clean."""
+    from dataclasses import dataclass, field as dfield
+
+    @dataclass
+    class _R:
+        check_name: str = "node_completeness"
+        severity: str = "amber"
+        status: str = "pass"
+        passed: bool = True
+        warnings: list = dfield(default_factory=list)
+        findings: list = dfield(default_factory=list)
+        violations: list = dfield(default_factory=list)
+
+    return _R()
+
+
+def test_has_findings_consistent_across_cli_coverage_deployer():
+    # Round-14 #2: coverage_metrics and deployer carried their own status-blind
+    # copies of _dag_result_has_findings that ignored `warnings`/`findings`, so an
+    # amber+status=warn result was counted as a CLEAN pass there while the CLI
+    # counted it as WARN. All three must now agree (byte-once).
+    from codd.cli import _dag_result_has_findings as cli_fn
+    from codd.coverage_metrics import _dag_result_has_findings as cov_fn
+    from codd.deployer import _dag_result_has_findings as dep_fn
+
+    warn = _warn_amber_result()
+    clean = _clean_pass_result()
+
+    # RED before fix: cov_fn(warn) and dep_fn(warn) returned False (clean).
+    assert cli_fn(warn) is True
+    assert cov_fn(warn) is True
+    assert dep_fn(warn) is True
+
+    # Regression: a true clean pass stays clean in all three.
+    assert cli_fn(clean) is False
+    assert cov_fn(clean) is False
+    assert dep_fn(clean) is False
+
+
+def test_coverage_dag_completeness_counts_warn_amber(monkeypatch):
+    # coverage summary must surface an amber+status=warn result as a warning,
+    # not silently drop it as a clean pass.
+    from codd import coverage_metrics
+    from codd.dag import runner
+
+    monkeypatch.setattr(
+        runner,
+        "run_all_checks",
+        lambda project_root, settings=None, **kwargs: [_warn_amber_result()],
+    )
+
+    result = coverage_metrics.compute_dag_completeness("/tmp/nonexistent")
+
+    # The warn-bearing amber result is rendered as a warning line (RED before fix:
+    # has_findings()==False there → amber_findings empty → no warning line).
+    assert any(line.startswith("warning:") for line in result.details)
+
+
+def test_deployer_dag_gate_counts_warn_amber(monkeypatch):
+    # deploy gate must add a warning for an amber+status=warn result (RED before
+    # fix: its status-blind copy treated it as clean → no warning).
+    from codd import deployer
+    from codd.dag import runner
+
+    monkeypatch.setattr(
+        runner,
+        "run_all_checks",
+        lambda project_root, settings=None, check_names=None, **kwargs: [_warn_amber_result()],
+    )
+
+    gate = deployer.DeployGateResult()
+    deployer._collect_dag_completeness_gate("/tmp/nonexistent", {}, gate)
+
+    assert gate.warnings
+    assert not gate.failures  # an amber warning never blocks deploy

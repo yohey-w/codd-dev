@@ -3066,3 +3066,149 @@ def test_python_primitive_regex_narrow_receiver():
     assert R.search("    tc.assertRaises(X)")
     assert not R.search("    helpers.assert_token_values(x)")  # namespace + snake -> not primitive
     assert not R.search("    obj.process(x)")
+
+
+# ---------------------------------------------------------------------------
+# Import-specifier path-escape jail (regression: VB-authenticity-helper-import-
+# specifier-path-escape). A test file's import specifier is ATTACKER-SHAPED data:
+# a TS ``../../../etc/passwd`` or Python ``....evil`` specifier could resolve a
+# helper module OUTSIDE the project root, and the helper-resolver would then
+# ``read_text()`` that off-root file as a credible assertion-helper body — a
+# path-escape FALSE-GREEN feeding the VB authenticity gate. The fix jails both
+# resolvers through ``codd.path_safety.resolve_project_path`` so an escaping
+# candidate becomes None (helper unresolved ⇒ fail-CLOSED no_assertion). In-root
+# resolution (the legitimate sibling/barrel helper graph) is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_ts_resolve_specifier_jails_path_escape(tmp_path):
+    """A relative TS specifier that escapes the project root resolves to None even
+    when a real off-root file exists at that path (pre-fix: returned the off-root
+    Path, which the caller then read as a helper body — a path-escape false-green)."""
+    from codd.vb_marker_authenticity import _ts_resolve_specifier
+
+    root = tmp_path / "proj"
+    (root / "tests" / "e2e").mkdir(parents=True)
+    # A real, readable file ONE level above the project root.
+    (tmp_path / "evil.ts").write_text("export function x() {}\n", encoding="utf-8")
+    # From tests/e2e/, ``../../../evil`` climbs out of ``root`` to ``tmp_path/evil``.
+    resolved = _ts_resolve_specifier("tests/e2e/x.test.ts", "../../../evil", root)
+    assert resolved is None
+
+
+def test_ts_resolve_specifier_in_root_sibling_still_resolves(tmp_path):
+    """Anti-false-RED: a legitimate IN-ROOT relative specifier still resolves to the
+    real sibling file (the jail must not break the normal same-repo helper graph)."""
+    from codd.vb_marker_authenticity import _ts_resolve_specifier
+
+    root = tmp_path / "proj"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "helpers.ts").write_text("export function assertOk() {}\n", encoding="utf-8")
+    resolved = _ts_resolve_specifier("tests/x.test.ts", "./helpers", root)
+    assert resolved is not None
+    assert resolved.name == "helpers.ts"
+
+
+def test_ts_resolve_specifier_in_root_symlink_still_resolves(tmp_path):
+    """Anti-false-RED: an IN-ROOT specifier whose resolved target is an in-root file
+    (reached via an in-root symlink) still resolves — only OFF-ROOT escapes are cut."""
+    from codd.vb_marker_authenticity import _ts_resolve_specifier
+
+    root = tmp_path / "proj"
+    (root / "tests").mkdir(parents=True)
+    (root / "real_helpers.ts").write_text("export function assertOk() {}\n", encoding="utf-8")
+    (root / "tests" / "helpers.ts").symlink_to(root / "real_helpers.ts")
+    resolved = _ts_resolve_specifier("tests/x.test.ts", "./helpers", root)
+    assert resolved is not None  # in-root -> in-root symlink stays resolvable
+
+
+def test_py_resolve_module_jails_path_escape(tmp_path):
+    """A Python relative ``from ....mod import`` specifier that escapes the project
+    root resolves to None even when a real off-root module exists (pre-fix: returned
+    the off-root module file, read as a helper body — a path-escape false-green)."""
+    from codd.vb_marker_authenticity import _py_resolve_module
+
+    root = tmp_path / "proj"
+    (root / "tests" / "e2e").mkdir(parents=True)
+    # A real, readable module ONE level above the project root.
+    (tmp_path / "evil_module.py").write_text("def assert_ok(r):\n    assert r == 0\n", encoding="utf-8")
+    # From tests/e2e/, ``....evil_module`` climbs out of ``root`` to tmp_path/evil_module.py.
+    resolved = _py_resolve_module("tests/e2e/test_x.py", "....evil_module", root)
+    assert resolved is None
+
+
+def test_py_resolve_module_in_root_relative_still_resolves(tmp_path):
+    """Anti-false-RED: a legitimate IN-ROOT relative module still resolves (the jail
+    must not break the normal sibling/barrel helper resolution)."""
+    from codd.vb_marker_authenticity import _py_resolve_module
+
+    root = tmp_path / "proj"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "helpers.py").write_text("def assert_ok(r):\n    assert r == 0\n", encoding="utf-8")
+    resolved = _py_resolve_module("tests/test_x.py", ".helpers", root)
+    assert resolved is not None
+    assert resolved.name == "helpers.py"
+
+
+def test_py_resolve_module_in_root_absolute_still_resolves(tmp_path):
+    """Anti-false-RED: a legitimate IN-ROOT absolute dotted module still resolves
+    against the project root (the absolute-barrel re-export graph stays intact)."""
+    from codd.vb_marker_authenticity import _py_resolve_module
+
+    root = tmp_path / "proj"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "tests" / "helpers.py").write_text("def assert_ok(r):\n    assert r == 0\n", encoding="utf-8")
+    resolved = _py_resolve_module("tests/test_x.py", "tests.helpers", root)
+    assert resolved is not None
+    assert resolved.name == "helpers.py"
+
+
+def test_gate_ts_import_specifier_escape_is_not_credited(tmp_path):
+    """End-to-end anti-false-green: a covers-marker whose assertion-helper is imported
+    via an OFF-ROOT TS specifier is NOT credited — the off-root helper (a real
+    asserting body) is never read, so the gate fails CLOSED (no_assertion)."""
+    root = tmp_path / "proj"
+    (root / "tests" / "e2e").mkdir(parents=True)
+    _canonical(root, "| VB-01 | does a thing |\n")
+    _write(root / "package.json", _json.dumps({"name": "app", "version": "0.0.0"}))
+    # A REAL asserting helper placed OUTSIDE the project root.
+    _write(
+        tmp_path / "evil.ts",
+        "export function assertOk(r: number) { expect(r).toBe(0); }\n",
+    )
+    _write(
+        root / "tests" / "e2e" / "x.test.ts",
+        "import { assertOk } from '../../../evil';\n"
+        "// codd: covers vb=VB-01\n"
+        "it('x', () => { assertOk(0); });\n",
+    )
+    report = build_authenticity_report(root, config={"scan": {"test_dirs": ["tests/"]}}, profile=TS_PROFILE)
+    assert report.passed is False
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations), [
+        (v.kind, v.message) for v in report.violations
+    ]
+
+
+def test_gate_py_import_specifier_escape_is_not_credited(tmp_path):
+    """End-to-end anti-false-green: a covers-marker whose assertion-helper is imported
+    via an OFF-ROOT Python specifier is NOT credited — the off-root helper module
+    (a real asserting body) is never read, so the gate fails CLOSED (no_assertion)."""
+    root = tmp_path / "proj"
+    (root / "tests" / "e2e").mkdir(parents=True)
+    _canonical(root, "| VB-01 | does a thing |\n")
+    # A REAL asserting helper module placed OUTSIDE the project root.
+    _write(tmp_path / "evil_module.py", "def assert_ok(result):\n    assert result == 0\n")
+    _write(root / "tests" / "__init__.py", "")
+    _write(root / "tests" / "e2e" / "__init__.py", "")
+    _write(
+        root / "tests" / "e2e" / "test_cli.py",
+        "from ....evil_module import assert_ok\n\n"
+        "# codd: covers vb=VB-01\n"
+        "def test_cli_ok():\n    result = 0\n    assert_ok(result)\n",
+    )
+    report = build_authenticity_report(root, config={"scan": {"test_dirs": ["tests/"]}}, profile=PY_PROFILE)
+    assert report.passed is False
+    assert any(v.kind == "no_assertion" and v.vb_id == "VB-01" for v in report.violations), [
+        (v.kind, v.message) for v in report.violations
+    ]

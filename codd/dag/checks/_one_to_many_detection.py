@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 import yaml
 
-from codd.path_safety import require_project_path
+from codd.path_safety import require_project_path, resolve_project_path
 
 
 ONE_TO_MANY_RE = re.compile(
@@ -58,6 +58,11 @@ def detect_one_to_many_relations(
     honest red/error finding. An *empty / unset* ``lexicon_file`` is a legitimate
     no-config skip (returns nothing), and the legacy default filenames simply not
     existing is a legitimate absence (skipped, never fail-closed).
+
+    The *legacy default* filenames are also re-confined per-file before reading:
+    an in-root ``project_lexicon.yaml``/``lexicon.yaml`` that is a symlink whose
+    target escapes the tree is dropped (a path-escape false-green otherwise),
+    while an in-root → in-root symlink and plain absence stay legitimate skips.
     """
 
     relations: list[dict[str, str]] = []
@@ -97,6 +102,17 @@ def _relations_from_project_lexicon(
         candidates.append(configured)
     candidates.extend([project_root / "project_lexicon.yaml", project_root / "lexicon.yaml"])
     for path in _unique_paths(candidates):
+        # Re-confine each candidate before reading. ``_unique_paths`` resolves
+        # symlinks, so a fixed-name in-root candidate (the legacy
+        # ``project_lexicon.yaml``/``lexicon.yaml``) that is a symlink pointing
+        # off-root would otherwise be read as evidence (path-escape false-green).
+        # An escaping candidate is dropped silently: for a legacy default the
+        # drop is indistinguishable from plain absence, both of which are
+        # legitimate skips (anti-false-red). The configured ``lexicon_file`` was
+        # already jailed in-root by ``_configured_lexicon_path``, so re-confining
+        # it here is a no-op for the happy path.
+        if resolve_project_path(project_root, path) is None:
+            continue
         if not path.is_file():
             continue
         try:

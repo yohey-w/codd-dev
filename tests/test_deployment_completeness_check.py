@@ -276,6 +276,70 @@ def test_verification_in_deploy_flow_by_deploy_yaml(tmp_path):
     assert result.passed is True
 
 
+def test_deploy_yaml_symlink_escaping_root_is_not_credited(tmp_path):
+    # RED-before-GREEN: ``_project_hooks`` read the fixed-name ``deploy.yaml``
+    # candidate via ``is_file()`` / ``read_text()`` after ``Path.resolve()``
+    # followed the symlink off-root, so an in-root ``deploy.yaml`` symlink whose
+    # target escapes the project tree credited its off-root post_deploy hook into
+    # the C6 chain (path-escape false-green: the verification looked deploy-wired).
+    import os
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    # An off-root deploy.yaml whose post_deploy WOULD credit the smoke test.
+    outside = tmp_path / "outside_deploy.yaml"
+    outside.write_text(
+        "targets:\n  vps:\n    post_deploy:\n      - npm run test:smoke\n",
+        encoding="utf-8",
+    )
+    link = project_root / "deploy.yaml"
+    try:
+        os.symlink(outside, link)
+    except (OSError, NotImplementedError):
+        import pytest
+
+        pytest.skip("symlinks not supported on this platform")
+
+    dag = _complete_seed_dag(deploy_flow=False)
+
+    result = _run(dag, project_root)
+
+    # Old behavior: off-root hook read => passed=True (false-green). Now: the
+    # escaping candidate is dropped, the verification is NOT deploy-wired.
+    assert result.passed is False
+    assert len(result.violations) == 1
+    assert result.violations[0].broken_at == "verification_test_not_in_deploy_flow"
+
+
+def test_deploy_yaml_in_root_symlink_still_credited(tmp_path):
+    # Anti-false-red: an in-root ``deploy.yaml`` symlink whose target ALSO stays
+    # inside the project root keeps crediting its post_deploy hook (in-root ->
+    # in-root is a valid layout, not an escape).
+    import os
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    real = project_root / "config" / "real_deploy.yaml"
+    real.parent.mkdir(parents=True)
+    real.write_text(
+        "targets:\n  vps:\n    post_deploy:\n      - npm run test:smoke\n",
+        encoding="utf-8",
+    )
+    link = project_root / "deploy.yaml"
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        import pytest
+
+        pytest.skip("symlinks not supported on this platform")
+
+    dag = _complete_seed_dag(deploy_flow=False)
+
+    result = _run(dag, project_root)
+
+    assert result.passed is True
+
+
 def test_format_report_outputs_incomplete_chain_report_json(tmp_path):
     dag = _complete_seed_dag(deploy_flow=False)
     result = _run(dag, tmp_path)
