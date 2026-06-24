@@ -392,3 +392,17 @@ def test_dangling_consumer_violation_has_remediation():
     result = _run(dag)
     assert result.violations
     assert all(v.get("remediation") for v in result.violations)
+
+
+# every amber finding is self-repairable too (dead_resource shown; malformed/unscoped likewise).
+def test_dead_resource_warning_has_remediation():
+    dag = _dag(
+        _design_doc(
+            capability_contracts=[
+                {"capability": "build_report", "produces": [{"resource": "data:report.cache"}]},
+            ],
+        )
+    )
+    result = _run(dag)
+    dead = [w for w in result.warnings if w["type"] == "dead_resource"]
+    assert dead and all(w.get("remediation") for w in dead)

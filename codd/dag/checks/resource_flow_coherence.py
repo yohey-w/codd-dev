@@ -163,6 +163,11 @@ class ResourceFlowCoherenceCheck(DagCheck):
                             f"Required consumer reads {consumer.resource} but its capability "
                             "is not a required capability of any critical/high journey; not gated."
                         ),
+                        "remediation": (
+                            f"Add {consumer.capability} to a critical/high journey's "
+                            "required_capabilities to gate it, or mark the consumer "
+                            "required:false if it is not essential."
+                        ),
                     }
                 )
                 continue
@@ -353,6 +358,10 @@ class ResourceFlowCoherenceCheck(DagCheck):
                     "message": (
                         f"Resource {resource} has producer obligation(s) but no declared consumers."
                     ),
+                    "remediation": (
+                        f"Consume {resource} where it is needed, or drop the producer / mark "
+                        "it externally_provided_by if it is intentionally external."
+                    ),
                 }
             )
         return warnings
@@ -397,6 +406,7 @@ class ResourceFlowCoherenceCheck(DagCheck):
                 f"Declared contract entry at {location} is unusable ({detail}); "
                 "it would otherwise be dropped silently."
             ),
+            "remediation": f"Fix the entry at {location} ({detail}), or remove it if unintended.",
         }
 
     # ---------------------------------------------------------- canonical/parse

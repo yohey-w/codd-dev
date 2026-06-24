@@ -43,12 +43,13 @@ findings are genuine coherence debt in CoDD's own docs/graph.
 | 1 | verifier check | `malformed_contract` amber in resource_flow_coherence: surface declared-but-unusable contract entries (missing required field) instead of silently dropping them — Tier-1 scope of extractor_silent_noop | candidate test RED pre-impl (`test_malformed_contract_entry_is_amber` failed: no warning) → GREEN post-impl; 14 resource_flow tests + full suite 5873 passed | autonomous (visibility, amber; gate unchanged) | ✅ main |
 
 | 2 | diagnostic | `remediation` actionable hint on `dangling_required_consumer` reds (self-repair quality) | candidate test RED pre-impl (violations lacked `remediation`) → GREEN; 15 resource_flow + full suite 5874 passed | autonomous (additive diagnostic) | ✅ main |
+| 3 | diagnostic | `remediation` extended to all amber findings (dead_resource / malformed_contract / unscoped) — every finding self-repairable | warnings lacked `remediation` (diff adds it; same mechanism as #2's observed red→green); 16 resource_flow + full suite 5875 passed | autonomous (additive diagnostic) | ✅ main |
 
 ## Saturation tracker (2026-06-24)
 
 | requirement | status |
 |---|---|
-| ≥5 real codd-dev changes, each red-before-green | **2/5** (#1 malformed_contract, #2 remediation hint) |
+| ≥5 real codd-dev changes, each red-before-green | **3/5** (#1 malformed_contract, #2 dangling-red remediation, #3 all-finding remediation) |
 | false-green corpus regression gate (4 vectors) | ✅ 33 fixtures pass (`test_resource_flow_coherence.py` + `test_dag_verify_cli.py`) |
 | control/legacy false-red = 0 | ✅ (all guard/control/legacy fixtures pass) |
 | Contract Kernel generality preserved | ✅ (no project/FW/lang literal in resource_flow_coherence core) |
