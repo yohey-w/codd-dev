@@ -27,6 +27,14 @@ false reds):
   producer / external provider exists for that resource. Anything weaker
   (optional consumer, ``on_missing: skip|degrade``, capability not on a critical
   journey, external/seed provider declared) is not gated.
+* **Ordering (opt-in).** When — and only when — a design declares an explicit
+  ``operation_flow`` with ordered operations, a *satisfied* required consumer is
+  additionally RED (``producer_after_consumer``) if every mapped, non-external
+  producer of its resource runs strictly after it (consumed before produced).
+  Without an operation_flow, or when the producer/consumer cannot be mapped to a
+  single operation (ambiguous), ordering is skipped (no red) — the existence
+  check above is unchanged. This keeps ordering reds out of graphs that never
+  declared an order, the original reason ordering was deferred.
 
 This is intentionally separate from the enablement axis: ``enables/exercises``
 is the *capability* supply relation, ``produces/consumes`` is the *resource*
@@ -40,12 +48,28 @@ from pathlib import Path
 from typing import Any
 
 from codd.dag.checks import DagCheck, register_dag_check
+from codd.requirements_meta import operation_flow_operations
 
 
 _CRITICAL_LEVELS = {"critical", "high"}
 _OPTIONAL_ON_MISSING = {"skip", "degrade", "ignore", "optional", "tolerate"}
 _TRUE_TOKENS = {"true", "yes", "1", "required", "must"}
 _FALSE_TOKENS = {"false", "no", "0", "optional"}
+
+# Generic ref keys an operation entry may carry to identify itself. Kept
+# vocabulary-only (no project/framework/language tokens) so the ordering check
+# stays language-free: it matches a producer/consumer's declared capability or
+# obligation name against whichever of these keys an operation declares.
+_OPERATION_REF_KEYS = (
+    "id",
+    "name",
+    "operation",
+    "operation_id",
+    "capability",
+    "capabilities",
+    "obligation",
+    "obligations",
+)
 
 
 @dataclass
@@ -58,6 +82,11 @@ class ResourceUse:
     required: bool | None = None
     on_missing: str | None = None
     external: bool = False
+    operation_index: int | None = None
+    operation_ref: str | None = None
+    # "mapped" | "unmapped" | "ambiguous" — whether this use resolves to exactly
+    # one declared operation in the explicit operation_flow ordering.
+    operation_mapping_status: str = "unmapped"
 
 
 @dataclass
@@ -133,6 +162,13 @@ class ResourceFlowCoherenceCheck(DagCheck):
 
         critical_caps = self._critical_required_capabilities(design_docs)
 
+        # Explicit operation ordering (opt-in). Only when a design declares an
+        # operation_flow with ordered operations can we reason about
+        # producer-after-consumer ordering at all; without it we fall back to the
+        # existence-based check (no ordering reds — avoids false reds).
+        ref_to_index = self._operation_ref_to_index(design_docs)
+        self._attach_operation_indices(uses, ref_to_index)
+
         producers: dict[str, list[ResourceUse]] = {}
         consumers: list[ResourceUse] = []
         for use in uses:
@@ -172,6 +208,17 @@ class ResourceFlowCoherenceCheck(DagCheck):
                 )
                 continue
             if self._has_satisfying_producer(consumer.resource, producers):
+                # Producer exists. Existence is satisfied; now — and only when the
+                # design declared explicit operation ordering — check that at least
+                # one mapped, non-external producer is not strictly after the
+                # consumer. A producer-after-consumer ordering bug is a real red.
+                order_violation, order_warning = self._producer_order_violation(
+                    consumer, producers
+                )
+                if order_warning is not None:
+                    warnings.append(order_warning)
+                if order_violation is not None:
+                    violations.append(order_violation)
                 continue
             violations.append(
                 {
@@ -196,15 +243,23 @@ class ResourceFlowCoherenceCheck(DagCheck):
             )
 
         if violations:
+            dangling = sum(
+                1 for v in violations if v.get("type") == "dangling_required_consumer"
+            )
+            after = sum(
+                1 for v in violations if v.get("type") == "producer_after_consumer"
+            )
+            parts: list[str] = []
+            if dangling:
+                parts.append(f"{dangling} dangling required consumer(s) with no producer obligation")
+            if after:
+                parts.append(f"{after} producer-after-consumer ordering violation(s)")
             return ResourceFlowCoherenceResult(
                 severity="red",
                 status="fail",
                 passed=False,
                 block_deploy=True,
-                message=(
-                    f"resource_flow_coherence found {len(violations)} dangling required "
-                    "consumer(s) with no producer obligation"
-                ),
+                message="resource_flow_coherence found " + "; ".join(parts),
                 violations=violations,
                 warnings=warnings,
             )
@@ -313,6 +368,159 @@ class ResourceFlowCoherenceCheck(DagCheck):
                     if cap_s:
                         caps.add(cap_s)
         return caps
+
+    # ----------------------------------------------------- operation ordering
+    def _operation_ref_to_index(self, design_docs: list[Any]) -> dict[str, set[int]]:
+        """Map each operation's declared ref tokens to its ordinal index.
+
+        Operations are ordered by their position in the (already-normalized)
+        ``operation_flow.operations`` list, concatenated across design docs in
+        sorted node order. A token resolving to more than one index is ambiguous
+        and callers must treat it as unmapped for ordering (no red).
+        """
+
+        ref_to_index: dict[str, set[int]] = {}
+        index = 0
+        for node in design_docs:
+            attrs = getattr(node, "attributes", None) or {}
+            for operation in operation_flow_operations(attrs.get("operation_flow")):
+                for ref in self._operation_refs(operation):
+                    ref_to_index.setdefault(ref, set()).add(index)
+                index += 1
+        return ref_to_index
+
+    def _operation_refs(self, operation: dict[str, Any]) -> set[str]:
+        refs: set[str] = set()
+        for key in _OPERATION_REF_KEYS:
+            for value in self._as_list(operation.get(key)):
+                token = self._str(value)
+                if token:
+                    refs.add(token)
+        return refs
+
+    def _attach_operation_indices(
+        self, uses: list[ResourceUse], ref_to_index: dict[str, set[int]]
+    ) -> None:
+        """Resolve each use's capability/obligation ref to an operation index.
+
+        ``mapped`` = exactly one index; ``ambiguous`` = more than one; otherwise
+        the status stays ``unmapped``. No ref table (no explicit operation_flow)
+        leaves every use ``unmapped`` so ordering is skipped entirely.
+        """
+
+        for use in uses:
+            ref = use.capability or use.obligation
+            if not ref:
+                continue
+            indices = ref_to_index.get(ref)
+            if not indices:
+                continue
+            use.operation_ref = ref
+            if len(indices) == 1:
+                use.operation_index = next(iter(indices))
+                use.operation_mapping_status = "mapped"
+            else:
+                use.operation_mapping_status = "ambiguous"
+
+    def _producer_order_violation(
+        self, consumer: ResourceUse, producers: dict[str, list[ResourceUse]]
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Return ``(violation, warning)`` for one required, satisfied consumer.
+
+        Producer-after-consumer is RED only when ALL of these hold:
+          * the consumer is mapped to a single operation index, and
+          * the resource has at least one mapped, non-external producer, and
+          * every such producer's index is strictly greater than the consumer's.
+        Any mapped producer at or before the consumer (``index <= consumer``)
+        means the consumer can be satisfied in order → pass (no red). Ambiguous
+        consumer/producer mapping yields an amber ``ambiguous_operation_mapping``
+        and never a red. Same-index producer/consumer is treated as in-order.
+        """
+
+        resource_producers = producers.get(consumer.resource) or []
+
+        if consumer.operation_mapping_status == "ambiguous":
+            return None, self._ambiguous_warning(consumer, "consumer")
+        if consumer.operation_index is None:
+            # No explicit ordering for this consumer → ordering skipped (no red).
+            return None, None
+
+        # An external provider seeds the resource outside the operation flow, so
+        # it pre-exists any operation by definition. Ordering is moot → skip (no
+        # red), even if an internal producer happens to run later.
+        if any(producer.external for producer in resource_producers):
+            return None, None
+
+        # Internal producers carrying an operation index. External providers are
+        # out of scope for ordering (they pre-exist the flow by definition).
+        ordered_producers = [
+            producer
+            for producer in resource_producers
+            if not producer.external and producer.operation_index is not None
+        ]
+        if any(
+            producer.operation_mapping_status == "ambiguous" and not producer.external
+            for producer in resource_producers
+        ):
+            return None, self._ambiguous_warning(consumer, "producer")
+        if not ordered_producers:
+            # No mapped internal producer to order against (e.g. only external
+            # providers, or producers without an explicit operation) → skip.
+            return None, None
+        # In order if any mapped producer runs at or before the consumer.
+        if any(producer.operation_index <= consumer.operation_index for producer in ordered_producers):
+            return None, None
+
+        producer_indices = sorted(producer.operation_index for producer in ordered_producers)
+        violation = {
+            "type": "producer_after_consumer",
+            "severity": "red",
+            "resource": consumer.resource,
+            "consumer_capability": consumer.capability,
+            "owner_node_id": consumer.owner_node_id,
+            "consumer_operation_index": consumer.operation_index,
+            "producer_operation_indices": producer_indices,
+            "producer_refs": sorted(
+                {
+                    ref
+                    for producer in ordered_producers
+                    for ref in [producer.obligation or producer.capability]
+                    if ref
+                }
+            ),
+            "required_by": "user_journeys[].required_capabilities",
+            "message": (
+                f"Required consumer reads {consumer.resource} at operation index "
+                f"{consumer.operation_index}, but every mapped producer runs later "
+                f"(indices {producer_indices}); the resource is consumed before it is produced."
+            ),
+            "remediation": (
+                f"Reorder operation_flow so a producer of {consumer.resource} precedes its "
+                "consumer, add an earlier producer / externally_provided_by source, or relax "
+                "the consumer (required: false / on_missing: skip) if the ordering is intended."
+            ),
+        }
+        return violation, None
+
+    @staticmethod
+    def _ambiguous_warning(consumer: ResourceUse, role: str) -> dict[str, Any]:
+        return {
+            "type": "ambiguous_operation_mapping",
+            "severity": "amber",
+            "resource": consumer.resource,
+            "consumer_capability": consumer.capability,
+            "owner_node_id": consumer.owner_node_id,
+            "role": role,
+            "message": (
+                f"The {role} for {consumer.resource} resolves to more than one operation in "
+                "operation_flow; producer-after-consumer ordering cannot be decided unambiguously, "
+                "so it is not gated."
+            ),
+            "remediation": (
+                "Give each operation a unique id/ref so the producer and consumer map to a single "
+                "operation, enabling deterministic ordering checks."
+            ),
+        }
 
     # --------------------------------------------------------------- predicates
     def _is_required(self, use: ResourceUse) -> bool:

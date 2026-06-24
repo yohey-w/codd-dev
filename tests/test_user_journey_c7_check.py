@@ -591,6 +591,76 @@ def test_journey_step_with_assertion_passes_amber_check(tmp_path):
     assert "journey_step_no_assertion" not in _types(result)
 
 
+def _write_e2e_source(tmp_path: Path, body: str) -> None:
+    spec = tmp_path / "tests" / "e2e" / "login.spec.ts"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text(body, encoding="utf-8")
+
+
+def test_weak_outcome_assertion_skipped_when_explicit_attribute_present(tmp_path):
+    _write_e2e_source(tmp_path, "test('persists order', () => { doThing('order_persisted'); });\n")
+    result = _run(
+        _dag(
+            plan_outputs=["lexicon:e2e_login_journey"],
+            expected_attrs={"browser_requirements": [{"capability": "order_persisted", "value": True}]},
+            e2e_attrs={"assertions": ["order_persisted"]},
+            runtime_caps=[],
+        ),
+        tmp_path,
+    )
+
+    assert "weak_outcome_assertion" not in _types(result)
+
+
+def test_weak_outcome_assertion_amber_for_source_presence_without_assertion(tmp_path):
+    _write_e2e_source(
+        tmp_path,
+        "test('navigates', () => {\n  navigateTo('/order_persisted');\n  logMessage('order_persisted');\n});\n",
+    )
+    result = _run(
+        _dag(
+            plan_outputs=["lexicon:e2e_login_journey"],
+            expected_attrs={"browser_requirements": [{"capability": "order_persisted", "value": True}]},
+            runtime_caps=[],
+        ),
+        tmp_path,
+    )
+
+    violation = _violation(result, "weak_outcome_assertion")
+    assert result.passed is True
+    assert result.severity == "amber"
+    assert violation["severity"] == "amber"
+    assert violation["signal"] == "order_persisted"
+    assert "browser_expected_not_asserted" not in _types(result)
+
+
+def test_weak_outcome_assertion_silent_when_no_declared_signal(tmp_path):
+    _write_e2e_source(tmp_path, "test('navigates', () => { navigateTo('/dashboard'); });\n")
+    result = _run(
+        _dag(plan_outputs=["lexicon:e2e_login_journey"], runtime_caps=[]),
+        tmp_path,
+    )
+
+    assert "weak_outcome_assertion" not in _types(result)
+
+
+def test_weak_outcome_assertion_skipped_when_source_has_assertion_context(tmp_path):
+    _write_e2e_source(
+        tmp_path,
+        "test('persists order', () => {\n  expect(state).toContain('order_persisted');\n});\n",
+    )
+    result = _run(
+        _dag(
+            plan_outputs=["lexicon:e2e_login_journey"],
+            expected_attrs={"browser_requirements": [{"capability": "order_persisted", "value": True}]},
+            runtime_caps=[],
+        ),
+        tmp_path,
+    )
+
+    assert "weak_outcome_assertion" not in _types(result)
+
+
 def test_format_report_outputs_journey_report_json(tmp_path):
     result = _run(_dag(constraints=[_constraint()], plan_outputs=["lexicon:e2e_login_journey"], runtime_caps=[]), tmp_path)
 

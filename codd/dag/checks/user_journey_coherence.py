@@ -213,6 +213,11 @@ class UserJourneyCoherenceCheck(DagCheck):
         report["violations"].extend(
             self._presentation_obligation_violations(dag, design_doc, journey_name, journey, e2e_tests)
         )
+        report["violations"].extend(
+            self._weak_outcome_assertion_violations(
+                design_doc, journey_name, journey, expected_nodes.values(), e2e_tests
+            )
+        )
         if not self._has_assertion_step(journey):
             report["violations"].append(
                 self._violation(
@@ -433,6 +438,140 @@ class UserJourneyCoherenceCheck(DagCheck):
                     )
                 )
         return violations
+
+    def _weak_outcome_assertion_violations(
+        self,
+        design_doc: Node,
+        journey_name: str,
+        journey: dict[str, Any],
+        expected_nodes: Iterable[Node],
+        e2e_tests: list[Node],
+    ) -> list[dict[str, Any]]:
+        """Amber-only diagnostic for tests that mention an outcome signal without asserting it.
+
+        A declared outcome signal is considered weakly covered when an e2e test
+        contains the signal in its source text but there is neither an explicit
+        assertion attribute nor a nearby generic assertion verb. This is an amber
+        hint only: source presence is weak evidence, so it must never gate deploy
+        and must never escalate to red (anti-false-red).
+        """
+
+        if not e2e_tests:
+            # Absence of any e2e test is reported by no_e2e_test_for_journey; do not duplicate.
+            return []
+
+        signals = self._declared_outcome_signals(journey, expected_nodes, design_doc)
+        if not signals:
+            return []
+
+        # Signals that merely name a test's own location/id are self-references, not
+        # asserted outcomes; excluding them keeps source-text presence meaningful.
+        self_references: set[str] = set()
+        for test_node in e2e_tests:
+            self_references.update(self._test_signals(test_node))
+
+        violations: list[dict[str, Any]] = []
+        for signal in signals:
+            if signal in self_references:
+                continue
+            best = self._best_assertion_evidence(e2e_tests, signal)
+            if best != "source_presence_hit":
+                continue
+            violations.append(
+                self._violation(
+                    "weak_outcome_assertion",
+                    journey_name,
+                    design_doc.id,
+                    severity="amber",
+                    signal=signal,
+                    verification_tests=[node.id for node in e2e_tests],
+                    remediation=(
+                        f"E2E test references '{signal}' but does not assert it. Add an explicit "
+                        "assertion attribute (assertions/asserted_capabilities) or an assert/expect/"
+                        "verify on this outcome."
+                    ),
+                )
+            )
+        return self._dedupe_violations(violations)
+
+    def _declared_outcome_signals(
+        self,
+        journey: dict[str, Any],
+        expected_nodes: Iterable[Node],
+        design_doc: Node,
+    ) -> list[str]:
+        signals: list[str] = []
+        signals.extend(self._lexicon_refs(journey))
+        for expected_node in expected_nodes:
+            signals.extend(self._expected_test_signals(expected_node))
+            for requirement in self._requirement_entries(expected_node):
+                capability = requirement.get("capability")
+                if isinstance(capability, str) and capability:
+                    signals.append(capability)
+        for field in self._display_field_entries(design_doc, journey):
+            signals.extend(self._expected_presentation_signals(field, self._merged_obligation(field, None, "presentation")))
+            signals.extend(self._expected_aggregation_signals(field, self._merged_obligation(field, None, "aggregation")))
+        return self._dedupe_strings(str(signal) for signal in signals if signal)
+
+    def _best_assertion_evidence(self, tests: list[Node], signal: str) -> str:
+        """Strongest evidence across all tests for a signal.
+
+        Ordering: explicit_attr_hit > source_assertion_hit > source_presence_hit > no_hit.
+        """
+
+        rank = {"explicit_attr_hit": 3, "source_assertion_hit": 2, "source_presence_hit": 1, "no_hit": 0}
+        best = "no_hit"
+        for test_node in tests:
+            evidence = self._assertion_evidence_for_signal(test_node, signal)
+            if rank[evidence] > rank[best]:
+                best = evidence
+            if best == "explicit_attr_hit":
+                break
+        return best
+
+    def _assertion_evidence_for_signal(self, test_node: Node, signal: str) -> str:
+        """Classify how a single test covers a declared outcome signal.
+
+        Returns one of: ``explicit_attr_hit`` (signal in an explicit assertion
+        attribute), ``source_assertion_hit`` (signal in source text near a generic
+        assertion verb), ``source_presence_hit`` (signal in source text only), or
+        ``no_hit``.
+        """
+
+        if signal in self._assertion_signals(test_node):
+            return "explicit_attr_hit"
+        source_text = self._verification_source_text(test_node)
+        if not source_text or signal not in source_text:
+            return "no_hit"
+        if self._source_has_assertion_context(source_text, signal):
+            return "source_assertion_hit"
+        return "source_presence_hit"
+
+    # Generic assertion verbs only — same family as _has_assertion_step. No
+    # framework/library-specific matcher names belong here (generality).
+    _ASSERTION_VERBS = ("assert", "expect", "verify")
+
+    def _source_has_assertion_context(self, source_text: str, signal: str) -> bool:
+        lines = source_text.splitlines()
+        for index, line in enumerate(lines):
+            if signal not in line:
+                continue
+            window = " ".join(lines[max(0, index - 1): index + 2]).lower()
+            if any(verb in window for verb in self._ASSERTION_VERBS):
+                return True
+        return False
+
+    @staticmethod
+    def _dedupe_violations(violations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for violation in violations:
+            key = (str(violation.get("type")), str(violation.get("signal")))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(violation)
+        return result
 
     def _display_field_entries(self, design_doc: Node, journey: dict[str, Any]) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []

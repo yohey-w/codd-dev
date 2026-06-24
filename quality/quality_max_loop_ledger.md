@@ -25,8 +25,8 @@ explicit contracts; otherwise amber diagnostic / item-count visibility.
 |---|---|---|---|---|---|
 | 1 | vacuous_pass | 0-item PASS shown as vacuous (materiality overlay) | amber | 250 | ✅ shipped-to-main |
 | 2 | extractor_silent_noop broader | invalid capability_pattern regex → verify (self-contained re-validate) | amber | 160 | ✅ shipped-to-main |
-| 3 | resource_order_explicit_flow | producer-after-consumer red **only** w/ explicit op order | red(cond) | 80 | ⏳ |
-| 4 | assertion_abuse | weak outcome assertion → amber (red needs owner) | amber | 75 | ⏳ |
+| 3 | resource_order_explicit_flow | producer-after-consumer red **only** w/ explicit op order | red(cond) | 80 | ✅ shipped-to-main |
+| 4 | assertion_abuse | weak outcome assertion → amber (red needs owner) | amber | 75 | ✅ shipped-to-main |
 | 5 | identity_alias_drift | explicit alias collision / shadow only | amber | 48 | ⏳ |
 | 6 | reconcile-baseline gap | `propagate --baseline` acks current doc-to-doc edges | n/a | 48 | ⏳ |
 | 7 | cross_artifact_partial_coverage | expected_extraction group diagnostic (no quirk touch) | amber | 45 | ⏳ |
@@ -64,3 +64,30 @@ beyond exact scalar. Default (amber) impls proceed autonomously.
 - Registered in `runner.py` CHECK_MODULES.
 - red-before-green: `test_extraction_diagnostics.py` (4-fixture + registration)
   RED pre-module → GREEN (5 passed); full suite **5888**.
+
+### #3 resource_order_explicit_flow ✅ (2026-06-24)
+- `resource_flow_coherence.py`: `producer_after_consumer` **red** — fires only when
+  a required consumer (critical/high journey scope, same gate as dangling) maps to a
+  single operation index, the resource has ≥1 mapped non-external producer, and
+  **every** such producer runs strictly later. ResourceUse gains
+  operation_index/ref/mapping_status; `_operation_ref_to_index` +
+  `_attach_operation_indices` read the existing `operation_flow` (via
+  `requirements_meta.operation_flow_operations`) — no new schema.
+- anti-false-red guards: no operation_flow → skip; external provider → skip;
+  ambiguous ref → amber `ambiguous_operation_mapping`, never red; any producer
+  at/before consumer → pass; dangling (producer-absent) red path unchanged. Red
+  reachable only with explicit ordering.
+- red-before-green proven (Fixture B red comes solely from new code); 4-fixture;
+  tests/dag 251 passed.
+
+### #4 assertion_abuse ✅ (2026-06-24)
+- `user_journey_coherence.py`: `weak_outcome_assertion` **amber** — a declared
+  outcome signal whose only evidence is its presence in test source text (no
+  explicit assertion attribute, no generic assertion verb nearby) is flagged. Verbs
+  generic (`assert`/`expect`/`verify`) — no framework matcher in core.
+- amber only / never red (red promotion owner-gated). Guards: no declared signal →
+  none; no e2e → defer to `no_e2e_test_for_journey`; explicit attr / source-assertion
+  → pass; self-reference filtered. Existing `browser_expected_not_asserted` red kept.
+- red-before-green (1 failed → 4 passed); user_journey suite 124 passed.
+
+Both verified together: full suite **5896**, corpus gate 52.

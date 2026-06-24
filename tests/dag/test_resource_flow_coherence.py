@@ -408,6 +408,160 @@ def test_dead_resource_warning_has_remediation():
     assert dead and all(w.get("remediation") for w in dead)
 
 
+# ── producer_after_consumer (explicit operation ordering, opt-in) ──────────────
+#
+# An operation_flow declares ordered operations; the ordering check fires ONLY
+# when a design opted into it. Each operation here carries a `capability` ref so
+# producer obligations / consumer capabilities map to a single operation index.
+
+_PRODUCER_CONSUMER_JOURNEY = {
+    "name": "issue_then_redeem_token",
+    "criticality": "critical",
+    "steps": [{"action": "redeem_token"}],
+    "required_capabilities": ["redeem_token"],
+    "expected_outcome_refs": [],
+}
+
+
+def _ordering_doc(*, producer_index: int, consumer_index: int):
+    """Design doc with an explicit operation_flow ordering producer vs consumer.
+
+    The slot at ``producer_index`` is the resource producer, the slot at
+    ``consumer_index`` is the required consumer on a critical journey.
+    """
+
+    slots = {
+        producer_index: {"id": "issue_token", "capability": "issue_token"},
+        consumer_index: {"id": "redeem_token", "capability": "redeem_token"},
+    }
+    operations = [slots[i] for i in sorted(slots)]
+    return _design_doc(
+        user_journeys=[_PRODUCER_CONSUMER_JOURNEY],
+        operation_flow={"operations": operations},
+        capability_contracts=[
+            {
+                "capability": "issue_token",
+                "produces": [{"resource": "data:tokens.value"}],
+            },
+            {
+                "capability": "redeem_token",
+                "consumes": [
+                    {
+                        "resource": "data:tokens.value",
+                        "required": True,
+                        "on_missing": "fail",
+                    }
+                ],
+            },
+        ],
+    )
+
+
+# Fixture A — producer op index 0, consumer op index 1 → in order → pass.
+def test_producer_before_consumer_passes():
+    dag = _dag(_ordering_doc(producer_index=0, consumer_index=1))
+    result = _run(dag)
+    assert result.passed is True
+    assert result.violations == []
+    assert _warnings_of_type(result, "producer_after_consumer") == []
+
+
+# Fixture B — consumer op index 0, producer op index 1 → consumed-before-produced → RED.
+def test_consumer_before_producer_is_red():
+    dag = _dag(_ordering_doc(producer_index=1, consumer_index=0))
+    result = _run(dag)
+    assert result.passed is False
+    assert result.severity == "red"
+    assert any(
+        v["type"] == "producer_after_consumer"
+        and v["resource"] == "data:tokens.value"
+        and v["consumer_capability"] == "redeem_token"
+        for v in result.violations
+    )
+    # The existence-based dangling red must NOT fire — a producer does exist.
+    assert not any(v["type"] == "dangling_required_consumer" for v in result.violations)
+
+
+# Fixture C — contract present but operations carry no matching refs → ordering skipped → pass.
+def test_contract_without_operation_refs_passes():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[_PRODUCER_CONSUMER_JOURNEY],
+            # operations exist but reference unrelated ids → producer/consumer
+            # cannot be mapped to any operation index → no ordering, no red.
+            operation_flow={
+                "operations": [
+                    {"id": "unrelated_a"},
+                    {"id": "unrelated_b"},
+                ]
+            },
+            capability_contracts=[
+                {
+                    "capability": "issue_token",
+                    "produces": [{"resource": "data:tokens.value"}],
+                },
+                {
+                    "capability": "redeem_token",
+                    "consumes": [
+                        {
+                            "resource": "data:tokens.value",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                },
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert result.violations == []
+    assert _warnings_of_type(result, "producer_after_consumer") == []
+
+
+# Fixture D — external provider + consumer ordered before the internal producer → pass.
+# External providers are out of scope for ordering; an external source pre-exists
+# the flow, so a consumer "before" the internal producer must not be a red.
+def test_external_provider_consumer_before_internal_producer_passes():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[_PRODUCER_CONSUMER_JOURNEY],
+            operation_flow={
+                "operations": [
+                    {"id": "redeem_token", "capability": "redeem_token"},
+                    {"id": "issue_token", "capability": "issue_token"},
+                ]
+            },
+            capability_contracts=[
+                {
+                    "capability": "issue_token",
+                    "produces": [{"resource": "data:tokens.value"}],
+                },
+                {
+                    "capability": "redeem_token",
+                    "consumes": [
+                        {
+                            "resource": "data:tokens.value",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                },
+            ],
+            resource_contracts=[
+                {
+                    "resource": "data:tokens.value",
+                    "externally_provided_by": [{"provider": "token_seed_file"}],
+                }
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert result.violations == []
+    assert _warnings_of_type(result, "producer_after_consumer") == []
+
+
 # transparency: a PASS reports how many resource uses it actually checked.
 def test_pass_message_reports_checked_count():
     dag = _dag(
