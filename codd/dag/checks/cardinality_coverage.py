@@ -37,6 +37,7 @@ from typing import Any, Mapping
 from codd.dag import DAG, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.dag.checks._one_to_many_detection import detect_one_to_many_relations
+from codd.path_safety import PathEscapeError
 
 
 _VERIFICATION_KINDS = {"test_file", "verification_test"}
@@ -95,7 +96,15 @@ class CardinalityCoverageCheck(DagCheck):
         # Thread the flattened DAG settings so a configured ``dag.lexicon_file``
         # (canonical to the builder) is honored; otherwise a custom lexicon path
         # is silently missed and this check goes dormant (SKIP, checked_count=0).
-        relations = detect_one_to_many_relations(target_dag, root, settings=self.settings)
+        #
+        # A configured ``dag.lexicon_file`` that escapes the project root raises
+        # PathEscapeError. That is NOT a skip: the check cannot hold (its 1:N
+        # evidence source points out-of-root), so surface an honest red/error
+        # rather than crashing the run or silently passing (a false-green).
+        try:
+            relations = detect_one_to_many_relations(target_dag, root, settings=self.settings)
+        except PathEscapeError as exc:
+            return _lexicon_escape_error_result(exc)
 
         if not relations:
             # Dormant: no 1:N shape means there is nothing to reason about.
@@ -590,6 +599,43 @@ def _missing_member_violation(field_id: str, missing: list[str]) -> dict[str, An
             "the policy (at_least_one / representative)"
         ),
     }
+
+
+def _lexicon_escape_error_result(exc: PathEscapeError) -> CardinalityCoverageResult:
+    """Red/error result for a configured ``dag.lexicon_file`` that escapes root.
+
+    The configured lexicon is the canonical 1:N evidence source; when it points
+    outside the project tree the check cannot hold. This is fail-closed (red,
+    block_deploy) — not a skip — because a silent skip would let the gate "pass"
+    on metadata it never read (a false-green). It is distinct from the legacy
+    default filenames simply not existing, which stays a legitimate skip.
+    """
+
+    violation = {
+        "type": "cardinality_lexicon_file_out_of_root",
+        "lexicon_file": exc.path,
+        "severity": "red",
+        "block_deploy": True,
+        "suggestion": (
+            "configured dag.lexicon_file resolves outside the project root, so "
+            "cardinality_coverage cannot hold (its one-to-many evidence source is "
+            "unreadable); point lexicon_file at an in-root file or remove it"
+        ),
+    }
+    return CardinalityCoverageResult(
+        status="fail",
+        severity="red",
+        passed=False,
+        block_deploy=True,
+        skipped=False,
+        checked_count=0,
+        one_to_many_relations_total=0,
+        warnings=[violation],
+        message=(
+            "cardinality_coverage ERROR: configured dag.lexicon_file out-of-root, "
+            f"check cannot hold ({exc})"
+        ),
+    )
 
 
 __all__ = ["CardinalityCoverageCheck", "CardinalityCoverageResult"]

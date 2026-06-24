@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from codd.dag import DAG, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.dag.checks._one_to_many_detection import detect_one_to_many_relations
-from codd.path_safety import resolve_project_path
+from codd.path_safety import PathEscapeError, resolve_project_path
 from codd.requirements_meta import operation_flow_operations
 
 
@@ -68,7 +68,15 @@ class UiCoherenceCheck(DagCheck):
         config = codd_config if codd_config is not None else self.settings
         # Pass the flattened DAG settings (which carry the canonical
         # ``lexicon_file``), so a configured custom lexicon path is honored.
-        relations = detect_one_to_many_relations(target_dag, root, settings=self.settings)
+        #
+        # A configured ``dag.lexicon_file`` that escapes the project root raises
+        # PathEscapeError. That is NOT a skip: the canonical 1:N evidence source
+        # is out-of-root and unreadable, so surface an honest red/error finding
+        # rather than crashing the run or silently passing (a false-green).
+        try:
+            relations = detect_one_to_many_relations(target_dag, root, settings=self.settings)
+        except PathEscapeError as exc:
+            return _lexicon_escape_error_result(exc)
         if not relations:
             # No one-to-many data shape exists, so there is no master-detail UI
             # obligation to verify. Report skip (not a clean PASS) so a verify
@@ -128,6 +136,48 @@ class UiCoherenceCheck(DagCheck):
             violations=violations,
             passed=True,
         )
+
+
+def _lexicon_escape_error_result(exc: PathEscapeError) -> UiCoherenceResult:
+    """Red/error result for a configured ``dag.lexicon_file`` that escapes root.
+
+    The configured lexicon is the canonical source of the one-to-many relations
+    this check reasons about; when it points outside the project tree the check
+    cannot hold. Fail-closed (red, block_deploy) rather than skip, because a
+    silent skip would let the gate "pass" on metadata it never read (a
+    false-green). Distinct from the legacy default filenames simply being absent,
+    which stays a legitimate skip.
+    """
+
+    violation = {
+        "type": "ui_coherence_lexicon_file_out_of_root",
+        "lexicon_file": exc.path,
+        "severity": "red",
+        "block_deploy": True,
+        "suggestion": (
+            "configured dag.lexicon_file resolves outside the project root, so "
+            "ui_coherence_for_one_to_many cannot hold (its one-to-many evidence "
+            "source is unreadable); point lexicon_file at an in-root file or remove it"
+        ),
+    }
+    return UiCoherenceResult(
+        status="fail",
+        severity="red",
+        passed=False,
+        block_deploy=True,
+        skipped=False,
+        checked_count=0,
+        one_to_many_relations_total=0,
+        warnings=[
+            "configured dag.lexicon_file out-of-root, ui_coherence_for_one_to_many "
+            f"cannot hold ({exc})"
+        ],
+        violations=[violation],
+        message=(
+            "ui_coherence_for_one_to_many ERROR: configured dag.lexicon_file "
+            f"out-of-root, check cannot hold ({exc})"
+        ),
+    )
 
 
 def _missing_relation_entry(relation: Mapping[str, Any]) -> dict[str, Any]:

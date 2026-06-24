@@ -524,3 +524,15 @@ Sonnet 1 + Codex 3, all evidence-scope:
   _load_or_extract chokepoint.
 full suite 6360. These closed the per-file-reconfine + audit-fail-closed sub-patterns.
 Streak still 0 (round 11 had findings); round 12 + 13 must both be clean.
+
+## Round 12 (2026-06-25, evidence-scoped): NOT clean → 1 fixed (last bespoke-jail straggler)
+**Sonnet: CLEAN** (verified the remaining bespoke jails — ci_health/cardinality/
+user_journey/stale_evidence — are fail-closed or empty/warn, no PASS-credit → not P0/P1).
+**Codex: 1 P1** — _one_to_many_detection._configured_lexicon_path used a local bespoke
+jail that SILENT-SKIPPED an escaping configured dag.lexicon_file (callers cardinality_
+coverage + ui_coherence are checks) → false-green. Fixed: unified onto
+path_safety.require_project_path (fail-closed on a configured-but-escaping lexicon_file);
+callers catch PathEscapeError → red finding; the local jail deleted. Configured-escape =
+red, unset/legacy-absent = legit skip. full suite 6367.
+Convergence: Sonnet clean in rounds 10 & 12; Codex's bespoke-jail/silent-skip tail
+(drift → audit → lexicon) is now exhausted. Streak still 0; round 13 + 14 must be clean.

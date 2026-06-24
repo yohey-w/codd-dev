@@ -9,6 +9,8 @@ from typing import Any, Mapping
 
 import yaml
 
+from codd.path_safety import require_project_path
+
 
 ONE_TO_MANY_RE = re.compile(
     r"\b(?:1\s*:\s*N|N\s*:\s*1|one[-\s]?to[-\s]?many|many[-\s]?to[-\s]?one)\b",
@@ -45,8 +47,17 @@ def detect_one_to_many_relations(
     ``settings`` carries the (flattened) DAG settings so the configured
     ``lexicon_file`` — which the builder treats as canonical — is honored. The
     configured lexicon is read before the legacy ``project_lexicon.yaml`` /
-    ``lexicon.yaml`` filenames, using the same root-jail resolution the builder
-    applies: a ``lexicon_file`` resolving outside ``project_root`` is never read.
+    ``lexicon.yaml`` filenames.
+
+    Path safety is fail-closed for the *configured* lexicon: a non-empty
+    ``lexicon_file`` that resolves outside ``project_root`` (``../`` traversal,
+    out-of-root absolute, or an in-root symlink whose target escapes) raises
+    :class:`codd.path_safety.PathEscapeError` rather than being silently skipped
+    — a silent skip there is a false-green (the check "passes" on configured
+    metadata it never actually read). Callers catch the error and surface an
+    honest red/error finding. An *empty / unset* ``lexicon_file`` is a legitimate
+    no-config skip (returns nothing), and the legacy default filenames simply not
+    existing is a legitimate absence (skipped, never fail-closed).
     """
 
     relations: list[dict[str, str]] = []
@@ -315,12 +326,16 @@ def _norm(value: str) -> str:
 def _configured_lexicon_path(
     project_root: Path, settings: Mapping[str, Any] | None
 ) -> Path | None:
-    """Resolve ``settings['lexicon_file']`` with builder-equivalent root-jail.
+    """Resolve ``settings['lexicon_file']`` fail-closed via the shared path jail.
 
-    Mirrors ``codd.dag.builder._jailed_project_path``: an empty value, or a path
-    (relative traversal or absolute) that resolves outside ``project_root``, is
-    rejected (returns ``None``) so a configured lexicon can never leak file
-    contents from outside the project tree.
+    An *empty / unset* ``lexicon_file`` is a legitimate no-config skip and
+    returns ``None``. A *configured* (non-empty) ``lexicon_file`` is required to
+    stay inside ``project_root``: it is resolved through
+    :func:`codd.path_safety.require_project_path`, which raises
+    :class:`codd.path_safety.PathEscapeError` when the path (``../`` traversal,
+    out-of-root absolute, or an in-root symlink whose target escapes) leaves the
+    tree. Silently skipping an escaped configured lexicon would be a false-green,
+    so the escape is surfaced to the caller instead of swallowed.
     """
 
     if not isinstance(settings, Mapping):
@@ -329,19 +344,7 @@ def _configured_lexicon_path(
     text = str(raw or "").strip()
     if not text:
         return None
-    resolved = _project_relative_path(project_root, text)
-    try:
-        resolved.relative_to(project_root.resolve())
-    except (ValueError, OSError):
-        return None
-    return resolved
-
-
-def _project_relative_path(project_root: Path, path_text: str) -> Path:
-    path = Path(path_text).expanduser()
-    if path.is_absolute():
-        return path.resolve()
-    return (project_root / path).resolve()
+    return require_project_path(project_root, text, context="dag.lexicon_file")
 
 
 def _unique_paths(paths: list[Path]) -> list[Path]:
