@@ -562,6 +562,103 @@ def test_external_provider_consumer_before_internal_producer_passes():
     assert _warnings_of_type(result, "producer_after_consumer") == []
 
 
+# ── alias drift (duplicate_alias_target / alias_shadows_canonical) ─────────────
+#
+# Aliases are exact-string only — no fuzzy / case-insensitive normalization. An
+# alias resolving to exactly one canonical resource is normal (no warning). Two
+# minimal incoherence shapes are surfaced amber (never red):
+#   * duplicate_alias_target  — the same alias name maps to >1 canonical resource.
+#   * alias_shadows_canonical — an alias name is also a canonical resource of
+#                               another entry.
+
+
+# Fixture A — consumer uses an alias that resolves to a single canonical → pass, no warning.
+def test_alias_resolves_to_single_canonical_no_warning():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[CRITICAL_JOURNEY],
+            capability_contracts=[
+                {
+                    "capability": "line_individual_nudge",
+                    "consumes": [
+                        {
+                            "resource": "user_id",
+                            "required": True,
+                            "on_missing": "fail",
+                        }
+                    ],
+                },
+                {
+                    "capability": "bind_line_friend_to_user",
+                    "produces": [{"resource": "data:users.id"}],
+                },
+            ],
+            resource_contracts=[
+                {"resource": "data:users.id", "aliases": ["user_id"]},
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert _warnings_of_type(result, "duplicate_alias_target") == []
+    assert _warnings_of_type(result, "alias_shadows_canonical") == []
+
+
+# Fixture B — same alias name maps to two different canonicals → duplicate_alias_target amber.
+def test_duplicate_alias_target_is_amber():
+    dag = _dag(
+        _design_doc(
+            resource_contracts=[
+                {"resource": "data:users.id", "aliases": ["user_id"]},
+                {"resource": "data:accounts.id", "aliases": ["user_id"]},
+            ],
+        )
+    )
+    result = _run(dag)
+    dup = _warnings_of_type(result, "duplicate_alias_target")
+    assert result.passed is True
+    assert result.violations == []
+    assert len(dup) == 1
+    assert dup[0]["severity"] == "amber"
+    assert dup[0]["alias"] == "user_id"
+    assert set(dup[0]["canonical_resources"]) == {"data:users.id", "data:accounts.id"}
+
+
+# Fixture C — an alias name is also a canonical resource of another entry → alias_shadows_canonical amber.
+def test_alias_shadows_canonical_is_amber():
+    dag = _dag(
+        _design_doc(
+            resource_contracts=[
+                {"resource": "data:users.id", "aliases": ["user"]},
+                {"resource": "user", "aliases": []},
+            ],
+        )
+    )
+    result = _run(dag)
+    shadow = _warnings_of_type(result, "alias_shadows_canonical")
+    assert result.passed is True
+    assert result.violations == []
+    assert len(shadow) == 1
+    assert shadow[0]["severity"] == "amber"
+    assert shadow[0]["alias"] == "user"
+
+
+# Fixture D — look-alike names (exact-string differ) are NOT fuzzy-matched → no warning.
+def test_lookalike_aliases_are_not_fuzzy_matched():
+    dag = _dag(
+        _design_doc(
+            resource_contracts=[
+                {"resource": "data:users.id", "aliases": ["user_id"]},
+                {"resource": "data:accounts.id", "aliases": ["userID"]},
+            ],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert _warnings_of_type(result, "duplicate_alias_target") == []
+    assert _warnings_of_type(result, "alias_shadows_canonical") == []
+
+
 # transparency: a PASS reports how many resource uses it actually checked.
 def test_pass_message_reports_checked_count():
     dag = _dag(

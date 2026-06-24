@@ -341,3 +341,186 @@ def test_literal_hints_do_not_suppress_additional_implementation(tmp_path):
     assert result.passed is True
     additional = [item for item in result.violations if item["type"] == "additional_implementation"]
     assert [item["impl_file"] for item in additional] == ["src/unrelated/orphan.ts"]
+
+
+# --- coverage summaries + cross-artifact diagnostics (amber only) -------------
+
+
+def _multi_kind_doc(*nodes: tuple[str, str], doc_id: str = "docs/design/spec.md") -> Node:
+    """Build a design_doc whose expected_extraction declares several nodes.
+
+    Each ``nodes`` entry is ``(kind, path_hint)``. Mirrors ``_expected_doc``
+    but supports the multi-artifact shape the coverage summary describes.
+    """
+
+    return Node(
+        id=doc_id,
+        kind="design_doc",
+        path=doc_id,
+        attributes={
+            "expected_extraction": ExpectedExtraction(
+                expected_nodes=[
+                    ExpectedNode(
+                        kind=kind,
+                        path_hint=path_hint,
+                        rationale="expected artifact",
+                        source_design_section="S01",
+                    )
+                    for kind, path_hint in nodes
+                ],
+                expected_edges=[],
+                source_design_doc=doc_id,
+            )
+        },
+    )
+
+
+def _summary_for(result, design_doc: str):
+    for summary in result.coverage_summaries:
+        if summary["design_doc"] == design_doc:
+            return summary
+    return None
+
+
+def test_coverage_summary_full_impl_and_test_present_passes(tmp_path):
+    dag = DAG()
+    dag.add_node(Node(id="src/auth/login.ts", kind="impl_file", path="src/auth/login.ts"))
+    dag.add_node(Node(id="tests/auth/login.test.ts", kind="test_file", path="tests/auth/login.test.ts"))
+    dag.add_node(
+        _multi_kind_doc(
+            ("impl_file", "src/auth/login.ts"),
+            ("test_file", "tests/auth/login.test.ts"),
+        )
+    )
+
+    result = ImplementationCoverageCheck().run(dag, tmp_path, {})
+
+    assert result.passed is True
+    assert result.violations == []
+    summary = _summary_for(result, "docs/design/spec.md")
+    assert summary is not None
+    assert summary["expected_total"] == 2
+    assert summary["matched_total"] == 2
+    assert summary["by_kind"]["impl_file"] == {"expected": 1, "matched": 1}
+    assert summary["by_kind"]["test_file"] == {"expected": 1, "matched": 1}
+
+
+def test_missing_test_keeps_existing_red_and_emits_summary(tmp_path):
+    dag = DAG()
+    dag.add_node(Node(id="src/auth/login.ts", kind="impl_file", path="src/auth/login.ts"))
+    dag.add_node(
+        _multi_kind_doc(
+            ("impl_file", "src/auth/login.ts"),
+            ("test_file", "tests/auth/login.test.ts"),
+        )
+    )
+
+    result = ImplementationCoverageCheck().run(dag, tmp_path, {})
+
+    # Existing red behavior is unchanged: the missing test is still red.
+    assert result.passed is False
+    missing = [item for item in result.violations if item["type"] == "missing_implementation"]
+    assert [item["expected_kind"] for item in missing] == ["test_file"]
+    # Summary is still produced alongside the red.
+    summary = _summary_for(result, "docs/design/spec.md")
+    assert summary is not None
+    assert summary["expected_total"] == 2
+    assert summary["matched_total"] == 1
+    assert summary["missing_total"] == 1
+    assert summary["by_kind"]["impl_file"] == {"expected": 1, "matched": 1}
+    assert summary["by_kind"]["test_file"] == {"expected": 1, "matched": 0}
+
+
+def test_partial_coverage_defers_to_red_no_duplicate_amber(tmp_path):
+    """Dedup invariant: a partially-covered multi-artifact doc whose gap is a
+    missing required artifact must NOT also raise cross_artifact_partial_coverage
+    — the missing piece is already owned by the existing red. (Under the current
+    missing==red coupling, every count-based partial coincides with a red, so
+    the cross-artifact amber defers entirely to the red and stays silent.)"""
+
+    dag = DAG()
+    dag.add_node(Node(id="src/auth/login.ts", kind="impl_file", path="src/auth/login.ts"))
+    dag.add_node(
+        _multi_kind_doc(
+            ("impl_file", "src/auth/login.ts"),
+            ("test_file", "tests/auth/login.test.ts"),  # missing -> red
+        )
+    )
+
+    result = ImplementationCoverageCheck().run(dag, tmp_path, {})
+
+    partial = [item for item in result.violations if item["type"] == "cross_artifact_partial_coverage"]
+    assert partial == []  # deferred to the existing missing_implementation red
+    # And the summary still records the partial shape for observability.
+    summary = _summary_for(result, "docs/design/spec.md")
+    assert summary["expected_total"] == 2 and summary["matched_total"] == 1
+
+
+def test_impl_without_declared_test_kind_emits_shape_incomplete_amber(tmp_path):
+    dag = DAG()
+    dag.add_node(Node(id="src/auth/login.ts", kind="impl_file", path="src/auth/login.ts"))
+    dag.add_node(Node(id="src/auth/config.ts", kind="config_file", path="src/auth/config.ts"))
+    # A multi-artifact shape (impl + config) but NO test_file kind declared.
+    dag.add_node(
+        _multi_kind_doc(
+            ("impl_file", "src/auth/login.ts"),
+            ("config_file", "src/auth/config.ts"),
+        )
+    )
+
+    result = ImplementationCoverageCheck().run(dag, tmp_path, {})
+
+    # No red: both declared artifacts exist.
+    assert result.passed is True
+    shape = [item for item in result.violations if item["type"] == "coverage_shape_incomplete"]
+    assert len(shape) == 1
+    assert shape[0]["severity"] == "amber"
+    assert shape[0]["design_doc"] == "docs/design/spec.md"
+
+
+def test_single_impl_without_test_does_not_emit_amber(tmp_path):
+    """Prime-directive guard: a lone impl artifact with no declared test must
+    NOT raise any amber (would flood existing projects)."""
+
+    dag = DAG()
+    dag.add_node(Node(id="src/auth/login.ts", kind="impl_file", path="src/auth/login.ts"))
+    dag.add_node(_multi_kind_doc(("impl_file", "src/auth/login.ts")))
+
+    result = ImplementationCoverageCheck().run(dag, tmp_path, {})
+
+    assert result.passed is True
+    assert result.violations == []
+
+
+def test_shape_incomplete_not_emitted_when_test_kind_declared(tmp_path):
+    dag = DAG()
+    dag.add_node(Node(id="src/auth/login.ts", kind="impl_file", path="src/auth/login.ts"))
+    dag.add_node(Node(id="tests/auth/login.test.ts", kind="test_file", path="tests/auth/login.test.ts"))
+    dag.add_node(
+        _multi_kind_doc(
+            ("impl_file", "src/auth/login.ts"),
+            ("test_file", "tests/auth/login.test.ts"),
+        )
+    )
+
+    result = ImplementationCoverageCheck().run(dag, tmp_path, {})
+
+    assert [item for item in result.violations if item["type"] == "coverage_shape_incomplete"] == []
+
+
+def test_glob_quirk_unaffected_by_summary_additions(tmp_path):
+    """Historical glob-suppression of additional_implementation stays intact
+    even though coverage summaries are now produced for the same doc."""
+
+    _write(tmp_path / "src" / "extra" / "helper.ts", "export {}\n")
+    dag = _dag_with_impls("src/unrelated/orphan.ts")
+    dag.add_node(_expected_doc("impl_file", "src/extra/*.ts"))
+
+    result = ImplementationCoverageCheck().run(dag, tmp_path, {})
+
+    # Glob hint matched a file on disk -> additional_implementation suppressed.
+    assert [item for item in result.violations if item["type"] == "additional_implementation"] == []
+    # Summary still generated for the design doc.
+    summary = _summary_for(result, "docs/design/spec.md")
+    assert summary is not None
+    assert summary["expected_total"] == 1

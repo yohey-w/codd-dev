@@ -27,9 +27,9 @@ explicit contracts; otherwise amber diagnostic / item-count visibility.
 | 2 | extractor_silent_noop broader | invalid capability_pattern regex → verify (self-contained re-validate) | amber | 160 | ✅ shipped-to-main |
 | 3 | resource_order_explicit_flow | producer-after-consumer red **only** w/ explicit op order | red(cond) | 80 | ✅ shipped-to-main |
 | 4 | assertion_abuse | weak outcome assertion → amber (red needs owner) | amber | 75 | ✅ shipped-to-main |
-| 5 | identity_alias_drift | explicit alias collision / shadow only | amber | 48 | ⏳ |
+| 5 | identity_alias_drift | explicit alias collision / shadow only | amber | 48 | ✅ shipped-to-main |
 | 6 | reconcile-baseline gap | `propagate --baseline` acks current doc-to-doc edges | n/a | 48 | ⏳ |
-| 7 | cross_artifact_partial_coverage | expected_extraction group diagnostic (no quirk touch) | amber | 45 | ⏳ |
+| 7 | cross_artifact_partial_coverage | expected_extraction group diagnostic (no quirk touch) | amber | 45 | ✅ shipped-to-main |
 | 8 | cardinality_partial | default representative/unknown; all→red only if declared | amber/red | 27 | ⏳ |
 | 9 | stale_evidence | fingerprint-based only (never wall-clock) | amber | 27 | ⏳ |
 | 10 | negative_space | explicit forbidden-evidence only (no absence guarantee) | amber/red | 8 | ⏳ |
@@ -91,3 +91,16 @@ beyond exact scalar. Default (amber) impls proceed autonomously.
 - red-before-green (1 failed → 4 passed); user_journey suite 124 passed.
 
 Both verified together: full suite **5896**, corpus gate 52.
+
+### #5 identity_alias_drift ✅ + #7 cross_artifact_partial_coverage ✅ (2026-06-24)
+- **#5** `resource_flow_coherence.py`: alias collection overwrite → collect; amber
+  `duplicate_alias_target` (one alias → multiple canonicals) + `alias_shadows_canonical`
+  (alias name also a declared canonical). amber only, exact-string (no fuzzy);
+  conflicting aliases left unresolved (conservative). Existing alias resolution / #3
+  ordering / dangling intact (frontmatter_alias 62, tests/dag 255).
+- **#7** `implementation_coverage.py`: per-design coverage summaries +
+  `coverage_shape_incomplete` (multi-artifact shape, test kind undeclared) +
+  `cross_artifact_partial_coverage` (expected>1, 0<matched<expected). amber only;
+  **defers to the existing red** (count-based partial ⊇ red set → amber suppressed
+  whenever red fires; zero duplication, proven); historical glob quirk untouched.
+- Both red-before-green; generality preserved. Full suite **5907**.

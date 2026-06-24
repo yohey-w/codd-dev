@@ -35,6 +35,7 @@ class ImplementationCoverageResult:
     block_deploy: bool = False
     violations: list[dict[str, Any]] = field(default_factory=list)
     passed: bool = True
+    coverage_summaries: list[dict[str, Any]] = field(default_factory=list)
 
 
 @register_dag_check("implementation_coverage")
@@ -61,16 +62,32 @@ class ImplementationCoverageCheck(DagCheck):
         root = self.project_root or Path.cwd()
 
         violations: list[dict[str, Any]] = []
+        coverage_summaries: list[dict[str, Any]] = []
         expected_impl_nodes: list[ExpectedNode] = []
         for design_doc in _design_doc_nodes(target_dag):
             expected = _expected_extraction(design_doc)
             if expected is None:
                 continue
+            # Per-design-doc coverage accounting feeds the amber-only
+            # diagnostics below. ``doc_has_red`` mirrors the existing red
+            # emission exactly, so the cross-artifact amber can defer to the
+            # red instead of duplicating it.
+            by_kind: dict[str, dict[str, int]] = {}
+            expected_total = 0
+            matched_total = 0
+            doc_has_red = False
             for expected_node in expected.expected_nodes:
                 if expected_node.kind == "impl_file":
                     expected_impl_nodes.append(expected_node)
-                if _matches_any_artifact(target_dag, expected_node, root, self.settings):
+                matched = _matches_any_artifact(target_dag, expected_node, root, self.settings)
+                expected_total += 1
+                bucket = by_kind.setdefault(expected_node.kind, {"expected": 0, "matched": 0})
+                bucket["expected"] += 1
+                if matched:
+                    matched_total += 1
+                    bucket["matched"] += 1
                     continue
+                doc_has_red = True
                 violations.append(
                     {
                         "type": "missing_implementation",
@@ -82,6 +99,19 @@ class ImplementationCoverageCheck(DagCheck):
                         "severity": "red",
                     }
                 )
+
+            coverage_summaries.append(
+                {
+                    "design_doc": design_doc.id,
+                    "expected_total": expected_total,
+                    "matched_total": matched_total,
+                    "missing_total": expected_total - matched_total,
+                    "by_kind": by_kind,
+                }
+            )
+            violations.extend(
+                _coverage_shape_violations(design_doc.id, by_kind, expected_total, matched_total, doc_has_red)
+            )
 
         if expected_impl_nodes:
             # Historical behavior preserved on purpose: a glob path_hint that
@@ -109,12 +139,15 @@ class ImplementationCoverageCheck(DagCheck):
 
         red_count = sum(1 for item in violations if item.get("severity") == "red")
         amber_count = sum(1 for item in violations if item.get("severity") == "amber")
+        additional_count = sum(1 for item in violations if item.get("type") == "additional_implementation")
         status = "fail" if red_count else ("warn" if amber_count else "pass")
         severity = "red" if red_count else ("amber" if amber_count else "info")
         if red_count:
             message = f"C8 implementation_coverage found {red_count} missing expected artifact(s)"
-        elif amber_count:
+        elif amber_count == additional_count and additional_count:
             message = f"C8 implementation_coverage found {amber_count} additional implementation artifact(s)"
+        elif amber_count:
+            message = f"C8 implementation_coverage found {amber_count} coverage warning(s)"
         else:
             message = "C8 implementation_coverage PASS"
 
@@ -125,7 +158,66 @@ class ImplementationCoverageCheck(DagCheck):
             block_deploy=self.block_deploy,
             violations=violations,
             passed=red_count == 0,
+            coverage_summaries=coverage_summaries,
         )
+
+
+def _coverage_shape_violations(
+    design_doc_id: str,
+    by_kind: dict[str, dict[str, int]],
+    expected_total: int,
+    matched_total: int,
+    doc_has_red: bool,
+) -> list[dict[str, Any]]:
+    """Amber-only diagnostics derived from one design doc's coverage shape.
+
+    These are summaries on top of the existing red ``missing_implementation``
+    pass — they never change the red verdict and never re-report a missing
+    artifact that the red already owns.
+    """
+
+    diagnostics: list[dict[str, Any]] = []
+
+    impl_expected = by_kind.get("impl_file", {}).get("expected", 0)
+    test_expected = by_kind.get("test_file", {}).get("expected", 0)
+    # Only flag the missing-test dimension for docs that already declare a
+    # multi-artifact shape (``expected_total > 1``). A lone implementation
+    # artifact with no declared test is far too common to be a coherence
+    # signal, and flagging it would flood every existing project with amber.
+    if expected_total > 1 and impl_expected > 0 and test_expected == 0:
+        # An implementation artifact (plus at least one more artifact) is
+        # declared but no test artifact kind is — the coverage shape is
+        # incomplete by construction, independent of whether the declared
+        # artifacts exist on disk.
+        diagnostics.append(
+            {
+                "type": "coverage_shape_incomplete",
+                "design_doc": design_doc_id,
+                "by_kind": dict(by_kind),
+                "severity": "amber",
+            }
+        )
+
+    # Cross-artifact partial coverage is a doc-level shape signal. Any missing
+    # required artifact is already a red, so when this doc has a red we defer
+    # to it and stay silent to avoid double-reporting the same gap. Because the
+    # red emission uses the same matcher, a count-based partial always coincides
+    # with a red today; this branch is therefore a deliberate forward-compatible
+    # guard (e.g. for a future soft/optional-artifact state where a gap is not
+    # red). The visible partial-coverage signal lives in ``coverage_summaries``.
+    if expected_total > 1 and 0 < matched_total < expected_total and not doc_has_red:
+        diagnostics.append(
+            {
+                "type": "cross_artifact_partial_coverage",
+                "design_doc": design_doc_id,
+                "expected_total": expected_total,
+                "matched_total": matched_total,
+                "by_kind": dict(by_kind),
+                "severity": "amber",
+            }
+        )
+
+    return diagnostics
 
 
 def _design_doc_nodes(dag: DAG) -> list[Node]:

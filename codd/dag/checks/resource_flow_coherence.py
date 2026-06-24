@@ -126,30 +126,52 @@ class ResourceFlowCoherenceCheck(DagCheck):
         ]
 
         uses: list[ResourceUse] = []
-        alias_map: dict[str, str] = {}
+        # alias name -> set of canonical resources it has been declared to target.
+        # Collected (not overwritten) so a colliding alias is detectable; a
+        # colliding alias is deliberately NOT resolved (kept conservative).
+        alias_targets: dict[str, set[str]] = {}
+        # Every canonical resource declared by a resource_contract entry.
+        canonical_resources: set[str] = set()
         for node in design_docs:
             attrs = getattr(node, "attributes", None) or {}
             uses.extend(self._capability_contract_uses(node.id, attrs))
-            node_uses, node_aliases = self._resource_contract_uses(node.id, attrs)
+            node_uses, node_aliases, node_canonicals = self._resource_contract_uses(
+                node.id, attrs
+            )
             uses.extend(node_uses)
-            alias_map.update(node_aliases)
+            for alias, target in node_aliases:
+                alias_targets.setdefault(alias, set()).add(target)
+            canonical_resources.update(node_canonicals)
 
+        # Only aliases that resolve unambiguously (exactly one canonical target)
+        # are used for canonicalization. Colliding aliases are left unresolved so
+        # the conflicting resource ids stay distinct (no silent collapse).
+        alias_map: dict[str, str] = {
+            alias: next(iter(targets))
+            for alias, targets in alias_targets.items()
+            if len(targets) == 1
+        }
+
+        alias_warnings = self._alias_drift_warnings(alias_targets, canonical_resources)
         malformed_warnings = self._malformed_contract_warnings(design_docs)
 
         if not uses:
-            if malformed_warnings:
-                # Contracts were declared but every entry is unusable (missing a
-                # required field). Surface that as amber — never a silent clean skip.
+            standalone_warnings = malformed_warnings + alias_warnings
+            if standalone_warnings:
+                # Contracts were declared but produced no usable produce/consume
+                # edges (e.g. every entry malformed, or only alias declarations
+                # that collide/shadow). Surface that as amber — never a silent
+                # clean skip.
                 return ResourceFlowCoherenceResult(
                     severity="amber",
                     status="pass",
                     passed=True,
                     block_deploy=False,
                     message=(
-                        f"resource_flow_coherence: {len(malformed_warnings)} declared "
-                        "contract entry(ies) unusable (malformed)"
+                        f"resource_flow_coherence: {len(standalone_warnings)} declared "
+                        "contract issue(s) (malformed/alias) with no usable resource edges"
                     ),
-                    warnings=malformed_warnings,
+                    warnings=standalone_warnings,
                 )
             return ResourceFlowCoherenceResult(
                 severity="info",
@@ -180,7 +202,9 @@ class ResourceFlowCoherenceCheck(DagCheck):
 
         violations: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = (
-            self._dead_resource_warnings(producers, consumers) + malformed_warnings
+            self._dead_resource_warnings(producers, consumers)
+            + malformed_warnings
+            + alias_warnings
         )
         for consumer in sorted(consumers, key=lambda c: (c.resource, c.capability or "", c.owner_node_id)):
             if not self._is_required(consumer):
@@ -311,17 +335,21 @@ class ResourceFlowCoherenceCheck(DagCheck):
 
     def _resource_contract_uses(
         self, node_id: str, attrs: dict[str, Any]
-    ) -> tuple[list[ResourceUse], dict[str, str]]:
+    ) -> tuple[list[ResourceUse], list[tuple[str, str]], set[str]]:
         uses: list[ResourceUse] = []
-        aliases: dict[str, str] = {}
+        # (alias, canonical) pairs — collected, not overwritten, so the caller can
+        # detect an alias declared against more than one canonical resource.
+        aliases: list[tuple[str, str]] = []
+        canonicals: set[str] = set()
         for entry in self._entries(attrs, "resource_contracts"):
             resource = self._str(entry.get("resource"))
             if not resource:
                 continue
+            canonicals.add(resource)
             for alias in self._as_list(entry.get("aliases")):
                 alias_s = self._str(alias)
                 if alias_s:
-                    aliases[alias_s] = resource
+                    aliases.append((alias_s, resource))
             for consumer in self._dict_list(entry.get("consumers")):
                 uses.append(
                     ResourceUse(
@@ -353,7 +381,7 @@ class ResourceFlowCoherenceCheck(DagCheck):
                         external=True,
                     )
                 )
-        return uses, aliases
+        return uses, aliases, canonicals
 
     def _critical_required_capabilities(self, design_docs: list[Any]) -> set[str]:
         caps: set[str] = set()
@@ -575,6 +603,59 @@ class ResourceFlowCoherenceCheck(DagCheck):
                     ),
                 }
             )
+        return warnings
+
+    def _alias_drift_warnings(
+        self,
+        alias_targets: dict[str, set[str]],
+        canonical_resources: set[str],
+    ) -> list[dict[str, Any]]:
+        # Exact-string only (no fuzzy / case-insensitive normalization — same as
+        # the rest of this check). Amber only; an alias name conflict is an
+        # ambiguity to surface, never a deploy-blocking red.
+        warnings: list[dict[str, Any]] = []
+        for alias, targets in sorted(alias_targets.items()):
+            # (1) duplicate_alias_target — one alias name claims >1 canonical
+            # resource. The collision is left unresolved upstream (resources stay
+            # distinct); surface it so the ambiguity is not silent.
+            if len(targets) > 1:
+                warnings.append(
+                    {
+                        "type": "duplicate_alias_target",
+                        "severity": "amber",
+                        "alias": alias,
+                        "canonical_resources": sorted(targets),
+                        "message": (
+                            f"Alias '{alias}' is declared against multiple canonical "
+                            f"resources ({sorted(targets)}); it is left unresolved so the "
+                            "resources stay distinct."
+                        ),
+                        "remediation": (
+                            f"Point alias '{alias}' at a single canonical resource, or give "
+                            "each target its own distinct alias."
+                        ),
+                    }
+                )
+            # (2) alias_shadows_canonical — an alias name is also a canonical
+            # resource id of another entry, so the same token means two things.
+            if alias in canonical_resources:
+                warnings.append(
+                    {
+                        "type": "alias_shadows_canonical",
+                        "severity": "amber",
+                        "alias": alias,
+                        "canonical_resources": sorted(targets),
+                        "message": (
+                            f"Alias '{alias}' is also declared as a canonical resource by "
+                            "another contract entry; the same name denotes both an alias and "
+                            "a distinct resource."
+                        ),
+                        "remediation": (
+                            f"Rename the alias or the canonical resource so '{alias}' refers "
+                            "to exactly one resource."
+                        ),
+                    }
+                )
         return warnings
 
     def _malformed_contract_warnings(self, design_docs: list[Any]) -> list[dict[str, Any]]:
