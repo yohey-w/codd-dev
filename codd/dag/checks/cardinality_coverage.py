@@ -318,8 +318,12 @@ def _signal_asserted(signal: str, asserted_signals: set[str]) -> bool:
     if signal in asserted_signals:
         return True
     for entry in asserted_signals:
-        if entry.startswith(_SOURCE_TEXT_BLOB_PREFIX) and signal and signal in entry:
-            return True
+        if entry.startswith(_SOURCE_TEXT_BLOB_PREFIX) and signal:
+            # Search only the content AFTER the sentinel prefix, so a signal that is
+            # itself a substring of the prefix (e.g. "source", "blob") cannot
+            # spuriously register as asserted — that would be a false-green.
+            if signal in entry[len(_SOURCE_TEXT_BLOB_PREFIX):]:
+                return True
     return False
 
 

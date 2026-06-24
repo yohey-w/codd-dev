@@ -224,12 +224,21 @@ def _first_str(record: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
 
 def _resolve_source(root: Path, source_path: str) -> Path | None:
     candidate = Path(source_path)
-    if candidate.is_absolute():
-        return candidate
     try:
-        return root / candidate
-    except (TypeError, ValueError):  # pragma: no cover - defensive
+        resolved = (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (root / candidate).resolve()
+        )
+    except (TypeError, ValueError, OSError):  # pragma: no cover - defensive
         return None
+    # Root-jail: never hash a file outside the project root. An absolute source_path
+    # from untrusted DAG content must not leak the existence/hash of arbitrary files.
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return resolved
 
 
 def _sha256_of(path: Path) -> str | None:
