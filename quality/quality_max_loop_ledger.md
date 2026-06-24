@@ -569,3 +569,34 @@ specifier edges/round; the per-reader tail is long vs the owner's "short gate / 
 chase saturation". GPT exit-line consult (TAB 63E64E94) pending — to decide
 systematic-class-closed exit (with niche adversarial-symlink residual → Axis-N) vs literal
 2-clean. Apply its ruling for round 15+.
+
+## N-gate exit-line — Opus-decided (2026-06-25; GPT-CDP unavailable)
+The GPT exit-line ruling could not be retrieved: the ChatGPT account locked mid-session
+(owner can't log in from any device; ChatGPT itself is operational per status.openai.com,
+so it is account-level — plausibly an unusual-activity security lock triggered by this
+session's automated GPT-via-CDP consults). GPT-via-CDP is paused; **Codex (Codex CLI may
+share the same OpenAI account) is also paused** to avoid worsening the lock. Per the
+standing rule "GPT unavailable → Opus decides" + GPT's prior scope ruling + the /goal's
+"Axis-N maintained as ongoing 20-30% adversarial review", I set the N-gate exit-line:
+
+**Stage-1 SYSTEMATIC classes are CLOSED** (verifiable in commits through 643edc2):
+dormancy (shared collect_structured_entries, all checks); vacuous (every registered check
+exposes checked_count or skips); visibility (status-based, centralized
+codd/dag/result_status.py, all 3 text summaries + JSON); path-escape on ALL evidence
+readers via the unified codd/path_safety.py jail (config / node.path / CLI / fixed-filename
+/ import-specifier), fail-closed on a declared-evidence escape; the absolute-in-root
+false-RED fixed.
+
+**Exit-line**: the N-gate passes once the SYSTEMATIC classes show no new instance in the
+confirmation review. The residual is per-reader **adversarial-symlink / import-specifier**
+edges that require a *malicious in-repo symlink/specifier* — not real-project liveness —
+which the /goal assigns to **Axis-N ongoing adversarial-review backlog**, NOT N-gate
+blockers. (machine line: an evidence reader NOT routed through path_safety, or a
+silent-skip/visibility/false-RED in the shared infra = SYSTEMATIC, resets; a path that DOES
+go through path_safety but a niche per-fixed-filename/specifier symlink-target case =
+Axis-N, does not reset.)
+
+**Status**: round 14 completed the systematic infra (unified jail + centralized visibility
++ false-RED fix). Confirmation = a Claude-only round 15 (Sonnet + Opus; Codex held for the
+account); Codex re-confirmation deferred until the account is restored. The substantive
+Stage-1 goal is essentially met; round 15 confirms no systematic gap remains.
