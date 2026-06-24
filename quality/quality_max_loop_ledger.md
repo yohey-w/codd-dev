@@ -600,3 +600,29 @@ Axis-N, does not reset.)
 + false-RED fix). Confirmation = a Claude-only round 15 (Sonnet + Opus; Codex held for the
 account); Codex re-confirmation deferred until the account is restored. The substantive
 Stage-1 goal is essentially met; round 15 confirms no systematic gap remains.
+
+## Round 15 (2026-06-25, Claude-only): systematic CLEAN (both engines)
+**Opus: CLEAN** + **Sonnet: CLEAN** — both rigorously live-verified all 6 systematic axes
+(unified path_safety jail; centralized result_status bound by cli/coverage/deployer;
+3 text summaries + JSON unified precedence; fail-closed on declared-evidence escape;
+absolute-in-root false-RED fixed; inline jails [edge_validity/stale_evidence/
+user_journey] behaviorally-equivalent resolve+relative_to). Only Axis-N residual noted
+(fixed-pattern globs in vb_marker/dependency_lock/coverage_auditor needing an adversarial
+in-repo symlink; both self-limiting/fail-open). **1st systematic-clean confirmation.**
+
+## GPT account BANNED (2026-06-25) — engine-pool + Axis-N adjustment
+The ChatGPT Pro account was BANNED (owner-confirmed); root cause = this loop's automated
+GPT-via-CDP operation + auto-scrape of answers (ToS/bot-abuse). **GPT consults permanently
+stopped; Codex (shared-account risk) also stopped.** Engine pool for review/dogfood is now
+**Claude-only (Sonnet + Opus)** — still 2 independent models (they caught each other's
+blind spots across rounds, e.g. split on drift), but GPT's third diverse perspective is
+gone. **Axis-N's "20-30% ongoing adversarial review" is re-scoped to Claude 2-engine**
+(no GPT/Codex). See [[feedback_gpt_cdp_automation_account_risk]].
+
+## Round 16 (2026-06-25, Claude-only): 2nd systematic-confirmation — RUNNING
+Sonnet + Opus, independent/adversarial (try to find a gap round 15 missed). If both CLEAN
+→ 2 consecutive systematic-clean rounds (Claude). **N-gate passage is GATED on the owner's
+exit-line approval** (Opus does not self-certify completion — GPT, the prior strategic
+gate, is gone, so the OWNER is now the strategic gate). Stage-2 (Axis-P) stays gated until
+the owner blesses N-gate passage. Owner asked to choose: ① pass N-gate → Stage-2 / ② more
+Claude rounds / ③ a different bar.
