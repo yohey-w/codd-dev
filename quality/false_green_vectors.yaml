@@ -122,6 +122,20 @@ vectors:
     check: dag verify summary (cli.py)
     fixtures: tests/test_dag_verify_cli.py::test_verify_shows_skip_distinctly_not_pass
 
+  - id: vacuous_pass
+    class: gate_coverage
+    priority: P1
+    summary: a check returns PASS having checked 0 items (no material), which is
+      indistinguishable from a check that actually verified items
+    invariant: a pass over 0 items is shown distinctly from a verified pass
+    mutation: run a check on a project with no matching items; assert the summary
+    expected_detection: n/a
+    severity: amber
+    owner_gate: true         # a general gate needs per-check item-count semantics
+    false_red_risk: 4
+    status: owner_gated      # discovery round 1 (self-host); see self_hosting_ledger.md
+    detection: missed_green
+
   - id: cross_artifact_partial_coverage
     class: coverage_drift
     priority: P0

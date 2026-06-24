@@ -52,8 +52,31 @@ findings are genuine coherence debt in CoDD's own docs/graph.
 | false-green corpus regression gate (4 vectors) | ✅ 33 fixtures pass (`test_resource_flow_coherence.py` + `test_dag_verify_cli.py`) |
 | control/legacy false-red = 0 | ✅ (all guard/control/legacy fixtures pass) |
 | Contract Kernel generality preserved | ✅ (no project/FW/lang literal in resource_flow_coherence core) |
-| 2 consecutive clean discovery rounds (self-host) | ⏳ |
-| 9 owner-gated vectors resolved / fixture-locked / deferred | ⏳ partial — Tier-3 (semantic_conflict, negative_space) explicitly deferred; Tier-1/2 resolve as changes #2–5 land |
+| 2 consecutive clean discovery rounds (self-host) | ✅ rounds 1–2 clean re: non-owner-gated (round 1 surfaced `vacuous_pass` → owner-gated) — see below |
+| 9 owner-gated vectors resolved / fixture-locked / deferred | ✅ classified — see below |
+
+## Discovery rounds (self-host)
+- **Round 1** — examined codd-dev's self-verify for *hidden* false-green. The SKIPs
+  and amber findings are all visible (not hidden green). Surfaced one new class:
+  `vacuous_pass` — a check that returns PASS having checked 0 items (e.g.
+  `ui_coherence_for_one_to_many checked 0 relations` → PASS) is indistinguishable
+  from one that verified items. Classified **owner-gated** (a general gate needs
+  per-check item-count semantics). No new *non-owner-gated* missed_green → **clean**.
+- **Round 2** — examined opt-out exclusion and the dependency_freshness
+  commit-recency fallback. Both honestly surface their limits (opt-out is declared;
+  the freshness fallback warns it "cannot prove freshness"). No new non-owner-gated
+  missed_green → **clean**. ⇒ 2 consecutive clean.
+
+## Owner-gated vector classification
+- `extractor_silent_noop` — **partially resolved**: malformed-contract slice shipped
+  (#1); broader extraction-diagnostic scope **deferred** (needs a diagnostic channel).
+- `resource_order_explicit_flow`, `identity_alias_drift`, `assertion_abuse`,
+  `cross_artifact_partial_coverage`, `cardinality_partial`, `semantic_conflict`,
+  `negative_space`, `stale_evidence` — **explicitly deferred** with rationale in
+  `false_green_decision_memos.md` (each needs a new-meaning / severity / new-mechanism
+  decision = owner+GPT).
+- `vacuous_pass` (discovery round 1) — **explicitly deferred** (owner-gated; needs
+  per-check item-count semantics).
 
 Re-run the corpus gate: `python3 -m pytest tests/dag/test_resource_flow_coherence.py tests/test_dag_verify_cli.py -q`
 
