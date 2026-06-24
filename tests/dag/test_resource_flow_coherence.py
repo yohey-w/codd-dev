@@ -534,6 +534,45 @@ def test_independent_flows_verdict_is_order_invariant():
     assert red_when_producer_first is False
 
 
+# ── class resource_flow_ambiguous_alias_false_red ──────────────────────────
+# An alias that resolves to >1 canonical resource is left un-canonicalized; a
+# consumer using it must NOT red as dangling (a producer exists for a target).
+def test_ambiguous_alias_consumer_does_not_false_red():
+    dag = _dag(
+        _design_doc(
+            user_journeys=[
+                {
+                    "name": "use_user_flow",
+                    "criticality": "critical",
+                    "steps": [{"action": "use_user"}],
+                    "required_capabilities": ["use_user_id"],
+                    "expected_outcome_refs": [],
+                }
+            ],
+            resource_contracts=[
+                {"resource": "data:users.id", "aliases": ["user_id"]},
+                {"resource": "data:accounts.id", "aliases": ["user_id"]},
+            ],
+            capability_contracts=[
+                {"capability": "make_user", "produces": [{"resource": "data:users.id"}]},
+                {
+                    "capability": "use_user_id",
+                    "consumes": [
+                        {"resource": "user_id", "required": True, "on_missing": "fail"}
+                    ],
+                },
+            ],
+        )
+    )
+    result = _run(dag)
+    # The ambiguous alias must not manufacture a dangling false-red...
+    assert not any(
+        v.get("type") == "dangling_required_consumer" for v in result.violations
+    )
+    # ...it is surfaced as amber instead.
+    assert _warnings_of_type(result, "ambiguous_alias_unresolved")
+
+
 # Fixture C — contract present but operations carry no matching refs → ordering skipped → pass.
 def test_contract_without_operation_refs_passes():
     dag = _dag(

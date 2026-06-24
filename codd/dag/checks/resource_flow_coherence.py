@@ -152,6 +152,12 @@ class ResourceFlowCoherenceCheck(DagCheck):
             for alias, targets in alias_targets.items()
             if len(targets) == 1
         }
+        # Aliases resolving to >1 canonical are excluded from alias_map above, so a
+        # consumer using one is never canonicalized and would look producerless —
+        # the dangling check suppresses its red (amber instead) to avoid a false-red.
+        ambiguous_aliases = {
+            alias for alias, targets in alias_targets.items() if len(targets) > 1
+        }
 
         alias_warnings = self._alias_drift_warnings(alias_targets, canonical_resources)
         malformed_warnings = self._malformed_contract_warnings(design_docs)
@@ -244,6 +250,33 @@ class ResourceFlowCoherenceCheck(DagCheck):
                     warnings.append(order_warning)
                 if order_violation is not None:
                     violations.append(order_violation)
+                continue
+            if consumer.resource in ambiguous_aliases:
+                # Reads an ambiguous alias (>1 canonical target) → left
+                # un-canonicalized, so it only looks producerless. Suppress the
+                # dangling false-red; surface amber so the author disambiguates.
+                warnings.append(
+                    {
+                        "type": "ambiguous_alias_unresolved",
+                        "severity": "amber",
+                        "resource": consumer.resource,
+                        "consumer_capability": consumer.capability,
+                        "owner_node_id": consumer.owner_node_id,
+                        "alias_targets": sorted(
+                            alias_targets.get(consumer.resource, set())
+                        ),
+                        "message": (
+                            f"Required consumer reads alias {consumer.resource!r}, which "
+                            "resolves to multiple canonical resources "
+                            f"{sorted(alias_targets.get(consumer.resource, set()))}; it cannot "
+                            "be canonicalized, so producer existence is not asserted."
+                        ),
+                        "remediation": (
+                            f"Disambiguate {consumer.resource!r} to one resource (or have the "
+                            "consumer name the canonical resource directly)."
+                        ),
+                    }
+                )
                 continue
             violations.append(
                 {

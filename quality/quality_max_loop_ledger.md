@@ -173,3 +173,15 @@ held-out) → deterministic check / corpus / structured protocol. Origin: the
 - **CSUMR effect**: the class is now a regression fixture, so *any* engine running
   the corpus catches it — the harness, not model insight, does the catching. This is
   the goal's mechanism in one concrete instance.
+
+### Class #2: resource_flow_ambiguous_alias_false_red ✅ (false-red)
+- **Strong-union miss**: Codex flagged a false-red introduced by the cycle-1 alias
+  fix — an alias resolving to >1 canonical is left out of `alias_map` (unresolved),
+  so a consumer using it is never canonicalized and reds as `dangling_required_consumer`
+  although a producer exists for one of its targets.
+- **Fix**: the dangling check suppresses the red when the consumer's resource is an
+  ambiguous alias and surfaces amber `ambiguous_alias_unresolved` (with the resolved
+  targets + remediation) instead — conservative, no false-red, author disambiguates.
+- **Corpus**: red-before-green test (`user_id` → `users.id` + `accounts.id`, a
+  producer for one target → no dangling red, amber instead). RED pre-fix → GREEN;
+  full suite **5949**.
