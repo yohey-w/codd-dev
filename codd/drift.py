@@ -9,6 +9,7 @@ from typing import Any, Sequence
 
 from codd.coherence_adapters import drift_entry_to_event
 from codd.coherence_engine import DriftEvent, EventBus
+from codd.path_safety import require_project_path, resolve_project_path
 
 
 _coherence_bus: EventBus | None = None
@@ -179,9 +180,10 @@ def extract_e2e_have_url_assertions(
     project_root = Path(project_root)
     e2e_config = _e2e_config(config)
     assertion_pattern = _string_config(e2e_config.get("assertion_pattern"), "toHaveURL")
-    test_dir = _resolve_project_path(
+    test_dir = _require_in_root_evidence_path(
         project_root,
         _string_config(e2e_config.get("test_dir"), "tests/e2e"),
+        context="e2e.test_dir",
     )
     spec_globs = _string_list_config(
         e2e_config.get("spec_globs", e2e_config.get("file_globs")),
@@ -209,12 +211,13 @@ def detect_screen_transition_drift(
     """Compare extracted screen-transition destinations against E2E URL assertions."""
     project_root = Path(project_root)
     e2e_config = _e2e_config(config)
-    transitions_path = _resolve_project_path(
+    transitions_path = _require_in_root_evidence_path(
         project_root,
         _string_config(
             e2e_config.get("screen_transitions_path"),
             "docs/extracted/screen-transitions.yaml",
         ),
+        context="e2e.screen_transitions_path",
     )
 
     if not transitions_path.exists():
@@ -243,7 +246,11 @@ def compute_screen_flow_drift(
     """Compare designed screen transitions with implementation-extracted transitions."""
     project_root = Path(project_root)
     transitions_path = (
-        _resolve_project_path(project_root, str(screen_transitions_yaml_path))
+        _require_in_root_evidence_path(
+            project_root,
+            str(screen_transitions_yaml_path),
+            context="screen_flow_drift.screen_transitions_path",
+        )
         if screen_transitions_yaml_path is not None
         else _screen_flow_transitions_path(project_root, extractor_config)
     )
@@ -375,6 +382,12 @@ def _extract_used_design_tokens(project_root: Path) -> set[str]:
             continue
         if _should_skip_path(ui_file, project_root):
             continue
+        # Re-confine each walked file: an in-root symlink whose target escapes the
+        # tree must not be read as a project UI file (escape GATE only) — its
+        # off-root contents would otherwise count as a used design token
+        # (path-escape false-green). Anti-false-red: in-root files are unaffected.
+        if resolve_project_path(project_root, ui_file) is None:
+            continue
         try:
             text = ui_file.read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -429,10 +442,24 @@ def _extract_design_urls(project_root: Path, config: dict[str, Any]) -> tuple[li
     doc_dirs = config.get("scan", {}).get("doc_dirs", [])
 
     for doc_dir in doc_dirs:
-        full_dir = project_root / doc_dir
+        # ``scan.doc_dirs`` is user-controllable (codd.yaml). A configured doc ROOT
+        # that escapes the project (absolute / ``../`` / an in-root symlink whose
+        # target leaves the tree) is INVALID drift evidence — FAIL-CLOSED
+        # (``require_project_path`` raises PathEscapeError) rather than silently
+        # skipping the entry and letting drift "succeed" reading nothing (a silent
+        # skip is a false-green in another form). A NON-EXISTENT in-root dir is NOT
+        # an escape — it stays a benign skip (anti-false-red).
+        full_dir = require_project_path(project_root, doc_dir, context="scan.doc_dirs")
         if not full_dir.exists():
             continue
-        for md_file in full_dir.rglob("*.md"):
+        for md_file in sorted(full_dir.rglob("*.md")):
+            # Re-confine each walked file: an in-root tree may contain a symlink
+            # whose target escapes the root — drop it (escape GATE only) so its
+            # off-root contents are not consumed as drift evidence. The
+            # project-relative ``rel_path`` keeps its original in-root derivation so
+            # in-root sources are byte-identical to before (anti-false-red).
+            if resolve_project_path(project_root, md_file) is None:
+                continue
             text = md_file.read_text(encoding="utf-8", errors="ignore")
             rel_path = md_file.relative_to(project_root).as_posix()
             result = linker.extract_urls(text, rel_path)
@@ -483,11 +510,22 @@ def _string_list_config(value: Any, default: list[str]) -> list[str]:
     return default
 
 
-def _resolve_project_path(project_root: Path, path_text: str) -> Path:
-    path = Path(path_text).expanduser()
-    if path.is_absolute():
-        return path
-    return project_root / path
+def _require_in_root_evidence_path(project_root: Path, path_text: str, *, context: str) -> Path:
+    """Resolve a configured evidence path, FAIL-CLOSED on project-root escape.
+
+    ``path_text`` is a user-controllable ``codd.yaml`` value (``e2e.test_dir`` /
+    ``screen_transitions_path`` / a ``compute_screen_flow_drift`` argument). drift
+    is *evidence* consumed by check / coverage / gate, so an out-of-root read
+    (absolute, ``../`` traversal, or an in-root symlink whose target escapes the
+    tree) is a path-escape false-green — an off-root file's contents standing in
+    as drift evidence. Delegates to the shared :func:`require_project_path` jail
+    (resolve → follow symlinks → confine to ``project_root``): an escape raises
+    :class:`PathEscapeError` (an honest "drift not established / red-equivalent"
+    signal, NOT a silent skip and NOT silently-empty evidence). A NON-EXISTENT
+    in-root path is not an escape — it resolves in-root and the caller's existence
+    check keeps it a benign no-op (anti-false-red).
+    """
+    return require_project_path(project_root, path_text, context=context)
 
 
 def _iter_e2e_spec_files(e2e_dir: Path, spec_globs: list[str], project_root: Path):
@@ -495,6 +533,13 @@ def _iter_e2e_spec_files(e2e_dir: Path, spec_globs: list[str], project_root: Pat
     for spec_glob in spec_globs:
         for spec_file in sorted(e2e_dir.rglob(spec_glob)):
             if not spec_file.is_file() or _should_skip_path(spec_file, project_root):
+                continue
+            # Re-confine each walked spec: the e2e ROOT is jailed by the caller,
+            # but an in-root symlink spec FILE whose target escapes the tree must
+            # be dropped (escape GATE only) so its off-root URL assertions are not
+            # consumed as e2e drift evidence (path-escape false-green). The
+            # in-root ``spec_file`` is yielded unchanged (anti-false-red).
+            if resolve_project_path(project_root, spec_file) is None:
                 continue
             resolved = spec_file.resolve()
             if resolved in seen:
@@ -526,9 +571,10 @@ def _screen_flow_transitions_path(project_root: Path, config: dict[str, Any] | N
     path_value = drift_config.get("screen_transitions_path") if isinstance(drift_config, dict) else None
     if not path_value:
         path_value = _e2e_config(config).get("screen_transitions_path")
-    return _resolve_project_path(
+    return _require_in_root_evidence_path(
         project_root,
         _string_config(path_value, "docs/extracted/screen-transitions.yaml"),
+        context="screen_flow_drift.screen_transitions_path",
     )
 
 

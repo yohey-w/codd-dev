@@ -497,3 +497,16 @@ Closed the entire in-scope set per the ruling, in 4 groups:
   subagent role-confusion wrote a stray cmd_522; verified correct and folded in; Karo
   told to close cmd_522 and stop concurrent codd-dev edits.)
 Round 10 next, review SCOPED to the evidence set (B is backlog, not a reset).
+
+## Round 10 (2026-06-25, evidence-scoped): NOT clean → 1 fixed (drift.py bespoke jail)
+**Sonnet: CLEAN** (no in-scope P0/P1). **Codex: 2 P0** — both in drift.py: a LOCAL
+`_resolve_project_path` (no root-confine) fed drift evidence readers (e2e.test_dir,
+screen_transitions_path, document-URL drift). The global audit had mislabeled drift.py
+"already jailed" (it imports path_safety for some readers but kept a bespoke local jail
+for these). Per GPT's ruling (bespoke/string jails don't count as clean mitigation), the
+local resolver was DELETED and all drift evidence readers routed through
+path_safety.require_project_path (fail-closed: escaped evidence path raises
+PathEscapeError, never silent-read/silent-empty). full suite 6352. The two engines split
+on whether drift is "evidence" (Codex in / Sonnet out); fixing it is correct either way
+(anti-false-green hardening, no false-red). Streak reset (round 10 had a finding);
+round 11 + 12 must both be clean.
