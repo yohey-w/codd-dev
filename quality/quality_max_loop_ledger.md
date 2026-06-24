@@ -142,3 +142,34 @@ Both verified together: full suite **5896**, corpus gate 52.
   declared-values-only (no default backfill), exact alias; skip when no entries.
 - All red-before-green; registered in runner.py; generality preserved. Full suite
   **5944** (+23 tests), corpus green.
+
+---
+
+# Cycle-2 — Harness-closes-model-gap (CSUMR goal, 2026-06-24)
+
+New `/goal`: absorb strong-model-only true-positives as harness-internalized
+**issue-classes** (false-green / false-red / diagnostic-gap) so that
+harness-assisted Sonnet's detection set ⊇ harness-assisted Codex/Opus union on the
+classed, non-owner-gated subset. Metric **CSUMR=0** (Classed Strong-Union Miss
+Rate) + mutation-survival=0 + unexpected-red=0, sustained 3 consecutive
+review/dogfood rounds. Method: class-ify → red-before-green fixture (4-fixture +
+held-out) → deterministic check / corpus / structured protocol. Origin: the
+3-engine parallel review where Codex caught issues Sonnet missed.
+
+### Class #1: resource_flow_operation_scope_false_red ✅ (false-red)
+- **Strong-union miss**: Codex caught a BLOCKER false-red that Sonnet **and** Opus
+  missed — the flagship gap this goal exists to absorb.
+- **Defect**: `producer_after_consumer` compared operation indices concatenated
+  **globally** across design docs → producer/consumer in *independent flows in
+  separate docs* red purely on doc-sort order.
+- **Fix**: the index is now `(flow_scope = owning node, local_index)`; ordering
+  compares only same-scope producer/consumer; cross-flow → not comparable → no red.
+  The in-order check now precedes the ambiguous bail (also resolves the Sonnet-flagged
+  ambiguous-sibling false-amber).
+- **Corpus**: 4-fixture = green_control + false_green_candidate + legacy (existing
+  single-doc) + **new false_red_guard** (multi-doc independent flows → no red);
+  **held-out** = order-invariance metamorphic (verdict invariant to doc insertion
+  order). Both new tests RED pre-fix → GREEN. Full suite **5948**.
+- **CSUMR effect**: the class is now a regression fixture, so *any* engine running
+  the corpus catches it — the harness, not model insight, does the catching. This is
+  the goal's mechanism in one concrete instance.

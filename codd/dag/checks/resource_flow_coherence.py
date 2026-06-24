@@ -82,7 +82,8 @@ class ResourceUse:
     required: bool | None = None
     on_missing: str | None = None
     external: bool = False
-    operation_index: int | None = None
+    operation_index: int | None = None  # LOCAL index within its operation_flow scope
+    operation_scope: str | None = None  # the node/flow the local index belongs to
     operation_ref: str | None = None
     # "mapped" | "unmapped" | "ambiguous" — whether this use resolves to exactly
     # one declared operation in the explicit operation_flow ordering.
@@ -398,23 +399,29 @@ class ResourceFlowCoherenceCheck(DagCheck):
         return caps
 
     # ----------------------------------------------------- operation ordering
-    def _operation_ref_to_index(self, design_docs: list[Any]) -> dict[str, set[int]]:
-        """Map each operation's declared ref tokens to its ordinal index.
+    def _operation_ref_to_index(
+        self, design_docs: list[Any]
+    ) -> dict[str, set[tuple[str, int]]]:
+        """Map each operation's declared ref tokens to ``(flow_scope, local_index)``.
 
-        Operations are ordered by their position in the (already-normalized)
-        ``operation_flow.operations`` list, concatenated across design docs in
-        sorted node order. A token resolving to more than one index is ambiguous
-        and callers must treat it as unmapped for ordering (no red).
+        The index is LOCAL to its own ``operation_flow`` (the owning node is the
+        flow scope) and resets per design doc — operations are NOT concatenated into
+        one global order across docs. Ordering is meaningful only within a single
+        explicit flow, so callers compare a consumer and producer only when they
+        share a scope; a global index would red independent flows purely by doc-sort
+        order (a false-red). A token resolving to more than one (scope, index) is
+        ambiguous and treated as unmapped for ordering (no red).
         """
 
-        ref_to_index: dict[str, set[int]] = {}
-        index = 0
+        ref_to_index: dict[str, set[tuple[str, int]]] = {}
         for node in design_docs:
             attrs = getattr(node, "attributes", None) or {}
-            for operation in operation_flow_operations(attrs.get("operation_flow")):
+            scope = str(getattr(node, "id", "") or "")
+            for local_index, operation in enumerate(
+                operation_flow_operations(attrs.get("operation_flow"))
+            ):
                 for ref in self._operation_refs(operation):
-                    ref_to_index.setdefault(ref, set()).add(index)
-                index += 1
+                    ref_to_index.setdefault(ref, set()).add((scope, local_index))
         return ref_to_index
 
     def _operation_refs(self, operation: dict[str, Any]) -> set[str]:
@@ -427,25 +434,27 @@ class ResourceFlowCoherenceCheck(DagCheck):
         return refs
 
     def _attach_operation_indices(
-        self, uses: list[ResourceUse], ref_to_index: dict[str, set[int]]
+        self, uses: list[ResourceUse], ref_to_index: dict[str, set[tuple[str, int]]]
     ) -> None:
-        """Resolve each use's capability/obligation ref to an operation index.
+        """Resolve each use's capability/obligation ref to a ``(scope, index)``.
 
-        ``mapped`` = exactly one index; ``ambiguous`` = more than one; otherwise
-        the status stays ``unmapped``. No ref table (no explicit operation_flow)
-        leaves every use ``unmapped`` so ordering is skipped entirely.
+        ``mapped`` = exactly one (scope, index); ``ambiguous`` = more than one;
+        otherwise the status stays ``unmapped``. No ref table (no explicit
+        operation_flow) leaves every use ``unmapped`` so ordering is skipped.
         """
 
         for use in uses:
             ref = use.capability or use.obligation
             if not ref:
                 continue
-            indices = ref_to_index.get(ref)
-            if not indices:
+            entries = ref_to_index.get(ref)
+            if not entries:
                 continue
             use.operation_ref = ref
-            if len(indices) == 1:
-                use.operation_index = next(iter(indices))
+            if len(entries) == 1:
+                scope, index = next(iter(entries))
+                use.operation_scope = scope
+                use.operation_index = index
                 use.operation_mapping_status = "mapped"
             else:
                 use.operation_mapping_status = "ambiguous"
@@ -479,24 +488,35 @@ class ResourceFlowCoherenceCheck(DagCheck):
         if any(producer.external for producer in resource_producers):
             return None, None
 
-        # Internal producers carrying an operation index. External providers are
-        # out of scope for ordering (they pre-exist the flow by definition).
+        # Only producers in the SAME explicit flow scope as the consumer are
+        # comparable. A producer in another doc's independent flow has no ordering
+        # relation to this consumer; comparing positions across flows would be a
+        # false-red (class: resource_flow_operation_scope_false_red). External
+        # providers pre-exist the flow and are out of scope for ordering.
         ordered_producers = [
             producer
             for producer in resource_producers
-            if not producer.external and producer.operation_index is not None
+            if not producer.external
+            and producer.operation_index is not None
+            and producer.operation_scope == consumer.operation_scope
         ]
+        # In order if any same-scope producer runs at or before the consumer. This
+        # is checked BEFORE the ambiguous bail so a satisfying mapped producer is
+        # not suppressed to amber by an ambiguous sibling.
+        if any(
+            producer.operation_index <= consumer.operation_index
+            for producer in ordered_producers
+        ):
+            return None, None
+        # Not satisfied by a mapped same-scope producer: an ambiguous producer ref
+        # means we cannot decide the order → amber (never red).
         if any(
             producer.operation_mapping_status == "ambiguous" and not producer.external
             for producer in resource_producers
         ):
             return None, self._ambiguous_warning(consumer, "producer")
         if not ordered_producers:
-            # No mapped internal producer to order against (e.g. only external
-            # providers, or producers without an explicit operation) → skip.
-            return None, None
-        # In order if any mapped producer runs at or before the consumer.
-        if any(producer.operation_index <= consumer.operation_index for producer in ordered_producers):
+            # No mapped same-scope producer to order against → skip (no red).
             return None, None
 
         producer_indices = sorted(producer.operation_index for producer in ordered_producers)

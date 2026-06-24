@@ -482,6 +482,58 @@ def test_consumer_before_producer_is_red():
     assert not any(v["type"] == "dangling_required_consumer" for v in result.violations)
 
 
+# ── class resource_flow_operation_scope_false_red ──────────────────────────
+# Operation order is meaningful only WITHIN one explicit flow. A producer in a
+# different doc's independent flow has no ordering relation to this consumer; a
+# global concatenated index would red it purely on doc-sort order (a false-red).
+def _independent_flow_docs(consumer_first: bool):
+    consumer_doc = _design_doc(
+        node_id="docs/design/a_consumer.md",
+        user_journeys=[_PRODUCER_CONSUMER_JOURNEY],
+        operation_flow={"operations": [{"id": "redeem_token", "capability": "redeem_token"}]},
+        capability_contracts=[
+            {
+                "capability": "redeem_token",
+                "consumes": [
+                    {"resource": "data:tokens.value", "required": True, "on_missing": "fail"}
+                ],
+            }
+        ],
+    )
+    producer_doc = _design_doc(
+        node_id="docs/design/z_producer.md",
+        operation_flow={"operations": [{"id": "issue_token", "capability": "issue_token"}]},
+        capability_contracts=[
+            {"capability": "issue_token", "produces": [{"resource": "data:tokens.value"}]}
+        ],
+    )
+    order = (consumer_doc, producer_doc) if consumer_first else (producer_doc, consumer_doc)
+    return _dag(*order)
+
+
+# false_red_guard — independent flows in separate docs must NOT red on doc order.
+def test_independent_flows_across_docs_do_not_false_red():
+    result = _run(_independent_flow_docs(consumer_first=True))
+    assert _warnings_of_type(result, "producer_after_consumer") == []
+    assert not any(v.get("type") == "producer_after_consumer" for v in result.violations)
+    # Existence is satisfied cross-doc, so no dangling red either.
+    assert not any(v.get("type") == "dangling_required_consumer" for v in result.violations)
+
+
+# held-out (metamorphic) — the verdict must be invariant to doc insertion order.
+def test_independent_flows_verdict_is_order_invariant():
+    red_when_consumer_first = any(
+        v.get("type") == "producer_after_consumer"
+        for v in _run(_independent_flow_docs(consumer_first=True)).violations
+    )
+    red_when_producer_first = any(
+        v.get("type") == "producer_after_consumer"
+        for v in _run(_independent_flow_docs(consumer_first=False)).violations
+    )
+    assert red_when_consumer_first is False
+    assert red_when_producer_first is False
+
+
 # Fixture C — contract present but operations carry no matching refs → ordering skipped → pass.
 def test_contract_without_operation_refs_passes():
     dag = _dag(
