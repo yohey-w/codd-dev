@@ -8,6 +8,7 @@ from typing import Any
 
 from codd.config import find_codd_dir, load_project_config
 from codd.graph import CEG
+from codd.path_safety import resolve_project_path
 from codd.propagation_common import parse_frontmatter_diff, render_updated_doc_content
 from codd.propagator import (
     AffectedDoc,
@@ -115,9 +116,18 @@ def _find_ceg_scan_dir(project_root: Path) -> Path | None:
             config = load_project_config(project_root)
         except (FileNotFoundError, ValueError):
             config = {}
+        # ``graph.path`` is a user-controllable codd.yaml value. An absolute
+        # out-of-root path, a ``../`` traversal, or an in-root symlink whose target
+        # escapes the tree would make CoDD load nodes/edges from outside the project
+        # as the CEG (out-of-root evidence driving propagation — a path-escape
+        # false-green). Root-jail it: out-of-root → not added (same as "no configured
+        # graph"; the in-root ``.codd``/``codd`` fallbacks below still apply). The
+        # other candidates are hardcoded/derived-from-found-codd-dir, not user paths.
         graph_path = config.get("graph", {}).get("path")
         if graph_path:
-            candidates.append(project_root / graph_path)
+            jailed_graph = resolve_project_path(project_root, graph_path)
+            if jailed_graph is not None:
+                candidates.append(jailed_graph)
         candidates.append(codd_dir / "scan")
 
     candidates.extend(
@@ -325,13 +335,18 @@ def _to_affected_doc(node: dict, changes: list[dict], ceg: CEG) -> AffectedDoc:
 
 
 def _resolve_node_path(node: dict, project_root: Path) -> Path | None:
+    # ``node["path"]`` is a CEG node path — user-controllable (an absolute path, a
+    # ``../`` traversal, or an in-root symlink whose target escapes the tree). It is
+    # read (``.exists()`` / ``.read_text()``) and its body is fed to the AI update
+    # prompt; an out-of-root path would smuggle a file from outside the project as
+    # design-doc content (a path-escape false-green). Root-jail via
+    # ``resolve_project_path``: out-of-root (including absolute escapes that the old
+    # absolute passthrough leaked) → ``None`` (skipped, never read). In-root paths
+    # resolve as before (anti-false-red).
     path = node.get("path")
     if not path:
         return None
-    doc_path = Path(path)
-    if doc_path.is_absolute():
-        return doc_path
-    return project_root / doc_path
+    return resolve_project_path(project_root, path)
 
 
 def _load_config_for_ai(project_root: Path) -> dict:

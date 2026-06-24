@@ -31,6 +31,7 @@ from codd.operational_e2e_audit import (
     _rel_path,
     _resolve_vb_scan_dirs,
 )
+from codd.path_safety import resolve_project_path
 
 VB_AUDIT_CONTRACT_VERSION = "verifiable-behavior-audit/v1"
 
@@ -729,18 +730,29 @@ def discover_vb_documents(
     resolved: list[Path] = []
     if candidates:
         for item in candidates:
-            path = Path(item)
-            if not path.is_absolute():
-                path = project_root / path
+            # ``test_coverage.docs`` is user-controllable (codd.yaml); jail each entry
+            # so an absolute/``../`` path or an in-root symlink escaping the tree is
+            # dropped (escape → skip, never read/parsed as a VB-table source).
+            path = resolve_project_path(project_root, item)
+            if path is None:
+                continue
             if path.is_file():
                 resolved.append(path)
             elif path.is_dir():
-                resolved.extend(sorted(path.rglob("*.md")))
+                for match in sorted(path.rglob("*.md")):
+                    # Re-confine each match: an in-root dir may hold a symlink whose
+                    # target escapes the root.
+                    confined = resolve_project_path(project_root, match)
+                    if confined is not None:
+                        resolved.append(confined)
         return resolved
 
     default_dir = project_root / _DEFAULT_VB_DOC_DIR
     if default_dir.is_dir():
-        resolved.extend(sorted(default_dir.rglob("*.md")))
+        for match in sorted(default_dir.rglob("*.md")):
+            confined = resolve_project_path(project_root, match)
+            if confined is not None:
+                resolved.append(confined)
     return resolved
 
 

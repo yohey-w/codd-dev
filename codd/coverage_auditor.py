@@ -10,6 +10,7 @@ import re
 from typing import Any, Literal
 
 from codd.config import load_project_config
+from codd.path_safety import resolve_project_path as _resolve_project_path
 
 try:
     from codd.knowledge_fetcher import (
@@ -549,11 +550,21 @@ class CoverageAuditor:
         artifacts: set[str] = set()
 
         for configured_path in _artifact_discovery_paths(discovery_config):
+            # ``artifact_discovery.paths`` is user-controllable (codd.yaml); the shared
+            # jail returns ``None`` for an absolute/``../`` path or an in-root symlink
+            # escaping the tree, so an out-of-root design doc is never PASS-credited.
             path = _resolve_project_path(root, configured_path)
+            if path is None:
+                continue
             if path.is_file():
                 candidates = [path]
             elif path.exists():
-                candidates = list(path.rglob("*.md"))
+                # Re-confine each match: an in-root dir may hold a symlink escaping root.
+                candidates = [
+                    confined
+                    for md_path in path.rglob("*.md")
+                    if (confined := _resolve_project_path(root, md_path)) is not None
+                ]
             else:
                 candidates = []
             for md_path in candidates:
@@ -562,7 +573,11 @@ class CoverageAuditor:
                     artifacts.add(artifact_id)
 
         for artifact_id, paths in _artifact_path_overrides(discovery_config).items():
-            if any(_resolve_project_path(root, path).exists() for path in paths):
+            if any(
+                (resolved := _resolve_project_path(root, path)) is not None
+                and resolved.exists()
+                for path in paths
+            ):
                 artifacts.add(artifact_id)
         return artifacts
 
@@ -832,11 +847,6 @@ def _artifact_path_overrides(config: dict[str, Any]) -> dict[str, list[str]]:
     return overrides
 
 
-def _resolve_project_path(project_root: Path, configured_path: str) -> Path:
-    path = Path(configured_path)
-    return path if path.is_absolute() else project_root / path
-
-
 def _artifact_id_from_path(project_root: Path, path: Path, mappings: dict[str, str]) -> str:
     relative = _safe_relative_path(project_root, path)
     relative_key = _normalize_mapping_key(relative)
@@ -870,8 +880,12 @@ def _artifact_exists(
 ) -> bool:
     if artifact_id in existing:
         return True
+    # Candidate paths derive from user-controllable config (artifact_paths overrides /
+    # artifact_discovery.paths); the shared jail returns ``None`` for an out-of-root
+    # path, so existence there is never credited as the artifact being present.
     return any(
-        _resolve_project_path(project_root, candidate).exists()
+        (resolved := _resolve_project_path(project_root, candidate)) is not None
+        and resolved.exists()
         for candidate in _candidate_artifact_paths(artifact_id, config)
     )
 

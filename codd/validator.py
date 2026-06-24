@@ -14,6 +14,7 @@ from codd.bridge import load_bridge_registry
 from codd.coherence_adapters import design_token_violation_to_event, validation_issue_to_event
 from codd.coherence_engine import EventBus
 from codd.frontmatter import parse_frontmatter
+from codd.path_safety import resolve_project_path
 
 
 NODE_ID_PATTERN = re.compile(r"^(?P<prefix>[a-z_]+):(?P<name>.+)$")
@@ -465,10 +466,21 @@ class FrontmatterParseResult:
 def _iter_doc_files(project_root: Path, config: dict[str, Any]):
     doc_dirs = ((config.get("scan") or {}).get("doc_dirs") or [])
     for doc_dir in doc_dirs:
+        # Jail the configured doc_dir: an absolute/``../`` value resolving outside
+        # the project root must not be scanned (its *.md would be read as a
+        # checked CoDD document — i.e. evidence).
+        if resolve_project_path(project_root, doc_dir) is None:
+            continue
         full_path = project_root / doc_dir
         if not full_path.exists():
             continue
         for file_path in sorted(full_path.rglob("*.md")):
+            # rglob follows symlinks: re-jail every match so an in-root *.md
+            # symlinked to an out-of-root file is not yielded (and so not read).
+            # The original (project-rooted) path is yielded to keep callers'
+            # ``relative_to(project_root)`` working.
+            if resolve_project_path(project_root, file_path) is None:
+                continue
             if file_path.is_file():
                 yield file_path
 
@@ -615,12 +627,15 @@ def _load_scanned_node_ids(project_root: Path, config: dict[str, Any]) -> set[st
         if isinstance(configured_path, str) and configured_path.strip():
             graph_path = configured_path
 
-    scan_dir = Path(graph_path)
-    if not scan_dir.is_absolute():
-        scan_dir = project_root / scan_dir
+    # Jail the configured graph path: an absolute/``../`` value resolving outside
+    # the project root must not be read for scanned node ids (evidence).
+    safe_scan_dir = resolve_project_path(project_root, graph_path)
+    if safe_scan_dir is None:
+        return set()
 
-    nodes_path = scan_dir / "nodes.jsonl"
-    if not nodes_path.exists():
+    nodes_path = safe_scan_dir / "nodes.jsonl"
+    # Re-jail the concrete file (guards an in-root ``nodes.jsonl`` symlinked out).
+    if resolve_project_path(project_root, nodes_path) is None or not nodes_path.exists():
         return set()
 
     node_ids: set[str] = set()

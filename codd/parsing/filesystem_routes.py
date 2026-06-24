@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from codd.parsing._shared import _IGNORED_DIR_NAMES, _normalize_list
+from codd.path_safety import resolve_project_path
 
 
 @dataclass
@@ -45,14 +46,24 @@ class FileSystemRouteExtractor:
             if not base_dir_value:
                 continue
 
+            # ``base_dir`` is a codd.yaml ``filesystem_routes[*].base_dir`` value
+            # (user-controllable config). Jail it through the shared path_safety
+            # closure: an absolute/``../``-escaping base_dir, or an in-root symlink
+            # whose target leaves the tree, would otherwise let the walk read files
+            # from outside the project root (a path-escape leak). Out-of-root → skip.
             base_dir = _resolve_route_base_dir(root, str(base_dir_value))
-            if not base_dir.is_dir():
+            if base_dir is None or not base_dir.is_dir():
                 continue
 
             page_patterns = _expand_route_patterns(config.get("page_pattern"))
             api_patterns = _expand_route_patterns(config.get("api_pattern"))
 
             for file_path in _iter_filesystem_route_files(base_dir):
+                # Re-confine each walked file: a symlink *inside* an in-root base_dir
+                # may still resolve outside the tree. Drop those (never credit an
+                # off-root file as a route).
+                if resolve_project_path(root, file_path) is None:
+                    continue
                 relative_path = file_path.relative_to(base_dir)
                 kind, matched_pattern = _match_filesystem_route_kind(
                     relative_path,
@@ -74,11 +85,15 @@ class FileSystemRouteExtractor:
         info.routes.sort(key=lambda route: (route["url"], route["kind"], route["file"]))
         return info
 
-def _resolve_route_base_dir(project_root: Path, base_dir: str) -> Path:
-    path = Path(base_dir)
-    if path.is_absolute():
-        return path
-    return project_root / path
+def _resolve_route_base_dir(project_root: Path, base_dir: str) -> Path | None:
+    """Resolve a configured route ``base_dir`` confined to the project root.
+
+    Returns the in-root resolved directory, or ``None`` when the value is absolute
+    out-of-root, traverses out via ``../``, or is an in-root symlink whose target
+    escapes the tree. Delegates to :func:`codd.path_safety.resolve_project_path`
+    so every reader rejects/accepts the same raw path identically.
+    """
+    return resolve_project_path(project_root, base_dir)
 
 def _expand_route_patterns(value: Any) -> list[str]:
     patterns = _normalize_list(value)

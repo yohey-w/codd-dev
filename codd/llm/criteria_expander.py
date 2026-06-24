@@ -17,6 +17,7 @@ from codd.config import load_project_config
 from codd.dag import Node
 from codd.deployment.providers.ai_command import SubprocessAiCommand
 from codd.deployment.providers.ai_command_factory import get_ai_command
+from codd.path_safety import resolve_project_path
 from codd.requirements_meta import normalize_operation_flow, operation_flow_operations
 
 
@@ -377,9 +378,15 @@ def load_task_criteria(project_root: Path | str, task: str) -> TaskCriteriaSourc
 
 
 def find_task_yaml(project_root: Path | str, task: str) -> Path | None:
+    # ``task`` may be an explicit file path (user-path-controllable). Jail it through
+    # the shared path_safety closure before reading: an absolute out-of-root path,
+    # a ``../`` traversal, or an in-root symlink escaping the tree must not be picked
+    # up as the task YAML (path-escape leak). Out-of-root → fall through to the
+    # confined directory search below; in-root explicit paths resolve unchanged.
     raw = Path(task).expanduser()
-    if raw.is_file():
-        return raw.resolve()
+    jailed = resolve_project_path(project_root, raw)
+    if jailed is not None and jailed.is_file():
+        return jailed
 
     roots = _unique_paths([Path(project_root).resolve(), Path.cwd().resolve()])
     names = _task_file_names(task)
@@ -415,13 +422,14 @@ def load_design_docs(project_root: Path | str, paths: list[Path | str] | tuple[P
 
     nodes: list[Node] = []
     for path in doc_paths:
-        resolved = path if path.is_absolute() else root / path
-        if not resolved.is_file():
+        # Each design-doc path is user-path-controllable (CLI --design-doc / config).
+        # Jail through the shared path_safety closure so an absolute out-of-root
+        # path, a ``../`` traversal, or an in-root symlink escaping the tree is not
+        # read as design evidence (path-escape false-green). Out-of-root → skip.
+        resolved = resolve_project_path(root, path)
+        if resolved is None or not resolved.is_file():
             continue
-        try:
-            node_path = resolved.relative_to(root).as_posix()
-        except ValueError:
-            node_path = resolved.as_posix()
+        node_path = resolved.relative_to(root).as_posix()
         nodes.append(
             Node(
                 id=node_path,
@@ -433,10 +441,23 @@ def load_design_docs(project_root: Path | str, paths: list[Path | str] | tuple[P
     return nodes
 
 
-def load_expected_extractions(paths: list[Path | str] | tuple[Path | str, ...]) -> list[dict[str, Any]]:
+def load_expected_extractions(
+    paths: list[Path | str] | tuple[Path | str, ...],
+    project_root: Path | str | None = None,
+) -> list[dict[str, Any]]:
     loaded: list[dict[str, Any]] = []
     for path_value in paths:
         path = Path(path_value)
+        # When a project_root is supplied, jail each expected-extraction path
+        # through the shared path_safety closure: an absolute out-of-root path,
+        # a ``../`` traversal, or an in-root symlink escaping the tree must not be
+        # read as expected-artifact evidence (path-escape leak). Out-of-root → skip.
+        # When project_root is omitted the behaviour is unchanged (backward compat).
+        if project_root is not None:
+            resolved = resolve_project_path(project_root, path)
+            if resolved is None:
+                continue
+            path = resolved
         payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         if isinstance(payload, Mapping) and isinstance(payload.get("expected_extractions"), list):
             loaded.extend(_mappings(payload["expected_extractions"]))
@@ -666,10 +687,15 @@ def _node_content(node: Node, project_root: Path) -> str:
         return str(content)
     if not node.path:
         return ""
-    candidate = Path(node.path)
-    if not candidate.is_absolute():
-        candidate = project_root / candidate
-    if candidate.is_file():
+    # ``node.path`` is a user-controllable design-doc reference (DAG node path /
+    # CLI --design-doc / config evidence). Jail it through the shared path_safety
+    # closure before reading its body as completion evidence: an absolute
+    # out-of-root path, a ``../`` traversal, or an in-root symlink escaping the
+    # tree would otherwise leak an off-root file into the criteria prompt (a
+    # path-escape false-green). Out-of-root → treated as no content (skip, never
+    # crash); in-root paths are read unchanged.
+    candidate = resolve_project_path(project_root, node.path)
+    if candidate is not None and candidate.is_file():
         return candidate.read_text(encoding="utf-8")
     return ""
 
@@ -751,13 +777,24 @@ def _axes_from_context(context: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _axes_from_project_lexicon(context: Mapping[str, Any]) -> list[dict[str, Any]]:
     project_root = _context_root(context, None)
-    candidates: list[Path] = []
+    # Lexicon paths come from context (codd.yaml ``lexicon_path`` /
+    # ``project_lexicon_path``) — user-path-controllable. Jail every candidate
+    # through the shared path_safety closure so an absolute out-of-root path, a
+    # ``../`` traversal, or an in-root symlink escaping the tree cannot read an
+    # off-root lexicon's coverage_axes into the prompt (path-escape leak).
+    # Out-of-root candidates are dropped; the in-root default is unchanged.
+    raw_candidates: list[Path | str] = []
     for key in ("project_lexicon_path", "lexicon_path"):
         value = context.get(key)
         if isinstance(value, str) and value.strip():
-            path = Path(value)
-            candidates.append(path if path.is_absolute() else project_root / path)
-    candidates.append(project_root / "project_lexicon.yaml")
+            raw_candidates.append(value)
+    raw_candidates.append("project_lexicon.yaml")
+
+    candidates = [
+        resolved
+        for candidate in raw_candidates
+        if (resolved := resolve_project_path(project_root, candidate)) is not None
+    ]
 
     for path in _unique_paths(candidates):
         if not path.is_file():

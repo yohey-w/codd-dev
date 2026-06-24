@@ -18,6 +18,7 @@ from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.hitl_session import HitlSession
 from codd.knowledge_fetcher import KnowledgeFetcher
 from codd.lexicon import AskItem, AskOption, LEXICON_FILENAME
+from codd.path_safety import resolve_project_path
 from codd.project_types import (
     GENERIC_PROJECT_TYPE,
     resolve_project_type,
@@ -168,10 +169,15 @@ class RequirementCompletenessAuditor:
         return resolved
 
     def _read_requirement_docs(self, requirement_docs: list[str]) -> str:
-        doc_paths = [
-            _resolve_project_path(self.project_root, doc_path)
+        # Jail every user-supplied requirement_doc path: an absolute/``../`` value
+        # (or in-root symlink) resolving outside the project root is excluded so
+        # its contents never enter the audit evidence text.
+        explicit = [
+            safe
             for doc_path in requirement_docs
-        ] or self._discover_requirement_docs()
+            if (safe := resolve_project_path(self.project_root, doc_path)) is not None
+        ]
+        doc_paths = explicit or self._discover_requirement_docs()
         contents: list[str] = []
         for path in doc_paths:
             if not path.exists():
@@ -183,10 +189,16 @@ class RequirementCompletenessAuditor:
         candidates: list[Path] = []
         req_dir = self.project_root / "docs" / "requirements"
         if req_dir.exists():
-            candidates.extend(sorted(req_dir.rglob("*.md")))
+            # rglob follows symlinks: jail each match so an in-root *.md symlinked
+            # outside the root is not surfaced as a requirement doc.
+            candidates.extend(
+                path
+                for path in sorted(req_dir.rglob("*.md"))
+                if resolve_project_path(self.project_root, path) is not None
+            )
         for filename in ("docs/requirements.md", "REQUIREMENTS.md", "requirements.md"):
             path = self.project_root / filename
-            if path.exists():
+            if resolve_project_path(self.project_root, path) is not None and path.exists():
                 candidates.append(path)
         return _unique_paths(candidates)
 

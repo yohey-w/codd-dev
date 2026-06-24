@@ -424,3 +424,19 @@ the propagator and cli layers' deeper readers:
   the e2e function) jailed.
 All via path_safety; anti-false-red; escaped → not read / stale / not-evidence. full
 suite 6162. Round 9 next; propagator + cli now comprehensively jailed too.
+
+## Round 9 (2026-06-25, scoped + exhaustive-sweep): NOT clean → ~11 fixed (deep modules)
+The exhaustive-sweep prompt surfaced the deep-module surface: user-path FS readers
+across auditors / validators / derivers / parsers / llm / fix that read config/doc/node
+paths as evidence without path_safety. Fixed in 4 file-disjoint groups (each also
+audited its layer): fix/candidate_selector (node.path) + require_propagate (node.path +
+graph.path); operational_e2e_audit + verifiable_behavior_audit + coverage_auditor
+(scan.test_dirs / test_coverage.docs / artifact_discovery.paths; replaced a local
+no-jail _resolve_project_path) + coverage_execution_coherence (transitive);
+validator + required_artifacts_deriver + requirement_completeness_auditor
+(doc_dirs / graph.path / requirement docs); parsing/filesystem_routes (route base_dir)
++ llm/criteria_expander (design-doc + 4 audit-found readers). full suite 6225.
+Finding count rose because the sweep widened to all of codd/; the user-path surface is
+larger than the dag/builder/cli/propagator core. Next: a GLOBAL audit to enumerate the
+COMPLETE remaining surface (brownfield / languages / stack / assembler / extractors) in
+one pass, fix, then 2 clean rounds — instead of discovering it round-by-round.

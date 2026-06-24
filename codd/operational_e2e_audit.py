@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from codd.claude_cli import DEFAULT_CLAUDE_EFFORT, DEFAULT_CLAUDE_MODEL
 from codd.e2e_extractor import DodObligation, ScenarioCollection, ScenarioExtractor, UserScenario
 from codd.e2e_generator import load_scenarios_from_markdown
+from codd.path_safety import resolve_project_path
 
 
 SUPPORTED_RUNNER_BACKENDS = (
@@ -951,15 +952,23 @@ def _iter_test_files(project_root: Path, *, test_dirs: Iterable[Path | str] | No
     else:
         dirs = list(test_dirs)
     for item in dirs:
-        root = Path(item)
-        if not root.is_absolute():
-            root = project_root / root
+        # ``scan.test_dirs`` is user-controllable (codd.yaml); jail each entry so an
+        # absolute/``../`` dir or an in-root symlink escaping the tree is dropped
+        # (escape → skip, never read as test evidence). ``None`` ⇒ out-of-root.
+        root = resolve_project_path(project_root, item)
+        if root is None:
+            continue
         if root.is_file() and _is_test_file(root):
             yield root
         elif root.is_dir():
             for path in sorted(root.rglob("*")):
-                if path.is_file() and _is_test_file(path):
-                    yield path
+                # Re-confine each match: an in-root dir may contain a symlink whose
+                # target escapes the root.
+                confined = resolve_project_path(project_root, path)
+                if confined is None:
+                    continue
+                if confined.is_file() and _is_test_file(confined):
+                    yield confined
 
 
 def _is_test_file(path: Path) -> bool:

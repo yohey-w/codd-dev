@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable
 from codd.dag import DAG, Node
 from codd.fix.phenomenon_parser import PhenomenonAnalysis
 from codd.fix.templates_loader import load_template
+from codd.path_safety import resolve_project_path
 
 AiInvoke = Callable[[str], str]
 
@@ -191,8 +192,14 @@ def _tier1_score(
 def _read_node_text(node: Node, project_root: Path) -> str:
     if not node.path:
         return ""
-    path = project_root / node.path
-    if not path.exists():
+    # ``node.path`` is user-controllable (a DAG node path can be ``../../etc/passwd``,
+    # an absolute path, or an in-root symlink whose target escapes the tree). Reading
+    # such a path would feed an out-of-root file into tier-1 scoring AND the tier-2 AI
+    # prompt — a path-escape false-green (an off-root file "matching" the phenomenon).
+    # Root-jail it: out-of-root → empty text (no score, no evidence). In-root paths
+    # are unchanged (anti-false-red).
+    path = resolve_project_path(project_root, node.path)
+    if path is None or not path.exists():
         return ""
     try:
         return path.read_text(encoding="utf-8")

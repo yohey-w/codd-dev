@@ -15,6 +15,7 @@ from codd.require_propagate import (
     _detect_requirements_changes,
     _format_changes_for_prompt,
     _generate_update_proposals,
+    _resolve_node_path,
     require_propagate,
 )
 
@@ -393,3 +394,100 @@ def test_format_changes_for_prompt():
     assert "Requirements frontmatter changes detected:" in text
     assert "docs/requirements/auth.md" in text
     assert "status changed from 'draft' to 'approved'" in text
+
+
+def test_resolve_node_path_in_root(tmp_path):
+    """Anti-false-red: a normal in-root relative node path resolves under root."""
+    project = tmp_path / "project"
+    project.mkdir()
+    doc = project / "docs" / "design" / "auth.md"
+    _write_design_doc(doc)
+    resolved = _resolve_node_path({"path": "docs/design/auth.md"}, project)
+    assert resolved is not None
+    assert resolved.resolve() == doc.resolve()
+
+
+def test_resolve_node_path_traversal_jailed(tmp_path):
+    """A ``../`` traversal in the CEG node path escapes the root → jailed to None."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (tmp_path / "secret.md").write_text("secret", encoding="utf-8")
+    assert _resolve_node_path({"path": "../secret.md"}, project) is None
+
+
+def test_resolve_node_path_absolute_out_of_root_jailed(tmp_path):
+    """An absolute node path outside the root must NOT be returned for reading."""
+    project = tmp_path / "project"
+    project.mkdir()
+    secret = tmp_path / "secret.md"
+    secret.write_text("secret", encoding="utf-8")
+    assert _resolve_node_path({"path": str(secret)}, project) is None
+
+
+def test_resolve_node_path_symlink_escape_jailed(tmp_path):
+    """An in-root path that symlinks outside the root is jailed to None."""
+    project = tmp_path / "project"
+    project.mkdir()
+    secret = tmp_path / "secret.md"
+    secret.write_text("secret", encoding="utf-8")
+    link = project / "linked.md"
+    try:
+        link.symlink_to(secret)
+    except (OSError, NotImplementedError):
+        import pytest
+
+        pytest.skip("symlinks not supported on this platform")
+    assert _resolve_node_path({"path": "linked.md"}, project) is None
+
+
+def test_generate_update_proposals_skips_out_of_root_node(tmp_path, monkeypatch, capsys):
+    """Path-escape jail: an affected-doc node whose ``path`` escapes the project
+    root must NOT have its content read and fed to the AI update prompt (its body
+    would be smuggled out-of-root evidence — a path-escape false-green). No
+    proposal is produced for the escaping node; an in-root node still works."""
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_config(project)
+    # Genuine in-root design doc.
+    _write_design_doc(project / "docs" / "design" / "auth.md")
+    # Secret outside the root that the traversal node would point at.
+    (tmp_path / "secret.md").write_text(
+        "---\ntitle: Secret\n---\n# Secret\nsensitive\n", encoding="utf-8"
+    )
+
+    ceg = CEG(project / ".codd" / "scan")
+    ceg.upsert_node("design:auth", "design", path="docs/design/auth.md", name="Auth")
+    ceg.upsert_node("design:escape", "design", path="../secret.md", name="Escape")
+
+    read_paths: list[str] = []
+    real_resolve = require_module._resolve_node_path
+
+    def tracking_resolve(node, project_root):
+        resolved = real_resolve(node, project_root)
+        if resolved is not None:
+            read_paths.append(str(resolved))
+        return resolved
+
+    monkeypatch.setattr(require_module, "_resolve_node_path", tracking_resolve)
+    monkeypatch.setattr(
+        require_module,
+        "_invoke_ai_command",
+        lambda *_: "# Auth\n\nUpdated.\n",
+    )
+
+    proposals = _generate_update_proposals(
+        project,
+        [_requirement_change()],
+        [
+            {"node_id": "design:auth", "path": "docs/design/auth.md", "triggered_by": []},
+            {"node_id": "design:escape", "path": "../secret.md", "triggered_by": []},
+        ],
+        ceg,
+    )
+    ceg.close()
+
+    produced_nodes = {p["node_id"] for p in proposals}
+    assert "design:escape" not in produced_nodes
+    assert "design:auth" in produced_nodes
+    # The out-of-root secret was never resolved-for-read.
+    assert not any(str(tmp_path / "secret.md") in p for p in read_paths)

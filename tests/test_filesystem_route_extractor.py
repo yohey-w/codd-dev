@@ -146,3 +146,109 @@ def test_extracts_filesystem_routes_for_framework_conventions(
     assert {(route["url"], route["kind"]) for route in info.routes} == expected_routes
     assert len(info.routes) == len(expected_routes)
     assert all(Path(route["file"]).exists() for route in info.routes)
+
+
+# --- path-escape jail (round-9) -------------------------------------------------
+#
+# ``base_dir`` comes from codd.yaml ``filesystem_routes[*].base_dir`` — a
+# user-controllable config value. An absolute/``../``-escaping base_dir, or an
+# in-root symlink whose target leaves the tree, must NOT let the extractor
+# walk/read files from outside the project root. Out-of-root files must never
+# become routes (a path-escape leak). In-root behaviour is unchanged (regression).
+
+
+def _route_config(base_dir: str) -> dict:
+    return {
+        "base_dir": base_dir,
+        "page_pattern": "page.tsx",
+        "api_pattern": "route.ts",
+        "url_template": "/{relative_dir}",
+        "base_url": "",
+    }
+
+
+def test_filesystem_routes_absolute_base_dir_outside_root_is_excluded(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside = tmp_path / "outside"
+    _write_fixture_files(outside, ["secret/page.tsx"])
+
+    info = FileSystemRouteExtractor().extract_routes(
+        project_root, [_route_config(str(outside))]
+    )
+
+    assert info.routes == []
+
+
+def test_filesystem_routes_parent_traversal_base_dir_is_excluded(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside = tmp_path / "outside"
+    _write_fixture_files(outside, ["secret/page.tsx"])
+
+    info = FileSystemRouteExtractor().extract_routes(
+        project_root, [_route_config("../outside")]
+    )
+
+    assert info.routes == []
+
+
+def test_filesystem_routes_symlinked_base_dir_escaping_root_is_excluded(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside = tmp_path / "outside"
+    _write_fixture_files(outside, ["secret/page.tsx"])
+    link = project_root / "linked_app"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform guard
+        import pytest as _pytest
+
+        _pytest.skip("symlinks unsupported on this platform")
+
+    info = FileSystemRouteExtractor().extract_routes(
+        project_root, [_route_config("linked_app")]
+    )
+
+    assert info.routes == []
+
+
+def test_filesystem_routes_symlinked_file_escaping_root_is_excluded(tmp_path):
+    """An in-root base_dir containing a symlink whose target leaves the tree must
+    not yield that off-root file as a route, even though base_dir itself is in-root."""
+    project_root = tmp_path / "project"
+    app = project_root / "app"
+    app.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = outside / "page.tsx"
+    real.write_text("// off-root\n", encoding="utf-8")
+    link = app / "page.tsx"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform guard
+        import pytest as _pytest
+
+        _pytest.skip("symlinks unsupported on this platform")
+
+    info = FileSystemRouteExtractor().extract_routes(project_root, [_route_config("app/")])
+
+    assert all(
+        Path(route["file"]).resolve().is_relative_to(project_root.resolve())
+        for route in info.routes
+    )
+    assert real.resolve().as_posix() not in {
+        Path(route["file"]).resolve().as_posix() for route in info.routes
+    }
+
+
+def test_filesystem_routes_in_root_base_dir_unchanged_regression(tmp_path):
+    """In-root base_dir keeps producing its routes (anti-false-red)."""
+    _write_fixture_files(tmp_path, ["app/page.tsx", "app/api/health/route.ts"])
+
+    info = FileSystemRouteExtractor().extract_routes(tmp_path, [_route_config("app/")])
+
+    assert {(route["url"], route["kind"]) for route in info.routes} == {
+        ("/", "page"),
+        ("/api/health", "api"),
+    }

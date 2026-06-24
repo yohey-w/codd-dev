@@ -17,6 +17,7 @@ from codd.config import load_project_config
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.knowledge_fetcher import KnowledgeFetcher
 from codd.lexicon import AskItem
+from codd.path_safety import resolve_project_path
 from codd.project_types import (
     CUSTOM_PROJECT_TYPE,
     GENERIC_PROJECT_TYPE,
@@ -215,10 +216,15 @@ class RequiredArtifactsDeriver:
         return resolved
 
     def _read_requirement_docs(self, requirement_docs: list[str]) -> str:
-        paths = [
-            _resolve_project_path(self.project_root, doc_path)
+        # Jail every user-supplied requirement_doc path: an absolute/``../`` value
+        # (or in-root symlink) resolving outside the project root is excluded so
+        # its contents never enter the requirement evidence text.
+        explicit = [
+            safe
             for doc_path in requirement_docs
-        ] or self._discover_requirement_docs()
+            if (safe := resolve_project_path(self.project_root, doc_path)) is not None
+        ]
+        paths = explicit or self._discover_requirement_docs()
         if not paths:
             raise FileNotFoundError("No requirement documents found")
 
@@ -232,19 +238,28 @@ class RequiredArtifactsDeriver:
     def _discover_requirement_docs(self) -> list[Path]:
         configured_paths = self.config.get("requirement_docs")
         if isinstance(configured_paths, list):
+            # Jail each configured path; out-of-root entries are dropped.
             return [
-                _resolve_project_path(self.project_root, str(doc_path))
+                safe
                 for doc_path in configured_paths
                 if str(doc_path).strip()
+                and (safe := resolve_project_path(self.project_root, str(doc_path)))
+                is not None
             ]
 
         candidates: list[Path] = []
         req_dir = self.project_root / "docs" / "requirements"
         if req_dir.exists():
-            candidates.extend(sorted(req_dir.rglob("*.md")))
+            # rglob follows symlinks: jail each match so an in-root *.md symlinked
+            # outside the root is not surfaced as a requirement doc.
+            candidates.extend(
+                path
+                for path in sorted(req_dir.rglob("*.md"))
+                if resolve_project_path(self.project_root, path) is not None
+            )
         for filename in ("docs/requirements.md", "REQUIREMENTS.md", "requirements.md"):
             path = self.project_root / filename
-            if path.exists():
+            if resolve_project_path(self.project_root, path) is not None and path.exists():
                 candidates.append(path)
         return _unique_paths(candidates)
 
