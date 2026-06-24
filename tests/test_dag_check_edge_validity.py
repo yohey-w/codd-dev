@@ -122,3 +122,49 @@ def test_node_without_path_no_dangling(tmp_path):
 
     assert result.passed is True
     assert result.dangling_refs == []
+
+
+def test_in_root_absolute_path_pass(tmp_path):
+    """An absolute node.path inside project_root that exists stays valid (anti-false-red)."""
+    target = tmp_path / "src" / "index.ts"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("export const ok = true;\n", encoding="utf-8")
+    dag = _dag_with_node(str(target), str(target))
+
+    result = EdgeValidityCheck().run(dag, tmp_path, {})
+
+    assert result.passed is True
+    assert result.dangling_refs == []
+
+
+def test_out_of_root_absolute_path_red(tmp_path):
+    """An absolute node.path outside project_root is dangling/spoof even if it exists on disk."""
+    outside_root = tmp_path.parent / (tmp_path.name + "_outside")
+    outside_root.mkdir(parents=True, exist_ok=True)
+    escapee = outside_root / "evil.py"
+    escapee.write_text("x = 1\n", encoding="utf-8")
+    assert escapee.exists()
+    dag = _dag_with_node(str(escapee), str(escapee))
+
+    result = EdgeValidityCheck().run(dag, tmp_path, {})
+
+    assert result.passed is False
+    assert str(escapee) in result.dangling_refs
+
+
+def test_out_of_root_relative_traversal_path_red(tmp_path):
+    """A node.path that traverses out of project_root via ``..`` is dangling even if it exists."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    escapee = outside / "evil.py"
+    escapee.write_text("x = 1\n", encoding="utf-8")
+    node_path = "../outside/evil.py"
+    assert (project_root / node_path).exists()
+    dag = _dag_with_node(node_path, node_path)
+
+    result = EdgeValidityCheck().run(dag, project_root, {})
+
+    assert result.passed is False
+    assert node_path in result.dangling_refs

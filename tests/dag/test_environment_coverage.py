@@ -276,6 +276,64 @@ def test_builder_attaches_design_doc_axes(tmp_path: Path):
     assert dag.coverage_axes[0].owner_section == "docs/design/spec.md"
 
 
+def test_builder_attaches_design_doc_axes_under_codd_block(tmp_path: Path):
+    # Axes authored at the canonical frontmatter.codd position must be attached.
+    # Before the central metadata helper they were ignored (C9 dormant), so a
+    # codd-nested critical variant with no test silently PASSED (false-green).
+    _write(
+        tmp_path / "docs" / "design" / "spec.md",
+        _doc(
+            {
+                "codd": {
+                    "node_id": "spec",
+                    "coverage_axes": [
+                        {
+                            "axis_type": "runtime_shape",
+                            "variants": [{"id": "shape_a", "criticality": "critical"}],
+                        }
+                    ],
+                }
+            }
+        ),
+    )
+
+    dag = build_dag(tmp_path, {"design_doc_patterns": ["docs/design/*.md"]})
+
+    assert [axis.axis_type for axis in dag.coverage_axes] == ["runtime_shape"]
+    assert dag.coverage_axes[0].source == "design_doc"
+
+    # And C9 must now actually gate it (critical variant, no covering test → red).
+    result = _run(dag, tmp_path)
+    assert result.passed is False
+    assert any(item["type"] == "missing_test_for_variant" for item in result.violations)
+
+
+def test_builder_design_doc_axis_under_codd_not_double_counted(tmp_path: Path):
+    # A top-level frontmatter axis is lifted into attributes AND kept raw; the
+    # builder dedup + helper dedup must keep it to a single axis (no dup variant
+    # violations).
+    _write(
+        tmp_path / "docs" / "design" / "spec.md",
+        _doc(
+            {
+                "coverage_axes": [
+                    {
+                        "axis_type": "runtime_shape",
+                        "variants": [{"id": "shape_a", "criticality": "critical"}],
+                    }
+                ]
+            }
+        ),
+    )
+
+    dag = build_dag(tmp_path, {"design_doc_patterns": ["docs/design/*.md"]})
+
+    assert len(dag.coverage_axes) == 1
+    result = _run(dag, tmp_path)
+    missing = [item for item in result.violations if item["type"] == "missing_test_for_variant"]
+    assert len(missing) == 1
+
+
 def test_dag_json_serializes_coverage_axes(tmp_path: Path):
     dag = _dag_with_axis()
 

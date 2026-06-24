@@ -8837,10 +8837,42 @@ def _string_list(value: Any) -> list[str]:
 
 def _dag_result_to_dict(result: Any) -> dict[str, Any]:
     if is_dataclass(result):
-        return asdict(result)
-    if isinstance(result, dict):
-        return result
-    return dict(vars(result))
+        payload = asdict(result)
+    elif isinstance(result, dict):
+        # Copy so the materiality overlay below never mutates a caller's dict.
+        payload = dict(result)
+    else:
+        payload = dict(vars(result))
+    return _apply_json_materiality_overlay(result, payload)
+
+
+def _apply_json_materiality_overlay(result: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """Carry the text-summary materiality signals into the JSON payload.
+
+    The `--format json` output is what CI consumes. Without this overlay a
+    vacuous pass (PASS that verified 0 items) and an amber-with-findings result
+    serialize as a plain ``passed: true`` — a false-green to a JSON consumer,
+    even though the text summary surfaces both. Reuses the canonical predicates
+    (``is_vacuous_pass`` / ``_dag_pass_is_warn``) so there is one source of truth
+    and no per-check / language literal leaks in.
+
+    Additive and backward compatible: raw fields (``passed`` / ``status`` /
+    ``severity`` …) are never changed, and the markers are only set on the bad
+    cases (a normal pass stays untouched). Markers are not overwritten if a check
+    already declared them itself.
+    """
+    from codd.dag.materiality import is_vacuous_pass
+
+    if is_vacuous_pass(result) and "vacuous" not in payload:
+        payload["vacuous"] = True
+    if _dag_pass_is_warn(result):
+        # A passed amber check carrying findings reads as WARN in text; expose an
+        # explicit warn-equivalent signal so JSON consumers don't read it as a
+        # clean pass. We add fields rather than rewriting ``status`` to keep the
+        # raw, check-declared status intact for existing consumers.
+        payload.setdefault("is_warn", True)
+        payload.setdefault("effective_status", "warn")
+    return payload
 
 
 def _dag_result_name(result: Any) -> str:
@@ -8864,10 +8896,17 @@ def _dag_result_message(result: Any) -> str:
 
 
 def _dag_result_has_findings(result: Any) -> bool:
+    # A check's own declared non-pass status is the most robust signal — it does not
+    # depend on which field name the check uses for its findings (violations /
+    # warnings / findings / …). A WARN/FAIL status means there is something to
+    # surface, so it must never render as a clean PASS.
+    if _dag_result_status(result) in {"warn", "warning", "fail", "failed"}:
+        return True
     for key in (
         "violations",
         "warnings",  # amber checks report advisories here — they ARE findings,
-        # so an amber-via-warnings check is counted/shown, not rendered as PASS.
+        "findings",  # some checks (e.g. ci_health) report advisories under this name,
+        # so an amber-via-warnings/findings check is counted/shown, not rendered PASS.
         "missing_impl_files",
         "orphan_edges",
         "dangling_refs",

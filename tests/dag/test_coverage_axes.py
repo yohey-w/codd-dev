@@ -133,6 +133,64 @@ def test_extract_coverage_axes_from_design_doc_node():
     assert axes[0].variants[0].id == "shape_a"
 
 
+def test_extract_coverage_axes_from_design_doc_reads_frontmatter_codd():
+    # Axes authored at the canonical frontmatter.codd position must be read.
+    # Before the central metadata helper, only attributes["coverage_axes"] was
+    # read, so a codd-nested axis was dropped → C9 dormant (false-green).
+    node = Node(
+        id="docs/design/spec.md",
+        kind="design_doc",
+        attributes={
+            "coverage_axes": [],
+            "frontmatter": {
+                "codd": {"coverage_axes": [{"axis_type": "runtime_shape", "variants": ["shape_a"]}]}
+            },
+        },
+    )
+
+    axes = extract_coverage_axes_from_design_doc(node)
+
+    assert len(axes) == 1
+    assert axes[0].axis_type == "runtime_shape"
+    assert axes[0].source == "design_doc"
+
+
+def test_extract_coverage_axes_does_not_double_count_lifted_axis():
+    # Extractor lifts a top-level frontmatter axis into BOTH attributes and the
+    # raw frontmatter copy; it must be read once, not twice.
+    axis_entry = {"axis_type": "runtime_shape", "variants": ["shape_a"]}
+    node = Node(
+        id="docs/design/spec.md",
+        kind="design_doc",
+        attributes={
+            "coverage_axes": [axis_entry],
+            "frontmatter": {"coverage_axes": [axis_entry]},
+        },
+    )
+
+    axes = extract_coverage_axes_from_design_doc(node)
+
+    assert len(axes) == 1
+
+
+def test_extract_coverage_axes_unions_top_level_and_codd():
+    node = Node(
+        id="docs/design/spec.md",
+        kind="design_doc",
+        attributes={
+            "coverage_axes": [{"axis_type": "axis_top", "variants": ["v1"]}],
+            "frontmatter": {
+                "coverage_axes": [{"axis_type": "axis_top", "variants": ["v1"]}],  # raw dup
+                "codd": {"coverage_axes": [{"axis_type": "axis_nested", "variants": ["v2"]}]},
+            },
+        },
+    )
+
+    axes = extract_coverage_axes_from_design_doc(node)
+
+    assert {axis.axis_type for axis in axes} == {"axis_top", "axis_nested"}
+
+
 def test_design_doc_axis_can_override_owner_section():
     node = Node(
         id="docs/design/spec.md",

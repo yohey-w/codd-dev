@@ -14,6 +14,7 @@ from codd.config import load_project_config
 from codd.dag import DAG, Edge, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.dag.checks.deployment_completeness import DeploymentCompletenessCheck
+from codd.dag.metadata_access import collect_structured_entries
 from codd.llm.approval import (
     approval_mode_from_config,
     filter_approved,
@@ -236,18 +237,38 @@ class UserJourneyCoherenceCheck(DagCheck):
     def _extract_actors(self, dag: DAG) -> list[str]:
         actors: list[str] = []
         for node in sorted(dag.nodes.values(), key=lambda item: item.id):
-            actors.extend(self._actor_names_from_mapping(node.attributes))
-            details = node.attributes.get("details")
-            if isinstance(details, dict):
-                actors.extend(
-                    self._actor_names_from_mapping(
-                        details,
-                        actor_dimension=self._is_actor_dimension(details),
+            # Scan the lifted top-level attributes plus the canonical
+            # frontmatter / frontmatter.codd mappings so actor declarations made
+            # under the ``codd:`` block are not missed (final _dedupe_strings
+            # collapses any overlap between the locations).
+            for mapping in self._actor_source_mappings(node.attributes):
+                actors.extend(self._actor_names_from_mapping(mapping))
+                details = mapping.get("details")
+                if isinstance(details, dict):
+                    actors.extend(
+                        self._actor_names_from_mapping(
+                            details,
+                            actor_dimension=self._is_actor_dimension(details),
+                        )
                     )
-                )
-            if self._is_actor_dimension(node.attributes):
-                actors.extend(self._actor_names_from_mapping(node.attributes, actor_dimension=True))
+                if self._is_actor_dimension(mapping):
+                    actors.extend(self._actor_names_from_mapping(mapping, actor_dimension=True))
         return self._dedupe_strings(actors)
+
+    @staticmethod
+    def _actor_source_mappings(attributes: dict[str, Any]) -> list[dict[str, Any]]:
+        """Top-level attributes plus the nested frontmatter / frontmatter.codd
+        mappings, so key-scanned fields (actors) are found wherever authored."""
+        mappings: list[dict[str, Any]] = []
+        if isinstance(attributes, dict):
+            mappings.append(attributes)
+            frontmatter = attributes.get("frontmatter")
+            if isinstance(frontmatter, dict):
+                mappings.append(frontmatter)
+                codd_meta = frontmatter.get("codd")
+                if isinstance(codd_meta, dict):
+                    mappings.append(codd_meta)
+        return mappings
 
     def _runtime_constraint_violations(
         self,
@@ -586,8 +607,12 @@ class UserJourneyCoherenceCheck(DagCheck):
         return entries
 
     def _structured_entries(self, mapping: dict[str, Any], key: str) -> list[dict[str, Any]]:
-        entries = mapping.get(key, [])
-        return [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+        # Used for both a design_doc's attributes (where ``key`` may live under
+        # frontmatter.codd) and a per-journey mapping (a plain dict with no
+        # frontmatter nesting). collect_structured_entries handles both: it merges
+        # the frontmatter.codd location when present and otherwise just reads the
+        # direct ``key`` list.
+        return collect_structured_entries(mapping, key)
 
     def _entries_by_field_id(self, entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         by_field: dict[str, dict[str, Any]] = {}
@@ -973,12 +998,13 @@ class UserJourneyCoherenceCheck(DagCheck):
         return attributes.get("journey") == journey_name or edge.to_id in lex_refs
 
     def _runtime_constraints(self, design_doc: Node) -> list[dict[str, Any]]:
-        entries = design_doc.attributes.get("runtime_constraints", [])
-        return [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+        return collect_structured_entries(design_doc.attributes, "runtime_constraints")
 
     def _journey_entries(self, design_doc: Node) -> list[dict[str, Any]]:
-        entries = design_doc.attributes.get("user_journeys", [])
-        manual = [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+        # Read user_journeys from the canonical frontmatter.codd position as well
+        # as the lifted top-level attribute (with top-level dedup) so a journey
+        # authored under ``codd:`` is not silently ignored (false-green).
+        manual = collect_structured_entries(design_doc.attributes, "user_journeys")
         return [*manual, *self._approved_derived_journey_entries(design_doc)]
 
     def _approved_derived_journey_entries(self, design_doc: Node) -> list[dict[str, Any]]:

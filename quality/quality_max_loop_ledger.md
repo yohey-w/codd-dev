@@ -285,3 +285,38 @@ top-level keys; implementation_coverage passes the raw hint to the root-jail
 stale acks at commit across all outcomes. (Low-severity advisories — e.g. propagator
 corrupt-state robustness — deferred per the stop line.)
 **N-gate progress: rounds 1-2 done. Need 2 consecutive clean rounds → round 3 next.**
+
+## Round 3 (2026-06-25): NOT clean → 5 fixed (SYSTEMATIC, full suite 6033)
+Sonnet+Codex round-3 found 5 P0/P1 foundational; all red-before-green. Fixes closed
+CLASSES, not instances:
+- `_dag_result_has_findings` now keys on the check's declared status (warn/fail) +
+  the `findings` field — robust to field name (ci_health amber was hidden as PASS).
+- new shared `metadata_access.collect_structured_entries` (attrs/frontmatter/
+  frontmatter.codd + top-level dedup), applied to user_journey_coherence (C7) and
+  coverage_axes (C9) — they were dormant on `frontmatter.codd`-nested declarations.
+- builder `_glob_project_paths` root-jails all scans (out-of-root files never become
+  nodes); edge_validity reds out-of-root absolute paths.
+- `--format json` overlay marks vacuous + effective-warn (additive; raw preserved) so
+  a JSON/CI consumer can't read a false-green.
+- resource_flow malformed-only early-return now amber/warn (was JSON status=pass).
+Round 3 NOT clean (5) → streak resets; round 4 next.
+
+## Owner-free Axis-P design (GPT-decided 2026-06-25) — Stage-2 spec + N-gate refinement
+Full: `/tmp/gpt_ownerfree_answer.md`. **Owner is never a per-item step.** Axis-P
+discovers gaps owner-free (amber); **RED only from explicit/confirmed/closed-world
+contracts via deterministic rules — never strong-model confidence** (that is amber
+recall only). Gaps → amber Finding/AskItem(blocking=false, RECOMMENDED_PROCEEDING) in
+coverage_decisions; CI/loop never waits; anyone batch-confirms later →
+CONFIRMED=contract→then red-enforceable. Default-profile recs are not contracts.
+**Axis-P gate**: pass when explicit/confirmed/closed-world contracts deterministically
+checked + their violations red + model-discovered gaps surfaced as amber (not hidden)
++ no owner answer required for CI/merge + amber residue persisted + corpus PCUMR vs
+frozen/construction-derived gold. Must NOT ask owner per gap / convert model
+confidence to red / treat default recs as contracts / show pure green while amber
+semantic residue exists. Real-project metric = E-PCUMR (explicit-contract coverage);
+multi-engine union = Advisory Union (amber backlog).
+**N-gate refinement (apply now):** acceptance = red-before-green + deterministic
+regression (not Opus's say-so); 3-engine consensus = amber confidence, not red;
+deferred new-semantics shown as **amber-residue=N, not pure green**. Revised pass:
+"all explicit invariant checks red-before-green proven + no P0/P1 operational-liveness
+remains; deferred new semantics visible as amber residue, not counted as pure green."

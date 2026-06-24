@@ -258,3 +258,88 @@ def test_build_dag_no_cycle(tmp_path):
     dag = build_dag(tmp_path, _settings())
 
     assert dag.detect_cycles() == []
+
+
+def test_build_dag_impl_pattern_escaping_root_excluded(tmp_path):
+    """impl_file_patterns that traverse outside project_root must not node-ize external files."""
+    project_root = tmp_path / "proj"
+    outside = tmp_path / "outside"
+    _write(project_root / "src" / "good.py", "y = 2\n")
+    escapee = _write(outside / "evil.py", "x = 1\n")
+    assert escapee.exists()
+
+    dag = build_dag(
+        project_root,
+        _settings(impl_file_patterns=["src/**/*.py", "../outside/*.py"]),
+    )
+
+    # In-root file is node-ized as usual.
+    assert "src/good.py" in dag.nodes
+    # No node id resolves to the out-of-root file (raw, absolute, or normalized form).
+    forbidden = {
+        "../outside/evil.py",
+        str(escapee),
+        str(escapee.resolve()),
+    }
+    assert forbidden.isdisjoint(dag.nodes)
+    assert not any("outside/evil.py" in node_id for node_id in dag.nodes)
+
+
+def test_build_dag_design_pattern_escaping_root_excluded(tmp_path):
+    """design_doc_patterns that traverse outside project_root must not node-ize external docs."""
+    project_root = tmp_path / "proj"
+    outside = tmp_path / "outside"
+    _write(project_root / "docs" / "design" / "api_design.md", "---\ntitle: API\n---\n")
+    escapee = _write(outside / "evil_design.md", "---\ntitle: Evil\n---\n")
+    assert escapee.exists()
+
+    dag = build_dag(
+        project_root,
+        _settings(design_doc_patterns=["docs/design/*.md", "../outside/*.md"]),
+    )
+
+    assert "docs/design/api_design.md" in dag.nodes
+    assert not any("outside/evil_design.md" in node_id for node_id in dag.nodes)
+    assert str(escapee.resolve()) not in dag.nodes
+
+
+def test_build_dag_test_pattern_escaping_root_excluded(tmp_path):
+    """test_file_patterns that traverse outside project_root must not node-ize external tests."""
+    project_root = tmp_path / "proj"
+    outside = tmp_path / "outside"
+    _write(project_root / "tests" / "test_good.py", "def test_ok():\n    assert True\n")
+    escapee = _write(outside / "test_evil.py", "def test_evil():\n    assert True\n")
+    assert escapee.exists()
+
+    dag = build_dag(
+        project_root,
+        _settings(
+            impl_file_patterns=["src/**/*.py"],
+            test_file_patterns=["tests/**/*.py", "../outside/test_*.py"],
+        ),
+    )
+
+    assert "tests/test_good.py" in dag.nodes
+    assert not any("outside/test_evil.py" in node_id for node_id in dag.nodes)
+    assert str(escapee.resolve()) not in dag.nodes
+
+
+def test_build_dag_in_root_patterns_unchanged(tmp_path):
+    """Regression: normal in-root design/impl/test patterns still node-ize (anti-false-red)."""
+    project_root = tmp_path / "proj"
+    _write(project_root / "docs" / "design" / "api_design.md", "---\ntitle: API\n---\n")
+    _write(project_root / "src" / "index.py", "y = 1\n")
+    _write(project_root / "tests" / "test_index.py", "def test_ok():\n    assert True\n")
+
+    dag = build_dag(
+        project_root,
+        _settings(
+            design_doc_patterns=["docs/design/*.md"],
+            impl_file_patterns=["src/**/*.py"],
+            test_file_patterns=["tests/**/*.py"],
+        ),
+    )
+
+    assert dag.nodes["docs/design/api_design.md"].kind == "design_doc"
+    assert dag.nodes["src/index.py"].kind == "impl_file"
+    assert dag.nodes["tests/test_index.py"].kind == "test_file"

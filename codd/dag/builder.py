@@ -1113,13 +1113,22 @@ def _glob_project_paths(
     patterns: Any,
     exclude_patterns: Any = None,
 ) -> list[Path]:
+    project_root_resolved = project_root.resolve()
     paths: dict[str, Path] = {}
     for pattern in _as_list(patterns):
         if not isinstance(pattern, str) or not pattern:
             continue
         for expanded in _expand_braces(pattern):
             for path in project_root.glob(expanded):
-                paths[str(path.resolve())] = path.resolve()
+                resolved = path.resolve()
+                # Root-jail: a pattern such as ``../outside/*.py`` can glob files
+                # outside the project tree. Drop anything whose resolved location
+                # escapes ``project_root`` so it never becomes a DAG node (which
+                # would otherwise let an out-of-root file satisfy coverage and
+                # produce a false-green). In-root paths are unaffected.
+                if not resolved.is_relative_to(project_root_resolved):
+                    continue
+                paths[str(resolved)] = resolved
     excludes = [
         str(pattern)
         for pattern in _as_list(exclude_patterns)
@@ -1127,7 +1136,6 @@ def _glob_project_paths(
     ]
     if not excludes:
         return [paths[key] for key in sorted(paths)]
-    project_root_resolved = project_root.resolve()
     filtered: list[Path] = []
     for key in sorted(paths):
         path = paths[key]

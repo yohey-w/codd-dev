@@ -57,3 +57,25 @@ def test_dag_result_has_findings_counts_warnings():
 
     assert _dag_result_has_findings(_R(warnings=[{"type": "dead_resource"}])) is True
     assert _dag_result_has_findings(_R()) is False
+
+
+def test_dag_result_has_findings_robust_to_field_name_and_status():
+    # Round-3 P1: a check (e.g. ci_health) that reports under `findings` and/or
+    # declares status="warn" must register as having findings — robust to field name
+    # via the check's own declared status — so it renders WARN, not a clean PASS.
+    from dataclasses import dataclass, field as dfield
+
+    from codd.cli import _dag_result_has_findings
+
+    @dataclass
+    class _R:
+        status: str = "pass"
+        violations: list = dfield(default_factory=list)
+        warnings: list = dfield(default_factory=list)
+        findings: list = dfield(default_factory=list)
+
+    assert _dag_result_has_findings(
+        _R(status="warn", findings=[{"type": "ci_trigger_incomplete"}])
+    ) is True
+    assert _dag_result_has_findings(_R(status="warn")) is True
+    assert _dag_result_has_findings(_R(status="pass")) is False

@@ -68,4 +68,15 @@ class EdgeValidityCheck:
 def _node_path_exists(project_root: Path, node_path: str) -> bool:
     path = Path(node_path)
     candidate = path if path.is_absolute() else project_root / path
+    # Root-jail: a node.path that resolves outside the project tree — whether an
+    # out-of-root absolute path or a relative path escaping via ``..`` — is a
+    # dangling/spoof reference even if it happens to exist on disk. Treating it
+    # as "exists" would let a path-escape produce a false-green. In-root paths
+    # (relative or absolute) are validated by their actual existence as before.
+    try:
+        within_root = candidate.resolve().is_relative_to(project_root.resolve())
+    except OSError:
+        return False
+    if not within_root:
+        return False
     return candidate.exists()

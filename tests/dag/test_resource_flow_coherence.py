@@ -980,6 +980,48 @@ def test_no_violation_without_warnings_stays_info_pass():
     assert result.status == "pass"
 
 
+# ── Fix 4: malformed-only early-return must be amber/warn (not amber/pass) ──────
+#
+# When contracts are declared but produce NO usable produce/consume edges (every
+# entry malformed, or only alias declarations that collide/shadow), the early
+# `if not uses:` branch returns BEFORE the no-violation branch. Round-2 fixed the
+# no-violation branch to amber/warn, but this early-return branch was left at
+# severity="amber"/status="pass" — text renders WARN (via _dag_pass_is_warn) yet
+# JSON reports status=pass, a status/severity mismatch (false-green in JSON). With
+# warnings present this branch must be amber/warn (deploy still allowed:
+# passed=True, block_deploy=False). With no warnings it stays a clean skip.
+
+
+# Fix 4a — malformed-only resource_contract (alias-only, no `resource`) → amber/warn.
+def test_malformed_only_early_return_is_amber_warn():
+    dag = _dag(
+        _design_doc(
+            # Only an alias declaration, no `resource` → malformed, produces no
+            # usable consume/produce edge → hits the `if not uses:` branch.
+            resource_contracts=[{"aliases": ["session"]}],
+        )
+    )
+    result = _run(dag)
+    assert result.passed is True
+    assert result.violations == []
+    assert _warnings_of_type(result, "malformed_contract")
+    # the bug: this was severity="amber" but status="pass" (JSON false-green).
+    assert result.severity == "amber"
+    assert result.status == "warn"
+    assert result.skipped is False
+    assert result.block_deploy is False
+
+
+# Fix 4b — guard: no declarations at all → clean skip (regression, unchanged).
+def test_no_declarations_stays_skip():
+    dag = _dag(_design_doc(user_journeys=[CRITICAL_JOURNEY]))
+    result = _run(dag)
+    assert result.skipped is True
+    assert result.passed is True
+    assert result.status == "skip"
+    assert result.warnings == []
+
+
 # ── Fix 3: top-level frontmatter declaration must not be double-counted ─────────
 #
 # Regression introduced by Fix 1 (reading frontmatter / frontmatter.codd). The

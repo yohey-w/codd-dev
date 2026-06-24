@@ -124,6 +124,102 @@ def test_verify_json_format(tmp_path, monkeypatch):
     assert json.loads(result.output)[0]["check_name"] == "edge_validity"
 
 
+# --- JSON materiality overlay -------------------------------------------------
+#
+# The text summary surfaces vacuous passes (PASS that verified 0 items) and
+# renders amber-with-findings as WARN. The `--format json` output is what CI
+# consumes, so it must carry the same signals — otherwise a vacuous pass or an
+# amber-with-findings result is a false-green to a JSON consumer.
+
+
+def test_verify_json_flags_vacuous_pass(tmp_path, monkeypatch):
+    # A check that PASSED having verified 0 items must be marked vacuous in the
+    # JSON too, so a CI consumer can tell a green run actually checked nothing.
+    _patch_results(
+        monkeypatch,
+        [
+            _CheckResult(
+                "ui_coherence_for_one_to_many",
+                severity="amber",
+                status="pass",
+                checked_count=0,
+            )
+        ],
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["dag", "verify", "--project-path", str(tmp_path), "--format", "json"],
+    )
+
+    assert result.exit_code == 0
+    entry = json.loads(result.output)[0]
+    assert entry["check_name"] == "ui_coherence_for_one_to_many"
+    assert entry.get("vacuous") is True
+
+
+def test_verify_json_amber_findings_is_warn(tmp_path, monkeypatch):
+    # An amber check that passed but carries findings shows as WARN in text; the
+    # JSON must expose a warn-equivalent signal so a CI consumer does not read it
+    # as a clean pass.
+    _patch_results(
+        monkeypatch,
+        [
+            _CheckResult(
+                "transitive_closure",
+                severity="amber",
+                passed=True,
+                status="pass",
+                unreachable_nodes=["src/orphan.ts"],
+            )
+        ],
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["dag", "verify", "--project-path", str(tmp_path), "--format", "json"],
+    )
+
+    assert result.exit_code == 0
+    entry = json.loads(result.output)[0]
+    # raw signals must be preserved (backward compat)
+    assert entry["passed"] is True
+    assert entry["severity"] == "amber"
+    # ...but a warn-equivalent marker must be present and discoverable.
+    assert entry.get("is_warn") is True
+    assert entry.get("effective_status") == "warn"
+
+
+def test_verify_json_normal_pass_unchanged(tmp_path, monkeypatch):
+    # Regression guard: an ordinary pass (verified items, no findings) must NOT
+    # gain the vacuous / warn markers — the overlay only fires on the bad cases.
+    _patch_results(
+        monkeypatch,
+        [
+            _CheckResult(
+                "edge_validity",
+                severity="red",
+                passed=True,
+                status="pass",
+                checked_count=7,
+            )
+        ],
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["dag", "verify", "--project-path", str(tmp_path), "--format", "json"],
+    )
+
+    assert result.exit_code == 0
+    entry = json.loads(result.output)[0]
+    assert entry["check_name"] == "edge_validity"
+    assert entry["passed"] is True
+    assert "vacuous" not in entry
+    assert "is_warn" not in entry
+    assert "effective_status" not in entry
+
+
 def test_verify_empty_dag(tmp_path, monkeypatch):
     _patch_results(monkeypatch, [])
 

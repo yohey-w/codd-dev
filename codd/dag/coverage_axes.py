@@ -12,6 +12,7 @@ import warnings
 import yaml
 
 from codd.dag import Node
+from codd.dag.metadata_access import collect_structured_entries
 
 
 Criticality = Literal["critical", "high", "medium", "info"]
@@ -227,7 +228,11 @@ def extract_coverage_axes_from_lexicon(project_lexicon_path: Path) -> list[Cover
 
 
 def extract_coverage_axes_from_design_doc(design_doc_node: Node) -> list[CoverageAxis]:
-    entries = design_doc_node.attributes.get("coverage_axes", [])
+    # Read coverage_axes from the canonical frontmatter.codd position as well as
+    # the lifted top-level attribute (with top-level dedup) so axes authored
+    # under ``codd:`` are not silently ignored — otherwise C9 stays dormant on a
+    # codd-nested declaration (a false-green).
+    entries = collect_structured_entries(design_doc_node.attributes, "coverage_axes")
     return _axes_from_entries(
         entries,
         default_source="design_doc",

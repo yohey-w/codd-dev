@@ -167,11 +167,15 @@ class ResourceFlowCoherenceCheck(DagCheck):
             if standalone_warnings:
                 # Contracts were declared but produced no usable produce/consume
                 # edges (e.g. every entry malformed, or only alias declarations
-                # that collide/shadow). Surface that as amber — never a silent
-                # clean skip.
+                # that collide/shadow). Surface that as amber/warn — never a
+                # silent clean skip, and never a status=pass with amber severity.
+                # status MUST be "warn" (not "pass") so the JSON verdict matches
+                # the text WARN the CLI renders for amber; status=pass here was a
+                # JSON-only false-green (same fix as the no-violation branch in
+                # round-2). Deploy stays allowed (passed=True, block_deploy=False).
                 return ResourceFlowCoherenceResult(
                     severity="amber",
-                    status="pass",
+                    status="warn",
                     passed=True,
                     block_deploy=False,
                     message=(
