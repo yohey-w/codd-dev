@@ -8,6 +8,7 @@ import re
 from typing import Any
 import warnings
 
+from codd.path_safety import resolve_project_path
 from codd.screen_flow_validator import EdgeCoverageResult
 
 
@@ -46,9 +47,9 @@ def compute_e2e_coverage(project_root: Path | str, threshold: float = 100.0) -> 
     scenarios_path = project_root / "docs" / "e2e" / "scenarios.md"
     tests_dir = project_root / "docs" / "e2e" / "tests"
 
-    scenarios = _load_e2e_scenarios(scenarios_path)
+    scenarios = _load_e2e_scenarios(scenarios_path, project_root)
     expected_test_stems = _expected_e2e_test_stems([scenario.name for scenario in scenarios])
-    actual_test_stems = _actual_e2e_test_stems(tests_dir)
+    actual_test_stems = _actual_e2e_test_stems(tests_dir, project_root)
     covered_stems = [stem for stem in expected_test_stems if stem in actual_test_stems]
     missing_stems = [stem for stem in expected_test_stems if stem not in actual_test_stems]
 
@@ -284,13 +285,19 @@ def _edge_coverage_threshold(config: dict[str, Any] | None = None) -> float:
     return float(screen_flow_config.get("edge_coverage_threshold", 0.5))
 
 
-def _load_e2e_scenarios(scenarios_path: Path) -> list[Any]:
-    if not scenarios_path.exists():
+def _load_e2e_scenarios(scenarios_path: Path, project_root: Path) -> list[Any]:
+    # Re-confine the scenarios path through the shared jail before reading it.
+    # The path is hardcoded in-root (docs/e2e/scenarios.md), but it may itself be
+    # an in-root symlink whose target escapes the tree; resolving + confining
+    # rejects that per-file symlink escape so an off-root markdown file can never
+    # be consumed as the scenario source (a path-escape false-green).
+    confined = resolve_project_path(project_root, scenarios_path)
+    if confined is None or not confined.exists():
         return []
 
     from codd.e2e_generator import load_scenarios_from_markdown
 
-    return load_scenarios_from_markdown(scenarios_path).scenarios
+    return load_scenarios_from_markdown(confined).scenarios
 
 
 def _expected_e2e_test_stems(scenario_names: list[str]) -> list[str]:
@@ -310,7 +317,7 @@ def _scenario_to_test_stem(name: str) -> str:
     return f"test_{slug or 'scenario'}"
 
 
-def _actual_e2e_test_stems(tests_dir: Path) -> set[str]:
+def _actual_e2e_test_stems(tests_dir: Path, project_root: Path) -> set[str]:
     if not tests_dir.exists():
         return set()
 
@@ -320,6 +327,14 @@ def _actual_e2e_test_stems(tests_dir: Path) -> set[str]:
         *tests_dir.glob("*.e2e.ts"),
         *tests_dir.glob("*.cy.ts"),
     ]:
+        # Re-confine each glob match through the shared jail. A symlink inside
+        # docs/e2e/tests/ that points at an off-root file (e.g.
+        # /tmp/outside.spec.ts) would otherwise be counted as a covering e2e
+        # test — crediting coverage from a file outside the project tree
+        # (a path-escape false-green). Escaping matches resolve to None and are
+        # dropped, so they are never counted toward covered stems.
+        if resolve_project_path(project_root, test_path) is None:
+            continue
         name = test_path.name
         if name.endswith(".spec.ts"):
             stems.add(name.removesuffix(".spec.ts"))

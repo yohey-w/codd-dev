@@ -65,12 +65,18 @@ the module.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from glob import has_magic
 from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
 from codd.dag.checks import DagCheck, register_dag_check
-from codd.path_safety import resolve_project_path
+from codd.path_safety import (
+    PathEscapeError,
+    project_relative_path,
+    require_project_path,
+    resolve_project_path,
+)
 
 
 _ON_VIOLATION_FAIL = "fail"
@@ -148,6 +154,7 @@ class NegativeSpaceCheck(DagCheck):
         warnings: list[dict[str, Any]] = []
         checked_count = 0
         has_fail_hit = False
+        has_scope_escape = False
 
         for index, declaration in enumerate(declarations):
             decl_id = _declaration_id(declaration, index)
@@ -161,7 +168,19 @@ class NegativeSpaceCheck(DagCheck):
             compiled, regex_errors = _compile_patterns(declaration, decl_id)
             warnings.extend(regex_errors)
 
-            scanned_files, scope_warnings = _resolve_scope_files(paths, root)
+            try:
+                scanned_files, scope_warnings = _resolve_scope_files(paths, root)
+            except PathEscapeError as exc:
+                # A DECLARED scope (its raw glob) resolves OUTSIDE the project
+                # root — an absolute path pointing off-tree, or a ``../``
+                # traversal that escapes. This is fail-closed: the project
+                # declared an evidence scope CoDD cannot honestly scan, so the
+                # check is NOT-VALID rather than silently amber. (Distinct from
+                # an in-root scope that merely matches a per-file symlink whose
+                # target escapes — that match is dropped + amber, below.)
+                has_scope_escape = True
+                warnings.append(_scope_outside_root_diagnostic(decl_id, exc))
+                continue
             warnings.extend(scope_warnings)
 
             if not compiled:
@@ -218,6 +237,7 @@ class NegativeSpaceCheck(DagCheck):
             checked_count=checked_count,
             declarations_total=len(declarations),
             has_fail_hit=has_fail_hit,
+            has_scope_escape=has_scope_escape,
         )
 
 
@@ -308,17 +328,32 @@ def _compile_patterns(
 def _resolve_scope_files(
     paths: list[str], root: Path
 ) -> tuple[list[Path], list[dict[str, Any]]]:
-    """Resolve scope globs to files inside ``root``; reject anything escaping it."""
+    """Resolve scope globs to in-root files.
+
+    Two distinct path-escape cases, kept separate on purpose:
+
+    * a DECLARED scope whose raw glob escapes the project root (an absolute
+      off-tree path, or a ``../`` traversal) -> raise :class:`PathEscapeError`
+      (fail-closed). The project declared an evidence scope CoDD cannot honestly
+      scan; a silent amber there is a false-green. ``lstrip("/")`` is *not*
+      applied, so an absolute scope keeps its absolute semantics (it is honoured
+      only when it genuinely lives under the root) and is never re-rooted onto a
+      same-named in-root tree.
+    * an in-root scope glob that merely *matches* a per-file symlink whose target
+      escapes the root -> that single match is dropped + amber ``path_outside_root``
+      (visibility), not fail-closed.
+    """
     files: dict[Path, None] = {}
     warnings: list[dict[str, Any]] = []
     flagged_escape = False
     for raw in paths:
+        # Fail-closed on a declared scope that escapes the root (may raise
+        # PathEscapeError, which the caller turns into a red scope_outside_root).
         for match in _glob(root, raw):
-            # Confinement decision via the shared path_safety jail (a scope glob may
-            # match an in-root symlink whose target escapes the root). The
-            # out-of-root *visibility* (an amber diagnostic) is preserved here — the
-            # shared closure silently drops escapes, but negative_space must surface
-            # them, so we keep emitting the diagnostic on the first escape.
+            # Confinement decision via the shared path_safety jail: an in-root
+            # scope glob may still match an in-root symlink whose target escapes
+            # the root. The shared closure silently drops escapes; negative_space
+            # surfaces the first such per-file escape as amber visibility.
             resolved = resolve_project_path(root, match)
             if resolved is None:
                 if not flagged_escape:
@@ -335,16 +370,80 @@ def _resolve_scope_files(
 
 
 def _glob(root: Path, raw: str) -> list[Path]:
+    """Enumerate a single declared scope glob, anchored inside ``root``.
+
+    The declared scope's static (non-magic) base is confined via the shared
+    path_safety jail *before* any enumeration: an absolute base pointing off-tree
+    or a ``../`` traversal that escapes raises :class:`PathEscapeError`
+    (fail-closed). An absolute base that genuinely lives under the root is
+    re-expressed as a root-relative pattern so ``Path.glob`` (which rejects
+    absolute patterns) can enumerate it while preserving absolute semantics.
+    """
     pattern = raw.strip()
-    # Anchor every pattern under the project root. ``Path.glob`` rejects an
-    # absolute pattern, so strip a leading slash and treat it as root-relative.
-    pattern = pattern.lstrip("/")
     if not pattern:
         return []
+
+    rel_pattern = _project_relative_glob(root, pattern)
+    if rel_pattern is None:
+        # Empty after anchoring (e.g. the scope was exactly the project root).
+        return []
     try:
-        return list(root.glob(pattern))
+        return list(root.glob(rel_pattern))
     except (ValueError, OSError):
         return []
+
+
+def _glob_static_base(pattern: str) -> str:
+    """Return the leading prefix of ``pattern`` that contains no glob magic.
+
+    e.g. ``/tmp/secret/**/*.py`` -> ``/tmp/secret``; ``src/**/*.py`` -> ``src``;
+    ``../outside.py`` -> ``../outside.py`` (no magic at all -> whole pattern).
+    The base is what determines whether a *declared scope* escapes the root,
+    independent of the wildcard tail.
+    """
+    parts = Path(pattern).parts
+    base_parts: list[str] = []
+    for part in parts:
+        if has_magic(part):
+            break
+        base_parts.append(part)
+    if not base_parts:
+        return ""
+    return str(Path(*base_parts))
+
+
+def _project_relative_glob(root: Path, pattern: str) -> str | None:
+    """Anchor a declared scope glob under ``root`` as a root-relative pattern.
+
+    Fail-closed (raises :class:`PathEscapeError`) when the scope's static base
+    escapes the project root. Returns ``None`` when the pattern anchors exactly
+    at the root (nothing to enumerate). Relative in-root patterns are returned
+    unchanged; absolute in-root patterns are rebased onto the root.
+    """
+    base = _glob_static_base(pattern)
+    # Confine the static base (fail-closed on escape). ``require_project_path``
+    # resolves + follows symlinks + confines, raising PathEscapeError otherwise.
+    # An empty base means the magic starts at the first segment (a relative
+    # pattern like ``**/*.py``); that is trivially in-root, so skip the check.
+    if base:
+        require_project_path(root, base, context="negative_space scope path")
+
+    if Path(pattern).is_absolute():
+        # Re-express the absolute (and now confirmed in-root) pattern relative to
+        # the root so Path.glob accepts it, preserving its absolute semantics.
+        rel_base = project_relative_path(root, base) if base else ""
+        if rel_base is None:
+            # Defensive: base confined above, so this should not happen.
+            raise PathEscapeError(
+                f"negative_space scope path resolves outside the project root: {pattern!r}",
+                path=pattern,
+            )
+        magic_tail = Path(pattern).parts[len(Path(base).parts):] if base else Path(pattern).parts[1:]
+        rel_parts = [p for p in (rel_base,) if p and p != "."] + list(magic_tail)
+        return str(Path(*rel_parts)) if rel_parts else None
+
+    # Relative pattern: already root-relative; enumerate as-is.
+    return pattern
 
 
 def _read_text(path: Path) -> str | None:
@@ -370,7 +469,29 @@ def _finalize(
     checked_count: int,
     declarations_total: int,
     has_fail_hit: bool,
+    has_scope_escape: bool = False,
 ) -> NegativeSpaceResult:
+    if has_scope_escape:
+        # A declared scope escaped the project root: fail-closed (red/error),
+        # never a silent amber. CoDD cannot honestly scan an off-tree evidence
+        # scope, so the check is NOT-VALID. This takes precedence — the gate must
+        # not green/amber while a declared scope could not be examined at all.
+        return NegativeSpaceResult(
+            status="error",
+            severity="red",
+            passed=False,
+            block_deploy=True,
+            checked_count=checked_count,
+            declarations_total=declarations_total,
+            warnings=warnings,
+            message=(
+                "negative_space ERROR — a declared scope path resolves outside "
+                "the project root and cannot be scanned (fail-closed); keep "
+                "scope paths within the project tree "
+                f"({checked_count} file(s) scanned across "
+                f"{declarations_total} declaration(s))"
+            ),
+        )
     if has_fail_hit:
         return NegativeSpaceResult(
             status="fail",
@@ -518,6 +639,28 @@ def _path_outside_root_diagnostic(raw_path: str, root: Path) -> dict[str, Any]:
             f"negative_space scope path '{raw_path}' resolves outside the "
             f"project root ({root}); out-of-root files are not scanned. "
             "Keep scope paths within the project tree."
+        ),
+    }
+
+
+def _scope_outside_root_diagnostic(decl_id: str, exc: PathEscapeError) -> dict[str, Any]:
+    """Red diagnostic for a DECLARED scope whose glob escapes the project root.
+
+    This is the fail-closed twin of ``path_outside_root`` (which is a per-file
+    symlink escape inside an in-root scope, amber). Here the *declared scope
+    itself* points off-tree, so the declaration cannot be honestly scanned and
+    the check is NOT-VALID — never a silent amber/green false-green.
+    """
+    return {
+        "type": "scope_outside_root",
+        "declaration_id": decl_id,
+        "path": exc.path,
+        "severity": "red",
+        "remediation": (
+            f"negative_space declaration '{decl_id}' declares a scope path that "
+            f"resolves outside the project root ({exc.path!r}); CoDD will not "
+            "scan off-tree evidence. Keep every scope path within the project "
+            "tree (this is fail-closed, not a clean pass)."
         ),
     }
 

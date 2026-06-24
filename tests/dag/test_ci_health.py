@@ -241,6 +241,70 @@ def test_c8_out_of_root_glob_serializes_in_json_mode(tmp_path: Path) -> None:
     assert finding["block_deploy"] is True
 
 
+def test_c8_out_of_root_glob_rejected_before_enumeration(tmp_path: Path) -> None:
+    """An out-of-root absolute ``workflow_glob`` is rejected BEFORE enumeration.
+
+    Pre-fix the glob was enumerated first (``glob(pattern)`` against an off-tree
+    directory), so the finding shape depended on whether out-of-root files
+    existed: a non-existent out-of-root base enumerated to ``[]`` and fell
+    through to ``ci_workflow_missing`` instead of flagging the escape. The glob
+    base must be jailed up front, so the escape is flagged as
+    ``ci_workflow_out_of_root`` regardless of whether the off-tree path exists
+    (and the off-tree directory is never listed)."""
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    # An absolute glob whose base directory does NOT exist on disk and is OUTSIDE
+    # the project root. Enumerating it would yield [] (old: ci_workflow_missing);
+    # jailing the base up front flags the escape regardless of existence.
+    abs_glob = str(tmp_path / "does_not_exist_outside" / "*.yml")
+
+    result = _run(project_root, {"provider": "github_actions", "workflow_glob": abs_glob})
+
+    assert result.status == "fail"
+    assert result.severity == "red"
+    assert result.block_deploy is True
+    assert result.passed is False
+    assert result.findings[0].violation_type == "ci_workflow_out_of_root"
+    assert any(
+        str(tmp_path / "does_not_exist_outside") in detail
+        for detail in result.findings[0].details
+    )
+    assert result.workflow_files == []
+
+
+def test_c8_in_root_symlink_target_escape_is_not_read(tmp_path: Path) -> None:
+    """A per-file symlink matched by an in-root glob whose target escapes the
+    project root must be dropped (not read into workflow_files), not crash. The
+    in-root scope itself is valid; only the symlinked entry points off-tree."""
+
+    project_root = tmp_path / "project"
+    workflow_dir = project_root / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "ci.yml").write_text(
+        "name: ci\non: [push, pull_request]\njobs:\n  test:\n    steps:\n      - run: pytest\n",
+        encoding="utf-8",
+    )
+    # A workflow file OUTSIDE the project root, symlinked into the in-root dir.
+    outside = tmp_path / "outside_ci.yml"
+    outside.write_text("name: evil\non: [push]\n", encoding="utf-8")
+    link = workflow_dir / "linked.yml"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        import pytest
+
+        pytest.skip("symlinks not supported on this platform")
+
+    result = _run(project_root, {"provider": "github_actions"})
+
+    # The off-tree symlink target is dropped; only the genuine in-root workflow
+    # is read. The valid in-root workflow makes this a clean pass.
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.workflow_files == [".github/workflows/ci.yml"]
+
+
 def test_c8_in_root_absolute_glob_unchanged(tmp_path: Path) -> None:
     """An absolute glob that resolves INSIDE the project root keeps working
     exactly as before (regression guard for the root-jail change)."""

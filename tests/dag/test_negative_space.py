@@ -449,7 +449,12 @@ def test_invalid_regex_is_amber_not_swallowed(tmp_path: Path):
     assert bad[0]["error"]
 
 
-def test_path_traversal_outside_root_is_rejected(tmp_path: Path):
+def test_path_traversal_outside_root_is_fail_closed(tmp_path: Path):
+    # A DECLARED scope using ``../`` to escape the project root must be
+    # fail-closed (red/error), NOT a silent amber pass. Pre-fix this resolved to
+    # 0 in-scope files and fell through to a vacuous amber PASS — a path-escape
+    # false-green: the project declared an evidence scope CoDD could not honestly
+    # scan, yet the gate passed.
     root = tmp_path / "project"
     root.mkdir()
     (root / "inside.py").write_text("clean\n")
@@ -469,14 +474,132 @@ def test_path_traversal_outside_root_is_rejected(tmp_path: Path):
         project_root=root,
     )
 
-    # The out-of-root file must not be scanned: no hit, and a traversal
-    # diagnostic must be raised (not silently swallowed). It resolves to 0
-    # in-scope files -> vacuous amber, never red.
+    # Fail-closed: the declared scope escaped the root -> red/error, blocks
+    # deploy, and the off-tree file is never scanned (no hit).
+    assert result.status == "error"
+    assert result.severity == "red"
+    assert result.passed is False
+    assert result.block_deploy is True
+    assert _warnings_of_type(result, "forbidden_evidence_hit") == []
+    escape = _warnings_of_type(result, "scope_outside_root")
+    assert len(escape) == 1
+    assert escape[0]["declaration_id"] == "traversal_attempt"
+    assert escape[0]["severity"] == "red"
+
+
+def test_absolute_out_of_root_scope_is_fail_closed(tmp_path: Path):
+    # A DECLARED scope given as an ABSOLUTE path that points off-tree must be
+    # fail-closed, never a clean pass. Pre-fix ``lstrip("/")`` turned the
+    # absolute ``/.../outside/secret.py`` into a root-relative glob, so it either
+    # matched nothing (vacuous amber PASS) or looked under ``project/...`` — both
+    # path-escape false-greens (the real off-tree secret was never examined).
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "inside.py").write_text("clean\n")
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "secret.py").write_text("SECRET_KEY = 'leak'\n")
+    abs_scope = str(outside_dir / "*.py")
+
+    result = _run(
+        [
+            {
+                "id": "absolute_escape",
+                "scope": {"paths": [abs_scope]},
+                "patterns": [{"name": "secret", "regex": r"SECRET_[A-Z]+"}],
+                "on_violation": "fail",
+            }
+        ],
+        project_root=root,
+    )
+
+    assert result.status == "error"
+    assert result.severity == "red"
+    assert result.passed is False
+    assert result.block_deploy is True
+    assert _warnings_of_type(result, "forbidden_evidence_hit") == []
+    escape = _warnings_of_type(result, "scope_outside_root")
+    assert len(escape) == 1
+    assert escape[0]["declaration_id"] == "absolute_escape"
+
+
+def test_absolute_in_root_scope_is_scanned_unchanged(tmp_path: Path):
+    # Anti-false-red regression: an ABSOLUTE scope path that genuinely lives
+    # UNDER the project root must keep working — it is rebased onto the root and
+    # enumerated normally (absolute semantics preserved, never re-rooted onto a
+    # same-named tree). A real hit in-root still reds when on_violation: fail.
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "src").mkdir()
+    (root / "src" / "config.py").write_text("API = 'x'\nSECRET_KEY = 'leak'\n")
+    abs_scope = str(root / "src" / "*.py")
+
+    result = _run(
+        [
+            {
+                "id": "absolute_in_root",
+                "scope": {"paths": [abs_scope]},
+                "patterns": [{"name": "secret", "regex": r"SECRET_[A-Z]+"}],
+                "on_violation": "fail",
+            }
+        ],
+        project_root=root,
+    )
+
+    # In-root absolute scope is scanned just like a relative one.
+    assert result.status == "fail"
+    assert result.severity == "red"
+    assert result.passed is False
+    assert result.block_deploy is True
+    assert result.checked_count == 1
+    hits = _warnings_of_type(result, "forbidden_evidence_hit")
+    assert len(hits) == 1
+    assert hits[0]["declaration_id"] == "absolute_in_root"
+    assert _warnings_of_type(result, "scope_outside_root") == []
+
+
+def test_in_root_symlink_target_escape_is_skipped_not_failed(tmp_path: Path):
+    # A per-file symlink INSIDE an in-root scope whose target escapes the root is
+    # dropped (not scanned) + amber visibility — NOT fail-closed. This is the
+    # distinct, milder case from a declared off-tree scope: the scope itself is
+    # in-root, only one matched entry is a symlink pointing out. Pre-fix the
+    # off-tree target could be read (path-escape false-green); it must not be.
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "logs").mkdir()
+    (root / "logs" / "clean.txt").write_text("all good\n")
+    outside_secret = tmp_path / "outside_secret.txt"
+    outside_secret.write_text("SECRET_KEY = 'leak'\n")
+    link = root / "logs" / "linked.txt"
+    try:
+        link.symlink_to(outside_secret)
+    except (OSError, NotImplementedError):
+        import pytest
+
+        pytest.skip("symlinks not supported on this platform")
+
+    result = _run(
+        [
+            {
+                "id": "in_root_scope_with_symlink",
+                "scope": {"paths": ["logs/*.txt"]},
+                "patterns": [{"name": "secret", "regex": r"SECRET_[A-Z]+"}],
+                "on_violation": "fail",
+            }
+        ],
+        project_root=root,
+    )
+
+    # NOT fail-closed: the declared scope is in-root. The off-tree symlink target
+    # is dropped (no hit, no red) and surfaced as amber path_outside_root; the
+    # clean in-root file is still scanned.
     assert result.passed is True
     assert result.block_deploy is False
+    assert result.severity == "amber"
     assert _warnings_of_type(result, "forbidden_evidence_hit") == []
-    traversal = _warnings_of_type(result, "path_outside_root")
-    assert len(traversal) == 1
+    assert _warnings_of_type(result, "scope_outside_root") == []
+    assert len(_warnings_of_type(result, "path_outside_root")) == 1
+    assert result.checked_count == 1  # only the clean in-root file
 
 
 def test_binary_unreadable_file_is_skipped_diagnostic(tmp_path: Path):

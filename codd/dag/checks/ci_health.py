@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from glob import glob
+from glob import has_magic
 import json
 from pathlib import Path
 import re
@@ -12,6 +12,7 @@ from typing import Any, Mapping
 import yaml
 
 from codd.dag.checks import DagCheck, register_dag_check
+from codd.path_safety import project_relative_path, resolve_project_path
 from codd.dag.checks.opt_out import (
     OPT_OUT_STATUS,
     OptOutDeclaration,
@@ -216,7 +217,7 @@ class CiHealthCheck(DagCheck):
 
     @staticmethod
     def _out_of_root_finding(
-        out_of_root: list[Path],
+        out_of_root: list[str],
         project_root: Path,
     ) -> CiHealthFinding | None:
         if not out_of_root:
@@ -226,10 +227,10 @@ class CiHealthCheck(DagCheck):
             severity="red",
             block_deploy=True,
             message=(
-                "CI workflow_glob resolved to path(s) outside the project root; "
-                "out-of-root workflows are not read."
+                "CI workflow_glob resolves outside the project root; "
+                "out-of-root workflows are not enumerated or read."
             ),
-            details=[path.as_posix() for path in out_of_root],
+            details=list(out_of_root),
         )
 
     def format_report(self, result: CiHealthResult) -> str:
@@ -239,32 +240,56 @@ class CiHealthCheck(DagCheck):
         self,
         project_root: Path,
         workflow_glob: str,
-    ) -> tuple[list[Path], list[Path]]:
-        """Resolve workflow files, partitioned into in-root and out-of-root.
+    ) -> tuple[list[Path], list[str]]:
+        """Resolve in-root workflow files via the shared path_safety jail.
 
-        Root-jail is applied here, *before* any file is read or serialized, so
-        a configured absolute ``workflow_glob`` pointing outside the project can
-        never reach :meth:`Path.relative_to` (``ValueError``) or cause reads of
-        files outside the project. Out-of-root matches are returned separately
-        for the caller to surface as a structured red finding.
+        The glob root is validated *before* enumeration. An absolute
+        ``workflow_glob`` whose static (non-magic) base escapes the project root
+        is rejected without enumerating any path — the out-of-root tree is never
+        listed (its mere existence/contents could otherwise change the finding
+        shape) and is returned as an ``out_of_root`` marker for a structured red
+        finding. An absolute base that genuinely lives under the root is rebased
+        onto the root so ``Path.glob`` (which rejects absolute patterns) can
+        enumerate it. Each enumerated match is then re-confined through the jail,
+        so an in-root symlink whose target escapes the tree cannot smuggle an
+        off-root workflow into the in-root list.
         """
 
         pattern = workflow_glob.strip()
         if not pattern:
             return [], []
+
+        base = _glob_static_base(pattern)
+        # Validate the glob ROOT before enumerating anything. An out-of-root
+        # absolute base (or a ``../`` traversal that escapes) is rejected up
+        # front: we never call glob() against an off-tree directory.
+        if base and resolve_project_path(project_root, base) is None:
+            return [], [base]
+
         if Path(pattern).is_absolute():
-            paths = [Path(path) for path in glob(pattern)]
+            rel_pattern = _absolute_to_relative_glob(project_root, pattern, base)
+            if rel_pattern is None:
+                # Defensive: base confined above; treat as nothing to enumerate.
+                return [], []
+            candidates = list(project_root.glob(rel_pattern))
         else:
-            paths = list(project_root.glob(pattern))
-        files = sorted(path for path in paths if path.is_file())
+            try:
+                candidates = list(project_root.glob(pattern))
+            except (ValueError, OSError):
+                candidates = []
+
         in_root: list[Path] = []
-        out_of_root: list[Path] = []
-        for path in files:
-            if _is_within_root(path, project_root):
-                in_root.append(path)
-            else:
-                out_of_root.append(path)
-        return in_root, out_of_root
+        for path in sorted(candidates):
+            try:
+                if not path.is_file():
+                    continue
+            except OSError:
+                continue
+            # Re-confine each match (per-file symlink escape defense).
+            if resolve_project_path(project_root, path) is None:
+                continue
+            in_root.append(path)
+        return in_root, []
 
     def _check_triggers(
         self,
@@ -360,32 +385,57 @@ class CiHealthCheck(DagCheck):
 def _relative_to_root(path: Path, project_root: Path) -> str:
     """Serialize ``path`` relative to ``project_root`` without raising.
 
-    Workflow paths reaching this helper are already root-jailed by
-    :func:`_is_within_root`, but an absolute-glob match may be lexically outside
+    Workflow paths reaching this helper are already confined to the root by
+    :meth:`CiHealthCheck._locate_workflows` (each match is re-checked through the
+    shared path_safety jail), but an absolute-glob match may be lexically outside
     the (unresolved) root while still resolving inside it (e.g. via a symlink).
-    Falling back to the resolved relative form keeps serialization total and
-    never re-raises the ``ValueError`` this fix removed.
+    The shared :func:`project_relative_path` resolves + confines + relativizes;
+    the lexical fallback keeps serialization total for the already-confined case.
     """
 
+    relative = project_relative_path(project_root, path)
+    if relative is not None:
+        return relative
     try:
         return path.relative_to(project_root).as_posix()
     except ValueError:
         return path.resolve().relative_to(project_root.resolve()).as_posix()
 
 
-def _is_within_root(path: Path, project_root: Path) -> bool:
-    """True when ``path`` is inside ``project_root`` (root-jail predicate).
+def _glob_static_base(pattern: str) -> str:
+    """Return the leading prefix of ``pattern`` that contains no glob magic.
 
-    Both sides are resolved so that ``..`` segments and symlinks cannot smuggle
-    an out-of-root target past the check. Used before any read/serialize of a
-    configured ``workflow_glob`` match.
+    e.g. ``/abs/.github/workflows/*.yml`` -> ``/abs/.github/workflows``;
+    ``.github/workflows/*.yml`` -> ``.github/workflows``. The base is what
+    determines whether a configured ``workflow_glob`` escapes the project root,
+    independent of the wildcard tail — so it can be confined BEFORE enumeration.
     """
+    base_parts: list[str] = []
+    for part in Path(pattern).parts:
+        if has_magic(part):
+            break
+        base_parts.append(part)
+    if not base_parts:
+        return ""
+    return str(Path(*base_parts))
 
-    try:
-        path.resolve().relative_to(project_root.resolve())
-    except ValueError:
-        return False
-    return True
+
+def _absolute_to_relative_glob(project_root: Path, pattern: str, base: str) -> str | None:
+    """Rebase an absolute (in-root) ``workflow_glob`` to a root-relative pattern.
+
+    ``Path.glob`` rejects absolute patterns, so an absolute glob whose base has
+    already been confirmed in-root is re-expressed relative to ``project_root``
+    (preserving its absolute semantics). Returns ``None`` when the pattern
+    anchors exactly at the root (nothing to enumerate).
+    """
+    rel_base = project_relative_path(project_root, base) if base else ""
+    if rel_base is None:
+        return None
+    magic_tail = (
+        Path(pattern).parts[len(Path(base).parts):] if base else Path(pattern).parts[1:]
+    )
+    rel_parts = [p for p in (rel_base,) if p and p != "."] + list(magic_tail)
+    return str(Path(*rel_parts)) if rel_parts else None
 
 
 def _read_yaml_mapping(path: Path) -> dict[str, Any]:

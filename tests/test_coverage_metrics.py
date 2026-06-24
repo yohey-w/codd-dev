@@ -27,6 +27,11 @@ class _DesignTokenViolation:
 def _write_scenarios(project_root, names: list[str]) -> None:
     scenarios = project_root / "docs" / "e2e" / "scenarios.md"
     scenarios.parent.mkdir(parents=True)
+    _write_scenarios_file(scenarios, names)
+
+
+def _write_scenarios_file(scenarios, names: list[str]) -> None:
+    scenarios.parent.mkdir(parents=True, exist_ok=True)
     sections = ["# E2E Scenarios", ""]
     for index, name in enumerate(names, 1):
         sections.extend(
@@ -82,6 +87,94 @@ def test_e2e_coverage_counts_e2e_ts_stems(tmp_path):
 
     assert result.total == 1
     assert result.covered == 1
+    assert result.passed is True
+
+
+def test_e2e_coverage_symlink_test_escaping_root_not_credited(tmp_path):
+    # A test file inside docs/e2e/tests/ that is a SYMLINK pointing to an
+    # off-root .spec.ts must NOT be credited as covering its scenario. Pre-fix
+    # the glob match was used by name without re-confining, so an out-of-root
+    # symlinked spec counted toward coverage (passed=True) — a path-escape
+    # false-green crediting a file outside the project tree.
+    import pytest
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _write_scenarios(project_root, ["Learner login via /login"])
+    tests_dir = project_root / "docs" / "e2e" / "tests"
+    tests_dir.mkdir()
+
+    # The real spec lives OUTSIDE the project root; its stem matches the scenario.
+    outside_spec = tmp_path / "outside" / "test_learner_login_via_login.spec.ts"
+    outside_spec.parent.mkdir(parents=True)
+    outside_spec.write_text("", encoding="utf-8")
+    link = tests_dir / "test_learner_login_via_login.spec.ts"
+    try:
+        link.symlink_to(outside_spec)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    result = compute_e2e_coverage(project_root)
+
+    # The off-root symlinked spec is dropped: scenario stays uncovered.
+    assert result.total == 1
+    assert result.covered == 0
+    assert result.uncovered == 1
+    assert result.passed is False
+
+
+def test_e2e_coverage_in_root_symlink_still_credited(tmp_path):
+    # Anti-false-red regression: a symlink inside docs/e2e/tests/ whose target
+    # stays INSIDE the project root is a legitimate in-root test and must still
+    # be credited (the jail drops only escaping targets, not all symlinks).
+    import pytest
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _write_scenarios(project_root, ["Learner login via /login"])
+    tests_dir = project_root / "docs" / "e2e" / "tests"
+    tests_dir.mkdir()
+
+    # Real spec lives elsewhere IN-ROOT; symlinked into the tests dir.
+    real_spec = project_root / "generated" / "test_learner_login_via_login.spec.ts"
+    real_spec.parent.mkdir(parents=True)
+    real_spec.write_text("", encoding="utf-8")
+    link = tests_dir / "test_learner_login_via_login.spec.ts"
+    try:
+        link.symlink_to(real_spec)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    result = compute_e2e_coverage(project_root)
+
+    assert result.total == 1
+    assert result.covered == 1
+    assert result.passed is True
+
+
+def test_e2e_coverage_scenarios_symlink_escaping_root_yields_no_scenarios(tmp_path):
+    # The scenarios.md path is hardcoded in-root, but if it is itself a symlink
+    # whose target escapes the project root, an off-root markdown must NOT be
+    # consumed as the scenario source. Pre-fix the path was read without
+    # re-confining (a per-file symlink escape false-green).
+    import pytest
+
+    project_root = tmp_path / "project"
+    (project_root / "docs" / "e2e").mkdir(parents=True)
+
+    outside_scenarios = tmp_path / "outside_scenarios.md"
+    _write_scenarios_file(outside_scenarios, ["Smuggled scenario"])
+    link = project_root / "docs" / "e2e" / "scenarios.md"
+    try:
+        link.symlink_to(outside_scenarios)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    result = compute_e2e_coverage(project_root)
+
+    # Off-root scenarios source dropped -> behaves as if there are no scenarios.
+    assert result.total == 0
+    assert result.pct == 100.0
     assert result.passed is True
 
 

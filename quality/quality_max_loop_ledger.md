@@ -536,3 +536,17 @@ callers catch PathEscapeError → red finding; the local jail deleted. Configure
 red, unset/legacy-absent = legit skip. full suite 6367.
 Convergence: Sonnet clean in rounds 10 & 12; Codex's bespoke-jail/silent-skip tail
 (drift → audit → lexicon) is now exhausted. Streak still 0; round 13 + 14 must be clean.
+
+## Round 13 (2026-06-25, evidence-scoped): NOT clean → 3 fixed (isolated niche edges)
+**Sonnet: CLEAN** (3rd clean in 4 rounds). **Codex: 3 P1** (niche, isolated): (1)
+coverage_metrics e2e-coverage counted an out-of-root symlink test (per-file glob match +
+scenarios_path not re-confined); (2) negative_space used lstrip("/") on configured scope
+paths → an absolute scope reinterpreted root-relative (missed an in-root forbidden-text
+file = false-green; /tmp/x → project/tmp/x) — removed lstrip, jail via path_safety
+(in-root absolute → project-relative; escaped declared scope → fail-closed red); (3)
+ci_health enumerated an out-of-root workflow_glob BEFORE jailing — now validates the glob
+root before enumeration (out-of-root → red without enumerating), round-4 bespoke jail
+unified onto path_safety. full suite 6375. (lstrip("/") confirmed isolated to
+negative_space; other lstrip uses are ./-normalize / URL / already-jailed.) Streak still
+0; **round 14 onward uses 3 engines (Codex + Sonnet + Opus)** per the /goal's "3-engine
+review"; need 2 consecutive clean.
