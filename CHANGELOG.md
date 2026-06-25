@@ -13,6 +13,24 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.7.3] - 2026-06-25 — Java brownfield support (import edges, tree-sitter, proto-enum crash fix)
+
+### Added
+- **Java structural support.** The DAG now builds Java import edges — `import com.x.Y;`,
+  `import static`, wildcard `import com.x.*;`, and package declarations are extracted and
+  resolved against JVM source roots (`src/main/java`, `src/test/java`) into impl→impl
+  edges, so reachability / transitive-closure work on Java for the first time.
+  tree-sitter-java is wired into the parser registry (Java auto-promotes from the regex
+  backend to tree-sitter); the regex backend also gains Java imports and
+  interface/enum/record symbols; the bootstrap detects the Maven/Gradle layout. (Gson:
+  0 → 519 import edges; 121 → 2 unreachable.)
+
+### Fixed
+- **`codd extract` crashed on proto enums.** An api-contract template accessed
+  `schema.values`, which Jinja resolved to the dict's `.values` method (then `| join`
+  raised); any project with proto enum schemas crashed out of the box. It now uses
+  `.get("values")` with a uniform renderer for proto/GraphQL value shapes.
+
 ## [3.7.2] - 2026-06-25 — brownfield reachability + JS (Express) dogfood fixes
 
 ### Added
