@@ -113,6 +113,18 @@ class LanguageExtractor(Protocol):
     ) -> tuple[dict[str, list[str]], set[str]]:
         """Return internal and external imports for the given source content."""
 
+    def extract_import_specifiers(self, content: str) -> list[str]:
+        """Return RAW import specifiers (un-resolved) for DAG edge building.
+
+        Distinct from :meth:`extract_imports` (which classifies into the
+        scanner's internal/external module graph): this returns the literal
+        specifier strings the DAG builder resolves against the node file-set
+        (e.g. Python ``.b`` / ``pkg.c``). Backends that don't carry intra-tree
+        specifiers (or where the builder already extracts them another way)
+        return ``[]``.
+        """
+        return []
+
     def detect_code_patterns(self, mod: ModuleInfo, content: str) -> None:
         """Mutate ModuleInfo with any detected structural patterns."""
 
@@ -150,6 +162,13 @@ class RegexExtractor:
             src_dir,
             file_path,
         )
+
+    def extract_import_specifiers(self, content: str) -> list[str]:
+        # Best-effort fallback: the regex backend has no language-agnostic raw
+        # specifier extraction. Non-Python source files keep flowing through the
+        # builder's quoted-specifier path (``extract_imports`` in
+        # ``codd.dag.extractor``), so returning ``[]`` here is a no-op for them.
+        return []
 
     def detect_code_patterns(self, mod: ModuleInfo, content: str) -> None:
         from codd import extractor as extractor_module

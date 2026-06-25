@@ -75,6 +75,52 @@ def test_build_dag_import_edges(tmp_path):
     assert any(edge.from_id == "src/a.ts" and edge.to_id == "src/b.ts" and edge.kind == "imports" for edge in dag.edges)
 
 
+def test_build_dag_python_import_edges(tmp_path):
+    # Python impl→impl import edges must be built for BOTH absolute (``from
+    # pkg.c import y``) and relative (``from .b import x`` / ``from . import
+    # mod``) imports. Before the fix the impl ``imports`` attribute came from the
+    # JS/TS-only quoted-specifier extractor, so it was ``[]`` for every ``.py``
+    # file and ZERO import edges were ever built — silently neutering
+    # transitive_closure reachability for all Python projects.
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(
+        tmp_path / "pkg" / "a.py",
+        "from .b import x\nfrom pkg.c import y\nfrom . import d\nx; y; d\n",
+    )
+    _write(tmp_path / "pkg" / "b.py", "x = 1\n")
+    _write(tmp_path / "pkg" / "c.py", "y = 2\n")
+    _write(tmp_path / "pkg" / "d.py", "d = 3\n")
+
+    dag = build_dag(
+        tmp_path,
+        _settings(impl_file_patterns=["pkg/**/*.py"], test_file_patterns=[]),
+    )
+
+    import_edges = {
+        (edge.from_id, edge.to_id)
+        for edge in dag.edges
+        if edge.kind == "imports"
+    }
+    # relative ``from .b`` → pkg/b.py
+    assert ("pkg/a.py", "pkg/b.py") in import_edges
+    # absolute ``from pkg.c`` → pkg/c.py
+    assert ("pkg/a.py", "pkg/c.py") in import_edges
+    # bare relative ``from . import d`` → pkg/d.py
+    assert ("pkg/a.py", "pkg/d.py") in import_edges
+
+    # transitive_closure must now SEE pkg/b.py, pkg/c.py, pkg/d.py as reachable
+    # from pkg/a.py via the import edges (the reachability the bug silently lost).
+    reachable: set[str] = set()
+    stack = list(dag.get_neighbors("pkg/a.py"))
+    while stack:
+        current = stack.pop()
+        if current in reachable:
+            continue
+        reachable.add(current)
+        stack.extend(dag.get_neighbors(current))
+    assert {"pkg/b.py", "pkg/c.py", "pkg/d.py"} <= reachable
+
+
 def test_is_test_file_recognizes_e2e_ts(tmp_path):
     # The DAG test-file classifier must recognise the ``.e2e.ts`` convention
     # alongside ``.test.``/``.spec.`` so a generated e2e file is a TEST node.

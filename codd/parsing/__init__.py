@@ -58,6 +58,7 @@ from codd.parsing.python_ast import (
     _PY_BUILTIN_CALLS,
     _detect_python_code_patterns_stdlib,
     _extract_python_call_graph_stdlib,
+    _extract_python_import_specifiers_stdlib,
     _extract_python_imports_stdlib,
     _extract_python_symbols_stdlib,
     _header_until_colon,

@@ -56,6 +56,32 @@ class PythonAstExtractor:
             return {}, set()
         return _extract_python_imports_stdlib(tree, content, file_path, project_root, src_dir)
 
+    def extract_import_specifiers(self, content: str) -> list[str]:
+        """Return raw Python import specifiers (dots preserved), in source order.
+
+        Unlike :meth:`extract_imports` — which classifies imports into the
+        scanner's internal/external module graph keyed by normalized module
+        names — this returns the RAW dotted module strings exactly as written,
+        with leading dots preserved for relative imports (``.b``, ``..pkg.x``,
+        ``.`` for a bare ``from . import name`` package ref). The DAG builder
+        resolves these against the actual node file-set, so it needs the literal
+        specifier, not a normalized key.
+
+        AST-based (stdlib ``ast``) so multi-line / parenthesized / aliased
+        imports and — critically — relative imports are all captured. The
+        previous regex seam (``PY_IMPORT_RE``) silently dropped every relative
+        import. Syntax errors yield ``[]`` (the file's other facts are kept by
+        the caller), matching the rest of this backend.
+        """
+
+        if self.category != "source":
+            return []
+        try:
+            tree = ast.parse(content)
+        except (SyntaxError, ValueError, TypeError):
+            return []
+        return _extract_python_import_specifiers_stdlib(tree)
+
     def detect_code_patterns(self, mod: ModuleInfo, content: str) -> None:
         if self.category != "source":
             return None
@@ -316,6 +342,51 @@ def _extract_python_imports_stdlib(
 
     external -= _python_stdlib()
     return internal, external
+
+def _extract_python_import_specifiers_stdlib(tree: ast.AST) -> list[str]:
+    """Return raw dotted import specifiers (relative dots preserved) in order.
+
+    * ``import os, pkg.sub`` → ``["os", "pkg.sub"]``
+    * ``from pkg.c import y`` → ``["pkg.c"]``
+    * ``from .b import x`` → ``[".b"]`` (one leading dot per ``node.level``)
+    * ``from . import d`` → ``[".d"]`` (the imported submodule of the package)
+    * ``from ..pkg2 import w`` → ``["..pkg2"]``
+
+    Deterministic source order (``ast.walk`` is BFS, so sort by line/col) and
+    de-duplicated while preserving first-seen order, so the DAG builds a stable
+    edge set across runs.
+    """
+
+    located: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name:
+                    located.append((node.lineno, node.col_offset, alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            prefix = "." * node.level
+            if node.module:
+                located.append((node.lineno, node.col_offset, f"{prefix}{node.module}"))
+            elif prefix:
+                # ``from . import a, b`` — each name is a SUBMODULE of the
+                # relative package (``.a`` / ``.b``), so emit one specifier per
+                # imported name. The builder resolves each to its ``.py`` /
+                # package so the real intra-package edge forms. (``*`` cannot
+                # appear in a no-module relative import, so no filtering needed.)
+                for alias in node.names:
+                    if alias.name:
+                        located.append(
+                            (node.lineno, node.col_offset, f"{prefix}{alias.name}")
+                        )
+
+    located.sort(key=lambda item: (item[0], item[1]))
+    seen: set[str] = set()
+    specifiers: list[str] = []
+    for _lineno, _col, specifier in located:
+        if specifier not in seen:
+            seen.add(specifier)
+            specifiers.append(specifier)
+    return specifiers
 
 def _detect_python_code_patterns_stdlib(mod: ModuleInfo, tree: ast.AST, content: str) -> None:
     docstring = ast.get_docstring(tree, clean=True)

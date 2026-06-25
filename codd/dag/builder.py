@@ -44,7 +44,6 @@ LEGACY_IMPLEMENTATION_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".
 LEGACY_TEST_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".bats")
 PLAN_HEADER_RE = re.compile(r"^#{2,6}\s+([A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)(?:\s+(.+))?$", re.MULTILINE)
 OUTPUTS_RE = re.compile(r"(?im)^outputs?[ \t]*:[ \t]*(.*)$")
-PY_IMPORT_RE = re.compile(r"(?m)^\s*(?:from\s+([A-Za-z_][\w.]*)(?:\s+import\s+)|import\s+([A-Za-z_][\w.]*))")
 LEXICON_OUTPUT_PREFIX = "lexicon:"
 EXPECTED_ARTIFACT_ATTRIBUTE_KEYS = (
     "id",
@@ -298,7 +297,7 @@ def _add_impl_files(dag: DAG, project_root: Path, settings: dict[str, Any]) -> d
                 path=node_id,
                 attributes={
                     "language": _language_for_path(file_path),
-                    "imports": extract_imports(file_path),
+                    "imports": _extract_impl_imports(file_path),
                     "runtime_evidence": _runtime_evidence_for_file(file_path, node_id, capability_patterns),
                 },
             ),
@@ -913,19 +912,73 @@ def _resolve_import_target(
     aliases: dict[str, list[str]],
 ) -> str | None:
     candidates: list[Path] = []
-    if import_ref.startswith("."):
+    if _is_js_relative_specifier(import_ref):
+        # JS/TS relative: ``./foo`` / ``../foo`` — resolve against the file dir
+        # exactly as before (a path with a separator after the dots).
         candidates.append((file_path.parent / import_ref).resolve())
+    elif import_ref.startswith("."):
+        # Python relative: ``.b`` / ``..pkg.x`` / ``.`` — leading dots select a
+        # package directory (1 dot = current package, 2 = parent, …) and the
+        # dotted remainder maps to a sub-path. Distinct from JS ``./`` because
+        # Python uses ``.`` as the component separator, so ``pkg/.b`` (the old
+        # JS-style join) never matched ``pkg/b.py``.
+        candidates.extend(_python_relative_candidates(import_ref, file_path))
     elif import_ref.startswith("/"):
         candidates.append((project_root / import_ref.lstrip("/")).resolve())
     else:
         candidates.extend(_alias_candidates(import_ref, project_root, aliases))
         candidates.append((project_root / import_ref).resolve())
+        # Absolute dotted module specifier (``pkg.c`` / ``a.b.c``): also try the
+        # dotted→path mapping rooted at the project, so a Python absolute import
+        # resolves to ``pkg/c.py`` (``__init__.py`` handled downstream). The
+        # plain join above keeps ``pkg/sub`` directory-style specifiers working.
+        if "." in import_ref:
+            candidates.append((project_root / Path(*import_ref.split("."))).resolve())
 
     for candidate in candidates:
         resolved = _resolve_file_candidate(candidate, path_to_node)
         if resolved:
             return resolved
     return None
+
+
+def _is_js_relative_specifier(import_ref: str) -> bool:
+    """True for JS/TS relative specifiers (``./x`` / ``../x`` / ``.`` / ``..``).
+
+    The discriminator is purely the SHAPE of the specifier (data), not a
+    language flag: JS relative imports put a path separator after the leading
+    dots (or are the bare ``.`` / ``..`` directory refs), whereas Python
+    relative imports use ``.`` as the module-component separator (``.b``,
+    ``..pkg.mod``). Keeping the JS branch byte-identical preserves the existing
+    TS/JS edge behavior.
+    """
+
+    if import_ref in (".", ".."):
+        return True
+    return import_ref.startswith("./") or import_ref.startswith("../")
+
+
+def _python_relative_candidates(import_ref: str, file_path: Path) -> list[Path]:
+    """Resolve a Python relative import specifier to filesystem candidates.
+
+    Mirrors Python's own relative-import semantics: ``leading_dots`` counts the
+    package levels (1 = the importing file's package == its directory, 2 = the
+    parent package, …); the remaining dotted name becomes sub-directories.
+    ``_resolve_file_candidate`` then appends the real suffix / ``__init__.py``.
+    """
+
+    leading_dots = len(import_ref) - len(import_ref.lstrip("."))
+    remainder = import_ref[leading_dots:]
+
+    # 1 dot → current package dir (the file's own directory); each extra dot
+    # walks one package up.
+    base = file_path.parent
+    for _ in range(leading_dots - 1):
+        base = base.parent
+
+    if not remainder:
+        return [base.resolve()]
+    return [(base / Path(*remainder.split("."))).resolve()]
 
 
 def _infer_test_targets(
@@ -954,14 +1007,48 @@ def _infer_test_targets(
     return targets
 
 
+def _extract_python_import_specifiers(file_path: Path) -> list[str]:
+    """Return raw Python import specifiers (relative dots preserved) via AST.
+
+    Dispatches to the registry's Python ``source`` backend
+    (:class:`codd.parsing.PythonAstExtractor`) so the SAME stdlib-``ast``
+    extraction that the scanner uses produces the DAG's specifiers — including
+    relative imports (``.b`` / ``from . import d`` / ``..pkg.x``) that the old
+    line-anchored regex (a ``from ([A-Za-z_]…)`` pattern that could not match a
+    leading-dot module) silently dropped. Selection is registry-DATA-driven
+    (``get_extractor``), not a ``language ==`` branch.
+    """
+
+    from codd.parsing import get_extractor
+
+    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    return get_extractor("python", "source").extract_import_specifiers(content)
+
+
+def _extract_impl_imports(file_path: Path) -> list[str]:
+    """Return raw import specifiers for an implementation file.
+
+    Python impl files go through AST-based specifier extraction (the same path
+    test files use) so impl→impl import edges form for Python — the core of the
+    fix. Every other language keeps the existing quoted-specifier extractor
+    (``extract_imports``: JS/TS ``from '…'`` / ``require('…')``), unchanged.
+    Dispatch is by file suffix (DATA), mirroring ``_extract_test_imports``.
+    """
+
+    if file_path.suffix == ".py":
+        return _extract_python_import_specifiers(file_path)
+    return extract_imports(file_path)
+
+
 def _extract_test_imports(file_path: Path) -> list[str]:
     imports = extract_imports(file_path)
     if file_path.suffix != ".py":
         return imports
 
-    content = file_path.read_text(encoding="utf-8", errors="ignore")
-    python_imports = [match.group(1) or match.group(2) for match in PY_IMPORT_RE.finditer(content)]
-    return [*imports, *python_imports]
+    # AST-based Python specifiers (relative imports included). Combined with the
+    # quoted-specifier pass above so a polyglot test file (e.g. a ``.py`` test
+    # that also embeds a JS ``require('…')`` literal in a string) keeps both.
+    return [*imports, *_extract_python_import_specifiers(file_path)]
 
 
 def _resolve_python_import_target(import_ref: str, project_root: Path, path_to_node: dict[Path, str]) -> str | None:
