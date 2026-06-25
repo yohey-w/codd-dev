@@ -131,6 +131,7 @@ class DependsOnConsistencyCheck:
                 )
             return DependsOnConsistencyResult(
                 status="skip",
+                severity="info",
                 skipped=True,
                 passed=True,
                 checked_count=0,

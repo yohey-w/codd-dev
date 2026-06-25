@@ -385,7 +385,10 @@ def test_dag_verify_cli_runs_deployment_completeness_check(tmp_path):
     )
 
     assert result.exit_code == 0
-    assert "SKIP  deployment_completeness [red]" in result.output
+    # The skip is emitted with severity="info" (not the dataclass default "red")
+    # so severity-keyed roll-ups never count a "verified nothing" skip as a
+    # covered red check. The CLI therefore labels the SKIP [info].
+    assert "SKIP  deployment_completeness [info]" in result.output
 
 
 def test_design_acceptance_criteria_can_supply_required_steps(tmp_path):

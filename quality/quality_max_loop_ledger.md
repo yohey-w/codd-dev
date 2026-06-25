@@ -626,3 +626,20 @@ exit-line approval** (Opus does not self-certify completion — GPT, the prior s
 gate, is gone, so the OWNER is now the strategic gate). Stage-2 (Axis-P) stays gated until
 the owner blesses N-gate passage. Owner asked to choose: ① pass N-gate → Stage-2 / ② more
 Claude rounds / ③ a different bar.
+
+## Round 16 (2026-06-25, Claude-only): NOT clean → 1 SYSTEMATIC P1 (multi-engine vindicated)
+**Opus: CLEAN. Sonnet: 1 SYSTEMATIC P1** — `coverage_metrics.compute_dag_completeness`
+counted SKIP results of red-severity checks (node_completeness / deployment_completeness,
+whose skip carried the dataclass-default severity="red") as *covered* → the merge-gate
+metric reported dag_completeness 100% / passed while ZERO checks ran (a CI-consumed
+false-green). This is a visibility-class straggler (the merge-gate metric), SYSTEMATIC,
+not Axis-N. **This vindicates the owner's concern "won't Opus alone be wrong?": Opus
+round-16 declared CLEAN, but Sonnet caught a real systematic false-green — multi-engine
+(Sonnet+Opus) is doing real work, and self-certification by one engine would have been
+wrong.** Fixed: (1) compute_dag_completeness excludes skips from covered (severity-
+independent guard, reports skip count); (2) node_completeness / deployment_completeness /
+depends_on_consistency skip constructors now set severity="info" (audit found all 3;
+others already info/amber). Test test_severity_is_red re-pointed to a real violation
+(red); added test_empty_values_skips_with_info_severity. full suite 6403.
+**Streak reset (round 16 had a systematic finding); round 17 + 18 must both be
+systematic-clean.** N-gate passage still gated on owner's exit-line approval.

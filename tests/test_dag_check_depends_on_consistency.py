@@ -131,9 +131,32 @@ def test_empty_dag_pass(tmp_path):
 
 
 def test_severity_is_red(tmp_path):
-    result = _run(tmp_path, {"values": []})
+    # A real depends_on inconsistency is a red (deploy-blocking) violation. (An empty /
+    # no-comparable-material run SKIPs with severity="info" — asserted in the next test —
+    # so this uses a real violation to confirm the check's red severity.)
+    result = _run(
+        tmp_path,
+        {
+            "values": [
+                {"node_id": "docs/design/ux.md", "value_type": "url", "name": "dashboard", "value": "/tenant/dashboard"},
+                {"node_id": "docs/design/api.md", "value_type": "url", "name": "dashboard", "value": "/tenant-admin"},
+            ]
+        },
+    )
 
     assert result.severity == "red"
+    assert result.passed is False
+
+
+def test_empty_values_skips_with_info_severity(tmp_path):
+    # Empty propagation values = no comparable material = SKIP; the skip must not carry
+    # the dataclass-default "red" severity (else severity-based merge-gate metrics
+    # miscount it as a red-but-passed = covered false-green).
+    result = _run(tmp_path, {"values": []})
+
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.severity == "info"
 
 
 def test_violation_dataclass_fields():

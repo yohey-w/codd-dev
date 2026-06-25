@@ -95,7 +95,13 @@ class DeploymentCompletenessCheck:
             self.settings = codd_config
 
         if not self._has_deployment_signal(target_dag):
+            # The C6 deploy chain is not declared for this project, so the check
+            # verified nothing. Emit the skip with ``severity="info"`` (not the
+            # dataclass default ``"red"``) so severity-keyed roll-ups — e.g. the
+            # coverage merge gate — never count a "verified nothing" skip as a
+            # covered red check (a systematic false-green).
             return DeploymentCompletenessResult(
+                severity="info",
                 status="skip",
                 skipped=True,
                 message=(

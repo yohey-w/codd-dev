@@ -70,8 +70,12 @@ class NodeCompletenessCheck:
         if checked == 0:
             # No ``expects`` edge to verify against → this gate examined nothing.
             # Returning a clean PASS here was a vacuous false-green; a no-input run
-            # is a SKIP (deploy still allowed, but nothing was verified).
+            # is a SKIP (deploy still allowed, but nothing was verified). The skip
+            # is emitted with ``severity="info"`` (not the dataclass default
+            # ``"red"``) so severity-keyed roll-ups — e.g. the coverage merge gate —
+            # never mistake a "verified nothing" skip for a covered red check.
             return NodeCompletenessResult(
+                severity="info",
                 missing_impl_files=[],
                 passed=True,
                 status="skip",

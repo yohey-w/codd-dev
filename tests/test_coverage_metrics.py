@@ -328,6 +328,99 @@ def test_run_coverage_includes_dag_completeness(tmp_path):
     assert any(result.metric == "dag_completeness" for result in report.results)
 
 
+def test_dag_completeness_skip_results_not_counted_as_covered(tmp_path, monkeypatch):
+    """SKIP results must NOT be counted as covered red checks.
+
+    Reproduces the systematic merge-gate false-green (Claude review round-16):
+    ``node_completeness`` and ``deployment_completeness`` return ``status="skip",
+    passed=True`` while their dataclass default ``severity`` is ``"red"``. Pre-fix
+    those SKIPs landed in ``red_results`` (because severity == "red") yet were
+    excluded from ``failed_red`` (because passed is True), so the metric reported
+    ``total=2 / covered=2 / pct=100% / passed=True`` while verifying ZERO checks.
+
+    The gate must instead exclude skips from total/covered: a project where every
+    red check skipped is NOT "100% covered". It must not report 100%-passed with
+    covered > 0 here.
+    """
+    from codd.dag import runner as dag_runner
+    from codd.dag.checks.deployment_completeness import DeploymentCompletenessResult
+    from codd.dag.checks.node_completeness import NodeCompletenessResult
+
+    skipped_results = [
+        NodeCompletenessResult(passed=True, status="skip", skipped=True, checked_count=0),
+        DeploymentCompletenessResult(passed=True, status="skip", skipped=True),
+    ]
+    # Both carry the dataclass default severity "red" + status "skip" (the bug
+    # surface). Confirm the fixture really exercises the red-severity skip path.
+    assert all(r.severity == "red" and r.status == "skip" for r in skipped_results)
+
+    monkeypatch.setattr(dag_runner, "run_all_checks", lambda *a, **k: skipped_results)
+
+    result = compute_dag_completeness(tmp_path)
+
+    # Skips are not covered red checks: the metric must not manufacture a
+    # 100%-covered PASS out of zero verified checks.
+    assert result.covered == 0
+    assert not (result.pct == 100.0 and result.covered > 0)
+
+
+def test_dag_completeness_real_covered_red_check_still_counts(tmp_path, monkeypatch):
+    """Anti-false-red regression: a genuinely-verified red check stays covered.
+
+    A red-severity check that actually ran (``status="pass"``, not skipped) with
+    no failures must continue to count as covered = 100% passed. The skip-exclusion
+    fix must drop only skips, never demote a real clean pass.
+    """
+    from codd.dag import runner as dag_runner
+    from codd.dag.checks.node_completeness import NodeCompletenessResult
+
+    real_pass = NodeCompletenessResult(
+        passed=True, status="pass", skipped=False, checked_count=3
+    )
+    assert real_pass.severity == "red" and real_pass.status == "pass"
+
+    monkeypatch.setattr(dag_runner, "run_all_checks", lambda *a, **k: [real_pass])
+
+    result = compute_dag_completeness(tmp_path)
+
+    assert result.total == 1
+    assert result.covered == 1
+    assert result.uncovered == 0
+    assert result.pct == 100.0
+    assert result.passed is True
+
+
+def test_dag_completeness_real_failed_red_check_still_fails(tmp_path, monkeypatch):
+    """Anti-false-green/red: a real red failure mixed with a skip still fails.
+
+    The skip is excluded from total/covered, but the genuinely-failing red check
+    must keep the gate red (covered < total, passed=False).
+    """
+    from codd.dag import runner as dag_runner
+    from codd.dag.checks.deployment_completeness import DeploymentCompletenessResult
+    from codd.dag.checks.node_completeness import NodeCompletenessResult
+
+    results = [
+        NodeCompletenessResult(
+            passed=False,
+            status="fail",
+            missing_impl_files=["src/missing.ts"],
+            checked_count=1,
+        ),
+        DeploymentCompletenessResult(passed=True, status="skip", skipped=True),
+    ]
+
+    monkeypatch.setattr(dag_runner, "run_all_checks", lambda *a, **k: results)
+
+    result = compute_dag_completeness(tmp_path)
+
+    # Only the real red check counts toward total; the skip is excluded.
+    assert result.total == 1
+    assert result.covered == 0
+    assert result.uncovered == 1
+    assert result.passed is False
+
+
 def test_cli_coverage_help():
     result = CliRunner().invoke(main, ["coverage", "--help"])
 

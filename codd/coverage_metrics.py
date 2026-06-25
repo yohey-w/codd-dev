@@ -184,7 +184,22 @@ def compute_dag_completeness(
     except Exception as exc:  # pragma: no cover - defensive gate behavior
         return _exception_result("dag_completeness", threshold, exc)
 
-    red_results = [result for result in results if _dag_result_severity(result) == "red"]
+    # A SKIP result verified nothing on purpose (no input to check). Several
+    # red-severity checks (e.g. node_completeness, deployment_completeness) carry
+    # the dataclass default ``severity="red"`` even when they skip, returning
+    # ``status="skip", passed=True``. Counting those as covered red checks is a
+    # systematic merge-gate false-green: a project where every red check skipped
+    # would report ``total == covered`` = 100% PASS while verifying zero checks.
+    # Exclude skips from total/covered here (severity-independent guard) and
+    # surface them separately in details. This is anti-false-RED: a check that
+    # actually ran and passed is not a skip, so genuinely-covered cases are
+    # unaffected; only "verified nothing" runs stop inflating coverage.
+    skipped_results = [result for result in results if _dag_result_skipped(result)]
+    red_results = [
+        result
+        for result in results
+        if _dag_result_severity(result) == "red" and not _dag_result_skipped(result)
+    ]
     failed_red = [
         result
         for result in red_results
@@ -193,18 +208,29 @@ def compute_dag_completeness(
     amber_findings = [
         result
         for result in results
-        if _dag_result_severity(result) == "amber" and _dag_result_has_findings(result)
+        if _dag_result_severity(result) == "amber"
+        and _dag_result_has_findings(result)
+        and not _dag_result_skipped(result)
     ]
-    opt_outs = [result for result in results if _dag_result_status(result) == "opt_out"]
+    opt_outs = [
+        result
+        for result in results
+        if _dag_result_status(result) == "opt_out" and not _dag_result_skipped(result)
+    ]
 
     total = len(red_results)
     uncovered = len(failed_red)
     covered = max(0, total - uncovered)
     pct = _coverage_pct(covered, total)
-    details = [f"checks: {len(results)}", f"red_failures: {uncovered}"]
+    details = [
+        f"checks: {len(results)}",
+        f"red_failures: {uncovered}",
+        f"skipped: {len(skipped_results)}",
+    ]
     details.extend(_format_dag_result(result) for result in failed_red[:5])
     details.extend(f"warning: {_format_dag_result(result)}" for result in amber_findings[:5])
     details.extend(f"opt_out: {_format_dag_result(result)}" for result in opt_outs[:5])
+    details.extend(f"skip: {_format_dag_result(result)}" for result in skipped_results[:5])
 
     return CoverageResult(
         metric="dag_completeness",
@@ -388,6 +414,20 @@ _dag_result_severity = _result_status.result_severity
 _dag_result_passed = _result_status.result_passed
 _dag_result_status = _result_status.result_status
 _dag_result_has_findings = _result_status.result_has_findings
+
+
+def _dag_result_skipped(result: Any) -> bool:
+    """True iff the check skipped (verified nothing on purpose).
+
+    A skip is recognised by an explicit ``status`` of ``skip``/``skipped`` or a
+    truthy ``skipped`` flag. This is severity-independent on purpose: it is the
+    guard that stops a red-severity SKIP (which carries ``severity="red"`` from
+    its dataclass default) from being miscounted as a covered red check in the
+    merge gate.
+    """
+    if _result_status.result_status(result) in {"skip", "skipped"}:
+        return True
+    return bool(_result_status.result_value(result, "skipped"))
 
 
 def _dag_result_name(result: Any) -> str:
