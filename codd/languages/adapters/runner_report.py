@@ -21,6 +21,7 @@ re-exported from :mod:`codd.coverage_execution_coherence`.
 from __future__ import annotations
 
 import json
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -676,3 +677,519 @@ def _go_static_test_func_index(project_root: Path) -> dict[str, dict[str, str]]:
             if func.startswith("Test") and func not in bucket:
                 bucket[func] = rel
     return index
+
+
+@dataclass(frozen=True)
+class CTestJunitReportAdapter:
+    """CTest JUnit-XML reporter adapter (``ctest --output-junit <file>``).
+
+    ``ctest --test-dir build --output-junit build/ctest-junit.xml`` writes a
+    standard JUnit-style XML document::
+
+        <testsuite ...>
+          <testcase name="MyTest.Adds" classname="MyTest" time="0.01"/>
+          <testcase name="MyTest.Throws" classname="MyTest">
+            <failure message="...">...</failure>
+          </testcase>
+          <testcase name="Skipped.Case"><skipped/></testcase>
+        </testsuite>
+
+    (The root may be a single ``<testsuite>`` or a ``<testsuites>`` wrapper around
+    one or more ``<testsuite>`` elements — both are handled.) A case PASSES only
+    when it has NO ``<failure>``/``<error>``/``<skipped>`` child — a skip taints
+    (proves nothing — the SAME rule the vitest/go adapters and the static
+    authenticity gate apply); a failure/error is an honest fail.
+
+    THE FILE-LEVEL LIMITATION (fail-closed, documented — analogous to Go's
+    parser-miss note). CTest reports a test by NAME (its ``classname``/``name``
+    rarely encodes a SOURCE FILE — a CTest "test" is a registered command, typically
+    a whole test executable or a GoogleTest ``Suite.Case``, not a ``*.cpp`` path).
+    There is therefore NO reliable way to attribute a ctest case to a real ``.cpp``
+    test file on disk. So this adapter is FAIL-CLOSED at the FILE granularity: it
+    populates ``executed_passed_cases`` with per-case ``"<key>::<name>"`` identities
+    (the authority for reconciliation), but it does NOT fabricate
+    ``executed_passed_files`` — those stay EMPTY rather than inventing a passed FILE
+    that cannot be proven. This mirrors :class:`GoTestJsonReportAdapter`'s discipline
+    that a parser-miss test is left uncredited (it can prove no VB) but is NEVER
+    turned into a false-RED of a legitimately-running test, and the coherence gate's
+    "missing from report is not green" rule still holds (an unattributed VB stays
+    execution-unverified — fail-closed toward "not executed", never a false pass).
+
+    The case ``<key>`` is the ``classname`` when present (GoogleTest's suite name),
+    else the ctest test name itself; ``<name>`` is the ``name`` attribute. A case
+    with no usable name is skipped (it can identify nothing).
+
+    Raises :class:`RunnerReportUnsupported` on an unreadable / garbled / non-JUnit
+    XML document (missing file, malformed XML, or a root that is neither
+    ``testsuite`` nor ``testsuites``) so the gate degrades EXPLICITLY rather than
+    silently treating "nothing parseable" as "nothing ran" (a false-green) — exactly
+    like the vitest/go adapters' ``RunnerReportUnsupported`` contract.
+    """
+
+    def parse(self, report_path: Path, *, project_root: Path) -> RunnerExecution:
+        try:
+            raw = report_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RunnerReportUnsupported(
+                f"ctest JUnit report unreadable at {report_path}: {exc}"
+            ) from exc
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as exc:
+            raise RunnerReportUnsupported(
+                f"ctest JUnit report at {report_path} is not parseable XML: {exc}"
+            ) from exc
+
+        # Accept either a single <testsuite> root or a <testsuites> wrapper. A root
+        # that is neither is not a JUnit report (fail-closed, never an empty pass).
+        tag = _ctest_localname(root.tag)
+        if tag == "testsuite":
+            suites = [root]
+        elif tag == "testsuites":
+            suites = [el for el in root if _ctest_localname(el.tag) == "testsuite"]
+        else:
+            raise RunnerReportUnsupported(
+                f"ctest JUnit report at {report_path} root is <{tag}>, expected "
+                "<testsuite> or <testsuites>"
+            )
+
+        passed_cases: set[str] = set()
+        total_cases = 0
+        passed_count = 0
+        for suite in suites:
+            for case in suite:
+                if _ctest_localname(case.tag) != "testcase":
+                    continue
+                name = (case.get("name") or "").strip()
+                if not name:
+                    # A case with no name identifies nothing — skip (it can credit no
+                    # VB and taints nothing it cannot name).
+                    continue
+                classname = (case.get("classname") or "").strip()
+                key = f"{classname or name}::{name}"
+                total_cases += 1
+                if _ctest_case_passed(case):
+                    passed_count += 1
+                    passed_cases.add(key)
+                # a failure/error/skipped case is NOT a pass; it contributes no key
+                # (a skip proves nothing — vitest/go/authenticity parity).
+        return RunnerExecution(
+            # FILE-level intentionally EMPTY: ctest case names do not map to a real
+            # .cpp file on disk, so we never fabricate a passed FILE (see docstring).
+            executed_passed_files=frozenset(),
+            executed_failed_files=frozenset(),
+            executed_passed_cases=frozenset(passed_cases),
+            test_level_available=total_cases > 0,
+            total_cases=total_cases,
+            passed_cases=passed_count,
+        )
+
+
+def _ctest_localname(tag: Any) -> str:
+    """The local element name of a possibly namespaced XML tag (``{ns}testcase`` → ``testcase``)."""
+    text = str(tag or "")
+    return text.rsplit("}", 1)[-1].strip().lower()
+
+
+def _ctest_case_passed(case: "ET.Element") -> bool:
+    """True iff a ``<testcase>`` has NO ``<failure>``/``<error>``/``<skipped>`` child.
+
+    A skip taints (proves nothing — the same rule the vitest/go adapters and the
+    static authenticity gate apply), so a ``<skipped>`` child is NOT a pass, exactly
+    like a ``<failure>``/``<error>``.
+    """
+    for child in case:
+        if _ctest_localname(child.tag) in ("failure", "error", "skipped"):
+            return False
+    return True
+
+
+# ── C# VSTest TRX report adapter (Contract Kernel verify report surface) ──────
+
+#: The VSTest TRX XML namespace. Every element in a ``*.trx`` file is in this
+#: namespace, so a tag is matched as ``{NS}TagName`` (or via this map).
+_TRX_NS = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"
+
+
+def _trx_local_tag(tag: str) -> str:
+    """The local name of an XML tag, with any ``{namespace}`` prefix stripped."""
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _trx_class_short_name(class_name: str) -> str:
+    """The short (unqualified) class name from a (possibly) namespaced className.
+
+    ``Ns.Sub.FooTests`` → ``FooTests``. A nested type ``Ns.Outer+Inner`` keeps the
+    last ``+`` segment (``Inner``). Used for the best-effort className→file join.
+    """
+    name = (class_name or "").strip()
+    if not name:
+        return ""
+    name = name.rsplit(".", 1)[-1]
+    return name.rsplit("+", 1)[-1]
+
+
+def _trx_cs_file_index(project_root: Path) -> dict[str, str]:
+    """Index ``class-short-name → relfile`` over every ``*.cs`` file in the tree.
+
+    Discovery is SELF-CONTAINED (``rglob("*.cs")`` under the project root, skipping
+    ``bin``/``obj``/``.git``) rather than reusing the shared :func:`_iter_test_files`:
+    that helper's ``_TEST_SUFFIXES`` allow-list recognizes ``.py``/``*_test.go``/
+    ``*.spec.ts`` etc. but NOT ``.cs`` (extending that shared infra table is a
+    different module's concern), so it would discover ZERO C# files. We therefore
+    glob ``.cs`` directly, mirroring the C# oracle adapter's own ``.cs`` discovery.
+
+    The map is best-effort: a C# file USUALLY (by the dominant convention) declares
+    one public test class named after the file (``FooTests.cs`` → ``class FooTests``),
+    so we key on the file STEM as the class-short-name candidate. If two files share a
+    stem the FIRST (sorted) wins — and the attribution stays fail-closed: a case whose
+    class cannot be matched to a file is NOT credited as a FILE pass (see
+    :meth:`DotnetTrxReportAdapter.parse`). Files that cannot be read contribute nothing.
+    """
+    if not project_root.is_dir():
+        return {}
+    index: dict[str, str] = {}
+    for path in sorted(project_root.rglob("*.cs")):
+        parts = set(path.parts)
+        if {"bin", "obj", ".git"} & parts:
+            continue
+        if not path.is_file():
+            continue
+        try:
+            rel = path.resolve().relative_to(project_root.resolve()).as_posix()
+        except (ValueError, OSError):
+            continue
+        rel = _norm_test_path(rel)
+        stem = rel.rsplit("/", 1)[-1][: -len(".cs")]
+        if stem and stem not in index:
+            index[stem] = rel
+    return index
+
+
+@dataclass(frozen=True)
+class DotnetTrxReportAdapter:
+    """``dotnet test`` VSTest **TRX** (XML) reporter adapter (the ``dotnet-trx`` report).
+
+    ``dotnet test --logger "trx;LogFileName=test.trx"`` writes a VSTest TRX file: a
+    ``<TestRun>`` root (in the :data:`_TRX_NS` namespace) carrying
+
+    * ``<Results>`` → many ``<UnitTestResult testName=... outcome="Passed|Failed|
+      NotExecuted|...|Skipped" testId=.../>`` (the per-case OUTCOMES), and
+    * ``<TestDefinitions>`` → ``<UnitTest id=...>`` → ``<TestMethod className=...
+      name=.../>`` (the per-case DEFINITIONS).
+
+    The two are joined by ``testId`` (the result's ``testId`` == the definition's
+    ``id``) to recover each case's ``(className, name)``.
+
+    THE FILE BRIDGE (anti-false-green core, mirroring the Go/vitest adapters). TRX
+    reports ``(className, name)`` — NOT a file path — while the coherence gate
+    reconciles at FILE granularity. We map a case to a relative ``.cs`` file
+    BEST-EFFORT by matching the class SHORT name against a ``*.cs`` whose path stem
+    equals it (the dominant ``FooTests.cs`` → ``class FooTests`` convention). When NO
+    file can be attributed we FAIL CLOSED: the case is NOT credited as a FILE pass
+    (it adds to no ``executed_passed_files`` entry), though its per-case key is still
+    recorded under a stable className-derived key so the run is never deemed empty.
+
+    PASS / TAINT rule (IDENTICAL to Go/vitest — a skip proves nothing): a ``.cs``
+    FILE is in ``executed_passed_files`` only when it had ≥1 ``Passed`` case AND no
+    ``Failed``/``Skipped``/``NotExecuted`` case attributed to it; ANY non-``Passed``
+    outcome (a ``NotExecuted``/``Skipped`` proves nothing — the SAME rule the vitest/go
+    adapters and the static authenticity gate apply) taints the whole file into
+    ``executed_failed_files``. ``executed_passed_cases`` carries the per-case
+    ``"<relfile-or-key>::<className>.<name>"`` keys for the passed cases.
+
+    Raises :class:`RunnerReportUnsupported` on an unreadable / garbled / non-``TestRun``
+    XML — a wholly unparseable report is an observability error, NEVER "nothing ran"
+    (a false-green). Uses stdlib :mod:`xml.etree.ElementTree`.
+    """
+
+    def parse(self, report_path: Path, *, project_root: Path) -> RunnerExecution:
+        try:
+            text = report_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RunnerReportUnsupported(
+                f"dotnet TRX report unreadable at {report_path}: {exc}"
+            ) from exc
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError as exc:
+            raise RunnerReportUnsupported(
+                f"dotnet TRX report at {report_path} is not parseable XML: {exc}"
+            ) from exc
+        if _trx_local_tag(root.tag) != "TestRun":
+            raise RunnerReportUnsupported(
+                f"dotnet TRX report at {report_path} root is "
+                f"<{_trx_local_tag(root.tag)}>, expected <TestRun> "
+                "(an unrecognized report is unreadable, not an empty pass)"
+            )
+
+        # testId → (className, name) from <TestDefinitions>/<UnitTest>/<TestMethod>.
+        defs: dict[str, tuple[str, str]] = {}
+        for unit_test in root.iter():
+            if _trx_local_tag(unit_test.tag) != "UnitTest":
+                continue
+            test_id = unit_test.get("id")
+            if not test_id:
+                continue
+            for child in unit_test.iter():
+                if _trx_local_tag(child.tag) != "TestMethod":
+                    continue
+                class_name = (child.get("className") or "").strip()
+                name = (child.get("name") or "").strip()
+                defs[test_id] = (class_name, name)
+                break
+
+        cs_index = _trx_cs_file_index(project_root)
+
+        # Per-file rollup (coarse signal); per-case keys (the finer reconciliation).
+        file_has_pass: dict[str, bool] = {}
+        file_tainted: set[str] = set()
+        passed_case_keys: set[str] = set()
+        total_cases = 0
+        passed_count = 0
+        saw_result = False
+
+        for result in root.iter():
+            if _trx_local_tag(result.tag) != "UnitTestResult":
+                continue
+            saw_result = True
+            outcome = (result.get("outcome") or "").strip().lower()
+            test_id = result.get("testId") or ""
+            class_name, def_name = defs.get(test_id, ("", ""))
+            # Prefer the definition's (className, name); fall back to the result's own
+            # testName so a result with no matching definition is still keyed.
+            case_name = def_name or (result.get("testName") or "").strip()
+            relfile = cs_index.get(_trx_class_short_name(class_name)) if class_name else None
+            # Stable key: the attributed file when known, else a className-derived key
+            # (NEVER credited as a FILE pass — fail-closed on unattributable cases).
+            key_base = relfile if relfile is not None else (class_name or "<unknown>")
+            qualified = f"{class_name}.{case_name}".strip(".") or case_name or "<case>"
+
+            total_cases += 1
+            if outcome == "passed":
+                passed_count += 1
+                passed_case_keys.add(f"{key_base}::{qualified}")
+                if relfile is not None:
+                    file_has_pass.setdefault(relfile, True)
+            else:
+                # failed / notexecuted / skipped / timeout / aborted / ... — none is a
+                # clean pass; a skip/NotExecuted proves nothing. Taint the FILE (only
+                # possible when the case is attributable; an unattributable non-pass
+                # cannot be credited OR taint a file it was never matched to).
+                if relfile is not None:
+                    file_tainted.add(relfile)
+
+        if not saw_result:
+            raise RunnerReportUnsupported(
+                f"dotnet TRX report at {report_path} contained no <UnitTestResult> "
+                "entries (a TestRun with no results is unreadable, not an empty pass)"
+            )
+
+        passed_files: set[str] = set()
+        failed_files: set[str] = set()
+        for relfile, has_pass in file_has_pass.items():
+            if relfile in file_tainted or not has_pass:
+                failed_files.add(relfile)
+            else:
+                passed_files.add(relfile)
+        failed_files |= file_tainted  # tainted files are failed even with no pass
+
+        return RunnerExecution(
+            executed_passed_files=frozenset(passed_files),
+            executed_failed_files=frozenset(failed_files),
+            executed_passed_cases=frozenset(passed_case_keys),
+            test_level_available=total_cases > 0,
+            total_cases=total_cases,
+            passed_cases=passed_count,
+        )
+
+
+# ── Maven Surefire XML report adapter (parallels GoTestJsonReportAdapter) ─────
+
+
+def _surefire_classname_to_relfile(classname: str) -> str | None:
+    """Map a Surefire ``classname`` to its conventional ``src/test/java`` relfile.
+
+    Surefire reports a fully-qualified test CLASS (``com.example.FooTest``) — NOT a
+    file path — while the coherence gate reconciles at FILE granularity. Maven's
+    standard layout puts a test class ``com.example.FooTest`` at
+    ``src/test/java/com/example/FooTest.java`` (the package path mirrors the dotted
+    name). We convert ``a.b.C`` → ``src/test/java/a/b/C.java``. A NESTED/inner class
+    (``com.example.FooTest$Inner``) folds to its top-level enclosing class file
+    (everything before the first ``$``), the file that physically declares it. An
+    empty / placeholder classname yields ``None`` (no attributable file).
+    """
+    name = (classname or "").strip()
+    if not name:
+        return None
+    top = name.split("$", 1)[0]  # inner class → enclosing top-level class file
+    rel = top.replace(".", "/")
+    if not rel:
+        return None
+    return f"src/test/java/{rel}.java"
+
+
+def _iter_surefire_report_files(report_path: Path) -> list[Path]:
+    """Resolve a Surefire ``report_path`` (a DIR or a FILE) to its XML report files.
+
+    Surefire writes one ``target/surefire-reports/TEST-<class>.xml`` per test class.
+    The campaign may point ``report_path`` at the directory OR at a single file:
+
+    * a directory → glob ``TEST-*.xml`` first (Surefire's canonical XML naming);
+      fall back to ``*.xml`` if no ``TEST-*.xml`` exists (some setups rename), so a
+      non-standard layout is still read rather than silently treated as empty;
+    * a file → that one file.
+
+    Returns a sorted list (deterministic order); empty when the path does not exist
+    or a directory holds no XML (the caller raises :class:`RunnerReportUnsupported`
+    on empty — "nothing parseable" is never silently "nothing ran").
+    """
+    if report_path.is_dir():
+        files = sorted(report_path.glob("TEST-*.xml"))
+        if not files:
+            files = sorted(report_path.glob("*.xml"))
+        return files
+    if report_path.is_file():
+        return [report_path]
+    return []
+
+
+def _iter_surefire_testsuites(root: ET.Element):
+    """Yield every ``<testsuite>`` element from a parsed Surefire XML root.
+
+    A Surefire file's root is normally a single ``<testsuite>``; a ``<testsuites>``
+    wrapper (aggregated reports) holds many. Yields the root itself when it IS a
+    testsuite, plus any nested ``<testsuite>`` descendants — so both shapes parse.
+    """
+    if root.tag == "testsuite":
+        yield root
+    for suite in root.iter("testsuite"):
+        if suite is not root:
+            yield suite
+
+
+@dataclass(frozen=True)
+class SurefireXmlReportAdapter:
+    """Maven Surefire XML reporter adapter (the stack ``surefire-xml`` report).
+
+    ``mvn test`` writes ``target/surefire-reports/TEST-<class>.xml`` — one file per
+    test CLASS. Each ``<testsuite>`` has ``<testcase classname=... name=... />``
+    children; a testcase with a child ``<failure>`` or ``<error>`` FAILED, a child
+    ``<skipped>`` was SKIPPED (NOT a pass — a skip proves nothing, the SAME rule the
+    go-test-json / vitest adapters and the static authenticity gate apply), anything
+    else PASSED.
+
+    THE FILE BRIDGE (anti-false-green core). Surefire reports a ``(classname, name)``
+    — NOT a file path — while the gate reconciles at FILE granularity. Maven's
+    standard layout maps a class ``com.example.FooTest`` → the FILE
+    ``src/test/java/com/example/FooTest.java`` (:func:`_surefire_classname_to_relfile`);
+    we credit a pass ONLY when that file EXISTS on disk under ``project_root``. If the
+    conventional file is absent (a non-standard layout we cannot attribute), the case
+    is NOT credited as a pass for any file (fail-closed: a pass you cannot attribute
+    is never a green VB) — it still counts toward ``total_cases`` so the report is not
+    deemed empty.
+
+    SKIP/FAIL granularity (mirrors the go/vitest "any non-pass taints the FILE"):
+    a test file is in ``executed_passed_files`` only when it had ≥1 passed case AND
+    no failed/skipped case attributed to it; ANY failure OR skip taints it into
+    ``executed_failed_files``. ``executed_passed_cases`` carries
+    ``"<relfile>::<classname>#<name>"`` keys for the passed cases.
+
+    Raises :class:`RunnerReportUnsupported` on a structurally-unreadable report (no
+    XML files found / NO file parsed / a parsed root that is not a testsuite) — never
+    silently treating "nothing parseable" as "nothing ran" (a false-green). Per-file
+    parse errors are tolerated as long as at least ONE file parsed (mirrors the
+    go-test-json tolerance of non-JSON lines); if NO file parses, the report is
+    unreadable → Unsupported.
+    """
+
+    def parse(self, report_path: Path, *, project_root: Path) -> RunnerExecution:
+        report_files = _iter_surefire_report_files(report_path)
+        if not report_files:
+            raise RunnerReportUnsupported(
+                f"surefire XML report has no XML files at {report_path} "
+                "(a missing/empty report is unreadable, not an empty pass)"
+            )
+
+        # Per-file rollup at TWO granularities (parallels GoTestJsonReportAdapter):
+        #  * PER-FILE coarse signal: a file is passed iff ≥1 pass AND no fail/skip.
+        #  * PER-CASE keys: each PASSED case contributes "<relfile>::<class>#<name>".
+        file_passed: dict[str, bool] = {}   # rel → had ≥1 passed case
+        file_tainted: set[str] = set()      # any fail/skip ⇒ not a clean file
+        passed_case_keys: set[str] = set()
+        total_cases = 0
+        passed_count = 0
+        parsed_any = False
+
+        for xml_file in report_files:
+            try:
+                tree = ET.parse(xml_file)
+            except (ET.ParseError, OSError):
+                # Tolerate a single unparseable file (mirrors go-test-json's tolerance
+                # of non-JSON lines) — but only as long as SOME file parses; if none
+                # do, the empty-result guard below raises Unsupported (never a silent
+                # empty pass).
+                continue
+            root = tree.getroot()
+            suites = list(_iter_surefire_testsuites(root))
+            if not suites:
+                # A well-formed XML whose root is not a <testsuite> is structurally
+                # wrong for Surefire — skip it (if NO file yields a testsuite, the
+                # empty guard turns the whole report into Unsupported).
+                continue
+            parsed_any = True
+            for suite in suites:
+                for case in suite.findall("testcase"):
+                    classname = (case.get("classname") or "").strip()
+                    name = (case.get("name") or "").strip()
+                    total_cases += 1
+                    relfile = _surefire_classname_to_relfile(classname)
+                    on_disk = (
+                        relfile is not None
+                        and (project_root / relfile).is_file()
+                    )
+                    failed = (
+                        case.find("failure") is not None
+                        or case.find("error") is not None
+                    )
+                    skipped = case.find("skipped") is not None
+                    if failed or skipped:
+                        # fail OR skip — a skip proves nothing (go/vitest/authenticity
+                        # parity), a fail is honest. Either taints the FILE (when it is
+                        # attributable on disk); an unattributable taint cannot be
+                        # credited to any file, so it simply yields no passed case.
+                        if on_disk and relfile is not None:
+                            file_tainted.add(relfile)
+                        continue
+                    # PASSED.
+                    passed_count += 1
+                    if on_disk and relfile is not None:
+                        file_passed[relfile] = True
+                        passed_case_keys.add(f"{relfile}::{classname}#{name}")
+                    # else: a pass we cannot attribute to a real file is NOT credited
+                    # (fail-closed — never a green VB you cannot point at a file for).
+
+        if not parsed_any:
+            raise RunnerReportUnsupported(
+                f"surefire XML report at {report_path} had no parseable <testsuite> "
+                "(every file was unreadable / not a testsuite — unreadable, not an "
+                "empty pass)"
+            )
+
+        passed_files: set[str] = set()
+        failed_files: set[str] = set()
+        for relfile in file_passed:
+            if relfile in file_tainted:
+                failed_files.add(relfile)
+            else:
+                passed_files.add(relfile)
+        failed_files |= file_tainted  # tainted files are failed even with no pass
+
+        return RunnerExecution(
+            executed_passed_files=frozenset(passed_files),
+            executed_failed_files=frozenset(failed_files),
+            executed_passed_cases=frozenset(passed_case_keys),
+            test_level_available=total_cases > 0,
+            total_cases=total_cases,
+            passed_cases=passed_count,
+        )

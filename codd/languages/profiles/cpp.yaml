@@ -1,0 +1,250 @@
+# C++ language profile (design §1.2–1.9, §5.1), modeled on go.yaml.
+#
+# Contract-Kernel data only — the core never branches on the language NAME; the
+# cpp-toolchain oracle adapter + the ctest-junit report adapter carry every
+# C++-specific behavior. (Registration of those adapters is done centrally by the
+# parent, not here.)
+#
+# Load-bearing notes (asserted by tests/languages/test_profile_cpp.py):
+#   * module_root = "."           — CMakeLists.txt lives at the repo root.
+#   * source_sets = src/** (sources) + include/** (headers). C++ does NOT use the
+#     Java-style src/main/... layout; the conventional layout is include/ + src/.
+#   * The Go-only "no src/" invariant is GO-SPECIFIC (it exists because go.mod has
+#     no package root); C++ legitimately uses src/, so NO forbidden_generated_prefixes
+#     entry for src/ is declared here.
+#   * test_sets   = tests/** (GoogleTest / Catch2 sources).
+#   * package_root.kind = none    — C++ has no single package root (like Go).
+#   * strictness  = strict        — a new language is strict from day one.
+#   * implement_oracle = composite (configure THEN build), adapter cpp-toolchain.
+#   * verify = ctest, JUnit report via ctest-junit.
+#
+# Placeholders ({module_root}, {cpp_standard}, ...) are LITERAL template strings —
+# substitution is PathPlanner's job in a later phase.
+
+id: cpp
+aliases: ["c++", "cxx", "cplusplus"]
+display_name: "C++"
+strictness: strict
+file_extensions: [".h", ".hpp", ".hh", ".cc", ".cpp", ".cxx"]
+
+layout:
+  repo_root: "."
+  module_root: "."
+  manifest_root: "."
+  default_command_cwd: "{module_root}"
+
+  # C++ has no single package root (like Go); the source/header split is expressed
+  # via source_sets, not a package_root.
+  package_root:
+    kind: none
+
+  source_sets:
+    - id: src
+      role: first_party
+      root: "src"
+      file_globs:
+        - "src/**/*.cpp"
+        - "src/**/*.cc"
+        - "src/**/*.cxx"
+
+    - id: include
+      role: first_party_public
+      root: "include"
+      file_globs:
+        - "include/**/*.h"
+        - "include/**/*.hpp"
+        - "include/**/*.hh"
+
+  test_sets:
+    - id: tests
+      role: unit
+      root: "tests"
+      file_globs:
+        - "tests/**/*.cpp"
+        - "tests/**/*.cc"
+        - "tests/**/*.cxx"
+
+# Preserved verbatim (modeled as profile.extra in Phase 1) — note there is NO
+# forbidden_generated_prefixes for src/ (that invariant is Go-specific).
+path_rules:
+  canonical_path_base: repo_root
+  path_separator: "/"
+
+  output_roles:
+    build_manifest:
+      owner: harness
+      path: "CMakeLists.txt"
+
+    public_header_file:
+      owner: sut
+      template: "include/{package}/{name}.hpp"
+
+    source_file:
+      owner: sut
+      template: "src/{package}/{name}.cpp"
+
+    test_file:
+      owner: sut
+      template: "tests/{name}_test.cpp"
+
+toolchain:
+  manifest:
+    path: "CMakeLists.txt"
+    format: cmake
+    required: true
+
+  module_identity:
+    source: manifest
+    path: "CMakeLists.txt"
+    field: "project"
+    default_template: "{package_name}"
+
+  # C++/CMake has no universal lock/checksum file (deps come via FetchContent /
+  # find_package / a vendored submodule). None declared.
+  dependency_integrity_files: []
+
+  package_manager:
+    id: cmake
+    materialize_command:
+      argv: ["cmake", "-S", ".", "-B", "build"]
+      cwd: "{module_root}"
+      network_policy: controlled
+
+imports:
+  resolver_adapter: cpp-include
+
+  first_party:
+    rule: include_path_prefix
+    base: "include"
+
+  stdlib:
+    classifier: adapter
+
+commands:
+  configure:
+    argv: ["cmake", "-S", ".", "-B", "build"]
+    cwd: "{module_root}"
+    # The cpp implement-oracle's configure step does NOT require materialized deps:
+    # the cpp-toolchain adapter classifies a missing system toolchain component
+    # (e.g. find_package could-not-find) as an env concern, not a coherence failure
+    # — so the oracle opts OUT of the contract install preflight (mirrors Go's
+    # typecheck requires_materialized_deps: false). false here, not true.
+    requires_materialized_deps: false
+    scope:
+      must_include_source_sets: ["src", "include"]
+
+  build:
+    argv: ["cmake", "--build", "build"]
+    cwd: "{module_root}"
+    # The second oracle step. Same env tolerance rationale as configure.
+    requires_materialized_deps: false
+    scope:
+      must_include_source_sets: ["src", "include"]
+
+  verify:
+    argv: ["ctest", "--test-dir", "build", "--output-junit", "build/ctest-junit.xml"]
+    cwd: "{module_root}"
+    report:
+      path: "build/ctest-junit.xml"
+      format: ctest-junit
+      adapter: ctest-junit
+    scope:
+      must_include_test_sets: ["tests"]
+
+# Implement-time oracle (Contract Kernel §1): a composite of configure + build,
+# resolved by the cpp-toolchain adapter. References command ids only — configure
+# THEN build is the implement-time oracle (the C++ analogue of Go's typecheck+vet
+# two-step: configure proves the build description is coherent, build proves the
+# generated translation units compile + link against each other's headers/symbols).
+implement_oracle:
+  kind: composite
+  adapter: cpp-toolchain
+  steps:
+    - command: configure
+    - command: build
+
+tests:
+  semantics_adapter: cpp-test-semantics
+  runner_report_adapter: ctest-junit
+
+  test_file_globs:
+    - "tests/**/*.cpp"
+    - "tests/**/*.cc"
+    - "tests/**/*.cxx"
+
+  authenticity_policy:
+    marker_must_be_inside_executable_test_block: true
+    skipped_is_not_authentic: true
+    focused_only_is_not_authentic: true
+    assertion_required: true
+    accepted_assertion_confidence: ["certain"]
+
+  test_block_kinds:
+    - googletest_test
+    - catch2_test_case
+
+  assertion_hints:
+    libraries:
+      - import_path: "gtest/gtest.h"
+        functions:
+          - EXPECT_EQ
+          - EXPECT_NE
+          - EXPECT_TRUE
+          - EXPECT_FALSE
+          - ASSERT_EQ
+          - ASSERT_TRUE
+          - ASSERT_THROW
+      - import_path: "catch2/catch_test_macros.hpp"
+        functions:
+          - REQUIRE
+          - CHECK
+          - REQUIRE_THROWS
+          - CHECK_THROWS
+
+verify:
+  command: verify
+  report:
+    path: "build/ctest-junit.xml"
+    format: ctest-junit
+    adapter: ctest-junit
+
+  execution_policy:
+    every_vb_test_block_must_execute: true
+    every_vb_test_block_must_pass: true
+    skipped_is_not_green: true
+    missing_from_report_is_not_green: true
+
+scaffold:
+  adapter: generic-template
+  owned_files:
+    - "CMakeLists.txt"
+
+  templates:
+    - path: "CMakeLists.txt"
+      content_template: |
+        cmake_minimum_required(VERSION 3.20)
+        project({package_name} LANGUAGES CXX)
+
+        set(CMAKE_CXX_STANDARD {cpp_standard})
+        set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+        enable_testing()
+
+artifacts:
+  harness_root: ".codd"
+
+  harness_owned:
+    - ".codd/**"
+    - "CMakeLists.txt"
+
+  build_outputs:
+    default_dir: "build"
+    orphan_policy: harness_owned
+
+  ignored:
+    - "build/"
+
+# CI scaffold (design §v2.70): toolchain bootstrap for a generated CI workflow.
+ci:
+  setup_steps:
+    - run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build

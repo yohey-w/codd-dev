@@ -874,7 +874,10 @@ class LayoutProfile:
 
         try:
             from codd.vb_marker_authenticity import (
+                CppTestBlockProfile,
+                CSharpTestBlockProfile,
                 GoTestBlockProfile,
+                JavaTestBlockProfile,
                 PythonTestBlockProfile,
                 TypeScriptTestBlockProfile,
             )
@@ -882,11 +885,16 @@ class LayoutProfile:
             return None
 
         # adapter-id → test-block parser. The keys are CAPABILITY ids from the
-        # language profiles (never language names), so this is language-free.
+        # language profiles (never language names), so this is language-free: a new
+        # compiler stack registers its parser by declaring its semantics adapter id
+        # in its YAML + adding ONE entry here — no language-name logic in the gate.
         builders = {
             "python-test-semantics": PythonTestBlockProfile,
             "typescript-test-semantics": TypeScriptTestBlockProfile,
             "go-test-semantics": GoTestBlockProfile,
+            "java-junit-semantics": JavaTestBlockProfile,
+            "csharp-test-semantics": CSharpTestBlockProfile,
+            "cpp-test-semantics": CppTestBlockProfile,
         }
         builder = builders.get(str(adapter_id))
         return builder() if builder is not None else None

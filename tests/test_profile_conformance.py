@@ -88,6 +88,97 @@ CONFORMANCE_FIXTURES: dict[str, dict] = {
             ),
         },
     },
+    "java": {
+        "profile": LayoutProfile(
+            language="java", package_name="app",
+            source_root="src/main/java", package_root="src/main/java", test_root="tests",
+        ),
+        "filename": "XTest.java",
+        "cases": {
+            # @Test method, no assertion (calls add but checks nothing) → reject.
+            "fake_no_assertion": (
+                "import org.junit.jupiter.api.Test;\n\nclass XTest {\n"
+                f"    // {_MARKER}\n    @Test\n    void x() {{\n        add(2, 3);\n    }}\n}}\n"
+            ),
+            # @Test method with a CONSTANT-only assertion → reject (constant_direct).
+            "fake_constant_only": (
+                "import org.junit.jupiter.api.Test;\n"
+                "import static org.junit.jupiter.api.Assertions.assertEquals;\n\nclass XTest {\n"
+                f"    // {_MARKER}\n    @Test\n    void x() {{\n        assertEquals(1, 1);\n    }}\n}}\n"
+            ),
+            # @Disabled @Test → reject (not executable).
+            "fake_skipped": (
+                "import org.junit.jupiter.api.Test;\n"
+                "import org.junit.jupiter.api.Disabled;\n"
+                "import static org.junit.jupiter.api.Assertions.assertEquals;\n\nclass XTest {\n"
+                f"    // {_MARKER}\n    @Disabled\n    @Test\n    void x() {{\n        assertEquals(5, add(2, 3));\n    }}\n}}\n"
+            ),
+            # @Test with a real assertion referencing the SUT (add) → credit.
+            "real_covering": (
+                "import org.junit.jupiter.api.Test;\n"
+                "import static org.junit.jupiter.api.Assertions.assertEquals;\n\nclass XTest {\n"
+                f"    // {_MARKER}\n    @Test\n    void x() {{\n        assertEquals(5, add(2, 3));\n    }}\n}}\n"
+            ),
+        },
+    },
+    "csharp": {
+        "profile": LayoutProfile(
+            language="csharp", package_name="app",
+            source_root="src", package_root="src", test_root="tests",
+        ),
+        "filename": "XTests.cs",
+        "cases": {
+            # [Fact] method, no assertion → reject.
+            "fake_no_assertion": (
+                "using Xunit;\n\npublic class XTests {\n"
+                f"    // {_MARKER}\n    [Fact]\n    public void X() {{\n        Add(2, 3);\n    }}\n}}\n"
+            ),
+            # [Fact] with a CONSTANT-only assertion → reject (constant_direct).
+            "fake_constant_only": (
+                "using Xunit;\n\npublic class XTests {\n"
+                f"    // {_MARKER}\n    [Fact]\n    public void X() {{\n        Assert.True(true);\n    }}\n}}\n"
+            ),
+            # [Fact(Skip=...)] → reject (not executable).
+            "fake_skipped": (
+                "using Xunit;\n\npublic class XTests {\n"
+                f'    // {_MARKER}\n    [Fact(Skip="wip")]\n    public void X() {{\n        Assert.Equal(5, Add(2, 3));\n    }}\n}}\n'
+            ),
+            # [Fact] with a real assertion referencing the SUT (Add) → credit.
+            "real_covering": (
+                "using Xunit;\n\npublic class XTests {\n"
+                f"    // {_MARKER}\n    [Fact]\n    public void X() {{\n        Assert.Equal(5, Add(2, 3));\n    }}\n}}\n"
+            ),
+        },
+    },
+    "cpp": {
+        "profile": LayoutProfile(
+            language="cpp", package_name="app",
+            source_root="src", package_root="src", test_root="tests",
+        ),
+        "filename": "x_test.cpp",
+        "cases": {
+            # gtest TEST, no assertion → reject.
+            "fake_no_assertion": (
+                "#include <gtest/gtest.h>\n"
+                f"// {_MARKER}\nTEST(MySuite, Foo) {{ add(2, 3); }}\n"
+            ),
+            # gtest TEST with a CONSTANT-only assertion → reject (constant_direct).
+            "fake_constant_only": (
+                "#include <gtest/gtest.h>\n"
+                f"// {_MARKER}\nTEST(MySuite, Foo) {{ EXPECT_TRUE(true); }}\n"
+            ),
+            # gtest DISABLED_ prefix → reject (not executable).
+            "fake_skipped": (
+                "#include <gtest/gtest.h>\n"
+                f"// {_MARKER}\nTEST(MySuite, DISABLED_Foo) {{ EXPECT_EQ(5, add(2, 3)); }}\n"
+            ),
+            # gtest TEST with a real assertion referencing the SUT (add) → credit.
+            "real_covering": (
+                "#include <gtest/gtest.h>\n"
+                f"// {_MARKER}\nTEST(MySuite, Foo) {{ EXPECT_EQ(5, add(2, 3)); }}\n"
+            ),
+        },
+    },
 }
 
 

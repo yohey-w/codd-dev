@@ -1,0 +1,221 @@
+# Java language profile (design §1.2–1.9, §5.1) — modeled on go.yaml.
+#
+# Load-bearing invariants (asserted by tests/languages/test_profile_java.py):
+#   * module_root = "."   — pom.xml lives at the repo root.
+#   * source_sets = src/main/java/** (Maven's standard main source root).
+#   * test_sets   = src/test/java/** (Maven's standard test source root).
+#   * package_root.kind = none — Java has no single package root in the Go sense.
+#   * strictness  = strict — a new language is strict from day one.
+#   * implement_oracle kind=composite, adapter=java-toolchain, step=[compile].
+#   * verify report adapter = surefire-xml (Maven Surefire XML).
+#
+# NOTE on src/: Java legitimately uses ``src/main/java`` + ``src/test/java`` —
+# this is Maven's standard directory layout, NOT the forbidden bare ``src/`` of the
+# Go no-src invariant (that invariant is Go-specific). So NO
+# forbidden_generated_prefixes: ["src/"] here.
+#
+# Placeholders ({package_name}, {java_version}, ...) are LITERAL template strings
+# in Phase 1 — substitution is PathPlanner's job later.
+
+id: java
+aliases: ["jvm"]
+display_name: "Java"
+strictness: strict
+file_extensions: [".java"]
+
+layout:
+  repo_root: "."
+  module_root: "."
+  manifest_root: "."
+  default_command_cwd: "{module_root}"
+
+  package_root:
+    kind: none
+
+  source_sets:
+    - id: main
+      role: first_party
+      root: "src/main/java"
+      file_globs:
+        - "src/main/java/**/*.java"
+
+  test_sets:
+    - id: unit
+      role: unit
+      root: "src/test/java"
+      file_globs:
+        - "src/test/java/**/*.java"
+
+# Preserved verbatim (modeled as profile.extra in Phase 1).
+path_rules:
+  canonical_path_base: repo_root
+  path_separator: "/"
+
+  output_roles:
+    module_manifest:
+      owner: harness
+      path: "pom.xml"
+
+    main_source_file:
+      owner: sut
+      template: "src/main/java/{package_path}/{name}.java"
+
+    test_source_file:
+      owner: sut
+      template: "src/test/java/{package_path}/{name}Test.java"
+
+toolchain:
+  manifest:
+    path: "pom.xml"
+    format: pom.xml
+    required: true
+
+  module_identity:
+    source: manifest
+    path: "pom.xml"
+    field: "artifactId"
+    default_template: "{package_name}"
+
+  package_manager:
+    id: maven
+    materialize_command:
+      argv: ["mvn", "-q", "dependency:resolve"]
+      cwd: "{module_root}"
+      network_policy: controlled
+    reconcile_command:
+      argv: ["mvn", "-q", "versions:use-latest-versions"]
+      cwd: "{module_root}"
+      mutates:
+        - "pom.xml"
+    frozen_mode:
+      argv_flags: ["-o"]
+
+imports:
+  resolver_adapter: java-package
+
+  first_party:
+    rule: source_root_package
+    source_root: "src/main/java"
+
+  stdlib:
+    classifier: adapter
+
+commands:
+  compile:
+    argv: ["mvn", "-q", "-e", "compile"]
+    cwd: "{module_root}"
+    # The Java implement-oracle ``compile`` step is the implement-time coherence
+    # gate (javac via maven-compiler). It must NOT force the contract install
+    # preflight: maven resolves its own classpath, so a separate ``dependency:resolve``
+    # before the oracle is not required (mirrors Go's typecheck ``requires_materialized_deps:
+    # false``). A stale ``true`` would wrongly trigger the preflight for Java.
+    requires_materialized_deps: false
+    scope:
+      must_include_source_sets: ["main"]
+
+  verify:
+    argv: ["mvn", "-q", "test"]
+    cwd: "{module_root}"
+    report:
+      capture: none
+      path: "target/surefire-reports"
+      format: surefire-xml
+      adapter: surefire-xml
+    scope:
+      must_include_test_sets: ["unit"]
+
+# Implement-time oracle (Contract Kernel §1): the ``compile`` command, resolved by
+# the java-toolchain adapter. References command ids only.
+implement_oracle:
+  kind: composite
+  adapter: java-toolchain
+  steps:
+    - command: compile
+
+tests:
+  semantics_adapter: java-junit-semantics
+  runner_report_adapter: surefire-xml
+
+  test_file_globs:
+    - "src/test/java/**/*.java"
+
+  authenticity_policy:
+    marker_must_be_inside_executable_test_block: true
+    skipped_is_not_authentic: true
+    focused_only_is_not_authentic: true
+    assertion_required: true
+    accepted_assertion_confidence: ["certain"]
+
+  test_block_kinds:
+    - junit_test_method
+
+  assertion_hints:
+    junit_jupiter:
+      import_path: "org.junit.jupiter.api"
+      assertion_methods:
+        - assertEquals
+        - assertTrue
+        - assertFalse
+        - assertNotNull
+        - assertNull
+        - assertThrows
+        - assertSame
+        - assertArrayEquals
+      annotation_methods:
+        - Test
+      skip_annotations:
+        - Disabled
+
+verify:
+  command: verify
+  report:
+    path: "target/surefire-reports"
+    format: surefire-xml
+    adapter: surefire-xml
+
+  execution_policy:
+    every_vb_test_block_must_execute: true
+    every_vb_test_block_must_pass: true
+    skipped_is_not_green: true
+    missing_from_report_is_not_green: true
+
+scaffold:
+  adapter: generic-template
+  owned_files:
+    - "pom.xml"
+
+  templates:
+    - path: "pom.xml"
+      content_template: |
+        <project xmlns="http://maven.apache.org/POM/4.0.0">
+          <modelVersion>4.0.0</modelVersion>
+          <groupId>{group_id}</groupId>
+          <artifactId>{package_name}</artifactId>
+          <version>0.1.0</version>
+          <properties>
+            <maven.compiler.release>{java_version}</maven.compiler.release>
+          </properties>
+        </project>
+
+artifacts:
+  harness_root: ".codd"
+
+  harness_owned:
+    - ".codd/**"
+    - "pom.xml"
+
+  build_outputs:
+    default_dir: "target"
+    orphan_policy: harness_owned
+
+  ignored:
+    - "target/"
+    - "*.class"
+
+# CI scaffold (design §v2.70): toolchain bootstrap for a generated CI workflow.
+ci:
+  setup_steps:
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "21"

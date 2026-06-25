@@ -3125,6 +3125,482 @@ def _go_split_param_names(params: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# C# (xUnit / NUnit / MSTest) structural adapter.
+#
+# A test block is a test METHOD annotated with a recognized test attribute
+# (``[Fact]`` / ``[Theory]`` xUnit, ``[Test]`` / ``[TestCase]`` NUnit,
+# ``[TestMethod]`` MSTest). C# has no flat-function tests (everything lives in a
+# class) and no Go-style subtests, so — unlike :class:`GoTestBlockProfile` — there
+# is NO group→leaf fan-out: each annotated method is a single leaf coverage
+# target. Skip is an attribute fact (xUnit ``[Fact(Skip="…")]`` / ``[Theory(Skip=
+# …)]``, NUnit ``[Ignore("…")]``, MSTest ``[Ignore]``) — NOT a body call (C# has no
+# in-body skip idiom like Go's ``t.Skip()``), so it is read off the attribute block
+# ABOVE the signature. A PRIMITIVE assertion is an ``Assert.<Method>(`` call on the
+# framework's static ``Assert`` API (xUnit ``Assert.Equal``/``True``/``Throws``/…,
+# NUnit ``Assert.That``/``AreEqual``/…, MSTest ``Assert.AreEqual``/``IsTrue``/…); a
+# bare named-helper call is resolved one hop via the shared evidence engine.
+#
+# REUSE: ``_go_strip_comments`` (C# uses ``//`` line + ``/* */`` block comments,
+# identical to Go), ``_go_match_brace`` (string-aware brace matcher), ``_balanced_
+# args`` (call-arg extraction) and ``_go_reference_idents`` (identifier-reference
+# harvest, ``.``-selector aware, string/comment stripped) — C#'s lexical surface
+# for these is the same as Go's, so re-using them keeps ONE audited implementation
+# of each rather than a parallel C# copy that could drift.
+# ---------------------------------------------------------------------------
+
+
+#: C# reserved words / literals / obvious builtins that are NOT credit-worthy
+#: references inside an ``Assert.X(...)`` argument list — the C# analogue of
+#: :data:`_GO_IGNORED_NAMES`. The ``Assert`` token itself is ignored (it is the
+#: assertion API 器, not an observed value, so ``Assert.Equal(1, 1)`` must not
+#: anchor via ``Assert``), as are the literals ``true``/``false``/``null`` and the
+#: common assertion method names (so ``Assert.Equal``'s ``Equal`` selector, already
+#: dropped by :func:`_go_reference_idents`, is doubly safe). A SUT call name
+#: (``Add``), a local variable, an expected/actual var, an enum/const NAME a test
+#: declares are NEVER here, so ``Assert.Equal(5, Add(2, 3))`` (``Add``) stays GREEN
+#: while ``Assert.Equal(1, 1)`` / ``Assert.True(true)`` (only ignored tokens)
+#: become RED (``constant_direct``).
+_CSHARP_IGNORED_NAMES = frozenset(
+    {
+        # The assertion API handle + framework receiver tokens.
+        "Assert",
+        "Xunit",
+        "NUnit",
+        "Is",  # NUnit constraint root: ``Assert.That(x, Is.EqualTo(1))`` → ``Is``.
+        # Boolean / null literals.
+        "true",
+        "false",
+        "null",
+        # Common assertion method names (selector fields are already dropped by
+        # _go_reference_idents, but harvesting belt-and-suspenders for any call
+        # form that surfaces the bare method name).
+        "Equal",
+        "NotEqual",
+        "True",
+        "False",
+        "Null",
+        "NotNull",
+        "Same",
+        "NotSame",
+        "Throws",
+        "ThrowsAsync",
+        "Contains",
+        "DoesNotContain",
+        "Empty",
+        "NotEmpty",
+        "That",
+        "AreEqual",
+        "AreNotEqual",
+        "AreSame",
+        "IsTrue",
+        "IsFalse",
+        "IsNull",
+        "IsNotNull",
+        "IsInstanceOf",
+        # C# keywords / type names that may appear in an inline arg expression
+        # (``Assert.Equal(typeof(int), x.GetType())``) and prove nothing on their
+        # own — a SUT call/local in the SAME arg still anchors.
+        "var",
+        "new",
+        "typeof",
+        "nameof",
+        "default",
+        "void",
+        "int",
+        "uint",
+        "long",
+        "ulong",
+        "short",
+        "ushort",
+        "byte",
+        "sbyte",
+        "bool",
+        "char",
+        "string",
+        "object",
+        "float",
+        "double",
+        "decimal",
+        "return",
+        "if",
+        "else",
+        "for",
+        "foreach",
+        "while",
+        "switch",
+        "case",
+        "this",
+        "base",
+        "async",
+        "await",
+        "public",
+        "private",
+        "protected",
+        "internal",
+        "static",
+    }
+)
+
+#: A recognized C# test-method ATTRIBUTE name (without the leading ``[``). xUnit
+#: ``Fact``/``Theory``, NUnit ``Test``/``TestCase``, MSTest ``TestMethod``. The
+#: attribute may carry args (``Fact(Skip="…")``) and may be one of several stacked
+#: attributes (``[Trait(...)] [Fact]``); the parser tolerates other attributes in
+#: the block above the signature and only requires that AT LEAST ONE of these is
+#: present (otherwise the method is an ordinary, non-test method and is skipped).
+_CSHARP_TEST_ATTRIBUTES = (
+    "Fact",
+    "Theory",
+    "Test",
+    "TestCase",
+    "TestMethod",
+)
+#: ``[<Attr>`` opener for any recognized test attribute (word-bounded after ``[``).
+#: Matches ``[Fact]``, ``[Fact(Skip="x")]``, ``[Theory(...)]``, ``[Test]`` etc. We
+#: anchor on the ``[`` + attribute name; the attribute's optional ``(...)`` args
+#: and the ``]`` are scanned separately when we need the Skip fact.
+_CSHARP_TEST_ATTR_RE = re.compile(
+    r"\[\s*(?P<attr>" + "|".join(_CSHARP_TEST_ATTRIBUTES) + r")\b"
+)
+#: A C# method SIGNATURE opener: optional modifiers, optional return type, the
+#: method NAME, a parameter ``(...)`` list, then the body ``{``. Permissive on
+#: modifiers/return type (``public``/``private``/``static``/``async``/``Task``/
+#: ``void``/``Task<T>`` …) because the test attribute above is what authorizes the
+#: block; this regex only needs to LOCATE the name + body brace. ``[^;{(\n]*?`` for
+#: the leading modifiers/return type stays non-greedy and forbids ``;`` (so a field
+#: / abstract-method-without-body declaration is not matched), ``(`` / ``{`` (so
+#: the name is the token immediately before the param list) and ``\n`` (so the
+#: head + name stay on the signature line — C# signatures conventionally do).
+_CSHARP_METHOD_SIG_RE = re.compile(
+    r"(?P<indent>[ \t]*)(?P<head>[A-Za-z_][^;{(\n]*?\b)"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{]*?\)\s*(?:where[^{;]*?)?\{",
+    re.DOTALL,
+)
+#: An ``[Ignore`` attribute (NUnit / MSTest) anywhere in a method's attribute block
+#: ⇒ the method is skipped (``[Ignore]`` or ``[Ignore("reason")]``).
+_CSHARP_IGNORE_ATTR_RE = re.compile(r"\[\s*Ignore\b")
+#: ``Skip=`` inside an xUnit ``[Fact(...)]`` / ``[Theory(...)]`` attribute's arg
+#: list ⇒ the test is skipped (``[Fact(Skip="wip")]``). Matched against the
+#: attribute's argument text only (extracted via brace/paren scan) so a ``Skip=``
+#: appearing in an unrelated string elsewhere never marks a test skipped.
+_CSHARP_SKIP_ARG_RE = re.compile(r"\bSkip\s*=")
+#: A C# ``Assert.<Method>(`` primitive-assertion call: the static ``Assert`` API
+#: followed by a Capitalized method name and ``(``. Keyed on ``Assert.`` + an
+#: UpperCamel method (covers xUnit ``Assert.Equal``/``True``/``Throws``, NUnit
+#: ``Assert.That``/``AreEqual``, MSTest ``Assert.IsTrue``/``IsNotNull`` …) without
+#: enumerating every method name. Constant-only-ness is decided later from the ARG
+#: text, never the method name, so this permissive match never false-GREENs.
+#: ``(?<![A-Za-z0-9_.])`` so a member access ``foo.Assert.X`` (an unrelated SUT
+#: type that happens to expose an ``Assert`` member) does not masquerade as the
+#: framework's static ``Assert``.
+_CSHARP_ASSERT_CALL_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])Assert\.[A-Z][A-Za-z0-9_]*\s*\("
+)
+
+
+def _csharp_attr_args(text: str, attr_open_idx: int) -> str:
+    """The argument text of a C# attribute whose ``[`` is at ``attr_open_idx``.
+
+    For ``[Fact(Skip="wip")]`` this returns ``Skip="wip"`` (the text inside the
+    attribute's ``(...)``). When the attribute has NO ``(`` before its closing
+    ``]`` (a bare ``[Fact]``), returns ``""``. Best-effort and string-aware (a
+    ``)`` inside a string arg does not close the group); used only to look for a
+    ``Skip=`` argument, so a fail-open empty result simply means "not skipped",
+    which for the bare ``[Fact]`` is correct.
+    """
+
+    n = len(text)
+    # Find the attribute's own ``]`` (so we never read into a SIBLING attribute's
+    # parens) and its ``(`` if any, scanning string-aware.
+    i = attr_open_idx
+    in_str: str | None = None
+    prev = ""
+    paren_at = -1
+    while i < n:
+        ch = text[i]
+        if in_str is not None:
+            if ch == in_str and prev != "\\":
+                in_str = None
+            prev = ch
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            in_str = ch
+        elif ch == "(" and paren_at < 0:
+            paren_at = i
+        elif ch == "]" and paren_at < 0:
+            return ""  # bare attribute, no args before the closer.
+        elif ch == "(" and paren_at >= 0:
+            break
+        prev = ch
+        i += 1
+    if paren_at < 0:
+        return ""
+    return _balanced_args(text, paren_at)
+
+
+@dataclass(frozen=True)
+class CSharpTestBlockProfile:
+    """C# (xUnit / NUnit / MSTest) structural adapter.
+
+    A test block is a test METHOD annotated with a recognized test attribute
+    (``[Fact]`` / ``[Theory]`` xUnit, ``[Test]`` / ``[TestCase]`` NUnit,
+    ``[TestMethod]`` MSTest) inside a test class. Its body is brace-matched with
+    :func:`_go_match_brace` (string-aware). Unlike :class:`GoTestBlockProfile`
+    there are NO subtests / no group→leaf fan-out: every annotated method is a
+    single LEAF coverage target (C# tests live in classes, and a ``[Theory]``'s
+    data rows are not separately-markable blocks). The block's ``start_line`` is
+    the line of the method's FIRST recognized test attribute (``[Fact]``), so a
+    ``codd: covers`` marker written on the line immediately ABOVE the attribute
+    attaches as a LEADING marker with an empty between-range (the same shape as a
+    marker above a Go ``func TestX``).
+
+    SKIP is an ATTRIBUTE fact, not a body call (C# has no ``t.Skip()`` idiom): an
+    xUnit ``[Fact(Skip="…")]`` / ``[Theory(Skip=…)]`` (a ``Skip=`` argument inside
+    the test attribute), or a NUnit/MSTest ``[Ignore]`` / ``[Ignore("…")]``
+    attribute on the method. A PRIMITIVE assertion is an ``Assert.<Method>(`` call
+    on the framework's static ``Assert`` API; a bare named-helper call
+    (``VerifyResult(actual)``) is NOT primitive and is resolved one hop via
+    :meth:`resolve_assertion_evidence`.
+
+    PURE and best-effort: a parse it cannot do returns ``[]`` (the gate then
+    degrades for that file), never raises.
+    """
+
+    def handles_file(self, rel_path: str) -> bool:
+        """Whether ``rel_path`` is a C# test file.
+
+        Permissive (the gate degrades on a file it cannot parse, so a false
+        POSITIVE here is harmless; a false NEGATIVE would silently skip a real C#
+        test). True iff the file is a ``.cs`` file AND it is either under a
+        ``tests`` / ``.Tests`` path segment (the conventional C# test-project
+        location) OR its basename matches the conventional ``*Test.cs`` /
+        ``*Tests.cs`` naming. The conformance fixture is ``tests/XTests.cs``, which
+        satisfies BOTH the path and the basename predicate.
+        """
+
+        if not rel_path.endswith(".cs"):
+            return False
+        lowered = rel_path.replace("\\", "/").lower()
+        if "/tests/" in f"/{lowered}" or ".tests/" in lowered or lowered.startswith("tests/"):
+            return True
+        base = lowered.rsplit("/", 1)[-1]
+        return base.endswith("test.cs") or base.endswith("tests.cs")
+
+    def parse_test_blocks(self, text: str) -> list[TestBlock]:
+        """Parse ``text`` into one leaf :class:`TestBlock` per annotated test method.
+
+        For each method signature, look BACKWARD over the contiguous attribute /
+        comment / blank block immediately above it for a recognized test attribute
+        (``[Fact]`` / ``[Theory]`` / ``[Test]`` / ``[TestCase]`` / ``[TestMethod]``);
+        a method with no such attribute is an ordinary method and is skipped. The
+        block's ``start_line`` is the line of that FIRST test attribute so a marker
+        placed directly above the attribute attaches cleanly. Skip / assertion
+        facts are computed off a comment-stripped skeleton (so a ``Skip=`` or
+        ``Assert.X`` written in a COMMENT is never read as real). Returns ``[]`` on
+        anything it cannot parse (degrade, never raise).
+        """
+
+        try:
+            return self._parse(text)
+        except Exception:  # noqa: BLE001 — best-effort parser ⇒ degrade, never raise.
+            return []
+
+    def _parse(self, text: str) -> list[TestBlock]:
+        def _line_of(pos: int) -> int:
+            return text.count("\n", 0, pos) + 1
+
+        # Comment-stripped skeleton: attribute / signature / Skip / assertion
+        # scanning all run over THIS so a test attribute, a ``Skip=`` arg, or an
+        # ``Assert.X`` written inside a COMMENT is never mistaken for real code
+        # (the false-GREEN this closes). Offsets/newlines are preserved by
+        # ``_go_strip_comments`` (comment bytes → spaces), so positions taken from
+        # the skeleton map back onto ``text`` line-for-line.
+        skeleton = _go_strip_comments(text)
+        lines = skeleton.splitlines()
+
+        blocks: list[TestBlock] = []
+        for sig in _CSHARP_METHOD_SIG_RE.finditer(skeleton):
+            brace = skeleton.index("{", sig.end() - 1)
+            close = _go_match_brace(skeleton, brace)
+            if close < 0:
+                close = len(skeleton) - 1
+            body_inner = skeleton[brace + 1 : close]
+
+            # ── Walk the contiguous attribute/comment/blank block ABOVE the
+            # signature line, collecting it and finding the FIRST recognized test
+            # attribute. The walk stops at the first line that is NOT an attribute
+            # (``[...]``), a comment, or blank — i.e. the previous statement /
+            # method / class-opener — so attributes belonging to an EARLIER member
+            # are never attributed to this method.
+            sig_line = _line_of(sig.start())
+            attr_lines: list[str] = []
+            attr_block_start_line = sig_line  # default if no attribute precedes.
+            first_test_attr_line: int | None = None
+            ln = sig_line - 1
+            while ln >= 1:
+                raw = lines[ln - 1] if ln - 1 < len(lines) else ""
+                stripped = raw.strip()
+                if not stripped:
+                    ln -= 1
+                    continue
+                is_attr = stripped.startswith("[")
+                is_comment = stripped.startswith(_COMMENT_PREFIXES)
+                if not is_attr and not is_comment:
+                    break  # a real statement / brace — top of the attribute block.
+                attr_block_start_line = ln
+                if is_attr:
+                    attr_lines.append(stripped)
+                ln -= 1
+
+            # The method must carry at least one recognized TEST attribute to be a
+            # test block; otherwise it is an ordinary method (helper / setup) and is
+            # skipped entirely (NOT emitted as a block).
+            attr_text = "\n".join(reversed(attr_lines))
+            if not _CSHARP_TEST_ATTR_RE.search(attr_text):
+                continue
+
+            # The block's ``start_line`` is the line of the FIRST recognized test
+            # attribute (so a marker directly above ``[Fact]`` attaches with an
+            # empty between-range). Find it within the attribute block.
+            for cand in range(attr_block_start_line, sig_line):
+                cand_raw = lines[cand - 1] if cand - 1 < len(lines) else ""
+                if _CSHARP_TEST_ATTR_RE.search(cand_raw):
+                    first_test_attr_line = cand
+                    break
+            start_line = first_test_attr_line if first_test_attr_line is not None else sig_line
+            end_line = _line_of(close)
+
+            blocks.append(
+                TestBlock(
+                    start_line=start_line,
+                    end_line=end_line,
+                    is_executable=not self._is_skipped(attr_text),
+                    has_assertion=self._has_primitive_assertion(body_inner),
+                    label=sig.group("name"),
+                    body_text=body_inner,
+                )
+            )
+        # Document order (start_line) so the gate's smallest-containing / nearest-
+        # after attachment scans behave like the Go/TS/PY adapters.
+        return sorted(blocks, key=lambda b: (b.start_line, -b.end_line))
+
+    @staticmethod
+    def _is_skipped(attr_text: str) -> bool:
+        """Whether a method's attribute block marks it SKIPPED.
+
+        xUnit: a ``Skip=`` argument inside the ``[Fact(...)]`` / ``[Theory(...)]``
+        test attribute (``[Fact(Skip="wip")]``). NUnit / MSTest: an ``[Ignore]`` /
+        ``[Ignore("…")]`` attribute on the method. ``attr_text`` is already
+        comment-stripped (the caller built it from the skeleton), so a ``Skip=`` /
+        ``[Ignore]`` written in a COMMENT does not mark a real test skipped (which
+        would be a false-RED — the opposite hazard).
+        """
+
+        if _CSHARP_IGNORE_ATTR_RE.search(attr_text):
+            return True
+        # A ``Skip=`` argument INSIDE an xUnit ``[Fact(...)]`` / ``[Theory(...)]``.
+        for m in _CSHARP_TEST_ATTR_RE.finditer(attr_text):
+            if m.group("attr") not in ("Fact", "Theory"):
+                continue
+            args = _csharp_attr_args(attr_text, m.start())
+            if _CSHARP_SKIP_ARG_RE.search(args):
+                return True
+        return False
+
+    @staticmethod
+    def _has_primitive_assertion(body_text: str) -> bool:
+        """Whether ``body_text`` contains a C# PRIMITIVE ``Assert.X(`` call.
+
+        A primitive is a static-``Assert`` API call (``Assert.Equal(`` /
+        ``Assert.True(`` / ``Assert.That(`` / ``Assert.AreEqual(`` / …). A bare
+        named-helper call (``VerifyResult(x)``) is NOT primitive (resolved via the
+        evidence graph). ``body_text`` is already a comment-stripped skeleton (the
+        parser passes the skeleton body), so an ``Assert.X`` written in a COMMENT is
+        not counted (false-GREEN guard).
+        """
+
+        return bool(_CSHARP_ASSERT_CALL_RE.search(body_text))
+
+    def resolve_assertion_evidence(
+        self, block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+    ) -> AssertionEvidence:
+        """C# DELEGATED-assertion (helper) evidence — fail-CLOSED minimal resolver.
+
+        Called by the gate ONLY for an attached, executable block with NO direct
+        primitive assertion (``block.has_assertion`` is False). C# helper
+        resolution (following a ``VerifyResult(...)`` call to its method body one
+        hop through ``using`` imports) is NOT implemented here — the conformance
+        fixtures, like the Go ones, do not delegate. We therefore fail CLOSED
+        without ever spuriously crediting:
+
+        * if the body contains an assertion-LIKE bare call (a helper named
+          ``Assert*``/``Verify*``/``Check*``/``Expect*``/… per
+          :func:`_looks_like_assertion_helper`) that we cannot resolve →
+          ``unresolved_helper`` (an unresolved assertion helper is not evidence);
+        * otherwise (no primitive, no assertion-like call — e.g. the
+          ``fake_no_assertion`` body that only calls ``Add(2, 3)``) →
+          ``no_assertion``.
+
+        NEVER returns ``ok=True`` (no resolution path is implemented), so this can
+        only ever REJECT, never false-GREEN. A future ``dotnet-using`` import
+        resolver can widen this to real 1-hop helper following.
+        """
+
+        body = _go_strip_comments(block.body_text)
+        if _extract_helper_calls(body):
+            return AssertionEvidence(
+                ok=False,
+                reason="unresolved_helper",
+                detail="csharp helper resolution not implemented",
+            )
+        return AssertionEvidence(ok=False, reason="no_assertion")
+
+    def resolve_direct_assertion_evidence(
+        self,
+        block: TestBlock,
+        *,
+        importer_text: str = "",
+        importer_rel: str = "",
+        project_root: Path | None = None,
+        config: dict[str, Any] | None = None,
+        profile: Any = None,
+    ) -> AssertionEvidence:
+        """Whether the block's DIRECT C# ``Assert.X`` assertion references a real name.
+
+        Modeled on :func:`_go_direct_assertion_evidence`. For each ``Assert.X(`` in
+        the comment-stripped body, extract its argument text via
+        :func:`_balanced_args` and decide REAL vs CONSTANT-only: the call is REAL
+        when its arguments reference a NON-constant identifier
+        (``_go_reference_idents(args) - _CSHARP_IGNORED_NAMES`` is non-empty) — a
+        SUT call, local, expected/actual var, exception, or output.
+        ``Assert.Equal(5, Add(2, 3))`` references ``Add`` ⇒ ``direct`` (ok).
+        ``Assert.True(true)`` / ``Assert.Equal(1, 1)`` reference only literals / the
+        ignored ``Assert`` token ⇒ ``constant_direct`` (not ok), the direct-side
+        analogue of the helper-side argument anchor.
+
+        If ANY ``Assert.X`` is REAL ⇒ ``direct``. If at least one was seen and ALL
+        are constant-only ⇒ ``constant_direct``. If the body's ``has_assertion`` was
+        True but this scanner classifies no primitive (an assertion shape it cannot
+        read) ⇒ fail OPEN (``direct``), never a false-RED. Called by the gate only
+        when ``block.has_assertion`` is True.
+        """
+
+        skeleton = _go_strip_comments(block.body_text)
+        saw_primitive = False
+        for m in _CSHARP_ASSERT_CALL_RE.finditer(skeleton):
+            saw_primitive = True
+            args = _balanced_args(skeleton, m.end() - 1)
+            if _go_reference_idents(args) - _CSHARP_IGNORED_NAMES:
+                return AssertionEvidence(ok=True, reason="direct")
+        if not saw_primitive:
+            # ``has_assertion`` matched but no primitive classified here → fail OPEN
+            # (toward credit, never a false-RED) — the same防波堤 the Go/PY/TS
+            # direct resolvers use.
+            return AssertionEvidence(ok=True, reason="direct")
+        return AssertionEvidence(ok=False, reason="constant_direct")
+
+
+# ---------------------------------------------------------------------------
 # Per-profile 1-hop helper resolution (the assertion EVIDENCE graph).
 #
 # Both implementations follow the SAME shape (mirroring the native implement-
@@ -4317,3 +4793,932 @@ def _resolve_python_evidence(
         def_finder=_py_find_function_def,
         reexport_edges=_py_reexport_edges,
     )
+
+
+# ---------------------------------------------------------------------------
+# Java (JUnit 4/5 + Hamcrest/AssertJ) structural adapter
+#
+# Modeled cell-for-cell on :class:`GoTestBlockProfile`. A test block is a JUnit
+# test METHOD — a ``[modifiers] void name(...) [throws ...] { ... }`` whose
+# leading annotation run contains ``@Test`` (JUnit5 ``org.junit.jupiter.api.Test``
+# or JUnit4 ``org.junit.Test``). The body is brace-matched with the SAME
+# string-aware :func:`_go_match_brace` the Go adapter uses (braces/strings are
+# language-agnostic), and comments are stripped with :func:`_go_strip_comments`
+# (Java uses ``//`` + ``/* */`` — identical to Go, verified to preserve string
+# literals + offsets), so a fake assertion written in a COMMENT never counts
+# (the false-GREEN guard). Skip is the ``@Disabled`` (JUnit5) / ``@Ignore``
+# (JUnit4) annotation on the method, OR a body that unconditionally aborts via
+# ``Assumptions.abort(...)`` / ``Assumptions.assumeTrue(false)`` — a skipped test
+# proves nothing. A PRIMITIVE assertion is a JUnit/Hamcrest/AssertJ assertion
+# call (``assertEquals(`` / ``assertTrue(`` / ``assertThat(`` / ``fail(`` / …);
+# a bare named-helper call (``checkResult(x)``) is NOT primitive — it is resolved
+# one hop via :meth:`resolve_assertion_evidence`. Constant-only-ness is decided
+# from the ARGUMENT text (``_go_reference_idents`` minus an ignored set), NOT the
+# method name, exactly like the Go testify path, so a permissive primitive match
+# never false-GREENs (``assertEquals(1, 1)`` is constant-only; ``assertEquals(5,
+# add(2, 3))`` references ``add`` ⇒ real). The reused helpers (``_go_match_brace``,
+# ``_go_strip_comments``, ``_balanced_args``, ``_go_reference_idents``) are all
+# language-agnostic (brace matching / comment stripping / identifier extraction),
+# so no Java-specific re-implementation is needed for them.
+# ---------------------------------------------------------------------------
+
+
+#: Java JUnit/Hamcrest/AssertJ PRIMITIVE assertion call names. A DIRECT primitive
+#: is one of these tokens followed by ``(`` (word-boundary anchored so a SUT method
+#: ``myAssertEquals(`` or ``doFail(`` is not mistaken for ``assertEquals``/``fail``).
+#: ``assertThat(`` covers both Hamcrest (``assertThat(x, is(y))``) AND AssertJ
+#: (``assertThat(x).isEqualTo(y)``) — the fluent tail is part of the same statement,
+#: so the single ``assertThat(`` token suffices. Constant-only-ness is judged from
+#: the args downstream, so a permissive name list never false-GREENs.
+_JAVA_PRIMITIVE_ASSERT_NAMES = (
+    "assertEquals",
+    "assertNotEquals",
+    "assertTrue",
+    "assertFalse",
+    "assertNull",
+    "assertNotNull",
+    "assertSame",
+    "assertNotSame",
+    "assertArrayEquals",
+    "assertThrows",
+    "assertThrowsExactly",
+    "assertDoesNotThrow",
+    "assertTimeout",
+    "assertIterableEquals",
+    "assertLinesMatch",
+    "assertAll",
+    "assertThat",
+    "fail",
+)
+
+#: One regex matching ANY Java primitive assertion CALL (name + ``(``). The
+#: ``(?<![A-Za-z0-9_.])`` guard means the name must not be the tail of a longer
+#: identifier or a member-select (``obj.fail(`` / ``myassertTrue(`` do not match),
+#: mirroring the Go receiver-anchoring discipline. Built once at import.
+_JAVA_PRIMITIVE_ASSERT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])(?:" + "|".join(_JAVA_PRIMITIVE_ASSERT_NAMES) + r")\s*\("
+)
+
+#: Helper-body primitive detector for Java (used by the shared evidence engine's
+#: ``primitive_re`` when resolving a delegated-assertion helper). SAME surface as
+#: the direct primitive regex — a helper whose body runs a real ``assertEquals(``
+#: + an argument anchor passes; a no-op / constant helper fails. (Java's
+#: assertion calls are STATIC imports, not receiver methods, so unlike Go there is
+#: no receiver to rename — the name set is stable across direct and helper sites.)
+_JAVA_HELPER_PRIMITIVE_RE = _JAVA_PRIMITIVE_ASSERT_RE
+
+#: A JUnit ``@Test`` annotation (JUnit5 ``org.junit.jupiter.api.Test`` or JUnit4
+#: ``org.junit.Test``; possibly fully-qualified ``@org.junit.jupiter.api.Test``).
+#: A trailing ``(`` would be a different annotation (``@TestFactory`` is its own
+#: word; ``@TestInstance(...)`` is excluded by requiring NOT-an-identifier-char
+#: after ``Test``). Word-boundary so ``@TestFactory`` / ``@TestTemplate`` do not
+#: match (those are not plain ``@Test`` methods).
+_JAVA_TEST_ANNOTATION_RE = re.compile(
+    r"@(?:[A-Za-z_][A-Za-z0-9_]*\.)*Test(?![A-Za-z0-9_])"
+)
+
+#: Skip annotations: JUnit5 ``@Disabled`` / JUnit4 ``@Ignore`` (optionally
+#: fully-qualified, optionally with a ``("reason")`` arg). A method carrying one is
+#: not executable — a skipped test asserts nothing (stage-2 attachment failure).
+_JAVA_SKIP_ANNOTATION_RE = re.compile(
+    r"@(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:Disabled|Ignore)(?![A-Za-z0-9_])"
+)
+
+#: Body-level unconditional skip: ``Assumptions.abort(...)`` / a constant
+#: ``assumeTrue(false)`` / ``assumeFalse(true)`` aborts the test at runtime, so a
+#: marker on it is not coverage. Best-effort (the PRIMARY skip signal is the
+#: ``@Disabled``/``@Ignore`` annotation); these only ADD detection, never remove.
+_JAVA_BODY_SKIP_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])(?:Assumptions\s*\.\s*)?abort\s*\("
+    r"|(?<![A-Za-z0-9_.])(?:Assumptions\s*\.\s*)?assumeTrue\s*\(\s*false\s*\)"
+    r"|(?<![A-Za-z0-9_.])(?:Assumptions\s*\.\s*)?assumeFalse\s*\(\s*true\s*\)"
+)
+
+#: A Java test-method SIGNATURE: optional modifiers, ``void``, a method name, a
+#: parameter list, an optional ``throws`` clause, then the body-opening ``{``. We
+#: do NOT require ``public`` (JUnit5 tolerates package-private test methods). The
+#: return type is constrained to ``void`` — JUnit test methods return void (a
+#: non-void ``@TestFactory`` / parameterized provider is intentionally out of
+#: scope; those are a deliberately-unbuilt extension, mirroring Go's flat-func
+#: focus). ``name`` is captured for the block label; the match ends just before
+#: the body ``{`` so brace-matching starts there.
+_JAVA_TEST_METHOD_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:(?:public|protected|private|static|final|synchronized|"
+    r"abstract|default)\s+)*void\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)"
+    r"(?:\s*throws\s+[A-Za-z0-9_.,\s<>]+?)?\s*\{",
+    re.DOTALL,
+)
+
+#: Java reserved words / literals / obvious builtins + the assertion METHOD names
+#: that are NOT credit-worthy references inside an assertion's argument list — the
+#: Java analogue of :data:`_GO_IGNORED_NAMES`. A SUT call name (``add``), a local
+#: variable (``got``/``want``), an expected constant a test declares are NEVER
+#: here, so ``assertEquals(5, add(2, 3))`` (references ``add``) stays GREEN while
+#: ``assertEquals(1, 1)`` / ``assertTrue(true)`` (only ignored tokens + literals)
+#: become RED. The assertion method names themselves are ignored so a primitive's
+#: OWN callee name never anchors it (``assertTrue(true)`` must not credit via
+#: ``assertTrue``); Hamcrest/AssertJ matcher/fluent words (``is``/``equalTo``/
+#: ``isEqualTo``/``containsExactly``/…) are NOT listed — a matcher applied to a
+#: real value still anchors on that value, and a matcher applied to a literal is
+#: still constant (the matcher words are dropped as selector fields after ``.`` by
+#: :func:`_go_reference_idents`, or are themselves constant-only callees).
+_JAVA_IGNORED_NAMES = frozenset(
+    {
+        # literals / keywords
+        "true",
+        "false",
+        "null",
+        "this",
+        "super",
+        "new",
+        "void",
+        "int",
+        "long",
+        "short",
+        "byte",
+        "char",
+        "boolean",
+        "float",
+        "double",
+        "String",
+        "Integer",
+        "Long",
+        "Short",
+        "Byte",
+        "Character",
+        "Boolean",
+        "Float",
+        "Double",
+        "Object",
+        "Class",
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "return",
+        "throw",
+        "throws",
+        "try",
+        "catch",
+        "finally",
+        "switch",
+        "case",
+        "default",
+        "break",
+        "continue",
+        "instanceof",
+        "var",
+        "final",
+        "static",
+        "public",
+        "private",
+        "protected",
+        "class",
+        "interface",
+        "enum",
+        "extends",
+        "implements",
+        "import",
+        "package",
+        # assertion API method names (the callee is the 器, not an observation)
+        *_JAVA_PRIMITIVE_ASSERT_NAMES,
+        # the conventional JUnit assertion entry classes (a fully-qualified call
+        # ``Assertions.assertEquals(1, 1)`` must not anchor on ``Assertions``).
+        "Assertions",
+        "Assert",
+        "Assumptions",
+        "Assume",
+        "MatcherAssert",
+    }
+)
+
+
+def _java_method_blocks(text: str) -> "list[tuple[int, int, str, str, bool]]":
+    """Locate every JUnit ``@Test`` method in ``text``.
+
+    Returns a list of ``(start_line, end_line, name, body_inner, is_executable)``
+    tuples (1-based inclusive line bounds). A method qualifies when its LEADING
+    ANNOTATION RUN — the contiguous run of ``@Annotation`` / comment / blank lines
+    immediately above its signature — contains ``@Test`` (the annotation may sit
+    several lines above the signature with ``@DisplayName(...)`` / other
+    annotations in between, all tolerated). ``start_line`` is the line of the FIRST
+    annotation in that run (so a coverage marker placed immediately ABOVE the
+    ``@Test`` annotation attaches to this block via the gate's ``_attached_block``,
+    whose walk treats ``@`` / comment / blank lines as header lines). The body is
+    brace-matched with the string-aware :func:`_go_match_brace`. ``is_executable``
+    is False when a ``@Disabled``/``@Ignore`` annotation is in the run OR the body
+    unconditionally aborts. PURE + best-effort: a signature whose body cannot be
+    brace-matched is skipped (never raises).
+    """
+
+    def _line_of(pos: int) -> int:
+        return text.count("\n", 0, pos) + 1
+
+    # Comment-stripped skeleton for STRUCTURE detection (so an ``@Test`` or a
+    # ``void foo() {`` written inside a COMMENT/string is not read as a real
+    # method — the false-GREEN guard). Offsets are preserved (comments → spaces),
+    # so positions map back onto the original ``text`` for line math + brace match.
+    skeleton = _go_strip_comments(text)
+
+    out: list[tuple[int, int, str, str, bool]] = []
+    for m in _JAVA_TEST_METHOD_RE.finditer(skeleton):
+        brace = m.end() - 1  # the signature regex ends ON the body-opening ``{``.
+        close = _go_match_brace(text, brace)
+        if close < 0:
+            continue  # unbalanced body ⇒ skip (degrade), never raise.
+        name = m.group("name")
+        if name in {"main"}:
+            continue  # not a test method.
+
+        # ── Leading annotation run: walk UP from the signature over @ / comment /
+        # blank lines, collecting the annotation text, until a real statement /
+        # another method / a brace. The run must contain ``@Test`` to qualify.
+        sig_line = _line_of(m.start())
+        lines = text.splitlines()
+        run_lines: list[str] = []
+        first_line = sig_line
+        ln = sig_line - 1  # 1-based line ABOVE the signature line
+        while ln >= 1:
+            raw = lines[ln - 1] if (ln - 1) < len(lines) else ""
+            stripped = raw.strip()
+            if not stripped:
+                ln -= 1
+                first_line = ln + 1  # blank lines are part of the header run
+                continue
+            if stripped.startswith("@") or stripped.startswith(
+                ("//", "/*", "*", "*/")
+            ):
+                run_lines.append(stripped)
+                first_line = ln
+                ln -= 1
+                continue
+            break  # a real statement / brace terminates the annotation run.
+        annotation_blob = "\n".join(reversed(run_lines))
+        # The signature line itself may carry inline annotations before ``void``
+        # (``@Test void foo()`` on one line) — include the pre-signature slice.
+        pre_sig = skeleton[m.start():m.start() + (m.start("name") - m.start())]
+        annotation_scope = annotation_blob + "\n" + pre_sig
+
+        if not _JAVA_TEST_ANNOTATION_RE.search(annotation_scope):
+            continue  # not a ``@Test`` method.
+
+        body_inner = text[brace + 1 : close]
+        skip_skeleton = _go_strip_comments(body_inner)
+        is_executable = not (
+            _JAVA_SKIP_ANNOTATION_RE.search(annotation_scope)
+            or _JAVA_BODY_SKIP_RE.search(skip_skeleton)
+        )
+        out.append(
+            (
+                first_line,
+                _line_of(close),
+                name,
+                body_inner,
+                is_executable,
+            )
+        )
+    return out
+
+
+def _java_body_has_primitive_assertion(body_text: str) -> bool:
+    """Whether ``body_text`` contains a Java PRIMITIVE assertion (lexical).
+
+    A primitive is a JUnit/Hamcrest/AssertJ assertion call (``assertEquals(`` /
+    ``assertThat(`` / ``fail(`` / …). A bare named-helper call (``checkResult(x)``)
+    is NOT primitive — that is resolved via the evidence graph. Comments are
+    stripped first (``_go_strip_comments``) so an assertion written in a COMMENT is
+    not counted (false-GREEN guard).
+    """
+
+    skeleton = _go_strip_comments(body_text)
+    return bool(_JAVA_PRIMITIVE_ASSERT_RE.search(skeleton))
+
+
+def _java_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
+    """Verdict: does ``body_text`` carry a NON-constant Java primitive assertion?
+
+    Mirrors :func:`_go_direct_assertion_evidence` (the testify ``value args``
+    branch): for each primitive assertion call in the (comment-stripped) body,
+    extract its argument text via :func:`_balanced_args` and decide REAL vs
+    CONSTANT-only by whether the args reference a NON-ignored identifier
+    (``_go_reference_idents(args) - _JAVA_IGNORED_NAMES``). ``assertEquals(5,
+    add(2, 3))`` references ``add`` ⇒ REAL ⇒ ``direct`` (ok). ``assertEquals(1,
+    1)`` / ``assertTrue(true)`` reference only literals/ignored names ⇒
+    CONSTANT-only. If ANY primitive is REAL ⇒ ``direct`` (ok). If at least one
+    primitive was seen and ALL are constant-only ⇒ ``constant_direct`` (not ok).
+    If the regex matched but this scanner classifies no primitive ⇒ fail OPEN
+    (``direct``), never a false-RED — exactly the Go contract. Called by the gate
+    only when ``block.has_assertion`` is True.
+    """
+
+    # Comment-stripped SKELETON so an assertion / arg written in a COMMENT is not
+    # read as real code. Offsets preserved, so ``_balanced_args`` positions align.
+    skeleton = _go_strip_comments(body_text)
+    saw_primitive = False
+    for m in _JAVA_PRIMITIVE_ASSERT_RE.finditer(skeleton):
+        saw_primitive = True
+        args = _balanced_args(skeleton, m.end() - 1)
+        if _go_reference_idents(args) - _JAVA_IGNORED_NAMES:
+            return AssertionEvidence(ok=True, reason="direct")
+    if not saw_primitive:
+        # ``has_assertion`` matched but no primitive classified here → fail OPEN.
+        return AssertionEvidence(ok=True, reason="direct")
+    return AssertionEvidence(ok=False, reason="constant_direct")
+
+
+@dataclass(frozen=True)
+class JavaTestBlockProfile:
+    """Java (JUnit 4/5 + Hamcrest/AssertJ) structural adapter.
+
+    A test block is a JUnit test METHOD — a ``[modifiers] void name(...) { ... }``
+    whose leading annotation run contains ``@Test`` (JUnit5
+    ``org.junit.jupiter.api.Test`` or JUnit4 ``org.junit.Test``). The body is
+    brace-matched with the string-aware :func:`_go_match_brace`. Skip is a
+    ``@Disabled`` (JUnit5) / ``@Ignore`` (JUnit4) annotation on the method, or a
+    body that unconditionally aborts via ``Assumptions.abort(...)`` /
+    ``assumeTrue(false)``. A PRIMITIVE assertion is a JUnit/Hamcrest/AssertJ
+    assertion call (``assertEquals(`` / ``assertThat(`` / ``fail(`` / …); a bare
+    named-helper call is resolved one hop via
+    :meth:`resolve_assertion_evidence`.
+
+    Java methods are NOT nested the way Go subtests / TS ``describe``→``it`` are
+    (a ``@Test`` method cannot contain another ``@Test`` method), so EVERY block
+    this adapter emits is a LEAF coverage target — there is no group→leaf fan-out
+    to model (the one structural simplification vs the Go template). PURE +
+    best-effort: a parse that cannot be done returns ``[]`` (the gate then
+    degrades for that file), never raises.
+    """
+
+    def handles_file(self, rel_path: str) -> bool:
+        """Whether ``rel_path`` is a Java test file.
+
+        True for a ``.java`` file that is EITHER under a Maven test source root
+        (``src/test/java``) OR whose basename signals a test class
+        (``*Test.java`` / ``*Tests.java`` / ``*IT.java``). The basename rule (not
+        just the dir) is what makes the conformance fixture ``tests/XTest.java``
+        — written OUTSIDE ``src/test/java`` by the harness — recognized. A
+        non-test ``Main.java`` under no test root returns False (the gate then
+        degrades rather than parsing a production file for coverage markers).
+        """
+
+        if not rel_path.endswith(".java"):
+            return False
+        norm = rel_path.replace("\\", "/")
+        if "src/test/java/" in norm or norm.startswith("src/test/java/"):
+            return True
+        base = norm.rsplit("/", 1)[-1]
+        stem = base[: -len(".java")]
+        return stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("IT")
+
+    def parse_test_blocks(self, text: str) -> list[TestBlock]:
+        """Parse ``text`` into one :class:`TestBlock` per JUnit ``@Test`` method."""
+
+        blocks: list[TestBlock] = []
+        for start_line, end_line, name, body_inner, is_executable in _java_method_blocks(
+            text
+        ):
+            blocks.append(
+                TestBlock(
+                    start_line=start_line,
+                    end_line=end_line,
+                    is_executable=is_executable,
+                    has_assertion=_java_body_has_primitive_assertion(body_inner),
+                    label=name,
+                    body_text=body_inner,
+                )
+            )
+        # Document order (start_line), like the Go/TS/PY adapters, so the gate's
+        # smallest-containing / nearest-after attachment scans behave identically.
+        return sorted(blocks, key=lambda b: (b.start_line, -b.end_line))
+
+    def resolve_direct_assertion_evidence(
+        self,
+        block: TestBlock,
+        *,
+        importer_text: str = "",
+        importer_rel: str = "",
+        project_root: Path | None = None,
+        config: dict[str, Any] | None = None,
+        profile: Any = None,
+    ) -> AssertionEvidence:
+        """Whether the block's DIRECT Java primitive assertion references a real name.
+
+        ``constant_direct`` when every primitive is constant-only
+        (``assertTrue(true)`` / ``assertEquals(1, 1)``); ``direct`` when an
+        assertion's args reference a non-constant (``assertEquals(5, add(2, 3))``
+        references ``add``). Delegates to :func:`_java_direct_assertion_evidence`.
+        Called by the gate only when ``block.has_assertion`` is True.
+        """
+
+        return _java_direct_assertion_evidence(block.body_text)
+
+    def resolve_assertion_evidence(
+        self, block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+    ) -> AssertionEvidence:
+        """Resolve a block's DELEGATED-assertion (helper) evidence — fail-CLOSED.
+
+        Called by the gate ONLY for an attached, executable block with NO direct
+        primitive assertion (``block.has_assertion`` is False). One-hop Java
+        import resolution (static-import / same-package / Maven source-root
+        package mapping) is heavy and not yet built, so this adapter does NOT
+        credit delegated helpers: it returns NOT-ok in every case, distinguishing
+        only the diagnostic reason.
+
+        * If the body contains an assertion-LIKE bare helper call (a ``name(...)``
+          whose name looks like an assertion helper — ``checkResult`` /
+          ``verifyState`` / …, per the shared :func:`_extract_helper_calls`
+          selector) → ``unresolved_helper`` (an assertion helper we cannot resolve
+          is not evidence — the design's "unresolved helper = fail").
+        * Otherwise (no assertion-like call at all — e.g. the body only calls the
+          SUT ``add(2, 3)``) → ``no_assertion``.
+
+        Either way ``ok`` is False, so this NEVER produces a false-GREEN. (A
+        future ``java-package`` import-resolver adapter can widen this to real
+        1-hop helper resolution, exactly as the Go ``_go_imported_module``
+        residual documents.)
+        """
+
+        try:
+            helper_calls = _extract_helper_calls(_go_strip_comments(block.body_text))
+        except Exception:  # noqa: BLE001 — extraction is best-effort; fail-closed.
+            helper_calls = []
+        if helper_calls:
+            return AssertionEvidence(
+                ok=False,
+                reason="unresolved_helper",
+                detail="java helper resolution not implemented",
+            )
+        return AssertionEvidence(ok=False, reason="no_assertion")
+
+
+# ---------------------------------------------------------------------------
+# C++ (GoogleTest / Catch2) structural adapter
+#
+# Modeled on :class:`GoTestBlockProfile`. The C++ comment grammar (``//`` line +
+# ``/* */`` block) is identical to Go's, so the brace matcher
+# (:func:`_go_match_brace`), the comment stripper (:func:`_go_strip_comments`),
+# the balanced-argument reader (:func:`_balanced_args`), the comma splitter
+# (:func:`_go_split_args`) and the reference-identifier harvester
+# (:func:`_go_reference_idents`) are REUSED verbatim — there is no C++-specific
+# lexing here beyond the test-MACRO recognizers below.
+#
+# The key structural difference from Go: a C++ test block is not a plain
+# function but a test-framework MACRO invocation —
+#   * GoogleTest:  ``TEST(Suite, Name) { ... }`` / ``TEST_F(Fixture, Name){...}``
+#                  / ``TEST_P(Suite, Name){...}``. A test is DISABLED (skipped)
+#                  when its suite OR name is prefixed ``DISABLED_``
+#                  (``TEST(S, DISABLED_Foo)``), or its body calls ``GTEST_SKIP(``.
+#   * Catch2:      ``TEST_CASE("name", "[tag]") { ... }`` — the first string
+#                  literal is the case name. Skip is a Catch2 v3 ``SKIP(`` in the
+#                  body or a hidden ``[.]`` / ``[!mayfail]`` tag.
+# A PRIMITIVE assertion is a gtest/Catch2 assertion MACRO (``EXPECT_EQ(`` /
+# ``ASSERT_TRUE(`` / ``REQUIRE(`` / ``CHECK(`` / …). A bare helper call is NOT
+# primitive (resolved separately, fail-closed — see ``resolve_assertion_evidence``).
+# ---------------------------------------------------------------------------
+
+#: A GoogleTest test-defining macro: ``TEST`` / ``TEST_F`` / ``TEST_P`` followed
+#: by ``( <suite> , <name> )`` then a body ``{``. The two macro args are captured
+#: so the label is ``Suite.Name`` and the DISABLED_ skip prefix (on EITHER the
+#: suite or the name) can be detected. ``[ \t\r\n]*`` between the ``)`` and ``{``
+#: tolerates a brace on the next line.
+_CPP_GTEST_MACRO_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<macro>TEST|TEST_F|TEST_P)\s*"
+    r"\(\s*(?P<suite>[A-Za-z_][A-Za-z0-9_]*)\s*,\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\)"
+    r"[ \t\r\n]*\{",
+)
+#: A Catch2 ``TEST_CASE("name"[, "[tag]"]) { ... }``. Only the OPENING is matched
+#: here (callee + ``(``); the name string and tags are read from the balanced
+#: argument text so a multi-line / many-tag header is handled. ``SCENARIO`` (the
+#: BDD spelling) shares Catch2's body grammar and is recognized too.
+_CPP_CATCH2_MACRO_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<macro>TEST_CASE|SCENARIO)\s*\(",
+)
+#: GoogleTest + Catch2 assertion MACROS that are PRIMITIVE (a call that, on its
+#: own, can fail the test). Word-bounded + immediately-``(`` so ``EXPECT_EQ`` the
+#: token is matched but ``MY_EXPECT_EQ`` / ``EXPECT_EQ_THING`` are not. ``SUCCEED``
+#: is deliberately EXCLUDED — it proves nothing (the C++ analogue of a constant
+#: assertion), so a body whose only "assertion" is ``SUCCEED()`` is NOT primitive.
+_CPP_ASSERT_MACROS = (
+    # gtest equality / comparison / boolean
+    "EXPECT_EQ", "ASSERT_EQ", "EXPECT_NE", "ASSERT_NE",
+    "EXPECT_LT", "ASSERT_LT", "EXPECT_LE", "ASSERT_LE",
+    "EXPECT_GT", "ASSERT_GT", "EXPECT_GE", "ASSERT_GE",
+    "EXPECT_TRUE", "ASSERT_TRUE", "EXPECT_FALSE", "ASSERT_FALSE",
+    # gtest string
+    "EXPECT_STREQ", "ASSERT_STREQ", "EXPECT_STRNE", "ASSERT_STRNE",
+    "EXPECT_STRCASEEQ", "ASSERT_STRCASEEQ",
+    # gtest float
+    "EXPECT_FLOAT_EQ", "ASSERT_FLOAT_EQ", "EXPECT_DOUBLE_EQ", "ASSERT_DOUBLE_EQ",
+    "EXPECT_NEAR", "ASSERT_NEAR",
+    # gtest exceptions / death
+    "EXPECT_THROW", "ASSERT_THROW", "EXPECT_NO_THROW", "ASSERT_NO_THROW",
+    "EXPECT_ANY_THROW", "ASSERT_ANY_THROW",
+    "EXPECT_DEATH", "ASSERT_DEATH",
+    # gtest matchers + unconditional failure
+    "EXPECT_THAT", "ASSERT_THAT", "FAIL", "ADD_FAILURE",
+    # Catch2
+    "REQUIRE", "CHECK", "REQUIRE_FALSE", "CHECK_FALSE",
+    "REQUIRE_THROWS", "CHECK_THROWS", "REQUIRE_THROWS_AS", "CHECK_THROWS_AS",
+    "REQUIRE_NOTHROW", "CHECK_NOTHROW", "REQUIRE_THAT", "CHECK_THAT",
+)
+#: ``<MACRO>(`` for any assertion macro, word-bounded (no leading ident char), so
+#: it never matches a SUFFIXED identifier. Longest-first alternation so e.g.
+#: ``REQUIRE_FALSE`` wins over ``REQUIRE`` at the same position.
+_CPP_ASSERT_MACRO_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    + "|".join(re.escape(m) for m in sorted(_CPP_ASSERT_MACROS, key=len, reverse=True))
+    + r")\s*\("
+)
+#: gtest's in-body skip directive. Word-bounded + ``(`` so a comment/identifier
+#: mention is not matched (comments are stripped before the scan anyway).
+_CPP_SKIP_RE = re.compile(r"(?<![A-Za-z0-9_])(?:GTEST_SKIP|SKIP)\s*\(")
+#: The gtest ``DISABLED_`` skip prefix on a suite or test name.
+_CPP_DISABLED_PREFIX = "DISABLED_"
+#: A C++ string literal (double-quoted, escapes honoured) + a raw string
+#: ``R"(...)"`` (no escapes). Used only to find a Catch2 case NAME / detect a
+#: hidden ``[.]`` tag; reference harvesting reuses Go's string-aware scanner.
+_CPP_STRING_RE = re.compile(r'R"\((?:.*?)\)"|"(?:\\.|[^"\\])*"', re.DOTALL)
+
+#: C++ keywords / literals / common std type & macro tokens that are NOT
+#: credit-worthy references inside an assertion's argument text — the C++ analogue
+#: of :data:`_GO_IGNORED_NAMES`. A SUT call name, a local variable, an expected
+#: value a test declares are NEVER here, so ``EXPECT_EQ(5, add(2, 3))`` (``add``)
+#: stays GREEN while ``EXPECT_EQ(1, 1)`` / ``EXPECT_TRUE(true)`` (only ignored
+#: tokens / literals) become RED. The assertion macro names themselves are ignored
+#: too (a nested ``EXPECT_THAT(x, Eq(y))`` anchors on ``x``/``y``, not the macro).
+_CPP_IGNORED_NAMES = frozenset(
+    {
+        # boolean / null literals
+        "true", "false", "nullptr", "NULL", "TRUE", "FALSE",
+        # keywords
+        "if", "else", "for", "while", "do", "switch", "case", "default",
+        "return", "break", "continue", "goto", "const", "constexpr",
+        "static", "volatile", "mutable", "auto", "decltype", "typename",
+        "template", "class", "struct", "union", "enum", "namespace", "using",
+        "public", "private", "protected", "virtual", "override", "final",
+        "new", "delete", "this", "sizeof", "operator", "throw", "try",
+        "catch", "noexcept", "explicit", "friend", "inline", "extern",
+        # fundamental / common std types
+        "void", "bool", "char", "wchar_t", "char8_t", "char16_t", "char32_t",
+        "short", "int", "long", "signed", "unsigned", "float", "double",
+        "size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t",
+        "int8_t", "int16_t", "int32_t", "int64_t",
+        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "std", "string", "wstring", "string_view", "vector", "map",
+        "unordered_map", "set", "unordered_set", "pair", "tuple", "array",
+        "optional", "variant", "shared_ptr", "unique_ptr", "make_shared",
+        "make_unique", "move", "forward",
+        # gtest/Catch2 fixture/util names that are API 器, not observations
+        "GetParam", "GTEST_SKIP", "SKIP", "SUCCEED",
+    }
+    | {m for m in _CPP_ASSERT_MACROS}
+)
+
+
+def _cpp_reference_idents(expr: str) -> set[str]:
+    """Genuine identifier REFERENCES in a C++ expression (strings/comments stripped).
+
+    Delegates to :func:`_go_reference_idents` — the lexical rules that matter here
+    (drop ``//`` / ``/* */`` comments, blank double-quoted strings, drop a member
+    field after ``.`` so ``got.value`` anchors on ``got``) are identical between Go
+    and C++. The residual differences (``->`` member access, ``::`` scope) are
+    handled coarsely: ``a->b`` harvests ``a`` and ``b`` (both kept ⇒ fail-OPEN
+    toward credit, never a false-RED), and ``ns::Type`` harvests ``ns`` and
+    ``Type`` (the scope-resolved names are filtered by :data:`_CPP_IGNORED_NAMES`
+    when they are std/keyword tokens). Best-effort and fail-open by construction.
+    """
+
+    return _go_reference_idents(expr)
+
+
+def _cpp_body_has_primitive_assertion(body_text: str) -> bool:
+    """Whether ``body_text`` contains a C++ PRIMITIVE assertion macro (lexical).
+
+    A primitive is any gtest/Catch2 assertion MACRO in :data:`_CPP_ASSERT_MACROS`
+    (``EXPECT_EQ(`` / ``REQUIRE(`` / …). A bare named-helper call (``verifyRun(r)``)
+    is NOT primitive — it is resolved one hop via the evidence graph. Comments are
+    stripped first (reusing :func:`_go_strip_comments`, whose ``//`` + ``/* */``
+    grammar is shared with C++) so a fake assertion written in a COMMENT
+    (``// EXPECT_EQ(got, want);``) is never counted (the false-GREEN guard).
+    ``SUCCEED()`` is excluded from the macro set, so a body whose only assertion-ish
+    call is ``SUCCEED()`` is correctly NOT primitive.
+    """
+
+    skeleton = _go_strip_comments(body_text)
+    return bool(_CPP_ASSERT_MACRO_RE.search(skeleton))
+
+
+def _cpp_body_is_skipped(body_text: str) -> bool:
+    """Whether ``body_text`` unconditionally skips via ``GTEST_SKIP(`` / ``SKIP(``.
+
+    Comments stripped first so a ``GTEST_SKIP()`` mentioned in a COMMENT does not
+    mark a real test skipped (a false-RED — the opposite hazard). The gtest
+    ``DISABLED_`` NAME prefix is a separate signal handled at parse time (it lives
+    in the macro header, not the body).
+    """
+
+    skeleton = _go_strip_comments(body_text)
+    return bool(_CPP_SKIP_RE.search(skeleton))
+
+
+def _cpp_catch2_case_name(args: str) -> str:
+    """The Catch2 case NAME (first string-literal arg), or ``""``.
+
+    ``TEST_CASE("adds two numbers", "[math]")`` → ``adds two numbers``. Best-effort;
+    a non-string first arg (rare) yields ``""`` (used only for the diagnostic label).
+    """
+
+    m = _CPP_STRING_RE.search(args)
+    if not m:
+        return ""
+    raw = m.group(0)
+    # Strip a raw-string ``R"(...)"`` wrapper or the plain quotes for the label.
+    if raw.startswith('R"('):
+        return raw[3:-2]
+    return raw[1:-1]
+
+
+def _cpp_catch2_is_hidden(args: str) -> bool:
+    """Whether a Catch2 case's TAGS mark it hidden / non-running.
+
+    A leading-``.`` tag (``"[.]"`` / ``"[.integration]"``) hides a case from the
+    default run, and ``"[!mayfail]"`` / ``"[!shouldfail]"`` invert the verdict — in
+    all of these the case does not straightforwardly PROVE the behavior, so it is
+    treated as not-executable (skipped) for authenticity, mirroring gtest
+    ``DISABLED_``. Only the tag STRING args are inspected.
+    """
+
+    for sm in _CPP_STRING_RE.finditer(args):
+        tag = sm.group(0)
+        if "[." in tag or "[!mayfail" in tag or "[!shouldfail" in tag:
+            return True
+    return False
+
+
+def _cpp_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
+    """Verdict: does ``body_text`` carry a NON-constant C++ primitive assertion?
+
+    For each assertion macro in the comment-stripped body, extract its argument
+    text via :func:`_balanced_args` and decide REAL vs CONSTANT-only by the same
+    reference rule the Go/PY/TS direct stages use: the args must reference at least
+    one NON-ignored identifier (a SUT call, a local, an expected value). So
+    ``EXPECT_EQ(5, add(2, 3))`` references ``add`` ⇒ REAL (``direct``), while
+    ``EXPECT_EQ(1, 1)`` / ``EXPECT_TRUE(true)`` reference only literals ⇒
+    constant-only. If ANY macro is REAL ⇒ ``direct`` (ok). If at least one macro
+    was seen and ALL are constant-only ⇒ ``constant_direct`` (not ok). If the
+    regex matched ``has_assertion`` upstream but THIS scanner classifies no macro
+    (an assertion shape it cannot read) ⇒ fail OPEN (``direct``), never a
+    false-RED — the same anti-false-RED discipline as
+    :func:`_go_direct_assertion_evidence`.
+    """
+
+    # Scan a comment-stripped SKELETON so an assertion written in a COMMENT is not
+    # read as real code (offsets preserved — comments become spaces — so
+    # ``_balanced_args`` positions still align).
+    skeleton = _go_strip_comments(body_text)
+    saw_primitive = False
+    for m in _CPP_ASSERT_MACRO_RE.finditer(skeleton):
+        saw_primitive = True
+        # ``m.end() - 1`` is the macro's ``(``; read its balanced argument text.
+        args = _balanced_args(skeleton, m.end() - 1)
+        if _cpp_reference_idents(args) - _CPP_IGNORED_NAMES:
+            return AssertionEvidence(ok=True, reason="direct")
+    if not saw_primitive:
+        # ``has_assertion`` matched upstream but no macro classified here → fail OPEN.
+        return AssertionEvidence(ok=True, reason="direct")
+    return AssertionEvidence(ok=False, reason="constant_direct")
+
+
+@dataclass(frozen=True)
+class CppTestBlockProfile:
+    """C++ (GoogleTest + Catch2) structural adapter.
+
+    A test block is a framework test MACRO with a brace-matched body:
+
+    * GoogleTest — ``TEST(Suite, Name) { ... }`` / ``TEST_F(Fixture, Name){...}`` /
+      ``TEST_P(Suite, Name){...}``. The label is ``Suite.Name``. The test is
+      NOT executable (skipped) when its suite OR name carries the ``DISABLED_``
+      prefix (``TEST(MySuite, DISABLED_Foo)``) or its body calls ``GTEST_SKIP()``.
+    * Catch2 — ``TEST_CASE("name", "[tag]") { ... }`` (and the ``SCENARIO`` BDD
+      spelling). The label is the case name. The case is not executable when it
+      carries a hidden ``[.]`` / ``[!mayfail]`` tag or its body calls ``SKIP()``.
+
+    Each macro is a LEAF coverage target (C++ test macros do not nest the way Go
+    ``t.Run`` subtests / TS ``describe`` groups do — Catch2 ``SECTION``s share the
+    enclosing case's assertions and are intentionally not split out, which is
+    conservative: a marker on the case credits only when the case body itself
+    asserts). A PRIMITIVE assertion is a gtest/Catch2 assertion macro
+    (:data:`_CPP_ASSERT_MACROS`); a bare named-helper call is resolved one hop via
+    :meth:`resolve_assertion_evidence` (fail-closed). PURE + best-effort: an
+    unparseable file yields ``[]`` (the gate then degrades), never an exception.
+    """
+
+    def handles_file(self, rel_path: str) -> bool:
+        """Whether ``rel_path`` is a C++ TEST SOURCE this adapter parses.
+
+        C++ tests live in SOURCE files (``.cpp`` / ``.cc`` / ``.cxx``), not headers
+        — a header has no ``TEST(...)`` definitions to execute. Permissive on
+        naming: any source-extension path that either contains ``test`` (case-
+        insensitive, so ``foo_test.cpp`` / ``test_foo.cc`` / ``FooTests.cpp`` all
+        match) OR sits under a ``tests/`` directory. This recognizes the conformance
+        fixture ``tests/x_test.cpp`` on BOTH counts.
+        """
+
+        if not rel_path:
+            return False
+        norm = rel_path.replace("\\", "/")
+        lower = norm.lower()
+        if not lower.endswith((".cpp", ".cc", ".cxx")):
+            return False
+        if "test" in lower:
+            return True
+        # Under a ``tests/`` (or ``test/``) directory anywhere in the path.
+        parts = lower.split("/")
+        return any(p in ("tests", "test") for p in parts[:-1])
+
+    def parse_test_blocks(self, text: str) -> list[TestBlock]:
+        """Parse gtest + Catch2 test macros into executable-test-block records.
+
+        Best-effort: a brace that does not match (truncated file) extends the block
+        to EOF rather than raising; an unrecognizable file yields ``[]``.
+        """
+
+        def _line_of(pos: int) -> int:
+            return text.count("\n", 0, pos) + 1
+
+        blocks: list[TestBlock] = []
+
+        # ── GoogleTest: TEST / TEST_F / TEST_P (Suite, Name) { ... } ──
+        for fm in _CPP_GTEST_MACRO_RE.finditer(text):
+            brace = text.index("{", fm.end() - 1)
+            close = _go_match_brace(text, brace)
+            if close < 0:
+                close = len(text) - 1
+            inner = text[brace + 1 : close]
+            suite = fm.group("suite")
+            name = fm.group("name")
+            # gtest skip: DISABLED_ prefix on EITHER suite or name, OR GTEST_SKIP()
+            # in the body. The DISABLED_ prefix is the conformance fixture's skip.
+            disabled = suite.startswith(_CPP_DISABLED_PREFIX) or name.startswith(
+                _CPP_DISABLED_PREFIX
+            )
+            blocks.append(
+                TestBlock(
+                    start_line=_line_of(fm.start()),
+                    end_line=_line_of(close),
+                    is_executable=not (disabled or _cpp_body_is_skipped(inner)),
+                    has_assertion=_cpp_body_has_primitive_assertion(inner),
+                    label=f"{suite}.{name}",
+                    body_text=inner,
+                )
+            )
+
+        # ── Catch2: TEST_CASE("name", "[tag]") { ... } / SCENARIO(...) { ... } ──
+        for cm in _CPP_CATCH2_MACRO_RE.finditer(text):
+            args = _balanced_args(text, cm.end() - 1)
+            # The body ``{`` follows the macro's balanced ``(...)``. Find the close
+            # paren, then the next ``{``.
+            paren_open = text.find("(", cm.end() - 1)
+            if paren_open < 0:
+                continue
+            # Re-derive the close-paren index by brace-independent paren matching.
+            close_paren = _cpp_match_paren(text, paren_open)
+            if close_paren < 0:
+                continue
+            brace = text.find("{", close_paren)
+            if brace < 0:
+                continue
+            # Reject a stray ``{`` that is actually a different statement: only treat
+            # it as the body when nothing but whitespace separates ``)`` and ``{``.
+            if text[close_paren + 1 : brace].strip():
+                continue
+            close = _go_match_brace(text, brace)
+            if close < 0:
+                close = len(text) - 1
+            inner = text[brace + 1 : close]
+            name = _cpp_catch2_case_name(args)
+            blocks.append(
+                TestBlock(
+                    start_line=_line_of(cm.start()),
+                    end_line=_line_of(close),
+                    is_executable=not (
+                        _cpp_catch2_is_hidden(args) or _cpp_body_is_skipped(inner)
+                    ),
+                    has_assertion=_cpp_body_has_primitive_assertion(inner),
+                    label=name or "TEST_CASE",
+                    body_text=inner,
+                )
+            )
+
+        # Document order (start_line) so attachment's smallest-containing and
+        # nearest-after scans behave like the Go/TS/PY adapters.
+        return sorted(blocks, key=lambda b: (b.start_line, -b.end_line))
+
+    def resolve_assertion_evidence(
+        self, block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+    ) -> AssertionEvidence:
+        """Delegated-assertion (helper) resolution for C++ — fail-closed.
+
+        Called by the gate ONLY for an attached executable block with NO direct
+        primitive assertion macro (``block.has_assertion`` is False). A C++ test
+        that delegates its check to a helper function (``verifyResult(r);`` whose
+        body runs the real ``EXPECT_EQ``) is a legitimate shape, but cross-file C++
+        helper resolution requires include-graph + (often) namespace resolution
+        that this adapter deliberately does NOT implement yet. So this stays
+        FAIL-CLOSED, never spuriously ok=True: if the body contains an
+        assertion-LIKE bare call (an unresolved helper) the verdict is
+        ``unresolved_helper`` (a hard fail in greenfield strict — an unresolved
+        assertion helper is not evidence); otherwise it is ``no_assertion``. This
+        matches the design's "unresolved helper = fail" rule and never credits a
+        non-asserting body. (A future ``cpp-include`` resolver adapter can widen
+        this to real 1-hop resolution like Go/PY/TS.)
+        """
+
+        skeleton = _go_strip_comments(block.body_text)
+        # An assertion-LIKE bare call: a callee whose leading name matches the
+        # shared assertion-helper name set (expect/assert/check/verify/…), but that
+        # is NOT one of the recognized primitive MACROS (those are handled by the
+        # direct stage). Its presence means "the test tried to delegate a check we
+        # cannot resolve" → unresolved_helper (fail-closed), not a silent pass.
+        for match in _CALL_RE.finditer(skeleton):
+            callee = match.group("callee")
+            segment = callee.split(".")[-1].split("::")[-1]
+            if segment in _CPP_ASSERT_MACROS:
+                continue  # a primitive macro — not a helper (direct stage's job).
+            if _looks_like_assertion_helper(segment):
+                return AssertionEvidence(
+                    ok=False,
+                    reason="unresolved_helper",
+                    detail="cpp helper resolution not implemented",
+                )
+        return AssertionEvidence(ok=False, reason="no_assertion")
+
+    def resolve_direct_assertion_evidence(
+        self,
+        block: TestBlock,
+        *,
+        importer_text: str = "",
+        importer_rel: str = "",
+        project_root: Path | None = None,
+        config: dict[str, Any] | None = None,
+        profile: Any = None,
+    ) -> AssertionEvidence:
+        """Whether the block's DIRECT C++ assertion macro references a real name.
+
+        ``constant_direct`` when every assertion macro is constant-only
+        (``EXPECT_TRUE(true)`` / ``EXPECT_EQ(1, 1)``); ``direct`` when a macro's
+        arguments reference a non-constant identifier (``EXPECT_EQ(5, add(2, 3))``
+        references ``add``). Called by the gate only when ``block.has_assertion`` is
+        True. Delegates to :func:`_cpp_direct_assertion_evidence`.
+        """
+
+        return _cpp_direct_assertion_evidence(block.body_text)
+
+
+def _cpp_match_paren(text: str, open_idx: int) -> int:
+    """Index of the ``)`` matching the ``(`` at ``open_idx`` (string/comment-aware), or -1.
+
+    The C++ analogue of :func:`_go_match_brace` for parentheses — needed to locate
+    the end of a Catch2 ``TEST_CASE( ... )`` header (which may contain nested parens
+    inside tag/name expressions or commas inside a raw string) before its body
+    ``{``. Tracks ``"`` / ``'`` literals and ``//`` + ``/* */`` comments so a paren
+    inside a string or comment does not unbalance the count. Best-effort: returns -1
+    if no match before EOF.
+    """
+
+    depth = 0
+    in_str: str | None = None
+    prev = ""
+    i = open_idx
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str is not None:
+            if ch == in_str and prev != "\\":
+                in_str = None
+            prev = ch
+            i += 1
+            continue
+        # Comments (only outside a string).
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            prev = ""
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            prev = ""
+            continue
+        if ch in ("'", '"'):
+            in_str = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        prev = ch
+        i += 1
+    return -1

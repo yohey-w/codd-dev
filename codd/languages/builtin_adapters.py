@@ -76,13 +76,24 @@ def ensure_builtin_adapters_registered(registry: AdapterRegistry | None = None) 
     # Lazy import: the adapter implementations are read ONLY here, never at module
     # import time, so codd.languages stays free of an adapter/coverage import cycle.
     from codd.languages.adapters.runner_report import (
+        CTestJunitReportAdapter,
+        DotnetTrxReportAdapter,
         GoTestJsonReportAdapter,
         PlaywrightJsonReportAdapter,
+        SurefireXmlReportAdapter,
         VitestJsonReportAdapter,
     )
 
     _register_once(target, "runner_report", "vitest-json", VitestJsonReportAdapter())
     _register_once(target, "runner_report", "go-test-json", GoTestJsonReportAdapter())
+    # Compiler-language verify-report parsers (Java/C#/C++) — each declared by its
+    # profile's ``verify.report.adapter`` id, registered HERE under the SAME
+    # fail-closed ``_register_once`` as the JS/Go parsers (a profile that names an
+    # unregistered runner_report adapter is an INCOMPLETE contract / RED, never a
+    # silent green). The adapter classes are imported lazily above (leaf rule).
+    _register_once(target, "runner_report", "surefire-xml", SurefireXmlReportAdapter())
+    _register_once(target, "runner_report", "dotnet-trx", DotnetTrxReportAdapter())
+    _register_once(target, "runner_report", "ctest-junit", CTestJunitReportAdapter())
     # Stack e2e: the Playwright addon declares ``report.adapter: playwright_json`` —
     # register under that EXACT id so a TEST-kind stack command's required report has a
     # resolvable adapter (an unregistered adapter for a required report is RED, never a
@@ -118,7 +129,10 @@ def register_oracle_adapters(registry: AdapterRegistry) -> None:
     (Cut Condition A). The adapter classes are imported INSIDE this function (lazy),
     never at module load, preserving the leaf rule.
     """
+    from codd.languages.adapters.oracle_cpp import CppToolchainOracleAdapter
+    from codd.languages.adapters.oracle_csharp import DotnetToolchainOracleAdapter
     from codd.languages.adapters.oracle_go import GoToolchainOracleAdapter
+    from codd.languages.adapters.oracle_java import JavaToolchainOracleAdapter
     from codd.languages.adapters.oracle_python import PythonCompositeOracleAdapter
     from codd.languages.adapters.oracle_typescript import TypeScriptTscOracleAdapter
     from codd.languages.contract import KIND_IMPLEMENT_ORACLE
@@ -129,4 +143,20 @@ def register_oracle_adapters(registry: AdapterRegistry) -> None:
     )
     _register_once(
         registry, KIND_IMPLEMENT_ORACLE, "typescript-tsc", TypeScriptTscOracleAdapter()
+    )
+    # Compiler-stack composites (Java ``mvn compile`` / C# ``dotnet build`` / C++
+    # ``cmake configure``+``build``): each is a ``kind="composite"`` shell-command
+    # oracle resolved by the generic command-sequence executor, registered under the
+    # SAME fail-closed ``_register_once`` (a different adapter at an occupied id
+    # raises — a silent oracle override is exactly the false-green this kernel
+    # forbids). Selection stays GENERIC (modeled oracle + registered adapter), never
+    # a language-name comparison (Cut Condition A). Imported lazily above (leaf rule).
+    _register_once(
+        registry, KIND_IMPLEMENT_ORACLE, "java-toolchain", JavaToolchainOracleAdapter()
+    )
+    _register_once(
+        registry, KIND_IMPLEMENT_ORACLE, "dotnet-toolchain", DotnetToolchainOracleAdapter()
+    )
+    _register_once(
+        registry, KIND_IMPLEMENT_ORACLE, "cpp-toolchain", CppToolchainOracleAdapter()
     )

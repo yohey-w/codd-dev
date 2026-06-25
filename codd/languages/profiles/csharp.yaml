@@ -1,0 +1,223 @@
+# C# language profile (design §1.2–1.9, §5.1), modeled on go.yaml.
+#
+# Phase 1: declarative data only — the implement-oracle (dotnet-toolchain) +
+# runner-report (dotnet-trx) adapters are registered centrally by the parent, not
+# here. Auto-discovered by LanguageRegistry (profiles/*.yaml keyed on id).
+#
+# Load-bearing decisions (asserted by tests/languages/test_profile_csharp.py):
+#   * module_root = "."   — the project/solution lives at the repo root.
+#   * source_sets = src/**/*.cs (first-party source under a representable `src` root).
+#   * test_sets   = tests/**/*.cs (a representable xUnit/NUnit/MSTest convention).
+#   * package_root.kind = none — C# has NO single package root in the Go sense.
+#   * strictness  = strict — a new language is strict from day one.
+#   * implement_oracle = composite (build), adapter dotnet-toolchain.
+#   * verify report adapter = dotnet-trx (VSTest TRX).
+#
+# C# does NOT use Go's no-src/ invariant: there is NO forbidden_generated_prefixes
+# ["src/"] here — a `src` root is a perfectly conventional C# source location.
+#
+# manifest.path is consumed loosely (the certifier globs *.csproj/*.sln); a literal
+# glob value `*.csproj` is an acceptable DECLARED manifest pattern in Phase 1.
+# Placeholders ({module_root}, {package_name}, ...) are LITERAL template strings.
+
+id: csharp
+aliases: ["c#", "cs", "dotnet"]
+display_name: "C#"
+strictness: strict
+file_extensions: [".cs"]
+
+layout:
+  repo_root: "."
+  module_root: "."
+  manifest_root: "."
+  default_command_cwd: "{module_root}"
+
+  package_root:
+    kind: none
+
+  source_sets:
+    - id: src
+      role: first_party
+      root: "src"
+      file_globs:
+        - "src/**/*.cs"
+
+  test_sets:
+    - id: tests
+      role: unit
+      root: "tests"
+      file_globs:
+        - "tests/**/*.cs"
+
+# Preserved verbatim (modeled as profile.extra in Phase 1). NOTE: unlike go.yaml
+# there is intentionally NO forbidden_generated_prefixes ["src/"] — the no-src/
+# invariant is Go-specific; `src` is a conventional C# source root.
+path_rules:
+  canonical_path_base: repo_root
+  path_separator: "/"
+
+  output_roles:
+    project_manifest:
+      owner: harness
+      path: "*.csproj"
+
+    source_file:
+      owner: sut
+      template: "src/{name}.cs"
+
+    test_file:
+      owner: sut
+      template: "tests/{name}Tests.cs"
+
+toolchain:
+  manifest:
+    # Consumed loosely in Phase 1 (the dotnet-toolchain certifier globs
+    # *.csproj/*.sln); a glob pattern is an acceptable declared manifest value.
+    path: "*.csproj"
+    format: msbuild-csproj
+    required: true
+
+  module_identity:
+    source: manifest
+    # The assembly/root namespace; loosely declared (read by an adapter later).
+    path: "*.csproj"
+    field: "AssemblyName"
+    default_template: "{package_name}"
+
+  package_manager:
+    id: dotnet
+    materialize_command:
+      argv: ["dotnet", "restore"]
+      cwd: "{module_root}"
+      network_policy: controlled
+    reconcile_command:
+      argv: ["dotnet", "restore"]
+      cwd: "{module_root}"
+
+imports:
+  resolver_adapter: dotnet-using
+
+  first_party:
+    rule: root_namespace_prefix
+    base: "src"
+
+  stdlib:
+    classifier: adapter
+
+commands:
+  build:
+    argv: ["dotnet", "build", "-c", "Release"]
+    cwd: "{module_root}"
+    # The dotnet implement-oracle's build step does NOT require a separate
+    # materialization preflight: `dotnet build` restores implicitly, and the
+    # dotnet-toolchain adapter tolerates restore banners as benign noise. false here
+    # (mirrors Go's typecheck): the contract oracle consumes this flag, so a stale
+    # `true` would wrongly trigger an install preflight for the oracle command.
+    requires_materialized_deps: false
+    scope:
+      must_include_source_sets: ["src"]
+
+  verify:
+    # `dotnet test` runs the test project(s). In a real run the verify command would
+    # add `--logger "trx;LogFileName=test.trx"` to emit the TRX report at the declared
+    # path; for THIS task the profile only needs to DECLARE the dotnet-trx report
+    # adapter (registered centrally by the parent).
+    argv: ["dotnet", "test"]
+    cwd: "{module_root}"
+    report:
+      capture: stdout
+      path: "TestResults/test.trx"
+      format: dotnet-trx
+      adapter: dotnet-trx
+    scope:
+      must_include_test_sets: ["tests"]
+
+# Implement-time oracle (Contract Kernel §1): a composite whose single step is the
+# build command, resolved by the dotnet-toolchain adapter. References command ids only.
+implement_oracle:
+  kind: composite
+  adapter: dotnet-toolchain
+  steps:
+    - command: build
+
+tests:
+  semantics_adapter: csharp-test-semantics
+  runner_report_adapter: dotnet-trx
+
+  test_file_globs:
+    - "tests/**/*.cs"
+
+  authenticity_policy:
+    marker_must_be_inside_executable_test_block: true
+    skipped_is_not_authentic: true
+    focused_only_is_not_authentic: true
+    assertion_required: true
+    accepted_assertion_confidence: ["certain"]
+
+  assertion_hints:
+    libraries:
+      - import_path: "Xunit"
+        functions:
+          - Assert.Equal
+          - Assert.True
+          - Assert.False
+          - Assert.Throws
+          - Assert.NotNull
+      - import_path: "NUnit.Framework"
+        functions:
+          - Assert.That
+          - Assert.AreEqual
+          - Assert.IsTrue
+      - import_path: "Microsoft.VisualStudio.TestTools.UnitTesting"
+        functions:
+          - Assert.AreEqual
+          - Assert.IsTrue
+          - Assert.IsNotNull
+
+verify:
+  command: verify
+  report:
+    path: "TestResults/test.trx"
+    format: dotnet-trx
+    adapter: dotnet-trx
+
+  execution_policy:
+    every_vb_test_block_must_execute: true
+    every_vb_test_block_must_pass: true
+    skipped_is_not_green: true
+    missing_from_report_is_not_green: true
+
+scaffold:
+  adapter: generic-template
+  owned_files:
+    - "{package_name}.csproj"
+
+  templates:
+    - path: "{package_name}.csproj"
+      content_template: |
+        <Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup>
+            <TargetFramework>net8.0</TargetFramework>
+            <Nullable>enable</Nullable>
+            <ImplicitUsings>enable</ImplicitUsings>
+          </PropertyGroup>
+        </Project>
+
+artifacts:
+  harness_root: ".codd"
+
+  harness_owned:
+    - ".codd/**"
+    - "{package_name}.csproj"
+
+  ignored:
+    - "bin/**"
+    - "obj/**"
+    - "TestResults/**"
+
+# CI scaffold (design §v2.70): toolchain bootstrap for a generated CI workflow.
+ci:
+  setup_steps:
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: "8.0.x"

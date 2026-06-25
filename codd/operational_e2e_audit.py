@@ -97,6 +97,49 @@ _TEST_SUFFIXES = (
     # modules (``main.go`` / ``server.go``) are still excluded, mirroring how
     # ``.py`` admits tests without admitting every module via the test-dir scope.
     "_test.go",
+    # C# (xUnit/NUnit/MSTest) test files are ``.cs`` files. Unlike Go there is no
+    # mandatory filename suffix the runner enforces (``dotnet test`` runs whatever
+    # the test project compiles), and the conventional names are diverse
+    # (``XTests.cs`` / ``XTest.cs`` / ``XSpec.cs`` / ``XFacts.cs``). Admit the bare
+    # ``.cs`` extension — exactly like ``.py`` — and rely on the declared test-dir
+    # scope (``tests/`` per csharp.yaml) to keep source modules under ``src/`` out
+    # of the scan. Without this the VB-coverage scan and this operational-e2e scan
+    # never SEE a C# test file, so every C# ``codd: covers vb=…`` marker goes
+    # unread and all declared behaviors read as uncovered — the C# analogue of the
+    # C-Go false-RED above. (The per-profile ``CSharpTestBlockProfile.handles_file``
+    # narrows further to recognized C# test files for stages 2-3.)
+    ".cs",
+    # Java (JUnit 4/5) test files are ``.java`` files. Like C# (and unlike Go),
+    # ``mvn test`` enforces no mandatory filename suffix -- Surefire runs whatever
+    # the test source set compiles -- and the conventional names are diverse
+    # (``XTest.java`` / ``XTests.java`` / ``XIT.java``). Admit the bare ``.java``
+    # extension, exactly like ``.cs`` / ``.py``, and rely on the declared test-dir
+    # scope (``src/test/java`` per java.yaml) to keep main sources under
+    # ``src/main/java`` out of the scan. Without this the VB-coverage scan and this
+    # operational-e2e scan never SEE a Java test file, so every Java
+    # ``codd: covers vb=...`` marker goes unread and all declared behaviors read as
+    # uncovered -- the Java analogue of the C-Go false-RED above. (The per-profile
+    # ``JavaTestBlockProfile.handles_file`` narrows further to recognized Java test
+    # files -- ``src/test/java`` or ``*Test``/``*Tests``/``*IT`` basenames -- for
+    # stages 2-3.)
+    ".java",
+    # C++ (GoogleTest/Catch2) test files are SOURCE files (``.cpp`` / ``.cc`` /
+    # ``.cxx``); a header carries no ``TEST(...)`` definition to execute. Like C#
+    # and Java (and unlike Go), ``ctest`` enforces no mandatory filename suffix --
+    # it runs whatever the test target compiles -- and the conventional names are
+    # diverse (``XTest.cpp`` / ``x_test.cc`` / ``test_x.cxx`` / ``XTests.cpp``).
+    # Admit the bare source extensions, exactly like ``.cs`` / ``.java`` / ``.py``,
+    # and rely on the declared test-dir scope (``tests/`` per cpp.yaml) to keep
+    # first-party sources under ``src/`` out of the scan. Without this the
+    # VB-coverage scan and this operational-e2e scan never SEE a C++ test file, so
+    # every C++ ``codd: covers vb=...`` marker goes unread and all declared
+    # behaviors read as uncovered -- the C++ analogue of the C-Go false-RED above.
+    # (The per-profile ``CppTestBlockProfile.handles_file`` narrows further to
+    # recognized C++ test sources -- under a ``tests/`` dir or a ``*test*`` basename
+    # -- for stages 2-3, and headers are excluded there.)
+    ".cpp",
+    ".cc",
+    ".cxx",
 )
 
 
