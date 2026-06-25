@@ -733,3 +733,26 @@ CONFIRMS]→promote→contract→deterministic red) + positive materiality + E-P
 reduce PCUMR (improve amber recall, e.g. C7's missing-actor gap → 20%→0) + maintain Axis-N
 (Claude 2-engine). Owner still owns: the routing override (async) and which gaps to
 CONFIRM (→ red). OpenAI stays off (GPT ban).
+
+## Axis-P quality: corpus-PCUMR 20% → 0% (2026-06-25, full suite 6473)
+First PCUMR-reduction iteration: user_journey_coherence (C7) now surfaces a declared
+actor that has no corresponding journey as **amber** (`missing_journey/actor/<actor>`)
+even when other journeys exist — previously it only named actors when journeys were zero
+(the detection blind spot the corpus surfaced). amber recall only (red stays owner-gated
+via CONFIRM); general "declared actors minus actors named by any journey"; existing C7
+red/amber/pass/skip judgment unchanged. **corpus-PCUMR miss 20% → 0%** (all 5
+construction-derived gold gaps now detected). The corpus test pins the measurement
+contract (it anticipated this flip), not a fixed rate.
+
+**Session arc summary**: Stage-1 N-gate took 18 rounds (the path-escape class spanned the
+whole codebase; GPT's scope ruling cut it to evidence-readers; systematic-class closure +
+unified path_safety jail + centralized result_status made it converge to 2 consecutive
+3-engine→then Claude-2-engine clean). Mid-session the ChatGPT Pro account was BANNED
+(automated GPT-via-CDP scrape) → GPT consults permanently stopped, Codex stopped, all
+review/dogfood moved to Claude-only (Sonnet+Opus); round 16 vindicated multi-engine (Opus
+clean, Sonnet caught a real false-green). Stage-2 Axis-P then built owner-free
+(A: gap→amber→coverage_decisions + positive materiality + E-PCUMR; B+C: routing + CONFIRMED
+→contract promotion + 5-fixture corpus-PCUMR) — all Claude-only. The 2-stage /goal is
+OPERATIONAL; corpus-PCUMR=0%. Ongoing maintenance (not a hard gate): expand the corpus,
+real-project E-PCUMR, Axis-N adversarial review. Owner gates: routing override + gap
+CONFIRM + GPT appeal outcome.

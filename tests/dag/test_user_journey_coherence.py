@@ -23,6 +23,84 @@ def test_c7_amber_when_actor_present_no_journey(tmp_path: Path) -> None:
     assert result.violations[0]["type"] == "actors_without_journeys"
 
 
+def test_c7_amber_names_journeyless_actor_when_other_journeys_exist(tmp_path: Path) -> None:
+    # C7 must surface a declared actor with no journey even when OTHER journeys
+    # exist. Before this, actors_without_journeys only fired when ZERO journeys
+    # were declared, so a journeyless actor was silently skipped (the corpus-PCUMR
+    # missing_journey blind spot). The finding is amber-only and names exactly the
+    # uncovered actor — it never escalates to red and never blocks deploy.
+    dag = DAG()
+    dag.add_node(
+        Node(
+            id="docs/design/app.md",
+            kind="design_doc",
+            attributes={
+                "actors": ["Learner", "Admin", "Instructor"],
+                "user_journeys": [
+                    {
+                        "name": "learner_views",
+                        "actor": "Learner",
+                        "steps": [{"action": "assert", "value": "x"}],
+                        "expected_outcome_refs": [],
+                    },
+                    {
+                        "name": "instructor_grades",
+                        "actors": ["Instructor"],
+                        "steps": [{"action": "assert", "value": "y"}],
+                        "expected_outcome_refs": [],
+                    },
+                ],
+            },
+        )
+    )
+
+    result = _run(dag, tmp_path)
+
+    missing = [v for v in result.violations if v["type"] == "actors_without_journeys"]
+    assert len(missing) == 1
+    # Only Admin is named (Learner / Instructor have journeys); the finding is amber.
+    assert missing[0]["actors"] == ["Admin"]
+    assert missing[0]["severity"] == "amber"
+    assert missing[0]["block_deploy"] is False
+    # Amber-only: this finding contributes no red. (Other journeys may carry their
+    # own reds for missing plan tasks; this missing-actor finding must not be one.)
+    assert missing[0].get("severity") != "red"
+
+
+def test_c7_no_missing_actor_amber_when_every_actor_has_journey(tmp_path: Path) -> None:
+    # False-positive guard: when every declared actor is covered by a journey
+    # (matched case-insensitively, via actor or actors keys), C7 emits no
+    # actors_without_journeys finding.
+    dag = DAG()
+    dag.add_node(
+        Node(
+            id="docs/design/app.md",
+            kind="design_doc",
+            attributes={
+                "actors": ["Learner", "Admin"],
+                "user_journeys": [
+                    {
+                        "name": "learner_views",
+                        "actor": "Learner",
+                        "steps": [{"action": "assert", "value": "x"}],
+                        "expected_outcome_refs": [],
+                    },
+                    {
+                        "name": "admin_panel",
+                        "actor": "admin",  # case differs from declared "Admin"
+                        "steps": [{"action": "assert", "value": "z"}],
+                        "expected_outcome_refs": [],
+                    },
+                ],
+            },
+        )
+    )
+
+    result = _run(dag, tmp_path)
+
+    assert [v for v in result.violations if v["type"] == "actors_without_journeys"] == []
+
+
 def test_c7_skip_when_no_actors_no_journeys(tmp_path: Path) -> None:
     # No actors and no journeys = C7 has no input to verify. It must report a real
     # SKIP (status/skipped), not a clean PASS over nothing (false-green).

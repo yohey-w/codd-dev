@@ -118,12 +118,44 @@ class UserJourneyCoherenceCheck(DagCheck):
         journey_reports: list[dict[str, Any]] = []
         violations: list[dict[str, Any]] = []
         checked_count = 0
+        covered_actors: set[str] = set()
         for design_doc in journey_docs:
             for index, journey in enumerate(self._journey_entries(design_doc)):
                 checked_count += 1
+                covered_actors.update(self._journey_actor_keys(journey))
                 report = self._check_journey(target_dag, design_doc, index, journey)
                 journey_reports.append(report)
                 violations.extend(report["violations"])
+
+        # Amber recall: even when SOME journeys exist, a declared actor with no
+        # corresponding journey is an uncovered positive-space gap. Surface it as
+        # an amber finding (never red — red is owner-gated promotion only) so the
+        # specific journeyless actor is named instead of being silently skipped.
+        actors_without_journeys = self._actors_without_journeys(target_dag, covered_actors)
+        if actors_without_journeys:
+            message = (
+                f"Actors declared without a corresponding user_journey: "
+                f"{', '.join(actors_without_journeys)}. Consider declaring a journey for each."
+            )
+            violation = {
+                "type": "actors_without_journeys",
+                "severity": "amber",
+                "actors": actors_without_journeys,
+                "message": message,
+                "block_deploy": False,
+                "human_review_required": self._human_review_required(actors_without_journeys),
+            }
+            violations.append(violation)
+            journey_reports.append(
+                {
+                    "user_journey": "(actors without journeys)",
+                    "design_doc": "(multiple)",
+                    "violations": [violation],
+                    "remediation_hints": [
+                        "Declare a user_journey for each actor still missing one."
+                    ],
+                }
+            )
 
         red_count = sum(1 for violation in violations if violation.get("severity", "red") == "red")
         amber_count = sum(1 for violation in violations if violation.get("severity") == "amber")
@@ -264,6 +296,28 @@ class UserJourneyCoherenceCheck(DagCheck):
                 if self._is_actor_dimension(mapping):
                     actors.extend(self._actor_names_from_mapping(mapping, actor_dimension=True))
         return self._dedupe_strings(actors)
+
+    def _journey_actor_keys(self, journey: dict[str, Any]) -> set[str]:
+        """Casefolded actor names a single journey covers.
+
+        Reuses the same actor-name extraction as actor *declaration* discovery
+        (``actor`` / ``actors`` keys on the journey mapping) so the matching is
+        symmetric: an actor is "covered" iff a journey names it under the same
+        keys that declare actors elsewhere. Casefolded for case-insensitive
+        comparison against declared actors.
+        """
+        return {name.casefold() for name in self._actor_names_from_mapping(journey)}
+
+    def _actors_without_journeys(self, dag: DAG, covered_actors: set[str]) -> list[str]:
+        """Declared actors that no journey covers (original-cased, deduped).
+
+        ``covered_actors`` is the set of casefolded actor names taken from the
+        journeys actually present. The result is the declared actors whose
+        casefolded form is not in that set — i.e. actors left without a journey
+        even though other journeys exist. Returns the declared spelling so the
+        finding names the actor as authored.
+        """
+        return [actor for actor in self._extract_actors(dag) if actor.casefold() not in covered_actors]
 
     @staticmethod
     def _actor_source_mappings(attributes: dict[str, Any]) -> list[dict[str, Any]]:
