@@ -121,6 +121,102 @@ def test_build_dag_python_import_edges(tmp_path):
     assert {"pkg/b.py", "pkg/c.py", "pkg/d.py"} <= reachable
 
 
+def test_build_dag_esm_js_extension_resolves_to_ts_source(tmp_path):
+    # Bug (Zod dogfood): under ``moduleResolution: NodeNext``/``Bundler`` a TS
+    # import specifier MUST carry the emitted ``.js`` extension that resolves to
+    # the ``.ts`` SOURCE file (``import "./b.js"`` → ``b.ts``). Before the fix the
+    # resolver did exact-match + suffix-append only: ``b.js`` + ``.ts`` =
+    # ``b.js.ts`` ✗ → ZERO import edges for every modern TS project.
+    _write(tmp_path / "src" / "a.ts", 'import { b } from "./b.js";\n')
+    _write(tmp_path / "src" / "b.ts", "export const b = 1;\n")
+
+    dag = build_dag(tmp_path, _settings())
+
+    assert any(
+        edge.from_id == "src/a.ts" and edge.to_id == "src/b.ts" and edge.kind == "imports"
+        for edge in dag.edges
+    ), "ESM .js specifier must resolve to the .ts source file"
+
+
+def test_build_dag_esm_jsx_mjs_cjs_extensions_resolve_to_ts(tmp_path):
+    # The swap is data-driven across the emitted-suffix family, not just ``.js``.
+    _write(tmp_path / "src" / "a.ts", 'import "./b.jsx";\nimport "./c.mjs";\nimport "./d.cjs";\n')
+    _write(tmp_path / "src" / "b.tsx", "export const b = 1;\n")
+    _write(tmp_path / "src" / "c.ts", "export const c = 2;\n")
+    _write(tmp_path / "src" / "d.ts", "export const d = 3;\n")
+
+    dag = build_dag(tmp_path, _settings())
+
+    import_edges = {(e.from_id, e.to_id) for e in dag.edges if e.kind == "imports"}
+    assert ("src/a.ts", "src/b.tsx") in import_edges
+    assert ("src/a.ts", "src/c.ts") in import_edges
+    assert ("src/a.ts", "src/d.ts") in import_edges
+
+
+def test_build_dag_esm_js_directory_index_resolves_to_ts(tmp_path):
+    # ``import "./foo.js"`` where ``foo`` is a directory must resolve to
+    # ``foo/index.ts`` (the directory-index form of the swap fallback).
+    _write(tmp_path / "src" / "a.ts", 'import "./foo.js";\n')
+    _write(tmp_path / "src" / "foo" / "index.ts", "export const x = 1;\n")
+
+    dag = build_dag(tmp_path, _settings())
+
+    assert any(
+        edge.from_id == "src/a.ts" and edge.to_id == "src/foo/index.ts" and edge.kind == "imports"
+        for edge in dag.edges
+    )
+
+
+def test_build_dag_real_js_target_wins_by_exact_match(tmp_path):
+    # GENERALITY: a JS project whose specifier points at a REAL ``.js`` file
+    # (express: ``require('./foo')`` / ``import './foo.js'``) MUST be unaffected.
+    # The swap only fires after exact-match fails, so a real ``./b.js`` still
+    # resolves to ``b.js`` even when a ``b.ts`` also exists — exact match wins.
+    _write(tmp_path / "src" / "a.js", "const b = require('./b.js');\n")
+    _write(tmp_path / "src" / "b.js", "module.exports = 1;\n")
+    _write(tmp_path / "src" / "b.ts", "export const b = 1;\n")  # decoy
+
+    dag = build_dag(
+        tmp_path,
+        _settings(impl_file_patterns=["src/**/*.js", "src/**/*.ts"]),
+    )
+
+    import_edges = {(e.from_id, e.to_id) for e in dag.edges if e.kind == "imports"}
+    assert ("src/a.js", "src/b.js") in import_edges, "real .js must win by exact match"
+    assert ("src/a.js", "src/b.ts") not in import_edges, "swap must NOT hijack a real .js target"
+
+
+def test_build_dag_extensionless_js_require_unaffected(tmp_path):
+    # GENERALITY: extensionless CommonJS ``require('./foo')`` still resolves via
+    # the bare suffix-append path to ``foo.js`` (the swap never enters).
+    _write(tmp_path / "src" / "a.js", "const b = require('./b');\n")
+    _write(tmp_path / "src" / "b.js", "module.exports = 1;\n")
+
+    dag = build_dag(
+        tmp_path,
+        _settings(impl_file_patterns=["src/**/*.js"]),
+    )
+
+    import_edges = {(e.from_id, e.to_id) for e in dag.edges if e.kind == "imports"}
+    assert ("src/a.js", "src/b.js") in import_edges
+
+
+def test_build_dag_esm_js_swap_preserves_inner_dots(tmp_path):
+    # The swap replaces ONLY the trailing emitted suffix, so a multi-dot stem
+    # (``./schema.v2.js``) resolves to ``schema.v2.ts`` and never collapses to
+    # ``schema.ts``. (Stem avoids the ``.test.``/``.spec.`` test conventions on
+    # purpose — those become TEST nodes, a separate concern.)
+    _write(tmp_path / "src" / "a.ts", 'import "./schema.v2.js";\n')
+    _write(tmp_path / "src" / "schema.v2.ts", "export const x = 1;\n")
+    _write(tmp_path / "src" / "schema.ts", "export const y = 2;\n")  # must NOT be picked
+
+    dag = build_dag(tmp_path, _settings())
+
+    import_edges = {(e.from_id, e.to_id) for e in dag.edges if e.kind == "imports"}
+    assert ("src/a.ts", "src/schema.v2.ts") in import_edges
+    assert ("src/a.ts", "src/schema.ts") not in import_edges
+
+
 def test_is_test_file_recognizes_e2e_ts(tmp_path):
     # The DAG test-file classifier must recognise the ``.e2e.ts`` convention
     # alongside ``.test.``/``.spec.`` so a generated e2e file is a TEST node.

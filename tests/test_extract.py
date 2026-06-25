@@ -494,3 +494,43 @@ class TestBrowserNavigationPatternDetection:
         code = 'return redirect("/dashboard")'
         p = self._detect(code, "python")
         assert "auth_redirects" in p
+
+
+@pytest.mark.xfail(
+    reason="FLAGGED follow-up: module-doc basename collapse across parallel "
+    "source roots. _file_to_module returns parts[0] relative to EACH source "
+    "dir, so same-named files in parallel roots (Zod v4: core/schemas.ts, "
+    "classic/schemas.ts, mini/schemas.ts) merge into one 'schemas.ts' module "
+    "(-> one schemas-ts.md), flattening distinct architecture. A correct fix "
+    "must disambiguate by the distinguishing parent path AND keep every "
+    "language's extract_imports internal-import KEY in lockstep (they "
+    "independently key by rel.parts[0]); otherwise dependency edges dangle and "
+    "drop. That cross-language coordination + golden-output regeneration is "
+    "broad churn in the Contract Kernel parsing zone, so it is deferred.",
+    strict=True,
+)
+def test_module_doc_basename_no_collapse_across_parallel_roots(tmp_path):
+    # Red-before-green repro for the FLAGGED Bug 2. Two parallel source roots
+    # each contain a file named ``schemas.ts``. They are architecturally
+    # distinct and MUST remain separate modules. Today they collapse into one.
+    (tmp_path / "core").mkdir()
+    (tmp_path / "classic").mkdir()
+    (tmp_path / "core" / "schemas.ts").write_text(
+        "export const coreSchema = 1;\n", encoding="utf-8"
+    )
+    (tmp_path / "classic" / "schemas.ts").write_text(
+        "export const classicSchema = 2;\n", encoding="utf-8"
+    )
+
+    facts = extract_facts(tmp_path, "typescript", ["core", "classic"])
+
+    schemas_modules = [
+        name for name, mod in facts.modules.items()
+        if any(Path(f).name == "schemas.ts" for f in mod.files)
+    ]
+    # Expect TWO distinct modules (one per root). Currently ONE (collapsed) ->
+    # xfail. When the follow-up lands, drop the xfail marker.
+    assert len(schemas_modules) == 2, (
+        f"parallel-root files collapsed into modules={schemas_modules}; "
+        "each root's schemas.ts must be its own module"
+    )

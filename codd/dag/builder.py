@@ -1403,6 +1403,22 @@ def _resolve_python_import_target(import_ref: str, project_root: Path, path_to_n
     return path_to_node.get(init_path)
 
 
+#: ESM/TS extension-swap map (DATA, not a ``language ==`` branch). Under
+#: ``moduleResolution: NodeNext``/``Bundler`` a TypeScript import specifier MUST
+#: carry the EMITTED ``.js`` extension that resolves to the ``.ts`` SOURCE file
+#: (``import { x } from "./types.js"`` → ``types.ts``). Each emitted suffix maps
+#: to the source suffixes it can stand in for. Resolution tries these ONLY as a
+#: last-resort fallback (after exact-match and bare suffix-append both fail), so
+#: a real ``./foo.js`` target still wins by exact match — JS projects with real
+#: ``.js`` files are unaffected.
+_ESM_EXTENSION_SWAP: dict[str, tuple[str, ...]] = {
+    ".js": (".ts", ".tsx"),
+    ".jsx": (".tsx", ".ts"),
+    ".mjs": (".mts", ".ts"),
+    ".cjs": (".cts", ".ts"),
+}
+
+
 def _resolve_file_candidate(candidate: Path, path_to_node: dict[Path, str]) -> str | None:
     if candidate in path_to_node:
         return path_to_node[candidate]
@@ -1420,6 +1436,26 @@ def _resolve_file_candidate(candidate: Path, path_to_node: dict[Path, str]) -> s
     init_file = candidate / "__init__.py"
     if init_file in path_to_node:
         return path_to_node[init_file]
+
+    # FALLBACK (only after exact-match + suffix-append + index/__init__ all
+    # failed): the specifier carries an emitted ESM extension (``.js``/…) that
+    # should resolve to a ``.ts`` SOURCE file. Swap the emitted suffix for each
+    # candidate source suffix and retry both the file form (``./types.js`` →
+    # ``types.ts``) and the directory-index form (``./foo.js`` → ``foo/index.ts``).
+    source_suffixes = _ESM_EXTENSION_SWAP.get(candidate.suffix)
+    if source_suffixes:
+        # Strip ONLY the trailing emitted suffix as a string so inner dots are
+        # preserved (``types.test.js`` → base ``types.test``, not ``types``).
+        stem = candidate.name[: -len(candidate.suffix)]
+        swapped_base = candidate.parent / stem
+        for source_suffix in source_suffixes:
+            swapped = candidate.parent / f"{stem}{source_suffix}"
+            if swapped in path_to_node:
+                return path_to_node[swapped]
+        for source_suffix in source_suffixes:
+            indexed = swapped_base / f"index{source_suffix}"
+            if indexed in path_to_node:
+                return path_to_node[indexed]
     return None
 
 
