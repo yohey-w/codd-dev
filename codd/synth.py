@@ -176,12 +176,28 @@ def synth_architecture(
 
 
 def _build_environment() -> Environment:
-    return Environment(
+    env = Environment(
         loader=FileSystemLoader(str(_TEMPLATE_DIR)),
         autoescape=False,
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    # Enum schema "values" are heterogeneous across spec dialects: protobuf
+    # carries list-of-dicts ``{name, number}`` while GraphQL carries plain
+    # strings. ``string_or_name`` renders either shape to a display string so the
+    # api-contract template can ``join`` them uniformly. (NOTE: the template uses
+    # ``schema.get("values")`` — a real ``dict.get`` returning ``None`` when absent
+    # — NOT ``schema.values`` / ``schema["values"]``, both of which fall back to the
+    # built-in ``dict.values`` METHOD on a dict and crash ``join``.)
+    env.filters["string_or_name"] = _enum_value_display
+    return env
+
+
+def _enum_value_display(value: Any) -> str:
+    """Render one enum value (proto ``{name, number}`` dict or plain string)."""
+    if isinstance(value, dict):
+        return str(value.get("name", value))
+    return str(value)
 
 
 def _render_system_context(env: Environment, facts: ProjectFacts, today: str) -> str:

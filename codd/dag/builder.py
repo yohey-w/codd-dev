@@ -10,7 +10,7 @@ import warnings
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -911,6 +911,19 @@ def _resolve_import_target(
     path_to_node: dict[Path, str],
     aliases: dict[str, list[str]],
 ) -> str | None:
+    # Java FQN specifiers (``com.x.Y`` / ``static com.x.Y.m`` / ``com.x.*`` /
+    # ``package com.x``) are dispatched by the IMPORTING file's ``.java`` suffix
+    # (DATA, not a ``language ==`` core branch) because their dotted shape
+    # otherwise collides with Python's project-rooted dotted resolution. Java
+    # types live under a source root (``src/main/java``), not the project root.
+    if file_path.suffix == ".java":
+        candidates = _java_import_candidates(import_ref, file_path, project_root, path_to_node)
+        for candidate in candidates:
+            resolved = _resolve_file_candidate(candidate, path_to_node)
+            if resolved:
+                return resolved
+        return None
+
     candidates: list[Path] = []
     if _is_js_relative_specifier(import_ref):
         # JS/TS relative: ``./foo`` / ``../foo`` — resolve against the file dir
@@ -981,6 +994,119 @@ def _python_relative_candidates(import_ref: str, file_path: Path) -> list[Path]:
     return [(base / Path(*remainder.split("."))).resolve()]
 
 
+#: Conventional Java/JVM source-root segment chains (Maven/Gradle). A type whose
+#: FQN is ``com.x.Y`` lives at ``<root>/com/x/Y.java`` under one of these roots.
+_JAVA_SOURCE_ROOT_SEGMENTS = (
+    ("src", "main", "java"),
+    ("src", "test", "java"),
+    ("src", "main", "kotlin"),
+    ("src", "test", "kotlin"),
+)
+
+
+def _java_source_roots(project_root: Path, path_to_node: dict[Path, str]) -> list[Path]:
+    """Return candidate Java source roots (deepest-first), derived from DATA.
+
+    Built from the actual node file-set rather than hard-coded paths: every
+    ``…/src/main/java`` (etc.) prefix that some node file sits under becomes a
+    root, plus the project root itself as a last resort (flat layouts / default
+    package). Deeper roots are tried first so ``src/main/java`` wins over the
+    project root when both could match.
+    """
+    roots: dict[str, Path] = {}
+    for file_path in path_to_node:
+        parts = file_path.parts
+        for segments in _JAVA_SOURCE_ROOT_SEGMENTS:
+            idx = _find_segment_chain(parts, segments)
+            if idx is not None:
+                root = Path(*parts[: idx + len(segments)])
+                roots[str(root)] = root
+    ordered = sorted(roots.values(), key=lambda path: len(path.parts), reverse=True)
+    ordered.append(project_root.resolve())
+    return ordered
+
+
+def _find_segment_chain(parts: tuple[str, ...], chain: tuple[str, ...]) -> int | None:
+    """Return the start index where ``chain`` appears contiguously in ``parts``."""
+    if not chain:
+        return None
+    for start in range(len(parts) - len(chain) + 1):
+        if parts[start : start + len(chain)] == chain:
+            return start
+    return None
+
+
+def _java_import_candidates(
+    import_ref: str,
+    file_path: Path,
+    project_root: Path,
+    path_to_node: dict[Path, str],
+) -> list[Path]:
+    """Map a Java specifier to filesystem candidates under the source roots.
+
+    Handles the four shapes emitted by the Java specifier extractor:
+
+    * ``package com.x`` → the file's OWN package dir, so same-package implicit
+      references (Java needs no import for siblings) yield edges to the package's
+      other files (the caller skips the self-edge).
+    * ``com.x.*`` (wildcard) → the package directory; the caller links to the
+      in-package files found there (or skips cleanly when none are nodes).
+    * ``static com.x.Y.m`` → the owning class file ``com/x/Y.java`` (member
+      ``m`` stripped).
+    * ``com.x.Y`` (normal) → ``com/x/Y.java``.
+
+    ``_resolve_file_candidate`` appends the real ``.java`` suffix once a directory
+    candidate is produced, so package/wildcard dirs resolve to a sibling file.
+    """
+    roots = _java_source_roots(project_root, path_to_node)
+
+    if import_ref.startswith("package "):
+        package = import_ref[len("package "):].strip()
+        return _java_package_dir_candidates(package, roots)
+
+    if import_ref.endswith(".*"):
+        package = import_ref[:-2].strip()
+        return _java_package_dir_candidates(package, roots)
+
+    fqn = import_ref
+    if fqn.startswith("static "):
+        # ``static com.x.Y.member`` → owning class ``com.x.Y`` (drop the member).
+        fqn = fqn[len("static "):].strip()
+        parts = fqn.split(".")
+        if len(parts) >= 2:
+            fqn = ".".join(parts[:-1])
+
+    parts = [part for part in fqn.split(".") if part]
+    if not parts:
+        return []
+    return [(root / Path(*parts)).resolve() for root in roots]
+
+
+def _java_package_dir_candidates(package: str, roots: list[Path]) -> list[Path]:
+    parts = [part for part in package.split(".") if part]
+    if not parts:
+        return []
+    candidates: list[Path] = []
+    for root in roots:
+        package_dir = (root / Path(*parts)).resolve()
+        # List the package dir's in-tree files as candidates (same-package /
+        # wildcard linkage). ``_resolve_file_candidate`` matches exact node paths,
+        # so we hand it each existing ``.java`` file directly.
+        for node_path in _sorted_java_dir_files(package_dir):
+            candidates.append(node_path)
+    return candidates
+
+
+def _sorted_java_dir_files(package_dir: Path) -> list[Path]:
+    if not package_dir.is_dir():
+        return []
+    return sorted(
+        child.resolve()
+        for child in package_dir.iterdir()
+        if child.is_file() and child.suffix == ".java"
+    )
+
+
 def _infer_test_targets(
     test_path: Path,
     project_root: Path,
@@ -1025,30 +1151,89 @@ def _extract_python_import_specifiers(file_path: Path) -> list[str]:
     return get_extractor("python", "source").extract_import_specifiers(content)
 
 
+# Regex fallback for Java ``import`` / ``package`` specifiers, used only when the
+# tree-sitter-java binding is unavailable (otherwise the registry backend's AST
+# extractor is preferred). Mirrors the SHAPES emitted by
+# ``treesitter._extract_java_import_specifiers`` (``static`` keyword + ``.*``
+# wildcard + ``package`` line preserved) so the Java resolver branch is agnostic
+# to which extractor produced the specifier.
+_JAVA_IMPORT_SPECIFIER_RE = re.compile(
+    r"^\s*import\s+(static\s+)?([\w.]+(?:\.\*)?)\s*;",
+    re.MULTILINE,
+)
+_JAVA_PACKAGE_SPECIFIER_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+
+
+def _extract_java_import_specifiers(file_path: Path) -> list[str]:
+    """Return raw Java ``import``/``package`` specifiers for DAG edge building.
+
+    Prefers the registry's Java ``source`` backend (tree-sitter-java) so the SAME
+    extraction the scanner uses produces the DAG specifiers; degrades to a regex
+    when the binding is absent. Either way the SHAPES (``static …`` / ``….*`` /
+    ``package …``) match, so ``_resolve_import_target``'s Java branch — dispatched
+    by the ``.java`` suffix (DATA), not a ``language ==`` core branch — resolves
+    them identically. Mirrors ``_extract_python_import_specifiers``.
+    """
+
+    from codd.parsing import get_extractor
+
+    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    specifiers = get_extractor("java", "source").extract_import_specifiers(content)
+    if specifiers:
+        return specifiers
+    # Fallback: tree-sitter-java unavailable → RegexExtractor returned []. Recover
+    # the same specifier shapes from a line regex so Java edges still form.
+    fallback: list[str] = []
+    package_match = _JAVA_PACKAGE_SPECIFIER_RE.search(content)
+    if package_match:
+        fallback.append(f"package {package_match.group(1)}")
+    for static_kw, name in _JAVA_IMPORT_SPECIFIER_RE.findall(content):
+        if name.endswith(".*"):
+            fallback.append(name)
+        elif static_kw:
+            fallback.append(f"static {name}")
+        else:
+            fallback.append(name)
+    return fallback
+
+
+#: Suffix → raw-specifier extractor (DATA dispatch). A source file whose language
+#: carries its intra-tree dependency graph in DOTTED specifiers (Python modules,
+#: Java FQNs) resolves edges from these, instead of the builder's quoted-string
+#: ``extract_imports`` seam (JS/TS ``from '…'`` / ``require('…')``). Adding a
+#: language here is pure data — no core ``if language ==`` branch.
+_SUFFIX_SPECIFIER_EXTRACTORS: dict[str, "Callable[[Path], list[str]]"] = {
+    ".py": _extract_python_import_specifiers,
+    ".java": _extract_java_import_specifiers,
+}
+
+
 def _extract_impl_imports(file_path: Path) -> list[str]:
     """Return raw import specifiers for an implementation file.
 
-    Python impl files go through AST-based specifier extraction (the same path
-    test files use) so impl→impl import edges form for Python — the core of the
-    fix. Every other language keeps the existing quoted-specifier extractor
-    (``extract_imports``: JS/TS ``from '…'`` / ``require('…')``), unchanged.
-    Dispatch is by file suffix (DATA), mirroring ``_extract_test_imports``.
+    Python and Java impl files go through their registry-backed specifier
+    extractors (the same path test files use) so impl→impl import edges form for
+    them — the core of the fix. Every other language keeps the existing
+    quoted-specifier extractor (``extract_imports``: JS/TS ``from '…'`` /
+    ``require('…')``), unchanged. Dispatch is by file suffix (DATA).
     """
 
-    if file_path.suffix == ".py":
-        return _extract_python_import_specifiers(file_path)
+    extractor = _SUFFIX_SPECIFIER_EXTRACTORS.get(file_path.suffix)
+    if extractor is not None:
+        return extractor(file_path)
     return extract_imports(file_path)
 
 
 def _extract_test_imports(file_path: Path) -> list[str]:
     imports = extract_imports(file_path)
-    if file_path.suffix != ".py":
+    extractor = _SUFFIX_SPECIFIER_EXTRACTORS.get(file_path.suffix)
+    if extractor is None:
         return imports
 
-    # AST-based Python specifiers (relative imports included). Combined with the
-    # quoted-specifier pass above so a polyglot test file (e.g. a ``.py`` test
-    # that also embeds a JS ``require('…')`` literal in a string) keeps both.
-    return [*imports, *_extract_python_import_specifiers(file_path)]
+    # Registry-backed dotted specifiers (Python relative imports / Java FQNs)
+    # combined with the quoted-specifier pass above so a polyglot test file keeps
+    # both seams' results.
+    return [*imports, *extractor(file_path)]
 
 
 def _resolve_python_import_target(import_ref: str, project_root: Path, path_to_node: dict[Path, str]) -> str | None:

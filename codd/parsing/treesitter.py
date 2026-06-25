@@ -1,4 +1,4 @@
-"""Tree-sitter extraction backend for Python and TypeScript/JavaScript."""
+"""Tree-sitter extraction backend for Python, TypeScript/JavaScript, and Java."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ _TREE_SITTER_LANGUAGE_PACKAGES = {
     "python": "tree_sitter_python",
     "typescript": "tree_sitter_typescript",
     "javascript": "tree_sitter_typescript",
+    "java": "tree_sitter_java",
 }
 
 _JS_IMPORT_SUFFIXES = {
@@ -78,6 +79,8 @@ class TreeSitterExtractor:
                 return _extract_python_symbols_ast(root, content, file_path)
             if self.language in {"typescript", "javascript"}:
                 return _extract_typescript_symbols(root, content, file_path)
+            if self.language == "java":
+                return _extract_java_symbols(root, content, file_path)
         except Exception:
             return self._fallback.extract_symbols(content, file_path)
         return self._fallback.extract_symbols(content, file_path)
@@ -97,9 +100,32 @@ class TreeSitterExtractor:
                 return _extract_python_imports_ast(root, content, file_path, project_root, src_dir)
             if self.language in {"typescript", "javascript"}:
                 return _extract_typescript_imports_ast(root, content, file_path, src_dir, self.language)
+            if self.language == "java":
+                return _extract_java_imports_ast(root, content, project_root, src_dir)
         except Exception:
             return self._fallback.extract_imports(content, file_path, project_root, src_dir)
         return self._fallback.extract_imports(content, file_path, project_root, src_dir)
+
+    def extract_import_specifiers(self, content: str) -> list[str]:
+        """Return RAW import specifiers for DAG edge building.
+
+        Only languages whose intra-tree dependency graph the DAG builder
+        resolves from dotted specifiers (rather than the builder's quoted-string
+        ``extract_imports`` path) emit here. Java emits its ``import`` FQNs,
+        preserving the ``static`` keyword and trailing ``.*`` wildcard exactly as
+        written, plus the file's own ``package`` (so the DAG resolver can model
+        same-package implicit refs). Other tree-sitter languages return ``[]``
+        (their edges already form via the builder's quoted-specifier seam).
+        """
+        if self.category != "source":
+            return []
+        if self.language != "java":
+            return []
+        try:
+            root = self._parse(content)
+        except Exception:
+            return []
+        return _extract_java_import_specifiers(root, content)
 
     def detect_code_patterns(self, mod: ModuleInfo, content: str) -> None:
         if self.category != "source":
@@ -160,6 +186,10 @@ def _load_tree_sitter_language(language: str):
         import tree_sitter_sql
 
         return Language(tree_sitter_sql.language())
+    if normalized == "java":
+        import tree_sitter_java
+
+        return Language(tree_sitter_java.language())
     raise ValueError(f"Unsupported Tree-sitter language: {language}")
 
 def _node_text(content_bytes: bytes, node: Any) -> str:
@@ -618,6 +648,205 @@ def _call_expression_module_specifier(content_bytes: bytes, node: Any) -> str | 
         # resolvable — stop at the first argument either way.
         break
     return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Java backend (tree-sitter-java). Symbols cover class/interface/enum/record +
+# methods; imports classify first-party vs java/javax/third-party; the RAW
+# specifier extractor feeds the DAG builder's FQN→file resolver.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Java standard-library / platform package roots that are NEVER first-party.
+_JAVA_STDLIB_ROOTS = frozenset({"java", "javax", "jdk", "sun", "com.sun", "org.w3c", "org.xml"})
+
+_JAVA_TYPE_NODE_KINDS = {
+    "class_declaration": "class",
+    "interface_declaration": "interface",
+    "enum_declaration": "enum",
+    "record_declaration": "class",
+    "annotation_type_declaration": "interface",
+}
+
+
+def _java_scoped_name(content_bytes: bytes, node: Any) -> str:
+    """Return the dotted name of an import/package ``scoped_identifier`` node.
+
+    The grammar nests ``scoped_identifier`` left-recursively and a wildcard adds
+    a sibling ``asterisk``; the flat node text (e.g. ``com.google.gson.Gson``)
+    already carries the dotted FQN, so the node text is the canonical specifier.
+    """
+    return _node_text(content_bytes, node).strip()
+
+
+def _extract_java_import_specifiers(root: Any, content: str) -> list[str]:
+    """RAW Java ``import`` / ``package`` specifiers, in source order.
+
+    * normal import → ``com.google.gson.Gson``
+    * static import → ``static com.google.gson.Foo.bar`` (keyword preserved so
+      the resolver strips the trailing member to find the owning class file)
+    * wildcard import → ``com.google.gson.*`` (resolver maps to the package dir)
+    * package decl → ``package com.google.gson`` (lets the resolver model
+      same-package implicit references)
+
+    The shapes mirror Java source syntax so the specifier is self-describing; the
+    DAG builder's Java resolver branch (dispatched by the ``.java`` suffix, i.e.
+    DATA) parses them.
+    """
+    content_bytes = content.encode("utf-8", errors="ignore")
+    specifiers: list[str] = []
+    for node in _iter_named_nodes(root):
+        if node.type == "package_declaration":
+            for child in node.named_children:
+                if child.type in {"scoped_identifier", "identifier"}:
+                    specifiers.append(f"package {_java_scoped_name(content_bytes, child)}")
+                    break
+            continue
+        if node.type != "import_declaration":
+            continue
+        text = _node_text(content_bytes, node)
+        is_static = bool(re.match(r"\s*import\s+static\b", text))
+        is_wildcard = any(child.type == "asterisk" for child in node.children)
+        name = ""
+        for child in node.named_children:
+            if child.type in {"scoped_identifier", "identifier"}:
+                name = _java_scoped_name(content_bytes, child)
+                break
+        if not name:
+            continue
+        if is_wildcard:
+            specifiers.append(f"{name}.*")
+        elif is_static:
+            specifiers.append(f"static {name}")
+        else:
+            specifiers.append(name)
+    return specifiers
+
+
+def _extract_java_imports_ast(
+    root: Any,
+    content: str,
+    project_root: Path,
+    src_dir: Path,
+) -> tuple[dict[str, list[str]], set[str]]:
+    """Classify Java imports into first-party ``internal`` vs ``external``.
+
+    First-party = an import whose FQN shares the file's own top package segments
+    OR which resolves to a file under a Java source root; everything under the
+    JDK/platform roots (``java.*`` / ``javax.*`` / …) or any other third-party
+    package is ``external``. The ``internal`` map is keyed by the second package
+    component (mirroring the python/go scanners' "first meaningful segment" key).
+    """
+    content_bytes = content.encode("utf-8", errors="ignore")
+    internal: dict[str, list[str]] = {}
+    external: set[str] = set()
+
+    package_root = _java_package_root(root, content_bytes)
+
+    for spec in _extract_java_import_specifiers(root, content):
+        if spec.startswith("package "):
+            continue
+        line = spec
+        fqn = spec
+        if fqn.startswith("static "):
+            fqn = fqn[len("static "):]
+        if fqn.endswith(".*"):
+            fqn = fqn[:-2]
+        parts = fqn.split(".")
+        if _java_is_stdlib(fqn):
+            external.add(fqn)
+            continue
+        if package_root and _java_same_first_party(package_root, fqn):
+            key = _java_internal_key(parts, package_root.split("."))
+            internal.setdefault(key, []).append(line)
+        else:
+            external.add(fqn)
+
+    return internal, external
+
+
+def _java_internal_key(fqn_parts: list[str], root_parts: list[str]) -> str:
+    """First sub-package segment after the file's package root (see regex twin).
+
+    Mirrors ``regex_strategies._java_internal_key`` so the tree-sitter and regex
+    Java import seams produce the SAME internal keys.
+    """
+    common = 0
+    for left, right in zip(fqn_parts, root_parts):
+        if left != right:
+            break
+        common += 1
+    remainder = fqn_parts[common:]
+    if remainder:
+        return remainder[0]
+    return fqn_parts[-2] if len(fqn_parts) >= 2 else fqn_parts[0]
+
+
+def _java_same_first_party(package_root: str, fqn: str) -> bool:
+    """True when ``fqn`` belongs to the same first-party package tree.
+
+    Matches on a shared leading package prefix: the org+domain (first 2
+    segments, e.g. ``com.google``) when the file's package has that depth, else
+    the single root segment. This keeps a sibling package
+    (``com.google.gson.internal`` for a ``com.google.gson`` file) first-party
+    while pushing an unrelated third party that merely shares ``com``
+    (``com.example.*``) to external — the common Java case where ``com`` / ``org``
+    first segments are shared across vendors.
+    """
+    root_parts = package_root.split(".")
+    fqn_parts = fqn.split(".")
+    depth = min(2, len(root_parts))
+    return fqn_parts[:depth] == root_parts[:depth]
+
+
+def _java_package_root(root: Any, content_bytes: bytes) -> str:
+    for node in _iter_named_nodes(root):
+        if node.type == "package_declaration":
+            for child in node.named_children:
+                if child.type in {"scoped_identifier", "identifier"}:
+                    return _java_scoped_name(content_bytes, child)
+    return ""
+
+
+def _java_is_stdlib(fqn: str) -> bool:
+    parts = fqn.split(".")
+    if parts[0] in _JAVA_STDLIB_ROOTS:
+        return True
+    # Two-segment platform roots (``com.sun.*`` / ``org.w3c.*`` / ``org.xml.*``).
+    if len(parts) >= 2 and f"{parts[0]}.{parts[1]}" in _JAVA_STDLIB_ROOTS:
+        return True
+    return False
+
+
+def _extract_java_symbols(root: Any, content: str, file_path: str) -> list[Symbol]:
+    content_bytes = content.encode("utf-8", errors="ignore")
+    symbols: list[Symbol] = []
+
+    def visit(node: Any):
+        kind = _JAVA_TYPE_NODE_KINDS.get(node.type)
+        if kind is not None:
+            name = _field_text(content_bytes, node, "name")
+            if name:
+                symbols.append(_make_symbol(name, kind, file_path, node.start_point.row + 1))
+            body = node.child_by_field_name("body")
+            if body is not None:
+                for child in getattr(body, "named_children", []):
+                    visit(child)
+            return
+
+        if node.type == "method_declaration":
+            name = _field_text(content_bytes, node, "name")
+            params = _strip_wrapping(
+                _normalize_ws(_field_text(content_bytes, node, "parameters")), "(", ")"
+            )
+            if name:
+                symbols.append(_make_symbol(name, "function", file_path, node.start_point.row + 1, params=params))
+            return
+
+        for child in getattr(node, "named_children", []):
+            visit(child)
+
+    visit(root)
+    return symbols
+
 
 def _detect_python_code_patterns(mod: ModuleInfo, root: Any, content: str) -> None:
     content_bytes = content.encode("utf-8", errors="ignore")

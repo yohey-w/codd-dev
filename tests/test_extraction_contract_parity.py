@@ -476,6 +476,9 @@ def test_get_extractor_selection_identity():
 
     _assert_selected("typescript", "source", TreeSitterExtractor, TreeSitterExtractor.is_available("typescript"))
     _assert_selected("javascript", "source", TreeSitterExtractor, TreeSitterExtractor.is_available("javascript"))
+    # Java auto-promotes to tree-sitter when the binding is installed (Increment 1
+    # registered tree-sitter-java), else degrades to the regex backend.
+    _assert_selected("java", "source", TreeSitterExtractor, TreeSitterExtractor.is_available("java"))
     _assert_selected("sql", "schema", SqlDdlExtractor, SqlDdlExtractor.is_available())
     # unknown language / category → regex fallback (best-effort analysis)
     assert isinstance(get_extractor("ruby", "source"), RegexExtractor)

@@ -50,8 +50,8 @@
 {% for field in schema.fields -%}
 | {{ field.name }} | {{ field.type or "—" }} |
 {% endfor %}
-{% elif schema.values %}
-- Values: {{ schema.values | join(", ") }}
+{% elif schema.get("values") %}
+- Values: {{ schema.get("values") | map("string_or_name") | join(", ") }}
 {% else %}
 - Structural details unavailable
 {% endif %}

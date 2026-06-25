@@ -111,7 +111,11 @@ def test_get_extractor_returns_regex_for_unsupported_language(monkeypatch):
         classmethod(lambda cls, language=None: True),
     )
 
-    extractor = get_extractor("java")
+    # ``ruby`` has no tree-sitter binding registered in
+    # ``_TREE_SITTER_LANGUAGE_PACKAGES``, so even with availability FORCED True it
+    # falls through to the regex backend. (``java`` is no longer a valid example
+    # here: Increment 1 registered tree-sitter-java, so it now auto-promotes.)
+    extractor = get_extractor("ruby")
 
     assert isinstance(extractor, RegexExtractor)
 

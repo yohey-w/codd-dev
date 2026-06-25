@@ -126,16 +126,97 @@ def _symbols_ts_js(content: str, rel_path: str) -> "list[Symbol]":
     return symbols
 
 
+#: Java type-declaration keyword → emitted symbol kind. ``record`` and the
+#: annotation type collapse to the nearest existing kind so downstream symbol
+#: consumers (which only know class/interface/enum/function) stay unchanged.
+_JAVA_TYPE_KEYWORD_KINDS = (
+    (re.compile(r'^\s*(?:public|protected|private)?\s*(?:static\s+)?(?:abstract\s+|final\s+)?class\s+(\w+)'), "class"),
+    (re.compile(r'^\s*(?:public|protected|private)?\s*(?:static\s+)?(?:abstract\s+)?interface\s+(\w+)'), "interface"),
+    (re.compile(r'^\s*(?:public|protected|private)?\s*(?:static\s+)?enum\s+(\w+)'), "enum"),
+    (re.compile(r'^\s*(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?record\s+(\w+)'), "class"),
+)
+
+
 def _symbols_java(content: str, rel_path: str) -> "list[Symbol]":
     symbols: list = []
     for i, line in enumerate(content.splitlines(), 1):
-        m = re.match(r'^\s*(?:public|protected|private)?\s*(?:static\s+)?(?:abstract\s+)?class\s+(\w+)', line)
-        if m:
-            symbols.append(_symbol(m.group(1), "class", rel_path, i))
+        for pattern, kind in _JAVA_TYPE_KEYWORD_KINDS:
+            m = pattern.match(line)
+            if m:
+                symbols.append(_symbol(m.group(1), kind, rel_path, i))
+                break
         m = re.match(r'^\s*(?:public|protected)\s+(?:static\s+)?[\w<>\[\],\s]+\s+(\w+)\s*\(([^)]*)\)', line)
         if m and m.group(1)[0].islower():
             symbols.append(_symbol(m.group(1), "function", rel_path, i, m.group(2).strip()))
     return symbols
+
+
+#: Java stdlib / platform package roots (mirrors treesitter._JAVA_STDLIB_ROOTS).
+_JAVA_STDLIB = frozenset({"java", "javax", "jdk", "sun"})
+
+_JAVA_IMPORT_RE = re.compile(r'^\s*import\s+(static\s+)?([\w.]+(?:\.\*)?)\s*;')
+_JAVA_PACKAGE_RE = re.compile(r'^\s*package\s+([\w.]+)\s*;')
+
+
+def _imports_java(content, project_root, src_dir, file_path):
+    """Classify Java imports: first-party ``internal`` vs ``java.*``/third-party.
+
+    The regex sibling of ``treesitter._extract_java_imports_ast`` (used when
+    tree-sitter-java is unavailable). First-party = an import sharing the file's
+    own package org+domain prefix (first 2 segments, e.g. ``com.google``);
+    ``java.*``/``javax.*``/``jdk.*``/``sun.*`` and unrelated third parties are
+    external. ``stdlib`` subtraction is applied by ``RegexLanguageStrategy``.
+    """
+    internal: dict[str, list[str]] = {}
+    external: set[str] = set()
+
+    package_root = ""
+    for line in content.splitlines():
+        pm = _JAVA_PACKAGE_RE.match(line)
+        if pm:
+            package_root = pm.group(1)
+            break
+
+    root_parts = package_root.split(".") if package_root else []
+    depth = min(2, len(root_parts))
+
+    for line in content.splitlines():
+        m = _JAVA_IMPORT_RE.match(line)
+        if not m:
+            continue
+        fqn = m.group(2)
+        if fqn.endswith(".*"):
+            fqn = fqn[:-2]
+        parts = fqn.split(".")
+        top = parts[0]
+        if top in _JAVA_STDLIB:
+            external.add(fqn)
+            continue
+        if root_parts and parts[:depth] == root_parts[:depth]:
+            key = _java_internal_key(parts, root_parts)
+            internal.setdefault(key, []).append(line.strip())
+        else:
+            external.add(fqn)
+
+    return internal, external
+
+
+def _java_internal_key(fqn_parts: list[str], root_parts: list[str]) -> str:
+    """The first sub-package segment after the file's package root.
+
+    For a ``com.acme.app`` file importing ``com.acme.app.util.Helper`` the key is
+    ``util`` (the meaningful first-party sub-module), not the shared org segment.
+    Falls back to the last package segment when the import IS the package root.
+    """
+    common = 0
+    for left, right in zip(fqn_parts, root_parts):
+        if left != right:
+            break
+        common += 1
+    remainder = fqn_parts[common:]
+    if remainder:
+        return remainder[0]
+    return fqn_parts[-2] if len(fqn_parts) >= 2 else fqn_parts[0]
 
 
 def _symbols_go(content: str, rel_path: str) -> "list[Symbol]":
@@ -395,9 +476,13 @@ _JAVASCRIPT = RegexLanguageStrategy(
 _JAVA = RegexLanguageStrategy(
     name="java",
     extensions=frozenset({".java"}),
+    # stdlib stays EMPTY: the old ladder had no java stdlib set and
+    # ``common_stdlib("java")`` is pinned to ``set()``. ``_imports_java`` classifies
+    # ``java.*`` into ``external`` itself (per the Piece-2 contract) rather than
+    # relying on strategy-level stdlib subtraction.
     entry_points=("Application.java", "Main.java", "App.java"),
     extract_symbols=_symbols_java,
-    extract_imports=None,  # the old ladder had NO java import branch (no-op)
+    extract_imports=_imports_java,
     detect_code_patterns=None,  # the old ladder had NO java code-pattern branch
     file_to_module=_file_to_module_java,
     guess_test_target=None,
@@ -503,6 +588,41 @@ def _ceg_targets_python(
     return targets
 
 
+def _ceg_targets_java(
+    internal: dict, project_root: Path, file_path: Path
+) -> "list[CegImportTarget]":
+    """Java internal imports → ``module`` CEG nodes keyed by first-party FQN.
+
+    Mirrors the python resolver's module-node modelling (a stable identifier per
+    imported first-party unit) rather than probing the filesystem; the DAG
+    builder owns the precise FQN→file resolution for import EDGES. The ``internal``
+    map values are the raw import lines (``com.google.gson.internal.Streams`` /
+    ``static com.google.gson.Foo.bar``); we recover the owning FQN for the node.
+    """
+    targets: list[CegImportTarget] = []
+    seen: set[str] = set()
+    for import_lines in internal.values():
+        for line in import_lines:
+            fqn = line.strip()
+            if fqn.startswith("static "):
+                fqn = fqn[len("static "):]
+            if fqn.endswith(".*"):
+                fqn = fqn[:-2]
+            if not fqn or fqn in seen:
+                continue
+            seen.add(fqn)
+            targets.append(
+                CegImportTarget(
+                    target_id=f"module:{fqn}",
+                    node_type="module",
+                    node_kwargs={"name": fqn},
+                    evidence_method="static_import",
+                    confidence=0.90,
+                )
+            )
+    return targets
+
+
 #: Per-language scanner CEG-import resolvers (registry DATA). Languages without
 #: an entry contribute NO import edges, byte-identical to the former scanner
 #: block that only handled python and typescript/javascript.
@@ -512,6 +632,7 @@ _CEG_IMPORT_RESOLVERS: dict[
     "typescript": _ceg_targets_ts_js,
     "javascript": _ceg_targets_ts_js,
     "python": _ceg_targets_python,
+    "java": _ceg_targets_java,
 }
 
 

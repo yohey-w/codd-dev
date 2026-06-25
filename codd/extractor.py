@@ -323,8 +323,23 @@ def _detect_language(project_root: Path, exclude_patterns: list[str]) -> str:
     return max(counts, key=counts.get)
 
 
+# Conventional JVM (Maven/Gradle) source / test layout. Detected by directory
+# PRESENCE (DATA), not a language gate, so a polyglot repo that happens to carry
+# this layout is handled the same way. ``src`` is deliberately NOT used as a
+# source dir when ``src/main/*`` exists, because the bare ``src`` glob would also
+# sweep in ``src/test/*`` (mixing tests into impl).
+_JVM_SOURCE_LAYOUT_DIRS = ("src/main/java", "src/main/kotlin", "src/main/scala")
+_JVM_TEST_LAYOUT_DIRS = ("src/test/java", "src/test/kotlin", "src/test/scala")
+
+
 def _detect_source_dirs(project_root: Path, language: str) -> list[str]:
     """Auto-detect source directories."""
+    jvm_source = [d for d in _JVM_SOURCE_LAYOUT_DIRS if (project_root / d).is_dir()]
+    if jvm_source:
+        # Maven/Gradle layout: point at ``src/main/<lang>`` so the impl glob does
+        # not also pick up ``src/test/<lang>`` (which _detect_test_dirs claims).
+        return jvm_source
+
     candidates = ["src", "lib", "app", "pkg", "cmd", "internal"]
     found = []
 
@@ -361,6 +376,12 @@ def _detect_test_dirs(project_root: Path) -> list[str]:
     for c in candidates:
         if (project_root / c).is_dir():
             found.append(c)
+    # JVM (Maven/Gradle) layout keeps tests under ``src/test/<lang>`` rather than
+    # a top-level ``tests/``. Detected by directory presence (DATA), additive so
+    # non-JVM projects are unaffected.
+    for d in _JVM_TEST_LAYOUT_DIRS:
+        if (project_root / d).is_dir():
+            found.append(d)
     return found
 
 
