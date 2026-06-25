@@ -251,14 +251,31 @@ def extract_runtime_states(
     return [states[key] for key in sorted(states)]
 
 
+#: Project types for which the criteria-driven ``runtime:db_seed:users`` WEB/DB
+#: heuristic stays enabled WITHOUT an explicit declaration. ``web`` legitimately
+#: has the users/login modality; ``generic`` carries no build markers (a script
+#: app that might be web), so it keeps the legacy injection. Every OTHER detected
+#: type is a typed non-web project by default (``cpp_embedded``/``java``/
+#: ``csharp``/``rust``/… — Guava, Newtonsoft, LevelDB) and is gated OUT, so the web
+#: heuristic is never synthesized into a non-web library. Generic — keyed on the
+#: detected type (registry DATA), not a per-OSS special-case.
+_DB_SEED_HEURISTIC_DEFAULT_TYPES = frozenset({"web", "generic"})
+
+
 def _db_seed_injection_allowed(project_root: Path, config: dict[str, Any]) -> bool:
     """Whether the criteria-driven ``runtime:db_seed:users`` node may be injected.
 
-    Backward-compatible default: injection is ALLOWED unless the project
-    EXPLICITLY declares a non-web/non-DB modality. Concretely, it is suppressed
-    only when a ``project_type`` is configured AND its capabilities have no UI
-    and ``network_surface == "none"`` (a pure CLI/library). A project with no
-    declared type keeps the legacy injection. An explicit
+    The injection is a WEB/DB heuristic (assumes a users table + login). It is
+    ALLOWED when:
+
+    * a ``project_type`` is EXPLICITLY declared and is web-ish (has a UI or a
+      non-``none`` network surface); OR
+    * no type is declared but the DETECTED type is web-or-ambiguous (``web`` /
+      ``generic`` — see ``_DB_SEED_HEURISTIC_DEFAULT_TYPES``).
+
+    It is SUPPRESSED for any explicitly-declared non-web modality (pure CLI /
+    library) AND for any DETECTED typed non-web project (C++/Java/C#/Rust/… libs),
+    so the heuristic never pollutes a non-web codebase. An explicit
     ``deployment.infer_db_seed_from_criteria: true|false`` overrides either way.
     """
     deployment = config.get("deployment")
@@ -275,9 +292,15 @@ def _db_seed_injection_allowed(project_root: Path, config: dict[str, Any]) -> bo
         project = config.get("project")
         if isinstance(project, dict):
             configured = str(project.get("type") or "").strip().lower()
+
     if not configured:
-        # No declared type → legacy behaviour (inject).
-        return True
+        # No declared type → DETECT it from build markers and gate the WEB
+        # heuristic to web-or-ambiguous types (so a typed non-web lib is excluded
+        # even without an explicit declaration). This is the PRECISION fix.
+        from codd.dag.builder import _detect_project_type
+
+        detected = _detect_project_type(Path(project_root)).strip().lower()
+        return detected in _DB_SEED_HEURISTIC_DEFAULT_TYPES
 
     capabilities = _resolve_capabilities(project_root, config)
     web_ish = bool(

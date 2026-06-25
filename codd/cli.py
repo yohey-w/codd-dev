@@ -816,12 +816,14 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
     else:
         _line("  PASS — no warnings")
 
-    # --- vb declarations (gate) -------------------------------------------
+    # --- verifiable-behavior declarations (gate) --------------------------
     # Incoherent verifiable-behavior declarations (same id, different meaning in
     # two docs) make 100% coverage structurally impossible — fail loudly. The
     # WARNING-severity case (a non-canonical doc with first-column VB rows) is
-    # already surfaced as a doctor advisory above with migration guidance.
-    _section("vb declarations")
+    # already surfaced as a doctor advisory above with migration guidance. The
+    # label spells out "verifiable-behavior" (the ``vb`` abbreviation read like
+    # Visual Basic — it is the V-Model verification boundary, not a language).
+    _section("verifiable-behavior declarations")
     try:
         vb_errors = _vb_declaration_issue_messages(project_root, load_project_config(project_root), severity="error")
     except (FileNotFoundError, ValueError) as exc:

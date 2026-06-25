@@ -223,6 +223,83 @@ def _make_symbol(
         implements=list(implements or []),
     )
 
+#: Byte-order marks that some editors prepend to UTF-8/UTF-16 source files. The
+#: UTF-8 BOM decodes to ``﻿``; the UTF-16 forms appear when a mis-decoded
+#: file leaks a leading ``￾``. They are NOT ``\s``, so a first-line
+#: declaration regex anchored with ``^\s*`` (a C# ``namespace``, a Java
+#: ``package``, a line-1 Python ``import``) silently fails to match, orphaning the
+#: declaration and islanding the file in the DAG.
+_BOM_CHARS = "﻿￾"
+
+
+def strip_bom(content: str) -> str:
+    """Strip a leading byte-order mark from decoded source text (idempotent).
+
+    GENERIC first-line robustness: applied at the parsing boundary for EVERY
+    language (not a per-language branch), so a BOM on line 1 never orphans a
+    first-line declaration. Only a LEADING BOM is removed — interior content is
+    untouched, and the common no-BOM case returns the same string object.
+    """
+    if content and content[0] in _BOM_CHARS:
+        return content.lstrip(_BOM_CHARS)
+    return content
+
+
+#: Conventional C/C++ include-root directory names (single source of truth shared
+#: by the builder's edge resolver AND the scanner-CEG resolver, so the two cannot
+#: drift). A quote-form include not relative to the including file is probed under
+#: these roots, walked up from the file, plus the project root itself.
+CPP_INCLUDE_ROOTS: tuple[str, ...] = ("include", "src", "inc")
+
+
+def cpp_include_candidate_paths(
+    spec: str,
+    file_path: Path,
+    project_root: Path,
+    extra_roots: tuple[Path, ...] = (),
+) -> list[Path]:
+    """Ordered candidate filesystem paths for one quote-form C++ ``#include``.
+
+    GENERIC FIX 3: the ONE C++ include-resolution path. Both the DAG builder
+    (matching candidates against the node file-set) and the scanner-CEG resolver
+    (matching against the live filesystem) call THIS, so they can no longer
+    diverge (the LevelDB drift: 59% of scan edges were lost because the scan
+    resolver lacked the project-root-rooted candidate and the harvested-root
+    candidates the builder had). A quote-form spec already carries its extension,
+    so there is no suffix synthesis. Resolution order:
+
+      1. relative to the including file's own directory (quote-form primary rule);
+      2. each conventional include root (``include``/``src``/``inc``) walked up the
+         including file's ancestors;
+      3. the PROJECT ROOT itself as an include root (covers an unconventional
+         layout where ``#include "db/foo.h"`` is rooted at the repo root — LevelDB);
+      4. caller-supplied ``extra_roots`` (the builder harvests header-node parent
+         dirs here so a node-set with an exotic include root still resolves).
+
+    Pure path construction — existence/in-tree checks are the caller's job (node
+    membership for edges; ``is_file()`` + in-tree for the scanner), so no false
+    edge can form from a candidate that does not exist.
+    """
+    rel = Path(spec)
+    candidates: list[Path] = [(file_path.parent / rel).resolve()]
+    seen_roots: set[Path] = set()
+
+    def _add_root(root: Path) -> None:
+        key = root.resolve()
+        if key in seen_roots:
+            return
+        seen_roots.add(key)
+        candidates.append((root / rel).resolve())
+
+    for ancestor in [file_path.parent, *file_path.parents]:
+        for root_name in CPP_INCLUDE_ROOTS:
+            _add_root(ancestor / root_name)
+    _add_root(project_root)
+    for root in extra_roots:
+        _add_root(root)
+    return candidates
+
+
 def _normalize_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 

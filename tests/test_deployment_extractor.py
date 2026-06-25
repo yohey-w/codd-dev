@@ -516,3 +516,43 @@ def test_db_seed_explicit_override_enables_for_cli(tmp_path):
     )
 
     assert any(state.identifier == "runtime:db_seed:users" for state in states)
+
+
+def test_db_seed_not_injected_for_detected_cpp_lib(tmp_path):
+    """PRECISION: a C++ library (detected ``cpp_embedded``, no declared type) whose
+    criteria mention ``user`` must NOT get the web/DB ``db_seed:users`` heuristic.
+
+    The injection is a WEB heuristic; a typed non-web project detected by its build
+    markers (here ``CMakeLists.txt``) is gated out generically — not a per-OSS case.
+    """
+    (tmp_path / "CMakeLists.txt").write_text("project(demo)\n", encoding="utf-8")
+    states = extract_runtime_states(
+        tmp_path,
+        [],
+        [{"id": "docs/design/api.md", "acceptance_criteria": ["The user runs the tool"]}],
+    )
+
+    assert all(state.identifier != "runtime:db_seed:users" for state in states)
+
+
+def test_db_seed_not_injected_for_detected_java_lib(tmp_path):
+    """PRECISION: a Java library (detected ``java`` via pom.xml) is gated out too."""
+    (tmp_path / "pom.xml").write_text("<project />\n", encoding="utf-8")
+    states = extract_runtime_states(
+        tmp_path,
+        [],
+        [{"id": "docs/design/api.md", "acceptance_criteria": ["A user can login"]}],
+    )
+
+    assert all(state.identifier != "runtime:db_seed:users" for state in states)
+
+
+def test_db_seed_still_injected_for_generic_untyped_project(tmp_path):
+    """No build markers → ``generic`` → legacy injection preserved (no over-gating)."""
+    states = extract_runtime_states(
+        tmp_path,
+        [],
+        [{"id": "docs/design/api.md", "acceptance_criteria": ["User can login"]}],
+    )
+
+    assert any(state.identifier == "runtime:db_seed:users" for state in states)

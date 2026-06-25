@@ -91,5 +91,11 @@ def test_java_ceg_resolver_registered_and_builds_module_targets(tmp_path):
     targets = ceg_import_targets("java", internal, tmp_path, tmp_path / "Service.java")
     ids = {t.target_id for t in targets}
     assert "module:com.acme.app.util.Helper" in ids
-    # static import's owning member is preserved on the module node id.
-    assert "module:com.acme.app.model.User.find" in ids
+    # PRECISION: a ``static`` import collapses to its OWNING CLASS (member dropped)
+    # so per-member static imports of the same class dedup to one node; it is also
+    # labeled ``static_import`` (the plain import above is labeled ``import``).
+    assert "module:com.acme.app.model.User" in ids
+    assert "module:com.acme.app.model.User.find" not in ids
+    by_id = {t.target_id: t.evidence_method for t in targets}
+    assert by_id["module:com.acme.app.util.Helper"] == "import"
+    assert by_id["module:com.acme.app.model.User"] == "static_import"

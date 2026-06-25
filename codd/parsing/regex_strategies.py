@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from codd.parsing._shared import cpp_include_candidate_paths, strip_bom
+
 if TYPE_CHECKING:
     from codd.extractor import ModuleInfo, Symbol
 
@@ -72,20 +74,22 @@ class RegexLanguageStrategy:
     def symbols(self, content: str, file_path: str) -> "list[Symbol]":
         if self.extract_symbols is None:
             return []
-        return self.extract_symbols(content, file_path)
+        return self.extract_symbols(strip_bom(content), file_path)
 
     def imports(
         self, content: str, project_root: Path, src_dir: Path, file_path: Path
     ) -> "tuple[dict[str, list[str]], set[str]]":
         if self.extract_imports is None:
             return {}, set()
-        internal, external = self.extract_imports(content, project_root, src_dir, file_path)
+        internal, external = self.extract_imports(
+            strip_bom(content), project_root, src_dir, file_path
+        )
         external -= set(self.stdlib)
         return internal, external
 
     def code_patterns(self, mod: "ModuleInfo", content: str) -> None:
         if self.detect_code_patterns is not None:
-            self.detect_code_patterns(mod, content)
+            self.detect_code_patterns(mod, strip_bom(content))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -786,11 +790,26 @@ def _ceg_targets_java(
     seen: set[str] = set()
     for import_lines in internal.values():
         for line in import_lines:
-            fqn = line.strip()
-            if fqn.startswith("static "):
-                fqn = fqn[len("static "):]
-            if fqn.endswith(".*"):
-                fqn = fqn[:-2]
+            raw = line.strip()
+            if not raw:
+                continue
+            # PRECISION: label by the ACTUAL import kind, and resolve to the OWNING
+            # first-party unit. A ``static com.x.Y.member`` collapses to its owning
+            # class ``com.x.Y`` (member dropped) so per-member static imports of the
+            # same class DEDUP to one node; a ``com.x.*`` wildcard collapses to the
+            # package; a plain ``com.x.Y`` stays as-is.
+            if raw.startswith("static "):
+                evidence_method = "static_import"
+                fqn = raw[len("static "):].strip()
+                parts = fqn.split(".")
+                if len(parts) >= 2:
+                    fqn = ".".join(parts[:-1])  # drop the member → owning class
+            elif raw.endswith(".*"):
+                evidence_method = "wildcard_import"
+                fqn = raw[:-2].strip()
+            else:
+                evidence_method = "import"
+                fqn = raw
             if not fqn or fqn in seen:
                 continue
             seen.add(fqn)
@@ -799,16 +818,13 @@ def _ceg_targets_java(
                     target_id=f"module:{fqn}",
                     node_type="module",
                     node_kwargs={"name": fqn},
-                    evidence_method="static_import",
+                    evidence_method=evidence_method,
                     confidence=0.90,
                 )
             )
     return targets
 
 
-#: C/C++ include-root directory names probed when a quote-form include is not
-#: relative to the including file (mirrors ``builder._CPP_INCLUDE_ROOTS``).
-_CPP_INCLUDE_ROOTS = ("include", "src", "inc")
 _CPP_INCLUDE_LINE_RE = re.compile(r'#\s*include\s*"([^"]+)"')
 
 
@@ -855,28 +871,19 @@ def _resolve_cpp_include_path(
 ) -> str | None:
     """Resolve a quote-form include path to an in-tree posix path, or ``None``.
 
-    Tries (1) relative to the including file's directory, then (2) each
-    conventional include root walked up from the file. Returns the
-    project-relative posix path of the first candidate that exists on disk and
-    lies inside the project tree (so an out-of-tree ``../`` escape yields no
-    node → no false edge).
+    Delegates candidate generation to the SHARED
+    :func:`codd.parsing._shared.cpp_include_candidate_paths` (the same one the DAG
+    builder uses) so the scan and builder resolvers cannot drift (GENERIC FIX 3 —
+    the LevelDB 59%-scan-edge-loss class). Returns the project-relative posix path
+    of the first candidate that exists on disk AND lies inside the project tree
+    (so an out-of-tree ``../`` escape yields no node → no false edge).
     """
-    rel = Path(spec)
-    candidates = [(file_path.parent / rel)]
-    seen_roots: set[Path] = set()
-    for ancestor in [file_path.parent, *file_path.parents]:
-        for root_name in _CPP_INCLUDE_ROOTS:
-            root = (ancestor / root_name).resolve()
-            if root in seen_roots:
-                continue
-            seen_roots.add(root)
-            candidates.append(ancestor / root_name / rel)
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if not resolved.is_file():
+    project_root_resolved = project_root.resolve()
+    for candidate in cpp_include_candidate_paths(spec, file_path, project_root_resolved):
+        if not candidate.is_file():
             continue
         try:
-            return resolved.relative_to(project_root.resolve()).as_posix()
+            return candidate.relative_to(project_root_resolved).as_posix()
         except ValueError:
             continue
     return None

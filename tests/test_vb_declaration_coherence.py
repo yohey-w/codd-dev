@@ -394,7 +394,7 @@ def test_codd_check_errors_on_colliding_vb_declarations(tmp_path):
     )
     result = CliRunner().invoke(main, ["check", "--path", str(project)])
     assert result.exit_code != 0
-    assert "vb declarations" in result.output
+    assert "verifiable-behavior declarations" in result.output
     assert "incoherent" in result.output.lower() or "different descriptions" in result.output.lower()
 
 
@@ -420,5 +420,5 @@ def test_codd_check_passes_clean_canonical_project(tmp_path):
         "| ID | D |\n| --- | --- |\n| VB-01 | a |\n| VB-02 | b |\n",
     )
     result = CliRunner().invoke(main, ["check", "--path", str(project)])
-    assert "vb declarations" in result.output
+    assert "verifiable-behavior declarations" in result.output
     assert "PASS — coherent VB declarations" in result.output

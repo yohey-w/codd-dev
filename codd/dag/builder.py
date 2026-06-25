@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import fnmatch
+import os
 import re
 import warnings
 from copy import deepcopy
@@ -16,6 +17,7 @@ import yaml
 
 from codd.config import load_project_config
 from codd.discovery import scan_exclude_patterns as shared_scan_exclude_patterns
+from codd.parsing._shared import cpp_include_candidate_paths, strip_bom
 from codd.path_safety import iter_project_glob, resolve_project_path
 from codd.dag import DAG, Edge, Node
 from codd.dag.coverage_axes import CoverageAxis, extract_coverage_axes_from_design_doc, extract_coverage_axes_from_lexicon
@@ -91,6 +93,8 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
     _add_plan_tasks(dag, root, dag_settings)
     _add_deployment_graph(dag, root, design_docs, impl_nodes)
     _attach_coverage_axes(dag, root, dag_settings)
+
+    _warn_source_completeness(root, dag_settings, impl_nodes, test_nodes)
 
     write_dag_json(dag, root, default_dag_json_path(root))
     return dag
@@ -369,14 +373,148 @@ def _add_import_edges(
     aliases = _load_import_aliases(project_root, settings)
     path_to_node = {path: node_id for node_id, path in impl_nodes.items()}
 
+    residue: list[str] = []
     for node_id, file_path in impl_nodes.items():
         imports = dag.nodes[node_id].attributes.get("imports", [])
+        seen_targets: set[str] = set()
         for import_ref in imports:
+            resolved_any = False
             for target_id in _resolve_import_targets(
                 import_ref, file_path, project_root, path_to_node, aliases
             ):
-                if target_id and target_id != node_id:
-                    dag.add_edge(Edge(from_id=node_id, to_id=target_id, kind="imports"))
+                if not target_id or target_id == node_id:
+                    continue
+                resolved_any = True
+                if target_id in seen_targets:
+                    continue
+                seen_targets.add(target_id)
+                dag.add_edge(Edge(from_id=node_id, to_id=target_id, kind="imports"))
+            # GENERIC FIX 1: an INTERNAL-looking specifier (a relative import, or a
+            # first-party alias-prefixed one) that resolved to NOTHING is explicit
+            # "unresolved residue" — a discovery gap made VISIBLE (surfacing only).
+            if not resolved_any and _is_internal_looking_specifier(import_ref, aliases):
+                residue.append(f"{node_id}: {import_ref}")
+
+    _warn_unresolved_residue(residue)
+
+
+#: JS/TS relative specifier shapes — unambiguously first-party (you cannot write a
+#: relative import to an external package), so an unresolved one is a real gap.
+def _is_internal_looking_specifier(import_ref: str, aliases: dict[str, list[str]]) -> bool:
+    """True for a specifier that can ONLY refer to in-tree code (GENERIC FIX 1).
+
+    Conservative on purpose: only RELATIVE imports (Python ``.b`` / ``..pkg``; JS
+    ``./x`` / ``../x``), C++ quote-form local includes, and configured first-party
+    ALIAS prefixes count. Absolute dotted/FQN specifiers (``os`` / ``org.junit.*``
+    / ``java.util.List``) are NOT flagged — they are usually stdlib/third-party, so
+    flagging them would drown the signal in false residue.
+    """
+    spec = import_ref.strip()
+    if not spec:
+        return False
+    if spec.startswith(_CPP_QUOTE_SPECIFIER):
+        return True
+    if spec.startswith(_CPP_ANGLE_SPECIFIER):
+        return False  # system/STL — external by construction
+    if spec in (".", ".."):
+        return True
+    if spec.startswith("./") or spec.startswith("../"):
+        return True
+    if spec.startswith("."):  # Python relative (``.b`` / ``..pkg.x``)
+        return True
+    # Configured first-party alias prefix (e.g. ``@app/…`` → src). The alias map is
+    # the project's own DATA declaration that these are first-party.
+    for alias_prefix in aliases:
+        if alias_prefix and (spec == alias_prefix or spec.startswith(alias_prefix + "/")):
+            return True
+    return False
+
+
+def _warn_unresolved_residue(residue: list[str]) -> None:
+    """WARN (advisory) when internal-looking specifiers did not resolve."""
+    if not residue:
+        return
+    examples = ", ".join(sorted(residue)[:5])
+    warnings.warn(
+        f"discovery: {len(residue)} internal-looking import specifier(s) did not "
+        f"resolve to any in-tree node (unresolved residue) — e.g. {examples}. "
+        f"These are likely missing source files or an under-scoped source set.",
+        UserWarning,
+        stacklevel=2,
+    )
+
+
+def _warn_source_completeness(
+    project_root: Path,
+    settings: dict[str, Any],
+    impl_nodes: dict[str, Path],
+    test_nodes: dict[str, Path],
+) -> None:
+    """WARN (advisory) when on-disk source files outnumber source nodes.
+
+    GENERIC FIX 1 — the convergence safety-net. The DAG's source-bearing nodes are
+    materialized from the configured ``source_dirs``/glob patterns; if MORE files
+    of the SAME implementation/test suffixes exist on disk (outside that scope)
+    they are silently inert — a discovery gap and a false-green risk. We surface
+    the gap (count + a few example missing files) so it becomes visible and the
+    operator can widen the scope. Surfacing only: never a fail-gate (that would be
+    new gating = owner-gated).
+    """
+    impl_suffixes = set(_suffix_tuple(settings.get("implementation_suffixes")) or LEGACY_IMPLEMENTATION_SUFFIXES)
+    test_suffixes = set(_suffix_tuple(settings.get("test_suffixes")) or LEGACY_TEST_SUFFIXES)
+    source_suffixes = impl_suffixes | test_suffixes
+    if not source_suffixes:
+        return
+
+    node_paths = {path.resolve() for path in (*impl_nodes.values(), *test_nodes.values())}
+    exclude_patterns = settings.get("scan_exclude_patterns")
+    project_root_resolved = project_root.resolve()
+
+    missing: list[str] = []
+    on_disk = 0
+    for file_path in _iter_on_disk_source_files(project_root_resolved, source_suffixes, exclude_patterns):
+        on_disk += 1
+        if file_path.resolve() not in node_paths:
+            if len(missing) < 10:
+                missing.append(_relative_id(file_path, project_root_resolved))
+
+    if on_disk > len(node_paths) and missing:
+        examples = ", ".join(missing[:5])
+        warnings.warn(
+            f"discovery: {on_disk} source file(s) on disk but only {len(node_paths)} "
+            f"source node(s) in the DAG — {len(missing)} file(s) are outside the "
+            f"configured source scope and will be inert (e.g. {examples}). Consider "
+            f"widening source_dirs / impl_file_patterns.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
+def _iter_on_disk_source_files(
+    project_root: Path,
+    source_suffixes: set[str],
+    exclude_patterns: Any,
+):
+    """Yield on-disk files whose suffix is a source suffix (ignored dirs pruned)."""
+    from codd.discovery import DEFAULT_IGNORED_DIRS
+
+    excludes = [
+        str(pattern)
+        for pattern in _as_list(exclude_patterns)
+        if isinstance(pattern, str) and pattern.strip()
+    ]
+    for root, dirs, files in os.walk(project_root):
+        dirs[:] = [
+            d for d in dirs
+            if d not in DEFAULT_IGNORED_DIRS and d != "codd" and not d.startswith(".")
+        ]
+        for fname in files:
+            if Path(fname).suffix not in source_suffixes:
+                continue
+            file_path = Path(root) / fname
+            if excludes and _path_matches_any_pattern(file_path, project_root, excludes):
+                continue
+            yield file_path
 
 
 def _add_tested_by_edges(
@@ -956,7 +1094,7 @@ def _resolve_import_target(
     # relative-to-file first, then via include roots; an angle-form include is
     # system/STL and produces no edge.
     if file_path.suffix in _CPP_SOURCE_SUFFIXES:
-        for candidate in _cpp_include_candidates(import_ref, file_path, path_to_node):
+        for candidate in _cpp_include_candidates(import_ref, file_path, project_root, path_to_node):
             resolved = _resolve_file_candidate(candidate, path_to_node)
             if resolved:
                 return resolved
@@ -1064,6 +1202,68 @@ def _java_source_roots(project_root: Path, path_to_node: dict[Path, str]) -> lis
     return ordered
 
 
+#: Java ``package`` declaration (mirrors ``regex_strategies._JAVA_PACKAGE_RE``),
+#: used to derive (source-root, fqn-prefix) pairs from the node file-set so a tree
+#: SCOPED INSIDE a package (``com/google/common`` as the project root) resolves
+#: without a double package prefix.
+_JAVA_PACKAGE_DECL_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+
+
+def _java_root_prefix_pairs(
+    project_root: Path, path_to_node: dict[Path, str]
+) -> list[tuple[Path, tuple[str, ...]]]:
+    """Derive ``(source_root, fqn_prefix)`` pairs for Java FQN→path resolution.
+
+    GENERIC FIX 2c. The source root is the directory under which a type's FQN
+    resolves to ``<root>/<fqn-as-path>.java``. We infer it from DATA by matching
+    each ``.java`` node's DECLARED package against its on-disk directory:
+
+    * Conventional ``src/main/java/com/a/A.java`` (package ``com.a``) → the dir's
+      trailing ``com/a`` matches the package fully, so root = ``…/src/main/java``
+      and prefix = ``()`` (the FQN resolves whole). [no behaviour change]
+    * Scoped-INSIDE ``<root>/base/Preconditions.java`` (package
+      ``com.google.common.base``) → only the trailing ``base`` matches the dir, so
+      root = ``<root>`` and prefix = ``("com","google","common")``. An import of
+      ``com.google.common.base.X`` then has its prefix stripped → ``base/X.java``
+      under ``<root>`` (no double ``com/google/common`` prefix → edges form).
+
+    A non-empty prefix is the novel case; ``prefix == ()`` reproduces the existing
+    root behaviour. Pairs are de-duplicated and ordered deepest-root-first so a
+    conventional root still wins when several could match.
+    """
+    pairs: dict[tuple[str, tuple[str, ...]], tuple[Path, tuple[str, ...]]] = {}
+    for file_path in path_to_node:
+        if file_path.suffix != ".java":
+            continue
+        try:
+            content = _read_source_text(file_path)
+        except OSError:
+            continue
+        match = _JAVA_PACKAGE_DECL_RE.search(content)
+        if not match:
+            continue
+        package_parts = tuple(part for part in match.group(1).split(".") if part)
+        if not package_parts:
+            continue
+        dir_parts = file_path.parent.parts
+        # Longest common SUFFIX between the file's on-disk dir and the package.
+        k = 0
+        while (
+            k < len(package_parts)
+            and k < len(dir_parts)
+            and dir_parts[len(dir_parts) - 1 - k] == package_parts[len(package_parts) - 1 - k]
+        ):
+            k += 1
+        root = Path(*dir_parts[: len(dir_parts) - k]) if k else file_path.parent
+        prefix = package_parts[: len(package_parts) - k]
+        pairs[(str(root), prefix)] = (root.resolve(), prefix)
+    return sorted(
+        pairs.values(),
+        key=lambda item: (len(item[0].parts), len(item[1])),
+        reverse=True,
+    )
+
+
 def _find_segment_chain(parts: tuple[str, ...], chain: tuple[str, ...]) -> int | None:
     """Return the start index where ``chain`` appears contiguously in ``parts``."""
     if not chain:
@@ -1072,6 +1272,47 @@ def _find_segment_chain(parts: tuple[str, ...], chain: tuple[str, ...]) -> int |
         if parts[start : start + len(chain)] == chain:
             return start
     return None
+
+
+#: Process-lifetime cache of the COMBINED Java ``(source_root, fqn_prefix)`` pairs,
+#: keyed by the IDENTITY + size of ``path_to_node`` (guarded by ``len`` against
+#: id-reuse after GC) + the project root. ``_add_import_edges`` /
+#: ``_add_tested_by_edges`` build a fresh ``path_to_node`` and reuse it across every
+#: import in their loop, so deriving the pairs ONCE per DAG-build phase — instead of
+#: re-reading every ``.java`` file's package for EVERY import — turns an
+#: O(files × imports) blow-up (which made Guava-scale builds crawl) back into O(files).
+_JAVA_RESOLUTION_PAIRS_CACHE: dict[
+    tuple[int, int, str], list[tuple[Path, tuple[str, ...]]]
+] = {}
+
+
+def _java_resolution_pairs(
+    project_root: Path, path_to_node: dict[Path, str]
+) -> list[tuple[Path, tuple[str, ...]]]:
+    """Combined, de-duplicated Java resolution pairs (built once per build, cached).
+
+    Prefix-bearing pairs (the scoped-inside fix) first, then the bare
+    ``_java_source_roots`` (prefix == (), conventional layouts / default-package
+    files), de-duplicated. Cached so the per-file package scan is paid once.
+    """
+    key = (id(path_to_node), len(path_to_node), str(project_root))
+    cached = _JAVA_RESOLUTION_PAIRS_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    root_prefixes = _java_root_prefix_pairs(project_root, path_to_node)
+    bare_roots = [(root, ()) for root in _java_source_roots(project_root, path_to_node)]
+    seen_pairs: set[tuple[str, tuple[str, ...]]] = set()
+    pairs: list[tuple[Path, tuple[str, ...]]] = []
+    for root, prefix in [*root_prefixes, *bare_roots]:
+        pair_key = (str(root), prefix)
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+        pairs.append((root, prefix))
+
+    _JAVA_RESOLUTION_PAIRS_CACHE[key] = pairs
+    return pairs
 
 
 def _java_import_candidates(
@@ -1095,16 +1336,30 @@ def _java_import_candidates(
 
     ``_resolve_file_candidate`` appends the real ``.java`` suffix once a directory
     candidate is produced, so package/wildcard dirs resolve to a sibling file.
+
+    GENERIC FIX 2c: resolution is rooted at ``(source_root, fqn_prefix)`` pairs
+    derived from the file-set's package declarations, so a tree SCOPED INSIDE a
+    package (``com/google/common`` as the root) resolves with its package prefix
+    stripped (no double-prefix). The bare ``_java_source_roots`` (prefix == ()) is
+    folded in as the fallback, preserving conventional-layout behaviour.
     """
-    roots = _java_source_roots(project_root, path_to_node)
+    pairs = _java_resolution_pairs(project_root, path_to_node)
 
     if import_ref.startswith("package "):
-        package = import_ref[len("package "):].strip()
-        return _java_package_dir_candidates(package, roots)
+        # PRECISION: a ``package`` line is a DECLARATION, not a written import.
+        # Synthesizing an edge to every same-package sibling is imprecise (Java
+        # needs no import for siblings, but not every sibling is referenced) AND
+        # explosive — O(package_size²) edges per package, which on Guava-scale
+        # repos produced >400k spurious edges. We emit only REAL import edges, so
+        # a ``package`` line contributes none. (Same-package files reached only by
+        # an implicit reference rely on the reachability layer's roots, not a
+        # fabricated import edge.) The package declaration is still READ — by
+        # ``_java_root_prefix_pairs`` — to derive source roots.
+        return []
 
     if import_ref.endswith(".*"):
         package = import_ref[:-2].strip()
-        return _java_package_dir_candidates(package, roots)
+        return _java_package_dir_candidates(package, pairs)
 
     fqn = import_ref
     if fqn.startswith("static "):
@@ -1114,25 +1369,71 @@ def _java_import_candidates(
         if len(parts) >= 2:
             fqn = ".".join(parts[:-1])
 
-    parts = [part for part in fqn.split(".") if part]
-    if not parts:
-        return []
-    return [(root / Path(*parts)).resolve() for root in roots]
-
-
-def _java_package_dir_candidates(package: str, roots: list[Path]) -> list[Path]:
-    parts = [part for part in package.split(".") if part]
+    parts = tuple(part for part in fqn.split(".") if part)
     if not parts:
         return []
     candidates: list[Path] = []
-    for root in roots:
-        package_dir = (root / Path(*parts)).resolve()
+    for root, prefix in pairs:
+        remainder = _strip_fqn_prefix(parts, prefix)
+        if remainder is None:
+            continue
+        candidates.append((root / Path(*remainder)).resolve())
+    return candidates
+
+
+def _strip_fqn_prefix(
+    parts: tuple[str, ...], prefix: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    """Strip ``prefix`` from the front of ``parts`` (the FQN), or ``None``.
+
+    ``prefix == ()`` returns ``parts`` unchanged (conventional root). A non-empty
+    prefix returns the remainder only when ``parts`` actually starts with it (so a
+    scoped-inside root contributes a candidate only for FQNs in its package);
+    otherwise ``None`` (this pair does not apply → no spurious candidate).
+    """
+    if not prefix:
+        return parts
+    if parts[: len(prefix)] == prefix and len(parts) > len(prefix):
+        return parts[len(prefix):]
+    return None
+
+
+def _java_package_dir_candidates(
+    package: str, pairs: list[tuple[Path, tuple[str, ...]]]
+) -> list[Path]:
+    parts = tuple(part for part in package.split(".") if part)
+    if not parts:
+        return []
+    candidates: list[Path] = []
+    for root, prefix in pairs:
+        # Strip the root's package prefix (scoped-inside) before mapping the
+        # package to a directory; ``prefix == ()`` is the conventional case.
+        remainder = _strip_package_prefix(parts, prefix)
+        if remainder is None:
+            continue
+        package_dir = (root / Path(*remainder)).resolve() if remainder else root.resolve()
         # List the package dir's in-tree files as candidates (same-package /
         # wildcard linkage). ``_resolve_file_candidate`` matches exact node paths,
         # so we hand it each existing ``.java`` file directly.
         for node_path in _sorted_java_dir_files(package_dir):
             candidates.append(node_path)
     return candidates
+
+
+def _strip_package_prefix(
+    parts: tuple[str, ...], prefix: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    """Strip ``prefix`` from a PACKAGE path (like :func:`_strip_fqn_prefix`).
+
+    Differs only in allowing an EXACT match (package == prefix → ``()``), because
+    a ``package com.google.common`` line under a root scoped at exactly that
+    package legitimately refers to the root directory itself.
+    """
+    if not prefix:
+        return parts
+    if parts[: len(prefix)] == prefix:
+        return parts[len(prefix):]
+    return None
 
 
 def _sorted_java_dir_files(package_dir: Path) -> list[Path]:
@@ -1151,17 +1452,11 @@ def _sorted_java_dir_files(package_dir: Path) -> list[Path]:
 #: ``_SUFFIX_SPECIFIER_EXTRACTORS``.
 _CPP_SOURCE_SUFFIXES = frozenset({".h", ".hpp", ".hh", ".cc", ".cpp", ".cxx"})
 
-#: Conventional C/C++ include-root directory names. A quote-form include such as
-#: ``"fmt/core.h"`` that is not relative to the including file is probed under
-#: these roots (``include`` covers fmt's ``include/fmt/*.h`` layout). Harvested
-#: header-node parent dirs are added at resolution time so unconventional roots
-#: still resolve from DATA.
-_CPP_INCLUDE_ROOTS = ("include", "src", "inc")
-
 
 def _cpp_include_candidates(
     import_ref: str,
     file_path: Path,
+    project_root: Path,
     path_to_node: dict[Path, str],
 ) -> list[Path]:
     """Map a C++ ``#include`` specifier to filesystem candidates (PATH-based).
@@ -1194,30 +1489,14 @@ def _cpp_include_candidates(
     if not spec:
         return []
 
-    rel = Path(spec)
-    candidates: list[Path] = []
-    # 1. Relative to the including file's own directory (quote-form's primary
-    #    rule — ``#include "lib/b.h"`` next to ``a.cc``).
-    candidates.append((file_path.parent / rel).resolve())
-
-    # 2. Conventional include roots discovered by walking up the including file's
-    #    ancestors (so ``include/fmt/core.h`` resolves from ``src/format.cc``).
-    seen: set[Path] = set()
-    for ancestor in [file_path.parent, *file_path.parents]:
-        for root_name in _CPP_INCLUDE_ROOTS:
-            root = ancestor / root_name
-            key = root.resolve()
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append((root / rel).resolve())
-
-    # 3. Harvest header-node parent directories from the file-set (DATA), so an
-    #    unconventional include root still resolves the trailing path segment(s).
-    for header_dir in _cpp_header_root_dirs(path_to_node):
-        candidates.append((header_dir / rel).resolve())
-
-    return candidates
+    # GENERIC FIX 3: ONE shared candidate generator (relative-to-file →
+    # conventional roots → PROJECT ROOT → harvested header-node dirs). The
+    # builder's data-source-specific augmentation (header-node parent dirs from
+    # the node file-set, so an exotic include root still resolves) is passed as
+    # ``extra_roots``. The scanner-CEG resolver calls the SAME generator, so the
+    # two cannot drift (the LevelDB 59%-edge-loss class).
+    extra_roots = tuple(_cpp_header_root_dirs(path_to_node))
+    return cpp_include_candidate_paths(spec, file_path, project_root, extra_roots)
 
 
 def _cpp_header_root_dirs(path_to_node: dict[Path, str]) -> list[Path]:
@@ -1304,7 +1583,7 @@ def _csharp_namespace_index(path_to_node: dict[Path, str]) -> dict[str, list[str
         if file_path.suffix != ".cs":
             continue
         try:
-            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            content = _read_source_text(file_path)
         except OSError:
             continue
         for namespace in _CSHARP_NAMESPACE_DECL_RE.findall(content):
@@ -1397,6 +1676,18 @@ def _infer_test_targets(
     return targets
 
 
+def _read_source_text(file_path: Path) -> str:
+    """Read a source file as text with a leading BOM stripped (GENERIC FIX 4).
+
+    Every builder-side parse of source TEXT (import-specifier extraction, the C#
+    namespace reverse-index) goes through here so a UTF-8/UTF-16 BOM on line 1
+    can never orphan a first-line declaration (``namespace``/``package``/a line-1
+    ``import``). Generic — not a per-language branch.
+    """
+
+    return strip_bom(file_path.read_text(encoding="utf-8", errors="ignore"))
+
+
 def _extract_python_import_specifiers(file_path: Path) -> list[str]:
     """Return raw Python import specifiers (relative dots preserved) via AST.
 
@@ -1411,7 +1702,7 @@ def _extract_python_import_specifiers(file_path: Path) -> list[str]:
 
     from codd.parsing import get_extractor
 
-    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    content = _read_source_text(file_path)
     return get_extractor("python", "source").extract_import_specifiers(content)
 
 
@@ -1441,7 +1732,7 @@ def _extract_java_import_specifiers(file_path: Path) -> list[str]:
 
     from codd.parsing import get_extractor
 
-    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    content = _read_source_text(file_path)
     specifiers = get_extractor("java", "source").extract_import_specifiers(content)
     if specifiers:
         return specifiers
@@ -1489,7 +1780,7 @@ def _extract_cpp_include_specifiers(file_path: Path) -> list[str]:
     no edge (analogous to Java ``java.*`` producing no edge).
     """
 
-    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    content = _read_source_text(file_path)
     specifiers: list[str] = []
     for quote_target, angle_target in _CPP_INCLUDE_RE.findall(content):
         if quote_target:
@@ -1531,7 +1822,7 @@ def _extract_csharp_import_specifiers(file_path: Path) -> list[str]:
     global / alias usings are surfaced as the bare imported namespace.
     """
 
-    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    content = _read_source_text(file_path)
     specifiers: list[str] = []
     for static_kw, namespace in _CSHARP_USING_RE.findall(content):
         if static_kw:

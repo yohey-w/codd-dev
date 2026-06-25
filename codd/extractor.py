@@ -19,7 +19,7 @@ from typing import Any
 import yaml
 
 from codd.bridge import load_bridge_registry
-from codd.discovery import default_exclude_patterns
+from codd.discovery import DEFAULT_IGNORED_DIRS, default_exclude_patterns
 from codd.parsing import (
     AnsibleExtractor,
     BuildDepsExtractor,
@@ -226,12 +226,22 @@ def extract_facts(project_root: Path, language: str | None = None,
 
     facts = ProjectFacts(language=language, source_dirs=source_dirs)
 
-    # Discover modules
+    # Discover modules. A shared ``seen_files`` set makes discovery idempotent so
+    # an OVERLAPPING source-root cover (GENERIC FIX 2: a top-level dir plus the
+    # root ``.`` completeness sweep) never lists a file twice. The root ``.`` sweep
+    # excludes the project's test dirs so it does not pull tests into impl modules.
+    test_dir_excludes = _test_dir_exclude_patterns(project_root)
+    seen_files: set[str] = set()
     for src_dir in source_dirs:
         src_path = project_root / src_dir
         if not src_path.exists():
             continue
-        _discover_modules(facts, project_root, src_path, language, exclude_patterns)
+        # The whole-tree ``.`` sweep additionally prunes test dirs (the narrower
+        # source-root entries are scoped already and keep the legacy behaviour).
+        dir_excludes = exclude_patterns + test_dir_excludes if src_dir == "." else exclude_patterns
+        _discover_modules(
+            facts, project_root, src_path, language, dir_excludes, seen_files
+        )
 
     # Discover DDL / schema artifacts
     _discover_schemas(facts, project_root, exclude_patterns)
@@ -342,41 +352,96 @@ _JVM_SOURCE_LAYOUT_DIRS = ("src/main/java", "src/main/kotlin", "src/main/scala")
 _JVM_TEST_LAYOUT_DIRS = ("src/test/java", "src/test/kotlin", "src/test/scala")
 
 
+#: Top-level directory names that are never IMPL source roots (tests, docs, build
+#: artefacts, vendored deps, the codd metadata dir). The root ``.`` completeness
+#: sweep prunes test dirs separately (``_test_dir_exclude_patterns``); this set is
+#: what the source-bearing-top-level-dir COVER skips so a ``tests/`` package never
+#: becomes an impl source root.
+_NON_SOURCE_TOP_DIRS = frozenset(
+    {"tests", "test", "spec", "__tests__", "docs", "doc", "codd"}
+    | set(DEFAULT_IGNORED_DIRS)
+)
+
+
+def _dir_contains_source(directory: Path, exts: set[str]) -> bool:
+    """True if ``directory`` holds a file with a source extension at ANY depth.
+
+    The DATA primitive behind the generic cover: a top-level dir whose source
+    lives only in a nested subpackage (Java BUG 2: ``util/`` → ``util/concurrent``)
+    still counts as a source root. Ignored dirs are pruned during the walk.
+    """
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
+        for fname in files:
+            if Path(fname).suffix in exts:
+                return True
+    return False
+
+
 def _detect_source_dirs(project_root: Path, language: str) -> list[str]:
-    """Auto-detect source directories."""
+    """Auto-detect source directories — generic and COMPLETE (GENERIC FIX 2).
+
+    One mechanism, tolerant of arbitrary scoping, that COVERS every detected-
+    language source file under the root (so nothing is silently dropped from
+    extraction; the completeness accounting in the DAG builder warns if a gap
+    remains):
+
+    * Maven/Gradle ``src/main/<lang>`` layout → those dirs (test-safe; unchanged).
+    * Otherwise the cover = every top-level dir that contains source AT ANY DEPTH
+      (fixes Java BUG 2's nested-only ``util/concurrent``), EXCLUDING test / docs /
+      build / vendored dirs, PLUS the root ``.`` when source files sit at the root
+      level (fixes BUG A — root files alongside subpackages, 5 languages). The
+      ``.`` entry's discovery prunes test dirs and de-dups against the narrower
+      entries, so the cover may overlap harmlessly.
+    * If nothing is found → ``["."]`` (project root).
+    """
     jvm_source = [d for d in _JVM_SOURCE_LAYOUT_DIRS if (project_root / d).is_dir()]
     if jvm_source:
         # Maven/Gradle layout: point at ``src/main/<lang>`` so the impl glob does
         # not also pick up ``src/test/<lang>`` (which _detect_test_dirs claims).
         return jvm_source
 
-    candidates = ["src", "lib", "app", "pkg", "cmd", "internal", "include"]
-    found = []
+    exts = _language_extensions(language)
 
-    for c in candidates:
-        if (project_root / c).is_dir():
-            found.append(c)
+    found: list[str] = []
+    has_root_level_source = False
+    for item in sorted(project_root.iterdir(), key=lambda p: p.name):
+        if item.is_file():
+            if item.suffix in exts:
+                has_root_level_source = True
+            continue
+        if not item.is_dir():
+            continue
+        if item.name.startswith(".") or item.name in _NON_SOURCE_TOP_DIRS:
+            continue
+        if _dir_contains_source(item, exts):
+            found.append(item.name)
 
-    if not found:
-        # Use project root if no standard dirs found
-        # Look for source files directly
-        exts = _language_extensions(language)
-        for item in project_root.iterdir():
-            if item.is_dir() and not item.name.startswith(".") and item.name not in (
-                "tests", "test", "docs", "doc", "node_modules", "__pycache__",
-                "dist", "build", "venv", ".venv", "vendor", "codd",
-            ):
-                # Check if dir has source files
-                for f in item.iterdir():
-                    if f.is_file() and f.suffix in exts:
-                        found.append(item.name)
-                        break
+    # BUG A: root-level source files alongside subpackages — add the root ``.`` as
+    # a completeness sweep (test dirs pruned + files de-duped at discovery time).
+    if has_root_level_source:
+        found.append(".")
 
-    # If still nothing, use "." (project root itself)
+    # If still nothing, use "." (project root itself).
     if not found:
         found = ["."]
 
     return found
+
+
+def _test_dir_exclude_patterns(project_root: Path) -> list[str]:
+    """Glob excludes for the project's test dirs (used by the root ``.`` sweep).
+
+    The whole-tree completeness sweep would otherwise pull test files into impl
+    modules; excluding the detected test dirs keeps the impl/test split intact.
+    The narrower source-root entries are scoped already, so this is applied only
+    to the ``.`` sweep.
+    """
+    patterns: list[str] = []
+    for test_dir in _detect_test_dirs(project_root):
+        patterns.append(f"{test_dir}/**")
+        patterns.append(f"**/{test_dir}/**")
+    return patterns
 
 
 def _detect_test_dirs(project_root: Path) -> list[str]:
@@ -407,10 +472,17 @@ def _language_extensions(language: str) -> set[str]:
 
 
 def _discover_modules(facts: ProjectFacts, project_root: Path, src_dir: Path,
-                      language: str, exclude_patterns: list[str]):
-    """Walk source tree and discover modules with their symbols and imports."""
+                      language: str, exclude_patterns: list[str],
+                      seen_files: set[str] | None = None):
+    """Walk source tree and discover modules with their symbols and imports.
+
+    ``seen_files`` (shared across source roots) de-duplicates files so an
+    overlapping source-root cover never discovers the same file twice.
+    """
     exts = _language_extensions(language)
     extractor = get_extractor(language, "source")
+    if seen_files is None:
+        seen_files = set()
 
     for root, dirs, files in os.walk(src_dir):
         rel_root = Path(root).relative_to(project_root).as_posix()
@@ -427,6 +499,10 @@ def _discover_modules(facts: ProjectFacts, project_root: Path, src_dir: Path,
 
             if any(_match_glob(rel, pat) for pat in exclude_patterns):
                 continue
+
+            if rel in seen_files:
+                continue
+            seen_files.add(rel)
 
             # Determine module name
             module_name = _file_to_module(rel, project_root, src_dir, language)
