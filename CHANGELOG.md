@@ -13,6 +13,23 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.7.4] - 2026-06-25 — C++ brownfield support (#include edges, false-green fix)
+
+### Added
+- **C++ structural support.** CoDD now recognizes C/C++ (`.c/.cc/.cpp/.cxx/.h/.hpp/.hh`),
+  detects the language and `include/` source roots, and builds `#include` edges — a local
+  `#include "fmt/core.h"` resolves PATH-based (relative to the including file, then the
+  include roots) into impl→impl edges, while `<system>` includes are external.
+  Reachability / transitive-closure now work on C++. (fmt: mis-detected as Python with 0
+  edges → detected as C++ with 67 real nodes and 36 #include edges.) Regex-based;
+  tree-sitter-cpp wiring is a deferred enhancement.
+
+### Fixed
+- **False green on C++ projects.** Because C++ extensions were absent from language
+  detection, a C++ project was mis-detected as Python, its code was invisible, and
+  `codd check` PASSed having verified nothing. With C++ now visible and its graph built,
+  the checks analyze the real code instead of passing vacuously.
+
 ## [3.7.3] - 2026-06-25 — Java brownfield support (import edges, tree-sitter, proto-enum crash fix)
 
 ### Added
