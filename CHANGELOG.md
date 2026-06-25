@@ -13,6 +13,35 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.7.6] - 2026-06-25 — brownfield discovery hardening (generality-first; 6-language stress dogfood)
+
+A second, more complex OSS per language (SQLAlchemy, Fastify, NestJS, Guava, LevelDB,
+Newtonsoft) showed CoDD's import RESOLVERS hold at scale, but the brownfield DISCOVERY layer
+silently under-covered real-world layouts. Every fix here is generic (no per-language or
+per-project special-casing).
+
+### Added
+- **Discovery completeness accounting.** After a DAG build, CoDD warns when on-disk source
+  files exceed graph nodes (naming the uncovered files) and when an internal-looking import
+  specifier resolves to nothing (an "unresolved residue" count) — silent under-coverage
+  becomes visible instead of passing quietly.
+
+### Fixed
+- **Source discovery dropped real files across many layouts.** Auto-detection now covers
+  root-level source files alongside subpackages, packages whose source lives only in a
+  nested subdirectory, C++ trees scoped to `include/` only, and — for FQN/namespace
+  languages — a scan rooted *inside* the package tree (which previously double-prefixed the
+  path into a silently empty graph). One generic mechanism (e.g. SQLAlchemy 255→444 nodes; a
+  Java tree scoped inside its package 0→2015 edges).
+- **Divergent C++ include resolvers unified.** Builder and scanner now share one
+  include-resolution path so they can't drift (a non-`include/` layout went 38%→93% resolved).
+- **BOM-prefixed first lines** (e.g. a UTF-8 BOM glued to a `namespace`/`import` on line 1)
+  are handled for every language.
+- **Java package-implicit edges** no longer fan out to every sibling — only real import
+  edges are emitted (Guava 427k spurious → 6.9k real, also removing an O(n²) blow-up). Import
+  edges are labeled by actual kind; the web-only seed heuristic no longer injects into
+  non-web projects.
+
 ## [3.7.5] - 2026-06-25 — TypeScript fix + C# brownfield support (top-6 language coverage)
 
 With this release CoDD builds real dependency graphs on brownfield projects across the six
