@@ -13,6 +13,30 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.7.1] - 2026-06-25 — Flask brownfield dogfood: real-OSS-found fixes
+
+Pointing CoDD at a real external OSS (Flask) — human-authored code outside the design
+loop — surfaced bugs the self-built fixture corpus could not.
+
+### Fixed
+- **Python dependency graph was empty.** The DAG import-edge extractor matched only quoted
+  (JS/TS) specifiers, so Python impl files yielded zero import edges and
+  reachability/transitive-closure was silently neutered for every Python project. Import
+  extraction is now AST-based (`codd/parsing/python_ast.py`), resolving both absolute and
+  relative imports (`from .x import y`); dispatch is by file type, not a language branch.
+  Flask went from 0 to 94 impl→impl import edges.
+- **`ci_health` missed `.yaml` workflows.** The default glob was `.github/workflows/*.yml`,
+  RED-failing every project whose CI uses the equally-valid `.yaml` extension. It now
+  matches both `.yml` and `.yaml`.
+- **`codd extract --ai` silently dropped documents.** The parser split only on exact
+  `--- FILE: ---` markers and did not strip ```` ```markdown ```` fences, so a fenced
+  multi-document model reply lost most of its output and corrupted the survivor's
+  frontmatter. It now strips fences, falls back to frontmatter / `# L<n>:` header
+  splitting, writes the raw output before parsing, and warns when recovered docs are fewer
+  than the expected MECE layers.
+- **Bootstrap template emitted a dead `context_acquisition` key** that the config schema
+  rejected, warning on every fresh project. Removed (no code reads it).
+
 ## [3.7.0] - 2026-06-25 — N-gate systematic hardening + Axis-P owner-free coverage
 
 ### N-liveness gate (Stage 1) — systematic false-green / path-escape closure
