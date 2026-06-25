@@ -8116,7 +8116,13 @@ def _summary_severity(item: Any) -> str:
 
 
 def _summary_skipped(item: Any) -> bool:
-    return bool(_summary_value(item, "skipped"))
+    # Status-aware, consistent with the other two verify summaries and
+    # coverage_metrics._dag_result_skipped: a result is skipped if it sets the skipped
+    # flag OR declares a skip status — so a future check that sets only one is never
+    # mis-bucketed as a clean PASS.
+    if bool(_summary_value(item, "skipped")):
+        return True
+    return str(_summary_value(item, "status") or "").strip().lower() in {"skip", "skipped"}
 
 
 def _summary_node_id(item: Any) -> str:

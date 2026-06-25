@@ -661,3 +661,25 @@ locks it. Swept all 15 checks' skip constructors — none inherit default red no
 full suite 6403. **1st systematic-clean of the restarted streak. Round 18 = 2nd
 confirmation (reviews the tidied HEAD); if clean → 2 consecutive → present to owner for
 exit-line approval.**
+
+## Round 18 (2026-06-25, Claude-only): systematic CLEAN (both engines) — 2nd of 2 → STREAK MET
+**Opus: CLEAN. Sonnet: CLEAN.** Both ran a maximally-adversarial sweep (all evidence
+readers, all 22 checks' skip constructors/severities, all 3 text summaries, merge-gate
+metrics, JSON overlay, round-16/17 deltas, false-RED, dormancy) and found no systematic
+gap. Both noted one identical LATENT residual: `_summary_skipped` (cli) detected skip by
+the `skipped` flag only, not status — not a live finding (every check sets both), but
+tidied for consistency: `_summary_skipped` is now status-aware (flag OR status in
+{skip,skipped}), matching the other 2 summaries + coverage_metrics. full suite 6403.
+
+**★ N-gate Stage-1 SYSTEMATIC: 2 consecutive clean rounds achieved (17 + 18), each
+confirmed by 2 independent Claude engines (Sonnet + Opus), all residuals tidied.** Per
+the Opus-decided exit-line (GPT-CDP banned/unavailable): the systematic classes
+(dormancy / vacuous / visibility incl merge-gate + JSON / path-escape on all evidence
+readers via unified path_safety / fail-closed / centralized result_status / no false-RED)
+are CLOSED. Residual = only the niche adversarial-symlink-on-fixed-pattern Axis-N tail
+(requires a malicious in-repo symlink; self-limiting/fail-open) → ongoing Axis-N review
+(now Claude 2-engine, GPT removed). **N-gate passage + Stage-2 (Axis-P) start are GATED on
+the OWNER's exit-line approval** — Opus does not self-certify completion; with GPT (the
+prior strategic gate) banned, the owner is the strategic gate. Round 16 vindicated this
+(Opus said clean, Sonnet caught a real systematic false-green). Awaiting owner: ① pass
+N-gate → Stage-2 / ② more Claude rounds / ③ a different bar.
