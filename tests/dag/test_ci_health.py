@@ -32,6 +32,12 @@ def _write_workflow(project_root: Path, text: str) -> None:
     (workflow_dir / "ci.yml").write_text(text, encoding="utf-8")
 
 
+def _write_workflow_named(project_root: Path, filename: str, text: str) -> None:
+    workflow_dir = project_root / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True, exist_ok=True)
+    (workflow_dir / filename).write_text(text, encoding="utf-8")
+
+
 def test_c8_red_when_provider_none_without_declaration(tmp_path: Path) -> None:
     result = _run(tmp_path, {"provider": "none"})
 
@@ -420,3 +426,75 @@ def test_c8_bare_verification_string_is_still_a_command(tmp_path: Path) -> None:
     assert result.status == "warn"
     assert result.findings[0].violation_type == "ci_verification_not_in_workflow"
     assert result.findings[0].details == ["pytest tests/e2e"]
+
+
+# --- .yaml / .yml extension parity (GitHub Actions accepts BOTH) -------------
+
+
+_GOOD_WORKFLOW = (
+    "name: ci\non: [push, pull_request]\njobs:\n  test:\n    steps:\n      - run: pytest\n"
+)
+
+
+def test_c8_pass_when_only_yaml_extension_workflow(tmp_path: Path) -> None:
+    """RED-before-GREEN: GitHub Actions accepts BOTH ``.yml`` and ``.yaml``.
+
+    Pre-fix the default ``workflow_glob`` was ``.github/workflows/*.yml``, so a
+    project whose only workflow is ``ci.yaml`` (extremely common — Flask ships 5
+    such files) RED-failed ``ci_workflow_missing`` even though CI is fully
+    configured. The default must match both extensions."""
+
+    _write_workflow_named(tmp_path, "ci.yaml", _GOOD_WORKFLOW)
+
+    result = _run(tmp_path, {"provider": "github_actions"})
+
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.findings == []
+    assert result.workflow_files == [".github/workflows/ci.yaml"]
+
+
+def test_c8_pass_when_only_yml_extension_workflow_no_regression(tmp_path: Path) -> None:
+    """Regression guard: a ``.yml``-only project must still pass after the
+    both-extensions fix."""
+
+    _write_workflow_named(tmp_path, "ci.yml", _GOOD_WORKFLOW)
+
+    result = _run(tmp_path, {"provider": "github_actions"})
+
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.findings == []
+    assert result.workflow_files == [".github/workflows/ci.yml"]
+
+
+def test_c8_mixed_yml_and_yaml_workflows_both_enumerated(tmp_path: Path) -> None:
+    """Both extensions are enumerated together (no duplication, sorted)."""
+
+    _write_workflow_named(tmp_path, "ci.yml", _GOOD_WORKFLOW)
+    _write_workflow_named(tmp_path, "release.yaml", _GOOD_WORKFLOW)
+
+    result = _run(tmp_path, {"provider": "github_actions"})
+
+    assert result.status == "pass"
+    assert result.passed is True
+    assert result.workflow_files == [
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yaml",
+    ]
+
+
+def test_c8_explicit_yaml_glob_override_still_honored(tmp_path: Path) -> None:
+    """A user who explicitly narrows ``workflow_glob`` keeps full control:
+    an explicit ``*.yaml`` glob must not also pull in ``.yml`` files."""
+
+    _write_workflow_named(tmp_path, "ci.yml", _GOOD_WORKFLOW)
+    _write_workflow_named(tmp_path, "release.yaml", _GOOD_WORKFLOW)
+
+    result = _run(
+        tmp_path,
+        {"provider": "github_actions", "workflow_glob": ".github/workflows/*.yaml"},
+    )
+
+    assert result.status == "pass"
+    assert result.workflow_files == [".github/workflows/release.yaml"]

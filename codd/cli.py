@@ -5862,6 +5862,8 @@ def extract(
         click.echo(f"Output: {output_display}/")
         for f in result.generated_files:
             click.echo(f"  {f.name}")
+        for warning in getattr(result, "parse_warnings", []):
+            click.echo(f"  WARNING: {warning}")
         if generated_config:
             click.echo(f"Generated: {config_display} (minimal brownfield config)")
 

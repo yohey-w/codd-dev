@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from typing import Any
+import warnings
 
 import yaml
 
@@ -30,6 +32,11 @@ from codd.discovery import (
 # ═══════════════════════════════════════════════════════════
 
 PROMPT_TEMPLATE_FILE = Path(__file__).parent / "templates" / "extract_ai_prompt_baseline.md"
+
+# The extract prompt targets six MECE layers (L1 data … L6 tests). Recovering
+# fewer documents from the model's output is surfaced as an advisory warning
+# (never a hard failure: not every project populates all six layers).
+_EXPECTED_EXTRACT_LAYER_COUNT = 6
 
 # Files to always read if they exist (framework detection)
 FRAMEWORK_FILES = [
@@ -107,6 +114,9 @@ class ExtractAIResult:
     generated_files: list[Path] = field(default_factory=list)
     ai_raw_output: str = ""
     module_count: int = 0
+    # Advisory parse warnings (e.g. fewer documents recovered than the six MECE
+    # layers expected) surfaced to the caller instead of silently dropping docs.
+    parse_warnings: list[str] = field(default_factory=list)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -498,37 +508,218 @@ def _safe_output_path(output_dir: Path, name: str) -> Path:
     return candidate
 
 
-def _parse_ai_output(raw: str, output_dir: Path) -> list[Path]:
-    """Parse AI output separated by `--- FILE: <name> ---` markers.
+_FENCE_RE = re.compile(r"^\s*```+[A-Za-z0-9_-]*\s*$")
+_FILE_MARKER_RE = re.compile(r"^\s*---\s*FILE:\s*(?P<name>.+?)\s*---\s*$")
+_LAYER_HEADER_RE = re.compile(r"^\s*#{1,6}\s*L\d+\b.*$")
 
-    All writes are confined to *output_dir*; traversal/absolute names are
-    rejected (fail-closed) so extraction can never clobber source/user files.
+
+def _strip_outer_fence(raw: str) -> str:
+    """Drop a single code-fence wrapper around the WHOLE response.
+
+    Models routinely wrap their entire reply in ```` ```markdown … ``` ````.
+    Left in place, the leading fence lands at byte 0 and breaks frontmatter
+    normalization (which requires ``---`` at byte 0), and the trailing fence
+    leaks into the last document. Only the OUTER wrapper is removed: a fence as
+    the first non-blank line paired with a fence as the last non-blank line.
+    Inner code blocks inside a document body are untouched.
     """
-    files: list[Path] = []
+    lines = raw.split("\n")
+    first = next((i for i, ln in enumerate(lines) if ln.strip()), None)
+    if first is None:
+        return raw
+    last = next(i for i in range(len(lines) - 1, -1, -1) if lines[i].strip())
+    if first < last and _FENCE_RE.match(lines[first]) and _FENCE_RE.match(lines[last]):
+        return "\n".join(lines[first + 1 : last])
+    return raw
+
+
+def _strip_doc_fences(body: str) -> str:
+    """Strip a code-fence wrapper around a SINGLE parsed document segment.
+
+    Per-document fences appear when a model fences each doc individually (the
+    Flask shape mixed a single ``--- FILE:`` marker with per-doc fences). Only a
+    leading fence as the first non-blank line and/or a trailing fence as the
+    last non-blank line are removed, so a real code block in the middle of a
+    document body is preserved.
+    """
+    lines = body.split("\n")
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    if start < end and _FENCE_RE.match(lines[start]):
+        lines = lines[:start] + lines[start + 1 :]
+        end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    if end > 0 and _FENCE_RE.match(lines[end - 1]):
+        lines = lines[: end - 1] + lines[end:]
+    return "\n".join(lines)
+
+
+def _split_on_file_markers(raw: str) -> list[tuple[str | None, str]]:
+    """Split on ``--- FILE: <name> ---`` markers (the canonical format).
+
+    Returns ``(name, body)`` segments. A leading segment before the first
+    marker has ``name=None`` (it is preamble, not a file) — callers decide
+    whether to keep it.
+    """
+    segments: list[tuple[str | None, str]] = []
     current_name: str | None = None
     current_lines: list[str] = []
-
-    def _flush(name: str, lines: list[str]) -> None:
-        out_path = _safe_output_path(output_dir, name)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text("\n".join(lines), encoding="utf-8")
-        files.append(out_path)
-
     for line in raw.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("--- FILE:") and stripped.endswith("---"):
-            # Flush previous file
-            if current_name:
-                _flush(current_name, current_lines)
-            # Start new file
-            current_name = stripped.replace("--- FILE:", "").replace("---", "").strip()
+        match = _FILE_MARKER_RE.match(line)
+        if match:
+            segments.append((current_name, "\n".join(current_lines)))
+            current_name = match.group("name").strip()
             current_lines = []
         else:
             current_lines.append(line)
+    segments.append((current_name, "\n".join(current_lines)))
+    return segments
 
-    # Flush last file
-    if current_name:
-        _flush(current_name, current_lines)
+
+def _split_on_frontmatter_docs(raw: str) -> list[str] | None:
+    """Fallback: split a multi-document body on ``^---`` frontmatter blocks.
+
+    Used when the model separated docs by repeated ``---``-delimited frontmatter
+    rather than ``--- FILE:`` markers. A document starts at a ``---`` line whose
+    matching close ``---`` is followed by more content. Returns ``None`` when
+    fewer than two frontmatter docs are present (nothing to recover by this
+    strategy).
+    """
+    lines = raw.split("\n")
+    # Index every standalone ``---`` delimiter (frontmatter fences are bare ---).
+    delims = [i for i, ln in enumerate(lines) if ln.strip() == "---"]
+    if len(delims) < 4:  # need at least two open/close pairs for >=2 docs
+        return None
+    # A doc opens at delims[0], delims[2], delims[4], ... (every other delimiter
+    # is an opener; the one between is its closer).
+    openers = delims[0::2]
+    if len(openers) < 2:
+        return None
+    segments: list[str] = []
+    for idx, start in enumerate(openers):
+        end = openers[idx + 1] if idx + 1 < len(openers) else len(lines)
+        segments.append("\n".join(lines[start:end]))
+    return [seg for seg in segments if seg.strip()]
+
+
+def _split_on_layer_headers(raw: str) -> list[str] | None:
+    """Fallback: split on ``# L<n>: …`` layer headers.
+
+    Used when there is neither a ``--- FILE:`` marker nor per-doc frontmatter,
+    but the body carries the canonical six-layer ``# L1:`` … ``# L6:`` headers.
+    Returns ``None`` when fewer than two layer headers are present.
+    """
+    lines = raw.split("\n")
+    starts = [i for i, ln in enumerate(lines) if _LAYER_HEADER_RE.match(ln)]
+    if len(starts) < 2:
+        return None
+    segments: list[str] = []
+    for idx, start in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        segments.append("\n".join(lines[start:end]))
+    return [seg for seg in segments if seg.strip()]
+
+
+def _segment_node_name(body: str, index: int) -> str:
+    """Derive a stable output filename for a marker-less recovered segment.
+
+    Prefers an ``id:`` from the segment's frontmatter, then a ``# L<n>:`` header
+    token, finally a positional fallback. Always yields a ``.md`` name confined
+    later by :func:`_safe_output_path`.
+    """
+    fm = re.match(r"\A\s*---\s*\n(.*?)\n---\s*(?:\n|$)", body, re.DOTALL)
+    if fm:
+        try:
+            front = yaml.safe_load(fm.group(1)) or {}
+        except yaml.YAMLError:
+            front = {}
+        if isinstance(front, dict):
+            for key in ("node_id", "id", "name"):
+                value = front.get(key)
+                if isinstance(value, str) and value.strip():
+                    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()).strip("_")
+                    if slug:
+                        return slug if slug.endswith(".md") else f"{slug}.md"
+    header = _LAYER_HEADER_RE.match(body.lstrip("\n").split("\n", 1)[0] if body.strip() else "")
+    if header:
+        token = re.search(r"L\d+", header.group(0))
+        if token:
+            return f"{token.group(0)}_extracted.md"
+    return f"extracted_doc_{index + 1}.md"
+
+
+def _parse_ai_output(
+    raw: str,
+    output_dir: Path,
+    *,
+    expected_doc_count: int | None = None,
+    warnings_out: list[str] | None = None,
+) -> list[Path]:
+    """Parse AI extract output into per-document files (fence/format tolerant).
+
+    Resilient to two real failure modes seen in brownfield dogfood runs:
+
+    1. The model wraps its whole reply (or each document) in a ```` ```markdown ````
+       code fence — stripped so ``---`` lands at byte 0 for frontmatter
+       normalization.
+    2. The model separates documents by repeated ``^---`` frontmatter blocks or
+       ``# L<n>:`` layer headers instead of ``--- FILE:`` markers — recovered by
+       fallback splitting so documents are not silently collapsed/dropped.
+
+    When *expected_doc_count* is given and fewer files are persisted, a loud
+    warning is appended to *warnings_out* (surfaced in the extract result)
+    rather than dropping documents silently. All writes are confined to
+    *output_dir*; traversal/absolute names are rejected (fail-closed) so
+    extraction can never clobber source/user files.
+    """
+    warnings = warnings_out if warnings_out is not None else []
+    files: list[Path] = []
+
+    def _flush(name: str, body: str) -> None:
+        out_path = _safe_output_path(output_dir, name)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(_strip_doc_fences(body), encoding="utf-8")
+        files.append(out_path)
+
+    de_fenced = _strip_outer_fence(raw)
+    marker_segments = _split_on_file_markers(de_fenced)
+    named = [(name, body) for name, body in marker_segments if name]
+
+    if len(named) >= 2:
+        # Canonical multi-file format — keep historical behavior.
+        for name, body in named:
+            _flush(name, body)
+    else:
+        # 0-1 FILE markers: recover documents the model separated another way
+        # rather than collapsing everything into a single (or zero) file.
+        fallback = _split_on_frontmatter_docs(de_fenced) or _split_on_layer_headers(de_fenced)
+        if fallback:
+            if named:
+                # Preserve the one explicitly-named doc, then recover the rest.
+                name, body = named[0]
+                _flush(name, body)
+                fallback = [seg for seg in fallback if seg.strip() != _strip_doc_fences(body).strip()]
+            for index, segment in enumerate(fallback):
+                _flush(_segment_node_name(segment, index), segment)
+        elif named:
+            name, body = named[0]
+            _flush(name, body)
+        else:
+            # Single plain document (no markers, no recoverable separators):
+            # write it as one file instead of silently dropping it.
+            if de_fenced.strip():
+                _flush(_segment_node_name(de_fenced, 0), de_fenced)
+
+    if expected_doc_count is not None and len(files) < expected_doc_count:
+        warnings.append(
+            f"AI extract parsed only {len(files)} document(s) but {expected_doc_count} "
+            f"were expected — the model's output format may be malformed (check "
+            f"_raw_ai_output.txt). No documents were silently dropped; review the raw "
+            f"output and re-run extract if incomplete."
+        )
 
     return files
 
@@ -636,20 +827,33 @@ def run_extract_ai(
     # Phase 3: AI invocation
     raw_output = _invoke_ai_command(ai_command, prompt)
 
-    # Phase 4: Parse and write
-    generated = _parse_ai_output(raw_output, out)
+    # Always persist the raw output FIRST so it survives even if parsing below
+    # hits a fail-closed path-safety error — it is the recovery artifact when the
+    # model's format is malformed.
+    raw_path = out / "_raw_ai_output.txt"
+    raw_path.write_text(raw_output, encoding="utf-8")
+
+    # Phase 4: Parse and write. The extractor targets the six MECE layers
+    # (L1-L6); recovering fewer documents is surfaced as an advisory warning
+    # (never a silent drop) so an under-parse is visible at the call site.
+    parse_warnings: list[str] = []
+    generated = _parse_ai_output(
+        raw_output,
+        out,
+        expected_doc_count=_EXPECTED_EXTRACT_LAYER_COUNT,
+        warnings_out=parse_warnings,
+    )
+    for message in parse_warnings:
+        warnings.warn(message, stacklevel=2)
 
     # Phase 4b: Normalize node identity to canonical codd.node_id so the DAG can
     # link restored docs the same way it links greenfield-generated docs.
     _normalize_extracted_frontmatter(generated)
-
-    # Also save raw output
-    raw_path = out / "_raw_ai_output.txt"
-    raw_path.write_text(raw_output, encoding="utf-8")
 
     return ExtractAIResult(
         output_dir=out,
         generated_files=generated,
         ai_raw_output=raw_output,
         module_count=len(scan.source_files),
+        parse_warnings=parse_warnings,
     )

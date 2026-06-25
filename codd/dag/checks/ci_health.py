@@ -24,10 +24,19 @@ _DEFAULT_PROVIDER = "github" + "_actions"
 _OPT_OUT_PROVIDER = "none"
 
 
+# GitHub Actions officially loads workflow files with EITHER ``.yml`` or
+# ``.yaml``. The default glob therefore matches both extensions (comma-separated
+# union — see ``_locate_workflows``). A user who narrows ``workflow_glob`` to a
+# single pattern keeps exact control (an explicit ``*.yaml`` pulls in only
+# ``.yaml``); only the DEFAULT spans both so the common ``.yaml``-only project
+# (e.g. Flask) is not mis-RED-flagged ``ci_workflow_missing``.
+_DEFAULT_WORKFLOW_GLOB = ".github/workflows/*.yml,.github/workflows/*.yaml"
+
+
 @dataclass
 class CiConfig:
     provider: str = _DEFAULT_PROVIDER
-    workflow_glob: str = ".github/workflows/*.yml"
+    workflow_glob: str = _DEFAULT_WORKFLOW_GLOB
     required_triggers: list[str] = field(default_factory=lambda: ["push", "pull_request"])
     runtime_check: bool = False
     staleness_days: int = 14
@@ -241,7 +250,43 @@ class CiHealthCheck(DagCheck):
         project_root: Path,
         workflow_glob: str,
     ) -> tuple[list[Path], list[str]]:
-        """Resolve in-root workflow files via the shared path_safety jail.
+        """Resolve in-root workflow files for one OR MORE comma-separated globs.
+
+        ``workflow_glob`` may carry several patterns separated by commas (the
+        default spans both ``*.yml`` and ``*.yaml`` because GitHub Actions loads
+        either extension). Each sub-glob is resolved independently through the
+        shared path_safety jail (see :meth:`_locate_one_glob`); the in-root
+        matches are unioned + de-duplicated, and any out-of-root markers are
+        accumulated so a single escaping sub-glob still surfaces a structured red
+        finding. A single (comma-free) pattern behaves exactly as before, so a
+        user who narrows ``workflow_glob`` to one pattern keeps exact control.
+        """
+
+        sub_globs = [part.strip() for part in workflow_glob.split(",") if part.strip()]
+        if not sub_globs:
+            return [], []
+
+        seen: set[Path] = set()
+        in_root: list[Path] = []
+        out_of_root: list[str] = []
+        for sub in sub_globs:
+            files, escaped = self._locate_one_glob(project_root, sub)
+            for path in files:
+                if path not in seen:
+                    seen.add(path)
+                    in_root.append(path)
+            for marker in escaped:
+                if marker not in out_of_root:
+                    out_of_root.append(marker)
+        in_root.sort()
+        return in_root, out_of_root
+
+    def _locate_one_glob(
+        self,
+        project_root: Path,
+        workflow_glob: str,
+    ) -> tuple[list[Path], list[str]]:
+        """Resolve in-root workflow files for ONE glob via the path_safety jail.
 
         The glob root is validated *before* enumeration. An absolute
         ``workflow_glob`` whose static (non-magic) base escapes the project root

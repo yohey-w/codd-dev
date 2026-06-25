@@ -201,3 +201,51 @@ def test_doctor_silent_on_clean_config(tmp_path: Path) -> None:
 
 def test_project_config_key_warnings_handles_missing_project(tmp_path: Path) -> None:
     assert project_config_key_warnings(tmp_path) == []
+
+
+# --- shipped template must not drift from the schema --------------------------
+
+
+def _render_bootstrap_codd_yaml(tmp_path: Path) -> Path:
+    """Render the shipped ``codd.yaml`` template the way ``codd extract`` does."""
+    from codd.cli import _ensure_bootstrap_codd_yaml
+
+    project = tmp_path / "proj"
+    src = project / "src"
+    src.mkdir(parents=True)
+    (src / "app.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+
+    config_path, created = _ensure_bootstrap_codd_yaml(
+        project, language="python", source_dirs=["src"]
+    )
+    assert created
+    return config_path
+
+
+def test_bootstrap_template_yields_no_unknown_key_warnings(tmp_path: Path) -> None:
+    """A freshly bootstrapped project's ``codd.yaml`` must produce ZERO unknown-
+    key doctor warnings.
+
+    RED-before-GREEN: the template emitted a ``context_acquisition:`` block that
+    no consumer reads and the schema does not know, so every fresh project got a
+    spurious ``unknown config key 'context_acquisition'`` warning (cosmetic, but
+    it trains users to ignore doctor output). The template and schema must agree.
+    """
+    import yaml
+
+    config_path = _render_bootstrap_codd_yaml(tmp_path)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    warnings = validate_config_keys(payload)
+
+    assert warnings == [], f"shipped template drifted from schema: {warnings}"
+
+
+def test_bootstrap_template_has_no_orphan_context_acquisition_key(tmp_path: Path) -> None:
+    """Pin the specific stale key so a future re-add is caught immediately."""
+    import yaml
+
+    config_path = _render_bootstrap_codd_yaml(tmp_path)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert "context_acquisition" not in payload

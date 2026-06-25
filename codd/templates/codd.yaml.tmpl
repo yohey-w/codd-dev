@@ -83,30 +83,15 @@ typecheck:
 
 ci:
   provider: github_actions   # github_actions | gitlab_ci | none
-  workflow_glob: .github/workflows/*.yml
+  # GitHub Actions loads BOTH .yml and .yaml; the default spans both (comma-
+  # separated union). Narrow to a single pattern to scope to one extension.
+  workflow_glob: .github/workflows/*.yml,.github/workflows/*.yaml
   required_triggers:
     - push
     - pull_request
   runtime_check: false       # opt-in (v2.13.0)
   staleness_days: 14
   default_branch: main
-
-context_acquisition:
-  enabled: true
-  strategy: web_search_first   # web_search_first | offline | human_only
-  sources:
-    - type: official_docs
-      priority: high
-    - type: github_search
-      priority: medium
-    - type: web_search
-      priority: medium
-  cache_ttl_days: 30
-  freshness_check_on_startup: false
-  fact_check:
-    enabled: true
-    min_sources: 2
-    min_confidence: 0.6
 
 # runtime_smoke:
 #   enabled: false
