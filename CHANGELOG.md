@@ -13,6 +13,32 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.7.5] - 2026-06-25 — TypeScript fix + C# brownfield support (top-6 language coverage)
+
+With this release CoDD builds real dependency graphs on brownfield projects across the six
+most common languages (Python, JavaScript, TypeScript, Java, C++, C#) — each verified on a
+famous OSS that was not built with CoDD.
+
+### Added
+- **C# structural support.** CoDD recognizes C# (`.cs`), detects the language (fixing a
+  false green where C# repositories were mis-detected as Python and `codd check` passed
+  having verified nothing), and builds `using`-based dependency edges through a
+  namespace→declaring-files reverse index — C# namespaces are not directory-tied, so a
+  `using Dapper.X` resolves to every file declaring `namespace Dapper.X` (exact match, with
+  an out-edge cap as an explosion guard). (Dapper: mis-detected Python / 0 edges → C# /
+  122 real nodes / 11 using + 54 tested_by edges.) Regex-based; tree-sitter-c-sharp and the
+  oracle/profile are deferred.
+
+### Fixed
+- **TypeScript dependency graphs were silently empty under modern TS-ESM.** Import
+  resolution did exact-match + suffix-append only, so specifiers carrying the mandatory
+  `.js` extension that resolve to `.ts` sources (`import { x } from "./types.js"` →
+  `types.ts`, the NodeNext/Bundler convention) produced zero edges. Resolution now falls
+  back — only after an exact match fails, so extensionless JavaScript is unaffected — to
+  swapping emitted ESM extensions (`.js/.jsx/.mjs/.cjs`) to their source counterparts
+  (`.ts/.tsx/.mts/.cts`), in both file and directory-index form. (Zod v4: 0 → 356 import
+  edges.)
+
 ## [3.7.4] - 2026-06-25 — C++ brownfield support (#include edges, false-green fix)
 
 ### Added
