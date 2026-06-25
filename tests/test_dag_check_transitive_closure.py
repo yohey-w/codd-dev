@@ -197,3 +197,94 @@ def test_deploy_non_blocking():
     assert result.unreachable_nodes == ["src/orphan.ts"]
     assert result.passed is True
     assert result.severity == "amber"
+
+
+# --- Brownfield (doc-less) reachability ------------------------------------
+#
+# A raw external codebase (e.g. Flask) has ZERO ``design_doc`` nodes but a fully
+# connected impl graph wired by ``imports`` edges. Seeding reachability only from
+# ``design_doc`` roots reports EVERYTHING unreachable on exactly these brownfield
+# targets. Reachability must additionally seed from *code-entry roots*: impl
+# source nodes with no incoming in-project ``imports`` edge (the package's public
+# entry points). Only nodes unreachable from ALL entries are genuine orphans.
+
+
+def _import(dag: DAG, importer: str, imported: str) -> None:
+    """An ``imports`` edge: importer -> imported (importer depends on imported)."""
+    _edge(dag, importer, imported, "imports")
+
+
+def test_brownfield_no_design_docs_reachable_from_code_entry_root():
+    """Doc-less project: a component connected from a code-entry root is reachable.
+
+    ``__init__.py`` is imported by nothing in-project (the public entry point);
+    it imports ``app.py`` which imports ``helpers.py`` — a connected component.
+    ``orphan.py`` is imported by nothing AND imports nothing (a true orphan).
+
+    Pre-fix: roots are design_doc-only → ``[]`` roots → every node unreachable
+    (the connected component is falsely flagged). Post-fix: the connected
+    component is reachable from the ``__init__.py`` code-entry root; only the
+    true orphan is flagged.
+    """
+    dag = _dag()
+    _node(dag, "pkg/__init__.py", "impl_file")
+    _node(dag, "pkg/app.py", "impl_file")
+    _node(dag, "pkg/helpers.py", "impl_file")
+    _node(dag, "pkg/orphan.py", "impl_file")
+    # __init__ -> app -> helpers (connected component, __init__ is the entry)
+    _import(dag, "pkg/__init__.py", "pkg/app.py")
+    _import(dag, "pkg/app.py", "pkg/helpers.py")
+    # orphan: no edges in or out -> genuinely unreachable
+
+    result = _run(dag)
+
+    assert result.unreachable_nodes == ["pkg/orphan.py"]
+    assert "pkg/__init__.py" not in result.unreachable_nodes
+    assert "pkg/app.py" not in result.unreachable_nodes
+    assert "pkg/helpers.py" not in result.unreachable_nodes
+    # All four impl nodes were examined for reachability.
+    assert result.checked_count == 4
+    assert result.passed is True
+
+
+def test_brownfield_pure_cycle_falls_back_to_all_nodes():
+    """No clear entry (every impl node has an in-project importer / a cycle).
+
+    a -> b -> c -> a: every node has an incoming import edge, so there is no
+    code-entry root. Rather than report a false "all unreachable", fall back to
+    seeding from the impl nodes so connectivity is still measured. Must not crash
+    on the cycle.
+    """
+    dag = _dag()
+    _node(dag, "pkg/a.py", "impl_file")
+    _node(dag, "pkg/b.py", "impl_file")
+    _node(dag, "pkg/c.py", "impl_file")
+    _import(dag, "pkg/a.py", "pkg/b.py")
+    _import(dag, "pkg/b.py", "pkg/c.py")
+    _import(dag, "pkg/c.py", "pkg/a.py")  # cycle closes -> no node lacks an importer
+
+    result = _run(dag)
+
+    assert result.unreachable_nodes == []
+    assert result.checked_count == 3
+    assert result.passed is True
+
+
+def test_doc_rooted_project_unchanged_by_code_entry_seeding():
+    """Generality guard: a project WITH design docs is unchanged.
+
+    The impl file is reachable via the design_doc root (as before). The code-entry
+    roots are purely additive and must not change the outcome here, and an
+    unreferenced impl node is STILL flagged (no false-green).
+    """
+    dag = _dag()
+    _node(dag, "docs/design/system.md")  # design_doc root
+    _node(dag, "src/app.py", "impl_file")
+    _node(dag, "src/orphan.py", "impl_file")  # referenced by nothing -> orphan
+    _edge(dag, "docs/design/system.md", "src/app.py")  # expects edge
+
+    result = _run(dag)
+
+    # app reachable from the doc root; orphan still flagged.
+    assert result.unreachable_nodes == ["src/orphan.py"]
+    assert result.passed is True
