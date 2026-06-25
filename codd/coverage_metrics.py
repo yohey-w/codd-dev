@@ -244,6 +244,268 @@ def compute_dag_completeness(
     )
 
 
+# Declared-contract vocabulary → the deterministic check(s) that examine each
+# family. This is the *explicit obligation* surface of the DAG: keys an author
+# declares (``user_journeys`` / ``resource_contracts`` / ``coverage_axes`` …)
+# that a deterministic check is responsible for. It is a single declarative
+# table — extend it (like ``CHECK_MODULES``) when a new contract family gains a
+# check, rather than scattering check names through the metric. It is
+# vocabulary-/framework-/language-free: keys are CoDD contract names, not project
+# or framework tokens, so the metric stays generality-safe (no per-subject string
+# matching against project content). A family is "examined" when ANY of its
+# checks ran (did not skip) — by construction those checks skip iff the family is
+# absent, so a *declared* family whose checks all skipped is a real
+# declared-but-never-examined gap (uncovered), never a silent green.
+_EXPLICIT_CONTRACT_CHECKS: dict[str, frozenset[str]] = {
+    "user_journeys": frozenset({"user_journey_coherence", "resource_flow_coherence"}),
+    "runtime_constraints": frozenset({"user_journey_coherence"}),
+    "resource_contracts": frozenset({"resource_flow_coherence"}),
+    "capability_contracts": frozenset({"resource_flow_coherence"}),
+    "coverage_axes": frozenset({"environment_coverage"}),
+    "negative_space": frozenset({"negative_space"}),
+}
+
+
+def compute_explicit_pcumr(
+    project_root: Path | str,
+    dag: Any | None = None,
+    lexicon: Any | None = None,
+    threshold: float = 0.0,
+    config: dict[str, Any] | None = None,
+) -> CoverageResult:
+    """E-PCUMR — explicit-contract coverage rate for a real project.
+
+    ``Explicit-contract coverage rate`` = ``|explicit coverage obligations that a
+    deterministic check examined (or amber-surfaced)| / |explicit obligation
+    total|``. An *explicit obligation* is a declared contract entry on a DAG node
+    (``user_journeys`` / ``resource_contracts`` / ``capability_contracts`` /
+    ``coverage_axes`` / ``runtime_constraints`` / ``negative_space`` — the
+    ``_EXPLICIT_CONTRACT_CHECKS`` vocabulary), collected generically with
+    ``collect_structured_entries`` (no framework/language token inspection).
+
+    * ``total`` = number of declared explicit obligations across all DAG nodes.
+    * ``covered`` = obligations whose family was *examined*: at least one of the
+      family's deterministic checks ran (``status != skip``) — covering both a
+      clean deterministic pass and an amber surface (``status="warn"`` / amber
+      findings are an examined, surfaced obligation, not a hidden gap).
+    * ``uncovered`` = declared obligations whose family's checks all skipped
+      (declared-but-never-examined) — the real explicit-coverage gap.
+
+    round-16 lesson: with **zero** declared obligations the metric is vacuous —
+    it reports ``total=0, covered=0`` and never manufactures a ``covered>0`` 100%
+    PASS over nothing. ``lexicon`` is accepted for symmetry with the other
+    builders and future lexicon-declared obligations; it is not required today.
+
+    E-PCUMR is **measure-only**: the default ``threshold`` is ``0.0`` so the
+    rolled-up result always reports ``passed=True`` (like
+    ``design_token_coverage``). The metric *surfaces* the explicit-coverage
+    fraction; it does not gate. Gating is a separate decision — a caller that
+    wants a gate passes an explicit ``threshold`` (e.g. ``100.0``). This keeps
+    the addition from minting a new merge/deploy RED.
+    """
+
+    del lexicon  # reserved for future lexicon-declared obligations
+    project_root = Path(project_root)
+
+    try:
+        provided_dag = dag is not None
+        target_dag = dag if provided_dag else _build_project_dag(project_root, config)
+        obligations = _collect_explicit_obligations(target_dag)
+        # When a DAG is supplied, examine that exact DAG (do not rebuild from
+        # disk, which would diverge from the obligations just counted).
+        examined_checks = _examined_check_names(
+            project_root, config, dag=target_dag if provided_dag else None
+        )
+    except Exception as exc:  # pragma: no cover - defensive gate behavior
+        return _exception_result("e_pcumr", threshold, exc)
+
+    total = len(obligations)
+    covered = 0
+    uncovered_keys: dict[str, int] = {}
+    for key, count in obligations.items():
+        responsible = _EXPLICIT_CONTRACT_CHECKS.get(key, frozenset())
+        if responsible & examined_checks:
+            covered += count
+        else:
+            uncovered_keys[key] = uncovered_keys.get(key, 0) + count
+
+    uncovered = total - covered
+    pct = _coverage_pct(covered, total)
+    details = [
+        f"explicit_obligations: {total}",
+        f"covered: {covered}",
+        f"contract_keys: {', '.join(sorted(obligations)) or '(none)'}",
+    ]
+    if uncovered_keys:
+        details.append(
+            "uncovered (declared but never examined): "
+            + ", ".join(f"{key}×{count}" for key, count in sorted(uncovered_keys.items()))
+        )
+
+    # Vacuous when nothing is declared: pct from _coverage_pct is 100.0 for
+    # total==0, but covered stays 0 so it is never a covered>0 false green.
+    return CoverageResult(
+        metric="e_pcumr",
+        total=total,
+        covered=covered,
+        uncovered=uncovered,
+        pct=pct,
+        threshold=threshold,
+        passed=pct >= threshold,
+        details=details,
+    )
+
+
+def compute_pcumr(
+    gold_positive: list[Any],
+    detected: list[Any],
+    threshold: float = 0.0,
+) -> CoverageResult:
+    """PCUMR — Positive-Coverage Under-detection Miss Rate for a corpus.
+
+    Pure function: ``|G_pos - D_pos| / |G_pos|`` — the fraction of gold-expected
+    positive coverage gaps that the detector did NOT find. ``gold_positive`` is
+    supplied by the caller (the Phase C corpus); this function does not load any
+    corpus itself.
+
+    Matching key = ``kind`` + ``dimension`` + ``canonical_subject`` (subject
+    canonicalized by trim + casefold so cosmetic case/whitespace differences do
+    not count as a miss). The result is reported in the shared ``CoverageResult``
+    shape so the merge gate can roll it up uniformly:
+
+    * ``total`` = ``|G_pos|`` (gold positive count).
+    * ``covered`` = matched gold positives (``|G_pos ∩ D_pos|``).
+    * ``uncovered`` = missed gold positives (``|G_pos - D_pos|``).
+    * ``pct`` = miss rate ``uncovered/total * 100`` — a *miss* rate, so a full
+      match is ``0.0`` and ``passed`` means miss rate ``<= threshold`` (default
+      ``0.0``, i.e. zero misses).
+
+    Empty gold is vacuous: ``total=0, uncovered=0`` and a ``0.0`` miss rate, never
+    a fabricated signal.
+    """
+
+    gold_keys = [_pcumr_match_key(item) for item in gold_positive]
+    detected_keys = {_pcumr_match_key(item) for item in detected}
+
+    total = len(gold_keys)
+    matched = sum(1 for key in gold_keys if key in detected_keys)
+    missed = total - matched
+    miss_rate = (missed / total * 100.0) if total else 0.0
+    missed_examples = [
+        "/".join(str(part) for part in key)
+        for key in gold_keys
+        if key not in detected_keys
+    ]
+
+    details = [
+        f"gold_positive: {total}",
+        f"matched: {matched}",
+        f"missed: {missed}",
+    ]
+    if missed_examples:
+        details.append("missed: " + ", ".join(missed_examples[:5]))
+
+    return CoverageResult(
+        metric="pcumr",
+        total=total,
+        covered=matched,
+        uncovered=missed,
+        pct=miss_rate,
+        threshold=threshold,
+        passed=miss_rate <= threshold,
+        details=details,
+    )
+
+
+def _build_project_dag(project_root: Path, config: dict[str, Any] | None) -> Any:
+    from codd.dag.builder import build_dag, load_dag_settings
+
+    settings = load_dag_settings(project_root, config)
+    return build_dag(project_root, settings)
+
+
+def _collect_explicit_obligations(dag: Any) -> dict[str, int]:
+    """Count declared explicit obligations per contract key across DAG nodes.
+
+    Uses the shared ``collect_structured_entries`` so a contract authored under
+    the canonical ``frontmatter.codd`` position is counted wherever it lives. It
+    never inspects entry contents, so it stays language-/framework-free.
+    """
+    from codd.dag.metadata_access import collect_structured_entries
+
+    counts: dict[str, int] = {}
+    nodes = getattr(dag, "nodes", {}) or {}
+    for node in nodes.values():
+        attributes = getattr(node, "attributes", None)
+        if not attributes:
+            continue
+        for key in _EXPLICIT_CONTRACT_CHECKS:
+            entries = collect_structured_entries(attributes, key)
+            if entries:
+                counts[key] = counts.get(key, 0) + len(entries)
+    return counts
+
+
+def _examined_check_names(
+    project_root: Path,
+    config: dict[str, Any] | None,
+    dag: Any | None = None,
+) -> set[str]:
+    """Names of deterministic checks that examined input (did not skip).
+
+    A check that skipped verified nothing (its contract family was absent), so it
+    does not credit coverage. A non-skip result — clean pass, red failure, or
+    amber surface — means the family was examined and is therefore credited. When
+    ``dag`` is provided the checks run against that exact DAG (``run_checks``);
+    otherwise the project DAG is built from disk (``run_all_checks``).
+    """
+    if dag is not None:
+        from codd.dag.runner import run_checks
+
+        results = run_checks(dag, Path(project_root), settings=config or {})
+    else:
+        from codd.dag.runner import run_all_checks
+
+        results = run_all_checks(Path(project_root), settings=config or {})
+    examined: set[str] = set()
+    for result in results:
+        if _dag_result_skipped(result):
+            continue
+        examined.add(_dag_result_name(result))
+    return examined
+
+
+def _pcumr_match_key(item: Any) -> tuple[str, str, str]:
+    """Canonical (kind, dimension, subject) match key for PCUMR.
+
+    ``subject`` (also accepted as ``canonical_subject`` / ``subject_canonical``)
+    is canonicalized by trim + casefold so cosmetic differences are not misses.
+    """
+    if isinstance(item, dict):
+        kind = item.get("kind")
+        dimension = item.get("dimension")
+        subject = (
+            item.get("canonical_subject")
+            if item.get("canonical_subject") is not None
+            else item.get("subject_canonical")
+            if item.get("subject_canonical") is not None
+            else item.get("subject")
+        )
+    else:
+        kind = getattr(item, "kind", None)
+        dimension = getattr(item, "dimension", None)
+        subject = (
+            getattr(item, "canonical_subject", None)
+            or getattr(item, "subject_canonical", None)
+            or getattr(item, "subject", None)
+        )
+    return (
+        str(kind or "").strip().casefold(),
+        str(dimension or "").strip().casefold(),
+        str(subject or "").strip().casefold(),
+    )
+
+
 def check_edge_coverage_gate(result: EdgeCoverageResult, config: dict[str, Any] | None = None) -> bool:
     """Return True when transition edge coverage meets the configured threshold."""
 
@@ -291,6 +553,10 @@ def run_coverage(
     report.add(compute_lexicon_compliance(project_root, threshold=lexicon_threshold))
     report.add(compute_screen_flow_coverage(project_root, config, threshold=screen_flow_threshold))
     report.add(compute_dag_completeness(project_root, config=config))
+    # E-PCUMR (explicit-contract coverage) is the sixth metric. PCUMR needs a
+    # corpus gold set (Phase C) so it stays a pure function callers invoke
+    # directly; it is intentionally not auto-wired here.
+    report.add(compute_explicit_pcumr(project_root, config=config))
     return report
 
 

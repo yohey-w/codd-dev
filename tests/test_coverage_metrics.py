@@ -10,10 +10,13 @@ from codd.coverage_metrics import (
     compute_dag_completeness,
     compute_design_token_coverage,
     compute_e2e_coverage,
+    compute_explicit_pcumr,
     compute_lexicon_compliance,
+    compute_pcumr,
     compute_screen_flow_coverage,
     run_coverage,
 )
+from codd.dag import DAG, Node
 
 
 @dataclass(frozen=True)
@@ -313,6 +316,7 @@ def test_run_coverage_all_pass(tmp_path):
         "lexicon_compliance",
         "screen_flow_coverage",
         "dag_completeness",
+        "e_pcumr",
     ]
 
 
@@ -436,3 +440,240 @@ def test_cli_coverage_returns_exit_1_on_gate_failure(tmp_path):
     assert result.exit_code == 1
     assert "[FAIL] e2e_coverage" in result.output
     assert "Coverage gate FAILED" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# E-PCUMR (explicit-contract coverage) + PCUMR (corpus miss-rate)             #
+# Stage-2 (Axis-P) Phase A3.                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def _design_doc_with_contracts(**attrs) -> DAG:
+    """A DAG carrying only declared contracts on one design_doc node.
+
+    The deterministic checks see the contracts via ``collect_structured_entries``
+    off the node ``attributes`` exactly as the builder would lift them.
+    """
+    dag = DAG()
+    dag.add_node(
+        Node(
+            id="docs/design/app.md",
+            kind="design_doc",
+            path="docs/design/app.md",
+            attributes=dict(attrs),
+        )
+    )
+    return dag
+
+
+def test_e_pcumr_no_contracts_is_vacuous_not_false_green(tmp_path):
+    # round-16 lesson: zero declared obligations must NOT report a green 100%
+    # PASS over nothing. With no explicit contracts the metric is vacuous: it
+    # neither manufactures covered>0 nor claims a real PASS.
+    result = compute_explicit_pcumr(tmp_path, dag=DAG())
+
+    assert result.metric == "e_pcumr"
+    assert result.total == 0
+    assert result.covered == 0
+    # Must not be a covered>0 100% PASS conjured from an empty contract set.
+    assert not (result.pct == 100.0 and result.covered > 0)
+
+
+def test_e_pcumr_examined_contract_counts_as_covered(tmp_path):
+    # A declared user_journey is examined by the deterministic
+    # user_journey_coherence check (it does NOT skip when a journey is declared),
+    # so the explicit obligation is covered. pct = covered/total.
+    dag = _design_doc_with_contracts(
+        user_journeys=[
+            {
+                "name": "login",
+                "steps": [{"action": "expect_url", "value": "/home"}],
+                "expected_outcome_refs": [],
+            }
+        ]
+    )
+
+    result = compute_explicit_pcumr(tmp_path, dag=dag)
+
+    assert result.metric == "e_pcumr"
+    assert result.total == 1
+    assert result.covered == 1
+    assert result.uncovered == 0
+    assert result.pct == 100.0
+
+
+def test_e_pcumr_partial_pct_when_a_family_is_dormant(tmp_path, monkeypatch):
+    # Two explicit obligations in different families. One family's deterministic
+    # checks all SKIP (declared-but-never-examined dormant input) -> that
+    # obligation is uncovered, so pct is the examined fraction, not a false 100%.
+    from codd.dag import runner as dag_runner
+
+    dag = _design_doc_with_contracts(
+        user_journeys=[{"name": "login", "steps": [], "expected_outcome_refs": []}],
+        coverage_axes=[{"name": "browser", "values": ["chrome"]}],
+    )
+
+    @dataclass
+    class _Res:
+        check_name: str
+        severity: str = "red"
+        status: str = "pass"
+        passed: bool = True
+        skipped: bool = False
+        checked_count: int = 0
+
+    def fake_checks(_dag, *_a, **_k):
+        # user_journey_coherence ran (examined 1); environment_coverage SKIPPED
+        # (coverage_axes obligation never examined -> uncovered).
+        return [
+            _Res("user_journey_coherence", status="pass", checked_count=1),
+            _Res("environment_coverage", status="skip", skipped=True, checked_count=0),
+        ]
+
+    # A DAG is injected, so the metric examines it via run_checks.
+    monkeypatch.setattr(dag_runner, "run_checks", fake_checks)
+
+    # Explicit threshold exercises the gating math (default is measure-only 0.0).
+    result = compute_explicit_pcumr(tmp_path, dag=dag, threshold=100.0)
+
+    assert result.total == 2
+    assert result.covered == 1
+    assert result.uncovered == 1
+    assert result.pct == 50.0
+    assert result.passed is False
+
+
+def test_e_pcumr_default_is_measure_only_never_new_red(tmp_path, monkeypatch):
+    # Default threshold 0.0 => even a dormant declared family (pct 50%) reports
+    # passed=True. The metric measures coverage; it does not mint a new gate RED.
+    from codd.dag import runner as dag_runner
+
+    dag = _design_doc_with_contracts(
+        user_journeys=[{"name": "login", "steps": [], "expected_outcome_refs": []}],
+        coverage_axes=[{"name": "browser", "values": ["chrome"]}],
+    )
+
+    @dataclass
+    class _Res:
+        check_name: str
+        severity: str = "red"
+        status: str = "pass"
+        passed: bool = True
+        skipped: bool = False
+        checked_count: int = 0
+
+    def fake_checks(_dag, *_a, **_k):
+        return [
+            _Res("user_journey_coherence", status="pass", checked_count=1),
+            _Res("environment_coverage", status="skip", skipped=True),
+        ]
+
+    monkeypatch.setattr(dag_runner, "run_checks", fake_checks)
+
+    result = compute_explicit_pcumr(tmp_path, dag=dag)  # default threshold 0.0
+
+    assert result.pct == 50.0
+    assert result.threshold == 0.0
+    assert result.passed is True
+
+
+def test_e_pcumr_amber_surface_counts_as_covered(tmp_path, monkeypatch):
+    # An obligation surfaced as amber (warn) by its deterministic check is
+    # "amber surface 済" and therefore counts as covered (not a hidden gap).
+    from codd.dag import runner as dag_runner
+
+    dag = _design_doc_with_contracts(
+        resource_contracts=[{"resource": "db", "produced_by": ["svc"]}],
+    )
+
+    @dataclass
+    class _Res:
+        check_name: str
+        severity: str = "amber"
+        status: str = "warn"
+        passed: bool = True
+        skipped: bool = False
+        checked_count: int = 0
+        warnings: list = None
+
+    def fake_checks(_dag, *_a, **_k):
+        return [
+            _Res(
+                "resource_flow_coherence",
+                severity="amber",
+                status="warn",
+                warnings=["advisory"],
+            )
+        ]
+
+    # A DAG is injected, so the metric examines it via run_checks.
+    monkeypatch.setattr(dag_runner, "run_checks", fake_checks)
+
+    result = compute_explicit_pcumr(tmp_path, dag=dag)
+
+    assert result.total == 1
+    assert result.covered == 1
+    assert result.uncovered == 0
+    assert result.pct == 100.0
+
+
+def test_pcumr_exact_match_is_zero_miss(tmp_path):
+    gold = [
+        {"kind": "missing_producer", "dimension": "resource", "subject": "DB"},
+        {"kind": "missing_journey", "dimension": "actor", "subject": "Admin"},
+    ]
+    detected = [
+        # canonicalization: case/whitespace differences must still match.
+        {"kind": "missing_producer", "dimension": "resource", "subject": " db "},
+        {"kind": "missing_journey", "dimension": "actor", "subject": "admin"},
+    ]
+
+    result = compute_pcumr(gold, detected)
+
+    assert result.metric == "pcumr"
+    assert result.total == 2
+    assert result.covered == 2
+    assert result.uncovered == 0
+    assert result.pct == 0.0  # PCUMR is a MISS rate: full match -> 0% miss
+
+
+def test_pcumr_missing_detection_yields_positive_miss(tmp_path):
+    gold = [
+        {"kind": "missing_producer", "dimension": "resource", "subject": "DB"},
+        {"kind": "missing_journey", "dimension": "actor", "subject": "Admin"},
+    ]
+    detected = [
+        {"kind": "missing_producer", "dimension": "resource", "subject": "DB"},
+    ]
+
+    result = compute_pcumr(gold, detected)
+
+    assert result.metric == "pcumr"
+    assert result.total == 2
+    assert result.covered == 1  # matched gold positives
+    assert result.uncovered == 1  # the missed gold positive
+    assert result.pct == 50.0  # |G_pos - D_pos| / |G_pos|
+
+
+def test_pcumr_empty_gold_is_vacuous(tmp_path):
+    # No gold positives -> miss rate is undefined/vacuous, never a false signal.
+    result = compute_pcumr([], [{"kind": "x", "dimension": "y", "subject": "z"}])
+
+    assert result.metric == "pcumr"
+    assert result.total == 0
+    assert result.uncovered == 0
+
+
+def test_run_coverage_includes_e_pcumr(tmp_path):
+    report = run_coverage(tmp_path, config=_CI_HEALTH_OPT_OUT_CONFIG)
+
+    assert any(result.metric == "e_pcumr" for result in report.results)
+    # E-PCUMR is wired as the sixth metric.
+    assert [result.metric for result in report.results] == [
+        "e2e_coverage",
+        "design_token_coverage",
+        "lexicon_compliance",
+        "screen_flow_coverage",
+        "dag_completeness",
+        "e_pcumr",
+    ]

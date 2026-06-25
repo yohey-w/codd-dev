@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import click
 import pytest
+import yaml
 from click.testing import CliRunner
 
 import codd.cli as cli_module
@@ -230,7 +231,14 @@ def test_check_format_json_parses(project: Path, monkeypatch) -> None:
     assert payload["doctor"] == ["one advisory"]
     assert payload["dag"][0]["check_name"] == "edge_validity"
     assert payload["contract"]["status"] == "skipped"
-    assert payload["summary"] == {"gates_failed": 0, "advisories": 1, "vacuous": 0}
+    # Pre-existing summary fields are unchanged; the positive-coverage materiality
+    # overlay (Axis-P) is the only additive key.
+    summary = payload["summary"]
+    assert summary["gates_failed"] == 0
+    assert summary["advisories"] == 1
+    assert summary["vacuous"] == 0
+    assert summary["coverage"] == {"contracts": 0, "covered": 0, "pending": 0, "gap": 0}
+    assert set(summary) == {"gates_failed", "advisories", "vacuous", "coverage"}
 
 
 def test_check_summary_flags_vacuous_pass(project: Path, monkeypatch) -> None:
@@ -383,3 +391,136 @@ def test_check_help_mentions_preflight_stays_separate() -> None:
 
     assert result.exit_code == 0
     assert "codd preflight" in result.output
+
+
+# --- Axis-P Phase A2: positive coverage materiality (additive) -------------
+
+
+def _write_dag_json_with_contracts(project: Path) -> None:
+    """Write a real .codd/dag.json declaring assorted contract entries.
+
+    The aggregated check reads contract declarations from the persisted DAG
+    (the dag-verify stage writes it for real runs); here we provide it directly
+    so the materiality counter has explicit declarations to count regardless of
+    the mocked ``run_all_checks``.
+    """
+    payload = {
+        "version": "1",
+        "project_root": str(project.resolve()),
+        "nodes": [
+            {
+                "id": "docs/design.md",
+                "kind": "design_doc",
+                "path": "docs/design.md",
+                "attributes": {
+                    "user_journeys": [
+                        {"name": "checkout", "criticality": "high"},
+                        {"name": "refund", "criticality": "medium"},
+                    ],
+                    "resource_contracts": [{"resource": "order_id"}],
+                    "frontmatter": {
+                        "codd": {
+                            "capability_contracts": [{"capability": "place_order"}],
+                            "aggregation_policies": [{"field_id": "total"}],
+                        }
+                    },
+                },
+            },
+            {"id": "src/app.ts", "kind": "impl", "path": "src/app.ts", "attributes": {}},
+        ],
+        "edges": [],
+        "cycles": [],
+        "coverage_axes": [{"id": "axis_locale", "name": "locale"}],
+    }
+    dag_path = project / ".codd" / "dag.json"
+    dag_path.parent.mkdir(parents=True, exist_ok=True)
+    dag_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_lexicon_with_decisions(project: Path) -> None:
+    lexicon = {
+        "node_vocabulary": [{"id": "page", "description": "a page"}],
+        "naming_conventions": [],
+        "design_principles": [],
+        "coverage_decisions": [
+            {"id": "d_confirmed", "question": "q1?", "status": "CONFIRMED"},
+            {"id": "d_recommended", "question": "q2?", "status": "RECOMMENDED_PROCEEDING"},
+            {"id": "d_ask", "question": "q3?", "status": "ASK"},
+            {"id": "d_ask2", "question": "q4?", "status": "ASK"},
+        ],
+    }
+    (project / "project_lexicon.yaml").write_text(yaml.safe_dump(lexicon), encoding="utf-8")
+
+
+def test_check_summary_includes_positive_coverage_materiality(project: Path, monkeypatch) -> None:
+    # Axis-P: 'check' surfaces positive coverage materiality alongside the
+    # existing negative findings — contract declarations counted from the DAG and
+    # coverage decisions counted from the lexicon, additively.
+    _patch_doctor(monkeypatch, [])
+    _patch_dag(monkeypatch, [_CheckResult("edge_validity")])
+    _write_dag_json_with_contracts(project)
+    _write_lexicon_with_decisions(project)
+
+    result = CliRunner().invoke(main, ["check", "--path", str(project)])
+
+    assert result.exit_code == 0
+    # 2 journeys + 1 resource + 1 capability + 1 aggregation + 1 coverage_axis = 6.
+    # decisions: 1 CONFIRMED -> covered, (1 RECOMMENDED_PROCEEDING + 2 ASK) -> pending,
+    # 2 ASK -> gap.
+    assert "Coverage: 6 contract(s), 1 covered, 3 pending, 2 gap(s)" in result.output
+    # Existing summary line is unchanged and still present.
+    assert "Summary: 0 gate(s) failed, 0 advisory finding(s)" in result.output
+
+
+def test_check_json_summary_includes_positive_coverage_materiality(project: Path, monkeypatch) -> None:
+    _patch_doctor(monkeypatch, [])
+    _patch_dag(monkeypatch, [_CheckResult("edge_validity")])
+    _write_dag_json_with_contracts(project)
+    _write_lexicon_with_decisions(project)
+    runner = _split_stream_runner()
+
+    result = runner.invoke(main, ["check", "--path", str(project), "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["summary"]["coverage"] == {
+        "contracts": 6,
+        "covered": 1,
+        "pending": 3,
+        "gap": 2,
+    }
+    # Pre-existing summary keys remain untouched (additive).
+    assert payload["summary"]["gates_failed"] == 0
+    assert payload["summary"]["advisories"] == 0
+    assert payload["summary"]["vacuous"] == 0
+
+
+def test_check_summary_coverage_all_zero_when_nothing_declared(project: Path, monkeypatch) -> None:
+    # Regression: a project with no contract declarations and no coverage
+    # decisions reports all-zero coverage, and the existing summary line is
+    # byte-for-byte unchanged (no behavioural drift for the common case).
+    _patch_doctor(monkeypatch, [])
+    _patch_dag(monkeypatch, [_CheckResult("edge_validity")])
+
+    result = CliRunner().invoke(main, ["check", "--path", str(project)])
+
+    assert result.exit_code == 0
+    assert "Coverage: 0 contract(s), 0 covered, 0 pending, 0 gap(s)" in result.output
+    assert "Summary: 0 gate(s) failed, 0 advisory finding(s)" in result.output
+
+
+def test_check_json_summary_coverage_all_zero_when_nothing_declared(project: Path, monkeypatch) -> None:
+    _patch_doctor(monkeypatch, [])
+    _patch_dag(monkeypatch, [_CheckResult("edge_validity")])
+    runner = _split_stream_runner()
+
+    result = runner.invoke(main, ["check", "--path", str(project), "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["summary"]["coverage"] == {
+        "contracts": 0,
+        "covered": 0,
+        "pending": 0,
+        "gap": 0,
+    }

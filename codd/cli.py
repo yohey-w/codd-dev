@@ -633,6 +633,91 @@ def _run_preflight_command(
         raise SystemExit(1)
 
 
+# Axis-P: contract declarations counted for the positive-coverage materiality
+# overlay. These are explicit, author-written contract surfaces — read straight
+# from the persisted DAG node attributes. The list is vocabulary-free in the
+# sense that it names declaration *keys* (the same structured-frontmatter keys
+# the DAG schema already recognizes), never project/framework/language tokens.
+_COVERAGE_CONTRACT_NODE_KEYS = (
+    "user_journeys",
+    "resource_contracts",
+    "capability_contracts",
+    "aggregation_policies",
+)
+
+
+def _coverage_materiality_summary(project_root: Path) -> dict[str, int]:
+    """Count positive coverage materiality for the aggregated ``check`` summary.
+
+    Purely additive and side-effect-free: it only *reads* already-produced data
+    (the ``.codd/dag.json`` the dag-verify stage just wrote, and the project
+    lexicon). It makes no new red/amber judgement — it counts declarations and
+    decision statuses that already exist.
+
+    * ``contracts`` — explicit contract declarations: structured DAG-node entries
+      (user_journeys / resource_contracts / capability_contracts /
+      aggregation_policies), plus declared coverage_axes and the
+      ``negative_space.forbidden_evidence`` declarations from config.
+    * ``covered`` — CONFIRMED coverage decisions.
+    * ``pending`` — ASK + RECOMMENDED_PROCEEDING coverage decisions.
+    * ``gap`` — ASK-origin pending gaps (coverage decisions still in ASK).
+
+    Missing inputs (no dag.json, no lexicon, no coverage_decisions) yield zeros.
+    Never raises: a visibility overlay must not break the health check.
+    """
+    from codd.dag.builder import default_dag_json_path
+    from codd.dag.metadata_access import collect_structured_entries
+
+    contracts = 0
+    try:
+        dag_path = default_dag_json_path(project_root)
+        if dag_path.is_file():
+            dag_payload = json.loads(dag_path.read_text(encoding="utf-8"))
+            if isinstance(dag_payload, dict):
+                nodes = dag_payload.get("nodes")
+                if isinstance(nodes, list):
+                    for node in nodes:
+                        if not isinstance(node, dict):
+                            continue
+                        attributes = node.get("attributes")
+                        for key in _COVERAGE_CONTRACT_NODE_KEYS:
+                            contracts += len(collect_structured_entries(attributes, key))
+                axes = dag_payload.get("coverage_axes")
+                if isinstance(axes, list):
+                    contracts += sum(1 for axis in axes if isinstance(axis, dict))
+    except (OSError, ValueError):
+        contracts = contracts  # leave the partial count; overlay must not break
+
+    try:
+        config = load_project_config(project_root)
+        negative_space = config.get("negative_space") if isinstance(config, dict) else None
+        if isinstance(negative_space, dict):
+            forbidden = negative_space.get("forbidden_evidence")
+            if isinstance(forbidden, list):
+                contracts += sum(1 for entry in forbidden if isinstance(entry, dict))
+    except (FileNotFoundError, ValueError):
+        pass
+
+    covered = 0
+    pending = 0
+    gap = 0
+    try:
+        lexicon = load_lexicon(project_root)
+    except (FileNotFoundError, ValueError):
+        lexicon = None
+    if lexicon is not None:
+        for decision in lexicon.coverage_decisions:
+            status = getattr(decision, "status", None)
+            if status == "CONFIRMED":
+                covered += 1
+            elif status in {"ASK", "RECOMMENDED_PROCEEDING"}:
+                pending += 1
+                if status == "ASK":
+                    gap += 1
+
+    return {"contracts": contracts, "covered": covered, "pending": pending, "gap": gap}
+
+
 @main.command("check", epilog="Task-YAML preflight stays separate: run 'codd preflight <task.yaml>'.")
 @project_root_option("project_path")
 @click.option("--full", "run_full", is_flag=True, default=False, help="Also run policy and coverage threshold gates.")
@@ -956,14 +1041,26 @@ def check_cmd(project_path: str, run_full: bool, apply_fixes: bool, output_forma
 
     if errors:
         payload["errors"] = errors
+    # Axis-P positive-coverage materiality overlay: additive only. Counts
+    # already-produced declarations/decisions; never raises, never changes the
+    # gate verdict or any pre-existing summary field.
+    coverage_materiality = _coverage_materiality_summary(project_root)
     payload["summary"] = {
         "gates_failed": gates_failed,
         "advisories": advisories,
         "vacuous": len(payload.get("dag_vacuous", [])),
+        "coverage": coverage_materiality,
     }
 
     if as_text:
         click.echo(f"\nSummary: {gates_failed} gate(s) failed, {advisories} advisory finding(s)")
+        click.echo(
+            "Coverage: "
+            f"{coverage_materiality['contracts']} contract(s), "
+            f"{coverage_materiality['covered']} covered, "
+            f"{coverage_materiality['pending']} pending, "
+            f"{coverage_materiality['gap']} gap(s)"
+        )
     else:
         click.echo(json.dumps(payload, indent=2, default=str))
     for notice in notices:

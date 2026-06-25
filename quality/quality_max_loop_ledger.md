@@ -683,3 +683,28 @@ the OWNER's exit-line approval** — Opus does not self-certify completion; with
 prior strategic gate) banned, the owner is the strategic gate. Round 16 vindicated this
 (Opus said clean, Sonnet caught a real systematic false-green). Awaiting owner: ① pass
 N-gate → Stage-2 / ② more Claude rounds / ③ a different bar.
+
+## Stage-2 (Axis-P coverage, owner-free) — STARTED (2026-06-25; owner: "意外にはやく収束した")
+Proceeding autonomously per the owner's standing directives (don't idle-wait / implement
+the decided design / owner-not-a-bottleneck); N-gate passage treated as met on the
+OBJECTIVE 2-consecutive-clean evidence (not a self-cert opinion). The Axis-P design was
+GPT-decided pre-ban (saved), so this is execution, not new-concept creation. An infra map
+confirmed most parts exist + are largely Axis-P-compliant (resource_flow / negative_space
+already "RED only from explicit contracts").
+
+**Phase A done (autonomous, additive, no new meaning; full suite 6428):**
+- A1 gap→AskItem bridge: new `codd/elicit/gap_to_ask.py` — amber/gap Finding →
+  AskItem(blocking=false, ASK→RECOMMENDED_PROCEEDING) → ProjectLexicon.coverage_decisions
+  (idempotent by deterministic id; never reverts CONFIRMED/OVERRIDDEN; CI never waits).
+- A2 positive materiality: `codd check` summary now also shows coverage
+  (contracts/covered/pending/gap) — purely additive, existing output byte-identical.
+- A3 E-PCUMR metric: coverage_metrics.compute_explicit_pcumr (declared explicit
+  obligations examined vs total; measure-only default, no new RED; round-16 vacuous
+  lesson followed) wired into run_coverage; compute_pcumr pure fn for the Phase-C corpus.
+
+**Phase B = the ONE owner-gated item (new meaning): the gap_kind→contract_key routing
+table.** Presented to the owner for async batch-confirm (recommended default proposed).
+**Phase C (autonomous, post-routing-confirm):** CONFIRMED→contract promotion + 5-fixture
+positive corpus. Opus does not solo-decide the routing (new meaning → owner gate, per
+"新概念創出だけ殿介入必須" + the owner's "won't Opus alone be wrong" concern). OpenAI
+(GPT-CDP/Codex) stays off; Claude-only.
