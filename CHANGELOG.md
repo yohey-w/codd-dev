@@ -13,6 +13,32 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.7.2] - 2026-06-25 — brownfield reachability + JS (Express) dogfood fixes
+
+### Added
+- **Doc-less brownfield reachability.** `transitive_closure` now seeds reachability from
+  code-entry roots (impl source nodes with outgoing but no incoming import edges) in
+  addition to design-doc roots, so a project with no design docs is measured from its code
+  structure instead of being reported entirely unreachable. Genuine orphans are still
+  flagged and doc-rooted projects are unchanged. (Flask 46→12 unreachable; Express 6/6
+  reachable from the auto-detected entry.)
+
+### Fixed (surfaced by the Express brownfield dogfood)
+- **CommonJS `require()` was invisible to JS import extraction.** The tree-sitter extractor
+  visited only `import`/`export` statements (not `require()` / dynamic `import()` call
+  expressions) and the regex fallback matched only ESM specifiers, so a CommonJS project's
+  dependency graph came out empty. Both paths now capture `require()` / `import()`.
+- **AI extraction degenerated with tools disabled.** The extract prompt instructed the model
+  to shell out, but the default `ai_command` passes `--tools ""`; the model went agentic and
+  produced stub output. The prompt now detects tool availability and, when disabled, directs
+  extraction from the embedded project context.
+- **Bootstrap hardcoded `tests/`/`docs/`**, and the DAG's test-file rule required a `.test.`
+  infix — so a project using `test/*.js` (e.g. Mocha) had its tests silently excluded. The
+  bootstrap now detects the actual test/doc directories and any source under a test
+  directory counts (Python keeps its stricter `test_*.py` rule). Express: 0 → 91 test nodes.
+- **Route paths were mis-extracted from JSDoc comments.** Comments are stripped before route
+  detection.
+
 ## [3.7.1] - 2026-06-25 — Flask brownfield dogfood: real-OSS-found fixes
 
 Pointing CoDD at a real external OSS (Flask) — human-authored code outside the design
