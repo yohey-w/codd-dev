@@ -17,7 +17,16 @@ import yaml
 
 from codd.config import load_project_config
 from codd.discovery import scan_exclude_patterns as shared_scan_exclude_patterns
-from codd.parsing._shared import cpp_include_candidate_paths, strip_bom
+from codd.parsing._shared import (
+    CPP_INCLUDE_RE as _SHARED_CPP_INCLUDE_RE,
+    CSHARP_NAMESPACE_RE as _SHARED_CSHARP_NAMESPACE_RE,
+    CSHARP_USING_RE as _SHARED_CSHARP_USING_RE,
+    ESM_EXTENSION_SWAP,
+    JAVA_IMPORT_RE as _SHARED_JAVA_IMPORT_RE,
+    JAVA_PACKAGE_RE as _SHARED_JAVA_PACKAGE_RE,
+    cpp_include_candidate_paths,
+    strip_bom,
+)
 from codd.path_safety import iter_project_glob, resolve_project_path
 from codd.dag import DAG, Edge, Node
 from codd.dag.coverage_axes import CoverageAxis, extract_coverage_axes_from_design_doc, extract_coverage_axes_from_lexicon
@@ -1202,11 +1211,14 @@ def _java_source_roots(project_root: Path, path_to_node: dict[Path, str]) -> lis
     return ordered
 
 
-#: Java ``package`` declaration (mirrors ``regex_strategies._JAVA_PACKAGE_RE``),
-#: used to derive (source-root, fqn-prefix) pairs from the node file-set so a tree
+#: Java ``package`` declaration — the SHARED :data:`_SHARED_JAVA_PACKAGE_RE`
+#: (single source of truth in ``codd.parsing._shared``, also used by the scanner's
+#: ``_imports_java`` classifier and the builder's fallback specifier extractor), so
+#: the "what is a package line" grammar cannot drift across the parse layers. Used
+#: to derive (source-root, fqn-prefix) pairs from the node file-set so a tree
 #: SCOPED INSIDE a package (``com/google/common`` as the project root) resolves
 #: without a double package prefix.
-_JAVA_PACKAGE_DECL_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+_JAVA_PACKAGE_DECL_RE = _SHARED_JAVA_PACKAGE_RE
 
 
 def _java_root_prefix_pairs(
@@ -1542,11 +1554,10 @@ _CPP_HEADER_SUFFIXES = frozenset({".h", ".hpp", ".hh"})
 
 #: C# namespace declaration — both file-scoped (``namespace X.Y;``) and block
 #: (``namespace X.Y {`` / ``namespace X.Y`` then ``{`` on the next line) forms.
-#: Mirrors ``regex_strategies._CSHARP_NAMESPACE_RE``.
-_CSHARP_NAMESPACE_DECL_RE = re.compile(
-    r'^\s*namespace\s+([\w.]+)\s*[;{]?\s*$',
-    re.MULTILINE,
-)
+#: The SHARED :data:`_SHARED_CSHARP_NAMESPACE_RE` (single source of truth in
+#: ``codd.parsing._shared``, also used by the scanner's ``_imports_csharp``
+#: classifier), so the namespace grammar cannot drift across the parse layers.
+_CSHARP_NAMESPACE_DECL_RE = _SHARED_CSHARP_NAMESPACE_RE
 
 #: Cap on how many files a SINGLE ``using`` may resolve to, so a using of a very
 #: large namespace cannot explode the edge count pathologically. When a namespace
@@ -1708,15 +1719,14 @@ def _extract_python_import_specifiers(file_path: Path) -> list[str]:
 
 # Regex fallback for Java ``import`` / ``package`` specifiers, used only when the
 # tree-sitter-java binding is unavailable (otherwise the registry backend's AST
-# extractor is preferred). Mirrors the SHAPES emitted by
-# ``treesitter._extract_java_import_specifiers`` (``static`` keyword + ``.*``
-# wildcard + ``package`` line preserved) so the Java resolver branch is agnostic
-# to which extractor produced the specifier.
-_JAVA_IMPORT_SPECIFIER_RE = re.compile(
-    r"^\s*import\s+(static\s+)?([\w.]+(?:\.\*)?)\s*;",
-    re.MULTILINE,
-)
-_JAVA_PACKAGE_SPECIFIER_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+# extractor is preferred). The SHARED grammar regexes (single source of truth in
+# ``codd.parsing._shared``, also used by the scanner's ``_imports_java``
+# classifier) emit the SHAPES ``treesitter._extract_java_import_specifiers`` does
+# (``static`` keyword + ``.*`` wildcard + ``package`` line preserved), so the Java
+# resolver branch is agnostic to which extractor produced the specifier — and the
+# grammar cannot drift across the parse layers.
+_JAVA_IMPORT_SPECIFIER_RE = _SHARED_JAVA_IMPORT_RE
+_JAVA_PACKAGE_SPECIFIER_RE = _SHARED_JAVA_PACKAGE_RE
 
 
 def _extract_java_import_specifiers(file_path: Path) -> list[str]:
@@ -1763,10 +1773,10 @@ def _extract_java_import_specifiers(file_path: Path) -> list[str]:
 # is stripped by the resolver's ``.suffix``-dispatched C++ branch.
 _CPP_QUOTE_SPECIFIER = "quote:"
 _CPP_ANGLE_SPECIFIER = "angle:"
-_CPP_INCLUDE_RE = re.compile(
-    r'^\s*#\s*include\s*(?:"([^"]+)"|<([^>]+)>)',
-    re.MULTILINE,
-)
+#: The SHARED ``#include`` grammar (single source of truth in
+#: ``codd.parsing._shared``, also used by the scanner's ``_imports_cpp``
+#: classifier), so the quote/angle grammar cannot drift across the parse layers.
+_CPP_INCLUDE_RE = _SHARED_CPP_INCLUDE_RE
 
 
 def _extract_cpp_include_specifiers(file_path: Path) -> list[str]:
@@ -1805,10 +1815,11 @@ def _extract_cpp_include_specifiers(file_path: Path) -> list[str]:
 # C++ precedent of deferring tree-sitter wiring). The ``static`` marker is the
 # only shape distinction the resolver needs.
 _CSHARP_STATIC_SPECIFIER = "static "
-_CSHARP_USING_RE = re.compile(
-    r'^\s*(?:global\s+)?using\s+(static\s+)?(?:[\w.]+\s*=\s*)?([\w.]+)\s*;',
-    re.MULTILINE,
-)
+#: The SHARED ``using`` grammar (single source of truth in
+#: ``codd.parsing._shared``, also used by the scanner's ``_imports_csharp``
+#: classifier), so the using grammar cannot drift across the parse layers. The
+#: ``static`` keyword is the capturing group(1); the namespace is group(2).
+_CSHARP_USING_RE = _SHARED_CSHARP_USING_RE
 
 
 def _extract_csharp_import_specifiers(file_path: Path) -> list[str]:
@@ -1889,20 +1900,13 @@ def _resolve_python_import_target(import_ref: str, project_root: Path, path_to_n
     return path_to_node.get(init_path)
 
 
-#: ESM/TS extension-swap map (DATA, not a ``language ==`` branch). Under
-#: ``moduleResolution: NodeNext``/``Bundler`` a TypeScript import specifier MUST
-#: carry the EMITTED ``.js`` extension that resolves to the ``.ts`` SOURCE file
-#: (``import { x } from "./types.js"`` → ``types.ts``). Each emitted suffix maps
-#: to the source suffixes it can stand in for. Resolution tries these ONLY as a
-#: last-resort fallback (after exact-match and bare suffix-append both fail), so
-#: a real ``./foo.js`` target still wins by exact match — JS projects with real
-#: ``.js`` files are unaffected.
-_ESM_EXTENSION_SWAP: dict[str, tuple[str, ...]] = {
-    ".js": (".ts", ".tsx"),
-    ".jsx": (".tsx", ".ts"),
-    ".mjs": (".mts", ".ts"),
-    ".cjs": (".cts", ".ts"),
-}
+#: ESM/TS extension-swap map: now the SHARED :data:`ESM_EXTENSION_SWAP` (single
+#: source of truth in ``codd.parsing._shared``), so the builder edge resolver and
+#: the scanner/CEG resolver swap ``.js``→``.ts`` IDENTICALLY (no drift). Resolution
+#: tries these ONLY as a last-resort fallback (after exact-match and bare
+#: suffix-append both fail), so a real ``./foo.js`` target still wins by exact
+#: match — JS projects with real ``.js`` files are unaffected.
+_ESM_EXTENSION_SWAP = ESM_EXTENSION_SWAP
 
 
 def _resolve_file_candidate(candidate: Path, path_to_node: dict[Path, str]) -> str | None:

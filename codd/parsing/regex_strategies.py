@@ -33,7 +33,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from codd.parsing._shared import cpp_include_candidate_paths, strip_bom
+from codd.parsing._shared import (
+    CPP_INCLUDE_RE as _SHARED_CPP_INCLUDE_RE,
+    CSHARP_NAMESPACE_RE as _SHARED_CSHARP_NAMESPACE_RE,
+    CSHARP_USING_RE as _SHARED_CSHARP_USING_RE,
+    JAVA_IMPORT_RE as _SHARED_JAVA_IMPORT_RE,
+    JAVA_PACKAGE_RE as _SHARED_JAVA_PACKAGE_RE,
+    JS_TS_SOURCE_EXTENSIONS,
+    cpp_include_candidate_paths,
+    js_ts_source_candidate_paths,
+    strip_bom,
+)
 
 if TYPE_CHECKING:
     from codd.extractor import ModuleInfo, Symbol
@@ -158,8 +168,14 @@ def _symbols_java(content: str, rel_path: str) -> "list[Symbol]":
 #: Java stdlib / platform package roots (mirrors treesitter._JAVA_STDLIB_ROOTS).
 _JAVA_STDLIB = frozenset({"java", "javax", "jdk", "sun"})
 
-_JAVA_IMPORT_RE = re.compile(r'^\s*import\s+(static\s+)?([\w.]+(?:\.\*)?)\s*;')
-_JAVA_PACKAGE_RE = re.compile(r'^\s*package\s+([\w.]+)\s*;')
+# SHARED Java grammar (single source of truth in ``codd.parsing._shared``, also
+# used by the DAG builder's Java specifier extractor), so the import/package
+# grammar cannot drift between the scan and builder layers. group(2) = the FQN
+# (group(1) = the ``static`` keyword); the package regex group(1) = the package.
+# The shared patterns carry ``re.MULTILINE`` — inert for the per-line ``.match()``
+# calls below (a single line has no interior newline and ``.match`` anchors at 0).
+_JAVA_IMPORT_RE = _SHARED_JAVA_IMPORT_RE
+_JAVA_PACKAGE_RE = _SHARED_JAVA_PACKAGE_RE
 
 
 def _imports_java(content, project_root, src_dir, file_path):
@@ -249,18 +265,18 @@ def _symbols_csharp(content: str, rel_path: str) -> "list[Symbol]":
     return symbols
 
 
-#: C# ``using`` directives + ``namespace`` declarations. Mirrors
-#: ``builder._CSHARP_USING_RE`` / ``builder._CSHARP_NAMESPACE_RE`` so the scan-path
-#: parser and the DAG builder agree on a C# project's using graph. ``using``
-#: covers plain / ``static`` / ``global`` / alias (``using Alias = X.Y;``) forms;
-#: the namespace regex covers BOTH file-scoped (``namespace X.Y;``) and block
-#: (``namespace X.Y {``) declarations (Dapper uses both).
-_CSHARP_USING_RE = re.compile(
-    r'^\s*(?:global\s+)?using\s+(?:static\s+)?'
-    r'(?:[\w.]+\s*=\s*)?'  # optional ``Alias =`` (we capture the RHS namespace)
-    r'([\w.]+)\s*;'
-)
-_CSHARP_NAMESPACE_RE = re.compile(r'^\s*namespace\s+([\w.]+)\s*[;{]?\s*$')
+#: C# ``using`` directives + ``namespace`` declarations — the SHARED grammar
+#: (single source of truth in ``codd.parsing._shared``, also used by the DAG
+#: builder), so the scan-path parser and the DAG builder cannot drift on a C#
+#: project's using graph. ``using`` covers plain / ``static`` / ``global`` / alias
+#: (``using Alias = X.Y;``) forms; the namespace regex covers BOTH file-scoped
+#: (``namespace X.Y;``) and block (``namespace X.Y {``) declarations.
+#: NOTE: in the shared ``using`` regex the ``static`` keyword is the CAPTURING
+#: group(1) and the imported NAMESPACE is group(2) (so the builder can decide
+#: parent-namespace probing); the classifier below reads group(2). The shared
+#: patterns carry ``re.MULTILINE`` — inert for the per-line ``.match()`` calls.
+_CSHARP_USING_RE = _SHARED_CSHARP_USING_RE
+_CSHARP_NAMESPACE_RE = _SHARED_CSHARP_NAMESPACE_RE
 
 #: C# framework / BCL namespace roots. A ``using`` rooted here is external (the
 #: analogue of Java ``java.*`` / C++ angle-form ``<…>``). Everything else is a
@@ -286,7 +302,10 @@ def _imports_csharp(content, project_root, src_dir, file_path):
         m = _CSHARP_USING_RE.match(line)
         if not m:
             continue
-        namespace = m.group(1)
+        # group(2) = the imported namespace (group(1) is the ``static`` keyword in
+        # the SHARED capturing regex); the static flag is irrelevant to scan
+        # classification, which only needs the namespace.
+        namespace = m.group(2)
         top = namespace.split(".", 1)[0]
         if top in _CSHARP_FRAMEWORK_ROOTS:
             external.add(namespace)
@@ -351,10 +370,12 @@ def _symbols_cpp(content: str, rel_path: str) -> "list[Symbol]":
     return symbols
 
 
-#: C++ ``#include`` directive: quote-form (``"…"`` — local/first-party) vs
-#: angle-form (``<…>`` — system/STL). Mirrors ``builder._CPP_INCLUDE_RE`` so the
-#: scan-path parser and the DAG builder agree on a C++ project's include graph.
-_CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s*(?:"([^"]+)"|<([^>]+)>)')
+#: C++ ``#include`` directive: quote-form (``"…"`` — local/first-party, group(1))
+#: vs angle-form (``<…>`` — system/STL, group(2)). The SHARED grammar (single
+#: source of truth in ``codd.parsing._shared``, also used by the DAG builder), so
+#: the scan-path parser and the DAG builder cannot drift on a C++ project's
+#: include grammar. Carries ``re.MULTILINE`` — inert for the per-line ``.match()``.
+_CPP_INCLUDE_RE = _SHARED_CPP_INCLUDE_RE
 
 
 def _imports_cpp(content, project_root, src_dir, file_path):
@@ -723,28 +744,42 @@ class CegImportTarget:
 def _ceg_targets_ts_js(
     internal: dict, project_root: Path, file_path: Path
 ) -> "list[CegImportTarget]":
+    """JS/TS relative imports → PATH-resolved ``file:`` CEG nodes.
+
+    Resolution unification: the candidate filesystem paths come from the SHARED
+    :func:`codd.parsing._shared.js_ts_source_candidate_paths` — the SAME ordering
+    + ESM ``.js``→``.ts`` swap the DAG builder uses (the builder matches the
+    candidates against its node-set; this resolver matches them against disk). The
+    pre-unification scan resolver hand-rolled its own extension list WITHOUT the
+    ESM swap and only re-parsed ``import``/``from`` lines, so it silently dropped
+    (a) ``import "./x.js"`` → ``x.ts`` edges and (b) ``require('./x')`` /
+    ``import('./x')`` edges that the builder DID form — the same drift class the
+    C++ unification killed (the LevelDB scan-edge loss). Both layers now share the
+    one candidate generator, so they cannot diverge.
+    """
+    project_root_resolved = project_root.resolve()
     targets: list[CegImportTarget] = []
+    seen: set[str] = set()
     for import_lines in internal.values():
         for line in import_lines:
-            match = re.search(r'''(?:import|from)\s+['"]([^'"]+)['"]''', line)
+            match = _TS_JS_IMPORT_SPECIFIER_RE.search(line)
             if not match:
                 continue
             target_module = match.group(1)
             if not target_module.startswith("."):
                 continue
-            resolved = (file_path.parent / target_module).resolve()
-            extensions = [
-                ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts",
-                "/index.ts", "/index.tsx", "/index.js", "/index.jsx",
-            ]
-            for ext in [""] + extensions:
-                candidate = Path(f"{resolved}{ext}")
-                if not candidate.exists():
+            for candidate in js_ts_source_candidate_paths(
+                target_module, file_path, JS_TS_SOURCE_EXTENSIONS
+            ):
+                if not candidate.is_file():
                     continue
                 try:
-                    target_rel = candidate.relative_to(project_root).as_posix()
+                    target_rel = candidate.relative_to(project_root_resolved).as_posix()
                 except ValueError:
                     continue
+                if target_rel in seen:
+                    break
+                seen.add(target_rel)
                 targets.append(
                     CegImportTarget(
                         target_id=f"file:{target_rel}",

@@ -30,10 +30,12 @@ _TREE_SITTER_LANGUAGE_PACKAGES = {
     "java": "tree_sitter_java",
 }
 
-_JS_IMPORT_SUFFIXES = {
-    "javascript": ("", ".js", ".jsx", ".mjs", ".cjs", "/index.js", "/index.jsx"),
-    "typescript": ("", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", "/index.ts", "/index.tsx"),
-}
+# NOTE: JS/TS relative-import candidate generation now lives in the SHARED
+# :func:`codd.parsing._shared.js_ts_source_candidate_paths` (the same generator
+# the DAG builder and the scanner-CEG resolver use), so this tree-sitter
+# classification path cannot drift from them — in particular it now applies the
+# ESM ``.js``→``.ts`` swap, so ``import "./x.js"`` is classified INTERNAL (and
+# reaches the CEG ``file:`` resolver) instead of being mis-bucketed external.
 
 
 def _strip_js_comments(src: str) -> str:
@@ -263,9 +265,14 @@ def _unwrap_value_node(node: Any) -> Any:
     return node
 
 def _resolve_js_import(import_path: str, file_path: Path, src_dir: Path, language: str) -> Path | None:
-    candidate_base = (file_path.parent / import_path).resolve()
-    for suffix in _JS_IMPORT_SUFFIXES.get(language, _JS_IMPORT_SUFFIXES["typescript"]):
-        candidate = candidate_base if suffix == "" else Path(f"{candidate_base}{suffix}")
+    from codd.parsing._shared import (
+        JS_TS_SOURCE_EXTENSIONS,
+        js_ts_source_candidate_paths,
+    )
+
+    for candidate in js_ts_source_candidate_paths(
+        import_path, file_path, JS_TS_SOURCE_EXTENSIONS
+    ):
         if candidate.exists():
             return candidate
     return None

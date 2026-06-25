@@ -73,7 +73,6 @@ from codd.parsing.python_ast import (
 )
 from codd.parsing.treesitter import (
     TreeSitterExtractor,
-    _JS_IMPORT_SUFFIXES,
     _TREE_SITTER_LANGUAGE_PACKAGES,
     _TS_BUILTIN_NAMES,
     _build_parser,

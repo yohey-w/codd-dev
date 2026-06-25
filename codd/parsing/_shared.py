@@ -300,6 +300,140 @@ def cpp_include_candidate_paths(
     return candidates
 
 
+#: Canonical JS/TS source-file extensions (single source of truth) for the
+#: scan-side disk resolvers (scanner-CEG + the tree-sitter fallback). The DAG
+#: builder derives its suffix set dynamically from the live node-file-set instead,
+#: so it adapts to whatever extensions a project actually contains; the scan side
+#: walks disk and needs an explicit list. Both run the SAME ordering/ESM-swap
+#: algorithm via :func:`js_ts_source_candidate_paths`, so they cannot drift.
+JS_TS_SOURCE_EXTENSIONS: tuple[str, ...] = (
+    ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs",
+)
+
+#: ESM/TS emitted-extension → source-extension(s) swap (single source of truth
+#: shared by the builder edge resolver AND the scanner/CEG resolver, so the two
+#: cannot drift). Under ``moduleResolution: NodeNext``/``Bundler`` a TypeScript
+#: import specifier MUST carry the EMITTED ``.js`` extension that resolves to the
+#: ``.ts`` SOURCE file (``import { x } from "./types.js"`` → ``types.ts``). Each
+#: emitted suffix maps to the source suffixes it can stand in for. This is DATA,
+#: not a ``language ==`` branch — it is suffix-keyed.
+ESM_EXTENSION_SWAP: dict[str, tuple[str, ...]] = {
+    ".js": (".ts", ".tsx"),
+    ".jsx": (".tsx", ".ts"),
+    ".mjs": (".mts", ".ts"),
+    ".cjs": (".cts", ".ts"),
+}
+
+
+def js_ts_source_candidate_paths(
+    spec: str,
+    file_path: Path,
+    extensions: tuple[str, ...],
+    *,
+    include_index: bool = True,
+    esm_swap: bool = True,
+) -> list[Path]:
+    """Ordered candidate filesystem paths for one JS/TS RELATIVE import specifier.
+
+    GENERIC FIX (resolution unification): the ONE JS/TS relative-import candidate
+    generator. Both the DAG builder edge resolver (matching candidates against the
+    node file-set) and the scanner/CEG resolver (matching against the live
+    filesystem) call THIS, so they can no longer diverge — the same drift class the
+    shared :func:`cpp_include_candidate_paths` killed for C++ (the LevelDB 59%
+    scan-edge loss). The pre-unification JS/TS drift: the scanner-CEG resolver
+    lacked the ESM ``.js``→``.ts`` swap the builder had, so ``import "./x.js"`` →
+    ``x.ts`` formed a builder edge but no scan edge.
+
+    The ``extensions`` are the caller's candidate source suffixes (the builder
+    passes the live node-set's suffixes; the scanner passes the canonical JS/TS
+    source extensions). Resolution order, matching the builder's historical
+    precedence (exact → bare suffix-append → directory index → ESM-swap FALLBACK):
+
+      1. the spec relative to the importing file's directory, verbatim (an
+         already-extensioned ``./foo.ts`` resolves by exact match);
+      2. the relative base with each ``extensions`` suffix appended
+         (``./foo`` → ``./foo.ts`` / ``./foo.tsx`` / …);
+      3. ``include_index``: the relative base as a directory, ``…/index.<ext>``
+         for each suffix (``./foo`` → ``./foo/index.ts``);
+      4. ``esm_swap``: ONLY as a last-resort fallback, the emitted ``.js``/``.jsx``/
+         ``.mjs``/``.cjs`` suffix swapped for each source suffix in
+         :data:`ESM_EXTENSION_SWAP`, both the file form (``./types.js`` →
+         ``types.ts``) and the directory-index form (``./foo.js`` →
+         ``foo/index.ts``). The forward suffix-append in step 2 still lets a real
+         ``./foo.js`` file win first when one exists.
+
+    Pure path construction — existence/in-tree checks are the caller's job (node
+    membership for edges; ``is_file()``/``exists()`` + in-tree for the scanner), so
+    no false edge can form from a candidate that does not exist.
+    """
+    base = (file_path.parent / spec).resolve()
+    candidates: list[Path] = [base]
+    seen: set[Path] = {base}
+
+    def _add(path: Path) -> None:
+        if path not in seen:
+            seen.add(path)
+            candidates.append(path)
+
+    for suffix in extensions:
+        _add(Path(f"{base}{suffix}"))
+    if include_index:
+        for suffix in extensions:
+            _add(base / f"index{suffix}")
+
+    if esm_swap:
+        source_suffixes = ESM_EXTENSION_SWAP.get(base.suffix)
+        if source_suffixes:
+            # Strip ONLY the trailing emitted suffix as a string so inner dots are
+            # preserved (``types.test.js`` → base ``types.test``, not ``types``).
+            stem = base.name[: -len(base.suffix)]
+            swapped_base = base.parent / stem
+            for source_suffix in source_suffixes:
+                _add(base.parent / f"{stem}{source_suffix}")
+            if include_index:
+                for source_suffix in source_suffixes:
+                    _add(swapped_base / f"index{source_suffix}")
+    return candidates
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Specifier-GRAMMAR regexes — single source of truth shared by the builder's raw
+# specifier extractors AND the scanner's regex classifiers, so the "what is the
+# import specifier" grammar cannot drift between the two layers (the same drift
+# class as the candidate-path resolvers, one layer up). Each pattern carries
+# ``re.MULTILINE`` so a builder whole-file ``findall``/``search`` works; the
+# scanner's per-line ``match`` callers are unaffected by the flag (a single line
+# has no interior newlines, and ``match`` anchors at position 0 regardless).
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Java ``import`` (incl. ``static`` keyword, capturing, and ``.*`` wildcard).
+#: group(1) = the ``static `` keyword (or empty); group(2) = the FQN.
+JAVA_IMPORT_RE = re.compile(r"^\s*import\s+(static\s+)?([\w.]+(?:\.\*)?)\s*;", re.MULTILINE)
+
+#: Java ``package`` declaration. group(1) = the dotted package name.
+JAVA_PACKAGE_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+
+#: C++ ``#include`` directive: quote-form (group(1), local/first-party) vs
+#: angle-form (group(2), system/STL).
+CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s*(?:"([^"]+)"|<([^>]+)>)', re.MULTILINE)
+
+#: C# ``using`` directive — plain / ``static`` / ``global`` / alias
+#: (``using Alias = X.Y;``) forms. group(1) = the ``static `` keyword (or empty);
+#: group(2) = the imported namespace (the alias RHS is captured, the alias name
+#: is discarded). The ``static`` keyword is CAPTURING so the builder's
+#: namespace-index resolver can decide parent-namespace probing; scanner callers
+#: that only need the namespace read group(2).
+CSHARP_USING_RE = re.compile(
+    r"^\s*(?:global\s+)?using\s+(static\s+)?(?:[\w.]+\s*=\s*)?([\w.]+)\s*;",
+    re.MULTILINE,
+)
+
+#: C# ``namespace`` declaration — both file-scoped (``namespace X.Y;``) and block
+#: (``namespace X.Y {`` / ``namespace X.Y`` then ``{`` next line) forms.
+#: group(1) = the dotted namespace name.
+CSHARP_NAMESPACE_RE = re.compile(r"^\s*namespace\s+([\w.]+)\s*[;{]?\s*$", re.MULTILINE)
+
+
 def _normalize_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
