@@ -496,23 +496,11 @@ class TestBrowserNavigationPatternDetection:
         assert "auth_redirects" in p
 
 
-@pytest.mark.xfail(
-    reason="FLAGGED follow-up: module-doc basename collapse across parallel "
-    "source roots. _file_to_module returns parts[0] relative to EACH source "
-    "dir, so same-named files in parallel roots (Zod v4: core/schemas.ts, "
-    "classic/schemas.ts, mini/schemas.ts) merge into one 'schemas.ts' module "
-    "(-> one schemas-ts.md), flattening distinct architecture. A correct fix "
-    "must disambiguate by the distinguishing parent path AND keep every "
-    "language's extract_imports internal-import KEY in lockstep (they "
-    "independently key by rel.parts[0]); otherwise dependency edges dangle and "
-    "drop. That cross-language coordination + golden-output regeneration is "
-    "broad churn in the Contract Kernel parsing zone, so it is deferred.",
-    strict=True,
-)
 def test_module_doc_basename_no_collapse_across_parallel_roots(tmp_path):
-    # Red-before-green repro for the FLAGGED Bug 2. Two parallel source roots
-    # each contain a file named ``schemas.ts``. They are architecturally
-    # distinct and MUST remain separate modules. Today they collapse into one.
+    # Was the FLAGGED Bug-2 xfail repro; the basename-collapse fix turns it GREEN.
+    # Two parallel source roots each contain a file named ``schemas.ts``. They are
+    # architecturally distinct and MUST remain separate modules (one module doc
+    # each), not collapse into a single ``schemas.ts`` module.
     (tmp_path / "core").mkdir()
     (tmp_path / "classic").mkdir()
     (tmp_path / "core" / "schemas.ts").write_text(
@@ -528,9 +516,70 @@ def test_module_doc_basename_no_collapse_across_parallel_roots(tmp_path):
         name for name, mod in facts.modules.items()
         if any(Path(f).name == "schemas.ts" for f in mod.files)
     ]
-    # Expect TWO distinct modules (one per root). Currently ONE (collapsed) ->
-    # xfail. When the follow-up lands, drop the xfail marker.
+    # Expect TWO distinct modules (one per root): the distinguishing parent
+    # segment (core / classic) is kept instead of being stripped.
     assert len(schemas_modules) == 2, (
         f"parallel-root files collapsed into modules={schemas_modules}; "
         "each root's schemas.ts must be its own module"
+    )
+    # Each disambiguated module owns exactly its own root's file.
+    by_name = {name: facts.modules[name] for name in schemas_modules}
+    assert "core" in by_name and "classic" in by_name, sorted(by_name)
+    assert by_name["core"].files == ["core/schemas.ts"]
+    assert by_name["classic"].files == ["classic/schemas.ts"]
+
+
+def test_basename_disambiguation_preserves_dependency_edges(tmp_path):
+    # The CRITICAL coupling guard (no silent edge drop). Two parallel roots each
+    # hold a same-named ``util.ts`` (collides) AND a same-named ``index.ts`` that
+    # imports its OWN root's util. A NAME-ONLY module split would re-key the
+    # modules but leave the importer's ``util.ts`` bucket dangling -> synth's
+    # ``if dependency in facts.modules`` guard would SILENTLY DROP the edge. The
+    # coupled fix re-resolves import keys into the SAME namespace, so every
+    # internal-import key still resolves to a real module (no dangling key).
+    #
+    # Plus a CROSS-root edge (classic/index also imports core/util): per-src_dir
+    # resolution misclassified that as external; the coupled fix recovers it as a
+    # real internal edge. RED against a naive name-only fix, GREEN with the
+    # coupled key fix.
+    (tmp_path / "core").mkdir()
+    (tmp_path / "classic").mkdir()
+    (tmp_path / "core" / "util.ts").write_text(
+        "export const u = 1;\n", encoding="utf-8"
+    )
+    (tmp_path / "core" / "index.ts").write_text(
+        "import { u } from './util';\nexport const ci = u;\n", encoding="utf-8"
+    )
+    (tmp_path / "classic" / "util.ts").write_text(
+        "export const u = 2;\n", encoding="utf-8"
+    )
+    # classic/index imports its own util (collides) AND core/util (cross-root).
+    (tmp_path / "classic" / "index.ts").write_text(
+        "import { u } from './util';\n"
+        "import { u as cu } from '../core/util';\n"
+        "export const cl = u + cu;\n",
+        encoding="utf-8",
+    )
+
+    facts = extract_facts(tmp_path, "typescript", ["core", "classic"])
+
+    # Same-named files did not collapse: two roots -> two modules.
+    assert set(facts.modules) == {"core", "classic"}, sorted(facts.modules)
+
+    # NO DANGLING KEYS: every internal-import key resolves to a real module
+    # (a name-only split would leave a stale ``util.ts`` key here that resolves to
+    # nothing, so synth would drop the edge).
+    for name, mod in facts.modules.items():
+        for dep_key in mod.internal_imports:
+            assert dep_key in facts.modules, (
+                f"module {name!r} has dangling internal-import key {dep_key!r}; "
+                f"modules={sorted(facts.modules)}"
+            )
+
+    # CROSS-root edge recovered: classic depends on core (it imports core/util).
+    # Per-src_dir resolution had dropped this as external; it must now be a real
+    # internal edge between the disambiguated modules.
+    assert "core" in facts.modules["classic"].internal_imports, (
+        "cross-root edge classic -> core was dropped; "
+        f"classic.internal_imports={dict(facts.modules['classic'].internal_imports)}"
     )

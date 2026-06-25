@@ -232,6 +232,10 @@ def extract_facts(project_root: Path, language: str | None = None,
     # excludes the project's test dirs so it does not pull tests into impl modules.
     test_dir_excludes = _test_dir_exclude_patterns(project_root)
     seen_files: set[str] = set()
+    # ``rel file path`` → the source-root it was discovered under. The finalize
+    # disambiguation pass uses this to detect a module whose files were merged
+    # ACROSS parallel source roots (the basename-collapse pathology).
+    file_src_dirs: dict[str, str] = {}
     for src_dir in source_dirs:
         src_path = project_root / src_dir
         if not src_path.exists():
@@ -240,8 +244,17 @@ def extract_facts(project_root: Path, language: str | None = None,
         # source-root entries are scoped already and keep the legacy behaviour).
         dir_excludes = exclude_patterns + test_dir_excludes if src_dir == "." else exclude_patterns
         _discover_modules(
-            facts, project_root, src_path, language, dir_excludes, seen_files
+            facts, project_root, src_path, language, dir_excludes, seen_files,
+            file_src_dirs, src_dir,
         )
+
+    # GENERIC disambiguation (basename-collapse fix): same-named files reached via
+    # PARALLEL source roots collapse into one module because the module key is the
+    # first segment RELATIVE TO EACH src_dir, erasing the distinguishing root. The
+    # finalize pass below re-keys ONLY such cross-root-merged modules — and only
+    # when it can PROVE every dependency edge still resolves — so single-root
+    # projects (and any split that would dangle an edge) are left byte-identical.
+    _disambiguate_module_collisions(facts, project_root, language, file_src_dirs)
 
     # Discover DDL / schema artifacts
     _discover_schemas(facts, project_root, exclude_patterns)
@@ -473,11 +486,16 @@ def _language_extensions(language: str) -> set[str]:
 
 def _discover_modules(facts: ProjectFacts, project_root: Path, src_dir: Path,
                       language: str, exclude_patterns: list[str],
-                      seen_files: set[str] | None = None):
+                      seen_files: set[str] | None = None,
+                      file_src_dirs: dict[str, str] | None = None,
+                      src_dir_name: str | None = None):
     """Walk source tree and discover modules with their symbols and imports.
 
     ``seen_files`` (shared across source roots) de-duplicates files so an
     overlapping source-root cover never discovers the same file twice.
+    ``file_src_dirs`` (when given) records ``rel path`` → ``src_dir_name`` (the
+    source-root entry the file came from), so the finalize disambiguation pass can
+    detect a module merged across parallel source roots.
     """
     exts = _language_extensions(language)
     extractor = get_extractor(language, "source")
@@ -503,6 +521,8 @@ def _discover_modules(facts: ProjectFacts, project_root: Path, src_dir: Path,
             if rel in seen_files:
                 continue
             seen_files.add(rel)
+            if file_src_dirs is not None and src_dir_name is not None:
+                file_src_dirs[rel] = src_dir_name
 
             # Determine module name
             module_name = _file_to_module(rel, project_root, src_dir, language)
@@ -534,6 +554,164 @@ def _discover_modules(facts: ProjectFacts, project_root: Path, src_dir: Path,
             for imp_module, imp_lines in internal.items():
                 mod.internal_imports.setdefault(imp_module, []).extend(imp_lines)
             mod.external_imports.update(external)
+
+
+def _module_internal_import_keys_resolve(facts: ProjectFacts) -> bool:
+    """True if EVERY module's internal-import keys resolve to a real module.
+
+    The no-silent-drop invariant: ``synth`` only emits a dependency edge when
+    ``dependency in facts.modules``. A re-key that leaves an import bucket pointing
+    at a vanished key would SILENTLY drop that edge. This predicate lets the
+    disambiguation pass fail-closed: if a proposed re-key would dangle ANY edge
+    that resolved before, the pass reverts (so it can only ever PRESERVE edges).
+    """
+    keys = set(facts.modules)
+    for module in facts.modules.values():
+        for dep_key in module.internal_imports:
+            if dep_key not in keys:
+                return False
+    return True
+
+
+def _disambiguate_module_collisions(
+    facts: ProjectFacts,
+    project_root: Path,
+    language: str,
+    file_src_dirs: dict[str, str],
+) -> None:
+    """Split modules merged ACROSS parallel source roots (basename-collapse fix).
+
+    GENERIC, language-agnostic (no ``if language ==`` branch), and fail-closed.
+
+    Pathology: when several source roots are scanned, a module key is the first
+    path segment RELATIVE TO EACH src_dir, so same-named files reached through
+    DIFFERENT roots (``core/schemas.ts`` + ``classic/schemas.ts`` via roots
+    ``core`` / ``classic``) collapse into ONE module — and one module doc —
+    erasing the architecture.
+
+    The single mechanism:
+
+    * TRIGGER — only a module whose files originate from ≥2 distinct source roots
+      (``file_src_dirs``) AND whose files all sit DIRECTLY under their root. For
+      such files the project-root-relative first segment IS the distinguishing
+      root, so the disambiguated module key and the re-resolved import key live in
+      the SAME one-segment namespace (the load-bearing coupling — without it the
+      now-dangling edges would be silently dropped). Single-root projects, and
+      cross-root merges nested DEEPER under their roots, never trigger (the deeper
+      case needs multi-segment module+import keys — broad cross-language churn in
+      the parsing zone — and is deliberately left for a follow-up rather than
+      risking dropped edges here).
+    * RE-KEY — every file of a triggering module is re-assigned to the module named
+      by its first PROJECT-ROOT-relative segment (the stripped distinguishing
+      root). Non-triggering modules are untouched.
+    * IMPORTS — triggering files' internal imports are RE-RESOLVED with
+      ``src_dir = project_root`` so the buckets land in the same one-segment
+      namespace as the new keys (this also RECOVERS cross-root edges that
+      per-src_dir resolution had misclassified as external).
+
+    FAIL-CLOSED: the whole transformation is applied to a COPY and kept only if
+    :func:`_module_internal_import_keys_resolve` still holds (no dangling edge was
+    introduced); otherwise the original facts are preserved unchanged. So the pass
+    can only ever PRESERVE or REPAIR edges, never drop them.
+    """
+    # Which modules merge files from ≥2 distinct source roots?
+    spanning: set[str] = set()
+    for module in facts.modules.values():
+        roots = {file_src_dirs.get(f) for f in module.files if f in file_src_dirs}
+        roots.discard(None)
+        if len(roots) >= 2:
+            spanning.add(module.name)
+    if not spanning:
+        return
+
+    # Restrict to spanning modules whose files all sit DIRECTLY under their root,
+    # so the project-root-relative first segment is the whole distinguishing key
+    # (one-segment module key == one-segment re-resolved import key). A deeper file
+    # would need a multi-segment key the import strategies do not emit, so we skip
+    # such modules entirely (they stay byte-identical — flagged for follow-up).
+    triggering = {
+        name for name in spanning
+        if all(
+            _file_directly_under_root(f, file_src_dirs.get(f))
+            for f in facts.modules[name].files
+            if f in file_src_dirs
+        )
+    }
+    if not triggering:
+        return
+
+    extractor = get_extractor(language, "source")
+    rebuilt: dict[str, ModuleInfo] = {}
+
+    # Carry NON-triggering modules over verbatim (object identity preserved).
+    for name, module in facts.modules.items():
+        if name in triggering:
+            continue
+        rebuilt[name] = module
+
+    # Re-key the triggering modules' files and re-resolve their imports.
+    for name in triggering:
+        old_mod = facts.modules[name]
+        for rel in old_mod.files:
+            new_key = _root_relative_first_segment(rel)
+            mod = rebuilt.get(new_key)
+            if mod is None:
+                mod = ModuleInfo(name=new_key)
+                rebuilt[new_key] = mod
+            mod.files.append(rel)
+
+            full = project_root / rel
+            try:
+                content = full.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                content = ""
+            mod.line_count += len(content.splitlines())
+            mod.symbols.extend(extractor.extract_symbols(content, rel))
+            # Re-resolve relative to the PROJECT ROOT so import keys match the
+            # root-relative module keys (and cross-root edges resolve internally).
+            internal, external = extractor.extract_imports(
+                content, full, project_root, project_root
+            )
+            for imp_key, imp_lines in internal.items():
+                mod.internal_imports.setdefault(imp_key, []).extend(imp_lines)
+            mod.external_imports.update(external)
+
+    # FAIL-CLOSED: keep the re-key ONLY if it introduced no dangling edge.
+    candidate = ProjectFacts(language=facts.language, source_dirs=facts.source_dirs)
+    candidate.modules = rebuilt
+    if _module_internal_import_keys_resolve(candidate):
+        facts.modules = rebuilt
+
+
+def _file_directly_under_root(rel_path: str, src_dir_name: str | None) -> bool:
+    """True if ``rel_path`` sits DIRECTLY inside source root ``src_dir_name``.
+
+    ``core/schemas.ts`` under root ``core`` → True (one segment after the root).
+    ``packages/websockets/foo.ts`` under ``packages`` → False (nested deeper).
+    Root ``.`` means the file's own first segment is the distinguishing unit, so a
+    top-level file (one segment) counts as directly-under.
+    """
+    if src_dir_name is None:
+        return False
+    parts = Path(rel_path).parts
+    if src_dir_name == ".":
+        return len(parts) == 1
+    root_parts = Path(src_dir_name).parts
+    return len(parts) == len(root_parts) + 1
+
+
+def _root_relative_first_segment(rel_path: str) -> str:
+    """The first segment of a file's PROJECT-ROOT-relative path.
+
+    This is the distinguishing source root that per-src_dir module keying stripped
+    (``core/schemas.ts`` → ``core``). A bare top-level file keys to its own name.
+    ONE rule — both the module-key and the re-resolved import-key sides use it, so
+    they stay in the same namespace.
+    """
+    parts = Path(rel_path).parts
+    if len(parts) >= 2:
+        return parts[0]
+    return parts[0] if parts else "root"
 
 
 def _discover_schemas(facts: ProjectFacts, project_root: Path, exclude_patterns: list[str]):
