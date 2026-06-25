@@ -231,6 +231,83 @@ def _symbols_go(content: str, rel_path: str) -> "list[Symbol]":
     return symbols
 
 
+#: C++ type-declaration keyword → emitted symbol kind. ``struct`` keeps its own
+#: kind (distinct from ``class``) since it is meaningful in C++; ``enum`` (incl.
+#: ``enum class``) and ``namespace`` map to their literal kinds.
+_CPP_TYPE_KEYWORD_KINDS = (
+    (re.compile(r'^\s*(?:template\s*<[^>]*>\s*)?class\s+(\w+)'), "class"),
+    (re.compile(r'^\s*(?:template\s*<[^>]*>\s*)?struct\s+(\w+)'), "struct"),
+    (re.compile(r'^\s*enum\s+(?:class\s+|struct\s+)?(\w+)'), "enum"),
+    (re.compile(r'^\s*namespace\s+(\w+)'), "namespace"),
+)
+
+#: A free-function definition/declaration line. Deliberately conservative: a
+#: return type (one or more type tokens, optional ``*``/``&``) followed by a name
+#: and a parameter list. Excludes control-flow keywords so ``if (...)`` /
+#: ``while (...)`` / ``for (...)`` / ``switch (...)`` never read as functions.
+_CPP_FUNCTION_RE = re.compile(
+    r'^\s*(?:[\w:]+[\w:<>,\s\*&]*?\s+[\*&]?)(\w+)\s*\([^;{]*\)\s*(?:const\s*)?[{;]'
+)
+_CPP_CONTROL_KEYWORDS = frozenset({
+    "if", "for", "while", "switch", "return", "else", "do", "catch", "sizeof",
+})
+
+
+def _symbols_cpp(content: str, rel_path: str) -> "list[Symbol]":
+    symbols: list = []
+    for i, line in enumerate(content.splitlines(), 1):
+        matched_type = False
+        for pattern, kind in _CPP_TYPE_KEYWORD_KINDS:
+            m = pattern.match(line)
+            if m:
+                symbols.append(_symbol(m.group(1), kind, rel_path, i))
+                matched_type = True
+                break
+        if matched_type:
+            continue
+        m = _CPP_FUNCTION_RE.match(line)
+        if m and m.group(1) not in _CPP_CONTROL_KEYWORDS:
+            symbols.append(_symbol(m.group(1), "function", rel_path, i))
+    return symbols
+
+
+#: C++ ``#include`` directive: quote-form (``"…"`` — local/first-party) vs
+#: angle-form (``<…>`` — system/STL). Mirrors ``builder._CPP_INCLUDE_RE`` so the
+#: scan-path parser and the DAG builder agree on a C++ project's include graph.
+_CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s*(?:"([^"]+)"|<([^>]+)>)')
+
+
+def _imports_cpp(content, project_root, src_dir, file_path):
+    """Classify C++ includes: quote-form ``internal`` vs angle-form ``external``.
+
+    The regex sibling of the DAG builder's include extraction (there is no
+    tree-sitter-cpp binding). Quote-form ``#include "demo/core.h"`` is a
+    first-party include (kept as ``internal`` with the raw line, bucketed by the
+    include path's first segment); angle-form ``#include <vector>`` is system/STL
+    (``external``, keyed by the bare header token). Returns the
+    ``(internal, external)`` shape every ``extract_imports`` strategy yields.
+    """
+    internal: dict[str, list[str]] = {}
+    external: set[str] = set()
+
+    for line in content.splitlines():
+        m = _CPP_INCLUDE_RE.match(line)
+        if not m:
+            continue
+        quote_target, angle_target = m.group(1), m.group(2)
+        if quote_target:
+            # Bucket by the first path segment (``demo`` for ``demo/core.h``); the
+            # DAG builder owns the precise path→file resolution for edges.
+            bucket = quote_target.split("/", 1)[0] or "root"
+            internal.setdefault(bucket, []).append(line.strip())
+        elif angle_target:
+            # ``<sys/types.h>`` keys on the bare top token; bare ``<vector>`` on
+            # itself. Either way it is a system/STL external.
+            external.add(angle_target)
+
+    return internal, external
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Import extraction (verbatim bodies of the old _extract_imports ladder).
 # stdlib subtraction is applied by RegexLanguageStrategy.imports().
@@ -499,6 +576,20 @@ _GO = RegexLanguageStrategy(
     guess_test_target=None,
 )
 
+_CPP = RegexLanguageStrategy(
+    name="cpp",
+    extensions=frozenset({".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh"}),
+    # stdlib stays EMPTY: ``_imports_cpp`` already classifies angle-form includes
+    # (the STL/system headers) into ``external`` itself; there is no name-set to
+    # subtract (C++ system headers are arbitrary tokens, not a fixed list).
+    entry_points=("main.cc", "main.cpp", "main.cxx"),
+    extract_symbols=_symbols_cpp,
+    extract_imports=_imports_cpp,
+    detect_code_patterns=None,
+    file_to_module=_file_to_module_first_part,
+    guess_test_target=None,
+)
+
 #: The generic fallback for an unknown language — best-effort no-op analysis,
 #: matching the implicit ``else`` of every old ladder (empty symbols/imports,
 #: no patterns, first-path-part module name, no test-target, no extensions).
@@ -513,6 +604,7 @@ _STRATEGIES: dict[str, RegexLanguageStrategy] = {
     "javascript": _JAVASCRIPT,
     "java": _JAVA,
     "go": _GO,
+    "cpp": _CPP,
 }
 
 
@@ -623,6 +715,82 @@ def _ceg_targets_java(
     return targets
 
 
+#: C/C++ include-root directory names probed when a quote-form include is not
+#: relative to the including file (mirrors ``builder._CPP_INCLUDE_ROOTS``).
+_CPP_INCLUDE_ROOTS = ("include", "src", "inc")
+_CPP_INCLUDE_LINE_RE = re.compile(r'#\s*include\s*"([^"]+)"')
+
+
+def _ceg_targets_cpp(
+    internal: dict, project_root: Path, file_path: Path
+) -> "list[CegImportTarget]":
+    """C++ quote-form includes → PATH-resolved ``file:`` CEG nodes.
+
+    Modeled on ``_ceg_targets_ts_js`` (path-resolved ``file:`` nodes), NOT the
+    Java module-node resolver — C++ resolution is PATH-based. A quote-form
+    include already carries its extension, so there is no suffix synthesis: the
+    path is resolved relative to the including file first, then under the
+    conventional include roots, and emitted as a ``file:`` node keyed by the
+    in-tree relative path. Angle-form includes never reach ``internal`` (they are
+    classified ``external`` by ``_imports_cpp``), so only first-party headers
+    become nodes.
+    """
+    targets: list[CegImportTarget] = []
+    seen: set[str] = set()
+    for include_lines in internal.values():
+        for line in include_lines:
+            match = _CPP_INCLUDE_LINE_RE.search(line)
+            if not match:
+                continue
+            spec = match.group(1)
+            resolved = _resolve_cpp_include_path(spec, project_root, file_path)
+            if resolved is None or resolved in seen:
+                continue
+            seen.add(resolved)
+            targets.append(
+                CegImportTarget(
+                    target_id=f"file:{resolved}",
+                    node_type="file",
+                    node_kwargs={"path": resolved},
+                    evidence_method="cpp_include",
+                    confidence=0.95,
+                )
+            )
+    return targets
+
+
+def _resolve_cpp_include_path(
+    spec: str, project_root: Path, file_path: Path
+) -> str | None:
+    """Resolve a quote-form include path to an in-tree posix path, or ``None``.
+
+    Tries (1) relative to the including file's directory, then (2) each
+    conventional include root walked up from the file. Returns the
+    project-relative posix path of the first candidate that exists on disk and
+    lies inside the project tree (so an out-of-tree ``../`` escape yields no
+    node → no false edge).
+    """
+    rel = Path(spec)
+    candidates = [(file_path.parent / rel)]
+    seen_roots: set[Path] = set()
+    for ancestor in [file_path.parent, *file_path.parents]:
+        for root_name in _CPP_INCLUDE_ROOTS:
+            root = (ancestor / root_name).resolve()
+            if root in seen_roots:
+                continue
+            seen_roots.add(root)
+            candidates.append(ancestor / root_name / rel)
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if not resolved.is_file():
+            continue
+        try:
+            return resolved.relative_to(project_root.resolve()).as_posix()
+        except ValueError:
+            continue
+    return None
+
+
 #: Per-language scanner CEG-import resolvers (registry DATA). Languages without
 #: an entry contribute NO import edges, byte-identical to the former scanner
 #: block that only handled python and typescript/javascript.
@@ -633,6 +801,7 @@ _CEG_IMPORT_RESOLVERS: dict[
     "javascript": _ceg_targets_ts_js,
     "python": _ceg_targets_python,
     "java": _ceg_targets_java,
+    "cpp": _ceg_targets_cpp,
 }
 
 

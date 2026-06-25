@@ -924,6 +924,19 @@ def _resolve_import_target(
                 return resolved
         return None
 
+    # C++ ``#include`` specifiers are dispatched by the IMPORTING file's C/C++
+    # suffix (DATA, not a ``language ==`` core branch). Resolution is PATH-based
+    # (the specifier already carries its extension, e.g. ``fmt/core.h``), the key
+    # divergence from Java's FQN→path synthesis: a quote-form include resolves
+    # relative-to-file first, then via include roots; an angle-form include is
+    # system/STL and produces no edge.
+    if file_path.suffix in _CPP_SOURCE_SUFFIXES:
+        for candidate in _cpp_include_candidates(import_ref, file_path, path_to_node):
+            resolved = _resolve_file_candidate(candidate, path_to_node)
+            if resolved:
+                return resolved
+        return None
+
     candidates: list[Path] = []
     if _is_js_relative_specifier(import_ref):
         # JS/TS relative: ``./foo`` / ``../foo`` — resolve against the file dir
@@ -1107,6 +1120,105 @@ def _sorted_java_dir_files(package_dir: Path) -> list[Path]:
     )
 
 
+#: C/C++ source/header suffixes whose ``#include`` directives carry the intra-tree
+#: dependency graph. Used to suffix-dispatch the PATH-based resolver branch (DATA,
+#: not a ``language ==`` core gate). Kept in sync with the ``.h``/``.cc``/… keys of
+#: ``_SUFFIX_SPECIFIER_EXTRACTORS``.
+_CPP_SOURCE_SUFFIXES = frozenset({".h", ".hpp", ".hh", ".cc", ".cpp", ".cxx"})
+
+#: Conventional C/C++ include-root directory names. A quote-form include such as
+#: ``"fmt/core.h"`` that is not relative to the including file is probed under
+#: these roots (``include`` covers fmt's ``include/fmt/*.h`` layout). Harvested
+#: header-node parent dirs are added at resolution time so unconventional roots
+#: still resolve from DATA.
+_CPP_INCLUDE_ROOTS = ("include", "src", "inc")
+
+
+def _cpp_include_candidates(
+    import_ref: str,
+    file_path: Path,
+    path_to_node: dict[Path, str],
+) -> list[Path]:
+    """Map a C++ ``#include`` specifier to filesystem candidates (PATH-based).
+
+    The specifier is marker-prefixed by ``_extract_cpp_include_specifiers``:
+
+    * ``angle:vector`` (``#include <vector>``) → system/STL: NO candidates, so no
+      edge forms (mirrors Java ``java.*`` producing no edge).
+    * ``quote:fmt/core.h`` (``#include "fmt/core.h"``) → local header. The path
+      ALREADY has its extension, so there is NO suffix synthesis (the divergence
+      from Java's FQN→path mapping). Resolution order:
+        1. relative to the including file's directory (``file.parent / spec``);
+        2. each conventional include root (``include``/``src``/``inc``) under the
+           project tree, located by walking up from the including file;
+        3. the parent directory of every header node already in the file-set
+           (harvested from DATA), so unconventional include roots still resolve.
+
+    ``_resolve_file_candidate`` matches exact node paths first, so a fully-pathed
+    candidate (``…/include/fmt/core.h``) resolves directly to its node.
+    """
+    if import_ref.startswith(_CPP_ANGLE_SPECIFIER):
+        return []
+    if import_ref.startswith(_CPP_QUOTE_SPECIFIER):
+        spec = import_ref[len(_CPP_QUOTE_SPECIFIER):]
+    else:
+        # Defensive: an unmarked specifier (e.g. a future extractor) is treated
+        # as a quote-form local include.
+        spec = import_ref
+    spec = spec.strip()
+    if not spec:
+        return []
+
+    rel = Path(spec)
+    candidates: list[Path] = []
+    # 1. Relative to the including file's own directory (quote-form's primary
+    #    rule — ``#include "lib/b.h"`` next to ``a.cc``).
+    candidates.append((file_path.parent / rel).resolve())
+
+    # 2. Conventional include roots discovered by walking up the including file's
+    #    ancestors (so ``include/fmt/core.h`` resolves from ``src/format.cc``).
+    seen: set[Path] = set()
+    for ancestor in [file_path.parent, *file_path.parents]:
+        for root_name in _CPP_INCLUDE_ROOTS:
+            root = ancestor / root_name
+            key = root.resolve()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((root / rel).resolve())
+
+    # 3. Harvest header-node parent directories from the file-set (DATA), so an
+    #    unconventional include root still resolves the trailing path segment(s).
+    for header_dir in _cpp_header_root_dirs(path_to_node):
+        candidates.append((header_dir / rel).resolve())
+
+    return candidates
+
+
+def _cpp_header_root_dirs(path_to_node: dict[Path, str]) -> list[Path]:
+    """Candidate include roots harvested from header nodes in the file-set.
+
+    For a header node ``…/include/fmt/core.h`` whose include path is ``fmt/core.h``
+    the include ROOT is ``…/include``. We cannot know the split a priori, so we
+    offer each header's parent AND grandparent dirs as roots; the joined
+    candidate only resolves when it matches a real node path, so over-offering is
+    harmless (no false edges).
+    """
+    roots: dict[str, Path] = {}
+    for node_path in path_to_node:
+        if node_path.suffix not in _CPP_HEADER_SUFFIXES:
+            continue
+        for ancestor in (node_path.parent, node_path.parent.parent):
+            resolved = ancestor.resolve()
+            roots[str(resolved)] = resolved
+    return sorted(roots.values(), key=lambda path: len(path.parts), reverse=True)
+
+
+#: C/C++ header suffixes (subset of ``_CPP_SOURCE_SUFFIXES``) used to harvest
+#: include-root directories from the node file-set.
+_CPP_HEADER_SUFFIXES = frozenset({".h", ".hpp", ".hh"})
+
+
 def _infer_test_targets(
     test_path: Path,
     project_root: Path,
@@ -1197,14 +1309,59 @@ def _extract_java_import_specifiers(file_path: Path) -> list[str]:
     return fallback
 
 
+# C++ ``#include`` directives. The DAG resolver needs to know quote-form
+# (``"…"`` — local, relative-first) vs angle-form (``<…>`` — system/STL, no
+# edge), so the extractor preserves that distinction by prefixing a marker:
+#   ``"fmt/core.h"`` → ``quote:fmt/core.h``
+#   ``<vector>``     → ``angle:vector``
+# Built-in regex (NOT routed through the registry): tree-sitter-cpp is not
+# installed, and ``RegexExtractor.extract_import_specifiers`` returns ``[]`` for
+# C++, so a self-contained regex is the source of these specifiers. The marker
+# is stripped by the resolver's ``.suffix``-dispatched C++ branch.
+_CPP_QUOTE_SPECIFIER = "quote:"
+_CPP_ANGLE_SPECIFIER = "angle:"
+_CPP_INCLUDE_RE = re.compile(
+    r'^\s*#\s*include\s*(?:"([^"]+)"|<([^>]+)>)',
+    re.MULTILINE,
+)
+
+
+def _extract_cpp_include_specifiers(file_path: Path) -> list[str]:
+    """Return raw C++ ``#include`` specifiers (quote/angle-marked) for the DAG.
+
+    Mirrors ``_extract_java_import_specifiers`` in role (suffix-dispatched raw
+    specifier extraction) but uses a built-in regex because tree-sitter-cpp is
+    absent. The quote/angle form is carried as a marker prefix so the
+    PATH-based resolver can apply the right rule: quote-form resolves
+    relative-to-file then via include roots; angle-form is system/STL and forms
+    no edge (analogous to Java ``java.*`` producing no edge).
+    """
+
+    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    specifiers: list[str] = []
+    for quote_target, angle_target in _CPP_INCLUDE_RE.findall(content):
+        if quote_target:
+            specifiers.append(f"{_CPP_QUOTE_SPECIFIER}{quote_target}")
+        elif angle_target:
+            specifiers.append(f"{_CPP_ANGLE_SPECIFIER}{angle_target}")
+    return specifiers
+
+
 #: Suffix → raw-specifier extractor (DATA dispatch). A source file whose language
 #: carries its intra-tree dependency graph in DOTTED specifiers (Python modules,
-#: Java FQNs) resolves edges from these, instead of the builder's quoted-string
-#: ``extract_imports`` seam (JS/TS ``from '…'`` / ``require('…')``). Adding a
-#: language here is pure data — no core ``if language ==`` branch.
+#: Java FQNs) or ``#include`` directives (C/C++) resolves edges from these,
+#: instead of the builder's quoted-string ``extract_imports`` seam (JS/TS
+#: ``from '…'`` / ``require('…')``). Adding a language here is pure data — no
+#: core ``if language ==`` branch.
 _SUFFIX_SPECIFIER_EXTRACTORS: dict[str, "Callable[[Path], list[str]]"] = {
     ".py": _extract_python_import_specifiers,
     ".java": _extract_java_import_specifiers,
+    ".h": _extract_cpp_include_specifiers,
+    ".hpp": _extract_cpp_include_specifiers,
+    ".hh": _extract_cpp_include_specifiers,
+    ".cc": _extract_cpp_include_specifiers,
+    ".cpp": _extract_cpp_include_specifiers,
+    ".cxx": _extract_cpp_include_specifiers,
 }
 
 
@@ -1949,8 +2106,11 @@ def _language_for_path(path: Path) -> str:
         ".cs": "csharp",
         ".c": "c",
         ".cpp": "cpp",
+        ".cc": "cpp",
+        ".cxx": "cpp",
         ".h": "cpp",
         ".hpp": "cpp",
+        ".hh": "cpp",
         ".kt": "kotlin",
         ".kts": "kotlin",
         ".swift": "swift",

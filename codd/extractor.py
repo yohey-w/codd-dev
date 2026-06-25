@@ -305,6 +305,11 @@ def _detect_language(project_root: Path, exclude_patterns: list[str]) -> str:
         ".py": "python", ".ts": "typescript", ".tsx": "typescript",
         ".js": "javascript", ".jsx": "javascript",
         ".java": "java", ".go": "go",
+        # C++ (incl. the common .cc/.cxx/.hh/.hpp variants). Listed as DATA so a
+        # header-heavy project like fmt (15 headers + .cc sources) is detected as
+        # ``cpp`` instead of vacuously falling back to ``python``.
+        ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
+        ".h": "cpp", ".hpp": "cpp", ".hh": "cpp",
     }
 
     for root, dirs, files in os.walk(project_root):
@@ -340,7 +345,7 @@ def _detect_source_dirs(project_root: Path, language: str) -> list[str]:
         # not also pick up ``src/test/<lang>`` (which _detect_test_dirs claims).
         return jvm_source
 
-    candidates = ["src", "lib", "app", "pkg", "cmd", "internal"]
+    candidates = ["src", "lib", "app", "pkg", "cmd", "internal", "include"]
     found = []
 
     for c in candidates:
