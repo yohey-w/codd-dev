@@ -41,6 +41,10 @@ def test_no_propagation_output_skip_with_warn(tmp_path):
     assert result.skipped is True
     assert result.warnings
     assert "WARN" in result.warnings[0]
+    # The skip must carry status="skip" + severity="info" (not the dataclass-default
+    # "red") so no severity-based merge-gate metric miscounts it.
+    assert result.status == "skip"
+    assert result.severity == "info"
 
 
 def test_consistent_url_pass(tmp_path):

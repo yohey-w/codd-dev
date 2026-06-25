@@ -68,6 +68,8 @@ class DependsOnConsistencyCheck:
         output_path = _find_propagation_output(root, active_settings)
         if output_path is None:
             return DependsOnConsistencyResult(
+                status="skip",
+                severity="info",
                 passed=True,
                 skipped=True,
                 warnings=["WARN: propagation output not found; depends_on_consistency skipped"],

@@ -643,3 +643,21 @@ others already info/amber). Test test_severity_is_red re-pointed to a real viola
 (red); added test_empty_values_skips_with_info_severity. full suite 6403.
 **Streak reset (round 16 had a systematic finding); round 17 + 18 must both be
 systematic-clean.** N-gate passage still gated on owner's exit-line approval.
+
+## Round 17 (2026-06-25, Claude-only): systematic CLEAN (both engines) — 1st of restarted 2
+**Opus: CLEAN. Sonnet: CLEAN.** Both ran an adversarial hunt on the exact class Sonnet
+caught in round 16 (severity-based aggregation counting skips): confirmed
+coverage_metrics.compute_dag_completeness is the ONLY multi-check severity→coverage
+aggregator and its skip guard is complete; the other 2 text summaries + deploy gate
+exclude skips via passed=False / _summary_skipped; the round-16 skip=info change masks no
+real red. Both engines noted the SAME non-systematic residual: depends_on_consistency:70
+(the "no propagation output" skip) still omitted status="skip"/severity="info" (carried
+dataclass-default red), but it is excluded as a skip by every consumer (skipped flag /
+passed=False / coverage_metrics severity-independent guard) → mis-counts nowhere, below
+the SYSTEMATIC bar. Tidied anyway for consistency: depends_on:70 now sets
+status="skip"+severity="info" (matching :132); test_no_propagation_output_skip_with_warn
+locks it. Swept all 15 checks' skip constructors — none inherit default red now
+(info/amber only; transitive_closure + ui_coherence carry class-default amber = safe).
+full suite 6403. **1st systematic-clean of the restarted streak. Round 18 = 2nd
+confirmation (reviews the tidied HEAD); if clean → 2 consecutive → present to owner for
+exit-line approval.**
