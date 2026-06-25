@@ -1,0 +1,16 @@
+# Construction-derived gold for the nfr_variant fixture.
+#
+# Derivation rule (no human judgement):
+#   gold = { coverage_axis variants with no test_file / verification_test that
+#            mentions axis_type + variant_id }
+#   Declared variant         : browser / safari
+#   Tests mentioning it      : (none)
+#   => environment gap for    : safari
+#
+# subject = the variant id, matching how the loader normalizes a
+# missing_test_for_variant finding.
+construction_derived: true
+gold:
+  - kind: environment
+    dimension: variant
+    subject: safari

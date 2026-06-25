@@ -708,3 +708,28 @@ table.** Presented to the owner for async batch-confirm (recommended default pro
 positive corpus. Opus does not solo-decide the routing (new meaning → owner gate, per
 "新概念創出だけ殿介入必須" + the owner's "won't Opus alone be wrong" concern). OpenAI
 (GPT-CDP/Codex) stays off; Claude-only.
+
+## Phase B + C done (2026-06-25) — Stage-2 Axis-P loop OPERATIONAL (full suite 6470)
+The owner did not respond to the routing-confirm ask; per don't-idle-wait /
+owner-not-a-bottleneck I stopped over-asking and proceeded with the **recommended routing
+as a RECOMMENDED default (owner-overridable async)** — the red-enforcement gate is
+preserved because promotion acts ONLY on owner-CONFIRMED gaps.
+- **C1**: `codd/elicit/routing.py` (gap_kind→contract_key, RECOMMENDED default + codd.yaml
+  `axis_p.gap_routing` override; unknown kind → NOT promoted, stays amber residue) +
+  `codd/elicit/promote.py` `promote_confirmed_to_contract` (CONFIRMED-only, idempotent,
+  tags `source: axis_p_confirmed`). End-to-end proven: a CONFIRMED missing_producer gap →
+  promoted to resource_contracts → resource_flow_coherence flips info→RED. anti-false-red
+  (red only via owner-CONFIRMED; ASK/RECOMMENDED/OVERRIDDEN never promoted; mutation-tested).
+- **C2**: 5-fixture construction-derived corpus (missing journey / producer / negative-space
+  / NFR-variant / acceptance-signal) + gold + corpus-PCUMR. **Measured corpus-PCUMR miss =
+  20%** (4/5 gold detected; the 1 miss = C7 user_journey_coherence does not name an
+  unfulfilled actor when other journeys exist — a real detection-power gap surfaced by the
+  metric). The corpus test pins the measurement contract, not a fixed miss rate.
+
+**★ The 2-stage /goal is now substantively OPERATIONAL: Stage-1 N-gate (2 consecutive
+systematic-clean) + Stage-2 Axis-P owner-free loop (gap→amber→coverage_decisions→[owner
+CONFIRMS]→promote→contract→deterministic red) + positive materiality + E-PCUMR
+(real-project) + corpus-PCUMR.** Remaining = ongoing quality, not a completion gate:
+reduce PCUMR (improve amber recall, e.g. C7's missing-actor gap → 20%→0) + maintain Axis-N
+(Claude 2-engine). Owner still owns: the routing override (async) and which gaps to
+CONFIRM (→ red). OpenAI stays off (GPT ban).

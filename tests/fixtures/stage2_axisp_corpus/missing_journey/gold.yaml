@@ -1,0 +1,16 @@
+# Construction-derived gold for the missing_journey fixture.
+#
+# Derivation rule (no human judgement):
+#   gold = { (declared actors) - (actors that have a declared journey) }
+#   Declared actors      : Learner, Admin, Instructor
+#   Actors with a journey : Learner, Instructor
+#   => uncovered actor    : Admin
+#
+# Each gold entry is a positive-coverage gap in the canonical PCUMR match shape
+# (kind + dimension + canonical_subject). subject is canonicalized by the metric
+# (trim + casefold), so the case here need not match the detector exactly.
+construction_derived: true
+gold:
+  - kind: missing_journey
+    dimension: actor
+    subject: Admin

@@ -1,0 +1,19 @@
+# Stage-2 (Axis-P) positive corpus fixture: missing_journey
+#
+# Construction rule (so gold is derived, not hand-judged):
+#   N actors are declared; a user_journey is declared for all but ONE actor.
+#   The actor with no journey is, by construction, an uncovered positive-space
+#   gap (kind=missing_journey, dimension=actor, subject=<that actor>).
+#
+# Why this fixture exists: the C7 user_journey_coherence check only emits an
+# actors_without_journeys finding when ZERO journeys are declared. When SOME
+# journeys exist it never points at the specific actor still missing one, so this
+# construction-derived gold is the detector's known blind spot — it makes the
+# corpus PCUMR > 0 honestly (a real miss, not a fabricated one).
+design_doc_patterns:
+  - docs/design/*.md
+impl_file_patterns:
+  - src/**/*.ts
+test_file_patterns:
+  - tests/**/*.ts
+lexicon_file: project_lexicon.yaml

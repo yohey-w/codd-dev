@@ -1,0 +1,17 @@
+# Stage-2 (Axis-P) positive corpus fixture: nfr_variant
+#
+# Construction rule (so gold is derived, not hand-judged):
+#   A design doc declares a coverage_axis with a variant, and NO test_file /
+#   verification_test mentions that axis+variant. By the environment_coverage
+#   (C9) contract that is, by construction, a missing_test_for_variant
+#   (kind=environment, dimension=variant, subject=<variant id>).
+#
+# This is a detector HIT case: a critical variant with no test is a red
+# missing_test_for_variant, so the gold gap is matched (no miss).
+design_doc_patterns:
+  - docs/design/*.md
+impl_file_patterns:
+  - src/**/*.ts
+test_file_patterns:
+  - tests/**/*.ts
+lexicon_file: project_lexicon.yaml

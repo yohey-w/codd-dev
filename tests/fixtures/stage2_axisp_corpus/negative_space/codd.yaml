@@ -1,0 +1,31 @@
+# Stage-2 (Axis-P) positive corpus fixture: negative_space
+#
+# Construction rule (so gold is derived, not hand-judged):
+#   The project DECLARES a forbidden_evidence pattern over a scope, and a file
+#   in that scope CONTAINS a string matching the pattern. By construction the
+#   negative_space check must report a forbidden_evidence_hit for that
+#   declaration (kind=forbidden, dimension=evidence, subject=<declaration id>).
+#
+# This is a detector HIT case: with on_violation: fail the hit is a red
+# forbidden_evidence_hit, so the gold gap is matched (no miss).
+#
+# The pattern below is a synthetic placeholder token; no real secret or PII
+# lives in core or in this fixture (negative_space is project-declared by
+# design).
+design_doc_patterns:
+  - docs/design/*.md
+impl_file_patterns:
+  - src/**/*.ts
+test_file_patterns:
+  - tests/**/*.ts
+lexicon_file: project_lexicon.yaml
+negative_space:
+  forbidden_evidence:
+    - id: no_placeholder_token_in_src
+      scope:
+        paths:
+          - src/**/*.ts
+      patterns:
+        - name: placeholder_token
+          regex: "FORBIDDEN_TOKEN_[A-Z0-9]+"
+      on_violation: fail

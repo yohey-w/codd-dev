@@ -78,6 +78,7 @@ _OPEN_SECTIONS: tuple[tuple[str, ...], ...] = (
 #: does not declare. Children are not validated (their sub-schemas live in
 #: the consuming modules, not in defaults.yaml). Each entry cites a reader.
 _CODE_READ_TOP_LEVEL_KEYS: tuple[str, ...] = (
+    "axis_p",                 # elicit/routing.py + elicit/promote.py (gap_routing / promote_target)
     "ci",                     # deployer.py (CiConfig.from_mapping(codd_config.get("ci")))
     "codex_app_server",       # deployment/providers/ai_command_factory.py:_section
     "common_node_patterns",   # dag/builder.py:_apply_common_node_patterns (top-level form)

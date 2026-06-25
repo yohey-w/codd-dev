@@ -1,0 +1,6 @@
+required_artifacts:
+  - id: purchase_done
+    title: Purchase completed
+    scope: shop
+    source: ai_derived
+    path: src/app.ts

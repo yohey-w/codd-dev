@@ -1,0 +1,13 @@
+# Construction-derived gold for the missing_producer fixture.
+#
+# Derivation rule (no human judgement):
+#   gold = { resources with a REQUIRED consumer on a critical journey
+#            and NO declared producer / externally_provided_by }
+#   Required consumer on critical journey : read_cart -> cart_data
+#   Declared producers                    : (none)
+#   => missing producer for               : cart_data
+construction_derived: true
+gold:
+  - kind: missing_producer
+    dimension: resource
+    subject: cart_data

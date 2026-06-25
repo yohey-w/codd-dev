@@ -74,6 +74,12 @@ def finding_to_ask_item(finding: Finding) -> AskItem:
         blocking=False,
         status="ASK",
         recommended_id=recommended_id,
+        # Axis-P provenance for Phase C promotion: carry the canonical gap kind +
+        # subject as structured fields so promotion routes the kind without
+        # re-parsing the id. The values match the tokens embedded in ``ask_id``.
+        gap_kind=_canonical_token(finding.kind) or "gap",
+        gap_subject=_canonical_subject(finding),
+        gap_context=_gap_context_from_finding(finding),
     )
 
 
@@ -106,9 +112,15 @@ def upsert_ask_items(
         if prior.status in _OWNER_SETTLED_STATUSES:
             continue
         # Pending entry: keep the latest recall transcription, but carry forward
-        # any recommendation already recorded so we never lose it.
+        # any recommendation / gap provenance already recorded so we never lose it.
         if item.recommended_id is None and prior.recommended_id is not None:
             item.recommended_id = prior.recommended_id
+        if item.gap_kind is None and prior.gap_kind is not None:
+            item.gap_kind = prior.gap_kind
+        if item.gap_subject is None and prior.gap_subject is not None:
+            item.gap_subject = prior.gap_subject
+        if not item.gap_context and prior.gap_context:
+            item.gap_context = prior.gap_context
         by_id[item.id] = item
 
     return [by_id[item_id] for item_id in order]
@@ -229,6 +241,23 @@ def _recommended_id_from_finding(finding: Finding) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+# Generic detail keys carrying a routing-relevant contract payload. A finding may
+# pre-shape the exact contract fields (e.g. the consuming capability + required
+# flag a missing_producer must declare); Phase C merges this verbatim into the
+# promoted entry. No domain literals — purely structural field names, so the
+# contract shape is data-driven (the finding emitter owns it, not the promoter).
+_CONTEXT_DETAIL_KEYS = ("contract_entry", "contract_payload", "gap_context")
+
+
+def _gap_context_from_finding(finding: Finding) -> dict[str, Any]:
+    details = finding.details if isinstance(finding.details, dict) else {}
+    for key in _CONTEXT_DETAIL_KEYS:
+        value = details.get(key)
+        if isinstance(value, dict) and value:
+            return {str(k): v for k, v in value.items()}
+    return {}
 
 
 __all__ = [

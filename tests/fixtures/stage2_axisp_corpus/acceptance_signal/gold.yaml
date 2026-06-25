@@ -1,0 +1,16 @@
+# Construction-derived gold for the acceptance_signal fixture.
+#
+# Derivation rule (no human judgement):
+#   gold = { journeys that declare an expected outcome and have a producing plan
+#            task but no e2e verification test }
+#   Journey with expected outcome + plan task : purchase_flow
+#   e2e tests covering it                     : (none)
+#   => acceptance-signal gap for               : purchase_flow
+#
+# subject = the journey name, matching how the loader normalizes a
+# no_e2e_test_for_journey finding.
+construction_derived: true
+gold:
+  - kind: acceptance_signal
+    dimension: journey
+    subject: purchase_flow

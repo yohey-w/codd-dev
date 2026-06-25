@@ -1,0 +1,20 @@
+# Stage-2 (Axis-P) positive corpus fixture: missing_producer
+#
+# Construction rule (so gold is derived, not hand-judged):
+#   A resource_contract declares a REQUIRED consumer of a resource whose
+#   consuming capability is a required capability of a critical journey, and the
+#   contract declares NO producer / externally_provided_by for that resource.
+#   By the resource_flow_coherence contract that is, by construction, a
+#   dangling_required_consumer (kind=missing_producer, dimension=resource,
+#   subject=<resource>).
+#
+# This is a detector HIT case: resource_flow_coherence raises a red
+# dangling_required_consumer, so the gold gap is matched (no miss). It anchors
+# the corpus so PCUMR is not 100% miss (it proves the metric credits real hits).
+design_doc_patterns:
+  - docs/design/*.md
+impl_file_patterns:
+  - src/**/*.ts
+test_file_patterns:
+  - tests/**/*.ts
+lexicon_file: project_lexicon.yaml

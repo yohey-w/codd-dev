@@ -51,6 +51,20 @@ class AskItem:
     answer: str | None = None
     asked_at: str = ""
     answered_at: str = ""
+    # Stage-2 Axis-P provenance: when this decision originated from a coverage
+    # gap (gap_to_ask bridge), the originating gap's canonical kind + subject are
+    # carried so Phase C promotion can route the kind to a contract key without
+    # re-parsing the id. Optional / defaulted -> backward-compatible (older
+    # persisted coverage_decisions simply omit them; promotion falls back to the
+    # id encoding ``axis_p.<kind>.<subject>``). Non-gap AskItems leave them None.
+    gap_kind: str | None = None
+    gap_subject: str | None = None
+    # Routing-relevant contract payload recovered from the originating finding
+    # (e.g. the consuming capability + required flag for a missing_producer gap).
+    # Generic mapping merged into the promoted contract entry by Phase C so the
+    # entry shape is data-driven (no per-kind hard-coding). Empty for non-gap or
+    # context-free decisions.
+    gap_context: dict[str, Any] = field(default_factory=dict)
 
 
 class LexiconError(ValueError):
@@ -289,6 +303,11 @@ def ask_item_from_dict(data: dict[str, Any]) -> AskItem:
         answer=_optional_str(data.get("answer")),
         asked_at=str(data.get("asked_at", "")),
         answered_at=str(data.get("answered_at", "")),
+        gap_kind=_optional_str(data.get("gap_kind")),
+        gap_subject=_optional_str(data.get("gap_subject")),
+        gap_context=deepcopy(data["gap_context"])
+        if isinstance(data.get("gap_context"), dict)
+        else {},
     )
 
 

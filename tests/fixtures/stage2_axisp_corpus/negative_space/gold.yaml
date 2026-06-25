@@ -1,0 +1,16 @@
+# Construction-derived gold for the negative_space fixture.
+#
+# Derivation rule (no human judgement):
+#   gold = { forbidden_evidence declarations whose scope contains a file that
+#            matches the declared pattern }
+#   Declaration             : no_placeholder_token_in_src (scope src/**/*.ts)
+#   Matching file in scope  : src/leak.ts (contains FORBIDDEN_TOKEN_ABC123)
+#   => forbidden gap for     : no_placeholder_token_in_src
+#
+# subject = the declaration id (canonical_subject for a forbidden gap), matching
+# how the loader normalizes a forbidden_evidence_hit.
+construction_derived: true
+gold:
+  - kind: forbidden
+    dimension: evidence
+    subject: no_placeholder_token_in_src
