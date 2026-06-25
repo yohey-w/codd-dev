@@ -310,6 +310,11 @@ def _detect_language(project_root: Path, exclude_patterns: list[str]) -> str:
         # ``cpp`` instead of vacuously falling back to ``python``.
         ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
         ".h": "cpp", ".hpp": "cpp", ".hh": "cpp",
+        # C# (.cs). Listed as DATA so a C# project like Dapper (157 .cs files,
+        # no .py at all) is detected as ``csharp`` instead of vacuously falling
+        # back to ``python`` — the single change that fixes the false-green where
+        # ``codd check`` PASSes on a 0-edge graph because the .cs files were inert.
+        ".cs": "csharp",
     }
 
     for root, dirs, files in os.walk(project_root):

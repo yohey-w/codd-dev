@@ -372,9 +372,11 @@ def _add_import_edges(
     for node_id, file_path in impl_nodes.items():
         imports = dag.nodes[node_id].attributes.get("imports", [])
         for import_ref in imports:
-            target_id = _resolve_import_target(import_ref, file_path, project_root, path_to_node, aliases)
-            if target_id and target_id != node_id:
-                dag.add_edge(Edge(from_id=node_id, to_id=target_id, kind="imports"))
+            for target_id in _resolve_import_targets(
+                import_ref, file_path, project_root, path_to_node, aliases
+            ):
+                if target_id and target_id != node_id:
+                    dag.add_edge(Edge(from_id=node_id, to_id=target_id, kind="imports"))
 
 
 def _add_tested_by_edges(
@@ -904,6 +906,29 @@ def _resolve_design_dependency(
     return None
 
 
+def _resolve_import_targets(
+    import_ref: str,
+    file_path: Path,
+    project_root: Path,
+    path_to_node: dict[Path, str],
+    aliases: dict[str, list[str]],
+) -> list[str]:
+    """Resolve one import specifier to ALL its in-tree target node ids.
+
+    Most languages have a single resolved target per specifier (Python module,
+    Java FQN, C++ ``#include`` path), so this delegates to the singular
+    ``_resolve_import_target`` and wraps its result. C# is the one intrinsically
+    MULTI-target language: a ``using`` names a namespace that many files declare,
+    so its ``.cs``-suffix branch resolves via the namespace reverse-index and may
+    return several node ids. Dispatch is by the importing file's suffix (DATA),
+    not a ``language ==`` core gate — adding a multi-target language is data.
+    """
+    if file_path.suffix == ".cs":
+        return _resolve_csharp_import_targets(import_ref, file_path, path_to_node)
+    single = _resolve_import_target(import_ref, file_path, project_root, path_to_node, aliases)
+    return [single] if single else []
+
+
 def _resolve_import_target(
     import_ref: str,
     file_path: Path,
@@ -1219,6 +1244,129 @@ def _cpp_header_root_dirs(path_to_node: dict[Path, str]) -> list[Path]:
 _CPP_HEADER_SUFFIXES = frozenset({".h", ".hpp", ".hh"})
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# C# NAMESPACE reverse-index resolution (the novel mechanism for this language).
+#
+# C# is the third structural model after Java (FQN→path synthesis) and C++
+# (PATH-based include). The divergence: a C# ``using`` names a NAMESPACE, and a
+# namespace is NOT directory-tied — ``namespace Dapper;`` is declared by many
+# files spread across different directories (Dapper/, Dapper.SqlBuilder/, …).
+# There is no path to synthesize. So resolution is two-phase:
+#   (1) a first pass over the file-set builds a namespace→declaring-files reverse
+#       index (each .cs file's declared ``namespace`` lines → that file);
+#   (2) a ``using Dapper.X`` resolves to the files declaring ``namespace
+#       Dapper.X`` (EXACT namespace match), which is a SET of files, not one.
+# Because one ``using`` legitimately depends on every file of the target
+# namespace, this is the one language whose resolution is intrinsically
+# multi-target (handled by ``_resolve_import_targets`` plural).
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: C# namespace declaration — both file-scoped (``namespace X.Y;``) and block
+#: (``namespace X.Y {`` / ``namespace X.Y`` then ``{`` on the next line) forms.
+#: Mirrors ``regex_strategies._CSHARP_NAMESPACE_RE``.
+_CSHARP_NAMESPACE_DECL_RE = re.compile(
+    r'^\s*namespace\s+([\w.]+)\s*[;{]?\s*$',
+    re.MULTILINE,
+)
+
+#: Cap on how many files a SINGLE ``using`` may resolve to, so a using of a very
+#: large namespace cannot explode the edge count pathologically. When a namespace
+#: is declared by more files than this, we keep the edges deterministic (sorted)
+#: and truncate; the WARN-level reachability layer still sees a connected node.
+#: Generous enough that real same-namespace fan-out (Dapper declares its core
+#: namespace across ~dozens of files) is preserved.
+_CSHARP_NAMESPACE_FANOUT_CAP = 64
+
+#: Process-lifetime cache of the namespace reverse-index, keyed by the IDENTITY +
+#: size of the ``path_to_node`` map. ``_add_import_edges`` / ``_add_tested_by_edges``
+#: each build a fresh ``path_to_node`` and reuse it across every import in their
+#: loop, so caching by ``id()`` (guarded by ``len()`` against id-reuse after GC)
+#: builds the index ONCE per DAG-build phase instead of per-using.
+_CSHARP_NS_INDEX_CACHE: dict[tuple[int, int], dict[str, list[str]]] = {}
+
+
+def _csharp_namespace_index(path_to_node: dict[Path, str]) -> dict[str, list[str]]:
+    """Return the namespace→declaring-node-ids reverse-index (built once, cached).
+
+    First pass over the .cs file-set: every ``namespace X.Y`` declared in a file
+    (file-scoped OR block form) maps that namespace to the file's node id. A file
+    may declare multiple namespaces; a namespace may be declared by many files
+    (the whole point — namespaces are not directory-tied). Node-id lists are kept
+    sorted for deterministic edge output.
+    """
+    key = (id(path_to_node), len(path_to_node))
+    cached = _CSHARP_NS_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    index: dict[str, set[str]] = {}
+    for file_path, node_id in path_to_node.items():
+        if file_path.suffix != ".cs":
+            continue
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for namespace in _CSHARP_NAMESPACE_DECL_RE.findall(content):
+            index.setdefault(namespace, set()).add(node_id)
+
+    materialized = {ns: sorted(ids) for ns, ids in index.items()}
+    _CSHARP_NS_INDEX_CACHE[key] = materialized
+    return materialized
+
+
+def _csharp_using_namespaces(import_ref: str) -> list[str]:
+    """Candidate namespaces to look up for one ``using`` specifier (most-specific first).
+
+    * plain / global / alias ``using Dapper.X`` → ``["Dapper.X"]`` (exact).
+    * ``static Dapper.SqlMapper`` → ``["Dapper.SqlMapper", "Dapper"]``: a
+      ``using static`` targets a TYPE (``Dapper.SqlMapper``), whose declaring file
+      lives in the type's OWNING namespace (``Dapper``). We try the full path as a
+      namespace first (harmless if it is not one — just no match), then the parent
+      namespace (drop the type segment), which is the real resolution.
+    """
+    spec = import_ref
+    is_static = spec.startswith(_CSHARP_STATIC_SPECIFIER)
+    if is_static:
+        spec = spec[len(_CSHARP_STATIC_SPECIFIER):].strip()
+    if not spec:
+        return []
+    candidates = [spec]
+    if is_static:
+        parent = spec.rsplit(".", 1)[0] if "." in spec else ""
+        if parent and parent != spec:
+            candidates.append(parent)
+    return candidates
+
+
+def _resolve_csharp_import_targets(
+    import_ref: str,
+    file_path: Path,
+    path_to_node: dict[Path, str],
+) -> list[str]:
+    """Resolve one C# ``using`` to the node ids declaring its namespace (EXACT).
+
+    Sub-namespace handling: resolution is by EXACT namespace match only. A
+    ``using Dapper`` resolves to files declaring exactly ``namespace Dapper`` — it
+    does NOT transitively pull in ``Dapper.Tests`` / ``Dapper.SqlBuilder`` files.
+    This is both correct (a parent-namespace using does not import child
+    namespaces in C#; each child needs its own ``using``) and the primary
+    explosion guard (no namespace-prefix fan-out). For a ``using static`` the
+    type's owning namespace is the fallback candidate (see
+    ``_csharp_using_namespaces``); the first candidate that matches the index
+    wins, so a static import does not double-count.
+
+    Secondary explosion guard: a single using that matches a very large namespace
+    is truncated at ``_CSHARP_NAMESPACE_FANOUT_CAP`` (deterministic, sorted).
+    """
+    index = _csharp_namespace_index(path_to_node)
+    for namespace in _csharp_using_namespaces(import_ref):
+        node_ids = index.get(namespace)
+        if node_ids:
+            return node_ids[:_CSHARP_NAMESPACE_FANOUT_CAP]
+    return []
+
+
 def _infer_test_targets(
     test_path: Path,
     project_root: Path,
@@ -1228,11 +1376,15 @@ def _infer_test_targets(
     targets: set[str] = set()
 
     for import_ref in _extract_test_imports(test_path):
-        target_id = _resolve_import_target(import_ref, test_path, project_root, path_to_node, aliases)
-        if not target_id and "." in import_ref and not import_ref.startswith("."):
-            target_id = _resolve_python_import_target(import_ref, project_root, path_to_node)
-        if target_id:
-            targets.add(target_id)
+        resolved = _resolve_import_targets(import_ref, test_path, project_root, path_to_node, aliases)
+        if not resolved and "." in import_ref and not import_ref.startswith("."):
+            # Python absolute-dotted fallback (non-C#: the plural resolver returns
+            # at most one for those). C# usings already resolve via the namespace
+            # index inside ``_resolve_import_targets``, so this never double-fires.
+            python_target = _resolve_python_import_target(import_ref, project_root, path_to_node)
+            if python_target:
+                resolved = [python_target]
+        targets.update(resolved)
 
     convention_key = _test_convention_key(test_path, project_root)
     if convention_key:
@@ -1347,12 +1499,54 @@ def _extract_cpp_include_specifiers(file_path: Path) -> list[str]:
     return specifiers
 
 
+# C# ``using`` directives. Unlike C++ ``#include`` (path) or Java FQN→path, a C#
+# ``using`` names a NAMESPACE, which is NOT directory-tied — ``namespace Dapper;``
+# is declared across files in different dirs. So the resolver needs a
+# namespace→declaring-files reverse-index (built once over the file-set), not a
+# path probe. The extractor's job is just to surface the raw using forms:
+#   ``using X.Y;``              → ``X.Y``
+#   ``using static X.Y.Member;``→ ``static X.Y.Member``  (resolver drops Member)
+#   ``using Alias = X.Y;``      → ``X.Y``  (alias name is irrelevant to edges)
+#   ``global using X.Y;``       → ``X.Y``
+# Built-in regex (NOT routed through the registry): tree-sitter-c-sharp is NOT
+# installed, and ``RegexExtractor.extract_import_specifiers`` returns ``[]`` for
+# C#, so a self-contained regex is the source of these specifiers (mirrors the
+# C++ precedent of deferring tree-sitter wiring). The ``static`` marker is the
+# only shape distinction the resolver needs.
+_CSHARP_STATIC_SPECIFIER = "static "
+_CSHARP_USING_RE = re.compile(
+    r'^\s*(?:global\s+)?using\s+(static\s+)?(?:[\w.]+\s*=\s*)?([\w.]+)\s*;',
+    re.MULTILINE,
+)
+
+
+def _extract_csharp_import_specifiers(file_path: Path) -> list[str]:
+    """Return raw C# ``using`` specifiers (static-marked) for the DAG.
+
+    Mirrors ``_extract_cpp_include_specifiers`` / ``_extract_java_import_specifiers``
+    in role (suffix-dispatched raw specifier extraction) but uses a built-in
+    regex because tree-sitter-c-sharp is absent. ``using static X.Y.Member`` is
+    surfaced with a ``static `` prefix so the NAMESPACE-index resolver knows to
+    also try the parent namespace (the member's owning type's namespace); plain /
+    global / alias usings are surfaced as the bare imported namespace.
+    """
+
+    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    specifiers: list[str] = []
+    for static_kw, namespace in _CSHARP_USING_RE.findall(content):
+        if static_kw:
+            specifiers.append(f"{_CSHARP_STATIC_SPECIFIER}{namespace}")
+        else:
+            specifiers.append(namespace)
+    return specifiers
+
+
 #: Suffix → raw-specifier extractor (DATA dispatch). A source file whose language
 #: carries its intra-tree dependency graph in DOTTED specifiers (Python modules,
-#: Java FQNs) or ``#include`` directives (C/C++) resolves edges from these,
-#: instead of the builder's quoted-string ``extract_imports`` seam (JS/TS
-#: ``from '…'`` / ``require('…')``). Adding a language here is pure data — no
-#: core ``if language ==`` branch.
+#: Java FQNs, C# namespaces) or ``#include`` directives (C/C++) resolves edges
+#: from these, instead of the builder's quoted-string ``extract_imports`` seam
+#: (JS/TS ``from '…'`` / ``require('…')``). Adding a language here is pure data —
+#: no core ``if language ==`` branch.
 _SUFFIX_SPECIFIER_EXTRACTORS: dict[str, "Callable[[Path], list[str]]"] = {
     ".py": _extract_python_import_specifiers,
     ".java": _extract_java_import_specifiers,
@@ -1362,6 +1556,7 @@ _SUFFIX_SPECIFIER_EXTRACTORS: dict[str, "Callable[[Path], list[str]]"] = {
     ".cc": _extract_cpp_include_specifiers,
     ".cpp": _extract_cpp_include_specifiers,
     ".cxx": _extract_cpp_include_specifiers,
+    ".cs": _extract_csharp_import_specifiers,
 }
 
 

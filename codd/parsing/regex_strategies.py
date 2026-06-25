@@ -219,6 +219,82 @@ def _java_internal_key(fqn_parts: list[str], root_parts: list[str]) -> str:
     return fqn_parts[-2] if len(fqn_parts) >= 2 else fqn_parts[0]
 
 
+#: C# type-declaration keyword → emitted symbol kind. ``record`` collapses to the
+#: nearest existing kind (``class``) so downstream symbol consumers (which only
+#: know class/interface/enum/struct/function) stay unchanged; ``record struct`` is
+#: covered by the ``struct`` pattern. Access/`partial`/`sealed`/`abstract`/etc.
+#: modifiers are tolerated before the keyword.
+_CSHARP_MODIFIERS = r'(?:public|internal|protected|private|static|sealed|abstract|partial|readonly|ref|unsafe|new|file)'
+_CSHARP_TYPE_KEYWORD_KINDS = (
+    (re.compile(rf'^\s*(?:{_CSHARP_MODIFIERS}\s+)*class\s+(\w+)'), "class"),
+    (re.compile(rf'^\s*(?:{_CSHARP_MODIFIERS}\s+)*interface\s+(\w+)'), "interface"),
+    (re.compile(rf'^\s*(?:{_CSHARP_MODIFIERS}\s+)*enum\s+(\w+)'), "enum"),
+    (re.compile(rf'^\s*(?:{_CSHARP_MODIFIERS}\s+)*(?:record\s+)?struct\s+(\w+)'), "struct"),
+    (re.compile(rf'^\s*(?:{_CSHARP_MODIFIERS}\s+)*record\s+(?:class\s+)?(\w+)'), "class"),
+)
+
+
+def _symbols_csharp(content: str, rel_path: str) -> "list[Symbol]":
+    symbols: list = []
+    for i, line in enumerate(content.splitlines(), 1):
+        for pattern, kind in _CSHARP_TYPE_KEYWORD_KINDS:
+            m = pattern.match(line)
+            if m:
+                symbols.append(_symbol(m.group(1), kind, rel_path, i))
+                break
+    return symbols
+
+
+#: C# ``using`` directives + ``namespace`` declarations. Mirrors
+#: ``builder._CSHARP_USING_RE`` / ``builder._CSHARP_NAMESPACE_RE`` so the scan-path
+#: parser and the DAG builder agree on a C# project's using graph. ``using``
+#: covers plain / ``static`` / ``global`` / alias (``using Alias = X.Y;``) forms;
+#: the namespace regex covers BOTH file-scoped (``namespace X.Y;``) and block
+#: (``namespace X.Y {``) declarations (Dapper uses both).
+_CSHARP_USING_RE = re.compile(
+    r'^\s*(?:global\s+)?using\s+(?:static\s+)?'
+    r'(?:[\w.]+\s*=\s*)?'  # optional ``Alias =`` (we capture the RHS namespace)
+    r'([\w.]+)\s*;'
+)
+_CSHARP_NAMESPACE_RE = re.compile(r'^\s*namespace\s+([\w.]+)\s*[;{]?\s*$')
+
+#: C# framework / BCL namespace roots. A ``using`` rooted here is external (the
+#: analogue of Java ``java.*`` / C++ angle-form ``<…>``). Everything else is a
+#: candidate first-party namespace; the DAG builder owns the precise
+#: namespace→file resolution for edges via the reverse-index.
+_CSHARP_FRAMEWORK_ROOTS = frozenset({"System", "Microsoft", "Windows", "Mono"})
+
+
+def _imports_csharp(content, project_root, src_dir, file_path):
+    """Classify C# usings: first-party ``internal`` vs ``System.*``/framework.
+
+    The regex sibling of the DAG builder's using extraction (there is no
+    tree-sitter-c-sharp binding). A ``using Dapper.X;`` rooted outside the
+    framework roots is first-party (``internal``, bucketed by the namespace's
+    first segment); ``using System.Text;`` / ``using Microsoft.*`` is framework
+    (``external``, keyed by the full namespace). Returns the
+    ``(internal, external)`` shape every ``extract_imports`` strategy yields.
+    """
+    internal: dict[str, list[str]] = {}
+    external: set[str] = set()
+
+    for line in content.splitlines():
+        m = _CSHARP_USING_RE.match(line)
+        if not m:
+            continue
+        namespace = m.group(1)
+        top = namespace.split(".", 1)[0]
+        if top in _CSHARP_FRAMEWORK_ROOTS:
+            external.add(namespace)
+        else:
+            # Bucket by the first namespace segment (``Dapper`` for
+            # ``Dapper.ProviderTools``); the DAG builder owns the precise
+            # namespace→file resolution for edges via the reverse-index.
+            internal.setdefault(top, []).append(line.strip())
+
+    return internal, external
+
+
 def _symbols_go(content: str, rel_path: str) -> "list[Symbol]":
     symbols: list = []
     for i, line in enumerate(content.splitlines(), 1):
@@ -590,6 +666,20 @@ _CPP = RegexLanguageStrategy(
     guess_test_target=None,
 )
 
+_CSHARP = RegexLanguageStrategy(
+    name="csharp",
+    extensions=frozenset({".cs"}),
+    # stdlib stays EMPTY: ``_imports_csharp`` already classifies framework usings
+    # (``System.*``/``Microsoft.*``/…) into ``external`` itself; there is no fixed
+    # name-set to subtract (C# uses arbitrary dotted namespaces, not a list).
+    entry_points=("Program.cs", "Main.cs"),
+    extract_symbols=_symbols_csharp,
+    extract_imports=_imports_csharp,
+    detect_code_patterns=None,
+    file_to_module=_file_to_module_first_part,
+    guess_test_target=None,
+)
+
 #: The generic fallback for an unknown language — best-effort no-op analysis,
 #: matching the implicit ``else`` of every old ladder (empty symbols/imports,
 #: no patterns, first-path-part module name, no test-target, no extensions).
@@ -605,6 +695,7 @@ _STRATEGIES: dict[str, RegexLanguageStrategy] = {
     "java": _JAVA,
     "go": _GO,
     "cpp": _CPP,
+    "csharp": _CSHARP,
 }
 
 
@@ -791,6 +882,50 @@ def _resolve_cpp_include_path(
     return None
 
 
+#: C# ``using`` directive (mirrors the scan/builder regexes) for recovering the
+#: imported namespace from a stored ``internal`` line.
+_CSHARP_USING_LINE_RE = re.compile(
+    r'(?:global\s+)?using\s+(?:static\s+)?(?:[\w.]+\s*=\s*)?([\w.]+)\s*;'
+)
+
+
+def _ceg_targets_csharp(
+    internal: dict, project_root: Path, file_path: Path
+) -> "list[CegImportTarget]":
+    """C# internal usings → ``module`` CEG nodes keyed by first-party namespace.
+
+    Mirrors ``_ceg_targets_java`` (a stable ``module:`` identifier per imported
+    first-party unit) rather than probing the filesystem — C# resolution is
+    NAMESPACE-based, not path-based, so there is no single file a ``using``
+    points at; the DAG builder owns the precise namespace→declaring-files
+    resolution for import EDGES via its reverse-index. The ``internal`` map values
+    are the raw using lines (``using Dapper.ProviderTools;`` / ``using static
+    Dapper.SqlMapper;`` / ``using Foo = Dapper.X;``); we recover the imported
+    namespace for the node.
+    """
+    targets: list[CegImportTarget] = []
+    seen: set[str] = set()
+    for using_lines in internal.values():
+        for line in using_lines:
+            match = _CSHARP_USING_LINE_RE.search(line)
+            if not match:
+                continue
+            namespace = match.group(1)
+            if not namespace or namespace in seen:
+                continue
+            seen.add(namespace)
+            targets.append(
+                CegImportTarget(
+                    target_id=f"module:{namespace}",
+                    node_type="module",
+                    node_kwargs={"name": namespace},
+                    evidence_method="csharp_using",
+                    confidence=0.90,
+                )
+            )
+    return targets
+
+
 #: Per-language scanner CEG-import resolvers (registry DATA). Languages without
 #: an entry contribute NO import edges, byte-identical to the former scanner
 #: block that only handled python and typescript/javascript.
@@ -802,6 +937,7 @@ _CEG_IMPORT_RESOLVERS: dict[
     "python": _ceg_targets_python,
     "java": _ceg_targets_java,
     "cpp": _ceg_targets_cpp,
+    "csharp": _ceg_targets_csharp,
 }
 
 
