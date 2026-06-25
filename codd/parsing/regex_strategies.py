@@ -189,12 +189,22 @@ def _imports_python(content, project_root, src_dir, file_path):
     return internal, external
 
 
+# Capture the module specifier from every JS/TS import form: ESM
+# ``import .. from '..'`` / ``from '..'``, plus CommonJS ``require('..')`` and
+# dynamic ``import('..')``. Mirrors codd.dag.extractor._IMPORT_SPECIFIER_RE so the
+# scan-path parser and the DAG builder agree on a CommonJS codebase's internal
+# dependency graph.
+_TS_JS_IMPORT_SPECIFIER_RE = re.compile(
+    r'''(?:import|from|require\(\s*|import\(\s*)\s*['"]([^'"]+)['"]'''
+)
+
+
 def _imports_ts_js(content, project_root, src_dir, file_path):
     internal: dict[str, list[str]] = {}
     external: set[str] = set()
 
     for line in content.splitlines():
-        m = re.search(r'''(?:import|from)\s+['"]([^'"]+)['"]''', line)
+        m = _TS_JS_IMPORT_SPECIFIER_RE.search(line)
         if not m:
             continue
         import_path = m.group(1)

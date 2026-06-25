@@ -1143,6 +1143,9 @@ def _convention_path_candidates(test_path: Path, project_root: Path, convention_
     return candidates
 
 
+_TEST_DIR_NAMES = {"tests", "test", "spec", "__tests__"}
+
+
 def _is_test_file(file_path: Path, project_root: Path) -> bool:
     relative_parts = _relative_id(file_path, project_root).split("/")
     name = file_path.name
@@ -1153,9 +1156,19 @@ def _is_test_file(file_path: Path, project_root: Path) -> bool:
         return True
     if file_path.suffix == ".bats":
         return True
-    if file_path.suffix == ".py" and any(part in {"tests", "test"} for part in relative_parts[:-1]):
-        return name.startswith("test_") or name.endswith("_test.py")
-    return False
+    in_test_dir = any(part in _TEST_DIR_NAMES for part in relative_parts[:-1])
+    if file_path.suffix == ".py":
+        # Python keeps the stricter pytest/unittest convention even under a test
+        # directory (``test_*.py`` / ``*_test.py``) to avoid pulling fixtures.
+        if in_test_dir:
+            return name.startswith("test_") or name.endswith("_test.py")
+        return False
+    # Other languages: a source file living under a conventional test directory
+    # is a test even without a ``.test.`` infix — e.g. Mocha/Tape ``test/app.js``
+    # (Express) or ``spec/foo.js``. The caller already gates on ``test_suffixes``
+    # and the configured ``test_file_patterns`` (scoped to the project's test
+    # dirs), so this never sweeps in arbitrary source files.
+    return in_test_dir
 
 
 def _load_import_aliases(project_root: Path, settings: dict[str, Any]) -> dict[str, list[str]]:

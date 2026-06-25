@@ -34,6 +34,20 @@ _JS_IMPORT_SUFFIXES = {
     "typescript": ("", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", "/index.ts", "/index.tsx"),
 }
 
+
+def _strip_js_comments(src: str) -> str:
+    """Remove ``/* block */`` (including JSDoc) and ``// line`` comments.
+
+    Used to keep route-path extraction from reading example routes embedded in
+    documentation comments. String-literal edge cases are tolerated: route
+    specifiers of interest are app-relative paths (``/users``), never URLs that
+    would carry a ``//`` sequence inside a string literal.
+    """
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"//[^\n]*", "", src)
+    return src
+
+
 class TreeSitterExtractor:
     """Tree-sitter backend for Python and TypeScript/JavaScript source files."""
 
@@ -540,25 +554,70 @@ def _extract_typescript_imports_ast(
     external: set[str] = set()
 
     for node in _iter_named_nodes(root):
-        if node.type not in {"export_statement", "import_statement"}:
+        if node.type in {"export_statement", "import_statement"}:
+            source_node = node.child_by_field_name("source")
+            if source_node is None:
+                continue
+            import_path = _extract_string_literal(_node_text(content_bytes, source_node))
+            if not import_path:
+                continue
+            _record_js_import(
+                import_path,
+                _normalize_ws(_node_text(content_bytes, node)),
+                internal,
+                external,
+                file_path=file_path,
+                src_dir=src_dir,
+                language=language,
+            )
             continue
-        source_node = node.child_by_field_name("source")
-        if source_node is None:
-            continue
-        import_path = _extract_string_literal(_node_text(content_bytes, source_node))
-        if not import_path:
-            continue
-        _record_js_import(
-            import_path,
-            _normalize_ws(_node_text(content_bytes, node)),
-            internal,
-            external,
-            file_path=file_path,
-            src_dir=src_dir,
-            language=language,
-        )
+
+        # CommonJS ``require('..')`` and dynamic ``import('..')`` are
+        # call_expressions, not import_statements. A CommonJS codebase (e.g.
+        # Express) carries its entire internal dependency graph here, so the AST
+        # walk must capture it too — otherwise the scan reports no inter-module
+        # dependencies. Mirrors codd.dag.extractor._IMPORT_SPECIFIER_RE.
+        if node.type == "call_expression":
+            import_path = _call_expression_module_specifier(content_bytes, node)
+            if not import_path:
+                continue
+            _record_js_import(
+                import_path,
+                _normalize_ws(_node_text(content_bytes, node)),
+                internal,
+                external,
+                file_path=file_path,
+                src_dir=src_dir,
+                language=language,
+            )
 
     return internal, external
+
+
+def _call_expression_module_specifier(content_bytes: bytes, node: Any) -> str | None:
+    """Return the module specifier of a ``require('..')`` / ``import('..')`` call.
+
+    Returns ``None`` for any other call expression (including ``require(var)``
+    with a non-literal argument — only statically resolvable specifiers count).
+    """
+    func_node = node.child_by_field_name("function")
+    if func_node is None:
+        return None
+    callee = _node_text(content_bytes, func_node).strip()
+    # ``import(...)`` parses with an ``import`` callee; ``require(...)`` with an
+    # identifier callee. Accept both; reject everything else.
+    if callee != "require" and func_node.type != "import":
+        return None
+    args_node = node.child_by_field_name("arguments")
+    if args_node is None:
+        return None
+    for child in getattr(args_node, "named_children", []):
+        if child.type in {"string", "template_string"}:
+            return _extract_string_literal(_node_text(content_bytes, child))
+        # A non-literal first argument (e.g. require(modName)) is not statically
+        # resolvable — stop at the first argument either way.
+        break
+    return None
 
 def _detect_python_code_patterns(mod: ModuleInfo, root: Any, content: str) -> None:
     content_bytes = content.encode("utf-8", errors="ignore")
@@ -624,9 +683,14 @@ def _detect_typescript_code_patterns(mod: ModuleInfo, root: Any, content: str) -
     if orm_models:
         mod.patterns["db_models"] = f"ORM models: {', '.join(sorted(set(orm_models)))}"
 
+    # Strip /* block */ (incl. JSDoc) and // line comments BEFORE pulling route
+    # path strings: framework docs embed example routes such as
+    # ``app.get('/user/:uid/photos/:file', ...)`` inside @example JSDoc blocks
+    # (e.g. express/lib/response.js), which would otherwise register as real
+    # endpoints (false positives).
     route_matches = re.findall(
         r'(?:app|router)\.(?:get|post|put|delete|patch)\s*\(\s*["\']([^"\']+)["\']',
-        content,
+        _strip_js_comments(content),
     )
     if route_matches:
         mod.patterns["api_routes"] = f"HTTP route handlers: {', '.join(sorted(set(route_matches)))}"

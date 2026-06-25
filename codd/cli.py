@@ -434,6 +434,30 @@ def _display_path(path: Path, project_root: Path) -> str:
         return path.as_posix()
 
 
+def _detect_bootstrap_test_dirs(project_root: Path) -> list[str]:
+    """Detect the project's test directories for the bootstrap codd.yaml.
+
+    Reuses the extractor's inventory (``test``/``tests``/``spec``/``__tests__``)
+    so a project that uses ``test/`` is not silently excluded by a hardcoded
+    ``tests/`` default (which yields a vacuous task_completion). Falls back to the
+    conventional ``tests/`` when none exist so the config stays valid + editable.
+    """
+    from codd.extractor import _detect_test_dirs
+
+    found = _detect_test_dirs(project_root)
+    return [f"{d}/" for d in found] if found else ["tests/"]
+
+
+def _detect_bootstrap_doc_dirs(project_root: Path) -> list[str]:
+    """Detect the project's documentation directories for the bootstrap codd.yaml.
+
+    Mirrors :func:`_detect_bootstrap_test_dirs`: prefer what exists (``docs``
+    vs ``doc``), fall back to the conventional ``docs/`` when none exist.
+    """
+    found = [d for d in ("docs", "doc", "documentation") if (project_root / d).is_dir()]
+    return [f"{d}/" for d in found] if found else ["docs/"]
+
+
 def _ensure_bootstrap_codd_yaml(
     project_root: Path,
     *,
@@ -456,6 +480,8 @@ def _ensure_bootstrap_codd_yaml(
             "project_name": project_root.name,
             "language": language,
             "source_dirs": _format_yaml_list(source_dirs),
+            "test_dirs": _format_yaml_list(_detect_bootstrap_test_dirs(project_root)),
+            "doc_dirs": _format_yaml_list(_detect_bootstrap_doc_dirs(project_root)),
             "graph_path": f"{codd_dir_name}/scan",
         },
     )
@@ -2323,11 +2349,15 @@ def init(
     (codd_dir / "reports").mkdir(parents=True)
     (codd_dir / "scan").mkdir(exist_ok=True)
 
-    # Copy templates
+    # Copy templates. Greenfield init uses the conventional test/doc layout
+    # (brownfield extract detects the project's real dirs instead — see
+    # _ensure_bootstrap_codd_yaml).
     _render_template("codd.yaml.tmpl", codd_dir / "codd.yaml", {
         "project_name": project_name,
         "language": language,
         "source_dirs": _format_yaml_list(["src/"]),
+        "test_dirs": _format_yaml_list(["tests/"]),
+        "doc_dirs": _format_yaml_list(["docs/"]),
         "graph_path": f"{config_dir}/scan",
     })
     _render_template("gitignore.tmpl", codd_dir / ".gitignore", {})

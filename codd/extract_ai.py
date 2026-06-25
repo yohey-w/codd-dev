@@ -57,6 +57,60 @@ CONFIG_FILES = [
 # IaC patterns
 IAC_EXTENSIONS = {".bicep", ".bicepparam", ".tf", ".tfvars", ".hcl"}
 
+
+def ai_command_has_tools(ai_command: str) -> bool:
+    """Return whether ``ai_command`` grants the model file/shell tools.
+
+    The extract prompt's "Extraction Procedure" enumerates the codebase via bash
+    (``find``/``ls``/``rg``). That only works when the AI CLI can actually shell
+    out. The default ``ai_command`` disables tools (``--tools ""``), and agentic
+    CLIs are hardened to read-only from an empty workspace elsewhere — so the
+    procedural bash framing pushes the model into agentic mode and it stubs or
+    hangs. We therefore treat NO TOOLS as the safe default and require an
+    explicit grant to keep the tool-enabled path.
+
+    Tools are considered AVAILABLE only when a ``--tools``/``--allowedTools``
+    flag carries a non-empty value. ``--tools ""`` (or the flag absent) → no
+    tools. Unparseable commands fail closed to no-tools (context-only is always
+    correct because the full PROJECT CONTEXT is embedded in the prompt).
+    """
+    import shlex
+
+    try:
+        parts = shlex.split(ai_command)
+    except ValueError:
+        return False
+
+    tool_flags = {"--tools", "--allowedTools", "--allowed-tools"}
+    for i, part in enumerate(parts):
+        flag, sep, inline = part.partition("=")
+        if flag in tool_flags:
+            value = inline if sep else (parts[i + 1] if i + 1 < len(parts) else "")
+            if value.strip():
+                return True
+    return False
+
+
+# Prepended to the prompt when the AI CLI has no tools: it overrides the
+# template's bash "Extraction Procedure" so the model extracts from the embedded
+# PROJECT CONTEXT instead of trying to shell out (which it cannot do).
+_NO_TOOLS_DIRECTIVE = """# ═══ EXECUTION MODE: NO TOOLS (context-only) ═══
+
+You are running WITHOUT shell or file-system tools. Do NOT call any tool, do NOT
+run bash/`find`/`ls`/`rg`/`cat`, and do NOT attempt to read files from disk.
+
+The COMPLETE pre-scanned codebase — the directory tree plus the full contents of
+every relevant source, config, IaC, and test file — is embedded verbatim under
+"PROJECT CONTEXT (pre-scanned)" further down this prompt. That embedded context
+is your ONLY source of truth.
+
+When the "Extraction Procedure" below shows ```bash``` enumeration commands,
+treat them as a DESCRIPTION of what to look for, NOT as commands to execute.
+Instead, derive the same information by reading the embedded file contents
+directly. Produce the full output document set in one response from that context.
+
+"""
+
 # Schema file patterns
 SCHEMA_PATTERNS = [
     "prisma/schema.prisma", "db/schema.rb", "alembic/versions",
@@ -360,9 +414,19 @@ def pre_scan(project_root: Path) -> PreScanResult:
 # Phase 2: AI prompt building
 # ═══════════════════════════════════════════════════════════
 
-def _build_prompt(scan: PreScanResult) -> str:
-    """Build the AI prompt from pre-scan results + extract template."""
+def _build_prompt(scan: PreScanResult, *, tools_available: bool = False) -> str:
+    """Build the AI prompt from pre-scan results + extract template.
+
+    ``tools_available`` reflects whether the AI CLI can shell out (see
+    :func:`ai_command_has_tools`). When False (the default for ``--tools ""``),
+    a NO-TOOLS directive is prepended so the model extracts from the embedded
+    PROJECT CONTEXT instead of trying to run the template's bash procedure.
+    """
     sections: list[str] = []
+
+    # No-tools mode: override the template's bash procedure up front.
+    if not tools_available:
+        sections.append(_NO_TOOLS_DIRECTIVE)
 
     # Load prompt template
     if PROMPT_TEMPLATE_FILE.exists():
@@ -810,6 +874,10 @@ def run_extract_ai(
     # Phase 1: Pre-scan
     scan = pre_scan(project_root)
 
+    # Whether the AI CLI can shell out. The default ``--tools ""`` disables
+    # tools, so the prompt must NOT lean on its bash enumeration procedure.
+    tools_available = ai_command_has_tools(ai_command)
+
     # Phase 2: Build prompt (custom or baseline)
     if prompt_file:
         custom_path = Path(prompt_file)
@@ -819,10 +887,10 @@ def run_extract_ai(
         # Temporarily swap template for custom prompt
         import codd.extract_ai as _self
         _self.PROMPT_TEMPLATE_FILE = custom_path
-        prompt = _build_prompt(scan)
+        prompt = _build_prompt(scan, tools_available=tools_available)
         _self.PROMPT_TEMPLATE_FILE = original_template
     else:
-        prompt = _build_prompt(scan)
+        prompt = _build_prompt(scan, tools_available=tools_available)
 
     # Phase 3: AI invocation
     raw_output = _invoke_ai_command(ai_command, prompt)
