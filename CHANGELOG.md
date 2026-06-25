@@ -13,6 +13,35 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.7.0] - 2026-06-25 — N-gate systematic hardening + Axis-P owner-free coverage
+
+### N-liveness gate (Stage 1) — systematic false-green / path-escape closure
+- Unified FS root-jail in new `codd/path_safety.py` (resolve → follow symlinks →
+  `relative_to(project_root)`; `PathEscapeError` / `require_project_path` fail-closed).
+  Every user-path-controllable evidence reader (codd.yaml config, design-doc frontmatter,
+  DAG node.path, CLI path args, fixed-filename, import-specifier) across the dag checks,
+  builder, extractors, propagator, and cli routes through it. Absolute-in-root glob
+  patterns are rebased (no false-RED); a declared-evidence path that escapes the project
+  now fails closed instead of being silently skipped.
+- Visibility centralized in new `codd/dag/result_status.py` (status-aware
+  `result_has_findings` / `pass_is_warn`), bound by cli + coverage_metrics + deployer.
+  All three text verify summaries and the `--format json` output consistently render
+  SKIP / WARN / vacuous — a red/warn result is never shown as a clean PASS, and a merge-gate
+  metric never counts a SKIP as covered. Every registered check exposes `checked_count`
+  or skips; skip results carry `severity="info"`.
+- Confirmed by two consecutive multi-engine systematic-clean review rounds.
+
+### Axis-P coverage (Stage 2) — owner-free
+- Owner-free gap flow: a model/structural coverage gap becomes an amber
+  `AskItem(blocking=false)` persisted in `coverage_decisions` (CI/merge never wait); a
+  CONFIRMED decision is promoted to an explicit contract (`gap_kind→contract_key` routing,
+  overridable via `codd.yaml` `axis_p.gap_routing`) that the existing deterministic checks
+  then enforce as red. RED comes only from explicit/confirmed/closed-world contracts;
+  model confidence stays amber recall.
+- `codd check` now reports positive coverage materiality (contracts / covered / pending /
+  gap). New coverage metrics: E-PCUMR (explicit-contract coverage for real projects) and
+  corpus PCUMR (frozen + construction-derived gold).
+
 ## [3.6.0] - 2026-06-24 — Self-hosted coherence gate
 
 Shipped via the **Self-hosted Coherence Gate** milestone — codd-dev's own changes
