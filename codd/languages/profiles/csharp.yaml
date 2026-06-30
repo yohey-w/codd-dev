@@ -36,6 +36,17 @@ file_extensions: [".cs"]
 # test_unknown_stack_is_noop. Preserved verbatim under LanguageProfile.extra by the loader.
 greenfield_synthesis: true
 
+# Greenfield ② FORK C — package-name CASING is per-language DATA (the language-free core
+# branches on this VALUE, never on a language name). C# is idiomatically PascalCase, so the
+# harness must PRESERVE the author's / --project-name casing instead of force-``.lower()``-ing
+# it (a Python snake_case assumption). Without this, an AI-authored ``TextKit`` became the
+# scaffold dir ``src/textkit/`` whose .csproj compiled NONE of the ``src/TextKit/`` sources on
+# a case-sensitive FS ⇒ build break. ``pascal`` = case-preserving (+ leading-upper guarantee);
+# the default (absent) is ``lower`` (Python/TS/Go, unchanged). Preserved under .raw/.extra and
+# read by LanguageProfile.package_case.
+naming:
+  package_case: pascal
+
 layout:
   repo_root: "."
   module_root: "."

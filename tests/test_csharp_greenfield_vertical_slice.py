@@ -64,13 +64,14 @@ def test_csharp_synthesizes_layout_profile() -> None:
     non-"package_absolute" policy (so the Python import-coherence checks stay NO-OPs);
     the implement-oracle + verify-campaign are SET (not None).
     """
-    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    profile = resolve_layout_profile(language="csharp", project_name="TodoCli")
     assert profile is not None, "csharp layout profile must be synthesized, not None"
     assert profile.language == "csharp"
     assert profile.source_root == "src"
     assert profile.test_root == "tests"
     # kind: path_package → the package nests in its own lib dir (src/<pkg>), NOT bare src/.
-    assert profile.package_root == "src/todo_cli"
+    # pascal: the PascalCase project name is PRESERVED (fork C) — NOT lower-cased to todocli.
+    assert profile.package_root == "src/TodoCli"
     assert profile.requires_package_init is False
     assert profile.requires_test_init is False
     assert profile.test_import_policy != "package_absolute"
@@ -131,7 +132,7 @@ def test_csharp_coverage_gate_applies_not_noop() -> None:
     """The coverage-execution coherence gate is APPLICABLE for the synthesized csharp
     profile (it was a strict NO-OP before — no campaign → not applicable), and its
     runner-report adapter resolves to the dotnet-trx parser."""
-    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    profile = resolve_layout_profile(language="csharp", project_name="TodoCli")
     assert profile is not None
     assert coherence_gate_applies(profile) is True
     assert isinstance(profile.runner_report_adapter(), DotnetTrxReportAdapter)
@@ -154,7 +155,7 @@ def test_csharp_coverage_gate_applies_not_noop() -> None:
 
 def test_csharp_toolchain_dependencies_is_none() -> None:
     """C# declares no lockfile → toolchain_dependencies None (honest NO-OP, Python-like)."""
-    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    profile = resolve_layout_profile(language="csharp", project_name="TodoCli")
     assert profile is not None
     assert profile.toolchain_dependencies is None
 
@@ -190,18 +191,18 @@ def test_csharp_scaffolds_idiomatic_multi_project(tmp_path: Path) -> None:
     ``tests/{pkg}.Tests/`` (ProjectReference back to the lib), and a root ``.sln`` that
     ties them — create-only / idempotent / non-clobber, substituting {package_name} +
     scaffold.defaults (target_framework, package versions)."""
-    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    profile = resolve_layout_profile(language="csharp", project_name="TodoCli")
     assert profile is not None
 
     result = scaffold_layout(tmp_path, profile)
-    lib = tmp_path / "src" / "todo_cli" / "todo_cli.csproj"
-    test = tmp_path / "tests" / "todo_cli.Tests" / "todo_cli.Tests.csproj"
-    sln = tmp_path / "todo_cli.sln"
+    lib = tmp_path / "src" / "TodoCli" / "TodoCli.csproj"
+    test = tmp_path / "tests" / "TodoCli.Tests" / "TodoCli.Tests.csproj"
+    sln = tmp_path / "TodoCli.sln"
     assert lib.is_file() and test.is_file() and sln.is_file()
     assert {
-        "src/todo_cli/todo_cli.csproj",
-        "tests/todo_cli.Tests/todo_cli.Tests.csproj",
-        "todo_cli.sln",
+        "src/TodoCli/TodoCli.csproj",
+        "tests/TodoCli.Tests/TodoCli.Tests.csproj",
+        "TodoCli.sln",
     } <= set(result.created)
 
     # scaffold.defaults substituted; no UNSUBSTITUTED template var leaked. (The .sln
@@ -219,7 +220,7 @@ def test_csharp_scaffolds_idiomatic_multi_project(tmp_path: Path) -> None:
     # idempotent: a second call creates nothing, skips the existing files.
     result2 = scaffold_layout(tmp_path, profile)
     assert result2.created == ()
-    assert "src/todo_cli/todo_cli.csproj" in result2.skipped
+    assert "src/TodoCli/TodoCli.csproj" in result2.skipped
 
     # non-clobber: an authored file is left byte-for-byte.
     lib.write_text("AUTHORED", encoding="utf-8")
@@ -233,35 +234,35 @@ def test_csharp_library_deliverable_is_pure_no_test_packages(tmp_path: Path) -> 
     project model (one .csproj that builds+tests green but bakes xunit into the shipped
     assembly's deps.json) is a FALSE GREEN; this pins the STRUCTURAL purity that forbids it.
     A regression that re-collapses the test packages into the lib .csproj turns this RED."""
-    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    profile = resolve_layout_profile(language="csharp", project_name="TodoCli")
     assert profile is not None
     scaffold_layout(tmp_path, profile)
 
-    lib_text = (tmp_path / "src" / "todo_cli" / "todo_cli.csproj").read_text(encoding="utf-8")
+    lib_text = (tmp_path / "src" / "TodoCli" / "TodoCli.csproj").read_text(encoding="utf-8")
     assert "PackageReference" not in lib_text, "lib deliverable must have NO PackageReference"
     assert "xunit" not in lib_text.lower(), "lib deliverable must not reference xunit"
     assert "Test.Sdk" not in lib_text, "lib deliverable must not reference the test SDK"
 
     # the test deps + the source<-test linkage live ONLY in the separate test project.
     test_text = (
-        tmp_path / "tests" / "todo_cli.Tests" / "todo_cli.Tests.csproj"
+        tmp_path / "tests" / "TodoCli.Tests" / "TodoCli.Tests.csproj"
     ).read_text(encoding="utf-8")
     assert "xunit" in test_text.lower()
     assert "Microsoft.NET.Test.Sdk" in test_text
     assert "xunit.runner.visualstudio" in test_text
-    assert '<ProjectReference Include="../../src/todo_cli/todo_cli.csproj" />' in test_text
+    assert '<ProjectReference Include="../../src/TodoCli/TodoCli.csproj" />' in test_text
 
 
 def test_csharp_solution_references_both_projects(tmp_path: Path) -> None:
     """The root .sln ties the lib + test projects together so a single root ``dotnet test``
     resolves the whole surface. GUID braces survive the REPLACE-based substitution
     (``str.format`` would raise on them) — the reason the scaffolder is replace-based."""
-    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    profile = resolve_layout_profile(language="csharp", project_name="TodoCli")
     assert profile is not None
     scaffold_layout(tmp_path, profile)
-    sln = (tmp_path / "todo_cli.sln").read_text(encoding="utf-8")
-    assert "src/todo_cli/todo_cli.csproj" in sln
-    assert "tests/todo_cli.Tests/todo_cli.Tests.csproj" in sln
+    sln = (tmp_path / "TodoCli.sln").read_text(encoding="utf-8")
+    assert "src/TodoCli/TodoCli.csproj" in sln
+    assert "tests/TodoCli.Tests/TodoCli.Tests.csproj" in sln
     # the .NET-SDK project-type GUID is intact and exactly the two projects are declared.
     assert "{9A19103F-16F7-4668-BE54-9A1E7A4F7556}" in sln
     assert sln.count("Project(") == 2
@@ -284,10 +285,10 @@ def test_csharp_import_coherence_no_false_red(tmp_path: Path) -> None:
         "{ [Fact] public void Adds() { Assert.Equal(3, new Calculator().Add(1, 2)); } }\n",
         encoding="utf-8",
     )
-    (tmp_path / "todo_cli.csproj").write_text(
+    (tmp_path / "TodoCli.csproj").write_text(
         '<Project Sdk="Microsoft.NET.Sdk"></Project>\n', encoding="utf-8"
     )
-    result = check_import_coherence(tmp_path, language="csharp", project_name="todo-cli")
+    result = check_import_coherence(tmp_path, language="csharp", project_name="TodoCli")
     assert result.passed is True, [f.kind for f in result.findings]
     assert result.findings == []
 
@@ -299,12 +300,12 @@ def test_csharp_harness_owned_scaffold_paths_includes_all_three() -> None:
     """The orphan-gate / write-fence must recognise ALL THREE scaffolded files (lib csproj,
     test csproj, .sln) as harness-owned — never unowned orphans, never reverted by the
     scoped-rerun write-fence."""
-    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    profile = resolve_layout_profile(language="csharp", project_name="TodoCli")
     assert profile is not None
     owned = profile.harness_owned_scaffold_paths()
-    assert "src/todo_cli/todo_cli.csproj" in owned
-    assert "tests/todo_cli.Tests/todo_cli.Tests.csproj" in owned
-    assert "todo_cli.sln" in owned
+    assert "src/TodoCli/TodoCli.csproj" in owned
+    assert "tests/TodoCli.Tests/TodoCli.Tests.csproj" in owned
+    assert "TodoCli.sln" in owned
 
 
 # ── (7) Go exclusion: opt-out stays a strict NO-OP ──────────────────────────────
@@ -420,10 +421,10 @@ def test_csharp_synthesized_package_root_is_nested_lib_dir() -> None:
     glob + the scaffold parent). The Python import-contract stays OFF (the new
     ``path_package`` kind is NOT ``named_package``), so the import-coherence init / policy
     checks remain strict NO-OPs (anti-false-RED)."""
-    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    profile = resolve_layout_profile(language="csharp", project_name="TodoCli")
     assert profile is not None
     assert profile.source_root == "src"
-    assert profile.package_root == "src/todo_cli"
+    assert profile.package_root == "src/TodoCli"
     assert profile.requires_package_init is False
     assert profile.requires_test_init is False
     assert profile.test_import_policy != "package_absolute"
@@ -443,19 +444,19 @@ def test_csharp_scaffold_dir_equals_routing_and_output_role_dir(tmp_path: Path) 
     from codd.languages import default_registry
     from codd.languages.path_planner import PathPlanner
 
-    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    profile = resolve_layout_profile(language="csharp", project_name="TodoCli")
     assert profile is not None
 
     # (a) scaffold — the dirs the LIBRARY / TEST projects are written into.
     result = scaffold_layout(tmp_path, profile)
-    assert "src/todo_cli/todo_cli.csproj" in set(result.created)
-    assert "tests/todo_cli.Tests/todo_cli.Tests.csproj" in set(result.created)
-    lib_dir = dirname("src/todo_cli/todo_cli.csproj")  # "src/todo_cli"
-    test_dir = dirname("tests/todo_cli.Tests/todo_cli.Tests.csproj")  # "tests/todo_cli.Tests"
+    assert "src/TodoCli/TodoCli.csproj" in set(result.created)
+    assert "tests/TodoCli.Tests/TodoCli.Tests.csproj" in set(result.created)
+    lib_dir = dirname("src/TodoCli/TodoCli.csproj")  # "src/TodoCli"
+    test_dir = dirname("tests/TodoCli.Tests/TodoCli.Tests.csproj")  # "tests/TodoCli.Tests"
 
     # (b) routing — the bare source root reroutes INTO the lib dir (== package_root).
     config = {
-        "project": {"name": "todo-cli", "language": "csharp"},
+        "project": {"name": "TodoCli", "language": "csharp"},
         "scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]},
     }
     routed = _route_source_into_package(config, ["src"], project_root=tmp_path)
@@ -463,11 +464,11 @@ def test_csharp_scaffold_dir_equals_routing_and_output_role_dir(tmp_path: Path) 
     assert profile.package_root == lib_dir  # synthesizer agrees with the scaffold dir
 
     # (c) output_roles — an AI source/test file is PLANNED into the same dirs.
-    planner = PathPlanner(default_registry.resolve("csharp"), {"package_name": "todo_cli"})
+    planner = PathPlanner(default_registry.resolve("csharp"), {"package_name": "TodoCli"})
     src_plan = planner.plan_output("source_file", name="Calculator").posix
     test_plan = planner.plan_output("test_file", name="Calculator").posix
-    assert dirname(src_plan) == lib_dir, src_plan  # src/todo_cli/Calculator.cs
-    assert dirname(test_plan) == test_dir, test_plan  # tests/todo_cli.Tests/Calculator.cs
+    assert dirname(src_plan) == lib_dir, src_plan  # src/TodoCli/Calculator.cs
+    assert dirname(test_plan) == test_dir, test_plan  # tests/TodoCli.Tests/Calculator.cs
 
 
 def test_csharp_fix_does_not_regress_python_ts_go_layout() -> None:
@@ -480,3 +481,134 @@ def test_csharp_fix_does_not_regress_python_ts_go_layout() -> None:
     ts = resolve_layout_profile(language="typescript", project_name="todo-cli")
     assert ts is not None and ts.package_root == "src"  # path_root, flat
     assert resolve_layout_profile(language="go", project_name="m") is None  # NO-OP
+
+
+# ── FORK (C): language-specific package naming (CASE) ────────────────────────────
+#
+# normalize_package_name forced ``.lower()`` (a Python snake_case assumption). C# is
+# idiomatically PascalCase: a greenfield AI authors ``TextKit`` but the harness lower-cased
+# it to ``textkit`` → on a case-sensitive FS (Linux) the ``src/textkit/`` .csproj compiled
+# NONE of the ``src/TextKit/`` sources → build break (a ``--project-name TextKit`` override
+# was also defeated by the same ``.lower()``). The fix is DATA-DRIVEN: a LanguageProfile
+# declares ``naming.package_case`` (``lower`` default | ``pascal`` case-preserving); the core
+# branches on that VALUE, NEVER a language name. csharp.yaml declares ``pascal``; Python / TS /
+# Go (no declaration) stay ``lower`` — byte-for-byte their old behavior.
+
+
+def test_normalize_package_name_pascal_preserves_case() -> None:
+    """``package_case='pascal'`` PRESERVES the author's casing (+ guarantees a leading upper).
+
+    The realistic path: ``--project-name TextKit`` → ``TextKit`` (no force-lower). A bare
+    lower single word gets a leading upper (``textkit`` → ``Textkit``) without over-guessing
+    word splits; an invalid char still sanitizes to ``_`` while the case is kept."""
+    from codd.project_types import normalize_package_name
+
+    assert normalize_package_name("TextKit", package_case="pascal") == "TextKit"
+    assert normalize_package_name("textkit", package_case="pascal") == "Textkit"
+    assert normalize_package_name("My-Lib", package_case="pascal") == "My_Lib"
+    assert normalize_package_name("", package_case="pascal") == "app"  # garbage → fallback
+
+
+def test_normalize_package_name_lower_is_default_and_byte_identical() -> None:
+    """REGRESSION GUARD: the default (and any non-pascal value) is the EXACT historical
+    lower behavior — Python / TS / Go are unchanged because they never declare a case."""
+    from codd.project_types import normalize_package_name
+
+    assert normalize_package_name("TextKit") == "textkit"  # default lower
+    assert normalize_package_name("TextKit", package_case="lower") == "textkit"
+    assert normalize_package_name("todo-cli") == "todo_cli"
+    assert normalize_package_name("2048 Game") == "_2048_game"
+    assert normalize_package_name("---") == "app"
+
+
+def test_resolve_canonical_package_name_threads_package_case() -> None:
+    """resolve_canonical_package_name (the single canonical-name path) threads package_case to
+    the project-name default; default/lower preserve the legacy force-lower behavior."""
+    from codd.project_types import resolve_canonical_package_name
+
+    assert resolve_canonical_package_name("TextKit", package_case="pascal") == "TextKit"
+    assert resolve_canonical_package_name("TextKit") == "textkit"
+    assert resolve_canonical_package_name("TextKit", package_case="lower") == "textkit"
+
+
+def test_csharp_profile_declares_pascal_other_languages_default_lower() -> None:
+    """csharp.yaml declares ``naming.package_case: pascal``; profiles WITHOUT a naming block
+    default to ``lower`` — proving the casing is per-profile DATA, never a code language-branch."""
+    from codd.languages import default_registry
+
+    assert default_registry.resolve("csharp").package_case == "pascal"
+    assert default_registry.resolve("python").package_case == "lower"
+    assert default_registry.resolve("typescript").package_case == "lower"
+    assert default_registry.resolve("go").package_case == "lower"
+
+
+def test_csharp_synthesized_profile_preserves_pascal_case() -> None:
+    """A C# greenfield profile PRESERVES a PascalCase project name end-to-end: ``package_name``
+    AND the nested ``package_root`` keep ``TextKit`` (was force-lowered to ``textkit`` → the
+    .csproj/source dir mismatch that broke the build on a case-sensitive FS). ``source_root``
+    (the source-set ROOT — the glob + scaffold parent) is unchanged."""
+    profile = resolve_layout_profile(language="csharp", project_name="TextKit")
+    assert profile is not None
+    assert profile.package_name == "TextKit"
+    assert profile.package_root == "src/TextKit"  # NOT src/textkit
+    assert profile.source_root == "src"
+
+
+def test_csharp_scaffold_writes_cased_paths_and_harness_owned(tmp_path: Path) -> None:
+    """Propagation: the scaffold writes the CASED dirs/files (``src/TextKit/TextKit.csproj`` /
+    ``TextKit.sln``) and ``harness_owned_scaffold_paths`` reports the SAME cased paths — so the
+    routing accept-list, the orphan-gate, and the scoped-rerun write-fence all agree on the one
+    cased package name (no residual ``.lower()`` crushes it on the harness-owned side)."""
+    profile = resolve_layout_profile(language="csharp", project_name="TextKit")
+    assert profile is not None
+    result = scaffold_layout(tmp_path, profile)
+    assert (tmp_path / "src" / "TextKit" / "TextKit.csproj").is_file()
+    assert (tmp_path / "tests" / "TextKit.Tests" / "TextKit.Tests.csproj").is_file()
+    assert (tmp_path / "TextKit.sln").is_file()
+    cased = {
+        "src/TextKit/TextKit.csproj",
+        "tests/TextKit.Tests/TextKit.Tests.csproj",
+        "TextKit.sln",
+    }
+    assert cased <= set(result.created)
+    assert cased <= set(profile.harness_owned_scaffold_paths())
+
+
+def test_csharp_routing_and_output_roles_agree_on_cased_lib_dir(tmp_path: Path) -> None:
+    """Propagation: ``_route_source_into_package`` reroutes the bare source root INTO the cased
+    lib dir (``src/TextKit``), and the ``path_rules.output_roles`` PathPlanner plans an AI
+    source/test file into that SAME cased dir — the scaffold/routing/output-role triple agrees
+    on ``src/TextKit`` so AI-authored ``.cs`` lands where the SDK's project-dir compile glob
+    captures it (the whole point of fork C on a case-sensitive FS)."""
+    from posixpath import dirname
+
+    from codd.greenfield.pipeline import _route_source_into_package
+    from codd.languages import default_registry
+    from codd.languages.path_planner import PathPlanner
+
+    profile = resolve_layout_profile(language="csharp", project_name="TextKit")
+    assert profile is not None and profile.package_root == "src/TextKit"
+
+    config = {
+        "project": {"name": "TextKit", "language": "csharp"},
+        "scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]},
+    }
+    routed = _route_source_into_package(config, ["src"], project_root=tmp_path)
+    assert "src/TextKit" in routed, routed
+
+    planner = PathPlanner(default_registry.resolve("csharp"), {"package_name": "TextKit"})
+    src_plan = planner.plan_output("source_file", name="Calculator").posix
+    test_plan = planner.plan_output("test_file", name="Calculator").posix
+    assert dirname(src_plan) == "src/TextKit", src_plan
+    assert dirname(test_plan) == "tests/TextKit.Tests", test_plan
+
+
+def test_pascal_case_does_not_regress_python_ts_go_package_names() -> None:
+    """Non-regression: Python / TS package names stay LOWERCASE for the SAME PascalCase input
+    (``TextKit`` → ``textkit``); Go stays a strict NO-OP. Only the pascal-declaring stack (C#)
+    preserves case — a regression that leaked ``pascal`` into the lower stacks trips here."""
+    py = resolve_layout_profile(language="python", project_name="TextKit")
+    assert py is not None and py.package_name == "textkit" and py.package_root == "src/textkit"
+    ts = resolve_layout_profile(language="typescript", project_name="TextKit")
+    assert ts is not None and ts.package_name == "textkit" and ts.package_root == "src"
+    assert resolve_layout_profile(language="go", project_name="TextKit") is None

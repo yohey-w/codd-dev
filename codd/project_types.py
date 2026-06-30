@@ -986,14 +986,18 @@ class LayoutProfile:
         return resolve_runner_report_adapter(campaign.report_format)
 
 
-def normalize_package_name(project_name: str | None, *, fallback: str = "app") -> str:
-    """Derive a valid Python package identifier from a project name.
+def _sanitize_package_identifier(
+    raw_input: str, *, fallback: str, preserve_case: bool, leading_upper: bool
+) -> str:
+    """Shared identifier sanitizer behind :func:`normalize_package_name`.
 
-    ``todo-cli`` → ``todo_cli``; ``2048 Game`` → ``_2048_game``; empty/garbage →
-    ``fallback``. Deterministic and pure so the same project name always yields
-    the same package, which is what makes source + tests + pyproject agree.
+    ``preserve_case=False`` force-lowers first (the historical default). Any run of
+    non-``[A-Za-z0-9_]`` chars collapses to a single ``_``; leading/trailing ``_`` are
+    stripped; an empty result → ``fallback``; a leading digit is prefixed with ``_``.
+    ``leading_upper`` then upper-cases the first char when it is a letter (the PascalCase
+    guarantee). Pure + deterministic — the SAME inputs always yield the SAME identifier.
     """
-    raw = str(project_name or "").strip().lower()
+    raw = raw_input if preserve_case else raw_input.lower()
     chars: list[str] = []
     for ch in raw:
         chars.append(ch if (ch.isalnum() or ch == "_") else "_")
@@ -1004,17 +1008,52 @@ def normalize_package_name(project_name: str | None, *, fallback: str = "app") -
         return fallback
     if collapsed[0].isdigit():
         collapsed = "_" + collapsed
+    if leading_upper and collapsed[0].isalpha():
+        collapsed = collapsed[0].upper() + collapsed[1:]
     return collapsed
 
 
-def _config_package_name_override(config: Any) -> str | None:
+def normalize_package_name(
+    project_name: str | None, *, fallback: str = "app", package_case: str = "lower"
+) -> str:
+    """Derive a valid package identifier from a project name (casing is DATA-driven).
+
+    ``package_case`` is the casing discipline a LanguageProfile declares via
+    ``naming.package_case`` — the harness branches on this VALUE, NEVER on a language
+    name, so a stack opts into a casing by data alone:
+
+    * ``"lower"`` (DEFAULT — Python/TS/Go) → force a lower-case identifier:
+      ``todo-cli`` → ``todo_cli``; ``2048 Game`` → ``_2048_game``. BYTE-FOR-BYTE the
+      historical behavior (every caller that omits ``package_case`` is unchanged).
+    * ``"pascal"`` (case-PRESERVING — C#) → keep the author's casing + guarantee a
+      leading uppercase: ``TextKit`` → ``TextKit`` (the ``--project-name TextKit`` a
+      force-``.lower()`` used to defeat); a bare lower word ``textkit`` → ``Textkit``
+      (no over-guessing of word splits). An invalid char still sanitizes to ``_``.
+
+    Empty/garbage → ``fallback`` under either discipline. Deterministic and pure so the
+    same ``(project name, package_case)`` always yields the same package, which is what
+    makes source + tests + manifest agree on ONE cased name.
+    """
+    raw_input = str(project_name or "").strip()
+    if str(package_case).strip().lower() == "pascal":
+        return _sanitize_package_identifier(
+            raw_input, fallback=fallback, preserve_case=True, leading_upper=True
+        )
+    # "lower" (and any non-"pascal" value) → the historical force-lower discipline.
+    return _sanitize_package_identifier(
+        raw_input, fallback=fallback, preserve_case=False, leading_upper=False
+    )
+
+
+def _config_package_name_override(config: Any, *, package_case: str = "lower") -> str | None:
     """Read an explicit ``project.package_name`` override from project config.
 
     The harness OWNS the package name; an owner may pin it explicitly via
     ``project.package_name`` in ``codd.yaml`` (highest precedence — design-doc
-    PROSE is never the topology authority). Returns the normalized identifier, or
-    ``None`` when unset/blank/invalid so resolution falls through to the next
-    tier.
+    PROSE is never the topology authority). Returns the normalized identifier
+    (honoring the profile's ``package_case`` so a pinned ``TextKit`` stays cased on a
+    pascal stack), or ``None`` when unset/blank/invalid so resolution falls through to
+    the next tier.
     """
     if not isinstance(config, Mapping):
         return None
@@ -1029,7 +1068,7 @@ def _config_package_name_override(config: Any) -> str | None:
         return None
     # Normalize so an owner who writes ``calc-lib`` still gets a valid identifier;
     # a value that normalizes to the bare fallback (garbage) is treated as unset.
-    normalized = normalize_package_name(text)
+    normalized = normalize_package_name(text, package_case=package_case)
     return normalized if normalized != "app" or text.strip().lower() in {"app"} else None
 
 
@@ -1082,6 +1121,7 @@ def resolve_canonical_package_name(
     config: Any = None,
     project_root: Path | None = None,
     source_root: str = "src",
+    package_case: str = "lower",
 ) -> str:
     """Resolve the ONE canonical Python package name the harness owns (deterministic).
 
@@ -1103,14 +1143,19 @@ def resolve_canonical_package_name(
     Every tier is deterministic and model-independent: the same inputs (config,
     on-disk structure, project name) always yield the same canonical name, which
     is what makes the reconciled source/pyproject/imports all agree.
+
+    ``package_case`` (DATA the LanguageProfile declares — never a language branch) is
+    threaded to the config-override and project-name tiers so a ``pascal`` stack PRESERVES
+    case (``TextKit`` → ``TextKit``); ``lower`` (the default) is the legacy behavior. The
+    derive-from-actual tier already preserves the on-disk dir's case verbatim.
     """
-    override = _config_package_name_override(config)
+    override = _config_package_name_override(config, package_case=package_case)
     if override is not None:
         return override
     detected = _detect_single_top_level_package(project_root, source_root)
     if detected is not None:
         return detected
-    return normalize_package_name(project_name)
+    return normalize_package_name(project_name, package_case=package_case)
 
 
 def _first_clean_dir(dirs: Any, default: str) -> str:
@@ -1550,7 +1595,14 @@ def _synthesize_layout_profile_from_language(
     if not source_root or not test_root:
         return None
 
-    package_name = normalize_package_name(project_name)
+    # Casing is DATA the profile declares (``naming.package_case``: lower default | pascal
+    # case-preserving) — the core branches on the VALUE inside normalize_package_name, NEVER
+    # on the language name here. C# declares ``pascal`` so ``TextKit`` survives end-to-end
+    # (package_name → the nested package_root → scaffold/routing/harness_owned all cased);
+    # Python/TS/Go declare nothing → lower (unchanged).
+    package_name = normalize_package_name(
+        project_name, package_case=lang_profile.package_case
+    )
     pkg = getattr(layout, "package_root", None)
     pkg_kind = str(getattr(pkg, "kind", "none") or "none")
     # A declared ``{package_name}``-bearing path nests the package (``src/<pkg>``); absent a

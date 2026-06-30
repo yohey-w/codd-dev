@@ -501,6 +501,12 @@ class ImplementOracleProfileSpec:
 # top-level profile
 # ---------------------------------------------------------------------------
 
+#: Valid ``naming.package_case`` values (design fork C). ``lower`` = the historical
+#: force-lower identifier discipline (Python snake_case); ``pascal`` = case-PRESERVING
+#: (C# idiomatic PascalCase). ``snake`` etc. are a documented future extension. This is
+#: per-profile DATA the core branches on — NEVER a language-name branch.
+_VALID_PACKAGE_CASES: frozenset[str] = frozenset({"lower", "pascal"})
+
 
 @dataclass(frozen=True)
 class LanguageProfile:
@@ -553,3 +559,29 @@ class LanguageProfile:
         if needle == self.identity.id.strip().lower():
             return True
         return any(needle == alias.strip().lower() for alias in self.identity.aliases)
+
+    @property
+    def package_case(self) -> str:
+        """The declared package-name casing discipline (design fork C — DATA, not a branch).
+
+        Read from the profile's ``naming.package_case`` block: ``lower`` (the historical
+        default — Python/TS/Go force a lower-case identifier) or ``pascal`` (case-PRESERVING
+        — C#'s idiomatic PascalCase). ABSENT → ``lower``, so EVERY existing profile (none
+        declare ``naming``) is byte-for-byte unchanged. A DECLARED-but-unknown value RAISES
+        (anti-false-green: a misdeclared casing must surface loudly, never silently degrade
+        to lower and re-break a case-sensitive build). The harness branches on this VALUE,
+        so a new casing is one profile key — never a language-name code branch.
+        """
+        naming = self.raw.get("naming") if isinstance(self.raw, Mapping) else None
+        if not isinstance(naming, Mapping):
+            return "lower"
+        raw_value = naming.get("package_case")
+        if raw_value is None:
+            return "lower"
+        value = str(raw_value).strip().lower()
+        if value not in _VALID_PACKAGE_CASES:
+            raise ValueError(
+                f"naming.package_case must be one of {sorted(_VALID_PACKAGE_CASES)}, "
+                f"got {raw_value!r}"
+            )
+        return value
