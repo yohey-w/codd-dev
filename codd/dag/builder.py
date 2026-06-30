@@ -9,6 +9,7 @@ import os
 import re
 import warnings
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -453,6 +454,89 @@ def _warn_unresolved_residue(residue: list[str]) -> None:
     )
 
 
+@dataclass
+class SourceCompletenessReport:
+    """The source-completeness gap, computed once and shared (drift-proof).
+
+    GENERIC FIX 1 — the convergence safety-net. Fields:
+
+    * ``on_disk`` — files on disk whose suffix is a configured source suffix;
+    * ``node_count`` — DAG source nodes the on-disk set is compared against;
+    * ``missing`` — up to 10 relative ids of on-disk source files NOT covered by
+      a source node (the visible gap sample, capped to keep messages bounded);
+    * ``source_suffixes`` — the resolved source-suffix set used (DATA, never a
+      language/framework literal).
+
+    This is a measurement only: it makes no pass/fail decision. The builder's
+    advisory :func:`_warn_source_completeness` and the first-class
+    ``source_completeness`` DAG check both consume it, so the warning and the
+    check cannot drift.
+    """
+
+    on_disk: int
+    node_count: int
+    missing: list[str]
+    source_suffixes: tuple[str, ...]
+
+
+def source_suffixes_from_settings(settings: dict[str, Any]) -> set[str]:
+    """Resolve the DATA-driven set of "source" suffixes (implementation ∪ test).
+
+    Single source of truth shared by :func:`compute_source_completeness` and the
+    ``source_completeness`` DAG check, so "what counts as a source file" cannot
+    drift between the on-disk scan and the node-set derivation. Carries no
+    ``language ==`` / framework literal — the suffixes come entirely from settings
+    (falling back to the legacy defaults), so supporting another language is a
+    config/suffix change, not a core edit.
+    """
+    impl_suffixes = set(_suffix_tuple(settings.get("implementation_suffixes")) or LEGACY_IMPLEMENTATION_SUFFIXES)
+    test_suffixes = set(_suffix_tuple(settings.get("test_suffixes")) or LEGACY_TEST_SUFFIXES)
+    return impl_suffixes | test_suffixes
+
+
+def compute_source_completeness(
+    project_root: Path,
+    settings: dict[str, Any],
+    source_node_paths: set[Path],
+) -> SourceCompletenessReport:
+    """Compute the source-completeness gap as a pure, single-source function.
+
+    GENERIC FIX 1 (the convergence safety-net), extracted so the builder's
+    advisory ``_warn_source_completeness`` and the first-class
+    ``source_completeness`` DAG check share ONE implementation. Counts on-disk
+    files whose suffix is a configured source suffix and compares them against
+    ``source_node_paths`` (the resolved file paths of the DAG's source nodes).
+    ``missing`` is capped at 10 relative ids — the visible gap sample. Surfacing
+    only: this function makes no pass/fail decision (the caller decides).
+    """
+    project_root_resolved = Path(project_root).resolve()
+    node_paths = {Path(path).resolve() for path in source_node_paths}
+    source_suffixes = source_suffixes_from_settings(settings)
+    if not source_suffixes:
+        return SourceCompletenessReport(
+            on_disk=0,
+            node_count=len(node_paths),
+            missing=[],
+            source_suffixes=(),
+        )
+
+    exclude_patterns = settings.get("scan_exclude_patterns")
+    missing: list[str] = []
+    on_disk = 0
+    for file_path in _iter_on_disk_source_files(project_root_resolved, source_suffixes, exclude_patterns):
+        on_disk += 1
+        if file_path.resolve() not in node_paths:
+            if len(missing) < 10:
+                missing.append(_relative_id(file_path, project_root_resolved))
+
+    return SourceCompletenessReport(
+        on_disk=on_disk,
+        node_count=len(node_paths),
+        missing=missing,
+        source_suffixes=tuple(sorted(source_suffixes)),
+    )
+
+
 def _warn_source_completeness(
     project_root: Path,
     settings: dict[str, Any],
@@ -468,30 +552,20 @@ def _warn_source_completeness(
     the gap (count + a few example missing files) so it becomes visible and the
     operator can widen the scope. Surfacing only: never a fail-gate (that would be
     new gating = owner-gated).
+
+    Delegates the gap computation to the shared, pure
+    :func:`compute_source_completeness` (the single source of truth also used by
+    the first-class ``source_completeness`` DAG check) so the warning text and the
+    check can never drift apart. The emitted warning is byte-for-byte unchanged.
     """
-    impl_suffixes = set(_suffix_tuple(settings.get("implementation_suffixes")) or LEGACY_IMPLEMENTATION_SUFFIXES)
-    test_suffixes = set(_suffix_tuple(settings.get("test_suffixes")) or LEGACY_TEST_SUFFIXES)
-    source_suffixes = impl_suffixes | test_suffixes
-    if not source_suffixes:
-        return
-
     node_paths = {path.resolve() for path in (*impl_nodes.values(), *test_nodes.values())}
-    exclude_patterns = settings.get("scan_exclude_patterns")
-    project_root_resolved = project_root.resolve()
+    report = compute_source_completeness(project_root, settings, node_paths)
 
-    missing: list[str] = []
-    on_disk = 0
-    for file_path in _iter_on_disk_source_files(project_root_resolved, source_suffixes, exclude_patterns):
-        on_disk += 1
-        if file_path.resolve() not in node_paths:
-            if len(missing) < 10:
-                missing.append(_relative_id(file_path, project_root_resolved))
-
-    if on_disk > len(node_paths) and missing:
-        examples = ", ".join(missing[:5])
+    if report.on_disk > report.node_count and report.missing:
+        examples = ", ".join(report.missing[:5])
         warnings.warn(
-            f"discovery: {on_disk} source file(s) on disk but only {len(node_paths)} "
-            f"source node(s) in the DAG — {len(missing)} file(s) are outside the "
+            f"discovery: {report.on_disk} source file(s) on disk but only {report.node_count} "
+            f"source node(s) in the DAG — {len(report.missing)} file(s) are outside the "
             f"configured source scope and will be inert (e.g. {examples}). Consider "
             f"widening source_dirs / impl_file_patterns.",
             UserWarning,

@@ -33,6 +33,7 @@ CHECK_MODULES = (
     "codd.dag.checks.stale_evidence",
     "codd.dag.checks.negative_space",
     "codd.dag.checks.semantic_contract_conflict",
+    "codd.dag.checks.source_completeness",
 )
 
 
