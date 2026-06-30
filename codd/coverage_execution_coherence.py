@@ -87,8 +87,10 @@ from codd.vb_marker_authenticity import (
 # :mod:`codd.languages.adapters.runner_report` for the Contract Kernel so the
 # coverage-execution coherence gate AND the language contract resolve ONE source
 # of these adapters. They are RE-EXPORTED here (same objects — identity preserved)
-# so ``from codd.coverage_execution_coherence import RunnerExecution`` and the
-# ``_RUNNER_REPORT_ADAPTERS`` map below keep working unchanged. ``_norm_test_path``
+# so ``from codd.coverage_execution_coherence import RunnerExecution`` keeps working
+# unchanged. The format→adapter RESOLUTION below also defers to that ONE source —
+# the process-wide ``default_adapter_registry`` (see ``resolve_runner_report_adapter``)
+# — so there is no second local table to drift from it. ``_norm_test_path``
 # moved with them (the moved Go index needs it) and is re-imported here because the
 # inventory/gate code below still uses it. (runner_report imports only stdlib +
 # operational_e2e_audit + vb_marker_authenticity — none import codd.languages —
@@ -112,39 +114,73 @@ COHERENCE_CONTRACT_VERSION = "coverage-execution-coherence/v1"
 
 
 # The runner-report PARSERS (RunnerReportUnsupported / RunnerExecution /
-# RunnerReportAdapter / VitestJsonReportAdapter / GoTestJsonReportAdapter) and
-# their helpers were RELOCATED to codd/languages/adapters/runner_report.py for
-# the Contract Kernel (re-imported above; same objects). The format->adapter MAP
-# and its resolvers STAY here: they are the coverage gate's lookup surface.
+# RunnerReportAdapter / VitestJsonReportAdapter / GoTestJsonReportAdapter and the
+# compiler-language Surefire / CTest / TRX adapters) and their helpers were
+# RELOCATED to codd/languages/adapters/runner_report.py for the Contract Kernel
+# (re-imported above; same objects). The format→adapter RESOLUTION resolves against
+# the SINGLE source of truth — the process-wide ``default_adapter_registry``
+# populated by ``codd.languages.builtin_adapters.ensure_builtin_adapters_registered``
+# (the ONE place built-in adapters are registered). There is deliberately NO local
+# format→adapter table here: a second table is exactly what let ``surefire-xml`` /
+# ``ctest-junit`` / ``dotnet-trx`` register on the registry yet stay unresolvable to
+# this gate. The coverage gate and the language contract now read the SAME registry,
+# so they cannot drift.
 
-#: report_format → adapter. A new runner registers ONE entry here + sets the
-#: matching ``report_format`` on its profile's :class:`VerifyCampaignSpec`.
-#: ``pytest-junit-xml`` is the remaining documented extension point (pytest JUnit
-#: XML parses ``<testcase classname name>`` + ``<skipped>``/``<failure>``/``<error>``
-#: children); until added it resolves to ``None`` and the gate degrades EXPLICITLY
-#: for that stack (never a silent green).
-_RUNNER_REPORT_ADAPTERS: dict[str, RunnerReportAdapter] = {
-    "vitest-json": VitestJsonReportAdapter(),
-    "go-test-json": GoTestJsonReportAdapter(),
-}
+
+def _runner_report_registry() -> tuple[Any, str]:
+    """The ``(registry, kind)`` pair for runner-report adapter resolution.
+
+    Returns the process-wide ``default_adapter_registry`` with the built-in adapters
+    lazily registered, plus the ``runner_report`` adapter kind. Registration is
+    idempotent and cheap after the first call (guarded inside
+    :func:`~codd.languages.builtin_adapters.ensure_builtin_adapters_registered`); it
+    is done lazily INSIDE this function so importing this module pulls no adapter
+    implementation at load time (mirrors :func:`codd.languages.contract.build_language_contract`'s
+    lazy registration). This registry is the SINGLE source — no local table.
+    """
+
+    from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
+    from codd.languages.contract import KIND_RUNNER_REPORT
+    from codd.languages.registry import default_adapter_registry
+
+    ensure_builtin_adapters_registered(default_adapter_registry)
+    return default_adapter_registry, KIND_RUNNER_REPORT
 
 
 def resolve_runner_report_adapter(report_format: str | None) -> RunnerReportAdapter | None:
     """The adapter for a campaign ``report_format``, or ``None`` if unregistered.
 
-    ``None`` (an unknown / not-yet-implemented format) makes the gate degrade
-    EXPLICITLY — it surfaces "this stack's campaign report has no adapter" rather
-    than silently passing a build whose executions it cannot read.
+    Resolves against the SINGLE source of truth — the process-wide
+    ``default_adapter_registry`` (kind ``runner_report``) populated by
+    :func:`codd.languages.builtin_adapters.ensure_builtin_adapters_registered` — so
+    the coverage-execution coherence gate and the language contract resolve the SAME
+    adapters: ``vitest-json`` / ``go-test-json`` and the compiler-language
+    ``surefire-xml`` / ``dotnet-trx`` / ``ctest-junit`` (and the stack
+    ``playwright_json``). The lookup is data-driven on the ``report_format`` string
+    key — no language-name branch.
+
+    ``None`` (an unknown / not-yet-implemented format such as ``pytest-junit-xml``)
+    makes the gate degrade EXPLICITLY — it surfaces "this stack's campaign report has
+    no adapter" rather than silently passing a build whose executions it cannot read.
     """
 
     if not report_format:
         return None
-    return _RUNNER_REPORT_ADAPTERS.get(str(report_format).strip().lower())
+    key = str(report_format).strip().lower()
+    if not key:
+        return None
+    registry, kind = _runner_report_registry()
+    return registry.get(kind, key)
 
 
 def supported_runner_report_formats() -> list[str]:
-    """Report formats with a registered runner adapter (deterministic order)."""
-    return sorted(_RUNNER_REPORT_ADAPTERS)
+    """Report formats with a registered runner adapter (deterministic order).
+
+    Enumerated from the SAME registry :func:`resolve_runner_report_adapter` resolves
+    against, so the advertised-supported set cannot drift from what actually resolves.
+    """
+    registry, kind = _runner_report_registry()
+    return registry.ids(kind)
 
 
 # ───────────────────────────────────────────────────────────────────────────

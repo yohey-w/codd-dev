@@ -436,6 +436,59 @@ def test_vitest_json_adapter_is_registered():
     assert resolve_runner_report_adapter(None) is None
 
 
+def test_compiler_runner_report_adapters_resolve_via_single_source():
+    """The compiler-language runner-report adapters (surefire-xml / ctest-junit /
+    dotnet-trx) registered in ``codd.languages.builtin_adapters`` resolve through
+    the SAME resolver the coverage gate uses.
+
+    Before the registries were unified these adapters lived ONLY on
+    ``default_adapter_registry`` while ``resolve_runner_report_adapter`` read a
+    second LOCAL table (``vitest-json`` / ``go-test-json`` only), so a profile that
+    wired a Java/C#/C++ verify campaign would resolve a ``None`` adapter and
+    ``certify_verify_campaign_observable`` would honest-FAIL the build. With the
+    single-source registry they resolve to their concrete adapters, and they appear
+    in ``supported_runner_report_formats`` consistently with resolution.
+    """
+
+    from codd.languages.adapters.runner_report import (
+        CTestJunitReportAdapter,
+        DotnetTrxReportAdapter,
+        SurefireXmlReportAdapter,
+    )
+
+    assert isinstance(resolve_runner_report_adapter("surefire-xml"), SurefireXmlReportAdapter)
+    assert isinstance(resolve_runner_report_adapter("ctest-junit"), CTestJunitReportAdapter)
+    assert isinstance(resolve_runner_report_adapter("dotnet-trx"), DotnetTrxReportAdapter)
+
+    supported = set(supported_runner_report_formats())
+    assert {"surefire-xml", "ctest-junit", "dotnet-trx"} <= supported
+
+
+def test_existing_runner_report_resolution_unchanged_after_unification():
+    """REGRESSION LOCK: unifying the source must not change the existing
+    ``vitest-json`` / ``go-test-json`` resolution — same adapter types, same
+    case-insensitive normalization, same EXPLICIT ``None`` for unknown/empty/None
+    (never a silent green for an unreadable campaign report)."""
+
+    from codd.languages.adapters.runner_report import (
+        GoTestJsonReportAdapter,
+        VitestJsonReportAdapter,
+    )
+
+    assert isinstance(resolve_runner_report_adapter("vitest-json"), VitestJsonReportAdapter)
+    assert isinstance(resolve_runner_report_adapter("go-test-json"), GoTestJsonReportAdapter)
+    # Case-insensitivity + surrounding-whitespace tolerance is preserved.
+    assert isinstance(resolve_runner_report_adapter("  VITEST-JSON  "), VitestJsonReportAdapter)
+    assert isinstance(resolve_runner_report_adapter("Go-Test-Json"), GoTestJsonReportAdapter)
+    # Unknown / not-yet-implemented / empty / None still degrade EXPLICITLY to None.
+    assert resolve_runner_report_adapter("pytest-junit-xml") is None
+    assert resolve_runner_report_adapter("totally-unknown-format") is None
+    assert resolve_runner_report_adapter("") is None
+    assert resolve_runner_report_adapter(None) is None
+    # vitest-json / go-test-json remain advertised as supported.
+    assert {"vitest-json", "go-test-json"} <= set(supported_runner_report_formats())
+
+
 def test_campaign_with_unknown_report_format_degrades_explicitly(tmp_path):
     """A profile that declares a campaign whose report_format has no adapter is
     NOT applicable (the gate cannot read it) — surfaced, never a silent green."""

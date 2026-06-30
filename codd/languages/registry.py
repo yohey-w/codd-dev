@@ -127,6 +127,15 @@ class AdapterRegistry:
     def get(self, kind: str, id: str) -> Any | None:
         return self._adapters.get((kind, id))
 
+    def ids(self, kind: str) -> list[str]:
+        """All adapter ids registered under ``kind`` (sorted, deterministic).
+
+        Lets a caller enumerate "what is registered for this kind" from the SAME
+        registry it resolves against — so an advertised-supported list cannot drift
+        from what :meth:`get` actually resolves (no second local table).
+        """
+        return sorted(id for (k, id) in self._adapters if k == kind)
+
     def require(self, kind: str, id: str) -> Any:
         try:
             return self._adapters[(kind, id)]
