@@ -126,13 +126,17 @@ commands:
       must_include_source_sets: ["src"]
 
   verify:
-    # `dotnet test` runs the test project(s). The `--logger "trx;LogFileName=test.trx"`
-    # is REQUIRED for the VSTest TRX report to be emitted at the declared path
-    # (`TestResults/test.trx`, dotnet's default TestResults dir). The synthesized verify
-    # campaign runs this argv with shell=False, so the `;` inside the logger value is
-    # passed VERBATIM (never split/interpreted by a shell). YAML is the SSOT for the
-    # campaign command — the harness reads this argv at real-run time.
-    argv: ["dotnet", "test", "--logger", "trx;LogFileName=test.trx"]
+    # `dotnet test` (no project arg, cwd={module_root}=repo root) auto-discovers the single
+    # root `.sln` the scaffold writes and runs the WHOLE test surface across it. Two flags are
+    # load-bearing:
+    #   * `--logger "trx;LogFileName=test.trx"` emits the VSTest TRX. The synthesized campaign
+    #     runs this argv with shell=False, so the `;` is passed VERBATIM (never shell-split).
+    #   * `--results-directory TestResults` forces the SINGLE .trx to the ROOT-level
+    #     TestResults/ (= verify.report.path). WITHOUT it, a SOLUTION `dotnet test` writes a
+    #     PER-TEST-PROJECT TestResults/ (tests/<pkg>.Tests/TestResults/test.trx) and the
+    #     campaign would find NO report at the declared path. Verified with real dotnet 8.
+    # YAML is the SSOT for the campaign command — the harness reads this argv at real-run time.
+    argv: ["dotnet", "test", "--logger", "trx;LogFileName=test.trx", "--results-directory", "TestResults"]
     cwd: "{module_root}"
     report:
       capture: stdout
@@ -199,18 +203,38 @@ verify:
 
 scaffold:
   adapter: generic-template
+
+  # Greenfield ② Option C — the IDIOMATIC C# topology, declared as per-language DATA so the
+  # language-free generic-template scaffolder writes it with NO new code abstraction (no
+  # `language ==` branch). The single-project model (one .csproj that builds+tests green but
+  # bakes xunit into the shipped assembly's *.deps.json) is a FALSE GREEN; the only way C#
+  # produces a PURE deliverable is the conventional separation of a 0-package LIBRARY project
+  # from a SEPARATE xunit TEST project, tied by a .sln. The library is then PHYSICALLY unable
+  # to carry the test packages — purity is structurally enforced, not prompt-enforced.
   owned_files:
-    - "{package_name}.csproj"
+    - "src/{package_name}/{package_name}.csproj"
+    - "tests/{package_name}.Tests/{package_name}.Tests.csproj"
+    - "{package_name}.sln"
 
   # Default values for the template substitution variables (consumed by the generic-
   # template scaffolder). {package_name} comes from the resolved LayoutProfile and always
-  # wins over a default; other vars (target_framework) fall back to these. New this
-  # increment so a TFM bump is a data edit, not a template/code edit.
+  # wins over a default; other vars fall back to these. A TFM / package-version bump is a
+  # DATA edit here, never a template/code edit.
   defaults:
     target_framework: "net8.0"
+    test_sdk_version: "17.11.1"
+    xunit_version: "2.9.2"
+    xunit_runner_version: "2.8.2"
 
+  # Three templates realize Option C. Substitution is REPLACE-based ({package_name} →
+  # value), so the literal braces in XML and in the .sln GUIDs are passed VERBATIM (str.format
+  # would raise on a GUID like {9A19103F-...}). Paths sit UNDER source_root=src / test_root=
+  # tests (consistent with the layout the synthesizer reads — the roots are the parents).
   templates:
-    - path: "{package_name}.csproj"
+    # (1) LIBRARY project — the deliverable. ZERO PackageReference (anti-false-green: a test
+    # package here would leak into <pkg>.deps.json). Lives at src/{pkg}/ so the SDK's implicit
+    # `**/*.cs` compile glob (project-dir-relative) captures the SUT's src/{pkg}/*.cs sources.
+    - path: "src/{package_name}/{package_name}.csproj"
       content_template: |
         <Project Sdk="Microsoft.NET.Sdk">
           <PropertyGroup>
@@ -219,13 +243,68 @@ scaffold:
             <ImplicitUsings>enable</ImplicitUsings>
           </PropertyGroup>
         </Project>
+    # (2) TEST project — carries the xunit/test SDK packages AND a ProjectReference back to
+    # the library. IsPackable=false (a test project is never a shipped package).
+    - path: "tests/{package_name}.Tests/{package_name}.Tests.csproj"
+      content_template: |
+        <Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup>
+            <TargetFramework>{target_framework}</TargetFramework>
+            <Nullable>enable</Nullable>
+            <ImplicitUsings>enable</ImplicitUsings>
+            <IsPackable>false</IsPackable>
+          </PropertyGroup>
+          <ItemGroup>
+            <PackageReference Include="Microsoft.NET.Test.Sdk" Version="{test_sdk_version}" />
+            <PackageReference Include="xunit" Version="{xunit_version}" />
+            <PackageReference Include="xunit.runner.visualstudio" Version="{xunit_runner_version}" />
+          </ItemGroup>
+          <ItemGroup>
+            <ProjectReference Include="../../src/{package_name}/{package_name}.csproj" />
+          </ItemGroup>
+        </Project>
+    # (3) SOLUTION — ties lib + test so a single root `dotnet test` resolves the whole VB
+    # surface. GUIDs are STATIC/deterministic (a fixed-string scaffold is reproducible; the
+    # .NET-SDK project-type GUID 9A19103F… + one fixed GUID per project). Space-indented (the
+    # dotnet sln parser accepts spaces; keeps this a clean YAML literal block, no tabs).
+    - path: "{package_name}.sln"
+      content_template: |
+        Microsoft Visual Studio Solution File, Format Version 12.00
+        # Visual Studio Version 17
+        VisualStudioVersion = 17.0.31903.59
+        MinimumVisualStudioVersion = 10.0.40219.1
+        Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "{package_name}", "src/{package_name}/{package_name}.csproj", "{11111111-1111-1111-1111-111111111111}"
+        EndProject
+        Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "{package_name}.Tests", "tests/{package_name}.Tests/{package_name}.Tests.csproj", "{22222222-2222-2222-2222-222222222222}"
+        EndProject
+        Global
+            GlobalSection(SolutionConfigurationPlatforms) = preSolution
+                Debug|Any CPU = Debug|Any CPU
+                Release|Any CPU = Release|Any CPU
+            EndGlobalSection
+            GlobalSection(ProjectConfigurationPlatforms) = postSolution
+                {11111111-1111-1111-1111-111111111111}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+                {11111111-1111-1111-1111-111111111111}.Debug|Any CPU.Build.0 = Debug|Any CPU
+                {11111111-1111-1111-1111-111111111111}.Release|Any CPU.ActiveCfg = Release|Any CPU
+                {11111111-1111-1111-1111-111111111111}.Release|Any CPU.Build.0 = Release|Any CPU
+                {22222222-2222-2222-2222-222222222222}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+                {22222222-2222-2222-2222-222222222222}.Debug|Any CPU.Build.0 = Debug|Any CPU
+                {22222222-2222-2222-2222-222222222222}.Release|Any CPU.ActiveCfg = Release|Any CPU
+                {22222222-2222-2222-2222-222222222222}.Release|Any CPU.Build.0 = Release|Any CPU
+            EndGlobalSection
+            GlobalSection(SolutionProperties) = preSolution
+                HideSolutionNode = FALSE
+            EndGlobalSection
+        EndGlobal
 
 artifacts:
   harness_root: ".codd"
 
   harness_owned:
     - ".codd/**"
-    - "{package_name}.csproj"
+    - "src/{package_name}/{package_name}.csproj"
+    - "tests/{package_name}.Tests/{package_name}.Tests.csproj"
+    - "{package_name}.sln"
 
   ignored:
     - "bin/**"

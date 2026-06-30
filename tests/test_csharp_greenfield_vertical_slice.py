@@ -137,8 +137,14 @@ def test_csharp_coverage_gate_applies_not_noop() -> None:
     campaign = profile.verify_campaign
     assert campaign is not None
     assert campaign.report_format == "dotnet-trx"
-    # argv form (design A) with the --logger completion that emits the TRX.
-    assert campaign.command_argv == ("dotnet", "test", "--logger", "trx;LogFileName=test.trx")
+    # argv form (design A): --logger emits the TRX; --results-directory lands the SINGLE
+    # .trx at the ROOT-level TestResults/ where run_verify_campaign reads it. (A solution
+    # `dotnet test` otherwise writes a per-test-project TestResults/ — empirically the TRX
+    # would land at tests/<pkg>.Tests/TestResults/, NOT the declared report_relpath.)
+    assert campaign.command_argv == (
+        "dotnet", "test", "--logger", "trx;LogFileName=test.trx",
+        "--results-directory", "TestResults",
+    )
     assert campaign.report_relpath == "TestResults/test.trx"
 
 
@@ -174,32 +180,90 @@ def test_synthesize_toolchain_dependencies_lock_branch_is_data_driven() -> None:
     assert result.package_manager_version_command is None
 
 
-# ── (4) generic-template scaffolder ─────────────────────────────────────────────
+# ── (4) generic-template scaffolder → IDIOMATIC C# multi-project (Option C) ──────
 
 
-def test_csharp_scaffolds_csproj_from_template(tmp_path: Path) -> None:
-    """scaffold_layout writes the .csproj from the YAML template (create-only / idempotent
-    / non-clobber), substituting {package_name} + scaffold.defaults (target_framework)."""
+def test_csharp_scaffolds_idiomatic_multi_project(tmp_path: Path) -> None:
+    """scaffold_layout writes the IDIOMATIC C# topology from the YAML templates: a 0-pkg
+    LIBRARY project under ``src/{pkg}/``, a SEPARATE xunit TEST project under
+    ``tests/{pkg}.Tests/`` (ProjectReference back to the lib), and a root ``.sln`` that
+    ties them — create-only / idempotent / non-clobber, substituting {package_name} +
+    scaffold.defaults (target_framework, package versions)."""
     profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
     assert profile is not None
 
     result = scaffold_layout(tmp_path, profile)
-    assert "todo_cli.csproj" in result.created
-    csproj = tmp_path / "todo_cli.csproj"
-    assert csproj.is_file()
-    text = csproj.read_text(encoding="utf-8")
-    assert "<TargetFramework>net8.0</TargetFramework>" in text  # defaults substituted
-    assert "{" not in text and "}" not in text  # no unsubstituted placeholder leaked
+    lib = tmp_path / "src" / "todo_cli" / "todo_cli.csproj"
+    test = tmp_path / "tests" / "todo_cli.Tests" / "todo_cli.Tests.csproj"
+    sln = tmp_path / "todo_cli.sln"
+    assert lib.is_file() and test.is_file() and sln.is_file()
+    assert {
+        "src/todo_cli/todo_cli.csproj",
+        "tests/todo_cli.Tests/todo_cli.Tests.csproj",
+        "todo_cli.sln",
+    } <= set(result.created)
 
-    # idempotent: a second call creates nothing, skips the existing file.
+    # scaffold.defaults substituted; no UNSUBSTITUTED template var leaked. (The .sln
+    # legitimately contains GUID braces, so we assert on the actual {var} tokens — never
+    # on the mere presence of a brace, which would false-RED on a valid GUID.)
+    assert "<TargetFramework>net8.0</TargetFramework>" in lib.read_text(encoding="utf-8")
+    for f in (lib, test, sln):
+        body = f.read_text(encoding="utf-8")
+        for var in (
+            "{package_name}", "{target_framework}", "{test_sdk_version}",
+            "{xunit_version}", "{xunit_runner_version}",
+        ):
+            assert var not in body, (f.name, var)
+
+    # idempotent: a second call creates nothing, skips the existing files.
     result2 = scaffold_layout(tmp_path, profile)
     assert result2.created == ()
-    assert "todo_cli.csproj" in result2.skipped
+    assert "src/todo_cli/todo_cli.csproj" in result2.skipped
 
     # non-clobber: an authored file is left byte-for-byte.
-    csproj.write_text("AUTHORED", encoding="utf-8")
+    lib.write_text("AUTHORED", encoding="utf-8")
     scaffold_layout(tmp_path, profile)
-    assert csproj.read_text(encoding="utf-8") == "AUTHORED"
+    assert lib.read_text(encoding="utf-8") == "AUTHORED"
+
+
+def test_csharp_library_deliverable_is_pure_no_test_packages(tmp_path: Path) -> None:
+    """ANTI-FALSE-GREEN (the load-bearing point of Option C): the LIBRARY project — the
+    actual deliverable — carries ZERO third-party/test PackageReferences. The single-
+    project model (one .csproj that builds+tests green but bakes xunit into the shipped
+    assembly's deps.json) is a FALSE GREEN; this pins the STRUCTURAL purity that forbids it.
+    A regression that re-collapses the test packages into the lib .csproj turns this RED."""
+    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    assert profile is not None
+    scaffold_layout(tmp_path, profile)
+
+    lib_text = (tmp_path / "src" / "todo_cli" / "todo_cli.csproj").read_text(encoding="utf-8")
+    assert "PackageReference" not in lib_text, "lib deliverable must have NO PackageReference"
+    assert "xunit" not in lib_text.lower(), "lib deliverable must not reference xunit"
+    assert "Test.Sdk" not in lib_text, "lib deliverable must not reference the test SDK"
+
+    # the test deps + the source<-test linkage live ONLY in the separate test project.
+    test_text = (
+        tmp_path / "tests" / "todo_cli.Tests" / "todo_cli.Tests.csproj"
+    ).read_text(encoding="utf-8")
+    assert "xunit" in test_text.lower()
+    assert "Microsoft.NET.Test.Sdk" in test_text
+    assert "xunit.runner.visualstudio" in test_text
+    assert '<ProjectReference Include="../../src/todo_cli/todo_cli.csproj" />' in test_text
+
+
+def test_csharp_solution_references_both_projects(tmp_path: Path) -> None:
+    """The root .sln ties the lib + test projects together so a single root ``dotnet test``
+    resolves the whole surface. GUID braces survive the REPLACE-based substitution
+    (``str.format`` would raise on them) — the reason the scaffolder is replace-based."""
+    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    assert profile is not None
+    scaffold_layout(tmp_path, profile)
+    sln = (tmp_path / "todo_cli.sln").read_text(encoding="utf-8")
+    assert "src/todo_cli/todo_cli.csproj" in sln
+    assert "tests/todo_cli.Tests/todo_cli.Tests.csproj" in sln
+    # the .NET-SDK project-type GUID is intact and exactly the two projects are declared.
+    assert "{9A19103F-16F7-4668-BE54-9A1E7A4F7556}" in sln
+    assert sln.count("Project(") == 2
 
 
 # ── (5) import-coherence does NOT false-RED for csharp ──────────────────────────
@@ -230,13 +294,16 @@ def test_csharp_import_coherence_no_false_red(tmp_path: Path) -> None:
 # ── (6) harness_owned_scaffold_paths includes the csproj ────────────────────────
 
 
-def test_csharp_harness_owned_scaffold_paths_includes_csproj() -> None:
-    """The orphan-gate / write-fence must recognise the scaffolded .csproj as harness-
-    owned (not an unowned orphan)."""
+def test_csharp_harness_owned_scaffold_paths_includes_all_three() -> None:
+    """The orphan-gate / write-fence must recognise ALL THREE scaffolded files (lib csproj,
+    test csproj, .sln) as harness-owned — never unowned orphans, never reverted by the
+    scoped-rerun write-fence."""
     profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
     assert profile is not None
     owned = profile.harness_owned_scaffold_paths()
-    assert "todo_cli.csproj" in owned
+    assert "src/todo_cli/todo_cli.csproj" in owned
+    assert "tests/todo_cli.Tests/todo_cli.Tests.csproj" in owned
+    assert "todo_cli.sln" in owned
 
 
 # ── (7) Go exclusion: opt-out stays a strict NO-OP ──────────────────────────────
