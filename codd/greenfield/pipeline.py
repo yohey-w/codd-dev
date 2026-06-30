@@ -1204,6 +1204,26 @@ class GreenfieldPipeline:
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {task.task_id: units.get(task.task_id, STATUS_PENDING) for task in tasks}
 
+        # Scaffold the harness-owned stack TOPOLOGY before the per-task loop runs
+        # any task gate / build-oracle. The per-task runner's contract check
+        # (_verify_task_contract) and any compiler-class build run task-by-task,
+        # INSIDE the loop below; for a MANIFEST-DRIVEN stack the build resolves its
+        # compile surface from a harness-owned manifest the AI never authors (a C#
+        # ``src/<Pkg>/<Pkg>.csproj`` + ``<Pkg>.sln`` — the SDK compiles ONLY what a
+        # project file's implicit glob captures). Until now scaffold_layout ran only
+        # at verify and implement-END, so the FIRST task's build saw NO manifest and
+        # compiled zero files — an honest-looking RED with no real defect. Running
+        # the scaffold here puts that topology on disk BEFORE the first build. It is
+        # PROFILE-DRIVEN (dispatched through the layout-profile / scaffolder-id
+        # registry — never a language-name branch) so it is the SAME idempotent,
+        # non-clobbering, create-only call verify and the implement-end finalizers
+        # already use: a strict no-op for a stack with no scaffolder (and for a
+        # legacy Python/TS stack it merely materializes the same topology earlier —
+        # a SUT/AI-authored file is preserved byte-for-byte, and verify's later
+        # re-scaffold is a no-op). Advisory (self-swallowing); the verify honesty +
+        # coherence gates remain the authorities on whether the build is certifiable.
+        self._ensure_test_runner(project_root)
+
         runner = self.implement_task_runner or self._default_implement_task_runner
         for task in tasks:
             if record["units"][task.task_id] == STATUS_DONE:

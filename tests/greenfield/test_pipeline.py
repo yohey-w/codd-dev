@@ -1364,6 +1364,223 @@ def test_verify_stage_unknown_stack_still_gates_honesty(tmp_path: Path) -> None:
     assert not (project / "pyproject.toml").exists()
 
 
+# ═══════════════════════════════════════════════════════════
+# Scaffold lifecycle: harness-owned topology exists BEFORE the
+# per-task loop's build/oracle (greenfield ② generic-fix A)
+# ═══════════════════════════════════════════════════════════
+#
+# The implement stage runs a per-task loop; each task's contract check
+# (_verify_task_contract) and any compiler-class build run task-by-task, INSIDE
+# that loop. For a MANIFEST-DRIVEN stack (C#: the SDK compiles only what a
+# ``<Pkg>.csproj`` implicit glob captures) the build resolves its compile surface
+# from a harness-owned manifest the AI never authors. Before this fix
+# scaffold_layout ran ONLY at verify + implement-END, so the FIRST task's build
+# saw no .csproj/.sln and compiled zero files — an honest-looking RED with no real
+# defect. The fix runs the (profile-driven, idempotent, non-clobbering) scaffold
+# at implement-START, before the loop. These tests pin the ORDERING for C# and the
+# language-agnostic call-order, plus the idempotency / Python non-regression.
+
+
+def _make_csharp_project(tmp_path: Path, *, name: str = "TodoCli") -> Path:
+    """A pre-initialized CoDD project declaring the manifest-driven C# stack.
+
+    Mirrors ``make_stub_project`` but ``language: csharp`` so ``_layout_inputs``
+    resolves the synthesized C# layout profile (the generic-template scaffolder
+    writes ``src/<Pkg>/<Pkg>.csproj`` + ``tests/<Pkg>.Tests/...`` + ``<Pkg>.sln``).
+    """
+    project = tmp_path / name
+    codd_dir = project / "codd"
+    (codd_dir / "scan").mkdir(parents=True)
+    config: dict = {
+        "project": {"name": name, "language": "csharp"},
+        "ai_command": "stub-ai-cli --print",
+        "scan": {
+            "source_dirs": ["src/"],
+            "test_dirs": ["tests/"],
+            "doc_dirs": ["docs/"],
+            "config_files": [],
+            "exclude": [],
+        },
+        "graph": {"store": "jsonl", "path": "codd/scan"},
+        # The composite C# implement-oracle would shell out to ``dotnet``; these
+        # tests isolate the SCAFFOLD ordering, so opt it out at config level too
+        # (the stage tests below also stub the gate method as defense in depth).
+        "implement": {"implement_oracle": False},
+        "test_coverage": {"gate": False},
+    }
+    (codd_dir / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return project
+
+
+def test_implement_scaffolds_harness_owned_layout_before_per_task_loop(tmp_path: Path) -> None:
+    """(A-core, RED-before-green) The harness-owned C# topology (lib ``.csproj``,
+    test ``.csproj``, root ``.sln`` — PascalCase preserved) must exist on disk at
+    the FIRST task's evaluation, i.e. BEFORE the per-task loop runs any build/gate.
+
+    Today (scaffold only at verify + implement-end) this is RED: the first task
+    sees no manifest. After the fix the implement-start scaffold makes it GREEN.
+    """
+    project = _make_csharp_project(tmp_path, name="TodoCli")
+
+    observed: dict[str, bool] = {}
+
+    def task_lister(_root):
+        return [
+            ImplementTaskRef(task_id="t_core", design_node="docs/design/core_design.md"),
+            ImplementTaskRef(task_id="t_cli", design_node="docs/design/cli_design.md"),
+        ]
+
+    def implement_task_runner(root, task, **kwargs):
+        # Record the disk state ONCE, at the FIRST task evaluation — this stands in
+        # for the per-task gate / manifest-driven build that runs here in real life.
+        if not observed:
+            root = Path(root)
+            observed["lib_csproj"] = (root / "src" / "TodoCli" / "TodoCli.csproj").is_file()
+            observed["test_csproj"] = (
+                root / "tests" / "TodoCli.Tests" / "TodoCli.Tests.csproj"
+            ).is_file()
+            observed["sln"] = (root / "TodoCli.sln").is_file()
+        return "0 file(s) generated"
+
+    pipeline = GreenfieldPipeline(
+        task_lister=task_lister, implement_task_runner=implement_task_runner
+    )
+    # The post-loop C# composite oracle would invoke ``dotnet``; stub it so the
+    # test exercises ONLY the implement-start scaffold ordering.
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(pipeline, "_enforce_implement_oracle_gate", lambda *a, **k: None)
+    try:
+        record: dict = {}
+        pipeline._stage_implement(project, record, {"coverage_gate": False})
+    finally:
+        monkey.undo()
+
+    assert observed.get("lib_csproj") is True, "lib .csproj must exist before the first task's build"
+    assert observed.get("test_csproj") is True, "test .csproj must exist before the first task's build"
+    assert observed.get("sln") is True, "solution .sln must exist before the first task's build"
+
+
+def test_implement_start_scaffold_runs_before_first_task_runner(tmp_path: Path) -> None:
+    """(RED-before-green, language-agnostic) ``_ensure_test_runner`` (the
+    profile-driven scaffold) is invoked at implement-START — before the first
+    per-task runner. Today the implement stage never scaffolds for a Python stack
+    (the implement-end finalizer short-circuits on a no-toolchain stack), so the
+    timeline has no scaffold marker → RED. The fix prepends it → GREEN."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")  # python stack
+    timeline: list[str] = []
+
+    pipeline = GreenfieldPipeline()
+    real_ensure = pipeline._ensure_test_runner
+
+    def spy_ensure(root):
+        timeline.append("scaffold")
+        return real_ensure(root)
+
+    def task_lister(_root):
+        return [ImplementTaskRef(task_id="t1", design_node="docs/design/core_design.md")]
+
+    def implement_task_runner(_root, task, **kwargs):
+        timeline.append(f"task:{task.task_id}")
+        return "ok"
+
+    pipeline.task_lister = task_lister
+    pipeline.implement_task_runner = implement_task_runner
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(pipeline, "_ensure_test_runner", spy_ensure)
+    monkey.setattr(pipeline, "_enforce_implement_oracle_gate", lambda *a, **k: None)
+    try:
+        pipeline._stage_implement(project, {}, {"coverage_gate": False})
+    finally:
+        monkey.undo()
+
+    assert "scaffold" in timeline, "the implement stage must scaffold the topology"
+    assert "task:t1" in timeline
+    assert timeline.index("scaffold") < timeline.index("task:t1"), timeline
+
+
+def test_implement_start_scaffold_is_idempotent_and_non_clobbering(tmp_path: Path) -> None:
+    """(idempotency) The implement-start scaffold + a later (implement-end / verify)
+    re-scaffold is safe: create-only / non-clobber. A file authored INTO the
+    scaffolded lib dir during the loop survives, and a second ``_ensure_test_runner``
+    neither overwrites the harness manifest the test then customizes nor duplicates."""
+    project = _make_csharp_project(tmp_path, name="TodoCli")
+
+    def task_lister(_root):
+        return [ImplementTaskRef(task_id="t_core", design_node="docs/design/core_design.md")]
+
+    def implement_task_runner(root, task, **kwargs):
+        # AI authors a source file INTO the scaffolded lib project dir (which the
+        # implement-START scaffold created just before this loop). mkdir is defensive
+        # so the assertion that fails without the fix is the harness-owned ``.csproj``
+        # absence (below), not an incidental write error.
+        lib_dir = Path(root) / "src" / "TodoCli"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        (lib_dir / "Calculator.cs").write_text("// AI authored\n", encoding="utf-8")
+        return "1 file(s) generated"
+
+    pipeline = GreenfieldPipeline(
+        task_lister=task_lister, implement_task_runner=implement_task_runner
+    )
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(pipeline, "_enforce_implement_oracle_gate", lambda *a, **k: None)
+    try:
+        pipeline._stage_implement(project, {}, {"coverage_gate": False})
+
+        lib_csproj = project / "src" / "TodoCli" / "TodoCli.csproj"
+        ai_file = project / "src" / "TodoCli" / "Calculator.cs"
+        assert lib_csproj.is_file()
+        assert ai_file.read_text(encoding="utf-8") == "// AI authored\n"
+
+        # An author/AI customization of the harness manifest is authoritative: the
+        # second scaffold (implement-end / verify) leaves it byte-for-byte.
+        lib_csproj.write_text("AUTHORED", encoding="utf-8")
+        pipeline._ensure_test_runner(project)  # the second execution
+    finally:
+        monkey.undo()
+
+    assert lib_csproj.read_text(encoding="utf-8") == "AUTHORED", "non-clobber on re-scaffold"
+    assert ai_file.read_text(encoding="utf-8") == "// AI authored\n"
+
+
+def test_implement_start_scaffold_does_not_regress_python(tmp_path: Path) -> None:
+    """(Python non-regression) The implement-start scaffold is a benign early
+    materialization for a legacy Python stack: it does NOT clobber a SUT/AI-authored
+    source file, and the runnable ``pyproject.toml`` + package topology end up present
+    exactly as the verify-time scaffold produced them before."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")  # python stack
+
+    def task_lister(_root):
+        return [ImplementTaskRef(task_id="t1", design_node="docs/design/core_design.md")]
+
+    def implement_task_runner(root, task, **kwargs):
+        # AI authors the package module; the implement-start scaffold already created
+        # the package __init__/__main__, so this must coexist (non-clobber).
+        pkg = Path(root) / "src" / "stub_app"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "core.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        return "1 file(s) generated"
+
+    pipeline = GreenfieldPipeline(
+        task_lister=task_lister, implement_task_runner=implement_task_runner
+    )
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(pipeline, "_enforce_implement_oracle_gate", lambda *a, **k: None)
+    try:
+        pipeline._stage_implement(project, {}, {"coverage_gate": False})
+    finally:
+        monkey.undo()
+
+    # The Python topology was scaffolded (runnable pyproject, package init) and the
+    # AI-authored module is intact — no clobber, same end state as the verify scaffold.
+    assert (project / "pyproject.toml").is_file()
+    assert "[tool.pytest" in (project / "pyproject.toml").read_text(encoding="utf-8")
+    assert (project / "src" / "stub_app" / "__init__.py").is_file()
+    assert (
+        project / "src" / "stub_app" / "core.py"
+    ).read_text(encoding="utf-8") == "def add(a, b):\n    return a + b\n"
+
+
 # ---------------------------------------------------------------------------
 # a+ refinement: the greenfield propagate window must cover the REAL build
 # delta. A fresh build has its generated source<->design UNTRACKED (and may
