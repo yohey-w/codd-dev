@@ -374,6 +374,33 @@ def _add_design_edges(
                 dag.add_edge(Edge(from_id=node_id, to_id=impl_id, kind="expects"))
 
 
+@dataclass
+class ImportResidueReport:
+    """Unresolved internal-import residue, computed once and shared (drift-proof).
+
+    GENERIC FIX 1 — the convergence safety-net. Attached to the DAG by
+    :func:`_add_import_edges` (the single place import resolution happens) and
+    consumed by BOTH the advisory :func:`_warn_unresolved_residue` and the
+    first-class ``unresolved_import_residue`` DAG check, so the warning and the
+    check can never drift (``codd dag verify`` rebuilds the DAG in-memory, so the
+    check reads this exact object). Mirrors the established ``dag.coverage_axes``
+    attach. Fields:
+
+    * ``residue`` — ``"<node_id>: <specifier>"`` for each INTERNAL-looking import
+      specifier (relative / first-party alias / C++ quote include) that resolved
+      to no in-tree node — a discovery gap made visible. This is the SAME list the
+      advisory warns about (insertion order preserved).
+    * ``internal_import_count`` — total internal-looking specifiers examined
+      (resolved + unresolved); it is the SKIP/PASS denominator for the check
+      (``0`` means nothing was examined → SKIP, never a vacuous green PASS).
+
+    This is a measurement only; it makes no pass/fail decision (the consumers do).
+    """
+
+    residue: list[str]
+    internal_import_count: int
+
+
 def _add_import_edges(
     dag: DAG,
     project_root: Path,
@@ -384,6 +411,7 @@ def _add_import_edges(
     path_to_node = {path: node_id for node_id, path in impl_nodes.items()}
 
     residue: list[str] = []
+    internal_import_count = 0
     for node_id, file_path in impl_nodes.items():
         imports = dag.nodes[node_id].attributes.get("imports", [])
         seen_targets: set[str] = set()
@@ -402,9 +430,25 @@ def _add_import_edges(
             # GENERIC FIX 1: an INTERNAL-looking specifier (a relative import, or a
             # first-party alias-prefixed one) that resolved to NOTHING is explicit
             # "unresolved residue" — a discovery gap made VISIBLE (surfacing only).
-            if not resolved_any and _is_internal_looking_specifier(import_ref, aliases):
-                residue.append(f"{node_id}: {import_ref}")
+            # We evaluate the (pure, data-driven) internal-looking predicate for
+            # EVERY specifier — not only unresolved ones — so we can BOTH collect
+            # the residue AND count how many internal-looking specifiers were
+            # examined (the SKIP/PASS denominator for the ``unresolved_import_residue``
+            # check). No per-language branch: the predicate is shape-driven. The
+            # residue membership condition is unchanged, so the advisory warning is
+            # byte-for-byte identical.
+            if _is_internal_looking_specifier(import_ref, aliases):
+                internal_import_count += 1
+                if not resolved_any:
+                    residue.append(f"{node_id}: {import_ref}")
 
+    # Single source of truth: attach the SAME residue the advisory warns about so
+    # the first-class ``unresolved_import_residue`` DAG check consumes one shared
+    # measurement and can never drift from the warning.
+    dag.import_residue_report = ImportResidueReport(
+        residue=residue,
+        internal_import_count=internal_import_count,
+    )
     _warn_unresolved_residue(residue)
 
 

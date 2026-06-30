@@ -34,6 +34,7 @@ CHECK_MODULES = (
     "codd.dag.checks.negative_space",
     "codd.dag.checks.semantic_contract_conflict",
     "codd.dag.checks.source_completeness",
+    "codd.dag.checks.unresolved_import_residue",
 )
 
 
