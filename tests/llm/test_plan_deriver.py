@@ -484,3 +484,105 @@ def test_deriver_persists_canonical_source_design_doc(tmp_path):
     record = read_derived_task_cache(cache_path)
     assert record is not None
     assert record.tasks[0].source_design_doc == "docs/design/api_interface_contract.md"
+
+
+# ─────────────────────────────────────────────────────────────
+# harness-owned scaffold outputs are dropped from a derived task's deliverables
+# (greenfield ② generic-fix B — ownership wired into task DERIVATION). A
+# profile-declared harness-owned scaffold artifact (e.g. a C# ``.csproj`` whose
+# manifest lives under ``src/``) is created by the harness, never authored by the
+# SUT, so it must NOT be listed as an AI implement task's expected output. The
+# drop is a CLOSED set keyed on ``LayoutProfile.harness_owned_scaffold_paths()``
+# (no language literal, no path prefix): a REAL source file is always kept.
+# ─────────────────────────────────────────────────────────────
+
+
+def _csharp_project(tmp_path: Path) -> Path:
+    return _write_project(
+        tmp_path,
+        config={
+            "project": {"name": "TextKit", "language": "csharp"},
+            "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]},
+        },
+    )
+
+
+def test_exclude_harness_owned_outputs_drops_csproj_keeps_real_source(tmp_path):
+    """A derived task's harness-owned scaffold output (C# ``.csproj``) is dropped
+    from ``expected_outputs`` (the harness scaffolds it), while a REAL source file
+    the profile does NOT own is kept (anti-false-green)."""
+    from codd.llm.plan_deriver import exclude_harness_owned_outputs
+
+    project = _csharp_project(tmp_path)
+    task = DerivedTask(
+        id="scaffold_zero_dependency_library",
+        title="t",
+        description="d",
+        source_design_doc="docs/design/contract.md",
+        v_model_layer="detailed",
+        expected_outputs=[
+            "src/TextKit/TextKit.csproj",          # harness-owned → dropped
+            "tests/TextKit.Tests/TextKit.Tests.csproj",  # harness-owned → dropped
+            "TextKit.sln",                         # harness-owned → dropped
+            "src/TextKit/Foo.cs",                  # REAL source → kept
+        ],
+    )
+    [out] = exclude_harness_owned_outputs([task], {"project_root": project})
+    assert out.expected_outputs == ["src/TextKit/Foo.cs"]
+
+
+def test_exclude_harness_owned_outputs_noop_without_resolvable_profile():
+    """Fail-closed: with no resolvable profile (no project_root in context) the
+    harness-owned set is empty and every task is returned UNCHANGED — never an
+    over-broad exclusion."""
+    from codd.llm.plan_deriver import exclude_harness_owned_outputs
+
+    task = DerivedTask(
+        id="t",
+        title="t",
+        description="d",
+        source_design_doc="d",
+        v_model_layer="detailed",
+        expected_outputs=["src/TextKit/TextKit.csproj", "src/foo.cs"],
+    )
+    out = exclude_harness_owned_outputs([task], {})
+    assert out[0].expected_outputs == ["src/TextKit/TextKit.csproj", "src/foo.cs"]
+
+
+def test_exclude_harness_owned_outputs_python_keeps_real_source(tmp_path):
+    """Python non-regression: a real source path is kept; the harness-owned
+    ``pyproject.toml`` / package ``__init__.py`` (if ever declared) are dropped."""
+    from codd.llm.plan_deriver import exclude_harness_owned_outputs
+
+    project = _write_project(tmp_path)  # name=demo, language=python
+    task = DerivedTask(
+        id="t",
+        title="t",
+        description="d",
+        source_design_doc="docs/design/contract.md",
+        v_model_layer="detailed",
+        expected_outputs=["pyproject.toml", "src/demo/__init__.py", "src/contract.py"],
+    )
+    [out] = exclude_harness_owned_outputs([task], {"project_root": project})
+    assert out.expected_outputs == ["src/contract.py"]
+
+
+def test_derive_tasks_excludes_harness_owned_output_in_cache(tmp_path):
+    """End-to-end: ``derive_tasks`` drops the harness-owned declared output before
+    caching, so ``list_implement_tasks`` never sees the AI 'owning' the scaffold."""
+    raw = (
+        '{"tasks": [{"id": "scaffold_library", "title": "t", "description": "d", '
+        '"source_design_doc": "docs/design/contract.md", "v_model_layer": "detailed", '
+        '"expected_outputs": ["src/TextKit/TextKit.csproj", "src/TextKit/Foo.cs"], '
+        '"test_kinds": ["unit"], "dependencies": []}]}'
+    )
+    project = _csharp_project(tmp_path)
+    tasks = SubprocessAiCommandPlanDeriver(FakeAiCommand([raw])).derive_tasks(
+        [_node()], "detailed", {"project_root": project}
+    )
+    assert len(tasks) == 1
+    assert tasks[0].expected_outputs == ["src/TextKit/Foo.cs"]
+    # The persisted cache reflects the exclusion too (list_implement_tasks reads it).
+    record = read_derived_task_cache(derived_task_cache_path([_node()], {"project_root": project}))
+    assert record is not None
+    assert record.tasks[0].expected_outputs == ["src/TextKit/Foo.cs"]

@@ -429,3 +429,194 @@ def test_verify_task_contract_runs_completeness_in_warn_without_breaking(tmp_pat
     # default config → warn only; no required kind for a bare .ts under no roots →
     # the kind gate is a no-op, the completeness check warns (echo discarded).
     _verify_task_contract(task, results, tmp_path, {}, echo=lambda _m: None)
+
+
+# ─────────────────────────────────────────────────────────────
+# harness-owned scaffold outputs wired into the kind / completeness contract
+# (greenfield ② generic-fix B). A profile-DECLARED harness-owned scaffold
+# artifact — a C# ``src/<Pkg>/<Pkg>.csproj`` whose dependency manifest lives
+# UNDER ``src/`` — is created by the harness SCAFFOLD, never authored by the SUT.
+# It must therefore impose NO source-kind / completeness obligation on the AI
+# task (the C# greenfield false-RED: "declared output kind [source] but produced
+# only [test]"). The exemption is a CLOSED set keyed on the profile's OWN
+# ``harness_owned_scaffold_paths()`` declaration (no ``language ==``, no path
+# prefix), so a REAL source file the profile does NOT own stays strictly gated.
+# ─────────────────────────────────────────────────────────────
+
+
+def _csharp_config(project_name: str = "TextKit") -> dict:
+    """A config that resolves to the C# LayoutProfile (manifest lives under src/).
+
+    C# is the first stack whose dependency manifest (``<Pkg>.csproj``) lives UNDER
+    the ``src/`` source root, so its harness-owned scaffold artifact is classified
+    SOURCE by the kind gate — the exact condition the exemption must neutralise.
+    """
+    return {
+        "project": {"name": project_name, "language": "csharp"},
+        "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]},
+    }
+
+
+def test_harness_owned_outputs_resolves_closed_cased_csharp_set(tmp_path):
+    """(C) cased path: the harness-owned set is resolved from config and contains
+    the EXACT, case-PRESERVED ``src/TextKit/TextKit.csproj`` (+ test csproj + sln)
+    — the closed set the exemption keys on. A real source file is NOT in it."""
+    from codd.greenfield.pipeline import _harness_owned_outputs
+
+    owned = _harness_owned_outputs(_csharp_config("TextKit"), tmp_path)
+    assert "src/TextKit/TextKit.csproj" in owned
+    assert "tests/TextKit.Tests/TextKit.Tests.csproj" in owned
+    assert "TextKit.sln" in owned
+    # The guard's negative half: a genuine SUT source file is NEVER in the set.
+    assert "src/TextKit/Foo.cs" not in owned
+
+
+def test_required_kinds_exempts_harness_owned_csproj(tmp_path):
+    """(B) core: a task whose only source-classified output is the harness-owned
+    ``.csproj`` imposes NO source-kind requirement. Today RED — the csproj sits
+    under ``src/`` so the kind gate classifies it SOURCE (the false-RED root)."""
+    from codd.greenfield.pipeline import _harness_owned_outputs, _required_kinds
+
+    config = _csharp_config("TextKit")
+    owned = _harness_owned_outputs(config, tmp_path)
+    task = ImplementTaskRef(
+        task_id="scaffold_zero_dependency_library",
+        design_node="n",
+        expected_outputs=("src/TextKit/TextKit.csproj",),
+    )
+    # Without the exemption the csproj is classified SOURCE (false-RED root cause).
+    assert _required_kinds(task, config) == {"source"}
+    # With the profile-declared CLOSED set, the harness-owned csproj imposes no kind.
+    assert _required_kinds(task, config, harness_owned=owned) == set()
+
+
+def test_verify_task_contract_passes_for_harness_owned_only_task(tmp_path):
+    """(B) end-to-end red-before-green: the scaffold task declares ONLY the
+    harness-owned ``.csproj``; the SUT produces only test files (it must NOT write
+    the csproj — the harness scaffolds it). Pre-fix this false-RED'd with "declared
+    output kind [source] but produced only [test]"; post-fix it is a clean no-op."""
+    config = _csharp_config("TextKit")
+    produced = tmp_path / "tests" / "TextKit.Tests" / "CoreTests.cs"
+    produced.parent.mkdir(parents=True)
+    produced.write_text("// xunit test\n", encoding="utf-8")
+    task = ImplementTaskRef(
+        task_id="scaffold_zero_dependency_library",
+        design_node="n",
+        expected_outputs=("src/TextKit/TextKit.csproj",),
+    )
+    results = [_Result(generated_files=[str(produced)])]
+    _verify_task_contract(task, results, tmp_path, config, echo=lambda _m: None)  # no raise
+
+
+def test_verify_task_contract_still_red_for_non_owned_source_csharp(tmp_path):
+    """★false-green guard (MOST IMPORTANT, C# exact-match): the exemption is
+    CLOSED-SET + EXACT. A task declares the harness-owned ``TextKit.csproj``
+    (exempt) AND a DIFFERENT source-classified path the profile does NOT own
+    (``src/Extra/Extra.csproj``); producing only a test MUST still hard-fail on
+    the non-owned source. If this goes green, the exemption has leaked past the
+    profile's closed declaration to a similar-looking-but-unowned path.
+
+    (NB: a C# ``.cs`` file classifies as TEST via the shared ``_TEST_SUFFIXES`` —
+    a pre-existing, separate behaviour — so the source-classified, non-owned
+    artifact used here is a second ``.csproj`` under ``src/``.)"""
+    config = _csharp_config("TextKit")
+    produced = tmp_path / "tests" / "TextKit.Tests" / "FooTests.cs"
+    produced.parent.mkdir(parents=True)
+    produced.write_text("// xunit test\n", encoding="utf-8")
+    task = ImplementTaskRef(
+        task_id="implement_extra",
+        design_node="n",
+        expected_outputs=(
+            "src/TextKit/TextKit.csproj",  # harness-owned → exempt
+            "src/Extra/Extra.csproj",      # NOT owned, source-classified → still required
+        ),
+    )
+    results = [_Result(generated_files=[str(produced)])]
+    with pytest.raises(StageError) as exc:
+        _verify_task_contract(task, results, tmp_path, config, echo=lambda _m: None)
+    assert "source" in str(exc.value)
+
+
+def test_verify_task_contract_still_red_for_non_owned_source_python(tmp_path):
+    """★false-green guard (cross-language, unambiguous): for Python a real source
+    file (``src/demo/core.py``) is classified SOURCE. A task declares the
+    harness-owned ``src/demo/__init__.py`` (exempt — the scaffold writes it) AND
+    ``src/demo/core.py`` (a real, non-owned source); producing only a test MUST
+    still hard-fail. The genuine source obligation survives the exemption."""
+    config = {
+        "project": {"name": "demo", "language": "python"},
+        "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]},
+    }
+    produced = tmp_path / "tests" / "test_core.py"
+    produced.parent.mkdir(parents=True)
+    produced.write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    task = ImplementTaskRef(
+        task_id="impl_core",
+        design_node="n",
+        expected_outputs=(
+            "src/demo/__init__.py",  # harness-owned → exempt
+            "src/demo/core.py",      # real source → still required
+        ),
+    )
+    results = [_Result(generated_files=[str(produced)])]
+    with pytest.raises(StageError) as exc:
+        _verify_task_contract(task, results, tmp_path, config, echo=lambda _m: None)
+    assert "source" in str(exc.value)
+
+
+def test_completeness_check_exempts_harness_owned_but_not_real_source(tmp_path):
+    """completeness gate (enforce): a missing harness-owned ``.csproj`` is NOT
+    flagged (the harness produces it), while a missing REAL source file IS — the
+    anti-false-green half of the same closed-set exemption."""
+    from codd.greenfield.pipeline import _harness_owned_outputs
+
+    config = _csharp_config("TextKit")
+    config["implement"] = {"declared_output_completeness": "enforce"}
+    owned = _harness_owned_outputs(config, tmp_path)
+    # harness-owned only, nothing produced and absent on disk → still NO raise.
+    task_owned = ImplementTaskRef(
+        task_id="scaffold", design_node="n",
+        expected_outputs=("src/TextKit/TextKit.csproj",),
+    )
+    _check_declared_output_completeness(
+        task_owned, [_Result(generated_files=[])], tmp_path, config,
+        echo=lambda _m: None, harness_owned=owned,
+    )  # no raise
+    # a REAL declared source file missing → hard-fail under enforce.
+    task_src = ImplementTaskRef(
+        task_id="impl", design_node="n",
+        expected_outputs=("src/TextKit/Foo.cs",),
+    )
+    with pytest.raises(StageError):
+        _check_declared_output_completeness(
+            task_src, [_Result(generated_files=[])], tmp_path, config,
+            echo=lambda _m: None, harness_owned=owned,
+        )
+
+
+def test_required_kinds_python_root_manifest_unchanged(tmp_path):
+    """Python/TS non-regression: a ROOT manifest (pyproject.toml / package.json)
+    is classified UNKNOWN (not under src/tests, not test-shaped) → contributes no
+    kind, with OR without the exemption. Real source + test stay required either
+    way — the harness-owned wiring must not perturb the existing no-op."""
+    from codd.greenfield.pipeline import (
+        _classify_declared_output,
+        _harness_owned_outputs,
+        _required_kinds,
+    )
+
+    py_config = {
+        "project": {"name": "demo", "language": "python"},
+        "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]},
+    }
+    # The root manifest is UNKNOWN — the reason Python/TS never hit the C# false-RED.
+    assert _classify_declared_output("pyproject.toml", py_config) is None
+    task = ImplementTaskRef(
+        task_id="t", design_node="n",
+        expected_outputs=("pyproject.toml", "src/demo/core.py", "tests/test_core.py"),
+    )
+    owned = _harness_owned_outputs(py_config, tmp_path)
+    base = _required_kinds(task, py_config)
+    exempt = _required_kinds(task, py_config, harness_owned=owned)
+    assert base == {"source", "test"}
+    assert exempt == {"source", "test"}

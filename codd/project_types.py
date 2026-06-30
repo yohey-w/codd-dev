@@ -1718,6 +1718,58 @@ def resolve_layout_profile(
     )
 
 
+def harness_owned_output_paths(
+    config: Any = None,
+    *,
+    project_root: Path | None = None,
+) -> frozenset[str]:
+    """The CLOSED, profile-declared set of harness-owned scaffold paths for a config.
+
+    Resolves the active stack's :class:`LayoutProfile` from the loaded project
+    ``config`` (``project.language`` / ``project.name`` / ``scan.*_dirs``) and
+    returns its :meth:`LayoutProfile.harness_owned_scaffold_paths` as a normalized
+    frozenset. These are the files the harness SCAFFOLD owns — created by the
+    harness, NEVER authored by the SUT/AI (e.g. a C# ``src/<Pkg>/<Pkg>.csproj``
+    whose dependency manifest lives UNDER ``src/``, the first stack whose manifest
+    is classified SOURCE by the kind gate).
+
+    This is the SINGLE authority both the task deriver
+    (:func:`codd.llm.plan_deriver.exclude_harness_owned_outputs`) and the implement
+    kind/completeness contract (greenfield pipeline) consult to decide which
+    declared outputs are scaffold-satisfied and therefore impose NO AI-produced
+    deliverable obligation. It is a CLOSED set keyed on the profile's OWN ownership
+    DECLARATION — never a path prefix, never a ``language ==`` literal — so an
+    arbitrary path can never claim exemption, and a real SOURCE file the profile
+    does not own (``src/<Pkg>/Foo.cs``) is never in it (anti-false-green).
+
+    Fail-closed: any resolution failure (no/unknown/unaccepted language, no
+    profile, a builder error) returns the EMPTY set — i.e. NO exemption, the
+    strict gate stays in force — never a wrong / over-broad set.
+    """
+    try:
+        section = config.get("project") if isinstance(config, Mapping) else None
+        language = section.get("language") if isinstance(section, Mapping) else None
+        project_name = section.get("name") if isinstance(section, Mapping) else None
+        scan = config.get("scan") if isinstance(config, Mapping) else None
+        source_dirs = scan.get("source_dirs") if isinstance(scan, Mapping) else None
+        test_dirs = scan.get("test_dirs") if isinstance(scan, Mapping) else None
+        profile = resolve_layout_profile(
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+            project_root=project_root,
+        )
+        if profile is None:
+            return frozenset()
+        return frozenset(
+            norm for rel in profile.harness_owned_scaffold_paths() if (norm := _norm_rel(rel))
+        )
+    except Exception:  # noqa: BLE001 — fail-closed: no exemption, strict gate.
+        return frozenset()
+
+
 # ═══════════════════════════════════════════════════════════
 # Deterministic scaffold (harness creates topology; model fills contents)
 # ═══════════════════════════════════════════════════════════

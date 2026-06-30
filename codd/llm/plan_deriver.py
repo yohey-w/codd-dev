@@ -191,6 +191,7 @@ class SubprocessAiCommandPlanDeriver(PlanDeriver):
         )
         tasks = apply_declarative_v_model_layers(tasks, design_docs)
         tasks = canonicalize_derived_task_references(tasks, project_context)
+        tasks = exclude_harness_owned_outputs(tasks, project_context)
 
         if write_cache:
             write_derived_task_cache(
@@ -375,6 +376,61 @@ def canonicalize_derived_task_references(
         else:
             canonical.append(task)
     return canonical
+
+
+def exclude_harness_owned_outputs(
+    tasks: list[DerivedTask],
+    project_context: Mapping[str, Any],
+) -> list[DerivedTask]:
+    """Drop profile-declared harness-owned scaffold paths from each task's outputs.
+
+    This binds artifact OWNERSHIP into task DERIVATION (greenfield ② generic-fix
+    B). A harness-owned scaffold artifact — e.g. a C# ``src/<Pkg>/<Pkg>.csproj``
+    whose dependency manifest lives UNDER ``src/`` — is created by the harness
+    SCAFFOLD, never authored by the SUT/AI. Listing it in a derived task's
+    ``expected_outputs`` makes the implement kind/completeness contract demand the
+    AI produce a file it must NOT write (the C# greenfield false-RED). An AI
+    implement task's deliverables are its SUT-authored outputs only, so a declared
+    output the profile owns is removed here, at the source.
+
+    CLOSED-SET, EXACT match (anti-false-green): a path is dropped ONLY when it is
+    in the profile's own
+    :meth:`~codd.project_types.LayoutProfile.harness_owned_scaffold_paths`
+    declaration (resolved via :func:`~codd.project_types.harness_owned_output_paths`).
+    A real SOURCE file the profile does NOT own (``src/<Pkg>/Foo.cs``) is NEVER
+    dropped and stays a declared deliverable subject to the source-kind gate — and
+    a non-Python/TS-classified path is unaffected.
+
+    Fail-closed: if the profile cannot be resolved (no project root/config, no/
+    unknown language) the harness-owned set is empty and every task is returned
+    unchanged — never an over-broad exclusion.
+    """
+    if not tasks:
+        return tasks
+
+    from codd.project_types import harness_owned_output_paths
+
+    project_root, config = _resolve_root_and_config(project_context)
+    harness_owned = harness_owned_output_paths(config, project_root=project_root)
+    if not harness_owned:
+        return tasks
+
+    rewritten: list[DerivedTask] = []
+    changed = False
+    for task in tasks:
+        kept = [
+            out
+            for out in task.expected_outputs
+            if str(out).strip().replace("\\", "/").strip("/") not in harness_owned
+        ]
+        if len(kept) != len(task.expected_outputs):
+            changed = True
+            data = task.to_dict()
+            data["expected_outputs"] = kept
+            rewritten.append(DerivedTask.from_dict(data))
+        else:
+            rewritten.append(task)
+    return rewritten if changed else tasks
 
 
 def _resolve_root_and_config(
@@ -699,6 +755,7 @@ __all__ = [
     "derived_task_cache_key",
     "derived_task_cache_path",
     "design_doc_bundle",
+    "exclude_harness_owned_outputs",
     "find_derived_task_cache",
     "iter_derived_task_records",
     "merge_approved_tasks_into_plan",

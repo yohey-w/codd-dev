@@ -2682,6 +2682,33 @@ def _has_test_shape(rel_path: str) -> bool:
     return False
 
 
+def _norm_decl_path(raw: Any) -> str:
+    """Normalize a declared-output path for EXACT comparison vs the owned set."""
+    return str(raw).strip().replace("\\", "/").strip("/")
+
+
+def _harness_owned_outputs(config: dict[str, Any], project_root: Path | None) -> frozenset[str]:
+    """The CLOSED, profile-declared set of harness-owned scaffold paths (or empty).
+
+    Thin wrapper over :func:`codd.project_types.harness_owned_output_paths` — the
+    SINGLE authority for "which declared outputs does the profile say the HARNESS
+    owns" (e.g. a C# ``src/<Pkg>/<Pkg>.csproj`` whose manifest lives under
+    ``src/``). These artifacts are created by the scaffold, never authored by the
+    SUT, so the kind/completeness contract must NOT demand the AI produce them.
+
+    The exemption keyed on this set is CLOSED + EXACT: only a path that the
+    profile itself declares harness-owned is exempt — a real SOURCE file the
+    profile does not own stays strictly gated (anti-false-green). Fail-closed: any
+    resolution failure yields the EMPTY set, so the gate stays strict.
+    """
+    try:
+        from codd.project_types import harness_owned_output_paths
+
+        return harness_owned_output_paths(config, project_root=project_root)
+    except Exception:  # noqa: BLE001 — fail-closed: no exemption, strict gate.
+        return frozenset()
+
+
 def _classify_declared_output(rel_path: str, config: dict[str, Any]) -> str | None:
     """Classify ONE ``expected_outputs`` entry as the deliverable KIND it implies.
 
@@ -2697,9 +2724,25 @@ def _classify_declared_output(rel_path: str, config: dict[str, Any]) -> str | No
     return None
 
 
-def _required_kinds(task: ImplementTaskRef, config: dict[str, Any]) -> set[str]:
+def _required_kinds(
+    task: ImplementTaskRef,
+    config: dict[str, Any],
+    *,
+    harness_owned: frozenset[str] | None = None,
+) -> set[str]:
+    """The deliverable KIND(s) a task's declared outputs require of the SUT.
+
+    A declared output in the profile's CLOSED ``harness_owned`` set (e.g. a C#
+    ``.csproj`` the scaffold creates) imposes NO kind — the harness produces it,
+    not the AI. EXACT match only: a real SOURCE file the profile does not own
+    stays classified and required (anti-false-green). ``harness_owned`` defaults
+    to ``None`` (no exemption), preserving the legacy behaviour for every caller
+    that does not resolve the profile.
+    """
     kinds: set[str] = set()
     for output in task.expected_outputs:
+        if harness_owned and _norm_decl_path(output) in harness_owned:
+            continue
         kind = _classify_declared_output(str(output), config)
         if kind is not None:
             kinds.add(kind)
@@ -2784,10 +2827,20 @@ def _verify_task_contract(
     ``warn`` by default (echo only — does NOT hard-fail existing runs), and
     ``enforce`` only when ``implement.declared_output_completeness: enforce`` is
     set. The kind check below is UNCHANGED (still a hard gate).
-    """
-    _check_declared_output_completeness(task, results, project_root, config, echo=echo)
 
-    required = _required_kinds(task, config)
+    A declared output the active profile says the HARNESS owns (its CLOSED
+    ``harness_owned_scaffold_paths`` — e.g. a C# ``src/<Pkg>/<Pkg>.csproj`` whose
+    manifest lives under ``src/``) is created by the scaffold, never authored by
+    the SUT, so it imposes NO source-kind / completeness obligation (the C#
+    greenfield false-RED). EXACT, closed-set match only — a real SOURCE file the
+    profile does not own stays gated (anti-false-green).
+    """
+    harness_owned = _harness_owned_outputs(config, project_root)
+    _check_declared_output_completeness(
+        task, results, project_root, config, echo=echo, harness_owned=harness_owned
+    )
+
+    required = _required_kinds(task, config, harness_owned=harness_owned)
     if not required:
         return
     generated: list[Any] = []
@@ -2845,6 +2898,7 @@ def _check_declared_output_completeness(
     config: dict[str, Any],
     *,
     echo: Callable[[str], None],
+    harness_owned: frozenset[str] | None = None,
 ) -> None:
     """WARN-by-default: an EXACT declared ``expected_outputs`` path was not produced.
 
@@ -2862,11 +2916,18 @@ def _check_declared_output_completeness(
     mode = _declared_output_completeness_mode(config)
     if mode == "off":
         return
-    declared_files = [
-        str(out).strip().replace("\\", "/").strip("/")
-        for out in task.expected_outputs
-        if _declared_output_is_file_path(str(out))
-    ]
+    declared_files: list[str] = []
+    for out in task.expected_outputs:
+        if not _declared_output_is_file_path(str(out)):
+            continue
+        rel = _norm_decl_path(out)
+        # A profile-declared harness-owned scaffold artifact (e.g. a C# ``.csproj``)
+        # is created by the harness, never authored by the SUT — it is not a
+        # missing AI deliverable. EXACT, closed-set match only; a real source file
+        # the profile does not own stays subject to the completeness check.
+        if harness_owned and rel in harness_owned:
+            continue
+        declared_files.append(rel)
     if not declared_files:
         return
 
