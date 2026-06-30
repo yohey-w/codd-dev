@@ -94,8 +94,8 @@ from typing import Any
 from codd.project_types import (
     ImplementOracleSpec,
     LayoutProfile,
-    OracleScopeSpec,
     resolve_layout_profile,
+    synthesize_implement_oracle_spec,
 )
 
 # Value-objects + evidence constants relocated to the LEAF module so the Contract
@@ -1503,6 +1503,14 @@ def _resolve_registry_oracle(
     if contract is None:
         return None
     lang_profile, oracle_decl, _adapter = contract
+    # SHARED spec construction (drift-proofing): build the ImplementOracleSpec via the
+    # SAME helper the synthesized LayoutProfile uses
+    # (``codd.project_types.synthesize_implement_oracle_spec``), so a stack that LATER
+    # gains a synthesized profile (csharp) keeps byte-identical oracle behaviour whether
+    # it reaches the oracle via the legacy-profile path or this registry path.
+    spec = synthesize_implement_oracle_spec(lang_profile)
+    if spec is None:
+        return None
     kind = getattr(oracle_decl, "kind", None)
     if kind == "adapter":
         # An in-process ``kind="adapter"`` oracle reads the LayoutSpec off the resolved
@@ -1520,17 +1528,9 @@ def _resolve_registry_oracle(
             source_root=_carrier_root,
             package_root=_carrier_root,
             test_root="tests",
-            implement_oracle=ImplementOracleSpec(
-                command=f"{lang_profile.id}-adapter",  # sentinel; kind dispatch runs the contract path
-                kind="adapter",
-                # An adapter bakes its own scope policy in certify_scope; the spec scope
-                # is not the authority. Default both-required (the conservative, Python-
-                # composite-matching choice) — the adapter may still strengthen.
-                scope=OracleScopeSpec(require_source_root=True, require_test_root=True),
-                requires_node_install=False,
-            ),
+            implement_oracle=spec,
         )
-        return synthetic, synthetic.implement_oracle
+        return synthetic, spec
     # command / composite: a command-sequence oracle. Carry the module root for the
     # commands' cwd; the executor reads argv/cwd/env from lang_profile.layout.
     module_root = _norm(getattr(lang_profile.layout, "module_root", ".") or ".") or "."
@@ -1540,14 +1540,9 @@ def _resolve_registry_oracle(
         source_root=module_root,  # carries the module root for the go commands' cwd
         package_root=module_root,
         test_root=module_root,
-        implement_oracle=ImplementOracleSpec(
-            command=f"{lang_profile.id}-{kind}",  # sentinel; kind dispatch runs the contract path
-            kind=str(kind or "composite"),
-            scope=OracleScopeSpec(require_source_root=True, require_test_root=False),
-            requires_node_install=False,
-        ),
+        implement_oracle=spec,
     )
-    return synthetic, synthetic.implement_oracle
+    return synthetic, spec
 
 
 def _with_implement_oracle(

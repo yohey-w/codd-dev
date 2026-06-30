@@ -26,6 +26,14 @@ display_name: "C#"
 strictness: strict
 file_extensions: [".cs"]
 
+# Greenfield ② OPT-IN (data-driven; the language-free core authorizes the generic
+# LayoutProfile synthesizer + the generic-template scaffolder by the PRESENCE of this
+# key, never by a language name). C# is the first non-Python stack to opt in. Go/Java/C++
+# do NOT declare it — Go in particular keeps its existing NO-OP scaffold path (its
+# scaffold.adapter is generic-template too) and stays excluded by this opt-in, preserving
+# test_unknown_stack_is_noop. Preserved verbatim under LanguageProfile.extra by the loader.
+greenfield_synthesis: true
+
 layout:
   repo_root: "."
   module_root: "."
@@ -118,11 +126,13 @@ commands:
       must_include_source_sets: ["src"]
 
   verify:
-    # `dotnet test` runs the test project(s). In a real run the verify command would
-    # add `--logger "trx;LogFileName=test.trx"` to emit the TRX report at the declared
-    # path; for THIS task the profile only needs to DECLARE the dotnet-trx report
-    # adapter (registered centrally by the parent).
-    argv: ["dotnet", "test"]
+    # `dotnet test` runs the test project(s). The `--logger "trx;LogFileName=test.trx"`
+    # is REQUIRED for the VSTest TRX report to be emitted at the declared path
+    # (`TestResults/test.trx`, dotnet's default TestResults dir). The synthesized verify
+    # campaign runs this argv with shell=False, so the `;` inside the logger value is
+    # passed VERBATIM (never split/interpreted by a shell). YAML is the SSOT for the
+    # campaign command — the harness reads this argv at real-run time.
+    argv: ["dotnet", "test", "--logger", "trx;LogFileName=test.trx"]
     cwd: "{module_root}"
     report:
       capture: stdout
@@ -192,12 +202,19 @@ scaffold:
   owned_files:
     - "{package_name}.csproj"
 
+  # Default values for the template substitution variables (consumed by the generic-
+  # template scaffolder). {package_name} comes from the resolved LayoutProfile and always
+  # wins over a default; other vars (target_framework) fall back to these. New this
+  # increment so a TFM bump is a data edit, not a template/code edit.
+  defaults:
+    target_framework: "net8.0"
+
   templates:
     - path: "{package_name}.csproj"
       content_template: |
         <Project Sdk="Microsoft.NET.Sdk">
           <PropertyGroup>
-            <TargetFramework>net8.0</TargetFramework>
+            <TargetFramework>{target_framework}</TargetFramework>
             <Nullable>enable</Nullable>
             <ImplicitUsings>enable</ImplicitUsings>
           </PropertyGroup>

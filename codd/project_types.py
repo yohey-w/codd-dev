@@ -454,18 +454,58 @@ class VerifyCampaignSpec:
     NO-OP for that stack.
     """
 
-    command_template: str
+    # A campaign declares its command in ONE of two forms (design A — argv support):
+    #   * ``command_template`` — a SHELL string (vitest/go), run with ``shell=True``;
+    #     ``{test_root}`` / ``{report}`` are substituted before execution.
+    #   * ``command_argv``     — an ARGV list (C#/dotnet), run with ``shell=False`` so
+    #     an argument containing shell metacharacters (``trx;LogFileName=test.trx``)
+    #     is passed VERBATIM, never split/interpreted by a shell. ``{test_root}`` /
+    #     ``{report}`` are substituted per element (only elements that contain a
+    #     ``{`` placeholder are formatted, so a literal ``;`` argv element is safe).
+    # Exactly one must be set (validated in ``__post_init__``). The report path is
+    # INDEPENDENT of the command (a single-file report at ``report_relpath`` — C#'s
+    # ``.trx`` is written by the runner to a fixed path, not via a ``{report}`` arg).
     report_relpath: str
     report_format: str
+    command_template: str | None = None
+    command_argv: tuple[str, ...] | None = None
     requires_node_install: bool = False
 
+    def __post_init__(self) -> None:
+        if not self.command_template and not self.command_argv:
+            raise ValueError(
+                "VerifyCampaignSpec requires a command_template (shell) OR a "
+                "command_argv (argv); a campaign with no command cannot run."
+            )
+
     def resolve_command(self, *, test_root: str, report_path: str) -> str:
-        """The runnable command with ``{test_root}`` / ``{report}`` substituted."""
+        """The runnable SHELL command with ``{test_root}`` / ``{report}`` substituted."""
+        if self.command_template is None:
+            raise ValueError(
+                "this campaign is argv-based (no command_template); use resolve_argv()"
+            )
         return self.command_template.format(test_root=test_root, report=report_path)
+
+    def resolve_argv(self, *, test_root: str, report_path: str) -> tuple[str, ...]:
+        """The runnable ARGV with ``{test_root}`` / ``{report}`` substituted per element.
+
+        Only elements containing a ``{`` placeholder are ``.format``-substituted, so a
+        literal argv element with shell metacharacters but no placeholder (C#'s
+        ``trx;LogFileName=test.trx``) is passed through verbatim.
+        """
+        if self.command_argv is None:
+            raise ValueError(
+                "this campaign is shell-based (no command_argv); use resolve_command()"
+            )
+        return tuple(
+            (a.format(test_root=test_root, report=report_path) if "{" in a else a)
+            for a in self.command_argv
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "command_template": self.command_template,
+            "command_argv": list(self.command_argv) if self.command_argv is not None else None,
             "report_relpath": self.report_relpath,
             "report_format": self.report_format,
             "requires_node_install": self.requires_node_install,
@@ -841,6 +881,25 @@ class LayoutProfile:
             _add(_TSCONFIG_FILENAME)
             _add(_VITEST_CONFIG_FILENAME)
             _add(_PACKAGE_JSON_FILENAME)
+        else:
+            # Generic-template stack (opt-in; csharp): the scaffold files are the profile's
+            # ``scaffold.owned_files`` + each ``scaffold.templates[].path``, with
+            # ``{package_name}`` + ``scaffold.defaults`` substituted (the SAME values
+            # :func:`_scaffold_generic_template` writes — so the orphan-gate/write-fence
+            # recognise the scaffolded ``<pkg>.csproj`` as harness-owned, not an orphan).
+            # Go is excluded (no opt-in key → spec is None) so this stays empty for it.
+            spec = _generic_template_scaffold_spec(self.language)
+            if spec is not None:
+                templates, defaults, owned = spec
+                subst = _generic_template_substitutions(self, defaults)
+                for rel in owned:
+                    _add(_apply_template_substitutions(str(rel), subst))
+                for tmpl in templates:
+                    if not hasattr(tmpl, "get"):
+                        continue
+                    template_path = tmpl.get("path")
+                    if template_path:
+                        _add(_apply_template_substitutions(str(template_path), subst))
 
         return tuple(paths)
 
@@ -1300,6 +1359,234 @@ def supported_layout_profile_languages() -> list[str]:
     return _legacy_bridged_names("layout_builder")
 
 
+# ═══════════════════════════════════════════════════════════
+# Generic LayoutProfile synthesizer (greenfield ② — opt-in, language-free)
+# ═══════════════════════════════════════════════════════════
+#
+# A stack with NO per-language legacy builder (Python/TS each have one) can still get a
+# harness-owned LayoutProfile WITHOUT adding a per-language builder: when its declarative
+# LanguageProfile OPTS IN (``greenfield_synthesis: true``), the roots + implement-oracle +
+# verify-campaign are SYNTHESIZED directly from the YAML. This mirrors the implement-oracle's
+# ``_resolve_registry_oracle`` (legacy None → YAML-direct synthesis) — the same "型紙".
+# Anti-false-green: a non-opted-in / unknown / data-incomplete stack → ``None`` (the
+# conservative NO-OP, never a wrong-layout default).
+#
+# OPT-IN GATE (data-driven; the core NEVER branches on a language NAME): presence of the
+# ``greenfield_synthesis`` key (a top-level YAML key → preserved in LanguageProfile.extra)
+# authorizes BOTH this synthesizer AND the generic-template scaffolder. A profile WITHOUT it
+# keeps its prior behaviour — crucially Go (whose ``scaffold.adapter`` is ``generic-template``
+# too, but which has no legacy builder) stays a strict NO-OP, preserving
+# ``test_unknown_stack_is_noop``. Added ONLY to csharp.yaml this increment.
+_GREENFIELD_SYNTHESIS_KEY = "greenfield_synthesis"
+
+
+def _greenfield_synthesis_opted_in(lang_profile: Any) -> bool:
+    """True IFF the resolved LanguageProfile declares the opt-in synthesis key truthy."""
+    extra = getattr(lang_profile, "extra", None)
+    if not isinstance(extra, Mapping):
+        return False
+    return bool(extra.get(_GREENFIELD_SYNTHESIS_KEY))
+
+
+def synthesize_implement_oracle_spec(lang_profile: Any) -> ImplementOracleSpec | None:
+    """Build the gate's :class:`ImplementOracleSpec` from a LanguageProfile's modeled
+    ``implement_oracle`` declaration.
+
+    SHARED by BOTH the synthesized :class:`LayoutProfile` (below) AND
+    ``implement_oracle._resolve_registry_oracle`` so the two cannot DRIFT: a synthesized
+    profile whose ``implement_oracle`` differed from the registry path would silently
+    change — or stop — the oracle for that stack (the exact regression this extraction
+    prevents). Mirrors the declaration's ``kind`` so the SAME kind-routed dispatch in
+    ``implement_oracle._run_oracle_command`` runs the registered adapter; the ``command``
+    is a SENTINEL (the real argv/cwd come from ``lang_profile.layout`` / ``.commands`` at
+    run time). Scope policy matches the registry path exactly: an ``adapter`` kind
+    certifies BOTH roots; a ``command``/``composite`` kind certifies the source root (the
+    adapter owns its own test-scope certification). ``None`` when no oracle is declared.
+    """
+    oracle_decl = getattr(lang_profile, "implement_oracle", None)
+    if oracle_decl is None:
+        return None
+    lang_id = str(getattr(lang_profile, "id", "") or "")
+    kind = getattr(oracle_decl, "kind", None)
+    if kind == "adapter":
+        return ImplementOracleSpec(
+            command=f"{lang_id}-adapter",  # sentinel; kind dispatch runs the contract path
+            kind="adapter",
+            scope=OracleScopeSpec(require_source_root=True, require_test_root=True),
+            requires_node_install=False,
+        )
+    return ImplementOracleSpec(
+        command=f"{lang_id}-{kind}",  # sentinel; kind dispatch runs the contract path
+        kind=str(kind or "composite"),
+        scope=OracleScopeSpec(require_source_root=True, require_test_root=False),
+        requires_node_install=False,
+    )
+
+
+def _synthesize_verify_campaign(lang_profile: Any) -> VerifyCampaignSpec | None:
+    """Synthesize a :class:`VerifyCampaignSpec` from the profile's verify command + report.
+
+    Design A (argv form + single-file report): the campaign ARGV is the resolved
+    ``commands[<verify.command>].argv``; the report path + adapter come from the top-level
+    ``verify.report`` (``report_format`` = ``verify.report.adapter`` — the id the
+    runner-report registry resolves on, e.g. ``dotnet-trx``). ``None`` when the profile
+    declares no verify block / report / adapter / argv (the coverage gate then stays a
+    strict NO-OP for the stack — never a silent green for an unreadable campaign).
+    """
+    verify = getattr(lang_profile, "verify", None)
+    if verify is None:
+        return None
+    report = getattr(verify, "report", None)
+    if report is None:
+        return None
+    report_relpath = _norm_rel(getattr(report, "path", "") or "")
+    report_format = getattr(report, "adapter", None) or getattr(report, "format", None)
+    if not report_relpath or not report_format:
+        return None
+    command_id = getattr(verify, "command", None)
+    commands = getattr(lang_profile, "commands", {}) or {}
+    cmd = commands.get(command_id) if command_id else None
+    argv = tuple(str(a) for a in (getattr(cmd, "argv", ()) or ())) if cmd is not None else ()
+    if not argv:
+        return None
+    return VerifyCampaignSpec(
+        report_relpath=report_relpath,
+        report_format=str(report_format),
+        command_argv=argv,
+        requires_node_install=False,
+    )
+
+
+def _synthesize_toolchain_dependencies(lang_profile: Any) -> ToolchainDependencyProfile | None:
+    """Synthesize a :class:`ToolchainDependencyProfile` IFF the stack declares a LOCKFILE.
+
+    DATA-DRIVEN (no language name): only a stack whose
+    ``toolchain.dependency_integrity_files`` lists a ``kind: lock`` entry has a
+    manifest↔lock coherence contract. C# declares NONE (like Python) → ``None`` — an
+    HONEST NO-OP, not a gap (there is no frozen-lock install to diverge). A lock-bearing
+    stack synthesizes its profile from the declared manifest + lock filename(s) +
+    package-manager reconcile/materialize commands; ecosystem-specific digest inputs
+    (workspace globs / config files / manager-version probe) default EMPTY (single
+    package, no extra inputs) so the contract generalizes without npm-specific literals.
+    """
+    toolchain = getattr(lang_profile, "toolchain", None)
+    if toolchain is None:
+        return None
+    dep_files = tuple(getattr(toolchain, "dependency_integrity_files", ()) or ())
+    lock_filenames = tuple(
+        _norm_rel(getattr(f, "path", "") or "")
+        for f in dep_files
+        if str(getattr(f, "kind", "")).strip().lower() == "lock" and getattr(f, "path", None)
+    )
+    if not lock_filenames:
+        return None  # C#: no lockfile → honest NO-OP (Python-equivalent).
+    manifest = getattr(toolchain, "manifest", None)
+    manifest_filename = _norm_rel(getattr(manifest, "path", "") or "") if manifest is not None else ""
+    pm = getattr(toolchain, "package_manager", None)
+
+    def _argv_command(key: str) -> str | None:
+        raw = pm.get(key) if hasattr(pm, "get") else None
+        argv = list(raw.get("argv") or []) if hasattr(raw, "get") else []
+        return " ".join(str(a) for a in argv) if argv else None
+
+    refresh = _argv_command("reconcile_command")
+    materialize = _argv_command("materialize_command")
+    if not manifest_filename or not refresh:
+        return None  # incomplete declaration — decline (never a half-specified contract).
+    return ToolchainDependencyProfile(
+        deps=(),
+        manifest_filename=manifest_filename,
+        lock_filenames=lock_filenames,
+        lock_refresh_command=refresh,
+        materialize_command=materialize,
+        frozen_install_command=materialize or refresh,
+        completeness_refresh_command=None,
+        workspace_manifest_globs=(),
+        config_filenames=(),
+        package_manager_version_command=None,
+    )
+
+
+def _synthesize_layout_profile_from_language(
+    *,
+    language: str | None,
+    project_name: str | None,
+    source_dirs: Any = None,  # noqa: ARG001 — parity; a synthesized stack reads its roots from the declarative profile.
+    test_dirs: Any = None,  # noqa: ARG001 — parity (see above).
+    config: Any = None,  # noqa: ARG001 — parity; the package name is project-derived (no named-package config tier here).
+    project_root: Path | None = None,  # noqa: ARG001 — parity.
+) -> LayoutProfile | None:
+    """Synthesize a :class:`LayoutProfile` from a declarative LanguageProfile (opt-in).
+
+    The general, per-language-builder-FREE fallback ``resolve_layout_profile`` uses when a
+    stack has no legacy builder: when the profile OPTS IN (``greenfield_synthesis: true``)
+    the harness-owned topology + verify-campaign + implement-oracle are built DIRECTLY from
+    the YAML (``layout`` / ``commands`` / ``verify`` / ``implement_oracle``). ``None`` when
+    the language is unknown, does not opt in, or lacks the data the synthesis needs (a
+    conservative NO-OP — never a wrong-layout default).
+
+    Field derivation (design): ``source_root`` = ``layout.source_sets[0].root``;
+    ``test_root`` = ``layout.test_sets[0].root``; ``package_root`` from
+    ``layout.package_root.kind`` (``none`` → ``= source_root``). A non-named-package layout
+    sets ``requires_*_init=False`` + ``test_import_policy != "package_absolute"`` so the
+    Python-specific import-coherence checks are strict NO-OPs (anti-false-RED).
+    """
+    lang_profile = _resolve_kernel_language_profile(language)
+    if lang_profile is None or not _greenfield_synthesis_opted_in(lang_profile):
+        return None
+    layout = getattr(lang_profile, "layout", None)
+    if layout is None:
+        return None
+    source_sets = tuple(getattr(layout, "source_sets", ()) or ())
+    test_sets = tuple(getattr(layout, "test_sets", ()) or ())
+    if not source_sets or not test_sets:
+        return None
+    source_root = _norm_rel(getattr(source_sets[0], "root", "") or "")
+    test_root = _norm_rel(getattr(test_sets[0], "root", "") or "")
+    if not source_root or not test_root:
+        return None
+
+    package_name = normalize_package_name(project_name)
+    pkg = getattr(layout, "package_root", None)
+    pkg_kind = str(getattr(pkg, "kind", "none") or "none")
+    if pkg_kind == "named_package":
+        raw_path = _norm_rel(getattr(pkg, "path", "") or "")
+        package_root = raw_path.replace("{package_name}", package_name) if raw_path else source_root
+        requires_package_init = True
+        requires_test_init = True
+        test_import_policy = "package_absolute"
+    else:
+        # ``none`` / ``path_root`` (C#): no named-package subdir → package_root ==
+        # source_root. The Python import-coherence init/policy checks MUST NOT engage
+        # (a path/root layout has no __init__/package-absolute contract):
+        #   * requires_*_init=False  → _check_missing_init / _check_source_outside_package
+        #     are strict NO-OPs (no false-RED on a missing __init__.py).
+        #   * test_import_policy != "package_absolute" → the bare-basename check skips.
+        package_root = source_root
+        requires_package_init = False
+        requires_test_init = False
+        test_import_policy = "relative"
+
+    pm = getattr(getattr(lang_profile, "toolchain", None), "package_manager", None)
+    runner = str(pm.get("id")) if hasattr(pm, "get") and pm.get("id") else "generic"
+
+    return LayoutProfile(
+        language=str(getattr(lang_profile, "id", "") or language or ""),
+        package_name=package_name,
+        source_root=source_root,
+        package_root=package_root,
+        test_root=test_root,
+        runner=runner,
+        install_mode="none",
+        test_import_policy=test_import_policy,
+        requires_package_init=requires_package_init,
+        requires_test_init=requires_test_init,
+        implement_oracle=synthesize_implement_oracle_spec(lang_profile),
+        toolchain_dependencies=_synthesize_toolchain_dependencies(lang_profile),
+        verify_campaign=_synthesize_verify_campaign(lang_profile),
+    )
+
+
 def resolve_layout_profile(
     *,
     language: str | None,
@@ -1334,7 +1621,17 @@ def resolve_layout_profile(
     realizer_id = _legacy_realizer_id(language, "layout_builder")
     builder = _LAYOUT_BUILDERS_BY_REALIZER.get(realizer_id) if realizer_id else None
     if builder is None:
-        return None
+        # No per-language legacy builder → try the OPT-IN generic synthesizer (a stack
+        # whose declarative profile declares ``greenfield_synthesis: true``; csharp this
+        # increment). A non-opted-in / unknown language (Go) → None (conservative NO-OP).
+        return _synthesize_layout_profile_from_language(
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+            project_root=project_root,
+        )
     return builder(
         project_name=project_name,
         source_dirs=source_dirs,
@@ -1382,6 +1679,69 @@ class ScaffoldResult:
 _SCAFFOLDER_PY_SRC_PACKAGE = "pyproject-src-package-scaffold-v1"
 _SCAFFOLDER_TS_NPM = "npm-tsconfig-vitest-scaffold-v1"
 
+#: The scaffold ADAPTER id (a ``LanguageProfile.scaffold.adapter`` value, NOT a legacy
+#: realizer id) that selects the GENERIC-TEMPLATE scaffolder (design (c)). Gated by the
+#: opt-in key so Go (adapter is generic-template too, but no opt-in) stays a NO-OP.
+_SCAFFOLD_ADAPTER_GENERIC_TEMPLATE = "generic-template"
+
+
+def _generic_template_scaffold_spec(
+    language: str | None,
+) -> tuple[tuple[Mapping[str, Any], ...], dict[str, str], tuple[str, ...]] | None:
+    """The ``(templates, defaults, owned_files)`` for an OPTED-IN generic-template stack.
+
+    ``None`` unless the resolved profile (a) opts in (``greenfield_synthesis``) AND
+    (b) declares ``scaffold.adapter == "generic-template"`` AND (c) declares ≥1 template.
+    This is what keeps Go — whose ``scaffold.adapter`` is generic-template too but which
+    does NOT opt in — a strict NO-OP (preserving ``test_unknown_stack_is_noop``). Selection
+    is by the adapter id + the opt-in key, NEVER a language-name literal. ``defaults``
+    (``scaffold.defaults`` — the per-stack substitution-variable defaults) is read from the
+    profile's ``raw`` view (the ScaffoldSpec dataclass models only adapter/owned_files/
+    templates; ``raw`` is the documented later-phase escape hatch).
+    """
+    lang_profile = _resolve_kernel_language_profile(language)
+    if lang_profile is None or not _greenfield_synthesis_opted_in(lang_profile):
+        return None
+    scaffold = getattr(lang_profile, "scaffold", None)
+    if scaffold is None:
+        return None
+    adapter = str(getattr(scaffold, "adapter", "") or "").strip().lower()
+    if adapter != _SCAFFOLD_ADAPTER_GENERIC_TEMPLATE:
+        return None
+    templates = tuple(getattr(scaffold, "templates", ()) or ())
+    if not templates:
+        return None
+    owned = tuple(str(p) for p in (getattr(scaffold, "owned_files", ()) or ()))
+    defaults: dict[str, str] = {}
+    raw = getattr(lang_profile, "raw", None)
+    if isinstance(raw, Mapping):
+        raw_scaffold = raw.get("scaffold")
+        if isinstance(raw_scaffold, Mapping):
+            raw_defaults = raw_scaffold.get("defaults")
+            if isinstance(raw_defaults, Mapping):
+                defaults = {str(k): str(v) for k, v in raw_defaults.items()}
+    return templates, defaults, owned
+
+
+def _generic_template_substitutions(
+    profile: LayoutProfile, defaults: Mapping[str, str]
+) -> dict[str, str]:
+    """``{var}`` → value: ``scaffold.defaults`` overlaid with the resolved
+    ``package_name`` (the harness-owned name always wins over a default)."""
+    subst = {str(k): str(v) for k, v in defaults.items()}
+    subst["package_name"] = profile.package_name
+    return subst
+
+
+def _apply_template_substitutions(text: str, subst: Mapping[str, str]) -> str:
+    """Replace each ``{key}`` token with its value (replace-based, NOT ``str.format`` — so
+    a template's literal braces never raise; mirrors the oracle gate's ``{package_name}``
+    replace)."""
+    out = str(text)
+    for key, value in subst.items():
+        out = out.replace("{" + key + "}", str(value))
+    return out
+
 
 def scaffold_layout(
     project_root: Path | str,
@@ -1394,8 +1754,10 @@ def scaffold_layout(
     PROFILE-DRIVEN (Contract Kernel v2.71): the scaffolder is selected by the
     resolved :class:`LanguageProfile`'s legacy-bridge ``scaffolder`` realizer id (a
     harness-policy capability name — Python package-topology vs TS config), NOT a
-    ``profile.language ==`` literal. A stack with no legacy bridge (Go) or an
-    unknown/unaccepted language is a strict no-op (the conservative degradation —
+    ``profile.language ==`` literal. A stack with no legacy bridge but an OPT-IN
+    ``generic-template`` scaffold (csharp) routes to :func:`_scaffold_generic_template`.
+    A stack with neither (Go — generic-template adapter but no opt-in; or an
+    unknown/unaccepted language) is a strict no-op (the conservative degradation —
     never a wrong scaffolder writing a wrong layout).
     """
     scaffolder_id = _legacy_realizer_id(profile.language, "scaffolder")
@@ -1403,7 +1765,64 @@ def scaffold_layout(
         return _scaffold_python(Path(project_root), profile)
     if scaffolder_id == _SCAFFOLDER_TS_NPM:
         return _scaffold_typescript(Path(project_root), profile)
+    # Generic-template scaffolder (opt-in, data-driven): no legacy scaffolder, but the
+    # profile opts in AND declares ``scaffold.adapter == "generic-template"``. Go is
+    # excluded (no opt-in key → spec is None → strict NO-OP).
+    spec = _generic_template_scaffold_spec(profile.language)
+    if spec is not None:
+        return _scaffold_generic_template(Path(project_root), profile, spec)
     return ScaffoldResult(language=profile.language, detail="no scaffolder for stack")
+
+
+def _scaffold_generic_template(
+    project_root: Path,
+    profile: LayoutProfile,
+    spec: tuple[tuple[Mapping[str, Any], ...], dict[str, str], tuple[str, ...]],
+) -> ScaffoldResult:
+    """Realize a profile's ``scaffold.templates`` on disk (create-only / idempotent /
+    non-clobber — the SAME contract as ``_scaffold_python``'s ``_ensure_file``).
+
+    Each template ``{path, content_template}`` has ``{package_name}`` + the per-stack
+    ``scaffold.defaults`` substituted (replace-based), then is written IFF absent. The
+    template SET + the substitution variables come from the YAML, never a per-language
+    code branch — a new generic-template stack is one YAML profile + the opt-in key.
+    """
+    templates, defaults, _owned = spec
+    subst = _generic_template_substitutions(profile, defaults)
+    created: list[str] = []
+    skipped: list[str] = []
+
+    def _ensure_file(rel: str, content: str) -> None:
+        norm = _norm_rel(rel)
+        if not norm:
+            return
+        target = project_root / norm
+        if target.exists():
+            skipped.append(norm)
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        created.append(norm)
+
+    for tmpl in templates:
+        if not hasattr(tmpl, "get"):
+            continue
+        path = _apply_template_substitutions(str(tmpl.get("path", "") or ""), subst)
+        if not path:
+            continue
+        content = _apply_template_substitutions(str(tmpl.get("content_template", "") or ""), subst)
+        _ensure_file(path, content)
+
+    detail = (
+        f"generic-template: {len(created)} created, {len(skipped)} skipped "
+        f"(package={profile.package_name})"
+    )
+    return ScaffoldResult(
+        language=profile.language,
+        created=tuple(created),
+        skipped=tuple(skipped),
+        detail=detail,
+    )
 
 
 def _scaffold_python(project_root: Path, profile: LayoutProfile) -> ScaffoldResult:

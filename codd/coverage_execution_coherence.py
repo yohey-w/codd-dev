@@ -61,6 +61,7 @@ backstop, UNCHANGED.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -982,15 +983,26 @@ def run_verify_campaign(
         report_path.unlink()
     except FileNotFoundError:
         pass
-    command = campaign.resolve_command(
-        test_root=test_root, report_path=campaign.report_relpath
-    )
+    # Design A — the campaign command is EITHER a shell string (vitest/go: shell=True,
+    # ``{test_root}``/``{report}`` substituted) OR an argv list (C#/dotnet: shell=False so
+    # an argument with shell metacharacters — ``trx;LogFileName=test.trx`` — is passed
+    # VERBATIM, never split by a shell). The report path is independent of the command (a
+    # single-file report at ``report_relpath`` the runner writes — C#'s ``.trx``).
     timeout = _campaign_timeout_seconds(config)
-    echo(f"[greenfield] verify: running coverage-execution campaign — {command}")
+    use_argv = getattr(campaign, "command_argv", None) is not None
+    if use_argv:
+        argv = campaign.resolve_argv(test_root=test_root, report_path=campaign.report_relpath)
+        display = shlex.join(argv)
+    else:
+        shell_command = campaign.resolve_command(
+            test_root=test_root, report_path=campaign.report_relpath
+        )
+        display = shell_command
+    echo(f"[greenfield] verify: running coverage-execution campaign — {display}")
     try:
         completed = subprocess.run(
-            command,
-            shell=True,
+            argv if use_argv else shell_command,
+            shell=not use_argv,
             cwd=project_root,
             capture_output=True,
             text=True,
@@ -998,14 +1010,14 @@ def run_verify_campaign(
         )
     except subprocess.TimeoutExpired as exc:
         raise CampaignError(
-            f"verify campaign timed out after {timeout:g}s: {command}"
+            f"verify campaign timed out after {timeout:g}s: {display}"
         ) from exc
 
     output_tail = _output_tail(completed.stdout, completed.stderr)
     if not report_path.is_file():
         raise CampaignError(
             f"verify campaign produced no report at {campaign.report_relpath} "
-            f"(exit {completed.returncode}): {command}\n{output_tail}"
+            f"(exit {completed.returncode}): {display}\n{output_tail}"
         )
     try:
         execution = adapter.parse(report_path, project_root=project_root)
@@ -1016,10 +1028,10 @@ def run_verify_campaign(
         # JS-runner "collected 0 tests" hard-fail, generalized to the report.
         raise CampaignError(
             f"verify campaign collected/ran 0 tests (report at {campaign.report_relpath} "
-            f"is empty): {command}\n{output_tail}"
+            f"is empty): {display}\n{output_tail}"
         )
     return CampaignRun(
-        command=command,
+        command=display,
         exit_code=completed.returncode,
         report_path=report_path,
         execution=execution,
