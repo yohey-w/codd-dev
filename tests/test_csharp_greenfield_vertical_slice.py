@@ -58,8 +58,9 @@ _NS = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"
 def test_csharp_synthesizes_layout_profile() -> None:
     """resolve_layout_profile('csharp') synthesizes a profile (was None → NO-OP).
 
-    Fields follow the design: source_root/test_root from the YAML layout sets;
-    package_root == source_root for a ``kind: none`` layout; requires_*_init=False and a
+    Fields follow the design: source_root/test_root from the YAML layout sets; package_root
+    is the NESTED lib-project dir ``src/{package_name}`` for a ``kind: path_package`` layout
+    (FORK #1: matches the scaffold's lib dir); requires_*_init=False and a
     non-"package_absolute" policy (so the Python import-coherence checks stay NO-OPs);
     the implement-oracle + verify-campaign are SET (not None).
     """
@@ -68,8 +69,8 @@ def test_csharp_synthesizes_layout_profile() -> None:
     assert profile.language == "csharp"
     assert profile.source_root == "src"
     assert profile.test_root == "tests"
-    # kind: none → no named-package subdir.
-    assert profile.package_root == "src"
+    # kind: path_package → the package nests in its own lib dir (src/<pkg>), NOT bare src/.
+    assert profile.package_root == "src/todo_cli"
     assert profile.requires_package_init is False
     assert profile.requires_test_init is False
     assert profile.test_import_policy != "package_absolute"
@@ -399,3 +400,83 @@ def test_verify_campaign_argv_substitution_is_per_element() -> None:
     )
     argv = campaign.resolve_argv(test_root="tests", report_path="r.trx")
     assert argv == ("dotnet", "test", "tests", "--logger", "trx;LogFileName=test.trx")
+
+
+# ── FORK #1: source-file routing / output_roles ↔ scaffold-dir consistency ───────
+#
+# Option C (ac8c923) made the scaffold write the LIBRARY project to the NESTED
+# ``src/{pkg}/`` dir, but the synthesizer still derived package_root == source_root
+# ("src") from ``package_root.kind: none`` and the routing accept-list + output_roles
+# pointed at ``src/`` directly. AI-authored source then landed at ``src/Foo.cs`` —
+# OUTSIDE the lib project's SDK implicit compile glob (project-dir-relative,
+# ``src/{pkg}/**/*.cs``) — so it never compiled. This block pins the data-aligned fix:
+# the scaffold dir, the routing destination, and the planned output dir all agree on
+# ``src/{pkg}`` (and ``tests/{pkg}.Tests``).
+
+
+def test_csharp_synthesized_package_root_is_nested_lib_dir() -> None:
+    """The synthesized package_root is the NESTED lib-project dir (``src/<pkg>``), matching
+    the scaffold's library project — NOT the bare ``src/``. source_root stays ``src`` (the
+    glob + the scaffold parent). The Python import-contract stays OFF (the new
+    ``path_package`` kind is NOT ``named_package``), so the import-coherence init / policy
+    checks remain strict NO-OPs (anti-false-RED)."""
+    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    assert profile is not None
+    assert profile.source_root == "src"
+    assert profile.package_root == "src/todo_cli"
+    assert profile.requires_package_init is False
+    assert profile.requires_test_init is False
+    assert profile.test_import_policy != "package_absolute"
+
+
+def test_csharp_scaffold_dir_equals_routing_and_output_role_dir(tmp_path: Path) -> None:
+    """THE anti-fork#1 consistency gate. The directory the scaffold writes the LIBRARY
+    project into MUST equal BOTH (a) the destination ``_route_source_into_package``
+    reroutes the bare source root to (== package_root), and (b) the directory
+    ``path_rules.output_roles`` plans an AI source file into. Before the fix these
+    disagreed (scaffold ``src/<pkg>`` vs routing/output_roles ``src/`` or repo-root) so AI
+    source landed outside the lib project and never compiled. The test project is mirrored
+    (``tests/<pkg>.Tests``)."""
+    from posixpath import dirname
+
+    from codd.greenfield.pipeline import _route_source_into_package
+    from codd.languages import default_registry
+    from codd.languages.path_planner import PathPlanner
+
+    profile = resolve_layout_profile(language="csharp", project_name="todo-cli")
+    assert profile is not None
+
+    # (a) scaffold — the dirs the LIBRARY / TEST projects are written into.
+    result = scaffold_layout(tmp_path, profile)
+    assert "src/todo_cli/todo_cli.csproj" in set(result.created)
+    assert "tests/todo_cli.Tests/todo_cli.Tests.csproj" in set(result.created)
+    lib_dir = dirname("src/todo_cli/todo_cli.csproj")  # "src/todo_cli"
+    test_dir = dirname("tests/todo_cli.Tests/todo_cli.Tests.csproj")  # "tests/todo_cli.Tests"
+
+    # (b) routing — the bare source root reroutes INTO the lib dir (== package_root).
+    config = {
+        "project": {"name": "todo-cli", "language": "csharp"},
+        "scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]},
+    }
+    routed = _route_source_into_package(config, ["src"], project_root=tmp_path)
+    assert lib_dir in routed, routed
+    assert profile.package_root == lib_dir  # synthesizer agrees with the scaffold dir
+
+    # (c) output_roles — an AI source/test file is PLANNED into the same dirs.
+    planner = PathPlanner(default_registry.resolve("csharp"), {"package_name": "todo_cli"})
+    src_plan = planner.plan_output("source_file", name="Calculator").posix
+    test_plan = planner.plan_output("test_file", name="Calculator").posix
+    assert dirname(src_plan) == lib_dir, src_plan  # src/todo_cli/Calculator.cs
+    assert dirname(test_plan) == test_dir, test_plan  # tests/todo_cli.Tests/Calculator.cs
+
+
+def test_csharp_fix_does_not_regress_python_ts_go_layout() -> None:
+    """Non-regression guard for the synthesizer change. Python (``named_package``) and
+    TypeScript (``path_root``) resolve through their LEGACY builders (NOT the synthesizer)
+    and keep their EXACT package_root; Go stays a strict NO-OP (not opted in). A regression
+    that leaked the ``path_package`` derivation into these stacks would trip here."""
+    py = resolve_layout_profile(language="python", project_name="todo-cli")
+    assert py is not None and py.package_root == "src/todo_cli"  # named_package, nested
+    ts = resolve_layout_profile(language="typescript", project_name="todo-cli")
+    assert ts is not None and ts.package_root == "src"  # path_root, flat
+    assert resolve_layout_profile(language="go", project_name="m") is None  # NO-OP

@@ -8,7 +8,9 @@
 #   * module_root = "."   — the project/solution lives at the repo root.
 #   * source_sets = src/**/*.cs (first-party source under a representable `src` root).
 #   * test_sets   = tests/**/*.cs (a representable xUnit/NUnit/MSTest convention).
-#   * package_root.kind = none — C# has NO single package root in the Go sense.
+#   * package_root.kind = path_package, path = src/{package_name} — the deliverable LIBRARY
+#     lives in its OWN nested dir (src/<pkg>/), matching the Option-C scaffold (FORK #1 fix).
+#     path_package ≠ named_package: there is NO __init__.py / package-absolute import contract.
 #   * strictness  = strict — a new language is strict from day one.
 #   * implement_oracle = composite (build), adapter dotnet-toolchain.
 #   * verify report adapter = dotnet-trx (VSTest TRX).
@@ -41,7 +43,16 @@ layout:
   default_command_cwd: "{module_root}"
 
   package_root:
-    kind: none
+    # path_package (FORK #1 fix): the deliverable LIBRARY lives in its OWN nested dir
+    # (src/<pkg>/). The synthesizer derives package_root = src/{package_name} so the routing
+    # accept-list (_route_source_into_package), the output_roles below, AND the Option-C
+    # scaffold all agree on that SAME dir — AI-authored source then lands INSIDE the lib
+    # project (the .NET SDK compiles by directory) instead of at the bare src/ (outside the
+    # project ⇒ never compiled). path_package is NOT named_package: C# has no __init__.py /
+    # package-absolute import contract, so the Python import-coherence checks stay strict
+    # NO-OPs (source_root stays "src" — the glob parent + the scaffold parent).
+    kind: path_package
+    path: "src/{package_name}"
 
   source_sets:
     - id: src
@@ -65,17 +76,25 @@ path_rules:
   path_separator: "/"
 
   output_roles:
+    # The harness-owned LIBRARY manifest lives in the nested lib-project dir (matches the
+    # scaffold + artifacts.harness_owned). A ``template`` (not a literal ``path``) so
+    # {package_name} substitutes; the toolchain certifier still globs *.csproj/*.sln loosely
+    # (see toolchain.manifest) — this declared role is the canonical write-target.
     project_manifest:
       owner: harness
-      path: "*.csproj"
+      template: "src/{package_name}/{package_name}.csproj"
 
+    # FORK #1 fix: AI-authored source/tests land INSIDE the lib / test project dirs
+    # (src/<pkg>/ and tests/<pkg>.Tests/) so the .NET SDK's project-dir-relative compile glob
+    # captures them — NEVER at the bare src/ (which sits OUTSIDE the lib project ⇒ the source
+    # would never compile). These dirs match the scaffold + the synthesized package_root.
     source_file:
       owner: sut
-      template: "src/{name}.cs"
+      template: "src/{package_name}/{name}.cs"
 
     test_file:
       owner: sut
-      template: "tests/{name}Tests.cs"
+      template: "tests/{package_name}.Tests/{name}.cs"
 
 toolchain:
   manifest:

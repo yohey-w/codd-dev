@@ -1527,9 +1527,13 @@ def _synthesize_layout_profile_from_language(
 
     Field derivation (design): ``source_root`` = ``layout.source_sets[0].root``;
     ``test_root`` = ``layout.test_sets[0].root``; ``package_root`` from
-    ``layout.package_root.kind`` (``none`` → ``= source_root``). A non-named-package layout
-    sets ``requires_*_init=False`` + ``test_import_policy != "package_absolute"`` so the
-    Python-specific import-coherence checks are strict NO-OPs (anti-false-RED).
+    ``layout.package_root.kind``: ``none`` / ``path_root`` (FLAT) → ``= source_root``;
+    ``named_package`` (Python) and ``path_package`` (C#) → the declared ``path`` sub-dir
+    (``src/<pkg>``, with ``{package_name}`` substituted). Only ``named_package`` carries the
+    Python ``__init__`` + package-absolute import contract; EVERY other kind (including the
+    nested ``path_package``) sets ``requires_*_init=False`` + ``test_import_policy !=
+    "package_absolute"`` so the Python-specific import-coherence checks are strict NO-OPs
+    (anti-false-RED). The dispatch is on the data ``kind`` only — never a language name.
     """
     lang_profile = _resolve_kernel_language_profile(language)
     if lang_profile is None or not _greenfield_synthesis_opted_in(lang_profile):
@@ -1549,16 +1553,37 @@ def _synthesize_layout_profile_from_language(
     package_name = normalize_package_name(project_name)
     pkg = getattr(layout, "package_root", None)
     pkg_kind = str(getattr(pkg, "kind", "none") or "none")
+    # A declared ``{package_name}``-bearing path nests the package (``src/<pkg>``); absent a
+    # path the package IS the source root (a flat layout). Computed once for the two nesting
+    # kinds below so they cannot drift.
+    raw_pkg_path = _norm_rel(getattr(pkg, "path", "") or "")
+    nested_pkg_root = (
+        raw_pkg_path.replace("{package_name}", package_name) if raw_pkg_path else source_root
+    )
     if pkg_kind == "named_package":
-        raw_path = _norm_rel(getattr(pkg, "path", "") or "")
-        package_root = raw_path.replace("{package_name}", package_name) if raw_path else source_root
+        # PYTHON: a nested package dir (``src/<pkg>``) that ALSO carries the ``__init__.py`` +
+        # package-absolute import contract.
+        package_root = nested_pkg_root
         requires_package_init = True
         requires_test_init = True
         test_import_policy = "package_absolute"
+    elif pkg_kind == "path_package":
+        # A nested package dir (``src/<pkg>``, e.g. C#'s library-project dir) with NO language
+        # package-import contract: the toolchain compiles by DIRECTORY (the .NET SDK's project-
+        # dir-relative ``**/*.cs`` glob), there is no ``__init__.py`` and no package-absolute
+        # import rule. package_root is the declared sub-path — so the routing accept-list +
+        # the scaffold agree on the SAME lib dir — while source_root stays the source-set root
+        # (the parent ``src`` the glob + scaffold use). The ONLY difference from the flat
+        # ``none``/``path_root`` case below is the nested package_root: the Python import-
+        # coherence init/policy checks MUST stay strict NO-OPs (anti-false-RED).
+        package_root = nested_pkg_root
+        requires_package_init = False
+        requires_test_init = False
+        test_import_policy = "relative"
     else:
-        # ``none`` / ``path_root`` (C#): no named-package subdir → package_root ==
+        # ``none`` / ``path_root``: FLAT — no nested package subdir → package_root ==
         # source_root. The Python import-coherence init/policy checks MUST NOT engage
-        # (a path/root layout has no __init__/package-absolute contract):
+        # (a flat/root layout has no __init__/package-absolute contract):
         #   * requires_*_init=False  → _check_missing_init / _check_source_outside_package
         #     are strict NO-OPs (no false-RED on a missing __init__.py).
         #   * test_import_policy != "package_absolute" → the bare-basename check skips.

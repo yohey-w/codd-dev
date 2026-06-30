@@ -66,12 +66,14 @@ def test_csharp_module_root_is_dot(registry: LanguageRegistry) -> None:
     assert cs.layout.module_root == "."
 
 
-def test_csharp_package_root_is_none(registry: LanguageRegistry) -> None:
-    """C# has NO single package root in the Go sense → kind 'none'."""
+def test_csharp_package_root_is_nested_path_package(registry: LanguageRegistry) -> None:
+    """C#'s deliverable LIBRARY lives in its OWN nested dir (FORK #1): kind 'path_package'
+    with path 'src/{package_name}'. path_package nests like named_package but carries NO
+    __init__/package-absolute import contract (the SDK compiles by directory)."""
     cs = registry.resolve("csharp")
     assert isinstance(cs.layout.package_root, PackageRoot)
-    assert cs.layout.package_root.kind == "none"
-    assert cs.layout.package_root.path is None
+    assert cs.layout.package_root.kind == "path_package"
+    assert cs.layout.package_root.path == "src/{package_name}"
 
 
 def test_csharp_source_and_test_sets_shape(registry: LanguageRegistry) -> None:
