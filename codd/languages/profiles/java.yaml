@@ -23,6 +23,13 @@ display_name: "Java"
 strictness: strict
 file_extensions: [".java"]
 
+# Greenfield ② OPT-IN (data-driven; the language-free core authorizes the generic
+# LayoutProfile synthesizer + the generic-template scaffolder by the PRESENCE of this
+# key, never by a language name — same opt-in mechanism C# uses). Java's
+# package_root.kind=none (flat layout) needs no nested-dir scheme: the synthesizer
+# already handles none|path_root as package_root == source_root.
+greenfield_synthesis: true
+
 layout:
   repo_root: "."
   module_root: "."
@@ -184,7 +191,24 @@ scaffold:
   owned_files:
     - "pom.xml"
 
+  # Default values for the template substitution variables (consumed by the generic-
+  # template scaffolder, replace-based — mirrors csharp.yaml's `defaults` block).
+  # {package_name} comes from the resolved LayoutProfile and always wins over a
+  # default; a version bump is a DATA edit here, never a template/code edit.
+  defaults:
+    group_id: "org.example"
+    java_version: "21"
+    junit_jupiter_version: "5.11.0"
+    surefire_plugin_version: "3.2.5"
+
   templates:
+    # Single pom.xml: Java's package_root.kind=none means there is no C#-style
+    # nested lib/test project split to enforce deliverable purity. Maven's own
+    # <scope>test</scope> is the structural purity mechanism here — a test-scoped
+    # dependency is excluded from the compile/runtime classpath of consumers and
+    # from the packaged jar by Maven's own dependency resolution, so a single pom
+    # with junit-jupiter scoped to test is anti-false-green-safe without a second
+    # project (unlike the .NET SDK, which has no built-in test/lib project split).
     - path: "pom.xml"
       content_template: |
         <project xmlns="http://maven.apache.org/POM/4.0.0">
@@ -195,6 +219,23 @@ scaffold:
           <properties>
             <maven.compiler.release>{java_version}</maven.compiler.release>
           </properties>
+          <dependencies>
+            <dependency>
+              <groupId>org.junit.jupiter</groupId>
+              <artifactId>junit-jupiter</artifactId>
+              <version>{junit_jupiter_version}</version>
+              <scope>test</scope>
+            </dependency>
+          </dependencies>
+          <build>
+            <plugins>
+              <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>{surefire_plugin_version}</version>
+              </plugin>
+            </plugins>
+          </build>
         </project>
 
 artifacts:
