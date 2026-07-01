@@ -11,7 +11,12 @@ import yaml
 
 import codd.implementer as implementer_module
 from codd.cli import main
-from codd.implementer import DesignContext, ImplementSpec, _build_implementation_prompt
+from codd.implementer import (
+    DesignContext,
+    ImplementSpec,
+    _build_implementation_prompt,
+    _parse_file_payloads,
+)
 
 
 def _write_doc(
@@ -204,6 +209,45 @@ def test_implement_fallback_uses_rust_extension(tmp_path, monkeypatch):
     assert generated_file.read_text(encoding="utf-8").startswith("// @generated-by: codd implement")
     assert "Primary language: rust" in calls[0]["input"]
     assert "=== FILE: src/auth/<filename>.rs ===" in calls[0]["input"]
+
+
+def test_parse_file_payloads_unheadered_unfenced_output_raises():
+    """No '=== FILE: ... ===' header AND no complete code fence must raise.
+
+    Regression for the 2026-06-30 java_v2 greenfield dogfood: this exact
+    content shape (a duplicated pom.xml tail fragment sliced mid-token,
+    starting "in>" instead of "<plugin>") had zero FILE-header matches and no
+    fence, yet the old fallback silently accepted it as one implicit file and
+    wrote it to disk as a bogus "index.java" with a full traceability header —
+    indistinguishable from genuine generated output. It must raise instead, so
+    the caller's existing ValueError -> NoUsableGeneratedFiles retry applies.
+    """
+    garbled = (
+        "in>\n                <groupId>org.jacoco</groupId>\n            </plugin>\n"
+        "        </plugins>\n    </build>\n</project>\n"
+    )
+
+    try:
+        _parse_file_payloads(garbled, ["."], "java")
+    except ValueError as exc:
+        assert "no complete code fence" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unheadered, unfenced output")
+
+
+def test_parse_file_payloads_unheadered_but_fenced_output_still_falls_back():
+    """A single COMPLETE code fence with no FILE header is still accepted.
+
+    Distinguishes the fix from an over-broad one: the fallback that
+    `test_implement_fallback_uses_rust_extension` relies on (an AI that
+    skipped the FILE header but did wrap its one file in a real fence) must
+    keep working.
+    """
+    fenced = "```python\nvalue = 1\n```\n"
+
+    payloads = _parse_file_payloads(fenced, ["src/auth"], "python")
+
+    assert payloads == [("src/auth/index.py", "value = 1\n")]
 
 
 def test_implement_clean_removes_existing_output_path(tmp_path, monkeypatch):

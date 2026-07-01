@@ -140,6 +140,15 @@ OUT_OF_SCOPE_OUTPUT = _file_block("/etc/passwd")
 ANOTHER_OUT_OF_SCOPE_OUTPUT = _file_block("src/other/service.py")
 # Syntactically invalid Python in an IN-scope path -> ImplementSyntaxGateError.
 BROKEN_PY_OUTPUT = _file_block("src/auth/service.py", "def f(:\n    return 1\n")
+# No `=== FILE: ... ===` header AND no complete code fence: indistinguishable
+# from a garbled/truncated response (e.g. a duplicated tail fragment of a
+# DIFFERENT file sliced mid-token — the 2026-06-30 java_v2 greenfield dogfood
+# shape, where this exact content class was silently written to disk as a
+# bogus repo-root `index.java`). Must retry, never guess it is one real file.
+UNHEADERED_UNFENCED_GARBAGE_OUTPUT = (
+    "in>\n                <groupId>org.jacoco</groupId>\n            </plugin>\n"
+    "        </plugins>\n    </build>\n</project>\n"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +199,32 @@ def test_all_blocks_invalid_then_success_retried(
     assert result.generated_files == [project / "src" / "auth" / "service.py"]
     assert not (project / "etc" / "passwd").exists()
     assert not Path("/etc/passwd_codd_should_never_write").exists()
+
+
+def test_unheadered_unfenced_garbage_then_success_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b) response has neither a FILE header nor a complete code fence.
+
+    Regression for the 2026-06-30 java_v2 greenfield dogfood: a garbled
+    attempt's raw output (a duplicated, mid-token-sliced tail fragment of a
+    DIFFERENT file) had zero `=== FILE: ... ===` matches, and the old fallback
+    silently accepted the WHOLE garbled string as "one implicit file",
+    writing it to disk as a bogus `index.<ext>` complete with a traceability
+    header — indistinguishable from genuine output. It must instead retry,
+    and the bogus path must never be written on either attempt.
+    """
+    project = _project(tmp_path)
+    prompts = _patch_invoke_sequence(
+        monkeypatch, [UNHEADERED_UNFENCED_GARBAGE_OUTPUT, VALID_OUTPUT]
+    )
+
+    result = _impl(project).run_implement(ImplementSpec("docs/design/auth.md", ["src/auth"]))
+
+    assert len(prompts) == 2
+    assert result.generated_files == [project / "src" / "auth" / "service.py"]
+    assert not (project / "src" / "auth" / "index.py").exists()
+    assert not list(project.glob("index.*"))
 
 
 def test_filtered_to_zero_then_success_retried(

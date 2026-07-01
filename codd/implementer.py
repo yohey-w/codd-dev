@@ -2312,9 +2312,31 @@ def _parse_file_payloads(
     root_patterns = list(root_artifact_patterns or ())
     matches = list(FILE_BLOCK_RE.finditer(cleaned_output))
     if not matches:
+        # No `=== FILE: ... ===` header anywhere in the response. Only trust
+        # this as "the AI emitted one file's content directly" when the output
+        # is at least a single complete, well-formed code fence — i.e. the
+        # model got the fallback-acceptable shorthand right, even if it skipped
+        # the FILE header (see test_implement_fallback_uses_rust_extension).
+        # Output that is neither a FILE block NOR a complete fence is
+        # indistinguishable from a garbled/truncated response, and blindly
+        # writing it to disk as "index.<ext>" (with a full traceability header)
+        # is exactly how a duplicated tail fragment of a DIFFERENT file — sliced
+        # mid-token — became a real, misleading file in the wild (2026-06-30
+        # java_v2 greenfield dogfood: a mangled retry's leftover pom.xml tail
+        # was written as a bogus repo-root index.java). Raising here routes
+        # through the same ValueError -> NoUsableGeneratedFiles retry path as
+        # the "matches found but all invalid" branch below, instead of
+        # guessing.
         fallback_content = _strip_code_fence(cleaned_output).strip()
         if not fallback_content:
             raise ValueError("AI command returned empty implementation output")
+        if not _FENCED_BLOCK_RE.match(cleaned_output):
+            raise ValueError(
+                "AI command returned output with no '=== FILE: ... ===' marker "
+                "and no complete code fence to fall back to "
+                f"({len(cleaned_output)} unstructured chars); treating the "
+                "response as unparseable rather than guessing it is one file"
+            )
         extension = _default_generated_extension(language, fallback_content)
         return [(f"{output_paths[0]}/index{extension}", fallback_content.rstrip() + "\n")]
 
@@ -2526,7 +2548,7 @@ def _strip_code_fence(block: str, *, destination: str | None = None) -> str:
     # Drop the `$` end-of-string anchor so the match still wins when the
     # LLM ignored the "no commentary" instruction and appended explanations.
     # `\s*\n` after the language tag tolerates trailing spaces and CRLF.
-    fenced = re.match(r"^```(?:[a-zA-Z0-9_+-]+)?\s*\n(?P<body>.*?)\r?\n```", stripped, re.DOTALL)
+    fenced = _FENCED_BLOCK_RE.match(stripped)
     if fenced:
         stripped = fenced.group("body")
     if destination is not None and PurePosixPath(destination).suffix.lower() in _MARKDOWN_SUFFIXES:
@@ -2535,6 +2557,13 @@ def _strip_code_fence(block: str, *, destination: str | None = None) -> str:
 
 
 _MARKDOWN_SUFFIXES = {".md", ".markdown"}
+# A single complete fenced block starting at position 0: opening ```lang?,
+# a body, and a closing ```. Shared by `_strip_code_fence` (which tolerates
+# trailing prose after the closing fence) and `_parse_file_payloads`'s
+# no-FILE-header fallback gate (which uses the match/no-match verdict itself
+# to decide whether unheadered output is trustworthy enough to accept as one
+# implicit file, rather than silently guessing on unstructured text).
+_FENCED_BLOCK_RE = re.compile(r"^```(?:[a-zA-Z0-9_+-]+)?\s*\n(?P<body>.*?)\r?\n```", re.DOTALL)
 _EMPTY_FENCE_BLOCK_RE = re.compile(r"^```[a-zA-Z0-9_+-]*[ \t]*(?:\r?\n\s*)?```$")
 # A fence OPENER line (optional language tag) and a bare closing fence line.
 _ORPHAN_OPEN_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_+-]*[ \t]*\r?$")
