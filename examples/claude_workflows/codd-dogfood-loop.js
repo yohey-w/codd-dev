@@ -23,28 +23,35 @@
 //        recorded by hand into the same ledger.
 //
 // EXECUTOR ASSIGNMENT (see dogfood/README.md "Executor assignment")
+//   (2026-07-01: Fable 5 — export-restricted since 2026-06-12 — and GPT-5.5 Pro
+//   consult — unusable since 2026-06-30 — are BOTH gone. There is no longer a
+//   second, architecturally-different model to consult as an external divergence
+//   layer. Opus 4.8 effort=max extended thinking + explicit self-critique is now
+//   the sole divergence mechanism; see dogfood/README.md and
+//   memory/feedback_gpt55_strategic_layer.md for the full rationale.)
 //   - Loop machinery + the scripted axes: NO model (deterministic, free, Tier 0).
-//   - SUT executor: cheapest viable model, Sonnet 4.6 floor (Tier 1); Codex
-//     (gpt-5.5 xhigh) for D6. Fable 5 is NOT used as the SUT (too capable — it
-//     would hide harness gaps, violating M1).
+//   - SUT executor: cheapest viable model, Sonnet floor (Tier 1); Codex
+//     (gpt-5.5 xhigh) for D6 — this is the Codex CLI as a system-under-test, a
+//     distinct and still-valid mechanism from the retired GPT-Pro-consult layer.
 //   - This driver itself, plus MECHANICAL triage/fix (a bug patch to existing
-//     behaviour), run on Opus 4.8 (Tier 2 — strong, episodic). Opus is assigned
-//     directly for the routine tiers (not Fable 5) because Opus is sufficient for
-//     a bug patch, cheaper, and classifier-free.
+//     behaviour), run on Opus 4.8 (Tier 2 — strong, episodic).
 //   - CONCEPTUAL findings (the fix is a NEW abstraction / NEW check-class, not a
 //     patch — precedent: the D13 visual-judge finding that birthed the
 //     environment-coverage axis) and the periodic PORTFOLIO-EVOLUTION pass ("which
-//     failure class does NO current axis cover?") are Tier 3 — apex: a Fable 5
-//     design pass, then committed+pushed AUTONOMOUSLY like any other fix (NO
-//     owner-approval gate). Best-effort: the loop's content (cross-model testing,
-//     adversarial/input-validation, security-adjacent) can trip Fable 5's
-//     content-safety classifiers and reroute to Opus 4.8, in which case Opus
-//     designs+fixes it autonomously (NOT parked in an owner queue). The
-//     mechanical/conceptual split only routes WHICH MODEL designs the fix (Opus
-//     vs Fable), not whether a human approves it — loop findings, mechanical AND
-//     conceptual, resolve autonomously. Only genuinely novel PRODUCT direction
-//     stays the owner's domain. The whole 4-tier stack = "the apex model designs,
-//     the execution model executes" applied recursively to the QA loop.
+//     failure class does NO current axis cover?") are Tier 3 — apex: an Opus 4.8
+//     effort=max extended-thinking design pass with EXPLICIT self-critique
+//     (necessary? sufficient — does it cover sibling cases? general — does it fix
+//     the class, not just this symptom? per feedback_fix_strategy_output_then_critique),
+//     then committed+pushed AUTONOMOUSLY like any other fix (NO owner-approval
+//     gate) — UNLESS the self-critique pass concludes the finding is genuinely
+//     novel PRODUCT direction with no training-data precedent, in which case it
+//     is marked wontfix and escalated to the owner (see the TRIAGE phase below).
+//     The mechanical/conceptual split now routes how much the design agent
+//     self-critiques before acting (mechanical = direct patch; conceptual =
+//     self-critique pass first), not which model is consulted — both routes are
+//     Opus 4.8. The whole stack = "the same apex model designs with explicit
+//     self-critique in place of external divergence, the execution model
+//     executes" applied recursively to the QA loop.
 //
 //   The workflow VEHICLE is Claude-Code-specific, but every `codd` command it
 //   triggers uses whatever `ai_command` the project's codd.yaml declares — Claude
@@ -223,7 +230,7 @@ PROTOCOL: ${protocol}
 SUT-executor rule (M1): set the project's ai_command for the system-under-test to
 ${sutModel}. ${chosen === "D6"
       ? "D6 is cross-CLI, so the SUT must run on Codex (gpt-5.5 xhigh)."
-      : "Use the cheapest viable model — Sonnet 4.6 is the floor; do NOT use a stronger model than needed (a lighter model is the more sensitive instrument and surfaces gaps a stronger one papers over). Fable 5 is NOT used as the SUT."} Capture every defect you
+      : "Use the cheapest viable model — Sonnet is the floor; do NOT use a stronger model than needed (a lighter model is the more sensitive instrument and surfaces gaps a stronger one papers over)."} Capture every defect you
 observe as a candidate finding (symptom, the stage that produced it, and how to
 reproduce). A clean run with no defects is a valid dry run.
 Report the candidate findings (or "none"). End with STATUS: OK or STATUS: FAIL.`);
@@ -233,19 +240,22 @@ Report the candidate findings (or "none"). End with STATUS: OK or STATUS: FAIL.`
   const axisFindings = !/no findings|none\b/i.test(String(axisRun));
 
   // ── Phase 4: TRIAGE every finding (classify, design+fix, derive) ────────────
-  // Triage CLASSIFIES each finding, which now only routes WHICH MODEL designs the
-  // fix — not whether a human approves it: MECHANICAL (a bug patch to existing
-  // behaviour) → designed+fixed on Opus 4.8 (Tier 2); CONCEPTUAL (the fix is a
-  // NEW abstraction / NEW check-class, not a patch — precedent: the D13
-  // visual-judge finding that birthed the environment-coverage axis) → designed
-  // by Fable 5 (Tier 3). BOTH branches then fix + regression-test + commit + push
-  // AUTONOMOUSLY — there is no owner-approval gate on loop findings. Reroute
-  // caveat: the loop's content can trip Fable 5's content-safety classifiers and
-  // reroute to Opus 4.8, in which case Opus designs+fixes it autonomously (NOT
-  // parked in an owner queue).
+  // Triage CLASSIFIES each finding, which now routes how much self-critique the
+  // SAME model (Opus 4.8) applies before acting — not whether a human approves
+  // it, and not which model is consulted (Fable 5 / GPT-5.5 Pro consult are both
+  // unavailable as of 2026-06-30; there is no second model to route to):
+  // MECHANICAL (a bug patch to existing behaviour) → Opus 4.8 fixes directly
+  // (Tier 2); CONCEPTUAL (the fix is a NEW abstraction / NEW check-class, not a
+  // patch — precedent: the D13 visual-judge finding that birthed the
+  // environment-coverage axis) → Opus 4.8 effort=max extended thinking with an
+  // EXPLICIT self-critique pass first (Tier 3). BOTH branches then fix +
+  // regression-test + commit + push AUTONOMOUSLY — there is no owner-approval
+  // gate on loop findings UNLESS the self-critique pass concludes the finding is
+  // genuinely novel PRODUCT direction with no training-data precedent, which is
+  // marked wontfix and escalated to the owner instead (see below).
   await phase("triage");
   if (axisFindings) {
-    log(`[dogfood] ${chosen} surfaced candidate findings — classifying, then mechanical→Opus 4.8 (Tier 2) / conceptual→Fable 5 (Tier 3); both fix+commit+push autonomously (no owner gate).`);
+    log(`[dogfood] ${chosen} surfaced candidate findings — classifying, then mechanical→Opus 4.8 direct fix (Tier 2) / conceptual→Opus 4.8 self-critique design pass (Tier 3); both fix+commit+push autonomously (no owner gate, unless self-critique flags genuine novelty).`);
     await agent(`${COMMON}
 TRIAGE the findings from axis ${chosen}. CLASSIFY each finding first, then act:
 
@@ -266,28 +276,38 @@ A) MECHANICAL finding (a bug patch to EXISTING CoDD behaviour, e.g. the type
 
 B) CONCEPTUAL finding (the right fix is a NEW abstraction or NEW check-class, not
    a patch — precedent: the D13 human/visual-judge finding whose fix was the new
-   environment-coverage axis). Do NOT hand this to Opus as a patch — the apex
-   model DESIGNS the new abstraction. Run a Fable 5 design pass, then for EVERY
-   conceptual finding do BOTH (exactly like the mechanical branch, AUTONOMOUSLY —
-   there is NO owner-approval gate):
+   environment-coverage axis). Do NOT patch this directly. Fable 5 and GPT-5.5 Pro
+   consult are NOT available (export-restricted / unusable as of 2026-06-30) — there
+   is no second, architecturally-different model to consult, so YOU (Opus 4.8,
+   effort=max, extended thinking) are the design agent. Before implementing, run
+   an EXPLICIT self-critique pass and answer in your reply: (a) Necessary — does
+   the finding actually require a new abstraction, or does an existing check
+   already cover it? (b) Sufficient — does the design cover sibling cases, not
+   just the one observed symptom? (c) General — does it fix the class (a
+   language-agnostic / stack-agnostic root cause), never a per-OSS or per-case
+   patch? If the self-critique concludes this is genuinely novel PRODUCT
+   direction with NO training-data precedent (not just "a new check-class for
+   the loop," which is still loop-internal and fine to design autonomously),
+   STOP and mark it wontfix per the escalation note below instead of proceeding.
+   Otherwise, for EVERY conceptual finding do BOTH (exactly like the mechanical
+   branch, AUTONOMOUSLY — there is NO owner-approval gate):
      1. Implement the designed abstraction / new check-class behind the
         codd-improve Generality Gate, with a REGRESSION TEST, then COMMIT + PUSH
         it like any other fix.
      2. DERIVE follow-up cases into dogfood/ledger.yaml pending_cases with origin
         "derived:<finding-id>".
-   Reroute caveat: if the finding's content trips Fable 5's content-safety
-   classifiers and reroutes to Opus 4.8, Opus DESIGNS and FIXES it autonomously
-   (do NOT park it in an owner queue). Mark the finding class: conceptual; record
-   it (id, axis, symptom, fix_commit, regression_test) like any other finding.
+   Mark the finding class: conceptual; record it (id, axis, symptom, fix_commit,
+   regression_test) like any other finding.
 
-The class now only routes WHICH MODEL designs the fix (Opus for mechanical, Fable
-for conceptual), not whether a human approves it: both branches end in an
-autonomous fix + regression test + commit + push.
+The class now only routes how much self-critique the design agent applies before
+acting (mechanical = direct patch; conceptual = self-critique pass first) — both
+routes are Opus 4.8, and both branches normally end in an autonomous fix +
+regression test + commit + push.
 
 If a finding is actually new-concept divergence, taste, or the self-hosting limit
-(the README's honest limits — genuinely novel PRODUCT direction, not a
-loop-internal fix), mark it wontfix with a note instead — that is the owner's
-judgment, not a loop fix.
+(the README's honest limits — genuinely novel PRODUCT direction with no
+training-data precedent, not a loop-internal new-check-class), mark it wontfix
+with a note instead — that is the owner's judgment, not a loop fix.
 End with STATUS: OK once each finding is classified, fixed, and committed+pushed,
 with regression tests and derived cases in place.`);
   } else {
@@ -298,10 +318,13 @@ with regression tests and derived cases in place.`);
   // from per-finding triage. Convergent case-derivation (this Opus driver) drifts
   // toward obvious variants of known axes; periodically run a DIVERGENT pass
   // asking "which failure class does NO current axis (D1..D14) cover?" to mint NEW
-  // axes / check-categories. That "what are we NOT testing" judgment is the apex
-  // role (Fable 5, autonomous — owner informed, not gating), not a convergent job,
-  // and is best run occasionally (e.g. once the portfolio has gone quiet) rather
-  // than every iteration — hence it is documented here, not invoked on every tick.
+  // axes / check-categories. That "what are we NOT testing" judgment is the same
+  // apex role as above (Opus 4.8 effort=max + explicit self-critique — Fable 5 is
+  // no longer available to provide an external divergent head, so the
+  // self-critique pass IS the divergence safeguard; autonomous, owner informed,
+  // not gating), not a convergent job, and is best run occasionally (e.g. once
+  // the portfolio has gone quiet) rather than every iteration — hence it is
+  // documented here, not invoked on every tick.
 
   // ── Phase 5: RECORD the run into the ledger ────────────────────────────────
   await phase("record");
