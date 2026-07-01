@@ -33,3 +33,6 @@ dogfood/*
 
 # Internal task reports (cmd_* process records) — kept LOCAL, not published
 reports/
+
+# Claude Code project-local settings (machine-specific paths, e.g. autoMemoryDirectory) — kept LOCAL, not published
+.claude/
