@@ -27,6 +27,13 @@ display_name: "C++"
 strictness: strict
 file_extensions: [".h", ".hpp", ".hh", ".cc", ".cpp", ".cxx"]
 
+# Greenfield ② OPT-IN (data-driven; the language-free core authorizes the generic
+# LayoutProfile synthesizer + the generic-template scaffolder by the PRESENCE of this
+# key, never by a language name — same opt-in mechanism Java/C# use). C++'s
+# package_root.kind=none (flat layout, like Java) needs no nested-dir scheme: the
+# synthesizer already handles none|path_root as package_root == source_root.
+greenfield_synthesis: true
+
 layout:
   repo_root: "."
   module_root: "."
@@ -142,7 +149,19 @@ commands:
       must_include_source_sets: ["src", "include"]
 
   verify:
-    argv: ["ctest", "--test-dir", "build", "--output-junit", "build/ctest-junit.xml"]
+    # NOTE (pre-existing bug fixed alongside the greenfield_synthesis opt-in;
+    # confirmed by an empirical dry run with real ctest 3.28.3, not by inspection
+    # alone): VerifyCampaignSpec.resolve_argv (project_types.py) passes an argv
+    # element through VERBATIM unless it contains a ``{...}`` placeholder, so this
+    # literal argv runs exactly as written. ``ctest --test-dir build`` internally
+    # chdirs INTO build/ before resolving its OWN relative-path flags — so a
+    # SECOND literal "build/" prefix on --output-junit doubled up: the report was
+    # actually written to build/build/ctest-junit.xml, never build/ctest-junit.xml,
+    # so ``report.path`` below (resolved relative to {module_root} by the harness)
+    # never found it — every C++ verify campaign would CampaignError("no report"),
+    # regardless of whether the tests themselves passed. Bare "ctest-junit.xml" is
+    # correct here because --test-dir already relocated ctest's relative-path base.
+    argv: ["ctest", "--test-dir", "build", "--output-junit", "ctest-junit.xml"]
     cwd: "{module_root}"
     report:
       path: "build/ctest-junit.xml"
@@ -219,7 +238,36 @@ scaffold:
   owned_files:
     - "CMakeLists.txt"
 
+  # Default values for the template substitution variables (consumed by the generic-
+  # template scaffolder, replace-based — mirrors java.yaml's/csharp.yaml's `defaults`
+  # block). {package_name} comes from the resolved LayoutProfile and always wins over
+  # a default; a version bump is a DATA edit here, never a template/code edit.
+  # googletest_version was cross-checked against the real upstream tags (GitHub API,
+  # google/googletest) at authoring time — v1.17.0 is the current latest release.
+  defaults:
+    cpp_standard: "20"
+    googletest_version: "1.17.0"
+
   templates:
+    # Single CMakeLists.txt: like Java's package_root.kind=none, C++ has no C#-style
+    # nested lib/test PROJECT split to structurally enforce deliverable purity.
+    # GoogleTest is FetchContent-pulled into its own gtest/gtest_main targets and
+    # linked ONLY to the test executable below — never to the library target — so
+    # a GoogleTest symbol can structurally never reach the library's own link unit,
+    # mirroring Maven's <scope>test</scope> exclusion (java.yaml) without needing a
+    # second CMake project.
+    #
+    # Both the library and the test-executable sources are GLOB'd rather than
+    # listed explicitly (mirrors Maven's / the .NET SDK's implicit source
+    # discovery: the AI authors files under src/+include/+tests/ and this template
+    # compiles whatever exists). Each glob is guarded by ``if(...)`` because
+    # add_library()/add_executable() with a genuinely EMPTY source list is a hard
+    # CMake configure error (confirmed empirically) — reachable in practice, since
+    # the greenfield pipeline scaffolds this file, and may run the implement-oracle
+    # per-task, BEFORE every task has written its source/test files yet.
+    # CONFIGURE_DEPENDS lets Ninja/Makefiles re-glob a reused build/ dir; the
+    # harness's own implement-oracle reruns `cmake -S . -B build` fresh every
+    # cycle regardless, so new files are always picked up either way.
     - path: "CMakeLists.txt"
       content_template: |
         cmake_minimum_required(VERSION 3.20)
@@ -229,6 +277,40 @@ scaffold:
         set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
         enable_testing()
+
+        # --- Library target: the project's own first-party source (src/ + include/) ---
+        file(GLOB_RECURSE CODD_LIB_SOURCES CONFIGURE_DEPENDS "src/*.cpp" "src/*.cc" "src/*.cxx")
+        if(CODD_LIB_SOURCES)
+          add_library({package_name} ${CODD_LIB_SOURCES})
+          target_include_directories({package_name} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        endif()
+
+        # --- GoogleTest via FetchContent (test-only — the modern, no-system-install
+        # approach; never find_package(GTest), which requires a pre-installed GTest
+        # and would silently break any environment that lacks one). ---
+        include(FetchContent)
+        FetchContent_Declare(
+          googletest
+          GIT_REPOSITORY https://github.com/google/googletest.git
+          GIT_TAG v{googletest_version}
+        )
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googletest)
+
+        # --- Test executable: GoogleTest-based, discovered by ctest ---------------------
+        # Linked against GTest::gtest_main (test-scope only) + the library target (if
+        # it exists yet) — GoogleTest never becomes a link requirement of the library
+        # itself, exactly like JUnit5's <scope>test</scope> for Java (see java.yaml).
+        file(GLOB_RECURSE CODD_TEST_SOURCES CONFIGURE_DEPENDS "tests/*.cpp" "tests/*.cc" "tests/*.cxx")
+        if(CODD_TEST_SOURCES)
+          add_executable({package_name}_tests ${CODD_TEST_SOURCES})
+          target_link_libraries({package_name}_tests PRIVATE GTest::gtest_main)
+          if(TARGET {package_name})
+            target_link_libraries({package_name}_tests PRIVATE {package_name})
+          endif()
+          include(GoogleTest)
+          gtest_discover_tests({package_name}_tests)
+        endif()
 
 artifacts:
   harness_root: ".codd"

@@ -12,8 +12,11 @@ parent, not in this task.)
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from codd.coverage_execution_coherence import coherence_gate_applies
 from codd.languages import (
     CommandSpec,
     LanguageProfile,
@@ -24,6 +27,8 @@ from codd.languages import (
     load_language_profile,
 )
 from codd.languages.registry import PROFILES_DIR
+from codd.project_types import resolve_layout_profile, scaffold_layout
+from codd.vb_marker_authenticity import CppTestBlockProfile
 
 
 @pytest.fixture(scope="module")
@@ -171,3 +176,149 @@ def test_cpp_extra_preserves_path_rules() -> None:
     # implement_oracle is a first-class field, NOT left in .extra
     assert "implement_oracle" not in cpp.extra
     assert cpp.raw["id"] == "cpp"
+
+
+# ── greenfield ② OPT-IN synthesis + scaffold ──────────────────────────────────
+#
+# This file (as of the greenfield_synthesis opt-in) previously covered ONLY the
+# raw YAML shape — nothing about the synthesizer/gate/scaffold machinery the
+# opt-in key actually activates. Mirrors the vertical-slice pattern used for
+# java.yaml / csharp.yaml (tests/test_java_greenfield_vertical_slice.py,
+# tests/test_csharp_greenfield_vertical_slice.py), scoped down to a focused set
+# of assertions for the C++ increment rather than a full new vertical-slice file.
+
+
+def test_cpp_greenfield_synthesis_opted_in() -> None:
+    """cpp.yaml declares greenfield_synthesis: true — the SAME data-driven opt-in
+    key java.yaml (commit 2736959) and csharp.yaml use; the language-free core
+    authorizes the generic LayoutProfile synthesizer + generic-template scaffolder
+    by the PRESENCE of this key alone, never a language-name branch."""
+    cpp = load_language_profile(PROFILES_DIR / "cpp.yaml")
+    assert cpp.raw.get("greenfield_synthesis") is True
+
+
+def test_cpp_coherence_gate_applies_after_opt_in() -> None:
+    """resolve_layout_profile('cpp') now synthesizes a real LayoutProfile (was
+    None before the opt-in, a strict NO-OP), and the coverage-execution-coherence
+    gate — previously a silent NO-OP for C++ — now applies. This is the load-
+    bearing empirical claim the greenfield_synthesis opt-in makes for every
+    downstream anti-false-green gate (coverage-execution-coherence here; VB
+    marker-authenticity via test_block_profile below)."""
+    profile = resolve_layout_profile(language="cpp", project_name="todo-cli")
+    assert profile is not None
+    assert coherence_gate_applies(profile) is True
+
+
+def test_cpp_test_block_profile_resolves_to_cpp_parser() -> None:
+    """LayoutProfile.test_block_profile() resolves to the ALREADY-EXISTING
+    CppTestBlockProfile (codd/vb_marker_authenticity.py) for a synthesized cpp
+    layout profile — no new adapter class was needed, only the opt-in flag.
+    Without this wiring the VB marker-authenticity gate would silently degrade to
+    its language-agnostic stage-1 (orphan-marker) check only, for every C++
+    project (the same silent-degrade risk java's analogous test guards against)."""
+    profile = resolve_layout_profile(language="cpp", project_name="todo-cli")
+    assert profile is not None
+    assert isinstance(profile.test_block_profile(), CppTestBlockProfile)
+
+
+def test_cpp_scaffolds_cmakelists_with_defaults_substituted(tmp_path: Path) -> None:
+    """scaffold_layout writes the SINGLE CMakeLists.txt at the repo root from
+    cpp.yaml's template — cpp's package_root.kind: none (like Java) means there is
+    no C#-style nested lib/test project split — create-only / idempotent,
+    substituting {package_name} + scaffold.defaults (cpp_standard,
+    googletest_version). Mirrors test_java_scaffolds_pom_with_defaults_substituted."""
+    profile = resolve_layout_profile(language="cpp", project_name="todo-cli")
+    assert profile is not None
+
+    result = scaffold_layout(tmp_path, profile)
+    cmakelists = tmp_path / "CMakeLists.txt"
+    assert cmakelists.is_file()
+    assert {"CMakeLists.txt"} <= set(result.created)
+
+    body = cmakelists.read_text(encoding="utf-8")
+
+    # scaffold.defaults + the resolved package_name substituted.
+    assert "project(todo_cli LANGUAGES CXX)" in body
+    assert "set(CMAKE_CXX_STANDARD 20)" in body  # cpp_standard default
+    assert "GIT_TAG v1.17.0" in body  # googletest_version default
+
+    # (a) no UNSUBSTITUTED template var leaked into the rendered file.
+    for var in ("{package_name}", "{cpp_standard}", "{googletest_version}"):
+        assert var not in body, var
+
+    # (b) GoogleTest FetchContent wiring is present — the modern, no-system-
+    # install approach; find_package(GTest) would require a pre-installed GTest
+    # and silently break any environment lacking one, so it must NOT be USED (an
+    # executable, non-comment line) — the template's own explanatory comment is
+    # allowed to just NAME find_package(GTest) when saying why it's avoided, so
+    # the check below is line-based and skips comment lines, not a raw substring
+    # match on the whole rendered file.
+    assert "include(FetchContent)" in body
+    assert "FetchContent_Declare(" in body
+    assert "FetchContent_MakeAvailable(googletest)" in body
+    executable_lines = [
+        line for line in body.splitlines() if line.strip() and not line.strip().startswith("#")
+    ]
+    assert not any("find_package(GTest" in line for line in executable_lines)
+    assert "include(GoogleTest)" in body
+    assert "gtest_discover_tests(" in body
+
+    # idempotent: a second call creates nothing, skips the existing file (the
+    # SAME create-only/non-clobber contract java/csharp scaffolding relies on).
+    result2 = scaffold_layout(tmp_path, profile)
+    assert result2.created == ()
+    assert "CMakeLists.txt" in result2.skipped
+
+    # non-clobber: an authored file is left byte-for-byte.
+    cmakelists.write_text("AUTHORED", encoding="utf-8")
+    scaffold_layout(tmp_path, profile)
+    assert cmakelists.read_text(encoding="utf-8") == "AUTHORED"
+
+
+def test_cpp_googletest_is_test_scope_only_no_leak_into_library_link(
+    tmp_path: Path,
+) -> None:
+    """ANTI-FALSE-GREEN (C++'s analogue of
+    test_java_pom_test_dependency_is_scoped_test_no_leak_into_compile_runtime):
+    GoogleTest must be a link requirement of the TEST EXECUTABLE ONLY, never of
+    the library target — C++ has no C#-style physical lib/test project split, so
+    purity here is enforced by the LINK GRAPH itself (mirrors Maven's
+    <scope>test</scope> exclusion for JUnit5)."""
+    profile = resolve_layout_profile(language="cpp", project_name="todo-cli")
+    assert profile is not None
+    scaffold_layout(tmp_path, profile)
+    body = (tmp_path / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    # Isolate the library target's OWN declaration block and prove nothing in it
+    # references GTest/gtest.
+    lib_start = body.index("add_library(")
+    lib_end = body.index("endif()", lib_start)
+    lib_block = body[lib_start:lib_end]
+    assert "GTest" not in lib_block
+    assert "gtest" not in lib_block
+
+    # The test executable, in contrast, DOES link GTest::gtest_main.
+    assert "add_executable(todo_cli_tests" in body
+    exe_start = body.index("add_executable(todo_cli_tests")
+    exe_block = body[exe_start:]
+    assert "target_link_libraries(todo_cli_tests PRIVATE GTest::gtest_main)" in exe_block
+
+
+def test_cpp_verify_argv_output_junit_path_matches_report_path(
+    registry: LanguageRegistry,
+) -> None:
+    """Regression test for a pre-existing bug found (by an empirical dry run with
+    real ctest 3.28.3) and fixed alongside the greenfield_synthesis opt-in:
+    ``ctest --test-dir build`` chdirs INTO build/ before resolving ITS OWN
+    relative-path flags, so --output-junit's value must be relative to build/
+    (bare "ctest-junit.xml"), NOT prefixed with "build/" again — a "build/"
+    prefix there silently writes the report to build/build/ctest-junit.xml, which
+    report.path (resolved relative to {module_root}) never finds, so every C++
+    verify campaign would CampaignError("no report") regardless of whether the
+    tests themselves passed."""
+    cpp = registry.resolve("cpp")
+    assert cpp.commands["verify"].argv == (
+        "ctest", "--test-dir", "build", "--output-junit", "ctest-junit.xml",
+    )
+    assert cpp.commands["verify"].report is not None
+    assert cpp.commands["verify"].report.path == "build/ctest-junit.xml"
