@@ -86,9 +86,16 @@ def test_resolve_by_id(registry: LanguageRegistry, lang_id: str) -> None:
         ("py", "python"),
         ("python3", "python"),
         ("node", "typescript"),
-        ("javascript", "typescript"),
         ("ts", "typescript"),
         ("  Node  ", "typescript"),  # surrounding whitespace tolerated
+        # NOTE: "javascript" is intentionally NOT parametrized here anymore.
+        # javascript.yaml (id: javascript) now claims that exact string via the
+        # registry's id fast-path — it resolves to its OWN profile, not
+        # typescript's, even though typescript.yaml's ``aliases:`` list still
+        # textually contains "javascript" (an intentionally-left, now-shadowed,
+        # harmless entry — see tests/languages/test_profile_javascript.py's
+        # ``test_javascript_id_shadows_the_typescript_alias_entry``). "ts"/
+        # "node" above are UNCHANGED, since neither is a distinct profile id.
     ],
 )
 def test_resolve_by_alias(

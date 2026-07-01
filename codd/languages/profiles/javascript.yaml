@@ -1,0 +1,265 @@
+# JavaScript language profile (design §1.2-1.9, §7) — a Greenfield ② OPT-IN
+# sibling of java.yaml / csharp.yaml / cpp.yaml, NOT an extension of
+# typescript.yaml and NOT a reuse of its legacy bridge.
+#
+# WHY A SEPARATE PROFILE (not a wider typescript.yaml legacy_project_types
+# entry): typescript.yaml's ``legacy_project_types.accepted_names`` is a
+# DELIBERATE, historical compatibility boundary — it accepts EXACTLY
+# ``typescript``/``node`` (byte-identical support), NOT the wider registry
+# aliases ``ts``/``js``/``javascript``. That legacy builder's realizer id
+# (``npm-vitest-tsc-layout-v1``) literally bakes in ``tsc`` (TypeScript's
+# compiler/type-checker) — applying it to a plain JavaScript project would be
+# semantically wrong, not just narrowly scoped. So JavaScript gets its OWN
+# onboarding via the MODERN, generic ``greenfield_synthesis: true`` opt-in
+# (the same mechanism java.yaml/csharp.yaml/cpp.yaml use), never touching
+# typescript.yaml's legacy boundary.
+#
+# REGISTRY MECHANICS (verified empirically, codd/languages/registry.py): a
+# language string resolves via ``LanguageRegistry.resolve`` — a FAST PATH exact
+# ``id`` dict lookup FIRST, THEN a linear alias scan. Discovery
+# (``LanguageRegistry._discover``) only rejects a duplicate ``id``; it never
+# validates cross-profile ALIAS uniqueness. So ``id: javascript`` here
+# intercepts the string ``"javascript"`` via the id fast path — it SHADOWS
+# typescript.yaml's own ``javascript`` alias entry for that one exact string,
+# with NO edit to typescript.yaml at all. This profile deliberately declares
+# NO ``aliases:`` — so ``ts``/``js``/``node`` are UNTOUCHED and keep resolving
+# to the canonical TypeScript profile exactly as before (adding ``js`` as an
+# alias here too would create a genuine cross-profile alias collision whose
+# winner depends on filename sort order — a latent hazard, not a clean fix).
+#
+# Load-bearing decisions (asserted by tests/languages/test_profile_javascript.py):
+#   * module_root = "."   — package.json lives at the repo root (mirrors
+#     typescript.yaml's topology, minus everything TypeScript-specific).
+#   * source_sets root  = src (**/*.js + **/*.jsx); test_sets root = tests
+#     (**/*.test.js + **/*.spec.js). NO ``.ts``/``.tsx`` anywhere.
+#   * package_root.kind = path_root, path = src — JS resolves modules by PATH
+#     (like TS), not a named/nested package.
+#   * strictness = strict — a new (non-legacy-historical) profile is strict
+#     from day one, like java/csharp/cpp; typescript.yaml's own
+#     ``legacy_compatible`` is specific to ITS historical bridge.
+#   * NO ``implement_oracle`` declared — plain JavaScript has no compiler/
+#     type-checker. This absence is HONEST (mirrors the reason NOT to reuse
+#     typescript.yaml's tsc-shaped legacy builder), not a gap: every OTHER
+#     anti-false-green surface below (manifest<->lock coherence,
+#     coverage-execution-coherence, VB marker-authenticity) still fires for
+#     real via the generic synthesizer.
+#   * tests.semantics_adapter = typescript-test-semantics — reuses the
+#     ALREADY-EXISTING ``TypeScriptTestBlockProfile``
+#     (codd/vb_marker_authenticity.py), which is verified extension-agnostic:
+#     its own docstring says "vitest / jest structural adapter (TS + JS +
+#     JSX/TSX)", ``handles_file`` matches ``.js``/``.jsx``/``.mjs``/``.cjs`` (not
+#     just ``.ts``/``.tsx``), and its specifier resolver (``_ts_candidates``)
+#     tries the literal given suffix FIRST — so a ``./foo.js`` import resolves
+#     to a real ``foo.js`` sibling without ever assuming TypeScript. No
+#     ``JavaScriptTestBlockProfile`` is needed or created.
+#   * verify report adapter = vitest-json — the SAME already-registered
+#     ``VitestJsonReportAdapter`` TypeScript uses. Its parser reads only
+#     vitest's JSON report SHAPE (``testResults``/``assertionResults``), never
+#     a source file extension — confirmed safe by reading its implementation.
+#   * toolchain.dependency_integrity_files DOES declare ``package-lock.json``
+#     as a real lock (``kind: lock``) — unlike java/csharp/cpp, which correctly
+#     leave this empty (an honest NO-OP for ecosystems with no universal lock
+#     file). npm's lock IS universal, and the reconcile/materialize commands
+#     below are the EXACT SAME proven npm commands typescript.yaml's legacy
+#     builder already runs in production
+#     (``project_types._TYPESCRIPT_TOOLCHAIN_PROFILE``: ``npm install
+#     --package-lock-only`` / ``npm ci``), so this profile gets REAL
+#     (non-NO-OP) manifest<->lock coherence — genuinely firing, not just a
+#     documented NO-OP.
+#
+# {report} / {test_root} / {package_name} are LITERAL template placeholders,
+# substituted later (PathPlanner / the generic-template scaffolder).
+
+id: javascript
+display_name: "JavaScript"
+strictness: strict
+file_extensions: [".js", ".jsx", ".mjs", ".cjs"]
+
+# Greenfield ② OPT-IN (data-driven; the SAME opt-in key java.yaml/csharp.yaml/
+# cpp.yaml use). Presence of this key is what lets "javascript" resolve to a
+# real LayoutProfile via the generic synthesizer instead of the conservative
+# None NO-OP.
+greenfield_synthesis: true
+
+layout:
+  repo_root: "."
+  module_root: "."
+  manifest_root: "."
+  default_command_cwd: "{module_root}"
+
+  package_root:
+    kind: path_root
+    path: "src"
+
+  source_sets:
+    - id: src
+      role: first_party
+      root: "src"
+      file_globs:
+        - "src/**/*.js"
+        - "src/**/*.jsx"
+
+  test_sets:
+    - id: tests
+      role: unit
+      root: "tests"
+      file_globs:
+        - "tests/**/*.test.js"
+        - "tests/**/*.spec.js"
+
+toolchain:
+  manifest:
+    path: "package.json"
+    format: package.json
+    required: true
+
+  module_identity:
+    source: manifest
+    path: "package.json"
+    field: "name"
+
+  # Manifest<->lock coherence (design: project_types.ToolchainDependencyProfile) —
+  # npm's lock file IS universal (unlike C++/CMake), so this is a REAL declaration,
+  # not a NO-OP placeholder. Mirrors typescript.yaml's own dependency_integrity_files
+  # entry exactly (same file, same "required: false").
+  dependency_integrity_files:
+    - path: "package-lock.json"
+      kind: lock
+      required: false
+
+  package_manager:
+    id: npm
+    # Materialize (install node_modules) — frozen, matches typescript.yaml.
+    materialize_command:
+      argv: ["npm", "ci"]
+      cwd: "{module_root}"
+    # Reconcile (refresh ONLY the lock to match the manifest, no frozen check) —
+    # the exact command project_types._TYPESCRIPT_TOOLCHAIN_PROFILE already runs
+    # in production for TypeScript; identical npm semantics for plain JS.
+    reconcile_command:
+      argv: ["npm", "install", "--package-lock-only"]
+      cwd: "{module_root}"
+    frozen_mode: {}
+
+imports:
+  # Honest, JS-specific capability id — deliberately NOT "typescript-tsconfig"
+  # (which implies tsconfig.json-driven resolution that does not exist for a
+  # plain JS project). Note: codd.languages.contract's import_resolver kind is
+  # not yet wired into any live gate (v2.68 "additive" module) for ANY
+  # language, so this id is not required to be registered today; declaring an
+  # honest, distinct capability name keeps the profile forward-compatible
+  # without smuggling in a TypeScript-specific claim.
+  resolver_adapter: javascript-path
+
+  first_party:
+    rule: path_alias
+    base: "src"
+
+  stdlib:
+    classifier: adapter
+
+commands:
+  verify:
+    argv:
+      - "npx"
+      - "--no-install"
+      - "vitest"
+      - "run"
+      - "{test_root}"
+      - "--reporter=json"
+      - "--outputFile={report}"
+    cwd: "{module_root}"
+    report:
+      path: ".codd/verify/vitest.json"
+      format: vitest-json
+      adapter: vitest-json
+
+tests:
+  semantics_adapter: typescript-test-semantics
+  runner_report_adapter: vitest-json
+
+  test_file_globs:
+    - "tests/**/*.test.js"
+    - "tests/**/*.spec.js"
+
+  authenticity_policy:
+    marker_must_be_inside_executable_test_block: true
+    skipped_is_not_authentic: true
+    focused_only_is_not_authentic: true
+    assertion_required: true
+
+  assertion_hints:
+    libraries:
+      - import_path: "vitest"
+        functions:
+          - expect
+      - import_path: "chai"
+        functions:
+          - expect
+          - assert
+
+verify:
+  command: verify
+  report:
+    path: ".codd/verify/vitest.json"
+    format: vitest-json
+    adapter: vitest-json
+
+  execution_policy:
+    every_vb_test_block_must_execute: true
+    every_vb_test_block_must_pass: true
+    skipped_is_not_green: true
+    missing_from_report_is_not_green: true
+
+scaffold:
+  adapter: generic-template
+  owned_files:
+    - "package.json"
+
+  # Default values for the template substitution variables (consumed by the
+  # generic-template scaffolder, replace-based — mirrors java.yaml's/csharp.yaml's/
+  # cpp.yaml's `defaults` block). {package_name} comes from the resolved
+  # LayoutProfile and always wins over a default. vitest_version mirrors the
+  # SAME major pin project_types._TYPESCRIPT_TOOLCHAIN_PROFILE uses for TS.
+  defaults:
+    vitest_version: "^3.2.4"
+
+  templates:
+    # Single package.json — plain JS has no C#-style nested lib/test project
+    # split to structurally enforce; npm's own dependencies/devDependencies
+    # split is the purity mechanism (vitest lives in devDependencies only),
+    # mirroring Maven's <scope>test-exclusion rationale in java.yaml. No
+    # TypeScript devDependency, no tsconfig.json anywhere.
+    - path: "package.json"
+      content_template: |
+        {
+          "name": "{package_name}",
+          "version": "0.1.0",
+          "private": true,
+          "scripts": {
+            "test": "vitest run"
+          },
+          "devDependencies": {
+            "vitest": "{vitest_version}"
+          }
+        }
+
+artifacts:
+  harness_root: ".codd"
+
+  harness_owned:
+    - ".codd/**"
+    - "package.json"
+
+  ignored:
+    - "node_modules/**"
+    - "dist/**"
+
+# CI scaffold (design §v2.70): toolchain bootstrap for a generated CI workflow.
+# Mirrors typescript.yaml's CI block exactly (same runtime, same install step).
+ci:
+  setup_steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: lts/*
+    - run: npm ci

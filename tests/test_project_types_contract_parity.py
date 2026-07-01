@@ -148,7 +148,15 @@ class TestLayoutResolutionParity:
             ("python3", False),
             ("typescript", True),
             ("node", True),
-            ("javascript", False),  # registry alias, NOT a legacy-accepted name
+            # "javascript" is now its OWN profile (javascript.yaml, id: javascript,
+            # greenfield_synthesis: true) — resolve_layout_profile synthesizes a
+            # REAL LayoutProfile for it via the generic (non-legacy) synthesizer.
+            # It is still NOT in typescript.yaml's legacy_project_types.accepted_names
+            # (that historical bridge is untouched), so this True comes ENTIRELY from
+            # the opt-in synthesis path, not the legacy dict. "ts"/"js" below stay
+            # False: they remain pure registry ALIASES of typescript with no distinct
+            # profile of their own and no legacy-bridge acceptance.
+            ("javascript", True),
             ("ts", False),
             ("js", False),
             ("go", False),  # Go has no legacy layout builder (contract path owns it)
@@ -160,7 +168,9 @@ class TestLayoutResolutionParity:
         # ANTI-FALSE-GREEN (GPT-flagged): pin the EXACT accepted-name set so the
         # registry-driven resolution cannot silently start resolving wider aliases
         # (py/ts/js/golang/...) into the legacy builders — which would scaffold +
-        # verify a previously-unsupported stack with the wrong policy.
+        # verify a previously-unsupported stack with the wrong policy. ("javascript"
+        # above is the one documented exception: it is supported, but via the
+        # separate opt-in greenfield_synthesis path, never the legacy dict.)
         profile = resolve_layout_profile(language=runtime_name, project_name="sample")
         assert (profile is not None) is supported
 

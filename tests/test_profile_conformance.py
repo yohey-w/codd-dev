@@ -63,6 +63,25 @@ CONFORMANCE_FIXTURES: dict[str, dict] = {
             "real_covering": f"// {_MARKER}\nit('x', () => {{ expect(add(2, 3)).toBe(5); }});\n",
         },
     },
+    "javascript": {
+        # Deliberately byte-identical vitest/jest SYNTAX to the "typescript" fixture
+        # above (that fixture already uses zero TS type annotations) — the marker
+        # gate's TypeScriptTestBlockProfile is verified extension-agnostic (docstring:
+        # "vitest / jest structural adapter (TS + JS + JSX/TSX)"), so the ONLY
+        # difference that matters here is the filename (.test.js, not .test.ts) and
+        # the resolved profile (language="javascript", no implement_oracle).
+        "profile": LayoutProfile(
+            language="javascript", package_name="app",
+            source_root="src", package_root="src", test_root="tests",
+        ),
+        "filename": "x.test.js",
+        "cases": {
+            "fake_no_assertion": f"// {_MARKER}\nit('x', () => {{ add(2, 3); }});\n",
+            "fake_constant_only": f"// {_MARKER}\nit('x', () => {{ expect(1).toBe(1); }});\n",
+            "fake_skipped": f"// {_MARKER}\nit.skip('x', () => {{ expect(add(2, 3)).toBe(5); }});\n",
+            "real_covering": f"// {_MARKER}\nit('x', () => {{ expect(add(2, 3)).toBe(5); }});\n",
+        },
+    },
     "go": {
         "profile": LayoutProfile(
             language="go", package_name="app",
