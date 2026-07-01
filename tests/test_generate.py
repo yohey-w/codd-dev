@@ -731,6 +731,38 @@ def test_generated_browser_test_prompt_requires_surface_copy_assertions():
     assert "Do not accept generic smoke assertions" in prompt
 
 
+def test_generation_prompt_states_project_language_for_non_test_docs():
+    """Design/infra docs must explicitly anchor the target language.
+
+    Regression test for a real greenfield dogfood failure: a Java project's
+    generated infra/build_setup.md described a Python project (pyproject.toml,
+    setuptools, importlib.metadata) because nothing in the prompt stated the
+    target language outside the test-doc branch (_build_test_doc_block).
+    """
+    artifact = generator_module.WaveArtifact(
+        wave=4,
+        node_id="infra:build-setup",
+        output="docs/infra/build_setup.md",
+        title="Build & Test Infrastructure Setup",
+        depends_on=[{"id": "design:system", "relation": "depends_on"}],
+        conventions=[],
+    )
+    dependency = generator_module.DependencyDocument(
+        node_id="design:system",
+        path=Path("docs/design/system_design.md"),
+        content="## Overview\nA dependency-free expression evaluator.\n",
+    )
+
+    prompt_java = generator_module._build_generation_prompt(
+        artifact, [dependency], [], project_language="java"
+    )
+    prompt_unset = generator_module._build_generation_prompt(artifact, [dependency], [])
+
+    assert "implementation language is java" in prompt_java
+    assert "MUST use java conventions exclusively" in prompt_java
+    assert "implementation language is" not in prompt_unset
+
+
 def test_render_document_strips_markdown_fences_from_test_code():
     """If AI wraps code in ```typescript fences, they should be stripped."""
     artifact = generator_module.WaveArtifact(

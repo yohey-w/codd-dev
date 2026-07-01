@@ -1215,6 +1215,16 @@ def _build_generation_prompt(
         f"You are writing a CoDD {doc_type} document.",
         f"Node ID: {artifact.node_id}",
         f"Title: {artifact.title}",
+    ]
+    if project_language:
+        lines.append(
+            f"This project's implementation language is {project_language}. Every file path, "
+            f"build/package manifest, module/package layout, dependency-management tool, and "
+            f"toolchain reference in this document MUST use {project_language} conventions "
+            f"exclusively. Do not introduce file extensions, manifests, or tooling from any "
+            f"other language, even as an example or fallback."
+        )
+    lines += [
         "Use the dependency documents below as the primary context, synthesize them, and write a complete Markdown document body.",
         (
             "ABSOLUTE PROHIBITION: **Do not emit** YAML frontmatter, implementation notes, "
