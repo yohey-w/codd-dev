@@ -369,6 +369,59 @@ def test_validator_does_not_flag_plain_hyphenated_scheme():
 
 
 # ---------------------------------------------------------------------------
+# parse_vb_table: a category-taxonomy summary row is not a declaration
+# ---------------------------------------------------------------------------
+
+
+def test_parse_vb_table_ignores_backtick_wildcard_prefix_summary_row():
+    """A `VB-TOK-*` count-summary row must not parse as a declared `VB-TOK-`.
+
+    A test-strategy doc commonly includes a human-readable "category taxonomy"
+    table summarizing how many ids exist per prefix, e.g. a row whose first
+    cell is `` `VB-TOK-*` `` (wildcard, meaning "all VB-TOK-NN ids"). Naively
+    stripping backticks AND `*` from that cell in one pass turns it into the
+    atomic-looking `VB-TOK-`, which then wrongly counts as its own declared,
+    uncovered behavior. The real, atomic rows in the actual traceability table
+    (`VB-TOK-01`, ...) must still parse correctly alongside it.
+    """
+    markdown_text = "\n".join(
+        [
+            "## Category Taxonomy",
+            "",
+            "| Prefix | Category | Count |",
+            "|---|---|---|",
+            "| `VB-TOK-*` | tokenizer | 2 |",
+            "| `VB-PAR-*` | parser | 1 |",
+            "",
+            "## Traceability Registry",
+            "",
+            "| VB ID | Module | Verifiable Behavior |",
+            "|---|---|---|",
+            "| VB-TOK-01 | tokenizer | tokenizes a valid expression |",
+            "| VB-TOK-02 | tokenizer | reports a lexical error |",
+            "| VB-PAR-01 | parser | parses precedence correctly |",
+        ]
+    )
+    behaviors = parse_vb_table(markdown_text)
+    assert {b.vb_id for b in behaviors} == {"VB-TOK-01", "VB-TOK-02", "VB-PAR-01"}
+    assert "VB-TOK-" not in {b.vb_id for b in behaviors}
+    assert "VB-PAR-" not in {b.vb_id for b in behaviors}
+
+
+def test_parse_vb_table_still_parses_backtick_wrapped_real_id():
+    """Backtick-wrapped atomic ids (no wildcard) must keep parsing correctly."""
+    markdown_text = "\n".join(
+        [
+            "| VB ID | Behavior |",
+            "|---|---|",
+            "| `VB-TOK-01` | tokenizes a valid expression |",
+        ]
+    )
+    behaviors = parse_vb_table(markdown_text)
+    assert {b.vb_id for b in behaviors} == {"VB-TOK-01"}
+
+
+# ---------------------------------------------------------------------------
 # Test 5: verifier-side validation via `codd check`
 # ---------------------------------------------------------------------------
 

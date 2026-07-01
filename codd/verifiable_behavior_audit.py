@@ -69,6 +69,31 @@ _CANONICAL_VB_NODE_ID = "test:test-strategy"
 _CANONICAL_VB_OUTPUT_PATH = "docs/test/test_strategy.md"
 
 
+def _first_cell_id_candidate(cell: str) -> str:
+    """Normalize a table's first cell to a candidate VB id.
+
+    A Markdown code span (`` `...` ``) escapes its interior from Markdown
+    syntax entirely, so a trailing ``*`` inside one (e.g. a category-taxonomy
+    summary row like `` `VB-TOK-*` ``, counting how many ``VB-TOK-NN`` ids
+    exist) is literal text, not emphasis markup. Stripping backticks and
+    ``*``/``_`` in one blind pass conflates the two and turns that wildcard
+    marker into the atomic-looking ``VB-TOK-``, which then falsely matches
+    ``_VB_ID_RE``. Backticks are therefore peeled first; only when the cell
+    was NOT a code span are surrounding ``*``/``_`` (real emphasis markers)
+    also stripped. A wildcard's trailing ``*`` then survives and correctly
+    fails the atomic-id regex, so the row is silently ignored — the same
+    outcome as any other non-VB table row.
+    """
+
+    value = cell.strip()
+    in_code_span = len(value) >= 2 and value.startswith("`") and value.endswith("`")
+    while len(value) >= 2 and value.startswith("`") and value.endswith("`"):
+        value = value[1:-1].strip()
+    if not in_code_span:
+        value = value.strip("*_ ").strip()
+    return value
+
+
 def is_canonical_vb_doc(node_id: str | None = None, output_path: str | None = None) -> bool:
     """Whether a test doc is the canonical VB declaration document.
 
@@ -484,7 +509,7 @@ def parse_vb_table(markdown_text: str, *, source_doc: str = "") -> list[Verifiab
         cells = [cell.strip() for cell in match.group("cells").split("|")]
         if not cells:
             continue
-        first = cells[0].strip("`*_ ").strip()
+        first = _first_cell_id_candidate(cells[0])
         if not _VB_ID_RE.match(first):
             continue
         behaviors.append(
@@ -525,7 +550,7 @@ def parse_vb_references(markdown_text: str, *, source_doc: str = "") -> list[VBR
         cells = [cell.strip() for cell in match.group("cells").split("|")]
         if len(cells) < 2:
             continue
-        first = cells[0].strip("`*_ ").strip()
+        first = _first_cell_id_candidate(cells[0])
         # A first-cell VB-* is a DECLARATION (owned by parse_vb_table), never a
         # reference — so the same id is not double-counted as both.
         if _VB_ID_RE.match(first):
