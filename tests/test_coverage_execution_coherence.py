@@ -16,6 +16,7 @@ schema without requiring an npm/node toolchain in CI.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -572,6 +573,88 @@ def test_run_verify_campaign_errors_when_no_report_written(tmp_path):
         command_template="true",  # writes no report
         report_relpath=".codd/verify/never.json",
         report_format="vitest-json",
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    with pytest.raises(CampaignError):
+        run_verify_campaign(project, profile2, echo=lambda _m: None)
+
+
+def test_run_verify_campaign_parses_a_directory_shaped_report(tmp_path):
+    """Report shape is a filesystem question, not a language one: Maven Surefire
+    writes ``target/surefire-reports/`` as a DIRECTORY of one ``TEST-<class>.xml``
+    per test class (not a single file like vitest-json/dotnet-trx). Regression
+    test for a real bug: run_verify_campaign's stale-cleanup and "produced no
+    report" checks originally assumed ``report_path`` was always a file
+    (``.unlink()`` / ``.is_file()``), so a directory-shaped report would either
+    crash on cleanup or be misreported as "no report produced" even when Surefire
+    wrote real, parseable XML.
+    """
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    report_dir = ".codd/verify/surefire-reports"
+    xml_one = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<testsuite name="com.example.FooTest" tests="1" failures="0" errors="0" skipped="0">'
+        '<testcase classname="com.example.FooTest" name="testAdds" time="0.01"/>'
+        "</testsuite>"
+    )
+    xml_two = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<testsuite name="com.example.BarTest" tests="1" failures="0" errors="0" skipped="0">'
+        '<testcase classname="com.example.BarTest" name="testSubtracts" time="0.01"/>'
+        "</testsuite>"
+    )
+    (project / report_dir).mkdir(parents=True, exist_ok=True)
+    # A stale report from a "prior run" — must be gone after this run's cleanup,
+    # not merely shadowed, so a campaign that legitimately drops a class's file
+    # (e.g. a class was deleted) can't resurrect its old evidence.
+    (project / report_dir / "TEST-com.example.Stale.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<testsuite name="com.example.Stale" tests="1" failures="0" errors="0" skipped="0">'
+        '<testcase classname="com.example.Stale" name="testGhost" time="0.01"/>'
+        "</testsuite>",
+        encoding="utf-8",
+    )
+    command = (
+        f"mkdir -p {report_dir} && "
+        f"printf '%s' {shlex.quote(xml_one)} > {report_dir}/TEST-com.example.FooTest.xml && "
+        f"printf '%s' {shlex.quote(xml_two)} > {report_dir}/TEST-com.example.BarTest.xml"
+    )
+    campaign = VerifyCampaignSpec(
+        command_template=command,
+        report_relpath=report_dir,
+        report_format="surefire-xml",
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    run = run_verify_campaign(project, profile2, echo=lambda _m: None)
+    assert run.execution.total_cases == 2
+    assert not (project / report_dir / "TEST-com.example.Stale.xml").exists()
+
+
+def test_run_verify_campaign_errors_when_report_directory_is_empty(tmp_path):
+    """An existing-but-empty report directory is exactly as "no report produced"
+    as a missing path — never a silent pass (anti-false-green)."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    report_dir = ".codd/verify/surefire-reports"
+    campaign = VerifyCampaignSpec(
+        command_template=f"mkdir -p {report_dir}",  # creates the dir, writes nothing into it
+        report_relpath=report_dir,
+        report_format="surefire-xml",
     )
     profile2 = LayoutProfile(
         language=profile.language,

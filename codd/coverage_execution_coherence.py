@@ -62,6 +62,7 @@ backstop, UNCHANGED.
 from __future__ import annotations
 
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -978,11 +979,18 @@ def run_verify_campaign(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     # A stale report from a prior run must never be mistaken for this run's
     # evidence — remove it first so a campaign that silently writes nothing fails
-    # the "no report" check instead of reusing old executions.
-    try:
-        report_path.unlink()
-    except FileNotFoundError:
-        pass
+    # the "no report" check instead of reusing old executions. The report shape
+    # is runner-defined, not language-defined: a single file (vitest JSON, C#
+    # .trx) unlinks; a directory of per-class files (Maven Surefire's
+    # ``target/surefire-reports/``) is removed wholesale so no stale sibling
+    # file survives into this run's parse.
+    if report_path.is_dir():
+        shutil.rmtree(report_path)
+    else:
+        try:
+            report_path.unlink()
+        except FileNotFoundError:
+            pass
     # Design A — the campaign command is EITHER a shell string (vitest/go: shell=True,
     # ``{test_root}``/``{report}`` substituted) OR an argv list (C#/dotnet: shell=False so
     # an argument with shell metacharacters — ``trx;LogFileName=test.trx`` — is passed
@@ -1014,7 +1022,15 @@ def run_verify_campaign(
         ) from exc
 
     output_tail = _output_tail(completed.stdout, completed.stderr)
-    if not report_path.is_file():
+    # "Produced a report" is a filesystem-shape question, not a language one:
+    # a file must be non-empty; a directory (Maven Surefire's one-file-per-class
+    # convention) must contain at least one entry. Either empty case is
+    # indistinguishable from "wrote nothing" and must fail exactly like a
+    # missing path — never a silent pass.
+    report_produced = (
+        report_path.is_file() and report_path.stat().st_size > 0
+    ) or (report_path.is_dir() and any(report_path.iterdir()))
+    if not report_produced:
         raise CampaignError(
             f"verify campaign produced no report at {campaign.report_relpath} "
             f"(exit {completed.returncode}): {display}\n{output_tail}"
