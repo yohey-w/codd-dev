@@ -222,3 +222,135 @@ def test_empty_scope_falls_back_to_broad(tmp_path: Path, monkeypatch) -> None:
     scope = OracleRerunScope(rung="narrow", task_ids=("nonexistent",), allowed_paths=("x.ts",))
     GreenfieldPipeline()._rerun_tasks_with_feedback(tmp_path, _tasks(), "fb", {}, scope=scope)
     assert set(reimplemented) == {"design/a.md", "design/b.md", "design/c.md"}, "empty scope ⇒ broad"
+
+
+# ═════════════════════════════════════════════════════════════
+# (3) Per-task resilience: one stuck task must not abort the rest, and a
+#     multi-task scope must never collapse into one combined call.
+# ═════════════════════════════════════════════════════════════
+
+
+def test_each_scoped_task_gets_its_own_separate_call_not_a_batch(tmp_path: Path, monkeypatch) -> None:
+    """A scope spanning N tasks issues N separate ``implement_tasks`` calls —
+    never one call for the union of their design nodes/output paths.
+
+    Direct evidence against "a multi-task rerun scope collapses into one
+    oversized combined AI call": each invocation is asked to reimplement
+    exactly ONE task's own ``design``/``output_paths``, never more than one.
+    This holds for both multi-task-scope producers that share this dispatch —
+    the VB coverage gate's batched test-task scope
+    (``codd.vb_rerun_scope.derive_vb_rerun_scope``) and the native oracle's
+    both-ends-of-a-broken-edge scope (``codd.implement_oracle_scope``).
+    """
+    import codd.config as _config_mod
+
+    monkeypatch.setattr(_config_mod, "load_project_config", lambda root: {})
+    monkeypatch.setattr(pipeline_mod, "_output_paths_for_task", lambda config, task: list(task.output_paths))
+
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_implement_tasks(project_root, *, design=None, output_paths=None, **kwargs):
+        calls.append((design, tuple(output_paths or ())))
+
+        class _R:
+            error = None
+            generated_files: list = []
+
+        return [_R()]
+
+    import codd.implementer as implementer_mod
+
+    monkeypatch.setattr(implementer_mod, "implement_tasks", fake_implement_tasks)
+
+    scope = OracleRerunScope(
+        rung="vb_targeted",
+        task_ids=("a", "b", "c"),
+        allowed_paths=("src/a.ts", "src/b.ts", "src/c.ts"),
+    )
+    GreenfieldPipeline()._rerun_tasks_with_feedback(tmp_path, _tasks(), "fb", {}, scope=scope)
+
+    assert len(calls) == 3, "3 scoped tasks must yield 3 separate calls, never 1 combined call"
+    by_design = {design: paths for design, paths in calls}
+    assert by_design["design/a.md"] == ("src/a.ts",)
+    assert by_design["design/b.md"] == ("src/b.ts",)
+    assert by_design["design/c.md"] == ("src/c.ts",)
+
+
+def test_one_task_exhaustion_does_not_abort_the_others(tmp_path: Path, monkeypatch) -> None:
+    """A multi-task scope keeps re-implementing the REMAINING tasks after one
+    task's bounded generation budget exhausts (``CoddCLIError``).
+
+    Regression for a shared bug in ``_reimplement_tasks``: a single task's
+    persistent malformed/empty AI output during a multi-task scope (the VB
+    coverage gate's batched test-task scope, or the native oracle's
+    both-ends-of-a-broken-edge scope) used to raise UNCAUGHT, aborting the
+    whole rerun before the OTHER tasks in the SAME scope were even attempted —
+    which also silently reduced the coverage gate's configured
+    ``max_retries`` to one effective attempt, and bypassed the oracle's own
+    escalation ladder entirely. Confirms the fix: task "b" exhausts, but "a"
+    and "c" are still (separately) reimplemented, and the call does not raise.
+    """
+    import codd.config as _config_mod
+
+    monkeypatch.setattr(_config_mod, "load_project_config", lambda root: {})
+    monkeypatch.setattr(pipeline_mod, "_output_paths_for_task", lambda config, task: list(task.output_paths))
+
+    from codd.cli import CoddCLIError
+
+    reimplemented: list[str] = []
+
+    def fake_implement_tasks(project_root, *, design=None, **kwargs):
+        reimplemented.append(design)
+        if design == "design/b.md":
+            raise CoddCLIError("Design 'design/b.md' produced 0 generated files.")
+
+        class _R:
+            error = None
+            generated_files: list = []
+
+        return [_R()]
+
+    import codd.implementer as implementer_mod
+
+    monkeypatch.setattr(implementer_mod, "implement_tasks", fake_implement_tasks)
+
+    scope = OracleRerunScope(
+        rung="narrow",
+        task_ids=("a", "b", "c"),
+        allowed_paths=("src/a.ts", "src/b.ts", "src/c.ts"),
+    )
+    # Must NOT raise — the caller (coverage gate / oracle gate) re-derives
+    # ground truth afterwards and reacts to whatever is still broken.
+    GreenfieldPipeline()._rerun_tasks_with_feedback(tmp_path, _tasks(), "fb", {}, scope=scope)
+
+    assert reimplemented == ["design/a.md", "design/b.md", "design/c.md"], (
+        "every scoped task must get its OWN separate implement_tasks() call, "
+        "in order, even though 'b' failed"
+    )
+
+
+def test_non_content_exception_still_propagates(tmp_path: Path, monkeypatch) -> None:
+    """A SYSTEMIC failure (not a per-task content exhaustion) still aborts.
+
+    Only ``CoddCLIError`` — a task's own bounded no-usable/syntax-gate retry
+    budget exhausting — is absorbed so the remaining scoped tasks get a
+    chance. Anything else (e.g. an environment/config error) is not a "this
+    one task's AI output was bad" signal and must keep failing fast, unchanged.
+    """
+    import pytest
+
+    import codd.config as _config_mod
+
+    monkeypatch.setattr(_config_mod, "load_project_config", lambda root: {})
+    monkeypatch.setattr(pipeline_mod, "_output_paths_for_task", lambda config, task: list(task.output_paths))
+
+    def fake_implement_tasks(project_root, *, design=None, **kwargs):
+        raise RuntimeError("disk full")
+
+    import codd.implementer as implementer_mod
+
+    monkeypatch.setattr(implementer_mod, "implement_tasks", fake_implement_tasks)
+
+    scope = OracleRerunScope(rung="narrow", task_ids=("a", "b"), allowed_paths=("src/a.ts", "src/b.ts"))
+    with pytest.raises(RuntimeError, match="disk full"):
+        GreenfieldPipeline()._rerun_tasks_with_feedback(tmp_path, _tasks(), "fb", {}, scope=scope)

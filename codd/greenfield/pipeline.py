@@ -1805,13 +1805,51 @@ class GreenfieldPipeline:
 
         Returns ``{task_id: elapsed_seconds}`` so a broad-campaign caller can budget
         + audit per-task cost. (The campaign's wall-clock gate measures elapsed
-        directly; the per-task map is the finer-grained record.)
+        directly; the per-task map is the finer-grained record.) A task that did
+        not complete (see below) has no entry.
+
+        A single task's bounded generation budget exhausting (``CoddCLIError`` —
+        ``implement_tasks`` produced zero usable/valid output after its OWN
+        no-usable-output/syntax-gate retries) is logged and SKIPPED rather than
+        propagated: the loop continues to the REMAINING tasks in ``tasks``
+        instead of aborting the whole (possibly multi-task) rerun on the first
+        stuck one. This is shared plumbing for both multi-task-scope callers:
+
+        * the VB coverage gate, whose scope can legitimately span EVERY test
+          task at once (:func:`codd.vb_rerun_scope.derive_vb_rerun_scope`'s
+          batched fallback/targeting); and
+        * the native-oracle gate, whose narrow/expanded scopes are "both ends
+          of a broken edge" — i.e. already >=2 tasks by design
+          (:mod:`codd.implement_oracle_scope`).
+
+        Before this, ANY single task's transient malformed/empty AI output
+        during a multi-task rerun raised UNCAUGHT out of this loop, which (a)
+        denied every OTHER task in that same scope a chance to regenerate, (b)
+        for the coverage gate, short-circuited its configured ``max_retries``
+        down to a single effective attempt (the caller's except-and-break in
+        :func:`_enforce_stage_coverage_gate` saw the exception and stopped
+        immediately), and (c) for the oracle, bypassed its own
+        signature-based escalation ladder entirely — narrow->expanded->broad
+        never got a chance to run because the exception fired before the
+        compiler was ever re-checked (``_invoke_rerun`` in
+        ``codd/implement_oracle.py`` has no try/except of its own).
+
+        Every caller already RE-DERIVES ground truth (the coverage audit / the
+        oracle's compiler re-run) immediately after this returns, so skipping a
+        stuck task loses no signal: whatever did not actually get fixed still
+        shows up as still-broken in that re-check, and the caller's existing
+        retry/escalation logic acts on it exactly as it would after a call that
+        "succeeded" without progress. Any OTHER exception (a systemic/
+        environment failure, not a per-task content exhaustion) still
+        propagates immediately, unchanged.
         """
         import time
 
+        from codd.cli import CoddCLIError
         from codd.implementer import implement_tasks
 
         elapsed: dict[str, float] = {}
+        failed_task_ids: list[str] = []
         for task in tasks:
             output_paths = (
                 list(task.output_paths)
@@ -1819,15 +1857,29 @@ class GreenfieldPipeline:
                 else _output_paths_for_task(config, task)
             )
             started = time.monotonic()
-            implement_tasks(
-                project_root,
-                design=task.design_node,
-                output_paths=output_paths,
-                ai_command=self.ai_command,
-                use_derived_steps=True,
-                feedback=feedback,
-            )
+            try:
+                implement_tasks(
+                    project_root,
+                    design=task.design_node,
+                    output_paths=output_paths,
+                    ai_command=self.ai_command,
+                    use_derived_steps=True,
+                    feedback=feedback,
+                )
+            except CoddCLIError as exc:
+                failed_task_ids.append(task.task_id)
+                self.echo(
+                    f"[greenfield] re-implement {task.task_id}: produced no usable output "
+                    f"this attempt ({exc}); continuing with the remaining scoped task(s) "
+                    "rather than aborting the whole rerun."
+                )
+                continue
             elapsed[task.task_id] = time.monotonic() - started
+        if failed_task_ids:
+            self.echo(
+                f"[greenfield] re-implement: {len(failed_task_ids)}/{len(tasks)} scoped "
+                f"task(s) produced no usable output this attempt: {', '.join(failed_task_ids)}"
+            )
         return elapsed
 
     def _make_vb_rerun_callback(
