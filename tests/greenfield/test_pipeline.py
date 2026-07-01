@@ -1156,6 +1156,50 @@ def test_contract_check_passes_source_task_that_produced_source(tmp_path: Path) 
     assert "file(s) generated" in detail
 
 
+def test_contract_check_passes_source_task_with_bare_admit_language_source(tmp_path: Path) -> None:
+    """(c2) A SOURCE task that produced a real source file in a language whose
+    ONLY test-file convention is a bare, whole-language extension (C#/Java/C++)
+    must NOT be misread as test-only — the 2026-06-30 Java
+    (``scaffold_package_skeleton``) and 2026-07-01 C++
+    (``scaffold_repository_layout``) greenfield false-RED: the implementer's
+    genuine ``src/`` output was reported as having produced "only test" because
+    ``.cs``/``.java``/``.cpp`` are admitted bare into the shared test-suffix set
+    (correct for the ``operational_e2e_audit`` VB scanner, which is ADDITIONALLY
+    gated by ``test_dirs``) but the greenfield kind-classifier reused that same
+    bare-extension list to exclude a file from ``source`` regardless of
+    directory. Never assume this is Python-only — a source file's own directory
+    must always win over a bare-extension coincidence for EVERY such language."""
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    task = ImplementTaskRef(
+        task_id="implement_core_module",
+        design_node="docs/design/core_design.md",
+        expected_outputs=("src",),
+        test_kinds=("integration",),  # coverage metadata — must NOT make it a test task
+    )
+    for source_file in ("src/core/core.cpp", "src/core/Core.java", "src/core/Core.cs"):
+        detail = _run_contract_task(project, task, files_to_write=[source_file])
+        assert "file(s) generated" in detail, f"false-RED for bare-extension source {source_file!r}"
+
+
+def test_produced_kinds_distinguishes_same_bare_extension_by_directory(tmp_path: Path) -> None:
+    """Direct unit check on the classifier itself: TWO files sharing the exact
+    same bare, whole-language extension (``.cpp``) must classify DIFFERENTLY —
+    SOURCE under the configured ``source_dirs`` root, TEST under ``test_dirs`` —
+    proving the directory (not the extension) drives the verdict. Before the
+    fix, BOTH landed in ``{"test"}`` and neither ever reached ``{"source"}``."""
+    from codd.greenfield.pipeline import _produced_kinds
+
+    config = {"scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]}}
+    source_file = tmp_path / "src" / "core" / "core.cpp"
+    test_file = tmp_path / "tests" / "test_core.cpp"
+    for path in (source_file, test_file):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// generated\n", encoding="utf-8")
+
+    produced = _produced_kinds([source_file, test_file], tmp_path, config)
+    assert produced == {"source", "test"}
+
+
 def test_contract_check_exempts_task_with_no_declared_outputs(tmp_path: Path) -> None:
     """(d) A task that declares NO recognisable output kind (skeleton / bare
     artifact name) imposes NO requirement — never a false-RED."""

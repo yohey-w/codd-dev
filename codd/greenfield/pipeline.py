@@ -2645,11 +2645,16 @@ def _default_task_deriver(project_root: Path, *, ai_command: str | None) -> int:
 #
 # Classification rules (deliberately conservative to avoid false-RED):
 #   • A path under a configured ``test_dirs`` root is a TEST artifact.
-#   • A test-SHAPED filename is a TEST artifact. ``.py`` ALONE is never enough
-#     (every Python file ends in ``.py``); only ``test_*.py`` / ``*_test.py``
-#     count, plus the language-specific ``.test.``/``.spec.``/``.cy.`` suffixes.
+#   • A test-SHAPED filename is a TEST artifact — but only via a suffix that is
+#     UNAMBIGUOUS on its own (JS/TS's dedicated ``.test.``/``.spec.``/``.e2e.``/
+#     ``.cy.`` conventions, Go's tooling-enforced ``_test.go``). A BARE
+#     whole-language extension (``.py``, ``.cs``, ``.java``, ``.cpp``/``.cc``/
+#     ``.cxx``) is never enough on its own — every file in that language ends in
+#     it — so ``.py`` requires ``test_*.py`` / ``*_test.py`` naming, and the
+#     other bare-admit languages are left entirely to the ``test_dirs`` check
+#     above (see ``_unambiguous_test_suffixes``).
 #   • A path under a configured ``source_dirs`` root (that is not test-shaped via
-#     a language-specific test suffix) is a SOURCE artifact.
+#     an unambiguous test suffix) is a SOURCE artifact.
 #   • Anything else is UNKNOWN and imposes no requirement.
 # Verification passes when every declared kind is represented among generated
 # files (``required_kinds ⊆ produced_kinds``); UNKNOWN never gates.
@@ -2681,21 +2686,51 @@ def _path_under_root(rel_path: str, roots: list[str]) -> bool:
     return False
 
 
-def _non_py_test_suffixes() -> tuple[str, ...]:
+# ``_TEST_SUFFIXES`` (operational_e2e_audit.py) mixes two different kinds of
+# entries: dedicated test-file conventions that are unambiguous on their own —
+# JS/TS's ``.spec./.test./.e2e./.cy.`` family and Go's tooling-enforced
+# ``_test.go`` (``go build`` structurally excludes it from the non-test binary)
+# — and BARE whole-language extensions (``.py``, ``.cs``, ``.java``,
+# ``.cpp``/``.cc``/``.cxx``) that scanner admits deliberately broadly because
+# IT is always additionally gated by the configured test-dir scope (see the
+# per-suffix comments in ``operational_e2e_audit.py``). This module's callers
+# do not apply that same scope gate on the SOURCE-exclusion side (see
+# ``_produced_kinds``), so reusing a bare extension here would flag EVERY file
+# of that language — test or not — as test-shaped and permanently bar it from
+# ever counting as SOURCE. ``.py`` already had this carve-out (only
+# ``test_*.py``/``*_test.py`` count, never bare ``.py``); the other bare-admit
+# languages need the identical treatment — generically, since none of them has
+# a tooling/naming-enforced unambiguous test suffix. Confirmed root cause of
+# the 2026-06-30 Java (``scaffold_package_skeleton``) and 2026-07-01 C++
+# (``scaffold_repository_layout``) greenfield false-REDs: a task's real
+# ``src/`` output was reported as having produced "only test".
+_AMBIGUOUS_BARE_SOURCE_SUFFIXES: frozenset[str] = frozenset(
+    {".py", ".cs", ".java", ".cpp", ".cc", ".cxx"}
+)
+
+
+def _unambiguous_test_suffixes() -> tuple[str, ...]:
+    """``_TEST_SUFFIXES`` minus every bare, direction-blind source extension."""
     from codd.operational_e2e_audit import _TEST_SUFFIXES
 
-    return tuple(suffix for suffix in _TEST_SUFFIXES if suffix != ".py")
+    return tuple(
+        suffix for suffix in _TEST_SUFFIXES if suffix not in _AMBIGUOUS_BARE_SOURCE_SUFFIXES
+    )
 
 
 def _has_test_shape(rel_path: str) -> bool:
     """A filename that is unambiguously a test, language-independent.
 
-    Reuses the project's :data:`_TEST_SUFFIXES` for the specific (non-Python)
-    suffixes, and recognises the conventional pytest/unittest naming for Python
-    (``test_*.py`` / ``*_test.py``) — never bare ``.py``.
+    Reuses the project's :data:`_TEST_SUFFIXES` for the suffixes that are
+    unambiguous on their own, and recognises the conventional pytest/unittest
+    naming for Python (``test_*.py`` / ``*_test.py``) — never bare ``.py``. A
+    bare whole-language extension for any OTHER bare-admit language (``.cs``,
+    ``.java``, ``.cpp``/``.cc``/``.cxx``) is likewise never enough alone; those
+    languages rely on the ``test_dirs`` scope check in :func:`_produced_kinds` /
+    ``_classify_declared_output`` instead.
     """
     name = PurePosixPath(str(rel_path).replace("\\", "/")).name
-    if name.endswith(_non_py_test_suffixes()):
+    if name.endswith(_unambiguous_test_suffixes()):
         return True
     if name.endswith(".py"):
         return name.startswith("test_") or name[:-3].endswith("_test")
@@ -2773,16 +2808,18 @@ def _produced_kinds(generated_files: list[Any], project_root: Path, config: dict
     """Classify the files a task actually produced.
 
     Source-side is positive-location based (under a configured ``source_dirs``
-    root and not a language-specific test file), NOT "anything that isn't a
-    test" — because for Python the suffix classifier would wrongly call every
-    ``.py`` a test and make the source requirement unsatisfiable (false-RED).
-    A file that is BOTH test-shaped and under a source root (a colocated test
+    root and not an unambiguous test file), NOT "anything that isn't a test" —
+    because for a bare-admit language (Python, C#, Java, C++/.cc/.cxx) the
+    suffix alone would wrongly call every file of that language a test and make
+    the source requirement unsatisfiable (false-RED; confirmed for Python by
+    inspection and reproduced for real by Java/C++ greenfield dogfood runs). A
+    file that is BOTH test-shaped and under a source root (a colocated test
     such as ``src/foo/test_foo.py`` or ``src/foo.test.ts``) is allowed to count
-    for the source side too only when it is not a non-Python test suffix.
+    for the source side too only when it is not an unambiguous test suffix.
     """
     test_roots = _scan_roots(config, "test_dirs")
     source_roots = _scan_roots(config, "source_dirs")
-    non_py_test = _non_py_test_suffixes()
+    unambiguous_test = _unambiguous_test_suffixes()
     try:
         root = Path(project_root).resolve()
     except OSError:
@@ -2799,7 +2836,7 @@ def _produced_kinds(generated_files: list[Any], project_root: Path, config: dict
             kinds.add(_KIND_TEST)
         if _path_under_root(rel_path, source_roots) and not in_test_dir:
             name = PurePosixPath(rel_path).name
-            if not name.endswith(non_py_test):
+            if not name.endswith(unambiguous_test):
                 kinds.add(_KIND_SOURCE)
     return kinds
 
