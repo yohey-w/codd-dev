@@ -1259,3 +1259,151 @@ def test_adversarial_16_static_import_maven_conventional_root_still_resolves(tmp
     assert ev.ok is True
     assert ev.reason == "helper_resolved"
     assert ev.confidence == "certain"
+
+
+# ---------------------------------------------------------------------------
+# Follow-up increment (post-e5c29ef): _java_resolve_module's declared-root
+# search now ALSO walks up to _JAVA_MAX_DECLARED_ROOT_DEPTH subdirectory
+# levels beneath each declared root, closing the DISTINCT residual e5c29ef's
+# own commit message diagnosed by direct inspection: the live dogfood
+# project's declared `scan.test_dirs: [tests/]` does not directly contain the
+# FQCN package tree at all -- the actual Java sources begin TWO levels
+# further in, at tests/e2e/java/com/..., because tests/e2e/java/ is itself
+# the project's real (non-Maven) source root. e5c29ef's own depth-0-only join
+# could not reach this and said so explicitly; this increment's bounded
+# widening does.
+# ---------------------------------------------------------------------------
+
+
+def test_good_1d_static_import_resolves_two_levels_beneath_declared_root(tmp_path):
+    """A ``import static a.b.HarnessAssertions.assertSuccess;`` FQN resolves to
+    a file living TWO directory levels beneath the project's declared
+    ``scan.test_dirs`` root (``tests/e2e/java/...``, not directly under
+    ``tests/``) — the EXACT live-dogfood residual shape e5c29ef's own commit
+    message diagnosed (4 ParseE2EIT/TokenizeE2EIT violations in
+    ``/tmp/codd_greenfield_java_v2_ExprCalc``: ``tests/`` is declared, but its
+    actual E2E Java sources begin at ``tests/e2e/java/`` — TWO levels further
+    in). Before this increment, ``_java_resolve_module``'s declared-root step
+    only tried a DIRECT depth-0 join (``declared_root`` + the FQCN-derived
+    path) and fell through to the — here, inapplicable — Maven fallback,
+    staying ``unresolved_helper`` no matter how the FQCN's package path was
+    nested."""
+
+    codd_yaml = "scan:\n  test_dirs:\n    - tests/\n"
+    importer_text = _STATIC_IMPORT_CALLER_TEMPLATE.format(
+        package="com.example.e2e",
+        helper_package="com.example.e2e.support",
+        class_name="HarnessCallerTwoLevelsBeneathRootTest",
+    )
+    root = _write_project(
+        tmp_path,
+        {
+            "codd/codd.yaml": codd_yaml,
+            "tests/e2e/java/com/example/e2e/HarnessCallerTwoLevelsBeneathRootTest.java": importer_text,
+            # dots -> slashes of com.example.e2e.support.HarnessAssertions, hung
+            # off `tests/e2e/java/` -- TWO directory levels (`e2e/`, `java/`)
+            # beneath the DECLARED root `tests/`, mirroring the live project.
+            "tests/e2e/java/com/example/e2e/support/HarnessAssertions.java": _static_import_helper(
+                "com.example.e2e.support"
+            ),
+        },
+    )
+    ev = JavaTestBlockProfile().resolve_assertion_evidence(
+        _STATIC_IMPORT_CALL_BLOCK,
+        importer_text=importer_text,
+        importer_rel="tests/e2e/java/com/example/e2e/HarnessCallerTwoLevelsBeneathRootTest.java",
+        project_root=root,
+    )
+    assert ev.ok is True
+    assert ev.reason == "helper_resolved"
+    assert ev.confidence == "certain"
+
+
+def test_adversarial_17_static_import_three_levels_beneath_declared_root_stays_unresolved(tmp_path):
+    """A helper THREE directory levels beneath the declared root — one level
+    beyond :data:`_JAVA_MAX_DECLARED_ROOT_DEPTH` — stays ``unresolved_helper``.
+
+    Proves the widening added by this increment is bounded to EXACTLY two
+    levels, never unbounded recursion (the same finite-hop discipline as
+    ``_MAX_HELPER_HOPS`` / the E2 one-subdirectory-level bound elsewhere in
+    this module): a helper nested deeper than the bound stays a deliberate,
+    documented residual, never a silently-accepted false-GREEN. Same
+    importer/call shape as GOOD 1D; only the helper's (and importer's) depth
+    differs, proving the bound actually holds."""
+
+    codd_yaml = "scan:\n  test_dirs:\n    - tests/\n"
+    importer_text = _STATIC_IMPORT_CALLER_TEMPLATE.format(
+        package="com.example.e2e",
+        helper_package="com.example.e2e.support",
+        class_name="HarnessCallerThreeLevelsBeneathRootTest",
+    )
+    root = _write_project(
+        tmp_path,
+        {
+            "codd/codd.yaml": codd_yaml,
+            "tests/e2e/it/java/com/example/e2e/HarnessCallerThreeLevelsBeneathRootTest.java": (
+                importer_text
+            ),
+            # THREE directory levels (`e2e/`, `it/`, `java/`) beneath the
+            # declared root `tests/` -- one level beyond the bound.
+            "tests/e2e/it/java/com/example/e2e/support/HarnessAssertions.java": _static_import_helper(
+                "com.example.e2e.support"
+            ),
+        },
+    )
+    ev = JavaTestBlockProfile().resolve_assertion_evidence(
+        _STATIC_IMPORT_CALL_BLOCK,
+        importer_text=importer_text,
+        importer_rel="tests/e2e/it/java/com/example/e2e/HarnessCallerThreeLevelsBeneathRootTest.java",
+        project_root=root,
+    )
+    assert ev.ok is False
+    assert ev.reason == "unresolved_helper"
+
+
+def test_adversarial_18_declared_root_depth_search_never_escapes_project(tmp_path):
+    """:func:`_java_declared_root_search_dirs` must never follow an in-root
+    symlinked subdirectory whose target escapes the project tree, even when
+    that symlink sits within the newly-widened search depth.
+
+    Proven by planting a REAL, genuinely resolvable helper OUTSIDE the
+    project root and reaching for it only through a symlinked subdirectory
+    one level beneath the declared root: if the jail did not hold, this
+    fixture would false-GREEN — mirroring
+    ``test_adversarial_11_fallback_candidates_path_traversal_is_rejected``'s
+    proof technique for E2, applied to this increment's new mechanism."""
+
+    project_root = tmp_path / "project"
+    codd_yaml = "scan:\n  test_dirs:\n    - tests/\n"
+    importer_text = _STATIC_IMPORT_CALLER_TEMPLATE.format(
+        package="com.example.escape",
+        helper_package="com.example.escape.support",
+        class_name="HarnessCallerEscapeTest",
+    )
+    _write_project(
+        project_root,
+        {
+            "codd/codd.yaml": codd_yaml,
+            "tests/HarnessCallerEscapeTest.java": importer_text,
+        },
+    )
+
+    # A REAL, resolvable helper OUTSIDE project_root -- reachable ONLY via a
+    # symlink planted one level beneath the declared root `tests/`.
+    outside_dir = tmp_path / "outside"
+    outside_pkg = outside_dir / "com" / "example" / "escape" / "support"
+    outside_pkg.mkdir(parents=True)
+    (outside_pkg / "HarnessAssertions.java").write_text(
+        _static_import_helper("com.example.escape.support")
+    )
+    symlinked_subdir = project_root / "tests" / "linked"
+    symlinked_subdir.symlink_to(outside_dir, target_is_directory=True)
+
+    ev = JavaTestBlockProfile().resolve_assertion_evidence(
+        _STATIC_IMPORT_CALL_BLOCK,
+        importer_text=importer_text,
+        importer_rel="tests/HarnessCallerEscapeTest.java",
+        project_root=project_root,
+    )
+    assert ev.ok is False
+    assert ev.reason == "unresolved_helper"

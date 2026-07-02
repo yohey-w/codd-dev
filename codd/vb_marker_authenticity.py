@@ -5488,10 +5488,11 @@ class JavaTestBlockProfile:
         resolution engine (:func:`_resolve_evidence`) plugged with THIN Java
         adapters (static-import lookup, module resolution that tries the
         project's OWN declared ``scan.test_dirs``/``source_dirs`` roots first
-        and the conventional Maven ``src/test/java``/``src/main/java`` roots as
-        a fallback, a same-package qualified-call fallback that searches the
-        importer's own directory and then one subdirectory level down when no
-        import at all names the helper), with a data-driven fallback to a
+        (and up to two subdirectory levels beneath them) and the conventional
+        Maven ``src/test/java``/``src/main/java`` roots as a fallback, a
+        same-package qualified-call fallback that searches the importer's own
+        directory and then one subdirectory level down when no import at all
+        names the helper), with a data-driven fallback to a
         DECLARED library fluent-terminal credit
         (``assertion_hints.library_assertion_terminals``) when the helper-hop
         engine still cannot resolve the call.
@@ -5588,9 +5589,81 @@ def _java_test_and_source_roots() -> tuple[str, ...]:
     return test_roots + source_roots
 
 
+#: Bound on how many directory levels beneath a project-declared scan root
+#: _java_resolve_module will descend while looking for the point where a
+#: FQCN's package path actually begins (the project's REAL Maven/Gradle-style
+#: "source root"). Diagnosed by direct inspection of a live dogfood project
+#: (/tmp/codd_greenfield_java_v2_ExprCalc): its codd.yaml declares
+#: `scan.test_dirs: [tests/]`, but the E2E suite's actual Java sources begin
+#: TWO levels further in (tests/e2e/java/com/...), not directly under
+#: `tests/` as a bare declared-root+FQCN-suffix join (depth 0) requires.
+#: Exactly this many levels, never unbounded: the same finite-hop discipline
+#: as _JAVA_MAX_FALLBACK_CANDIDATES / _MAX_HELPER_HOPS elsewhere in this
+#: module — a declared root nested deeper than this stays a deliberate,
+#: documented unresolved residual, not silently accepted.
+_JAVA_MAX_DECLARED_ROOT_DEPTH = 2
+
+
+def _java_declared_root_search_dirs(root: Path, project_root: Path, max_depth: int) -> list[Path]:
+    """``root`` itself, then its subdirectories, then THEIR subdirectories, ...
+    up to ``max_depth`` levels down — the candidate "source root" directories
+    :func:`_java_resolve_module` joins its FQCN-derived relative path onto.
+
+    Ordered shallowest-first (``root`` itself, then EVERY depth-1 directory,
+    then EVERY depth-2 directory, ...) so the caller's first hit is always the
+    LEAST-inferred match — a direct depth-0 join (the pre-existing behavior)
+    is always tried before any inferred deeper guess, mirroring the same
+    "stronger signal first" precedence :func:`_java_fallback_candidates` (E2)
+    already uses for its own same-directory-vs-subdirectory scan. No
+    directory NAME is ever assumed (no "look for a directory literally called
+    `java`" heuristic) — EVERY immediate subdirectory at each level is a
+    candidate, exactly like E2's own unrestricted one-level glob.
+
+    EVERY discovered child directory is individually re-resolved via
+    :func:`resolve_project_path` against ``project_root`` (never against its
+    own parent) at the moment it is discovered — BEFORE it is ever added to
+    the returned list — so an in-root symlinked subdirectory whose target
+    escapes the project is never followed, and never even reaches the caller
+    as a later join base. This mirrors :func:`_java_fallback_candidates`'s own
+    discipline exactly (it re-resolves each ``sub`` against ``project_root``
+    before passing it on, rather than trusting a raw ``iterdir()`` result) —
+    re-jailing a directory against its OWN unresolved self would be
+    circular and provide no protection at all, since the caller
+    (:func:`_java_resolve_module`) later uses each returned directory
+    AS THE TRUST BASE for its own final ``resolve_project_path(directory,
+    rel)`` join-check; only an ALREADY-verified-against-``project_root``
+    directory is safe to hand back for that. A missing/unreadable directory
+    at any level simply contributes no deeper candidates (``OSError``
+    degrades to "nothing further here", never a crash); the walk then stops
+    widening (there is nothing left to descend into) but keeps every
+    shallower level already collected.
+    """
+
+    ordered: list[Path] = [root]
+    level = [root]
+    for _ in range(max_depth):
+        next_level: list[Path] = []
+        for directory in level:
+            try:
+                children = sorted(p for p in directory.iterdir() if p.is_dir())
+            except OSError:
+                continue  # missing/unreadable directory -- no candidates from here.
+            for child in children:
+                resolved_child = resolve_project_path(project_root, child)
+                if resolved_child is None:
+                    continue  # symlinked subdirectory escaping the project -- never follow.
+                next_level.append(resolved_child)
+        if not next_level:
+            break
+        ordered.extend(next_level)
+        level = next_level
+    return ordered
+
+
 def _java_resolve_module(importer_rel: str, spec: str, project_root: Path) -> Path | None:
-    """Java FQCN → file: the project's OWN declared scan roots first, then the
-    conventional Maven TEST/SOURCE roots as a fallback.
+    """Java FQCN → file: the project's OWN declared scan roots first (searched
+    a small bounded number of directory levels down), then the conventional
+    Maven TEST/SOURCE roots as a fallback.
 
     ``spec`` is a fully-qualified class name (e.g. ``com.example.util.
     HarnessAssertions``) bound by a STATIC import (:func:`_java_imported_lookup`).
@@ -5608,23 +5681,34 @@ def _java_resolve_module(importer_rel: str, spec: str, project_root: Path) -> Pa
        test/source roots are not the Maven convention (e.g. a declared
        ``tests/`` instead of ``src/test/java``) is resolved correctly without
        teaching the bundled ``java.yaml`` profile about every possible layout.
+       A declared root does not even have to BE the source root directly:
+       :func:`_java_declared_root_search_dirs` also tries up to
+       :data:`_JAVA_MAX_DECLARED_ROOT_DEPTH` levels of subdirectories beneath
+       it (shallowest first, so a direct depth-0 hit is always preferred over
+       an inferred deeper one), closing the gap a project whose declared root
+       merely CONTAINS the real source root (e.g. a declared ``tests/`` whose
+       actual Java sources begin at ``tests/e2e/java/``) would otherwise miss.
     2. :func:`_java_test_and_source_roots` — the profile-driven Maven
        convention (``src/test/java``, ``src/main/java`` for the bundled
        ``java.yaml``) — consulted ONLY when NONE of the project's own declared
-       roots resolves ``spec``. Some Java projects genuinely use the Maven
-       layout (or declare no ``scan.test_dirs``/``source_dirs`` override at
-       all), so this fallback is KEPT, never replaced.
+       roots (at ANY searched depth) resolves ``spec``. Some Java projects
+       genuinely use the Maven layout (or declare no ``scan.test_dirs``/
+       ``source_dirs`` override at all), so this fallback is KEPT, never
+       replaced, and is NOT itself depth-widened (the Maven convention already
+       names the exact source root; that was not part of the diagnosed gap).
 
-    Every candidate is re-jailed via :func:`resolve_project_path` — both the
-    declared root itself (an operator-declared ``codd.yaml`` value, not
-    trusted as already in-tree) and the final joined file — so neither a
-    misconfigured/malicious declared scan root NOR a maliciously-dotted
-    ``spec`` (``../../etc/passwd``-shaped after substitution; not actually
-    reachable since a literal ``.`` → ``/`` substitution can never itself
-    produce ``..``, but re-jailed regardless as defense in depth, exactly
-    E2's own discipline) can resolve outside ``project_root``. Mirrors
-    :func:`_go_resolve_module` / :func:`_py_resolve_module` /
-    :func:`_ts_resolve_specifier`'s "``None`` on any miss" contract.
+    Every candidate is re-jailed via :func:`resolve_project_path` — the
+    declared root itself, every subdirectory level beneath it (an operator-
+    declared ``codd.yaml`` value is not trusted as already in-tree, and
+    neither is any directory reached by walking it), and the final joined
+    file — so neither a misconfigured/malicious declared scan root NOR a
+    maliciously-dotted ``spec`` (``../../etc/passwd``-shaped after
+    substitution; not actually reachable since a literal ``.`` → ``/``
+    substitution can never itself produce ``..``, but re-jailed regardless as
+    defense in depth, exactly E2's own discipline) can resolve outside
+    ``project_root``. Mirrors :func:`_go_resolve_module` /
+    :func:`_py_resolve_module` / :func:`_ts_resolve_specifier`'s "``None`` on
+    any miss" contract.
     """
 
     rel = spec.strip().strip(".").replace(".", "/") + ".java"
@@ -5640,9 +5724,12 @@ def _java_resolve_module(importer_rel: str, spec: str, project_root: Path) -> Pa
             # its directory does — same "fall back to the parent" handling
             # :func:`_java_directory_in_scan_roots` already uses for this.
             declared_root = declared_root.parent
-        candidate = resolve_project_path(declared_root, rel)
-        if candidate is not None and candidate.is_file():
-            return candidate
+        for directory in _java_declared_root_search_dirs(
+            declared_root, project_root, _JAVA_MAX_DECLARED_ROOT_DEPTH
+        ):
+            candidate = resolve_project_path(directory, rel)
+            if candidate is not None and candidate.is_file():
+                return candidate
 
     # 2. Maven-conventional fallback — consulted ONLY because step 1 found
     # nothing (never merged with it: a declared-root hit is always preferred).
@@ -6030,8 +6117,9 @@ def _resolve_java_evidence(
     :func:`_resolve_evidence` engine, plugged with THIN Java adapters:
     :func:`_java_imported_lookup` (static-import binding),
     :func:`_java_resolve_module` (FQCN → file: the project's OWN declared
-    ``scan.test_dirs``/``source_dirs`` roots first, Maven ``src/test/java``/
-    ``src/main/java`` as a fallback), and :func:`_java_fallback_candidates`
+    ``scan.test_dirs``/``source_dirs`` roots first — up to two subdirectory
+    levels beneath them — then Maven ``src/test/java``/``src/main/java`` as a
+    fallback), and :func:`_java_fallback_candidates`
     (E2 — the same-directory-or-one-level-down sibling guess a plain/absent
     import cannot express). Java has no barrel-reexport convention, so
     ``reexport_edges`` is ``None`` (same as Go).
