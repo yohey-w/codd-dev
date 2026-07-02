@@ -330,6 +330,243 @@ def test_error_summaries_excluded_from_prompt():
     assert "empty implementation output" not in prompt
 
 
+# ═══════════════════════════════════════════════════════════
+# Regression: 2026-07-02 ExprCalc Python greenfield dogfood, task
+# ``add_doctest_worked_examples``. That task's declared expected_outputs are
+# THREE ALREADY-EXISTING source files (its real job: add doctest examples to
+# their docstrings — an EDIT, not a from-scratch generation) plus an unrelated
+# test-wiring file it must also touch. On a retried/resumed invocation the
+# three source files already carried correct doctest content from an earlier
+# attempt, but this implement prompt never showed the model their current
+# content (only design docs and terse prior-task summaries reach the prompt),
+# so the model had no safe way to reproduce them complete-and-unchanged in a
+# whole-file response and left them out — leaving
+# ``_verify_task_contract`` to see produced={"test"} against a declared
+# required={"source"} and hard-fail, even though the real deliverable was
+# already complete on disk. The fix: thread the task's declared
+# ``expected_outputs`` into the prompt and show the CURRENT content of any
+# entry that already exists on disk.
+# ═══════════════════════════════════════════════════════════
+
+def test_build_implementation_prompt_includes_existing_output_file_content(tmp_path):
+    existing = tmp_path / "src" / "auth" / "service.py"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("def build_service() -> bool:\n    return True\n", encoding="utf-8")
+
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="design:test",
+            path=Path("docs/design/test.md"),
+            content="# Test design\n",
+        ),
+        spec=ImplementSpec(
+            "docs/design/test.md",
+            ["src/auth"],
+            expected_outputs=["src/auth/service.py"],
+        ),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+        project_root=tmp_path,
+    )
+
+    assert "Existing content of this task's declared output files" in prompt
+    assert "def build_service() -> bool:" in prompt
+    assert "EDIT them, not recreate them from scratch" in prompt
+
+
+def test_build_implementation_prompt_omits_existing_content_without_project_root(tmp_path):
+    """Backward compatibility: a caller that never passes ``project_root``
+    (every call site that predates this fix) gets a prompt with no trace of
+    the new section, even when ``expected_outputs`` names a real file."""
+    existing = tmp_path / "src" / "auth" / "service.py"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("def build_service() -> bool:\n    return True\n", encoding="utf-8")
+
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="design:test",
+            path=Path("docs/design/test.md"),
+            content="# Test design\n",
+        ),
+        spec=ImplementSpec(
+            "docs/design/test.md",
+            ["src/auth"],
+            expected_outputs=["src/auth/service.py"],
+        ),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert "Existing content of this task's declared output files" not in prompt
+    assert "def build_service() -> bool:" not in prompt
+
+
+def test_existing_output_files_context_skips_non_files_and_traversal(tmp_path):
+    from codd.implementer import _existing_output_files_context
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text("value = 1\n", encoding="utf-8")
+
+    context = _existing_output_files_context(
+        tmp_path,
+        [
+            "src/real.py",
+            "src/does_not_exist.py",
+            "module:Some.symbol",
+            "../outside.py",
+        ],
+    )
+
+    assert context is not None
+    assert "value = 1" in context
+    assert context.count("BEGIN EXISTING FILE") == 1
+
+
+def test_existing_output_files_context_returns_none_when_nothing_exists(tmp_path):
+    from codd.implementer import _existing_output_files_context
+
+    assert _existing_output_files_context(tmp_path, ["src/brand_new.py"]) is None
+
+
+def test_implement_tasks_shows_existing_content_for_edit_shaped_task(tmp_path, monkeypatch):
+    """End-to-end version of the regression above: through the full
+    ``implement_tasks`` public API (not the lower-level prompt-builder call),
+    the AI command actually invoked must receive the pre-existing file's real
+    content."""
+    project = _setup_project(tmp_path, language="python")
+    existing = project / "src" / "auth" / "service.py"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(
+        'def build_service() -> bool:\n'
+        '    """Build it.\n\n'
+        "    >>> build_service()\n"
+        "    True\n"
+        '    """\n'
+        "    return True\n",
+        encoding="utf-8",
+    )
+    calls = _mock_implement_ai(
+        monkeypatch,
+        stdout=(
+            "=== FILE: src/auth/service.py ===\n"
+            "```python\n"
+            'def build_service() -> bool:\n'
+            '    """Build it.\n\n'
+            "    >>> build_service()\n"
+            "    True\n"
+            '    """\n'
+            "    return True\n"
+            "```\n"
+        ),
+    )
+
+    results = implementer_module.implement_tasks(
+        project,
+        design="docs/design/auth.md",
+        output_paths=["src/auth"],
+        expected_outputs=["src/auth/service.py"],
+    )
+
+    assert not results[0].error
+    prompt = calls[0]["input"]
+    assert "Existing content of this task's declared output files" in prompt
+    assert ">>> build_service()" in prompt
+
+
+# ═══════════════════════════════════════════════════════════
+# Regression: the SAME 2026-07-02 ExprCalc Python dogfood incident, second
+# root cause. ``add_doctest_worked_examples``'s ``design_node`` (a derived
+# task's ``source_design_doc``) is ``docs/infra/build_and_ci_setup.md`` — the
+# SAME document backing a SIBLING task (``implement_zero_dependency_
+# verification_script``). ``ImplementTaskRef`` carried no ``title``/
+# ``description`` at all, so the implement prompt for EITHER task was
+# byte-for-byte identical except for the (coarse, routing-only) output paths:
+# the model had no way to tell which of the document's several described
+# pieces of work was actually assigned to THIS invocation. Confirmed live: the
+# model's response attempted to regenerate an UNRELATED sibling artifact
+# (``scripts/verify_zero_dependencies.py`` — that sibling task's own output)
+# while never touching this task's own declared source files. The fix adds a
+# ``YOUR SPECIFIC TASK FOR THIS INVOCATION`` scope-boundary block from the
+# DAG's own ``DerivedTask.title``/``description``, so the model is told
+# in-band which piece of a possibly-multi-task document is its job right now.
+# ═══════════════════════════════════════════════════════════
+
+def test_build_implementation_prompt_includes_task_scope_boundary():
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="infra:build-and-ci",
+            path=Path("docs/infra/build_and_ci_setup.md"),
+            content="# Build and CI\n\nCovers doctests AND the zero-dependency script.\n",
+        ),
+        spec=ImplementSpec(
+            "docs/infra/build_and_ci_setup.md",
+            ["src"],
+            task_title="Add doctest worked examples to public functions",
+            task_description=(
+                "Add doctest examples to tokenize()'s docstring, parse()'s docstring, "
+                "and evaluate()'s docstring. Wire tests/__init__.py's load_tests hook."
+            ),
+        ),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert "YOUR SPECIFIC TASK FOR THIS INVOCATION" in prompt
+    assert "Task: Add doctest worked examples to public functions" in prompt
+    assert "Wire tests/__init__.py's load_tests hook" in prompt
+    assert "a single design document commonly backs several separate tasks" in prompt
+    # The scope boundary must appear BEFORE the raw design-doc dump, so the
+    # model reads its actual assignment before the document's full text.
+    assert prompt.index("YOUR SPECIFIC TASK FOR THIS INVOCATION") < prompt.index("Design document content:")
+
+
+def test_build_implementation_prompt_omits_task_scope_boundary_when_untitled():
+    """Backward compatibility: a task with no DAG-derived title/description
+    (every call site that predates this fix, and configured
+    ``implement_targets`` tasks that have no DerivedTask at all) gets a prompt
+    with no trace of the new section."""
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="design:test",
+            path=Path("docs/design/test.md"),
+            content="# Test design\n",
+        ),
+        spec=ImplementSpec("docs/design/test.md", ["src/test"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert "YOUR SPECIFIC TASK FOR THIS INVOCATION" not in prompt
+
+
+def test_implement_tasks_forwards_task_title_and_description(tmp_path, monkeypatch):
+    """End-to-end: ``implement_tasks``'s new ``task_title``/``task_description``
+    kwargs reach the actual prompt sent to the AI command."""
+    project = _setup_project(tmp_path, language="python")
+    calls = _mock_implement_ai(monkeypatch)
+
+    implementer_module.implement_tasks(
+        project,
+        design="docs/design/auth.md",
+        output_paths=["src/auth"],
+        task_title="Add doctest worked examples to public functions",
+        task_description="Add doctest examples to tokenize()'s docstring.",
+    )
+
+    prompt = calls[0]["input"]
+    assert "YOUR SPECIFIC TASK FOR THIS INVOCATION" in prompt
+    assert "Add doctest worked examples to public functions" in prompt
+    assert "Add doctest examples to tokenize()'s docstring." in prompt
+
+
 def test_implementation_prompt_forbids_meta_copy_in_user_facing_ui():
     prompt = _build_implementation_prompt(
         config={"project": {"language": "typescript", "frameworks": ["next.js"]}},

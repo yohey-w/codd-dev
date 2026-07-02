@@ -147,3 +147,45 @@ def test_layer2_default_required_excludes_unapproved_inferred_steps(tmp_path: Pa
     prompt = calls[0]
     assert "build_declared_contract" in prompt
     assert "complete_related_concern" not in prompt
+
+
+def test_implementer_shows_existing_content_for_a_step_extending_a_prior_file(tmp_path: Path, monkeypatch):
+    """A step whose expected_outputs names a file an earlier task already wrote
+    (e.g. "extend this shared helper with N more methods") must see that file's
+    real current content in the prompt, not just its name — otherwise the model
+    has no way to preserve members it cannot see and silently drops them on the
+    full-file regeneration `codd implement` performs."""
+    project = _setup_project(tmp_path, config_extra={"implementer": {"use_derived_steps": True}})
+    _write_step_cache(project)
+    # build_declared_contract (Layer 1, always approved) expects src/contract.py —
+    # unlike the Layer 2 step, it is never filtered out of the prompt, so it is
+    # the reliable step to attach a pre-existing file to for this assertion.
+    prior_file = project / "src" / "contract.py"
+    prior_file.parent.mkdir(parents=True, exist_ok=True)
+    prior_file.write_text(
+        "def previously_generated_helper() -> bool:\n    return True\n",
+        encoding="utf-8",
+    )
+    calls = _patch_ai(monkeypatch)
+
+    results = implement_tasks(project, design=DESIGN_NODE, output_paths=["src/contract"])
+
+    assert results[0].error is None
+    prompt = calls[0]
+    assert "Existing file content" in prompt
+    assert "=== EXISTING FILE: src/contract.py ===" in prompt
+    assert "def previously_generated_helper() -> bool:" in prompt
+    assert "=== END EXISTING FILE ===" in prompt
+
+
+def test_implementer_omits_existing_content_section_when_outputs_are_all_new(tmp_path: Path, monkeypatch):
+    """The common case — every expected_outputs path is a brand-new file — must
+    not grow an empty or noisy "Existing file content" section."""
+    project = _setup_project(tmp_path, config_extra={"implementer": {"use_derived_steps": True}})
+    _write_step_cache(project)
+    calls = _patch_ai(monkeypatch)
+
+    results = implement_tasks(project, design=DESIGN_NODE, output_paths=["src/contract"])
+
+    assert results[0].error is None
+    assert "Existing file content" not in calls[0]

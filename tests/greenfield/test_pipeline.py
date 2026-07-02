@@ -1226,6 +1226,132 @@ def test_contract_check_exempts_task_with_no_declared_outputs(tmp_path: Path) ->
     assert "file(s) generated" in detail_bare
 
 
+# ═══════════════════════════════════════════════════════════
+# Regression: an EDIT-shaped task's declared expected_outputs must reach
+# implement_tasks(), so the prompt can show the model their CURRENT content.
+#
+# 2026-07-02 ExprCalc Python greenfield dogfood: task ``add_doctest_worked_
+# examples`` declares ``expected_outputs=[src/exprcalc/tokenizer.py, .../
+# parser.py, .../evaluator.py]`` (kind SOURCE) but its real job is to EDIT
+# those three already-existing files (add doctest examples to their
+# docstrings) plus wire an unrelated test file. On a retried/resumed
+# invocation the three source files already carried the correct doctest
+# content from an earlier attempt; this invocation's own response touched
+# only the test-wiring file, so ``_verify_task_contract`` saw
+# produced={"test"} against required={"source"} and hard-failed — even though
+# the task's real deliverable was already complete on disk. Root cause: the
+# implement prompt never carries the CURRENT content of a task's own declared
+# outputs (only design docs + terse prior-task summaries), so a model asked to
+# edit a pre-existing file it cannot see has no safe way to reproduce it
+# complete-and-unchanged, and may leave it out of its response. The general
+# fix threads the DAG's declared ``expected_outputs`` from ``ImplementTaskRef``
+# through to the implement prompt (see ``_existing_output_files_context`` /
+# ``_build_implementation_prompt`` in codd/implementer.py) so an existing
+# output file's real content is always available — this test locks in the
+# plumbing half of that fix at the greenfield-pipeline boundary.
+# ═══════════════════════════════════════════════════════════
+
+def test_default_implement_task_runner_forwards_expected_outputs(tmp_path: Path) -> None:
+    """``_default_implement_task_runner`` must pass the task's DECLARED
+    ``expected_outputs`` through to ``implement_tasks`` — NOT just the broader
+    routing ``output_paths`` — so the implement prompt can look up current
+    content for any declared output that already exists on disk (an
+    edit-shaped task)."""
+    import codd.greenfield.pipeline as pipeline_mod
+
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    task = ImplementTaskRef(
+        task_id="add_doctest_worked_examples",
+        design_node="add_doctest_worked_examples",
+        expected_outputs=("src/exprcalc/tokenizer.py", "src/exprcalc/parser.py", "src/exprcalc/evaluator.py"),
+        test_kinds=("unit",),
+    )
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_implement_tasks(project_root, **kwargs):
+        captured_kwargs.update(kwargs)
+        written = Path(project_root) / "src/exprcalc/tokenizer.py"
+        written.parent.mkdir(parents=True, exist_ok=True)
+        written.write_text("# generated\n", encoding="utf-8")
+
+        class _Result:
+            error = None
+            generated_files = [written]
+            output_paths = ["src/exprcalc/tokenizer.py"]
+
+        return [_Result()]
+
+    pipeline = GreenfieldPipeline()
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr("codd.implementer.implement_tasks", fake_implement_tasks)
+    monkey.setattr(pipeline_mod, "_derive_and_approve_steps", lambda *a, **k: 0)
+    monkey.setattr(pipeline_mod, "_output_paths_for_task", lambda config, task: ["src/"])
+    try:
+        pipeline._default_implement_task_runner(
+            project,
+            task,
+            ai_command=None,
+            coverage_gate=False,
+            chunk_size=None,
+            timeout_per_chunk=600,
+        )
+    finally:
+        monkey.undo()
+
+    assert captured_kwargs.get("expected_outputs") == list(task.expected_outputs)
+
+
+def test_default_implement_task_runner_forwards_task_title_and_description(tmp_path: Path) -> None:
+    """A derived task's ``title``/``description`` — its ONLY scoping signal
+    against a design doc shared with sibling tasks (see the module-level
+    regression comment above) — must also reach ``implement_tasks``."""
+    import codd.greenfield.pipeline as pipeline_mod
+
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    task = ImplementTaskRef(
+        task_id="add_doctest_worked_examples",
+        design_node="docs/infra/build_and_ci_setup.md",
+        expected_outputs=("src/exprcalc/tokenizer.py",),
+        test_kinds=("unit",),
+        title="Add doctest worked examples to public functions",
+        description="Add doctest examples to tokenize()'s docstring.",
+    )
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_implement_tasks(project_root, **kwargs):
+        captured_kwargs.update(kwargs)
+        written = Path(project_root) / "src/exprcalc/tokenizer.py"
+        written.parent.mkdir(parents=True, exist_ok=True)
+        written.write_text("# generated\n", encoding="utf-8")
+
+        class _Result:
+            error = None
+            generated_files = [written]
+            output_paths = ["src/exprcalc/tokenizer.py"]
+
+        return [_Result()]
+
+    pipeline = GreenfieldPipeline()
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr("codd.implementer.implement_tasks", fake_implement_tasks)
+    monkey.setattr(pipeline_mod, "_derive_and_approve_steps", lambda *a, **k: 0)
+    monkey.setattr(pipeline_mod, "_output_paths_for_task", lambda config, task: ["src/"])
+    try:
+        pipeline._default_implement_task_runner(
+            project,
+            task,
+            ai_command=None,
+            coverage_gate=False,
+            chunk_size=None,
+            timeout_per_chunk=600,
+        )
+    finally:
+        monkey.undo()
+
+    assert captured_kwargs.get("task_title") == task.title
+    assert captured_kwargs.get("task_description") == task.description
+
+
 def test_test_only_task_output_paths_resolve_to_test_dirs(tmp_path: Path) -> None:
     """(e) P2 routing: a TEST-only task's output_paths resolve to the configured
     ``scan.test_dirs`` (not the shared source root), so the implementer writes

@@ -329,14 +329,19 @@ def test_cli_implement_list_tasks_text_and_json(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     # The JSON contract now also carries each task's declared intent
-    # (expected_outputs/test_kinds) so scripts can verify artifact kind.
-    # Configured targets declare no V-model intent, so both are empty here.
+    # (expected_outputs/test_kinds) so scripts can verify artifact kind, and
+    # its scoping text (title/description) so the implement prompt can tell
+    # apart multiple tasks that share one design document. Configured targets
+    # declare no V-model intent and have no DerivedTask to draw scoping text
+    # from, so all four are empty here.
     assert payload[0] == {
         "task_id": "docs/design/auth.md",
         "design_node": "docs/design/auth.md",
         "source": "configured",
         "expected_outputs": [],
         "test_kinds": [],
+        "title": "",
+        "description": "",
     }
 
 

@@ -191,6 +191,23 @@ class ImplementSpec:
     design_node: str
     output_paths: list[str]
     dependency_design_nodes: list[str] = field(default_factory=list)
+    #: The task's DECLARED expected-output file paths (verbatim from the DAG's
+    #: DerivedTask), as opposed to ``output_paths`` (the broader routing/scope
+    #: prefix an implement run is allowed to write under). Used ONLY to look up
+    #: pre-existing file content for the prompt (see
+    #: ``_existing_output_files_context``) — never for path validation/routing,
+    #: so a non-path entry (a bare symbol like ``module:Foo.bar``) is harmless
+    #: here. Empty for callers that never had DAG-derived expected outputs
+    #: (configured ``implement_targets`` / direct ``implement_tasks`` callers).
+    expected_outputs: list[str] = field(default_factory=list)
+    #: The DAG task's own ``title``/``description`` (verbatim from its
+    #: DerivedTask). ``design_node`` for a derived task is its
+    #: ``source_design_doc`` — MULTIPLE derived tasks routinely share one
+    #: design doc — so without these the prompt has no way to tell the model
+    #: which slice of that shared document THIS task owns. Blank for a
+    #: configured ``implement_targets`` mapping (no DerivedTask to draw from).
+    task_title: str = ""
+    task_description: str = ""
 
     def __post_init__(self) -> None:
         design_node = str(self.design_node).strip()
@@ -202,9 +219,15 @@ class ImplementSpec:
         dependencies = _ordered_unique(
             [str(item).strip() for item in self.dependency_design_nodes if str(item).strip()]
         )
+        expected_outputs = _ordered_unique(
+            [str(item).strip() for item in self.expected_outputs if str(item).strip()]
+        )
         object.__setattr__(self, "design_node", design_node)
         object.__setattr__(self, "output_paths", output_paths)
         object.__setattr__(self, "dependency_design_nodes", dependencies)
+        object.__setattr__(self, "expected_outputs", expected_outputs)
+        object.__setattr__(self, "task_title", str(self.task_title or "").strip())
+        object.__setattr__(self, "task_description", str(self.task_description or "").strip())
 
     @property
     def task_id(self) -> str:
@@ -989,6 +1012,7 @@ class Implementer:
             impl_steps_context=impl_steps_context,
             feedback=current_feedback,
             capabilities=capabilities,
+            project_root=self.project_root,
         )
         prompt = generator_module._inject_lexicon(prompt, self.project_root)
         try:
@@ -1047,6 +1071,9 @@ def implement_tasks(
     design: str | None = None,
     output_paths: list[str] | tuple[str, ...] | None = None,
     dependency_design_nodes: list[str] | tuple[str, ...] | None = None,
+    expected_outputs: list[str] | tuple[str, ...] | None = None,
+    task_title: str | None = None,
+    task_description: str | None = None,
     ai_command: str | None = None,
     clean: bool = False,
     use_derived_steps: bool | None = None,
@@ -1073,6 +1100,9 @@ def implement_tasks(
         design_node=design_node,
         output_paths=outputs,
         dependency_design_nodes=list(dependency_design_nodes or ()),
+        expected_outputs=list(expected_outputs or ()),
+        task_title=task_title or "",
+        task_description=task_description or "",
     )
     spec = _normalize_spec_paths(spec)
     if clean:
@@ -1110,12 +1140,15 @@ def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
        only consulted when no targets are configured.
 
     Each entry is ``{"task_id", "design_node", "source", "expected_outputs",
-    "test_kinds"}`` where ``source`` is ``"configured"`` or ``"derived"``. For
-    derived tasks ``design_node`` is the task's source design document (the
-    artifact ``codd implement`` reads) and ``expected_outputs``/``test_kinds``
-    are the task's declared intent (verbatim from the ``DerivedTask``), so
-    callers can verify the implementer produced the intended *kind* of artifact.
-    Configured targets declare no V-model intent, so those two fields are empty.
+    "test_kinds", "title", "description"}`` where ``source`` is ``"configured"``
+    or ``"derived"``. For derived tasks ``design_node`` is the task's source
+    design document (the artifact ``codd implement`` reads) and
+    ``expected_outputs``/``test_kinds``/``title``/``description`` are the
+    task's declared intent (verbatim from the ``DerivedTask``), so callers can
+    verify the implementer produced the intended *kind* of artifact AND show
+    the model which slice of a (possibly multi-task) design document this
+    particular task owns. Configured targets declare no V-model intent, so all
+    four fields are empty/blank.
     """
     project_root = Path(project_root).resolve()
     config = _load_project_config(project_root)
@@ -1132,6 +1165,8 @@ def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
                 "source": "configured",
                 "expected_outputs": [],
                 "test_kinds": [],
+                "title": "",
+                "description": "",
             }
         )
     if entries:
@@ -1151,6 +1186,8 @@ def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
                     "source": "derived",
                     "expected_outputs": list(task.expected_outputs),
                     "test_kinds": list(task.test_kinds),
+                    "title": task.title,
+                    "description": task.description,
                 }
             )
     return entries
@@ -1222,6 +1259,9 @@ def _normalize_spec_paths(spec: ImplementSpec) -> ImplementSpec:
         design_node=spec.design_node,
         output_paths=output_paths,
         dependency_design_nodes=spec.dependency_design_nodes,
+        expected_outputs=spec.expected_outputs,
+        task_title=spec.task_title,
+        task_description=spec.task_description,
     )
 
 
@@ -1400,7 +1440,66 @@ def _implementation_steps_context(
                 render_impl_steps_for_prompt(implicit),
             ]
         )
+
+    existing_content_lines = _render_existing_expected_output_content(explicit + implicit, project_root)
+    if existing_content_lines:
+        if lines:
+            lines.append("")
+        lines.extend(existing_content_lines)
+
     return "\n".join(lines)
+
+
+def _render_existing_expected_output_content(steps: list[Any], project_root: Path) -> list[str]:
+    """Render current on-disk content for any step's ``expected_outputs`` path
+    that already exists.
+
+    A step whose ``expected_outputs`` names a file an earlier task already
+    generated (e.g. "extend the shared test helper with these methods") is
+    otherwise invisible to the model: only a regex-extracted symbol summary of
+    prior work ever reaches the prompt, never the file's actual text. Told to
+    "extend" a file it cannot see, the model has no way to preserve members it
+    doesn't know exist, and a full-file regeneration silently drops them. This
+    shows the real content so the model edits from ground truth instead of
+    guessing.
+    """
+    relative_paths = _ordered_unique(
+        [
+            str(path).strip()
+            for step in steps
+            for path in getattr(step, "expected_outputs", [])
+            if str(path).strip()
+        ]
+    )
+
+    resolved_root = project_root.resolve()
+    blocks: list[str] = []
+    for relative_path in relative_paths:
+        candidate = (project_root / relative_path).resolve()
+        try:
+            candidate.relative_to(resolved_root)
+        except ValueError:
+            continue
+        if not candidate.is_file():
+            continue
+        try:
+            content = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        blocks.append(f"=== EXISTING FILE: {relative_path} ===\n{content.rstrip()}\n=== END EXISTING FILE ===")
+
+    if not blocks:
+        return []
+
+    return [
+        "Existing file content (release-blocking — these expected-output paths already exist on "
+        "disk; the file you generate for each one REPLACES it completely, so it must include every "
+        "existing member, method, export, or behavior that should still be present, in addition to "
+        "whatever the steps above ask you to add or change. Never regenerate a shared file down to "
+        "only the newly-requested pieces and silently drop what was already there):",
+        "",
+        *blocks,
+    ]
 
 
 def _load_or_derive_implementation_steps(
@@ -1847,6 +1946,69 @@ def _merge_conventions(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return merged
 
 
+#: Cap on total bytes of pre-existing file content folded into an implement
+#: prompt by ``_existing_output_files_context``, so a task whose declared
+#: outputs happen to include one very large pre-existing file cannot blow out
+#: the prompt budget. Generous relative to ``SCREEN_FLOW_PROMPT_LIMIT`` because
+#: it may cover several files, but still bounded.
+EXISTING_OUTPUT_FILES_PROMPT_LIMIT = 20000
+
+
+def _existing_output_files_context(project_root: Path, expected_outputs: list[str]) -> str | None:
+    """Current content of *expected_outputs* entries that already exist on disk.
+
+    Every OTHER context section in this prompt (design docs, prior-task
+    summaries, conventions) describes what code should look like or briefly
+    names what a dependency exported — none of them carries the ACTUAL current
+    content of a file. That is a non-issue for the common task shape (every
+    declared output is a brand-new file this task alone owns). It is a real gap
+    for the other, less common but perfectly legitimate shape: a task whose
+    declared ``expected_outputs`` were already created by an EARLIER task (or a
+    previous, interrupted attempt at this very task) and whose job here is to
+    EDIT them — e.g. "add worked-example doctests to existing functions",
+    "add a header to every existing handler". Since this harness's file-output
+    contract is a COMPLETE file per block, not a diff, a model asked to touch
+    such a file without ever seeing its current content faces an impossible
+    choice: reconstruct the whole file from a two-line summary (risking a
+    silent regression of already-correct, previously-generated content) or
+    leave the file out of its response entirely. Feeding the real current
+    content back closes that gap generically, for any language and any task
+    shape — it never fires (returns ``None``) when every declared output is
+    still new, so it changes nothing for the majority case.
+
+    Best-effort and read-only: an unreadable/binary/missing file is skipped
+    rather than failing the whole prompt build, and a path that would resolve
+    outside the project (or is not a real path at all — a bare symbol like
+    ``module:Foo.bar`` is a legitimate ``expected_outputs`` entry for a non-file
+    declaration) is silently skipped the same way.
+    """
+    sections: list[str] = []
+    budget = EXISTING_OUTPUT_FILES_PROMPT_LIMIT
+    for raw in expected_outputs:
+        if budget <= 0:
+            break
+        text = str(raw).strip()
+        if not text:
+            continue
+        candidate = project_root / text
+        try:
+            _ensure_inside_project(project_root, candidate, "expected output")
+        except ValueError:
+            continue
+        if not candidate.is_file():
+            continue
+        try:
+            content = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        truncated = content[:budget]
+        budget -= len(truncated)
+        sections.append(f"--- BEGIN EXISTING FILE {text} ---\n{truncated.rstrip()}\n--- END EXISTING FILE {text} ---")
+    if not sections:
+        return None
+    return "\n\n".join(sections)
+
+
 def _build_implementation_prompt(
     *,
     config: dict[str, Any],
@@ -1862,6 +2024,7 @@ def _build_implementation_prompt(
     impl_steps_context: str | None = None,
     feedback: str | None = None,
     capabilities: ProjectCapabilities | None = None,
+    project_root: Path | None = None,
 ) -> str:
     # Default to UI-capable so untyped/legacy (web-ish) projects keep emitting the
     # UI wrapper guidance exactly as before; only an explicit no-UI capability set
@@ -1911,24 +2074,54 @@ def _build_implementation_prompt(
         f"Design node: {design_context.path.as_posix()} ({design_context.node_id})",
         f"Requested design: {spec.design_node}",
         f"Output paths: {output_text}",
-        "",
-        "Mandatory instructions:",
-        f"- Generate concrete production-oriented {language_name} source files.",
-        framework_guidance,
-        "- Reflect security, data boundaries, authentication, authorization, and auditability explicitly where the design requires them.",
-        "- Treat behavioral contracts in the design as release-blocking: if one artifact produces, stores, emits, returns, restores, consumes, reflects, or derives a value/state, wire every side of that chain in executable code rather than leaving a stub, fixture, in-memory placeholder, static label, or unused response field.",
-        "- Preserve trigger fidelity: automatic triggers, thresholds, timers, callbacks, stream events, retries, and cross-actor reflections must be implemented at the actor-facing/public boundary described by the design. A manual shortcut or direct lower-layer call is not equivalent unless the design explicitly declares that lower layer as the public surface.",
-        "- For percentages, counts, durations, scores, thresholds, and latest/last values, implement the measurement source, durable persistence or derivation rule, readback path, consumer usage, and boundary behavior.",
-        "- For UI files or user-facing strings, write production user copy only; never surface design rationale, test/demo/sample labels, implementation assumptions, TODOs, internal process, or environment notes as visible text.",
-        "- The tool will prepend traceability comments to each generated file; do not emit separate metadata files.",
-        "- Do not emit prose, explanations, Markdown headings, YAML, TODOs, placeholders, or file descriptions outside the required FILE blocks.",
-        "- Every generated file path must stay under one of the output paths shown above.",
-        *_root_artifact_prompt_lines(config),
-        extension_guidance,
-        "- Favor small coherent modules rather than one monolithic file.",
-        "- Cross-file imports may use relative imports or project-local aliases, but keep the output internally coherent.",
-        "",
     ]
+    if spec.task_title or spec.task_description:
+        # A design document commonly backs SEVERAL separate derived tasks (its
+        # "Requested design" above is the shared DOCUMENT, not this task) — so
+        # without this block the model has no way to tell which slice of that
+        # document THIS invocation owns, and may act on a sibling task's part
+        # of the document instead of (or in addition to) this one. See the
+        # 2026-07-02 ExprCalc Python greenfield dogfood: task
+        # ``add_doctest_worked_examples`` and ``implement_zero_dependency_
+        # verification_script`` share one design doc; without a scope
+        # boundary the model attempted unrelated sibling-task output instead
+        # of this task's own declared source-file edits.
+        lines.extend(
+            [
+                "",
+                "YOUR SPECIFIC TASK FOR THIS INVOCATION (release-blocking scope boundary):",
+                f"- Task: {spec.task_title or spec.design_node}",
+            ]
+        )
+        if spec.task_description:
+            lines.append(f"- Description: {spec.task_description}")
+        lines.append(
+            "- The design document below may describe OTHER tasks, sections, or follow-up work beyond "
+            "this one — a single design document commonly backs several separate tasks. Implement ONLY "
+            "the task described above in this response. Do not implement an unrelated section or a "
+            "sibling task's deliverable just because the document also mentions it."
+        )
+    lines.extend(
+        [
+            "",
+            "Mandatory instructions:",
+            f"- Generate concrete production-oriented {language_name} source files.",
+            framework_guidance,
+            "- Reflect security, data boundaries, authentication, authorization, and auditability explicitly where the design requires them.",
+            "- Treat behavioral contracts in the design as release-blocking: if one artifact produces, stores, emits, returns, restores, consumes, reflects, or derives a value/state, wire every side of that chain in executable code rather than leaving a stub, fixture, in-memory placeholder, static label, or unused response field.",
+            "- Preserve trigger fidelity: automatic triggers, thresholds, timers, callbacks, stream events, retries, and cross-actor reflections must be implemented at the actor-facing/public boundary described by the design. A manual shortcut or direct lower-layer call is not equivalent unless the design explicitly declares that lower layer as the public surface.",
+            "- For percentages, counts, durations, scores, thresholds, and latest/last values, implement the measurement source, durable persistence or derivation rule, readback path, consumer usage, and boundary behavior.",
+            "- For UI files or user-facing strings, write production user copy only; never surface design rationale, test/demo/sample labels, implementation assumptions, TODOs, internal process, or environment notes as visible text.",
+            "- The tool will prepend traceability comments to each generated file; do not emit separate metadata files.",
+            "- Do not emit prose, explanations, Markdown headings, YAML, TODOs, placeholders, or file descriptions outside the required FILE blocks.",
+            "- Every generated file path must stay under one of the output paths shown above.",
+            *_root_artifact_prompt_lines(config),
+            extension_guidance,
+            "- Favor small coherent modules rather than one monolithic file.",
+            "- Cross-file imports may use relative imports or project-local aliases, but keep the output internally coherent.",
+            "",
+        ]
+    )
 
     if _spec_targets_tests(spec, config):
         lines.extend(
@@ -2025,6 +2218,24 @@ def _build_implementation_prompt(
         )
         for summary in successful_prior_outputs:
             lines.extend(_format_prior_task_summary(summary))
+
+    existing_files_context = (
+        _existing_output_files_context(project_root, spec.expected_outputs)
+        if project_root is not None and spec.expected_outputs
+        else None
+    )
+    if existing_files_context:
+        lines.extend(
+            [
+                "",
+                "Existing content of this task's declared output files:",
+                "- The files below already exist on disk (created by an earlier task, or by a previous attempt at this same task) and this task's job is to EDIT them, not recreate them from scratch.",
+                "- Your response for each path shown below MUST still be the COMPLETE, updated file (this harness's file blocks are whole-file, never a diff): keep every existing line that this task does not change, and add only what this task requires.",
+                "- Do not leave a file below out of your response just because your only change to it is small (e.g. one docstring/comment addition) — a small in-place edit still requires the full file content in your response.",
+                "",
+                existing_files_context,
+            ]
+        )
 
     lines.extend(["", "Dependency documents:"])
     for document in dependency_documents:

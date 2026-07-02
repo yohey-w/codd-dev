@@ -290,6 +290,17 @@ class ImplementTaskRef:
     application code is a task-level false-GREEN). They are empty when the task
     came from a configured ``implement_targets`` mapping (which declares no
     V-model intent).
+
+    ``title``/``description`` carry the same DerivedTask's own scoping text.
+    ``design_node`` for a derived task is its ``source_design_doc`` — the
+    document the implement prompt reads — and MULTIPLE derived tasks routinely
+    share one design doc (a doc's Follow-ups section commonly spawns several
+    small tasks). Without ``title``/``description`` the implement prompt has no
+    way to tell the model which SLICE of that shared document this particular
+    invocation owns, so the model can only guess from the document's full text
+    — and may act on an unrelated section (or on the document's OTHER derived
+    task) instead of this one. Empty for a configured ``implement_targets``
+    mapping (no DerivedTask exists to draw them from).
     """
 
     task_id: str
@@ -298,6 +309,8 @@ class ImplementTaskRef:
     source: str = "configured"
     expected_outputs: tuple[str, ...] = ()
     test_kinds: tuple[str, ...] = ()
+    title: str = ""
+    description: str = ""
 
 
 # DI seam signatures (all keyword-overridable on the pipeline constructor).
@@ -1863,6 +1876,9 @@ class GreenfieldPipeline:
                     project_root,
                     design=task.design_node,
                     output_paths=output_paths,
+                    expected_outputs=list(task.expected_outputs),
+                    task_title=task.title,
+                    task_description=task.description,
                     ai_command=self.ai_command,
                     use_derived_steps=True,
                     feedback=feedback,
@@ -2006,6 +2022,9 @@ class GreenfieldPipeline:
                 project_root,
                 design=task.design_node,
                 output_paths=output_paths,
+                expected_outputs=list(task.expected_outputs),
+                task_title=task.title,
+                task_description=task.description,
                 ai_command=ai_command,
                 use_derived_steps=True,
             )
@@ -2643,6 +2662,8 @@ def _default_task_lister(project_root: Path) -> list[ImplementTaskRef]:
             source=entry["source"],
             expected_outputs=tuple(entry.get("expected_outputs") or ()),
             test_kinds=tuple(entry.get("test_kinds") or ()),
+            title=str(entry.get("title") or ""),
+            description=str(entry.get("description") or ""),
         )
         for entry in list_implement_tasks(project_root)
     ]
