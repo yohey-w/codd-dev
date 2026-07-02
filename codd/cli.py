@@ -427,6 +427,59 @@ def _format_yaml_list(items: list[str], *, indent: int = 4) -> str:
     return "\n".join(f'{" " * indent}- "{item}"' for item in items)
 
 
+def _default_scan_source_dirs(language: str) -> list[str]:
+    """Compute the default ``scan.source_dirs`` for a freshly-``codd init``'d project.
+
+    Baseline is the historical ``["src/"]`` default — preserved byte-for-byte
+    when the language is blank/unresolvable, or its profile declares no
+    ``layout.source_sets`` beyond a templated root (e.g. Python's
+    ``src/{package_name}``: substitution is PathPlanner's job, not this
+    bootstrap default's, so a templated root is skipped here).
+
+    When the resolved profile declares additional LITERAL source-set roots not
+    already covered by an entry already in the list — e.g. C++'s conventional
+    ``include/`` public-header split sitting alongside ``src/`` (design: public
+    headers and implementation are separate ``source_sets``, both
+    ``role: first_party*``) — each is appended, in profile order. A root
+    "covered" by an existing entry (e.g. Java's ``src/main/java`` under the
+    ``src/`` baseline) is skipped to avoid a redundant/overlapping scan root.
+
+    This is the language-free resolution seam (mirrors
+    ``codd.project_types._resolve_kernel_language_profile``): it keys off
+    profile DATA (``layout.source_sets``), never a ``language == "..."``
+    literal, so any current or future multi-root language layout is covered
+    with zero changes here — the only thing that decides the result is what
+    that language's profile YAML declares.
+    """
+    source_dirs = ["src/"]
+    try:
+        from codd.languages.registry import UnknownLanguageError, default_registry
+    except Exception:  # noqa: BLE001 — registry optional; degrade to the baseline.
+        return source_dirs
+    try:
+        profile = default_registry.resolve(language)
+    except UnknownLanguageError:
+        return source_dirs
+    except Exception:  # noqa: BLE001 — a malformed profile is the loader's gate; degrade here.
+        return source_dirs
+
+    for source_set in profile.layout.source_sets:
+        root = (source_set.root or "").strip()
+        if not root or "{" in root:
+            # Unresolved template placeholder — not a literal path we can use
+            # for a bootstrap default (mirrors PathPlanner._subst_root's own
+            # "{" in root test for the same distinction).
+            continue
+        normalized = f"{root.strip('/')}/"
+        if any(
+            Path(normalized.rstrip("/")).is_relative_to(Path(existing.rstrip("/")))
+            for existing in source_dirs
+        ):
+            continue
+        source_dirs.append(normalized)
+    return source_dirs
+
+
 def _display_path(path: Path, project_root: Path) -> str:
     try:
         return path.relative_to(project_root).as_posix()
@@ -2357,7 +2410,7 @@ def init(
     _render_template("codd.yaml.tmpl", codd_dir / "codd.yaml", {
         "project_name": project_name,
         "language": language,
-        "source_dirs": _format_yaml_list(["src/"]),
+        "source_dirs": _format_yaml_list(_default_scan_source_dirs(language)),
         "test_dirs": _format_yaml_list(["tests/"]),
         "doc_dirs": _format_yaml_list(["docs/"]),
         "graph_path": f"{config_dir}/scan",
