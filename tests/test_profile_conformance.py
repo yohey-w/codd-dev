@@ -68,8 +68,12 @@ CONFORMANCE_FIXTURES: dict[str, dict] = {
         # above (that fixture already uses zero TS type annotations) — the marker
         # gate's TypeScriptTestBlockProfile is verified extension-agnostic (docstring:
         # "vitest / jest structural adapter (TS + JS + JSX/TSX)"), so the ONLY
-        # difference that matters here is the filename (.test.js, not .test.ts) and
-        # the resolved profile (language="javascript", no implement_oracle).
+        # difference that matters here is the filename (.test.js, not .test.ts).
+        # This is a manually-constructed legacy LayoutProfile (not resolved via
+        # resolve_layout_profile), so its implement_oracle stays the dataclass
+        # default None regardless of javascript.yaml's own declaration — this
+        # fixture is pure marker-authenticity testing and does not exercise the
+        # implement-oracle gate at all.
         "profile": LayoutProfile(
             language="javascript", package_name="app",
             source_root="src", package_root="src", test_root="tests",

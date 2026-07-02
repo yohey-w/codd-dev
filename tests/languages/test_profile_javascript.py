@@ -3,11 +3,14 @@
 
 Asserts the profile loads, is auto-discovered + resolvable by id, carries the
 load-bearing shape (plain src/ + tests/ layout, no ``.ts``/``.tsx`` anywhere),
-declares NO implement-oracle (plain JS has no compiler/type-checker — an HONEST
-absence, not a gap), and wires a vitest verify campaign whose report adapter is
-``vitest-json`` (the SAME adapter TypeScript uses). It does NOT assert the
-language CONTRACT is complete — ``vitest-json`` is registered centrally by the
-parent, not in this task.
+declares a ``kind=adapter`` implement-oracle (``javascript-composite`` — plain
+JS has no compiler/type-checker, so this is an in-process ``node --check`` +
+first-party import/export resolver composite, NOT a tsc-shaped command/
+composite; see ``codd/languages/adapters/oracle_javascript.py``), and wires a
+vitest verify campaign whose report adapter is ``vitest-json`` (the SAME
+adapter TypeScript uses). It does NOT assert the language CONTRACT is
+complete — ``vitest-json`` is registered centrally by the parent, not in this
+task.
 
 Also asserts the registry-shadowing design this profile depends on: adding
 ``id: javascript`` here must NOT require any edit to typescript.yaml. The
@@ -98,8 +101,16 @@ def test_javascript_id_shadows_the_typescript_alias_entry(registry: LanguageRegi
     assert ts.identity.id == "typescript"
     assert js is not ts
     assert js.raw != ts.raw
-    assert js.implement_oracle is None
-    assert ts.implement_oracle is not None  # tsc — the exact divergence this profile avoids
+    # Both now declare a REAL implement-oracle, but distinct ones: TS's is a
+    # tsc-shaped kind=command (a static type-checker); JS's is a kind=adapter
+    # in-process composite (node --check + import/export resolution — no type
+    # information exists for JS, so it never claims to be tsc-equivalent).
+    assert js.implement_oracle is not None
+    assert ts.implement_oracle is not None
+    assert js.implement_oracle.kind == "adapter"
+    assert js.implement_oracle.adapter == "javascript-composite"
+    assert ts.implement_oracle.kind == "command"
+    assert ts.implement_oracle.adapter == "typescript-tsc"
 
 
 # ── identity / strictness / extensions ────────────────────────────────────────
@@ -156,7 +167,7 @@ def test_javascript_package_root_is_flat_path_root(registry: LanguageRegistry) -
     assert js.layout.package_root.path == "src"
 
 
-# ── commands + the HONEST absence of an implement-oracle ─────────────────────
+# ── commands + the in-process (not tsc-shaped) implement-oracle ──────────────
 
 
 def test_javascript_verify_command_uses_vitest_without_tsc(registry: LanguageRegistry) -> None:
@@ -168,17 +179,25 @@ def test_javascript_verify_command_uses_vitest_without_tsc(registry: LanguageReg
     assert not any("tsc" in str(a) for a in argv)
 
 
-def test_javascript_has_no_implement_oracle(registry: LanguageRegistry) -> None:
-    """Plain JavaScript has no compiler/type-checker — this MUST stay ``None``.
-
-    This is the entire reason javascript.yaml does not reuse typescript.yaml's
-    legacy builder (whose realizer id literally embeds ``tsc``). The absence is
-    honest: every other anti-false-green surface (lock-freshness, coverage-
-    execution-coherence, VB marker-authenticity) still applies for real (see
-    the tests below).
+def test_javascript_implement_oracle_is_an_in_process_composite_not_tsc(
+    registry: LanguageRegistry,
+) -> None:
+    """Plain JavaScript has no compiler/type-checker, so its oracle is NOT a
+    tsc-shaped ``kind=command``/``composite`` — it is the SAME in-process
+    ``kind=adapter`` shape Python's composite uses (node --check + a
+    first-party import/export resolver; see
+    codd/languages/adapters/oracle_javascript.py). This closes the
+    "declared but UNSUPPORTED" gate RED a fully-absent implement_oracle used
+    to leave open — every other anti-false-green surface (lock-freshness,
+    coverage-execution-coherence, VB marker-authenticity) still applies too
+    (see the tests below), this is a THIRD, independent one.
     """
     js = registry.resolve("javascript")
-    assert js.implement_oracle is None
+    assert js.implement_oracle is not None
+    assert js.implement_oracle.kind == "adapter"
+    assert js.implement_oracle.adapter == "javascript-composite"
+    assert js.implement_oracle.command is None
+    assert js.implement_oracle.steps == ()
 
 
 def test_javascript_verify_report_adapter_is_vitest_json(registry: LanguageRegistry) -> None:

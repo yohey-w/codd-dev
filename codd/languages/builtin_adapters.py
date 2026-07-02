@@ -110,9 +110,8 @@ def ensure_builtin_adapters_registered(registry: AdapterRegistry | None = None) 
     _register_once(target, "import_resolver", "java-package", JavaPackageImportResolverAdapter())
 
     # Implement-oracle tool-semantics adapters (Contract Kernel oracle dispatch §3).
-    # All three concrete adapters (go-toolchain / python-composite / typescript-tsc)
-    # register inside register_oracle_adapters — every compiler/composite stack is now
-    # on the contract path (no language-name dispatch left in the oracle gate).
+    # Every compiler/composite/adapter stack registers inside register_oracle_adapters
+    # — no language-name dispatch left in the oracle gate.
     register_oracle_adapters(target)
 
     if target is default_adapter_registry:
@@ -132,16 +131,20 @@ def register_oracle_adapters(registry: AdapterRegistry) -> None:
 
     Step 5 registered the ``go-toolchain`` adapter (Go on the contract path); step 6
     ``python-composite`` (Python's in-process ``kind=adapter`` composite); step 7
-    ``typescript-tsc`` (tsc ``kind=command``). ALL THREE are now registered, so every
-    compiler/composite stack routes to the contract path — the dispatch selection is
-    GENERIC (modeled oracle + registered adapter), never a language-name comparison
-    (Cut Condition A). The adapter classes are imported INSIDE this function (lazy),
-    never at module load, preserving the leaf rule.
+    ``typescript-tsc`` (tsc ``kind=command``); a later increment added
+    ``javascript-composite`` (plain JS's in-process ``kind=adapter`` composite —
+    ``node --check`` + a first-party import/export resolver, the "same checks,
+    minus type-checking" shape Python's composite already established). Every
+    compiler/composite/adapter stack routes to the contract path — the dispatch
+    selection is GENERIC (modeled oracle + registered adapter), never a
+    language-name comparison (Cut Condition A). The adapter classes are imported
+    INSIDE this function (lazy), never at module load, preserving the leaf rule.
     """
     from codd.languages.adapters.oracle_cpp import CppToolchainOracleAdapter
     from codd.languages.adapters.oracle_csharp import DotnetToolchainOracleAdapter
     from codd.languages.adapters.oracle_go import GoToolchainOracleAdapter
     from codd.languages.adapters.oracle_java import JavaToolchainOracleAdapter
+    from codd.languages.adapters.oracle_javascript import JavaScriptCompositeOracleAdapter
     from codd.languages.adapters.oracle_python import PythonCompositeOracleAdapter
     from codd.languages.adapters.oracle_typescript import TypeScriptTscOracleAdapter
     from codd.languages.contract import KIND_IMPLEMENT_ORACLE
@@ -152,6 +155,9 @@ def register_oracle_adapters(registry: AdapterRegistry) -> None:
     )
     _register_once(
         registry, KIND_IMPLEMENT_ORACLE, "typescript-tsc", TypeScriptTscOracleAdapter()
+    )
+    _register_once(
+        registry, KIND_IMPLEMENT_ORACLE, "javascript-composite", JavaScriptCompositeOracleAdapter()
     )
     # Compiler-stack composites (Java ``mvn compile`` / C# ``dotnet build`` / C++
     # ``cmake configure``+``build``): each is a ``kind="composite"`` shell-command

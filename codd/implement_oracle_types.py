@@ -122,7 +122,8 @@ class ImplementOracleResult:
             "imports, or imported symbols they demand of each other. Nothing was "
             "accepted. (TypeScript runs `tsc --noEmit`; Python runs an in-process "
             "compile + a first-party import/symbol resolver + `pytest "
-            "--collect-only`.)",
+            "--collect-only`; JavaScript runs `node --check` per file + a "
+            "first-party import/export resolver.)",
             "Fix the source AND tests so every file compiles, every import "
             "resolves, and every imported symbol is actually defined/exported by "
             "its module. Specifically:",

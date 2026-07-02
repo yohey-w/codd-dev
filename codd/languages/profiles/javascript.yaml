@@ -37,12 +37,26 @@
 #   * strictness = strict — a new (non-legacy-historical) profile is strict
 #     from day one, like java/csharp/cpp; typescript.yaml's own
 #     ``legacy_compatible`` is specific to ITS historical bridge.
-#   * NO ``implement_oracle`` declared — plain JavaScript has no compiler/
-#     type-checker. This absence is HONEST (mirrors the reason NOT to reuse
-#     typescript.yaml's tsc-shaped legacy builder), not a gap: every OTHER
-#     anti-false-green surface below (manifest<->lock coherence,
-#     coverage-execution-coherence, VB marker-authenticity) still fires for
-#     real via the generic synthesizer.
+#   * implement_oracle = kind: adapter, adapter: javascript-composite — plain
+#     JavaScript has no compiler/type-checker, so this is NOT a tsc-shaped
+#     command/composite (that would need a static checker binary that does not
+#     exist for JS). It is the SAME in-process "kind=adapter" shape Python's
+#     composite already established (codd/languages/adapters/oracle_python.py):
+#     TWO layers run BEFORE the test runner, while the SUT can still edit every
+#     file — (1) ``node --check`` per source+test file (syntax only, no ``.jsx``:
+#     plain Node has no JSX transform, so checking it would be a systematic
+#     false-RED), and (2) a static, regex-based first-party import/export
+#     resolver (THE keystone — proves every relative import/require resolves to
+#     a real file, and every named ESM import/re-export is actually exported by
+#     its target). See codd/languages/adapters/oracle_javascript.py's module
+#     docstring for the full anti-false-RED tolerance list. This closes the
+#     "declared but UNSUPPORTED" §9 RED a fully-absent implement_oracle used to
+#     leave open (2026-07-02): a declared, non-empty language with NO oracle at
+#     all is never a silent NO-OP — see codd/implement_oracle.py's
+#     ORACLE_STATE_UNSUPPORTED_EXPLICIT. Every OTHER anti-false-green surface
+#     below (manifest<->lock coherence, coverage-execution-coherence, VB
+#     marker-authenticity) still fires for real via the generic synthesizer, as
+#     it always did — this line adds a THIRD, independent one.
 #   * tests.semantics_adapter = typescript-test-semantics — reuses the
 #     ALREADY-EXISTING ``TypeScriptTestBlockProfile``
 #     (codd/vb_marker_authenticity.py), which is verified extension-agnostic:
@@ -173,6 +187,15 @@ commands:
       path: ".codd/verify/vitest.json"
       format: vitest-json
       adapter: vitest-json
+
+# Implement-time oracle (Contract Kernel §1): plain JS has no static
+# checker, so this is kind=adapter (an in-process composite — see the
+# header comment above + codd/languages/adapters/oracle_javascript.py),
+# NOT kind=command/composite like typescript.yaml's tsc / go.yaml's
+# go-toolchain (neither shape fits — there is no single checker binary).
+implement_oracle:
+  kind: adapter
+  adapter: javascript-composite
 
 tests:
   semantics_adapter: typescript-test-semantics
