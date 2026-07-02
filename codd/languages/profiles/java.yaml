@@ -151,7 +151,15 @@ tests:
     skipped_is_not_authentic: true
     focused_only_is_not_authentic: true
     assertion_required: true
-    accepted_assertion_confidence: ["certain"]
+    # "certain" (a direct primitive, or a resolved helper whose body asserts and
+    # is argument-anchored) stays accepted unconditionally. "declared" is added
+    # for the library fluent-terminal mechanism below (assertion_hints.
+    # library_assertion_terminals) — a call credited off DECLARED metadata (the
+    # test file imports the library AND the leaf method is a declared terminal
+    # AND the call/receiver argument-anchors) rather than a resolved body. Widen
+    # this list only when a NEW confidence tier is introduced; never remove
+    # "certain".
+    accepted_assertion_confidence: ["certain", "declared"]
 
   test_block_kinds:
     - junit_test_method
@@ -172,6 +180,30 @@ tests:
         - Test
       skip_annotations:
         - Disabled
+      # Qualified-call entry points: a call shaped ``<EntryClass>.<assertMethod>(``
+      # (e.g. ``Assertions.assertEquals(expected, actual)`` with only a PLAIN
+      # ``import org.junit.jupiter.api.Assertions;`` — no static import) is a
+      # DIRECT primitive assertion, not an unresolved helper call. The qualifier
+      # must be one of these declared names — this is DATA the qualified-call
+      # matcher is built from, never a hardcoded class name.
+      entry_classes:
+        - Assertions
+
+    # Fluent LIBRARY TERMINALS (design "the fluent-terminal problem"): a call is
+    # credited as assertion evidence when (a) the test file imports a path under
+    # one of these ``import_path`` prefixes, (b) the call's leaf name is in that
+    # entry's ``methods``, and (c) the call (or its receiver chain) argument-
+    # anchors to a non-ignored name — see ``_java_library_terminal_evidence``.
+    # ArchUnit's fluent architecture rules terminate in ``.check(classes)``
+    # (``noClasses().that()...should()...check(classes)``); the rule chain
+    # itself asserts nothing until ``.check(...)`` runs it, so without this
+    # declared-terminal mechanism every ArchUnit test looks like an unresolved
+    # helper call to the authenticity gate. Credited evidence carries
+    # ``confidence: "declared"`` (see ``accepted_assertion_confidence`` above).
+    library_assertion_terminals:
+      - import_path: "com.tngtech.archunit"
+        methods:
+          - check
 
 verify:
   command: verify

@@ -210,3 +210,26 @@ def test_resolve_language_contract_default_resolves_runner_report():
     contract = resolve_language_contract({"project": {"language": "typescript"}})
     assert contract is not None
     assert "runner_report:vitest-json" in contract.resolved_adapter_refs
+
+
+# ── java's ``import_resolver:java-package`` adapter (the FIRST import_resolver
+# ── kind ever registered — every profile declares one, but until this one none
+# ── were registered; closes the gap for java specifically, not every language).
+
+
+def test_default_registry_resolves_java_import_resolver_adapter():
+    from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
+
+    ensure_builtin_adapters_registered()  # deterministic regardless of test order
+    contract = build_language_contract(default_registry.resolve("java"))  # DEFAULT registry
+    missing = {r.ref for r in contract.missing_adapters}
+    assert "import_resolver:java-package" not in missing
+    assert "import_resolver:java-package" in contract.resolved_adapter_refs
+
+
+def test_explicit_empty_registry_keeps_java_import_resolver_missing():
+    # Passing an explicit empty AdapterRegistry() must NOT auto-register the
+    # built-ins — the incomplete-contract path stays exercisable (unchanged).
+    profile = default_registry.resolve("java")
+    contract = build_language_contract(profile, adapter_registry=AdapterRegistry())
+    assert "import_resolver:java-package" in {r.ref for r in contract.missing_adapters}

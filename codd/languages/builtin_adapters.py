@@ -100,6 +100,15 @@ def ensure_builtin_adapters_registered(registry: AdapterRegistry | None = None) 
     # silent skip; v2.77d authenticity). Underscore spelling matches the profile.
     _register_once(target, "runner_report", "playwright_json", PlaywrightJsonReportAdapter())
 
+    # Import-resolver adapters (Contract Kernel ``import_resolver`` kind). Every
+    # profile declares ``imports.resolver_adapter`` but none were registered
+    # until now; java.yaml's ``java-package`` is the first (Go/C#/C++/TS/Python's
+    # own resolver ids remain a later increment — see
+    # codd.languages.adapters.import_resolver's module docstring).
+    from codd.languages.adapters.import_resolver import JavaPackageImportResolverAdapter
+
+    _register_once(target, "import_resolver", "java-package", JavaPackageImportResolverAdapter())
+
     # Implement-oracle tool-semantics adapters (Contract Kernel oracle dispatch §3).
     # All three concrete adapters (go-toolchain / python-composite / typescript-tsc)
     # register inside register_oracle_adapters — every compiler/composite stack is now

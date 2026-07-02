@@ -97,7 +97,7 @@ import sys
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from codd.operational_e2e_audit import (
     _COVER_MARKER_RE,
@@ -153,15 +153,33 @@ class TestBlock:
 #:                             (``assert True`` / ``expect(true).toBe(true)``) —
 #:                             references no non-ignored name, so proves nothing
 #:   ``helper_resolved``     — a resolved helper with primitive + arg anchor (pass)
+#:   ``library_terminal``    — a DECLARED library fluent-terminal call credited off
+#:                             ``assertion_hints.library_assertion_terminals`` data
+#:                             (e.g. ArchUnit's ``rule.check(classes)``) — pass
 #:   ``no_assertion``        — neither a primitive nor any assertion-like call
 #:   ``unresolved_helper``   — an assertion-like call not resolvable 1-hop
 #:   ``helper_no_primitive`` — resolved helper body has no primitive assertion/fail
 #:   ``constant_helper``     — resolved helper asserts only constants (no anchor)
+#:   ``unaccepted_confidence`` — evidence resolved ``ok=True`` but its
+#:                             ``confidence`` is not in this profile's
+#:                             ``authenticity_policy.accepted_assertion_confidence``
 @dataclass(frozen=True)
 class AssertionEvidence:
     ok: bool
     reason: str
     detail: str = ""
+    #: How directly this evidence was observed. ``"certain"`` (the default, and
+    #: the ONLY value any resolver produced before this field existed) is a
+    #: primitive assertion seen directly or reached through the language-free
+    #: helper-hop engine (:func:`_resolve_evidence`). ``"declared"`` is evidence
+    #: credited off DECLARED, profile-supplied metadata rather than a resolved
+    #: body (today: a library fluent-terminal call — see ``library_terminal``
+    #: above). The gate (:func:`build_authenticity_report`) only accepts a
+    #: profile's declared ``authenticity_policy.accepted_assertion_confidence``
+    #: list; a profile that never mentions the key implicitly accepts only
+    #: ``["certain"]`` — unchanged behavior for every profile that does not
+    #: explicitly opt a wider tier in.
+    confidence: str = "certain"
 
 
 class TestBlockProfile(Protocol):
@@ -497,6 +515,56 @@ def _direct_evidence(
         return AssertionEvidence(ok=True, reason="direct")
 
 
+#: The confidence tier every resolver produced before the ``confidence`` field
+#: existed, and what every profile that never declares
+#: ``authenticity_policy.accepted_assertion_confidence`` implicitly accepts.
+_DEFAULT_ACCEPTED_CONFIDENCE: frozenset[str] = frozenset({"certain"})
+
+
+def _accepted_assertion_confidence(profile: Any) -> frozenset[str]:
+    """Resolve ``authenticity_policy.accepted_assertion_confidence`` for ``profile``.
+
+    ``profile`` is the active :class:`~codd.project_types.LayoutProfile` passed to
+    :func:`build_authenticity_report` (or any object exposing a ``language``
+    attribute — e.g. a test stub). This resolves the KERNEL
+    :class:`~codd.languages.profile.LanguageProfile` for that language via
+    :mod:`codd.languages.registry` and reads ``tests.authenticity_policy.
+    accepted_assertion_confidence`` from its YAML. That import is a ONE-WAY edge
+    (``codd.languages`` never imports this module) so it carries no cycle risk,
+    unlike ``codd.project_types`` which this module must never import (it imports
+    *this* module lazily inside ``LayoutProfile.test_block_profile()``).
+
+    Absent ``profile``, an unresolvable/unknown ``language``, a profile with no
+    ``tests`` block, or the key simply not being declared ⇒ the STRICT default
+    ``{"certain"}`` — today's behavior, byte-for-byte unchanged for every profile
+    that does not explicitly opt a wider confidence tier in. Best-effort: never
+    raises (a malformed value degrades to the strict default, never a crash and
+    never a silent widen).
+    """
+
+    language = getattr(profile, "language", None) if profile is not None else None
+    if not language or not str(language).strip():
+        return _DEFAULT_ACCEPTED_CONFIDENCE
+    try:
+        from codd.languages.registry import default_registry
+
+        lang_profile = default_registry.resolve(str(language))
+    except Exception:  # noqa: BLE001 — resolution is best-effort; never raise.
+        return _DEFAULT_ACCEPTED_CONFIDENCE
+    tests = getattr(lang_profile, "tests", None)
+    policy = getattr(tests, "authenticity_policy", None) if tests is not None else None
+    if not isinstance(policy, Mapping):
+        return _DEFAULT_ACCEPTED_CONFIDENCE
+    raw = policy.get("accepted_assertion_confidence")
+    if not raw:
+        return _DEFAULT_ACCEPTED_CONFIDENCE
+    try:
+        values = frozenset(str(v) for v in raw)
+    except TypeError:
+        return _DEFAULT_ACCEPTED_CONFIDENCE
+    return values or _DEFAULT_ACCEPTED_CONFIDENCE
+
+
 def build_authenticity_report(
     project_root: Path | str,
     *,
@@ -544,6 +612,7 @@ def build_authenticity_report(
                 adapter = getter()
             except Exception:  # noqa: BLE001 — adapter resolution is best-effort.
                 adapter = None
+    accepted_confidence = _accepted_assertion_confidence(profile)
 
     hook_list = list(hooks or ())
     violations: list[AuthenticityViolation] = []
@@ -708,6 +777,22 @@ def build_authenticity_report(
                     importer_rel=rel,
                     project_root=project_root,
                 )
+            # Confidence gate: evidence that resolved ``ok=True`` still only
+            # counts if its confidence tier is one this profile's
+            # ``authenticity_policy.accepted_assertion_confidence`` accepts.
+            # Every existing resolver only ever produces ``"certain"``, and
+            # every profile without the key accepts only ``{"certain"}``, so
+            # this is a no-op for every stack that has not opted a wider tier
+            # in (see :func:`_accepted_assertion_confidence`).
+            if evidence.ok and evidence.confidence not in accepted_confidence:
+                evidence = AssertionEvidence(
+                    ok=False,
+                    reason="unaccepted_confidence",
+                    detail=(
+                        f"confidence={evidence.confidence!r} not accepted by this profile "
+                        f"(accepted={sorted(accepted_confidence)!r})"
+                    ),
+                )
             if not evidence.ok:
                 label = f" ({block.label})" if block.label else ""
                 violations.append(
@@ -789,6 +874,13 @@ def _no_assertion_message(
             f" that delegates to a helper ({evidence.detail or 'helper'}) which asserts only "
             "CONSTANTS (it never references its arguments, e.g. `expect(true).toBe(true)`) — a "
             "constant assertion proves nothing. Assert against the call's actual result."
+        )
+    elif evidence.reason == "unaccepted_confidence":
+        why = (
+            f" whose evidence ({evidence.detail or 'a lower-confidence signal'}) this profile's "
+            "`authenticity_policy.accepted_assertion_confidence` does not accept. Strengthen the "
+            "assertion so it resolves at an accepted confidence tier, or widen the profile's "
+            "accepted list if this class of evidence is genuinely trusted."
         )
     else:  # no_assertion
         why = (
@@ -3032,7 +3124,7 @@ _GO_HELPER_PRIMITIVE_RE = re.compile(
 _GO_FUNC_DEF_RE = re.compile(r"(?<![A-Za-z0-9_])func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
-def _go_imported_module(importer_text: str, symbol: str) -> str | None:
+def _go_imported_module(importer_text: str, symbol: str, full_callee: str = "") -> str | None:
     """Binding 'module' for a Go helper symbol — always ``None`` (same-file search).
 
     Go has NO per-symbol import statement: a same-package helper is callable with
@@ -3047,6 +3139,8 @@ def _go_imported_module(importer_text: str, symbol: str) -> str | None:
     importer text ⇒ ``unresolved_helper`` ⇒ fail-CLOSED in strict, never a false
     pass) — a deliberate, documented residual matching the PY/TS "1-hop, same-repo"
     discipline (a future ``go-module`` import-resolver adapter can widen this).
+    ``full_callee`` (E1) is accepted for signature parity with the shared engine's
+    ``imported_lookup`` slot but unused — Go's lookup never needed the qualifier.
     """
 
     return None
@@ -3645,24 +3739,30 @@ _MAX_REEXPORT_HOPS = 4
 _CALL_RE = re.compile(r"(?P<callee>[A-Za-z_$][\w$.]*)\s*\(")
 
 
-def _extract_helper_calls(body_text: str) -> list[tuple[str, str]]:
-    """Assertion-like ``name(args)`` calls in a test body → (name, args) pairs.
+def _extract_helper_calls(body_text: str) -> list[tuple[str, str, str]]:
+    """Assertion-like ``name(args)`` calls in a test body → (callee, name, args).
 
     Returns calls whose callee leading identifier matches the assertion-helper
-    name set. ``args`` is the raw argument text (used for the argument-anchor
-    check). Member calls (``foo.bar(...)``) are reduced to the final segment
-    (``bar``) for the name test, but only assertion-ish names are considered —
-    this is the candidate-selection step, never a pass.
+    name set: ``callee`` is the FULL matched text (``rule.check`` /
+    ``HarnessAssertions.assertSuccess`` / a bare ``checkFoo``), ``name`` is its
+    final segment (``check`` / ``assertSuccess`` / ``checkFoo``), and ``args`` is
+    the raw argument text (used for the argument-anchor check). Only
+    assertion-ish LEAF names are considered — this is the candidate-selection
+    step, never a pass. The full ``callee`` (added for a receiver-aware lookup —
+    e.g. Java's static-import binding and the library fluent-terminal check, both
+    of which need the qualifier a bare leaf name discards) is additive: every
+    existing caller that only used the (name, args) pair keeps working by
+    unpacking the first element as ``_``.
     """
 
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     for match in _CALL_RE.finditer(body_text):
         callee = match.group("callee")
         segment = callee.split(".")[-1]
         if not _looks_like_assertion_helper(segment):
             continue
         args = _balanced_args(body_text, match.end("callee"))
-        out.append((segment, args))
+        out.append((callee, segment, args))
     return out
 
 
@@ -3722,8 +3822,13 @@ _TS_IMPORT_NAMED_RE = re.compile(
 _TS_SOURCE_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 
 
-def _ts_imported_specifier(importer_text: str, symbol: str) -> str | None:
-    """The module specifier that imports ``symbol`` into the importing file."""
+def _ts_imported_specifier(importer_text: str, symbol: str, full_callee: str = "") -> str | None:
+    """The module specifier that imports ``symbol`` into the importing file.
+
+    ``full_callee`` (E1) is accepted for signature parity with the shared
+    engine's ``imported_lookup`` slot but unused — TS/JS named-import binding
+    only ever needs the bare local symbol.
+    """
 
     for match in _TS_IMPORT_NAMED_RE.finditer(importer_text):
         for raw in match.group("names").split(","):
@@ -4127,8 +4232,13 @@ def _iter_py_from_imports(module_text: str) -> list[_PyFromImport]:
     return out
 
 
-def _py_imported_module(importer_text: str, symbol: str) -> str | None:
-    """The module path a ``from <mod> import <symbol>`` binds ``symbol`` from."""
+def _py_imported_module(importer_text: str, symbol: str, full_callee: str = "") -> str | None:
+    """The module path a ``from <mod> import <symbol>`` binds ``symbol`` from.
+
+    ``full_callee`` (E1) is accepted for signature parity with the shared
+    engine's ``imported_lookup`` slot but unused — Python's ``from`` binding
+    only ever needs the bare local symbol.
+    """
 
     for item in _iter_py_from_imports(importer_text):
         for original, local in item.names:
@@ -4292,22 +4402,28 @@ def _resolve_evidence(
     importer_rel: str,
     project_root: Path,
     primitive_re: re.Pattern[str],
-    imported_lookup: Callable[[str, str], str | None],
+    imported_lookup: Callable[[str, str, str], str | None],
     module_resolver: Callable[[str, str, Path], Path | None],
     def_finder: Callable[[str, str], "tuple[str, list[str]] | None"],
     reexport_edges: Callable[[str, str], list[tuple[str, str]]] | None = None,
+    fallback_module_candidates: Callable[[str, str, Path, str], list[Path]] | None = None,
 ) -> AssertionEvidence:
     """Shared 1-hop helper-resolution engine (language plug-ins supply the rest).
 
     ``primitive_re`` detects a primitive assertion/fail in a helper body;
-    ``imported_lookup(importer_text, symbol)`` returns the binding specifier/module;
+    ``imported_lookup(importer_text, symbol, full_callee)`` returns the binding
+    specifier/module (``full_callee`` is the whole matched callee text — e.g.
+    ``HarnessAssertions.assertSuccess`` — for a receiver-aware lookup; a profile
+    that only needs the bare symbol ignores it);
     ``module_resolver(importer_rel, spec, root)`` resolves it to a file;
     ``def_finder(module_text, name)`` returns ``(body, params)`` for the helper;
     ``reexport_edges(module_text, symbol)`` (optional) returns the barrel
     re-export edges that can carry ``symbol`` onward, so a helper imported from a
     barrel index that only RE-EXPORTS its real definition is still reachable. A
     profile that supplies no follower simply never crosses a barrel (degrades to
-    the 2.31.0 direct/simple-import behavior).
+    the 2.31.0 direct/simple-import behavior). ``fallback_module_candidates``
+    (optional, E2) is consulted ONLY when same-file + import-bound + barrel
+    resolution all miss — see :func:`_resolve_one_helper` for the exact seam.
     """
 
     calls = _extract_helper_calls(block.body_text)
@@ -4318,10 +4434,11 @@ def _resolve_evidence(
     saw_no_primitive = False
     saw_constant = False
     last_helper = ""
-    for name, _args in calls:
+    for full_callee, name, _args in calls:
         last_helper = name
         verdict = _resolve_one_helper(
             name=name,
+            full_callee=full_callee,
             importer_text=importer_text,
             importer_rel=importer_rel,
             project_root=project_root,
@@ -4330,6 +4447,7 @@ def _resolve_evidence(
             module_resolver=module_resolver,
             def_finder=def_finder,
             reexport_edges=reexport_edges,
+            fallback_module_candidates=fallback_module_candidates,
             hops=_MAX_HELPER_HOPS,
             seen=frozenset(),
         )
@@ -4423,14 +4541,16 @@ def _follow_reexports_for_def(
 def _resolve_one_helper(
     *,
     name: str,
+    full_callee: str = "",
     importer_text: str,
     importer_rel: str,
     project_root: Path,
     primitive_re: re.Pattern[str],
-    imported_lookup: Callable[[str, str], str | None],
+    imported_lookup: Callable[[str, str, str], str | None],
     module_resolver: Callable[[str, str, Path], Path | None],
     def_finder: Callable[[str, str], "tuple[str, list[str]] | None"],
     reexport_edges: Callable[[str, str], list[tuple[str, str]]] | None = None,
+    fallback_module_candidates: Callable[[str, str, Path, str], list[Path]] | None = None,
     hops: int,
     seen: frozenset[str],
 ) -> AssertionEvidence:
@@ -4448,13 +4568,27 @@ def _resolve_one_helper(
     file cycle guard). The defining module's text/rel then replace the barrel's so
     the SAME primitive + argument-anchor checks (and any deeper helper hop) run
     against the real body — barrel following adds reach, never a pass.
+
+    ``full_callee`` (E1 — the whole matched callee text, e.g.
+    ``HarnessAssertions.assertSuccess``, vs. ``name``'s bare leaf
+    ``assertSuccess``) is threaded to ``imported_lookup`` for a receiver-aware
+    binding lookup (e.g. a static-import table keyed on the leaf, or a future
+    profile that also wants the qualifier). ``fallback_module_candidates``
+    (E2, optional) is consulted ONLY as the LAST resort, after same-file +
+    import-bound + barrel resolution ALL miss (``found`` is still ``None``): it
+    returns candidate files to search for ``name``'s definition (e.g. Java's
+    same-directory sibling-by-class-name guess for a qualified call with no
+    static import). It supplies PLACES TO LOOK ONLY — every candidate is
+    re-jailed via :func:`resolve_project_path` before its content is read, and
+    the SAME primitive + argument-anchor checks below still judge whatever is
+    found there, so a bad guess can degrade to unresolved but never false-GREEN.
     """
 
     if hops <= 0 or name in seen:
         return AssertionEvidence(ok=False, reason="unresolved_helper", detail=name)
     seen = seen | {name}
 
-    spec = imported_lookup(importer_text, name)
+    spec = imported_lookup(importer_text, name, full_callee)
     module_text = importer_text  # same-file helper is allowed (no import needed)
     resolved_rel = importer_rel
     if spec is not None:
@@ -4488,9 +4622,39 @@ def _resolve_one_helper(
         )
         if followed is not None:
             found, module_text, resolved_rel = followed
+    if found is None and fallback_module_candidates is not None:
+        # E2 LAST RESORT: same-file, import-bound, AND barrel resolution all
+        # missed. Ask the plug-in for a bounded list of "places to look" (e.g.
+        # a same-directory sibling file whose name matches the call's receiver
+        # class); every candidate is re-jailed here regardless of what the
+        # plug-in returned — a bad/out-of-tree guess can never itself become a
+        # path escape (defense in depth on top of the plug-in's own jailing).
+        root = Path(project_root).resolve()
+        for candidate in fallback_module_candidates(
+            importer_text, importer_rel, project_root, full_callee
+        )[:16]:
+            candidate_resolved = resolve_project_path(project_root, candidate)
+            if candidate_resolved is None:
+                continue
+            try:
+                candidate_text = candidate_resolved.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            candidate_found = def_finder(candidate_text, name)
+            if candidate_found is None:
+                continue
+            try:
+                candidate_rel = candidate_resolved.relative_to(root).as_posix()
+            except ValueError:
+                candidate_rel = importer_rel
+            found = candidate_found
+            module_text = candidate_text
+            resolved_rel = candidate_rel
+            break
     if found is None:
-        # Not defined in the binding module, no same-file def, and no resolvable
-        # re-export chain reaches a def → unresolved (greenfield strict ⇒ fail).
+        # Not defined in the binding module, no same-file def, no resolvable
+        # re-export chain, and no fallback candidate reaches a def → unresolved
+        # (greenfield strict ⇒ fail).
         return AssertionEvidence(ok=False, reason="unresolved_helper", detail=name)
     body, params = found
     param_set = set(params)
@@ -4511,12 +4675,13 @@ def _resolve_one_helper(
 
     # No primitive here — does the body delegate to a DEEPER assertion helper,
     # forwarding its own params? Follow one more hop.
-    for inner_name, inner_args in _extract_helper_calls(body):
+    for inner_full_callee, inner_name, inner_args in _extract_helper_calls(body):
         inner_anchor = _arg_identifiers(inner_args)
         if not (inner_anchor & param_set):
             continue  # the inner call must carry THIS helper's data forward
         deeper = _resolve_one_helper(
             name=inner_name,
+            full_callee=inner_full_callee,
             importer_text=module_text,
             importer_rel=resolved_rel,
             project_root=project_root,
@@ -4525,6 +4690,7 @@ def _resolve_one_helper(
             module_resolver=module_resolver,
             def_finder=def_finder,
             reexport_edges=reexport_edges,
+            fallback_module_candidates=fallback_module_candidates,
             hops=hops - 1,
             seen=seen,
         )
@@ -5081,46 +5247,138 @@ def _java_method_blocks(text: str) -> "list[tuple[int, int, str, str, bool]]":
     return out
 
 
+def _java_language_profile() -> Any:
+    """Resolve the bundled ``java.yaml`` :class:`~codd.languages.profile.LanguageProfile`.
+
+    Self-contained: :mod:`codd.languages.registry` (and its ``loader``/``profile``
+    dependencies) never import this module, so this one-way import carries no
+    cycle risk — unlike ``codd.project_types``, which imports THIS module lazily
+    and therefore must never be imported back from here. ``"java"`` is hardcoded
+    because this helper is itself Java-specific, exactly like
+    :data:`_JAVA_PRIMITIVE_ASSERT_NAMES`. Returns ``None`` on any resolution
+    failure (missing/broken YAML, package unavailable) so every caller degrades
+    to its hardcoded fallback rather than raising — this adapter stays
+    best-effort, never raising, like the rest of this module.
+    """
+
+    try:
+        from codd.languages.registry import default_registry
+
+        return default_registry.resolve("java")
+    except Exception:  # noqa: BLE001 — resolution is best-effort; never raise.
+        return None
+
+
+def _java_assertion_hints() -> Mapping[str, Any]:
+    """The active java profile's ``tests.assertion_hints`` mapping (or ``{}``)."""
+
+    profile = _java_language_profile()
+    tests = getattr(profile, "tests", None) if profile is not None else None
+    hints = getattr(tests, "assertion_hints", None) if tests is not None else None
+    return hints if isinstance(hints, Mapping) else {}
+
+
+def _java_entry_classes() -> frozenset[str]:
+    """Declared qualified-call ENTRY CLASSES across every ``assertion_hints`` library.
+
+    Generic over the ``assertion_hints`` SHAPE — a mapping of library name to
+    ``{import_path, assertion_methods, ..., entry_classes: [...]}``, plus the
+    sibling ``library_assertion_terminals`` LIST (skipped here because it is a
+    list, not a mapping — never by checking its key NAME). No library name
+    (``junit_jupiter``, ...) is ever hardcoded; only the STRUCTURE (a mapping
+    value's own ``entry_classes`` list) is read. A qualified call
+    ``<EntryClass>.<assertMethod>(`` is recognized as a Java primitive assertion
+    iff ``<EntryClass>`` is one of these declared names (see
+    :func:`_java_qualified_primitive_re`) — this is what makes
+    ``Assertions.assertEquals(...)`` (bound by a PLAIN, non-static import)
+    resolve as a DIRECT primitive instead of an unresolved helper call.
+    """
+
+    classes: set[str] = set()
+    for value in _java_assertion_hints().values():
+        if not isinstance(value, Mapping):
+            continue
+        raw = value.get("entry_classes")
+        if not raw:
+            continue
+        classes.update(str(c) for c in raw if str(c).strip())
+    return frozenset(classes)
+
+
+def _java_qualified_primitive_re(entry_classes: frozenset[str]) -> re.Pattern[str] | None:
+    """A ``<EntryClass>.<assertMethod>(`` matcher built from DECLARED ``entry_classes``.
+
+    ``None`` when no entry classes are declared (nothing to match — the profile
+    opted out, or could not be resolved). Built fresh from the DATA each call
+    (cheap: a handful of names; ``re.compile`` itself caches identical pattern
+    strings) rather than a module-level constant, since ``entry_classes`` is
+    profile/YAML-driven, not a Python literal.
+    """
+
+    if not entry_classes:
+        return None
+    classes_alt = "|".join(re.escape(c) for c in sorted(entry_classes))
+    names_alt = "|".join(_JAVA_PRIMITIVE_ASSERT_NAMES)
+    return re.compile(rf"(?<![A-Za-z0-9_.])(?:{classes_alt})\.(?:{names_alt})\s*\(")
+
+
 def _java_body_has_primitive_assertion(body_text: str) -> bool:
     """Whether ``body_text`` contains a Java PRIMITIVE assertion (lexical).
 
     A primitive is a JUnit/Hamcrest/AssertJ assertion call (``assertEquals(`` /
-    ``assertThat(`` / ``fail(`` / …). A bare named-helper call (``checkResult(x)``)
-    is NOT primitive — that is resolved via the evidence graph. Comments are
-    stripped first (``_go_strip_comments``) so an assertion written in a COMMENT is
-    not counted (false-GREEN guard).
+    ``assertThat(`` / ``fail(`` / …) OR a QUALIFIED call on a declared
+    ``entry_classes`` name (``Assertions.assertEquals(...)`` bound by a plain,
+    non-static import — see :func:`_java_qualified_primitive_re`). A bare
+    named-helper call (``checkResult(x)``) is NOT primitive — that is resolved
+    via the evidence graph. Comments are stripped first (``_go_strip_comments``)
+    so an assertion written in a COMMENT is not counted (false-GREEN guard).
     """
 
     skeleton = _go_strip_comments(body_text)
-    return bool(_JAVA_PRIMITIVE_ASSERT_RE.search(skeleton))
+    if _JAVA_PRIMITIVE_ASSERT_RE.search(skeleton):
+        return True
+    qualified_re = _java_qualified_primitive_re(_java_entry_classes())
+    return bool(qualified_re and qualified_re.search(skeleton))
 
 
 def _java_direct_assertion_evidence(body_text: str) -> AssertionEvidence:
     """Verdict: does ``body_text`` carry a NON-constant Java primitive assertion?
 
     Mirrors :func:`_go_direct_assertion_evidence` (the testify ``value args``
-    branch): for each primitive assertion call in the (comment-stripped) body,
-    extract its argument text via :func:`_balanced_args` and decide REAL vs
-    CONSTANT-only by whether the args reference a NON-ignored identifier
-    (``_go_reference_idents(args) - _JAVA_IGNORED_NAMES``). ``assertEquals(5,
-    add(2, 3))`` references ``add`` ⇒ REAL ⇒ ``direct`` (ok). ``assertEquals(1,
-    1)`` / ``assertTrue(true)`` reference only literals/ignored names ⇒
-    CONSTANT-only. If ANY primitive is REAL ⇒ ``direct`` (ok). If at least one
-    primitive was seen and ALL are constant-only ⇒ ``constant_direct`` (not ok).
-    If the regex matched but this scanner classifies no primitive ⇒ fail OPEN
-    (``direct``), never a false-RED — exactly the Go contract. Called by the gate
-    only when ``block.has_assertion`` is True.
+    branch): for each primitive assertion call — UNQUALIFIED
+    (``_JAVA_PRIMITIVE_ASSERT_RE``) OR QUALIFIED on a declared ``entry_classes``
+    name (``_java_qualified_primitive_re``; e.g. ``Assertions.assertEquals(...)``
+    with only a plain, non-static ``import org.junit.jupiter.api.Assertions;``)
+    — in the (comment-stripped) body, extract its argument text via
+    :func:`_balanced_args` and decide REAL vs CONSTANT-only by whether the args
+    reference a NON-ignored identifier (``_go_reference_idents(args) -
+    _JAVA_IGNORED_NAMES`` — ``Assertions``/``Assert``/… are already ignored names,
+    so a qualifier never self-anchors). ``assertEquals(5, add(2, 3))`` /
+    ``Assertions.assertEquals(5, add(2, 3))`` references ``add`` ⇒ REAL ⇒
+    ``direct`` (ok). ``assertEquals(1, 1)`` / ``assertTrue(true)`` reference only
+    literals/ignored names ⇒ CONSTANT-only. If ANY primitive is REAL ⇒ ``direct``
+    (ok). If at least one primitive was seen and ALL are constant-only ⇒
+    ``constant_direct`` (not ok). If the regex matched but this scanner
+    classifies no primitive ⇒ fail OPEN (``direct``), never a false-RED —
+    exactly the Go contract. Called by the gate only when ``block.has_assertion``
+    is True.
     """
 
     # Comment-stripped SKELETON so an assertion / arg written in a COMMENT is not
     # read as real code. Offsets preserved, so ``_balanced_args`` positions align.
     skeleton = _go_strip_comments(body_text)
     saw_primitive = False
-    for m in _JAVA_PRIMITIVE_ASSERT_RE.finditer(skeleton):
-        saw_primitive = True
-        args = _balanced_args(skeleton, m.end() - 1)
-        if _go_reference_idents(args) - _JAVA_IGNORED_NAMES:
-            return AssertionEvidence(ok=True, reason="direct")
+    for pattern in (
+        _JAVA_PRIMITIVE_ASSERT_RE,
+        _java_qualified_primitive_re(_java_entry_classes()),
+    ):
+        if pattern is None:
+            continue
+        for m in pattern.finditer(skeleton):
+            saw_primitive = True
+            args = _balanced_args(skeleton, m.end() - 1)
+            if _go_reference_idents(args) - _JAVA_IGNORED_NAMES:
+                return AssertionEvidence(ok=True, reason="direct")
     if not saw_primitive:
         # ``has_assertion`` matched but no primitive classified here → fail OPEN.
         return AssertionEvidence(ok=True, reason="direct")
@@ -5138,9 +5396,13 @@ class JavaTestBlockProfile:
     ``@Disabled`` (JUnit5) / ``@Ignore`` (JUnit4) annotation on the method, or a
     body that unconditionally aborts via ``Assumptions.abort(...)`` /
     ``assumeTrue(false)``. A PRIMITIVE assertion is a JUnit/Hamcrest/AssertJ
-    assertion call (``assertEquals(`` / ``assertThat(`` / ``fail(`` / …); a bare
-    named-helper call is resolved one hop via
-    :meth:`resolve_assertion_evidence`.
+    assertion call (``assertEquals(`` / ``assertThat(`` / ``fail(`` / …) — either
+    UNQUALIFIED (bound by a static import) or QUALIFIED on a declared
+    ``entry_classes`` name (``Assertions.assertEquals(...)``); a bare named-helper
+    call is resolved one hop through the shared engine
+    (:func:`_resolve_java_evidence`) via :meth:`resolve_assertion_evidence`, with
+    a data-driven fallback for a DECLARED library fluent terminal (e.g. ArchUnit's
+    ``.check(classes)`` — see ``assertion_hints.library_assertion_terminals``).
 
     Java methods are NOT nested the way Go subtests / TS ``describe``→``it`` are
     (a ``@Test`` method cannot contain another ``@Test`` method), so EVERY block
@@ -5216,40 +5478,454 @@ class JavaTestBlockProfile:
     def resolve_assertion_evidence(
         self, block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
     ) -> AssertionEvidence:
-        """Resolve a block's DELEGATED-assertion (helper) evidence — fail-CLOSED.
+        """Resolve a block's DELEGATED-assertion (helper) evidence.
 
         Called by the gate ONLY for an attached, executable block with NO direct
-        primitive assertion (``block.has_assertion`` is False). One-hop Java
-        import resolution (static-import / same-package / Maven source-root
-        package mapping) is heavy and not yet built, so this adapter does NOT
-        credit delegated helpers: it returns NOT-ok in every case, distinguishing
-        only the diagnostic reason.
-
-        * If the body contains an assertion-LIKE bare helper call (a ``name(...)``
-          whose name looks like an assertion helper — ``checkResult`` /
-          ``verifyState`` / …, per the shared :func:`_extract_helper_calls`
-          selector) → ``unresolved_helper`` (an assertion helper we cannot resolve
-          is not evidence — the design's "unresolved helper = fail").
-        * Otherwise (no assertion-like call at all — e.g. the body only calls the
-          SUT ``add(2, 3)``) → ``no_assertion``.
-
-        Either way ``ok`` is False, so this NEVER produces a false-GREEN. (A
-        future ``java-package`` import-resolver adapter can widen this to real
-        1-hop helper resolution, exactly as the Go ``_go_imported_module``
-        residual documents.)
+        primitive assertion (``block.has_assertion`` is False). Delegates to
+        :func:`_resolve_java_evidence` — the shared, language-free 1-hop helper-
+        resolution engine (:func:`_resolve_evidence`) plugged with THIN Java
+        adapters (static-import lookup, Maven source/test-root module resolution,
+        a same-directory fallback for a same-package qualified call with no
+        import at all), with a data-driven fallback to a DECLARED library
+        fluent-terminal credit (``assertion_hints.library_assertion_terminals``)
+        when the helper-hop engine still cannot resolve the call.
         """
 
+        return _resolve_java_evidence(
+            block, importer_text=importer_text, importer_rel=importer_rel, project_root=project_root
+        )
+
+
+# ---------------------------------------------------------------------------
+# Java helper-resolution plug-ins (E1/E2-extended shared engine, THIN adapters).
+#
+# Java gets NO new engine — it reuses :func:`_resolve_evidence` /
+# :func:`_resolve_one_helper` exactly like Go/TS/Python, supplying only its own
+# regexes/lexical scanners, following the SAME naming convention as Go's
+# ``_go_imported_module`` / ``_go_resolve_module`` / ``_go_find_function_def``
+# (this section's template/precedent). Brace-matching and comment-stripping are
+# REUSED verbatim from Go's utilities (:func:`_go_match_brace`,
+# :func:`_go_strip_comments`, :func:`_balanced_args`, :func:`_go_reference_idents`)
+# rather than duplicated — the same discipline the C# adapter's own docstrings
+# already argue for.
+# ---------------------------------------------------------------------------
+
+#: ``import static a.b.C.sym;`` — binds the bare LEAF ``sym`` to the class ``a.b.C``.
+_JAVA_IMPORT_STATIC_NAMED_RE = re.compile(
+    r"^\s*import\s+static\s+(?P<fqcn>[\w.]+)\.(?P<sym>[A-Za-z_][A-Za-z0-9_]*)\s*;",
+    re.MULTILINE,
+)
+#: ``import static a.b.C.*;`` — binds EVERY unqualified call name to ``a.b.C``.
+_JAVA_IMPORT_STATIC_STAR_RE = re.compile(
+    r"^\s*import\s+static\s+(?P<fqcn>[\w.]+)\.\*\s*;",
+    re.MULTILINE,
+)
+
+
+def _java_imported_lookup(importer_text: str, symbol: str, full_callee: str = "") -> str | None:
+    """Java per-symbol import binding for the shared evidence engine (E1-aware).
+
+    Only a STATIC import binds a bare symbol to a class the engine can then
+    resolve to a file via :func:`_java_resolve_module`:
+
+    * ``import static a.b.C.sym;`` binds ``sym`` (exact match) to ``a.b.C``.
+    * ``import static a.b.C.*;`` binds EVERY unqualified name to ``a.b.C`` —
+      best-effort: the FIRST star import is tried (mirrors every other
+      ``imported_lookup`` here returning a single spec; several star imports
+      each naming a different class is a documented, acceptable residual).
+
+    A PLAIN ``import a.b.C;`` (non-static) binds NOTHING for a static-call
+    lookup — Java requires the ``C.sym`` receiver shape for that, which this
+    per-symbol table cannot express (it is keyed on the bare leaf regardless of
+    ``full_callee``). That case — and the common same-package case where
+    ``C.sym`` needs NO import at all — falls through to same-file search and
+    then :func:`_java_fallback_candidates` (E2). ``full_callee`` is accepted
+    (E1) but unused here for that reason.
+    """
+
+    for m in _JAVA_IMPORT_STATIC_NAMED_RE.finditer(importer_text):
+        if m.group("sym") == symbol:
+            return m.group("fqcn")
+    for m in _JAVA_IMPORT_STATIC_STAR_RE.finditer(importer_text):
+        return m.group("fqcn")  # best-effort: first star-import candidate.
+    return None
+
+
+#: Conventional Maven roots, used ONLY when the java profile itself cannot be
+#: resolved (defensive fallback — :func:`_java_test_and_source_roots` prefers
+#: the profile-driven ``layout.test_sets`` / ``layout.source_sets`` roots).
+_JAVA_DEFAULT_TEST_ROOTS: tuple[str, ...] = ("src/test/java",)
+_JAVA_DEFAULT_SOURCE_ROOTS: tuple[str, ...] = ("src/main/java",)
+
+
+def _java_test_and_source_roots() -> tuple[str, ...]:
+    """TEST source roots, then MAIN source roots, for FQCN → file resolution.
+
+    PROFILE-DRIVEN: read from the resolved java :class:`LanguageProfile`'s
+    ``layout.test_sets`` / ``layout.source_sets`` (never a hardcoded literal) —
+    for the bundled ``java.yaml`` this is ``("src/test/java", "src/main/java")``,
+    but a project-specific override to the profile would be honored too. Falls
+    back to the conventional Maven paths only if the profile cannot be resolved
+    at all (best-effort, matching this module's degrade-never-raise discipline).
+    Test roots are tried FIRST — a same-package TEST helper is far more common
+    than a helper living under ``main``.
+    """
+
+    profile = _java_language_profile()
+    layout = getattr(profile, "layout", None) if profile is not None else None
+    test_roots = tuple(
+        str(ts.root) for ts in (getattr(layout, "test_sets", None) or ()) if getattr(ts, "root", None)
+    ) or _JAVA_DEFAULT_TEST_ROOTS
+    source_roots = tuple(
+        str(ss.root) for ss in (getattr(layout, "source_sets", None) or ()) if getattr(ss, "root", None)
+    ) or _JAVA_DEFAULT_SOURCE_ROOTS
+    return test_roots + source_roots
+
+
+def _java_resolve_module(importer_rel: str, spec: str, project_root: Path) -> Path | None:
+    """Java FQCN → file: dots → slashes, tried under TEST roots then SOURCE roots.
+
+    ``spec`` is a fully-qualified class name (e.g. ``com.example.util.
+    HarnessAssertions``) bound by a STATIC import (:func:`_java_imported_lookup`).
+    Every candidate is re-jailed via :func:`resolve_project_path`, so a
+    maliciously-dotted spec (``../../etc/passwd``-shaped after substitution) can
+    never resolve outside ``project_root``. Mirrors :func:`_go_resolve_module` /
+    :func:`_py_resolve_module` / :func:`_ts_resolve_specifier`'s "``None`` on any
+    miss" contract.
+    """
+
+    rel = spec.strip().strip(".").replace(".", "/") + ".java"
+    for root in _java_test_and_source_roots():
+        candidate = resolve_project_path(project_root, f"{root.strip('/')}/{rel}")
+        if candidate is not None and candidate.is_file():
+            return candidate
+    return None
+
+
+#: A Java method DEFINITION: optional modifiers, a return-type token (identifier,
+#: optionally generic/array), the method name, a parameter list (no ``;``/``{``/
+#: ``}`` inside — never a statement spanning a call), an optional ``throws``
+#: clause, then the body-opening ``{``. Generalizes :data:`_JAVA_TEST_METHOD_RE`
+#: (which is pinned to ``void`` + ``@Test``) to ANY return type and ANY name — a
+#: helper like ``HarnessAssertions.assertSuccess`` is exactly this shape. A bare
+#: CALL (``assertSuccess(result, "14.0");``) never matches: it has no
+#: return-type-shaped token before it, and it ends in ``;`` rather than ``{``.
+_JAVA_METHOD_DEF_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])(?:(?:public|protected|private|static|final|synchronized|"
+    r"abstract|default|native|strictfp)\s+)*"
+    r"[A-Za-z_][A-Za-z0-9_$]*(?:<[^;{}]*?>)?(?:\[\])*\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^;{}]*)\)"
+    r"(?:\s*throws\s+[A-Za-z0-9_.,\s<>]+?)?\s*\{",
+    re.DOTALL,
+)
+
+
+def _java_split_param_names(params: str) -> list[str]:
+    """Parameter NAMES from a Java parameter list (``Result result, String expected``
+    → ``[result, expected]``).
+
+    Java writes ``[annotations] [final] Type name`` per parameter (never Go's
+    grouped ``a, b int`` shape), so — unlike :func:`_go_split_param_names` — each
+    comma-group's LAST whitespace-separated token is the name; this also handles
+    varargs (``String... args`` → ``args``) and arrays (``String[] names`` →
+    ``names``) since the bare name is still the final token either way. Best
+    effort: an unparsable group is simply skipped (fail-open at the param level;
+    the primitive + argument-anchor check downstream is the real gate).
+    """
+
+    names: list[str] = []
+    for raw in _go_split_args(params):
+        tokens = [t for t in raw.replace(",", " ").split() if t and t != "final" and not t.startswith("@")]
+        if not tokens:
+            continue
+        candidate = tokens[-1].lstrip("*")
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", candidate):
+            names.append(candidate)
+    return names
+
+
+def _java_find_method_def(module_text: str, name: str) -> "tuple[str, list[str]] | None":
+    """Find a Java method definition named ``name`` in ``module_text``.
+
+    Mirrors :func:`_go_find_function_def` / :func:`_py_find_function_def`:
+    COMMENT-STRIPPED first (:func:`_go_strip_comments`) so a definition-shaped
+    comment (or a commented-out assertion inside a real definition's body) is
+    never read as real, brace-matched via the string-aware :func:`_go_match_brace`
+    (run against the SAME skeleton, so offsets stay aligned), and the body
+    returned is ALSO from that comment-stripped skeleton — exactly Go's
+    contract — so the shared engine's ``primitive_re`` / argument-anchor scan
+    never credits a commented-out assertion. Returns ``(body, param_names)`` for
+    the FIRST matching definition (Java overloading can share a name; this
+    module's existing helper-resolution never attempts full overload
+    resolution), or ``None`` when nothing matches.
+    """
+
+    skeleton = _go_strip_comments(module_text)
+    for m in _JAVA_METHOD_DEF_RE.finditer(skeleton):
+        if m.group("name") != name:
+            continue
+        brace = m.end() - 1
+        close = _go_match_brace(skeleton, brace)
+        if close < 0:
+            continue  # unbalanced body ⇒ skip (degrade), never raise.
+        body = skeleton[brace + 1 : close]
+        return body, _java_split_param_names(m.group("params"))
+    return None
+
+
+#: Hard bound on E2 fallback candidates (design cap) — a same-directory glob is
+#: already narrow, but this keeps a pathological huge directory finite.
+_JAVA_MAX_FALLBACK_CANDIDATES = 16
+
+
+def _java_directory_in_scan_roots(
+    directory: Path, project_root: Path, config: dict[str, Any] | None
+) -> bool:
+    """Whether ``directory`` (already resolved, in-root) sits under a declared
+    project scan root.
+
+    Reuses :func:`_resolve_vb_scan_dirs` — the SAME ``scan.test_dirs`` /
+    ``scan.source_dirs`` (``codd.yaml``) resolution the marker scan itself
+    already uses to find test files — so the E2 fallback search is confined to
+    the project's OWN declared source/test trees FROM CONFIG, never a hardcoded
+    path, while staying permissive-by-default (an unconfigured project's
+    resolution is the whole tree) exactly like the rest of this gate's file
+    discovery. ``directory`` is trusted to already be inside ``project_root``
+    (the caller establishes that); this only narrows further.
+    """
+
+    roots = _resolve_vb_scan_dirs(project_root, config) or [str(project_root)]
+    for raw_root in roots:
+        resolved_root = resolve_project_path(project_root, raw_root)
+        if resolved_root is None:
+            continue
+        if resolved_root.is_file():
+            resolved_root = resolved_root.parent
         try:
-            helper_calls = _extract_helper_calls(_go_strip_comments(block.body_text))
-        except Exception:  # noqa: BLE001 — extraction is best-effort; fail-closed.
-            helper_calls = []
-        if helper_calls:
-            return AssertionEvidence(
-                ok=False,
-                reason="unresolved_helper",
-                detail="java helper resolution not implemented",
-            )
-        return AssertionEvidence(ok=False, reason="no_assertion")
+            directory.relative_to(resolved_root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _java_fallback_candidates(
+    importer_text: str, importer_rel: str, project_root: Path, full_callee: str
+) -> list[Path]:
+    """E2 fallback-candidate plug for Java (see :func:`_resolve_one_helper`).
+
+    Consulted by the shared engine ONLY as the LAST resort, after same-file +
+    import-bound + barrel resolution all miss. Covers the conventional Java
+    shape neither a same-file search nor a STATIC import can: a same-PACKAGE
+    helper class (``HarnessAssertions.assertSuccess(...)`` where
+    ``HarnessAssertions.java`` sits in the SAME DIRECTORY as the importing
+    test) — Maven's layout makes "same directory" and "same package" identical,
+    so a same-package helper needs NO import statement at all.
+
+    For a QUALIFIED call (``full_callee`` carries a receiver, e.g.
+    ``HarnessAssertions.assertSuccess``) the targeted candidate is the sibling
+    file whose STEM equals the receiver's simple name. For an UNQUALIFIED call
+    (no receiver) every ``.java`` sibling is a candidate (still bounded below),
+    since there is no class-name clue to narrow the guess.
+
+    This plug returns PLACES TO LOOK ONLY — it is never itself evidence; the
+    existing primitive + argument-anchor + hop-bound logic in
+    :func:`_resolve_one_helper` still judges whatever file content is found
+    there, and every returned path is independently re-jailed by the CALLER via
+    :func:`resolve_project_path` before its content is ever read. Hard-bounded
+    to :data:`_JAVA_MAX_FALLBACK_CANDIDATES` and confined to the project's
+    declared scan roots (:func:`_java_directory_in_scan_roots`).
+    """
+
+    importer_path = resolve_project_path(project_root, importer_rel)
+    if importer_path is None or not importer_path.is_file():
+        return []
+    directory = importer_path.parent
+    root = Path(project_root).resolve()
+    try:
+        directory.relative_to(root)
+    except ValueError:
+        return []
+
+    if not _java_directory_in_scan_roots(directory, root, _load_optional_config(project_root)):
+        return []
+
+    parts = full_callee.split(".") if full_callee else []
+    receiver = parts[-2] if len(parts) >= 2 else ""
+
+    try:
+        siblings = sorted(p for p in directory.iterdir() if p.is_file() and p.suffix == ".java")
+    except OSError:
+        return []
+
+    candidates: list[Path] = []
+    for sib in siblings:
+        try:
+            if sib.resolve() == importer_path:
+                continue  # never propose the importer's own file as a candidate.
+        except OSError:
+            continue
+        if receiver and sib.stem != receiver:
+            continue
+        candidates.append(sib)
+        if len(candidates) >= _JAVA_MAX_FALLBACK_CANDIDATES:
+            break
+    return candidates
+
+
+#: A Java ``import`` (or ``import static``) statement's dotted path, with an
+#: optional trailing ``.*`` (star import) stripped from the captured group.
+_JAVA_IMPORT_RE = re.compile(
+    r"^\s*import\s+(?:static\s+)?(?P<path>[\w.]+?)(?:\.\*)?\s*;",
+    re.MULTILINE,
+)
+
+
+def _java_imports_path(importer_text: str, import_path: str) -> bool:
+    """Whether ``importer_text`` imports ``import_path`` itself or a member/
+    subpackage under it.
+
+    Lexical (no full Java import resolution needed) — this is condition (a) of
+    the library-terminal check below: the test file must ACTUALLY import the
+    declared library before any of its calls can credit as that library's
+    terminal (this is what keeps adversarial case 8 — an unrelated
+    ``check(File f)`` method with NO ArchUnit import — correctly rejected).
+    Comment-stripped first so a commented-out import does not count.
+    """
+
+    import_path = (import_path or "").strip()
+    if not import_path:
+        return False
+    for m in _JAVA_IMPORT_RE.finditer(_go_strip_comments(importer_text)):
+        candidate = m.group("path")
+        if candidate == import_path or candidate.startswith(import_path + "."):
+            return True
+    return False
+
+
+def _java_library_terminal_evidence(
+    block: TestBlock, *, importer_text: str, assertion_hints: Mapping[str, Any]
+) -> AssertionEvidence | None:
+    """Credit a call to a DECLARED library fluent terminal (e.g. ArchUnit's ``.check()``).
+
+    Data-driven off ``tests.assertion_hints.library_assertion_terminals`` in the
+    active language YAML (see the module docstring's "fluent-terminal problem")
+    — NO library name is ever hardcoded here; every ``import_path``/``methods``
+    pair is DATA read from the profile. A call credits iff ALL THREE hold:
+
+    (a) ``importer_text`` actually imports the declared ``import_path``
+        (:func:`_java_imports_path`);
+    (b) the call's LEAF method name is in the declared ``methods`` list;
+    (c) the call's own argument text, OR its receiver-chain (the qualifier
+        before the leaf — empty for a bare/chain-broken call like ArchUnit's
+        typical ``noClasses().that()....check(classes)``, where the receiver is
+        unreachable through an intervening ``()``), references a non-ignored
+        name — the SAME :func:`_go_reference_idents` reference-identifier check
+        :func:`_java_direct_assertion_evidence` already uses; no new anchor
+        logic is introduced for this.
+
+    Returns ``None`` (not a verdict — "this mechanism does not apply") when no
+    terminal is declared for this profile or no call in the body matches; the
+    caller then keeps whatever verdict it already had. Never returns a NOT-ok
+    verdict itself (a mismatch here means "not a terminal", not "reject") —
+    called ONLY after the shared helper-hop engine already failed to resolve
+    the block's calls (see :func:`_resolve_java_evidence`), so only a credited
+    pass here can change the outcome.
+    """
+
+    terminals = assertion_hints.get("library_assertion_terminals") if isinstance(
+        assertion_hints, Mapping
+    ) else None
+    if not terminals:
+        return None
+    try:
+        calls = _extract_helper_calls(_go_strip_comments(block.body_text))
+    except Exception:  # noqa: BLE001 — extraction is best-effort; never raise.
+        return None
+    if not calls:
+        return None
+
+    for spec in terminals:
+        if not isinstance(spec, Mapping):
+            continue
+        import_path = str(spec.get("import_path") or "").strip()
+        methods_raw = spec.get("methods")
+        if not import_path or not methods_raw:
+            continue
+        try:
+            methods = {str(m) for m in methods_raw if str(m).strip()}
+        except TypeError:
+            continue
+        if not methods or not _java_imports_path(importer_text, import_path):
+            continue
+        for full_callee, leaf, args in calls:
+            if leaf not in methods:
+                continue
+            parts = full_callee.split(".")
+            receiver = parts[-2] if len(parts) >= 2 else ""
+            idents = _go_reference_idents(args) | _go_reference_idents(receiver)
+            if idents - _JAVA_IGNORED_NAMES:
+                return AssertionEvidence(ok=True, reason="library_terminal", confidence="declared")
+    return None
+
+
+def _java_combined_primitive_re() -> re.Pattern[str]:
+    """Helper-BODY primitive matcher: unqualified names UNION declared qualified
+    entry-class shapes.
+
+    Mirrors :func:`_java_body_has_primitive_assertion`'s direct-side union so a
+    HELPER that delegates via a QUALIFIED call (``Assertions.assertEquals(...)``
+    with only a plain, non-static import) is recognized the same way a direct
+    qualified call already is — the shared engine's ``primitive_re`` slot only
+    accepts one compiled pattern, so the two are combined into one here.
+    """
+
+    qualified = _java_qualified_primitive_re(_java_entry_classes())
+    if qualified is None:
+        return _JAVA_HELPER_PRIMITIVE_RE
+    return re.compile(f"(?:{_JAVA_HELPER_PRIMITIVE_RE.pattern})|(?:{qualified.pattern})")
+
+
+def _resolve_java_evidence(
+    block: TestBlock, *, importer_text: str, importer_rel: str, project_root: Path
+) -> AssertionEvidence:
+    """Java DELEGATED-assertion (helper) resolution — mirrors the Go/PY/TS engine.
+
+    A Java test that delegates its check to a same-package / statically-imported
+    helper (``HarnessAssertions.assertSuccess(result, "14.0")`` whose body runs a
+    real ``assertEquals(...)``) is resolved one hop through the shared
+    :func:`_resolve_evidence` engine, plugged with THIN Java adapters:
+    :func:`_java_imported_lookup` (static-import binding),
+    :func:`_java_resolve_module` (Maven source/test-root FQCN resolution), and
+    :func:`_java_fallback_candidates` (E2 — the same-directory sibling guess a
+    plain/absent import cannot express). Java has no barrel-reexport convention,
+    so ``reexport_edges`` is ``None`` (same as Go).
+
+    When the helper-hop engine still cannot resolve the call (e.g. a fluent
+    library terminal like ArchUnit's ``rule.check(classes)`` — not a helper
+    DEFINITION at all), :func:`_java_library_terminal_evidence` is consulted as
+    a data-driven fallback BEFORE the engine's failure verdict is returned to
+    the gate.
+    """
+
+    evidence = _resolve_evidence(
+        block,
+        importer_text=importer_text,
+        importer_rel=importer_rel,
+        project_root=project_root,
+        primitive_re=_java_combined_primitive_re(),
+        imported_lookup=_java_imported_lookup,
+        module_resolver=_java_resolve_module,
+        def_finder=_java_find_method_def,
+        reexport_edges=None,
+        fallback_module_candidates=_java_fallback_candidates,
+    )
+    if evidence.ok:
+        return evidence
+    terminal = _java_library_terminal_evidence(
+        block, importer_text=importer_text, assertion_hints=_java_assertion_hints()
+    )
+    return terminal if terminal is not None else evidence
 
 
 # ---------------------------------------------------------------------------
