@@ -40,8 +40,31 @@ def test_task_is_test_task_by_output_path():
     assert not task_is_test_task(_Task("s", output_paths=("src/app/x.py",)), config=CONFIG)
 
 
-def test_task_is_test_task_by_test_kinds():
-    assert task_is_test_task(_Task("t", test_kinds=("unit",)), config=CONFIG)
+def test_task_is_test_task_ignores_test_kinds_alone():
+    """Regression: ``test_kinds`` is V-model coverage-layer metadata, not a
+    deliverable-kind signal — a derived SOURCE task carries it exactly as often
+    as a derived TEST task (every derived task records which layer verifies
+    it). A task with no OTHER test signal must stay classified as source even
+    when ``test_kinds`` is non-empty.
+
+    Found live in the 2026-07-03 ExprCalc Python greenfield dogfood: the
+    derived task ``implement_tokenizer_module`` (a pure source task,
+    ``expected_outputs=["src/exprcalc/tokenizer.py"]``) carries
+    ``test_kinds=("unit",)`` like every other derived task. Treating that
+    alone as "is a test task" pulled it into the VB coverage gate's
+    test-only rerun scope alongside the real test task
+    (``write_tokenizer_unit_tests``), so it received a prompt scoped to one
+    source file PLUS test-coverage gap feedback for VBs owned by unrelated
+    modules — a conflict the model could not resolve into a valid response.
+    """
+    assert not task_is_test_task(
+        _Task("s", output_paths=("src/app/x.py",), test_kinds=("unit",)), config=CONFIG
+    )
+    # A genuine test task is still detected via its OWN output-path shape,
+    # independent of test_kinds.
+    assert task_is_test_task(
+        _Task("t", output_paths=("tests/test_x.py",), test_kinds=("unit",)), config=CONFIG
+    )
 
 
 def test_task_is_test_task_by_design_node():
@@ -103,6 +126,36 @@ def test_scope_broad_fallback_when_no_test_task():
     assert scope.is_broad()
     assert scope.allowed_paths == ()  # empty ⇒ no fence (broad)
     assert set(scope.task_ids) == {"src_a", "src_b"}
+
+
+def test_scope_excludes_source_task_that_merely_carries_test_kinds():
+    """Regression: reproduces the ``implement_tokenizer_module`` /
+    ``write_tokenizer_unit_tests`` pairing from the 2026-07-03 ExprCalc Python
+    greenfield dogfood. Both tasks share one design doc and both carry
+    ``test_kinds=("unit",)`` (V-model metadata, not a deliverable signal — see
+    ``test_task_is_test_task_ignores_test_kinds_alone``); only the one whose
+    OWN declared output is a test file may enter the VB gate's rerun scope or
+    write-fence.
+    """
+    tasks = [
+        _Task(
+            "implement_tokenizer_module",
+            design_node="docs/detailed_design/tokenizer_design.md",
+            output_paths=("src/exprcalc/tokenizer.py",),
+            expected_outputs=("src/exprcalc/tokenizer.py",),
+            test_kinds=("unit",),
+        ),
+        _Task(
+            "write_tokenizer_unit_tests",
+            design_node="docs/detailed_design/tokenizer_design.md",
+            output_paths=("tests/unit/test_tokenizer.py",),
+            expected_outputs=("tests/unit/test_tokenizer.py",),
+            test_kinds=("unit",),
+        ),
+    ]
+    scope = derive_vb_rerun_scope(["docs/test/test_strategy.md"], tasks, config=CONFIG)
+    assert scope.task_ids == ("write_tokenizer_unit_tests",)
+    assert not any(p.startswith("src") for p in scope.allowed_paths)
 
 
 def test_scope_uses_path_resolver_for_tasks_without_inline_paths():

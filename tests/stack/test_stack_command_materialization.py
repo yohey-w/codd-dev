@@ -704,12 +704,46 @@ def test_json_argv_is_not_a_false_unsubstituted_placeholder(tmp_path: Path) -> N
 def test_ambiguous_test_root_leaves_placeholder_for_red(tmp_path: Path) -> None:
     """``{test_root}`` is resolved only when EXACTLY one test root is declared; zero or
     multiple make it ambiguous → the placeholder is left literal so the executor reds
-    (never a silent guess)."""
+    (never a silent guess).
+
+    REGRESSION (found while dogfooding ``codd verify`` on a generated TypeScript
+    project): asserting the ``test_root`` PROPERTY alone is not sufficient proof of
+    the docstring's "the placeholder is left literal so the executor reds" claim.
+    ``_substitute_stack_placeholders`` used to replace ``{test_root}`` with that
+    empty string UNCONDITIONALLY — ``"run {test_root}".replace("{test_root}", "")``
+    silently ERASES the literal placeholder text (no ``{test_root}`` substring
+    survives; the argv element just becomes an empty string) rather than leaving it
+    for the unsubstituted-placeholder guard to catch, so the guard never actually
+    fired for an ambiguous test root even though this test already asserted the
+    ambiguous property value. Prove the FULL chain instead: property → substituted
+    argv → guard detection → refused spawn.
+    """
+    from codd.stack.command_plan import (
+        _substitute_stack_placeholders,
+        _unsubstituted_placeholders,
+        default_stack_command_executor,
+    )
     from codd.stack.compose import StackLayout
 
     assert StackLayout(test_roots=()).test_root == ""  # zero → ambiguous
     assert StackLayout(test_roots=("a", "b")).test_root == ""  # multiple → ambiguous
     assert StackLayout(test_roots=("tests",)).test_root == "tests"  # exactly one → ok
+
+    ambiguous_layout = StackLayout(module_root=".", repo_root=".", manifest_root=".", test_roots=())
+    argv = tuple(
+        _substitute_stack_placeholders(a, ambiguous_layout, report_path=".codd/verify/vitest.json")
+        for a in ("npx", "vitest", "run", "{test_root}", "--outputFile={report}")
+    )
+    assert "{test_root}" in argv, "an ambiguous test root must survive substitution, never be erased"
+
+    slot = StackCommandSlot(
+        slot_id="verify", owner="language:typescript", argv=argv, report_path=".codd/verify/vitest.json"
+    )
+    assert _unsubstituted_placeholders(slot), "the guard must detect the surviving {test_root} placeholder"
+
+    res = default_stack_command_executor(slot, tmp_path, timeout=5)
+    assert res.spawned is False, "an ambiguous {test_root} must refuse to spawn, never guess"
+    assert "unsubstituted" in res.detail.lower()
 
 
 def test_build_precedes_e2e_in_the_plan() -> None:

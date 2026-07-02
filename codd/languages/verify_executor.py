@@ -1,4 +1,4 @@
-"""Contract-driven verify EXECUTOR (Contract Kernel Step 4 — fixtures only).
+"""Contract-driven verify EXECUTOR (Contract Kernel Step 4 → wired at Step 6).
 
 Runs a :class:`~codd.languages.verify_plan.VerifyRunPlan`, captures + parses its
 machine-readable report, and classifies the outcome into a
@@ -7,9 +7,14 @@ machine-readable report, and classifies the outcome into a
 the process, persists/locates the report, runs the report adapter, and then maps
 the observed signals to a class.
 
-NOT WIRED IN. The live ``VerifyRunner`` still uses the legacy path; this executor
-is exercised only by fixtures (``tests/languages/test_verify_executor.py``). The
-switch is Step 6.
+WIRED IN. ``codd.repair.verify_runner.VerifyRunner`` routes any project with a
+resolvable language contract + verify command + available report adapter through
+this executor (Step 6: "run the contract executor; its verdict is FINAL, no legacy
+rescue"); only a declared-language-less project, an explicit author test-command
+override, a structural-only opt-out, or a missing report adapter on a
+``legacy_compatible`` profile still falls back to the legacy ladder. Exercised both
+by fixtures (``tests/languages/test_verify_executor.py``) and, live, by every
+project whose language profile resolves.
 
 THE CARDINAL RULE (anti-false-green). A not-green signal ALWAYS beats an
 exit-0 / clean-looking result. Every observation failure — a missing report, an
@@ -68,6 +73,42 @@ from .adapters.runner_report import RunnerExecution
 #: (a timeout is never green), never a hang that blocks the gate forever.
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 1800
 
+#: Any of these surviving in the plan's cwd/argv/env/report_path AFTER
+#: :func:`codd.languages.verify_plan.build_verify_plan` means the resolved language
+#: layout could not supply a concrete value for it (e.g. ``{test_root}`` is
+#: ambiguous when a profile declares zero or multiple test sets) — the executor
+#: must NOT spawn in a literal ``{module_root}`` dir / with a literal ``{test_root}``
+#: argument / write to a literal ``{report}`` path. Mirrors
+#: :data:`codd.stack.command_plan._KNOWN_LAYOUT_PLACEHOLDERS` (the v2.75 cwd-bug
+#: class), applied here to the core language verify plan.
+_KNOWN_VERIFY_PLACEHOLDERS = (
+    "{module_root}",
+    "{repo_root}",
+    "{manifest_root}",
+    "{test_root}",
+    "{report}",
+)
+
+
+def _unresolved_verify_placeholders(plan: VerifyRunPlan) -> list[str]:
+    """Human labels for any ``{placeholder}`` the plan-build substitution did not resolve.
+
+    Empty ⇒ every cwd/argv/env/report_path value is concrete (safe to spawn). Mirrors
+    :func:`codd.stack.command_plan._unsubstituted_placeholders`.
+    """
+    problems: list[str] = []
+    if any(tok in (plan.cwd or "") for tok in _KNOWN_VERIFY_PLACEHOLDERS):
+        problems.append(f"cwd={plan.cwd!r}")
+    for arg in plan.argv:
+        if any(tok in (arg or "") for tok in _KNOWN_VERIFY_PLACEHOLDERS):
+            problems.append(f"argv:{arg!r}")
+    for key, value in plan.env.items():
+        if any(tok in str(value) for tok in _KNOWN_VERIFY_PLACEHOLDERS):
+            problems.append(f"env[{key}]={value!r}")
+    if plan.report_path and any(tok in plan.report_path for tok in _KNOWN_VERIFY_PLACEHOLDERS):
+        problems.append(f"report_path={plan.report_path!r}")
+    return problems
+
 
 @dataclass(frozen=True)
 class VerifyExecutionResult:
@@ -125,6 +166,28 @@ def execute_verify_plan(
     cwd = (project_root / plan.cwd) if plan.cwd else project_root
     env = os.environ.copy()
     env.update(plan.env)
+
+    # (a2) Unsubstituted-placeholder guard (the v2.75 cwd-bug class, applied to the
+    # core verify plan): build_verify_plan() substitutes {module_root}/{repo_root}/
+    # {manifest_root}/{test_root}/{report} at plan-build time; a token the resolved
+    # layout could not supply is left literal (e.g. {test_root} is ambiguous when a
+    # profile declares zero or multiple test sets). Refuse to spawn with a literal
+    # "{...}" cwd/argv/env/report_path — never a silent pass, never a run against a
+    # wrong or partial path. Mirrors codd.stack.command_plan's own guard for the
+    # sibling stack-command subsystem.
+    unresolved = _unresolved_verify_placeholders(plan)
+    if unresolved:
+        return VerifyExecutionResult(
+            verify_class=VerifyClass.CONFIG_ERROR,
+            returncode=None,
+            execution=None,
+            detail=(
+                f"verify plan has unsubstituted layout placeholder(s) {unresolved}; "
+                "refusing to spawn in an unresolved path (a literal '{...}' cwd/argv/"
+                "env/report_path is the v2.75 cwd-bug class — RED, not a benign miss). "
+                "The resolved language layout did not provide a value for it."
+            ),
+        )
 
     # (b) Anti-false-green: remove any STALE report before the run so a leftover
     # green report can never be mistaken for this run's output. The report SHAPE

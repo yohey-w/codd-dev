@@ -56,6 +56,89 @@ def test_all_profiles_yield_a_verify_plan(language):
     assert plan.report_adapter  # all three declare a report adapter
 
 
+# REGRESSION (found while dogfooding ``codd verify`` on a generated TypeScript
+# project, ExprCalcTs): TypeScript's (and JavaScript's) ``commands.verify.argv``
+# declares ``{test_root}``/``{report}`` template placeholders, but
+# ``build_verify_plan`` used to copy ``cmd.argv`` VERBATIM — only ``cwd``/``env``
+# went through placeholder substitution. The spawned command was therefore
+# LITERALLY ``vitest run {test_root} --outputFile={report}``: vitest collected zero
+# tests (a nonexistent path filter) and wrote its report to a file literally named
+# ``{report}`` in the cwd, never to the declared ``report_path`` — a false
+# REPORT_MISSING on a project whose tests all genuinely passed. Prove every
+# profile's plan is fully substituted, not just the two (go/python) that never
+# happened to declare these placeholders in the first place.
+@pytest.mark.parametrize("language", [p.identity.id for p in default_registry.all_profiles()])
+def test_verify_plan_argv_has_no_unsubstituted_placeholder(language):
+    plan = build_verify_plan(_contract(language))
+    if plan is None:
+        pytest.skip(f"{language} profile declares no verify command")
+    known_placeholders = ("{module_root}", "{repo_root}", "{manifest_root}", "{test_root}", "{report}")
+    for arg in plan.argv:
+        for token in known_placeholders:
+            assert token not in arg, f"{language} verify argv still carries {token!r}: {plan.argv!r}"
+    for token in known_placeholders:
+        assert token not in (plan.cwd or ""), f"{language} verify cwd still carries {token!r}: {plan.cwd!r}"
+
+
+def test_typescript_verify_plan_substitutes_test_root_and_report():
+    plan = build_verify_plan(_contract("typescript"))
+    assert plan is not None
+    assert plan.argv == (
+        "npx",
+        "--no-install",
+        "vitest",
+        "run",
+        "tests",
+        "--reporter=json",
+        "--outputFile=.codd/verify/vitest.json",
+    )
+    assert plan.command_str == (
+        "npx --no-install vitest run tests --reporter=json --outputFile=.codd/verify/vitest.json"
+    )
+    assert plan.report_path == ".codd/verify/vitest.json"
+    # {report} must resolve to EXACTLY report_path, or the executor's own report
+    # read and the spawned command's --outputFile would silently name two different
+    # files (a false REPORT_MISSING, or a stale report read as this run's result).
+    assert f"--outputFile={plan.report_path}" in plan.argv
+
+
+def test_javascript_verify_plan_substitutes_test_root_and_report():
+    # javascript.yaml is a genuinely separate profile from typescript.yaml (not an
+    # alias) that declares the identical {test_root}/{report} verify.argv shape —
+    # the fix must be general across BOTH, not special-cased to "typescript".
+    plan = build_verify_plan(_contract("javascript"))
+    assert plan is not None
+    assert "{test_root}" not in plan.command_str
+    assert "{report}" not in plan.command_str
+    assert f"--outputFile={plan.report_path}" in plan.argv
+
+
+def test_ambiguous_test_root_leaves_placeholder_for_red():
+    # A profile declaring zero or multiple test sets cannot resolve {test_root}
+    # unambiguously — the placeholder must survive (not be silently erased) so the
+    # executor's unsubstituted-placeholder guard reds rather than guesses.
+    from codd.languages.verify_plan import _resolve_test_root, _substitute_test_command_placeholders
+
+    class _FakeLayout:
+        def __init__(self, test_sets):
+            self.test_sets = test_sets
+
+    class _FakeTestSet:
+        def __init__(self, root):
+            self.root = root
+
+    assert _resolve_test_root(_FakeLayout(())) == ""  # zero declared → ambiguous
+    assert _resolve_test_root(_FakeLayout((_FakeTestSet("a"), _FakeTestSet("b")))) == ""  # multiple → ambiguous
+    assert _resolve_test_root(_FakeLayout((_FakeTestSet("tests"),))) == "tests"  # exactly one → ok
+
+    resolved = _substitute_test_command_placeholders(
+        "vitest run {test_root} --outputFile={report}",
+        test_root="",
+        report_path=".codd/verify/vitest.json",
+    )
+    assert "{test_root}" in resolved, "an ambiguous test root must survive substitution, never be erased"
+
+
 # ── classifier: the six semantic classes ──────────────────
 
 

@@ -19,10 +19,22 @@ write-fence ``allowed_paths``) so the existing fenced-rerun dispatch
 (``GreenfieldPipeline._rerun_tasks_with_feedback``) drives it unchanged.
 
 GENERALITY: scope derivation is path/intent-based (a task is a "test task" when
-its declared outputs land under the configured test dirs, or it declares a
-``test_kinds`` V-model intent, or its output filenames look like tests). No
+its design node is itself a test-type document, or its declared outputs land
+under the configured test dirs, or its output filenames look like tests). No
 language-specific logic. A project with no resolvable test task degrades to a
 broad rerun (every task), exactly as the oracle does — never a no-op.
+
+NOTE: ``task.test_kinds`` is deliberately NOT consulted here, even though it
+looks like an obvious signal. Per ``ImplementTaskRef.test_kinds`` (see
+``codd/greenfield/pipeline.py``), it is V-model coverage-layer metadata
+("this task's deliverable is verified at the unit/e2e layer") that a derived
+SOURCE task carries just as often as a derived TEST task — it is explicitly
+documented elsewhere in this codebase as "coverage-level metadata, not a
+deliverable contract" for exactly this reason. Treating a non-empty
+``test_kinds`` as "this task IS a test task" pulled plain source tasks (e.g. a
+derived ``implement_<module>`` task) into the VB gate's test-only rerun scope
+and write-fence, contradicting this module's own "never rewrite production
+source" guarantee.
 """
 
 from __future__ import annotations
@@ -73,17 +85,18 @@ def task_is_test_task(
     config: dict[str, Any] | None,
     resolved_output_paths: Iterable[str] | None = None,
 ) -> bool:
-    """Whether an implement task produces TEST artifacts.
+    """Whether an implement task's OWN deliverable is a TEST artifact.
 
-    True when the task declares a V-model ``test_kinds`` intent, its design node
-    is a test-type node (``test:`` id or under ``docs/test/``), or any of its
-    declared/resolved output paths land under a test dir (or look like a test
-    file). Mirrors :func:`codd.verifiable_behavior_audit.is_test_related_implement`
-    but operates on an :class:`~codd.greenfield.pipeline.ImplementTaskRef`.
+    True when the task's design node is a test-type node (``test:`` id or under
+    ``docs/test/``), or any of its declared/resolved output paths land under a
+    test dir (or look like a test file). Mirrors
+    :func:`codd.verifiable_behavior_audit.is_test_related_implement` but
+    operates on an :class:`~codd.greenfield.pipeline.ImplementTaskRef` — and,
+    like that sibling, deliberately does NOT consult ``task.test_kinds`` (see
+    the module docstring: it is V-model coverage-layer metadata populated on
+    source tasks and test tasks alike, not a deliverable-kind signal).
     """
 
-    if tuple(getattr(task, "test_kinds", ()) or ()):
-        return True
     design_node = str(getattr(task, "design_node", "") or "")
     normalized = design_node.strip().replace("\\", "/")
     if normalized.startswith("test:"):

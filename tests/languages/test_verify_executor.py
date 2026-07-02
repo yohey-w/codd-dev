@@ -197,6 +197,36 @@ def test_collected_below_min_is_zero_tests(tmp_path):
     assert res.returncode == 0
 
 
+def test_unsubstituted_test_root_placeholder_refuses_to_spawn(tmp_path):
+    # REGRESSION (dogfood ExprCalcTs): a plan whose argv still carries a literal
+    # {test_root}/{report} template placeholder (e.g. build_verify_plan was skipped,
+    # or resolved an ambiguous test root) must NOT be spawned — that is the v2.75
+    # cwd-bug class, applied to the core verify plan. The fixture command below
+    # would otherwise exit 0 and write a clean report, so a false PASS here would
+    # not be an accident of the command simply failing to run.
+    plan = _plan(argv=_py("open('report.json','w').write('{}')") + ("{test_root}",))
+    res = execute_verify_plan(plan, tmp_path, adapter_registry=_registry_with(_FakeAdapter(_CLEAN)))
+    assert res.verify_class is VerifyClass.CONFIG_ERROR
+    assert res.returncode is None
+    assert "unsubstituted" in res.detail.lower()
+    assert "{test_root}" in res.detail
+
+
+def test_unsubstituted_report_placeholder_refuses_to_spawn(tmp_path):
+    plan = _plan(argv=_py("open('report.json','w').write('{}')") + ("--outputFile={report}",))
+    res = execute_verify_plan(plan, tmp_path, adapter_registry=_registry_with(_FakeAdapter(_CLEAN)))
+    assert res.verify_class is VerifyClass.CONFIG_ERROR
+    assert res.returncode is None
+
+
+def test_resolved_argv_with_concrete_test_root_and_report_still_passes(tmp_path):
+    # Sanity / no-regression: a FULLY substituted plan (the normal case) must still
+    # reach PASS — the new guard must not false-flag a legitimate concrete argv.
+    plan = _plan(argv=_py("open('report.json','w').write('{}')"))
+    res = execute_verify_plan(plan, tmp_path, adapter_registry=_registry_with(_FakeAdapter(_CLEAN)))
+    assert res.verify_class is VerifyClass.PASS
+
+
 def test_nonexistent_argv_is_tool_missing(tmp_path):
     plan = _plan(argv=("definitely-not-a-real-binary-xyz",))
     res = execute_verify_plan(plan, tmp_path, adapter_registry=_registry_with(_FakeAdapter(_CLEAN)))

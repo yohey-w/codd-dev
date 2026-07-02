@@ -302,7 +302,13 @@ def _substitute_stack_placeholders(
     v2.76 fix) — then resolves the two stack-command extras the language helper does not:
 
     * ``{test_root}`` — the resolved test tree root (a ``verify`` slot runs
-      ``vitest run {test_root}``); from :attr:`StackLayout.test_root`.
+      ``vitest run {test_root}``); from :attr:`StackLayout.test_root`. Replaced ONLY
+      when non-empty: an EMPTY ``test_root`` means the layout found zero or multiple
+      declared test sets (ambiguous — see :attr:`StackLayout.test_root`), and
+      unconditionally replacing would silently ERASE the literal ``{test_root}``
+      token (``"run {test_root}".replace("{test_root}", "")`` leaves no trace of it
+      at all, an empty positional argv element instead) rather than leave it for the
+      unsubstituted→RED guard to catch.
     * ``{report}`` — the slot's OWN declared ``report_path`` (a ``verify`` slot writes
       ``--outputFile={report}``). It MUST resolve to exactly ``report_path`` so the
       command's ``--outputFile`` and the authenticity/obligation reader (which reads
@@ -317,8 +323,9 @@ def _substitute_stack_placeholders(
         return None
     resolved = _substitute_layout_placeholders(value, layout)
     assert resolved is not None  # value was not None
-    resolved = resolved.replace("{test_root}", layout.test_root)
-    if report_path is not None:
+    if layout.test_root:
+        resolved = resolved.replace("{test_root}", layout.test_root)
+    if report_path:
         resolved = resolved.replace("{report}", report_path)
     return resolved
 

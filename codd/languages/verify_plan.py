@@ -111,6 +111,54 @@ def _substitute_layout_placeholders(value: str | None, layout) -> str | None:
     )
 
 
+def _resolve_test_root(layout) -> str:
+    """The single test-set root for ``{test_root}`` substitution, or ``""`` if ambiguous.
+
+    Mirrors :attr:`codd.stack.compose.StackLayout.test_root`: a verify command runs
+    the whole test tree from ONE root, so a profile declaring zero or multiple test
+    sets makes ``{test_root}`` unresolvable by construction — ``""`` deliberately
+    leaves the placeholder unsubstituted so the unsubstituted-placeholder guard in
+    :mod:`codd.languages.verify_executor` reds the plan rather than silently
+    spawning against a wrong or partial test root.
+    """
+    test_sets = layout.test_sets
+    return test_sets[0].root if len(test_sets) == 1 else ""
+
+
+def _substitute_test_command_placeholders(
+    value: str, *, test_root: str, report_path: str | None
+) -> str:
+    """Resolve ``{test_root}`` / ``{report}`` in one verify-command ``argv`` element.
+
+    These two placeholders are declarative in the profile YAML (e.g. TypeScript's
+    ``vitest run {test_root} --outputFile={report}``) but were, until now, never
+    substituted for the verify command specifically — unlike the structurally
+    identical ``{test_root}``/``{report}`` substitution
+    :func:`codd.stack.command_plan._substitute_stack_placeholders` already performs
+    for the sibling stack-command subsystem. ``{report}`` MUST resolve to exactly
+    ``report_path`` so the spawned command's ``--outputFile`` and the executor's own
+    report read (:attr:`VerifyRunPlan.report_path`) name the SAME file — a mismatch
+    would silently desync writer and reader.
+
+    ``test_root``/``report_path`` are replaced ONLY when truthy — an empty
+    ``test_root`` means :func:`_resolve_test_root` found the test set AMBIGUOUS
+    (zero or multiple declared) and deliberately did not resolve it. Replacing
+    ``{test_root}`` with ``""`` unconditionally would silently ERASE the literal
+    placeholder text (``"run {test_root}".replace("{test_root}", "")`` leaves no
+    trace of ``{test_root}`` at all, an empty positional argv element instead), so
+    the unsubstituted-placeholder guard in :mod:`codd.languages.verify_executor`
+    would never see it and could not fail closed. Skipping the replace when the
+    resolved value is empty keeps the literal ``{...}`` token in ``argv`` so that
+    guard actually fires.
+    """
+    resolved = value
+    if test_root:
+        resolved = resolved.replace("{test_root}", test_root)
+    if report_path:
+        resolved = resolved.replace("{report}", report_path)
+    return resolved
+
+
 def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | None:
     """Derive the verify run plan from ``contract.profile.commands['verify']``.
 
@@ -119,7 +167,9 @@ def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | Non
     expected to PRODUCE that report — its absence after a run is REPORT_MISSING
     (a not-green outcome), enforced once adapters land (v2.72) / the switch
     happens (v2.69b). ``cwd``/``env`` layout placeholders are resolved so the
-    executor runs in a real directory.
+    executor runs in a real directory, and ``argv``'s ``{test_root}``/``{report}``
+    are resolved so the spawned command is never run with a literal, unsubstituted
+    placeholder (see :func:`_substitute_test_command_placeholders`).
     """
     cmd = contract.profile.commands.get("verify")
     if cmd is None:
@@ -141,15 +191,22 @@ def build_verify_plan(contract: ResolvedLanguageContract) -> VerifyRunPlan | Non
         for set_id in must_include
         if set_id in sets_by_id
     )
+    report_path = report.path if report else None
+    test_root = _resolve_test_root(layout)
     return VerifyRunPlan(
         language_id=contract.language_id,
-        argv=tuple(cmd.argv),
+        argv=tuple(
+            _substitute_test_command_placeholders(
+                a, test_root=test_root, report_path=report_path
+            )
+            for a in cmd.argv
+        ),
         cwd=_substitute_layout_placeholders(cmd.cwd, layout),
         env={
             str(k): _substitute_layout_placeholders(str(v), layout)
             for k, v in cmd.env.items()
         },
-        report_path=(report.path if report else None),
+        report_path=report_path,
         report_adapter=(report.adapter if report else None),
         report_required=bool(report and report.path),
         report_capture=(report.capture if report else None),
