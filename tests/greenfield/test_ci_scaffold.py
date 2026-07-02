@@ -10,8 +10,14 @@ AI-freeform (which could emit a hollow ``run: true`` that games ci_health) and
 not an auto-opt-out (which would silently declare the system needs no CI).
 
 The cardinal property under test: the generated CI runs the project's REAL test
-command (``detect_test_command`` — the SAME source verify uses), so CI
-authenticity == verify authenticity by construction (anti-false-green).
+command, so CI authenticity == verify authenticity by construction
+(anti-false-green). That command is resolved in two tiers — see
+``_default_ci_scaffold_runner``'s docstring: (1) ``detect_test_command``, the
+legacy file-heuristic ladder verify's basic runner also uses; (2)
+``_ci_scaffold_profile_test_command``, a fallback sourced from the resolved
+language profile's ``commands.verify`` for stacks tier 1 has no file heuristic
+for at all (Maven/pom.xml, and C#/C++'s equivalents — their real verify proof
+already comes from the profile-owned coverage-execution-coherence campaign).
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from codd.greenfield.pipeline import (
     STATUS_SKIPPED,
     GreenfieldPipeline,
     StageError,
+    _ci_scaffold_profile_test_command,
     _default_ci_scaffold_runner,
 )
 from codd.test_detection import detect_test_command
@@ -34,6 +41,29 @@ from codd.test_detection import detect_test_command
 
 def _go_project(root: Path) -> Path:
     (root / "go.mod").write_text("module cgo-itemapi\n\ngo 1.21\n", encoding="utf-8")
+    return root
+
+
+def _java_project(root: Path) -> Path:
+    # No detect_test_command heuristic exists for Maven — pom.xml alone leaves
+    # tier 1 empty; this fixture exercises the tier-2 profile fallback.
+    (root / "pom.xml").write_text(
+        "<project><modelVersion>4.0.0</modelVersion></project>\n", encoding="utf-8"
+    )
+    return root
+
+
+def _csharp_project(root: Path) -> Path:
+    (root / "App.csproj").write_text(
+        "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n", encoding="utf-8"
+    )
+    return root
+
+
+def _cpp_project(root: Path) -> Path:
+    (root / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.16)\nproject(x)\n", encoding="utf-8"
+    )
     return root
 
 
@@ -139,6 +169,124 @@ def test_unprofiled_project_gets_no_setup_steps_but_still_authentic(tmp_path):
     text = (tmp_path / ".github/workflows/ci.yml").read_text()
     assert "actions/setup-go" not in text  # no profile resolved → no setup
     assert "go test ./..." in text  # still authentic (real test command)
+
+
+# ── tier-2 profile fallback (Maven/pom.xml gap — the Java greenfield dogfood) ──
+#
+# detect_test_command has NO heuristic for pom.xml, *.csproj/*.sln, or
+# CMakeLists.txt (confirmed by reading its full body — only pytest/npm/Cargo/
+# go.mod/bats/Makefile are covered). Before this fallback, a Java/C#/C++
+# greenfield project reached ci_scaffold and hit an honest StageError even
+# though verify itself had already run + passed the profile's real command
+# (Java: `mvn -q verify`, via the coverage-execution-coherence campaign, NOT
+# detect_test_command). These tests exercise the fallback that closes that gap
+# by reading the SAME `commands.verify` the campaign runs.
+
+
+def test_java_maven_project_scaffolds_ci_via_profile_fallback(tmp_path):
+    # pom.xml alone is not a detect_test_command signal (rule 3-10 all miss);
+    # codd.yaml declaring language=java is what lets the tier-2 fallback fire.
+    _java_project(tmp_path)
+    _write_codd_yaml(tmp_path, "java")
+    detail = _default_ci_scaffold_runner(tmp_path)
+    assert "generated" in detail
+    assert "mvn -q verify" in detail
+
+    text = (tmp_path / ".github/workflows/ci.yml").read_text()
+    assert "actions/setup-java" in text  # profile.ci.setup_steps, unaffected by this fix
+    runs = _run_step_commands(tmp_path / ".github/workflows/ci.yml")
+    assert "mvn -q verify" in runs
+
+    result = CiHealthCheck().check(tmp_path, CiConfig())
+    assert result.passed is True
+
+
+def test_csharp_project_scaffolds_ci_via_profile_fallback(tmp_path):
+    # *.csproj alone is also not a detect_test_command signal; same fallback,
+    # zero csharp-specific code — proves the fix generalizes to a sibling
+    # language for free, as the language profile mechanism is generic.
+    _csharp_project(tmp_path)
+    _write_codd_yaml(tmp_path, "csharp")
+    _default_ci_scaffold_runner(tmp_path)
+    runs = _run_step_commands(tmp_path / ".github/workflows/ci.yml")
+    # csharp.yaml's argv contains a `;`-laden logger arg — must be shell-quoted
+    # (shlex.join), not naively space-joined, or the `;` would split the `run:`
+    # step into two shell commands in the authored workflow.
+    assert 'dotnet test --logger \'trx;LogFileName=test.trx\' --results-directory TestResults' in runs
+
+
+def test_cpp_project_scaffolds_ci_via_profile_fallback(tmp_path):
+    _cpp_project(tmp_path)
+    _write_codd_yaml(tmp_path, "cpp")
+    _default_ci_scaffold_runner(tmp_path)
+    runs = _run_step_commands(tmp_path / ".github/workflows/ci.yml")
+    assert "ctest --test-dir build --output-junit ctest-junit.xml" in runs
+
+
+def test_profile_fallback_never_overrides_a_working_heuristic(tmp_path):
+    # THE load-bearing safety property: the profile fallback is LOWEST
+    # priority, never higher. Go's profile campaign command
+    # (`go test -json ./...`) intentionally differs from detect_test_command's
+    # legacy heuristic (`go test ./...` — see
+    # tests/languages/test_verify_plan.py's documented shadow-mode divergence).
+    # A project with BOTH a working heuristic AND a resolvable profile must
+    # keep getting the heuristic's answer — switching an already-working,
+    # already-tested stack's authored CI command out from under it would be an
+    # unrequested, silent behavior change.
+    _go_project(tmp_path)
+    _write_codd_yaml(tmp_path, "go")
+    _default_ci_scaffold_runner(tmp_path)
+    runs = _run_step_commands(tmp_path / ".github/workflows/ci.yml")
+    assert "go test ./..." in runs
+    assert not any("go test -json" in r for r in runs)
+
+
+def test_profile_fallback_declines_unresolved_placeholder_argv(tmp_path):
+    # TypeScript's profile campaign argv references {test_root}/{report}
+    # placeholders this bare fallback does not resolve (that needs the full
+    # VerifyCampaignSpec machinery). No package.json/other tier-1 signal here,
+    # so this must fail honestly rather than author a workflow with a literal,
+    # broken "{test_root}" in its run step.
+    _write_codd_yaml(tmp_path, "typescript")
+    with pytest.raises(StageError):
+        _default_ci_scaffold_runner(tmp_path)
+    assert not (tmp_path / ".github/workflows/ci.yml").exists()
+
+
+def test_ci_scaffold_now_honors_explicit_verify_test_command_config(tmp_path):
+    # Adjacent bug fixed alongside the Maven gap: detect_test_command's call
+    # inside _default_ci_scaffold_runner previously omitted `config=`, so the
+    # error message's own documented remedy ("Declare verify.test_command in
+    # codd.yaml") silently did not work. tmp_path has NO detectable signal at
+    # all (no pom.xml, no profile) — only the explicit config can save it.
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        "verify:\n  test_command: custom-runner\n", encoding="utf-8"
+    )
+    detail = _default_ci_scaffold_runner(tmp_path)
+    assert "generated" in detail
+    runs = _run_step_commands(tmp_path / ".github/workflows/ci.yml")
+    assert "custom-runner" in runs
+
+
+class TestCiScaffoldProfileTestCommandUnit:
+    """Direct unit coverage of the new helper's decline paths."""
+
+    def test_no_codd_yaml_declines(self, tmp_path):
+        assert _ci_scaffold_profile_test_command(tmp_path) is None
+
+    def test_unknown_language_declines(self, tmp_path):
+        _write_codd_yaml(tmp_path, "cobol-9000")
+        assert _ci_scaffold_profile_test_command(tmp_path) is None
+
+    def test_java_resolves_mvn_verify(self, tmp_path):
+        _write_codd_yaml(tmp_path, "java")
+        assert _ci_scaffold_profile_test_command(tmp_path) == "mvn -q verify"
+
+    def test_placeholder_argv_declines(self, tmp_path):
+        _write_codd_yaml(tmp_path, "typescript")
+        assert _ci_scaffold_profile_test_command(tmp_path) is None
 
 
 # ── honest refusals (no false-green, no silent opt-out) ─────

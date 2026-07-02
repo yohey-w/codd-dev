@@ -98,6 +98,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path, PurePosixPath
+import shlex
 from typing import Any
 
 import yaml
@@ -3665,6 +3666,68 @@ def _ci_opt_out_declared(project_root: Path) -> bool:
     return str(ci.get("provider", "")).strip().lower() == "none"
 
 
+def _ci_scaffold_profile_test_command(project_root: Path) -> str | None:
+    """Fallback test command sourced from the resolved language profile's verify
+    command (``commands[<verify.command>].argv``) — closes the ci_scaffold gap
+    for stacks :func:`codd.test_detection.detect_test_command` has NO file
+    heuristic for at all (Maven/``pom.xml`` — surfaced by the Java greenfield
+    dogfood; C#/``*.csproj``+``*.sln`` and C++/``CMakeLists.txt`` share the same
+    gap and the same fix for free, since this reads the profile generically).
+
+    Deliberately the LOWEST priority — consulted ONLY when ``detect_test_command``
+    already returned ``None`` — never higher. A profile's verify campaign may
+    legitimately run a DIFFERENT (often stricter) command than the legacy
+    heuristic for a stack that already has one: Go's profile campaign is
+    ``go test -json ./...`` (adds a machine-readable report) while the legacy
+    heuristic is the simpler ``go test ./...`` — an intentional, documented
+    divergence (see ``tests/languages/test_verify_plan.py``'s shadow-mode
+    comparison), not a bug to reconcile here. Firing only on ``None`` means this
+    can only turn an honest ``StageError`` into a real, profile-sourced command;
+    it can never override an already-working (and possibly deliberately
+    different) heuristic answer for Go/Python/JS/TS/Rust/bats/Make projects.
+
+    Reuses ``commands.verify`` — the SAME argv the coverage-execution-coherence
+    campaign runs (:func:`codd.project_types._synthesize_verify_campaign`) — so
+    CI authenticity stays sourced from ONE place for these stacks too, instead
+    of a second, independently-maintained guess.
+
+    Declines (returns ``None``, falling through to the pre-existing
+    ``StageError``) when: no ``project.language`` is configured; the profile
+    declares no ``verify.command`` or no matching ``commands`` entry; the argv
+    is empty; the command's ``cwd`` is not repo-root (this fallback assumes
+    plain ``run:`` execution right after checkout, no ``working-directory:``);
+    or the argv references a ``{test_root}``/``{report}`` substitution
+    placeholder (e.g. JS/TS's vitest campaign) — that shape needs the full
+    :class:`codd.project_types.VerifyCampaignSpec` resolution machinery, not a
+    bare shell string.
+    """
+    from codd.config import load_project_config
+    from codd.languages import resolve_language_profile
+
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        return None
+    try:
+        profile = resolve_language_profile(config)
+    except Exception:  # noqa: BLE001 — unknown/unsupported language → no fallback, never a crash.
+        return None
+    if profile is None or profile.verify is None:
+        return None
+    command_id = profile.verify.command
+    if not command_id:
+        return None
+    command_spec = profile.commands.get(command_id)
+    if command_spec is None or not command_spec.argv:
+        return None
+    if command_spec.cwd not in (None, ".", "{module_root}"):
+        return None
+    argv = command_spec.argv
+    if any("{" in arg for arg in argv):
+        return None
+    return shlex.join(argv)
+
+
 def _default_ci_scaffold_runner(project_root: Path, *, ai_command: str | None = None) -> str:
     """Author a minimal, authentic CI workflow so a freshly built system is
     CI-ready and the final ``check`` gate's ci_health requirement is satisfied
@@ -3674,16 +3737,31 @@ def _default_ci_scaffold_runner(project_root: Path, *, ai_command: str | None = 
     DETERMINISTIC by design, not AI-freeform (which could emit a hollow
     ``run: true`` that games ci_health) and not an auto-opt-out (which would
     silently declare the system needs no CI). The workflow runs the project's
-    REAL test command — :func:`codd.test_detection.detect_test_command`, the
-    SAME source the verify stage uses — so CI authenticity == verify
-    authenticity by construction. A project that reached this stage green
-    necessarily has a detectable test command (verify ran it), so the scaffold
-    succeeds for exactly the projects verify could validate.
+    REAL test command, resolved in two tiers:
+
+    1. :func:`codd.test_detection.detect_test_command` — the SAME legacy
+       heuristic ladder the basic verify runner uses (pytest/npm/Cargo/go.mod/
+       bats/Makefile). Explicit ``verify.test_command`` / ``fix.test_command``
+       config IS honored here (the codd.yaml-documented escape hatch below) —
+       this call now passes ``config=``, which it previously did not.
+    2. :func:`_ci_scaffold_profile_test_command` — a FALLBACK consulted only
+       when (1) finds nothing, sourcing the command from the resolved language
+       profile's ``commands.verify`` (Maven/``mvn -q verify``, and
+       C#/C++'s equivalents — stacks tier 1 has no file heuristic for at all;
+       their REAL verify proof already comes entirely from the profile-owned
+       coverage-execution-coherence campaign, never from tier 1). See that
+       function's docstring for why its priority is deliberately LOWEST, not
+       highest.
+
+    A project that reached this stage green necessarily has a detectable test
+    command from one of the two tiers (verify ran it, one way or the other), so
+    the scaffold succeeds for exactly the projects verify could validate.
 
     Idempotent: an existing workflow, or an explicit ``ci.provider=none``
     opt-out, is left untouched.
     """
     del ai_command  # signature parity with sibling runners; no AI call needed.
+    from codd.config import load_project_config
     from codd.test_detection import detect_test_command
 
     existing = sorted(project_root.glob(".github/workflows/*.yml")) + sorted(
@@ -3696,7 +3774,13 @@ def _default_ci_scaffold_runner(project_root: Path, *, ai_command: str | None = 
     if _ci_opt_out_declared(project_root):
         return "skipped — ci.provider=none opt-out declared in codd.yaml"
 
-    test_command = detect_test_command(project_root)
+    try:
+        ci_config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError):
+        ci_config = None
+    test_command = detect_test_command(project_root, config=ci_config) or _ci_scaffold_profile_test_command(
+        project_root
+    )
     if not test_command:
         raise StageError(
             "ci_scaffold: cannot determine the project's test command, so an "
