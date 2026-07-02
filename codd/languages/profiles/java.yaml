@@ -121,7 +121,15 @@ commands:
       must_include_source_sets: ["main"]
 
   verify:
-    argv: ["mvn", "-q", "test"]
+    # ``mvn verify`` (not ``test``): the Maven lifecycle phase that ALSO runs the
+    # Failsafe plugin's integration-test/verify goals declared below on
+    # ``tests/e2e/java/**`` — ``mvn test`` alone never reaches those goals, so the
+    # e2e/IT layer never ran regardless of how well its report was read (this
+    # ARGV change is the live half of the Surefire/Failsafe coherence-execution
+    # fix; the top-level ``verify.reports`` below, read by the coverage-execution
+    # coherence campaign, is the other half). This is ONE invocation writing TWO
+    # report roots, not two invocations — see ``verify.reports``.
+    argv: ["mvn", "-q", "verify"]
     cwd: "{module_root}"
     report:
       capture: none
@@ -207,10 +215,28 @@ tests:
 
 verify:
   command: verify
-  report:
-    path: "target/surefire-reports"
-    format: surefire-xml
-    adapter: surefire-xml
+  # TWO report roots from ONE ``mvn verify`` invocation (see ``commands.verify``
+  # above): Surefire writes unit-test results to ``target/surefire-reports``;
+  # Failsafe writes integration-test (``*IT``) results to
+  # ``target/failsafe-reports`` — the SAME ``TEST-<class>.xml`` schema, so both
+  # declare the identical ``surefire-xml`` adapter (never a second parser to
+  # write). ``failsafe-reports`` is ``optional: true``: Maven's Failsafe plugin
+  # ALWAYS writes a ``target/failsafe-reports/failsafe-summary.xml`` even when a
+  # project declares ZERO ``*IT`` classes (confirmed empirically) — a real,
+  # non-empty file that is not a ``<testsuite>`` document, not a genuinely
+  # absent directory. ``optional`` tolerates exactly that shape (see
+  # ``run_verify_campaign``) so a legitimately unit-only Java project is not
+  # hard-failed for having no integration-test layer; whether an e2e surface
+  # that NEEDED this evidence actually exists is decided downstream by the
+  # coverage-execution coherence gate's reconciliation, never by this flag.
+  reports:
+    - path: "target/surefire-reports"
+      format: surefire-xml
+      adapter: surefire-xml
+    - path: "target/failsafe-reports"
+      format: surefire-xml
+      adapter: surefire-xml
+      optional: true
 
   execution_policy:
     every_vb_test_block_must_execute: true
@@ -232,6 +258,11 @@ scaffold:
     java_version: "21"
     junit_jupiter_version: "5.11.0"
     surefire_plugin_version: "3.2.5"
+    # Failsafe is released in lockstep with Surefire by the Apache Maven team
+    # (same versioning scheme) — reusing {surefire_plugin_version} rather than a
+    # second, independently-tracked default avoids two version knobs for one pair.
+    compiler_plugin_version: "3.13.0"
+    build_helper_plugin_version: "3.6.0"
 
   templates:
     # Single pom.xml: Java's package_root.kind=none means there is no C#-style
@@ -241,6 +272,18 @@ scaffold:
     # from the packaged jar by Maven's own dependency resolution, so a single pom
     # with junit-jupiter scoped to test is anti-false-green-safe without a second
     # project (unlike the .NET SDK, which has no built-in test/lib project split).
+    #
+    # The build-helper + compiler-plugin + failsafe wiring below (added alongside
+    # the Surefire/Failsafe coverage-execution-coherence fix) gives every
+    # generated Java project a SECOND test source root, ``tests/e2e/java`` —
+    # Go-parallel (mirrors go.yaml's ``tests/e2e/*_test.go`` e2e set) — compiled
+    # and run by Failsafe's ``integration-test``/``verify`` goals as part of the
+    # SAME ``mvn verify`` invocation ``commands.verify`` runs. Without an EXPLICIT
+    # ``maven-compiler-plugin`` version, some default-bundled compiler-plugin
+    # versions reject a modern ``<release>`` value ("Source option 5 is no longer
+    # supported") — pinning the version here is what makes the release property
+    # actually take effect (confirmed via a throwaway Maven project during this
+    # change).
     - path: "pom.xml"
       content_template: |
         <project xmlns="http://maven.apache.org/POM/4.0.0">
@@ -263,8 +306,66 @@ scaffold:
             <plugins>
               <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>{compiler_plugin_version}</version>
+                <configuration>
+                  <release>{java_version}</release>
+                </configuration>
+                <executions>
+                  <execution>
+                    <id>default-testCompile</id>
+                    <configuration>
+                      <useModulePath>false</useModulePath>
+                    </configuration>
+                  </execution>
+                  <execution>
+                    <id>e2e-testCompile</id>
+                    <phase>generate-test-sources</phase>
+                    <goals>
+                      <goal>testCompile</goal>
+                    </goals>
+                    <configuration>
+                      <useModulePath>false</useModulePath>
+                    </configuration>
+                  </execution>
+                </executions>
+              </plugin>
+              <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>{build_helper_plugin_version}</version>
+                <executions>
+                  <execution>
+                    <id>add-e2e-test-source</id>
+                    <phase>generate-test-sources</phase>
+                    <goals>
+                      <goal>add-test-source</goal>
+                    </goals>
+                    <configuration>
+                      <sources>
+                        <source>tests/e2e/java</source>
+                      </sources>
+                    </configuration>
+                  </execution>
+                </executions>
+              </plugin>
+              <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>{surefire_plugin_version}</version>
+              </plugin>
+              <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>{surefire_plugin_version}</version>
+                <executions>
+                  <execution>
+                    <goals>
+                      <goal>integration-test</goal>
+                      <goal>verify</goal>
+                    </goals>
+                  </execution>
+                </executions>
               </plugin>
             </plugins>
           </build>

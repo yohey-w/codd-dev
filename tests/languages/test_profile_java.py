@@ -121,15 +121,32 @@ def test_java_compile_command_shape(registry: LanguageRegistry) -> None:
 
 def test_java_verify_report_adapter_is_surefire(registry: LanguageRegistry) -> None:
     java = registry.resolve("java")
-    assert java.commands["verify"].argv == ("mvn", "-q", "test")
+    # "verify" (not "test"): the lifecycle phase that also runs Failsafe's
+    # integration-test/verify goals on tests/e2e/java/** in the SAME invocation.
+    assert java.commands["verify"].argv == ("mvn", "-q", "verify")
+    # commands.verify.report (embedded) is the not-yet-wired contract-executor's
+    # single-report view — stays on the surefire-only path, unchanged.
     assert java.commands["verify"].report is not None
     assert java.commands["verify"].report.adapter == "surefire-xml"
-    # the top-level verify block + tests block agree on the adapter id
-    assert java.verify is not None
-    assert java.verify.report is not None
-    assert java.verify.report.adapter == "surefire-xml"
     assert java.tests is not None
     assert java.tests.runner_report_adapter == "surefire-xml"
+
+
+def test_java_verify_declares_surefire_and_optional_failsafe_reports(
+    registry: LanguageRegistry,
+) -> None:
+    """The top-level verify block declares TWO report roots from the ONE
+    ``mvn verify`` invocation — Surefire (required) and Failsafe (optional,
+    since a unit-only project legitimately produces no *IT evidence)."""
+    java = registry.resolve("java")
+    assert java.verify is not None
+    reports = java.verify.resolved_reports()
+    assert len(reports) == 2
+    by_path = {r.path: r for r in reports}
+    assert by_path["target/surefire-reports"].adapter == "surefire-xml"
+    assert by_path["target/surefire-reports"].optional is False
+    assert by_path["target/failsafe-reports"].adapter == "surefire-xml"
+    assert by_path["target/failsafe-reports"].optional is True
 
 
 # ── round-trip / loadability ─────────────────────────────────────────────────

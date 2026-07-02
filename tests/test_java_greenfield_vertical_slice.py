@@ -170,24 +170,28 @@ def test_java_coverage_gate_applies_not_noop() -> None:
     runner-report adapter resolves to the surefire-xml parser.
 
     NOTE (scope): this pins gate APPLICABILITY only. ``coherence_gate_applies`` checks
-    that a campaign is DECLARED and its report format HAS a registered adapter — it
-    does not run the campaign. A real end-to-end ``run_verify_campaign`` execution for
-    java surfaced a wrinkle while writing this file: the harness's post-execution
-    check requires ``report_path.is_file()``, but Maven Surefire's real convention
-    writes ``target/surefire-reports`` as a DIRECTORY (one ``TEST-<class>.xml`` per
-    test class) — verified with a script emitting that directory shape, which raised
-    ``CampaignError: verify campaign produced no report``. That reconciliation is a
-    harness-code fix, out of scope for this test-only file; this test intentionally
-    stops at gate-applicability, which is unaffected by that wrinkle."""
+    that a campaign is DECLARED and EVERY report format HAS a registered adapter — it
+    does not run the campaign. Java is now a ONE-step/TWO-report campaign (Surefire +
+    Failsafe from a single ``mvn verify`` invocation, both ``surefire-xml`` — the
+    multi-report verify campaigns generalization, 2026-07-02), so it resolves via
+    ``steps``/``resolved_steps()`` rather than the legacy flat ``report_format`` /
+    ``command_argv`` / ``report_relpath`` fields (those stay ``None`` for a
+    steps-based campaign — see ``VerifyCampaignSpec``); ``runner_report_adapter()``
+    still resolves to ONE adapter because both reports share the same format."""
     profile = resolve_layout_profile(language="java", project_name="todo-cli")
     assert profile is not None
     assert coherence_gate_applies(profile) is True
     assert isinstance(profile.runner_report_adapter(), SurefireXmlReportAdapter)
     campaign = profile.verify_campaign
     assert campaign is not None
-    assert campaign.report_format == "surefire-xml"
-    assert campaign.command_argv == ("mvn", "-q", "test")
-    assert campaign.report_relpath == "target/surefire-reports"
+    steps = campaign.resolved_steps()
+    assert len(steps) == 1
+    assert steps[0].command_argv == ("mvn", "-q", "verify")
+    reports_by_path = {r.relpath: r for r in steps[0].reports}
+    assert reports_by_path["target/surefire-reports"].format == "surefire-xml"
+    assert reports_by_path["target/surefire-reports"].optional is False
+    assert reports_by_path["target/failsafe-reports"].format == "surefire-xml"
+    assert reports_by_path["target/failsafe-reports"].optional is True
 
 
 # ── lock = honest NO-OP (data-driven) ───────────────────────────────────────────
@@ -213,7 +217,11 @@ def test_java_scaffolds_pom_with_defaults_substituted(tmp_path: Path) -> None:
     template: java.yaml's ``package_root.kind: none`` means there is no C#-style
     nested lib/test project split — create-only / idempotent / non-clobber,
     substituting {package_name} + scaffold.defaults (group_id, java_version,
-    junit_jupiter_version, surefire_plugin_version)."""
+    junit_jupiter_version, surefire_plugin_version, compiler_plugin_version,
+    build_helper_plugin_version). Also asserts the Failsafe/build-helper/compiler
+    wiring (added alongside the Surefire/Failsafe coverage-execution-coherence fix)
+    is present, since every generated Java project's pom depends on it to make
+    ``tests/e2e/java`` a real, Failsafe-run second test source root."""
     profile = resolve_layout_profile(language="java", project_name="todo-cli")
     assert profile is not None
 
@@ -233,8 +241,18 @@ def test_java_scaffolds_pom_with_defaults_substituted(tmp_path: Path) -> None:
     for var in (
         "{package_name}", "{group_id}", "{java_version}",
         "{junit_jupiter_version}", "{surefire_plugin_version}",
+        "{compiler_plugin_version}", "{build_helper_plugin_version}",
     ):
         assert var not in body, var
+
+    # Failsafe + build-helper + explicit compiler-plugin version, all present.
+    assert "maven-compiler-plugin" in body
+    assert "<version>3.13.0</version>" in body  # compiler_plugin_version default
+    assert "build-helper-maven-plugin" in body
+    assert "<version>3.6.0</version>" in body  # build_helper_plugin_version default
+    assert "<source>tests/e2e/java</source>" in body
+    assert "maven-failsafe-plugin" in body
+    assert "<goal>integration-test</goal>" in body
 
     # idempotent: a second call creates nothing, skips the existing file.
     result2 = scaffold_layout(tmp_path, profile)
