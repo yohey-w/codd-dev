@@ -2528,6 +2528,40 @@ def _reroot_bare_basename(
     return prefix / path
 
 
+def _has_unbalanced_braces(content: str) -> bool:
+    """Cheap, language-agnostic truncation signal for a guessed-path payload.
+
+    Tracks running ``{``/``}`` nesting across ``content``: a dip below zero,
+    or a nonzero total at the end, means some ``}`` closes a ``{`` that isn't
+    there. Deliberately naive — it does not skip braces inside string or
+    comment literals, because doing so would need a per-language lexer, the
+    exact complexity :func:`_payload_syntax_error` already opts out of for
+    these same extensions (TypeScript/JavaScript/Go/C++/...). That coarseness
+    is fine here because callers scope this check to only the two "guessed
+    the path myself" branches in :func:`_parse_file_payloads` (the no-marker
+    fallback and the bare-basename reroot) — paths already flagged risky
+    because the AI failed to follow the explicit ``=== FILE: ... ===``
+    protocol — never the normal, explicitly-pathed payload a stray brace
+    inside a string literal could otherwise false-positive.
+
+    A genuinely complete file's brace nesting never dips negative and always
+    ends balanced; a truncated mid-file fragment reliably violates one of the
+    two. Both confirmed incidents this closes — javascript
+    ``tests/index.js`` and cpp_v2 ``index.cpp`` (2026-07-02/03 Top-6
+    greenfield dogfood) — were tail fragments of a DIFFERENT file, missing
+    their opening context, caught by exactly this check.
+    """
+    balance = 0
+    for char in content:
+        if char == "{":
+            balance += 1
+        elif char == "}":
+            balance -= 1
+            if balance < 0:
+                return True
+    return balance != 0
+
+
 def _parse_file_payloads(
     raw_output: str,
     output_paths: list[str],
@@ -2566,6 +2600,18 @@ def _parse_file_payloads(
                 "response as unparseable rather than guessing it is one file"
             )
         extension = _default_generated_extension(language, fallback_content)
+        if _has_unbalanced_braces(fallback_content):
+            # Fence-shaped but not file-shaped: a single well-formed fence can
+            # still wrap a truncated mid-file fragment (the JS tests/index.js
+            # incident — see _has_unbalanced_braces). Same retry path as the
+            # empty/unfenced cases above rather than guessing a filename for it.
+            raise ValueError(
+                "AI command returned a single fenced block with no "
+                "'=== FILE: ... ===' marker, but its brace nesting is "
+                "unbalanced — indicating a truncated or garbled fragment "
+                "rather than a complete file; refusing to guess a filename "
+                f"for it ({len(fallback_content)} chars)"
+            )
         return [(f"{output_paths[0]}/index{extension}", fallback_content.rstrip() + "\n")]
 
     payloads: list[tuple[str, str]] = []
@@ -2579,6 +2625,14 @@ def _parse_file_payloads(
         if path.is_absolute() or ".." in path.parts:
             skipped.append(f"{path_text!r}: path traversal")
             continue
+        # A bare, single-component header (e.g. "index.js") carries no
+        # directory qualification from the AI at all — whether it ends up
+        # rerooted via _reroot_bare_basename (multiple prefixes configured)
+        # or already "matches" trivially because a single "." output prefix
+        # has no parts to compare against, it is the same weak signal: the
+        # model didn't tell us where this belongs. Checked on the path AS THE
+        # AI WROTE IT, before any of the resolution branches below mutate it.
+        is_bare_basename = len(path.parts) == 1
         root_destination = _root_artifact_destination(path, output_prefixes, root_patterns)
         if root_destination is not None:
             path = root_destination
@@ -2599,6 +2653,22 @@ def _parse_file_payloads(
                 payloads.append((path.as_posix(), ""))
                 continue
             skipped.append(f"{path_text!r}: empty content")
+            continue
+        if root_destination is None and is_bare_basename and _has_unbalanced_braces(content):
+            # A recognized root artifact (package.json, Dockerfile, ...) is a
+            # deliberate, well-known name, not a guess — excluded via the
+            # root_destination check. Everything else that arrived with no
+            # directory qualification gets the same scrutiny as the no-marker
+            # fallback above (the cpp_v2 index.cpp incident: a truncated tail
+            # fragment of a different file, headered as a bare "index.cpp"
+            # under a single "." output prefix, written with zero content
+            # validation because a bare name trivially "starts with" a
+            # zero-part prefix and never even reaches _reroot_bare_basename).
+            skipped.append(
+                f"{path_text!r}: resolved to {path.as_posix()!r} but its brace "
+                "nesting is unbalanced, indicating a truncated or garbled "
+                "fragment rather than a complete file"
+            )
             continue
         payloads.append((path.as_posix(), content.rstrip() + "\n"))
 

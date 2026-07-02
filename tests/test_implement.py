@@ -250,6 +250,80 @@ def test_parse_file_payloads_unheadered_but_fenced_output_still_falls_back():
     assert payloads == [("src/auth/index.py", "value = 1\n")]
 
 
+def test_parse_file_payloads_unheadered_fenced_truncated_fragment_raises():
+    """A single COMPLETE fence wrapping an unbalanced/truncated body must raise.
+
+    Regression for the 2026-07-02 javascript Top-6 greenfield dogfood:
+    tests/index.js was a truncated tail fragment of tests/e2e/tokenize.e2e.test.js
+    (missing its opening imports/test-block, starting mid-statement with a stray
+    orphaned `});`) that still happened to be wrapped start-to-end in one real
+    fence, so the existing "is this a complete fence" guard let it through and it
+    was written to disk as a bogus tests/index.js with a full traceability header
+    — a `node --check` SyntaxError that then poisoned an unrelated, later task's
+    coherence-oracle check. A complete fence is necessary but not sufficient: its
+    body must also look like a whole file, not a mid-file fragment.
+    """
+    fenced = (
+        "```javascript\n"
+        "assert.strictEqual(json.input, '2 + 3 * 4');\n"
+        "});\n"
+        "\n"
+        "test('does something else', () => {\n"
+        "  assert.ok(true);\n"
+        "});\n"
+        "```\n"
+    )
+
+    try:
+        _parse_file_payloads(fenced, ["tests"], "javascript")
+    except ValueError as exc:
+        assert "unbalanced" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for a truncated fragment wrapped in one fence")
+
+
+def test_parse_file_payloads_bare_basename_reroot_accepts_complete_file():
+    """A bare-basename FILE header with genuinely complete content still reroots.
+
+    Proves the new brace-balance guard on `_reroot_bare_basename` output is not
+    over-broad: the documented codex use case (a bare `task_model.py`-style name
+    rerooted under the single configured output prefix) must keep working when
+    the content is a real, balanced, complete file.
+    """
+    headered = "=== FILE: index.py ===\n```python\ndef build():\n    return {'ok': True}\n```\n"
+
+    payloads = _parse_file_payloads(headered, ["src/auth"], "python")
+
+    assert payloads == [("src/auth/index.py", "def build():\n    return {'ok': True}\n")]
+
+
+def test_parse_file_payloads_bare_basename_reroot_rejects_truncated_fragment():
+    """A bare-basename FILE header with unbalanced/truncated content is skipped.
+
+    Regression for the 2026-06-30/2026-07-03 cpp_v2 Top-6 greenfield dogfood:
+    a mangled retry left a truncated tail fragment of a parser test (starting
+    mid-token, missing #includes, unbalanced braces) under a bare `index.cpp`
+    FILE header with a single configured output prefix (`.`); `_reroot_bare_basename`
+    rerooted it to a real repo-root `index.cpp` with no content validation. The
+    same fragment shape here must be skipped instead of written.
+    """
+    headered = (
+        "=== FILE: index.cpp ===\n"
+        "```cpp\n"
+        "    const auto* left = dynamic_cast<const UnaryExpr*>(&root->left());\n"
+        "    ASSERT_NE(left, nullptr);\n"
+        "}\n"
+        "```\n"
+    )
+
+    try:
+        _parse_file_payloads(headered, ["."], "cpp")
+    except ValueError as exc:
+        assert "unbalanced" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for a truncated fragment under a bare-basename header")
+
+
 def test_implement_clean_removes_existing_output_path(tmp_path, monkeypatch):
     project = _setup_project(tmp_path)
     stale_dir = project / "src" / "auth"
