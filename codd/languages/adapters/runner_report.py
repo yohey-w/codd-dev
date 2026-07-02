@@ -16,11 +16,34 @@ and MUST NOT register adapters (registration stays lazy in
 :mod:`codd.languages.builtin_adapters`). The parser/helper bodies are unchanged —
 ZERO logic changes — so :class:`RunnerExecution` & co. keep their identity when
 re-exported from :mod:`codd.coverage_execution_coherence`.
+
+IDENTITY→FILE ATTRIBUTION NORM (house rule for every adapter in this module,
+codified 2026-07-02 alongside the Surefire tree-scan rewrite): a report format
+that names a test by an IDENTITY OTHER than its file path (a Go ``(Package,
+Test)``, a C# ``className``, a Java ``classname``) MUST resolve that identity to
+a real project file by SCANNING THE ACTUAL TREE (an identity→relfile index built
+from the SAME shared discovery every other gate uses — :func:`_iter_test_files`
+where the language's suffix admits it), NEVER by templating a single assumed
+root (``f"src/test/java/{pkg}/{cls}.java"`` and the like). A layout-template
+guess silently misattributes — or drops — any file the AI legitimately placed
+under a second declared root (an e2e/integration test tree colocated with, but
+not nested under, the unit root). A report identity that does not join to a
+real discovered file is NEVER credited to any file (fail-closed: it still
+counts toward the report's total-cases so an all-unattributed report is not
+mistaken for an empty one, but it proves no VB). See
+:func:`_go_static_test_func_index` and :func:`_surefire_class_file_index` for
+the two data-driven (content-parsed) implementations of this norm; each
+language's join key differs (Go: directory + top-level func name; Java: the
+file's OWN ``package`` declaration + its stem) because the identity shapes
+differ — the DISCIPLINE is shared, not a common helper function (a forced
+one-signature-fits-three-languages abstraction would cost more than it saves;
+see the Generality Gate in ``codd-improve``'s skill doc).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -1006,27 +1029,62 @@ class DotnetTrxReportAdapter:
 
 # ── Maven Surefire XML report adapter (parallels GoTestJsonReportAdapter) ─────
 
+#: Java's ``package a.b.c;`` declaration — at most one per file, and it MUST precede
+#: any type declaration, so the first match is authoritative. Anchored on a line start
+#: (``re.MULTILINE``) so it never fires inside a string literal/comment that merely
+#: contains the word "package" mid-line.
+_JAVA_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_$][\w$.]*)\s*;", re.MULTILINE)
 
-def _surefire_classname_to_relfile(classname: str) -> str | None:
-    """Map a Surefire ``classname`` to its conventional ``src/test/java`` relfile.
 
-    Surefire reports a fully-qualified test CLASS (``com.example.FooTest``) — NOT a
-    file path — while the coherence gate reconciles at FILE granularity. Maven's
-    standard layout puts a test class ``com.example.FooTest`` at
-    ``src/test/java/com/example/FooTest.java`` (the package path mirrors the dotted
-    name). We convert ``a.b.C`` → ``src/test/java/a/b/C.java``. A NESTED/inner class
-    (``com.example.FooTest$Inner``) folds to its top-level enclosing class file
-    (everything before the first ``$``), the file that physically declares it. An
-    empty / placeholder classname yields ``None`` (no attributable file).
+def _java_file_package(text: str) -> str:
+    """The declared ``package a.b.c;`` of a Java source file, or ``""`` (default package).
+
+    A property of the file's OWN text — never inferred from its path — so it is exact
+    rather than a layout guess: Java requires the package statement to match the
+    classpath-relative directory the file lives under, but WHICH declared root a file
+    is relative to (``src/test/java`` vs. a second e2e root) is a build-configuration
+    fact this function does not need to know. A file with no ``package`` line is in
+    Java's default (unnamed) package.
     """
-    name = (classname or "").strip()
-    if not name:
-        return None
-    top = name.split("$", 1)[0]  # inner class → enclosing top-level class file
-    rel = top.replace(".", "/")
-    if not rel:
-        return None
-    return f"src/test/java/{rel}.java"
+    match = _JAVA_PACKAGE_RE.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def _surefire_class_file_index(project_root: Path) -> dict[str, str]:
+    """Index ``FQCN → relfile`` over every ``.java`` file in the tree (tree-scanned).
+
+    Replaces a single-root path TEMPLATE (``src/test/java/{pkg}/{cls}.java``) with the
+    IDENTITY→FILE ATTRIBUTION NORM this module's docstring states: reuse the SHARED
+    test-file discovery (:func:`_iter_test_files`, the same glob the inventory / VB
+    audit / Go index consume — ``.java`` is in its suffix table), then for each file
+    read its OWN ``package`` declaration (:func:`_java_file_package`) and pair it with
+    the file's basename (stem) to form the fully-qualified class name key:
+    ``a.b.c.Stem`` (or bare ``Stem`` for the default package). A Failsafe-executed
+    ``tests/e2e/java/**`` class attributes correctly even though it is nowhere near
+    ``src/test/java`` — the index has no notion of "the" test root at all; it only
+    knows what a real, discovered file's own declaration says. Determinism on a
+    (build-breaking, hence practically impossible) duplicate FQCN: the first file in
+    sorted-path order wins — the SAME tie-break :func:`_trx_cs_file_index` uses.
+    Unreadable files contribute nothing (fail-closed: their classes then read as
+    unattributable, never a false attribution).
+    """
+    index: dict[str, str] = {}
+    for path in sorted(_iter_test_files(project_root, test_dirs=None)):
+        rel = _norm_test_path(_rel_path(path, project_root))
+        if not rel.endswith(".java"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        stem = rel.rsplit("/", 1)[-1][: -len(".java")]
+        if not stem:
+            continue
+        package = _java_file_package(text)
+        fqcn = f"{package}.{stem}" if package else stem
+        if fqcn not in index:
+            index[fqcn] = rel
+    return index
 
 
 def _iter_surefire_report_files(report_path: Path) -> list[Path]:
@@ -1080,14 +1138,17 @@ class SurefireXmlReportAdapter:
     else PASSED.
 
     THE FILE BRIDGE (anti-false-green core). Surefire reports a ``(classname, name)``
-    — NOT a file path — while the gate reconciles at FILE granularity. Maven's
-    standard layout maps a class ``com.example.FooTest`` → the FILE
-    ``src/test/java/com/example/FooTest.java`` (:func:`_surefire_classname_to_relfile`);
-    we credit a pass ONLY when that file EXISTS on disk under ``project_root``. If the
-    conventional file is absent (a non-standard layout we cannot attribute), the case
-    is NOT credited as a pass for any file (fail-closed: a pass you cannot attribute
-    is never a green VB) — it still counts toward ``total_cases`` so the report is not
-    deemed empty.
+    — NOT a file path — while the gate reconciles at FILE granularity. We resolve the
+    top-level classname (``$``-stripped) to a relfile via a TREE-SCANNED index
+    (:func:`_surefire_class_file_index` — the IDENTITY→FILE ATTRIBUTION NORM this
+    module's docstring states), built from every real ``.java`` file's OWN ``package``
+    declaration — never a single assumed root like ``src/test/java``. This is what
+    lets a Failsafe-executed ``tests/e2e/java/**`` class attribute correctly (it is
+    discovered and indexed exactly like any other test file). If a classname does not
+    join to any discovered file (unattributable — e.g. a generated/conditional class,
+    or a genuinely non-standard layout), the case is NOT credited as a pass for any
+    file (fail-closed: a pass you cannot attribute is never a green VB) — it still
+    counts toward ``total_cases`` so the report is not deemed empty.
 
     SKIP/FAIL granularity (mirrors the go/vitest "any non-pass taints the FILE"):
     a test file is in ``executed_passed_files`` only when it had ≥1 passed case AND
@@ -1110,6 +1171,12 @@ class SurefireXmlReportAdapter:
                 f"surefire XML report has no XML files at {report_path} "
                 "(a missing/empty report is unreadable, not an empty pass)"
             )
+
+        # Tree-scanned classname→file index (built ONCE per parse; see the
+        # IDENTITY→FILE ATTRIBUTION NORM in this module's docstring). Replaces a
+        # single-root path template so a class discovered under ANY declared test
+        # root (not just src/test/java) attributes correctly.
+        class_index = _surefire_class_file_index(project_root)
 
         # Per-file rollup at TWO granularities (parallels GoTestJsonReportAdapter):
         #  * PER-FILE coarse signal: a file is passed iff ≥1 pass AND no fail/skip.
@@ -1143,11 +1210,8 @@ class SurefireXmlReportAdapter:
                     classname = (case.get("classname") or "").strip()
                     name = (case.get("name") or "").strip()
                     total_cases += 1
-                    relfile = _surefire_classname_to_relfile(classname)
-                    on_disk = (
-                        relfile is not None
-                        and (project_root / relfile).is_file()
-                    )
+                    top_level = classname.split("$", 1)[0]  # inner class → enclosing file
+                    relfile = class_index.get(top_level) if top_level else None
                     failed = (
                         case.find("failure") is not None
                         or case.find("error") is not None
@@ -1156,14 +1220,14 @@ class SurefireXmlReportAdapter:
                     if failed or skipped:
                         # fail OR skip — a skip proves nothing (go/vitest/authenticity
                         # parity), a fail is honest. Either taints the FILE (when it is
-                        # attributable on disk); an unattributable taint cannot be
-                        # credited to any file, so it simply yields no passed case.
-                        if on_disk and relfile is not None:
+                        # attributable); an unattributable taint cannot be credited to
+                        # any file, so it simply yields no passed case.
+                        if relfile is not None:
                             file_tainted.add(relfile)
                         continue
                     # PASSED.
                     passed_count += 1
-                    if on_disk and relfile is not None:
+                    if relfile is not None:
                         file_passed[relfile] = True
                         passed_case_keys.add(f"{relfile}::{classname}#{name}")
                     # else: a pass we cannot attribute to a real file is NOT credited
