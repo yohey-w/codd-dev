@@ -154,6 +154,24 @@ tests:
   test_file_globs:
     - "src/test/java/**/*.java"
 
+  # Generation/implement ground truth (see typescript.yaml's ``tests.framework``
+  # for the motivating incident and the field's contract). The scaffold
+  # template below materializes ``junit-jupiter`` as the ONLY test dependency
+  # (test-scoped in pom.xml) — JUnit 5 is not a menu option here, it is what
+  # actually gets installed and what Surefire/Failsafe actually execute.
+  framework:
+    name: "JUnit 5 (Jupiter)"
+    example: |
+      import org.junit.jupiter.api.Test;
+      import static org.junit.jupiter.api.Assertions.assertThrows;
+
+      class TokenizerTest {
+          @Test
+          void rejectsUnrecognizedCharacter() {
+              assertThrows(LexicalException.class, () -> Tokenizer.tokenize("$"));
+          }
+      }
+
   authenticity_policy:
     marker_must_be_inside_executable_test_block: true
     skipped_is_not_authentic: true

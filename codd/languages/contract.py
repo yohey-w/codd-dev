@@ -27,10 +27,11 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-from .profile import LanguageProfile
+from .profile import LanguageProfile, TestFrameworkSpec
 from .registry import (
     AdapterRegistry,
     LanguageRegistry,
+    UnknownLanguageError,
     default_adapter_registry,
     default_registry,
 )
@@ -262,6 +263,41 @@ def resolve_language_profile(
     if not language:
         return None
     return lang_registry.resolve(language)
+
+
+def resolve_test_framework_guidance(
+    project_language: str | None,
+    *,
+    registry: LanguageRegistry | None = None,
+) -> TestFrameworkSpec | None:
+    """The declared test-authoring framework (name + example) for *project_language*.
+
+    ``project_language`` is an ALREADY-RESOLVED language string (an id or
+    alias, case-insensitive) — the value prompt-construction code (generator /
+    implementer) typically already holds, having derived it from
+    ``config["project"]["language"]`` via its own local normalization. This is
+    a convenience seam for exactly that call shape: code that only has the
+    language string on hand, not the full ``config`` mapping
+    :func:`resolve_language_profile` needs.
+
+    Returns ``None`` — never raises — when *project_language* is falsy, does
+    not match any known profile, or matches a profile that hasn't declared
+    ``tests.framework`` yet. Every caller MUST treat ``None`` as "no extra
+    guidance available" and silently omit the guidance, so an
+    unrecognized/undeclared language degrades to prior (silent) behavior
+    instead of breaking generation — this helper enriches prompts, it never
+    gates them.
+    """
+    if not project_language:
+        return None
+    lang_registry = registry if registry is not None else default_registry
+    try:
+        profile = lang_registry.resolve(project_language)
+    except UnknownLanguageError:
+        return None
+    if profile.tests is None:
+        return None
+    return profile.tests.framework
 
 
 def resolve_language_contract(

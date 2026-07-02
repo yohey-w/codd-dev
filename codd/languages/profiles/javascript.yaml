@@ -205,6 +205,22 @@ tests:
     - "tests/**/*.test.js"
     - "tests/**/*.spec.js"
 
+  # Generation/implement ground truth — same rationale as typescript.yaml's
+  # ``tests.framework`` (2026-07-03 TS ExprCalc greenfield dogfood): this
+  # profile's ``commands.verify`` above always runs Vitest directly, so
+  # generated tests must target Vitest's own API, never Node's built-in
+  # ``node:test`` (which Vitest does not collect).
+  framework:
+    name: Vitest
+    example: |
+      import { describe, it, expect } from "vitest";
+
+      describe("tokenizer", () => {
+        it("rejects an unrecognized character", () => {
+          expect(() => tokenize("$")).toThrow();
+        });
+      });
+
   authenticity_policy:
     marker_must_be_inside_executable_test_block: true
     skipped_is_not_authentic: true

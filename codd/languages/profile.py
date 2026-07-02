@@ -347,12 +347,51 @@ class ImportsSpec:
 
 
 @dataclass(frozen=True)
+class TestFrameworkSpec:
+    """The concrete test-authoring API this profile's scaffold actually executes.
+
+    Generation-time and implement-time prompts read this to state the
+    project's ACTUAL test framework as ground truth, rather than leaving the
+    AI to infer a test runner from general project conventions (e.g.
+    "minimize third-party dependencies") that can point AWAY from what the
+    profile's own ``commands.verify``/``scaffold`` actually materializes and
+    executes.
+
+    Motivating incident (2026-07-03, TypeScript ExprCalc greenfield dogfood):
+    the project's own "no third-party dependencies" requirement led the AI to
+    write every test using Node's built-in ``node:test`` module — a
+    defensible-looking inference (no extra dependency needed) that was
+    nonetheless wrong, because the TS profile's scaffolded ``commands.verify``
+    always runs Vitest (a devDependency ``codd greenfield`` itself installs),
+    and Vitest does not collect ``node:test``-style test files (they fail
+    verification with "No test suite found in file ..."). Nothing in any
+    generation-time prompt stated the actual, executed test runner, so the AI
+    had no ground truth to weigh against its own dependency-minimizing
+    inference.
+
+    ``name`` is a human-readable display name (e.g. "Vitest", "pytest",
+    "JUnit 5 (Jupiter)"). ``example`` is a short, idiomatic authoring snippet
+    showing the exact test-declaration API/import shape generated tests must
+    reproduce. Both are REQUIRED when a profile declares ``tests.framework``
+    at all — a partial declaration (name with no example, or vice versa)
+    would give prompts an incomplete, worse-than-nothing fact.
+    """
+
+    name: str
+    example: str
+
+
+@dataclass(frozen=True)
 class TestsSpec:
     """Test-semantics config (design §1.7).
 
     ``assertion_hints`` and ``authenticity_policy`` are adapter-facing and
     intentionally loose. ``test_file_globs`` is load-bearing (used to find
-    candidate test files) and is kept typed.
+    candidate test files) and is kept typed. ``framework`` (added 2026-07-03)
+    is likewise load-bearing — generation/implement prompt construction reads
+    it directly (see :class:`TestFrameworkSpec`) — and is ``None`` for any
+    profile that hasn't declared it yet, which callers must treat as "no
+    extra guidance available", never as an error.
     """
 
     # Not a pytest test class — silence PytestCollectionWarning when imported.
@@ -366,6 +405,7 @@ class TestsSpec:
         default_factory=lambda: MappingProxyType({})
     )
     test_block_kinds: tuple[str, ...] = ()
+    framework: "TestFrameworkSpec | None" = None
 
 
 # ---------------------------------------------------------------------------

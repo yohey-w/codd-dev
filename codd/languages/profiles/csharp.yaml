@@ -191,6 +191,26 @@ tests:
   test_file_globs:
     - "tests/**/*.cs"
 
+  # Generation/implement ground truth (see typescript.yaml's ``tests.framework``
+  # for the motivating incident and the field's contract). ``assertion_hints``
+  # below lists Xunit/NUnit/MSTest since any of them credits assertion
+  # evidence, but the scaffold template only ever materializes ``xunit`` +
+  # ``xunit.runner.visualstudio`` as real PackageReferences — xUnit.net is what
+  # actually gets installed and what ``dotnet test`` actually runs by default.
+  framework:
+    name: "xUnit.net"
+    example: |
+      using Xunit;
+
+      public class TokenizerTests
+      {
+          [Fact]
+          public void RejectsUnrecognizedCharacter()
+          {
+              Assert.Throws<LexicalException>(() => Tokenizer.Tokenize("$"));
+          }
+      }
+
   authenticity_policy:
     marker_must_be_inside_executable_test_block: true
     skipped_is_not_authentic: true

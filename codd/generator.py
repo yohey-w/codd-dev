@@ -20,6 +20,7 @@ from codd.ai_invoke import (
 )
 from codd.config import load_project_config
 from codd.e2e_harness import resolve_e2e_harness
+from codd.languages import resolve_test_framework_guidance
 from codd.project_types import (
     ProjectCapabilities,
     load_capabilities,
@@ -1224,6 +1225,22 @@ def _build_generation_prompt(
             f"exclusively. Do not introduce file extensions, manifests, or tooling from any "
             f"other language, even as an example or fallback."
         )
+        test_framework = resolve_test_framework_guidance(project_language)
+        if test_framework is not None:
+            lines.append(
+                f"This project's test runner is {test_framework.name} — fixed by the project's "
+                f"scaffold and verify command, and release-blocking ground truth for this document: "
+                f"it is not a style preference and this document may not reinterpret or override it. "
+                f"Any test-authoring guidance or example this document gives MUST target "
+                f"{test_framework.name}'s own test-declaration API. Idiomatic example:\n"
+                f"{test_framework.example.rstrip()}\n"
+                f"If another convention discussed in this project concerns minimizing third-party "
+                f"dependencies, that convention governs the RUNTIME dependencies of shipped code — "
+                f"never the test runner. Do not cite it to justify a different test framework or a "
+                f"language runtime's own built-in test module (e.g. Node's built-in `node:test`) "
+                f"instead of {test_framework.name}: {test_framework.name} is what actually executes "
+                f"when this project is verified, regardless of dependency-count philosophy."
+            )
     lines += [
         "Use the dependency documents below as the primary context, synthesize them, and write a complete Markdown document body.",
         (

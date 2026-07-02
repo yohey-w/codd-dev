@@ -118,6 +118,27 @@ tests:
     - "tests/**/*.test.ts"
     - "tests/**/*.spec.ts"
 
+  # Generation/implement ground truth (2026-07-03 — TS ExprCalc greenfield
+  # dogfood): ``commands.verify`` above always runs Vitest directly, but
+  # nothing told generation prompts that fact, so a project-level "no
+  # third-party dependencies" convention led the AI to write tests against
+  # Node's built-in ``node:test`` module instead — a file Vitest cannot
+  # collect ("No test suite found in file ..."). This block is read by
+  # generator._build_generation_prompt and implementer._build_implementation_prompt
+  # (via codd.languages.resolve_test_framework_guidance) so the actual,
+  # executed test framework is stated explicitly rather than left for the AI
+  # to infer.
+  framework:
+    name: Vitest
+    example: |
+      import { describe, it, expect } from "vitest";
+
+      describe("tokenizer", () => {
+        it("rejects an unrecognized character", () => {
+          expect(() => tokenize("$")).toThrow();
+        });
+      });
+
   authenticity_policy:
     marker_must_be_inside_executable_test_block: true
     skipped_is_not_authentic: true

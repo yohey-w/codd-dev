@@ -191,6 +191,20 @@ tests:
     - "tests/**/*.cc"
     - "tests/**/*.cxx"
 
+  # Generation/implement ground truth (see typescript.yaml's ``tests.framework``
+  # for the motivating incident and the field's contract). ``assertion_hints``
+  # below lists GoogleTest/Catch2 since either credits assertion evidence, but
+  # the scaffold's CMakeLists.txt only ever FetchContent-fetches GoogleTest —
+  # it is what actually gets built and linked, not a menu option.
+  framework:
+    name: GoogleTest
+    example: |
+      #include <gtest/gtest.h>
+
+      TEST(TokenizerTest, RejectsUnrecognizedCharacter) {
+        EXPECT_THROW(tokenize("$"), LexicalError);
+      }
+
   authenticity_policy:
     marker_must_be_inside_executable_test_block: true
     skipped_is_not_authentic: true

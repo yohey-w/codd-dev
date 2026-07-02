@@ -341,3 +341,67 @@ def test_every_bundled_profile_loads() -> None:
         profile = load_language_profile(yf)
         assert profile.identity.id
         assert profile.layout.source_sets  # every profile declares >=1 source set
+
+
+# ---------------------------------------------------------------------------
+# tests.framework — test-authoring ground truth for generation prompts
+# (2026-07-03: TS ExprCalc greenfield dogfood — the AI wrote tests against
+# Node's built-in ``node:test`` because nothing declared the project's ACTUAL
+# test runner; the TS profile's own scaffolded ``commands.verify`` always
+# runs Vitest, which does not collect ``node:test``-style files. See
+# ``TestFrameworkSpec`` in codd/languages/profile.py for the full incident.)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "lang_id, expected_name",
+    [
+        ("python", "pytest"),
+        ("typescript", "Vitest"),
+        ("javascript", "Vitest"),
+        ("go", "Go testing (standard library)"),
+        ("java", "JUnit 5 (Jupiter)"),
+        ("csharp", "xUnit.net"),
+        ("cpp", "GoogleTest"),
+    ],
+)
+def test_every_bundled_profile_declares_test_framework(
+    registry: LanguageRegistry, lang_id: str, expected_name: str
+) -> None:
+    """Every one of the 7 bundled profiles declares its ACTUALLY-executed test
+    framework (grounded in each profile's own ``commands.verify``/``scaffold``,
+    never a menu of merely-possible libraries)."""
+    profile = registry.resolve(lang_id)
+    assert profile.tests is not None
+    assert profile.tests.framework is not None
+    assert profile.tests.framework.name == expected_name
+    assert profile.tests.framework.example.strip()
+
+
+def test_test_framework_missing_name_raises() -> None:
+    from codd.languages.loader import LanguageProfileError, _parse_test_framework
+
+    with pytest.raises(LanguageProfileError):
+        _parse_test_framework({"example": "some example"})
+
+
+def test_test_framework_missing_example_raises() -> None:
+    from codd.languages.loader import LanguageProfileError, _parse_test_framework
+
+    with pytest.raises(LanguageProfileError):
+        _parse_test_framework({"name": "Vitest"})
+
+
+def test_test_framework_absent_is_none() -> None:
+    from codd.languages.loader import _parse_test_framework
+
+    assert _parse_test_framework(None) is None
+
+
+def test_profile_without_declared_framework_has_none() -> None:
+    """A profile that hasn't declared ``tests.framework`` yet must expose
+    ``None`` — never a fabricated guess — so callers degrade gracefully."""
+    from codd.languages.profile import TestsSpec
+
+    bare = TestsSpec(semantics_adapter="whatever")
+    assert bare.framework is None

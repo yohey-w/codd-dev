@@ -209,6 +209,25 @@ tests:
   test_file_globs:
     - "**/*_test.go"
 
+  # Generation/implement ground truth (see typescript.yaml's ``tests.framework``
+  # for the motivating incident and the field's contract). Go's own stdlib
+  # ``testing`` package is what ``commands.verify`` (``go test``) always runs;
+  # declaring it here keeps every profile in the registry consistent even
+  # though Go is low-risk (there is no ambiguous "which test API" choice —
+  # ``testing`` ships in the toolchain itself).
+  framework:
+    name: "Go testing (standard library)"
+    example: |
+      package tokenizer
+
+      import "testing"
+
+      func TestRejectsUnrecognizedCharacter(t *testing.T) {
+          if _, err := Tokenize("$"); err == nil {
+              t.Fatal("expected an error for an unrecognized character")
+          }
+      }
+
   authenticity_policy:
     marker_must_be_inside_executable_test_block: true
     skipped_is_not_authentic: true

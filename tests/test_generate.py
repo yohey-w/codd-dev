@@ -763,6 +763,64 @@ def test_generation_prompt_states_project_language_for_non_test_docs():
     assert "implementation language is" not in prompt_unset
 
 
+def test_generation_prompt_states_test_framework_ground_truth_for_typescript():
+    """Regression test for the 2026-07-03 TS ExprCalc greenfield dogfood failure:
+    the generated docs/infra/build_setup.md confidently declared `node:test`
+    "the target language's own standard unit-test runner" (reasoning from a
+    "no third-party dependencies" project convention), even though the TS
+    profile's scaffolded ``commands.verify`` always runs Vitest directly —
+    which does NOT collect `node:test`-style files ("No test suite found in
+    file ..."). The design doc must instead state Vitest as ground truth.
+    """
+    artifact = generator_module.WaveArtifact(
+        wave=4,
+        node_id="infra:build-setup",
+        output="docs/infra/build_setup.md",
+        title="Build & Test Infrastructure Setup",
+        depends_on=[{"id": "design:system", "relation": "depends_on"}],
+        conventions=[],
+    )
+    dependency = generator_module.DependencyDocument(
+        node_id="design:system",
+        path=Path("docs/design/system_design.md"),
+        content="## Overview\nA dependency-free expression evaluator.\n",
+    )
+
+    prompt_ts = generator_module._build_generation_prompt(
+        artifact, [dependency], [], project_language="typescript"
+    )
+    prompt_unset = generator_module._build_generation_prompt(artifact, [dependency], [])
+
+    assert "test runner is Vitest" in prompt_ts
+    assert 'import { describe, it, expect } from "vitest"' in prompt_ts
+    assert "node:test" in prompt_ts  # named explicitly as what NOT to use
+    assert "not a style preference" in prompt_ts
+    assert "test runner is" not in prompt_unset
+
+
+def test_generation_prompt_states_test_framework_ground_truth_for_python():
+    artifact = generator_module.WaveArtifact(
+        wave=1,
+        node_id="test:test-strategy",
+        output="docs/test/test_strategy.md",
+        title="Test Strategy",
+        depends_on=[],
+        conventions=[],
+    )
+    dependency = generator_module.DependencyDocument(
+        node_id="req:requirements",
+        path=Path("docs/requirements/requirements.md"),
+        content="## Overview\nRequirements.\n",
+    )
+
+    prompt = generator_module._build_generation_prompt(
+        artifact, [dependency], [], project_language="python"
+    )
+
+    assert "test runner is pytest" in prompt
+    assert "import pytest" in prompt
+
+
 def test_render_document_strips_markdown_fences_from_test_code():
     """If AI wraps code in ```typescript fences, they should be stripped."""
     artifact = generator_module.WaveArtifact(

@@ -22,6 +22,7 @@ from codd.languages import (
     default_registry,
     resolve_language_contract,
     resolve_language_profile,
+    resolve_test_framework_guidance,
 )
 
 # Adapters the bundled go.yaml declares (kind implied by declaration site).
@@ -105,6 +106,40 @@ def test_partial_registration_still_incomplete():
     contract = build_language_contract(profile, adapter_registry=reg)
     assert contract.is_complete is False
     assert {r.ref for r in contract.missing_adapters} == set(GO_ADAPTER_REFS[2:])
+
+
+# ── resolve_test_framework_guidance: the string-only convenience seam prompt
+# construction (generator/implementer) uses — see TestFrameworkSpec's
+# docstring (codd/languages/profile.py) for the motivating 2026-07-03 TS
+# ExprCalc greenfield dogfood incident. ──
+
+
+def test_resolve_test_framework_guidance_known_language():
+    fw = resolve_test_framework_guidance("typescript")
+    assert fw is not None
+    assert fw.name == "Vitest"
+    assert "vitest" in fw.example
+
+
+@pytest.mark.parametrize("alias", ["ts", "node", "TypeScript", "  typescript  "])
+def test_resolve_test_framework_guidance_resolves_aliases_and_is_forgiving(alias):
+    fw = resolve_test_framework_guidance(alias)
+    assert fw is not None
+    assert fw.name == "Vitest"
+
+
+def test_resolve_test_framework_guidance_unknown_language_returns_none_not_raise():
+    # Unlike resolve_language_profile, this seam is a prompt ENRICHMENT helper:
+    # an unrecognized language must degrade to "no extra guidance", never raise.
+    assert resolve_test_framework_guidance("klingon") is None
+
+
+def test_resolve_test_framework_guidance_none_language_returns_none():
+    assert resolve_test_framework_guidance(None) is None
+
+
+def test_resolve_test_framework_guidance_empty_string_returns_none():
+    assert resolve_test_framework_guidance("") is None
 
 
 # ── content hash + trace ──

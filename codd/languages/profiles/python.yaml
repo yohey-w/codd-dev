@@ -107,6 +107,22 @@ tests:
   test_file_globs:
     - "tests/**/*.py"
 
+  # Generation/implement ground truth (see typescript.yaml's ``tests.framework``
+  # for the motivating incident). Python is comparatively low-risk here since
+  # pytest also collects plain ``assert``-based functions with no import at
+  # all, but declaring the actual framework explicitly keeps this profile
+  # consistent with every other profile and gives defense-in-depth against an
+  # AI defaulting to a different stdlib idiom (e.g. unittest.TestCase) that a
+  # design doc's own conventions did not intend.
+  framework:
+    name: pytest
+    example: |
+      import pytest
+
+      def test_rejects_unrecognized_character():
+          with pytest.raises(LexicalError):
+              tokenize("$")
+
   authenticity_policy:
     marker_must_be_inside_executable_test_block: true
     skipped_is_not_authentic: true

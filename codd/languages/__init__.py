@@ -32,6 +32,7 @@ from .profile import (
     ScaffoldSpec,
     ScopeSpec,
     SourceSet,
+    TestFrameworkSpec,
     TestSet,
     TestsSpec,
     ToolchainSpec,
@@ -53,6 +54,7 @@ from .contract import (
     build_language_contract,
     resolve_language_contract,
     resolve_language_profile,
+    resolve_test_framework_guidance,
 )
 from .verify_plan import (
     ShadowComparison,
@@ -88,6 +90,7 @@ __all__ = [
     "ScaffoldSpec",
     "ScopeSpec",
     "SourceSet",
+    "TestFrameworkSpec",
     "TestSet",
     "TestsSpec",
     "ToolchainSpec",
@@ -109,6 +112,7 @@ __all__ = [
     "build_language_contract",
     "resolve_language_contract",
     "resolve_language_profile",
+    "resolve_test_framework_guidance",
     # verify run plan + semantic classifier (v2.69a, shadow)
     "ShadowComparison",
     "VerifyClass",

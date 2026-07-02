@@ -331,6 +331,76 @@ def test_error_summaries_excluded_from_prompt():
 
 
 # ═══════════════════════════════════════════════════════════
+# Regression: 2026-07-03 ExprCalc TypeScript greenfield dogfood. The
+# ``infra:build-setup`` task (output_paths ``src`` + ``tests``, matching the
+# real task shape exactly) generated tests/e2e/*.ts using Node's built-in
+# ``node:test`` module, reasoning from a "no third-party dependencies"
+# project convention. But the TS profile's scaffolded ``commands.verify``
+# always runs Vitest directly (``npx vitest run``), and Vitest does not
+# collect ``node:test``-style files — they fail verification with
+# "No test suite found in file ...". Nothing in the implement prompt stated
+# the project's ACTUAL test runner, so the AI had no ground truth to weigh
+# against its own dependency-minimizing inference. See
+# codd/languages/profile.py's ``TestFrameworkSpec`` for the full incident.
+# ═══════════════════════════════════════════════════════════
+
+
+def test_implementation_prompt_states_test_framework_for_typescript():
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "typescript"}},
+        design_context=DesignContext(
+            node_id="infra:build-setup",
+            path=Path("docs/infra/build_setup.md"),
+            content="# Build & Tooling Setup\n",
+        ),
+        spec=ImplementSpec("infra:build-setup", ["src", "tests"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert "Test framework (release-blocking" in prompt
+    assert "Vitest" in prompt
+    assert 'import { describe, it, expect } from "vitest"' in prompt
+    assert "node:test" in prompt  # named explicitly as what NOT to use
+
+
+def test_implementation_prompt_states_test_framework_for_python():
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="test:test-strategy",
+            path=Path("docs/test/test_strategy.md"),
+            content="# Test Strategy\n",
+        ),
+        spec=ImplementSpec("test:test-strategy", ["tests"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert "pytest" in prompt
+    assert "import pytest" in prompt
+
+
+def test_implementation_prompt_omits_test_framework_when_spec_is_not_test_related():
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "typescript"}},
+        design_context=DesignContext(
+            node_id="design:system",
+            path=Path("docs/design/system_design.md"),
+            content="# System Design\n",
+        ),
+        spec=ImplementSpec("design:system", ["src"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert "Test framework (release-blocking" not in prompt
+
+
+# ═══════════════════════════════════════════════════════════
 # Regression: 2026-07-02 ExprCalc Python greenfield dogfood, task
 # ``add_doctest_worked_examples``. That task's declared expected_outputs are
 # THREE ALREADY-EXISTING source files (its real job: add doctest examples to

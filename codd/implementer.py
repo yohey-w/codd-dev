@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 import codd.generator as generator_module
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
+from codd.languages import resolve_test_framework_guidance
 from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 import unicodedata
@@ -2124,6 +2125,22 @@ def _build_implementation_prompt(
     )
 
     if _spec_targets_tests(spec, config):
+        test_framework = resolve_test_framework_guidance(language)
+        if test_framework is not None:
+            lines.extend(
+                [
+                    f"Test framework (release-blocking — this project's verify command executes {test_framework.name} "
+                    "directly; a test file it cannot collect counts as a failed verification, never a passing one):",
+                    f"- Write every test using {test_framework.name}'s own test-declaration API. Idiomatic example:",
+                    test_framework.example.rstrip(),
+                    f"- Do not use a different test framework or a different language runtime's own built-in test "
+                    "module (e.g. Node's built-in `node:test`) even if a design document or another convention "
+                    "discusses minimizing third-party dependencies — that convention governs the shipped code's "
+                    f"runtime dependencies, never the test runner itself; {test_framework.name} is what this "
+                    "project's verify step actually runs, and that choice is fixed by the project's scaffold.",
+                    "",
+                ]
+            )
         lines.extend(
             [
                 "Verifiable-behavior traceability markers (release-blocking — the implement stage gate fails the build on any gap):",

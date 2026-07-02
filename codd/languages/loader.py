@@ -36,6 +36,7 @@ from .profile import (
     ScaffoldSpec,
     ScopeSpec,
     SourceSet,
+    TestFrameworkSpec,
     TestSet,
     TestsSpec,
     ToolchainSpec,
@@ -287,6 +288,24 @@ def _parse_imports(doc: Mapping[str, Any]) -> ImportsSpec | None:
     )
 
 
+def _parse_test_framework(raw: Any, *, where: str = "tests.framework") -> TestFrameworkSpec | None:
+    """Parse the optional ``tests.framework`` block (see :class:`TestFrameworkSpec`).
+
+    ``None`` (the key absent) is valid — a profile that hasn't declared its
+    test-authoring framework yet simply gives prompt construction no extra
+    guidance. Declaring the block at all REQUIRES both ``name`` and
+    ``example`` — a half-declared block (e.g. a name with no example) would
+    hand prompt construction a fact it cannot render usefully, so it fails
+    loudly at load time rather than silently degrading.
+    """
+    if raw is None:
+        return None
+    m = _as_mapping(raw, where=where)
+    name = _require(m, "name", where=where)
+    example = _require(m, "example", where=where)
+    return TestFrameworkSpec(name=str(name), example=str(example))
+
+
 def _parse_tests(doc: Mapping[str, Any]) -> TestsSpec | None:
     raw = doc.get("tests")
     if raw is None:
@@ -307,6 +326,7 @@ def _parse_tests(doc: Mapping[str, Any]) -> TestsSpec | None:
             m.get("authenticity_policy"), where="tests.authenticity_policy"
         ),
         test_block_kinds=_as_str_tuple(m.get("test_block_kinds")),
+        framework=_parse_test_framework(m.get("framework")),
     )
 
 
