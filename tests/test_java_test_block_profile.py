@@ -987,3 +987,142 @@ def test_bonus_accepted_assertion_confidence_defaults_to_certain_only():
     assert vma._accepted_assertion_confidence(type("Stub", (), {"language": ""})()) == frozenset(
         {"certain"}
     )
+
+
+# ---------------------------------------------------------------------------
+# Follow-up increment (post-8565889): E2's fallback-candidate scan now ALSO
+# checks one level of subdirectories when the same-directory scan finds
+# nothing — closing the live-dogfood residual this file's own module-level
+# comment already anticipated (a `support/`-style helper subdirectory one
+# level below the importing test). NOT part of the original approved 12-
+# fixture design above (hence not folded into that numbering) — these three
+# are additive regression coverage for the widened :func:`_java_fallback_
+# candidates`, mirroring GOOD 1's fixture shape exactly.
+# ---------------------------------------------------------------------------
+
+_GOOD1B_IMPORTER_TEMPLATE = (
+    "package com.example;\n\n"
+    "import org.junit.jupiter.api.Test;\n\n"
+    "class {class_name} {{\n"
+    "    // codd: covers vb=VB-01\n"
+    "    @Test\n"
+    "    void x() {{\n"
+    '        HarnessAssertions.assertSuccess(compute(), "14.0");\n'
+    "    }}\n\n"
+    "    static String compute() {{\n"
+    '        return "14.0";\n'
+    "    }}\n"
+    "}}\n"
+)
+
+_GOOD1B_CALL_BLOCK = TestBlock(
+    start_line=6,
+    end_line=8,
+    is_executable=True,
+    has_assertion=False,
+    label="x",
+    body_text='HarnessAssertions.assertSuccess(compute(), "14.0");',
+)
+
+
+def test_good_1b_helper_one_subdirectory_level_down_now_resolves(tmp_path):
+    """A qualified call to a helper class ONE SUBDIRECTORY LEVEL DOWN
+    (``support/HarnessAssertions.java``, sibling-less in the importer's own
+    directory) resolves as ``helper_resolved`` — the exact live-dogfood
+    residual shape from commit 8565889 (14 remaining ``HarnessAssertions``-
+    style violations in ``/tmp/codd_greenfield_java_v2_ExprCalc``, every one a
+    helper one ``support/`` level below its importing test). Before this
+    increment's subdirectory widening, :func:`_java_fallback_candidates` found
+    ZERO same-directory siblings for this shape and stopped there —
+    ``unresolved_helper``. GOOD 1 (above) proves the same-directory case;
+    this proves the newly-reachable one-level-down case."""
+
+    importer_text = _GOOD1B_IMPORTER_TEMPLATE.format(class_name="HarnessCallerOneLevelDownTest")
+    root = _write_project(
+        tmp_path,
+        {
+            "tests/HarnessCallerOneLevelDownTest.java": importer_text,
+            # ONE level below the importer's own directory (`tests/`).
+            "tests/support/HarnessAssertions.java": _GOOD1_HELPER,
+        },
+    )
+    ev = JavaTestBlockProfile().resolve_assertion_evidence(
+        _GOOD1B_CALL_BLOCK,
+        importer_text=importer_text,
+        importer_rel="tests/HarnessCallerOneLevelDownTest.java",
+        project_root=root,
+    )
+    assert ev.ok is True
+    assert ev.reason == "helper_resolved"
+    assert ev.confidence == "certain"
+
+
+def test_adversarial_13_helper_two_subdirectory_levels_down_stays_unresolved(tmp_path):
+    """A helper class TWO subdirectory levels down (``support/nested/
+    HarnessAssertions.java``) stays ``unresolved_helper`` — the widening added
+    by this increment is bounded to EXACTLY one level, never unbounded
+    recursion (same finite-hop discipline as ``_MAX_HELPER_HOPS`` elsewhere in
+    this module). Same importer/call shape as GOOD 1B; only the helper's
+    depth differs, proving the bound actually holds and this is a deliberate,
+    documented residual rather than an accidental limitation."""
+
+    importer_text = _GOOD1B_IMPORTER_TEMPLATE.format(class_name="HarnessCallerTwoLevelsDownTest")
+    root = _write_project(
+        tmp_path,
+        {
+            "tests/HarnessCallerTwoLevelsDownTest.java": importer_text,
+            # TWO levels below the importer's own directory (`tests/`).
+            "tests/support/nested/HarnessAssertions.java": _GOOD1_HELPER,
+        },
+    )
+    ev = JavaTestBlockProfile().resolve_assertion_evidence(
+        _GOOD1B_CALL_BLOCK,
+        importer_text=importer_text,
+        importer_rel="tests/HarnessCallerTwoLevelsDownTest.java",
+        project_root=root,
+    )
+    assert ev.ok is False
+    assert ev.reason == "unresolved_helper"
+
+
+def test_adversarial_14_same_directory_match_takes_precedence_over_subdirectory(tmp_path):
+    """When the SAME-DIRECTORY scan already finds a stem match, the
+    one-subdirectory-level scan is never consulted at all — proving the
+    explicit, documented scan-level precedence in :func:`_java_fallback_
+    candidates` (same-directory first; subdirectories ONLY when that finds
+    nothing; the two are mutually exclusive, never additive/merged).
+
+    The same-directory ``HarnessAssertions.java`` here is a deliberate NO-OP
+    (empty body, no primitive assertion) while a WORKING helper of the same
+    name sits one level down in ``support/``. If the two scans were merged/
+    additive, the resolver could still reach the working subdirectory helper.
+    Because same-directory precedes and short-circuits, the call instead
+    resolves against the broken same-directory stub and correctly FAILS
+    (``helper_no_primitive``) — proving subdirectories are truly unreached
+    once same-directory already produced a candidate, not just untested."""
+
+    importer_text = _GOOD1B_IMPORTER_TEMPLATE.format(class_name="HarnessCallerPrecedenceTest")
+    noop_helper = (
+        "package com.example;\n\n"
+        "class HarnessAssertions {\n"
+        "    static void assertSuccess(String result, String expected) {\n"
+        "        // deliberately empty: no primitive assertion in this sibling.\n"
+        "    }\n"
+        "}\n"
+    )
+    root = _write_project(
+        tmp_path,
+        {
+            "tests/HarnessCallerPrecedenceTest.java": importer_text,
+            "tests/HarnessAssertions.java": noop_helper,  # same dir: stem match, but no-op.
+            "tests/support/HarnessAssertions.java": _GOOD1_HELPER,  # one level down: the real one.
+        },
+    )
+    ev = JavaTestBlockProfile().resolve_assertion_evidence(
+        _GOOD1B_CALL_BLOCK,
+        importer_text=importer_text,
+        importer_rel="tests/HarnessCallerPrecedenceTest.java",
+        project_root=root,
+    )
+    assert ev.ok is False
+    assert ev.reason == "helper_no_primitive"

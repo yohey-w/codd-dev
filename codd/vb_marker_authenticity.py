@@ -4577,8 +4577,9 @@ def _resolve_one_helper(
     (E2, optional) is consulted ONLY as the LAST resort, after same-file +
     import-bound + barrel resolution ALL miss (``found`` is still ``None``): it
     returns candidate files to search for ``name``'s definition (e.g. Java's
-    same-directory sibling-by-class-name guess for a qualified call with no
-    static import). It supplies PLACES TO LOOK ONLY — every candidate is
+    sibling-by-class-name guess, tried in the importer's own directory first
+    and one subdirectory level down when that finds nothing, for a qualified
+    call with no static import). It supplies PLACES TO LOOK ONLY — every candidate is
     re-jailed via :func:`resolve_project_path` before its content is read, and
     the SAME primitive + argument-anchor checks below still judge whatever is
     found there, so a bad guess can degrade to unresolved but never false-GREEN.
@@ -4625,10 +4626,11 @@ def _resolve_one_helper(
     if found is None and fallback_module_candidates is not None:
         # E2 LAST RESORT: same-file, import-bound, AND barrel resolution all
         # missed. Ask the plug-in for a bounded list of "places to look" (e.g.
-        # a same-directory sibling file whose name matches the call's receiver
-        # class); every candidate is re-jailed here regardless of what the
-        # plug-in returned — a bad/out-of-tree guess can never itself become a
-        # path escape (defense in depth on top of the plug-in's own jailing).
+        # a sibling file, in the importer's directory or one level below,
+        # whose name matches the call's receiver class); every candidate is
+        # re-jailed here regardless of what the plug-in returned — a
+        # bad/out-of-tree guess can never itself become a path escape (defense
+        # in depth on top of the plug-in's own jailing).
         root = Path(project_root).resolve()
         for candidate in fallback_module_candidates(
             importer_text, importer_rel, project_root, full_callee
@@ -5485,8 +5487,9 @@ class JavaTestBlockProfile:
         :func:`_resolve_java_evidence` — the shared, language-free 1-hop helper-
         resolution engine (:func:`_resolve_evidence`) plugged with THIN Java
         adapters (static-import lookup, Maven source/test-root module resolution,
-        a same-directory fallback for a same-package qualified call with no
-        import at all), with a data-driven fallback to a DECLARED library
+        a same-package qualified-call fallback that searches the importer's own
+        directory and then one subdirectory level down when no import at all
+        names the helper), with a data-driven fallback to a DECLARED library
         fluent-terminal credit (``assertion_hints.library_assertion_terminals``)
         when the helper-hop engine still cannot resolve the call.
         """
@@ -5674,7 +5677,11 @@ def _java_find_method_def(module_text: str, name: str) -> "tuple[str, list[str]]
 
 
 #: Hard bound on E2 fallback candidates (design cap) — a same-directory glob is
-#: already narrow, but this keeps a pathological huge directory finite.
+#: already narrow, but this keeps a pathological huge directory finite. Shared
+#: across BOTH scan levels :func:`_java_fallback_candidates` now tries (the
+#: importer's own directory, and — only when that finds nothing — one level of
+#: subdirectories): the COMBINED total returned never exceeds this, regardless
+#: of how many levels contributed candidates.
 _JAVA_MAX_FALLBACK_CANDIDATES = 16
 
 
@@ -5692,6 +5699,12 @@ def _java_directory_in_scan_roots(
     resolution is the whole tree) exactly like the rest of this gate's file
     discovery. ``directory`` is trusted to already be inside ``project_root``
     (the caller establishes that); this only narrows further.
+
+    Called ONLY for the importer's own directory (see
+    :func:`_java_fallback_candidates`) — a subdirectory of an in-scan-root
+    directory is ALWAYS itself in-scan-root too (``Path.relative_to`` accepts
+    any descendant depth, not just an immediate child), so the one-level-down
+    widening does not need, and does not pay for, a second call here.
     """
 
     roots = _resolve_vb_scan_dirs(project_root, config) or [str(project_root)]
@@ -5709,6 +5722,44 @@ def _java_directory_in_scan_roots(
     return False
 
 
+def _java_sibling_matches(
+    directory: Path, importer_path: Path, receiver: str, limit: int
+) -> list[Path]:
+    """``.java`` files directly inside ``directory`` matching the E2 receiver rule.
+
+    Shared by BOTH scan levels in :func:`_java_fallback_candidates` (the
+    importer's own directory, and — when that finds nothing — each of its
+    immediate subdirectories): a QUALIFIED call (``receiver`` non-empty) only
+    matches a file whose STEM equals it; an UNQUALIFIED call (``receiver`` is
+    ``""``) matches every ``.java`` file in ``directory``, since there is no
+    class-name clue to narrow the guess. Never proposes ``importer_path``
+    itself. Returns at most ``limit`` matches, in sorted (deterministic) order;
+    a non-positive ``limit`` short-circuits to ``[]`` without touching the
+    filesystem.
+    """
+
+    if limit <= 0:
+        return []
+    try:
+        siblings = sorted(p for p in directory.iterdir() if p.is_file() and p.suffix == ".java")
+    except OSError:
+        return []
+
+    matches: list[Path] = []
+    for sib in siblings:
+        try:
+            if sib.resolve() == importer_path:
+                continue  # never propose the importer's own file as a candidate.
+        except OSError:
+            continue
+        if receiver and sib.stem != receiver:
+            continue
+        matches.append(sib)
+        if len(matches) >= limit:
+            break
+    return matches
+
+
 def _java_fallback_candidates(
     importer_text: str, importer_rel: str, project_root: Path, full_callee: str
 ) -> list[Path]:
@@ -5716,17 +5767,43 @@ def _java_fallback_candidates(
 
     Consulted by the shared engine ONLY as the LAST resort, after same-file +
     import-bound + barrel resolution all miss. Covers the conventional Java
-    shape neither a same-file search nor a STATIC import can: a same-PACKAGE
-    helper class (``HarnessAssertions.assertSuccess(...)`` where
-    ``HarnessAssertions.java`` sits in the SAME DIRECTORY as the importing
-    test) — Maven's layout makes "same directory" and "same package" identical,
-    so a same-package helper needs NO import statement at all.
+    shapes neither a same-file search nor a STATIC import can:
+
+    * a same-PACKAGE helper class (``HarnessAssertions.assertSuccess(...)``
+      where ``HarnessAssertions.java`` sits in the SAME DIRECTORY as the
+      importing test) — Maven's layout makes "same directory" and "same
+      package" identical, so a same-package helper needs NO import statement
+      at all; and
+    * the SAME shape ONE SUBDIRECTORY LEVEL DOWN (``…/support/
+      HarnessAssertions.java``, ``…/helpers/…``, ``…/util/…``,
+      ``…/fixtures/…`` — an idiomatic, framework-agnostic test-helper layout
+      convention, not a fixed name list this function special-cases: it globs
+      EVERY immediate subdirectory of the importer's own directory, never a
+      hardcoded set of directory names). This shape is bound by a PLAIN,
+      non-static import (``import foo.support.HarnessAssertions;``), which
+      :func:`_java_imported_lookup` deliberately does not resolve (Java's
+      per-symbol lookup table is static-import-only) — this directory glob is
+      what closes that gap structurally, without parsing the plain import.
 
     For a QUALIFIED call (``full_callee`` carries a receiver, e.g.
-    ``HarnessAssertions.assertSuccess``) the targeted candidate is the sibling
-    file whose STEM equals the receiver's simple name. For an UNQUALIFIED call
-    (no receiver) every ``.java`` sibling is a candidate (still bounded below),
-    since there is no class-name clue to narrow the guess.
+    ``HarnessAssertions.assertSuccess``) the targeted candidate is the file
+    whose STEM equals the receiver's simple name. For an UNQUALIFIED call (no
+    receiver) every ``.java`` file at the scanned level is a candidate (still
+    bounded below), since there is no class-name clue to narrow the guess.
+    Matching itself is :func:`_java_sibling_matches`, shared by both levels.
+
+    Scan-level precedence (an explicit, bounded choice): the SAME-DIRECTORY
+    scan runs first; the one-subdirectory-level scan runs ONLY when that finds
+    NOTHING. The two are mutually exclusive, never additive, so the combined
+    result stays bounded by the SAME :data:`_JAVA_MAX_FALLBACK_CANDIDATES` cap
+    that already governed the same-directory-only scan — never
+    same-directory-near-cap PLUS a second cap's worth from subdirectories —
+    and a same-package hit (the stronger, more conventional signal) is never
+    diluted by a weaker one-level-down guess. Exactly ONE level down, never
+    deeper: a subdirectory's own subdirectories are not walked, so a helper
+    two levels down stays a deliberate, documented unresolved residual — the
+    same finite-hop discipline as ``_MAX_HELPER_HOPS`` elsewhere in this
+    module, not unbounded recursion.
 
     This plug returns PLACES TO LOOK ONLY — it is never itself evidence; the
     existing primitive + argument-anchor + hop-bound logic in
@@ -5734,7 +5811,11 @@ def _java_fallback_candidates(
     there, and every returned path is independently re-jailed by the CALLER via
     :func:`resolve_project_path` before its content is ever read. Hard-bounded
     to :data:`_JAVA_MAX_FALLBACK_CANDIDATES` and confined to the project's
-    declared scan roots (:func:`_java_directory_in_scan_roots`).
+    declared scan roots (:func:`_java_directory_in_scan_roots`) — each
+    candidate SUBDIRECTORY is also independently re-resolved via
+    :func:`resolve_project_path` before its contents are ever listed, so an
+    in-root symlinked subdirectory whose target escapes the project is never
+    followed.
     """
 
     importer_path = resolve_project_path(project_root, importer_rel)
@@ -5753,23 +5834,27 @@ def _java_fallback_candidates(
     parts = full_callee.split(".") if full_callee else []
     receiver = parts[-2] if len(parts) >= 2 else ""
 
-    try:
-        siblings = sorted(p for p in directory.iterdir() if p.is_file() and p.suffix == ".java")
-    except OSError:
-        return []
+    candidates = _java_sibling_matches(
+        directory, importer_path, receiver, _JAVA_MAX_FALLBACK_CANDIDATES
+    )
+    if candidates:
+        return candidates
 
-    candidates: list[Path] = []
-    for sib in siblings:
-        try:
-            if sib.resolve() == importer_path:
-                continue  # never propose the importer's own file as a candidate.
-        except OSError:
-            continue
-        if receiver and sib.stem != receiver:
-            continue
-        candidates.append(sib)
-        if len(candidates) >= _JAVA_MAX_FALLBACK_CANDIDATES:
+    # One subdirectory level down (see docstring) — consulted ONLY because the
+    # same-directory scan above found NOTHING for this receiver/call shape.
+    try:
+        subdirs = sorted(p for p in directory.iterdir() if p.is_dir())
+    except OSError:
+        return candidates
+
+    for sub in subdirs:
+        remaining = _JAVA_MAX_FALLBACK_CANDIDATES - len(candidates)
+        if remaining <= 0:
             break
+        sub_resolved = resolve_project_path(project_root, sub)
+        if sub_resolved is None:
+            continue  # symlinked subdirectory escaping the project — never follow.
+        candidates.extend(_java_sibling_matches(sub_resolved, importer_path, receiver, remaining))
     return candidates
 
 
@@ -5897,9 +5982,9 @@ def _resolve_java_evidence(
     :func:`_resolve_evidence` engine, plugged with THIN Java adapters:
     :func:`_java_imported_lookup` (static-import binding),
     :func:`_java_resolve_module` (Maven source/test-root FQCN resolution), and
-    :func:`_java_fallback_candidates` (E2 — the same-directory sibling guess a
-    plain/absent import cannot express). Java has no barrel-reexport convention,
-    so ``reexport_edges`` is ``None`` (same as Go).
+    :func:`_java_fallback_candidates` (E2 — the same-directory-or-one-level-down
+    sibling guess a plain/absent import cannot express). Java has no
+    barrel-reexport convention, so ``reexport_edges`` is ``None`` (same as Go).
 
     When the helper-hop engine still cannot resolve the call (e.g. a fluent
     library terminal like ArchUnit's ``rule.check(classes)`` — not a helper
