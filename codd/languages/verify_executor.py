@@ -54,6 +54,7 @@ defensive not-green so a partial report never sneaks to PASS.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess  # noqa: S404 — argv is from the trusted language profile, shell=False
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,20 +126,34 @@ def execute_verify_plan(
     env = os.environ.copy()
     env.update(plan.env)
 
-    # (b) Anti-false-green: unlink any STALE report before the run so a leftover
-    # green report can never be mistaken for this run's output.
+    # (b) Anti-false-green: remove any STALE report before the run so a leftover
+    # green report can never be mistaken for this run's output. The report SHAPE
+    # is runner-defined, not language-defined: most runners write a single file
+    # (vitest JSON, a `.trx`), but Maven Surefire writes a whole DIRECTORY of
+    # per-class report files (`target/surefire-reports/`) — see
+    # SurefireXmlReportAdapter, which accepts either shape. A bare ``unlink()``
+    # only removes files: called on an existing, populated report DIRECTORY it
+    # raises ``IsADirectoryError`` (an ``OSError`` subclass), which used to be
+    # misreported as "could not remove" even though the real fix is just "use
+    # the directory-aware removal" — so branch on the actual on-disk shape
+    # (mirrors the same dir-vs-file removal already used by
+    # ``coverage_execution_coherence.py`` for the identical stale-report concern).
     report_path: Path | None = None
     if plan.report_path:
         report_path = (project_root / plan.report_path)
         if not report_path.is_absolute():
             report_path = report_path.resolve()
         try:
-            report_path.unlink()
+            if report_path.is_dir():
+                shutil.rmtree(report_path)
+            else:
+                report_path.unlink()
         except FileNotFoundError:
             pass
         except OSError:
-            # An unremovable stale file is itself an observability hazard: we cannot
-            # guarantee what we read next is THIS run's report → fail-closed.
+            # An unremovable stale report (file OR directory) is itself an
+            # observability hazard: we cannot guarantee what we read next is THIS
+            # run's report → fail-closed.
             return VerifyExecutionResult(
                 verify_class=VerifyClass.REPORT_UNREADABLE,
                 returncode=None,

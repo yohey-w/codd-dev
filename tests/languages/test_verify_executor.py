@@ -217,6 +217,50 @@ def test_stale_green_report_is_unlinked_then_report_missing(tmp_path):
     assert not stale.exists()  # the stale file was removed, not left behind
 
 
+def test_stale_report_directory_with_content_is_removed_then_report_missing(tmp_path):
+    # REGRESSION (dogfood java_v2, ExprCalc): some runners write a DIRECTORY of
+    # per-file reports, not a single file — e.g. Maven Surefire's
+    # `target/surefire-reports/` holds one XML/txt pair per test class. A bare
+    # `Path.unlink()` only removes FILES: called on an existing, non-empty
+    # report DIRECTORY it raises `IsADirectoryError` (an `OSError` subclass),
+    # which used to be swallowed and misreported as "could not remove stale
+    # report" — a permanent false RED on every subsequent verify run, even with
+    # completely ordinary ownership/permissions. Pre-populate report_path as a
+    # real, non-empty directory (mirrors an ordinary prior `mvn test` output)
+    # and assert it is removed CLEANLY and the run PROCEEDS (reaches the next
+    # legitimate not-green gate — a required report legitimately absent because
+    # this run's command wrote nothing — rather than erroring on removal).
+    stale_dir = tmp_path / "reports"
+    stale_dir.mkdir()
+    (stale_dir / "TEST-old-a.xml").write_text("<testsuite/>", encoding="utf-8")
+    (stale_dir / "TEST-old-b.xml").write_text("<testsuite/>", encoding="utf-8")
+    plan = _plan(argv=_py("import sys; sys.exit(0)"), report_path="reports")
+    res = execute_verify_plan(plan, tmp_path, adapter_registry=_registry_with(_FakeAdapter(_CLEAN)))
+    assert res.verify_class is VerifyClass.REPORT_MISSING
+    assert "could not remove" not in res.detail
+    assert not stale_dir.exists()  # the stale directory was removed, not left behind
+
+
+def test_stale_report_directory_is_removed_then_fresh_directory_report_passes(tmp_path):
+    # Full round-trip: a stale, POPULATED report directory exists before the run
+    # (as Maven Surefire's target/surefire-reports/ does across repeated `mvn
+    # test` invocations), and the command recreates the SAME directory path with
+    # fresh content. The run must reach PASS via the fresh content only, and the
+    # old file must be gone — proving the stale directory was actually removed
+    # (not merely tolerated / left to coexist with the new one).
+    stale_dir = tmp_path / "reports"
+    stale_dir.mkdir()
+    (stale_dir / "TEST-old.xml").write_text("<testsuite/>", encoding="utf-8")
+    write_fresh_report = (
+        "import os; os.makedirs('reports', exist_ok=True); "
+        "open('reports/TEST-new.xml', 'w').write('<testsuite/>')"
+    )
+    plan = _plan(argv=_py(write_fresh_report), report_path="reports")
+    res = execute_verify_plan(plan, tmp_path, adapter_registry=_registry_with(_FakeAdapter(_CLEAN)))
+    assert res.verify_class is VerifyClass.PASS
+    assert [p.name for p in stale_dir.iterdir()] == ["TEST-new.xml"]
+
+
 def test_required_adapter_unavailable_is_report_unreadable(tmp_path):
     # plan names an adapter id that is NOT registered, report_required → the executor
     # cannot observe → REPORT_UNREADABLE/RED, never PASS (fail-closed).
