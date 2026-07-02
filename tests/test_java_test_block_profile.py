@@ -1126,3 +1126,136 @@ def test_adversarial_14_same_directory_match_takes_precedence_over_subdirectory(
     )
     assert ev.ok is False
     assert ev.reason == "helper_no_primitive"
+
+
+# ---------------------------------------------------------------------------
+# Follow-up increment (post-530e896): _java_resolve_module now ALSO tries the
+# project's OWN declared scan.test_dirs/source_dirs roots (codd.yaml) BEFORE
+# falling back to the hardcoded Maven src/test/java / src/main/java roots --
+# closing the DISTINCT residual 530e896's own commit message diagnosed: 4
+# live-dogfood violations (ParseE2EIT/TokenizeE2EIT) where an
+# `import static ...HarnessAssertions.<method>;` FQN IS found by
+# _java_imported_lookup, but _java_resolve_module used to try ONLY the
+# bundled java.yaml's Maven roots and missed because that project's actual
+# test root is a non-conventional, project-declared directory
+# (tests/e2e/java/, not src/test/java/). NOT part of either prior commit's
+# own fixture numbering (hence not folded into GOOD/adversarial above) --
+# these two are additive coverage for the widened _java_resolve_module.
+# ---------------------------------------------------------------------------
+
+_STATIC_IMPORT_CALLER_TEMPLATE = (
+    "package {package};\n\n"
+    "import org.junit.jupiter.api.Test;\n\n"
+    "import static {helper_package}.HarnessAssertions.assertSuccess;\n\n"
+    "class {class_name} {{\n"
+    "    // codd: covers vb=VB-01\n"
+    "    @Test\n"
+    "    void x() {{\n"
+    '        assertSuccess(compute(), "14.0");\n'
+    "    }}\n\n"
+    "    static String compute() {{\n"
+    '        return "14.0";\n'
+    "    }}\n"
+    "}}\n"
+)
+
+_STATIC_IMPORT_CALL_BLOCK = TestBlock(
+    start_line=7,
+    end_line=9,
+    is_executable=True,
+    has_assertion=False,
+    label="x",
+    body_text='assertSuccess(compute(), "14.0");',
+)
+
+
+def _static_import_helper(package: str) -> str:
+    """A ``HarnessAssertions`` helper with a real primitive assertion, in ``package``."""
+
+    return (
+        f"package {package};\n\n"
+        "import static org.junit.jupiter.api.Assertions.assertEquals;\n\n"
+        "class HarnessAssertions {\n"
+        "    static void assertSuccess(String result, String expected) {\n"
+        "        assertEquals(expected, result);\n"
+        "    }\n"
+        "}\n"
+    )
+
+
+def test_good_1c_static_import_resolves_under_project_declared_nonconventional_root(tmp_path):
+    """A ``import static a.b.HarnessAssertions.assertSuccess;`` FQN resolves to
+    a file living under a NON-conventional root the project's OWN ``codd.yaml``
+    declares (``scan.test_dirs: [qa/]``, not ``src/test/java``) -- the exact
+    live-dogfood residual shape from commit 530e896 (4 remaining
+    ParseE2EIT/TokenizeE2EIT violations: a static-import spec IS found by
+    ``_java_imported_lookup``, but ``_java_resolve_module`` had no way to try
+    the project's actual declared root and stayed ``unresolved_helper``).
+    Before this increment, this exact call shape could not resolve no matter
+    how the FQCN's package path was nested, because ONLY the two hardcoded
+    Maven roots were ever tried."""
+
+    codd_yaml = "scan:\n  test_dirs:\n    - qa/\n"
+    importer_text = _STATIC_IMPORT_CALLER_TEMPLATE.format(
+        package="com.example.qa",
+        helper_package="com.example.qa.support",
+        class_name="HarnessCallerStaticImportTest",
+    )
+    root = _write_project(
+        tmp_path,
+        {
+            "codd/codd.yaml": codd_yaml,
+            "qa/HarnessCallerStaticImportTest.java": importer_text,
+            # dots -> slashes of com.example.qa.support.HarnessAssertions, hung
+            # off the DECLARED root ``qa/`` -- NOT src/test/java or src/main/java.
+            "qa/com/example/qa/support/HarnessAssertions.java": _static_import_helper(
+                "com.example.qa.support"
+            ),
+        },
+    )
+    ev = JavaTestBlockProfile().resolve_assertion_evidence(
+        _STATIC_IMPORT_CALL_BLOCK,
+        importer_text=importer_text,
+        importer_rel="qa/HarnessCallerStaticImportTest.java",
+        project_root=root,
+    )
+    assert ev.ok is True
+    assert ev.reason == "helper_resolved"
+    assert ev.confidence == "certain"
+
+
+def test_adversarial_16_static_import_maven_conventional_root_still_resolves(tmp_path):
+    """Regression: the PRE-EXISTING Maven-conventional resolution
+    (``src/test/java``) is unchanged by the new declared-root-first step --
+    when the project's OWN declared ``scan.test_dirs`` (``tests/``) does NOT
+    contain the helper, ``_java_resolve_module`` still falls through to the
+    hardcoded Maven roots exactly as before, and a static-import FQN under
+    ``src/test/java/...`` still resolves. Proves the widening in this
+    increment is additive (a new FIRST step), never a replacement of the
+    existing fallback."""
+
+    codd_yaml = "scan:\n  test_dirs:\n    - tests/\n"  # declared, but nothing lives under it below.
+    importer_text = _STATIC_IMPORT_CALLER_TEMPLATE.format(
+        package="com.example.mvn",
+        helper_package="com.example.mvn",
+        class_name="HarnessCallerStaticImportTest",
+    )
+    root = _write_project(
+        tmp_path,
+        {
+            "codd/codd.yaml": codd_yaml,
+            "src/test/java/com/example/mvn/HarnessCallerStaticImportTest.java": importer_text,
+            "src/test/java/com/example/mvn/HarnessAssertions.java": _static_import_helper(
+                "com.example.mvn"
+            ),
+        },
+    )
+    ev = JavaTestBlockProfile().resolve_assertion_evidence(
+        _STATIC_IMPORT_CALL_BLOCK,
+        importer_text=importer_text,
+        importer_rel="src/test/java/com/example/mvn/HarnessCallerStaticImportTest.java",
+        project_root=root,
+    )
+    assert ev.ok is True
+    assert ev.reason == "helper_resolved"
+    assert ev.confidence == "certain"

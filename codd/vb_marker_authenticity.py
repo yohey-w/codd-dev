@@ -5486,12 +5486,15 @@ class JavaTestBlockProfile:
         primitive assertion (``block.has_assertion`` is False). Delegates to
         :func:`_resolve_java_evidence` — the shared, language-free 1-hop helper-
         resolution engine (:func:`_resolve_evidence`) plugged with THIN Java
-        adapters (static-import lookup, Maven source/test-root module resolution,
-        a same-package qualified-call fallback that searches the importer's own
-        directory and then one subdirectory level down when no import at all
-        names the helper), with a data-driven fallback to a DECLARED library
-        fluent-terminal credit (``assertion_hints.library_assertion_terminals``)
-        when the helper-hop engine still cannot resolve the call.
+        adapters (static-import lookup, module resolution that tries the
+        project's OWN declared ``scan.test_dirs``/``source_dirs`` roots first
+        and the conventional Maven ``src/test/java``/``src/main/java`` roots as
+        a fallback, a same-package qualified-call fallback that searches the
+        importer's own directory and then one subdirectory level down when no
+        import at all names the helper), with a data-driven fallback to a
+        DECLARED library fluent-terminal credit
+        (``assertion_hints.library_assertion_terminals``) when the helper-hop
+        engine still cannot resolve the call.
         """
 
         return _resolve_java_evidence(
@@ -5586,18 +5589,63 @@ def _java_test_and_source_roots() -> tuple[str, ...]:
 
 
 def _java_resolve_module(importer_rel: str, spec: str, project_root: Path) -> Path | None:
-    """Java FQCN → file: dots → slashes, tried under TEST roots then SOURCE roots.
+    """Java FQCN → file: the project's OWN declared scan roots first, then the
+    conventional Maven TEST/SOURCE roots as a fallback.
 
     ``spec`` is a fully-qualified class name (e.g. ``com.example.util.
     HarnessAssertions``) bound by a STATIC import (:func:`_java_imported_lookup`).
-    Every candidate is re-jailed via :func:`resolve_project_path`, so a
-    maliciously-dotted spec (``../../etc/passwd``-shaped after substitution) can
-    never resolve outside ``project_root``. Mirrors :func:`_go_resolve_module` /
-    :func:`_py_resolve_module` / :func:`_ts_resolve_specifier`'s "``None`` on any
-    miss" contract.
+    Two root sources, tried in this explicit, mutually exclusive order (the
+    SAME "stronger signal first, weaker fallback only when that finds nothing"
+    precedence :func:`_java_fallback_candidates` (E2) already uses for its own
+    same-directory-vs-subdirectory scan):
+
+    1. The project's OWN declared ``scan.test_dirs`` / ``scan.source_dirs``
+       (``codd.yaml``), resolved via :func:`_resolve_vb_scan_dirs` — the SAME
+       config-access pattern :func:`_java_directory_in_scan_roots` /
+       :func:`_java_fallback_candidates` already use (test dirs first, source
+       dirs second — ``_resolve_vb_scan_dirs`` itself merges them in that
+       order). These are the ground truth for THIS project: a project whose
+       test/source roots are not the Maven convention (e.g. a declared
+       ``tests/`` instead of ``src/test/java``) is resolved correctly without
+       teaching the bundled ``java.yaml`` profile about every possible layout.
+    2. :func:`_java_test_and_source_roots` — the profile-driven Maven
+       convention (``src/test/java``, ``src/main/java`` for the bundled
+       ``java.yaml``) — consulted ONLY when NONE of the project's own declared
+       roots resolves ``spec``. Some Java projects genuinely use the Maven
+       layout (or declare no ``scan.test_dirs``/``source_dirs`` override at
+       all), so this fallback is KEPT, never replaced.
+
+    Every candidate is re-jailed via :func:`resolve_project_path` — both the
+    declared root itself (an operator-declared ``codd.yaml`` value, not
+    trusted as already in-tree) and the final joined file — so neither a
+    misconfigured/malicious declared scan root NOR a maliciously-dotted
+    ``spec`` (``../../etc/passwd``-shaped after substitution; not actually
+    reachable since a literal ``.`` → ``/`` substitution can never itself
+    produce ``..``, but re-jailed regardless as defense in depth, exactly
+    E2's own discipline) can resolve outside ``project_root``. Mirrors
+    :func:`_go_resolve_module` / :func:`_py_resolve_module` /
+    :func:`_ts_resolve_specifier`'s "``None`` on any miss" contract.
     """
 
     rel = spec.strip().strip(".").replace(".", "/") + ".java"
+
+    # 1. The project's OWN declared roots — ground truth for THIS project.
+    config = _load_optional_config(project_root)
+    for raw_root in _resolve_vb_scan_dirs(project_root, config) or [str(project_root)]:
+        declared_root = resolve_project_path(project_root, raw_root)
+        if declared_root is None:
+            continue  # out-of-tree declared root.
+        if declared_root.is_file():
+            # A file-shaped declared root has no package tree beneath IT, but
+            # its directory does — same "fall back to the parent" handling
+            # :func:`_java_directory_in_scan_roots` already uses for this.
+            declared_root = declared_root.parent
+        candidate = resolve_project_path(declared_root, rel)
+        if candidate is not None and candidate.is_file():
+            return candidate
+
+    # 2. Maven-conventional fallback — consulted ONLY because step 1 found
+    # nothing (never merged with it: a declared-root hit is always preferred).
     for root in _java_test_and_source_roots():
         candidate = resolve_project_path(project_root, f"{root.strip('/')}/{rel}")
         if candidate is not None and candidate.is_file():
@@ -5981,10 +6029,12 @@ def _resolve_java_evidence(
     real ``assertEquals(...)``) is resolved one hop through the shared
     :func:`_resolve_evidence` engine, plugged with THIN Java adapters:
     :func:`_java_imported_lookup` (static-import binding),
-    :func:`_java_resolve_module` (Maven source/test-root FQCN resolution), and
-    :func:`_java_fallback_candidates` (E2 — the same-directory-or-one-level-down
-    sibling guess a plain/absent import cannot express). Java has no
-    barrel-reexport convention, so ``reexport_edges`` is ``None`` (same as Go).
+    :func:`_java_resolve_module` (FQCN → file: the project's OWN declared
+    ``scan.test_dirs``/``source_dirs`` roots first, Maven ``src/test/java``/
+    ``src/main/java`` as a fallback), and :func:`_java_fallback_candidates`
+    (E2 — the same-directory-or-one-level-down sibling guess a plain/absent
+    import cannot express). Java has no barrel-reexport convention, so
+    ``reexport_edges`` is ``None`` (same as Go).
 
     When the helper-hop engine still cannot resolve the call (e.g. a fluent
     library terminal like ArchUnit's ``rule.check(classes)`` — not a helper
