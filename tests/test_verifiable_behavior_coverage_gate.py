@@ -17,7 +17,9 @@ from pathlib import Path
 
 from codd.verifiable_behavior_audit import (
     build_vb_coverage_audit,
+    format_gap_feedback,
     run_implement_coverage_gate,
+    scope_uncovered_rows,
     _normalize_vb_id,
 )
 
@@ -616,3 +618,189 @@ def test_project_expects_vb_registry_false_for_no_vb_surface_project(tmp_path):
     # only the canonical doc / planned canonical artifact / explicit config do.
     _write(tmp_path / "docs" / "test" / "behaviors.md", "| VB-X | a |\n| --- | --- |\n")
     assert project_expects_vb_registry(tmp_path, config) is False
+
+
+# ---------------------------------------------------------------------------
+# Cross-module feedback leak (the "ExprCalcTs" dogfood failure): a design-node-
+# scoped implement retry (e.g. ``codd implement --design
+# docs/detailed_design/tokenizer_design.md --output tests/unit``) audited the
+# WHOLE project's VB registry and handed the tokenizer-only retry every other
+# module's gaps too (12 VB-PAR-*, 6 VB-EVA-*, 2 VB-ARC-*) — none of which a
+# tokenizer-only test file can possibly cover (there is no parser.ts/
+# evaluator.ts to import from that design node's own output). The tokenizer's
+# OWN behaviors were already fully covered; the gate still reported the task
+# as FAILED and kept retrying it with feedback it could never satisfy.
+# ---------------------------------------------------------------------------
+
+
+def _module_doc(project: Path, path: str, *, node_id: str, modules: list[str]) -> None:
+    module_lines = "\n".join(f"  - {m}" for m in modules)
+    _write(
+        project / path,
+        f"---\ncodd:\n  node_id: {node_id}\n  modules:\n{module_lines}\n---\n\n# {node_id}\n",
+    )
+
+
+def _three_module_project(project: Path) -> None:
+    _module_doc(
+        project,
+        "docs/detailed_design/tokenizer_design.md",
+        node_id="detailed_design:tokenizer",
+        modules=["tokenizer"],
+    )
+    _module_doc(
+        project,
+        "docs/detailed_design/parser_design.md",
+        node_id="detailed_design:parser",
+        modules=["parser"],
+    )
+    _module_doc(
+        project,
+        "docs/detailed_design/evaluator_design.md",
+        node_id="detailed_design:evaluator",
+        modules=["evaluator"],
+    )
+    _canonical_strategy(
+        project,
+        "| VB-TOK-01 | tokenizer |\n"
+        "| VB-PAR-01 | parser |\n"
+        "| VB-PAR-02 | parser |\n"
+        "| VB-EVA-01 | evaluator |\n",
+    )
+
+
+def test_module_scoped_retry_ignores_other_modules_uncovered_vbs(tmp_path):
+    project = tmp_path
+    _three_module_project(project)
+    # Only the tokenizer's own behavior is covered; parser/evaluator have no
+    # test files at all yet (a realistic mid-build state — those tasks simply
+    # have not run yet, not a defect in the tokenizer task).
+    _write(
+        project / "tests" / "unit" / "tokenizer.test.ts",
+        "// codd: covers vb=VB-TOK-01\ntest('tokenizes', () => { expect(1).toBe(1); });\n",
+    )
+    config = {"scan": {"test_dirs": ["tests/"]}, "test_coverage": {"max_retries": 2}}
+
+    rerun_calls: list[str] = []
+    errors: list[str] = []
+    passed = run_implement_coverage_gate(
+        project,
+        config=config,
+        design_node="docs/detailed_design/tokenizer_design.md",
+        output_paths=["tests/unit"],
+        rerun=rerun_calls.append,
+        echo=lambda _m: None,
+        echo_error=errors.append,
+    )
+
+    # The tokenizer task's own behavior is fully covered — it must PASS and
+    # never retry, even though 3 VBs remain uncovered PROJECT-WIDE.
+    assert passed is True
+    assert rerun_calls == []
+    assert errors == []
+    # Ground truth: the whole-project audit still (correctly) sees the gap —
+    # scoping narrows FEEDBACK, it never hides anything from the real audit.
+    whole_project = build_vb_coverage_audit(project, config=config)
+    assert whole_project.summary["uncovered"] == 3
+
+
+def test_module_scoped_retry_feedback_never_names_other_modules_vbs(tmp_path):
+    project = tmp_path
+    _three_module_project(project)
+    # Tokenizer's OWN behavior is genuinely missing too, this time — the gate
+    # must still retry (and eventually fail) on VB-TOK-01, but the feedback
+    # text handed to that retry must never mention VB-PAR-*/VB-EVA-*: a
+    # tokenizer-only implement call has no parser.ts/evaluator.ts to cover
+    # them from, so naming them is actionable-looking but impossible to obey.
+    config = {"scan": {"test_dirs": ["tests/"]}, "test_coverage": {"max_retries": 2}}
+
+    rerun_calls: list[str] = []
+    errors: list[str] = []
+    passed = run_implement_coverage_gate(
+        project,
+        config=config,
+        design_node="docs/detailed_design/tokenizer_design.md",
+        output_paths=["tests/unit"],
+        rerun=rerun_calls.append,
+        echo=lambda _m: None,
+        echo_error=errors.append,
+    )
+
+    assert passed is False
+    assert len(rerun_calls) == 2  # bounded retries, both spent on the real gap
+    for feedback in rerun_calls:
+        assert "VB-TOK-01" in feedback
+        assert "VB-PAR-01" not in feedback
+        assert "VB-PAR-02" not in feedback
+        assert "VB-EVA-01" not in feedback
+    assert any("VB-TOK-01" in message for message in errors)
+    assert not any("VB-PAR-01" in message or "VB-EVA-01" in message for message in errors)
+
+
+def test_scope_uncovered_rows_keeps_untagged_rows_regardless_of_module(tmp_path):
+    """A row with no recognizable module tag is ambiguous — always kept.
+
+    Mirrors cross-cutting VBs (e.g. error-type distinctness, import-graph
+    direction) that legitimately span modules: absence of a tag must never be
+    read as "not mine," only a positive tag for a DIFFERENT module is.
+    """
+    project = tmp_path
+    _module_doc(
+        project,
+        "docs/detailed_design/tokenizer_design.md",
+        node_id="detailed_design:tokenizer",
+        modules=["tokenizer"],
+    )
+    _module_doc(
+        project,
+        "docs/detailed_design/parser_design.md",
+        node_id="detailed_design:parser",
+        modules=["parser"],
+    )
+    _canonical_strategy(
+        project,
+        "| VB-ARC-01 | cross-cutting error distinctness |\n"
+        "| VB-PAR-01 | parser |\n",
+    )
+    report = build_vb_coverage_audit(project, config={"scan": {"test_dirs": ["tests/"]}})
+    assert {row.vb_id for row in report.uncovered_rows} == {"VB-ARC-01", "VB-PAR-01"}
+
+    scoped = scope_uncovered_rows(
+        report.uncovered_rows,
+        project_root=project,
+        design_node="docs/detailed_design/tokenizer_design.md",
+    )
+    ids = {row.vb_id for row in scoped}
+    assert "VB-ARC-01" in ids  # untagged/ambiguous — kept
+    assert "VB-PAR-01" not in ids  # positively tagged for a different module — excluded
+
+
+def test_scope_uncovered_rows_is_a_noop_when_design_node_unresolvable(tmp_path):
+    """No scoping when the design node isn't an in-project file (e.g. a bare
+    node id like ``test:test-strategy``) — this is the exact ``design_node``
+    shape the pre-existing bounded-retry tests above use, so this pins that
+    they see EVERY uncovered row, unchanged, exactly as before this feature.
+    """
+    project = tmp_path
+    _canonical_strategy(project, "| VB-01 | a |\n| VB-02 | b |\n")
+    report = build_vb_coverage_audit(project, config={"scan": {"test_dirs": ["tests/"]}})
+    assert len(report.uncovered_rows) == 2
+
+    scoped = scope_uncovered_rows(
+        report.uncovered_rows, project_root=project, design_node="test:test-strategy"
+    )
+    assert scoped == report.uncovered_rows
+
+    scoped_no_node = scope_uncovered_rows(
+        report.uncovered_rows, project_root=project, design_node=None
+    )
+    assert scoped_no_node == report.uncovered_rows
+
+
+def test_format_gap_feedback_accepts_a_plain_row_list(tmp_path):
+    project = tmp_path
+    _canonical_strategy(project, "| VB-01 | widgets |\n")
+    report = build_vb_coverage_audit(project, config={"scan": {"test_dirs": ["tests/"]}})
+    text = format_gap_feedback(report.uncovered_rows)
+    assert "VB-01" in text
+    assert "widgets" in text

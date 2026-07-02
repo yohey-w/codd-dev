@@ -1756,6 +1756,7 @@ class GreenfieldPipeline:
         options: dict[str, Any],
         *,
         scope: Any = None,
+        feedback_rows: Any = None,
     ) -> None:
         """Re-invoke implementation under ``feedback`` — SCOPED when ``scope`` set.
 
@@ -1769,7 +1770,12 @@ class GreenfieldPipeline:
 
         Routes through the SAME implement path the stage uses (``implement_tasks``
         with the resolved output paths), threading the normalized oracle feedback
-        so the SUT regenerates coherent files.
+        so the SUT regenerates coherent files. ``feedback_rows``, when given
+        (the VB gate's raw uncovered ``VBAuditRow`` list), is forwarded to
+        :meth:`_reimplement_tasks` unchanged so a multi-task rerun can re-scope
+        the feedback per task rather than reusing one batched string for all of
+        them; the oracle-gate caller never passes it, so its plain-string
+        behavior is unaffected.
         """
         from codd.config import load_project_config
 
@@ -1791,7 +1797,7 @@ class GreenfieldPipeline:
             and not getattr(scope, "repair_plan", None)
         )
         if legacy_broad or not scoped:
-            self._reimplement_tasks(project_root, tasks, feedback, config)
+            self._reimplement_tasks(project_root, tasks, feedback, config, feedback_rows=feedback_rows)
             return
 
         # Fenced rerun: only the scope's tasks, fenced to its allowed paths.
@@ -1800,12 +1806,12 @@ class GreenfieldPipeline:
         if not scoped_tasks:
             # Nothing resolvable in this scope (defensive) → broad, never a no-op.
             self.echo("[greenfield] implement-oracle: scoped task set empty — re-running broad.")
-            self._reimplement_tasks(project_root, tasks, feedback, config)
+            self._reimplement_tasks(project_root, tasks, feedback, config, feedback_rows=feedback_rows)
             return
 
         allowed = tuple(getattr(scope, "allowed_paths", ()) or ())
         with _OracleWriteFence(project_root, allowed_paths=allowed, echo=self.echo) as fence:
-            self._reimplement_tasks(project_root, scoped_tasks, feedback, config)
+            self._reimplement_tasks(project_root, scoped_tasks, feedback, config, feedback_rows=feedback_rows)
             fence.enforce()
 
     def _reimplement_tasks(
@@ -1814,8 +1820,26 @@ class GreenfieldPipeline:
         tasks: list[ImplementTaskRef],
         feedback: str,
         config: dict[str, Any],
+        *,
+        feedback_rows: Any = None,
     ) -> dict[str, float]:
         """Re-run ``implement_tasks`` for each given task carrying ``feedback``.
+
+        ``feedback_rows`` (a ``list[VBAuditRow]``, optional): when the caller
+        has the raw uncovered rows behind ``feedback`` — only the VB coverage
+        gate does — each task's OWN feedback is re-scoped to its own module via
+        :func:`codd.verifiable_behavior_audit.scope_uncovered_rows` instead of
+        reusing the single batched ``feedback`` string for every task. This
+        matters because the gate's rerun scope can legitimately span EVERY test
+        task at once (see below), and without it, e.g. a tokenizer-only test
+        task would be handed parser/evaluator gap feedback it has no way to
+        close (a task-scoped implement call can't cover another module's
+        behavior — nothing to import it from). A task whose scoped list comes
+        back empty (every remaining gap belongs to a DIFFERENT module) is
+        skipped entirely rather than re-run with vacuous feedback. Omitted
+        (``None``, the default) preserves the legacy behavior of handing every
+        task the identical ``feedback`` string — used by the native-oracle gate,
+        whose feedback is compiler/type-error text with no VB rows behind it.
 
         Returns ``{task_id: elapsed_seconds}`` so a broad-campaign caller can budget
         + audit per-task cost. (The campaign's wall-clock gate measures elapsed
@@ -1865,6 +1889,21 @@ class GreenfieldPipeline:
         elapsed: dict[str, float] = {}
         failed_task_ids: list[str] = []
         for task in tasks:
+            task_feedback = feedback
+            if feedback_rows is not None:
+                from codd.verifiable_behavior_audit import format_gap_feedback, scope_uncovered_rows
+
+                scoped_rows = scope_uncovered_rows(
+                    feedback_rows, project_root=project_root, design_node=task.design_node
+                )
+                if not scoped_rows:
+                    self.echo(
+                        f"[greenfield] re-implement {task.task_id}: no uncovered VB relevant to "
+                        "this task's own module — skipping (gap belongs to another module's task)."
+                    )
+                    continue
+                task_feedback = format_gap_feedback(scoped_rows)
+
             output_paths = (
                 list(task.output_paths)
                 if task.output_paths
@@ -1881,7 +1920,7 @@ class GreenfieldPipeline:
                     task_description=task.description,
                     ai_command=self.ai_command,
                     use_derived_steps=True,
-                    feedback=feedback,
+                    feedback=task_feedback,
                 )
             except CoddCLIError as exc:
                 failed_task_ids.append(task.task_id)
@@ -1904,18 +1943,24 @@ class GreenfieldPipeline:
         project_root: Path,
         tasks: list[ImplementTaskRef],
         options: dict[str, Any],
-    ) -> Callable[[str, Any], None]:
-        """A ``rerun(feedback, scope)`` for the VB coverage gate's feedback loop.
+    ) -> Callable[..., None]:
+        """A ``rerun(feedback, scope, feedback_rows=...)`` for the VB gate's feedback loop.
 
         Reuses the oracle's scoped, write-fenced rerun dispatch
         (:meth:`_rerun_tasks_with_feedback`): a TEST-scoped
         :class:`~codd.implement_oracle_scope.OracleRerunScope` re-implements ONLY
         its test tasks, fenced to test files/helpers, so a VB coverage rerun can
-        never rewrite production source.
+        never rewrite production source. ``feedback_rows`` (the raw uncovered
+        ``VBAuditRow`` list, when the caller has it) lets the fan-out over
+        potentially several test tasks re-scope the feedback PER TASK instead of
+        handing every task the identical batched gap text — see
+        :meth:`_reimplement_tasks`.
         """
 
-        def _rerun(feedback: str, scope: Any = None) -> None:
-            self._rerun_tasks_with_feedback(project_root, tasks, feedback, options, scope=scope)
+        def _rerun(feedback: str, scope: Any = None, feedback_rows: Any = None) -> None:
+            self._rerun_tasks_with_feedback(
+                project_root, tasks, feedback, options, scope=scope, feedback_rows=feedback_rows
+            )
 
         return _rerun
 
@@ -3339,7 +3384,7 @@ def _enforce_stage_coverage_gate(
     *,
     coverage_gate: bool,
     echo: Callable[[str], None],
-    rerun: Callable[[str, Any], None] | None = None,
+    rerun: Callable[..., None] | None = None,  # (feedback, scope, feedback_rows=...)
     rerun_oracle: Callable[[], None] | None = None,
     scope_resolver: Callable[[list[str]], Any] | None = None,
     authenticity_profile: Any = None,
@@ -3442,7 +3487,13 @@ def _enforce_stage_coverage_gate(
                 f"re-running TEST tasks with gap feedback (attempt {attempt}/{max_retries})"
             )
             try:
-                rerun(format_gap_feedback(report), scope)
+                # Pass the raw rows too (not just the pre-rendered project-wide
+                # string): the scope can batch several test tasks together
+                # (derive_vb_rerun_scope's per-doc targeting is inert once every
+                # VB shares one canonical registry doc), and each of THOSE
+                # tasks' own implement call must only see the gap feedback
+                # relevant to ITS OWN module — see _reimplement_tasks.
+                rerun(format_gap_feedback(report.uncovered_rows), scope, report.uncovered_rows)
                 if rerun_oracle is not None:
                     # A VB test rerun can break test↔helper symbol coherence;
                     # re-assert the native oracle so a type/import break never

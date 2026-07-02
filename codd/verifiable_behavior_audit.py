@@ -19,8 +19,9 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
+from codd.frontmatter import codd_block, read_frontmatter
 from codd.operational_e2e_audit import (
     _BLOCKER_MARKER_RE,
     _COVER_MARKER_RE,
@@ -472,6 +473,7 @@ class VBAuditRow:
     blocker_details: str = ""
     blocker_evidence: list[str] = field(default_factory=list)
     suggested_next_action: str = ""
+    declared_scenarios: str = ""
 
 
 @dataclass
@@ -990,7 +992,129 @@ def is_test_related_implement(
     return False
 
 
-def format_gap_feedback(report: VBAuditReport) -> str:
+def _normalize_module_token(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def _design_node_declared_modules(project_root: Path, design_node: str | None) -> set[str]:
+    """Best-effort: the module name(s) ``design_node`` itself declares.
+
+    Reads the design node's OWN ``codd:`` frontmatter ``modules:`` list — the
+    same field :mod:`codd.planner`/:mod:`codd.generator` already populate on
+    every generated doc — when ``design_node`` resolves to an in-project file.
+    Returns an empty set when the node can't be resolved to a file (e.g. it is
+    a semantic node id like ``test:test-strategy`` rather than a path, or the
+    file declares no ``modules:``). Callers MUST treat an empty set as
+    "ownership unknown," never as "declares zero modules on purpose" — there
+    is no scoping to do without a positive signal.
+    """
+
+    if not design_node:
+        return set()
+    candidate = resolve_project_path(project_root, design_node)
+    if candidate is None or not candidate.is_file():
+        return set()
+    frontmatter = read_frontmatter(candidate, project_root=project_root)
+    block = codd_block(frontmatter)
+    if not block:
+        return set()
+    modules = block.get("modules")
+    if not isinstance(modules, list):
+        return set()
+    return {_normalize_module_token(item) for item in modules if str(item).strip()}
+
+
+def _project_declared_modules(project_root: Path) -> set[str]:
+    """Union of every ``modules:`` entry declared across the project's docs.
+
+    Scans ``docs/**/*.md`` (the whole CoDD doc tree, not just the VB-table
+    dir) for each file's own ``codd:`` frontmatter. Used only to recognize
+    genuine module-name tokens inside a VB row's own declared text — never to
+    validate or declare the module list itself.
+    """
+
+    project_root = Path(project_root).resolve()
+    docs_dir = project_root / "docs"
+    modules: set[str] = set()
+    if not docs_dir.is_dir():
+        return modules
+    for match in sorted(docs_dir.rglob("*.md")):
+        confined = resolve_project_path(project_root, match)
+        if confined is None:
+            continue
+        frontmatter = read_frontmatter(confined, project_root=project_root)
+        block = codd_block(frontmatter)
+        if not block:
+            continue
+        declared = block.get("modules")
+        if isinstance(declared, list):
+            modules.update(_normalize_module_token(item) for item in declared if str(item).strip())
+    return modules
+
+
+def _row_mentioned_modules(row: VBAuditRow, known_modules: set[str]) -> set[str]:
+    """Which of the project's known module names this row's own text names.
+
+    Whole-word, case-insensitive containment against the row's declared
+    description/scenario cells (e.g. a VB table's own "Module" column, whose
+    value is exactly a module name). A match is read as a POSITIVE ownership
+    tag; the absence of any match proves nothing (plenty of VB tables carry no
+    such column at all), so callers must never treat "no mention" as "not
+    mine" — only a mention of a DIFFERENT module is actionable.
+    """
+
+    text = _normalize_module_token(f"{row.description} {row.declared_scenarios}")
+    if not text:
+        return set()
+    mentioned = set()
+    for module in known_modules:
+        if module and re.search(rf"(?<![a-z0-9_-]){re.escape(module)}(?![a-z0-9_-])", text):
+            mentioned.add(module)
+    return mentioned
+
+
+def scope_uncovered_rows(
+    rows: Sequence[VBAuditRow],
+    *,
+    project_root: Path | str,
+    design_node: str | None,
+) -> list[VBAuditRow]:
+    """Narrow ``rows`` to the ones a ``design_node``-scoped retry could plausibly close.
+
+    The canonical VB registry is (by convention, see ``is_canonical_vb_doc``)
+    ONE document shared by every module, so a row's ``source_doc`` can never
+    distinguish "this VB is the tokenizer's job" from "this VB is the parser's
+    job" — every row shares the same declaring doc. This instead cross-
+    references each project module's OWN name (declared via ``modules:`` in
+    every doc's ``codd:`` frontmatter — an existing CoDD concept, not a new
+    one) against the row's own declared text.
+
+    A row is EXCLUDED only when it carries a positive module tag for a
+    DIFFERENT project module than ``design_node`` itself declares (e.g. a row
+    tagged "parser" is excluded from a tokenizer-scoped retry). A row with no
+    recognizable module tag, or a ``design_node``/project with no resolvable
+    module vocabulary at all, is always KEPT — this can only narrow feedback,
+    never silently hide a gap: the project-wide, unscoped audit (``design_node
+    =None``) remains the source of truth for final pass/fail.
+    """
+
+    project_root = Path(project_root).resolve()
+    current_modules = _design_node_declared_modules(project_root, design_node)
+    if not current_modules:
+        return list(rows)
+    known_modules = _project_declared_modules(project_root)
+    if not known_modules:
+        return list(rows)
+    scoped: list[VBAuditRow] = []
+    for row in rows:
+        mentioned = _row_mentioned_modules(row, known_modules)
+        if mentioned and not (mentioned & current_modules):
+            continue  # positively tagged for a different module — not this task's job
+        scoped.append(row)
+    return scoped
+
+
+def format_gap_feedback(rows: Sequence[VBAuditRow]) -> str:
     """Render uncovered VBs as review feedback for a bounded re-implementation."""
 
     lines = [
@@ -1009,7 +1133,7 @@ def format_gap_feedback(report: VBAuditReport) -> str:
         "",
         "Uncovered verifiable behaviors:",
     ]
-    for row in report.uncovered_rows:
+    for row in rows:
         description = f" — {row.description}" if row.description else ""
         lines.append(f"- {row.vb_id}{description} (declared in {row.source_doc})")
     return "\n".join(lines)
@@ -1047,25 +1171,34 @@ def run_implement_coverage_gate(
         echo("Test coverage gate: no VB table found in test documents — nothing to audit.")
         return True
 
+    # Scoped to THIS call's own design node (when it declares module(s)): a
+    # design-node-targeted implement retry must only be judged, and fed
+    # feedback, on the VBs it could plausibly close itself — never on another
+    # module's gaps that happen to still be outstanding project-wide (those
+    # are that module's own task's responsibility, and remain visible to the
+    # separate, unscoped, whole-project gate run with design_node=None).
+    relevant = scope_uncovered_rows(report.uncovered_rows, project_root=project_root, design_node=design_node)
+
     max_retries = coverage_gate_max_retries(config)
     attempt = 0
-    while report.uncovered_rows and rerun is not None and attempt < max_retries:
+    while relevant and rerun is not None and attempt < max_retries:
         attempt += 1
         echo(
-            f"Test coverage gate: {len(report.uncovered_rows)} uncovered verifiable behavior(s); "
-            f"re-running implementation with gap feedback (attempt {attempt}/{max_retries})"
+            f"Test coverage gate: {len(relevant)} uncovered verifiable behavior(s) relevant to "
+            f"this task; re-running implementation with gap feedback (attempt {attempt}/{max_retries})"
         )
-        rerun(format_gap_feedback(report))
+        rerun(format_gap_feedback(relevant))
         report = build_vb_coverage_audit(project_root, config=config)
+        relevant = scope_uncovered_rows(report.uncovered_rows, project_root=project_root, design_node=design_node)
 
     for orphan in report.orphan_vb_markers:
         emit_error(orphan.message)
-    if report.uncovered_rows:
+    if relevant:
         emit_error(
-            f"Test coverage gate FAILED: {len(report.uncovered_rows)} of {report.summary['vb_count']} "
+            f"Test coverage gate FAILED: {len(relevant)} of {report.summary['vb_count']} "
             "verifiable behavior(s) have no `codd: covers vb=` marker:"
         )
-        for row in report.uncovered_rows:
+        for row in relevant:
             description = f" — {row.description}" if row.description else ""
             emit_error(f"  ✗ {row.vb_id}{description} ({row.source_doc})")
         emit_error(
@@ -1074,10 +1207,17 @@ def run_implement_coverage_gate(
         )
         return False
 
-    echo(
-        f"Test coverage gate: {report.summary['covered']} covered / "
-        f"{report.summary['blocked']} blocked / {report.summary['vb_count']} verifiable behavior(s) — OK"
-    )
+    if report.uncovered_rows:
+        echo(
+            f"Test coverage gate: no uncovered verifiable behavior(s) relevant to this task's "
+            f"module(s) — OK ({len(report.uncovered_rows)} unrelated gap(s) remain project-wide "
+            "for other modules)."
+        )
+    else:
+        echo(
+            f"Test coverage gate: {report.summary['covered']} covered / "
+            f"{report.summary['blocked']} blocked / {report.summary['vb_count']} verifiable behavior(s) — OK"
+        )
     return True
 
 
@@ -1173,6 +1313,7 @@ def _audit_behavior(
         blocker_details=primary_blocker.details if primary_blocker else "",
         blocker_evidence=sorted({item.path for item in matching_blockers}),
         suggested_next_action=next_action,
+        declared_scenarios=behavior.declared_scenarios,
     )
 
 

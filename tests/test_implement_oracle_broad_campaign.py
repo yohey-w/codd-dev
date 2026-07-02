@@ -487,7 +487,7 @@ def test_broad_phase_with_allowed_paths_reverts_out_of_scope(tmp_path: Path) -> 
     pipe.echo = lambda _m: None
     pipe.ai_command = "fake"
 
-    def _fake_reimplement(project_root, tasks, feedback, config):
+    def _fake_reimplement(project_root, tasks, feedback, config, **kwargs):
         # The SUT writes in-scope (allowed) AND out-of-scope (must be reverted).
         (project_root / "src" / "barrel.ts").write_text("export const q = 1;  // fixed\n", encoding="utf-8")
         (project_root / "src" / "other.ts").write_text("export const k = 999;  // ROGUE\n", encoding="utf-8")
