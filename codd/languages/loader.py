@@ -159,15 +159,16 @@ def _parse_layout(doc: Mapping[str, Any]) -> LayoutSpec:
     )
 
 
-def _parse_report(raw: Any) -> ReportSpec | None:
+def _parse_report(raw: Any, *, where: str = "report") -> ReportSpec | None:
     if raw is None:
         return None
-    m = _as_mapping(raw, where="report")
+    m = _as_mapping(raw, where=where)
     return ReportSpec(
         path=(str(m["path"]) if m.get("path") is not None else None),
         format=(str(m["format"]) if m.get("format") is not None else None),
         adapter=(str(m["adapter"]) if m.get("adapter") is not None else None),
         capture=(str(m["capture"]) if m.get("capture") is not None else None),
+        optional=bool(m.get("optional", False)),
     )
 
 
@@ -314,9 +315,19 @@ def _parse_verify(doc: Mapping[str, Any]) -> VerifySpec | None:
     if raw is None:
         return None
     m = _as_mapping(raw, where="verify")
+    if m.get("report") is not None and m.get("reports") is not None:
+        raise LanguageProfileError(
+            "verify: declares both 'report' (singular) and 'reports' (plural) — "
+            "a verify block declares its report(s) in ONE form, not both."
+        )
+    reports = tuple(
+        _parse_report(r, where=f"verify.reports[{i}]")
+        for i, r in enumerate(_as_tuple(m.get("reports")))
+    )
     return VerifySpec(
         command=(str(m["command"]) if m.get("command") is not None else None),
         report=_parse_report(m.get("report")),
+        reports=reports,
         execution_policy=_as_mapping(
             m.get("execution_policy"), where="verify.execution_policy"
         ),

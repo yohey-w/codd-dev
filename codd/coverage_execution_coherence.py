@@ -57,6 +57,25 @@ the report format, the report parse — is a per-profile spec/adapter. A stack
 whose profile declares ``verify_campaign=None`` (Python today) makes the whole
 gate a strict NO-OP for it; its existing verify-stage coherence gates remain its
 backstop, UNCHANGED.
+
+MULTI-REPORT CAMPAIGNS (design: multi-report verify campaigns, 2026-07-02). A
+:class:`~codd.project_types.VerifyCampaignSpec` is an ordered tuple of
+:class:`~codd.project_types.VerifyCampaignStep`, each with one-or-more
+:class:`~codd.project_types.CampaignReportSpec` artifacts — Maven's Surefire/
+Failsafe split is ONE invocation writing TWO report roots, not two invocations.
+Every single-report profile (TS/C#/C++/Go's extension point) stays on the
+original flat-field shape via :meth:`~codd.project_types.VerifyCampaignSpec.resolved_steps`,
+byte-identical. THE DECLARATION DISCIPLINE THIS BUYS FRESHNESS: an adapter may
+only ever read a path the campaign DECLARED (a ``CampaignReportSpec.relpath`` —
+see :func:`run_verify_campaign`'s up-front clear-every-declared-path step). A
+root the campaign does not declare is a root :func:`run_verify_campaign` does
+not clear, so an adapter that quietly reads a "conventional sibling" directory
+the campaign never named (e.g. a ``surefire-xml`` adapter that also peeked at
+``failsafe-reports/`` without that path being a declared, cleared
+``CampaignReportSpec``) could let a STALE prior run's evidence sail straight
+into this run's verdict — the exact hazard multi-root stale-clearing exists to
+close. Every report an adapter may read MUST be declared, in the profile, as
+its own report artifact.
 """
 
 from __future__ import annotations
@@ -914,14 +933,57 @@ class CampaignError(RuntimeError):
 
 
 @dataclass
+class CampaignReportRun:
+    """Outcome of clearing + producing + parsing ONE declared report artifact.
+
+    ``execution`` is ``None`` when the report is ``optional`` AND contributed no
+    evidence (absent, or present-but-unparseable — see :func:`run_verify_campaign`);
+    a non-``optional`` report always has an ``execution`` when a
+    :class:`CampaignReportRun` for it exists at all (any other outcome raises
+    :class:`CampaignError` before one is constructed).
+    """
+
+    spec: Any  # a project_types.CampaignReportSpec (duck-typed — see module docstring)
+    report_path: Path
+    produced: bool
+    execution: RunnerExecution | None
+
+
+@dataclass
+class CampaignStepRun:
+    """Outcome of running ONE campaign step (one command invocation)."""
+
+    command: str
+    exit_code: int
+    output_tail: str
+    reports: tuple[CampaignReportRun, ...]
+
+
+@dataclass
 class CampaignRun:
-    """Outcome of executing a verify campaign command."""
+    """Outcome of executing a verify campaign (one or more steps).
+
+    Generalized (2026-07-02) from one command/one report to N steps/N reports;
+    every field below keeps its ORIGINAL meaning for a single-step/single-report
+    campaign (every profile before this generalization), so existing call sites
+    are unaffected: ``command`` is that one step's display string, ``exit_code``
+    is that one step's exit code, ``report_path`` is that one report's path, and
+    ``execution`` is that one report's parsed evidence — unchanged, byte-for-byte.
+    For a multi-step/multi-report campaign, ``command``/``output_tail`` join every
+    step's in order, ``exit_code`` is the WORST across steps (the first non-zero,
+    else 0), ``report_path`` is the FIRST declared report's path, and
+    ``execution`` is the MERGED evidence (see :func:`run_verify_campaign`) — the
+    per-step/per-report detail is always available via ``steps``.
+    """
 
     command: str
     exit_code: int
     report_path: Path
     execution: RunnerExecution
     output_tail: str = ""
+    #: Per-step, per-report detail (always populated, even for a single-step
+    #: campaign — a uniform introspection point regardless of campaign shape).
+    steps: tuple[CampaignStepRun, ...] = ()
 
 
 def _campaign_timeout_seconds(config: dict[str, Any] | None) -> float:
@@ -937,6 +999,48 @@ def _campaign_timeout_seconds(config: dict[str, Any] | None) -> float:
     return DEFAULT_CAMPAIGN_TIMEOUT_SECONDS
 
 
+def _report_produced(report_path: Path) -> bool:
+    """"Produced a report" is a filesystem-shape question, not a language one: a
+    file must be non-empty; a directory (Maven Surefire's one-file-per-class
+    convention) must contain at least one entry. Either empty case is
+    indistinguishable from "wrote nothing" and must fail exactly like a missing
+    path — never a silent pass.
+    """
+    return (report_path.is_file() and report_path.stat().st_size > 0) or (
+        report_path.is_dir() and any(report_path.iterdir())
+    )
+
+
+def _clear_stale_report(report_path: Path) -> None:
+    """Remove a stale report (file OR directory) before this run — fail-closed.
+
+    A stale report from a prior run must never be mistaken for this run's
+    evidence. The report shape is runner-defined, not language-defined: a single
+    file (vitest JSON, C#'s ``.trx``) unlinks; a directory of per-class files
+    (Maven Surefire's ``target/surefire-reports/``) is removed wholesale so no
+    stale sibling file survives into this run's parse.
+
+    An unremovable path (permission-locked, mid-write by another process, ...)
+    is an observability hazard in its own right — "we cannot guarantee what we
+    read next is THIS run's evidence" — so it raises :class:`CampaignError`
+    (mirroring :mod:`codd.languages.verify_executor`'s identical guard) rather
+    than escaping as a raw, uncaught ``OSError``.
+    """
+    try:
+        if report_path.is_dir():
+            shutil.rmtree(report_path)
+        else:
+            report_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise CampaignError(
+            f"could not remove stale report at {report_path} before this run: {exc} "
+            "(an unremovable stale report is an observability hazard — we cannot "
+            "guarantee what we read next is this run's evidence)"
+        ) from exc
+
+
 def run_verify_campaign(
     project_root: Path | str,
     profile: Any,
@@ -944,21 +1048,69 @@ def run_verify_campaign(
     config: dict[str, Any] | None = None,
     echo: Callable[[str], None] = print,
 ) -> CampaignRun:
-    """Execute the profile-owned verify campaign and parse its report.
+    """Execute the profile-owned verify campaign (one or more steps) and parse its
+    report(s).
 
-    Runs ``profile.verify_campaign``'s resolved command from the project root,
-    then parses the machine-readable report through the per-profile runner
-    adapter. ANTI-FALSE-GREEN: a campaign that produced NO report, an UNREADABLE
-    report, or an empty-execution report (collected 0 tests) is a :class:`CampaignError`
-    (a harness/observability failure), NEVER a silent pass. The command's own exit
-    code is captured AND consulted by ``enforce_campaign_clean_execution``
-    (contract verify.campaign.clean_execution.v1): a non-zero exit, or ANY failed
-    executed test file, hard-fails there — independent of the per-VB coherence
-    gate, which alone would miss a failing test that covers no declared VB.
+    Generalized (2026-07-02) from "one command → one report" to an ordered
+    sequence of :class:`~codd.project_types.VerifyCampaignStep`, each with
+    one-or-more report artifacts (Maven: one ``mvn verify`` invocation writing
+    BOTH ``surefire-reports/`` and ``failsafe-reports/``), while staying
+    BYTE-IDENTICAL in behavior for every single-step/single-report campaign
+    (every profile before this generalization). Order of operations (design
+    "Anti-false-green integrity for multiple roots"):
+
+      1. CLEAR every declared report path across EVERY step, UP FRONT, before any
+         step runs (dir-aware; an unremovable path is a :class:`CampaignError`,
+         fail-closed — see :func:`_clear_stale_report`). Doing this up front,
+         before running ANY step, means nothing THIS run writes can ever be
+         deleted by this run's own cleanup, so overlapping/nested report roots
+         across steps are harmless.
+      2. RUN each step's command, in order, each under the SAME configured
+         timeout (a per-step budget, not a shared/divided one).
+      3. For each report a step declares: check it was PRODUCED (see
+         :func:`_report_produced`). An absent, non-``optional`` report — or a
+         report that IS produced but fails to parse
+         (:class:`RunnerReportUnsupported`), regardless of ``optional`` — is a
+         :class:`CampaignError`. An ``optional`` report that is absent, OR that
+         is present but fails to parse, contributes ZERO evidence (no
+         :class:`RunnerExecution`) rather than failing the campaign — the SAME
+         tolerance for BOTH shapes is deliberate: Maven's Failsafe plugin
+         ALWAYS writes a ``failsafe-summary.xml`` even with zero ``*IT``
+         classes (a real, non-empty file whose root is ``<failsafe-summary>``,
+         not ``<testsuite>`` — confirmed via a throwaway Maven project during
+         this change), so "absent" alone would never actually trigger for a
+         unit-only Java project; treating "present but not a real testsuite
+         document" the same as "absent" is what makes ``optional: true``
+         deliver its stated purpose. This is safety-preserving, not a
+         loosened gate: whether an e2e surface that NEEDED this evidence
+         actually exists is decided DOWNSTREAM by reconciliation (the
+         ``e2e_scan_zero`` observability check + per-VB coherence), which
+         fires identically regardless of WHY the evidence is missing.
+      4. MERGE every report's execution into ONE :class:`RunnerExecution`:
+         ``failed`` = the union of every failed file; ``passed`` = the union of
+         every passed file MINUS ``failed`` (taint dominates — the SAME rule
+         every adapter already applies WITHIN one report); ``passed_cases`` =
+         the union of every passed-case key; ``total_cases`` / ``passed_cases``
+         (counts) are summed; ``test_level_available`` is the CONSERVATIVE
+         ``all(...)`` across every report that contributed evidence, so a merge
+         is trusted for per-case reconciliation only when EVERY contributing
+         report supports it.
+      5. The SAME zero-evidence guard as before, applied to the MERGED result: a
+         campaign whose merged report shows 0 total_cases and 0 executed files
+         is a :class:`CampaignError` — an empty-but-present OPTIONAL report can
+         never, by itself, trigger this (only a WHOLLY silent campaign can).
+
+    The command's own exit code is the WORST across steps (the first non-zero,
+    else 0) and is captured AND consulted by ``enforce_campaign_clean_execution``
+    (contract verify.campaign.clean_execution.v1): a non-zero exit from ANY step,
+    or ANY failed executed test file, hard-fails there — independent of the
+    per-VB coherence gate, which alone would miss a failing test that covers no
+    declared VB.
 
     Caller contract: only invoke when ``profile.verify_campaign`` is not None and
-    ``profile.runner_report_adapter()`` resolves. A None campaign/adapter is the
-    caller's NO-OP branch (the gate does not apply to that stack).
+    every declared report's format resolves an adapter (see
+    ``certify_verify_campaign_observable``). A None campaign is the caller's
+    NO-OP branch (the gate does not apply to that stack).
     """
 
     project_root = Path(project_root).resolve()
@@ -967,113 +1119,225 @@ def run_verify_campaign(
     campaign = getattr(profile, "verify_campaign", None)
     if campaign is None:
         raise CampaignError("profile declares no verify_campaign (caller must NO-OP)")
-    adapter = profile.runner_report_adapter()
-    if adapter is None:
+    steps = list(campaign.resolved_steps())
+    if not steps:
         raise CampaignError(
-            f"no runner-report adapter for campaign report_format "
-            f"{getattr(campaign, 'report_format', None)!r} — cannot read campaign executions"
+            "verify_campaign declares no steps (a campaign with nothing to run "
+            "cannot be observed)"
+        )
+
+    # Fail fast — BEFORE clearing/running anything — when any declared report's
+    # format has no registered adapter (mirrors the single-report check this
+    # replaces; generalized to EVERY report across EVERY step).
+    unresolved_formats = sorted(
+        {
+            report.format
+            for step in steps
+            for report in step.reports
+            if resolve_runner_report_adapter(report.format) is None
+        }
+    )
+    if unresolved_formats:
+        raise CampaignError(
+            f"no runner-report adapter for campaign report format(s) {unresolved_formats!r} "
+            "— cannot read this campaign's executions"
         )
 
     test_root = getattr(profile, "test_root", "tests")
-    report_path = project_root / campaign.report_relpath
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    # A stale report from a prior run must never be mistaken for this run's
-    # evidence — remove it first so a campaign that silently writes nothing fails
-    # the "no report" check instead of reusing old executions. The report shape
-    # is runner-defined, not language-defined: a single file (vitest JSON, C#
-    # .trx) unlinks; a directory of per-class files (Maven Surefire's
-    # ``target/surefire-reports/``) is removed wholesale so no stale sibling
-    # file survives into this run's parse.
-    if report_path.is_dir():
-        shutil.rmtree(report_path)
-    else:
-        try:
-            report_path.unlink()
-        except FileNotFoundError:
-            pass
-    # Design A — the campaign command is EITHER a shell string (vitest/go: shell=True,
-    # ``{test_root}``/``{report}`` substituted) OR an argv list (C#/dotnet: shell=False so
-    # an argument with shell metacharacters — ``trx;LogFileName=test.trx`` — is passed
-    # VERBATIM, never split by a shell). The report path is independent of the command (a
-    # single-file report at ``report_relpath`` the runner writes — C#'s ``.trx``).
     timeout = _campaign_timeout_seconds(config)
-    use_argv = getattr(campaign, "command_argv", None) is not None
-    if use_argv:
-        argv = campaign.resolve_argv(test_root=test_root, report_path=campaign.report_relpath)
-        display = shlex.join(argv)
-    else:
-        shell_command = campaign.resolve_command(
-            test_root=test_root, report_path=campaign.report_relpath
-        )
-        display = shell_command
-    echo(f"[greenfield] verify: running coverage-execution campaign — {display}")
-    try:
-        completed = subprocess.run(
-            argv if use_argv else shell_command,
-            shell=not use_argv,
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise CampaignError(
-            f"verify campaign timed out after {timeout:g}s: {display}"
-        ) from exc
 
-    output_tail = _output_tail(completed.stdout, completed.stderr)
-    # "Produced a report" is a filesystem-shape question, not a language one:
-    # a file must be non-empty; a directory (Maven Surefire's one-file-per-class
-    # convention) must contain at least one entry. Either empty case is
-    # indistinguishable from "wrote nothing" and must fail exactly like a
-    # missing path — never a silent pass.
-    report_produced = (
-        report_path.is_file() and report_path.stat().st_size > 0
-    ) or (report_path.is_dir() and any(report_path.iterdir()))
-    if not report_produced:
-        raise CampaignError(
-            f"verify campaign produced no report at {campaign.report_relpath} "
-            f"(exit {completed.returncode}): {display}\n{output_tail}"
+    # (1) Clear EVERY declared report path across EVERY step, up front (see the
+    # docstring's ordering rationale) — before any step runs.
+    all_report_paths: list[Path] = []
+    for step in steps:
+        for report in step.reports:
+            report_path = project_root / report.relpath
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            _clear_stale_report(report_path)
+            all_report_paths.append(report_path)
+
+    # (2)+(3) Run each step, in order; check + parse its report(s).
+    step_runs: list[CampaignStepRun] = []
+    exit_codes: list[int] = []
+    for step in steps:
+        # Design A — a step's command is EITHER a shell string (vitest/go:
+        # shell=True, ``{test_root}``/``{report}`` substituted) OR an argv list
+        # (C#/Java/dotnet: shell=False so an argument with shell metacharacters —
+        # ``trx;LogFileName=test.trx`` — is passed VERBATIM, never split by a
+        # shell). ``{report}`` (when referenced) resolves against the step's
+        # FIRST declared report (see ``VerifyCampaignStep``'s docstring).
+        first_report_relpath = step.reports[0].relpath
+        use_argv = step.command_argv is not None
+        if use_argv:
+            argv = step.resolve_argv(test_root=test_root, report_path=first_report_relpath)
+            display = shlex.join(argv)
+        else:
+            shell_command = step.resolve_command(
+                test_root=test_root, report_path=first_report_relpath
+            )
+            display = shell_command
+        echo(f"[greenfield] verify: running coverage-execution campaign step — {display}")
+        try:
+            completed = subprocess.run(
+                argv if use_argv else shell_command,
+                shell=not use_argv,
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CampaignError(
+                f"verify campaign step timed out after {timeout:g}s: {display}"
+            ) from exc
+
+        output_tail = _output_tail(completed.stdout, completed.stderr)
+        exit_codes.append(completed.returncode)
+
+        report_runs: list[CampaignReportRun] = []
+        for report in step.reports:
+            report_path = project_root / report.relpath
+            if str(report.capture or "").strip().lower() == "stdout":
+                # The command streams its machine-readable report to stdout (the
+                # documented extension point for a future stdout-reporting
+                # language opting into a multi-report campaign, e.g. a Go-shaped
+                # ``go test -json``) — persist it before checking "produced"
+                # (mirrors codd.languages.verify_executor's identical mechanism;
+                # this generalization closes the gap where the legacy
+                # ``_synthesize_verify_campaign`` silently dropped ``capture``).
+                try:
+                    report_path.write_text(completed.stdout or "", encoding="utf-8")
+                except OSError as exc:
+                    raise CampaignError(
+                        f"could not persist captured stdout to {report_path}: {exc}"
+                    ) from exc
+            produced = _report_produced(report_path)
+            if not produced:
+                if report.optional:
+                    report_runs.append(
+                        CampaignReportRun(
+                            spec=report, report_path=report_path, produced=False, execution=None
+                        )
+                    )
+                    continue
+                raise CampaignError(
+                    f"verify campaign produced no report at {report.relpath} "
+                    f"(exit {completed.returncode}): {display}\n{output_tail}"
+                )
+            adapter = resolve_runner_report_adapter(report.format)
+            try:
+                execution = adapter.parse(report_path, project_root=project_root)
+            except RunnerReportUnsupported as exc:
+                if report.optional:
+                    # Present but structurally empty/unreadable — tolerated ONLY
+                    # for an optional report (see the docstring's Failsafe-
+                    # summary example). Contributes zero evidence, never a hard
+                    # failure.
+                    report_runs.append(
+                        CampaignReportRun(
+                            spec=report, report_path=report_path, produced=True, execution=None
+                        )
+                    )
+                    continue
+                raise CampaignError(str(exc)) from exc
+            report_runs.append(
+                CampaignReportRun(
+                    spec=report, report_path=report_path, produced=True, execution=execution
+                )
+            )
+
+        step_runs.append(
+            CampaignStepRun(
+                command=display,
+                exit_code=completed.returncode,
+                output_tail=output_tail,
+                reports=tuple(report_runs),
+            )
         )
-    try:
-        execution = adapter.parse(report_path, project_root=project_root)
-    except RunnerReportUnsupported as exc:
-        raise CampaignError(str(exc)) from exc
-    if execution.total_cases == 0 and not execution.executed_files:
-        # The campaign ran but the report shows no executed tests at all — the
-        # JS-runner "collected 0 tests" hard-fail, generalized to the report.
+
+    # (4) Merge every report's execution into ONE RunnerExecution.
+    executions = [r.execution for s in step_runs for r in s.reports if r.execution is not None]
+    passed_files: set[str] = set()
+    failed_files: set[str] = set()
+    passed_case_keys: set[str] = set()
+    total_cases = 0
+    passed_count = 0
+    for ex in executions:
+        passed_files |= ex.executed_passed_files
+        failed_files |= ex.executed_failed_files
+        passed_case_keys |= ex.executed_passed_cases
+        total_cases += ex.total_cases
+        passed_count += ex.passed_cases
+    passed_files -= failed_files  # taint dominates across reports, same as within one
+    merged = RunnerExecution(
+        executed_passed_files=frozenset(passed_files),
+        executed_failed_files=frozenset(failed_files),
+        executed_passed_cases=frozenset(passed_case_keys),
+        test_level_available=bool(executions) and all(ex.test_level_available for ex in executions),
+        total_cases=total_cases,
+        passed_cases=passed_count,
+    )
+
+    # (5) The SAME zero-evidence guard as before, applied to the MERGED result.
+    if merged.total_cases == 0 and not merged.executed_files:
+        # The campaign ran but the reports show no executed tests at all — the
+        # JS-runner "collected 0 tests" hard-fail, generalized to N reports.
+        joined = "; ".join(s.command for s in step_runs)
         raise CampaignError(
-            f"verify campaign collected/ran 0 tests (report at {campaign.report_relpath} "
-            f"is empty): {display}\n{output_tail}"
+            f"verify campaign collected/ran 0 tests across all step(s)/report(s): {joined}"
         )
+
+    worst_exit_code = next((c for c in exit_codes if c != 0), 0)
     return CampaignRun(
-        command=display,
-        exit_code=completed.returncode,
-        report_path=report_path,
-        execution=execution,
-        output_tail=output_tail,
+        command="; ".join(s.command for s in step_runs),
+        exit_code=worst_exit_code,
+        report_path=all_report_paths[0],
+        execution=merged,
+        output_tail="\n".join(s.output_tail for s in step_runs if s.output_tail),
+        steps=tuple(step_runs),
+    )
+
+
+def _unresolvable_campaign_report_formats(campaign: Any) -> list[str]:
+    """Every declared report format across every resolved step that has NO
+    registered runner-report adapter (deterministic order; empty when all
+    resolve). Pure, side-effect-free — resolves against the registry only.
+    """
+    try:
+        steps = campaign.resolved_steps()
+    except Exception:  # noqa: BLE001 — a malformed campaign resolves to "none observable".
+        return ["<unresolvable campaign shape>"]
+    return sorted(
+        {
+            report.format
+            for step in steps
+            for report in step.reports
+            if resolve_runner_report_adapter(report.format) is None
+        }
     )
 
 
 def coherence_gate_applies(profile: Any) -> bool:
     """Whether the coverage-execution coherence gate applies to this stack.
 
-    True only when the profile declares a verify campaign AND a runner-report
-    adapter resolves for its format. Any other case (no campaign — Python today;
-    or a campaign whose format has no adapter yet) is a NO-OP for the gate — the
-    caller skips it (the no-adapter case is surfaced separately as an explicit
-    degrade where it matters, never a silent green for a stack that HAS a campaign
-    but no reader).
+    True only when the profile declares a verify campaign AND EVERY declared
+    report format (across every resolved step — see
+    :meth:`~codd.project_types.VerifyCampaignSpec.resolved_steps`) resolves a
+    runner-report adapter. For a single-report campaign this is exactly the
+    original check (``report_format`` resolves); a multi-report campaign
+    (Java: Surefire + Failsafe, both ``surefire-xml``) requires ALL of them to
+    resolve, not just one. Any other case (no campaign — Python today; or a
+    campaign with an unresolvable format) is a NO-OP for the gate — the caller
+    skips it (the no-adapter case is surfaced separately as an explicit degrade
+    where it matters, never a silent green for a stack that HAS a campaign but
+    no reader for part of its evidence).
     """
 
     campaign = getattr(profile, "verify_campaign", None)
     if campaign is None:
         return False
-    getter = getattr(profile, "runner_report_adapter", None)
-    if not callable(getter):
-        return False
     try:
-        return getter() is not None
+        return not _unresolvable_campaign_report_formats(campaign)
     except Exception:  # noqa: BLE001
         return False
 
@@ -1081,32 +1345,34 @@ def coherence_gate_applies(profile: Any) -> bool:
 def certify_verify_campaign_observable(profile: Any) -> None:
     """HARD GATE (contract verify.campaign.observable.v1; GPT round-2 §3.1).
 
-    A profile that DECLARES a verify campaign but whose ``runner_report_adapter()``
-    is ``None`` cannot have its executions read — the campaign would run and the
-    coherence gate would silently NO-OP (``coherence_gate_applies`` returns False
-    for exactly this state). That is an OBSERVABILITY failure, not a pass: a
-    declared-but-unreadable campaign must honest-fail, never no-op.
+    A profile that DECLARES a verify campaign but has ANY report whose format
+    has no registered adapter cannot have that report's executions read — the
+    campaign would run and the coherence gate would silently NO-OP
+    (``coherence_gate_applies`` returns False for exactly this state). That is
+    an OBSERVABILITY failure, not a pass: a declared-but-partially-unreadable
+    campaign must honest-fail, never no-op.
 
-    Raises :class:`CampaignError` when ``profile.verify_campaign is not None`` AND
-    ``profile.runner_report_adapter() is None``. A profile with NO campaign
-    (Python today) is a legitimate no-op and passes silently; a profile whose
-    campaign HAS an adapter passes. Deterministic, side-effect-free (it runs no
+    Raises :class:`CampaignError` listing EVERY unresolvable format (plural —
+    generalized from the original single-format check so a multi-report
+    campaign's second, third, ... report is held to the SAME fail-closed
+    contract as its first) when ``profile.verify_campaign is not None`` and any
+    declared report format is unresolvable. A profile with NO campaign (Python
+    today) is a legitimate no-op and passes silently; a profile whose campaign's
+    reports ALL resolve passes. Deterministic, side-effect-free (it runs no
     command). The caller wires it BEFORE the campaign runs so the failure is
     surfaced even though ``coherence_gate_applies`` would otherwise skip the stack.
     """
     campaign = getattr(profile, "verify_campaign", None)
     if campaign is None:
         return
-    getter = getattr(profile, "runner_report_adapter", None)
-    adapter = getter() if callable(getter) else None
-    if adapter is None:
-        report_format = getattr(campaign, "report_format", None)
+    unresolved = _unresolvable_campaign_report_formats(campaign)
+    if unresolved:
         raise CampaignError(
-            "verify campaign is declared but its report_format "
-            f"{report_format!r} has no registered runner-report adapter — the "
+            "verify campaign is declared but report format(s) "
+            f"{unresolved!r} have no registered runner-report adapter — the "
             "campaign's executions cannot be observed, so the coverage-execution "
             "coherence gate would silently NO-OP. An unobservable verification is "
-            "not a pass; register an adapter for this report_format (or remove the "
+            "not a pass; register an adapter for each format listed (or remove the "
             "campaign from the profile)."
         )
 

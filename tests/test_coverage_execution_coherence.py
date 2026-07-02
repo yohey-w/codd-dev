@@ -16,6 +16,7 @@ schema without requiring an npm/node toolchain in CI.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from pathlib import Path
 
@@ -666,6 +667,468 @@ def test_run_verify_campaign_errors_when_report_directory_is_empty(tmp_path):
     )
     with pytest.raises(CampaignError):
         run_verify_campaign(project, profile2, echo=lambda _m: None)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Multi-report / multi-step campaigns (design: multi-report verify campaigns,
+# 2026-07-02) — steps × reports, generalized from one command/one report.
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def _write_surefire_suite(reports_dir: Path, classname: str, body: str) -> None:
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    (reports_dir / f"TEST-{classname}.xml").write_text(
+        f'<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="{classname}">\n'
+        f"{body}\n</testsuite>\n",
+        encoding="utf-8",
+    )
+
+
+def test_legacy_campaign_resolved_steps_is_one_step_one_report(tmp_path):
+    """PARITY: a legacy (flat-field) campaign resolves to exactly one step with
+    exactly one report carrying the same relpath/format — the shape every
+    pre-generalization single-report profile (TS/C#/C++/Go's extension point)
+    implicitly had, now made explicit and directly assertable."""
+    campaign = VerifyCampaignSpec(
+        command_template="echo hi",
+        report_relpath=".codd/verify/report.json",
+        report_format="vitest-json",
+    )
+    steps = campaign.resolved_steps()
+    assert len(steps) == 1
+    assert steps[0].command_template == "echo hi"
+    assert len(steps[0].reports) == 1
+    assert steps[0].reports[0].relpath == ".codd/verify/report.json"
+    assert steps[0].reports[0].format == "vitest-json"
+    assert steps[0].reports[0].optional is False
+
+
+def test_verify_campaign_step_requires_exactly_one_command_form():
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    report = CampaignReportSpec(relpath="x.json", format="vitest-json")
+    with pytest.raises(ValueError):
+        VerifyCampaignStep(reports=(report,))  # neither form
+    with pytest.raises(ValueError):
+        VerifyCampaignStep(reports=(report,), command_template="a", command_argv=("b",))  # both
+
+
+def test_verify_campaign_spec_rejects_steps_plus_legacy_fields():
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    step = VerifyCampaignStep(
+        reports=(CampaignReportSpec(relpath="x.json", format="vitest-json"),),
+        command_argv=("echo",),
+    )
+    with pytest.raises(ValueError):
+        VerifyCampaignSpec(steps=(step,), report_relpath="also.json", report_format="vitest-json")
+
+
+def test_one_step_two_reports_merges_evidence_from_both(tmp_path):
+    """The Java shape: ONE invocation, TWO report roots (Surefire + Failsafe) —
+    both attribute into ONE merged RunnerExecution."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    unit_dir = ".codd/verify/surefire-reports"
+    e2e_dir = ".codd/verify/failsafe-reports"
+    command = (
+        f"mkdir -p {unit_dir} {e2e_dir} && "
+        f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="UnitSuite">'
+        f'<testcase classname="UnitSuite" name="a"/></testsuite>\' > {unit_dir}/TEST-UnitSuite.xml && '
+        f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="E2ESuite">'
+        f'<testcase classname="E2ESuite" name="b"/></testsuite>\' > {e2e_dir}/TEST-E2ESuite.xml'
+    )
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    campaign = VerifyCampaignSpec(
+        steps=(
+            VerifyCampaignStep(
+                reports=(
+                    CampaignReportSpec(relpath=unit_dir, format="surefire-xml"),
+                    CampaignReportSpec(relpath=e2e_dir, format="surefire-xml", optional=True),
+                ),
+                command_template=command,
+            ),
+        )
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    run = run_verify_campaign(project, profile2, echo=lambda _m: None)
+    assert run.execution.total_cases == 2
+    assert len(run.steps) == 1
+    assert len(run.steps[0].reports) == 2
+    assert all(r.execution is not None for r in run.steps[0].reports)
+
+
+def test_two_step_campaign_runs_both_commands_in_order(tmp_path):
+    """A campaign with TWO steps (two separate invocations) runs both and merges
+    their evidence — the general N-invocation shape (no current profile emits
+    this; exercised here as a generic fixture, per house policy of not churning
+    the shared contract surface a second time when a real profile needs it)."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    step1_dir = ".codd/verify/step1-reports"
+    step2_dir = ".codd/verify/step2-reports"
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    campaign = VerifyCampaignSpec(
+        steps=(
+            VerifyCampaignStep(
+                reports=(CampaignReportSpec(relpath=step1_dir, format="surefire-xml"),),
+                command_template=(
+                    f"mkdir -p {step1_dir} && "
+                    f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="Step1">'
+                    f'<testcase classname="Step1" name="a"/></testsuite>\' > {step1_dir}/TEST-Step1.xml'
+                ),
+            ),
+            VerifyCampaignStep(
+                reports=(CampaignReportSpec(relpath=step2_dir, format="surefire-xml"),),
+                command_template=(
+                    f"mkdir -p {step2_dir} && "
+                    f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="Step2">'
+                    f'<testcase classname="Step2" name="b"/></testsuite>\' > {step2_dir}/TEST-Step2.xml'
+                ),
+            ),
+        )
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    run = run_verify_campaign(project, profile2, echo=lambda _m: None)
+    assert len(run.steps) == 2
+    assert run.execution.total_cases == 2
+    assert (project / step1_dir / "TEST-Step1.xml").exists()
+    assert (project / step2_dir / "TEST-Step2.xml").exists()
+
+
+def test_optional_absent_report_is_tolerated_green_path(tmp_path):
+    """An ``optional`` report the command never creates contributes zero evidence
+    — NOT a CampaignError — as long as the REQUIRED report has real evidence."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    unit_dir = ".codd/verify/surefire-reports"
+    never_dir = ".codd/verify/failsafe-reports"  # never created by the command
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    campaign = VerifyCampaignSpec(
+        steps=(
+            VerifyCampaignStep(
+                reports=(
+                    CampaignReportSpec(relpath=unit_dir, format="surefire-xml"),
+                    CampaignReportSpec(relpath=never_dir, format="surefire-xml", optional=True),
+                ),
+                command_template=(
+                    f"mkdir -p {unit_dir} && "
+                    f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="OnlyUnit">'
+                    f'<testcase classname="OnlyUnit" name="a"/></testsuite>\' > {unit_dir}/TEST-OnlyUnit.xml'
+                ),
+            ),
+        )
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    run = run_verify_campaign(project, profile2, echo=lambda _m: None)
+    assert run.execution.total_cases == 1
+    assert not (project / never_dir).exists()
+
+
+def test_required_absent_report_still_raises_even_alongside_optional(tmp_path):
+    """A NON-optional report's absence is still a hard CampaignError, even in a
+    multi-report step where a sibling optional report is legitimately absent."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    required_dir = ".codd/verify/surefire-reports"
+    optional_dir = ".codd/verify/failsafe-reports"
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    campaign = VerifyCampaignSpec(
+        steps=(
+            VerifyCampaignStep(
+                reports=(
+                    CampaignReportSpec(relpath=required_dir, format="surefire-xml"),
+                    CampaignReportSpec(relpath=optional_dir, format="surefire-xml", optional=True),
+                ),
+                command_template="true",  # writes neither report
+            ),
+        )
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    with pytest.raises(CampaignError):
+        run_verify_campaign(project, profile2, echo=lambda _m: None)
+
+
+def test_optional_report_present_but_unparseable_is_tolerated(tmp_path):
+    """PREFLIGHT-VERIFIED SHAPE: Maven's Failsafe plugin ALWAYS writes a
+    ``failsafe-summary.xml`` (root ``<failsafe-summary>``, not ``<testsuite>``)
+    even with zero ``*IT`` classes — a real, non-empty, but structurally
+    unparseable-as-a-testsuite report. An ``optional`` report in exactly this
+    shape must be tolerated as zero evidence, not raise — this is what makes
+    ``optional: true`` deliver its actual purpose given Maven's real behavior."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    required_dir = ".codd/verify/surefire-reports"
+    summary_only_dir = ".codd/verify/failsafe-reports"
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    campaign = VerifyCampaignSpec(
+        steps=(
+            VerifyCampaignStep(
+                reports=(
+                    CampaignReportSpec(relpath=required_dir, format="surefire-xml"),
+                    CampaignReportSpec(relpath=summary_only_dir, format="surefire-xml", optional=True),
+                ),
+                command_template=(
+                    f"mkdir -p {required_dir} {summary_only_dir} && "
+                    f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="OnlyUnit">'
+                    f'<testcase classname="OnlyUnit" name="a"/></testsuite>\' > {required_dir}/TEST-OnlyUnit.xml && '
+                    f'printf \'%s\' \'<?xml version="1.0" encoding="UTF-8"?>'
+                    f'<failsafe-summary result="254"><completed>0</completed></failsafe-summary>\' '
+                    f"> {summary_only_dir}/failsafe-summary.xml"
+                ),
+            ),
+        )
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    run = run_verify_campaign(project, profile2, echo=lambda _m: None)
+    assert run.execution.total_cases == 1  # only the required report's case counted
+
+
+def test_merged_taint_dominates_across_reports(tmp_path):
+    """The SAME relfile reported PASSED by one report and FAILED by another
+    merges to FAILED — taint dominates across reports, the same rule every
+    adapter already applies WITHIN one report."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    report_a = ".codd/verify/report-a"
+    report_b = ".codd/verify/report-b"
+    _touch_java_class = project / "src/test/java/com/example/FlakyTest.java"
+    _touch_java_class.parent.mkdir(parents=True, exist_ok=True)
+    _touch_java_class.write_text("package com.example;\npublic class FlakyTest {}\n", encoding="utf-8")
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    campaign = VerifyCampaignSpec(
+        steps=(
+            VerifyCampaignStep(
+                reports=(
+                    CampaignReportSpec(relpath=report_a, format="surefire-xml"),
+                    CampaignReportSpec(relpath=report_b, format="surefire-xml"),
+                ),
+                command_template=(
+                    f"mkdir -p {report_a} {report_b} && "
+                    f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="com.example.FlakyTest">'
+                    f'<testcase classname="com.example.FlakyTest" name="passOnA"/></testsuite>\' '
+                    f"> {report_a}/TEST-com.example.FlakyTest.xml && "
+                    f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="com.example.FlakyTest">'
+                    f'<testcase classname="com.example.FlakyTest" name="failOnB">'
+                    f'<failure message="boom">trace</failure></testcase></testsuite>\' '
+                    f"> {report_b}/TEST-com.example.FlakyTest.xml"
+                ),
+            ),
+        )
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    run = run_verify_campaign(project, profile2, echo=lambda _m: None)
+    rel = "src/test/java/com/example/FlakyTest.java"
+    assert rel in run.execution.executed_failed_files
+    assert rel not in run.execution.executed_passed_files
+
+
+def test_zero_evidence_across_all_reports_raises(tmp_path):
+    """All reports optional-and-absent ⇒ the merged report shows 0 total_cases and
+    0 executed files ⇒ CampaignError (a wholly silent campaign still hard-fails;
+    only a PRESENT report can be tolerated as zero evidence, never a totally
+    empty campaign)."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    only_dir = ".codd/verify/failsafe-reports"
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    campaign = VerifyCampaignSpec(
+        steps=(
+            VerifyCampaignStep(
+                reports=(CampaignReportSpec(relpath=only_dir, format="surefire-xml", optional=True),),
+                command_template="true",  # writes nothing
+            ),
+        )
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    with pytest.raises(CampaignError):
+        run_verify_campaign(project, profile2, echo=lambda _m: None)
+
+
+def test_unremovable_stale_report_raises_campaign_error_before_any_command_runs(tmp_path):
+    """An unremovable stale report path is a CampaignError raised BEFORE any step
+    command runs — fail-closed (mirrors ``verify_executor.py``'s identical guard;
+    fixes the previously-unguarded ``shutil.rmtree`` in this function)."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    locked_parent = project / ".codd" / "verify" / "locked"
+    stale_dir = locked_parent / "surefire-reports"
+    (stale_dir).mkdir(parents=True, exist_ok=True)
+    (stale_dir / "TEST-Stale.xml").write_text("<testsuite/>", encoding="utf-8")
+    ran_marker = project / "should_never_be_created.txt"
+    campaign = VerifyCampaignSpec(
+        command_template=f"touch {ran_marker.name}",
+        report_relpath=".codd/verify/locked/surefire-reports",
+        report_format="surefire-xml",
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    original_mode = locked_parent.stat().st_mode
+    os.chmod(locked_parent, 0o555)  # remove write perm on the PARENT dir
+    try:
+        with pytest.raises(CampaignError, match="could not remove stale report"):
+            run_verify_campaign(project, profile2, echo=lambda _m: None)
+        assert not ran_marker.exists()  # cleared BEFORE any step command ran
+    finally:
+        os.chmod(locked_parent, original_mode)
+
+
+def test_second_step_timeout_raises_campaign_error(tmp_path):
+    """A timeout on a LATER step (not just the first) is a CampaignError — the
+    per-step timeout applies to every step, not just the campaign's first one."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    step1_dir = ".codd/verify/step1-reports"
+    step2_dir = ".codd/verify/step2-reports"
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    campaign = VerifyCampaignSpec(
+        steps=(
+            VerifyCampaignStep(
+                reports=(CampaignReportSpec(relpath=step1_dir, format="surefire-xml"),),
+                command_template=(
+                    f"mkdir -p {step1_dir} && "
+                    f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="Step1">'
+                    f'<testcase classname="Step1" name="a"/></testsuite>\' > {step1_dir}/TEST-Step1.xml'
+                ),
+            ),
+            VerifyCampaignStep(
+                reports=(CampaignReportSpec(relpath=step2_dir, format="surefire-xml"),),
+                command_template=f"sleep 5 && mkdir -p {step2_dir}",
+            ),
+        )
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    config = {"verify": {"campaign_timeout_seconds": 0.5}}
+    with pytest.raises(CampaignError, match="timed out"):
+        run_verify_campaign(project, profile2, config=config, echo=lambda _m: None)
+
+
+def test_stale_optional_evidence_never_leaks_into_the_verdict(tmp_path):
+    """ADVERSARIAL (design §5): yesterday's green run left an e2e-shaped report
+    populated; today the campaign legitimately produces none for it (e2e source
+    removed / skipped). The stale report is cleared up-front and NOT recreated;
+    because it is ``optional`` this is not a CampaignError — but the coherence
+    gate downstream still REDS honestly (0 e2e files executed against a real e2e
+    surface), proving the stale evidence never had a path into the verdict."""
+    project = _ts_project(tmp_path)
+    profile = _ts_profile(project)
+    unit_dir = ".codd/verify/surefire-reports"
+    e2e_dir = ".codd/verify/failsafe-reports"
+    # Stale "prior run" evidence for the e2e report, pre-existing before this run.
+    _write_surefire_suite(
+        project / e2e_dir,
+        "StaleE2E",
+        '  <testcase classname="StaleE2E" name="staleButGreen"/>',
+    )
+    from codd.project_types import CampaignReportSpec, VerifyCampaignStep
+
+    campaign = VerifyCampaignSpec(
+        steps=(
+            VerifyCampaignStep(
+                reports=(
+                    CampaignReportSpec(relpath=unit_dir, format="surefire-xml"),
+                    CampaignReportSpec(relpath=e2e_dir, format="surefire-xml", optional=True),
+                ),
+                # Only ever (re)writes the unit report — this run's e2e legitimately
+                # produces nothing (mirrors an IT source removed/skipped today).
+                command_template=(
+                    f"mkdir -p {unit_dir} && "
+                    f'printf \'%s\' \'<?xml version="1.0"?><testsuite name="UnitOnly">'
+                    f'<testcase classname="UnitOnly" name="a"/></testsuite>\' > {unit_dir}/TEST-UnitOnly.xml'
+                ),
+            ),
+        )
+    )
+    profile2 = LayoutProfile(
+        language=profile.language,
+        package_name=profile.package_name,
+        source_root=profile.source_root,
+        package_root=profile.package_root,
+        test_root=profile.test_root,
+        verify_campaign=campaign,
+    )
+    run = run_verify_campaign(project, profile2, echo=lambda _m: None)
+    # The stale directory was cleared and never recreated.
+    assert not (project / e2e_dir).exists()
+    # The stale case never appears anywhere in this run's evidence.
+    assert "StaleE2E" not in run.command
+    assert run.execution.total_cases == 1
+    # Downstream: build_coherence_report still sees the REAL e2e test file
+    # (tests/e2e/cli.e2e.test.ts, from _ts_project) with ZERO execution credit —
+    # an honest RED, never a false green from the stale evidence.
+    report = build_coherence_report(project, profile=profile, execution=run.execution)
+    assert report.passed is False
+    assert any(err.kind == "e2e_scan_zero" for err in report.observability_errors)
 
 
 def test_enforce_raises_coherence_error_on_unexecuted_e2e(tmp_path):

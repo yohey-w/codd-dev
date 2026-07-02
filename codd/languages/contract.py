@@ -126,6 +126,14 @@ def _declared_adapter_requirements(
         reqs.append(
             AdapterRequirement(KIND_RUNNER_REPORT, verify.report.adapter, "verify.report.adapter")
         )
+    if verify is not None:
+        for i, report in enumerate(verify.reports):
+            if report.adapter:
+                reqs.append(
+                    AdapterRequirement(
+                        KIND_RUNNER_REPORT, report.adapter, f"verify.reports[{i}].adapter"
+                    )
+                )
 
     for cmd_id, cmd in profile.commands.items():
         if cmd.report is not None and cmd.report.adapter:

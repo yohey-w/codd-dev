@@ -191,12 +191,25 @@ class ToolchainSpec:
 
 @dataclass(frozen=True)
 class ReportSpec:
-    """Machine-readable report descriptor for a command/verify (design §1.4/1.8)."""
+    """Machine-readable report descriptor for a command/verify (design §1.4/1.8).
+
+    ``optional`` (added 2026-07-02 for multi-report verify campaigns): this
+    report's ABSENCE is tolerated as "no evidence from this report" rather than a
+    hard verify-campaign failure — e.g. a unit-only Maven project legitimately
+    produces no Failsafe integration-test evidence. Requiredness of EVIDENCE
+    (does an e2e surface exist that needed this report?) stays downstream, in
+    coverage-execution reconciliation — this flag only ever governs report
+    presence, never VB-verification sufficiency, so a wrongly-``optional`` report
+    can cause an honest RED, never a false GREEN. ``False`` (required, the
+    invariant every profile declared before this field existed) for every
+    existing profile.
+    """
 
     path: str | None = None
     format: str | None = None
     adapter: str | None = None
     capture: str | None = None
+    optional: bool = False
 
 
 @dataclass(frozen=True)
@@ -367,13 +380,33 @@ class VerifySpec:
     ``command`` references a command id in ``LanguageProfile.commands``.
     ``execution_policy`` is the generic anti-false-green policy and is kept
     loose (adapter/gate-facing).
+
+    ``report`` (singular) is the ORIGINAL, still-supported form: one command
+    invocation writes one machine-readable report — every profile but Java
+    declares this. ``reports`` (plural, added 2026-07-02) is the general form: one
+    command invocation may leave behind MULTIPLE report artifacts (Maven's
+    Surefire/Failsafe split — one ``mvn verify``, two report roots). A profile
+    declares EXACTLY ONE of the two (the loader rejects declaring both); use
+    :meth:`resolved_reports` to read "this profile's reports" as one uniform
+    tuple regardless of which form was declared.
     """
 
     command: str | None = None
     report: ReportSpec | None = None
+    reports: tuple[ReportSpec, ...] = ()
     execution_policy: Mapping[str, Any] = field(
         default_factory=lambda: MappingProxyType({})
     )
+
+    def resolved_reports(self) -> tuple[ReportSpec, ...]:
+        """This verify block's report(s), plural-or-singular normalized.
+
+        ``reports`` when declared; otherwise ``report`` wrapped as a one-tuple;
+        empty when neither is declared.
+        """
+        if self.reports:
+            return self.reports
+        return (self.report,) if self.report is not None else ()
 
 
 # ---------------------------------------------------------------------------

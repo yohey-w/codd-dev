@@ -424,65 +424,96 @@ _VALID_ORACLE_KINDS = {"compiler", "composite"}
 # cases, reconcile with static coverage) is core. A stack whose profile declares
 # ``verify_campaign=None`` (Python today) keeps the existing verify-stage path
 # unchanged — the coherence gate is then a strict NO-OP for it.
-_VALID_RUNNER_REPORT_FORMATS = {"vitest-json", "pytest-junit-xml", "go-test-json"}
 
 
 @dataclass(frozen=True)
-class VerifyCampaignSpec:
-    """A stack's harness-owned greenfield verification campaign (profile-driven).
+class CampaignReportSpec:
+    """One machine-readable report artifact a campaign step must leave behind
+    (design: multi-report verify campaigns, 2026-07-02).
 
-    * ``command_template`` — the canonical verify command, run from the project
-      root during the greenfield VERIFY stage. It MUST run the WHOLE VB-bearing
-      test surface (unit AND e2e — never one SUT script) and write a
-      machine-readable report. ``{test_root}`` and ``{report}`` are substituted
-      with the profile's test root and the resolved report path (POSIX, project-
-      relative) before execution. TS: ``npx --no-install vitest run {test_root}
-      --reporter=json --outputFile={report}``.
-    * ``report_relpath`` — where the runner writes its machine-readable report
-      (project-relative; under ``.codd/`` so it is a harness artifact, never the
-      SUT's). The coherence gate reads + parses this.
-    * ``report_format`` — which per-profile adapter parses the report
-      (``vitest-json`` now; ``pytest-junit-xml`` / ``go-test-json`` are the
-      documented extension points). Selects the
-      :class:`~codd.coverage_execution_coherence.RunnerReportAdapter`.
-    * ``requires_node_install`` — whether the BLOCKING dependency-install
-      preflight must run first (TS: yes — vitest/deps must be materialized).
+    Maven's Surefire/Failsafe split is the motivating case: ONE ``mvn verify``
+    invocation writes TWO report directories (``target/surefire-reports/`` for
+    unit tests, ``target/failsafe-reports/`` for ``*IT`` integration tests) — a
+    one-invocation/N-artifact shape shared by any build orchestrator that fans
+    test execution across sub-units (.NET's multi-test-project ``dotnet test``,
+    a multi-suite CTest run).
 
-    The COMMAND + FORMAT are per-language (each runner has its own CLI + report);
-    the MEANING (run the whole VB surface, reconcile executed+passed with static
-    coverage) is core. ``None`` on a profile makes the coherence gate a strict
-    NO-OP for that stack.
+    * ``relpath`` — project-relative; a FILE or a DIRECTORY (runner-defined shape
+      — Surefire/Failsafe write a directory of one file per test class).
+    * ``format`` — the runner-report registry key
+      (:func:`~codd.coverage_execution_coherence.resolve_runner_report_adapter`);
+      Surefire and Failsafe share ONE format (``surefire-xml`` — Failsafe emits
+      the identical ``TEST-*.xml`` schema), so this is data, never a second
+      adapter to write.
+    * ``capture`` — mirrors :class:`~codd.languages.profile.ReportSpec.capture`
+      (``"stdout"`` ⇒ the step's captured stdout is persisted to ``relpath`` after
+      it runs). Carrying this through closes a gap in the pre-generalization
+      ``_synthesize_verify_campaign``, which silently dropped ``report.capture``
+      (harmless while every synthesized campaign was file-written, but would have
+      silently broken a future stdout-reporting language the day it opts in).
+    * ``optional`` — this report's ABSENCE (or an unparseable-but-present report;
+      see :func:`~codd.coverage_execution_coherence.run_verify_campaign`) is
+      tolerated as "no evidence from this report", never presumed green. Whether
+      an e2e surface that NEEDED this evidence actually exists is decided
+      DOWNSTREAM, by reconciliation (:mod:`codd.coverage_execution_coherence`'s
+      ``e2e_scan_zero`` observability check + per-VB reconciliation) — never by
+      this flag. A wrongly-``optional`` report can therefore cause an honest RED,
+      never a false GREEN.
     """
 
-    # A campaign declares its command in ONE of two forms (design A — argv support):
-    #   * ``command_template`` — a SHELL string (vitest/go), run with ``shell=True``;
-    #     ``{test_root}`` / ``{report}`` are substituted before execution.
-    #   * ``command_argv``     — an ARGV list (C#/dotnet), run with ``shell=False`` so
-    #     an argument containing shell metacharacters (``trx;LogFileName=test.trx``)
-    #     is passed VERBATIM, never split/interpreted by a shell. ``{test_root}`` /
-    #     ``{report}`` are substituted per element (only elements that contain a
-    #     ``{`` placeholder are formatted, so a literal ``;`` argv element is safe).
-    # Exactly one must be set (validated in ``__post_init__``). The report path is
-    # INDEPENDENT of the command (a single-file report at ``report_relpath`` — C#'s
-    # ``.trx`` is written by the runner to a fixed path, not via a ``{report}`` arg).
-    report_relpath: str
-    report_format: str
+    relpath: str
+    format: str
+    capture: str | None = None
+    optional: bool = False
+
+
+@dataclass(frozen=True)
+class VerifyCampaignStep:
+    """One command invocation within a verify campaign, and the report artifact(s)
+    it must leave behind (design: multi-report verify campaigns, 2026-07-02).
+
+    "step" — not "phase" (a Maven-specific noun) — matches the vocabulary
+    :class:`ImplementOracleProfileSpec` already uses for a composite oracle's own
+    command sequence, so the same word means "one command invocation" everywhere
+    in this module.
+
+    A step declares its command in ONE of two forms, EXACTLY one (never both,
+    never neither — validated in ``__post_init__``):
+
+    * ``command_template`` — a SHELL string, run with ``shell=True``;
+      ``{test_root}`` / ``{report}`` are substituted before execution.
+    * ``command_argv``     — an ARGV list, run with ``shell=False`` so an argument
+      containing shell metacharacters (``trx;LogFileName=test.trx``) is passed
+      VERBATIM, never split/interpreted by a shell.
+
+    ``{report}`` substitution (when a template/argv element references it)
+    resolves against the FIRST declared report only — a step whose ONE command
+    produces N artifacts (Maven: one ``mvn verify`` writes both
+    ``surefire-reports/`` and ``failsafe-reports/``) has no single ``{report}``
+    slot to fill for the others; Java's own ``command_argv`` (``["mvn", "-q",
+    "verify"]``) does not reference ``{report}`` at all, so this does not affect
+    it in practice.
+    """
+
+    reports: tuple[CampaignReportSpec, ...] = ()
     command_template: str | None = None
     command_argv: tuple[str, ...] | None = None
-    requires_node_install: bool = False
 
     def __post_init__(self) -> None:
-        if not self.command_template and not self.command_argv:
+        if not self.reports:
+            raise ValueError("VerifyCampaignStep requires at least one report")
+        if bool(self.command_template) == bool(self.command_argv):
             raise ValueError(
-                "VerifyCampaignSpec requires a command_template (shell) OR a "
-                "command_argv (argv); a campaign with no command cannot run."
+                "VerifyCampaignStep requires EXACTLY ONE of command_template (shell) "
+                "or command_argv (argv) — a step with neither cannot run, and one "
+                "declaring both is ambiguous about which form to execute."
             )
 
     def resolve_command(self, *, test_root: str, report_path: str) -> str:
         """The runnable SHELL command with ``{test_root}`` / ``{report}`` substituted."""
         if self.command_template is None:
             raise ValueError(
-                "this campaign is argv-based (no command_template); use resolve_argv()"
+                "this step is argv-based (no command_template); use resolve_argv()"
             )
         return self.command_template.format(test_root=test_root, report=report_path)
 
@@ -495,7 +526,7 @@ class VerifyCampaignSpec:
         """
         if self.command_argv is None:
             raise ValueError(
-                "this campaign is shell-based (no command_argv); use resolve_command()"
+                "this step is shell-based (no command_argv); use resolve_command()"
             )
         return tuple(
             (a.format(test_root=test_root, report=report_path) if "{" in a else a)
@@ -506,9 +537,119 @@ class VerifyCampaignSpec:
         return {
             "command_template": self.command_template,
             "command_argv": list(self.command_argv) if self.command_argv is not None else None,
+            "reports": [
+                {
+                    "relpath": r.relpath,
+                    "format": r.format,
+                    "capture": r.capture,
+                    "optional": r.optional,
+                }
+                for r in self.reports
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class VerifyCampaignSpec:
+    """A stack's harness-owned greenfield verification campaign (profile-driven).
+
+    Additively generalized (2026-07-02) from "one command + one report" to an
+    ordered tuple of :class:`VerifyCampaignStep`, each with one-or-more
+    :class:`CampaignReportSpec` artifacts — the cardinality Maven's Surefire/
+    Failsafe split actually evidences (ONE invocation, TWO report roots), while
+    every existing single-command/single-report stack (TS/C#/C++/Go's documented
+    extension point) stays on the four flat fields below, UNCHANGED:
+
+    * ``command_template`` / ``command_argv`` — see :class:`VerifyCampaignStep`
+      (same two command forms, same substitution rules).
+    * ``report_relpath`` / ``report_format`` — where the runner writes its report
+      and which adapter parses it. See :class:`CampaignReportSpec`.
+    * ``requires_node_install`` — whether the BLOCKING dependency-install
+      preflight must run first (TS: yes — vitest/deps must be materialized).
+    * ``steps`` — the GENERAL form (Java: one step, two reports). EXACTLY one of
+      ``steps`` or the four flat fields is populated (validated in
+      ``__post_init__``); :meth:`resolved_steps` is what every consumer
+      (:func:`~codd.coverage_execution_coherence.run_verify_campaign`) actually
+      iterates, so callers never need to branch on which form was used.
+
+    The COMMAND(s) + FORMAT(s) are per-language; the MEANING (run the whole VB
+    surface, reconcile executed+passed with static coverage) is core. ``None`` on
+    a profile makes the coherence gate a strict NO-OP for that stack.
+    """
+
+    report_relpath: str | None = None
+    report_format: str | None = None
+    command_template: str | None = None
+    command_argv: tuple[str, ...] | None = None
+    requires_node_install: bool = False
+    steps: tuple[VerifyCampaignStep, ...] = ()
+
+    def __post_init__(self) -> None:
+        legacy_fields_set = bool(
+            self.report_relpath or self.report_format or self.command_template or self.command_argv
+        )
+        if self.steps:
+            if legacy_fields_set:
+                raise ValueError(
+                    "VerifyCampaignSpec: 'steps' and the legacy single-report fields "
+                    "(report_relpath/report_format/command_template/command_argv) are "
+                    "mutually exclusive — declare a campaign in ONE form, not both."
+                )
+            return
+        if not self.report_relpath or not self.report_format:
+            raise ValueError(
+                "VerifyCampaignSpec requires report_relpath + report_format (the "
+                "legacy single-report form) or a non-empty 'steps' (the general, "
+                "multi-step/multi-report form)."
+            )
+        if not self.command_template and not self.command_argv:
+            raise ValueError(
+                "VerifyCampaignSpec requires a command_template (shell) OR a "
+                "command_argv (argv); a campaign with no command cannot run."
+            )
+
+    def resolved_steps(self) -> tuple[VerifyCampaignStep, ...]:
+        """This campaign as an ordered tuple of steps — the shape every consumer
+        (:func:`~codd.coverage_execution_coherence.run_verify_campaign`) iterates.
+
+        Returns ``steps`` when declared; otherwise wraps the legacy flat fields as
+        ONE step with ONE report — so every pre-existing single-report profile
+        resolves to the exact shape it always implicitly had, byte-identical.
+        """
+        if self.steps:
+            return self.steps
+        return (
+            VerifyCampaignStep(
+                reports=(CampaignReportSpec(relpath=self.report_relpath, format=self.report_format),),
+                command_template=self.command_template,
+                command_argv=self.command_argv,
+            ),
+        )
+
+    def resolve_command(self, *, test_root: str, report_path: str) -> str:
+        """The runnable SHELL command with ``{test_root}`` / ``{report}`` substituted.
+
+        Single-step convenience (legacy call sites) — delegates to the first
+        resolved step, which for a legacy (non-``steps``) campaign is the only one.
+        """
+        return self.resolved_steps()[0].resolve_command(test_root=test_root, report_path=report_path)
+
+    def resolve_argv(self, *, test_root: str, report_path: str) -> tuple[str, ...]:
+        """The runnable ARGV with ``{test_root}`` / ``{report}`` substituted per element.
+
+        Single-step convenience (legacy call sites) — delegates to the first
+        resolved step, which for a legacy (non-``steps``) campaign is the only one.
+        """
+        return self.resolved_steps()[0].resolve_argv(test_root=test_root, report_path=report_path)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command_template": self.command_template,
+            "command_argv": list(self.command_argv) if self.command_argv is not None else None,
             "report_relpath": self.report_relpath,
             "report_format": self.report_format,
             "requires_node_install": self.requires_node_install,
+            "steps": [s.to_dict() for s in self.steps],
         }
 
 
@@ -959,21 +1100,33 @@ class LayoutProfile:
         return builder() if builder is not None else None
 
     def runner_report_adapter(self) -> Any:
-        """Resolve this stack's runner-report adapter for the coherence gate.
+        """Resolve this stack's SINGLE runner-report adapter, iff one adapter reads
+        EVERY report the campaign declares.
 
-        Returns a ``codd.coverage_execution_coherence.RunnerReportAdapter`` that
-        normalizes the :class:`VerifyCampaignSpec` report into the set of executed
-        + passed test FILES (and, when available, test cases), or ``None`` for a
-        stack with no adapter. Selection keys off ``verify_campaign.report_format``
-        (``vitest-json`` now; ``pytest-junit-xml`` / ``go-test-json`` are the
-        documented extension points), so a new runner is one adapter + one profile
-        ``report_format`` value — never a core gate edit. The import is lazy so the
-        coherence module is not pulled in at ``project_types`` import time.
+        Returns a ``codd.coverage_execution_coherence.RunnerReportAdapter`` when
+        every :class:`~codd.project_types.CampaignReportSpec` across every resolved
+        step (:meth:`VerifyCampaignSpec.resolved_steps`) shares ONE distinct
+        ``format`` — true for every single-report campaign (TS/C#/C++/Go's
+        extension point) and for Java (both ``surefire-xml``) — else ``None``.
+        Selection is data-driven on the report ``format`` string(s) — never a
+        language-name branch — so a new runner is one adapter + one profile
+        ``format`` value, never a core gate edit.
 
-        ``None`` when the profile declares no ``verify_campaign`` (Python today) or
-        the declared ``report_format`` has no registered adapter yet — the
-        coherence gate then degrades EXPLICITLY (it never silently passes a build
-        whose campaign report it cannot read; see the gate's observability rule).
+        This is DELIBERATELY narrower than "can every report be read" (that
+        question is :func:`~codd.coverage_execution_coherence.coherence_gate_applies`
+        / ``certify_verify_campaign_observable``, which check EACH report's format
+        resolves independently): this method answers "is there one adapter whose
+        ``produces_test_case_identity()`` capability applies uniformly to this
+        campaign's WHOLE evidence" — the question ``_authentic_cover_case_keys``
+        needs to decide per-case vs. file-level reconciliation. A campaign whose
+        reports use DIFFERENT formats degrades to ``None`` here (safe: the caller
+        then falls back to file-level reconciliation), even though each report may
+        individually be perfectly readable. The import is lazy so the coherence
+        module is not pulled in at ``project_types`` import time.
+
+        ``None`` when the profile declares no ``verify_campaign`` (Python today),
+        the campaign's reports mix formats, or a declared format has no registered
+        adapter yet.
         """
 
         campaign = self.verify_campaign
@@ -983,7 +1136,13 @@ class LayoutProfile:
             from codd.coverage_execution_coherence import resolve_runner_report_adapter
         except Exception:  # noqa: BLE001 — adapter is optional; degrade if unavailable.
             return None
-        return resolve_runner_report_adapter(campaign.report_format)
+        try:
+            formats = {report.format for step in campaign.resolved_steps() for report in step.reports}
+        except Exception:  # noqa: BLE001 — a malformed campaign resolves to no adapter.
+            return None
+        if len(formats) != 1:
+            return None
+        return resolve_runner_report_adapter(next(iter(formats)))
 
 
 def _sanitize_package_identifier(
@@ -1469,24 +1628,32 @@ def synthesize_implement_oracle_spec(lang_profile: Any) -> ImplementOracleSpec |
 
 
 def _synthesize_verify_campaign(lang_profile: Any) -> VerifyCampaignSpec | None:
-    """Synthesize a :class:`VerifyCampaignSpec` from the profile's verify command + report.
+    """Synthesize a :class:`VerifyCampaignSpec` from the profile's verify command +
+    report(s) (additively generalized 2026-07-02 to N reports per command).
 
-    Design A (argv form + single-file report): the campaign ARGV is the resolved
-    ``commands[<verify.command>].argv``; the report path + adapter come from the top-level
-    ``verify.report`` (``report_format`` = ``verify.report.adapter`` — the id the
-    runner-report registry resolves on, e.g. ``dotnet-trx``). ``None`` when the profile
-    declares no verify block / report / adapter / argv (the coverage gate then stays a
-    strict NO-OP for the stack — never a silent green for an unreadable campaign).
+    Design A (argv form + report(s)): the campaign ARGV is the resolved
+    ``commands[<verify.command>].argv``; the report path(s) + adapter(s) come from
+    the top-level ``verify.reports`` (plural) or ``verify.report`` (singular) —
+    ``format`` = ``report.adapter`` (the id the runner-report registry resolves on,
+    e.g. ``dotnet-trx``) or ``report.format`` as a fallback. Exactly ONE report
+    synthesizes the legacy flat-field form (byte-identical to every profile before
+    this generalization — TS/C#/C++/Go's extension point all declare one report);
+    TWO OR MORE synthesize the general ``steps`` form as ONE step carrying every
+    declared report (Java: one ``mvn verify`` invocation, two report roots).
+    ``capture`` and ``optional`` are carried through in BOTH cases (the legacy path
+    previously silently dropped ``capture`` — harmless while every synthesized
+    campaign was file-written, but would have silently broken a future stdout-
+    reporting language the day it opts in). ``None`` when the profile declares no
+    verify block / reports / adapter / argv, or a declared report is incomplete
+    (missing path or format) — the coverage gate then stays a strict NO-OP for the
+    stack — never a silent green for an unreadable campaign.
     """
     verify = getattr(lang_profile, "verify", None)
     if verify is None:
         return None
-    report = getattr(verify, "report", None)
-    if report is None:
-        return None
-    report_relpath = _norm_rel(getattr(report, "path", "") or "")
-    report_format = getattr(report, "adapter", None) or getattr(report, "format", None)
-    if not report_relpath or not report_format:
+    resolver = getattr(verify, "resolved_reports", None)
+    reports = tuple(resolver()) if callable(resolver) else ()
+    if not reports:
         return None
     command_id = getattr(verify, "command", None)
     commands = getattr(lang_profile, "commands", {}) or {}
@@ -1494,10 +1661,38 @@ def _synthesize_verify_campaign(lang_profile: Any) -> VerifyCampaignSpec | None:
     argv = tuple(str(a) for a in (getattr(cmd, "argv", ()) or ())) if cmd is not None else ()
     if not argv:
         return None
+
+    campaign_reports: list[CampaignReportSpec] = []
+    for report in reports:
+        relpath = _norm_rel(getattr(report, "path", "") or "")
+        report_format = getattr(report, "adapter", None) or getattr(report, "format", None)
+        if not relpath or not report_format:
+            return None  # an incomplete report declaration voids the whole campaign
+        campaign_reports.append(
+            CampaignReportSpec(
+                relpath=relpath,
+                format=str(report_format),
+                capture=getattr(report, "capture", None),
+                optional=bool(getattr(report, "optional", False)),
+            )
+        )
+
+    # A single, fully-vanilla report (no capture, not optional — every profile
+    # today) synthesizes the legacy flat-field form, byte-identical to every
+    # profile before this generalization. A report that declares ``capture`` or
+    # ``optional`` — which the flat fields have no slot for — or two-or-more
+    # reports (Java: one ``mvn verify`` invocation, two report roots) synthesizes
+    # the general ``steps`` form instead, so neither flag is ever silently dropped.
+    only = campaign_reports[0]
+    if len(campaign_reports) == 1 and only.capture is None and not only.optional:
+        return VerifyCampaignSpec(
+            report_relpath=only.relpath,
+            report_format=only.format,
+            command_argv=argv,
+            requires_node_install=False,
+        )
     return VerifyCampaignSpec(
-        report_relpath=report_relpath,
-        report_format=str(report_format),
-        command_argv=argv,
+        steps=(VerifyCampaignStep(reports=tuple(campaign_reports), command_argv=argv),),
         requires_node_install=False,
     )
 
