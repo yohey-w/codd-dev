@@ -1226,6 +1226,77 @@ def test_contract_check_exempts_task_with_no_declared_outputs(tmp_path: Path) ->
     assert "file(s) generated" in detail_bare
 
 
+def test_task_declares_no_authored_artifact_classifies_gate_vs_generation() -> None:
+    """Direct unit check on the verification/gate discriminator: a task whose
+    every declared output is PROSE (``pytest -q output``) authors nothing, while a
+    task declaring a file, a bare artifact token, a glob, a package/test directory,
+    or NOTHING is a real generation task (fail-closed)."""
+    from codd.greenfield.pipeline import _task_declares_no_authored_artifact
+
+    config = {"scan": {"source_dirs": ["src"], "test_dirs": ["tests"]}}
+
+    def _task(*outs: str) -> ImplementTaskRef:
+        return ImplementTaskRef(task_id="t", design_node="n", expected_outputs=tuple(outs))
+
+    # Gate task — the 2026-07-03 Python false-RED shape.
+    assert _task_declares_no_authored_artifact(
+        _task("pytest -q output", "pytest tests/e2e -q output"), config
+    )
+    # Real generation tasks / ambiguous — never skipped.
+    assert not _task_declares_no_authored_artifact(_task("some_artifact"), config)
+    assert not _task_declares_no_authored_artifact(_task("src/pkg/x.py"), config)
+    assert not _task_declares_no_authored_artifact(_task("tests/test_x.py"), config)
+    assert not _task_declares_no_authored_artifact(_task("tests/", "tests/e2e/"), config)
+    assert not _task_declares_no_authored_artifact(_task("internal/httpapi/*_test.go"), config)
+    assert not _task_declares_no_authored_artifact(_task(), config)  # empty → strict
+    # Mixed (one real artifact) → not a gate task; the artifact is still owed.
+    assert not _task_declares_no_authored_artifact(
+        _task("pytest -q output", "src/pkg/x.py"), config
+    )
+
+
+def test_implement_runner_noops_verification_gate_task(tmp_path: Path) -> None:
+    """End-to-end red-before-green for the 2026-07-03 release-gate false-RED: a
+    task whose declared outputs are prose (``pytest -q output``) authors nothing,
+    so the runner returns a clean no-op WITHOUT invoking the implementer (whose
+    honest 0 files would otherwise hard-fail the 0-generated-files gate). Its
+    substance — running the suite green — is deferred to the verify stage."""
+    import codd.greenfield.pipeline as pipeline_mod
+
+    project = make_stub_project(tmp_path, "stub-ai-cli --print")
+    task = ImplementTaskRef(
+        task_id="run_full_pytest_release_gate",
+        design_node="docs/infra/test_runner_setup.md",
+        expected_outputs=("pytest -q output", "pytest tests/e2e -q output"),
+        test_kinds=("unit", "e2e"),
+    )
+    called = {"implement": False, "derive": False}
+
+    def _fail_if_called(*_a, **_k):  # the implementer must NOT run for a gate task
+        called["implement"] = True
+        raise AssertionError("implement_tasks must not be invoked for a gate task")
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr("codd.implementer.implement_tasks", _fail_if_called)
+
+    def _derive_spy(*_a, **_k):
+        called["derive"] = True
+        return 0
+
+    monkey.setattr(pipeline_mod, "_derive_and_approve_steps", _derive_spy)
+    try:
+        detail = GreenfieldPipeline()._default_implement_task_runner(
+            project, task, ai_command=None, coverage_gate=False,
+            chunk_size=None, timeout_per_chunk=600,
+        )
+    finally:
+        monkey.undo()
+    assert not called["implement"]
+    assert not called["derive"]
+    assert "verification/gate task" in detail
+    assert "0 file(s) generated" in detail
+
+
 # ═══════════════════════════════════════════════════════════
 # Regression: an EDIT-shaped task's declared expected_outputs must reach
 # implement_tasks(), so the prompt can show the model their CURRENT content.

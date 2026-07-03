@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codd-dev"
-version = "3.10.1"
+version = "3.10.2"
 description = "CoDD: Coherence-Driven Development — cross-artifact change impact analysis"
 readme = "README.md"
 license = "MIT"

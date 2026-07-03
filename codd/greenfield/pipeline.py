@@ -2043,6 +2043,24 @@ class GreenfieldPipeline:
         from codd.implementer import implement_tasks
 
         config = load_project_config(project_root)
+
+        # A VERIFICATION / RELEASE-GATE task declares no authored artifact — its
+        # deliverable is an ACTION + its output (``run_full_pytest_release_gate``:
+        # ``expected_outputs: ['pytest -q output', ...]``), not a file. The
+        # implementer has nothing to write, honestly emits 0 files, and the
+        # 0-generated-files gate then hard-fails it (the 2026-07-03 Python
+        # greenfield false-RED). Its real work — install + run the suite green with
+        # SKIP=0 — is exactly the VERIFY stage's job, so implement treats it as a
+        # no-op (deferred to verify) rather than demanding generation. No gate is
+        # weakened: verify re-runs the full suite as the release gate, and any task
+        # that DOES declare a codebase artifact stays fully gated. Also saves the
+        # wasted derive-steps + AI generation the 0-file honest miss would burn.
+        if _task_declares_no_authored_artifact(task, config):
+            return (
+                "0 file(s) generated — verification/gate task "
+                "(no authored artifact; release gate enforced at verify)"
+            )
+
         output_paths = list(task.output_paths) if task.output_paths else _output_paths_for_task(config, task)
         approved = _derive_and_approve_steps(
             project_root, config, task, output_paths, ai_command=ai_command, echo=self.echo
@@ -3355,6 +3373,52 @@ def _resolve_layout_profile_from_config(config: dict[str, Any], *, project_root:
         config=config,
         project_root=project_root,
     )
+
+
+def _task_declares_no_authored_artifact(task: ImplementTaskRef, config: dict[str, Any]) -> bool:
+    """Whether a task's declared outputs are NON-artifacts — a verification/gate task.
+
+    A derived task normally declares the FILE(S) it authors (``src/pkg/x.py``,
+    ``tests/test_x.py``, a glob, or a package/test DIRECTORY under a configured
+    root). A VERIFICATION / RELEASE-GATE task instead declares a non-filesystem
+    deliverable — an ACTION and its OUTPUT, e.g. ``run_full_pytest_release_gate``
+    with ``expected_outputs: ['pytest -q output', 'pytest tests/e2e -q output']``.
+    Nothing is authored: the implementer has no file to write and honestly emits
+    0 files, which the 0-generated-files gate then reports as a hard failure —
+    the 2026-07-03 Python greenfield false-RED. Such a task's real work (install +
+    run the suite green with SKIP=0) is precisely what the VERIFY stage already
+    performs, so implement must treat it as a no-op rather than demand generation.
+
+    True only when EVERY declared output is a PROSE description rather than an
+    authored artifact: it contains WHITESPACE (a filesystem path a task authors
+    never does — ``pytest -q output`` reads as a sentence, ``src/pkg/x.py`` and a
+    bare artifact name like ``some_artifact`` do not) AND is not, defensively, a
+    concrete file path, a glob, or a path under a configured ``source_dirs`` /
+    ``test_dirs`` root. The whitespace test is the discriminator that keeps a bare
+    single-token artifact name (``some_artifact`` → a real build output) a genuine
+    generation task while catching an action-and-its-output gate declaration. An
+    EMPTY ``expected_outputs`` stays strict (returns False): absence of a contract
+    is ambiguous, not a sanctioned skip. Anti-false-green + fail-closed: a task
+    that declares any path-shaped codebase artifact still owes it (the 0-files gate
+    + completeness gate remain), and the release gate's substance is never dropped
+    — verify re-runs the full suite as the authority.
+    """
+    outputs = [str(out).strip() for out in task.expected_outputs if str(out).strip()]
+    if not outputs:
+        return False
+    source_roots = _scan_roots(config, "source_dirs")
+    test_roots = _scan_roots(config, "test_dirs")
+    for out in outputs:
+        if not any(ch.isspace() for ch in out):
+            return False  # a whitespace-free token is a plausible authored artifact name
+        if _declared_output_is_file_path(out):
+            return False  # a real path (even one with a space) is an authored file
+        if any(ch in out for ch in "*?["):  # a glob denotes authored file(s)
+            return False
+        norm = _norm_decl_path(out)
+        if _path_under_root(norm, source_roots) or _path_under_root(norm, test_roots):
+            return False  # a package/test location under a root IS authored
+    return True
 
 
 def _test_only_output_paths(config: dict[str, Any], task: ImplementTaskRef) -> list[str] | None:

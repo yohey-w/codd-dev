@@ -13,6 +13,30 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.10.2] - 2026-07-03 — Verification/gate task false-RED: a prose-output task authors nothing
+
+After the scaffold + all 19 module/test implement tasks passed, the Python
+ExprCalc greenfield hard-failed implement on `run_full_pytest_release_gate`:
+`Design 'docs/infra/test_runner_setup.md' produced 0 generated files`. That task
+is a VERIFICATION/RELEASE-GATE unit — its `expected_outputs` are prose
+(`pytest -q output`, `pytest tests/e2e -q output`), not files — so the
+implementer honestly emits 0 files and the 0-generated-files gate rejects it
+(after burning 3 no-usable retries). Its real work (install + run the suite
+green, SKIP=0) is exactly what the **verify** stage already performs.
+
+### Fixed
+- **A verification/gate task that declares no authored artifact is a no-op in
+  implement** (deferred to verify). The greenfield implement runner now
+  recognizes a task whose every declared output is a PROSE description (contains
+  whitespace and is not a file path, glob, or path under a configured
+  source/test root) and returns a clean no-op WITHOUT invoking the implementer,
+  instead of demanding generation. No gate is weakened: verify re-runs the full
+  suite as the release gate, any task declaring a real path-shaped artifact stays
+  fully gated (0-files + completeness), and an empty `expected_outputs` stays
+  strict (fail-closed). Also saves the wasted derive-steps + AI generation the
+  honest 0-file miss would burn. Generic, language-independent (no `language ==`).
+  New helper `_task_declares_no_authored_artifact`.
+
 ## [3.10.1] - 2026-07-03 — Scaffold-task false-RED: a bare directory output imposes no author-kind
 
 The Python ExprCalc greenfield autopilot hard-failed at implement on
