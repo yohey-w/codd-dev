@@ -2124,6 +2124,40 @@ def _build_implementation_prompt(
         ]
     )
 
+    # PACKAGE-LAYOUT & IMPORT-COHERENCE CONTRACT (2026-07-03): project the
+    # verify-stage import-coherence gate's package-root + import-style rules onto
+    # the prompt, read from the SAME LayoutProfile the gate reads
+    # (resolve_layout_profile → the truth source check_import_coherence uses).
+    # Without it the model freelances the package name + import style: the
+    # ExprCalcPy Python greenfield laid source in `src/exprcalc/` while the harness
+    # owns `src/exprcalcpy/`, and unit tests bare-imported `evaluator`/`parser` —
+    # both rejected by the gate (source_outside_package / bare_basename_import)
+    # with no way to prevent it up front. Same data-driven seam as
+    # resolve_test_framework_guidance / render_vb_contract: language-free, no
+    # hardcoded package name (all from the profile), and a strict no-op ("") for a
+    # path-relative stack (TS). Applies to BOTH source and test tasks (source-under-
+    # package for source, package-absolute imports for tests). Skipped when
+    # project_root is unavailable (DI/standalone callers).
+    if project_root is not None:
+        try:
+            from codd.import_coherence import render_import_coherence_contract
+            from codd.project_types import resolve_layout_profile
+
+            scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+            layout_profile = resolve_layout_profile(
+                language=project.get("language"),
+                project_name=project.get("name"),
+                source_dirs=scan.get("source_dirs") if isinstance(scan, dict) else None,
+                test_dirs=scan.get("test_dirs") if isinstance(scan, dict) else None,
+                config=config,
+                project_root=project_root,
+            )
+            layout_block = render_import_coherence_contract(layout_profile)
+        except Exception:  # noqa: BLE001 — a projection failure must never break generation.
+            layout_block = ""
+        if layout_block:
+            lines.extend([layout_block, ""])
+
     if _spec_targets_tests(spec, config):
         test_framework = resolve_test_framework_guidance(language)
         if test_framework is not None:

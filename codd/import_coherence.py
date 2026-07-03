@@ -54,7 +54,79 @@ __all__ = [
     "ImportCoherenceResult",
     "check_import_coherence",
     "import_coherence_opt_out",
+    "render_import_coherence_contract",
 ]
+
+
+def render_import_coherence_contract(profile: LayoutProfile | None) -> str:
+    """Project the import-coherence gate's package-layout + import-style rules onto
+    a generation/implement prompt, DATA-DRIVEN from the resolved
+    :class:`~codd.project_types.LayoutProfile` — the SAME truth source
+    :func:`check_import_coherence` reads.
+
+    The generation prompt otherwise never conveys the harness-owned topology, so
+    the model freelances the package name + import style and the gate correctly
+    rejects it (the recurring meta-pattern: a deterministic gate enforces a
+    contract the prompt never stated). Rendering the profile the gate reads makes
+    the prompt-side contract unable to drift from the gate-side one — the same
+    same-truth-source principle behind ``resolve_test_framework_guidance`` /
+    :func:`~codd.verifiable_behavior_audit.render_vb_contract`.
+
+    Language-free: the package root, package name, source root, and the
+    package-absolute import idiom are all read from ``profile`` — there is NO
+    language-name branch and NO hardcoded package name. The two rules are gated
+    INDEPENDENTLY on the exact profile fields the corresponding gate checks read:
+
+    * the source-under-package rule iff ``requires_package_init`` (the guard on
+      :func:`_check_source_outside_package`);
+    * the package-absolute-import rule iff
+      ``test_import_policy == "package_absolute"`` (the guard on
+      :func:`_check_bare_basename_imports`).
+
+    Returns ``""`` when ``profile`` is ``None`` or when neither rule applies — a
+    path-relative stack (TypeScript: ``requires_package_init=False`` and
+    ``test_import_policy="relative"``, ``package_root == source_root``) has no
+    named-package contract to project and the gate's package checks are a strict
+    no-op for it, so nothing is added (no non-opt-in default).
+    """
+    if profile is None:
+        return ""
+
+    rules: list[str] = []
+    if profile.requires_package_init:
+        rules.append(
+            f"{len(rules) + 1}. PACKAGE ROOT — the harness OWNS a src-layout package "
+            f"rooted at `{profile.package_root}` (the scaffold has already created it "
+            f"with its package-init file). Put EVERY source module you generate UNDER "
+            f"`{profile.package_root}/` (e.g. `{profile.package_root}/<module>`). Do NOT "
+            f"place a source module directly under `{profile.source_root}/`, and do NOT "
+            f"invent a differently-named sibling package: a source module under "
+            f"`{profile.source_root}` but outside `{profile.package_root}` is rejected as "
+            f"`source_outside_package`. The package name is FIXED at "
+            f"`{profile.package_name}`; do not rename, shorten, or re-spell it."
+        )
+    if profile.test_import_policy == "package_absolute":
+        rules.append(
+            f"{len(rules) + 1}. PACKAGE-ABSOLUTE IMPORTS — import every source module by "
+            f"its package-absolute path, `from {profile.package_name}.<module> import "
+            f"...` (or `import {profile.package_name}.<module>`), NEVER by bare basename "
+            f"(`import <module>` / `from <module> import ...`). A bare basename only "
+            f"resolves when the source directory happens to be on the module search path "
+            f"(an environment-dependent false-green); the gate rejects it as "
+            f"`bare_basename_import`. This applies especially to tests importing the code "
+            f"under test."
+        )
+    if not rules:
+        return ""
+
+    header = (
+        "Package-layout & import-coherence CONTRACT (release-blocking — the "
+        "deterministic import-coherence gate enforces EXACTLY these rules at verify; "
+        "a violation fails the build, and the harness will NOT rewrite your files to "
+        "fix it — an incoherent build is regenerated from scratch, so get the layout "
+        "right the first time):"
+    )
+    return "\n".join([header, "", *rules])
 
 
 @dataclass(frozen=True)
