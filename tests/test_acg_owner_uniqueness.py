@@ -620,3 +620,77 @@ def test_required_kinds_python_root_manifest_unchanged(tmp_path):
     exempt = _required_kinds(task, py_config, harness_owned=owned)
     assert base == {"source", "test"}
     assert exempt == {"source", "test"}
+
+
+def test_required_kinds_ignores_bare_test_directory_scaffold(tmp_path):
+    """Scaffold false-RED (Python ``scaffold_package_and_pyproject`` 2026-07-03):
+    a task declaring a package-skeleton FILE plus BARE test DIRECTORIES
+    (``tests/``, ``tests/e2e/``) must require only SOURCE — the directories are
+    structural ``mkdir`` intent ("empty tests/ directory, populated later"), not a
+    test the scaffold authors. Before the fix each directory classified TEST and
+    the kind gate demanded a produced test file the scaffold never writes, hard-
+    failing implement with "declared output kind [...,'test'] but produced only
+    ['source']"."""
+    from codd.greenfield.pipeline import _classify_declared_output, _required_kinds
+
+    config = {
+        "project": {"name": "exprcalcpy", "language": "python"},
+        "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]},
+    }
+    # A bare directory under the test root imposes no author-kind obligation…
+    assert _classify_declared_output("tests/", config) is None
+    assert _classify_declared_output("tests/e2e/", config) is None
+    assert _classify_declared_output("tests/e2e", config) is None
+    # …and a bare directory under the source root is likewise structural.
+    assert _classify_declared_output("src/", config) is None
+    assert _classify_declared_output("src/exprcalcpy", config) is None
+    task = ImplementTaskRef(
+        task_id="scaffold_package_and_pyproject",
+        design_node="n",
+        expected_outputs=("src/exprcalcpy/__init__.py", "tests/", "tests/e2e/"),
+        test_kinds=("unit",),
+    )
+    assert _required_kinds(task, config) == {"source"}
+
+
+def test_verify_task_contract_passes_scaffold_dirs_producing_only_source(tmp_path):
+    """End-to-end red-before-green for the 2026-07-03 scaffold false-RED: the
+    scaffold task declares a package ``__init__.py`` (SOURCE) plus bare ``tests/``
+    + ``tests/e2e/`` directories and produces ONLY the source file (the harness
+    scaffolds the test tree; the task authors no test). Pre-fix this raised
+    "declared output kind ['source','test'] but produced only ['source']"; post-
+    fix it is a clean no-op."""
+    config = {
+        "project": {"name": "exprcalcpy", "language": "python"},
+        "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]},
+    }
+    produced = tmp_path / "src" / "exprcalcpy" / "__init__.py"
+    produced.parent.mkdir(parents=True)
+    produced.write_text("\n", encoding="utf-8")
+    task = ImplementTaskRef(
+        task_id="scaffold_package_and_pyproject",
+        design_node="n",
+        expected_outputs=("src/exprcalcpy/__init__.py", "tests/", "tests/e2e/"),
+        test_kinds=("unit",),
+    )
+    results = [_Result(generated_files=[str(produced)])]
+    _verify_task_contract(task, results, tmp_path, config, echo=lambda _m: None)  # no raise
+
+
+def test_required_kinds_still_gates_concrete_test_file_and_glob(tmp_path):
+    """★false-green guard: the bare-directory relaxation must NOT touch a real
+    test deliverable declared as a concrete FILE (``tests/test_x.py``) or a
+    test-name GLOB (Go ``internal/httpapi/*_test.go``) — both still classify TEST
+    so a task that emits only source still hard-fails the kind gate."""
+    from codd.greenfield.pipeline import _classify_declared_output, _required_kinds
+
+    py = {"scan": {"source_dirs": ["src"], "test_dirs": ["tests"]}}
+    assert _classify_declared_output("tests/test_x.py", py) == "test"
+    go = {"scan": {"source_dirs": ["internal"], "test_dirs": ["test"]}}
+    # A test-name glob denotes file(s) and is unambiguously test-shaped.
+    assert _classify_declared_output("internal/httpapi/*_test.go", go) == "test"
+    task = ImplementTaskRef(
+        task_id="write_tests", design_node="n",
+        expected_outputs=("tests/test_x.py",),
+    )
+    assert _required_kinds(task, py) == {"test"}

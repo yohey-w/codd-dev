@@ -13,6 +13,30 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.10.1] - 2026-07-03 — Scaffold-task false-RED: a bare directory output imposes no author-kind
+
+The Python ExprCalc greenfield autopilot hard-failed at implement on
+`scaffold_package_and_pyproject` with `declared output kind(s) ['source','test']
+but produced only ['source'] (missing ['test'])`. The task legitimately creates
+a package skeleton plus **empty** `tests/` + `tests/e2e/` directories ("populated
+later") and authors no test — but the implement kind gate classified those two
+bare-directory declarations as TEST deliverables and demanded a produced test
+file. This is the same false-RED CLASS previously seen for the Java/C++/C#
+scaffold tasks, at the directory-declaration level.
+
+### Fixed
+- **A bare DIRECTORY `expected_outputs` entry carries no deliverable-KIND
+  obligation.** `_classify_declared_output` now returns UNKNOWN for a directory
+  declaration (`tests/`, `tests/e2e/`, `src/pkg/`) — it is structural scaffold
+  intent created by `mkdir`, never an authored artifact — unifying the kind gate
+  with the completeness gate, which already leaves directory declarations
+  unchecked. The two gates now share one truth: only a concrete FILE path or a
+  glob carries an obligation. Anti-false-green is fully preserved: a real test
+  task declares a test FILE (`tests/test_x.py`) or a test-name GLOB
+  (`internal/httpapi/*_test.go`), both still classified TEST and still gated, so a
+  test task that emits only source still hard-fails. Generic (no `language ==`;
+  language-independent path classification). New helper `_is_bare_directory_decl`.
+
 ## [3.9.0] - 2026-07-03 — VB contract projection + bounded authenticity rework (Top-6 greenfield unblock)
 
 Python/JavaScript/TypeScript greenfield autopilots all stalled at the FINAL

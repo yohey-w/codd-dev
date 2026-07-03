@@ -2763,7 +2763,6 @@ def _default_task_deriver(project_root: Path, *, ai_command: str | None) -> int:
 # contract), or hardcoded path literals (roots come from ``scan.*_dirs``).
 #
 # Classification rules (deliberately conservative to avoid false-RED):
-#   • A path under a configured ``test_dirs`` root is a TEST artifact.
 #   • A test-SHAPED filename is a TEST artifact — but only via a suffix that is
 #     UNAMBIGUOUS on its own (JS/TS's dedicated ``.test.``/``.spec.``/``.e2e.``/
 #     ``.cy.`` conventions, Go's tooling-enforced ``_test.go``). A BARE
@@ -2771,9 +2770,14 @@ def _default_task_deriver(project_root: Path, *, ai_command: str | None) -> int:
 #     ``.cxx``) is never enough on its own — every file in that language ends in
 #     it — so ``.py`` requires ``test_*.py`` / ``*_test.py`` naming, and the
 #     other bare-admit languages are left entirely to the ``test_dirs`` check
-#     above (see ``_unambiguous_test_suffixes``).
-#   • A path under a configured ``source_dirs`` root (that is not test-shaped via
-#     an unambiguous test suffix) is a SOURCE artifact.
+#     below (see ``_unambiguous_test_suffixes``).
+#   • A FILE (or glob) under a configured ``test_dirs`` root is a TEST artifact.
+#   • A FILE (or glob) under a configured ``source_dirs`` root (that is not
+#     test-shaped via an unambiguous test suffix) is a SOURCE artifact.
+#   • A BARE DIRECTORY declaration (``tests/``, ``tests/e2e/``, ``src/pkg/``) is
+#     UNKNOWN — it is structural scaffold intent created by ``mkdir``, never an
+#     authored artifact, so it imposes no author-kind obligation (the same stance
+#     the completeness gate already takes). See ``_is_bare_directory_decl``.
 #   • Anything else is UNKNOWN and imposes no requirement.
 # Verification passes when every declared kind is represented among generated
 # files (``required_kinds ⊆ produced_kinds``); UNKNOWN never gates.
@@ -2883,15 +2887,55 @@ def _harness_owned_outputs(config: dict[str, Any], project_root: Path | None) ->
         return frozenset()
 
 
+def _is_bare_directory_decl(raw: str) -> bool:
+    """Whether a declared ``expected_outputs`` entry denotes a DIRECTORY, not file(s).
+
+    A directory declaration (``tests/``, ``tests/e2e``, ``src/pkg``) is neither a
+    node-id, a glob, nor an exact file path — it is a plain path with no file
+    extension on its last segment. Such an entry is STRUCTURAL scaffold intent
+    (the harness/scaffold creates it with ``mkdir``); it is never AUTHORED as a
+    source/test artifact, so it carries no deliverable-KIND obligation — mirroring
+    the completeness gate, which likewise leaves a directory declaration
+    unchecked. A concrete file (``token_bucket.py``), a glob (``*_test.go`` —
+    denotes file[s]), and a node-id (``module:parser.parse``) all return False.
+    """
+    s = str(raw).strip().replace("\\", "/").strip("/")
+    if not s:
+        return False
+    if ":" in s:  # node-id (``module:parser.parse``), not a filesystem path
+        return False
+    if any(ch in s for ch in "*?["):  # a glob denotes file(s), not a bare directory
+        return False
+    return not _declared_output_is_file_path(s)
+
+
 def _classify_declared_output(rel_path: str, config: dict[str, Any]) -> str | None:
     """Classify ONE ``expected_outputs`` entry as the deliverable KIND it implies.
 
     Returns ``_KIND_TEST`` / ``_KIND_SOURCE`` / ``None`` (unknown — e.g. a bare
-    artifact name, a doc, or a path under no configured root).
+    artifact name, a doc, a bare DIRECTORY, or a path under no configured root).
     """
-    if _path_under_root(rel_path, _scan_roots(config, "test_dirs")):
-        return _KIND_TEST
+    # A test-SHAPED name (a concrete test file OR a test-name glob such as
+    # ``*_test.go`` / ``**/*.test.ts``) is unambiguously a TEST deliverable,
+    # independent of where it sits — check it FIRST so the directory guard below
+    # never strips a real test obligation (a glob is not a file path).
     if _has_test_shape(rel_path):
+        return _KIND_TEST
+    # A BARE DIRECTORY declaration (``tests/``, ``tests/e2e/``, ``src/pkg/``) is
+    # STRUCTURAL scaffold intent: it is created by ``mkdir`` and never AUTHORED as
+    # a source/test artifact, so location under a configured root imposes NO
+    # author-kind obligation — exactly as the completeness gate already leaves a
+    # directory declaration unchecked. Gating it produced the scaffold-task
+    # false-RED (Python ``scaffold_package_and_pyproject`` 2026-07-03: declared
+    # ``tests/`` + ``tests/e2e/`` → demanded a produced test file although the task
+    # only creates empty dirs, "populated later"; the same false-RED CLASS as the
+    # Java/C++/C# scaffold cases). Only entries that denote FILE(s) — a concrete
+    # path or a glob — carry a location-derived kind (anti-false-green: a real
+    # test task declares a test FILE or a test-name GLOB, both still gated above /
+    # below).
+    if _is_bare_directory_decl(rel_path):
+        return None
+    if _path_under_root(rel_path, _scan_roots(config, "test_dirs")):
         return _KIND_TEST
     if _path_under_root(rel_path, _scan_roots(config, "source_dirs")):
         return _KIND_SOURCE
@@ -3081,10 +3125,16 @@ def _check_declared_output_completeness(
     Contract ``declared-output-completeness`` (GPT round-2 §3.4), registered
     ``enforcement=warn`` behind ``implement.declared_output_completeness``. Only
     EXACT file paths (a path with a file extension) participate — a directory or
-    bare-name declaration is left to the kind check (the design's "directory
-    output → at least one source/test file" is the kind gate). A declared file is
-    "produced" when it is in the task's generated files OR exists on disk. Missing
-    ones are WARNED (default) or, when ``enforce``, raised as a StageError.
+    bare-name declaration carries NO deliverable obligation in EITHER gate: it is
+    structural scaffold intent (created by ``mkdir``), so the completeness check
+    skips it AND the kind check (:func:`_classify_declared_output` /
+    :func:`_is_bare_directory_decl`) imposes no author-kind on it. (Historically
+    the kind gate DID demand "a directory output → at least one file of that
+    kind", which false-RED'd scaffold tasks that only create empty dirs — Python
+    ``scaffold_package_and_pyproject`` 2026-07-03; the two gates now agree that a
+    bare directory is not a deliverable.) A declared file is "produced" when it is
+    in the task's generated files OR exists on disk. Missing ones are WARNED
+    (default) or, when ``enforce``, raised as a StageError.
 
     Default warn-only so this PR does NOT hard-fail existing runs; the warn
     signal is collected first (per GPT §5) before any future default-to-enforce.
