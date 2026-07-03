@@ -459,3 +459,16 @@ greenfield:
   propagate_commit: true    # run propagate --verify/--commit (advisory on a fresh build)
   chunk_size: null          # run implement steps in chunks of N (null = single run)
   timeout_per_chunk: 600    # seconds per chunk when chunk_size is set
+  vb_rework:
+    # Bounded re-implementation rounds for the implement-stage marker-
+    # AUTHENTICITY gate (the coverage gate has its own test_coverage.max_retries).
+    # On an authenticity failure (an orphan / assertion-less / self-comparing
+    # `codd: covers vb=` marker) the owning TEST tasks are re-driven with the
+    # verbatim findings + the closed VB contract, then the UNCHANGED gate re-
+    # judges. The gate is never loosened — this only grants bounded retries.
+    # 0 = legacy behavior (fail immediately, no rework). Two determinism guards:
+    # a round-over-round finding count that stops shrinking aborts early
+    # (oscillation guard), and any edit to the declared VB-id set DURING rework
+    # is an immediate RED (a test task must not legalize an orphan by editing
+    # the VB registry).
+    max_rounds: 2

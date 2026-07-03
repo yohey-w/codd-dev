@@ -92,7 +92,7 @@ CLI string works unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -3379,6 +3379,190 @@ def _derive_and_approve_steps(
         return 0
 
 
+def _authenticity_failure_message(violations: Sequence[Any]) -> str:
+    """The canonical marker-authenticity StageError message (shared by both exits)."""
+    return (
+        "verifiable-behavior marker-authenticity gate failed for the implement stage: "
+        f"{len(violations)} `codd: covers vb=` marker(s) are not credible coverage claims "
+        "(attached to a skipped/empty test, an orphan id, a test with no assertion, or an "
+        "unobservable test structure — a recognized file with no parseable test). A covers "
+        "marker must sit on an executable test that asserts the behavior."
+    )
+
+
+def _vb_rework_max_rounds(config: dict[str, Any] | None) -> int:
+    """Bounded authenticity-rework rounds (``greenfield.vb_rework.max_rounds``, default 2).
+
+    ``0`` = legacy behavior (fail the authenticity gate immediately, no rework).
+    A versioned, visible default — not a silent activation.
+    """
+    section = ((config or {}).get("greenfield") or {}).get("vb_rework")
+    if isinstance(section, dict):
+        value = section.get("max_rounds")
+        if isinstance(value, int) and value >= 0:
+            return value
+    return 2
+
+
+def _build_authenticity_rework_feedback(
+    violations: Sequence[Any],
+    uncovered_rows: Sequence[Any],
+    *,
+    contract: str,
+) -> str:
+    """Structured rework feedback: verbatim findings + coverage gaps + VB contract.
+
+    Carries a "why the last output was rejected" header, the per-marker findings
+    (file:line/kind/reason), any coverage rows that regressed, and the closed VB
+    contract block (same ``render_vb_contract`` truth source the first pass saw),
+    so the re-driven test tasks fix the tests rather than invent new orphans.
+    """
+    from codd.verifiable_behavior_audit import format_gap_feedback
+
+    lines = [
+        "A previous test-authoring attempt was REJECTED by the deterministic "
+        "verifiable-behavior marker-authenticity gate. Each finding below is a "
+        "`codd: covers vb=<id>` marker that does NOT credibly prove its behavior. "
+        "Fix the marked test (or the marker) so it (a) names a VB id from the "
+        "closed contract list below and (b) actually executes the system under "
+        "test and asserts on the OBSERVED result. Do NOT delete tests or markers "
+        "to silence the gate, and do NOT edit the VB registry table — the declared "
+        "id set is fixed and changing it during implement fails the build.",
+        "",
+        "Rejected `codd: covers vb=` markers:",
+    ]
+    for violation in violations:
+        path = getattr(violation, "path", "?")
+        line = getattr(violation, "line", "?")
+        kind = getattr(violation, "kind", "?")
+        message = getattr(violation, "message", "")
+        lines.append(f"- {path}:{line} [{kind}] {message}")
+    if uncovered_rows:
+        lines.extend(["", format_gap_feedback(uncovered_rows)])
+    if contract:
+        lines.extend(["", contract])
+    return "\n".join(lines)
+
+
+def _drive_vb_authenticity_rework(
+    project_root: Path,
+    *,
+    config: dict[str, Any],
+    authenticity_profile: Any,
+    echo: Callable[[str], None],
+    rerun: Callable[..., None],
+    rerun_oracle: Callable[[], None] | None,
+    scope_resolver: Callable[[list[str]], Any],
+    max_rounds: int,
+) -> None:
+    """Bounded, deterministic rework loop for authenticity (+ coverage-regression) findings.
+
+    Re-drives the TEST tasks with the verbatim authenticity findings + the closed
+    VB contract, up to ``max_rounds`` rounds, re-judging with the UNCHANGED gate
+    after each round. Returns on convergence (authenticity passes AND coverage did
+    not regress). Raises :class:`StageError` (fail-closed) when:
+
+    * the round budget is exhausted with findings remaining;
+    * the finding count stops strictly shrinking round-over-round (oscillation
+      guard — kills "fix A, break B"); or
+    * the declared VB-id set is edited DURING rework (tampering guard — a test
+      task must not legalize an orphan or drop a coverage obligation by mutating
+      the VB registry; VB-table changes belong to generate/propagate).
+
+    The gate itself is never loosened — this only grants bounded retries, each
+    judged by the same deterministic authenticity + coverage audit.
+    """
+    from codd.vb_marker_authenticity import build_authenticity_report
+    from codd.verifiable_behavior_audit import (
+        _normalize_vb_id,
+        build_vb_coverage_audit,
+        collect_declared_vb_ids,
+        render_vb_contract,
+    )
+
+    def _declared_ids() -> frozenset:
+        return frozenset(
+            _normalize_vb_id(b.vb_id)
+            for b in collect_declared_vb_ids(project_root, config=config)
+        )
+
+    def _authenticity():
+        return build_authenticity_report(
+            project_root, config=config, profile=authenticity_profile, strict_observability=True
+        )
+
+    def _uncovered():
+        return build_vb_coverage_audit(project_root, config=config).uncovered_rows
+
+    baseline_ids = _declared_ids()
+    auth = _authenticity()
+    uncovered = _uncovered()
+    prev_count = len(auth.violations) + len(uncovered)
+
+    for round_no in range(1, max_rounds + 1):
+        contract = render_vb_contract(collect_declared_vb_ids(project_root, config=config))
+        feedback = _build_authenticity_rework_feedback(auth.violations, uncovered, contract=contract)
+        echo(
+            f"Test coverage gate: marker-authenticity gate found {len(auth.violations)} "
+            "non-credible marker(s); re-running TEST tasks with findings + VB contract "
+            f"(authenticity rework round {round_no}/{max_rounds})"
+        )
+        try:
+            scope = scope_resolver([])
+            rerun(feedback, scope, None)
+            if rerun_oracle is not None:
+                # A test rewrite can break test↔helper symbol coherence; re-assert
+                # the native oracle so a type/import break never rides into verify.
+                rerun_oracle()
+        except Exception as exc:  # noqa: BLE001 — a stalled rerun must not mask the verdict.
+            echo(
+                f"Test coverage gate: authenticity rework round {round_no} could not complete "
+                f"({exc}); evaluating the gate as-is."
+            )
+            break
+
+        # Tampering guard: the declared VB-id set must NOT change during rework.
+        if _declared_ids() != baseline_ids:
+            raise StageError(
+                "verifiable-behavior marker-authenticity gate failed for the implement stage: "
+                "the declared VB-id set was MODIFIED during authenticity rework. A test task "
+                "must fix the TEST to prove a declared behavior, never edit the VB registry to "
+                "legalize an orphan marker or drop a coverage obligation (VB-table changes belong "
+                "to the generate/propagate stages, not implement rework)."
+            )
+
+        auth = _authenticity()
+        uncovered = _uncovered()
+        if auth.passed and not uncovered:
+            echo(
+                f"Test coverage gate: marker authenticity OK after {round_no} rework round(s) "
+                f"({len(auth.degraded_paths)} file(s) stage-1-only)."
+            )
+            return
+
+        new_count = len(auth.violations) + len(uncovered)
+        if new_count >= prev_count:
+            echo(
+                f"Test coverage gate: authenticity findings did not shrink "
+                f"({prev_count} -> {new_count}) after round {round_no}; aborting rework "
+                "(oscillation guard) and failing the gate on the remaining findings."
+            )
+            break
+        prev_count = new_count
+
+    # Budget exhausted / aborted / rerun stalled — fail-closed on remaining findings.
+    for violation in auth.violations:
+        echo(violation.message)
+    if auth.violations:
+        raise StageError(_authenticity_failure_message(auth.violations))
+    # Authenticity passed but coverage regressed during a rework round.
+    raise StageError(
+        "verifiable-behavior coverage gate failed for the implement stage: "
+        f"{len(uncovered)} declared verifiable behavior(s) became uncovered during "
+        "authenticity rework (a fix removed a covering marker without replacing it)."
+    )
+
+
 def _enforce_stage_coverage_gate(
     project_root: Path,
     *,
@@ -3545,18 +3729,38 @@ def _enforce_stage_coverage_gate(
             f"{len(auth.degraded_paths)} un-parseable file(s) (stage-1 orphan check still applied): "
             + ", ".join(auth.degraded_paths)
         )
-    if not auth.passed:
+    if auth.passed:
+        echo(
+            f"Test coverage gate: marker authenticity OK ({len(auth.degraded_paths)} file(s) stage-1-only)."
+        )
+        return
+
+    # Authenticity FAILED. Unlike the coverage gate (which already re-drives the
+    # owning test tasks with gap feedback above), the authenticity gate used to
+    # fail-closed immediately here — a permanent RED the moment the model wrote
+    # one orphan/assertion-less marker, with no way to feed the finding back and
+    # let it converge (the ExprCalc Python greenfield dogfood stalled here with
+    # 24 such markers). Mirror the coverage loop's semantics: on an authenticity
+    # failure, re-drive the TEST tasks with the verbatim findings + the closed VB
+    # contract, bounded by greenfield.vb_rework.max_rounds, and let the UNCHANGED
+    # deterministic gate re-judge. The gate is NEVER loosened — the model only
+    # gets bounded retries. When rework is unwired (DI callers with no rerun) or
+    # turned off (max_rounds = 0), the legacy immediate fail-closed applies.
+    max_rounds = _vb_rework_max_rounds(config)
+    if rerun is None or scope_resolver is None or max_rounds <= 0:
         for violation in auth.violations:
             echo(violation.message)
-        raise StageError(
-            "verifiable-behavior marker-authenticity gate failed for the implement stage: "
-            f"{len(auth.violations)} `codd: covers vb=` marker(s) are not credible coverage claims "
-            "(attached to a skipped/empty test, an orphan id, a test with no assertion, or an "
-            "unobservable test structure — a recognized file with no parseable test). A covers "
-            "marker must sit on an executable test that asserts the behavior."
-        )
-    echo(
-        f"Test coverage gate: marker authenticity OK ({len(auth.degraded_paths)} file(s) stage-1-only)."
+        raise StageError(_authenticity_failure_message(auth.violations))
+
+    _drive_vb_authenticity_rework(
+        project_root,
+        config=config,
+        authenticity_profile=authenticity_profile,
+        echo=echo,
+        rerun=rerun,
+        rerun_oracle=rerun_oracle,
+        scope_resolver=scope_resolver,
+        max_rounds=max_rounds,
     )
 
 
