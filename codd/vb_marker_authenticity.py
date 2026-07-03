@@ -50,10 +50,27 @@ each later stage only strengthens, never replaces, the earlier ones:
   ``expect(true).toBe(true)``) references nothing but assertion APIs, literals,
   keywords and obvious builtins — it proves nothing, so it is NOT evidence (the
   direct-side analogue of the helper-side argument anchor that already rejects a
-  constant-only helper). It is NOT, however, a dataflow analysis: a
-  local-constant alias (``x = True; assert x``) is a deliberate, documented
-  residual — closing it risks false-RED on legitimate callback / mutation tests
-  (``called = False; …; assert called``).
+  constant-only helper). A SELF-COMPARISON tautology (``assert x == x`` /
+  ``assert f(a) == f(a)`` / ``assertEqual(sorted(v), sorted(v))``) is also NOT
+  evidence: normalized-operand equivalence (same AST dump) on a vacuously-true
+  operator (``==``/``is``/``<=``/``>=`` and the equality-family xUnit asserts)
+  proves nothing, so it is rejected (reason ``tautology_direct``). The dual
+  vacuously-FALSE forms (``!=``/``<``/``>``/``is not``) are deliberately NOT
+  flagged — they would FAIL the test (not a false-green) and ``x != x`` is the
+  legitimate NaN idiom (anti-false-red).
+
+  It is NOT, however, a full dataflow analysis. Three documented RESIDUALS
+  remain (all bounded by the coverage↔authenticity pincer, the intent-worded
+  contract, and verify actually executing the test):
+    - a local-constant alias (``x = True; assert x``) — closing it risks
+      false-RED on legitimate callback / mutation tests (``called = False; …;
+      assert called``);
+    - a SUT-DISCONNECTED literal assertion (``x = 4; assert x == 4`` — a real
+      name, a non-tautological compare, but the value never came from running
+      the SUT) — a test-body call-origin dataflow analysis is future work;
+    - a SEMANTIC tautology whose two operands DIFFER textually but are equal by
+      meaning (``assert x == 4`` next to ``x = 2 + 2``) — left to a future
+      mutation-probe stage (Stage 5), never to a brittle pattern hunt.
 
   The argument anchor is what keeps this anti-false-green: a no-op helper
   (``function expectSuccess() { expect(true).toBe(true); }``) does not reference
@@ -71,6 +88,12 @@ deliberately NOT implemented here — proving that a natural-language VB row's
 false-RED. They are left as explicit extension hooks (see ``AuthenticityHook``)
 so a profile that ships machine-readable anchors / a mutation harness can opt in
 later without reworking this gate.
+
+Marker STACKING (one test file carrying many ``codd: covers vb=`` markers) is
+another deliberate residual: it is REPORTED for audit visibility
+(``verifiable_behavior_audit.summarize_marker_distribution``) but NOT capped —
+a per-file marker ceiling would false-RED a legitimate table-driven /
+parametrized test that covers several related VBs in one file (anti-false-red).
 
 GENERALITY (see ``feedback_codd_generality_preservation``): every language-
 specific operation — locating the test block a marker sits in, detecting skip,
@@ -847,6 +870,14 @@ def _no_assertion_message(
             "a constant assertion proves nothing. Assert against an observed result, "
             "exception, state, or output that would FAIL if the behavior were broken."
         )
+    elif evidence.reason == "tautology_direct":
+        why = (
+            " whose direct primitive assertion compares a value to ITSELF "
+            "(`assert x == x`, `assert f(a) == f(a)`, `assertEqual(sorted(v), sorted(v))`) — "
+            "a self-comparison is a tautology that holds regardless of the system under test "
+            "and proves nothing. Compute the expected value INDEPENDENTLY of the value under "
+            "test and assert the two are equal."
+        )
     elif evidence.reason == "library_only_direct":
         detail = f" ({evidence.detail})" if evidence.detail else ""
         why = (
@@ -1468,6 +1499,67 @@ def _build_py_origin_context(
     )
 
 
+#: xUnit-style two-argument EQUALITY asserts — ``assertEqual(x, x)`` etc. are a
+#: tautology (vacuously true) when both args are structurally identical, exactly
+#: like ``assert x == x``. Only equality/``>=``/``<=``-family methods are listed:
+#: they PASS vacuously on identical args (a false-green). ``assertNotEqual`` /
+#: ``assertGreater`` / ``assertIsNot`` on identical args would FAIL the test, so
+#: they are not a false-green and are deliberately excluded (and ``x != x`` is a
+#: legitimate NaN idiom — see :func:`_py_assert_node_is_tautology`).
+_PY_TWO_ARG_EQ_ASSERT_METHODS = frozenset(
+    {
+        "assertEqual",
+        "assertEquals",
+        "assertIs",
+        "assertListEqual",
+        "assertDictEqual",
+        "assertSetEqual",
+        "assertTupleEqual",
+        "assertSequenceEqual",
+        "assertMultiLineEqual",
+        "assertCountEqual",
+        "assertAlmostEqual",
+        "assertGreaterEqual",
+        "assertLessEqual",
+    }
+)
+
+
+def _py_assert_node_is_tautology(node: ast.AST) -> bool:
+    """True when a primitive-assert node compares a value to a STRUCTURALLY IDENTICAL value.
+
+    Normalized-operand equivalence: two operands are equivalent when their AST
+    dumps match (position-independent), so ``assert x == x``, ``assert f(a) ==
+    f(a)``, and ``assertEqual(sorted(v), sorted(v))`` are all detected — a self-
+    comparison is a tautology that holds regardless of the system under test and
+    proves nothing. This is a STRENGTHENING of the existing constant-assertion
+    classification (``assert x == x`` currently credits because ``x`` is a real
+    name), not a loosening of any accept criterion.
+
+    Restricted to operators/methods that pass VACUOUSLY-TRUE on identical
+    operands (``==``, ``is``, ``<=``, ``>=`` and the equality-family xUnit
+    asserts). A vacuously-FALSE self-comparison (``!=``, ``is not``, ``<``,
+    ``>``) would FAIL the test — it is not a false-green — and ``x != x`` is the
+    legitimate NaN idiom, so those are intentionally NOT flagged (anti-false-red).
+    """
+
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Compare):
+            operands = [sub.left, *sub.comparators]
+            for index, op in enumerate(sub.ops):
+                if isinstance(op, (ast.Eq, ast.Is, ast.LtE, ast.GtE)) and ast.dump(
+                    operands[index]
+                ) == ast.dump(operands[index + 1]):
+                    return True
+        elif isinstance(sub, ast.Call):
+            name = _py_callee_name(sub.func)
+            if name and name.split(".")[-1] in _PY_TWO_ARG_EQ_ASSERT_METHODS:
+                positional = [arg for arg in sub.args if not isinstance(arg, ast.Starred)]
+                if len(positional) >= 2 and ast.dump(positional[0]) == ast.dump(positional[1]):
+                    return True
+    return False
+
+
 def _python_direct_assertion_evidence(
     body_text: str, *, origin_ctx: _PyOriginContext | None = None
 ) -> AssertionEvidence:
@@ -1502,11 +1594,19 @@ def _python_direct_assertion_evidence(
 
     saw_primitive = False
     saw_library_only = False
+    saw_tautology = False
     library_detail = ""
     for node in ast.walk(tree):
         if not _is_py_primitive_assert_node(node):
             continue
         saw_primitive = True
+        if _py_assert_node_is_tautology(node):
+            # A self-comparison (`assert x == x`) proves nothing about the SUT —
+            # treat as NO observation even though it references a real name. If
+            # the same test ALSO carries a genuine assertion, that node still
+            # credits below (this only withholds credit from the tautology).
+            saw_tautology = True
+            continue
         ids = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)} - _PY_DIRECT_IGNORED_NAMES
         if not ids:
             continue  # constant-only assertion (no observed name)
@@ -1530,6 +1630,8 @@ def _python_direct_assertion_evidence(
         return AssertionEvidence(ok=True, reason="direct")
     if saw_library_only:
         return AssertionEvidence(ok=False, reason="library_only_direct", detail=library_detail)
+    if saw_tautology:
+        return AssertionEvidence(ok=False, reason="tautology_direct")
     return AssertionEvidence(ok=False, reason="constant_direct")
 
 

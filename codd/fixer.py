@@ -746,6 +746,33 @@ def _build_fix_prompt(
         output_hint = "source"
         output_body_label = "source code"
 
+    # VB contract for a repair that may touch a TEST file (Task 7): the SAME
+    # deterministic marker-authenticity + coverage gate that judges implement
+    # runs also judges repaired tests, so a repair editing a test must not
+    # introduce an orphan `codd: covers vb=` marker or weaken an assertion to a
+    # constant/self-comparison. Attached only when a test file is among the
+    # failing artifacts and the project declares a VB table (render returns "").
+    vb_contract_section = ""
+    if any(_is_test_path(fp) for f in failures for fp in f.failed_files):
+        try:
+            from codd.verifiable_behavior_audit import (
+                collect_declared_vb_ids,
+                render_vb_contract,
+            )
+
+            _contract = render_vb_contract(collect_declared_vb_ids(project_root, config=config))
+            if _contract:
+                vb_contract_section = (
+                    "## Verifiable-behavior contract (a test file is among the failing artifacts)\n\n"
+                    "If your fix edits any TEST file, it MUST obey this contract — the same "
+                    "deterministic gate that judges implement runs also judges repaired tests. "
+                    "Do not add a `codd: covers vb=` marker naming an id outside the closed list, "
+                    "and do not weaken an assertion to a constant or a self-comparison.\n\n"
+                    + _contract
+                )
+        except Exception:  # noqa: BLE001 — contract enrichment must never break repair.
+            vb_contract_section = ""
+
     lines = [
         f"You are fixing failures in the project '{project_name}' ({language}).",
         "",
@@ -773,6 +800,7 @@ def _build_fix_prompt(
         "",
         design_context if design_context else "(no design documents found)",
         "",
+        *([vb_contract_section, ""] if vb_contract_section else []),
         "## Instructions",
         "",
         "### Step 1: Diagnose (MANDATORY — do this BEFORE writing any fix)",

@@ -3714,6 +3714,23 @@ def _enforce_stage_coverage_gate(
             "marker after all implement tasks completed (see the gap list above)"
         )
 
+    # Marker distribution (VISIBILITY ONLY — never a cap; a table-driven test may
+    # legitimately cover several related VBs). Surfaces marker stacking for audit.
+    try:
+        from codd.verifiable_behavior_audit import summarize_marker_distribution
+
+        distribution = summarize_marker_distribution(
+            build_vb_coverage_audit(project_root, config=config)
+        )
+        if distribution:
+            top = "; ".join(f"{path}×{count}" for path, count in list(distribution.items())[:3])
+            echo(
+                f"Test coverage gate: `covers` markers span {len(distribution)} test file(s) "
+                f"(most-marked: {top})."
+            )
+    except Exception:  # noqa: BLE001 — a reporting helper must never gate the build.
+        pass
+
     # --- Gate 2: marker authenticity (anti-false-green). HARD gate. ---
     from codd.vb_marker_authenticity import build_authenticity_report
 

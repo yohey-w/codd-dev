@@ -13,6 +13,48 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.9.0] - 2026-07-03 — VB contract projection + bounded authenticity rework (Top-6 greenfield unblock)
+
+Python/JavaScript/TypeScript greenfield autopilots all stalled at the FINAL
+anti-false-green gates: the implement prompt stated the marker RULES but never
+enumerated the CLOSED set of declared verifiable-behavior ids, so the model
+invented ids (acceptance-criterion ids like `AC-10` leaking into `vb=` markers,
+descriptive inventions like `VB-TOK-NONZERO-POSITION`), and the marker-
+authenticity gate — unlike the coverage gate — failed CLOSED on the first non-
+credible marker with no way to feed the finding back. The ExprCalc Python
+dogfood stalled with 24 markers (17 orphans + 7 assertion-less). Every fix is
+generic (no `language ==` in core; per-language idioms live in profile YAML).
+
+### Added
+- **VB contract projection.** `verifiable_behavior_audit.collect_declared_vb_ids`
+  (behavior-invariant re-exposure of the gate's own declared set) +
+  `render_vb_contract` (a language-free prompt block enumerating the closed id
+  list + assertion-quality + coverage-is-completion rules), injected into the
+  implement prompt for test-scope tasks from the SAME truth source the gate
+  reconciles against — the prompt-side closed list can no longer drift from the
+  gate-side declared set. Opt-in per-language assertion idioms ride a new
+  `tests.assertion_guidance` profile field.
+- **Bounded authenticity rework loop** (`greenfield.vb_rework.max_rounds`,
+  default 2, 0 = legacy). On an authenticity failure the owning TEST tasks are
+  re-driven with the verbatim findings + the closed VB contract, then the
+  UNCHANGED gate re-judges. Guards: an oscillation abort (finding count must
+  strictly shrink round-over-round), a VB-table tampering RED (the declared id
+  set must not change during rework), and a coverage-regression RED.
+- **Self-comparison tautology detection** (`tautology_direct`): `assert x == x`
+  / `assertEqual(sorted(v), sorted(v))` are rejected via normalized-operand
+  equivalence on vacuously-true operators only — the NaN idiom `x != x` stays
+  valid (anti-false-red).
+- **Marker distribution report** (`summarize_marker_distribution`) — visibility
+  into marker stacking, NOT a cap (a table-driven test may cover several VBs).
+
+### Changed
+- The verify-stage repair prompt now carries the VB contract when a test file is
+  among the failing artifacts, so a repair that edits a test cannot introduce an
+  orphan marker or a constant/self-comparison assertion.
+
+The deterministic gate is never loosened — this only adds detections and grants
+the model bounded, gate-judged retries.
+
 ## [3.7.6] - 2026-06-25 — brownfield discovery hardening (generality-first; 6-language stress dogfood)
 
 A second, more complex OSS per language (SQLAlchemy, Fastify, NestJS, Guava, LevelDB,

@@ -1042,6 +1042,24 @@ def render_vb_coverage_audit_markdown(report: VBAuditReport) -> str:
 # ---------------------------------------------------------------------------
 
 
+def summarize_marker_distribution(report: VBAuditReport) -> dict[str, int]:
+    """Markers-per-test-file distribution (VISIBILITY ONLY — never enforced).
+
+    Counts how many declared VBs each test file covers, surfacing marker
+    STACKING (a single file carrying many `codd: covers vb=` markers) so an audit
+    can SEE it. This is intentionally NOT a cap: a legitimate table-driven /
+    parametrized test can cover several related VBs in one file, and enforcing a
+    per-file marker ceiling would false-RED those (anti-false-red). Returned
+    ordered by count descending, then path — a stable, reportable ordering.
+    """
+
+    counts: dict[str, int] = {}
+    for row in report.rows:
+        for path in row.matched_tests:
+            counts[path] = counts.get(path, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def coverage_gate_enabled(config: dict[str, Any] | None) -> bool:
     """Whether the implement-completion coverage gate is enabled (default ON)."""
 
