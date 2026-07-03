@@ -300,6 +300,34 @@ def resolve_test_framework_guidance(
     return profile.tests.framework
 
 
+def resolve_assertion_guidance(
+    project_language: str | None,
+    *,
+    registry: LanguageRegistry | None = None,
+) -> str | None:
+    """The optional per-language assertion-idiom guidance for *project_language*.
+
+    Same convenience-seam contract as :func:`resolve_test_framework_guidance`
+    (an already-resolved language string, best-effort, never raises). Returns
+    the profile's ``tests.assertion_guidance`` prose (fed to
+    :func:`codd.verifiable_behavior_audit.render_vb_contract` as
+    ``extra_guidance``) or ``None`` when the language is unknown or the profile
+    has not declared the field. ``None`` MUST be treated as "append nothing" —
+    the shared VB contract text is language-free by construction, and per-
+    language assertion idioms are strictly opt-in via profile YAML.
+    """
+    if not project_language:
+        return None
+    lang_registry = registry if registry is not None else default_registry
+    try:
+        profile = lang_registry.resolve(project_language)
+    except UnknownLanguageError:
+        return None
+    if profile.tests is None:
+        return None
+    return profile.tests.assertion_guidance
+
+
 def resolve_language_contract(
     config: Mapping[str, Any] | None,
     *,

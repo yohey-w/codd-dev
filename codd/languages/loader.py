@@ -327,6 +327,9 @@ def _parse_tests(doc: Mapping[str, Any]) -> TestsSpec | None:
         ),
         test_block_kinds=_as_str_tuple(m.get("test_block_kinds")),
         framework=_parse_test_framework(m.get("framework")),
+        assertion_guidance=(
+            str(m["assertion_guidance"]) if m.get("assertion_guidance") is not None else None
+        ),
     )
 
 

@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 import codd.generator as generator_module
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
-from codd.languages import resolve_test_framework_guidance
+from codd.languages import resolve_assertion_guidance, resolve_test_framework_guidance
 from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 import unicodedata
@@ -2141,6 +2141,38 @@ def _build_implementation_prompt(
                     "",
                 ]
             )
+
+        # VB CONTRACT PROJECTION (2026-07-03): enumerate the CLOSED verifiable-
+        # behavior id list + assertion-quality + coverage-is-completion rules,
+        # read from the SAME truth source the deterministic gate reconciles
+        # against (collect_declared_vb_ids → load_verifiable_behaviors). The
+        # abstract marker rules below tell the model HOW to mark; without the
+        # concrete closed id list the model invents ids (acceptance-criterion
+        # ids like AC-10 leaking into vb= markers, descriptive inventions like
+        # VB-TOK-NONZERO-POSITION) and the marker-authenticity gate then rejects
+        # them as orphans with no way to prevent it up front. This is the same
+        # data-driven injection seam as resolve_test_framework_guidance: it is
+        # opt-in per-language ONLY for the assertion-idiom extra_guidance; the
+        # closed-list + 3 rules are language-free. Skipped when project_root is
+        # unavailable (DI/standalone callers) or the project declares no VB
+        # table (render returns "").
+        if project_root is not None:
+            try:
+                from codd.verifiable_behavior_audit import (
+                    collect_declared_vb_ids,
+                    render_vb_contract,
+                )
+
+                declared_vbs = collect_declared_vb_ids(project_root, config=config)
+                contract_block = render_vb_contract(
+                    declared_vbs,
+                    extra_guidance=resolve_assertion_guidance(language),
+                )
+            except Exception:  # noqa: BLE001 — a projection failure must never break generation.
+                contract_block = ""
+            if contract_block:
+                lines.extend(["", contract_block])
+
         lines.extend(
             [
                 "Verifiable-behavior traceability markers (release-blocking — the implement stage gate fails the build on any gap):",

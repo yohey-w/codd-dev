@@ -807,6 +807,114 @@ def load_verifiable_behaviors(
     return list(by_id.values())
 
 
+def collect_declared_vb_ids(
+    project_root: Path | str,
+    *,
+    config: dict[str, Any] | None = None,
+    docs: Iterable[Path | str] | None = None,
+) -> list[VerifiableBehavior]:
+    """Public projection of the declared verifiable-behavior universe.
+
+    Returns the SAME deduplicated ``VerifiableBehavior`` list
+    (``vb_id`` + ``description`` + ``source_doc``) that
+    :func:`build_vb_coverage_audit` reconciles against markers and that the
+    marker-authenticity gate's stage-1 orphan check builds its declared-id set
+    from. This is a behavior-invariant re-exposure of that single truth source
+    (it simply delegates to :func:`load_verifiable_behaviors`) so the
+    implement-prompt contract projection (:func:`render_vb_contract`) reads the
+    EXACT set the deterministic gates enforce — the prompt-side "closed id
+    list" can never drift from the gate-side declared set, because both come
+    from here. Empty when the project declares no VB table.
+    """
+
+    return load_verifiable_behaviors(project_root, config=config, docs=docs)
+
+
+def render_vb_contract(
+    declared: Sequence[VerifiableBehavior],
+    *,
+    extra_guidance: str | None = None,
+) -> str:
+    """Render the language-free VB contract block for a test-authoring prompt.
+
+    The contract PROJECTS the deterministic gate's rules onto the prompt so the
+    generator/implementer sees, up front, the exact obligations the gate will
+    later enforce (the same-truth-source principle behind
+    :func:`resolve_test_framework_guidance`). Three rules, stated in intent AND
+    with the concrete closed id list:
+
+    1. **Closed id list** — the enumerated ``VB-<id>`` set (with declaring doc)
+       is the ONLY set a ``codd: covers vb=<id>`` marker may name; anything else
+       (an acceptance-criterion id like ``AC-10``, an invented descriptive id)
+       is a deterministic orphan and is rejected. Do not invent/rename ids.
+    2. **Assertion quality** — a marked test must EXECUTE the system under test
+       and assert on the OBSERVED result (return value, raised error, output,
+       produced artifact); constant-only, self-comparing, and SUT-disconnected
+       assertions are rejected.
+    3. **Coverage is completion** — every listed id needs at least one such
+       test for the test task to be complete.
+
+    ``extra_guidance`` (a language's ``tests.assertion_guidance``, resolved via
+    :func:`codd.languages.resolve_assertion_guidance`) is appended verbatim when
+    present; absent ⇒ nothing is added (no non-opt-in default, so the shared
+    text stays language-free). Returns ``""`` when ``declared`` is empty — a
+    project with no VB table has no contract to project.
+    """
+
+    behaviors = list(declared)
+    if not behaviors:
+        return ""
+
+    lines = [
+        "Verifiable-behavior CONTRACT (release-blocking — the deterministic "
+        "marker-authenticity + coverage gate enforces EXACTLY these rules after "
+        "you write the tests; a violation fails the build):",
+        "",
+        "1. CLOSED ID LIST — the verifiable-behavior ids below are the COMPLETE, "
+        "closed set. A `codd: covers vb=<id>` marker may name ONLY an id from "
+        "this list. Any other id — an acceptance-criterion id (e.g. `AC-10`), a "
+        "requirement id, or an invented descriptive name (e.g. "
+        "`VB-TOK-NONZERO-POSITION`) — is rejected as an orphan marker. If you "
+        "believe a behavior is missing, do NOT invent or rename an id: implement "
+        "a test for the closest id that IS listed (the completeness of the list "
+        "is the design's concern, resolved in the VB registry, never in test "
+        "code). The valid ids are:",
+    ]
+    for behavior in behaviors:
+        vb_id = behavior.vb_id.strip()
+        description = (behavior.description or "").strip()
+        source = (behavior.source_doc or "").strip()
+        suffix = f" (declared in {source})" if source else ""
+        detail = f" — {description}" if description else ""
+        lines.append(f"   - {vb_id}{detail}{suffix}")
+    lines.extend(
+        [
+            "",
+            "2. ASSERTION QUALITY — a `codd: covers vb=<id>` marker is a CLAIM "
+            "that the marked test PROVES that behavior. The test must actually "
+            "execute the system under test and assert against the OBSERVED result "
+            "of that execution (a returned value, a raised error/exception, "
+            "emitted output, or a produced artifact's content). An assertion that "
+            "compares only constants, compares a value to itself, or asserts a "
+            "value never derived from running the system under test does NOT "
+            "prove the behavior and is rejected. Write the expected value "
+            "INDEPENDENTLY of the value you compute from the system under test — "
+            "never assert a system-derived value against itself.",
+            "",
+            "3. COVERAGE IS THE COMPLETION CONDITION — for EVERY id in the closed "
+            "list above, at least one test satisfying rule 2 (or an explicit "
+            "`codd: blocked vb=<id> reason=<short_reason>` marker when a behavior "
+            "genuinely cannot be tested yet) must exist. A declared id left with "
+            "no credible covering test is an incomplete test task, not a passing "
+            "one.",
+        ]
+    )
+    if extra_guidance and extra_guidance.strip():
+        lines.extend(["", extra_guidance.strip()])
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_vb_coverage_audit(
     project_root: Path | str,
     *,

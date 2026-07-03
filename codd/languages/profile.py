@@ -406,6 +406,14 @@ class TestsSpec:
     )
     test_block_kinds: tuple[str, ...] = ()
     framework: "TestFrameworkSpec | None" = None
+    # Optional per-language assertion-idiom guidance appended to the VB
+    # contract block in the implement prompt (see
+    # ``codd.verifiable_behavior_audit.render_vb_contract``'s ``extra_guidance``).
+    # A plain prose string; ``None`` for any profile that hasn't declared it,
+    # which callers MUST treat as "add nothing" (no non-opt-in default). This
+    # is the ONLY place per-language assertion idioms belong — the shared
+    # contract text stays language-free.
+    assertion_guidance: str | None = None
 
 
 # ---------------------------------------------------------------------------
