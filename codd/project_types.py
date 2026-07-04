@@ -1153,6 +1153,108 @@ class LayoutProfile:
         return resolve_runner_report_adapter(next(iter(formats)))
 
 
+def render_layout_placement_contract(profile: "LayoutProfile | None") -> str:
+    """Project the harness-owned repository LAYOUT (test root, source root, and the
+    harness-owned config files) onto a generation/implement prompt, DATA-DRIVEN
+    from the resolved :class:`LayoutProfile` — the SAME topology the scaffold
+    creates and the output-path fence enforces.
+
+    The generation prompt otherwise never conveys WHERE test files live, so the
+    model freelances a sibling test directory (the JS greenfield wrote unit specs
+    under ``test/`` while the harness owns ``tests/``); the output-path fence then
+    drops the misplaced file, and its declared 'test' deliverable reads as "not
+    produced" → a hard ``StageError``. Rendering the profile the scaffold realises
+    makes the prompt-side layout contract unable to drift from the harness-side
+    one — the same same-truth-source principle behind
+    :func:`~codd.import_coherence.render_import_coherence_contract` /
+    ``resolve_test_framework_guidance`` / :func:`~codd.verifiable_behavior_audit.render_vb_contract`.
+
+    Language-free: the test root, source root, and harness-owned scaffold paths are
+    all read from ``profile`` — there is NO language-name branch and NO hardcoded
+    owned path (the owned roots come from ``profile.test_root`` /
+    ``profile.package_root``). Each rule is gated on the exact profile fields that
+    decide it:
+
+    * the TEST ROOT rule is emitted whenever the profile declares a ``test_root``
+      (every supported stack does) — the owned root is rendered verbatim, so a
+      brownfield stack whose real test dir is ``test`` renders ``test/`` with no
+      ``tests`` literal anywhere;
+    * the SOURCE ROOT rule iff ``not requires_package_init`` — a named-package
+      stack (Python) already states the source-root rule through its import
+      contract (:func:`render_import_coherence_contract` rule 1), so re-emitting it
+      here would DUPLICATE it; a path-relative stack (TypeScript/JS) has no import
+      contract, so this is the ONLY place its source root is stated;
+    * the harness-owned config-file rule iff the profile declares any
+      ``harness_owned_scaffold_paths`` (else omitted).
+
+    Returns ``""`` when ``profile`` is ``None`` (a stack with no resolved layout,
+    e.g. Go) — there is nothing to project.
+    """
+    if profile is None:
+        return ""
+
+    rules: list[str] = []
+
+    test_root = str(profile.test_root or "").strip().replace("\\", "/").strip("/")
+    if test_root:
+        # Common sibling test-dir names the model may freelance, MINUS the owned
+        # root — so a stack whose owned root IS ``test`` is never told to avoid it
+        # (the illustration is derived, never a hardcoded ``tests``-vs-``test``
+        # assumption). Purely an example set to make the rule concrete.
+        siblings = [d for d in ("test", "tests", "spec", "specs") if d != test_root]
+        example = (
+            f" (do NOT invent a sibling test directory such as "
+            f"{', '.join(f'`{d}/`' for d in siblings)})"
+            if siblings
+            else ""
+        )
+        rules.append(
+            f"{len(rules) + 1}. TEST LOCATION — the harness OWNS the test root "
+            f"`{test_root}/`, and the verify runner discovers test files ONLY under "
+            f"`{test_root}/`. Put EVERY test file you author — and every test-file "
+            f"path this document references — UNDER `{test_root}/`{example}. A test "
+            f"file placed outside `{test_root}/` is dropped by the output-path fence, "
+            f"so its declared 'test' deliverable reads as never produced and fails "
+            f"the build."
+        )
+
+    if not profile.requires_package_init:
+        source_root = str(profile.package_root or "").strip().replace("\\", "/").strip("/")
+        if source_root:
+            rules.append(
+                f"{len(rules) + 1}. SOURCE LOCATION — put EVERY source module you "
+                f"author UNDER `{source_root}/`. A source file placed outside "
+                f"`{source_root}/` is dropped by the output-path fence."
+            )
+
+    try:
+        scaffold_paths = tuple(profile.harness_owned_scaffold_paths())
+    except Exception:  # noqa: BLE001 — an ownership-resolution failure must never break the prompt.
+        scaffold_paths = ()
+    if scaffold_paths:
+        listed = ", ".join(f"`{p}`" for p in scaffold_paths)
+        rules.append(
+            f"{len(rules) + 1}. HARNESS-OWNED SCAFFOLD — the dependency manifest, the "
+            f"lockfile, and the test-runner / toolchain config files are created by "
+            f"the harness scaffold, and the verify command is fixed. Do NOT author or "
+            f"declare a runner/tool config file among your outputs — these are already "
+            f"provided: {listed}. A config file you emit is dropped by the output-path "
+            f"fence (and never changes how verify runs)."
+        )
+
+    if not rules:
+        return ""
+
+    header = (
+        "Repository LAYOUT CONTRACT (release-blocking — the harness scaffold owns "
+        "this topology and the output-path fence enforces it at implement; a file "
+        "placed outside the owned roots is dropped, so a declared deliverable then "
+        "reads as never produced and fails the build — get the placement right the "
+        "first time):"
+    )
+    return "\n".join([header, "", *rules])
+
+
 def _sanitize_package_identifier(
     raw_input: str, *, fallback: str, preserve_case: bool, leading_upper: bool
 ) -> str:

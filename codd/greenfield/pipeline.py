@@ -2827,55 +2827,17 @@ def _path_under_root(rel_path: str, roots: list[str]) -> bool:
     return False
 
 
-# ``_TEST_SUFFIXES`` (operational_e2e_audit.py) mixes two different kinds of
-# entries: dedicated test-file conventions that are unambiguous on their own —
-# JS/TS's ``.spec./.test./.e2e./.cy.`` family and Go's tooling-enforced
-# ``_test.go`` (``go build`` structurally excludes it from the non-test binary)
-# — and BARE whole-language extensions (``.py``, ``.cs``, ``.java``,
-# ``.cpp``/``.cc``/``.cxx``) that scanner admits deliberately broadly because
-# IT is always additionally gated by the configured test-dir scope (see the
-# per-suffix comments in ``operational_e2e_audit.py``). This module's callers
-# do not apply that same scope gate on the SOURCE-exclusion side (see
-# ``_produced_kinds``), so reusing a bare extension here would flag EVERY file
-# of that language — test or not — as test-shaped and permanently bar it from
-# ever counting as SOURCE. ``.py`` already had this carve-out (only
-# ``test_*.py``/``*_test.py`` count, never bare ``.py``); the other bare-admit
-# languages need the identical treatment — generically, since none of them has
-# a tooling/naming-enforced unambiguous test suffix. Confirmed root cause of
-# the 2026-06-30 Java (``scaffold_package_skeleton``) and 2026-07-01 C++
-# (``scaffold_repository_layout``) greenfield false-REDs: a task's real
-# ``src/`` output was reported as having produced "only test".
-_AMBIGUOUS_BARE_SOURCE_SUFFIXES: frozenset[str] = frozenset(
-    {".py", ".cs", ".java", ".cpp", ".cc", ".cxx"}
+# ``_has_test_shape`` / ``_unambiguous_test_suffixes`` /
+# ``_AMBIGUOUS_BARE_SOURCE_SUFFIXES`` now live next to their sole data source
+# (``_TEST_SUFFIXES``) in ``codd.operational_e2e_audit`` — a LEAF module — so BOTH
+# this kind gate AND ``codd.implementer`` (the test-root re-key normalization) can
+# reuse them without ``implementer`` having to import ``greenfield.pipeline``
+# (which imports ``implementer`` — a cycle). Re-imported here so this module's
+# call sites (``_classify_declared_output`` / ``_produced_kinds``) are unchanged.
+from codd.operational_e2e_audit import (  # noqa: E402
+    _has_test_shape,
+    _unambiguous_test_suffixes,
 )
-
-
-def _unambiguous_test_suffixes() -> tuple[str, ...]:
-    """``_TEST_SUFFIXES`` minus every bare, direction-blind source extension."""
-    from codd.operational_e2e_audit import _TEST_SUFFIXES
-
-    return tuple(
-        suffix for suffix in _TEST_SUFFIXES if suffix not in _AMBIGUOUS_BARE_SOURCE_SUFFIXES
-    )
-
-
-def _has_test_shape(rel_path: str) -> bool:
-    """A filename that is unambiguously a test, language-independent.
-
-    Reuses the project's :data:`_TEST_SUFFIXES` for the suffixes that are
-    unambiguous on their own, and recognises the conventional pytest/unittest
-    naming for Python (``test_*.py`` / ``*_test.py``) — never bare ``.py``. A
-    bare whole-language extension for any OTHER bare-admit language (``.cs``,
-    ``.java``, ``.cpp``/``.cc``/``.cxx``) is likewise never enough alone; those
-    languages rely on the ``test_dirs`` scope check in :func:`_produced_kinds` /
-    ``_classify_declared_output`` instead.
-    """
-    name = PurePosixPath(str(rel_path).replace("\\", "/")).name
-    if name.endswith(_unambiguous_test_suffixes()):
-        return True
-    if name.endswith(".py"):
-        return name.startswith("test_") or name[:-3].endswith("_test")
-    return False
 
 
 def _norm_decl_path(raw: Any) -> str:

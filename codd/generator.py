@@ -231,6 +231,47 @@ def _resolve_project_language(config: dict[str, Any] | None) -> str | None:
     return normalized or None
 
 
+def _resolve_layout_placement_contract(
+    config: dict[str, Any] | None, project_root: Path | None
+) -> str:
+    """Pre-render the harness-owned layout-placement CONTRACT for the generation prompt.
+
+    Resolved ONCE per wave (``resolve_layout_profile`` may touch disk to derive the
+    package name from the actual tree) and threaded as a plain STRING into every
+    prompt builder, so the builders stay pure (no disk I/O inside a prompt builder).
+    Projects the SAME :class:`~codd.project_types.LayoutProfile` the scaffold + the
+    output-path fence read: the owned test root / source root / scaffold-owned config
+    files. This is the GENERATE-stage twin of the implement-stage injection in
+    :func:`codd.implementer._build_implementation_prompt`; without it the design docs
+    themselves freelance a sibling test dir (``test/``) that the fence later drops.
+
+    Returns ``""`` when ``project_root``/``config`` is unavailable or the stack has no
+    resolved layout (Go), and NEVER raises — a projection failure must never break
+    generation.
+    """
+    if project_root is None or not isinstance(config, dict):
+        return ""
+    try:
+        from codd.project_types import (
+            render_layout_placement_contract,
+            resolve_layout_profile,
+        )
+
+        project = config.get("project") if isinstance(config.get("project"), dict) else {}
+        scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+        profile = resolve_layout_profile(
+            language=project.get("language") if isinstance(project, dict) else None,
+            project_name=project.get("name") if isinstance(project, dict) else None,
+            source_dirs=scan.get("source_dirs") if isinstance(scan, dict) else None,
+            test_dirs=scan.get("test_dirs") if isinstance(scan, dict) else None,
+            config=config,
+            project_root=project_root,
+        )
+        return render_layout_placement_contract(profile)
+    except Exception:  # noqa: BLE001 — a projection failure must never break generation.
+        return ""
+
+
 # Test-doc traceability guidance — applies to every project type regardless of
 # capabilities (unit + integration coverage, traceability, operation_flow). It
 # is ROLE-AWARE: exactly one generated test document (the canonical doc,
@@ -603,6 +644,7 @@ def generate_wave(
     body_max_retries = _body_max_retries(config)
     capabilities = _resolve_generation_capabilities(config, project_root)
     project_language = _resolve_project_language(config)
+    layout_placement = _resolve_layout_placement_contract(config, project_root)
 
     results: list[GenerationResult] = []
     for artifact in selected:
@@ -621,6 +663,7 @@ def generate_wave(
                 body_max_retries=body_max_retries,
                 capabilities=capabilities,
                 project_language=project_language,
+                layout_placement=layout_placement,
                 feedback=feedback,
             )
         )
@@ -640,6 +683,7 @@ def _generate_one_artifact(
     body_max_retries: int,
     capabilities: "ProjectCapabilities | None",
     project_language: str | None,
+    layout_placement: str = "",
     feedback: str | None,
 ) -> GenerationResult:
     """Render ONE artifact's document and write it (overwriting any prior file).
@@ -670,6 +714,7 @@ def _generate_one_artifact(
             max_retries=body_max_retries,
             capabilities=capabilities,
             project_language=project_language,
+            layout_placement=layout_placement,
         ),
     )
     output_path.write_text(content, encoding="utf-8")
@@ -733,6 +778,7 @@ def regenerate_artifact(
     body_max_retries = _body_max_retries(config)
     capabilities = _resolve_generation_capabilities(config, project_root)
     project_language = _resolve_project_language(config)
+    layout_placement = _resolve_layout_placement_contract(config, project_root)
 
     return _generate_one_artifact(
         artifact=artifact,
@@ -744,6 +790,7 @@ def regenerate_artifact(
         body_max_retries=body_max_retries,
         capabilities=capabilities,
         project_language=project_language,
+        layout_placement=layout_placement,
         feedback=feedback,
     )
 
@@ -1123,6 +1170,7 @@ def _generate_document_body(
     max_retries: int = DEFAULT_BODY_MAX_RETRIES,
     capabilities: ProjectCapabilities | None = None,
     project_language: str | None = None,
+    layout_placement: str = "",
 ) -> str:
     """Generate one document body with a bounded validation-feedback retry loop.
 
@@ -1140,6 +1188,7 @@ def _generate_document_body(
             artifact, dependency_documents, conventions,
             feedback=current_feedback, capabilities=capabilities,
             project_language=project_language,
+            layout_placement=layout_placement,
         )
         prompt = _inject_lexicon(prompt, project_root)
         try:
@@ -1194,6 +1243,7 @@ def _build_generation_prompt(
     feedback: str | None = None,
     capabilities: ProjectCapabilities | None = None,
     project_language: str | None = None,
+    layout_placement: str = "",
 ) -> str:
     if capabilities is None:
         capabilities = WEB_FALLBACK_CAPABILITIES
@@ -1206,6 +1256,7 @@ def _build_generation_prompt(
             feedback=feedback,
             capabilities=capabilities,
             project_language=project_language,
+            layout_placement=layout_placement,
         )
 
     doc_type = _infer_doc_type(artifact.output)
@@ -1243,6 +1294,17 @@ def _build_generation_prompt(
                 f"instead of {test_framework.name}: {test_framework.name} is what actually executes "
                 f"when this project is verified, regardless of dependency-count philosophy."
             )
+        # LAYOUT-PLACEMENT CONTRACT (2026-07-04): the harness-owned test-root /
+        # source-root / scaffold-owned-config topology, pre-rendered from the SAME
+        # LayoutProfile the scaffold + output-path fence read (passed in — no disk
+        # I/O in this prompt builder). Same "scaffold fixes this, the document may
+        # not reinterpret it" register as the framework guidance directly above.
+        # Without it a design doc freelances a sibling test dir (``test/``) that the
+        # fence later drops, and the declared 'test' deliverable reads as never
+        # produced → hard StageError. Empty string for a stack with no resolved
+        # layout (Go) or an unavailable project_root.
+        if layout_placement:
+            lines.append(layout_placement)
     lines += [
         "Use the dependency documents below as the primary context, synthesize them, and write a complete Markdown document body.",
         (
@@ -1376,6 +1438,7 @@ def _build_test_code_prompt(
     feedback: str | None = None,
     capabilities: ProjectCapabilities | None = None,
     project_language: str | None = None,
+    layout_placement: str = "",
 ) -> str:
     """Build a prompt that generates executable test code (not a Markdown document)."""
     if capabilities is None:
@@ -1429,6 +1492,15 @@ def _build_test_code_prompt(
         conv_text,
         "",
     ]
+
+    # LAYOUT-PLACEMENT CONTRACT (2026-07-04): the harness-owned test-root /
+    # source-root / scaffold-owned-config topology, pre-rendered from the SAME
+    # LayoutProfile the scaffold + output-path fence read. Even a test-code
+    # artifact references sibling helper/source paths, so the same placement rules
+    # keep it from freelancing an off-fence location. Empty for a stack with no
+    # resolved layout (Go) or an unavailable project_root.
+    if layout_placement:
+        lines.extend([layout_placement, ""])
 
     if is_browser_e2e:
         lines.extend([

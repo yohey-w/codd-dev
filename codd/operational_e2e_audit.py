@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from codd.claude_cli import DEFAULT_CLAUDE_EFFORT, DEFAULT_CLAUDE_MODEL
@@ -141,6 +141,62 @@ _TEST_SUFFIXES = (
     ".cc",
     ".cxx",
 )
+
+
+# ``_TEST_SUFFIXES`` above mixes two different kinds of entries: dedicated
+# test-file conventions that are unambiguous on their own — JS/TS's
+# ``.spec./.test./.e2e./.cy.`` family and Go's tooling-enforced ``_test.go``
+# (``go build`` structurally excludes it from the non-test binary) — and BARE
+# whole-language extensions (``.py``, ``.cs``, ``.java``, ``.cpp``/``.cc``/
+# ``.cxx``) that the scanner admits deliberately broadly because IT is always
+# additionally gated by the configured test-dir scope (see the per-suffix
+# comments above). Some callers (notably ``_produced_kinds`` in
+# ``codd.greenfield.pipeline``) do NOT apply that same scope gate on the
+# SOURCE-exclusion side, so reusing a bare extension there would flag EVERY file
+# of that language — test or not — as test-shaped and permanently bar it from
+# ever counting as SOURCE. ``.py`` already had this carve-out (only
+# ``test_*.py``/``*_test.py`` count, never bare ``.py``); the other bare-admit
+# languages need the identical treatment — generically, since none of them has a
+# tooling/naming-enforced unambiguous test suffix. Confirmed root cause of the
+# 2026-06-30 Java (``scaffold_package_skeleton``) and 2026-07-01 C++
+# (``scaffold_repository_layout``) greenfield false-REDs: a task's real ``src/``
+# output was reported as having produced "only test".
+#
+# These three helpers live here (next to ``_TEST_SUFFIXES``, their sole data
+# source) rather than in ``codd.greenfield.pipeline`` so BOTH the pipeline kind
+# gate AND ``codd.implementer`` (the test-root re-key normalization) can reuse
+# them WITHOUT importing ``greenfield.pipeline`` (which imports ``implementer`` —
+# a cycle). This module imports only leaf modules, so it is a safe shared home.
+_AMBIGUOUS_BARE_SOURCE_SUFFIXES: frozenset[str] = frozenset(
+    {".py", ".cs", ".java", ".cpp", ".cc", ".cxx"}
+)
+
+
+def _unambiguous_test_suffixes() -> tuple[str, ...]:
+    """``_TEST_SUFFIXES`` minus every bare, direction-blind source extension."""
+    return tuple(
+        suffix for suffix in _TEST_SUFFIXES if suffix not in _AMBIGUOUS_BARE_SOURCE_SUFFIXES
+    )
+
+
+def _has_test_shape(rel_path: str) -> bool:
+    """A filename that is unambiguously a test, language-independent.
+
+    Reuses the project's :data:`_TEST_SUFFIXES` for the suffixes that are
+    unambiguous on their own, and recognises the conventional pytest/unittest
+    naming for Python (``test_*.py`` / ``*_test.py``) — never bare ``.py``. A
+    bare whole-language extension for any OTHER bare-admit language (``.cs``,
+    ``.java``, ``.cpp``/``.cc``/``.cxx``) is likewise never enough alone; those
+    languages rely on the ``test_dirs`` scope check in
+    :func:`codd.greenfield.pipeline._produced_kinds` /
+    ``_classify_declared_output`` instead.
+    """
+    name = PurePosixPath(str(rel_path).replace("\\", "/")).name
+    if name.endswith(_unambiguous_test_suffixes()):
+        return True
+    if name.endswith(".py"):
+        return name.startswith("test_") or name[:-3].endswith("_test")
+    return False
 
 
 @dataclass(frozen=True)

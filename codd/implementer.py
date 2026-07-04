@@ -1047,6 +1047,7 @@ class Implementer:
                 syntax_gate=syntax_gate,
                 confusable_check=confusable_check,
                 root_artifact_patterns=_root_artifact_patterns_from_config(self.config),
+                test_root=_test_root_from_config(self.config),
             )
         except ImplementSyntaxGateError:
             # Files were produced but failed deterministic validation: this is
@@ -1128,6 +1129,101 @@ def get_valid_task_slugs(project_root: Path) -> set[str]:
     return values
 
 
+def _norm_scan_path(raw: Any) -> str:
+    """Normalize a declared/scan path: forward slashes, no ``./`` prefix, no
+    leading/trailing slash. ``.`` (the root-module sentinel) survives verbatim."""
+    s = str(raw).strip().replace("\\", "/")
+    while s.startswith("./"):
+        s = s[2:]
+    return s.strip("/")
+
+
+def _path_under_any_root(norm: str, roots: list[str]) -> bool:
+    """Whether ``norm`` is at, or under, any of ``roots`` (all already normalized)."""
+    for root in roots:
+        if root and (norm == root or norm.startswith(root + "/")):
+            return True
+    return False
+
+
+def _replant_under_test_root(parts: tuple[str, ...], test_root: str) -> PurePosixPath:
+    """Strip the LEADING path segment and replant the remainder under ``test_root``.
+
+    ``('test', 'errors.test.js')`` → ``tests/errors.test.js``;
+    ``('test', 'unit', 'x.test.js')`` → ``tests/unit/x.test.js``;
+    a BARE basename ``('errors.test.js',)`` has no leading dir to strip, so it is
+    planted directly under the test root → ``tests/errors.test.js``.
+    """
+    tail = parts[1:] if len(parts) > 1 else parts
+    return PurePosixPath(test_root, *tail)
+
+
+def _configured_scan_roots(config: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """``(test_dirs, source_dirs)`` from ``scan``, normalized + de-blanked."""
+    scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+
+    def _roots(key: str) -> list[str]:
+        raw = scan.get(key) if isinstance(scan, dict) else None
+        if not isinstance(raw, list):
+            return []
+        return [r for r in (_norm_scan_path(item) for item in raw) if r]
+
+    return _roots("test_dirs"), _roots("source_dirs")
+
+
+def _test_root_from_config(config: dict[str, Any]) -> str | None:
+    """The owned test root (``scan.test_dirs[0]``) or ``None``.
+
+    The root-module sentinel ``"."`` yields ``None`` (a root-module stack like Go
+    has no distinct test dir to re-key INTO — B2 must stay a no-op for it)."""
+    test_roots, _ = _configured_scan_roots(config)
+    for root in test_roots:
+        if root and root != ".":
+            return root
+    return None
+
+
+def _normalize_declared_test_outputs(outputs: list[Any], config: dict[str, Any]) -> list[Any]:
+    """B1 — re-key a MISPLACED test-shaped declared output under the owned test root.
+
+    Normalize on READ (the persisted ``.codd/derived_tasks`` cache is NEVER
+    mutated), so every consumer of a derived task's ``expected_outputs`` — the kind
+    gate, the completeness check, output routing, step derivation, and ``--resume``
+    — sees the corrected path through this ONE chokepoint.
+
+    Rule: an entry that is test-shaped (:func:`_has_test_shape` — a concrete test
+    file OR a test-name glob) AND under NONE of the configured ``scan.test_dirs`` /
+    ``scan.source_dirs`` roots has its leading path segment stripped and is
+    replanted under ``test_dirs[0]`` (``test/errors.test.js`` →
+    ``tests/errors.test.js``; ``test/unit/x.test.js`` → ``tests/unit/x.test.js``;
+    bare ``errors.test.js`` → ``tests/errors.test.js``). This is why the JS
+    greenfield's ``test/errors.test.js`` (harness owns ``tests/``) no longer
+    self-contradicts: the declared 'test' kind and the fence now agree on ONE path.
+
+    GUARD (whole-normalization NO-OP): if ``test_dirs`` is empty OR any configured
+    root is ``"."`` — a root-module stack (Go) where the under-root check cannot
+    distinguish an in-root from an out-of-root path — return the outputs UNCHANGED.
+    """
+    test_roots, source_roots = _configured_scan_roots(config)
+    if not test_roots:
+        return outputs
+    all_roots = test_roots + source_roots
+    if any(root == "." for root in all_roots):
+        return outputs
+    target_root = test_roots[0]
+
+    from codd.operational_e2e_audit import _has_test_shape
+
+    normalized: list[Any] = []
+    for entry in outputs:
+        norm = _norm_scan_path(entry)
+        if not norm or not _has_test_shape(norm) or _path_under_any_root(norm, all_roots):
+            normalized.append(entry)
+            continue
+        normalized.append(_replant_under_test_root(PurePosixPath(norm).parts, target_root).as_posix())
+    return normalized
+
+
 def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
     """Deterministically enumerate ALL implement tasks.
 
@@ -1185,7 +1281,9 @@ def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
                     "task_id": task.id,
                     "design_node": task.source_design_doc or task.id,
                     "source": "derived",
-                    "expected_outputs": list(task.expected_outputs),
+                    "expected_outputs": _normalize_declared_test_outputs(
+                        list(task.expected_outputs), config
+                    ),
                     "test_kinds": list(task.test_kinds),
                     "title": task.title,
                     "description": task.description,
@@ -2141,7 +2239,10 @@ def _build_implementation_prompt(
     if project_root is not None:
         try:
             from codd.import_coherence import render_import_coherence_contract
-            from codd.project_types import resolve_layout_profile
+            from codd.project_types import (
+                render_layout_placement_contract,
+                resolve_layout_profile,
+            )
 
             scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
             layout_profile = resolve_layout_profile(
@@ -2153,10 +2254,22 @@ def _build_implementation_prompt(
                 project_root=project_root,
             )
             layout_block = render_import_coherence_contract(layout_profile)
+            # LAYOUT-PLACEMENT CONTRACT (2026-07-04): project the harness-owned
+            # test-root / source-root / scaffold-owned-config topology onto the
+            # SAME prompt, read from the SAME LayoutProfile. Complements the
+            # import contract (which for a path-relative stack like TS/JS is a
+            # strict no-op): without it the JS greenfield freelanced ``test/`` for
+            # unit specs while the harness owns ``tests/``, the fence dropped the
+            # file, and the declared 'test' deliverable read as never produced →
+            # hard StageError. Language-free, data-driven, no-op ("") for Go.
+            placement_block = render_layout_placement_contract(layout_profile)
         except Exception:  # noqa: BLE001 — a projection failure must never break generation.
             layout_block = ""
+            placement_block = ""
         if layout_block:
             lines.extend([layout_block, ""])
+        if placement_block:
+            lines.extend([placement_block, ""])
 
     if _spec_targets_tests(spec, config):
         test_framework = resolve_test_framework_guidance(language)
@@ -2420,9 +2533,14 @@ def _write_generated_files(
     syntax_gate: bool = True,
     confusable_check: bool = True,
     root_artifact_patterns: list[str] | tuple[str, ...] | None = None,
+    test_root: str | None = None,
 ) -> list[Path]:
     file_payloads = _parse_file_payloads(
-        raw_output, spec.output_paths, language, root_artifact_patterns=root_artifact_patterns
+        raw_output,
+        spec.output_paths,
+        language,
+        root_artifact_patterns=root_artifact_patterns,
+        test_root=test_root,
     )
     if syntax_gate or confusable_check:
         # Validate EVERY payload before writing ANY file: a gate failure leaves
@@ -2594,6 +2712,55 @@ def _reroot_bare_basename(
     return prefix / path
 
 
+def _rekey_test_shape_to_test_root(
+    path: PurePosixPath,
+    *,
+    test_root: str,
+    test_root_in_scope: bool,
+    header_paths: set[str],
+    accepted: list[str],
+) -> PurePosixPath | None:
+    """B2 — replant a MISPLACED test-shaped payload under the harness-owned test root.
+
+    The fence-side backstop for a model that, despite the placement contract, still
+    emits a test file OUTSIDE every output prefix (the JS greenfield's
+    ``test/errors.test.js`` while the harness owns ``tests/``). Called ONLY from the
+    drop branch of :func:`_parse_file_payloads`, AFTER :func:`_reroot_bare_basename`
+    declined — so it strictly REPLACES a certain-drop (a confirmed hard fail
+    downstream), never widens acceptance for anything already inside a prefix.
+
+    Fires only when ALL hold:
+
+    * a test root is owned AND this task's fence reaches under it
+      (``test_root_in_scope`` — some output prefix is at/under the test root, so the
+      task genuinely targets it);
+    * the payload is test-SHAPED (:func:`_has_test_shape`) — a source file that
+      merely landed off-fence is left to drop, unchanged;
+    * the re-key target (leading segment stripped, replanted under the test root)
+      does NOT collide with another payload's header OR an already-accepted payload
+      — a collision keeps the drop, so a model that emitted BOTH ``test/x`` and
+      ``tests/x`` stays deterministic (the in-root file wins, the dup drops).
+
+    Returns the re-keyed path, or ``None`` to keep the existing drop behavior.
+    Re-keying to the OWNED root — not accepting in place — is the only correct
+    acceptance: ``_produced_kinds`` counts a test-shaped file as kind 'test'
+    wherever it sits, so an in-place accept would green the kind gate for a file the
+    verify runner never executes (anti-false-green).
+    """
+    if not test_root_in_scope or not test_root:
+        return None
+
+    from codd.operational_e2e_audit import _has_test_shape
+
+    if not _has_test_shape(path.as_posix()):
+        return None
+    target = _replant_under_test_root(path.parts, test_root)
+    target_posix = target.as_posix()
+    if target_posix in header_paths or target_posix in set(accepted):
+        return None
+    return target
+
+
 def _has_unbalanced_braces(content: str) -> bool:
     """Cheap, language-agnostic truncation signal for a guessed-path payload.
 
@@ -2634,11 +2801,31 @@ def _parse_file_payloads(
     language: str,
     *,
     root_artifact_patterns: list[str] | tuple[str, ...] | None = None,
+    test_root: str | None = None,
 ) -> list[tuple[str, str]]:
     cleaned_output = raw_output.strip()
     output_prefixes = [PurePosixPath(item) for item in output_paths]
     root_patterns = list(root_artifact_patterns or ())
     matches = list(FILE_BLOCK_RE.finditer(cleaned_output))
+    # B2 — fence-side re-key backstop. When the harness OWNS a test root and this
+    # task's fence actually reaches under it (some output prefix is at/under the
+    # test root), a test-shaped payload that lands OUTSIDE every output prefix is
+    # replanted under the owned test root instead of being dropped — the ONLY
+    # correct acceptance (an in-place accept would false-green the kind gate:
+    # ``_produced_kinds`` counts a test-shaped file as kind 'test' wherever it
+    # sits, so accepting ``test/x.test.js`` in place greens a file the runner never
+    # executes). Gated tightly (see the drop branch below); never widens acceptance
+    # for anything already inside a prefix and never touches a non-test payload.
+    test_root_norm = _norm_scan_path(test_root) if test_root else ""
+    test_root_prefix = PurePosixPath(test_root_norm) if test_root_norm and test_root_norm != "." else None
+    test_root_in_scope = test_root_prefix is not None and any(
+        _path_starts_with(prefix, test_root_prefix) for prefix in output_prefixes
+    )
+    header_paths = {
+        PurePosixPath(match.group("path").strip()).as_posix()
+        for match in matches
+        if match.group("path").strip()
+    }
     if not matches:
         # No `=== FILE: ... ===` header anywhere in the response. Only trust
         # this as "the AI emitted one file's content directly" when the output
@@ -2707,8 +2894,28 @@ def _parse_file_payloads(
             if rerooted is not None:
                 path = rerooted
             else:
-                skipped.append(f"{path_text!r}: outside output paths {output_paths!r}")
-                continue
+                rekeyed = _rekey_test_shape_to_test_root(
+                    path,
+                    test_root=test_root_norm,
+                    test_root_in_scope=test_root_in_scope,
+                    header_paths=header_paths,
+                    accepted=[dest for dest, _ in payloads],
+                )
+                if rekeyed is not None:
+                    print(
+                        f"Warning: RE-KEYED misplaced test file {path_text!r} -> "
+                        f"{rekeyed.as_posix()!r} — the harness OWNS test root "
+                        f"{test_root_norm!r} and the model wrote a test-shaped file "
+                        "outside every output path; the output-path fence would DROP "
+                        "it, so its declared 'test' deliverable would read as never "
+                        "produced. Replanting it under the owned test root (where the "
+                        "verify runner actually discovers it) instead of dropping.",
+                        file=sys.stderr,
+                    )
+                    path = rekeyed
+                else:
+                    skipped.append(f"{path_text!r}: outside output paths {output_paths!r}")
+                    continue
 
         content = _strip_code_fence(block, destination=path_text).strip()
         if not content:
@@ -2739,7 +2946,6 @@ def _parse_file_payloads(
         payloads.append((path.as_posix(), content.rstrip() + "\n"))
 
     if skipped:
-        import sys
         for reason in skipped:
             print(f"Warning: skipped generated file - {reason}", file=sys.stderr)
 

@@ -13,6 +13,44 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.12.0] - 2026-07-04 — Layout-placement projection + deterministic test-root re-key (greenfield test-dir freelancing)
+
+**Projection-class fix surfaced by the JS greenfield ExprCalc dogfood.** Implement hard-failed at a
+task declaring a `test` output (`test/errors.test.js`): the harness owns a single test root `tests/`,
+but the generation prompt never conveyed WHERE tests live, so the model freelanced the sibling `test/`
+(unit specs) — the output-path fence dropped the misplaced file, its declared `test` deliverable read
+as "not produced", and the declared-output-kind check hard-failed the stage. Confirmed in source: the
+generator names `tests/e2e/` explicitly (so the model obeyed there) but never names the unit test root,
+so only the unspecified part was fabricated — direct evidence that projecting the layout fixes it.
+Two independent gaps, one fix (A + B), both data-driven (no `language ==`; read from `LayoutProfile`):
+
+- **A — layout-placement contract projection.** New language-free `render_layout_placement_contract(profile)`
+  (project_types.py) projects the harness-owned TEST ROOT (all test files + referenced test paths under
+  `{test_root}/`; don't invent a sibling `test/`/`spec/` — the forbidden-sibling example is *derived* as the
+  common names minus the owned root, so a brownfield stack whose root IS `test` is never told to avoid it),
+  the SOURCE ROOT (only when `not requires_package_init`, so it doesn't duplicate the Python import contract),
+  and "root tool/runner config files are harness-owned — don't author or declare them". Injected into BOTH
+  the generate-stage prompt (so design docs stop fabricating `test/`) and the implement-stage prompt (beside
+  the existing import contract). `profile is None` → `""`. This is the same same-truth-source seam as
+  `render_import_coherence_contract` / `render_vb_contract` / `resolve_test_framework_guidance`, and is where
+  a TypeScript build/emit contract will later be projected.
+- **B — deterministic re-key to the owned test root (NOT a fence relaxation).** B1: at task-load
+  (`list_implement_tasks`), a test-shaped declared output under NONE of the configured scan roots is
+  replanted under `test_dirs[0]` (`test/errors.test.js` → `tests/errors.test.js`), normalized on READ
+  (the `.codd/derived_tasks` cache is never mutated, so every consumer incl. `--resume` agrees on one path);
+  whole no-op when `test_dirs` is empty or any root is `.` (protects root-module stacks like Go). B2: a
+  fence-side backstop in `_parse_file_payloads`' drop branch re-keys a still-misplaced test-shaped payload
+  under the owned root (collision-guarded; replaces the drop only, never touches in-prefix files). Relaxing
+  the fence to accept `test/` in place would be a false-green — `_produced_kinds` counts a test-shaped file
+  as kind `test` wherever it sits, so only re-keying it to where the verify runner actually runs is correct.
+
+Refactor: `_has_test_shape` and friends moved to `operational_e2e_audit.py` (leaf module) to let both
+pipeline and implementer reuse them without an import cycle. Red-before-green tests added (33: renderer,
+B1, B2, and an ExprCalc-shaped greenfield integration case); full suite 7185 passed / 1 xfailed / 0 skipped.
+Recovery of the failed run: `codd greenfield --resume` (zero generate cycles) — B1 re-keys the declared
+output, A conveys the contract, B2 backstops; the stale `test/` refs left in the design docs are inert to
+every gate (VB audit is id-driven; verify walks the on-disk `test_dirs`).
+
 ## [3.11.0] - 2026-07-04 — Import-coherence false-RED: ambient stdlib-shadow exemption + confirmed-flow dynamic-import collection
 
 **Anti-false-RED fix to the verify-stage import-coherence gate** (`codd/import_coherence.py`),
