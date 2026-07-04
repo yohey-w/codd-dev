@@ -13,6 +13,41 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.11.0] - 2026-07-04 — Import-coherence false-RED: ambient stdlib-shadow exemption + confirmed-flow dynamic-import collection
+
+**Anti-false-RED fix to the verify-stage import-coherence gate** (`codd/import_coherence.py`),
+surfaced by the ExprCalc Python greenfield dogfood: the gate hard-failed a fully coherent
+source+test set with 7 `bare_basename_import` findings, forcing a spurious full regeneration.
+Two independent root causes, both fixed data-driven (no `language ==` branch; the false-RED
+class is not project-specific — `types` / `json` / `errors` / `logging` are common first-party
+module names and structural-guard tests that hold module names as DATA are a common pattern):
+
+- **Ambient stdlib-shadow exemption (A′).** A first-party source module whose bare name
+  collides with a runtime/stdlib module (a domain `ast.py` shadowing Python's stdlib `ast`) is
+  now EXEMPT from the bare-import check: a bare `import ast` in a test cannot be CONFIRMED as a
+  first-party reference (in every normal environment it resolves to the ambient module), so
+  flagging it violates anti-false-red. Driven by a new opt-in `LayoutProfile.ambient_modules`
+  sentinel (`"python-stdlib"` for Python) resolved at runtime from the live interpreter
+  (`sys.stdlib_module_names | sys.builtin_module_names`) — the core hardcodes no module list,
+  and a stack declaring no sentinel is unchanged (`None` default, opt-in). The exemption is
+  recorded in the gate's detail line.
+- **Confirmed-flow dynamic-import collection (B′).** A module-name string literal is collected
+  as a dynamic-import reference ONLY from a confirmed flow — the literal argument of an
+  `importlib.import_module(...)` / `__import__(...)` call, or a Name bound to literal values (the
+  tuple-iterated `for m in (...): import_module(m)` pattern) — instead of ANY single-segment
+  string anywhere in a file that merely uses `importlib`. This removes the false-RED where a
+  structural/graph test resolves modules package-absolutely via an f-string `import_module` call
+  and ALSO holds module names as assertion DATA. The codex3 bare tuple-iterated pattern stays a
+  true-positive RED (the Name is resolved to its literal loop elements).
+
+Detection power preserved: a real bare `import <mod>` / `import_module("<mod>")` / `__import__`
+of a non-ambient first-party module is still flagged; missed cases fall through to pytest as an
+honest `ModuleNotFoundError` in the harness-owned verify env, never a false-green. Red-before-green
+tests added for every case (generic names, `tmp_path`); full suite 7152 passed / 1 xfailed / 0
+skipped; the ExprCalc dogfood goes 7 findings → 0. Follow-up (separate commit): also run
+`check_import_coherence` at implement-end so a genuine violation feeds the existing re-implement
+feedback loop while the SUT can still edit files (the verify-stage hard gate stays the backstop).
+
 ## [3.10.2] - 2026-07-03 — Verification/gate task false-RED: a prose-output task authors nothing
 
 After the scaffold + all 19 module/test implement tasks passed, the Python

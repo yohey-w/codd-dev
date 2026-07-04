@@ -41,9 +41,10 @@ opt-out is an explicit author decision, not the default.
 from __future__ import annotations
 
 import ast
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from codd.path_safety import PathEscapeError, require_project_path, resolve_project_path
 from codd.project_types import LayoutProfile, resolve_layout_profile
@@ -260,6 +261,35 @@ def _source_module_basenames(
     return names
 
 
+# AMBIENT (runtime/stdlib-provided) module-name sets, keyed by an opt-in profile
+# sentinel. A source module whose bare name collides with an ambient module — a
+# first-party ``ast.py`` shadowing Python's stdlib ``ast`` — makes a bare ``import
+# ast`` in a test UNCONFIRMABLE as a first-party reference: the gate cannot tell it
+# apart from a legitimate use of the ambient module (and in every normal env it
+# resolves to the ambient one, so any author error is environment-INDEPENDENT and
+# outside this gate's "environment-dependent false-green" charter). Anti-false-red:
+# it must not be flagged. The sentinel→set dispatch keeps the core language-free —
+# no module-name list is hardcoded; each set is derived at runtime (Python: from the
+# running interpreter). A stack that declares no sentinel gets the empty set.
+_AMBIENT_MODULE_SETS: dict[str, Callable[[], set[str]]] = {
+    "python-stdlib": lambda: set(sys.stdlib_module_names) | set(sys.builtin_module_names),
+}
+
+
+def _resolve_ambient_modules(profile: LayoutProfile) -> set[str]:
+    """Ambient module names for the profile's stack, from its opt-in sentinel.
+
+    Returns the empty set when the profile declares no sentinel
+    (``ambient_modules`` is ``None``) — the bare-import check is then unchanged, so
+    this is a strict no-op for every stack that does not opt in.
+    """
+    sentinel = getattr(profile, "ambient_modules", None)
+    if not sentinel:
+        return set()
+    resolver = _AMBIENT_MODULE_SETS.get(sentinel)
+    return resolver() if resolver else set()
+
+
 def _is_module_token(value: str) -> bool:
     """A string that LOOKS like a module path: dotted segments, each an identifier."""
     if not value or value != value.strip():
@@ -268,25 +298,112 @@ def _is_module_token(value: str) -> bool:
     return all(part.isidentifier() for part in parts)
 
 
+def _single_segment_module_token(value: str) -> str | None:
+    """A bare (single-segment) module-name string literal, or ``None``.
+
+    A dotted token (``"pkg.mod"``) reaches its leaf package-absolutely and is
+    never a bare reference, so it is rejected here.
+    """
+    if "." not in value and _is_module_token(value):
+        return value
+    return None
+
+
+def _resolve_name_bound_module_strings(tree: ast.AST, names: set[str]) -> set[str]:
+    """Single-segment module strings bound to ``names`` by a literal iterable/value.
+
+    Resolves the ``for m in ("a", "b"): import_module(m)`` (plus comprehension and
+    simple-assignment) pattern: when a dynamic-import argument is a bare Name, the
+    module strings it can take are the literal elements iterated or assigned onto
+    it. This is the CONFIRMED-flow counterpart to collecting a literal call arg —
+    an unrelated data string (a dict key, an assertion table) is never bound to an
+    import argument, so it is never collected.
+    """
+    refs: set[str] = set()
+
+    def _collect_literal(node: ast.expr | None) -> None:
+        elements: list[ast.expr] = []
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            elements = list(node.elts)
+        elif node is not None:
+            elements = [node]
+        for elt in elements:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                token = _single_segment_module_token(elt.value)
+                if token:
+                    refs.add(token)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.For, ast.comprehension)) and isinstance(
+            node.target, ast.Name
+        ):
+            if node.target.id in names:
+                _collect_literal(node.iter)
+        elif isinstance(node, ast.Assign):
+            if any(isinstance(t, ast.Name) and t.id in names for t in node.targets):
+                _collect_literal(node.value)
+    return refs
+
+
+def _bare_module_refs_from_dynamic_imports(tree: ast.AST) -> set[str]:
+    """Single-segment module names passed to ``import_module`` / ``__import__``.
+
+    Collects a string ONLY from a CONFIRMED dynamic-import flow: the literal first
+    argument (or ``name=`` kwarg) of an ``importlib.import_module(...)`` /
+    ``__import__(...)`` call, or — when that argument is a bare Name — the literal
+    values bound to that name in the same module (the tuple-iterated pattern). A
+    module-name string that merely appears elsewhere in the file (a dict key, an
+    assertion table) is NOT an import and is never collected: that coincidence was
+    the source of a false-RED in structural/graph tests that hold module names as
+    data while using ``import_module`` for a coherent package-absolute purpose
+    (whose ``f"{pkg}.{mod}"`` argument is an f-string, contributing no bare token).
+    """
+    literal_refs: set[str] = set()
+    name_targets: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            (isinstance(func, ast.Attribute) and func.attr == "import_module")
+            or (isinstance(func, ast.Name) and func.id == "__import__")
+        ):
+            continue
+        arg: ast.expr | None = node.args[0] if node.args else None
+        if arg is None:
+            for kw in node.keywords:
+                if kw.arg == "name":
+                    arg = kw.value
+                    break
+        if arg is None:
+            continue
+        # Every single-segment module-name constant reachable in the argument
+        # subtree (handles a bare literal, a ternary, a subscript on a literal).
+        for sub in ast.walk(arg):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                token = _single_segment_module_token(sub.value)
+                if token:
+                    literal_refs.add(token)
+        # A bare Name argument — resolve its literal bindings in this module.
+        if isinstance(arg, ast.Name):
+            name_targets.add(arg.id)
+    if name_targets:
+        literal_refs |= _resolve_name_bound_module_strings(tree, name_targets)
+    return literal_refs
+
+
 def _collect_test_imports(tree: ast.AST) -> tuple[set[str], set[str]]:
-    """Return (top_level_module_names, bare_string_module_refs) referenced by a test.
+    """Return (top_level_module_names, dynamic_import_module_refs) referenced by a test.
 
     * ``import todo_store`` / ``import a.b`` → top-level ``todo_store`` / ``a``.
     * ``from todo_store import X`` (absolute, level 0) → ``todo_store``.
-    * Dynamic import by STRING — ``importlib.import_module("todo_store")``,
-      ``__import__("todo_store")``, or a module-name string literal anywhere
-      (the codex3 pattern puts the names in a tuple iterated by a variable, so we
-      cannot rely on the literal being the call arg). For a SINGLE-SEGMENT module
-      token (``"todo_store"``) the whole token is the bare reference; for a dotted
-      token (``"todo_cli.todo_store"``) only the leading segment matters — that is
-      the package, which is the COHERENT form, so it never flags the leaf.
+    * A module name passed to ``importlib.import_module`` / ``__import__`` — as a
+      literal argument, or via a Name bound to literal values — → the bare reference.
     Package-relative ``from . import`` / ``from .mod import`` (level >= 1) are NOT
-    flagged — coherent by construction.
+    flagged — coherent by construction. A module-name string that is NOT a dynamic
+    import argument (test data) is NOT collected — that would false-RED.
     """
     top_level: set[str] = set()
-    string_literals: set[str] = set()
-    uses_dynamic_import = False
-
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -298,24 +415,7 @@ def _collect_test_imports(tree: ast.AST) -> tuple[set[str], set[str]]:
                 continue  # relative import — coherent by construction
             if node.module:
                 top_level.add(node.module.split(".")[0])
-        elif isinstance(node, ast.Call):
-            func = node.func
-            if (isinstance(func, ast.Attribute) and func.attr == "import_module") or (
-                isinstance(func, ast.Name) and func.id == "__import__"
-            ):
-                uses_dynamic_import = True
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            value = node.value
-            # Only SINGLE-SEGMENT module tokens count as a "bare" reference; a
-            # dotted token's leaf is reached package-absolutely and never flags.
-            if "." not in value and _is_module_token(value):
-                string_literals.add(value)
-
-    # String-literal module refs are only treated as imports when the file uses
-    # dynamic-import machinery (importlib / __import__) — otherwise a coincidental
-    # test-data string equal to a module name would false-RED.
-    bare_string_refs = string_literals if uses_dynamic_import else set()
-    return top_level, bare_string_refs
+    return top_level, _bare_module_refs_from_dynamic_imports(tree)
 
 
 def _check_bare_basename_imports(
@@ -608,14 +708,24 @@ def check_import_coherence(
             detail=f"import coherence: no layout profile for language {language!r} (skipped)",
         )
 
+    ambient_exempt: list[str] = []
     try:
         source_modules = _source_module_basenames(root, profile)
+        # Ambient-shadowed source modules (a first-party name that also names a
+        # runtime/stdlib module) are exempt from the bare-import check — a bare
+        # ``import <name>`` cannot be CONFIRMED as a first-party reference, so
+        # flagging it would be a false-RED. The full source-module count in the
+        # detail line is unaffected (only the bare-import intersection shrinks).
+        ambient = _resolve_ambient_modules(profile)
+        ambient_exempt = sorted(source_modules & ambient)
 
         findings: list[ImportCoherenceFinding] = []
         findings.extend(_check_source_outside_package(root, profile))
         findings.extend(_check_missing_init(root, profile))
         findings.extend(_check_shadowing(root, profile))
-        findings.extend(_check_bare_basename_imports(root, profile, source_modules))
+        findings.extend(
+            _check_bare_basename_imports(root, profile, source_modules - ambient)
+        )
         findings.extend(_check_manifest_agreement(root, profile))
     except PathEscapeError as exc:
         # A configured/profile evidence ROOT (source_root / test_root /
@@ -646,4 +756,9 @@ def check_import_coherence(
         if passed
         else f"import coherence: {len(findings)} finding(s)"
     )
+    if ambient_exempt:
+        detail += (
+            f" [{len(ambient_exempt)} ambient-shadowed source module(s) exempt "
+            f"from the bare-import check: {', '.join(ambient_exempt)}]"
+        )
     return ImportCoherenceResult(passed=passed, findings=findings, profile=profile, detail=detail)

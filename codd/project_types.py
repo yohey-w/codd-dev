@@ -941,6 +941,13 @@ class LayoutProfile:
     implement_oracle: ImplementOracleSpec | None = None
     toolchain_dependencies: ToolchainDependencyProfile | None = None
     verify_campaign: VerifyCampaignSpec | None = None
+    # AMBIENT MODULES — opt-in sentinel (e.g. "python-stdlib") naming the set of
+    # runtime/stdlib-provided module names for this stack. The import-coherence
+    # gate exempts a first-party source module whose bare name collides with an
+    # ambient module (a first-party ``ast.py`` shadowing Python's stdlib ``ast``)
+    # from its bare-import check — such a bare import is not a CONFIRMED first-party
+    # reference (anti-false-red). ``None`` (default) = no exemption, unchanged.
+    ambient_modules: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -952,6 +959,7 @@ class LayoutProfile:
             "runner": self.runner,
             "install_mode": self.install_mode,
             "test_import_policy": self.test_import_policy,
+            "ambient_modules": self.ambient_modules,
             "implement_oracle": (
                 self.implement_oracle.to_dict() if self.implement_oracle is not None else None
             ),
@@ -1360,6 +1368,11 @@ def _python_layout_profile(
         test_import_policy="package_absolute",
         requires_package_init=True,
         requires_test_init=True,
+        # A first-party module may legitimately share a bare name with the Python
+        # stdlib (e.g. a domain ``ast.py``); resolved at runtime from the running
+        # interpreter so the core hardcodes no module list. Exempts such a name
+        # from the import-coherence bare-import check (anti-false-red).
+        ambient_modules="python-stdlib",
         # IMPLEMENT-TIME ORACLE — COMPOSITE (Python has no single compiler that
         # proves all-paths symbol coherence). ``kind="composite"`` routes the gate
         # to the in-process multi-tool executor in ``codd.implement_oracle``

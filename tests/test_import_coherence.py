@@ -330,3 +330,128 @@ class TestPathEscapeJail:
         result = _check(tmp_path)
         assert not result.passed
         assert any(f.kind == "bare_basename_import" for f in result.findings)
+
+
+def _flagged_modules(result) -> set[str]:
+    return {
+        f.details.get("module")
+        for f in result.findings
+        if f.kind == "bare_basename_import"
+    }
+
+
+def _project_with_stdlib_named_module(tmp_path: Path, module: str = "json") -> None:
+    """A coherent project that ALSO ships a first-party module whose bare name
+    collides with the stdlib (``src/<pkg>/json.py``)."""
+    _coherent_project(tmp_path)
+    pkg = tmp_path / _profile().package_root
+    (pkg / f"{module}.py").write_text("def dump(x):\n    return str(x)\n")
+
+
+# ═══════════════════════════════════════════════════════════
+# A′ — ambient (stdlib-shadow) exemption. A first-party module whose bare name
+# collides with a stdlib module is UNCONFIRMABLE as a bare-import target, so it
+# must be exempt (anti-false-red) — without weakening the check for real names.
+# ═══════════════════════════════════════════════════════════
+
+
+class TestAmbientShadowExemption:
+    def test_stdlib_shadowing_source_module_bare_import_is_exempt(self, tmp_path):
+        # A first-party src/<pkg>/json.py exists, and a test does `import json`
+        # (the STDLIB json). This must NOT be flagged, and the detail records it.
+        _project_with_stdlib_named_module(tmp_path, "json")
+        (tmp_path / "tests" / "test_uses_stdlib.py").write_text(
+            "import json\n\n\ndef test_x():\n    assert json.dumps([1]) == '[1]'\n"
+        )
+        result = _check(tmp_path)
+        assert result.passed, result.summary()
+        assert "ambient-shadowed" in result.detail
+        assert "json" in result.detail
+
+    def test_ambient_exemption_is_surgical(self, tmp_path):
+        # json (stdlib-shadow) is exempt, but a genuine first-party bare import of
+        # a NON-stdlib name (todo_store) is STILL flagged — the check is not weakened.
+        _project_with_stdlib_named_module(tmp_path, "json")
+        (tmp_path / "tests" / "test_mixed.py").write_text(
+            "import json\nimport todo_store\n\n\n"
+            "def test_x():\n    assert json and todo_store\n"
+        )
+        result = _check(tmp_path)
+        assert not result.passed
+        flagged = _flagged_modules(result)
+        assert "todo_store" in flagged
+        assert "json" not in flagged
+
+    def test_no_ambient_sentinel_means_no_exemption(self, tmp_path):
+        # Construct a profile with the sentinel cleared: the stdlib-shadow name is
+        # then treated like any other source module (opt-in, no silent default).
+        import dataclasses
+
+        from codd.import_coherence import check_import_coherence
+
+        _project_with_stdlib_named_module(tmp_path, "json")
+        (tmp_path / "tests" / "test_uses_stdlib.py").write_text("import json\n")
+        profile = dataclasses.replace(_profile(), ambient_modules=None)
+        result = check_import_coherence(tmp_path, language="python", profile=profile)
+        assert not result.passed
+        assert "json" in _flagged_modules(result)
+
+
+# ═══════════════════════════════════════════════════════════
+# B′ — dynamic-import string refs are collected only from a CONFIRMED import
+# flow (the literal arg of import_module/__import__, or a Name bound to literals).
+# A module-name string that is merely test DATA is not an import → not flagged.
+# ═══════════════════════════════════════════════════════════
+
+
+class TestDynamicImportConfirmedFlow:
+    def test_package_absolute_dynamic_import_with_module_name_data_passes(self, tmp_path):
+        # The dogfood false-RED, generalized: a structural test resolves modules
+        # package-absolutely via an f-string importlib call AND holds module names
+        # as assertion DATA. The data strings are NOT imports → must PASS.
+        _coherent_project(tmp_path)
+        profile = _profile()
+        (tmp_path / "tests" / "test_structure.py").write_text(
+            "import importlib\n\n"
+            f"PKG = {profile.package_name!r}\n"
+            "RANK = {'todo_store': 1, 'todo_model': 0}\n"
+            "EDGES = {('todo_store', 'todo_model')}\n\n\n"
+            "def test_x():\n"
+            "    mod = importlib.import_module(f'{PKG}.todo_store')\n"
+            "    assert mod and RANK and EDGES\n"
+        )
+        result = _check(tmp_path)
+        assert result.passed, result.summary()
+
+    def test_module_name_data_without_dynamic_import_passes(self, tmp_path):
+        # Module-name string literals with NO importlib/__import__ are pure data.
+        _coherent_project(tmp_path)
+        (tmp_path / "tests" / "test_data.py").write_text(
+            "NAMES = ('todo_store', 'todo_model')\n\n\n"
+            "def test_x():\n    assert 'todo_store' in NAMES\n"
+        )
+        result = _check(tmp_path)
+        assert result.passed, result.summary()
+
+    def test_tuple_iterated_bare_dynamic_import_still_fails(self, tmp_path):
+        # codex3 tuple pattern with BARE names must still RED (true positive): the
+        # Name arg is resolved to the literal loop elements.
+        _coherent_project(tmp_path)
+        (tmp_path / "tests" / "test_dyn.py").write_text(
+            "import importlib\n\n\n"
+            "def test_x():\n"
+            "    for m in ('todo_store', 'todo_model'):\n"
+            "        importlib.import_module(m)\n"
+        )
+        result = _check(tmp_path)
+        assert not result.passed
+        assert {"todo_store", "todo_model"} <= _flagged_modules(result)
+
+    def test_dunder_import_bare_string_still_fails(self, tmp_path):
+        _coherent_project(tmp_path)
+        (tmp_path / "tests" / "test_dunder.py").write_text(
+            "def test_x():\n    __import__('todo_store')\n"
+        )
+        result = _check(tmp_path)
+        assert not result.passed
+        assert any(f.kind == "bare_basename_import" for f in result.findings)
