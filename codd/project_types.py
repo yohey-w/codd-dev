@@ -907,6 +907,39 @@ _TYPESCRIPT_TOOLCHAIN_PROFILE = ToolchainDependencyProfile(
 
 
 @dataclass(frozen=True)
+class SourcePlacementSpec:
+    """One declared source-placement root for a stack's harness-owned layout.
+
+    A stack MAY own MORE than one source root — C++ owns ``src/`` (translation
+    units) AND ``include/`` (public headers) — which the single ``package_root``
+    field cannot express. ``root`` is the normalized project-relative directory;
+    ``file_globs`` are that set's OWN globs (verbatim from the declarative profile,
+    used to make a placement rule concrete WITHOUT a language-name literal);
+    ``reference_base`` is ``True`` iff the stack's first-party import rule resolves
+    a reference by that root as a path prefix (``imports.first_party.rule ==
+    "include_path_prefix"`` with ``base == root``) — i.e. a file under ``root`` is
+    referenced by its path RELATIVE TO ``root`` from every other file, never by a
+    bare same-directory filename.
+
+    ``LayoutProfile.source_placements`` defaults to ``()`` so every legacy-built
+    profile (Python/TypeScript) is untouched BY CONSTRUCTION; only the generic
+    synthesizer populates it, and the layout-placement contract renders the
+    multi-root rule ONLY when it holds >1 DISTINCT normalized root.
+    """
+
+    root: str
+    file_globs: tuple[str, ...] = ()
+    reference_base: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "root": self.root,
+            "file_globs": list(self.file_globs),
+            "reference_base": self.reference_base,
+        }
+
+
+@dataclass(frozen=True)
 class LayoutProfile:
     """Harness-owned repository topology + module-resolution contract for a stack.
 
@@ -948,6 +981,15 @@ class LayoutProfile:
     # from its bare-import check — such a bare import is not a CONFIRMED first-party
     # reference (anti-false-red). ``None`` (default) = no exemption, unchanged.
     ambient_modules: str | None = None
+    # SOURCE PLACEMENTS — the FULL set of harness-owned source roots (a stack may
+    # own >1, e.g. C++ ``src/`` + ``include/``). Empty by default so a legacy-built
+    # profile (Python/TS) is byte-identical BY CONSTRUCTION; populated ONLY by
+    # :func:`_synthesize_layout_profile_from_language` from the declarative
+    # profile's ``source_sets``. :func:`render_layout_placement_contract` projects a
+    # multi-root SOURCE LOCATION rule (plus a SOURCE REFERENCE FORM rule for any
+    # ``reference_base`` set) ONLY when this holds >1 DISTINCT normalized root —
+    # otherwise it falls through to the single-root rule, unchanged.
+    source_placements: tuple[SourcePlacementSpec, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -960,6 +1002,7 @@ class LayoutProfile:
             "install_mode": self.install_mode,
             "test_import_policy": self.test_import_policy,
             "ambient_modules": self.ambient_modules,
+            "source_placements": [p.to_dict() for p in self.source_placements],
             "implement_oracle": (
                 self.implement_oracle.to_dict() if self.implement_oracle is not None else None
             ),
@@ -1153,6 +1196,21 @@ class LayoutProfile:
         return resolve_runner_report_adapter(next(iter(formats)))
 
 
+def _placement_reference_ext(file_globs: tuple[str, ...]) -> str:
+    """The dotted file extension a placement's globs match (``.hpp`` from
+    ``include/**/*.hpp``), or ``""`` when none is derivable.
+
+    Keeps the SOURCE REFERENCE FORM sample path concrete WITHOUT a hardcoded
+    suffix or a language-specific noun — the extension is read from the profile's
+    OWN globs. Uses the first glob whose leaf is a ``*.<ext>`` wildcard.
+    """
+    for glob in file_globs:
+        leaf = str(glob).rsplit("/", 1)[-1]
+        if leaf.startswith("*.") and len(leaf) > 2:
+            return leaf[1:]
+    return ""
+
+
 def render_layout_placement_contract(profile: "LayoutProfile | None") -> str:
     """Project the harness-owned repository LAYOUT (test root, source root, and the
     harness-owned config files) onto a generation/implement prompt, DATA-DRIVEN
@@ -1219,13 +1277,63 @@ def render_layout_placement_contract(profile: "LayoutProfile | None") -> str:
         )
 
     if not profile.requires_package_init:
-        source_root = str(profile.package_root or "").strip().replace("\\", "/").strip("/")
-        if source_root:
+        # A stack may OWN more than one source root (C++ ``src/`` + ``include/``).
+        # ``source_placements`` is EMPTY for every legacy-built profile, so the
+        # multi-root path below is unreachable for them and the single-root rule in
+        # the ``else`` renders byte-for-byte as before. Collapse to the DISTINCT
+        # normalized roots (order-preserving) — a header-set whose root equals the
+        # source-set root dedupes back to single-root.
+        ordered_placements: list[SourcePlacementSpec] = []
+        seen_roots: list[str] = []
+        for placement in profile.source_placements:
+            root = _norm_rel(placement.root)
+            if root and root not in seen_roots:
+                seen_roots.append(root)
+                ordered_placements.append(placement)
+        if len(seen_roots) > 1:
+            # MULTI-ROOT: the single ``package_root`` rule can describe only ONE root
+            # and would (wrongly) tell the model that files outside it are dropped —
+            # so a file authored under a second owned root would read as contract-
+            # non-compliant. Emit one SOURCE LOCATION bullet per owned root, each
+            # listing that set's OWN file globs verbatim (placement made concrete with
+            # NO language noun — the globs are profile DATA).
+            bullets: list[str] = []
+            for placement in ordered_placements:
+                root = _norm_rel(placement.root)
+                globs = ", ".join(f"`{g}`" for g in placement.file_globs)
+                where = f"the files matching {globs}" if globs else "its files"
+                bullets.append(f"     - {where} belong under `{root}/`")
             rules.append(
-                f"{len(rules) + 1}. SOURCE LOCATION — put EVERY source module you "
-                f"author UNDER `{source_root}/`. A source file placed outside "
-                f"`{source_root}/` is dropped by the output-path fence."
+                f"{len(rules) + 1}. SOURCE LOCATION — this project owns MORE than one "
+                f"source root; author each file under the owned root whose file-glob "
+                f"set it matches (a file placed outside EVERY owned root is dropped by "
+                f"the output-path fence):\n" + "\n".join(bullets)
             )
+            # SOURCE REFERENCE FORM — for any owned root whose first-party rule
+            # resolves a reference by path RELATIVE TO that root (``reference_base``).
+            # Placement alone does not close the bug: a file at ``<root>/<dir>/<name>``
+            # referenced by a bare same-directory filename recreates the identical
+            # failure. The sample path's extension is derived from the set's OWN globs.
+            for placement in ordered_placements:
+                if not placement.reference_base:
+                    continue
+                root = _norm_rel(placement.root)
+                ext = _placement_reference_ext(placement.file_globs)
+                rules.append(
+                    f"{len(rules) + 1}. SOURCE REFERENCE FORM — a file at "
+                    f"`{root}/<dir>/<name>{ext}` is referenced as `<dir>/<name>{ext}` "
+                    f"from every other file wherever it lives, never by a bare "
+                    f"filename that only resolves from the referencing file's own "
+                    f"directory."
+                )
+        else:
+            source_root = str(profile.package_root or "").strip().replace("\\", "/").strip("/")
+            if source_root:
+                rules.append(
+                    f"{len(rules) + 1}. SOURCE LOCATION — put EVERY source module you "
+                    f"author UNDER `{source_root}/`. A source file placed outside "
+                    f"`{source_root}/` is dropped by the output-path fence."
+                )
 
     try:
         scaffold_paths = tuple(profile.harness_owned_scaffold_paths())
@@ -1957,6 +2065,35 @@ def _synthesize_layout_profile_from_language(
     pm = getattr(getattr(lang_profile, "toolchain", None), "package_manager", None)
     runner = str(pm.get("id")) if hasattr(pm, "get") and pm.get("id") else "generic"
 
+    # SOURCE PLACEMENTS: one spec per declared source set, carrying its OWN
+    # normalized root + globs. ``reference_base`` is decided by the first-party
+    # import rule DATA (never a language name): True iff the rule is
+    # ``include_path_prefix`` and its ``base`` equals this set's root — i.e. a
+    # reference is the file's path relative to that root (C++ ``include/``). Every
+    # other stack's rule (java ``source_root_package`` / csharp
+    # ``root_namespace_prefix`` / js/ts ``path_alias`` / python ``package_name``)
+    # fails the ``include_path_prefix`` guard, so only C++ can set it today.
+    imports_spec = getattr(lang_profile, "imports", None)
+    imports_data = getattr(imports_spec, "data", None)
+    first_party: Mapping[str, Any] = {}
+    if isinstance(imports_data, Mapping):
+        fp = imports_data.get("first_party")
+        if isinstance(fp, Mapping):
+            first_party = fp
+    fp_rule = str(first_party.get("rule") or "")
+    fp_base = _norm_rel(str(first_party.get("base") or ""))
+    source_placements = tuple(
+        SourcePlacementSpec(
+            root=set_root,
+            file_globs=tuple(getattr(s, "file_globs", ()) or ()),
+            reference_base=(
+                fp_rule == "include_path_prefix" and bool(fp_base) and fp_base == set_root
+            ),
+        )
+        for s in source_sets
+        if (set_root := _norm_rel(getattr(s, "root", "") or ""))
+    )
+
     return LayoutProfile(
         language=str(getattr(lang_profile, "id", "") or language or ""),
         package_name=package_name,
@@ -1971,6 +2108,7 @@ def _synthesize_layout_profile_from_language(
         implement_oracle=synthesize_implement_oracle_spec(lang_profile),
         toolchain_dependencies=_synthesize_toolchain_dependencies(lang_profile),
         verify_campaign=_synthesize_verify_campaign(lang_profile),
+        source_placements=source_placements,
     )
 
 

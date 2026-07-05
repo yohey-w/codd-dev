@@ -13,6 +13,38 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.13.0] - 2026-07-05 — Multi-source-set layout projection (C++ include/ headers + reference form)
+
+**Third instance of the projection-class lineage (v3.11 import-coherence → v3.12 test-dir → v3.13
+this), surfaced by the C++ greenfield ExprCalc dogfood.** The implement-time native oracle failed:
+`src/test_harness/main.cpp` did `#include "ast.hpp"` but the headers were generated FLAT in `src/`,
+while the harness-owned C++ layout puts headers under `include/{package}/` (the profile declares
+`include/` three ways; the scaffold CMake sets the include path to `include/`). Root cause was not an
+under-projection but a MIS-projection: v3.12's `render_layout_placement_contract` projected only a
+SINGLE source_root (for C++, `package_root.kind=none` → `source_root == src`) and even told the model
+"a file outside `src/` is dropped by the fence" — so flat headers in `src/` were the contract-COMPLIANT
+output. The second source set (`include/`) was read nowhere; `LayoutProfile` had no field to carry it.
+
+Fix (data-driven; no `language ==`; renders the multi-root rule ONLY for a stack that owns >1 source root):
+- **`SourcePlacementSpec`** (`root`, `file_globs`, `reference_base`) + `LayoutProfile.source_placements`
+  (default `()` → every legacy-built profile byte-identical by construction) + additive `to_dict` key.
+- Populated ONLY by the generic synthesizer, one spec per declarative `source_sets` entry;
+  `reference_base=True` iff the stack's first-party import rule is `include_path_prefix` with `base == root`
+  (verified: only C++ matches — java=`source_root_package`, csharp=`root_namespace_prefix`, js/ts=`path_alias`).
+- `render_layout_placement_contract` now emits, when `source_placements` collapses to >1 DISTINCT root, a
+  multi-root SOURCE LOCATION rule (one bullet per owned root with its globs) plus a SOURCE REFERENCE FORM
+  rule for each `reference_base` set ("a file at `<root>/<dir>/<name>.<ext>` is referenced as
+  `<dir>/<name>.<ext>` from every other file, never by a bare same-directory filename"). Single-root stacks
+  fall through to the v3.12 rule BYTE-FOR-BYTE. The reference-form rule is essential: placement alone would
+  leave headers at `include/pkg/ast.hpp` still `#include "ast.hpp"`, recreating the identical oracle RED.
+
+Option B (widen the CMake include path to `src/`) was rejected: it would make an empty `include/`
+permanently green — an accidental-green masking a real layout incoherence for every future C++ run. The
+fix is prompt-side projection only — zero new enforced gate, no new false-red surface. Golden byte-equality
+tests lock python/js/ts/java/csharp renders unchanged; red-before-green for the C++ multi-root + reference
+case; full suite 7195 passed / 1 xfailed / 0 skipped. Recovery of a failed run is a fresh generate (not
+`--resume`: stale `src/*.hpp` keeps satisfying same-dir includes and would mask the incoherence).
+
 ## [3.12.0] - 2026-07-04 — Layout-placement projection + deterministic test-root re-key (greenfield test-dir freelancing)
 
 **Projection-class fix surfaced by the JS greenfield ExprCalc dogfood.** Implement hard-failed at a

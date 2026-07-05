@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from codd.generator import WaveArtifact, _build_generation_prompt
 from codd.implementer import DesignContext, ImplementSpec, _build_implementation_prompt
 from codd.project_types import (
@@ -245,3 +247,213 @@ def test_implement_prompt_omits_placement_without_project_root():
         coding_principles=None,
     )
     assert "Repository LAYOUT CONTRACT" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Multi-root source placement (C++ src/ + include/) — the projection-class fix
+# for the flat-headers-in-src/ greenfield failure. A stack may OWN more than one
+# source root; the single package_root rule cannot describe that (and would tell
+# the model that files outside its ONE root are dropped), so a public header
+# authored under a second owned root reads as contract-non-compliant. cpp is the
+# only profile whose rendering changes; every single-root stack renders BYTE-FOR-
+# BYTE as before (the golden no-op proof below).
+# ---------------------------------------------------------------------------
+
+
+def _cpp_profile() -> LayoutProfile:
+    profile = resolve_layout_profile(
+        language="cpp",
+        project_name="ExprCalc",
+        source_dirs=["src", "include"],
+        test_dirs=["tests"],
+    )
+    assert profile is not None
+    return profile
+
+
+def test_cpp_renders_both_source_roots_and_reference_form():
+    # RED-before-green anchor: on pre-fix code cpp renders only the single-root
+    # SOURCE LOCATION rule for `src/` — `include/` and the SOURCE REFERENCE FORM
+    # rule are absent, so this test fails until (a)/(b)/(c) land.
+    block = render_layout_placement_contract(_cpp_profile())
+    assert block
+    # BOTH owned source roots are named as owned roots (not just one).
+    assert "`src/`" in block
+    assert "`include/`" in block
+    # A SINGLE multi-root SOURCE LOCATION rule (distinct wording from the single-
+    # root rule, so we know we took the multi-root branch).
+    assert "SOURCE LOCATION" in block
+    assert "owns MORE than one source root" in block
+    assert "put EVERY source module you author UNDER" not in block
+    # Each set's OWN file globs are rendered verbatim (placement made concrete
+    # without any language noun — the globs are profile DATA).
+    assert "`src/**/*.cpp`" in block
+    assert "`include/**/*.h`" in block
+    # The SOURCE REFERENCE FORM rule for the reference_base (include) set: a file
+    # under the base root is referenced by its path RELATIVE TO that root, never a
+    # bare same-directory filename (the exact enabling mechanism of the bug).
+    assert "SOURCE REFERENCE FORM" in block
+    assert "`include/<dir>/<name>.h`" in block
+    assert "`<dir>/<name>.h`" in block
+    assert "never by a bare filename" in block
+    # Vocabulary-neutral core: no language-specific reference verb / noun leaks in
+    # (the extensions come from the profile's globs, which is DATA — not a noun).
+    low = block.lower()
+    assert "#include" not in low
+    assert "header" not in low
+
+
+def test_synthesize_cpp_populates_source_placements():
+    # RED-before-green: `source_placements` does not exist on pre-fix LayoutProfile
+    # (AttributeError), and once it does it must carry exactly the two declared
+    # source sets with reference_base ONLY on the `include` set.
+    from codd.project_types import SourcePlacementSpec
+
+    placements = _cpp_profile().source_placements
+    assert len(placements) == 2
+    assert all(isinstance(p, SourcePlacementSpec) for p in placements)
+    by_root = {p.root: p for p in placements}
+    assert set(by_root) == {"src", "include"}
+    # reference_base is True ONLY for include (first_party rule=include_path_prefix,
+    # base=include) — data-driven, never a language name.
+    assert by_root["src"].reference_base is False
+    assert by_root["include"].reference_base is True
+    # Globs carried verbatim from the declarative profile.
+    assert by_root["src"].file_globs == ("src/**/*.cpp", "src/**/*.cc", "src/**/*.cxx")
+    assert by_root["include"].file_globs == (
+        "include/**/*.h",
+        "include/**/*.hpp",
+        "include/**/*.hh",
+    )
+    # No-op proof at the DATA layer: the other synthesized single-source-set stacks
+    # get exactly ONE placement and never reference_base (so they can never take
+    # the multi-root branch or emit a reference-form rule).
+    for lang in ("java", "csharp", "javascript"):
+        other = resolve_layout_profile(
+            language=lang,
+            project_name="ExprCalc",
+            source_dirs=["src"],
+            test_dirs=["tests"],
+        )
+        assert other is not None
+        assert len(other.source_placements) == 1
+        assert other.source_placements[0].reference_base is False
+
+
+# The CURRENT (pre-fix) rendered output for every single-root stack, captured
+# verbatim. The fix MUST leave these byte-identical — this is the critical no-op
+# proof that only cpp's rendering changes.
+_GOLDEN_LAYOUT_CONTRACT = {
+    'python': (
+        'Repository LAYOUT CONTRACT (release-blocking — the harness scaffold owns this topology and the output-path fence enforces it at implement; a file placed outside the owned roots is dropped, so a declared deliverable then reads as never produced and fails the build — get the placement right the first time):' '\n'
+        '' '\n'
+        "1. TEST LOCATION — the harness OWNS the test root `tests/`, and the verify runner discovers test files ONLY under `tests/`. Put EVERY test file you author — and every test-file path this document references — UNDER `tests/` (do NOT invent a sibling test directory such as `test/`, `spec/`, `specs/`). A test file placed outside `tests/` is dropped by the output-path fence, so its declared 'test' deliverable reads as never produced and fails the build." '\n'
+        '2. HARNESS-OWNED SCAFFOLD — the dependency manifest, the lockfile, and the test-runner / toolchain config files are created by the harness scaffold, and the verify command is fixed. Do NOT author or declare a runner/tool config file among your outputs — these are already provided: `pyproject.toml`, `src/exprcalc/__init__.py`, `src/exprcalc/__main__.py`, `tests/__init__.py`. A config file you emit is dropped by the output-path fence (and never changes how verify runs).'
+    ),
+    'javascript': (
+        'Repository LAYOUT CONTRACT (release-blocking — the harness scaffold owns this topology and the output-path fence enforces it at implement; a file placed outside the owned roots is dropped, so a declared deliverable then reads as never produced and fails the build — get the placement right the first time):' '\n'
+        '' '\n'
+        "1. TEST LOCATION — the harness OWNS the test root `tests/`, and the verify runner discovers test files ONLY under `tests/`. Put EVERY test file you author — and every test-file path this document references — UNDER `tests/` (do NOT invent a sibling test directory such as `test/`, `spec/`, `specs/`). A test file placed outside `tests/` is dropped by the output-path fence, so its declared 'test' deliverable reads as never produced and fails the build." '\n'
+        '2. SOURCE LOCATION — put EVERY source module you author UNDER `src/`. A source file placed outside `src/` is dropped by the output-path fence.' '\n'
+        '3. HARNESS-OWNED SCAFFOLD — the dependency manifest, the lockfile, and the test-runner / toolchain config files are created by the harness scaffold, and the verify command is fixed. Do NOT author or declare a runner/tool config file among your outputs — these are already provided: `package.json`, `package-lock.json`. A config file you emit is dropped by the output-path fence (and never changes how verify runs).'
+    ),
+    'typescript': (
+        'Repository LAYOUT CONTRACT (release-blocking — the harness scaffold owns this topology and the output-path fence enforces it at implement; a file placed outside the owned roots is dropped, so a declared deliverable then reads as never produced and fails the build — get the placement right the first time):' '\n'
+        '' '\n'
+        "1. TEST LOCATION — the harness OWNS the test root `tests/`, and the verify runner discovers test files ONLY under `tests/`. Put EVERY test file you author — and every test-file path this document references — UNDER `tests/` (do NOT invent a sibling test directory such as `test/`, `spec/`, `specs/`). A test file placed outside `tests/` is dropped by the output-path fence, so its declared 'test' deliverable reads as never produced and fails the build." '\n'
+        '2. SOURCE LOCATION — put EVERY source module you author UNDER `src/`. A source file placed outside `src/` is dropped by the output-path fence.' '\n'
+        '3. HARNESS-OWNED SCAFFOLD — the dependency manifest, the lockfile, and the test-runner / toolchain config files are created by the harness scaffold, and the verify command is fixed. Do NOT author or declare a runner/tool config file among your outputs — these are already provided: `package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`. A config file you emit is dropped by the output-path fence (and never changes how verify runs).'
+    ),
+    'java': (
+        'Repository LAYOUT CONTRACT (release-blocking — the harness scaffold owns this topology and the output-path fence enforces it at implement; a file placed outside the owned roots is dropped, so a declared deliverable then reads as never produced and fails the build — get the placement right the first time):' '\n'
+        '' '\n'
+        "1. TEST LOCATION — the harness OWNS the test root `src/test/java/`, and the verify runner discovers test files ONLY under `src/test/java/`. Put EVERY test file you author — and every test-file path this document references — UNDER `src/test/java/` (do NOT invent a sibling test directory such as `test/`, `tests/`, `spec/`, `specs/`). A test file placed outside `src/test/java/` is dropped by the output-path fence, so its declared 'test' deliverable reads as never produced and fails the build." '\n'
+        '2. SOURCE LOCATION — put EVERY source module you author UNDER `src/main/java/`. A source file placed outside `src/main/java/` is dropped by the output-path fence.' '\n'
+        '3. HARNESS-OWNED SCAFFOLD — the dependency manifest, the lockfile, and the test-runner / toolchain config files are created by the harness scaffold, and the verify command is fixed. Do NOT author or declare a runner/tool config file among your outputs — these are already provided: `pom.xml`. A config file you emit is dropped by the output-path fence (and never changes how verify runs).'
+    ),
+    'csharp': (
+        'Repository LAYOUT CONTRACT (release-blocking — the harness scaffold owns this topology and the output-path fence enforces it at implement; a file placed outside the owned roots is dropped, so a declared deliverable then reads as never produced and fails the build — get the placement right the first time):' '\n'
+        '' '\n'
+        "1. TEST LOCATION — the harness OWNS the test root `tests/`, and the verify runner discovers test files ONLY under `tests/`. Put EVERY test file you author — and every test-file path this document references — UNDER `tests/` (do NOT invent a sibling test directory such as `test/`, `spec/`, `specs/`). A test file placed outside `tests/` is dropped by the output-path fence, so its declared 'test' deliverable reads as never produced and fails the build." '\n'
+        '2. SOURCE LOCATION — put EVERY source module you author UNDER `src/ExprCalc/`. A source file placed outside `src/ExprCalc/` is dropped by the output-path fence.' '\n'
+        '3. HARNESS-OWNED SCAFFOLD — the dependency manifest, the lockfile, and the test-runner / toolchain config files are created by the harness scaffold, and the verify command is fixed. Do NOT author or declare a runner/tool config file among your outputs — these are already provided: `src/ExprCalc/ExprCalc.csproj`, `tests/ExprCalc.Tests/ExprCalc.Tests.csproj`, `ExprCalc.sln`. A config file you emit is dropped by the output-path fence (and never changes how verify runs).'
+    ),
+}
+
+
+@pytest.mark.parametrize("lang", sorted(_GOLDEN_LAYOUT_CONTRACT))
+def test_golden_single_root_render_unchanged(lang):
+    # The no-op proof: every single-root stack renders BYTE-FOR-BYTE as before the
+    # multi-root fix. Passes on BOTH pre-fix and post-fix code.
+    profile = resolve_layout_profile(
+        language=lang,
+        project_name="ExprCalc",
+        source_dirs=["src"],
+        test_dirs=["tests"],
+    )
+    assert profile is not None
+    assert render_layout_placement_contract(profile) == _GOLDEN_LAYOUT_CONTRACT[lang]
+
+
+def test_go_still_renders_empty():
+    # Go has no resolved layout → None → "" (strict no-op, unchanged by the fix).
+    profile = resolve_layout_profile(
+        language="go",
+        project_name="ExprCalc",
+        source_dirs=["src"],
+        test_dirs=["tests"],
+    )
+    assert profile is None
+    assert render_layout_placement_contract(profile) == ""
+
+
+def test_identical_normalized_roots_falls_to_single_root():
+    # A synthetic profile whose source sets normalize to the SAME root must take
+    # the single-root branch (>1 DISTINCT normalized root is the gate), and must
+    # NOT emit a reference-form rule even though one placement declares
+    # reference_base — byte-identical to a bare single-root profile.
+    from codd.project_types import SourcePlacementSpec
+
+    profile = LayoutProfile(
+        language="x",
+        package_name="app",
+        source_root="src",
+        package_root="src",
+        test_root="tests",
+        test_import_policy="relative",
+        requires_package_init=False,
+        requires_test_init=False,
+        source_placements=(
+            SourcePlacementSpec(root="src", file_globs=("src/**/*.x",)),
+            # Same root after normalization (trailing slash) → collapses to one.
+            SourcePlacementSpec(
+                root="src/", file_globs=("src/**/*.y",), reference_base=True
+            ),
+        ),
+    )
+    block = render_layout_placement_contract(profile)
+    baseline = LayoutProfile(
+        language="x",
+        package_name="app",
+        source_root="src",
+        package_root="src",
+        test_root="tests",
+        test_import_policy="relative",
+        requires_package_init=False,
+        requires_test_init=False,
+    )
+    assert block == render_layout_placement_contract(baseline)
+    assert "owns MORE than one source root" not in block
+    assert "SOURCE REFERENCE FORM" not in block
+    assert "put EVERY source module you author UNDER `src/`" in block
+
+
+def test_source_placement_key_is_additive_in_to_dict():
+    # to_dict gains an additive `source_placements` key (a strict-key reader in the
+    # full suite would catch a regression); an empty legacy profile serializes it
+    # as [], cpp serializes both placements.
+    empty = _js_like_profile().to_dict()
+    assert empty["source_placements"] == []
+    cpp_dict = _cpp_profile().to_dict()
+    roots = {p["root"] for p in cpp_dict["source_placements"]}
+    assert roots == {"src", "include"}
