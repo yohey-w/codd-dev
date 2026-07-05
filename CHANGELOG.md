@@ -13,6 +13,38 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.14.0] - 2026-07-06 — C++ ctest→file execution attribution (completes the identity→file norm for all 6 languages)
+
+**Verify-stage execution-attribution fix surfaced by the C++ greenfield ExprCalc dogfood.** After the
+v3.13.0 header-placement fix let C++ implement pass, verify RED'd: `required test set 'tests' had zero
+executed files in the report` (verify_executor.py SCOPE_MISSING). But the code is correct — `cmake --build`
++ `ctest --test-dir build` runs 43/43 GoogleTest cases green. Root cause: `CTestJunitReportAdapter`
+returned empty `executed_*_files` by design, its docstring asserting ctest case names cannot be attributed
+to `.cpp` files. That assertion was wrong. The module already codifies an "identity→file attribution norm"
+(a runner that reports by non-path identifiers is resolved via a static identifier→file index built by
+parsing the tree), implemented for Go (`_go_static_test_func_index`), Java (`_surefire_class_file_index`),
+and C# (`_trx_cs_file_index`) — C++ was simply never done, so the last language's execution went
+unattributed and the anti-false-green scope gate (correctly, given zero visible file execution) refused to
+certify.
+
+Fix (data-driven; no `language ==`; only the registered `ctest-junit` adapter changes):
+- `_cpp_test_label_index(project_root)` — mirror of the Surefire index: `_iter_test_files` → filter via the
+  EXISTING `CppTestBlockProfile` (the same gtest/Catch2 `TEST/TEST_F/TEST_P(Suite, Name)` parser the
+  marker-authenticity gate already uses) → `{label → relfile}`, first-wins, unparseable = no contribution.
+- `_ctest_case_label_candidates(name)` — normalizes gtest names (raw `Suite.Case`, the `Inst/Suite.Case/N`
+  `TEST_P` shape, Catch2) to the static `f"{suite}.{name}"` label ctest's JUnit reports verbatim.
+- `CTestJunitReportAdapter.parse` builds the index once and attributes each `<testcase>` to its file with
+  the SAME pass/taint discipline as Surefire/TRX (a file is `executed_passed` iff ≥1 passed case and no
+  fail/skip; a fail/skip taints it); an unattributed case is fail-closed (counted, credited to nothing).
+
+Anti-false-green preserved: the index is location-only (no execution status) — a file is credited ONLY via
+a real executed case in the report ∧ the static join, so a genuinely-unrun set attributes zero and stays
+RED. Core (verify_executor / coverage_execution_coherence), cpp.yaml, the CMake scaffold, and the Go/Java/C#
+adapters are byte-identical (their adapter tests unchanged and green). Options A (gtest native XML — collides
+with `gtest_discover_tests`' per-case processes, dies on brownfield) and C (relax to executable granularity —
+can't catch a compiled-but-zero-tests file) were rejected. Red-before-green tests added; full suite 7205
+passed / 1 xfailed / 0 skipped. This completes the identity→file attribution family across all six languages.
+
 ## [3.13.0] - 2026-07-05 — Multi-source-set layout projection (C++ include/ headers + reference form)
 
 **Third instance of the projection-class lineage (v3.11 import-coherence → v3.12 test-dir → v3.13

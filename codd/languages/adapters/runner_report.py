@@ -53,7 +53,7 @@ from codd.operational_e2e_audit import (
     _iter_test_files,
     _rel_path,
 )
-from codd.vb_marker_authenticity import GoTestBlockProfile
+from codd.vb_marker_authenticity import CppTestBlockProfile, GoTestBlockProfile
 
 
 class RunnerReportUnsupported(RuntimeError):
@@ -702,6 +702,91 @@ def _go_static_test_func_index(project_root: Path) -> dict[str, dict[str, str]]:
     return index
 
 
+def _cpp_test_label_index(project_root: Path) -> dict[str, str]:
+    """Index ``label ('Suite.Case' | Catch2 case name) → relfile`` over every C++
+    test source in the tree (tree-scanned).
+
+    The C++ arm of the IDENTITY→FILE ATTRIBUTION NORM this module's docstring states
+    — the direct mirror of :func:`_surefire_class_file_index` (Java) and
+    :func:`_go_static_test_func_index` (Go), differing only in the JOIN KEY: C++
+    tests are named by their GoogleTest ``Suite.Case`` (or Catch2 case) LABEL, not a
+    file path. Reuses the SHARED test-file discovery (:func:`_iter_test_files`, the
+    same glob the inventory / VB audit / Surefire+Go indexes consume — ``.cpp`` /
+    ``.cc`` / ``.cxx`` are in its suffix table), narrows to real C++ test sources via
+    :meth:`~codd.vb_marker_authenticity.CppTestBlockProfile.handles_file`, and parses
+    each with the SAME structural adapter the authenticity gate uses
+    (:meth:`~codd.vb_marker_authenticity.CppTestBlockProfile.parse_test_blocks`,
+    which labels a ``TEST/TEST_F/TEST_P(Suite, Name)`` block ``Suite.Name`` and a
+    Catch2 ``TEST_CASE("name", …)`` block ``name``). The FIRST file (sorted-path
+    order) to declare a label wins — the SAME tie-break the Surefire/TRX indexes use
+    (a duplicate label does not compile in one target, so order is immaterial in
+    practice). A file the adapter cannot read or parse contributes nothing
+    (fail-closed: its cases then read as unattributable, never a false attribution).
+    The index carries ONLY location info (no execution status), so a file is credited
+    ONLY via a real executed case in the report joined to this static index.
+    """
+    profile = CppTestBlockProfile()
+    index: dict[str, str] = {}
+    for path in sorted(_iter_test_files(project_root, test_dirs=None)):
+        rel = _norm_test_path(_rel_path(path, project_root))
+        if not profile.handles_file(rel):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            blocks = profile.parse_test_blocks(text)
+        except Exception:  # noqa: BLE001 — a parse failure contributes no labels.
+            continue
+        for block in blocks:
+            label = (block.label or "").strip()
+            if label and label not in index:
+                index[label] = rel
+    return index
+
+
+def _ctest_case_label_candidates(name: str) -> list[str]:
+    """Candidate static-label keys for a ctest/gtest case ``name``, most-specific first.
+
+    GoogleTest reports a case as ``<suite-part>.<case-part>`` where value- and
+    type-parameterized tests DECORATE the parts, while the static
+    :class:`~codd.vb_marker_authenticity.CppTestBlockProfile` labels the block with
+    the BARE macro arguments (``Suite.Case``)::
+
+        plain                Suite.Case              → label Suite.Case
+        value-param          Inst/Suite.Case/0       (INSTANTIATE_TEST_SUITE_P)
+        value-param          Suite.Case/0            (no instantiation prefix)
+        type-param           Suite/0.Case            (TYPED_TEST / TYPED_TEST_P)
+
+    We therefore try, in order and de-duplicated: (1) the RAW name (a plain
+    ``Suite.Case`` and any Catch2 case name match here); (2) the suite part's LAST
+    ``/`` segment + the case part's FIRST ``/`` segment (drops an ``Inst/`` prefix
+    and a ``/index`` suffix → ``Suite.Case`` for value-param); (3) the suite part's
+    FIRST ``/`` segment + the case part's FIRST ``/`` segment (recovers ``Suite.Case``
+    for the type-param ``Suite/0.Case`` shape). A name with no ``.`` (a bare ctest
+    command) yields only the raw candidate.
+    """
+    raw = (name or "").strip()
+    candidates: list[str] = []
+
+    def _add(candidate: str) -> None:
+        candidate = candidate.strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    _add(raw)
+    if "." in raw:
+        suite_part, case_part = raw.split(".", 1)
+        case_first = case_part.split("/", 1)[0]
+        suite_last = suite_part.rsplit("/", 1)[-1]
+        suite_first = suite_part.split("/", 1)[0]
+        if case_first:
+            _add(f"{suite_last}.{case_first}")
+            _add(f"{suite_first}.{case_first}")
+    return candidates
+
+
 @dataclass(frozen=True)
 class CTestJunitReportAdapter:
     """CTest JUnit-XML reporter adapter (``ctest --output-junit <file>``).
@@ -723,24 +808,36 @@ class CTestJunitReportAdapter:
     (proves nothing — the SAME rule the vitest/go adapters and the static
     authenticity gate apply); a failure/error is an honest fail.
 
-    THE FILE-LEVEL LIMITATION (fail-closed, documented — analogous to Go's
-    parser-miss note). CTest reports a test by NAME (its ``classname``/``name``
-    rarely encodes a SOURCE FILE — a CTest "test" is a registered command, typically
-    a whole test executable or a GoogleTest ``Suite.Case``, not a ``*.cpp`` path).
-    There is therefore NO reliable way to attribute a ctest case to a real ``.cpp``
-    test file on disk. So this adapter is FAIL-CLOSED at the FILE granularity: it
-    populates ``executed_passed_cases`` with per-case ``"<key>::<name>"`` identities
-    (the authority for reconciliation), but it does NOT fabricate
-    ``executed_passed_files`` — those stay EMPTY rather than inventing a passed FILE
-    that cannot be proven. This mirrors :class:`GoTestJsonReportAdapter`'s discipline
-    that a parser-miss test is left uncredited (it can prove no VB) but is NEVER
-    turned into a false-RED of a legitimately-running test, and the coherence gate's
-    "missing from report is not green" rule still holds (an unattributed VB stays
-    execution-unverified — fail-closed toward "not executed", never a false pass).
+    THE FILE BRIDGE (anti-false-green core, mirroring the Go/Java/C# adapters). CTest
+    reports a test by NAME (a GoogleTest ``Suite.Case`` or a Catch2 case string) —
+    NOT a file path — while the coherence gate reconciles at FILE granularity. This
+    is the C++ arm of the IDENTITY→FILE ATTRIBUTION NORM this module's docstring
+    states: we resolve each case NAME to its real ``.cpp``/``.cc``/``.cxx`` test file
+    via a TREE-SCANNED index (:func:`_cpp_test_label_index`) built from every real
+    C++ test source's OWN ``TEST/TEST_F/TEST_P(Suite, Name)`` (labelled ``Suite.Name``)
+    and Catch2 ``TEST_CASE("name", …)`` (labelled ``name``) macros — the SAME parser
+    (:class:`~codd.vb_marker_authenticity.CppTestBlockProfile`) the authenticity gate
+    uses, so the join key is identical on both sides. Value-/type-parameterized names
+    (``INSTANTIATE_TEST_SUITE_P``'s ``Inst/Suite.Case/0``, ``TYPED_TEST``'s
+    ``Suite/0.Case``) are normalized to the bare ``Suite.Case`` label by
+    :func:`_ctest_case_label_candidates`. The index carries ONLY location info (no
+    execution status), so a file is credited ONLY via a REAL executed case in the
+    report joined to the static index — a genuinely-unrun test set has no cases to
+    join, attributes zero files, and the SCOPE_MISSING gate stays RED (the
+    anti-false-green guarantee is preserved, not weakened).
 
-    The case ``<key>`` is the ``classname`` when present (GoogleTest's suite name),
-    else the ctest test name itself; ``<name>`` is the ``name`` attribute. A case
-    with no usable name is skipped (it can identify nothing).
+    SKIP/FAIL granularity (IDENTICAL to the go/java/csharp adapters — a skip proves
+    nothing): a test FILE is in ``executed_passed_files`` only when it had ≥1 passed
+    case AND no failed/error/skipped case attributed to it; ANY failure/error/skip
+    taints the whole file into ``executed_failed_files``. ``executed_passed_cases``
+    carries the per-case ``"<relfile>::<name>"`` keys for the ATTRIBUTED passed cases.
+
+    UNATTRIBUTED case (fail-closed, same discipline as Go's parser-miss): a case whose
+    normalized name joins NO discovered file is NEVER credited to any file and adds NO
+    passed-case key (it can prove no VB) — but it still counts toward ``total_cases``
+    (and ``passed_cases`` when it passed) so an all-unattributed report is not mistaken
+    for an empty one, and it is NEVER turned into a false-RED of a legitimately-running
+    test. A case with no usable name is skipped entirely (it can identify nothing).
 
     Raises :class:`RunnerReportUnsupported` on an unreadable / garbled / non-JUnit
     XML document (missing file, malformed XML, or a root that is neither
@@ -776,7 +873,17 @@ class CTestJunitReportAdapter:
                 "<testsuite> or <testsuites>"
             )
 
-        passed_cases: set[str] = set()
+        # Tree-scanned label→file index (built ONCE per parse; the C++ arm of the
+        # IDENTITY→FILE ATTRIBUTION NORM). Location-only, so a file is credited ONLY
+        # via a real executed case joined to this static index.
+        label_index = _cpp_test_label_index(project_root)
+
+        # Per-file rollup at TWO granularities (parallels the Surefire/TRX adapters):
+        #  * PER-FILE coarse signal: a file is passed iff ≥1 pass AND no fail/skip.
+        #  * PER-CASE keys: each ATTRIBUTED passed case → "<relfile>::<name>".
+        file_passed: dict[str, bool] = {}   # rel → had ≥1 attributed passed case
+        file_tainted: set[str] = set()      # any fail/error/skip ⇒ not a clean file
+        passed_case_keys: set[str] = set()
         total_cases = 0
         passed_count = 0
         for suite in suites:
@@ -788,20 +895,40 @@ class CTestJunitReportAdapter:
                     # A case with no name identifies nothing — skip (it can credit no
                     # VB and taints nothing it cannot name).
                     continue
-                classname = (case.get("classname") or "").strip()
-                key = f"{classname or name}::{name}"
                 total_cases += 1
+                relfile = None
+                for candidate in _ctest_case_label_candidates(name):
+                    relfile = label_index.get(candidate)
+                    if relfile is not None:
+                        break
                 if _ctest_case_passed(case):
                     passed_count += 1
-                    passed_cases.add(key)
-                # a failure/error/skipped case is NOT a pass; it contributes no key
-                # (a skip proves nothing — vitest/go/authenticity parity).
+                    if relfile is not None:
+                        file_passed[relfile] = True
+                        passed_case_keys.add(f"{relfile}::{name}")
+                    # else: an unattributed pass is NOT credited (fail-closed — never a
+                    # green VB you cannot point at a file for); it still counts in the
+                    # totals so the report is not deemed empty (Go parser-miss parity).
+                else:
+                    # failure/error/skipped — a skip proves nothing. Taint the FILE when
+                    # attributable; an unattributable non-pass credits/taints nothing it
+                    # was never matched to.
+                    if relfile is not None:
+                        file_tainted.add(relfile)
+
+        passed_files: set[str] = set()
+        failed_files: set[str] = set()
+        for relfile in file_passed:
+            if relfile in file_tainted:
+                failed_files.add(relfile)
+            else:
+                passed_files.add(relfile)
+        failed_files |= file_tainted  # tainted files are failed even with no pass
+
         return RunnerExecution(
-            # FILE-level intentionally EMPTY: ctest case names do not map to a real
-            # .cpp file on disk, so we never fabricate a passed FILE (see docstring).
-            executed_passed_files=frozenset(),
-            executed_failed_files=frozenset(),
-            executed_passed_cases=frozenset(passed_cases),
+            executed_passed_files=frozenset(passed_files),
+            executed_failed_files=frozenset(failed_files),
+            executed_passed_cases=frozenset(passed_case_keys),
             test_level_available=total_cases > 0,
             total_cases=total_cases,
             passed_cases=passed_count,
