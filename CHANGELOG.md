@@ -13,6 +13,61 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.15.0] - 2026-07-07 — Python test-execution environment provisioning (materialization's environment-continuation projection)
+
+**Makes `codd greenfield --language python` runnable unattended on a python3-only host.** The Python
+greenfield ExprCalc dogfood could not certify a build without a human because two root causes left the
+generated project's tests un-runnable by the harness:
+
+- **根因1** — the Python profile's verify argv is a bare `python` (`python.yaml` `commands.verify`/`test`),
+  absent on a host that provides only `python3`, so the verify spawn died with a tool-missing error before
+  any test ran.
+- **根因2** — a generated CLI/subprocess-e2e helper invokes `[sys.executable, "-c", DRIVER]` assuming an
+  **installed** package, but the pipeline never provisioned a venv nor ran `pip install -e .`. In-process
+  pytest resolved the package via `pythonpath=["src"]`, but that path never propagates to a subprocess
+  child — so the e2e child hit `ModuleNotFoundError`.
+
+This is the **environment-continuation projection of toolchain materialization** — the last unfilled seat
+of the greenfield "de-NO-OP the profile-driven gates" lineage (the same materialization→projection design
+that wired npm `node_modules` (cwd-continuation), cmake `build/`, and the Java/C# in-tool resolvers).
+Python is the first *environment*-channel stack: the interpreter identity IS the dependency store, so the
+missing half was projecting the materialized environment onto the verify spawn.
+
+Fix (4 parts; the shared core stays language-agnostic — zero `python`/`pip`/`venv` strings in
+`verify_executor.py` or the shared `pipeline.py`; no `language ==` branch in core):
+
+- **Provisioner realizer** (`project_types._provision_python_env`, Python zone): `sys.executable -m venv
+  <project>/.venv` (never assumes a PATH `python`; a venv always yields `bin/python`), then a
+  verifier-pinned pytest (`pytest>=8,<10`, the verifier's own toolchain — the SUT `pyproject.toml` is
+  NEVER edited, mirroring the TS `_TYPESCRIPT_TOOLCHAIN_PROFILE` vitest pin) + `pip install -e .` INTO the
+  venv. Idempotent probe (`import <canonical_package_name>, pytest`) short-circuits a usable env. Records a
+  harness-owned state artifact (`.codd/verify/exec_env.json`: the real absolute bin dir + interpreter). A
+  build failure is a code-NON-addressable `environment_build_error`, so the repair loop never thrashes on
+  it.
+- **Dispatch seam**: a 4th realizer field `env_provisioner: "venv-editable-pip-provisioner-v1"` on
+  `python.yaml`'s `legacy_project_types` block, registered in `_ENV_PROVISIONERS_BY_REALIZER` (mirroring
+  `_LAYOUT_BUILDERS_BY_REALIZER` / `_TEST_RUNNER_ENSURERS_BY_REALIZER`). The other 5 languages + Go declare
+  no key ⇒ strict NO-OP, byte-identical.
+- **Pipeline barrier**: `_stage_verify` calls the provisioner as a verify-direct StageError barrier (same
+  tier as `_ensure_lock_freshness`), GREENFIELD-ONLY — a plain `codd verify` on a brownfield repo never
+  grows a venv.
+- **Exec-path prepend** (CORE, language-agnostic): `execute_verify_plan` gains an optional
+  `exec_path_prepend: tuple[str, ...] = ()` that prepends existence-checked absolute dirs to the spawn's
+  `PATH` before spawning; `verify_runner` reads the state artifact and passes the dirs (also threaded
+  through the legacy `_run_evidence_command` path so resolution can't diverge). The unchanged
+  `["python", ...]` argv now resolves to `.venv/bin/python`, whose `sys.executable` is the venv interpreter,
+  so the generated e2e `[sys.executable, "-c", DRIVER]` child resolves the editable-installed package
+  (cwd-independent — `sys.executable` is absolute). No state (brownfield / other langs / manual) ⇒ zero
+  prepend ⇒ byte-identical.
+
+Anti-false-green **strengthened**, not weakened: the venv is isolated (`--system-site-packages` is NOT
+used), so a package present in the CoDD environment but undeclared by the project now honestly
+`ModuleNotFoundError`s (the false-green a `sys.executable` + `PYTHONPATH` alternative would have
+structurally embedded); the bare-basename src-layout import stays RED (`pythonpath` untouched); a forged
+state artifact pointing at a non-existent dir is dropped by the existence check → `TOOL_MISSING` RED. All
+observation gates (report-required / ZERO_TESTS / skip=red / SCOPE_MISSING) are untouched — the prepend
+acts only on spawn resolution, never on classification.
+
 ## [3.14.0] - 2026-07-06 — C++ ctest→file execution attribution (completes the identity→file norm for all 6 languages)
 
 **Verify-stage execution-attribution fix surfaced by the C++ greenfield ExprCalc dogfood.** After the

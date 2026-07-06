@@ -1437,6 +1437,40 @@ class GreenfieldPipeline:
                 "manifest set), not a code defect."
             )
 
+    def _provision_env(self, project_root: Path) -> None:
+        """Run the verify-time test-environment barrier (see the call in _stage_verify).
+
+        Dispatches through the profile realizer registry
+        (:func:`codd.project_types.provision_project_env`) — a strict NO-OP for a
+        stack that declares no env provisioner (returns ``ok=True,
+        action="unsupported"``, no side effects). For a stack that does, the
+        provisioner realizes the isolated, materialized execution environment its
+        layout declares and records a harness-owned state artifact the verify spawn
+        consumes. A build failure is an honest environment/toolchain error (NOT a
+        code defect) raised as a :class:`StageError`, symmetric with the lock-freshness
+        barrier. Language-agnostic: this method knows only "provision the stack's env".
+        """
+        from codd.project_types import provision_project_env
+
+        config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
+        project_name = self._layout_project_name(project_root, config)
+        result = provision_project_env(
+            project_root,
+            language=language,
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+        )
+        if not result.ok:
+            raise StageError(
+                "test-execution environment provisioning failed before verify: "
+                f"{result.detail}. This is an environment/toolchain failure (the "
+                "isolated execution environment could not be built), not a code defect."
+            )
+        if result.action == "provisioned":
+            self.echo(f"[greenfield] verify: provisioned test environment — {result.detail}")
+
     def _enforce_implement_oracle_gate(
         self,
         project_root: Path,
@@ -2159,6 +2193,19 @@ class GreenfieldPipeline:
         # NO-OP for a stack with no toolchain profile (Python today). See
         # codd.dependency_lock_coherence.ensure_lock_freshness_barrier.
         self._ensure_lock_freshness(project_root)
+
+        # Test-execution environment barrier — verify-direct, BEFORE the verify runner
+        # spawns any test command. A stack whose profile declares an env provisioner
+        # (its topology needs an isolated, materialized execution environment before
+        # its tests can honestly run) gets that environment realized here, and a
+        # harness-owned state artifact recorded so the verify spawn can find it. This
+        # is a hard barrier (a build failure is an environment/toolchain error raised
+        # as a StageError — never a code-repair target), mirroring the lock-freshness
+        # barrier above. GREENFIELD-ONLY (a plain ``codd verify`` on a brownfield repo
+        # never reaches here, so no environment is grown outside the autopilot). A
+        # strict NO-OP for a stack that declares no provisioner (dispatched through the
+        # profile realizer registry — never a language-name branch).
+        self._provision_env(project_root)
 
         runner = self.verify_runner or _default_verify_runner
         detail = str(

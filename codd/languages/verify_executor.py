@@ -137,13 +137,23 @@ def execute_verify_plan(
     *,
     adapter_registry: AdapterRegistry | None = None,
     timeout: float | None = None,
+    exec_path_prepend: tuple[str, ...] = (),
 ) -> VerifyExecutionResult:
     """Run ``plan`` under ``project_root`` and classify the outcome (anti-false-green).
+
+    ``exec_path_prepend`` is a caller-supplied list of directories to prepend to the
+    spawn's ``PATH`` (highest precedence first). It is a language-AGNOSTIC seam: the
+    executor knows nothing of what lives in those dirs — it only prepends the ones
+    that ACTUALLY EXIST as absolute directories, so an UNCHANGED bare ``argv[0]``
+    resolves to a binary the caller materialized (the caller — the verify runner —
+    reads the dirs from a harness-owned state artifact). The DEFAULT ``()`` prepends
+    nothing, so the spawn env is byte-identical to today for every existing caller.
 
     Steps, in order:
 
     a. cwd = ``project_root / plan.cwd`` (or ``project_root``); env = ``os.environ``
-       copy updated with ``plan.env``.
+       copy updated with ``plan.env``, then any existing ``exec_path_prepend`` dirs
+       prepended to ``PATH``.
     b. If ``plan.report_path`` is set, UNLINK any stale report file BEFORE running —
        a leftover green report from a prior run must never be read as this run's
        result (the canonical stale-report false-green).
@@ -223,6 +233,16 @@ def execute_verify_plan(
                 execution=None,
                 detail=f"could not remove stale report at {report_path} before run",
             )
+
+    # (a3) Prepend caller-supplied directories to PATH (existence-checked, absolute
+    # only). This is where an unchanged bare ``argv[0]`` gets resolved to a binary
+    # the caller materialized. A non-existent / non-absolute entry (a forged or
+    # stale state artifact) is DROPPED, so a bogus dir can never silently redirect
+    # the spawn — it simply falls through to normal PATH resolution (TOOL_MISSING if
+    # the tool is genuinely absent). No entries ⇒ PATH is untouched (byte-identical).
+    prepend = [d for d in exec_path_prepend if d and os.path.isabs(d) and os.path.isdir(d)]
+    if prepend:
+        env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
 
     # (c) Run the command.
     try:

@@ -344,3 +344,77 @@ def test_only_pass_result_is_green(tmp_path):
         adapter_registry=_registry_with(_FakeAdapter(_CLEAN)),
     )
     assert red.is_green is False
+
+
+# ── exec-path prepend (language-agnostic PATH resolution seam, v3.15.0) ─────────
+#
+# A caller (the verify runner reading a harness-owned env-provision state artifact)
+# can hand the executor a list of REAL absolute directories to prepend to the
+# spawn's PATH. The executor knows NOTHING of what lives there — it only prepends
+# existence-checked dirs so an unchanged bare ``argv[0]`` resolves to that dir's
+# binary. With NO dirs (the default) the spawn env is byte-identical to today.
+
+
+def _fake_tool_bin(tmp_path, *, name: str) -> Path:
+    """A dir holding an executable ``name`` that writes an empty report and exits 0."""
+    bindir = tmp_path / "toolbin"
+    bindir.mkdir(exist_ok=True)
+    tool = bindir / name
+    tool.write_text("#!/bin/sh\nprintf '{}' > report.json\nexit 0\n")
+    tool.chmod(0o755)
+    return bindir
+
+
+def test_exec_path_prepend_resolves_bare_argv0_to_prepended_dir(tmp_path):
+    # RED-1: a uniquely-named tool that is NOT on PATH.
+    bindir = _fake_tool_bin(tmp_path, name="codd_fake_verify_tool")
+    plan = _plan(argv=("codd_fake_verify_tool",))
+    # Without the prepend, the bare tool cannot spawn → TOOL_MISSING (proves the
+    # prepend is what resolves it, not an ambient PATH entry).
+    missing = execute_verify_plan(
+        plan, tmp_path, adapter_registry=_registry_with(_FakeAdapter(_CLEAN))
+    )
+    assert missing.verify_class is VerifyClass.TOOL_MISSING
+    # With the prepend, the bare argv[0] resolves to the prepended dir's binary → PASS.
+    res = execute_verify_plan(
+        plan,
+        tmp_path,
+        adapter_registry=_registry_with(_FakeAdapter(_CLEAN)),
+        exec_path_prepend=(str(bindir),),
+    )
+    assert res.verify_class is VerifyClass.PASS
+    assert res.returncode == 0
+
+
+def test_exec_path_prepend_ignores_nonexistent_dir(tmp_path):
+    # A forged / stale state artifact pointing at a dir that does not exist must be
+    # DROPPED by the existence check — the bare tool then stays unresolvable →
+    # TOOL_MISSING (never a silent pass from a bogus prepend).
+    plan = _plan(argv=("codd_fake_verify_tool",))
+    res = execute_verify_plan(
+        plan,
+        tmp_path,
+        adapter_registry=_registry_with(_FakeAdapter(_CLEAN)),
+        exec_path_prepend=(str(tmp_path / "does" / "not" / "exist"),),
+    )
+    assert res.verify_class is VerifyClass.TOOL_MISSING
+
+
+def test_empty_exec_path_prepend_is_byte_identical(tmp_path, monkeypatch):
+    # Byte-identity: the default (no prepend) never touches PATH. A tool reachable
+    # only via the ambient PATH still resolves; passing exec_path_prepend=() must
+    # behave exactly like omitting it.
+    bindir = _fake_tool_bin(tmp_path, name="codd_fake_verify_tool2")
+    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    plan = _plan(argv=("codd_fake_verify_tool2",))
+    default = execute_verify_plan(
+        plan, tmp_path, adapter_registry=_registry_with(_FakeAdapter(_CLEAN))
+    )
+    empty = execute_verify_plan(
+        plan,
+        tmp_path,
+        adapter_registry=_registry_with(_FakeAdapter(_CLEAN)),
+        exec_path_prepend=(),
+    )
+    assert default.verify_class is VerifyClass.PASS
+    assert empty.verify_class is VerifyClass.PASS

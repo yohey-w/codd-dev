@@ -1563,8 +1563,20 @@ def test_verify_stage_fails_honestly_on_incoherent_imports(tmp_path: Path) -> No
 
 def test_verify_stage_does_not_clobber_existing_config(tmp_path: Path) -> None:
     project = _python_project_with_tests_but_no_config(tmp_path)
+    # A COHERENT, installable author manifest (declares the setuptools build-system +
+    # the harness-canonical packaging tables, so the env-provision barrier can
+    # ``pip install -e .`` it) that ALSO carries an author ``[tool.pytest.ini_options]``.
+    # The packaging tables already match what the harness would reconcile, so the
+    # ensure step is idempotent — nothing is clobbered.
     original = (
-        '[project]\nname = "demo"\n\n'
+        "[build-system]\n"
+        'requires = ["setuptools>=61"]\n'
+        'build-backend = "setuptools.build_meta"\n\n'
+        '[project]\nname = "demo"\nversion = "0.0.0"\n\n'
+        "[tool.setuptools]\n"
+        'package-dir = {"" = "src"}\n\n'
+        "[tool.setuptools.packages.find]\n"
+        'where = ["src"]\n\n'
         '[tool.pytest.ini_options]\n'
         'pythonpath = ["src"]\n'
         'addopts = "-p no:cacheprovider --import-mode=importlib"\n'

@@ -25,6 +25,9 @@ Design goals:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1640,6 +1643,248 @@ def _python_layout_profile(
         # gates) remain its backstop, UNCHANGED.
         verify_campaign=None,
     )
+
+
+# ── Python test-execution environment provisioner (realizer, Python zone) ──
+#
+# The Python射影 of "toolchain materialization": realize the ``install_mode:
+# editable`` layout the profile DECLARES but no realizer previously EXECUTED — a
+# project-local venv with a verifier-pinned pytest + ``pip install -e .``. Unlike
+# the npm/cmake channels (whose materialized deps are found via cwd inheritance —
+# node_modules / build/), Python's channel is ENVIRONMENT inheritance: the
+# interpreter identity IS the dependency store. So the realizer additionally
+# records a state artifact naming the REAL absolute bin dir; the language-free
+# verify executor prepends it to PATH (its ``exec_path_prepend`` seam) so an
+# UNCHANGED ``python``/``pytest`` argv resolves to this venv.
+#
+# The pytest pin is the VERIFIER's own toolchain (the SUT's pyproject is NEVER
+# edited — same principle as the TS ``_TYPESCRIPT_TOOLCHAIN_PROFILE`` vitest pin),
+# a bounded current-major range so a hypothetical breaking pytest major cannot
+# silently change the harness verifier.
+_PYTHON_TEST_TOOLCHAIN_PIN = "pytest>=8,<10"
+
+#: Where the provisioner records its realized environment. ``.codd/**`` is
+#: harness_owned (python.yaml), so this never trips the orphan/propagate gates. The
+#: NAME + SHAPE are language-neutral on purpose (a plain list of dirs) — the verify
+#: runner that reads it stays free of any venv/interpreter knowledge.
+_ENV_PROVISION_STATE_RELPATH = ".codd/verify/exec_env.json"
+
+#: Bounded budget for the venv build + editable install (a cold pip resolve can be
+#: slow but must not hang the gate forever). Mirrors the node install preflight cap.
+_ENV_PROVISION_TIMEOUT_SECONDS = 900.0
+
+
+@dataclass(frozen=True)
+class EnvProvisionResult:
+    """Outcome of realizing a stack's test-execution environment.
+
+    ``ok`` is False ONLY on a genuine environment/toolchain build failure (an
+    ``environment_build_error`` — NOT a code defect, so the repair loop must never
+    edit source over it). A stack with no provisioner realizer is ``ok=True,
+    action="unsupported"`` (a benign NO-OP, never a failure). ``state_path`` is the
+    project-relative path of the recorded state artifact when one was written.
+    """
+
+    ok: bool
+    action: str  # "provisioned" | "up_to_date" | "unsupported" | "failed"
+    detail: str
+    state_path: str | None = None
+
+
+def _venv_bin_dir(venv_dir: Path) -> Path:
+    return venv_dir / ("Scripts" if os.name == "nt" else "bin")
+
+
+def _venv_interpreter(venv_dir: Path) -> Path:
+    return _venv_bin_dir(venv_dir) / ("python.exe" if os.name == "nt" else "python")
+
+
+def _env_probe_ok(interpreter: Path, package_name: str) -> bool:
+    """True iff the venv interpreter can import BOTH the project package and pytest.
+
+    The idempotency probe: a run that passes it needs no reinstall. Package name is
+    the harness-owned CANONICAL name (from :func:`resolve_canonical_package_name`,
+    carried on the resolved :class:`LayoutProfile`), never a hardcoded literal.
+    """
+    if not interpreter.exists() or not package_name:
+        return False
+    try:
+        completed = subprocess.run(  # noqa: S603 — trusted argv (harness), shell=False
+            [str(interpreter), "-c", f"import {package_name}, pytest"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def _record_env_provision_state(
+    project_root: Path, venv_dir: Path, *, action: str, detail: str
+) -> EnvProvisionResult:
+    """Write the REAL absolute bin dir + interpreter path to the state artifact."""
+    bin_dir = _venv_bin_dir(venv_dir)
+    interpreter = _venv_interpreter(venv_dir)
+    state = {
+        # A list of REAL absolute dirs for the verify executor to prepend to PATH.
+        "path_prepend_dirs": [str(bin_dir.resolve())],
+        "interpreter": str(interpreter.resolve()) if interpreter.exists() else str(interpreter),
+    }
+    state_file = project_root / _ENV_PROVISION_STATE_RELPATH
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    return EnvProvisionResult(
+        ok=True, action=action, detail=detail, state_path=_ENV_PROVISION_STATE_RELPATH
+    )
+
+
+def _env_build_error(detail: str) -> EnvProvisionResult:
+    """A code-NON-addressable environment_build_error (never a repair-loop target)."""
+    return EnvProvisionResult(ok=False, action="failed", detail=detail)
+
+
+def _provision_python_env(
+    project_root: Path, *, profile: LayoutProfile
+) -> EnvProvisionResult:
+    """Realize a project-local editable venv so verify can run unattended.
+
+    Steps (idempotent):
+      (i)   create ``<project>/.venv`` with THIS harness interpreter
+            (``sys.executable -m venv`` — never assumes a ``python`` on PATH; a venv
+            always provides ``bin/python`` even on a python3-only host, which is
+            what closes 根因1);
+      (ii)  install the verifier-pinned pytest + ``pip install -e .`` INTO the venv
+            (the SUT manifest is untouched; the pin is the verifier's own toolchain);
+      (iii) a probe short-circuit: if the venv already imports the package + pytest,
+            skip the install (re-record the state artifact and return);
+      (iv)  record the state artifact (real absolute bin dir + interpreter) under
+            ``.codd/`` so the verify executor can PATH-prepend it.
+
+    A create/install/probe failure is an honest ``environment_build_error`` (the
+    barrier maps it to a StageError; the repair loop never edits code over it).
+    """
+    venv_dir = project_root / ".venv"
+    interpreter = _venv_interpreter(venv_dir)
+    package_name = profile.package_name
+
+    # (iii) idempotent probe: an already-usable env is a no-op (still re-record state).
+    if _env_probe_ok(interpreter, package_name):
+        return _record_env_provision_state(
+            project_root, venv_dir, action="up_to_date",
+            detail="existing venv already imports the package + pytest",
+        )
+
+    # (i) create the venv with the harness interpreter (no PATH `python` assumed).
+    if not interpreter.exists():
+        try:
+            created = subprocess.run(  # noqa: S603 — trusted argv, shell=False
+                [sys.executable, "-m", "venv", str(venv_dir)],
+                capture_output=True,
+                text=True,
+                timeout=_ENV_PROVISION_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return _env_build_error(f"could not create virtualenv at {venv_dir}: {exc}")
+        if created.returncode != 0:
+            return _env_build_error(
+                f"virtualenv creation exited {created.returncode}: "
+                f"{(created.stderr or created.stdout or '').strip()[-2000:]}"
+            )
+
+    # (ii) install the verifier-pinned pytest + the editable project package.
+    try:
+        installed = subprocess.run(  # noqa: S603 — trusted argv, shell=False
+            [
+                str(interpreter), "-m", "pip", "install",
+                "--disable-pip-version-check",
+                _PYTHON_TEST_TOOLCHAIN_PIN, "-e", ".",
+            ],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=_ENV_PROVISION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return _env_build_error(
+            f"editable install exceeded {_ENV_PROVISION_TIMEOUT_SECONDS:g}s"
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _env_build_error(f"editable install could not run: {exc}")
+    if installed.returncode != 0:
+        return _env_build_error(
+            f"editable install exited {installed.returncode}: "
+            f"{(installed.stderr or installed.stdout or '').strip()[-2000:]}"
+        )
+
+    # (iv) prove the built env before recording it green.
+    if not _env_probe_ok(interpreter, package_name):
+        return _env_build_error(
+            "provisioned venv cannot import the project package + pytest after install "
+            "(the environment build did not produce a usable interpreter)"
+        )
+    return _record_env_provision_state(
+        project_root, venv_dir, action="provisioned",
+        detail=f"provisioned .venv (editable install + pinned pytest) for {package_name}",
+    )
+
+
+# Realizer capability id → env provisioner (Contract Kernel v2.71 seam). The dispatch
+# key is the profile's ``legacy_project_types.env_provisioner`` realizer id — a
+# harness-policy capability name, NOT a language name. A stack with no such key (every
+# other language + Go) resolves to no provisioner = a strict NO-OP.
+_EnvProvisioner = Callable[..., EnvProvisionResult]
+#: Realizer capability id (must match the profile YAML ``legacy_project_types``).
+_ENV_PROVISIONER_PY_VENV = "venv-editable-pip-provisioner-v1"
+_ENV_PROVISIONERS_BY_REALIZER: dict[str, _EnvProvisioner] = {
+    _ENV_PROVISIONER_PY_VENV: _provision_python_env,
+}
+
+
+def provision_project_env(
+    project_root: Path | str,
+    *,
+    language: str | None,
+    project_name: str | None,
+    source_dirs: Any = None,
+    test_dirs: Any = None,
+    config: Any = None,
+) -> EnvProvisionResult:
+    """Realize the stack's test-execution environment, or a NO-OP if unsupported.
+
+    PROFILE-DRIVEN dispatch (Contract Kernel v2.71): the runtime ``language`` is
+    gated by the profile's ``legacy_project_types`` bridge and the provisioner is
+    selected by the bridge's ``env_provisioner`` realizer id — never a ``language ==``
+    literal. A stack that declares no ``env_provisioner`` (every other language + Go),
+    an unknown/unaccepted language, or a stack with no resolvable layout profile is a
+    strict NO-OP (``ok=True, action="unsupported"`` — never a failure, never a venv).
+    All paths derive from the resolved :class:`LayoutProfile` (canonical package name
+    + roots); nothing is hardcoded.
+    """
+    root = Path(project_root)
+    realizer_id = _legacy_realizer_id(language, "env_provisioner")
+    provisioner = _ENV_PROVISIONERS_BY_REALIZER.get(realizer_id) if realizer_id else None
+    if provisioner is None:
+        return EnvProvisionResult(
+            ok=True,
+            action="unsupported",
+            detail=f"no env provisioner for language {language!r}",
+        )
+    profile = resolve_layout_profile(
+        language=language,
+        project_name=project_name,
+        source_dirs=source_dirs,
+        test_dirs=test_dirs,
+        config=config,
+        project_root=root,
+    )
+    if profile is None:
+        return EnvProvisionResult(
+            ok=True,
+            action="unsupported",
+            detail=f"no layout profile resolved for language {language!r}",
+        )
+    return provisioner(root, profile=profile)
 
 
 def _typescript_layout_profile(

@@ -63,6 +63,14 @@ SOURCE_INTEGRITY_EXTENSIONS: tuple[str, ...] = (".py", ".json", ".yaml", ".yml",
 #: ``verify.verification_timeout`` convention used by verification-test nodes.
 DEFAULT_TEST_TIMEOUT_SECONDS = 600.0
 
+#: A harness env-provisioning step (greenfield verify barrier) may record a
+#: language-NEUTRAL state artifact here: a plain list of directories to prepend to
+#: the verify spawn's PATH so an unchanged bare ``argv[0]`` resolves to a binary the
+#: harness materialized (e.g. a project-local interpreter). The runner reads it
+#: WITHOUT learning what lives there. Absent (brownfield / other stacks / manual
+#: runs) ⇒ no prepend ⇒ byte-identical to today. ``.codd/**`` is harness-owned.
+_EXEC_ENV_STATE_RELPATH = ".codd/verify/exec_env.json"
+
 #: The honesty rule: a verification that verified nothing must say so.
 STRUCTURAL_ONLY_WARNING = (
     "verification executed no tests/typecheck/runtime checks — structural DAG checks only. "
@@ -730,7 +738,12 @@ class VerifyRunner:
         from codd.languages.verify_executor import execute_verify_plan
 
         self._mark_contract_path()
-        result = execute_verify_plan(plan, self.project_root, adapter_registry=registry)
+        result = execute_verify_plan(
+            plan,
+            self.project_root,
+            adapter_registry=registry,
+            exec_path_prepend=self._exec_path_prepend(),
+        )
         return self._tuple_from_execution(plan, result)
 
     def _mark_contract_path(self) -> None:
@@ -738,6 +751,33 @@ class VerifyRunner:
         self._verify_path = "contract"
         self._fallback_used = False
         self._fallback_reason = None
+
+    def _exec_path_prepend(self) -> tuple[str, ...]:
+        """Directories an upstream provisioning barrier recorded for PATH prepend.
+
+        Reads the language-NEUTRAL state artifact (:data:`_EXEC_ENV_STATE_RELPATH` — a
+        plain ``{"path_prepend_dirs": [...]}``) and returns ONLY the entries that are
+        real absolute directories right now. Best-effort: no artifact / unreadable /
+        none valid → empty tuple → the spawn env stays byte-identical (the brownfield,
+        other-language, or manual case). The runner never learns WHAT lives in those
+        dirs — it forwards them to the language-free executor / evidence spawn, which
+        prepends them so an unchanged bare ``argv[0]`` resolves there. A forged
+        artifact pointing at a non-existent dir is dropped here (existence check),
+        so it can never silently redirect a spawn.
+        """
+        state_file = self.project_root / _EXEC_ENV_STATE_RELPATH
+        try:
+            raw = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ()
+        dirs = raw.get("path_prepend_dirs") if isinstance(raw, Mapping) else None
+        if not isinstance(dirs, list):
+            return ()
+        return tuple(
+            d
+            for d in (str(x) for x in dirs)
+            if d and os.path.isabs(d) and os.path.isdir(d)
+        )
 
     def _legacy_test_command(
         self, settings: dict[str, Any], *, reason: str
@@ -817,6 +857,15 @@ class VerifyRunner:
         observed failure IS execution evidence; only "never ran" is not).
         """
         timeout = _test_timeout_seconds(settings)
+        # Apply the SAME harness-recorded PATH prepend the contract executor uses, so
+        # the legacy/explicit-command spawn resolves an unchanged bare ``argv[0]`` the
+        # same way (no divergence between the two paths). Empty prepend keeps the env
+        # exactly as before (``_go_aware_env`` → None for non-Go = ambient inherit).
+        env = _go_aware_env(self.project_root)  # None → inherit ambient (non-Go)
+        prepend = self._exec_path_prepend()
+        if prepend:
+            env = dict(env if env is not None else os.environ)
+            env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
         try:
             completed = subprocess.run(
                 command,
@@ -825,7 +874,7 @@ class VerifyRunner:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env=_go_aware_env(self.project_root),  # None → inherit ambient (non-Go)
+                env=env,
             )
         except subprocess.TimeoutExpired:
             message = f"[TIMEOUT] {label} exceeded {timeout:g}s: {command}"

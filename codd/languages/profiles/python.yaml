@@ -177,6 +177,15 @@ legacy_project_types:
   layout_builder: "src-package-pytest-editable-layout-v1"
   scaffolder: "pyproject-src-package-scaffold-v1"
   test_runner_ensurer: "pyproject-pytest-runner-v1"
+  # env_provisioner — the harness-policy capability that MATERIALIZES the
+  # editable-installed test-execution environment this profile's ``install_mode:
+  # editable`` layout declares (a project-local venv + a verifier-pinned pytest +
+  # ``pip install -e .``). It realizes the "environment-continuation" toolchain
+  # channel (interpreter identity IS the dependency store) that the YAML
+  # ``package_manager`` schema — modelled for cwd-continuation channels (npm
+  # node_modules, cmake build/) — does not yet express. Stacks that omit this key
+  # (every other language + Go) are a strict NO-OP.
+  env_provisioner: "venv-editable-pip-provisioner-v1"
 
 artifacts:
   harness_root: ".codd"
