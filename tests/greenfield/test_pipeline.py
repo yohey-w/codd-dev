@@ -1255,6 +1255,44 @@ def test_task_declares_no_authored_artifact_classifies_gate_vs_generation() -> N
     )
 
 
+def test_task_declares_no_authored_artifact_noops_non_codebase_artifact() -> None:
+    """v3.16.0: a task declaring ONLY artifacts a LATER pipeline stage provisions
+    (a CI-setup design's ``.github/workflows/ci.yml``, owned by ci_scaffold) is a
+    deterministic implement no-op — closing the generation-variance halt — while a
+    codebase artifact (under a root, or an impl extension even if misplaced),
+    test-shape, glob, bare token, empty, or mix-with-code stays owed (fail-closed).
+    Decided from harness declaration DATA only (scan roots + language→ext table)."""
+    from codd.greenfield.pipeline import _task_declares_no_authored_artifact
+
+    config = {"project": {"language": "python"}, "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]}}
+
+    def _task(*outs: str) -> ImplementTaskRef:
+        return ImplementTaskRef(task_id="t", design_node="n", expected_outputs=tuple(outs))
+
+    # Non-codebase artifacts owned by later stages → no-op (the generation-variance fix).
+    assert _task_declares_no_authored_artifact(_task(".github/workflows/ci.yml"), config)
+    assert _task_declares_no_authored_artifact(_task("docs/infra/build_ci_setup.md"), config)
+    assert _task_declares_no_authored_artifact(
+        _task(".github/workflows/ci.yml", "docs/infra/notes.md"), config
+    )
+    # Still owed (fail-closed):
+    assert not _task_declares_no_authored_artifact(_task("lib/pkg/x.py"), config)  # impl ext, misplaced
+    assert not _task_declares_no_authored_artifact(_task("src/pkg/x.py"), config)  # under source root
+    assert not _task_declares_no_authored_artifact(_task("tests/test_x.py"), config)  # under test root
+    assert not _task_declares_no_authored_artifact(_task("infra/deploy/x.py"), config)  # impl ext
+    assert not _task_declares_no_authored_artifact(_task("infra/**/*.yml"), config)  # glob
+    assert not _task_declares_no_authored_artifact(_task("ci.yml"), config)  # bare token
+    assert not _task_declares_no_authored_artifact(
+        _task(".github/workflows/ci.yml", "src/pkg/x.py"), config
+    )  # mixed with real code → the code is owed
+
+    # Unresolved language → union of ALL impl extensions (fail-closed): a `.py`
+    # file is still caught as owed even without a declared language.
+    langless = {"scan": {"source_dirs": ["src"], "test_dirs": ["tests"]}}
+    assert not _task_declares_no_authored_artifact(_task("lib/pkg/x.py"), langless)
+    assert _task_declares_no_authored_artifact(_task(".github/workflows/ci.yml"), langless)
+
+
 def test_implement_runner_noops_verification_gate_task(tmp_path: Path) -> None:
     """End-to-end red-before-green for the 2026-07-03 release-gate false-RED: a
     task whose declared outputs are prose (``pytest -q output``) authors nothing,

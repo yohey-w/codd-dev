@@ -3384,49 +3384,114 @@ def _resolve_layout_profile_from_config(config: dict[str, Any], *, project_root:
     )
 
 
+def _output_is_prose_declaration(out: str, source_roots: list[str], test_roots: list[str]) -> bool:
+    """A PROSE action-and-output declaration (a verification/gate deliverable), not
+    an authored file. Contains WHITESPACE (``pytest -q output`` reads as a sentence;
+    ``src/pkg/x.py`` and a bare token ``some_artifact`` do not), and is not a
+    concrete file path, a glob, or a path under a configured source/test root. This
+    is the original (2026-07-03) rule, unchanged."""
+    if not any(ch.isspace() for ch in out):
+        return False  # a whitespace-free token is a plausible authored artifact name
+    if _declared_output_is_file_path(out):
+        return False  # a real path (even one with a space) is an authored file
+    if any(ch in out for ch in "*?["):  # a glob denotes authored file(s)
+        return False
+    norm = _norm_decl_path(out)
+    if _path_under_root(norm, source_roots) or _path_under_root(norm, test_roots):
+        return False  # a package/test location under a root IS authored
+    return True
+
+
+def _no_op_impl_extensions(config: dict[str, Any]) -> frozenset[str]:
+    """Implementation-file extensions for the project language, or the union of ALL
+    known impl extensions when the language is unresolved (fail-closed — an unknown
+    language must never let an implementation file pass as a non-codebase artifact).
+    Reads the language→extension registry DATA table, never a language branch."""
+    from codd.implementer import LANGUAGE_EXT_MAP, _implementation_language_extensions
+
+    language = None
+    project = config.get("project") if isinstance(config, Mapping) else None
+    if isinstance(project, Mapping):
+        language = project.get("language")
+    if language:
+        return frozenset(ext.lower() for ext in _implementation_language_extensions(language))
+    union: set[str] = set()
+    for exts in LANGUAGE_EXT_MAP.values():
+        union.update(ext.lower() for ext in exts)
+    return frozenset(union)
+
+
+def _output_is_non_codebase_artifact(
+    out: str, source_roots: list[str], test_roots: list[str], impl_exts: frozenset[str]
+) -> bool:
+    """A declared output that a LATER pipeline stage provisions, not an implement
+    authored file (v3.16.0).
+
+    True for a MULTI-COMPONENT path (contains ``/``) that is NOT under any
+    configured source/test root, carries NO implementation-language extension, is
+    NOT test-shaped, and is NOT a glob — i.e. an artifact a LATER pipeline stage
+    provisions after implementation. A bare single token (``some_artifact``) stays a
+    real generation target; a codebase path (under a root, or an impl extension even
+    if misplaced) stays owed. Decided from harness declaration DATA only (scan
+    roots, the language→extension table, test-shape) — no doc name / node type /
+    language / framework literal."""
+    if any(ch in out for ch in "*?["):
+        return False  # a glob denotes authored file(s)
+    norm = _norm_decl_path(out)
+    if "/" not in norm:
+        return False  # a bare single token is a plausible authored artifact name
+    if _path_under_root(norm, source_roots) or _path_under_root(norm, test_roots):
+        return False  # under an authored root → owed
+    if _has_test_shape(norm):
+        return False  # test-shaped → owed
+    suffix = PurePosixPath(norm).suffix.lower()
+    if suffix and suffix in impl_exts:
+        return False  # an implementation-language file (even misplaced) → owed
+    return True
+
+
 def _task_declares_no_authored_artifact(task: ImplementTaskRef, config: dict[str, Any]) -> bool:
-    """Whether a task's declared outputs are NON-artifacts — a verification/gate task.
+    """Whether a task's declared outputs are all NON-authored — a deterministic
+    implement no-op (no AI call), not a demand for generation.
 
     A derived task normally declares the FILE(S) it authors (``src/pkg/x.py``,
     ``tests/test_x.py``, a glob, or a package/test DIRECTORY under a configured
-    root). A VERIFICATION / RELEASE-GATE task instead declares a non-filesystem
-    deliverable — an ACTION and its OUTPUT, e.g. ``run_full_pytest_release_gate``
-    with ``expected_outputs: ['pytest -q output', 'pytest tests/e2e -q output']``.
-    Nothing is authored: the implementer has no file to write and honestly emits
-    0 files, which the 0-generated-files gate then reports as a hard failure —
-    the 2026-07-03 Python greenfield false-RED. Such a task's real work (install +
-    run the suite green with SKIP=0) is precisely what the VERIFY stage already
-    performs, so implement must treat it as a no-op rather than demand generation.
+    root). Two kinds of task legitimately author NOTHING and would otherwise trip
+    the 0-generated-files gate as a false-RED:
 
-    True only when EVERY declared output is a PROSE description rather than an
-    authored artifact: it contains WHITESPACE (a filesystem path a task authors
-    never does — ``pytest -q output`` reads as a sentence, ``src/pkg/x.py`` and a
-    bare artifact name like ``some_artifact`` do not) AND is not, defensively, a
-    concrete file path, a glob, or a path under a configured ``source_dirs`` /
-    ``test_dirs`` root. The whitespace test is the discriminator that keeps a bare
-    single-token artifact name (``some_artifact`` → a real build output) a genuine
-    generation task while catching an action-and-its-output gate declaration. An
-    EMPTY ``expected_outputs`` stays strict (returns False): absence of a contract
-    is ambiguous, not a sanctioned skip. Anti-false-green + fail-closed: a task
-    that declares any path-shaped codebase artifact still owes it (the 0-files gate
-    + completeness gate remain), and the release gate's substance is never dropped
-    — verify re-runs the full suite as the authority.
+    * a VERIFICATION / RELEASE-GATE task — an ACTION and its OUTPUT, e.g.
+      ``run_full_pytest_release_gate`` with ``['pytest -q output', ...]`` (the
+      2026-07-03 false-RED; the work is what the VERIFY stage already performs); and
+    * (v3.16.0) a NON-CODEBASE-ARTIFACT task — one that declares only artifacts a
+      LATER pipeline stage provisions after implementation. The generation prompt
+      demands concrete source files unconditionally, so a run where the model
+      correctly emits nothing hard-fails; a run where it fabricates the artifact
+      "succeeds" but usurps the owning stage's deterministic provisioning. This is
+      generation-variance surfaced as a stochastic implement halt.
+
+    Returns True when EVERY declared output is either a prose gate declaration
+    (:func:`_output_is_prose_declaration`) or a non-codebase artifact
+    (:func:`_output_is_non_codebase_artifact`). Otherwise False (fail-closed): an
+    EMPTY ``expected_outputs`` (absence of a contract is ambiguous, not a sanctioned
+    skip), a bare single token, a glob, or ANY path-shaped codebase artifact (under
+    a root, or an impl extension even if misplaced) still owes generation — the
+    0-files gate + completeness/kind gates + ``skip_generation`` HITL seam remain
+    byte-identical. Anti-false-green: a no-op'd task runs NO model, so a generation
+    failure cannot masquerade as 0-file success; a mis-derived module surfaces as a
+    downstream RED (verify / VB coverage+authenticity / check), never a false-GREEN.
     """
     outputs = [str(out).strip() for out in task.expected_outputs if str(out).strip()]
     if not outputs:
         return False
     source_roots = _scan_roots(config, "source_dirs")
     test_roots = _scan_roots(config, "test_dirs")
+    impl_exts = _no_op_impl_extensions(config)
     for out in outputs:
-        if not any(ch.isspace() for ch in out):
-            return False  # a whitespace-free token is a plausible authored artifact name
-        if _declared_output_is_file_path(out):
-            return False  # a real path (even one with a space) is an authored file
-        if any(ch in out for ch in "*?["):  # a glob denotes authored file(s)
-            return False
-        norm = _norm_decl_path(out)
-        if _path_under_root(norm, source_roots) or _path_under_root(norm, test_roots):
-            return False  # a package/test location under a root IS authored
+        if _output_is_prose_declaration(out, source_roots, test_roots):
+            continue
+        if _output_is_non_codebase_artifact(out, source_roots, test_roots, impl_exts):
+            continue
+        return False  # a codebase artifact (or ambiguous bare/empty token) is owed
     return True
 
 

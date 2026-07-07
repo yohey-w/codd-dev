@@ -13,6 +13,46 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.16.0] - 2026-07-07 — Non-codebase-artifact implement no-op (generation-variance halt fix)
+
+**Closes the stochastic implement-stage halt that blocked unattended Python greenfield.** A fresh
+`codd greenfield` sometimes stopped at implement with `Design 'docs/infra/build_ci_setup.md' produced 0
+generated files`. Root cause (not out-of-scope discarding): the planner legitimately plans an `docs/infra/`
+build/CI design (`planner.py:49,977`), the implement deriver may turn it into a task, and the generation
+prompt demands `concrete source files` unconditionally — so a run where the model correctly recognises "a
+CI-description design authors no source" hard-fails, while a run where it fabricates `.github/workflows/ci.yml`
+"succeeds" but usurps the **ci_scaffold stage's** deterministic ownership of that file. Same neutral spec,
+run-to-run generation-variance.
+
+Fix (Fable5-designed, single path): extend the EXISTING implement-runner predicate
+`_task_declares_no_authored_artifact` — the seam set on 2026-07-03 for the release-gate false-RED ("a task
+that authors nothing is an implement no-op, its substance owned by a later stage") — from "prose-only
+declarations" to also cover **non-codebase artifacts**. A task whose every declared output is either a prose
+gate declaration OR a multi-component path that is (a) not under any configured `scan.source_dirs`/`test_dirs`
+root, (b) carries no implementation-language extension (the `LANGUAGE_EXT_MAP` registry DATA table; union of
+all when the language is unresolved — fail-closed), (c) is not test-shaped, and (d) is not a glob → is a
+**deterministic no-op**: no AI call, an echoed reason, and the owning stage provisions it later. This decides
+from harness declaration DATA only — no doc name, node type, or `ci`/`github`/`infra`/language/framework
+literal enters the logic (grep-verified).
+
+Anti-false-green preserved and slightly strengthened:
+
+- A no-op'd task runs NO model, so a generation failure **cannot** masquerade as 0-file success (there is no
+  generation to fail). Every task that IS run keeps the 0-generated-files gate, the completeness/kind gates,
+  and the write-time syntax gate byte-identical; `skip_generation` remains the sole HITL 0-file success.
+- The "an implementation design is wrongly skipped" hole is closed structurally: a task bearing
+  implementation declares a source/test-root or impl-extension output, so it never matches. Even a
+  mis-derived module surfaces as a downstream RED (verify runs the real suite; the VB coverage/authenticity
+  gates require declared behaviours to be covered; check) — the worst case is early-RED→late-RED, never a new
+  false-GREEN. The authored/authenticated behaviour set is unchanged.
+- It removes the fabrication pressure the old gate put on a genuinely code-less design (≥1 file or hard-fail),
+  which is what let a run smuggle a hand-written `ci.yml` past the ci_scaffold deterministic owner.
+
+Owner escape hatches unchanged: a configured `implement_targets`, any declaration under a source/test root,
+and any impl-extension path (even misplaced) are ALWAYS generated; an EMPTY `expected_outputs` stays
+fail-closed (absence of a contract is ambiguous, not a sanctioned skip). This is the RC increment for the
+campaign's Python greenfield ② criterion (fresh, unattended, repeated green).
+
 ## [3.15.1] - 2026-07-07 — Environment/build failure defense (repair-thrash guard)
 
 **Stops the repair engine from mutating known-good source while flailing at an environment failure it
