@@ -2115,27 +2115,51 @@ class GreenfieldPipeline:
                 raise StageError(f"task {task.task_id}: chunked implementation status {chunked.status}")
             results: list[Any] = []
         else:
-            results = implement_tasks(
-                project_root,
-                design=task.design_node,
-                output_paths=output_paths,
-                expected_outputs=list(task.expected_outputs),
-                task_title=task.title,
-                task_description=task.description,
-                ai_command=ai_command,
-                use_derived_steps=True,
-            )
-            failed = [result for result in results if result.error]
-            if failed:
-                raise StageError(f"task {task.task_id}: {failed[0].error}")
-
             # Contract-aware task-done verification: a task is "done" only if the
             # implementer produced the KIND of artifact the task declared (e.g. a
             # test-writing task must emit at least one test file, not just app
             # code). Drives off the declared expected_outputs — never task names,
             # vendor CLI, or path literals. No-op for tasks with no declared
             # output kind. See _verify_task_contract for the rules.
-            _verify_task_contract(task, results, project_root, config, echo=self.echo)
+            #
+            # v3.17.0: bounded feedback re-drive when the produced kinds do not yet
+            # cover the declared kinds (a source+test task that emitted only source).
+            # Evaluation is UNION across attempts (every produced file is on disk),
+            # so a re-drive that adds only the missing test satisfies the contract
+            # together with attempt 1's source. Budget exhausted → the gate itself
+            # raises the SAME hard StageError (honest RED; anti-false-green intact).
+            all_results: list[Any] = []
+            kind_feedback: str | None = None
+            max_kind_retries = _kind_contract_max_retries(config)
+            for attempt in range(1 + max_kind_retries):
+                results = implement_tasks(
+                    project_root,
+                    design=task.design_node,
+                    output_paths=output_paths,
+                    expected_outputs=list(task.expected_outputs),
+                    task_title=task.title,
+                    task_description=task.description,
+                    ai_command=ai_command,
+                    use_derived_steps=True,
+                    feedback=kind_feedback,
+                )
+                failed = [result for result in results if result.error]
+                if failed:
+                    raise StageError(f"task {task.task_id}: {failed[0].error}")
+                all_results.extend(results)
+                try:
+                    _verify_task_contract(task, all_results, project_root, config, echo=self.echo)
+                    break
+                except StageError:
+                    if attempt >= max_kind_retries:
+                        raise  # budget exhausted → honest RED, gate's own message
+                    kind_feedback = _kind_contract_feedback(task, all_results, project_root, config)
+                    self.echo(
+                        f"[greenfield] task {task.task_id}: declared output kind(s) not yet "
+                        f"produced; re-driving implement with feedback "
+                        f"(attempt {attempt + 2}/{1 + max_kind_retries})"
+                    )
+            results = all_results
 
         # NOTE: the verifiable-behavior (VB) coverage gate is intentionally NOT
         # enforced per task here. The gate is PROJECT-WIDE (it reconciles every
@@ -3055,6 +3079,51 @@ def _declared_output_completeness_mode(config: dict[str, Any] | None) -> str:
     return DEFAULT_DECLARED_OUTPUT_COMPLETENESS
 
 
+def _kind_contract_max_retries(config: dict[str, Any]) -> int:
+    """``implement.kind_contract_max_retries`` — bounded feedback re-drives when a
+    task produced only SOME of its declared output kinds (v3.17.0). Default 2 — a
+    DISTINCT knob from the syntax / no-usable budgets (the implementer's "different
+    failure classes get different knobs" rule), so tuning one never perturbs another.
+    ``0`` restores the legacy hard-fail-on-first-miss (the gate stays hard)."""
+    section = config.get("implement") if isinstance(config, Mapping) else None
+    if isinstance(section, Mapping) and "kind_contract_max_retries" in section:
+        try:
+            value = int(section["kind_contract_max_retries"])
+        except (TypeError, ValueError):
+            return 2
+        return value if value >= 0 else 2
+    return 2
+
+
+def _kind_contract_feedback(
+    task: ImplementTaskRef, results: list[Any], project_root: Path, config: dict[str, Any]
+) -> str:
+    """Restate the kind contract for a bounded re-drive: which declared kind(s) are
+    still missing and the verbatim declared outputs that map to them. Same discipline
+    as the syntax-gate feedback (restate the contract; never hint at relaxing it), and
+    explicitly forbids hollow tests so the re-drive cannot game the downstream
+    authenticity gate. Recomputed with the SAME kind-classification helpers the gate
+    uses — the single authority stays in this module."""
+    required = _required_kinds(task, config)
+    generated = [f for result in results for f in getattr(result, "generated_files", [])]
+    produced = _produced_kinds(generated, project_root, config)
+    missing = sorted(required - produced)
+    missing_outputs = [
+        str(out).strip()
+        for out in task.expected_outputs
+        if str(out).strip() and _classify_declared_output(str(out), config) in set(missing)
+    ]
+    outputs_line = ", ".join(missing_outputs) if missing_outputs else "(the declared outputs for the missing kind)"
+    return (
+        f"The previous attempt for this task produced kind(s) {sorted(produced) or ['<none>']}, but "
+        f"the task declares {sorted(required)} — the {missing} deliverable(s) were NOT produced. "
+        f"Author the missing declared deliverable(s) now from the task description and design "
+        f"document: {outputs_line}. Produce a real, executable implementation — for a test, a "
+        f"genuine test with assertions that exercises the behavior, never an empty, skipped, or "
+        f"assertion-free test. Keep the file(s) already produced."
+    )
+
+
 def _verify_task_contract(
     task: ImplementTaskRef,
     results: list[Any],
@@ -3222,6 +3291,36 @@ def _check_declared_output_completeness(
     )
 
 
+def _augment_with_declared_test_roots(
+    config: dict[str, Any], task: ImplementTaskRef, base_paths: list[str]
+) -> list[str]:
+    """Envelope alignment (v3.17.0): expose the configured test dirs when a task
+    DECLARES a ``test`` kind but its resolved output paths are source-pure.
+
+    A MIXED task (declares both ``source`` and ``test``) routes source-pure by
+    default (:func:`_test_only_output_paths` returns ``None`` for non-test-only
+    tasks), so its declared test file falls OUTSIDE the output fence and is dropped
+    — the kind gate then fails a task the model could satisfy. Gated on the DECLARED
+    kind, so a pure-source task is never handed a test root; test-only tasks already
+    routed above never reach here. A ``"."`` test root (a root-module language that
+    colocates tests) is excluded — it needs no extra root. Purely additive: it only
+    widens where the model MAY write, never any judgement."""
+    if _KIND_TEST not in _required_kinds(task, config):
+        return base_paths
+    test_roots = [
+        r for r in _scan_roots(config, "test_dirs") if r and r.strip() and r.strip() != "."
+    ]
+    if not test_roots:
+        return base_paths
+    if any(_path_under_root(_norm_decl_path(p), test_roots) for p in base_paths):
+        return base_paths  # already in-fence for tests
+    merged = list(base_paths)
+    for root in test_roots:
+        if root not in merged:
+            merged.append(root)
+    return merged
+
+
 def _output_paths_for_task(config: dict[str, Any], task: ImplementTaskRef) -> list[str]:
     import codd.cli as cli_module
 
@@ -3248,7 +3347,8 @@ def _output_paths_for_task(config: dict[str, Any], task: ImplementTaskRef) -> li
     # output destination so that package — and a model emitting straight into
     # ``src/<pkg>/`` — is never dropped as "outside output paths". An explicit
     # ``implement.default_output_paths`` / ``output_root`` is respected.
-    return _route_source_into_package(config, explicit, project_root=_task_project_root(config, task))
+    base = _route_source_into_package(config, explicit, project_root=_task_project_root(config, task))
+    return _augment_with_declared_test_roots(config, task, base)
 
 
 def _task_project_root(config: dict[str, Any], task: ImplementTaskRef) -> Path | None:

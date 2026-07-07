@@ -2200,6 +2200,24 @@ def _build_implementation_prompt(
             "the task described above in this response. Do not implement an unrelated section or a "
             "sibling task's deliverable just because the document also mentions it."
         )
+    declared_deliverables = [str(out).strip() for out in spec.expected_outputs if str(out).strip()]
+    if declared_deliverables:
+        # Declared-deliverable contract (v3.17.0): a task's expected outputs are
+        # otherwise shown only as existing-file CONTEXT, never as the contract this
+        # invocation must fulfil. A task declaring both a source and a test file was
+        # producing only the source (the model framed the whole task as source-only),
+        # and the kind gate then hard-failed a task the model could satisfy. State the
+        # declared deliverables verbatim and require ALL declared kinds.
+        lines.append("")
+        lines.append("DECLARED DELIVERABLES for this task — you MUST produce every one:")
+        lines.extend(f"- {out}" for out in declared_deliverables)
+        lines.append(
+            "- Produce EVERY declared deliverable listed above. If both a source file and a "
+            "test file are declared, author BOTH — a real, executable test that exercises the "
+            "behavior AND its source. Producing only one kind is a task-contract violation. Do "
+            "NOT author an empty, skipped, or assertion-free test to satisfy this — write the "
+            "source and a genuine test; a coverage/authenticity gate rejects hollow tests."
+        )
     lines.extend(
         [
             "",

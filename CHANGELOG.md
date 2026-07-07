@@ -13,6 +13,55 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.17.0] - 2026-07-07 — Kind-contract envelope alignment + bounded feedback repair
+
+**Closes the systematic implement halt where a bundled source+test task produced only its source.** On the
+fresh unattended Python greenfield (v3.16.0 RC), implement failed — non-transiently, identically on resume —
+with `task implement_tokenize_scanner: declared output kind(s) ['source', 'test'] but produced only
+['source']`. The deriver bundled a source file and its test into ONE task; the model authored only the
+source; the kind contract gate (`_verify_task_contract`) hard-failed a task the model could satisfy.
+
+Root cause (deeper than "the retry loop has a hole"): a MIXED task's execution ENVELOPE is built source-pure
+while only the gate judges by declared kind. `_test_only_output_paths` returns `None` for a non-test-only
+task, so the output fence, the prompt frame (`is_test_related_implement` is False → no test-framework /
+verifiable-behavior-contract sections), and the B2 test-root re-key all resolve source-only — the declared
+test is dropped whether the model omits it OR writes it out-of-fence. Meanwhile the implementer's bounded
+retry covers only the syntax gate and the 0-usable-files case; the kind contract is verified by the pipeline
+AFTER the implementer returns, OUTSIDE that loop, so a partial produce (closer to success than 0 files) dies
+with no feedback re-drive. Fresh runs re-derive (task shape varies — bundled dies, split greens); resume
+replays the cached bundled task deterministically.
+
+Fix (Fable5-designed, one design in three edits — the gate stays byte-identical):
+
+- **Envelope alignment** (`_output_paths_for_task`): when a task's `_required_kinds` includes `test` but no
+  resolved output path is under a configured test root, expose the test dirs too (excluding a `"."` root — a
+  root-module language colocates tests). Gated on the DECLARED kind, so a pure-source task is never handed a
+  test root; idempotent when the base already covers tests. This one change cascades: the fence accepts the
+  test, B2 re-key activates, and `is_test_related_implement` flips True so the test-framework + VB-contract +
+  anti-hollow-marker sections load from the first attempt.
+- **Declared-deliverable projection** (`_build_implementation_prompt`): a "DECLARED DELIVERABLES" section
+  lists the task's `expected_outputs` verbatim and requires ALL declared kinds — the outputs were previously
+  shown only as existing-file context, never as the contract to fulfil. Explicitly forbids empty/skipped/
+  assertion-free tests.
+- **Bounded feedback repair** (`_default_implement_task_runner`): a bounded loop
+  (`implement.kind_contract_max_retries`, default 2; 0 = legacy hard-fail) that, on a kind-contract miss,
+  re-drives `implement_tasks` with feedback naming the missing kind + the verbatim declared outputs, and
+  evaluates the contract by UNION across attempts (a re-drive that adds only the missing test satisfies it
+  together with attempt 1's source, matching what is on disk). Budget exhausted → the gate itself raises the
+  SAME hard StageError. This is the third application of the existing "hard gate + bounded feedback re-drive"
+  pattern (attempt-level syntax gate, stage-level implement-oracle / VB-coverage, now task-level).
+
+Anti-false-green preserved and strengthened: `_verify_task_contract` is unchanged (the loop only adds
+attempts BEFORE it; the final round is the gate's own raise); union evaluation reflects the real files on
+disk; the feedback restates the contract without hinting at relaxation and forbids hollow tests; and because
+envelope alignment now loads the VB-contract + anti-hollow-marker sections into mixed-task prompts, hollow
+pressure is REDUCED, not added. Every downstream gate (marker authenticity + tautology rejection, the
+stage-wide VB coverage gate with its own source-fenced test rerun, verify's coverage-execution coherence,
+the release suite) is untouched — the worst case is early-RED→late-RED, never a new false-GREEN. Green-path
+cost is zero (the loop body runs only on a miss). Data-driven — no language / framework / task-name literal
+in the pipeline core (grep-verified). New check/node/edge/concept: none. This is the RC increment for the
+campaign's single-invocation unattended Python greenfield ② criterion.
+
 ## [3.16.0] - 2026-07-07 — Non-codebase-artifact implement no-op (generation-variance halt fix)
 
 **Closes the stochastic implement-stage halt that blocked unattended Python greenfield.** A fresh
