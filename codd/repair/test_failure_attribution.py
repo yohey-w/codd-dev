@@ -708,11 +708,61 @@ def parse_tsc_failure(output: str, project_root: Path, check_name: str) -> TestF
     )
 
 
+# ─────────────────────────────────────────────────────────────
+# shell command-resolution adapter (stack-agnostic, highest priority)
+# ─────────────────────────────────────────────────────────────
+
+#: A shell could not resolve a command's ``argv[0]`` — the bare interpreter/tool
+#: name is absent from PATH. Matches sh/bash/dash/zsh/ash/ksh "not found"
+#: phrasings, with or without a leading path (``/bin/sh``) and the optional
+#: ``<lineno>:`` dash/sh prefix. The tool name is captured only for the
+#: diagnosis; it is NEVER treated as project code. This is the shell's own
+#: vocabulary, carrying ZERO language/stack lexemes (``<tool>`` is any name).
+_SHELL_NOT_FOUND = re.compile(
+    r"(?m)^(?:/[^:\n]*/)?(?:sh|bash|dash|zsh|ash|ksh): "
+    r"(?:\d+: )?(?P<tool>[^:\n]+?): (?:command )?not found\s*$"
+)
+
+
+def _is_shell_resolution_failure(command: str, output: str) -> bool:
+    return bool(_SHELL_NOT_FOUND.search(output or ""))
+
+
+def parse_shell_resolution_failure(
+    output: str, project_root: Path, check_name: str
+) -> TestFailureAttribution:
+    """A shell-level command-not-found is an environment/build failure on ANY
+    stack — never project code.
+
+    Classified BEFORE the stack adapters so an interpreter command (e.g.
+    ``python -m pytest``) that dies with ``/bin/sh: <tool>: not found`` is not
+    mis-parsed by the pytest adapter as an ``unknown`` code failure and thrashed
+    by the repair engine: its ``argv[0]`` tool is simply absent from PATH. No
+    project path is attributed (``code_addressable`` False), so the repairability
+    rule routes it to ``unrepairable`` instead of editing source.
+    """
+    match = _SHELL_NOT_FOUND.search(output or "")
+    tool = match.group("tool").strip() if match else "command"
+    return TestFailureAttribution(
+        failure_class="environment_build_error",
+        attributed=[],
+        code_addressable=False,
+        diagnosis=(
+            f"shell could not resolve '{tool}' (absent from PATH) — "
+            "environment/build error, not project code"
+        ),
+    )
+
+
 # Register the built-in adapters on import. ORDER MATTERS: the first matching
-# predicate wins (see ``_select_adapter``). tsc is registered BEFORE vitest/jest
-# so a pure ``tsc --noEmit`` command (which never contains "vitest"/"jest") is
-# parsed as type diagnostics; the JS-runner predicate also keys off the command
-# string, so a vitest run is unaffected by tsc's registration.
+# predicate wins (see ``_select_adapter``). The shell-resolution adapter is
+# FIRST so a command-not-found is classed as environment/build on any stack
+# before a stack adapter (whose predicate also matches the command string) can
+# mis-parse it. tsc is registered BEFORE vitest/jest so a pure ``tsc --noEmit``
+# command (which never contains "vitest"/"jest") is parsed as type diagnostics;
+# the JS-runner predicate also keys off the command string, so a vitest run is
+# unaffected by tsc's registration.
+register_adapter(_is_shell_resolution_failure, parse_shell_resolution_failure)
 register_adapter(_is_pytest, parse_pytest_failure)
 register_adapter(_is_tsc, parse_tsc_failure)
 register_adapter(_is_vitest_or_jest, parse_vitest_failure)

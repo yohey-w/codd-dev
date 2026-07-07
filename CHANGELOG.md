@@ -13,6 +13,40 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.15.1] - 2026-07-07 — Environment/build failure defense (repair-thrash guard)
+
+**Stops the repair engine from mutating known-good source while flailing at an environment failure it
+cannot fix by editing code.** The Python greenfield dogfood (before the v3.15.0 third-surface fix landed)
+showed exactly this: a `verification_test` node died `/bin/sh: python: not found` — an ENVIRONMENT failure —
+yet the runtime failure carried no attribution, so the repairability classifier force-routed it and the LLM
+"repair" thrashed real source (it deleted a CLI entry-point). v3.15.0's env-channel projection removes that
+specific trigger, but the vulnerability CLASS (any env-shaped failure on the runtime/verification-template
+surface — a missing tool, a refused connection, an un-provisioned dependency) remained. This is the
+deterministic defense, built entirely on the EXISTING `environment_build_error` taxonomy — **no new
+classification name, no new check/node/concept**:
+
+- **D1 — attribute the runtime failure** (`verify_runner._failure_from_runtime_result`): the
+  verification-template failure now runs through `attribute_command_failure` the same way the evidence path
+  does, so it carries a `failure_class` / `code_addressable` instead of an unclassified dict. An
+  unrecognized command (curl / cdp) → attribution `None` → details unchanged (byte-identical).
+- **D2 — shell command-resolution signature** (`test_failure_attribution`): a `/bin/sh: <tool>: not found`
+  (sh/bash/dash/zsh, with or without a leading path / `<lineno>:` prefix) is classed `environment_build_error`
+  by a stack-agnostic adapter registered FIRST — so a `python -m pytest` that dies command-not-found is not
+  mis-parsed by the pytest adapter as an `unknown` code failure. The signature is the shell's own
+  vocabulary (`<tool>` is any name) — zero language/stack lexemes.
+- **D3 — deterministic routing** (`repairability_classifier`): a violation classed `environment_build_error`
+  is pulled to `unrepairable` BEFORE B0, the changed-files gate, and the LLM meta-classifier — the mirror of
+  the B0 force-route. Applied in `RepairabilityClassifier` AND `NullClassifier` so even the no-LLM fallback
+  can't hand the engine un-patchable infrastructure.
+- **D4 — fence the state artifact** (`auto_scope_guard`): `.codd/verify/exec_env.json` (the recorded
+  PATH-prepend dirs that steer verify spawn resolution) is added to the gate-control basenames, so the
+  repair engine can never forge/edit it to redirect a spawn (belt to the `.codd/**` harness-owned
+  suspenders).
+
+Anti-false-green preserved: the observed test PASS/FAIL set is bit-unchanged (D1-D3 only add/steer
+metadata; a genuine assertion failure with the shell-not-found signature ABSENT stays a code-addressable
+`assertion_failure`). This is the RC build for the campaign's Python greenfield ② criterion.
+
 ## [3.15.0] - 2026-07-07 — Python test-execution environment provisioning (materialization's environment-continuation projection)
 
 **Makes `codd greenfield --language python` runnable unattended on a python3-only host.** The Python

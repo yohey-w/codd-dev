@@ -107,6 +107,11 @@ _GATE_CONTROL_BASENAMES: frozenset[str] = frozenset(
         "karma.conf.js",
         "phpunit.xml",
         "phpunit.xml.dist",
+        # Harness-owned verify env-provision state (v3.15.x): the recorded
+        # PATH-prepend dirs steer where verify spawns resolve argv[0]. Fenced so
+        # the repair engine can never forge/edit it to redirect a spawn (belt to
+        # the ``.codd/**`` harness_owned suspenders).
+        "exec_env.json",
     }
 )
 

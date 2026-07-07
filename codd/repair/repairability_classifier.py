@@ -31,6 +31,15 @@ class RepairabilityClassifier:
         if not items:
             return RepairabilityClassification([], [], [])
 
+        # D3 (env/build guard): environment/build failures are deterministically
+        # unrepairable — pulled out BEFORE B0, the changed-files gate, and the LLM
+        # meta-classifier, so the engine never thrashes on un-patchable
+        # infrastructure (a missing interpreter/tool/service). Mirror of B0.
+        env_unrepairable = [item for item in items if _is_environment_failure(item)]
+        items = [item for item in items if not _is_environment_failure(item)]
+        if not items:
+            return RepairabilityClassification([], [], env_unrepairable)
+
         changed_files = self._git_diff_files(self.repo_path, baseline_ref) if baseline_ref else set()
         repairable: list[Any] = []
         pending: list[Any] = []
@@ -55,13 +64,13 @@ class RepairabilityClassifier:
                 pending.append(item)
 
         if not pending:
-            return RepairabilityClassification(repairable, [], [])
+            return RepairabilityClassification(repairable, [], env_unrepairable)
 
         decided = self._classify_pending(pending, baseline_ref)
         return RepairabilityClassification(
             repairable + decided.repairable,
             decided.pre_existing,
-            decided.unrepairable,
+            decided.unrepairable + env_unrepairable,
         )
 
     def _git_diff_files(self, repo_path: str | Path, baseline_ref: str | None) -> set[str]:
@@ -123,7 +132,12 @@ class RepairabilityClassifier:
 
 class NullClassifier:
     def classify(self, violations: list[Any], baseline_ref: str | None = None) -> RepairabilityClassification:
-        return RepairabilityClassification(list(violations), [], [])
+        # Even without an LLM, environment/build failures are never repairable —
+        # the deterministic env/build guard (D3) applies here too so a fallback
+        # NullClassifier can't hand the engine un-patchable infrastructure.
+        env = [item for item in violations if _is_environment_failure(item)]
+        repairable = [item for item in violations if not _is_environment_failure(item)]
+        return RepairabilityClassification(repairable, [], env)
 
 
 def _invoke_llm(llm: Any, prompt: str) -> str:
@@ -176,6 +190,31 @@ def _affected_paths(item: Any, repo_path: Path) -> set[str]:
 #: Checks whose failures are produced by EXECUTING the project's own tests /
 #: typecheck — i.e. observed at verify time, hence describing the current tree.
 _OBSERVED_EXECUTION_CHECKS = frozenset({"test_command", "typecheck_command"})
+
+#: Failure class (from the attribution layer) whose root cause is the execution
+#: ENVIRONMENT, not project code — a missing interpreter/tool/service, a shell
+#: resolution error, an un-provisioned dependency. Never patchable by editing
+#: source, so the classifier routes it straight to ``unrepairable``.
+_ENVIRONMENT_FAILURE_CLASS = "environment_build_error"
+
+
+def _is_environment_failure(item: Any) -> bool:
+    """True iff the violation is classed as an environment/build failure.
+
+    The deterministic mirror of the B0 force-route (:func:`_is_observed_code_failure`):
+    where B0 pulls an observed code failure straight to ``repairable``, this pulls
+    an environment/build failure straight to ``unrepairable`` — BEFORE the
+    changed-files gate or the LLM meta-classifier — so the engine never thrashes
+    on un-patchable infrastructure (e.g. editing source to "fix" a
+    ``command not found``). Reads ``failure_class`` off the item or its details,
+    mirroring how :func:`_is_observed_code_failure` reads ``code_addressable``.
+    """
+    direct = _value(item, "failure_class")
+    if direct is None:
+        details = _value(item, "details")
+        if isinstance(details, Mapping):
+            direct = details.get("failure_class")
+    return str(direct or "") == _ENVIRONMENT_FAILURE_CLASS
 
 
 def _is_observed_code_failure(item: Any) -> bool:

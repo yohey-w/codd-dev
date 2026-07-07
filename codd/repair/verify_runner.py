@@ -1038,11 +1038,32 @@ class VerifyRunner:
     def _failure_from_runtime_result(self, result: dict[str, Any]) -> VerificationFailure | None:
         if result.get("passed") is not False:
             return None
+        details = dict(result)
+        # Attribute the runtime command failure the SAME way the evidence path does
+        # (:meth:`_attach_failure_attribution`), so an env-shaped failure on this
+        # THIRD spawn surface carries a failure_class / code_addressable the
+        # repairability classifier can act on deterministically — instead of an
+        # unclassified dict that can be force-routed to the engine and thrashed.
+        # An unrecognized command (curl / cdp) yields attribution None ⇒ details
+        # unchanged ⇒ byte-identical to before.
+        command = str(result.get("command") or "")
+        if command:
+            attribution = attribute_command_failure(
+                command=command,
+                output=str(result.get("output") or ""),
+                project_root=self.project_root,
+                check_name="verification_test_runtime",
+            )
+            if attribution is not None:
+                details["failure_class"] = attribution.failure_class
+                details["code_addressable"] = attribution.code_addressable
+                if attribution.diagnosis:
+                    details["failure_diagnosis"] = attribution.diagnosis
         return VerificationFailure(
             check_name="verification_test_runtime",
             source="verification_test_runtime",
             message=str(result.get("output") or "verification test failed"),
-            details=dict(result),
+            details=details,
         )
 
     def _error_result(self, check_name: str, message: str) -> VerificationResult:
