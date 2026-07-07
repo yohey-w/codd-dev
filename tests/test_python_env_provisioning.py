@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from codd.dag import DAG, Node
 from codd.repair.verify_runner import VerifyRunner
 
 
@@ -257,3 +258,42 @@ def test_every_registered_env_provisioner_is_declared_by_some_profile():
         if isinstance(block, dict) and block.get("env_provisioner"):
             declared.add(str(block["env_provisioner"]))
     assert set(pt._ENV_PROVISIONERS_BY_REALIZER) == declared
+
+
+# ── v3.15.0 fold: THIRD spawn surface (template.execute) under python3-only ────
+
+
+def test_verification_template_surface_resolves_via_state_artifact_python3_only(
+    provisioned_project, tmp_path, monkeypatch
+):
+    """Faithful reproduction of the dogfood's 5 verification-node failures. A
+    ``verification_test`` node runs ``python -m pytest`` through the pytest_http
+    TEMPLATE — the THIRD verify spawn surface, distinct from the contract executor
+    and the evidence command. With the venv provisioned + its bin recorded in the
+    state artifact, the runner threads a PATH-prepended env into ``template.execute``
+    so the bare ``python`` resolves to the venv interpreter → GREEN — on a host
+    exposing only ``python3``. RED before this surface was covered (the exact
+    ``/bin/sh: 1: python: not found`` the dogfood hit)."""
+    root, _venv_bin, _pkg = provisioned_project
+    e2e_dir = root / "tests" / "e2e"
+    e2e_dir.mkdir(parents=True, exist_ok=True)
+    (e2e_dir / "test_ping.py").write_text(
+        "def test_ping():\n    assert True\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("PATH", _python3_only_path(tmp_path))
+    settings = _settings("red2pkg")
+    runner = VerifyRunner(root, settings)
+    node = Node(
+        "verification:e2e:tests/e2e/test_ping.py",
+        "verification_test",
+        attributes={
+            "kind": "e2e",
+            "template_ref": "pytest_http",
+            "source": "tests/e2e/test_ping.py",
+        },
+    )
+    dag = DAG()
+    dag.add_node(node)
+    results = runner._run_verification_tests(dag, settings)
+    assert len(results) == 1
+    assert results[0]["passed"] is True, results[0].get("output")

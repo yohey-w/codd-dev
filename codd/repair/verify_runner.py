@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import os
 import re
@@ -317,6 +318,11 @@ class VerifyRunner:
         per_node_seconds = _verification_per_node_seconds(settings)
         total_seconds = _verification_total_seconds(settings)
         start = time.monotonic()
+        # THIRD verify spawn surface: the harness-recorded PATH prepend (the same
+        # state artifact the contract executor + evidence command use) so a bare
+        # ``argv[0]`` (an unqualified interpreter/tool command) resolves against the
+        # provisioned binary. Built once; None ⇒ ambient inherit (byte-identical).
+        spawn_env = self._verification_spawn_env()
         for node in sorted(dag.nodes.values(), key=lambda item: item.id):
             if node.kind != "verification_test":
                 continue
@@ -354,7 +360,9 @@ class VerifyRunner:
                 # ``cwd`` threads through every template's ``execute`` so this is
                 # correct for vitest/playwright/curl alike. (The pytest evidence
                 # path already passes ``cwd`` in ``_run_evidence_command``.)
-                result = template.execute(command, cwd=self.project_root)
+                result = _template_execute(
+                    template, command, cwd=self.project_root, env=spawn_env
+                )
                 passed = bool(getattr(result, "passed", False))
                 output = _runtime_output(node.id, passed, getattr(result, "output", "") or "")
                 results.append(
@@ -778,6 +786,28 @@ class VerifyRunner:
             for d in (str(x) for x in dirs)
             if d and os.path.isabs(d) and os.path.isdir(d)
         )
+
+    def _verification_spawn_env(self) -> dict[str, str] | None:
+        """Spawn env for the verification-template surface, or None to inherit ambient.
+
+        The THIRD verify spawn surface — ``template.execute`` (a template that runs
+        an unqualified interpreter/tool command) — must resolve an unchanged bare
+        ``argv[0]`` the SAME way the contract executor (:meth:`execute_verify_plan`)
+        and the evidence command (:meth:`_run_evidence_command`) already do: against
+        the harness-provisioned binary recorded in the language-neutral state
+        artifact. Mirrors that PATH prepend via the shared :meth:`_exec_path_prepend`.
+        No prepend dirs (brownfield / other language / manual) ⇒ None ⇒ the template
+        inherits the ambient environment, byte-identically to before. Unlike the
+        evidence path this adds ONLY the prepend (no toolchain-specific env flags): a
+        verification template has never received those, so the env stays an ambient
+        copy plus the prepend and nothing else.
+        """
+        prepend = self._exec_path_prepend()
+        if not prepend:
+            return None
+        env = dict(os.environ)
+        env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
+        return env
 
     def _legacy_test_command(
         self, settings: dict[str, Any], *, reason: str
@@ -1279,6 +1309,36 @@ def _any_runtime_executed(runtime_results: list[Any]) -> bool:
         if not skipped:
             return True
     return False
+
+
+def _execute_accepts_env(execute_callable: Any) -> bool:
+    """True iff a template's ``execute`` accepts an ``env`` keyword.
+
+    Every in-tree template does (its signature carries ``env``). A third-party /
+    out-of-tree template registered on the older two-argument signature does NOT —
+    it is then called without ``env`` so its spawn stays byte-identical to today.
+    ``**kwargs`` counts as accepting ``env``.
+    """
+    try:
+        params = inspect.signature(execute_callable).parameters
+    except (TypeError, ValueError):
+        return False
+    if "env" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _template_execute(template: Any, command: str, *, cwd: Path, env: Mapping[str, str] | None) -> Any:
+    """Call ``template.execute`` threading the harness spawn ``env`` when present.
+
+    ``env is None`` (no provisioning state → brownfield / other language / manual)
+    OR an old-signature out-of-tree template ⇒ the legacy two-argument call ⇒ the
+    spawn environment is byte-identical to before this seam existed. The runner —
+    not the template — owns reading the state artifact; this shim only forwards.
+    """
+    if env is not None and _execute_accepts_env(template.execute):
+        return template.execute(command, cwd=cwd, env=env)
+    return template.execute(command, cwd=cwd)
 
 
 def _new_template(

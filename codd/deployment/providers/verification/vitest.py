@@ -101,13 +101,16 @@ class VitestTemplate(VerificationTemplate):
         command = ["npx", "vitest", "run", shlex.quote(test_target)]
         return " ".join(command)
 
-    def execute(self, command: str, cwd: Path | None = None) -> VerificationResult:
+    def execute(
+        self, command: str, cwd: Path | None = None, env: Mapping[str, str] | None = None
+    ) -> VerificationResult:
         started_at = time.monotonic()
         try:
             completed = subprocess.run(
                 command,
                 shell=True,
                 cwd=cwd,
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,

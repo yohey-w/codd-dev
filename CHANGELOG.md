@@ -68,6 +68,34 @@ state artifact pointing at a non-existent dir is dropped by the existence check 
 observation gates (report-required / ZERO_TESTS / skip=red / SCOPE_MISSING) are untouched — the prepend
 acts only on spawn resolution, never on classification.
 
+### Third verify spawn surface — env-channel coverage completed (same version)
+
+The dogfood that certified the four parts above surfaced a coverage gap the first cut's per-hand
+enumeration missed: the exec-path prepend reached the contract executor (`execute_verify_plan`) and the
+evidence command (`_run_evidence_command`) but NOT the **verification-template** surface. A
+`verification_test` node runs its command through `template.execute(...)` (e.g. the `pytest_http` template's
+`python -m pytest`), a third `subprocess.run` that inherited the ambient environment — so on a python3-only
+host the bare `python` still died `/bin/sh: python: not found` after the venv was provisioned. Fix (shared
+core stays language-agnostic — grep-clean of `python`/`pip`/`venv`):
+
+- `VerificationTemplate.execute` gains a keyword `env: Mapping[str, str] | None = None` (default `None` ⇒
+  inherit ambient, byte-identical). The RUNNER — never a template — reads the state artifact and builds the
+  env; a template just forwards it to `subprocess.run`. The four shell templates (`pytest_http`, `vitest`,
+  `curl`, `playwright`) forward it; `cdp_browser` accepts-and-ignores it (no bare `argv[0]` to resolve,
+  same as its existing `cwd` handling).
+- `verify_runner._verification_spawn_env()` builds the PATH-prepended env once from the shared
+  `_exec_path_prepend()` (the SAME state artifact the other two surfaces use); a signature-checked shim
+  (`_template_execute`) threads it, so an out-of-tree template on the legacy two-arg signature is called
+  without `env` and keeps working.
+- **Coverage is now a machine-checked invariant** (`tests/test_verify_observation_spawn_env.py`): an AST
+  test asserts every `subprocess.run(...)` in the verify observation surface (runner, contract executor,
+  and every verification template via glob) passes an explicit `env=` — a new template or spawn that
+  forgets the env-channel turns RED before it can ship. This replaces the one-shot manual enumeration that
+  let the third surface slip.
+
+No state (brownfield / other languages / manual) ⇒ `env=None` ⇒ byte-identical spawn; the prepend acts only
+on `argv[0]` resolution, never on the ZERO_TESTS / positive-execution gates.
+
 ## [3.14.0] - 2026-07-06 — C++ ctest→file execution attribution (completes the identity→file norm for all 6 languages)
 
 **Verify-stage execution-attribution fix surfaced by the C++ greenfield ExprCalc dogfood.** After the

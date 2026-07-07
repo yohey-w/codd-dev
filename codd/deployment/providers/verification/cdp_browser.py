@@ -84,12 +84,15 @@ class CdpBrowser(VerificationTemplate):
         command: str,
         axis_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> VerificationResult:
-        # ``cwd`` is accepted for interface uniformity (the verify runner passes
-        # it to every template) but is intentionally unused here: this template
-        # drives a CDP browser session, not a cwd-rooted subprocess, and already
-        # resolves the project root from the execution plan itself
-        # (``generate_test_command`` stamps ``plan["project_root"]``).
+        # ``cwd`` and ``env`` are accepted for interface uniformity (the verify
+        # runner passes them to every template) but are intentionally unused here:
+        # this template drives a CDP browser session, not a cwd-rooted / PATH-
+        # resolved subprocess, and already resolves the project root from the
+        # execution plan itself (``generate_test_command`` stamps
+        # ``plan["project_root"]``). There is no bare ``argv[0]`` to resolve, so the
+        # harness PATH-prepend env has nothing to act on.
         started_at = time.monotonic()
         wire: CdpWire | None = None
         result: VerificationResult | None = None

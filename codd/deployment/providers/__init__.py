@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +68,12 @@ class VerificationTemplate(ABC):
         """Generate the command used to verify ``runtime_state``."""
 
     @abstractmethod
-    def execute(self, command: str, cwd: Path | None = None) -> "VerificationResult":
+    def execute(
+        self,
+        command: str,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> "VerificationResult":
         """Execute a verification command and return its result.
 
         ``cwd`` is the project root the command must run in. A test runner like
@@ -76,6 +82,14 @@ class VerificationTemplate(ABC):
         makes it load the WRONG ``vitest.config.ts`` and collect 0 tests. Pass
         the generated project root here so every runner roots at the project.
         ``None`` keeps the caller's current working directory (legacy behaviour).
+
+        ``env`` is the FULLY-FORMED spawn environment for the subprocess, or
+        ``None`` to inherit the ambient environment (the legacy behaviour). The
+        RUNNER — never a template — owns reading harness state (``.codd/**``) and
+        building this env; a template is a dumb executor that forwards it to
+        ``subprocess.run`` unchanged. This is how an unchanged bare ``argv[0]``
+        (an unqualified interpreter/tool name) resolves to a harness-provisioned
+        binary on the prepended PATH, without any per-language knowledge here.
         """
 
 

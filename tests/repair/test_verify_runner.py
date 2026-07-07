@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -328,3 +331,106 @@ def test_verify_runner_keeps_runtime_state_inside_project_root(tmp_path, monkeyp
     assert VerifyRunner(tmp_path, {"project": {"type": "generic"}}).run().passed is True
     assert InspectingTemplate.seen_root == tmp_path.resolve()
     assert outside.read_text(encoding="utf-8") == "unchanged"
+
+
+# ── v3.15.0 fold: env-channel projection to the verification-template surface ──
+
+
+class _EnvCapturingTemplate:
+    """Records the ``env`` the runner threads into ``execute`` (accepts the seam)."""
+
+    seen_env: object = "unset"
+
+    def generate_test_command(self, runtime_state, test_kind: str) -> str:
+        return "true"
+
+    def execute(self, command: str, cwd=None, env=None) -> ProviderVerificationResult:
+        type(self).seen_env = env
+        return ProviderVerificationResult(True, "ok")
+
+
+def _write_exec_env_state(project_root: Path, *prepend_dirs: Path) -> None:
+    state = project_root / ".codd" / "verify" / "exec_env.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({"path_prepend_dirs": [str(d) for d in prepend_dirs]}),
+        encoding="utf-8",
+    )
+
+
+def test_verification_template_surface_receives_prepended_env_from_state(tmp_path, monkeypatch):
+    """The THIRD verify spawn surface (template.execute) gets the SAME harness PATH
+    prepend the contract executor + evidence command already use: the runner reads
+    the state artifact, builds the env, and threads it in. RED before this seam
+    existed (execute got no env → the pytest_http ``python`` argv was unresolvable
+    on a python3-only host = the dogfood's 5 real failures)."""
+    prepend = tmp_path / "provisioned_bin"
+    prepend.mkdir()
+    _write_exec_env_state(tmp_path, prepend)
+    _EnvCapturingTemplate.seen_env = "unset"
+    dag = _dag(Node("verification:e2e:flow", "verification_test", attributes={"kind": "e2e", "template_ref": "envcap"}))
+    _patch_verify_pipeline(monkeypatch, dag, [])
+    monkeypatch.setitem(verify_runner_module.VERIFICATION_TEMPLATES, "envcap", _EnvCapturingTemplate)
+
+    VerifyRunner(tmp_path, {"project": {"type": "generic"}}).run()
+
+    seen = _EnvCapturingTemplate.seen_env
+    assert isinstance(seen, Mapping), f"runner did not thread a spawn env: {seen!r}"
+    assert seen["PATH"].split(os.pathsep)[0] == str(prepend)
+
+
+def test_verification_template_env_is_none_without_state_artifact(tmp_path, monkeypatch):
+    """Byte-identity: with NO provisioning state (brownfield / other language /
+    manual), the runner threads ``env=None`` so the template inherits the ambient
+    environment exactly as before this seam existed."""
+    _EnvCapturingTemplate.seen_env = "unset"
+    dag = _dag(Node("verification:e2e:flow", "verification_test", attributes={"kind": "e2e", "template_ref": "envcap"}))
+    _patch_verify_pipeline(monkeypatch, dag, [])
+    monkeypatch.setitem(verify_runner_module.VERIFICATION_TEMPLATES, "envcap", _EnvCapturingTemplate)
+
+    VerifyRunner(tmp_path, {"project": {"type": "generic"}}).run()
+
+    assert _EnvCapturingTemplate.seen_env is None
+
+
+def test_forged_state_dir_is_dropped_no_env_threaded(tmp_path, monkeypatch):
+    """Adversarial: a state artifact pointing at a non-existent dir is dropped
+    (existence filter), so no env is threaded — a bogus dir can never silently
+    redirect a template spawn; it falls through to ambient resolution."""
+    _write_exec_env_state(tmp_path, tmp_path / "does_not_exist")
+    _EnvCapturingTemplate.seen_env = "unset"
+    dag = _dag(Node("verification:e2e:flow", "verification_test", attributes={"kind": "e2e", "template_ref": "envcap"}))
+    _patch_verify_pipeline(monkeypatch, dag, [])
+    monkeypatch.setitem(verify_runner_module.VERIFICATION_TEMPLATES, "envcap", _EnvCapturingTemplate)
+
+    VerifyRunner(tmp_path, {"project": {"type": "generic"}}).run()
+
+    assert _EnvCapturingTemplate.seen_env is None
+
+
+def test_old_signature_template_called_without_env(tmp_path, monkeypatch):
+    """An out-of-tree template on the legacy two-arg ``execute(command, cwd)`` is
+    called WITHOUT ``env`` (signature-checked shim) even when state exists, so it
+    keeps working byte-identically instead of raising ``unexpected keyword env``."""
+    prepend = tmp_path / "provisioned_bin"
+    prepend.mkdir()
+    _write_exec_env_state(tmp_path, prepend)
+
+    class _LegacyTemplate:
+        called = False
+
+        def generate_test_command(self, runtime_state, test_kind: str) -> str:
+            return "true"
+
+        def execute(self, command: str, cwd=None) -> ProviderVerificationResult:  # no env
+            type(self).called = True
+            return ProviderVerificationResult(True, "ok")
+
+    dag = _dag(Node("verification:e2e:flow", "verification_test", attributes={"kind": "e2e", "template_ref": "legacy"}))
+    _patch_verify_pipeline(monkeypatch, dag, [])
+    monkeypatch.setitem(verify_runner_module.VERIFICATION_TEMPLATES, "legacy", _LegacyTemplate)
+
+    result = VerifyRunner(tmp_path, {"project": {"type": "generic"}}).run()
+
+    assert _LegacyTemplate.called is True
+    assert result.passed is True

@@ -100,13 +100,16 @@ class PytestHttpTemplate(VerificationTemplate):
         # file/dir so an e2e node runs its OWN test, not the whole suite.
         return f"python -m pytest -q {shlex.quote(test_target)}"
 
-    def execute(self, command: str, cwd: Path | None = None) -> VerificationResult:
+    def execute(
+        self, command: str, cwd: Path | None = None, env: Mapping[str, str] | None = None
+    ) -> VerificationResult:
         started_at = time.monotonic()
         try:
             completed = subprocess.run(
                 command,
                 shell=True,
                 cwd=cwd,
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,

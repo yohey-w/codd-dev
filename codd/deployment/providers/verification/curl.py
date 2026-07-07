@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -65,7 +66,9 @@ class CurlTemplate(VerificationTemplate):
             return f"curl -s -o /dev/null -w '%{{http_code}}' -X POST {target}"
         return f"curl -s -o /dev/null -w '%{{http_code}}' {target}"
 
-    def execute(self, command: str, cwd: Path | None = None) -> VerificationResult:
+    def execute(
+        self, command: str, cwd: Path | None = None, env: Mapping[str, str] | None = None
+    ) -> VerificationResult:
         if self.dry_run:
             return VerificationResult(passed=True, output=command, duration=0.0)
 
@@ -75,6 +78,7 @@ class CurlTemplate(VerificationTemplate):
                 command,
                 shell=True,
                 cwd=cwd,
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
