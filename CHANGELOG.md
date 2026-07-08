@@ -13,6 +13,52 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.20.0] - 2026-07-08 — ② mop-up: two implement-stage variance classes + verify-repair in non-git
+
+Post-v3.19.0 hardening from the ② measurement endgame (repeated fresh unattended Python pure-library
+greenfields on the RC). Of several identical-spec runs, some greened and some failed with distinct
+LLM-generation variance classes; each was root-caused, consulted with the design authority (Fable5),
+and fixed as a re-application of a shipped pattern (no new gate/concept category). Also folds in the
+v3.19.0 review follow-ups.
+
+- **Class 1 — test↔impl surface-form mismatch (generation-side, `codd/implementer.py`).** The model
+  sometimes generated a test that bound an assertion to its impl's exact output surface form (a
+  verbatim error-message substring, exact stdout bytes) that the design never pinned; the impl
+  produced a different-but-reasonable form; the static implement-oracle passed; verify hard-failed on
+  the assertion; and auto-repair correctly refused to rewrite a substantive test (anti-false-green) →
+  recurring REPAIR_FAILED. Fix (Fable5): a sibling rule in the shipped "Scoped assertions" prompt
+  block — bind an exact surface form ONLY when the design/dependency docs pin it (and then assert it
+  verbatim); otherwise assert the semantic property the docs pin (the exception type + designed
+  condition, the parsed value not its rendering, the presence of designed fields), never incidental
+  wording/spelling/whitespace/formatting. Discriminator = design-pinnedness of the observable; no gate
+  semantics change (a test that still over-binds fails exactly as today — no new green path). The
+  repair-side arbitration widen was rejected as owner-gated.
+- **Class 2 — doc-only design → 0-file implement hard-fail (deriver contract, `codd/llm/templates/
+  plan_derive_meta.md`).** A doc-only detailed-design doc (a module dependency map / diagram, no code
+  to author) got a code-demanding task and hard-failed at the implement 0-file gate; v3.16's no-op
+  predicate keys on the derived task's output shape and could not see the source doc was diagram-only.
+  Fix (Fable5, Fork B): one deriver-template rule — a design that authors documentation/diagrams only
+  must declare its own document path as its sole `expected_outputs` — which routes into the SHIPPED
+  v3.16 `_task_declares_no_authored_artifact` predicate (a `docs/**/*.md` path is a non-codebase
+  artifact) so the task no-ops deterministically with a visible audit message. Zero new pipeline
+  logic; the implement 0-file gate stays byte-identical (a real code design that produces nothing
+  still hard-fails; empty outputs stay fail-closed; `skip_generation` stays HITL-only). Auto-marking
+  skip_generation (Fork C) was rejected as a false-green laundering vector; duplicate-owner suppression
+  (Fork A) was rejected (that shape dies earlier at the owner-uniqueness gate).
+- **verify-repair in a non-git greenfield workspace (`codd/repair/git_patcher.py`).** The verify-stage
+  auto-repair could not apply ANY patch in a greenfield workspace (not a git repo) because it
+  hardcoded `git apply --3way` (requires a git object DB) → `'--3way' outside a repository`; a
+  correctly-diagnosed fix bounced 10× and verify failed. Fix: apply `--3way` only inside a git
+  worktree, else a plain `git apply`.
+- **v3.19.0 review follow-ups** (Fable5 SHIP-AS-IS review + a second review): honor a pre-existing
+  `deliverable.excluded_surfaces` on a forced re-plan (NB-1) + pin the intake residual (NB-2);
+  brownfield reused-status honesty (removed a re-run false-green inside the anti-false-green feature);
+  widen the language-free-core ratchet to negated/normalized/`match` dispatch shapes.
+
+Anti-false-green preserved throughout: no gate weakened; both variance fixes are prompt/template
+contracts routing into shipped machinery, touch no shared-core Python branch, and keep the generality
+ratchet green. Full suite 7292 passed / 1 xfailed / 0 skipped.
+
 ## [3.19.0] - 2026-07-08 — Deliverable-surface fidelity (out-of-spec CLI exclusion)
 
 **Closes the ② blocker where a "Pure library (no CLI)" spec still produces a CLI that fails verify.** A fresh

@@ -594,3 +594,26 @@ def test_derive_tasks_excludes_harness_owned_output_in_cache(tmp_path):
     record = read_derived_task_cache(derived_task_cache_path([_node()], {"project_root": project}))
     assert record is not None
     assert record.tasks[0].expected_outputs == ["src/TextKit/Foo.cs"]
+
+
+# ─────────────────────────────────────────────────────────────
+# CLASS 2 (variance-fix, Fork B): deriver-template contract for a doc-only design
+# ─────────────────────────────────────────────────────────────
+
+
+def test_plan_derive_meta_declares_doc_only_output_rule():
+    """CLASS 2 fix (Fork B): the deriver template must instruct the model that a design
+    document authoring documentation/diagrams ONLY (it defines no code artifact to
+    write) declares its OWN document path as its sole ``expected_outputs`` entry.
+
+    That declaration routes a doc-only design into the SHIPPED v3.16 no-op predicate
+    (``_task_declares_no_authored_artifact``) so the task no-ops deterministically
+    instead of hard-failing the implement 0-generated-files gate. This pins the
+    template contract the pipeline predicate now relies on — no pipeline logic changes.
+    Red before the template edit, green after."""
+    from codd.llm.plan_deriver import DEFAULT_TEMPLATE_PATH
+
+    template = DEFAULT_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    assert "authors documentation or diagrams only" in template
+    assert "sole entry in `expected_outputs`" in template

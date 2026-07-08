@@ -1293,6 +1293,39 @@ def test_task_declares_no_authored_artifact_noops_non_codebase_artifact() -> Non
     assert _task_declares_no_authored_artifact(_task(".github/workflows/ci.yml"), langless)
 
 
+def test_task_declares_no_authored_artifact_noops_doc_only_design_output() -> None:
+    """CLASS 2 (variance-fix, Fork B): a DOC-ONLY design document — one that authors
+    documentation/diagrams only and defines no code artifact — has its derived task
+    declare its OWN document path (``docs/detailed_design/x.md``) as its sole output.
+    That path passes ``_output_is_non_codebase_artifact`` (multi-component, not under a
+    source/test root, ``.md`` not an impl extension, not test-shaped, not a glob), so
+    ``_task_declares_no_authored_artifact`` returns True and the task no-ops
+    deterministically instead of tripping the 0-generated-files gate as a false-RED.
+
+    This regression-pins the SHIPPED v3.16 predicate behavior that the deriver template
+    (``plan_derive_meta.md``) now routes into — the predicate itself is NOT modified. The
+    fail-closed cases stay False so a REAL code design that produces nothing STILL
+    hard-fails (anti-false-green): empty outputs, a glob, and a source-rooted path all
+    remain owed generation."""
+    from codd.greenfield.pipeline import _task_declares_no_authored_artifact
+
+    config = {
+        "project": {"language": "python"},
+        "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]},
+    }
+
+    def _task(*outs: str) -> ImplementTaskRef:
+        return ImplementTaskRef(task_id="t", design_node="n", expected_outputs=tuple(outs))
+
+    # NEW: a doc-only design declares its own doc path → deterministic implement no-op.
+    assert _task_declares_no_authored_artifact(_task("docs/detailed_design/x.md"), config)
+    # Fail-closed regression pins (anti-false-green): a real code design that produces
+    # nothing must STILL hard-fail.
+    assert not _task_declares_no_authored_artifact(_task(), config)  # empty → strict
+    assert not _task_declares_no_authored_artifact(_task("src/**/*.py"), config)  # glob → owed
+    assert not _task_declares_no_authored_artifact(_task("src/pkg/foo.py"), config)  # source-rooted → owed
+
+
 def test_implement_runner_noops_verification_gate_task(tmp_path: Path) -> None:
     """End-to-end red-before-green for the 2026-07-03 release-gate false-RED: a
     task whose declared outputs are prose (``pytest -q output``) authors nothing,

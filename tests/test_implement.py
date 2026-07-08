@@ -762,6 +762,43 @@ def test_test_generation_prompt_guides_scoped_content_assertions():
         assert literal not in prompt
 
 
+def test_test_generation_prompt_binds_assertions_to_design_pinned_surface_forms():
+    """Test-targeting implement runs must steer the model to bind an assertion to
+    an exact surface form ONLY when the design pins it, and otherwise assert the
+    semantic property the documents pin — the sibling rule to Scoped assertions
+    that closes the over-tight-binding half (recurring hard RED when a test
+    over-specifies an unpinned output wording that a correct impl renders
+    differently), without weakening any genuinely pinned-format assertion."""
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python", "frameworks": ["flask"]}},
+        design_context=DesignContext(
+            node_id="test:acceptance",
+            path=Path("docs/test/acceptance_criteria.md"),
+            content="# Acceptance criteria\n",
+        ),
+        spec=ImplementSpec("docs/test/acceptance_criteria.md", ["src/tests"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    # Conditional binding: an exact surface form is asserted verbatim ONLY when the
+    # design (or its dependency documents) pins that surface form.
+    assert "surface form" in prompt
+    assert "pin that surface form" in prompt
+    # When only the outcome is pinned, assert the semantic property, not the wording.
+    assert "semantic property" in prompt
+    assert "implementation freedom" in prompt
+    # Precision, not weakening — a broken designed behavior must still fail.
+    assert "must still FAIL when the designed behavior is broken" in prompt
+    # It ships inside the existing Scoped-assertions block, and coverage stays.
+    assert "Scoped assertions" in prompt
+    assert "codd: covers vb=<id>" in prompt
+    # The rule is domain-generic: no instance-level language/error/value literals.
+    for literal in ("ParseError", "kakeibo", "14.0"):
+        assert literal not in prompt
+
+
 def test_non_test_generation_prompt_omits_scoped_assertion_block():
     """The scoped-assertion guidance is gated to test-targeting runs only, so a
     plain source-implementation prompt must not carry it."""

@@ -26,6 +26,11 @@ material implementation task is implied but not explicit, state that inference
 in the description. Do not add recommendations from an assumed technology
 stack.
 
+When a design document authors documentation or diagrams only — it defines no
+code artifact to write — its derived task must declare that document's own path
+as its sole entry in `expected_outputs`. Do not invent code-shaped outputs or
+leave the outputs empty for such a document.
+
 Requested layer: {v_model_layer}
 Project context: {project_context}
 
