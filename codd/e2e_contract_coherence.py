@@ -55,6 +55,7 @@ from codd.import_coherence import import_coherence_opt_out
 from codd.path_safety import PathEscapeError, require_project_path, resolve_project_path
 from codd.project_types import (
     LayoutProfile,
+    effective_e2e_modality,
     load_capabilities,
     resolve_layout_profile,
     resolve_project_type,
@@ -214,7 +215,26 @@ def _resolve_modality(config: Mapping[str, Any] | None, project_root: Path) -> s
         return None
     resolved, _reason = resolve_project_type(configured, None, project_root)
     capabilities = load_capabilities(resolved, project_root)
-    return capabilities.e2e_modality
+    # ENVELOPE ALIGNMENT (K3): route through the EFFECTIVE modality so this gate
+    # agrees with generation that a pure library (the CLI-backing runnable-entrypoint
+    # surface excluded) is non-CLI and the no-runtime-import contract does not apply.
+    # Resolve the profile from config; fail-safe to the loaded modality on any error.
+    try:
+        project = config.get("project") if isinstance(config, Mapping) else None
+        scan = config.get("scan") if isinstance(config, Mapping) else None
+        project = project if isinstance(project, Mapping) else {}
+        scan = scan if isinstance(scan, Mapping) else {}
+        profile = resolve_layout_profile(
+            language=project.get("language"),
+            project_name=project.get("name"),
+            source_dirs=scan.get("source_dirs"),
+            test_dirs=scan.get("test_dirs"),
+            config=config,
+            project_root=project_root,
+        )
+        return effective_e2e_modality(capabilities, profile)
+    except Exception:  # noqa: BLE001 — an undecidable profile keeps the loaded modality.
+        return capabilities.e2e_modality
 
 
 def resolve_e2e_import_contract(

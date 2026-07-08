@@ -20,6 +20,7 @@ import pytest
 
 from codd.project_types import (
     LayoutProfile,
+    ProjectCapabilities,
     harness_owned_output_paths,
     normalize_package_name,
     resolve_layout_profile,
@@ -602,3 +603,82 @@ class TestExcludedSurfaces:
         assert self._MAIN in result.created
         # Authority parity holds in the control too.
         assert set(result.created) == set(profile.harness_owned_scaffold_paths())
+
+
+# ═══════════════════════════════════════════════════════════
+# effective e2e modality — data-driven downgrade  (K3 envelope alignment)
+# ═══════════════════════════════════════════════════════════
+#
+# ``e2e_modality`` is a STATIC per-type capability (default "cli"). When a project
+# EXCLUDES the optional surface that BACKS that modality (Python's
+# runnable-entrypoint surface backs "cli"), there is no CLI to subprocess, so
+# prompting for CLI-subprocess e2e tests is a variance. ``effective_e2e_modality``
+# downgrades the modality to "none" via a DATA join —
+# ``SurfaceSpec.backs_e2e_modality == capabilities.e2e_modality`` AND the surface is
+# excluded — with NO language/framework literal. Fail-safe: a None profile / any
+# error / a surface that declares no backing / a non-matching modality all return
+# the loaded modality unchanged (legacy).
+
+
+class TestEffectiveE2EModality:
+    def _profile(self, *, excluded: bool):
+        config: dict = {
+            "project": {"name": "todo-cli", "language": "python"},
+            "scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]},
+        }
+        if excluded:
+            config["deliverable"] = {"excluded_surfaces": ["runnable-entrypoint"]}
+        return resolve_layout_profile(
+            language="python",
+            project_name="todo-cli",
+            source_dirs=["src/"],
+            test_dirs=["tests/"],
+            config=config,
+        )
+
+    def test_cli_downgraded_to_none_when_entrypoint_excluded(self):
+        from codd.project_types import effective_e2e_modality
+
+        caps = ProjectCapabilities(e2e_modality="cli")
+        profile = self._profile(excluded=True)
+        assert effective_e2e_modality(caps, profile) == "none"
+
+    def test_cli_kept_when_entrypoint_not_excluded(self):
+        from codd.project_types import effective_e2e_modality
+
+        caps = ProjectCapabilities(e2e_modality="cli")
+        profile = self._profile(excluded=False)
+        assert effective_e2e_modality(caps, profile) == "cli"
+
+    def test_non_cli_modality_unchanged_even_if_entrypoint_excluded(self):
+        # The join is ``backs_e2e_modality == e2e_modality``; a browser project
+        # never matches the cli-backing surface, so exclusion never downgrades it.
+        from codd.project_types import effective_e2e_modality
+
+        caps = ProjectCapabilities(e2e_modality="browser")
+        profile = self._profile(excluded=True)
+        assert effective_e2e_modality(caps, profile) == "browser"
+
+    def test_none_profile_returns_modality_unchanged(self):
+        from codd.project_types import effective_e2e_modality
+
+        caps = ProjectCapabilities(e2e_modality="cli")
+        assert effective_e2e_modality(caps, None) == "cli"
+
+    def test_surface_without_backing_declaration_never_downgrades(self):
+        # A surface that declares NO backing (backs_e2e_modality is None) must not
+        # match any modality (None != "cli"), even when excluded — anti-false-green.
+        from codd.project_types import LayoutProfile, SurfaceSpec, effective_e2e_modality
+
+        caps = ProjectCapabilities(e2e_modality="cli")
+        surface = SurfaceSpec(id="doc-site", description="docs", paths=("docs/",))
+        profile = LayoutProfile(
+            language="python",
+            package_name="p",
+            source_root="src",
+            package_root="src/p",
+            test_root="tests",
+            optional_surfaces=(surface,),
+            excluded_surface_ids=frozenset({"doc-site"}),
+        )
+        assert effective_e2e_modality(caps, profile) == "cli"

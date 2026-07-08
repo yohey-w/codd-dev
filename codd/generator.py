@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 import re
 import subprocess  # noqa: F401 — kept: tests monkeypatch ``generator.subprocess.run``
@@ -23,7 +23,9 @@ from codd.e2e_harness import resolve_e2e_harness
 from codd.languages import resolve_test_framework_guidance
 from codd.project_types import (
     ProjectCapabilities,
+    effective_e2e_modality,
     load_capabilities,
+    resolve_layout_profile,
     resolve_project_type,
 )
 from codd.requirements_meta import normalize_operation_flow
@@ -207,7 +209,34 @@ def _resolve_generation_capabilities(
         return WEB_FALLBACK_CAPABILITIES
 
     resolved, _reason = resolve_project_type(configured, None, project_root)
-    return load_capabilities(resolved, project_root)
+    capabilities = load_capabilities(resolved, project_root)
+
+    # ENVELOPE ALIGNMENT (K3): the STATIC ``e2e_modality`` capability never consults
+    # the surfaces THIS project excluded. Resolve the LayoutProfile (same inputs as
+    # the layout-placement contract projection below) and downgrade the modality when
+    # the surface that BACKS it is excluded — so a pure library that dropped the
+    # CLI-backing runnable-entrypoint is not prompted for CLI-subprocess e2e tests it
+    # cannot satisfy. Data-driven join (no stack literal); fail-safe to the loaded
+    # modality on any resolution error, so this single seam cascades to every
+    # e2e-modality prompt branch (test-strategy meta-prompt, test-code prompt, and the
+    # implement prompt) without touching them.
+    try:
+        project = config.get("project") if isinstance(config.get("project"), dict) else {}
+        scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+        profile = resolve_layout_profile(
+            language=project.get("language") if isinstance(project, dict) else None,
+            project_name=project.get("name") if isinstance(project, dict) else None,
+            source_dirs=scan.get("source_dirs") if isinstance(scan, dict) else None,
+            test_dirs=scan.get("test_dirs") if isinstance(scan, dict) else None,
+            config=config,
+            project_root=project_root,
+        )
+        effective = effective_e2e_modality(capabilities, profile)
+        if effective != capabilities.e2e_modality:
+            capabilities = replace(capabilities, e2e_modality=effective)
+    except Exception:  # noqa: BLE001 — a resolution failure keeps the loaded modality.
+        pass
+    return capabilities
 
 
 def _resolve_project_language(config: dict[str, Any] | None) -> str | None:

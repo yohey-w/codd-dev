@@ -246,6 +246,33 @@ def test_resolve_capabilities_unknown_type_is_generic_conservative():
     assert caps.user_interface is False
 
 
+def test_resolve_capabilities_pure_library_downgrades_e2e_to_none():
+    # A CLI-typed python project that EXCLUDES the runnable-entrypoint surface is a
+    # PURE LIBRARY (no __main__ ⇒ no CLI to subprocess). The resolved modality must
+    # downgrade cli→none so generation stops prompting for CLI-subprocess e2e tests
+    # that cannot pass (K3 envelope alignment: the e2e modality now consults the
+    # excluded-surface set that backs it).
+    config = {
+        "project": {"name": "mathlib", "type": "cli", "language": "python"},
+        "scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]},
+        "deliverable": {"excluded_surfaces": ["runnable-entrypoint"]},
+    }
+    caps = _resolve_generation_capabilities(config, None)
+    assert caps.e2e_modality == "none"
+
+
+def test_resolve_capabilities_cli_requesting_project_keeps_cli():
+    # CONTROL (anti-false-green): a CLI project that does NOT exclude the
+    # runnable-entrypoint surface REQUESTS a CLI, so its e2e modality stays "cli"
+    # and CLI e2e tests are still generated.
+    config = {
+        "project": {"name": "todo", "type": "cli", "language": "python"},
+        "scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]},
+    }
+    caps = _resolve_generation_capabilities(config, None)
+    assert caps.e2e_modality == "cli"
+
+
 # --------------------------------------------------------------------------- #
 # Planner MECE / V-model: UX domain conditional on user_interface.
 # --------------------------------------------------------------------------- #

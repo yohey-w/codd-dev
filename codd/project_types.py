@@ -241,6 +241,42 @@ def _as_choice(value: Any, allowed: set[str], fallback: str) -> str:
     return fallback
 
 
+def effective_e2e_modality(
+    capabilities: ProjectCapabilities, profile: LayoutProfile | None
+) -> str:
+    """The project's e2e modality after applying the excluded-surface downgrade.
+
+    ``ProjectCapabilities.e2e_modality`` is a STATIC per-type capability (default
+    ``"cli"``). It never consults the OPTIONAL deliverable surfaces a project
+    excluded. But a modality is only realizable while the surface that BACKS it
+    exists: the ``"cli"`` modality's subprocess e2e (``python -m <pkg>``) requires
+    the runnable entry point. When a project EXCLUDES the backing surface (a pure
+    library with no ``__main__``) that e2e cannot pass, so the modality is
+    downgraded to ``"none"`` (which still emits in-process unit + integration
+    behavioral tests — no coverage is suppressed).
+
+    The downgrade is a pure DATA join over the profile — a ``SurfaceSpec`` in
+    ``profile.optional_surfaces`` whose ``backs_e2e_modality`` equals the loaded
+    modality AND whose id is in ``profile.excluded_surface_ids`` — with NO
+    language/framework literal (``"cli"``/``"none"`` are the existing e2e_modality
+    vocabulary, not stack names). FAIL-SAFE: a ``None`` profile, a surface that
+    declares no backing (``backs_e2e_modality is None`` never equals a real
+    modality), a non-matching modality, or ANY error returns the loaded modality
+    unchanged (legacy behavior).
+    """
+    modality = capabilities.e2e_modality
+    try:
+        if profile is None:
+            return modality
+        excluded = profile.excluded_surface_ids
+        for surface in profile.optional_surfaces:
+            if surface.backs_e2e_modality == modality and surface.id in excluded:
+                return "none"
+    except Exception:  # noqa: BLE001 — an undecidable profile keeps the legacy modality.
+        return modality
+    return modality
+
+
 # ═══════════════════════════════════════════════════════════
 # Stack layout profiles (the harness OWNS repo topology / module resolution)
 # ═══════════════════════════════════════════════════════════
@@ -958,9 +994,21 @@ class SurfaceSpec:
     id: str
     description: str
     paths: tuple[str, ...] = ()
+    # DATA JOIN KEY — names the ``ProjectCapabilities.e2e_modality`` this surface
+    # BACKS (e.g. the runnable console entry point backs the ``"cli"`` modality).
+    # ``None`` (default) = this surface backs no modality. When such a surface is
+    # EXCLUDED, :func:`effective_e2e_modality` downgrades the matching modality to
+    # ``"none"`` so a pure library is not prompted for a subprocess e2e it cannot
+    # satisfy — a pure DATA join (no language/framework literal in shared core).
+    backs_e2e_modality: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "description": self.description, "paths": list(self.paths)}
+        return {
+            "id": self.id,
+            "description": self.description,
+            "paths": list(self.paths),
+            "backs_e2e_modality": self.backs_e2e_modality,
+        }
 
 
 @dataclass(frozen=True)
@@ -1450,7 +1498,9 @@ def render_layout_placement_contract(profile: "LayoutProfile | None") -> str:
             f"{len(rules) + 1}. EXCLUDED DELIVERABLE SURFACE — the requirements exclude these "
             f"surface(s), so the harness does NOT create them and you must NOT author or declare "
             f"them among your outputs: {listed}. A file you emit here is an unowned orphan and "
-            f"fails the build."
+            f"fails the build. Do NOT author tests that invoke or exercise an excluded surface "
+            f"either (e.g. no subprocess/CLI test that runs an excluded entry point) — an excluded "
+            f"surface does not exist to be tested; cover the behavior in-process instead."
         )
 
     if not rules:
@@ -1689,6 +1739,10 @@ def _python_layout_profile(
                     "(e.g. `python -m <package>`)"
                 ),
                 paths=(f"{source_root}/{package_name}/__main__.py",),
+                # This surface BACKS the "cli" e2e modality: the CLI-subprocess e2e
+                # tests (run_cli → `python -m <pkg>`) exist only because this entry
+                # point does. Excluding it (a pure library) downgrades e2e to "none".
+                backs_e2e_modality="cli",
             ),
         ),
         # A first-party module may legitimately share a bare name with the Python

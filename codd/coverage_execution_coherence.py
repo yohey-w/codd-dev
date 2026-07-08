@@ -824,7 +824,11 @@ def _profile_has_e2e_modality(
     """
 
     try:
-        from codd.project_types import load_capabilities, resolve_project_type
+        from codd.project_types import (
+            effective_e2e_modality,
+            load_capabilities,
+            resolve_project_type,
+        )
 
         cfg = config if config is not None else _load_optional_config(project_root)
         project_section = cfg.get("project") if isinstance(cfg.get("project"), dict) else {}
@@ -834,7 +838,12 @@ def _profile_has_e2e_modality(
             else None
         )
         resolved_type, _ = resolve_project_type(configured, None, project_root)
-        modality = load_capabilities(resolved_type, project_root).e2e_modality
+        capabilities = load_capabilities(resolved_type, project_root)
+        # ENVELOPE ALIGNMENT (K3): use the EFFECTIVE modality — a pure library that
+        # excluded the CLI-backing surface declares no e2e modality, so it must not
+        # manufacture an observability claim. ``profile`` is already in scope; the
+        # helper is fail-safe (None profile ⇒ loaded modality unchanged).
+        modality = effective_e2e_modality(capabilities, profile)
         return str(modality).strip().lower() in ("browser", "cli", "device")
     except Exception:  # noqa: BLE001 — undecidable modality ⇒ no observability claim.
         return False

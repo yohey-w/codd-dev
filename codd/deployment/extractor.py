@@ -143,7 +143,27 @@ def _explicit_e2e_modality(project_root: Path, config: dict[str, Any]) -> str | 
             configured = str(project.get("type") or "").strip().lower()
     if not configured:
         return None
-    return _resolve_capabilities(project_root, config).e2e_modality
+    capabilities = _resolve_capabilities(project_root, config)
+    # ENVELOPE ALIGNMENT (K3): downgrade to the EFFECTIVE modality so a pure library
+    # (the CLI-backing runnable-entrypoint surface excluded) selects the non-CLI
+    # verification template rather than a CLI one. Resolve the profile from config;
+    # fail-safe to the loaded modality on any error.
+    try:
+        from codd.project_types import effective_e2e_modality, resolve_layout_profile
+
+        project = config.get("project") if isinstance(config.get("project"), dict) else {}
+        scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+        profile = resolve_layout_profile(
+            language=project.get("language") if isinstance(project, dict) else None,
+            project_name=project.get("name") if isinstance(project, dict) else None,
+            source_dirs=scan.get("source_dirs") if isinstance(scan, dict) else None,
+            test_dirs=scan.get("test_dirs") if isinstance(scan, dict) else None,
+            config=config,
+            project_root=project_root,
+        )
+        return effective_e2e_modality(capabilities, profile)
+    except Exception:  # noqa: BLE001 — an undecidable profile keeps the loaded modality.
+        return capabilities.e2e_modality
 
 
 def extract_deployment_docs(
