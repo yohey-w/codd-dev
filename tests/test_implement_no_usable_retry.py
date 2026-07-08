@@ -455,3 +455,86 @@ def test_no_usable_file_retries_zero_means_immediate_hard_fail(
         _impl(project).run_implement(ImplementSpec("docs/design/auth.md", ["src/auth"]))
 
     assert len(prompts) == 1  # zero retries: single attempt then hard-fail
+
+
+# ---------------------------------------------------------------------------
+# 10: terminal-error provenance — Fable5 §3 (b)-minimal (APPEND-ONLY)
+#
+# When the no-usable budget exhausts, the terminal hard-RED must carry the
+# already-captured per-attempt trail so a pure AI-output exhaustion (every
+# attempt empty/unparseable) is not misread as a design-only variance — the
+# ambiguity that caused a real human misclassification of a throttle event.
+# The `produced 0 generated files` substring and terminal behavior stay
+# byte-identical; only provenance text + a cause-conditioned hint are appended.
+# ---------------------------------------------------------------------------
+
+
+def test_all_no_usable_terminal_error_carries_trail_and_drops_design_blame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every attempt was a no-usable AI-output event (empty / unparseable).
+
+    The terminal hard-RED must (i) still carry the byte-identical
+    ``produced 0 generated files`` substring, (ii) append the per-attempt trail
+    (one entry per attempt, each carrying its already-captured no-usable reason
+    — codd's OWN protocol strings), and (iii) NOT blame the design (no
+    ``skip_generation`` / "verify the design document" advice); instead frame
+    it as an AI-output/likely-transient exhaustion and point at the retry-budget
+    config seam ``implement.no_usable_file_retries``.
+    """
+    project = _project(tmp_path)
+    # attempt 1 empty output; attempts 2..N unparseable (no FILE marker, no
+    # fence) — BOTH are codd's own protocol no-usable reasons. The last scripted
+    # step repeats, so every one of the (default) 4 attempts is no-parseable.
+    _patch_invoke_sequence(
+        monkeypatch, [EMPTY_OUTPUT_ERROR, UNHEADERED_UNFENCED_GARBAGE_OUTPUT]
+    )
+
+    with pytest.raises(CoddCLIError) as excinfo:
+        _impl(project).run_implement(ImplementSpec("docs/design/auth.md", ["src/auth"]))
+
+    message = str(excinfo.value)
+    # (i) terminal substring preserved verbatim (existing matchers depend on it)
+    assert "produced 0 generated files" in message
+    # (ii) attempt trail: one numbered entry per attempt, carrying each
+    # attempt's already-captured no-usable protocol reason.
+    assert "attempt 1:" in message
+    assert f"attempt {DEFAULT_NO_USABLE_FILE_RETRIES + 1}:" in message
+    assert "empty output" in message
+    assert "unstructured chars" in message
+    # (iii) NOT design-blaming; AI-output / retry-config framing instead.
+    assert "skip_generation" not in message
+    assert "verify the design document" not in message
+    assert "no parseable output" in message
+    assert "no_usable_file_retries" in message
+
+
+def test_parseable_but_insufficient_terminal_error_keeps_design_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control: every attempt produced parseable-but-insufficient output.
+
+    Each attempt emitted a FILE block that parsed but was filtered out
+    (out-of-scope path) — a genuine design/scope insufficiency, NOT an empty or
+    unparseable response. The original design-oriented hint is therefore kept
+    (this is the case it was written for), and the attempt trail is still
+    appended (provenance enrichment is append-only, not a replacement).
+    """
+    project = _project(tmp_path)
+    # A FILE-marked block whose only path is out of scope -> "all were invalid"
+    # (the output PARSED, then filtered): not an empty/unparseable AI-output
+    # event. The last step repeats -> every attempt is parseable-but-insufficient.
+    _patch_invoke_sequence(monkeypatch, [OUT_OF_SCOPE_OUTPUT])
+
+    with pytest.raises(CoddCLIError) as excinfo:
+        _impl(project).run_implement(ImplementSpec("docs/design/auth.md", ["src/auth"]))
+
+    message = str(excinfo.value)
+    assert "produced 0 generated files" in message
+    # design-oriented hint retained for genuine insufficiency ...
+    assert "skip_generation" in message
+    assert "verify the design document" in message
+    # ... and the provenance trail is still appended.
+    assert "attempt 1:" in message
+    # not misframed as a pure AI-output exhaustion.
+    assert "no parseable output" not in message

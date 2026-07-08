@@ -542,6 +542,33 @@ def _is_no_usable_output_error(exc: ValueError) -> bool:
     return any(marker in detail for marker in _NO_USABLE_OUTPUT_MARKERS)
 
 
+# A no-usable attempt reason that means the model NEVER emitted parseable code —
+# an empty response, or output with no `=== FILE: ... ===` marker (nor a fence)
+# to parse — as DISTINCT from a parseable-but-insufficient response (FILE blocks
+# WERE emitted but all filtered out / genuinely too few). Keyed on codd's OWN
+# protocol reason strings only: NO language/framework/vendor literals, and
+# deliberately NOT provider-throttle strings (an already-separate failure class).
+# Used only to CONDITION the terminal error's advisory text — it never changes
+# retry budget, gate semantics, or what is (not) written.
+_NO_PARSEABLE_OUTPUT_REASON_MARKERS: tuple[str, ...] = (
+    "empty output",
+    "empty implementation output",
+    "unstructured chars",
+    "=== file: ... ===",
+)
+
+
+def _reason_is_no_parseable_output(reason: str) -> bool:
+    """True when a no-usable reason means the AI emitted no parseable code.
+
+    Matches codd's own protocol reason strings for an empty response or output
+    with no ``=== FILE: ... ===`` marker to parse. A parseable-but-insufficient
+    reason (FILE blocks emitted but all filtered / too few) matches none.
+    """
+    detail = reason.casefold()
+    return any(marker in detail for marker in _NO_PARSEABLE_OUTPUT_REASON_MARKERS)
+
+
 def _payload_syntax_error(relative_path: str, content: str) -> str | None:
     """Best-effort syntax validation of one AI-produced payload.
 
@@ -903,6 +930,11 @@ class Implementer:
 
         current_feedback = feedback
         no_usable_retries_used = 0
+        # Each no-usable attempt's already-captured reason, in order, so the
+        # terminal zero-files error can append a provenance trail (append-only;
+        # see _zero_generated_files_error). These are the SAME strings already
+        # printed per-attempt to stderr and carried on the `from exc` chain.
+        no_usable_reasons: list[str] = []
         syntax_rejections = 0
         while True:
             try:
@@ -927,9 +959,13 @@ class Implementer:
                 # A no-usable retry never bypasses the eventual hard fail: once
                 # the budget is spent, raise the SAME zero-files error a no-retry
                 # world would (no softer warning, no partial success, no fallback
-                # artifact) — carrying the last no-usable reason as context.
+                # artifact) — carrying the last no-usable reason as context, plus
+                # the full per-attempt trail appended to the terminal message.
+                no_usable_reasons.append(str(exc))
                 if no_usable_retries_used >= no_usable_file_retries:
-                    raise _zero_generated_files_error(spec) from exc
+                    raise _zero_generated_files_error(
+                        spec, attempt_reasons=no_usable_reasons
+                    ) from exc
                 no_usable_retries_used += 1
                 print(
                     f"[codd] implement produced no usable files "
@@ -1899,14 +1935,63 @@ def _skip_generation_enabled(design_content: str) -> bool:
     return bool(_SKIP_GENERATION_RE.search(design_content))
 
 
-def _zero_generated_files_error(spec: ImplementSpec) -> Exception:
+def _zero_generated_files_error(
+    spec: ImplementSpec,
+    attempt_reasons: list[str] | None = None,
+) -> Exception:
+    """Terminal hard-RED when an implement task writes nothing to disk.
+
+    APPEND-ONLY provenance enrichment (Fable5 §3 (b)-minimal): the terminal
+    behavior is UNCHANGED — same ``CoddCLIError``, nothing written, retry budget
+    and every gate semantic byte-identical — and the ``produced 0 generated
+    files`` substring is preserved verbatim (existing matchers depend on it).
+
+    ``attempt_reasons`` carries each exhausted-budget attempt's ALREADY-captured
+    no-usable reason (codd's own protocol strings, in order). When EVERY attempt
+    was a no-parseable AI-output event (empty / unparseable — the model never
+    emitted parseable code), the message MUST NOT blame the design: that
+    cause-ambiguity once caused an AI-output/throttle exhaustion to be misread as
+    a design-only variance. It instead frames the exhaustion as an
+    AI-output/likely-transient event and points at the retry-budget seam
+    (``implement.no_usable_file_retries``). Only a trail with some
+    parseable-but-insufficient output keeps the original design-oriented hint.
+    Absent any trail (a caller with no captured reasons), the original message is
+    preserved unchanged.
+    """
     from codd.cli import CoddCLIError
 
-    return CoddCLIError(
-        f"Design '{spec.design_node}' produced 0 generated files. "
+    base = f"Design '{spec.design_node}' produced 0 generated files."
+    design_hint = (
         "If this is intentional, add 'skip_generation: true' to the design document. "
         "Otherwise, verify the design document contains sufficient implementation details."
     )
+
+    reasons = list(attempt_reasons or [])
+    if not reasons:
+        # No retry trail available: preserve the original message unchanged.
+        return CoddCLIError(f"{base} {design_hint}")
+
+    trail = "; ".join(
+        f"attempt {index}: {reason[:200]}"
+        for index, reason in enumerate(reasons, start=1)
+    )
+
+    if all(_reason_is_no_parseable_output(reason) for reason in reasons):
+        # Every attempt was a no-parseable AI-output event: an AI-output /
+        # likely-transient exhaustion, NOT a design insufficiency. Do NOT advise
+        # editing the design or adding skip_generation.
+        return CoddCLIError(
+            f"{base} The implement AI produced no parseable output after "
+            f"{len(reasons)} attempt(s) (attempt trail: {trail}). This is an "
+            "AI-output event, likely transient — re-running the identical task "
+            "may succeed. If it recurs, widen 'implement.no_usable_file_retries' "
+            "in codd.yaml. This is NOT a signal that the design is insufficient."
+        )
+
+    # Some attempt produced parseable-but-insufficient output: a genuine
+    # design/scope insufficiency — keep the original design-oriented hint, with
+    # the provenance trail appended.
+    return CoddCLIError(f"{base} {design_hint} (attempt trail: {trail})")
 
 
 def _syntax_gate_exhausted_error(
