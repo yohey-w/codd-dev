@@ -1,10 +1,12 @@
-"""Ratchet lint: keep hardcoded ``language`` dispatch out of shared core.
+r"""Ratchet lint: keep hardcoded ``language`` dispatch out of shared core.
 
 Fable5-designed increment (see
-``dogfood/fable5_reply_2026-07-08_quota-prioritization.md``, item 4). Converts the
+``dogfood/fable5_reply_2026-07-08_quota-prioritization.md``, item 4; widened in
+``dogfood/fable5_reply_2026-07-08_review2.md``, SECONDARY #4). Converts the
 manual per-diff ``grep`` discipline (which dies with the campaign session) into a
 PERMANENT machine gate that ratchets the number of hardcoded
-``language ==`` / ``language in (...)`` branches in shared core *downward-only*.
+``language ==`` / ``language !=`` / ``language in (...)`` branches in shared core
+*downward-only*.
 
 Mechanism
 ---------
@@ -17,9 +19,16 @@ Mechanism
   branch ``self.language == "python"`` survives as ``self.language == ""`` (the
   opening quote and ``==`` remain, so the regex still matches); a docstring or
   comment mention collapses to ``""`` / nothing and is not matched.
-* Match exactly two regexes (Fable5's spec) against the code-only text:
-    ``\blanguage\s*==\s*["']``
-    ``\blanguage\s+in\s*[({\[]``
+* Match the ``language``-dispatch regexes (Fable5's spec, widened in review #2 after
+  a proven live blind spot) against the code-only text:
+    ``\blanguage\s*[!=]=\s*["']``                                  (``==`` AND ``!=``)
+    ``\blanguage\s+in\s*[({\[]``                                   (positive membership)
+    ``\blanguage\s+not\s+in\s*[({\[]``                             (negated membership)
+    ``\blanguage\s*\.\s*(?:lower|casefold)\s*\(\s*\)\s*==\s*["']`` (normalize-then-compare)
+    ``\bmatch\s+language\s*:``                                     (structural match)
+  The original ``==``-only pattern let ``treesitter.py:124`` ``self.language != "java"``
+  — real dispatch in a PINNED file — sail through green; the ``[!=]=`` widen closes
+  exactly that hole (treesitter re-derived 10 -> 11 by this change).
 * Count matches PER FILE and compare to the pinned snapshot ``PINNED``.
 
 The ratchet tightens in BOTH directions:
@@ -31,6 +40,33 @@ The ratchet tightens in BOTH directions:
   pin. A silent decrease is pin-rot / drift; the pin MUST be updated down when
   branches are removed (this is how the ratchet stays honest).
 * exact match                                                     -> PASS.
+
+NOT COVERED (the DoD step-2 manual grep remains mandatory)
+----------------------------------------------------------
+This gate is a ratchet on the DOMINANT ``language``-token dispatch shapes; it is NOT
+proof that shared core is language-free. It is anchored on the literal token
+``language`` and blanks all string CONTENTS by design, so the following escape forms
+are STRUCTURALLY INVISIBLE to it and are caught ONLY by the mandatory step-2 grep +
+human review in the Definition of Done:
+
+* Aliased dispatch variables -- ``lang == "python"`` (the branch token is not
+  ``language``, so no regex here anchors on it).
+* Literal constants -- ``SUPPORTED = ("python", "java")`` followed by a membership
+  test against that name (the language set is bound to a non-``language`` symbol).
+* Dict-literal / ``.get(language)`` dispatch -- ``{...}[language]`` /
+  ``registry.get(language)``. DELIBERATELY not widened: undecidable against the
+  sanctioned registry pattern (``LANGUAGE_EXT_MAP[language]``), and string-blanking
+  erases the discriminating keys.
+* Helper functions whose language parameter is named something other than
+  ``language`` -- e.g. ``def dispatch(lang): ...``.
+* Yoda form -- ``"python" == language``. Zero live hits; documented here rather than
+  added as a noisy reversed pattern.
+* Tool / framework / runtime literals -- ``pip``, ``pytest``, ``venv``, ``__main__``,
+  etc. are ENTIRELY OUT OF SCOPE: the gate anchors only on the token ``language`` and
+  says nothing about non-language hardcodes.
+
+Do NOT read a green result here as evidence of language-freeness: it means only that
+no NEW ``language``-token dispatch of the covered shapes was added to shared core.
 
 Dependency-free (stdlib ``pathlib`` / ``re`` / ``tokenize`` / ``io``), fast,
 deterministic (sorted walk). If a file cannot be tokenized (e.g. a syntax error),
@@ -54,10 +90,22 @@ CODD_ROOT = REPO_ROOT / "codd"
 # Legitimate language-zone dirs: per-language dispatch lives here by design.
 EXCLUDED_PREFIXES = ("codd/languages/", "codd/stack/")
 
-# Exactly the two Fable5-spec regexes, applied to the CODE-ONLY reconstruction.
+# The Fable5-spec regexes, applied to the CODE-ONLY reconstruction. Widened in
+# review #2 after a LIVE blind spot: ``treesitter.py:124`` ``self.language != "java"``
+# is real dispatch in a pinned file that the original ``==``-only pattern missed.
+# See the "NOT COVERED" section in the module docstring for what these still cannot
+# see by design.
 PATTERNS = (
-    re.compile(r'\blanguage\s*==\s*["\']'),
+    # ``language == "x"`` AND ``language != "x"`` (``[!=]=`` covers both directions).
+    re.compile(r'\blanguage\s*[!=]=\s*["\']'),
+    # ``language in (...)`` positive membership dispatch.
     re.compile(r"\blanguage\s+in\s*[({\[]"),
+    # ``language not in (...)`` negated membership dispatch.
+    re.compile(r"\blanguage\s+not\s+in\s*[({\[]"),
+    # ``language.lower() == "x"`` / ``language.casefold() == "x"`` normalize-then-compare.
+    re.compile(r'\blanguage\s*\.\s*(?:lower|casefold)\s*\(\s*\)\s*==\s*["\']'),
+    # ``match language:`` structural dispatch (not valid Python in any other context).
+    re.compile(r"\bmatch\s+language\s*:"),
 )
 
 # f-string literal segments (Python 3.12+) can carry prose too; blank them like
@@ -70,7 +118,7 @@ _FSTRING_MIDDLE = getattr(tokenize, "FSTRING_MIDDLE", None)
 PINNED = {
     "codd/parsing/_shared.py": 2,
     "codd/parsing/tests_builddeps.py": 6,
-    "codd/parsing/treesitter.py": 10,
+    "codd/parsing/treesitter.py": 11,
 }
 
 
@@ -149,9 +197,9 @@ def test_language_free_core_ratchet() -> None:
     problems: list[str] = []
     if increases:
         problems.append(
-            "A new `language ==` / `language in (...)` hardcode branch entered shared "
-            "core. Route it through a profile accessor, or place the file under "
-            "codd/languages/ or codd/stack/. Increased sites:\n"
+            "A new `language ==` / `language !=` / `language in (...)` hardcode branch "
+            "entered shared core. Route it through a profile accessor, or place the file "
+            "under codd/languages/ or codd/stack/. Increased sites:\n"
             + "\n".join(increases)
         )
     if decreases:
