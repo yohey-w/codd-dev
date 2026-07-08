@@ -288,6 +288,8 @@ def test_git_patcher_apply_retries_three_way_once(tmp_path):
 
     def runner(command, **kwargs):
         calls.append(command)
+        if "rev-parse" in command:
+            return subprocess.CompletedProcess(command, 0, "true\n", "")
         three_way_calls = sum(1 for call in calls if "--3way" in call)
         if "--check" in command:
             return subprocess.CompletedProcess(command, 0, "", "")

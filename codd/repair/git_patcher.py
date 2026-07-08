@@ -62,11 +62,16 @@ class GitPatcher:
         if dry_run:
             return ApplyResult(True, [], [], None)
 
-        first = self._git_apply(root, patch.content, "--3way")
+        # ``--3way`` needs the git object database for a 3-way merge, so it is
+        # only valid inside a git worktree. Greenfield workspaces are not git
+        # repositories; there a plain ``git apply`` applies a clean patch fine.
+        apply_args = ("--3way",) if self._is_git_worktree(root) else ()
+
+        first = self._git_apply(root, patch.content, *apply_args)
         if first.returncode == 0:
             return ApplyResult(True, [patch.file_path], [], None)
 
-        second = self._git_apply(root, patch.content, "--3way")
+        second = self._git_apply(root, patch.content, *apply_args)
         if second.returncode == 0:
             return ApplyResult(True, [patch.file_path], [], None)
 
@@ -87,6 +92,25 @@ class GitPatcher:
         except OSError as exc:
             return ApplyResult(False, [], [patch.file_path], str(exc))
         return ApplyResult(True, [patch.file_path], [], None)
+
+    def _is_git_worktree(self, root: Path) -> bool:
+        """Return whether ``root`` is inside a git worktree.
+
+        Fail-safe: any failure (non-zero exit or exception) is treated as
+        "not a git worktree" so that a plain ``git apply`` fallback is used.
+        """
+
+        try:
+            result = self.runner(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0 and (result.stdout or "").strip() == "true"
 
     def _git_apply(self, root: Path, content: str, *args: str) -> subprocess.CompletedProcess[str]:
         return self.runner(
