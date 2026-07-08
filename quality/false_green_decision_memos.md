@@ -45,6 +45,12 @@ Surfacing shipped (stage_status + PARTIAL headline, exit code unchanged).
 `brownfield_stage_skip` exit-code escalation — OWNER-GATED (a nonzero exit on a
 skipped/partial stage is a NEW red for existing users).
 
+Interim contract until the owner decides (Fable5 review#2 N1): **CI consumers must
+gate on `stage_status` in `.codd/brownfield_report.json` (or the md `PARTIAL`
+headline), NOT on the exit code** — a skipped/partial/reused run still exits 0.
+Recommended owner decision: add an opt-in `--fail-on-partial` flag that mints the
+nonzero exit (a new exit-code semantic is itself an owner-gated F4 call).
+
 ## identity_alias_drift — `consult`
 **Vector:** the same resource/capability is written under different spellings and
 treated as distinct (or wrongly unified).

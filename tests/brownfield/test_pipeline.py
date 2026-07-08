@@ -443,6 +443,60 @@ def test_stage_status_reports_empty_extract_when_no_documents(tmp_path: Path) ->
     assert "extract: empty" in format_brownfield_result(result, "md")
 
 
+def test_stage_status_reuses_prior_aggregate_without_fabricating_ok(tmp_path: Path) -> None:
+    """RED-first anchor: a pre-existing aggregate must NOT be relabeled a fresh
+    'ok' extract with fabricated counts.
+
+    Nothing in the pipeline ever deletes/rewrites ``extracted.md``, so every run
+    after the first hits the early-return. Claiming ``status='ok'`` and
+    ``files_aggregated=len(paths)`` with zero read evidence is a false-green
+    (the honesty feature would be first-run-only). The honest label is 'reused'
+    with ``files_aggregated=None`` — a legitimate reuse, not a skip.
+    """
+    extract_dir = tmp_path / ".codd" / "extract"
+    extract_dir.mkdir(parents=True)
+    # A prior run's aggregate already sits on disk; nothing rewrites it.
+    (extract_dir / "extracted.md").write_text(
+        "# Extracted Brownfield Facts\n\nprior content\n", encoding="utf-8"
+    )
+    # Requirements present so the diff stage is genuinely executed: this isolates
+    # the assertion to the extract stage (no unrelated PARTIAL from a skipped diff).
+    (tmp_path / ".codd" / "requirements.md").write_text("# Requirements\n", encoding="utf-8")
+
+    def run_extract(project_root: Path, output: str) -> ExtractStub:
+        output_dir = Path(output)
+        doc = output_dir / "system-context.md"
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text("# System\nA\n", encoding="utf-8")
+        return ExtractStub(output_dir=output_dir, generated_files=[doc])
+
+    pipeline = BrownfieldPipeline(
+        extract_runner=run_extract,
+        diff_engine_factory=lambda root: RecordingDiffEngine(),
+        elicit_engine_factory=lambda: RecordingElicitEngine([]),
+    )
+
+    result = pipeline.run(tmp_path)
+
+    extract = result.stage_status["extract"]
+    # Must not fabricate a fresh "ok" verdict on an unread, reused aggregate.
+    assert extract["status"] != "ok"
+    assert extract["status"] == "reused"
+    # No fabricated aggregate count on a path we never read.
+    assert extract["files_aggregated"] is None
+    # A reused extract is a legitimate reuse, not a skip: it must NOT trip PARTIAL.
+    assert extract["status"] not in {"partial", "empty"}
+
+    # to_dict carries the honest status/None through untouched.
+    stage = result.to_dict()["stage_status"]
+    assert stage["extract"]["status"] == "reused"
+    assert stage["extract"]["files_aggregated"] is None
+
+    md = format_brownfield_result(result, "md")
+    assert "extract: reused" in md
+    assert "content not re-verified" in md
+
+
 def test_stage_status_all_green_control_is_stable_except_new_block(tmp_path: Path) -> None:
     (tmp_path / ".codd").mkdir()
     (tmp_path / ".codd" / "requirements.md").write_text("# Requirements\n", encoding="utf-8")

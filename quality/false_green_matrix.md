@@ -16,7 +16,7 @@ Detection legend: `caught_red` / `caught_amber` / `missed_green` / `n/a`.
 | check_selection_drift | P0 | no | covered | caught_amber | ✅ | unselected_check_names / test_dag_verify_cli.py |
 | silent_skip_shown_as_pass | P0 | no | shipped | caught_amber | ✅ | dag verify summary / test_dag_verify_cli.py (discovery round 1) |
 | resource_order_explicit_flow | P0 | consult | memo | missed_green | — | decision_memos |
-| extractor_silent_noop | P0 | consult | split: shipped | caught_amber | ✅ | capability-regex half → dag/checks/extraction_diagnostics.py (amber, dormant); document-extract half → see brownfield_stage_skip |
+| extractor_silent_noop | P0 | consult | split: 2 shipped, 1 parked | caught_amber | ⚠️ | capability-regex half → dag/checks/extraction_diagnostics.py (amber, dormant); document-extract half → brownfield_stage_skip; THIRD face PARKED (Fable5 review#2 N2): per-source-file read swallow in fact extraction (extractor.py `except Exception`) degrades fidelity upstream, invisible to both halves |
 | brownfield_stage_skip | P0 | no | shipped | caught_amber | ✅ | brownfield stage_status / test_pipeline.py (missing-requirements / unreadable-file / empty-extract / all-green control) |
 | identity_alias_drift | P1 | consult | memo | missed_green | — | decision_memos |
 | assertion_abuse | P0 | owner | memo | missed_green | — | decision_memos |

@@ -3836,12 +3836,19 @@ def brownfield_cmd(
         extract = stage_status.get("extract") or {}
         diff = stage_status.get("diff") or {}
         elicit = stage_status.get("elicit") or {}
-        click.echo(
-            f"  extract: {extract.get('status', 'unknown')} "
-            f"(discovered={extract.get('files_discovered', 0)}, "
-            f"aggregated={extract.get('files_aggregated', 0)}, "
-            f"failed={len(extract.get('files_failed') or [])})"
-        )
+        if extract.get("status") == "reused":
+            # Reused aggregate was not re-read: no fabricated aggregated count.
+            click.echo(
+                "  extract: reused (prior aggregate reused; content not re-verified; "
+                f"discovered={extract.get('files_discovered', 0)})"
+            )
+        else:
+            click.echo(
+                f"  extract: {extract.get('status', 'unknown')} "
+                f"(discovered={extract.get('files_discovered', 0)}, "
+                f"aggregated={extract.get('files_aggregated', 0)}, "
+                f"failed={len(extract.get('files_failed') or [])})"
+            )
         if diff.get("status") == "skipped":
             click.echo(f"  diff: SKIPPED ({diff.get('reason') or 'no requirements.md'})")
         else:

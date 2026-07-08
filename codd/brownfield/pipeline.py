@@ -252,12 +252,20 @@ def _format_stage_status_markdown(stage_status: dict[str, Any]) -> list[str]:
 
     extract = stage_status.get("extract") or {}
     failed = extract.get("files_failed") or []
-    lines.append(
-        f"- extract: {extract.get('status', 'unknown')} "
-        f"(discovered={extract.get('files_discovered', 0)}, "
-        f"aggregated={extract.get('files_aggregated', 0)}, "
-        f"failed={len(failed)})"
-    )
+    extract_status = extract.get("status", "unknown")
+    if extract_status == "reused":
+        # A reused aggregate was not re-read: report no fabricated count.
+        lines.append(
+            "- extract: reused (prior aggregate reused; content not re-verified; "
+            f"discovered={extract.get('files_discovered', 0)})"
+        )
+    else:
+        lines.append(
+            f"- extract: {extract_status} "
+            f"(discovered={extract.get('files_discovered', 0)}, "
+            f"aggregated={extract.get('files_aggregated', 0)}, "
+            f"failed={len(failed)})"
+        )
     for entry in failed:
         path, reason = entry[0], entry[1]
         lines.append(f"  - failed: `{path}` — {reason}")
@@ -325,11 +333,16 @@ def _ensure_aggregate_extract(
     aggregate_path = output_dir / "extracted.md"
     paths = _extract_markdown_paths(output_dir, generated_files)
     if aggregate_path.is_file():
-        # A prior run already built the aggregate; treat it as usable content.
+        # A prior run already built the aggregate; reuse it as-is. We do NOT
+        # re-read or re-aggregate its content, so we must NOT fabricate an "ok"
+        # verdict or an aggregated count over unread inputs. Since nothing ever
+        # deletes/rewrites this file, every run after the first lands here — a
+        # fabricated "ok" would make the honesty signal first-run-only. Emit an
+        # honest "reused" status instead (files_aggregated=None = "not counted").
         status = {
-            "status": "ok",
+            "status": "reused",
             "files_discovered": len(paths),
-            "files_aggregated": len(paths),
+            "files_aggregated": None,
             "files_failed": [],
         }
         return aggregate_path, status
