@@ -460,3 +460,87 @@ def test_source_placement_key_is_additive_in_to_dict():
     cpp_dict = _cpp_profile().to_dict()
     roots = {p["root"] for p in cpp_dict["source_placements"]}
     assert roots == {"src", "include"}
+
+
+# ---------------------------------------------------------------------------
+# Excluded deliverable surface — the EXCLUDED rule projection (R4, v3.19.0)
+#
+# The 5 non-python goldens + python WITHOUT the exclusion key stay BYTE-IDENTICAL
+# (proved by ``test_golden_single_root_render_unchanged`` above — the new EXCLUDED
+# rule appears ONLY when a surface is excluded). This section adds:
+#   * python WITH ``deliverable.excluded_surfaces: [runnable-entrypoint]`` → the
+#     rendered contract gains the EXCLUDED DELIVERABLE SURFACE rule naming
+#     ``src/<pkg>/__main__.py`` AND drops that path from the HARNESS-OWNED SCAFFOLD
+#     list (RED pre-impl: neither the rule nor the subtraction exists yet);
+#   * a NON-python stack resolved under the SAME exclusion config renders
+#     byte-identical to its golden (the exclusion is a no-op for a stack that
+#     declares no optional surface — a guard, GREEN pre- and post-impl).
+# ---------------------------------------------------------------------------
+
+_EXCLUDED_MAIN = "src/exprcalc/__main__.py"
+
+_EXCLUDED_SURFACE_RULE = (
+    "EXCLUDED DELIVERABLE SURFACE — the requirements exclude these surface(s), so "
+    "the harness does NOT create them and you must NOT author or declare them among "
+    f"your outputs: `{_EXCLUDED_MAIN}`. A file you emit here is an unowned orphan and "
+    "fails the build."
+)
+
+
+def _excluded_python_profile():
+    config = {
+        "project": {"name": "ExprCalc", "language": "python"},
+        "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]},
+        "deliverable": {"excluded_surfaces": ["runnable-entrypoint"]},
+    }
+    profile = resolve_layout_profile(
+        language="python",
+        project_name="ExprCalc",
+        source_dirs=["src"],
+        test_dirs=["tests"],
+        config=config,
+    )
+    assert profile is not None
+    return profile
+
+
+def test_python_excluded_surface_renders_exclusion_rule():
+    block = render_layout_placement_contract(_excluded_python_profile())
+    assert block
+    # The EXCLUDED rule is projected, naming the excluded surface path verbatim.
+    assert "EXCLUDED DELIVERABLE SURFACE" in block
+    assert _EXCLUDED_SURFACE_RULE in block
+
+
+def test_python_excluded_surface_dropped_from_harness_owned_scaffold_list():
+    block = render_layout_placement_contract(_excluded_python_profile())
+    # Isolate the HARNESS-OWNED SCAFFOLD rule (it precedes the EXCLUDED rule): the
+    # excluded __main__.py must be TRUE-SUBTRACTED from it, appearing ONLY in the
+    # EXCLUDED rule below.
+    assert "HARNESS-OWNED SCAFFOLD" in block
+    scaffold_section = block.split("HARNESS-OWNED SCAFFOLD", 1)[1]
+    scaffold_section = scaffold_section.split("EXCLUDED DELIVERABLE SURFACE", 1)[0]
+    assert "__main__.py" not in scaffold_section
+    # The still-owned scaffold files remain listed.
+    assert "`pyproject.toml`" in scaffold_section
+    assert "`tests/__init__.py`" in scaffold_section
+
+
+def test_non_python_stack_under_exclusion_config_is_byte_identical():
+    # GUARD (GREEN pre- and post-impl): a stack that declares no optional surface
+    # renders byte-identical even when the config carries an excluded-surfaces key —
+    # the exclusion is a strict no-op there (no `language ==`, no path prefix).
+    config = {
+        "project": {"name": "ExprCalc", "language": "typescript"},
+        "scan": {"source_dirs": ["src"], "test_dirs": ["tests"]},
+        "deliverable": {"excluded_surfaces": ["runnable-entrypoint"]},
+    }
+    profile = resolve_layout_profile(
+        language="typescript",
+        project_name="ExprCalc",
+        source_dirs=["src"],
+        test_dirs=["tests"],
+        config=config,
+    )
+    assert profile is not None
+    assert render_layout_placement_contract(profile) == _GOLDEN_LAYOUT_CONTRACT["typescript"]

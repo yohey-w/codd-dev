@@ -20,6 +20,7 @@ import pytest
 
 from codd.project_types import (
     LayoutProfile,
+    harness_owned_output_paths,
     normalize_package_name,
     resolve_layout_profile,
     scaffold_layout,
@@ -475,3 +476,129 @@ class TestFacadeOutputPaths:
         facade = set(profile.facade_output_paths())
         assert facade  # non-empty for Python
         assert facade <= set(profile.harness_owned_scaffold_paths())
+
+
+# ═══════════════════════════════════════════════════════════
+# optional_surfaces accessor + excluded_surface_paths no-op  (R5, v3.19.0)
+# ═══════════════════════════════════════════════════════════
+#
+# A stack MAY declare OPTIONAL deliverable surfaces (a surface the harness
+# scaffolds by default but a project may exclude — Python's runnable console
+# ``__main__.py`` entry point). ``optional_surfaces`` is profile DATA that
+# defaults to ``()`` so every stack declaring none is byte-identical BY
+# CONSTRUCTION; only Python declares the runnable-entrypoint surface, and
+# ``excluded_surface_paths()`` is a STRICT no-op (``()``) until a project actually
+# excludes a declared surface.
+
+
+class TestOptionalSurfaces:
+    def _resolve(self, language, name="ExprCalc"):
+        return resolve_layout_profile(
+            language=language, project_name=name, source_dirs=["src/"], test_dirs=["tests/"]
+        )
+
+    def test_python_declares_the_runnable_entrypoint_surface(self):
+        # Duck-typed on purpose: SurfaceSpec does not exist pre-impl, so we assert
+        # on the (id + paths) shape at RUNTIME rather than importing the symbol.
+        profile = resolve_layout_profile(
+            language="python", project_name="todo-cli", source_dirs=["src/"], test_dirs=["tests/"]
+        )
+        surfaces = profile.optional_surfaces
+        assert len(surfaces) == 1
+        surface = surfaces[0]
+        assert surface.id == "runnable-entrypoint"
+        # The surface's path is the scaffold's console entry point: src/<pkg>/__main__.py.
+        assert surface.paths == ("src/todo_cli/__main__.py",)
+
+    @pytest.mark.parametrize("language", ["javascript", "typescript", "java", "cpp", "csharp"])
+    def test_non_python_stacks_declare_no_optional_surface(self, language):
+        # STRICT no-op: no non-Python stack declares an optional surface, so its
+        # tuple is empty BY CONSTRUCTION (no `language ==` branch anywhere).
+        profile = self._resolve(language)
+        assert profile is not None
+        assert profile.optional_surfaces == ()
+
+    def test_excluded_surface_paths_empty_without_exclusion(self):
+        # Nothing excluded ⇒ the accessor is a strict no-op even though the python
+        # profile DOES declare an optional surface.
+        profile = self._resolve("python")
+        assert profile.excluded_surface_paths() == ()
+
+
+# ═══════════════════════════════════════════════════════════
+# excluded deliverable surface — TRUE subtraction  (R1, v3.19.0)
+# ═══════════════════════════════════════════════════════════
+#
+# Distinct from the v3.18 facade carve-out (CONTENT carve-out: the file is STILL
+# created + STILL owned): an EXCLUDED surface is a TRUE SUBTRACTION — the scaffold
+# does NOT create it, it is REMOVED from BOTH ownership authorities (so a stray one
+# is an honest orphan), and the derive fence rejects any task declaring it. The
+# excluded set is threaded onto the profile ONCE, in ``resolve_layout_profile``,
+# from ``config["deliverable"]["excluded_surfaces"]`` — every consumer just reads
+# ``profile.excluded_surface_paths()`` with no signature change.
+
+
+class TestExcludedSurfaces:
+    _PKG = "todo_cli"
+    _MAIN = "src/todo_cli/__main__.py"
+    _INIT = "src/todo_cli/__init__.py"
+
+    def _config(self, *, excluded: bool) -> dict:
+        config: dict = {
+            "project": {"name": "todo-cli", "language": "python"},
+            "scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]},
+        }
+        if excluded:
+            # The plan-persisted exclusion set (id-based): resolve_layout_profile
+            # reads it and threads the excluded ids onto the profile.
+            config["deliverable"] = {"excluded_surfaces": ["runnable-entrypoint"]}
+        return config
+
+    def _profile(self, *, excluded: bool):
+        config = self._config(excluded=excluded)
+        profile = resolve_layout_profile(
+            language="python",
+            project_name="todo-cli",
+            source_dirs=["src/"],
+            test_dirs=["tests/"],
+            config=config,
+        )
+        return profile, config
+
+    def test_excluded_surface_paths_names_main(self):
+        profile, _ = self._profile(excluded=True)
+        assert profile.excluded_surface_paths() == (self._MAIN,)
+
+    def test_excluded_main_dropped_from_both_authorities(self):
+        profile, config = self._profile(excluded=True)
+        # (1) profile-level owned-scaffold authority (orphan-gate / write-fence):
+        # true subtraction — the excluded surface is owned by NO ONE.
+        assert self._MAIN not in profile.harness_owned_scaffold_paths()
+        # (2) module-level obligation authority (deriver + kind/completeness gate).
+        assert self._MAIN not in harness_owned_output_paths(config)
+        # The package facade __init__ is UNAFFECTED — still scaffolded topology.
+        assert self._INIT in profile.harness_owned_scaffold_paths()
+
+    def test_excluded_main_not_scaffolded_but_init_is(self, tmp_path):
+        profile, _ = self._profile(excluded=True)
+        result = scaffold_layout(tmp_path, profile)
+        # The excluded surface is NOT written to disk...
+        assert not (tmp_path / self._MAIN).exists()
+        assert self._MAIN not in result.created
+        # ...but the (non-excluded) package __init__ still is.
+        assert (tmp_path / self._INIT).is_file()
+        # AUTHORITY PARITY: the files the scaffold created are EXACTLY the profile's
+        # declared owned-scaffold set (both drop __main__ under exclusion).
+        assert set(result.created) == set(profile.harness_owned_scaffold_paths())
+
+    def test_without_exclusion_main_present_and_created(self, tmp_path):
+        # CONTROL (unchanged legacy path): no exclusion ⇒ __main__ owned by BOTH
+        # authorities AND scaffolded — exclusion is strictly opt-in.
+        profile, config = self._profile(excluded=False)
+        assert self._MAIN in profile.harness_owned_scaffold_paths()
+        assert self._MAIN in harness_owned_output_paths(config)
+        result = scaffold_layout(tmp_path, profile)
+        assert (tmp_path / self._MAIN).is_file()
+        assert self._MAIN in result.created
+        # Authority parity holds in the control too.
+        assert set(result.created) == set(profile.harness_owned_scaffold_paths())

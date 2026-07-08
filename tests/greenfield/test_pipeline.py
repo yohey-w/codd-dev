@@ -2512,3 +2512,297 @@ def test_facade_coverage_all_configured_project_is_strict_noop(tmp_path: Path) -
     assert result == tasks
     assert deriver.calls == []
     assert lister.calls == 0
+
+
+# ═══════════════════════════════════════════════════════════
+# Derive-stage deliverable-surface EXCLUSION fence (v3.19.0)
+# ═══════════════════════════════════════════════════════════
+#
+# ``_enforce_deliverable_surface_exclusion`` is the SIBLING of
+# ``_enforce_api_facade_coverage`` and runs immediately after it at the top of the
+# implement stage. When the project's ``deliverable.excluded_surfaces`` lists a
+# surface the resolved profile declares (e.g. ``runnable-entrypoint`` → the python
+# ``src/<pkg>/__main__.py`` console entry point), NO implement task may declare
+# that path: the surface is excluded, the scaffold never creates it, and a file
+# emitted there is an unowned orphan. On a violation the gate FORCES a bounded
+# re-derivation with a deterministic repair directive naming the path, re-lists,
+# and re-checks; exhaustion raises StageError (honest RED, anti-false-green — the
+# fence only REJECTS). STRICT NO-OP unless the profile resolves an excluded-surface
+# path. Deriver/lister are the SAME injected stubs the facade gate uses, so the
+# fence math is exercised with no real LLM. (Python src-package stub-app → excluded
+# surface path ``src/stub_app/__main__.py``.)
+
+_EXCLUDED_MAIN_PATH = "src/stub_app/__main__.py"
+
+
+def _write_deliverable_config(
+    project: Path, excluded_surfaces: list[str], **derive
+) -> None:
+    """Persist ``deliverable.excluded_surfaces`` (+ optional ``derive:`` knobs) into
+    the project's codd.yaml so the resolved profile carries the exclusion and
+    ``load_project_config`` picks up ``derive.deliverable_surface_max_retries``."""
+    codd_yaml = project / "codd" / "codd.yaml"
+    data = yaml.safe_load(codd_yaml.read_text(encoding="utf-8"))
+    data["deliverable"] = {"excluded_surfaces": list(excluded_surfaces)}
+    if derive:
+        data["derive"] = dict(derive)
+    codd_yaml.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def test_deliverable_exclusion_violating_task_rederives_then_passes(tmp_path: Path) -> None:
+    """A derived task declaring the EXCLUDED ``__main__.py`` → force re-derive with
+    non-empty feedback NAMING the path; a stateful lister returns a clean set →
+    gate OK (the violating task is gone)."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    _write_deliverable_config(project, ["runnable-entrypoint"])
+    deriver = _RecordingDeriver()
+    clean = [_derived_source_task("impl_core", "src/stub_app/core.py")]
+    lister = _ScriptedLister([clean])
+    pipeline = _facade_gate_pipeline(deriver, lister)
+    tasks = [_derived_source_task("impl_main", _EXCLUDED_MAIN_PATH)]
+
+    result = pipeline._enforce_deliverable_surface_exclusion(project, tasks)
+
+    assert len(deriver.calls) == 1
+    assert deriver.calls[0]["force"] is True
+    assert deriver.calls[0]["feedback"]
+    assert _EXCLUDED_MAIN_PATH in deriver.calls[0]["feedback"]
+    assert lister.calls == 1
+    assert [t.task_id for t in result] == ["impl_core"]
+
+
+def test_deliverable_exclusion_exhaustion_raises_stage_error(tmp_path: Path) -> None:
+    """A lister that keeps the violating ``__main__.py`` task past the retry budget
+    (default 2) exhausts → StageError naming the excluded path."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    _write_deliverable_config(project, ["runnable-entrypoint"])
+    violating = [_derived_source_task("impl_main", _EXCLUDED_MAIN_PATH)]
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([violating])  # stays violating forever
+    pipeline = _facade_gate_pipeline(deriver, lister)
+
+    with pytest.raises(StageError, match=re.escape(_EXCLUDED_MAIN_PATH)):
+        pipeline._enforce_deliverable_surface_exclusion(project, list(violating))
+    # default max_retries=2 ⇒ two re-derive attempts before honest failure.
+    assert len(deriver.calls) == 2
+    assert all(call["force"] is True for call in deriver.calls)
+
+
+def test_deliverable_exclusion_clean_task_set_is_noop(tmp_path: Path) -> None:
+    """The surface is excluded but NO task declares it → strict no-op: tasks
+    returned unchanged and the deriver is never called."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    _write_deliverable_config(project, ["runnable-entrypoint"])
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])  # must not be consulted
+    pipeline = _facade_gate_pipeline(deriver, lister)
+    tasks = [_derived_source_task("impl_core", "src/stub_app/core.py")]
+
+    result = pipeline._enforce_deliverable_surface_exclusion(project, tasks)
+
+    assert result == tasks
+    assert deriver.calls == []
+    assert lister.calls == 0
+
+
+def test_deliverable_exclusion_zero_retries_fails_immediately(tmp_path: Path) -> None:
+    """``derive.deliverable_surface_max_retries: 0`` (legacy) → a violation raises
+    StageError NAMING the excluded path immediately; the deriver is never called."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    _write_deliverable_config(
+        project, ["runnable-entrypoint"], deliverable_surface_max_retries=0
+    )
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])
+    pipeline = _facade_gate_pipeline(deriver, lister)
+    tasks = [_derived_source_task("impl_main", _EXCLUDED_MAIN_PATH)]
+
+    with pytest.raises(StageError, match=re.escape(_EXCLUDED_MAIN_PATH)):
+        pipeline._enforce_deliverable_surface_exclusion(project, tasks)
+    assert deriver.calls == []
+    assert lister.calls == 0
+
+
+def test_deliverable_exclusion_no_excluded_surface_is_strict_noop(tmp_path: Path) -> None:
+    """No ``deliverable.excluded_surfaces`` (empty config) → strict no-op even when a
+    task DOES declare ``__main__.py`` (that surface is simply not excluded here)."""
+    project = make_stub_project(tmp_path, "stub-ai --print")  # no deliverable config
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])
+    pipeline = _facade_gate_pipeline(deriver, lister)
+    tasks = [_derived_source_task("impl_main", _EXCLUDED_MAIN_PATH)]
+
+    result = pipeline._enforce_deliverable_surface_exclusion(project, tasks)
+
+    assert result == tasks
+    assert deriver.calls == []
+    assert lister.calls == 0
+
+
+# ═══════════════════════════════════════════════════════════
+# Plan-stage deliverable-surface INTAKE classification (v3.19.0)
+# ═══════════════════════════════════════════════════════════
+#
+# ``_classify_deliverable_surfaces`` runs in the plan stage: iff the resolved
+# profile declares ≥1 optional surface, it reads the requirements text, asks a
+# strict-JSON classifier which surfaces the requirements EXCLUDE, and persists the
+# excluded ids to ``deliverable.excluded_surfaces`` in codd.yaml (read thereafter by
+# scaffold/derive/resume — deterministic, no re-classification). It is
+# DEFAULT-PERMISSIVE + fail-safe: a surface is excluded ONLY IF the classifier says
+# ``excluded: true`` AND its ``evidence`` is a non-empty VERBATIM substring of the
+# requirements (case-sensitive). Silence / a positive request / empty requirements /
+# malformed JSON / non-substring evidence all fall through to "not excluded"
+# (legacy) — the owner is never a bottleneck and ambiguity never subtracts a
+# surface. The AI is stubbed (canned JSON) so the deterministic guard is exercised
+# with no real LLM.
+
+import json  # noqa: E402  (module-level, mid-file — mirrors the local json usage above)
+
+
+_REQ_NO_CLI = """# Widget Library Requirements
+
+## Scope
+The system is a pure importable library. It exposes a computation API for other
+Python code to call. It ships no CLI and no runnable entry point.
+"""
+
+_REQ_WITH_CLI = """# Widget CLI Requirements
+
+## Scope
+The system provides a command-line interface. Users invoke `python -m app` to run
+the tool directly from a terminal.
+"""
+
+
+def _classify_project(tmp_path: Path, requirements_body: str, *, name: str = "stub-app") -> Path:
+    """A python stub project whose requirements doc we control verbatim (the
+    substring guard reads THIS text through ``elicit._collect_requirements``)."""
+    project = make_stub_project(tmp_path, "stub-ai --print", name=name)
+    req = project / "docs" / "requirements" / "requirements.md"
+    req.parent.mkdir(parents=True, exist_ok=True)
+    req.write_text(requirements_body, encoding="utf-8")
+    return project
+
+
+def _patch_stub_ai(monkeypatch, raw: str) -> None:
+    """Inject a stub AI command whose ``.invoke(prompt)`` returns canned ``raw``.
+
+    Patches the factory at its SOURCE module (the classifier resolves the command
+    via ``get_ai_command(config, project_root, command_override=self.ai_command)``,
+    a lazy local import that binds to the source module at call time) plus,
+    defensively, any name bound into the pipeline module namespace."""
+
+    class _StubAiCommand:
+        def invoke(self, prompt: str) -> str:  # noqa: D401 - stub
+            return raw
+
+    def _fake_get_ai_command(config, project_root=None, command_override=None):
+        return _StubAiCommand()
+
+    monkeypatch.setattr(
+        "codd.deployment.providers.ai_command_factory.get_ai_command",
+        _fake_get_ai_command,
+    )
+    monkeypatch.setattr(
+        "codd.greenfield.pipeline.get_ai_command", _fake_get_ai_command, raising=False
+    )
+
+
+def _excluded_surfaces_in_config(project: Path) -> list[str]:
+    data = yaml.safe_load((project / "codd" / "codd.yaml").read_text(encoding="utf-8"))
+    section = data.get("deliverable") if isinstance(data, dict) else None
+    surfaces = section.get("excluded_surfaces") if isinstance(section, dict) else None
+    return list(surfaces) if isinstance(surfaces, list) else []
+
+
+def _classify_pipeline() -> GreenfieldPipeline:
+    return GreenfieldPipeline(
+        project_name="stub-app",
+        language="python",
+        ai_command="stub-ai --print",
+        echo=lambda _m: None,
+    )
+
+
+def test_classify_excludes_on_verbatim_negation(tmp_path: Path, monkeypatch) -> None:
+    """(a) ``excluded: true`` with evidence that IS a verbatim substring of the
+    requirements → the id is persisted to ``deliverable.excluded_surfaces``."""
+    project = _classify_project(tmp_path, _REQ_NO_CLI)
+    _patch_stub_ai(
+        monkeypatch,
+        json.dumps(
+            {
+                "runnable-entrypoint": {
+                    "excluded": True,
+                    "evidence": "no CLI and no runnable entry point",
+                }
+            }
+        ),
+    )
+
+    _classify_pipeline()._classify_deliverable_surfaces(project)
+
+    assert _excluded_surfaces_in_config(project) == ["runnable-entrypoint"]
+
+
+def test_classify_does_not_exclude_positive_cli_request(tmp_path: Path, monkeypatch) -> None:
+    """(b) The requirements POSITIVELY ask for a CLI and the classifier returns
+    ``excluded: false`` → nothing is persisted."""
+    project = _classify_project(tmp_path, _REQ_WITH_CLI)
+    _patch_stub_ai(
+        monkeypatch,
+        json.dumps(
+            {"runnable-entrypoint": {"excluded": False, "evidence": "command-line interface"}}
+        ),
+    )
+
+    _classify_pipeline()._classify_deliverable_surfaces(project)
+
+    assert _excluded_surfaces_in_config(project) == []
+
+
+def test_classify_noop_on_empty_requirements(tmp_path: Path, monkeypatch) -> None:
+    """(c) Empty requirements → ``_collect_requirements`` yields "(none provided)" →
+    the classifier is a no-op (nothing to classify → legacy), NOT persisted."""
+    project = _classify_project(tmp_path, "")
+    _patch_stub_ai(
+        monkeypatch,
+        json.dumps({"runnable-entrypoint": {"excluded": True, "evidence": "irrelevant"}}),
+    )
+
+    _classify_pipeline()._classify_deliverable_surfaces(project)
+
+    assert _excluded_surfaces_in_config(project) == []
+
+
+def test_classify_noop_on_malformed_json(tmp_path: Path, monkeypatch) -> None:
+    """(d) Malformed classifier output → fail-safe to ``{}`` → NOT persisted
+    (legacy). A parse failure never subtracts a surface."""
+    project = _classify_project(tmp_path, _REQ_NO_CLI)
+    _patch_stub_ai(monkeypatch, "not valid json at all {{{ ]")
+
+    _classify_pipeline()._classify_deliverable_surfaces(project)
+
+    assert _excluded_surfaces_in_config(project) == []
+
+
+def test_classify_rejects_evidence_not_in_requirements(tmp_path: Path, monkeypatch) -> None:
+    """(e) DETERMINISTIC GUARD: ``excluded: true`` but the ``evidence`` is NOT a
+    verbatim substring of the requirements → NOT persisted (a hallucinated quote
+    cannot exclude a surface)."""
+    project = _classify_project(tmp_path, _REQ_NO_CLI)
+    _patch_stub_ai(
+        monkeypatch,
+        json.dumps(
+            {
+                "runnable-entrypoint": {
+                    "excluded": True,
+                    "evidence": "the requirements forbid any command line interface",
+                }
+            }
+        ),
+    )
+
+    _classify_pipeline()._classify_deliverable_surfaces(project)
+
+    assert _excluded_surfaces_in_config(project) == []

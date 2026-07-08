@@ -939,6 +939,10 @@ class GreenfieldPipeline:
     # ── stage: plan ─────────────────────────────────────────
 
     def _stage_plan(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        # Deterministic, default-permissive, fail-safe requirements intake: iff the
+        # resolved profile declares >=1 optional deliverable surface, classify which
+        # (if any) the requirements exclude and persist them BEFORE the plan runs.
+        self._classify_deliverable_surfaces(project_root)
         runner = self.plan_runner or _default_plan_runner
         try:
             wave_count = int(runner(project_root, ai_command=self.ai_command, force=True))
@@ -999,6 +1003,146 @@ class GreenfieldPipeline:
             "or declare VBs in a docs/test doc. Without it the declared-VB set is empty and the "
             "coverage/authenticity gate can pass WITHOUT certifying any behavior (a false-green). "
             "Disable the coverage gate explicitly if this build has no behaviors to verify."
+        )
+
+    def _classify_deliverable_surfaces(self, project_root: Path) -> None:
+        """Plan-stage intake: deterministically classify which OPTIONAL deliverable
+        surfaces the requirements exclude, and persist the excluded ids to codd.yaml.
+
+        Runs at the top of the plan stage IFF the resolved profile declares >=1
+        optional deliverable surface. Deterministic, default-permissive, fail-safe:
+        a surface is excluded ONLY when the model both marks it excluded AND cites a
+        verbatim substring of the requirements as evidence; silence, ambiguity, a
+        parse failure, or ANY exception leaves the excluded set empty (legacy —
+        every optional surface is scaffolded). The whole method is wrapped so a
+        classification failure can never break planning; nothing is written when the
+        excluded set is empty.
+        """
+        try:
+            profile = self._resolve_layout_profile(project_root)
+            if profile is None or not getattr(profile, "optional_surfaces", ()):
+                return  # no optional surfaces => nothing to classify (no-op)
+
+            from codd.elicit.engine import _collect_requirements
+
+            requirements = _collect_requirements(project_root, max_chars=40000)
+            if not requirements or requirements.strip() == "(none provided)":
+                return  # no requirements text => nothing to classify (legacy)
+
+            surfaces = list(profile.optional_surfaces)
+            prompt = self._build_deliverable_surface_intake_prompt(requirements, surfaces)
+
+            from codd.config import load_project_config
+            from codd.deployment.providers.ai_command_factory import get_ai_command
+            from codd.llm.plan_deriver import strip_json_fence
+
+            try:
+                config = load_project_config(project_root)
+            except (FileNotFoundError, ValueError):
+                config = {}
+
+            try:
+                raw = get_ai_command(
+                    config, project_root, command_override=self.ai_command
+                ).invoke(prompt)
+                verdicts = json.loads(strip_json_fence(raw))
+            except Exception:  # noqa: BLE001 — any invoke/parse failure => legacy (nothing excluded).
+                verdicts = {}
+
+            excluded: set[str] = set()
+            if isinstance(verdicts, Mapping):
+                valid_ids = {s.id for s in surfaces}
+                for surface_id, verdict in verdicts.items():
+                    if str(surface_id) not in valid_ids or not isinstance(verdict, Mapping):
+                        continue  # unknown id / malformed entry ignored
+                    if verdict.get("excluded") is not True:
+                        continue
+                    # DETERMINISTIC GUARD: honor the exclusion ONLY when the evidence
+                    # is a non-empty VERBATIM (case-sensitive) substring of the
+                    # requirements text — a model assertion with no textual support
+                    # is treated as NOT excluded (default-permissive).
+                    evidence = verdict.get("evidence")
+                    if isinstance(evidence, str) and evidence.strip() and evidence in requirements:
+                        excluded.add(str(surface_id))
+
+            if not excluded:
+                self.echo(
+                    "[greenfield] plan: deliverable-surface intake excluded none "
+                    "(legacy — every optional surface is scaffolded)"
+                )
+                return
+
+            self._persist_excluded_deliverable_surfaces(project_root, sorted(excluded))
+            self.echo(
+                "[greenfield] plan: deliverable-surface intake excluded "
+                f"{len(excluded)} surface(s): {', '.join(sorted(excluded))}"
+            )
+        except Exception as exc:  # noqa: BLE001 — classification must NEVER break planning.
+            self.echo(
+                f"[greenfield] plan: deliverable-surface intake skipped (non-blocking): {exc}"
+            )
+            return
+
+    def _build_deliverable_surface_intake_prompt(
+        self, requirements: str, surfaces: list[Any]
+    ) -> str:
+        """Strict-JSON classification prompt asking which optional deliverable
+        surfaces the requirements exclude. Generic: each surface's id and
+        description are profile DATA, never a hardcoded surface literal."""
+        lines = [
+            "You are classifying whether a software project's requirements EXCLUDE "
+            "certain OPTIONAL deliverable surfaces from the project's scope.",
+            "",
+            "A surface is EXCLUDED only when the requirements EXPLICITLY state the "
+            "project does not provide it. Silence, ambiguity, or a positive mention "
+            "means NOT excluded.",
+            "",
+            "Optional surfaces (id -- description):",
+        ]
+        for surface in surfaces:
+            lines.append(f"- {surface.id} -- {surface.description}")
+        lines.extend(
+            [
+                "",
+                "Requirements text:",
+                "<<<REQUIREMENTS",
+                requirements,
+                "REQUIREMENTS",
+                "",
+                "Respond with STRICT JSON only (no prose, no code fence): an object "
+                "keyed by surface id, each value an object "
+                '{"excluded": <true|false>, "evidence": "<verbatim quote copied from '
+                'the requirements that justifies exclusion, or an empty string>"}.',
+                "The evidence MUST be an exact, verbatim substring of the requirements "
+                'text above. If a surface is not excluded, use "excluded": false and '
+                '"evidence": "".',
+            ]
+        )
+        return "\n".join(lines)
+
+    def _persist_excluded_deliverable_surfaces(
+        self, project_root: Path, excluded: list[str]
+    ) -> None:
+        """Write the excluded surface-id list to the project codd.yaml under
+        ``deliverable.excluded_surfaces`` (non-destructive, idempotent). Only called
+        with a NON-EMPTY set — an empty set leaves the config untouched (legacy)."""
+        from codd.config import find_codd_dir
+
+        codd_dir = find_codd_dir(project_root)
+        if codd_dir is None:
+            return
+        config_path = codd_dir / "codd.yaml"
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            return
+        section = data.setdefault("deliverable", {})
+        if not isinstance(section, dict):
+            section = {}
+            data["deliverable"] = section
+        section["excluded_surfaces"] = sorted(excluded)
+        config_path.write_text(
+            yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
         )
 
     # ── stage: generate ─────────────────────────────────────
@@ -1221,6 +1365,13 @@ class GreenfieldPipeline:
         # deterministic feedback if not. STRICT NO-OP for a stack with no facade.
         tasks = self._enforce_api_facade_coverage(project_root, tasks)
 
+        # Derive-stage deliverable-surface exclusion fence (immediately after the
+        # facade gate, before the scaffold + per-task loop): no derived task may
+        # author an OPTIONAL deliverable surface the plan-stage intake marked
+        # out-of-scope. STRICT NO-OP unless the resolved profile reports excluded
+        # surfaces (a stray one would be an unowned orphan that fails the build).
+        tasks = self._enforce_deliverable_surface_exclusion(project_root, tasks)
+
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {task.task_id: units.get(task.task_id, STATUS_PENDING) for task in tasks}
 
@@ -1438,6 +1589,99 @@ class GreenfieldPipeline:
             f"(re-export the package's public symbols): {paths}. The file currently "
             "contains only the scaffold placeholder docstring. Do not split a facade "
             "across multiple tasks, and do not omit it."
+        )
+
+    def _enforce_deliverable_surface_exclusion(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+    ) -> list[ImplementTaskRef]:
+        """Derive-stage fence: no task may author an EXCLUDED deliverable surface.
+
+        A project whose plan-stage requirements intake marked an optional
+        deliverable surface out-of-scope (persisted to
+        ``deliverable.excluded_surfaces`` and threaded onto the resolved profile as
+        ``excluded_surface_ids``) must derive NO implement task that creates it. The
+        harness does not scaffold an excluded surface and its owned-scaffold
+        authority drops it, so a task declaring it would emit an unowned ORPHAN that
+        fails the build. This deterministic set-math check runs at the TOP of the
+        implement stage (right after the API-facade coverage gate); on a violation
+        it FORCES a bounded re-derivation with a deterministic repair directive
+        naming the excluded path(s), re-approves, re-lists, and re-checks.
+        Exhaustion raises :class:`StageError` (honest RED). Because the re-derive
+        overwrites the cache, a ``--resume`` stays consistent.
+
+        STRICT NO-OP unless the resolved profile reports non-empty
+        ``excluded_surface_paths()``. Fires on an accessor value, never a hardcoded
+        literal.
+        """
+        from codd.config import load_project_config
+
+        profile = self._resolve_layout_profile(project_root)
+        if profile is None:
+            return tasks
+        try:
+            excluded_paths = {
+                p for rel in profile.excluded_surface_paths() if (p := _norm_decl_path(rel))
+            }
+        except Exception:  # noqa: BLE001 — no accessor / no exclusion => no fence.
+            excluded_paths = set()
+        if not excluded_paths:
+            return tasks
+
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+
+        max_retries = _deliverable_surface_max_retries(config)
+        attempt = 0
+        while True:
+            violators = [
+                task
+                for task in tasks
+                if {_norm_decl_path(out) for out in task.expected_outputs} & excluded_paths
+            ]
+            if not violators:
+                break
+            offenders = sorted(
+                {
+                    p
+                    for task in violators
+                    for out in task.expected_outputs
+                    if (p := _norm_decl_path(out)) in excluded_paths
+                }
+            )
+            if attempt >= max_retries:
+                listed = ", ".join(f"`{p}`" for p in offenders)
+                raise StageError(
+                    "derive-stage deliverable-surface exclusion fence failed — the "
+                    "requirements exclude these deliverable surface(s), so the harness "
+                    "does not create them and no implement task may author them, yet a "
+                    f"derived task still declares: {listed}. Re-derive without any task "
+                    "that creates an excluded surface."
+                )
+            attempt += 1
+            feedback = self._build_deliverable_surface_exclusion_feedback(offenders)
+            self.echo(
+                "[greenfield] implement: deliverable-surface exclusion fence re-deriving "
+                f"with repair feedback (attempt {attempt}/{max_retries})"
+            )
+            deriver = self.task_deriver or _default_task_deriver
+            deriver(project_root, ai_command=self.ai_command, force=True, feedback=feedback)
+            lister = self.task_lister or _default_task_lister
+            tasks = list(lister(project_root))
+        return tasks
+
+    def _build_deliverable_surface_exclusion_feedback(self, offenders: list[str]) -> str:
+        """Deterministic repair directive for a deliverable-surface exclusion re-derivation."""
+        paths = ", ".join(f"`{p}`" for p in offenders)
+        return (
+            "Do NOT author these EXCLUDED deliverable surfaces (the requirements "
+            f"exclude them): {paths}. The harness does not create these paths and no "
+            "implement task may declare them among its expected_outputs — a file "
+            "emitted here is an unowned orphan that fails the build. Re-derive without "
+            "any task that creates them."
         )
 
     def _finalize_dependency_lock_coherence(self, project_root: Path) -> None:
@@ -3839,6 +4083,22 @@ def _api_facade_coverage_max_retries(config: dict[str, Any] | None) -> int:
     section = (config or {}).get("derive")
     if isinstance(section, dict):
         value = section.get("api_facade_coverage_max_retries")
+        if isinstance(value, int) and value >= 0:
+            return value
+    return 2
+
+
+def _deliverable_surface_max_retries(config: dict[str, Any] | None) -> int:
+    """Bounded derive-stage re-derivations for the deliverable-surface exclusion
+    fence (``derive.deliverable_surface_max_retries``, default 2).
+
+    ``0`` = legacy behavior (no re-derive: a task authoring an excluded surface
+    fails the fence immediately). A versioned, visible default — not a silent
+    activation.
+    """
+    section = (config or {}).get("derive")
+    if isinstance(section, dict):
+        value = section.get("deliverable_surface_max_retries")
         if isinstance(value, int) and value >= 0:
             return value
     return 2

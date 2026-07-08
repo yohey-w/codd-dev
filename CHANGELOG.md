@@ -13,6 +13,45 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.19.0] - 2026-07-08 — Deliverable-surface fidelity (out-of-spec CLI exclusion)
+
+**Closes the ② blocker where a "Pure library (no CLI)" spec still produces a CLI that fails verify.** A fresh
+unattended Python greenfield on the v3.18.0 RC completed implement (the facade oracle passed), then FAILED at
+`verify`: the deriver had designed a runnable console entry point (`src/<pkg>/__main__.py`) and a full e2e CLI
+test suite despite the requirements saying "Pure library (no CLI, no I/O)" and "Out of scope: … a CLI". v3.18
+greened the CLI's *import* (the facade resolves), but its e2e tests (`tests/e2e/test_cli_*.py`) fail behaviorally
+and auto-repair exhausts at PARTIAL_SUCCESS — so v3.18 alone does not single-green a pure-library spec. Every
+out-of-spec artifact is undesigned surface where variance breeds; v3.19 shrinks the deliverable surface to the
+spec.
+
+Fix (Fable5-designed, deterministic + default-permissive; the implement-oracle stays byte-identical):
+
+- **Optional-surface vocabulary** (no new DSL): a `LayoutProfile` spec field `optional_surfaces: tuple[SurfaceSpec,
+  …]` (`{id, description, paths}`) — a re-application of the `SourcePlacementSpec` (v3.13) / `facade_output_paths`
+  (v3.18) profile-field pattern. The Python profile declares exactly one — `id="runnable-entrypoint"`, paths
+  `(src/<pkg>/__main__.py,)`; every other profile declares none → strict no-op. Surface ids/descriptions are
+  profile DATA; no surface semantics (and no `language ==`) enters shared core.
+- **Plan-stage requirements intake** (bounded, deterministic, fail-safe): iff the resolved profile declares ≥1
+  optional surface, one structured AI classification at the start of `_stage_plan` (before task derivation) reads
+  the requirements text + the surface list and returns, per surface, `{excluded, evidence}`. A surface is excluded
+  ONLY IF `excluded is true` AND `evidence` is a verbatim substring of the requirements (deterministic guard) —
+  silence / ambiguity / parse-failure / a hallucinated quote all → NOT excluded (legacy). The decision is persisted
+  to `codd.yaml` (`deliverable.excluded_surfaces`) so scaffold/derive/resume read a stable artifact and never
+  re-classify; the key doubles as a manual override and kill-switch. Language-of-requirements-agnostic.
+- **True-subtraction authority conditioning**: when a surface is excluded, its paths are subtracted from
+  `harness_owned_scaffold_paths()` (so the scaffold does NOT create `__main__.py`, and a stray one is an honest
+  ORPHAN — unlike v3.18's facade *content* carve-out, where the file is still created), the `_scaffold_python`
+  write is conditioned in lockstep (authority parity: scaffold-created set == owned-scaffold set), and the layout
+  prompt gains an "EXCLUDED DELIVERABLE SURFACE — do NOT author" rule.
+- **Derive-stage surface fence**: a sibling of the v3.18 facade gate — any derived task whose `expected_outputs`
+  intersect an excluded surface's paths triggers a bounded force-re-derive with deterministic feedback
+  (`derive.deliverable_surface_max_retries`, default 2; 0 = legacy); exhaustion → `StageError` (honest RED).
+
+Anti-false-green preserved: the fence only REJECTS (early-RED direction, never a new false-green); the intake is
+default-permissive with a verbatim-evidence guard + a config kill-switch. Generality preserved: the vocabulary is
+profile data, the 5 non-Python profiles are byte-identical (goldens), Python without an exclusion is byte-identical,
+and no `language ==` entered shared core (grep + the new ratchet lint stay green). Version synced 3.18.0 → 3.19.0.
+
 ## [3.18.0] - 2026-07-08 — Package-facade ownership carve-out + derive-stage facade-coverage gate
 
 **Closes the implement-oracle facade incoherence where a scaffolded-but-empty package facade fails the

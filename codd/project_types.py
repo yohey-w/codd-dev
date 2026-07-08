@@ -24,6 +24,7 @@ Design goals:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -943,6 +944,26 @@ class SourcePlacementSpec:
 
 
 @dataclass(frozen=True)
+class SurfaceSpec:
+    """One OPTIONAL deliverable surface a stack CAN emit but a project MAY exclude.
+
+    The harness scaffolds a surface's ``paths`` (e.g. a runnable console entry point)
+    by default; a project whose requirements exclude it (deterministic plan-stage
+    intake) drops it entirely — the scaffold does not create it, the owned-scaffold
+    authority no longer lists it, and any implement task that declares it is
+    fence-rejected. ``LayoutProfile.optional_surfaces`` defaults to ``()`` so every
+    stack that declares none is byte-identical BY CONSTRUCTION; ids/descriptions are
+    profile DATA (no surface semantics in shared core).
+    """
+    id: str
+    description: str
+    paths: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "description": self.description, "paths": list(self.paths)}
+
+
+@dataclass(frozen=True)
 class LayoutProfile:
     """Harness-owned repository topology + module-resolution contract for a stack.
 
@@ -993,6 +1014,13 @@ class LayoutProfile:
     # ``reference_base`` set) ONLY when this holds >1 DISTINCT normalized root —
     # otherwise it falls through to the single-root rule, unchanged.
     source_placements: tuple[SourcePlacementSpec, ...] = ()
+    # OPTIONAL DELIVERABLE SURFACES — surfaces the stack CAN emit but a project MAY
+    # exclude (``optional_surfaces``), plus the set actually excluded for THIS
+    # project (``excluded_surface_ids``, threaded once in
+    # :func:`resolve_layout_profile` from config). Both EMPTY by default so a
+    # profile that declares none is byte-identical BY CONSTRUCTION.
+    optional_surfaces: tuple[SurfaceSpec, ...] = ()
+    excluded_surface_ids: frozenset[str] = frozenset()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1006,6 +1034,8 @@ class LayoutProfile:
             "test_import_policy": self.test_import_policy,
             "ambient_modules": self.ambient_modules,
             "source_placements": [p.to_dict() for p in self.source_placements],
+            "optional_surfaces": [s.to_dict() for s in self.optional_surfaces],
+            "excluded_surface_ids": sorted(self.excluded_surface_ids),
             "implement_oracle": (
                 self.implement_oracle.to_dict() if self.implement_oracle is not None else None
             ),
@@ -1096,7 +1126,8 @@ class LayoutProfile:
                     if template_path:
                         _add(_apply_template_substitutions(str(template_path), subst))
 
-        return tuple(paths)
+        excluded = {p for rel in self.excluded_surface_paths() if (p := _norm_rel(rel))}
+        return tuple(p for p in paths if p not in excluded)
 
     def facade_output_paths(self) -> tuple[str, ...]:
         """Project-relative package-FACADE file(s) whose TOPOLOGY the harness owns
@@ -1127,6 +1158,25 @@ class LayoutProfile:
             norm = _norm_rel(f"{self.package_root}/__init__.py")
             return (norm,) if norm else ()
         return ()
+
+    def excluded_surface_paths(self) -> tuple[str, ...]:
+        """Normalized paths of this profile's optional surfaces that are EXCLUDED.
+
+        STRICT no-op (``()``) unless the profile declares optional surfaces AND some
+        are excluded (``excluded_surface_ids``). A true subtraction target: the
+        scaffold skips these, ``harness_owned_scaffold_paths`` drops them, and the
+        derive fence rejects any task declaring them.
+        """
+        if not self.excluded_surface_ids:
+            return ()
+        out: list[str] = []
+        for surface in self.optional_surfaces:
+            if surface.id in self.excluded_surface_ids:
+                for rel in surface.paths:
+                    norm = _norm_rel(rel)
+                    if norm and norm not in out:
+                        out.append(norm)
+        return tuple(out)
 
     def test_block_profile(self) -> Any:
         """Resolve this stack's test-structure adapter for the VB authenticity gate.
@@ -1390,6 +1440,19 @@ def render_layout_placement_contract(profile: "LayoutProfile | None") -> str:
             f"fence (and never changes how verify runs)."
         )
 
+    try:
+        excluded_surfaces = tuple(profile.excluded_surface_paths())
+    except Exception:  # noqa: BLE001 — projection must never break the prompt.
+        excluded_surfaces = ()
+    if excluded_surfaces:
+        listed = ", ".join(f"`{p}`" for p in excluded_surfaces)
+        rules.append(
+            f"{len(rules) + 1}. EXCLUDED DELIVERABLE SURFACE — the requirements exclude these "
+            f"surface(s), so the harness does NOT create them and you must NOT author or declare "
+            f"them among your outputs: {listed}. A file you emit here is an unowned orphan and "
+            f"fails the build."
+        )
+
     if not rules:
         return ""
 
@@ -1618,6 +1681,16 @@ def _python_layout_profile(
         test_import_policy="package_absolute",
         requires_package_init=True,
         requires_test_init=True,
+        optional_surfaces=(
+            SurfaceSpec(
+                id="runnable-entrypoint",
+                description=(
+                    "an executable command-line entry point a user invokes directly "
+                    "(e.g. `python -m <package>`)"
+                ),
+                paths=(f"{source_root}/{package_name}/__main__.py",),
+            ),
+        ),
         # A first-party module may legitimately share a bare name with the Python
         # stdlib (e.g. a domain ``ast.py``); resolved at runtime from the running
         # interpreter so the core hardcodes no module list. Exempts such a name
@@ -2394,6 +2467,18 @@ def _synthesize_layout_profile_from_language(
     )
 
 
+def _read_excluded_surface_ids(config: Any) -> frozenset[str]:
+    """The plan-persisted set of excluded deliverable-surface ids (or empty)."""
+    try:
+        section = config.get("deliverable") if isinstance(config, Mapping) else None
+        raw = section.get("excluded_surfaces") if isinstance(section, Mapping) else None
+        if isinstance(raw, (list, tuple)):
+            return frozenset(str(x).strip() for x in raw if str(x).strip())
+    except Exception:  # noqa: BLE001 — no/garbage config ⇒ nothing excluded (legacy).
+        pass
+    return frozenset()
+
+
 def resolve_layout_profile(
     *,
     language: str | None,
@@ -2431,7 +2516,7 @@ def resolve_layout_profile(
         # No per-language legacy builder → try the OPT-IN generic synthesizer (a stack
         # whose declarative profile declares ``greenfield_synthesis: true``; csharp this
         # increment). A non-opted-in / unknown language (Go) → None (conservative NO-OP).
-        return _synthesize_layout_profile_from_language(
+        profile = _synthesize_layout_profile_from_language(
             language=language,
             project_name=project_name,
             source_dirs=source_dirs,
@@ -2439,13 +2524,25 @@ def resolve_layout_profile(
             config=config,
             project_root=project_root,
         )
-    return builder(
-        project_name=project_name,
-        source_dirs=source_dirs,
-        test_dirs=test_dirs,
-        config=config,
-        project_root=project_root,
-    )
+    else:
+        profile = builder(
+            project_name=project_name,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            config=config,
+            project_root=project_root,
+        )
+    # Thread the project's excluded optional-surface ids onto the profile in ONE
+    # place (all consumers then read ``profile.excluded_surface_paths()`` — no
+    # signature changes). Intersect with what the profile actually declares so an
+    # unknown/foreign id is ignored; empty (default) leaves the profile untouched.
+    if profile is not None and profile.optional_surfaces:
+        excluded = _read_excluded_surface_ids(config) & frozenset(
+            s.id for s in profile.optional_surfaces
+        )
+        if excluded:
+            profile = dataclasses.replace(profile, excluded_surface_ids=excluded)
+    return profile
 
 
 def harness_owned_output_paths(
@@ -2714,20 +2811,19 @@ def _scaffold_python(project_root: Path, profile: LayoutProfile) -> ScaffoldResu
     # __init__ makes <source_root>/<package_name> an importable package; __main__
     # gives ``python -m <package_name>`` an entry point. Both package-relative.
     if profile.requires_package_init:
-        _ensure_file(
-            f"{package_dir}/__init__.py",
-            _SCAFFOLD_INIT_DOC,
-        )
-        _ensure_file(
-            f"{package_dir}/__main__.py",
-            (
-                '"""Console entry point (scaffolded by codd greenfield)."""\n\n'
-                "def main() -> int:\n"
-                "    raise NotImplementedError\n\n\n"
-                'if __name__ == "__main__":\n'
-                "    raise SystemExit(main())\n"
-            ),
-        )
+        _ensure_file(f"{package_dir}/__init__.py", _SCAFFOLD_INIT_DOC)
+        _excluded = {p for rel in profile.excluded_surface_paths() if (p := _norm_rel(rel))}
+        if _norm_rel(f"{package_dir}/__main__.py") not in _excluded:
+            _ensure_file(
+                f"{package_dir}/__main__.py",
+                (
+                    '"""Console entry point (scaffolded by codd greenfield)."""\n\n'
+                    "def main() -> int:\n"
+                    "    raise NotImplementedError\n\n\n"
+                    'if __name__ == "__main__":\n'
+                    "    raise SystemExit(main())\n"
+                ),
+            )
     if profile.requires_test_init:
         _ensure_file(f"{profile.test_root}/__init__.py", "")
 

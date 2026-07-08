@@ -482,3 +482,18 @@ derive:
   # feedback, up to this many times, before failing honestly.
   # 0 = legacy behavior (no re-derive; fail immediately on a coverage violation).
   api_facade_coverage_max_retries: 2
+  # Bounded re-derivations for the greenfield derive-stage deliverable-surface
+  # exclusion fence: when the plan-stage intake marks an optional deliverable
+  # surface out-of-scope, no derived implement task may author it. On a violation
+  # the stage re-derives with deterministic repair feedback naming the excluded
+  # path(s), up to this many times, before failing honestly.
+  # 0 = legacy behavior (no re-derive; fail immediately on an exclusion violation).
+  deliverable_surface_max_retries: 2
+
+# ── Deliverable surfaces (optional surfaces a project may exclude) ──────────
+deliverable:
+  # Surface-ids the plan-stage requirements intake deterministically classified as
+  # out-of-scope (e.g. `runnable-entrypoint` for a "pure library, no CLI" spec).
+  # Written by the pipeline; a manual entry is honored (override / kill-switch).
+  # Empty = byte-identical legacy behavior (every optional surface is scaffolded).
+  excluded_surfaces: []
