@@ -28,6 +28,7 @@ class BrownfieldResult:
     lexicon_path: Path | None = None
     extract_result: Any | None = None
     elicit_result: ElicitResult | Any | None = None
+    stage_status: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -44,6 +45,11 @@ class BrownfieldResult:
                 "merged_findings": len(self.merged_findings),
             },
         }
+        # Machine-readable honesty signal: when a stage was skipped/partial/empty
+        # the counts above are not the whole story. Only emitted for real
+        # pipeline runs (directly-constructed results stay byte-stable / legacy).
+        if self.stage_status is not None:
+            payload["stage_status"] = self.stage_status
         if isinstance(self.elicit_result, ElicitResult):
             payload["elicit"] = {
                 "all_covered": self.elicit_result.all_covered,
@@ -86,7 +92,9 @@ class BrownfieldPipeline:
         extract_output = project_root / ".codd" / "extract"
         extract_result = self._run_extract(project_root, extract_output)
         result_output = Path(getattr(extract_result, "output_dir", extract_output))
-        extract_input = _ensure_aggregate_extract(result_output, getattr(extract_result, "generated_files", []))
+        extract_input, extract_status = _ensure_aggregate_extract(
+            result_output, getattr(extract_result, "generated_files", [])
+        )
 
         requirements = _resolve_optional_file(
             project_root,
@@ -97,6 +105,11 @@ class BrownfieldPipeline:
         diff_findings: list[Finding] = []
         if requirements is not None:
             diff_findings = list(self._run_diff(project_root, extract_input, requirements))
+        diff_status: dict[str, Any] = (
+            {"status": "executed", "reason": None}
+            if requirements is not None
+            else {"status": "skipped", "reason": "no requirements.md"}
+        )
 
         lexicon = _resolve_optional_path(
             project_root,
@@ -107,6 +120,16 @@ class BrownfieldPipeline:
         lexicon_config = self._load_lexicon(lexicon) if lexicon is not None else None
         elicit_result = self._run_elicit(project_root, lexicon_config)
         elicit_findings = _findings_from_elicit_result(elicit_result)
+        elicit_status = {
+            "status": "ok",
+            "mode": "lexicon" if lexicon is not None else "discovery",
+        }
+
+        stage_status = {
+            "extract": extract_status,
+            "diff": diff_status,
+            "elicit": elicit_status,
+        }
 
         merged_findings = merge_findings(diff_findings, elicit_findings)
         return BrownfieldResult(
@@ -119,6 +142,7 @@ class BrownfieldPipeline:
             merged_findings=merged_findings,
             extract_result=extract_result,
             elicit_result=elicit_result,
+            stage_status=stage_status,
         )
 
     def _run_extract(self, project_root: Path, output_dir: Path) -> Any:
@@ -188,6 +212,10 @@ def format_brownfield_result(result: BrownfieldResult, format_name: str) -> str:
 def _format_brownfield_markdown(result: BrownfieldResult) -> str:
     from codd.elicit.formatters.md import MdFormatter
 
+    stage_status = result.stage_status
+    diff_stage = (stage_status or {}).get("diff") or {}
+    diff_skipped = diff_stage.get("status") == "skipped"
+
     lines = [
         "# Brownfield Report",
         "",
@@ -197,15 +225,54 @@ def _format_brownfield_markdown(result: BrownfieldResult) -> str:
         f"- extract_input: `{_path_text(result.extract_input)}`",
         f"- requirements_path: `{_path_text(result.requirements_path) or 'skipped'}`",
         f"- lexicon_path: `{_path_text(result.lexicon_path) or 'discovery mode'}`",
-        f"- diff_findings: {len(result.diff_findings)}",
-        f"- elicit_findings: {len(result.elicit_findings)}",
-        f"- merged_findings: {len(result.merged_findings)}",
-        "",
     ]
+    if diff_skipped:
+        reason = diff_stage.get("reason") or "no requirements.md"
+        # Honest headline: a skipped diff must not read as "0 findings" (pass).
+        lines.append(f"- diff: SKIPPED ({reason})")
+    else:
+        lines.append(f"- diff_findings: {len(result.diff_findings)}")
+    lines.extend(
+        [
+            f"- elicit_findings: {len(result.elicit_findings)}",
+            f"- merged_findings: {len(result.merged_findings)}",
+            "",
+        ]
+    )
+    if stage_status:
+        lines.extend(_format_stage_status_markdown(stage_status))
     findings_report = MdFormatter().format(result.merged_findings).strip()
     lines.append(findings_report)
     lines.append("")
     return "\n".join(lines)
+
+
+def _format_stage_status_markdown(stage_status: dict[str, Any]) -> list[str]:
+    lines = ["## Stage status", ""]
+
+    extract = stage_status.get("extract") or {}
+    failed = extract.get("files_failed") or []
+    lines.append(
+        f"- extract: {extract.get('status', 'unknown')} "
+        f"(discovered={extract.get('files_discovered', 0)}, "
+        f"aggregated={extract.get('files_aggregated', 0)}, "
+        f"failed={len(failed)})"
+    )
+    for entry in failed:
+        path, reason = entry[0], entry[1]
+        lines.append(f"  - failed: `{path}` — {reason}")
+
+    diff = stage_status.get("diff") or {}
+    if diff.get("status") == "skipped":
+        reason = diff.get("reason") or "no requirements.md"
+        lines.append(f"- diff: SKIPPED ({reason})")
+    else:
+        lines.append(f"- diff: {diff.get('status', 'unknown')}")
+
+    elicit = stage_status.get("elicit") or {}
+    lines.append(f"- elicit: {elicit.get('status', 'unknown')} (mode={elicit.get('mode', 'unknown')})")
+    lines.append("")
+    return lines
 
 
 def _resolve_project_root(value: Path | str) -> Path:
@@ -251,18 +318,31 @@ def _resolve_optional_path(
     return None
 
 
-def _ensure_aggregate_extract(output_dir: Path, generated_files: Iterable[Path]) -> Path:
+def _ensure_aggregate_extract(
+    output_dir: Path, generated_files: Iterable[Path]
+) -> tuple[Path, dict[str, Any]]:
     output_dir = Path(output_dir)
     aggregate_path = output_dir / "extracted.md"
-    if aggregate_path.is_file():
-        return aggregate_path
-
     paths = _extract_markdown_paths(output_dir, generated_files)
+    if aggregate_path.is_file():
+        # A prior run already built the aggregate; treat it as usable content.
+        status = {
+            "status": "ok",
+            "files_discovered": len(paths),
+            "files_aggregated": len(paths),
+            "files_failed": [],
+        }
+        return aggregate_path, status
+
     sections: list[str] = []
+    files_failed: list[tuple[str, str]] = []
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
+        except OSError as exc:
+            # Do NOT silently drop read failures: a partial aggregate that hides
+            # unreadable inputs is a false-green. Collect and surface them.
+            files_failed.append((_relative_to(path, output_dir), str(exc) or exc.__class__.__name__))
             continue
         if not text:
             continue
@@ -271,7 +351,22 @@ def _ensure_aggregate_extract(output_dir: Path, generated_files: Iterable[Path])
     body = "\n\n---\n\n".join(sections) if sections else "No extracted documents generated."
     output_dir.mkdir(parents=True, exist_ok=True)
     aggregate_path.write_text(f"# Extracted Brownfield Facts\n\n{body}\n", encoding="utf-8")
-    return aggregate_path
+
+    if not sections:
+        # A stub body (currently written unconditionally) is NOT an "ok" extract:
+        # nothing usable was aggregated.
+        status_name = "empty"
+    elif files_failed:
+        status_name = "partial"
+    else:
+        status_name = "ok"
+    status = {
+        "status": status_name,
+        "files_discovered": len(paths),
+        "files_aggregated": len(sections),
+        "files_failed": files_failed,
+    }
+    return aggregate_path, status
 
 
 def _extract_markdown_paths(output_dir: Path, generated_files: Iterable[Path]) -> list[Path]:

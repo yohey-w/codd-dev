@@ -3830,6 +3830,30 @@ def brownfield_cmd(
         f"elicit_findings={len(result.elicit_findings)}, "
         f"merged_findings={len(result.merged_findings)}"
     )
+
+    stage_status = getattr(result, "stage_status", None)
+    if stage_status:
+        extract = stage_status.get("extract") or {}
+        diff = stage_status.get("diff") or {}
+        elicit = stage_status.get("elicit") or {}
+        click.echo(
+            f"  extract: {extract.get('status', 'unknown')} "
+            f"(discovered={extract.get('files_discovered', 0)}, "
+            f"aggregated={extract.get('files_aggregated', 0)}, "
+            f"failed={len(extract.get('files_failed') or [])})"
+        )
+        if diff.get("status") == "skipped":
+            click.echo(f"  diff: SKIPPED ({diff.get('reason') or 'no requirements.md'})")
+        else:
+            click.echo(f"  diff: {diff.get('status', 'unknown')}")
+        click.echo(f"  elicit: {elicit.get('status', 'unknown')} (mode={elicit.get('mode', 'unknown')})")
+
+        # Honest headline: if any coherence surface was skipped/partial/empty, the
+        # "complete" line above is not the whole story. Exit code stays 0 (an
+        # exit-code escalation is a NEW red and is owner-gated).
+        if extract.get("status") in {"partial", "empty"} or diff.get("status") == "skipped":
+            click.echo("PARTIAL — not all coherence surfaces were checked")
+
     click.echo(f"Output: {_display_path(output_path, project_root)}")
 
 

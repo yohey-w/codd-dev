@@ -16,7 +16,8 @@ Detection legend: `caught_red` / `caught_amber` / `missed_green` / `n/a`.
 | check_selection_drift | P0 | no | covered | caught_amber | ✅ | unselected_check_names / test_dag_verify_cli.py |
 | silent_skip_shown_as_pass | P0 | no | shipped | caught_amber | ✅ | dag verify summary / test_dag_verify_cli.py (discovery round 1) |
 | resource_order_explicit_flow | P0 | consult | memo | missed_green | — | decision_memos |
-| extractor_silent_noop | P0 | consult | memo | missed_green | — | decision_memos |
+| extractor_silent_noop | P0 | consult | split: shipped | caught_amber | ✅ | capability-regex half → dag/checks/extraction_diagnostics.py (amber, dormant); document-extract half → see brownfield_stage_skip |
+| brownfield_stage_skip | P0 | no | shipped | caught_amber | ✅ | brownfield stage_status / test_pipeline.py (missing-requirements / unreadable-file / empty-extract / all-green control) |
 | identity_alias_drift | P1 | consult | memo | missed_green | — | decision_memos |
 | assertion_abuse | P0 | owner | memo | missed_green | — | decision_memos |
 | cross_artifact_partial_coverage | P0 | owner | memo | missed_green | — | decision_memos |

@@ -357,3 +357,115 @@ def test_cli_brownfield_writes_integrated_report(tmp_path: Path, monkeypatch) ->
     report = tmp_path / ".codd" / "brownfield_report.json"
     assert json.loads(report.read_text(encoding="utf-8"))["merged_findings"][0]["id"] == "E-1"
     assert "Brownfield pipeline complete" in result.output
+
+
+# --- Stage-status honesty parity (anti-false-green invariant 1) ---
+
+
+def test_stage_status_marks_diff_skipped_when_requirements_missing(tmp_path: Path) -> None:
+    """RED-first anchor: a requirements-less run must NOT masquerade as a checked diff."""
+    pipeline = BrownfieldPipeline(
+        extract_runner=_extract_runner(),
+        diff_engine_factory=lambda root: RecordingDiffEngine(),
+        elicit_engine_factory=lambda: RecordingElicitEngine([]),
+    )
+
+    result = pipeline.run(tmp_path)
+
+    stage = result.to_dict()["stage_status"]
+    assert stage["diff"]["status"] == "skipped"
+    assert stage["diff"]["reason"] == "no requirements.md"
+
+    md = format_brownfield_result(result, "md")
+    assert "diff: SKIPPED (no requirements.md)" in md
+    # The bare "0 findings" headline must not survive when the stage never ran.
+    assert "- diff_findings: 0" not in md
+
+
+def test_stage_status_reports_partial_extract_on_unreadable_file(tmp_path: Path, monkeypatch) -> None:
+    def run_extract(project_root: Path, output: str) -> ExtractStub:
+        output_dir = Path(output)
+        good = output_dir / "good.md"
+        bad = output_dir / "bad.md"
+        good.parent.mkdir(parents=True, exist_ok=True)
+        good.write_text("# Good\nreadable\n", encoding="utf-8")
+        bad.write_text("# Bad\nplaceholder\n", encoding="utf-8")
+        return ExtractStub(output_dir=output_dir, generated_files=[good, bad])
+
+    real_read_text = Path.read_text
+
+    def failing_read_text(self: Path, *args, **kwargs):
+        if self.name == "bad.md":
+            raise OSError("simulated unreadable file")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    (tmp_path / ".codd").mkdir()
+    (tmp_path / ".codd" / "requirements.md").write_text("# Requirements\n", encoding="utf-8")
+
+    pipeline = BrownfieldPipeline(
+        extract_runner=run_extract,
+        diff_engine_factory=lambda root: RecordingDiffEngine(),
+        elicit_engine_factory=lambda: RecordingElicitEngine([]),
+    )
+
+    result = pipeline.run(tmp_path)
+
+    extract = result.stage_status["extract"]
+    assert extract["status"] == "partial"
+    assert extract["files_failed"], "read failures must be surfaced, not silently dropped"
+    assert extract["files_aggregated"] == 1
+    failed_names = [Path(entry[0]).name for entry in extract["files_failed"]]
+    assert "bad.md" in failed_names
+
+
+def test_stage_status_reports_empty_extract_when_no_documents(tmp_path: Path) -> None:
+    def run_extract(project_root: Path, output: str) -> ExtractStub:
+        output_dir = Path(output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return ExtractStub(output_dir=output_dir, generated_files=[])
+
+    (tmp_path / ".codd").mkdir()
+    (tmp_path / ".codd" / "requirements.md").write_text("# Requirements\n", encoding="utf-8")
+
+    pipeline = BrownfieldPipeline(
+        extract_runner=run_extract,
+        diff_engine_factory=lambda root: RecordingDiffEngine(),
+        elicit_engine_factory=lambda: RecordingElicitEngine([]),
+    )
+
+    result = pipeline.run(tmp_path)
+
+    extract = result.stage_status["extract"]
+    assert extract["status"] == "empty"
+    assert extract["files_aggregated"] == 0
+    assert "extract: empty" in format_brownfield_result(result, "md")
+
+
+def test_stage_status_all_green_control_is_stable_except_new_block(tmp_path: Path) -> None:
+    (tmp_path / ".codd").mkdir()
+    (tmp_path / ".codd" / "requirements.md").write_text("# Requirements\n", encoding="utf-8")
+
+    pipeline = BrownfieldPipeline(
+        extract_runner=_extract_runner(),
+        diff_engine_factory=lambda root: RecordingDiffEngine([_finding("D-1", source="extract_brownfield")]),
+        elicit_engine_factory=lambda: RecordingElicitEngine([_finding("E-1")]),
+    )
+
+    result = pipeline.run(tmp_path)
+
+    stage = result.to_dict()["stage_status"]
+    assert stage["diff"]["status"] == "executed"
+    assert stage["diff"]["reason"] is None
+    assert stage["extract"]["status"] == "ok"
+    assert stage["extract"]["files_failed"] == []
+    assert stage["elicit"]["mode"] == "discovery"
+
+    md = format_brownfield_result(result, "md")
+    assert "## Stage status" in md
+    assert "SKIPPED" not in md
+    # Executed diff keeps the legacy count line (byte-stable outside the new block).
+    assert "- diff_findings: 1" in md
+    assert "- elicit_findings: 1" in md
+    assert "- merged_findings: 2" in md

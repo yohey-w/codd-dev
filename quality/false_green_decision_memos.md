@@ -40,6 +40,11 @@ polluting the language-free core; amber advisory vs (owner-gated) red.
 never silently green." Visibility = autonomous; making it red = owner-gated.
 **false_red_risk:** 2.
 
+## brownfield_stage_skip — `owner`
+Surfacing shipped (stage_status + PARTIAL headline, exit code unchanged).
+`brownfield_stage_skip` exit-code escalation — OWNER-GATED (a nonzero exit on a
+skipped/partial stage is a NEW red for existing users).
+
 ## identity_alias_drift — `consult`
 **Vector:** the same resource/capability is written under different spellings and
 treated as distinct (or wrongly unified).
