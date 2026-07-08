@@ -2806,3 +2806,91 @@ def test_classify_rejects_evidence_not_in_requirements(tmp_path: Path, monkeypat
     _classify_pipeline()._classify_deliverable_surfaces(project)
 
     assert _excluded_surfaces_in_config(project) == []
+
+
+# A persona note mentions the CLI in a NON-BINDING way; the phrase quoted below is a
+# VERBATIM substring so the anti-hallucination guard passes (see NB-2 test).
+_REQ_NONBINDING_CLI = """# Widget Library Requirements
+
+## Scope
+The system is an importable Python library exposing a computation API for other
+Python code to call.
+
+## Persona note
+No prior CLI experience is needed to use this library.
+"""
+
+
+def test_classify_honors_preexisting_exclusion_without_reclassifying(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """(NB-1) When codd.yaml ALREADY carries a NON-EMPTY
+    ``deliverable.excluded_surfaces`` (an owner's MANUAL edit OR a prior plan's
+    persisted decision), ``_classify_deliverable_surfaces`` RETURNS EARLY: no AI
+    call, no re-classification, no overwrite. This makes a forced plan re-run
+    idempotent and unable to clobber the owner's decision.
+
+    RED-FIRST: the AI stub WOULD classify differently (``excluded: false``); the
+    crisp discriminator is that it is NEVER invoked. Before the fix the intake
+    re-classifies (the stub IS invoked) → this test is RED; after the fix the
+    pre-existing decision short-circuits it → GREEN. The pre-existing list is also
+    asserted byte-for-byte preserved."""
+    project = _classify_project(tmp_path, _REQ_WITH_CLI)
+    _write_deliverable_config(project, ["runnable-entrypoint"])
+    invocations: list[str] = []
+
+    class _RecordingAiCommand:
+        def invoke(self, prompt: str) -> str:  # noqa: D401 - stub
+            invocations.append(prompt)
+            return json.dumps(
+                {"runnable-entrypoint": {"excluded": False, "evidence": ""}}
+            )
+
+    def _fake_get_ai_command(config, project_root=None, command_override=None):
+        return _RecordingAiCommand()
+
+    monkeypatch.setattr(
+        "codd.deployment.providers.ai_command_factory.get_ai_command",
+        _fake_get_ai_command,
+    )
+    monkeypatch.setattr(
+        "codd.greenfield.pipeline.get_ai_command", _fake_get_ai_command, raising=False
+    )
+
+    _classify_pipeline()._classify_deliverable_surfaces(project)
+
+    assert invocations == []  # NO AI call — the pre-existing decision is honored.
+    assert _excluded_surfaces_in_config(project) == ["runnable-entrypoint"]  # unchanged.
+
+
+def test_classify_persists_verbatim_nonbinding_exclusion_accepted_residual(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """(f) ACCEPTED RESIDUAL: the verbatim-evidence guard is an anti-hallucination
+    check, NOT a binding-ness judge; this bounded false-exclusion is bounded by the
+    F8 control run and must NOT motivate loosening the guard (that is the
+    gate-weakening direction).
+
+    A persona note mentions the CLI in a NON-BINDING way
+    ("No prior CLI experience is needed to use this library.") and the classifier
+    both marks the surface excluded AND cites a VERBATIM substring as evidence — so
+    the guard passes and the surface IS excluded. If the exclusion fires wrongly,
+    the failure direction is scaffold-omission + fence early-RED (honest
+    StageError), never a false-green. Pinned here so any future guard change is a
+    visible diff. Do NOT change the guard to make this test go away."""
+    project = _classify_project(tmp_path, _REQ_NONBINDING_CLI)
+    _patch_stub_ai(
+        monkeypatch,
+        json.dumps(
+            {
+                "runnable-entrypoint": {
+                    "excluded": True,
+                    "evidence": "No prior CLI experience is needed",
+                }
+            }
+        ),
+    )
+
+    _classify_pipeline()._classify_deliverable_surfaces(project)
+
+    assert _excluded_surfaces_in_config(project) == ["runnable-entrypoint"]

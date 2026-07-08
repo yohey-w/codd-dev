@@ -1023,6 +1023,37 @@ class GreenfieldPipeline:
             if profile is None or not getattr(profile, "optional_surfaces", ()):
                 return  # no optional surfaces => nothing to classify (no-op)
 
+            # NB-1: honor a PRE-EXISTING exclusion decision before any AI call.
+            # If the RAW project codd.yaml already carries a NON-EMPTY
+            # ``deliverable.excluded_surfaces`` — an owner's MANUAL edit OR a prior
+            # plan's persisted decision — RETURN EARLY: no re-classification, no AI
+            # invocation, no overwrite. This makes a forced plan re-run idempotent
+            # and unable to clobber the owner's edit. Verified safe: ``codd init``
+            # does NOT materialize this key (it lives only in defaults.yaml, merged
+            # at load), so the presence-check can never dead-arm the intake on a
+            # fresh project. Fail-safe: ANY read error falls through to
+            # classification (legacy), NOT the outer skip.
+            try:
+                from codd.config import find_codd_dir
+
+                _existing_dir = find_codd_dir(project_root)
+                _existing = (
+                    yaml.safe_load((_existing_dir / "codd.yaml").read_text(encoding="utf-8"))
+                    if _existing_dir is not None
+                    else None
+                )
+                _section = _existing.get("deliverable") if isinstance(_existing, dict) else None
+                _prior = _section.get("excluded_surfaces") if isinstance(_section, dict) else None
+                if isinstance(_prior, list) and _prior:
+                    self.echo(
+                        "[greenfield] plan: deliverable-surface intake honored a "
+                        "pre-existing exclusion decision (no re-classification): "
+                        f"{', '.join(str(s) for s in _prior)}"
+                    )
+                    return
+            except Exception:  # noqa: BLE001 — read error => classify (legacy), never skip.
+                pass
+
             from codd.elicit.engine import _collect_requirements
 
             requirements = _collect_requirements(project_root, max_chars=40000)
