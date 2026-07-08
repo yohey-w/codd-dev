@@ -472,3 +472,13 @@ greenfield:
     # is an immediate RED (a test task must not legalize an orphan by editing
     # the VB registry).
     max_rounds: 2
+
+# ── Task derivation (codd plan derive / greenfield implement) ──────────────
+derive:
+  # Bounded re-derivations for the greenfield derive-stage API-facade coverage
+  # gate: the package-facade file's topology is harness-owned but its public-API
+  # content is SUT-authored, so exactly one derived implement task must own it.
+  # On a 0-or->=2-owner violation the stage re-derives with deterministic repair
+  # feedback, up to this many times, before failing honestly.
+  # 0 = legacy behavior (no re-derive; fail immediately on a coverage violation).
+  api_facade_coverage_max_retries: 2

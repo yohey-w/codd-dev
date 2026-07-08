@@ -431,3 +431,47 @@ class TestHarnessOwnedScaffoldPaths:
             assert created in declared, (
                 f"scaffolder created {created!r} but the profile does not declare it"
             )
+
+
+# ═══════════════════════════════════════════════════════════
+# facade_output_paths — the ownership carve-out accessor (v3.18.0)
+# ═══════════════════════════════════════════════════════════
+#
+# The package-FACADE file's TOPOLOGY is harness-owned (the scaffold creates it)
+# but its CONTENT — the package's public-API re-exports — is SUT-authored. This
+# accessor names ONLY the facade file(s) the harness creates but must NOT claim
+# as an AI obligation. It is a STRICT NO-OP for every stack whose scaffolder does
+# not emit a content-bearing package facade (the routing mirrors
+# ``harness_owned_scaffold_paths`` — same scaffolder-realizer id — so it never
+# widens beyond the one Python src-package stack), and it is a strict SUBSET of
+# ``harness_owned_scaffold_paths`` (the scaffold still creates the file and the
+# orphan-gate/write-fence still exempt it; only the obligation authority subtracts
+# it).
+
+
+class TestFacadeOutputPaths:
+    def _resolve(self, language, name="demo-app"):
+        return resolve_layout_profile(
+            language=language, project_name=name, source_dirs=["src/"], test_dirs=["tests/"]
+        )
+
+    def test_python_src_package_declares_package_init_facade(self):
+        profile = self._resolve("python")
+        assert profile.facade_output_paths() == (f"{profile.package_root}/__init__.py",)
+        # Concrete shape (package derived from the project name): src/<pkg>/__init__.py.
+        assert profile.facade_output_paths() == ("src/demo_app/__init__.py",)
+
+    @pytest.mark.parametrize("language", ["javascript", "typescript", "java", "cpp", "csharp"])
+    def test_non_python_stacks_declare_no_facade(self, language):
+        # STRICT NO-OP: no non-Python stack scaffolds a content-bearing package
+        # facade, so the carve-out never fires (no path prefix, no ``language ==``).
+        assert self._resolve(language).facade_output_paths() == ()
+
+    def test_python_facade_is_subset_of_harness_owned_scaffold_paths(self):
+        # The scaffold still CREATES the facade (fence/orphan authority keeps it);
+        # only the obligation authority subtracts it. So the carve-out is a strict
+        # subset of the harness-owned scaffold declaration.
+        profile = self._resolve("python")
+        facade = set(profile.facade_output_paths())
+        assert facade  # non-empty for Python
+        assert facade <= set(profile.harness_owned_scaffold_paths())

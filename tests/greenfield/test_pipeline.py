@@ -2335,3 +2335,180 @@ def test_vb_plan_contract_skipped_when_gate_off(tmp_path: Path) -> None:
     # config opt-out (test_coverage.gate: false)
     project2 = _vb_plan_project(tmp_path / "off", _WC_AC_ONLY, gate=False)
     GreenfieldPipeline()._enforce_greenfield_vb_plan_contract(project2, {"coverage_gate": True})
+
+
+# ═══════════════════════════════════════════════════════════
+# Derive-stage API-facade coverage gate (v3.18.0)
+# ═══════════════════════════════════════════════════════════
+#
+# ``_enforce_api_facade_coverage`` runs at the TOP of the implement stage (before
+# scaffold + per-task loop, strictly before the owner-uniqueness gate). It proves
+# EXACTLY ONE derived task owns each package-FACADE file (``src/<pkg>/__init__.py``
+# for a Python src-package stack — its topology harness-owned, its public-API
+# CONTENT SUT-authored). 0 owners leaves the empty scaffold placeholder (downstream
+# public-API import fails the implement-oracle); >=2 owners is an ambiguous-owner
+# topology. On a violation the gate FORCES a bounded re-derivation with a
+# deterministic repair directive naming the path, re-lists, and re-checks;
+# exhaustion raises StageError (honest RED). STRICT NO-OP unless the profile
+# declares a facade AND a derived-SOURCE task exists. Deriver/lister are injected
+# stubs so the gate math is exercised with no real LLM. (The project is a Python
+# src-package: ``make_stub_project(name="stub-app")`` → facade ``src/stub_app/
+# __init__.py``.)
+
+_FACADE_PATH = "src/stub_app/__init__.py"
+
+
+def _derived_source_task(task_id: str, rel: str) -> ImplementTaskRef:
+    return ImplementTaskRef(
+        task_id=task_id,
+        design_node="docs/design/core_design.md",
+        source="derived",
+        expected_outputs=(rel,),
+    )
+
+
+def _facade_owner_task(task_id: str = "impl_facade") -> ImplementTaskRef:
+    return _derived_source_task(task_id, _FACADE_PATH)
+
+
+class _RecordingDeriver:
+    """Stub ``task_deriver``: records each (force, feedback) call; derives nothing."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def __call__(self, project_root, *, ai_command=None, force=False, feedback=None) -> int:
+        self.calls.append({"force": force, "feedback": feedback, "ai_command": ai_command})
+        return 0
+
+
+class _ScriptedLister:
+    """Stub ``task_lister``: returns a scripted task list per call (last repeats)."""
+
+    def __init__(self, results: list[list[ImplementTaskRef]]) -> None:
+        self._results = [list(r) for r in results]
+        self.calls = 0
+
+    def __call__(self, project_root) -> list[ImplementTaskRef]:
+        idx = min(self.calls, len(self._results) - 1)
+        self.calls += 1
+        return list(self._results[idx])
+
+
+def _write_derive_config(project: Path, **derive) -> None:
+    """Persist a ``derive:`` section into the project's codd.yaml so
+    ``load_project_config`` picks up ``derive.api_facade_coverage_max_retries``."""
+    codd_yaml = project / "codd" / "codd.yaml"
+    data = yaml.safe_load(codd_yaml.read_text(encoding="utf-8"))
+    data["derive"] = dict(derive)
+    codd_yaml.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def _facade_gate_pipeline(deriver, lister) -> GreenfieldPipeline:
+    return GreenfieldPipeline(
+        project_name="stub-app",
+        language="python",
+        ai_command="stub-ai --print",
+        task_deriver=deriver,
+        task_lister=lister,
+        echo=lambda _m: None,
+    )
+
+
+def test_facade_coverage_exactly_one_owner_no_rederive_moves_owner_last(tmp_path: Path) -> None:
+    """Exactly-1 owner → gate passes with NO re-derive, and the order rider
+    stable-moves the facade-owner task to the END (authored after the modules
+    whose symbols it re-exports)."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])  # must not be consulted
+    pipeline = _facade_gate_pipeline(deriver, lister)
+    # facade owner FIRST to prove the order rider actually moves it last.
+    tasks = [_facade_owner_task("impl_facade"), _derived_source_task("impl_core", "src/stub_app/core.py")]
+
+    result = pipeline._enforce_api_facade_coverage(project, tasks)
+
+    assert deriver.calls == []
+    assert lister.calls == 0
+    assert [t.task_id for t in result] == ["impl_core", "impl_facade"]
+
+
+def test_facade_coverage_zero_owners_rederives_with_feedback_then_passes(tmp_path: Path) -> None:
+    """0 owners → re-derive with ``force=True`` and non-empty feedback NAMING the
+    facade path; a stateful lister returns a corrected (1-owner) list → gate OK,
+    owner moved last."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    corrected = [
+        _derived_source_task("impl_core", "src/stub_app/core.py"),
+        _facade_owner_task("impl_facade"),
+    ]
+    lister = _ScriptedLister([corrected])
+    pipeline = _facade_gate_pipeline(deriver, lister)
+    tasks = [_derived_source_task("impl_core", "src/stub_app/core.py")]  # 0 facade owners
+
+    result = pipeline._enforce_api_facade_coverage(project, tasks)
+
+    assert len(deriver.calls) == 1
+    assert deriver.calls[0]["force"] is True
+    assert deriver.calls[0]["feedback"]
+    assert _FACADE_PATH in deriver.calls[0]["feedback"]
+    assert lister.calls == 1
+    assert [t.task_id for t in result] == ["impl_core", "impl_facade"]
+
+
+def test_facade_coverage_zero_retries_fails_immediately_without_rederive(tmp_path: Path) -> None:
+    """``derive.api_facade_coverage_max_retries: 0`` (legacy) → a 0-owner violation
+    raises StageError NAMING the facade path immediately; the deriver is never
+    called."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    _write_derive_config(project, api_facade_coverage_max_retries=0)
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])
+    pipeline = _facade_gate_pipeline(deriver, lister)
+    tasks = [_derived_source_task("impl_core", "src/stub_app/core.py")]  # 0 facade owners
+
+    with pytest.raises(StageError, match=re.escape(_FACADE_PATH)):
+        pipeline._enforce_api_facade_coverage(project, tasks)
+    assert deriver.calls == []
+    assert lister.calls == 0
+
+
+def test_facade_coverage_two_owners_rederives_then_exhausts(tmp_path: Path) -> None:
+    """>=2 owners → re-derive fires (force=True); a lister that keeps 2 owners past
+    the retry budget (default 2) exhausts → StageError naming the facade path."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    two_owners = [_facade_owner_task("impl_facade_a"), _facade_owner_task("impl_facade_b")]
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([two_owners])  # stays ambiguous (2 owners) forever
+    pipeline = _facade_gate_pipeline(deriver, lister)
+
+    with pytest.raises(StageError, match=re.escape(_FACADE_PATH)):
+        pipeline._enforce_api_facade_coverage(project, list(two_owners))
+    # default max_retries=2 ⇒ two re-derive attempts before honest failure.
+    assert len(deriver.calls) == 2
+    assert all(call["force"] is True for call in deriver.calls)
+
+
+def test_facade_coverage_all_configured_project_is_strict_noop(tmp_path: Path) -> None:
+    """No derived-SOURCE task (an all-configured project derives nothing to gate) →
+    strict no-op: tasks returned unchanged and the deriver is never called, even
+    though no task owns the facade."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])
+    pipeline = _facade_gate_pipeline(deriver, lister)
+    tasks = [
+        ImplementTaskRef(
+            task_id="cfg",
+            design_node="docs/design/core_design.md",
+            source="configured",
+            expected_outputs=("src/stub_app/core.py",),
+        ),
+    ]
+
+    result = pipeline._enforce_api_facade_coverage(project, tasks)
+
+    assert result == tasks
+    assert deriver.calls == []
+    assert lister.calls == 0

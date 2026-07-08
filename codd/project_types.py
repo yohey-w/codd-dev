@@ -1098,6 +1098,36 @@ class LayoutProfile:
 
         return tuple(paths)
 
+    def facade_output_paths(self) -> tuple[str, ...]:
+        """Project-relative package-FACADE file(s) whose TOPOLOGY the harness owns
+        but whose CONTENT the SUT/AI authors (the ownership carve-out).
+
+        A named-package stack scaffolds an empty package-root facade file (a
+        docstring placeholder) as harness TOPOLOGY, yet its public-API re-exports
+        are genuine SUT-authored content: a downstream module importing the
+        package's public symbols resolves them THROUGH this file, so leaving it
+        empty is a real cross-artifact incoherence the implement-oracle rightly
+        rejects. This accessor names the file(s) the harness creates but must NOT
+        claim as an AI-produced obligation — the deriver keeps them in a task's
+        declared outputs, the completeness/kind contract imposes the source-kind
+        obligation on them, and the layout prompt stops forbidding them.
+
+        STRICT NO-OP for every stack whose scaffolder does not create a
+        content-bearing package facade: the routing mirrors
+        :meth:`harness_owned_scaffold_paths` (the same legacy-bridge scaffolder
+        realizer id), and any other scaffolder returns ``()`` — so this carve-out
+        never widens beyond the one stack whose scaffolder emits such a placeholder,
+        and it introduces NO path prefix and NO ``language ==`` literal. It is a
+        strict SUBSET of :meth:`harness_owned_scaffold_paths` (the scaffold still
+        creates the file and the orphan-gate/write-fence still exempt it); only the
+        module-level obligation authority subtracts it.
+        """
+        scaffolder_id = _legacy_realizer_id(self.language, "scaffolder")
+        if scaffolder_id == _SCAFFOLDER_PY_SRC_PACKAGE and self.requires_package_init:
+            norm = _norm_rel(f"{self.package_root}/__init__.py")
+            return (norm,) if norm else ()
+        return ()
+
     def test_block_profile(self) -> Any:
         """Resolve this stack's test-structure adapter for the VB authenticity gate.
 
@@ -1339,7 +1369,14 @@ def render_layout_placement_contract(profile: "LayoutProfile | None") -> str:
                 )
 
     try:
-        scaffold_paths = tuple(profile.harness_owned_scaffold_paths())
+        # The FACADE file is carved out of the harness obligation (its content is
+        # SUT-authored), so it must NOT appear in the "do not author these" list —
+        # the model is now expected to populate it. Subtract it here (this rule
+        # reads the profile method directly, not the obligation authority).
+        facade = {_norm_rel(p) for p in profile.facade_output_paths()}
+        scaffold_paths = tuple(
+            p for p in profile.harness_owned_scaffold_paths() if _norm_rel(p) not in facade
+        )
     except Exception:  # noqa: BLE001 — an ownership-resolution failure must never break the prompt.
         scaffold_paths = ()
     if scaffold_paths:
@@ -2456,9 +2493,22 @@ def harness_owned_output_paths(
         )
         if profile is None:
             return frozenset()
-        return frozenset(
+        owned = frozenset(
             norm for rel in profile.harness_owned_scaffold_paths() if (norm := _norm_rel(rel))
         )
+        # Ownership carve-out: the package FACADE file's topology is harness-owned
+        # (the scaffold creates it) but its CONTENT is SUT-authored (public-API
+        # re-exports). Subtract it from the OBLIGATION authority so the deriver
+        # keeps it in a task's declared outputs and the kind/completeness contract
+        # imposes the source obligation on it — while the fence/orphan authority
+        # (harness_owned_scaffold_paths) still lists it, so the scaffold still
+        # creates it and it is never flagged an orphan. STRICT SUBSET: a stack
+        # whose profile declares no facade (facade_output_paths() == ()) is
+        # unchanged.
+        facade = frozenset(
+            norm for rel in profile.facade_output_paths() if (norm := _norm_rel(rel))
+        )
+        return owned - facade
     except Exception:  # noqa: BLE001 — fail-closed: no exemption, strict gate.
         return frozenset()
 

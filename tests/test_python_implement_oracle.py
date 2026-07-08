@@ -150,6 +150,23 @@ def test_missing_imported_symbol_is_red(tmp_path: Path) -> None:
     assert "PY_IMPORT_NAME_NOT_FOUND" in _codes(result)
 
 
+def test_facade_reexport_of_missing_symbol_is_red(tmp_path: Path) -> None:
+    """A package facade re-exporting a nonexistent symbol stays RED — the __init__
+    is itself a scanned importer, so over-export cannot false-green (v3.18.0)."""
+    _scaffold(tmp_path, with_path_shim=True)
+    _write(tmp_path, "src/app/errors.py", "class RealError(Exception):\n    pass\n")
+    _write(tmp_path, "src/app/__init__.py", "from .errors import Nope\n")
+    _write(
+        tmp_path,
+        "tests/test_errors.py",
+        "from app.errors import RealError\n\n\ndef test_real():\n    assert RealError\n",
+    )
+    result = _run(tmp_path)
+    assert result.passed is False
+    assert result.category_counts().get(EVIDENCE_MISSING_SYMBOL, 0) >= 1
+    assert "PY_IMPORT_NAME_NOT_FOUND" in _codes(result)
+
+
 # ═════════════════════════════════════════════════════════════
 # 3. ``if TYPE_CHECKING:`` imports are IGNORED (PASS) — runtime oracle.
 # ═════════════════════════════════════════════════════════════

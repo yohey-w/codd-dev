@@ -1215,6 +1215,12 @@ class GreenfieldPipeline:
                 "or check that design documents support task derivation (codd plan derive)"
             )
 
+        # Derive-stage API-facade coverage gate (before scaffold + per-task loop,
+        # and strictly before the owner-uniqueness gate): guarantee exactly one
+        # derived task owns each SUT-authored package-facade file, re-deriving with
+        # deterministic feedback if not. STRICT NO-OP for a stack with no facade.
+        tasks = self._enforce_api_facade_coverage(project_root, tasks)
+
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {task.task_id: units.get(task.task_id, STATUS_PENDING) for task in tasks}
 
@@ -1318,6 +1324,121 @@ class GreenfieldPipeline:
             authenticity_profile=self._resolve_layout_profile(project_root) if coverage_on else None,
         )
         record["detail"] = f"{len(tasks)} task(s) implemented"
+
+    def _enforce_api_facade_coverage(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+    ) -> list[ImplementTaskRef]:
+        """Derive-stage gate: exactly one derived task owns each package-FACADE file.
+
+        The package facade (its topology harness-owned, its CONTENT SUT-authored —
+        see :meth:`~codd.project_types.LayoutProfile.facade_output_paths`) must be
+        populated by exactly ONE implement task; 0 owners leaves it the empty
+        scaffold placeholder (the downstream public-API import fails the
+        implement-oracle), and >=2 owners is an ambiguous-owner topology the
+        uniqueness gate would reject. This deterministic set-math check runs at the
+        TOP of the implement stage (before the scaffold and the per-task loop, and
+        strictly before ``_certify_output_owner_uniqueness``); on a violation it
+        FORCES a bounded re-derivation with a deterministic repair directive naming
+        the path, re-approves, re-lists, and re-checks. Exhaustion raises
+        :class:`StageError` (honest RED). Because the re-derive overwrites the
+        cache, a ``--resume`` stays consistent.
+
+        STRICT NO-OP unless the resolved profile declares a facade
+        (``facade_output_paths()`` non-empty) AND a derived-SOURCE task exists (an
+        all-configured project derives nothing to gate). Fires on an accessor
+        value, never a ``language ==`` literal.
+        """
+        from codd.config import load_project_config
+
+        profile = self._resolve_layout_profile(project_root)
+        if profile is None:
+            return tasks
+        try:
+            facade_paths = {p for rel in profile.facade_output_paths() if (p := _norm_decl_path(rel))}
+        except Exception:  # noqa: BLE001 — no facade accessor => no gate.
+            facade_paths = set()
+        if not facade_paths:
+            return tasks
+
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+
+        # Gate only when the project actually derives SOURCE tasks (an
+        # all-configured project has nothing to re-derive).
+        if not any(
+            task.source == "derived" and _KIND_SOURCE in _required_kinds(task, config)
+            for task in tasks
+        ):
+            return tasks
+
+        max_retries = _api_facade_coverage_max_retries(config)
+        attempt = 0
+        while True:
+            uncovered = self._facade_owner_violations(tasks, facade_paths)
+            if not uncovered:
+                break
+            if attempt >= max_retries:
+                detail = "; ".join(
+                    f"`{path}` declared by {count} task(s) (need exactly 1)"
+                    for path, count in sorted(uncovered.items())
+                )
+                raise StageError(
+                    "derive-stage API-facade coverage gate failed — the package "
+                    "facade file's public API is authored by the SUT but no single "
+                    f"implement task owns it: {detail}. Exactly one derived task must "
+                    "declare each facade path and populate its designed public API."
+                )
+            attempt += 1
+            feedback = self._build_facade_coverage_feedback(uncovered)
+            self.echo(
+                "[greenfield] implement: API-facade coverage gate re-deriving with "
+                f"repair feedback (attempt {attempt}/{max_retries})"
+            )
+            deriver = self.task_deriver or _default_task_deriver
+            deriver(project_root, ai_command=self.ai_command, force=True, feedback=feedback)
+            lister = self.task_lister or _default_task_lister
+            tasks = list(lister(project_root))
+
+        # Order rider: stable-move each facade-owner task to the END of the list so
+        # it is authored AFTER the modules whose real symbols it re-exports (the
+        # aggregator runs after the aggregated). Relative order is otherwise
+        # preserved.
+        owners = [task for task in tasks if self._task_declares_facade(task, facade_paths)]
+        others = [task for task in tasks if not self._task_declares_facade(task, facade_paths)]
+        return others + owners
+
+    def _facade_owner_violations(
+        self,
+        tasks: list[ImplementTaskRef],
+        facade_paths: set[str],
+    ) -> dict[str, int]:
+        """Map each facade path with an owner count != 1 to that count."""
+        counts = {path: 0 for path in facade_paths}
+        for task in tasks:
+            declared = {_norm_decl_path(out) for out in task.expected_outputs}
+            for path in facade_paths:
+                if path in declared:
+                    counts[path] += 1
+        return {path: count for path, count in counts.items() if count != 1}
+
+    def _task_declares_facade(self, task: ImplementTaskRef, facade_paths: set[str]) -> bool:
+        declared = {_norm_decl_path(out) for out in task.expected_outputs}
+        return bool(declared & facade_paths)
+
+    def _build_facade_coverage_feedback(self, uncovered: dict[str, int]) -> str:
+        """Deterministic repair directive for a facade-coverage re-derivation."""
+        paths = ", ".join(f"`{path}`" for path in sorted(uncovered))
+        return (
+            "Exactly ONE implement task must declare each of these package-facade "
+            "file(s) in its expected_outputs and populate its designed public API "
+            f"(re-export the package's public symbols): {paths}. The file currently "
+            "contains only the scaffold placeholder docstring. Do not split a facade "
+            "across multiple tasks, and do not omit it."
+        )
 
     def _finalize_dependency_lock_coherence(self, project_root: Path) -> None:
         """Reconcile harness-owned toolchain deps + refresh the lock (implement-end).
@@ -2803,11 +2924,23 @@ def _default_task_lister(project_root: Path) -> list[ImplementTaskRef]:
     ]
 
 
-def _default_task_deriver(project_root: Path, *, ai_command: str | None) -> int:
+def _default_task_deriver(
+    project_root: Path,
+    *,
+    ai_command: str | None,
+    force: bool = False,
+    feedback: str | None = None,
+) -> int:
     """Derive implement tasks from design docs and auto-approve them.
 
     Mirrors ``codd plan derive`` + ``codd plan approve <doc> --all`` — the
     autopilot equivalent of the HITL task-approval gate.
+
+    ``force`` re-derives even when a cache exists (busting the cached list), and
+    ``feedback`` threads a deterministic repair directive into the derivation
+    prompt (via the project-context payload). Both are used by the derive-stage
+    coverage gate to re-drive a derivation that failed a deterministic
+    completeness check; the defaults preserve the legacy single-derivation path.
     """
     import codd.cli as cli_module
     from codd.config import load_project_config
@@ -2822,15 +2955,18 @@ def _default_task_deriver(project_root: Path, *, ai_command: str | None) -> int:
     nodes = cli_module._plan_design_doc_nodes(project_root, ())
     command = ai_command or cli_module._plan_derive_command(config)
     deriver = deriver_cls(get_ai_command(config, project_root, command_override=command))
+    project_context: dict[str, Any] = {"project": config.get("project", {})}
+    if feedback:
+        project_context["derivation_repair_feedback"] = feedback
     tasks = deriver.derive_tasks(
         nodes,
         "detailed",
         {
             "project_root": project_root,
-            "force": False,
+            "force": bool(force),
             "dry_run": False,
             "write_cache": True,
-            "project_context": {"project": config.get("project", {})},
+            "project_context": project_context,
         },
     )
     for cache_path, _record in iter_derived_task_records(project_root):
@@ -3687,6 +3823,22 @@ def _vb_rework_max_rounds(config: dict[str, Any] | None) -> int:
     section = ((config or {}).get("greenfield") or {}).get("vb_rework")
     if isinstance(section, dict):
         value = section.get("max_rounds")
+        if isinstance(value, int) and value >= 0:
+            return value
+    return 2
+
+
+def _api_facade_coverage_max_retries(config: dict[str, Any] | None) -> int:
+    """Bounded derive-stage re-derivations for the API-facade coverage gate
+    (``derive.api_facade_coverage_max_retries``, default 2).
+
+    ``0`` = legacy behavior (no re-derive: a facade with the wrong owner count
+    fails the gate immediately). A versioned, visible default — not a silent
+    activation.
+    """
+    section = (config or {}).get("derive")
+    if isinstance(section, dict):
+        value = section.get("api_facade_coverage_max_retries")
         if isinstance(value, int) and value >= 0:
             return value
     return 2

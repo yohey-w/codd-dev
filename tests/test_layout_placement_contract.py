@@ -340,15 +340,18 @@ def test_synthesize_cpp_populates_source_placements():
         assert other.source_placements[0].reference_base is False
 
 
-# The CURRENT (pre-fix) rendered output for every single-root stack, captured
-# verbatim. The fix MUST leave these byte-identical — this is the critical no-op
-# proof that only cpp's rendering changes.
+# The rendered output for every single-root stack, captured verbatim (the
+# render-contract golden). v3.18.0 ownership carve-out: the named-package FACADE
+# `src/exprcalc/__init__.py` is now SUT-authored, so it is subtracted from the
+# python HARNESS-OWNED SCAFFOLD "do NOT author" list (the model must populate it);
+# `__main__.py` / `pyproject.toml` / test `__init__.py` stay harness-owned. Every
+# other stack is byte-identical (facade_output_paths() is empty for them).
 _GOLDEN_LAYOUT_CONTRACT = {
     'python': (
         'Repository LAYOUT CONTRACT (release-blocking — the harness scaffold owns this topology and the output-path fence enforces it at implement; a file placed outside the owned roots is dropped, so a declared deliverable then reads as never produced and fails the build — get the placement right the first time):' '\n'
         '' '\n'
         "1. TEST LOCATION — the harness OWNS the test root `tests/`, and the verify runner discovers test files ONLY under `tests/`. Put EVERY test file you author — and every test-file path this document references — UNDER `tests/` (do NOT invent a sibling test directory such as `test/`, `spec/`, `specs/`). A test file placed outside `tests/` is dropped by the output-path fence, so its declared 'test' deliverable reads as never produced and fails the build." '\n'
-        '2. HARNESS-OWNED SCAFFOLD — the dependency manifest, the lockfile, and the test-runner / toolchain config files are created by the harness scaffold, and the verify command is fixed. Do NOT author or declare a runner/tool config file among your outputs — these are already provided: `pyproject.toml`, `src/exprcalc/__init__.py`, `src/exprcalc/__main__.py`, `tests/__init__.py`. A config file you emit is dropped by the output-path fence (and never changes how verify runs).'
+        '2. HARNESS-OWNED SCAFFOLD — the dependency manifest, the lockfile, and the test-runner / toolchain config files are created by the harness scaffold, and the verify command is fixed. Do NOT author or declare a runner/tool config file among your outputs — these are already provided: `pyproject.toml`, `src/exprcalc/__main__.py`, `tests/__init__.py`. A config file you emit is dropped by the output-path fence (and never changes how verify runs).'
     ),
     'javascript': (
         'Repository LAYOUT CONTRACT (release-blocking — the harness scaffold owns this topology and the output-path fence enforces it at implement; a file placed outside the owned roots is dropped, so a declared deliverable then reads as never produced and fails the build — get the placement right the first time):' '\n'

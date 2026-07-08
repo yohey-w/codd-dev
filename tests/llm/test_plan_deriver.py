@@ -550,8 +550,16 @@ def test_exclude_harness_owned_outputs_noop_without_resolvable_profile():
 
 
 def test_exclude_harness_owned_outputs_python_keeps_real_source(tmp_path):
-    """Python non-regression: a real source path is kept; the harness-owned
-    ``pyproject.toml`` / package ``__init__.py`` (if ever declared) are dropped."""
+    """Python: a real source path is kept and the pure-scaffold ``pyproject.toml``
+    is dropped — but the package FACADE ``src/demo/__init__.py`` is now RETAINED
+    (v3.18.0 ownership carve-out).
+
+    The facade's TOPOLOGY is harness-owned (the scaffold creates it) yet its
+    CONTENT — the package's public-API re-exports — is SUT-authored, so
+    ``harness_owned_output_paths`` (the OBLIGATION authority) subtracts it and the
+    deriver keeps it in the task's declared outputs so the source-kind contract
+    imposes the authoring obligation on it. Only the pure-scaffold ``pyproject.toml``
+    (no SUT-authored content) is dropped."""
     from codd.llm.plan_deriver import exclude_harness_owned_outputs
 
     project = _write_project(tmp_path)  # name=demo, language=python
@@ -564,7 +572,7 @@ def test_exclude_harness_owned_outputs_python_keeps_real_source(tmp_path):
         expected_outputs=["pyproject.toml", "src/demo/__init__.py", "src/contract.py"],
     )
     [out] = exclude_harness_owned_outputs([task], {"project_root": project})
-    assert out.expected_outputs == ["src/contract.py"]
+    assert out.expected_outputs == ["src/demo/__init__.py", "src/contract.py"]
 
 
 def test_derive_tasks_excludes_harness_owned_output_in_cache(tmp_path):

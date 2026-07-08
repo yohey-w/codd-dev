@@ -13,6 +13,56 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.18.0] - 2026-07-08 — Package-facade ownership carve-out + derive-stage facade-coverage gate
+
+**Closes the implement-oracle facade incoherence where a scaffolded-but-empty package facade fails the
+post-implement gate.** On the fresh unattended Python greenfield (v3.17.0 RC), implement now completes ALL
+derived tasks, then the implement-oracle hard-fails with `missing_symbol × 2` in `src/<pkg>/__main__.py`: the
+generated module does `from <pkg> import ExprError, evaluate` but the package facade `<pkg>/__init__.py` is
+EMPTY (only the scaffold docstring, no public-API re-exports). The oracle gate is CORRECT — this is a real
+cross-artifact incoherence — so the fix is to make the facade authorable, not to weaken the gate.
+
+Root cause (Fable5 diagnosis): the harness CLAIMS ownership of the facade file but never populates its
+content, and TRIPLE-suppresses the AI content-author. (1) derive-strip: `exclude_harness_owned_outputs`
+removes the facade from any derived task's `expected_outputs`. (2) contract exemption: the kind/completeness
+checks impose no obligation on harness-owned declarations. (3) prompt prohibition:
+`render_layout_placement_contract` tells the model "do NOT author or declare" the facade. Meanwhile the
+scaffold writes only a docstring placeholder and never revisits it, and the composite oracle's repair feedback
+steers away from populating the facade → non-convergence.
+
+Fix (Fable5-designed, two INSEPARABLE components — the implement-oracle gate stays byte-identical):
+
+- **Ownership carve-out** (facade topology = harness, CONTENT = AI). A new profile accessor
+  `LayoutProfile.facade_output_paths()` names the package facade whose content the SUT authors, routed by the
+  same legacy-bridge scaffolder id as `harness_owned_scaffold_paths` (STRICT no-op / empty for every other
+  profile — no path prefix, no `language ==` literal). The module-level obligation authority
+  `harness_owned_output_paths` now returns `harness_owned_scaffold_paths() − facade_output_paths()`, which in
+  one change unblocks the derive-strip AND the kind/completeness contract; the layout-placement prompt
+  subtracts the facade from its "do NOT author" list. The fence/orphan authority
+  (`harness_owned_scaffold_paths`) is UNCHANGED — the scaffold still creates the facade and the orphan-gate /
+  write-fence still exempt it. The un-stripped `expected_outputs` flow into v3.17.0's DECLARED DELIVERABLES
+  prompt projection automatically.
+- **Derive-stage facade-coverage gate** (exactly-one owner + bounded re-derive). At the top of the implement
+  stage — before the scaffold and the per-task loop, and strictly before the owner-uniqueness hard gate — a
+  deterministic set-math check counts the derived tasks declaring each facade path. Exactly 1 → OK; 0 or ≥2 →
+  force a re-derivation (`_default_task_deriver` gains `force`/`feedback`) with a deterministic repair
+  directive naming the path, re-approve, re-list, re-check. Bounded by a new knob
+  `derive.api_facade_coverage_max_retries` (default 2; 0 = legacy immediate fail). Exhaustion → `StageError`
+  (honest RED). The re-derive overwrites the cache so `--resume` stays consistent. An order rider stable-moves
+  the facade-owner task to the END of the list (the aggregator authored after the modules whose symbols it
+  re-exports). STRICT no-op for a stack with no facade (all 5 non-Python profiles) or an all-configured
+  project.
+
+Anti-false-green preserved: the implement-oracle is untouched; a facade that re-exports a NONEXISTENT symbol
+stays RED (`__init__.py` is itself a scanned importer, so `missing_symbol` transposes onto it — regression-
+guarded). Generality preserved: the carve-out is a strict SUBSET accessor keyed on the scaffolder id, empty
+for every non-named-package stack; no `language ==` branch enters shared core (grep-gated). Side-finding
+fixed: `codd/__init__.py` `__version__` was stale at 3.10.2 — now synced to the shipped version.
+
+Deferred to a later increment: the deriver generated an out-of-spec CLI (`__main__.py`) despite requirements
+saying "Pure library (no CLI)"; v3.18.0 GREENS it (the import resolves once the facade is populated), and the
+no-CLI deliverable-surface fidelity is a separate increment.
+
 ## [3.17.0] - 2026-07-07 — Kind-contract envelope alignment + bounded feedback repair
 
 **Closes the systematic implement halt where a bundled source+test task produced only its source.** On the
