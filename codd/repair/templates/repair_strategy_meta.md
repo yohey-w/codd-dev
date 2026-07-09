@@ -9,34 +9,39 @@ Previous proposal:
 Root cause analysis:
 {root_cause_analysis}
 
+{failure_evidence}
+
 Target file contents:
 {file_contents}
 
 Project context:
 {project_context}
 
-Options:
-1. patch_mode=unified_diff: try with corrected context
-2. patch_mode=full_file_replacement: replace the entire file
-3. no-patch: this change cannot be applied as a patch
+The previous unified-diff patch could not be applied. A unified diff is the
+format models most often get wrong, so do not retry it — escalate deterministically
+to a full-file replacement, which always applies cleanly.
 
-Choose the best strategy and provide the patch.
+Options:
+1. patch_mode=full_file_replacement: return the COMPLETE new file content for each
+   target file in `content`. This is the required retry strategy after a diff
+   validation failure.
 
 Rules:
 - Stay domain-neutral. Do not assume a framework, platform, vendor, or product.
-- Use the validation error only as generic feedback about why the previous patch could not be applied.
+- Use the validation error only as generic feedback about why the previous patch
+  could not be applied.
 - For full replacement, content must be the complete new file content.
-- Use top-level patch_mode "no-patch" with an empty patches list when no safe source patch can address the failure.
+- Always return at least one patch. There is no "give up" option here; if you are
+  unsure, replace the target file with your best complete correction.
 - Return JSON only. Do not wrap the response in a code fence.
 
 Output schema:
 {
-  "patch_mode": "unified_diff",
   "patches": [
     {
       "file_path": "relative/path.ext",
-      "patch_mode": "unified_diff",
-      "content": "diff --git a/relative/path.ext b/relative/path.ext\n--- a/relative/path.ext\n+++ b/relative/path.ext\n@@ ...\n"
+      "patch_mode": "full_file_replacement",
+      "content": "<complete new file content>"
     }
   ],
   "rationale": "why this repair addresses the root cause",

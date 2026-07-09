@@ -120,8 +120,13 @@ class TestFailureAttribution:
         Read-only evidence (failing test files for assertion/runtime failures)
         is deliberately EXCLUDED so the repair engine is never handed a path it
         could "fix" by neutering the test. When no editable source/config target
-        can be resolved this is empty on purpose — an honest "addressable target
-        unknown" beats a test-rewrite opportunity.
+        can be resolved this is empty on purpose — but that no longer ABANDONS the
+        repair: an observed test/typecheck failure is still repairable (F1), and
+        the engine localizes from the failing test as READ-ONLY evidence (F3).
+        Per Fable5's 2026-07-09 ruling the earlier honest-abandon-over-bounded-thrash
+        trade is REVERSED (bounded-thrash is correct; budget + engine-failure
+        strikes + D3 cap the cost, abandonment costs correctness). Editability still
+        gates only which paths the engine may EDIT, never whether it may try.
         """
         editable = [item.path for item in self.attributed if item.editable]
         # source first, then any other editable (config) — order-stable.

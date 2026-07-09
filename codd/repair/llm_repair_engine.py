@@ -29,6 +29,16 @@ LOGGER = logging.getLogger(__name__)
 TEMPLATE_DIR = Path(__file__).with_name("templates")
 DEFAULT_MAX_STRATEGY_ATTEMPTS = 2
 
+#: Prompt rule for the F3 read-only failure-evidence block. Mirrors the Inc3
+#: PART-A ``DESIGN_CONTEXT_RULE``: the evidence is context to localize the bug,
+#: never an edit target.
+IMMUTABLE_EVIDENCE_RULE = (
+    "The following FAILURE EVIDENCE is READ-ONLY / IMMUTABLE. The test expectations "
+    "and their observed (expected-vs-received) output localize the defect — align "
+    "the IMPLEMENTATION toward them. NEVER edit these evidence files to make the "
+    "failure pass."
+)
+
 
 class RepairFailed(RuntimeError):
     """Raised when a repair phase cannot produce a valid result."""
@@ -78,13 +88,29 @@ class LlmRepairEngine(RepairEngine):
             LOGGER.warning("Repair analysis output did not match schema: %s", exc)
             raise RepairFailed("repair analysis output did not match schema") from exc
 
-    def propose_fix(self, rca: RootCauseAnalysis, file_contents: dict[str, str]) -> RepairProposal:
-        """Ask the AI command for patches and retry with validation feedback."""
+    def propose_fix(
+        self,
+        rca: RootCauseAnalysis,
+        file_contents: dict[str, str],
+        *,
+        error_messages: list[str] | None = None,
+        evidence: dict[str, str] | None = None,
+    ) -> RepairProposal:
+        """Ask the AI command for patches and retry with validation feedback.
+
+        F3: the picked failure's ``error_messages`` (expected-vs-received + call
+        shape) and the read-only ``evidence`` files (attribution ``evidence_nodes``)
+        are threaded into the prompt as an explicitly IMMUTABLE section — the
+        localization signal for a missing-``return`` facade — mirroring the Inc3
+        PART-A design-context threading. Both are optional and default to empty, so
+        a caller that supplies neither renders the prompt unchanged.
+        """
 
         prompt_values = {
             "root_cause_analysis": _json_dumps(_to_plain_data(rca)),
             "file_contents": _json_dumps(file_contents),
             "project_context": self._composed_project_context(),
+            "failure_evidence": _render_failure_evidence(error_messages, evidence),
         }
         prompt = _render_template(TEMPLATE_DIR / "propose_meta.md", **prompt_values)
         last_error: str | None = None
@@ -245,6 +271,30 @@ def _render_template(path: Path, **values: str) -> str:
     for name, value in values.items():
         rendered = rendered.replace("{" + name + "}", value)
     return rendered
+
+
+def _render_failure_evidence(
+    error_messages: list[str] | None,
+    evidence: dict[str, str] | None,
+) -> str:
+    """Render the F3 IMMUTABLE failure-evidence block, or "" when there is none.
+
+    Empty-string when neither the failing output nor any evidence file is present,
+    so the prompt is byte-identical to the pre-F3 prompt in that case (matching the
+    design-context threading's empty-on-nothing contract).
+    """
+    messages = [str(message).strip() for message in (error_messages or []) if str(message).strip()]
+    files = {str(path): str(body) for path, body in (evidence or {}).items() if str(path).strip()}
+    if not messages and not files:
+        return ""
+    sections = [IMMUTABLE_EVIDENCE_RULE]
+    if messages:
+        sections.append("Observed failure output (expected vs received):\n" + "\n".join(messages))
+    for path, body in files.items():
+        sections.append(
+            f"--- BEGIN READ-ONLY EVIDENCE {path} ---\n{body.rstrip()}\n--- END READ-ONLY EVIDENCE {path} ---"
+        )
+    return "\n\n".join(sections)
 
 
 def _parse_json_object(raw_output: str, label: str) -> Mapping[str, Any]:

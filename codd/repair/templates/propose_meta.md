@@ -6,6 +6,8 @@ Create a concrete repair proposal that addresses the root cause and only changes
 Root cause analysis:
 {root_cause_analysis}
 
+{failure_evidence}
+
 Target file contents:
 {file_contents}
 

@@ -13,6 +13,52 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.23.0] - 2026-07-09 — Auto-repair: budget-gated, evidence-complete convergence (F1-F6)
+
+With the infrastructure failures fixed, dogfood runs began failing verify on genuine generated-impl bugs
+that auto-repair should fix but abandoned — e.g. a JavaScript `evaluate()` returning `undefined` for
+every input (11/17 integration tests failing "expected undefined to be 14"), left unrepaired with the
+loop reporting PARTIAL_SUCCESS / `ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING` while attempt budget
+remained. Fable5 root-caused (and authorized the fix — owner delegated all decisions): **the repair
+loop's termination was judgment-gated, not budget-gated.** A failing test-run collapses into ONE
+`test_command` violation, so a single per-round open-world judgment — an engine exception, an LLM
+meta-classifier ruling the failure "broad mismatch → unrepairable" (which perversely abandons the
+BROADEST, clearest bugs first), a "no-patch" proposal, or a malformed diff failing `git apply --check`
+twice — ended the WHOLE loop with budget unspent. This is the same class the Inc1 revert named: an
+open-world question ("is this repairable?") was being JUDGED terminally instead of STEERED.
+
+Six language-blind fixes (no `language ==`; anti-false-green untouched — tests stay read-only, the scope
+guard is unchanged, GREEN is still decided solely by the post-repair verify; F1-F6 only grant more
+attempts and more evidence, never a green path):
+- **F2 — engine failure is a strike, not a verdict** (`repair/loop.py`): a propose/apply exception
+  consumes the attempt and RETAINS the violation; only after N consecutive strikes on the same violation
+  key (`repair.engine_failure_strikes`, default 3) is it ruled unrepairable. Turns a one-hiccup death
+  into up to the full budget of real attempts.
+- **F1 — observed ⇒ repairable, deterministically** (`repair/repairability_classifier.py`): an observed
+  `test_command`/`typecheck_command` failure that is not `environment_build_error` is unconditionally
+  repairable — the `code_addressable`/non-empty-paths preconditions (which gate addressing HINTS, not
+  repairability) are dropped, removing the LLM meta-classifier and its inverted "broad mismatch" rule
+  from the observed-failure path and closing the no-adapter hole (mocha / `node --test`). D3
+  (`environment_build_error` → unrepairable) is preserved and still runs first.
+- **F3 — evidence-complete propose** (`repair/loop.py`, `llm_repair_engine.py`, `schema.py`,
+  `templates/propose_meta.md`): the picked failure's `error_messages` and the read-only evidence files
+  (attribution `evidence_nodes`, previously discarded at coercion) are threaded into the propose prompt
+  in an explicitly IMMUTABLE section — the expected-vs-received value + the test's call shape is the
+  localization signal for a missing-`return` facade.
+- **F4 — deterministic diff→full-file escalation** (`templates/repair_strategy_meta.md`): after a
+  unified-diff validation failure the retry MUST use `full_file_replacement`; the "no-patch" trapdoor is
+  removed from the retry menu (a no-patch becomes an F2 strike, never a terminal exception).
+- **F5 — wider evidence window** (`repair/verify_runner.py`): repair failure reports keep head+tail
+  (first 2000 + last 10000 chars) instead of tail-4000, so evidence from many failing tests survives.
+- **F6 — status honesty** (`repair/loop.py`): PARTIAL_SUCCESS now requires non-empty
+  `applied_patch_files`; a zero-patch terminal is REPAIR_FAILED, not "partial success".
+
+Also sets the **② acceptance bar** (Fable5): per language, ≥2 of 3 fresh unattended single-runs GREEN,
+every non-green ending in an honest terminal reason with zero infrastructure-class failures (matching the
+Python 3× precedent) — measured only AFTER these fixes land. Red-first (9 tests); 8 pre-existing
+multi-violation tests updated to the new strike/status semantics. Full suite 7333 passed / 1 xfailed / 0
+skipped. All F1-F6 self-approvable (Fable5-authorized, existing-architecture-conformant). MINOR.
+
 ## [3.22.2] - 2026-07-09 — Generalize the CLI-e2e-modality downgrade to all languages (K3 was Python-only)
 
 The v3.20.0 K3 fix (downgrade `e2e_modality` "cli"→"none" when the CLI-backing `runnable-entrypoint`

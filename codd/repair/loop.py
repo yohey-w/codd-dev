@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
+import inspect
 from pathlib import Path
 import subprocess
 from typing import Any, Callable, Literal, Mapping
@@ -173,6 +174,14 @@ class RepairLoop:
         applied_patch_files: list[str] = []
         pre_existing: list[VerificationFailureReport] = []
         unrepairable: list[VerificationFailureReport] = []
+        # F2: per-violation-key strike counter. An engine failure (bad analyze /
+        # propose JSON, a no-patch proposal, a rejected diff, an apply exception)
+        # is a STRIKE that consumes the attempt and RETAINS the violation; only
+        # ``engine_failure_strikes`` CONSECUTIVE strikes on the SAME key rule it
+        # unrepairable. "Is this observed failure repairable?" is open-world — it
+        # gets STEERED (retried within budget), never JUDGED terminal on one strike.
+        strikes: dict[tuple[str, tuple[str, ...], tuple[str, ...]], int] = {}
+        engine_failure_strikes = _engine_failure_strikes(codd_yaml)
 
         try:
             engine = self._new_engine()
@@ -208,11 +217,19 @@ class RepairLoop:
                 )
 
             current_failure = self._pick_primary_violation(classification.repairable, dag)
+            failure_key = _violation_key(current_failure)
             try:
                 rca = engine.analyze(current_failure, dag)
                 file_contents = self._load_affected_file_contents(rca, dag)
-                proposal = engine.propose_fix(rca, file_contents)
+                proposal = self._propose_fix(engine, rca, file_contents, current_failure)
             except Exception as exc:  # noqa: BLE001 - repair engines are plug-ins.
+                # F2: engine failure is a STRIKE, not a verdict. Consume the
+                # attempt, RETAIN the violation (do not remove it from the set),
+                # and only after N consecutive strikes on this key rule it
+                # unrepairable. Budget (max_attempts) still bounds everything.
+                strikes[failure_key] = strikes.get(failure_key, 0) + 1
+                if strikes[failure_key] < engine_failure_strikes:
+                    continue
                 unrepairable = _merge_violations(unrepairable, [current_failure])
                 current_violations = _without_violation(classification.repairable, current_failure)
                 if not current_violations:
@@ -330,6 +347,8 @@ class RepairLoop:
             verify_result = None
             post_verify_passed: bool | None = None
             if apply_result.success:
+                # A clean apply breaks the consecutive-strike chain for this key.
+                strikes.pop(failure_key, None)
                 applied_patch_files.extend(_applied_patch_files(apply_result, proposal))
                 verify_result = verify_callable()
                 post_verify_passed = _verification_passed(verify_result)
@@ -348,22 +367,28 @@ class RepairLoop:
 
             if not apply_result.success:
                 if apply_exception:
-                    unrepairable = _merge_violations(unrepairable, [current_failure])
-                    current_violations = _without_violation(classification.repairable, current_failure)
-                    if not current_violations:
-                        status = _classified_work_status(applied_patch_files, pre_existing, unrepairable)
-                        return self._finalize(
-                            session_dir,
-                            status,
-                            attempts,
-                            apply_result.error_message,
-                            pre_existing_violations=pre_existing,
-                            unrepairable_violations=unrepairable,
-                            remaining_violations=pre_existing + unrepairable,
-                            partial_success_patches=applied_patch_files,
-                            baseline_ref=resolved_baseline_ref,
-                            reason=self._terminal_reason(pre_existing + unrepairable, dag),
-                        )
+                    # F2: an apply-time exception is a STRIKE, not a verdict —
+                    # same steer-don't-judge rule as the propose path above. A
+                    # non-exception apply failure (e.g. a rejected diff) already
+                    # retains the violation via the plain ``continue`` below.
+                    strikes[failure_key] = strikes.get(failure_key, 0) + 1
+                    if strikes[failure_key] >= engine_failure_strikes:
+                        unrepairable = _merge_violations(unrepairable, [current_failure])
+                        current_violations = _without_violation(classification.repairable, current_failure)
+                        if not current_violations:
+                            status = _classified_work_status(applied_patch_files, pre_existing, unrepairable)
+                            return self._finalize(
+                                session_dir,
+                                status,
+                                attempts,
+                                apply_result.error_message,
+                                pre_existing_violations=pre_existing,
+                                unrepairable_violations=unrepairable,
+                                remaining_violations=pre_existing + unrepairable,
+                                partial_success_patches=applied_patch_files,
+                                baseline_ref=resolved_baseline_ref,
+                                reason=self._terminal_reason(pre_existing + unrepairable, dag),
+                            )
                 continue
             if post_verify_passed:
                 return self._finalize(
@@ -503,10 +528,55 @@ class RepairLoop:
             codd_yaml=codd_yaml,
         )
 
+    def _propose_fix(
+        self,
+        engine: Any,
+        rca: RootCauseAnalysis,
+        file_contents: dict[str, str],
+        failure: VerificationFailureReport,
+    ) -> RepairProposal:
+        """Call the engine's ``propose_fix``, threading F3 evidence when supported.
+
+        The picked failure's ``error_messages`` (expected-vs-received + call shape)
+        and the read-only evidence files (attribution ``evidence_nodes``) are the
+        localization signal. They are passed ONLY to engines whose ``propose_fix``
+        accepts them (detected via signature); a legacy two-argument engine is
+        called exactly as before, so third-party engines keep working unchanged.
+        """
+        error_messages = [str(message) for message in (failure.error_messages or [])]
+        evidence = self._load_evidence_file_contents(failure)
+        try:
+            params = inspect.signature(engine.propose_fix).parameters
+        except (TypeError, ValueError):
+            params = {}
+        accepts_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        kwargs: dict[str, Any] = {}
+        if accepts_var_kw or "error_messages" in params:
+            kwargs["error_messages"] = error_messages
+        if accepts_var_kw or "evidence" in params:
+            kwargs["evidence"] = evidence
+        if kwargs:
+            return engine.propose_fix(rca, file_contents, **kwargs)
+        return engine.propose_fix(rca, file_contents)
+
     def _load_affected_file_contents(self, rca: RootCauseAnalysis, dag: DAG) -> dict[str, str]:
         contents: dict[str, str] = {}
         for raw_path in self._candidate_paths(rca, dag):
             resolved = self._resolve_project_file(raw_path)
+            if resolved is None or not resolved.is_file():
+                continue
+            relative = resolved.relative_to(self.project_root.resolve(strict=False))
+            contents[str(relative)] = resolved.read_text(encoding="utf-8")
+        return contents
+
+    def _load_evidence_file_contents(self, failure: VerificationFailureReport) -> dict[str, str]:
+        """Read-only evidence file contents (the failing test files) for the F3
+        propose prompt. Path-jailed exactly like the affected-file loader; a
+        missing / out-of-root evidence path is silently dropped. These are context
+        for localization only — NEVER edit targets."""
+        contents: dict[str, str] = {}
+        for raw_path in getattr(failure, "evidence_nodes", None) or []:
+            resolved = self._resolve_project_file(str(raw_path))
             if resolved is None or not resolved.is_file():
                 continue
             relative = resolved.relative_to(self.project_root.resolve(strict=False))
@@ -602,7 +672,29 @@ def _classified_work_status(
     pre_existing: list[VerificationFailureReport],
     unrepairable: list[VerificationFailureReport],
 ) -> RepairLoopStatus:
-    return "PARTIAL_SUCCESS" if applied_patch_files or pre_existing or unrepairable else "REPAIR_FAILED"
+    # F6 (status honesty): PARTIAL_SUCCESS is honest ONLY when at least one patch
+    # was actually applied. A run that repaired nothing — zero applied patches,
+    # only pre-existing / unrepairable violations left — is a FAILURE status, not
+    # a partial success. ``pre_existing`` / ``unrepairable`` are kept in the
+    # signature for call-site symmetry but no longer promote a patch-less run.
+    return "PARTIAL_SUCCESS" if applied_patch_files else "REPAIR_FAILED"
+
+
+_DEFAULT_ENGINE_FAILURE_STRIKES = 3
+
+
+def _engine_failure_strikes(codd_yaml: Mapping[str, Any] | None) -> int:
+    """Consecutive engine-failure strikes on one violation key before it is ruled
+    unrepairable (F2). Read from ``repair.engine_failure_strikes`` (default 3); a
+    non-positive or non-integer value falls back to the default."""
+    repair = codd_yaml.get("repair") if isinstance(codd_yaml, Mapping) else None
+    if isinstance(repair, Mapping) and "engine_failure_strikes" in repair:
+        try:
+            value = int(repair.get("engine_failure_strikes"))
+        except (TypeError, ValueError):
+            return _DEFAULT_ENGINE_FAILURE_STRIKES
+        return value if value >= 1 else _DEFAULT_ENGINE_FAILURE_STRIKES
+    return _DEFAULT_ENGINE_FAILURE_STRIKES
 
 
 def _default_repairability_classifier(config: RepairLoopConfig | None = None) -> Any:
@@ -674,8 +766,9 @@ def _coerce_violation_report(value: Any, fallback: VerificationFailureReport) ->
         timestamp = str(value.get("timestamp") or fallback.timestamp or _timestamp())
         failure_class = _attr_or_detail(value, details, "failure_class", str, fallback.failure_class)
         code_addressable = _attr_or_detail(value, details, "code_addressable", bool, fallback.code_addressable)
+        evidence_nodes = _evidence_nodes(value, details, fallback)
         return VerificationFailureReport(
-            check_name, failed_nodes, error_messages, snapshot, timestamp, failure_class, code_addressable
+            check_name, failed_nodes, error_messages, snapshot, timestamp, failure_class, code_addressable, evidence_nodes
         )
     check_name = str(getattr(value, "check_name", fallback.check_name) or fallback.check_name)
     message = str(getattr(value, "message", "") or "")
@@ -688,9 +781,25 @@ def _coerce_violation_report(value: Any, fallback: VerificationFailureReport) ->
     timestamp = str(getattr(value, "timestamp", None) or fallback.timestamp or _timestamp())
     failure_class = _attr_or_detail(value, details, "failure_class", str, fallback.failure_class)
     code_addressable = _attr_or_detail(value, details, "code_addressable", bool, fallback.code_addressable)
+    evidence_nodes = _evidence_nodes(value, details, fallback)
     return VerificationFailureReport(
-        check_name, failed_nodes, error_messages, dag_snapshot, timestamp, failure_class, code_addressable
+        check_name, failed_nodes, error_messages, dag_snapshot, timestamp, failure_class, code_addressable, evidence_nodes
     )
+
+
+def _evidence_nodes(value: Any, details: Any, fallback: VerificationFailureReport) -> list[str]:
+    """Read-only evidence paths (failing test files) from the verify result, so F3
+    can thread them into the propose prompt. Read from the top-level field, else
+    the runner's ``details['evidence_nodes']``, else the fallback's. Kept separate
+    from ``failed_nodes`` — evidence is never an edit target."""
+    direct = _string_list(_value(value, "evidence_nodes"))
+    if direct:
+        return direct
+    if isinstance(details, Mapping):
+        from_details = _string_list(details.get("evidence_nodes"))
+        if from_details:
+            return from_details
+    return list(fallback.evidence_nodes)
 
 
 def _attr_or_detail(value: Any, details: Any, key: str, cast: Callable[[Any], Any], default: Any) -> Any:

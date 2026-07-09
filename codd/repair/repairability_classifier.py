@@ -45,18 +45,21 @@ class RepairabilityClassifier:
         pending: list[Any] = []
         for item in items:
             affected = _affected_paths(item, self.repo_path)
-            if _is_observed_code_failure(item) and affected:
-                # B0: a test/typecheck failure was OBSERVED in this very verify
-                # run, so by definition it reflects the CURRENT tree — it cannot
-                # be "pre-existing/unrelated". In the greenfield path the
-                # implementer commits source+tests in one shot, so
-                # ``git diff baseline..HEAD`` is empty and the changed-files
-                # intersection below would (wrongly) send every such failure to
-                # the LLM meta-classifier as unrepairable. We route it straight
-                # to repairable instead. This applies ONLY to code-addressable
-                # classes (import/collection, assertion, runtime); environment/
-                # build/harness failures are NOT force-routed — making the
-                # engine thrash on a missing service is not repair.
+            if _is_observed_execution_failure(item):
+                # F1: a test/typecheck failure was OBSERVED in this very verify
+                # run — already past D3's environment/build guard above — so it
+                # reflects the CURRENT tree and is deterministically REPAIRABLE.
+                # It cannot be "pre-existing/unrelated" (it was just executed), and
+                # repairability is NOT gated on whether attribution resolved
+                # editable hint paths (those gate the addressing HINTS, not
+                # repairability). Dropping the ``code_addressable`` / non-empty
+                # paths preconditions routes AROUND the LLM meta-classifier (and its
+                # inverted "broad mismatch -> unrepairable" rule) entirely, and
+                # closes the no-adapter hole (mocha / node --test yield no
+                # failure_class / failed_nodes). The scope guard still keeps tests
+                # read-only; budget + engine-failure strikes + D3 cap the cost of a
+                # bounded thrash (Fable5 2026-07-09 ruling: bounded-thrash over
+                # honest-abandon — abandonment costs correctness).
                 repairable.append(item)
             elif affected and _intersects_changed_files(affected, changed_files):
                 repairable.append(item)
@@ -201,13 +204,14 @@ _ENVIRONMENT_FAILURE_CLASS = "environment_build_error"
 def _is_environment_failure(item: Any) -> bool:
     """True iff the violation is classed as an environment/build failure.
 
-    The deterministic mirror of the B0 force-route (:func:`_is_observed_code_failure`):
-    where B0 pulls an observed code failure straight to ``repairable``, this pulls
-    an environment/build failure straight to ``unrepairable`` — BEFORE the
-    changed-files gate or the LLM meta-classifier — so the engine never thrashes
-    on un-patchable infrastructure (e.g. editing source to "fix" a
-    ``command not found``). Reads ``failure_class`` off the item or its details,
-    mirroring how :func:`_is_observed_code_failure` reads ``code_addressable``.
+    The deterministic mirror of the F1 force-route (:func:`_is_observed_execution_failure`):
+    where F1 pulls an observed execution failure straight to ``repairable``, this
+    pulls an environment/build failure straight to ``unrepairable`` — BEFORE the
+    F1 force-route, the changed-files gate, or the LLM meta-classifier — so the
+    engine never thrashes on un-patchable infrastructure (e.g. editing source to
+    "fix" a ``command not found``). Reads ``failure_class`` off the item or its
+    details. D3 runs first, so an observed-execution failure that reaches F1 is a
+    real code failure, never an environment one.
     """
     direct = _value(item, "failure_class")
     if direct is None:
@@ -217,26 +221,21 @@ def _is_environment_failure(item: Any) -> bool:
     return str(direct or "") == _ENVIRONMENT_FAILURE_CLASS
 
 
-def _is_observed_code_failure(item: Any) -> bool:
-    """B0: was this an executed test/typecheck failure that is code-addressable?
+def _is_observed_execution_failure(item: Any) -> bool:
+    """F1: was this an EXECUTED test/typecheck failure observed in this verify run?
 
-    Such a failure was OBSERVED in this verify run, so it reflects the CURRENT
-    tree and cannot be "pre-existing/unrelated" — it should bypass the
-    changed-files gate (which is empty in the greenfield single-commit path) and
-    go straight to repairable. Environment/build/harness failures are excluded
-    by ``code_addressable`` being False, so this never forces the engine to
-    thrash on un-patchable infrastructure.
+    Such a failure reflects the CURRENT tree, so it cannot be "pre-existing/
+    unrelated" and must bypass the changed-files gate (empty in the greenfield
+    single-commit path) straight to repairable. Repairability keys ONLY on the
+    check being an observed-execution check — NOT on ``code_addressable`` or on
+    resolved editable paths, which gate the addressing HINTS, not repairability.
+    The deterministic environment/build guard (D3, :func:`_is_environment_failure`)
+    has already pulled un-patchable infrastructure failures to unrepairable BEFORE
+    this runs, so an observed-execution failure reaching here is a real code
+    failure the engine should attempt (bounded by budget + engine-failure strikes).
     """
     check_name = str(_value(item, "check_name") or "")
-    if check_name not in _OBSERVED_EXECUTION_CHECKS:
-        return False
-    direct = _value(item, "code_addressable")
-    if direct is not None:
-        return bool(direct)
-    details = _value(item, "details")
-    if isinstance(details, Mapping):
-        return bool(details.get("code_addressable"))
-    return False
+    return check_name in _OBSERVED_EXECUTION_CHECKS
 
 
 def _value(item: Any, key: str) -> Any:

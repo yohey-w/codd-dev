@@ -316,7 +316,9 @@ def test_final_status_persists_remaining_violations_and_patches(tmp_path: Path):
     assert final_status["remaining_violations"][0]["check_name"] == "check_b"
 
 
-def test_all_pre_existing_without_patch_returns_partial_success(tmp_path: Path):
+def test_all_pre_existing_without_patch_is_repair_failed(tmp_path: Path):
+    # F6 (status honesty): zero applied patches -> a run that repaired nothing is
+    # a FAILURE status, never PARTIAL_SUCCESS, even with pre-existing violations.
     _register_engine("pre-existing-none")
 
     class PreExistingClassifier:
@@ -325,8 +327,9 @@ def test_all_pre_existing_without_patch_returns_partial_success(tmp_path: Path):
 
     outcome = _run_loop(tmp_path, "pre-existing-none", [], classifier=PreExistingClassifier())
 
-    assert outcome.status == "PARTIAL_SUCCESS"
+    assert outcome.status == "REPAIR_FAILED"
     assert outcome.pre_existing_violations[0].check_name == "check_a"
+    assert outcome.partial_success_patches == []
 
 
 def test_pre_existing_after_patch_returns_partial_success(tmp_path: Path):
@@ -354,7 +357,8 @@ def test_pre_existing_after_patch_returns_partial_success(tmp_path: Path):
     assert outcome.pre_existing_violations == [remaining]
 
 
-def test_all_unrepairable_without_patch_returns_partial_success(tmp_path: Path):
+def test_all_unrepairable_without_patch_is_repair_failed(tmp_path: Path):
+    # F6: zero applied patches + all-unrepairable is a FAILURE status.
     _register_engine("unrepairable-none")
 
     class UnrepairableClassifier:
@@ -363,11 +367,14 @@ def test_all_unrepairable_without_patch_returns_partial_success(tmp_path: Path):
 
     outcome = _run_loop(tmp_path, "unrepairable-none", [], classifier=UnrepairableClassifier())
 
-    assert outcome.status == "PARTIAL_SUCCESS"
+    assert outcome.status == "REPAIR_FAILED"
     assert outcome.unrepairable_violations[0].check_name == "check_a"
+    assert outcome.partial_success_patches == []
 
 
-def test_all_pre_existing_and_unrepairable_without_patch_returns_partial_success(tmp_path: Path):
+def test_all_pre_existing_and_unrepairable_without_patch_is_repair_failed(tmp_path: Path):
+    # F6: zero applied patches + only classified (pre-existing/unrepairable)
+    # violations is a FAILURE status.
     _register_engine("classified-none-mixed")
     first = _failure("check_a", "node:a")
     second = _failure("check_b", "node:b")
@@ -384,7 +391,7 @@ def test_all_pre_existing_and_unrepairable_without_patch_returns_partial_success
         classifier=MixedClassifier(),
     )
 
-    assert outcome.status == "PARTIAL_SUCCESS"
+    assert outcome.status == "REPAIR_FAILED"
     assert outcome.pre_existing_violations == [first]
     assert outcome.unrepairable_violations == [second]
 
@@ -427,21 +434,34 @@ def test_unrepairable_after_patch_returns_partial_success(tmp_path: Path):
     assert outcome.unrepairable_violations == [remaining]
 
 
-def test_propose_fix_exception_marks_violation_unrepairable_without_patch(tmp_path: Path):
-    _register_engine("propose-exception-none", propose_errors=[RuntimeError("cannot propose")])
+def test_propose_fix_exception_strikes_out_to_unrepairable_without_patch(tmp_path: Path):
+    # F2: a propose exception is a STRIKE, not a verdict. Only after 3 CONSECUTIVE
+    # strikes on the same key does the violation become unrepairable (the whole
+    # loop no longer dies on ONE hiccup). F6: with zero patches that terminal is a
+    # FAILURE status.
+    _register_engine(
+        "propose-exception-none",
+        propose_errors=[RuntimeError("cannot propose")] * 3,
+    )
 
     outcome = _run_loop(tmp_path, "propose-exception-none", [], max_attempts=3)
 
-    assert outcome.status == "PARTIAL_SUCCESS"
-    assert outcome.attempts == []
+    assert outcome.status == "REPAIR_FAILED"
+    assert outcome.attempts == []  # propose exceptions never record an attempt
     assert outcome.error_message == "cannot propose"
     assert outcome.unrepairable_violations[0].check_name == "check_a"
     assert outcome.remaining_violations == outcome.unrepairable_violations
     assert outcome.reason == "ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING"
 
 
-def test_propose_fix_exception_continues_to_next_violation(tmp_path: Path):
-    engine_cls = _register_engine("propose-exception-continue", propose_errors=[RuntimeError("first cannot propose")])
+def test_propose_fix_exception_strikes_out_then_continues_to_next_violation(tmp_path: Path):
+    # F2: the first violation is retried until it strikes out (3 consecutive
+    # propose exceptions) and only THEN abandoned; the loop then repairs the
+    # second violation to GREEN. The budget bounds the retries.
+    engine_cls = _register_engine(
+        "propose-exception-continue",
+        propose_errors=[RuntimeError("first cannot propose")] * 3,
+    )
     first = _failure("check_a", "node:a")
     second = _failure("check_b", "node:b")
 
@@ -453,13 +473,24 @@ def test_propose_fix_exception_continues_to_next_violation(tmp_path: Path):
     )
 
     assert outcome.status == "REPAIR_SUCCESS"
-    assert [item.check_name for item in engine_cls.analyzed] == ["check_a", "check_b"]
+    assert [item.check_name for item in engine_cls.analyzed] == [
+        "check_a",
+        "check_a",
+        "check_a",
+        "check_b",
+    ]
     assert outcome.unrepairable_violations == [first]
     assert outcome.partial_success_patches == ["src/0.py"]
 
 
 def test_propose_fix_exception_after_patch_returns_partial_success(tmp_path: Path):
-    _register_engine("propose-exception-after-patch", propose_errors=[None, RuntimeError("second cannot propose")])
+    # attempt 0 applies a real patch (src/0.py) but re-verify still RED; the next
+    # violation then strikes out (3 propose exceptions) -> PARTIAL_SUCCESS because
+    # a patch WAS applied (F6 still allows partial when a patch landed).
+    _register_engine(
+        "propose-exception-after-patch",
+        propose_errors=[None] + [RuntimeError("second cannot propose")] * 3,
+    )
     remaining = _failure("check_b", "node:b")
 
     outcome = _run_loop(
@@ -474,8 +505,14 @@ def test_propose_fix_exception_after_patch_returns_partial_success(tmp_path: Pat
     assert outcome.unrepairable_violations == [remaining]
 
 
-def test_apply_exception_marks_violation_unrepairable_and_continues(tmp_path: Path):
-    engine_cls = _register_engine("apply-exception-continue", apply_errors=[RuntimeError("patch exploded")])
+def test_apply_exception_strikes_out_then_continues_to_next_violation(tmp_path: Path):
+    # F2: an apply-time exception is a STRIKE too. The first violation is retried
+    # until it strikes out (3 consecutive apply exceptions), then the loop repairs
+    # the second violation to GREEN.
+    engine_cls = _register_engine(
+        "apply-exception-continue",
+        apply_errors=[RuntimeError("patch exploded")] * 3,
+    )
     first = _failure("check_a", "node:a")
     second = _failure("check_b", "node:b")
 
@@ -487,19 +524,27 @@ def test_apply_exception_marks_violation_unrepairable_and_continues(tmp_path: Pa
     )
 
     assert outcome.status == "REPAIR_SUCCESS"
-    assert [item.check_name for item in engine_cls.analyzed] == ["check_a", "check_b"]
+    assert [item.check_name for item in engine_cls.analyzed] == [
+        "check_a",
+        "check_a",
+        "check_a",
+        "check_b",
+    ]
     assert outcome.attempts[0].apply_result.error_message == "patch exploded"
     assert outcome.unrepairable_violations == [first]
-    assert outcome.partial_success_patches == ["src/1.py"]
+    assert outcome.partial_success_patches == ["src/3.py"]
 
 
-def test_apply_exception_without_other_violations_returns_partial_success(tmp_path: Path):
-    _register_engine("apply-exception-none", apply_errors=[RuntimeError("patch exploded")])
+def test_apply_exception_strikes_out_without_other_violations_is_repair_failed(tmp_path: Path):
+    # F2: 3 consecutive apply exceptions strike the sole violation out; F6: with
+    # zero applied patches that terminal is a FAILURE status. Each striking
+    # attempt is still recorded.
+    _register_engine("apply-exception-none", apply_errors=[RuntimeError("patch exploded")] * 3)
 
     outcome = _run_loop(tmp_path, "apply-exception-none", [], max_attempts=3)
 
-    assert outcome.status == "PARTIAL_SUCCESS"
-    assert len(outcome.attempts) == 1
+    assert outcome.status == "REPAIR_FAILED"
+    assert len(outcome.attempts) == 3
     assert outcome.error_message == "patch exploded"
     assert outcome.unrepairable_violations[0].check_name == "check_a"
     assert outcome.partial_success_patches == []

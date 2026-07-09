@@ -1094,6 +1094,7 @@ class VerifyRunner:
             timestamp=datetime.now(timezone.utc).isoformat(),
             failure_class=failure_class,
             code_addressable=code_addressable,
+            evidence_nodes=_evidence_nodes(failures),
         )
 
 
@@ -1311,11 +1312,27 @@ def _js_test_runner_collected_zero(command: str, output: str) -> bool:
     return True
 
 
-def _command_output_tail(stdout: str | None, stderr: str | None, limit: int = 4000) -> str:
+def _command_output_tail(
+    stdout: str | None,
+    stderr: str | None,
+    *,
+    head_limit: int = 2000,
+    tail_limit: int = 10000,
+) -> str:
+    """Repair-facing command-output window: keep the HEAD (first ``head_limit``
+    chars) AND the TAIL (last ``tail_limit`` chars) (F5).
+
+    A tail-only window dropped almost all evidence when many tests failed (11+
+    failing tests overflow a 4000-char tail): the FIRST failing assertion and the
+    call shape — the localization signal a repair needs — live at the head, while
+    the run summary lives at the tail. Keeping both bounds the size while
+    preserving both ends. Byte-for-byte identical to the old behaviour whenever
+    the combined output already fits inside the window.
+    """
     combined = "\n".join(part.strip() for part in (stdout, stderr) if part and part.strip())
-    if len(combined) <= limit:
+    if len(combined) <= head_limit + tail_limit:
         return combined
-    return f"... (truncated) ...\n{combined[-limit:]}"
+    return f"{combined[:head_limit]}\n... (truncated) ...\n{combined[-tail_limit:]}"
 
 
 def _last_line(text: str | None) -> str:
@@ -1605,6 +1622,21 @@ def _failed_nodes(failures: list[VerificationFailure]) -> list[str]:
     nodes: list[str] = []
     for failure in failures:
         _collect_node_refs(failure.details, nodes)
+    return _dedupe(nodes)
+
+
+def _evidence_nodes(failures: list[VerificationFailure]) -> list[str]:
+    """Read-only evidence paths (failing test files) rolled up from B0 attribution
+    for the aggregate report (F3). NEVER edit targets; kept separate from
+    ``failed_nodes`` so the repair engine can localize from them without being
+    handed a test to neuter."""
+    nodes: list[str] = []
+    for failure in failures:
+        details = getattr(failure, "details", None)
+        if isinstance(details, Mapping):
+            evidence = details.get("evidence_nodes")
+            if isinstance(evidence, list):
+                nodes.extend(str(entry) for entry in evidence if isinstance(entry, str) and entry)
     return _dedupe(nodes)
 
 

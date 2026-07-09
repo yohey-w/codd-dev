@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -27,6 +27,12 @@ class VerificationFailureReport:
     #: a fix) AND was attributed to concrete project files. Drives the
     #: repairability "observed ⇒ current" bypass of the changed-files gate.
     code_addressable: bool = False
+    #: Read-only evidence paths (the failing test files) attributed to this
+    #: failure — NEVER edit targets. Threaded into the propose prompt as an
+    #: IMMUTABLE section (F3) so the engine localizes the bug from the test's
+    #: expected-vs-received without ever being handed a test to neuter. Additive;
+    #: the default keeps positional constructors valid.
+    evidence_nodes: list[str] = field(default_factory=list)
 
 
 @dataclass
