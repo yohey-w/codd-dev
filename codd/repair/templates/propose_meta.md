@@ -16,6 +16,7 @@ Project context:
 
 Rules:
 - Stay domain-neutral. Do not assume a framework, platform, vendor, or product.
+- If an assertion cannot be satisfied by ANY implementation conforming to the design (it is tautologically false, or it contradicts a design pin or a sibling design-pinned assertion), do NOT patch the test — emit a `test_defect_claim` entry instead; the claim is checked by re-derivation and re-verification, never trusted.
 - Prefer unified diff patches with patch_mode set to "unified_diff".
 - Each unified diff must be valid for git apply.
 - Use patch_mode "full_file_replacement" only when the repair_strategy requires complete replacement.
@@ -32,5 +33,14 @@ Output schema:
     }
   ],
   "rationale": "why this repair addresses the root cause",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "test_defect_claim": [
+    {
+      "file": "relative/path.test.ext",
+      "assertion": "the exact assertion that no design-conforming implementation can satisfy",
+      "reason": "why it is unsatisfiable (tautology / contradicts a design pin or sibling assertion)"
+    }
+  ]
 }
+
+Emit `test_defect_claim` ONLY for a genuinely unsatisfiable assertion; for a claim-only report, return an empty `patches` list. Otherwise omit `test_defect_claim`.

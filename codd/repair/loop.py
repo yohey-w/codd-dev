@@ -17,7 +17,12 @@ from codd.repair.approval_repair import (
     RepairApprovalMode,
     approve_repair_proposal,
 )
-from codd.repair.auto_scope_guard import evaluate_auto_patch_scope
+from codd.repair.auto_scope_guard import (
+    evaluate_auto_patch_scope,
+    _is_oracle_artifact,
+    _is_stack_contract_artifact,
+    _is_test_file,
+)
 from codd.repair.design_context import classify_terminal_reason
 from codd.repair.engine import get_repair_engine
 from codd.repair.history import RepairHistory
@@ -106,6 +111,17 @@ class RepairLoopOutcome:
     partial_success_patches: list[str] = field(default_factory=list)
     baseline_ref: str | None = None
     reason: str = ""
+    #: F7 (T1) — the failing test files a scope-guard rejection blocked, when EVERY
+    #: offending patch path fell under the test-file rule AND the primary failure is
+    #: ``verify_contract_not_green``. Threaded so the greenfield pipeline can route a
+    #: DEFECTIVE test transcription to the phase that HAS test-write authority
+    #: (implement's test authorship) instead of dead-ending at REPAIR_FAILED. Empty
+    #: for a MIXED proposal (test + oracle/gate-control offenders stay hard terminals).
+    blocked_test_paths: list[str] = field(default_factory=list)
+    #: F7 (T2) — a claim-only proposal's ``test_defect_claim`` entries, carried on the
+    #: structured terminal so the pipeline can re-derive the named test(s). The claim
+    #: is checked by re-derivation + fresh verify, NEVER trusted.
+    test_defect_claim: list[dict] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -248,6 +264,34 @@ class RepairLoop:
                     )
                 continue
 
+            # F7 (T2): a CLAIM-ONLY proposal (a legal ``test_defect_claim`` and no
+            # patches) is a STRUCTURED terminal, NOT an F2 strike-exception — the
+            # engine reported a test transcription no design-conforming impl can
+            # satisfy instead of attempting the forbidden test edit. Finalize
+            # REPAIR_FAILED but thread the claim + its files so the greenfield
+            # pipeline can re-derive the named test(s). The claim is NEVER trusted
+            # here; it is checked downstream by re-derivation + fresh verify.
+            claim = list(getattr(proposal, "test_defect_claim", None) or [])
+            if claim and not proposal.patches:
+                apply_result = ApplyResult(False, [], [], "test_defect_claim (no patch proposed)")
+                attempts.append(
+                    self._record_attempt(
+                        session_dir, attempt_n, current_failure, rca, proposal, apply_result, None
+                    )
+                )
+                return self._finalize(
+                    session_dir,
+                    "REPAIR_FAILED",
+                    attempts,
+                    None,
+                    remaining_violations=current_violations,
+                    partial_success_patches=applied_patch_files,
+                    baseline_ref=resolved_baseline_ref,
+                    reason="TEST_DEFECT_CLAIM",
+                    blocked_test_paths=_claim_files(claim),
+                    test_defect_claim=claim,
+                )
+
             try:
                 approved = approve_repair_proposal(
                     proposal,
@@ -326,6 +370,15 @@ class RepairLoop:
                         None,
                     )
                 )
+                # F7 (T1): the guard-event channel. When the rejection is a PURE
+                # test-transcription block — every offending path fell under the
+                # test-file rule AND the primary failure is verify_contract_not_green
+                # — thread the blocked test paths onto the (still hard) REPAIR_FAILED
+                # terminal so the greenfield pipeline can re-derive them from the
+                # design. A MIXED proposal (a test path + an oracle/gate-control
+                # offender) does NOT qualify; the scope guard is byte-unchanged and
+                # still rejects the whole proposal.
+                blocked = _blocked_test_paths_from_scope(scope, current_failure)
                 return self._finalize(
                     session_dir,
                     "REPAIR_FAILED",
@@ -334,6 +387,7 @@ class RepairLoop:
                     remaining_violations=current_violations,
                     partial_success_patches=applied_patch_files,
                     baseline_ref=resolved_baseline_ref,
+                    blocked_test_paths=blocked,
                     reason=scope.reason,
                 )
 
@@ -462,11 +516,15 @@ class RepairLoop:
         partial_success_patches: list[str] | None = None,
         baseline_ref: str | None = None,
         reason: str = "",
+        blocked_test_paths: list[str] | None = None,
+        test_defect_claim: list[dict] | None = None,
     ) -> RepairLoopOutcome:
         pre_existing = list(pre_existing_violations or [])
         unrepairable = list(unrepairable_violations or [])
         remaining = list(remaining_violations or [])
         patches = list(partial_success_patches or [])
+        blocked = list(blocked_test_paths or [])
+        claims = list(test_defect_claim or [])
         self.history.finalize(
             session_dir,
             status,
@@ -477,6 +535,12 @@ class RepairLoop:
                 "pre_existing_violations": pre_existing,
                 "unrepairable_violations": unrepairable,
                 "remaining_violations": remaining,
+                # F7 — structured routing fields on final_status.yaml. A
+                # defective-test-transcription terminal carries the blocked test
+                # paths / the legal claim so the greenfield route can re-derive
+                # them from the design (never trusting the claim).
+                "blocked_test_paths": blocked,
+                "test_defect_claim": claims,
             },
         )
         return RepairLoopOutcome(
@@ -490,6 +554,8 @@ class RepairLoop:
             patches,
             baseline_ref,
             reason or status,
+            blocked,
+            claims,
         )
 
     def _history_dir(self) -> Path:
@@ -655,6 +721,51 @@ class RepairLoop:
             except TypeError:
                 picked = self.primary_picker.pick(violations)
         return _coerce_violation_report(picked, violations[0])
+
+
+#: The verify verdict class the contract executor stamps on a not-green test run
+#: (``verify_runner._tuple_from_execution``). F7's guard-event channel (T1) only
+#: routes a defective TEST TRANSCRIPTION for this class — a red test-command run —
+#: never a structural / typecheck / other failure.
+_CONTRACT_NOT_GREEN = "verify_contract_not_green"
+
+
+def _blocked_test_paths_from_scope(scope: Any, failure: VerificationFailureReport) -> list[str]:
+    """F7 (T1): the blocked test paths when a scope rejection is a PURE test block.
+
+    Returns the offending paths ONLY when (a) the primary failure is
+    ``verify_contract_not_green`` and (b) EVERY offending path fell under the
+    scope guard's test-file rule — i.e. it is a test file that is neither an
+    oracle/gate-control artefact (rule 1) nor a stack-contract artefact (rule 0).
+    A MIXED proposal (any non-test / oracle / stack offender) returns ``[]`` and
+    stays a hard terminal. The scope guard itself is byte-unchanged; this only
+    RE-READS its published ``offending_paths`` with the guard's own recognizers.
+    """
+    if str(getattr(failure, "failure_class", "") or "") != _CONTRACT_NOT_GREEN:
+        return []
+    offending = list(getattr(scope, "offending_paths", None) or [])
+    if not offending:
+        return []
+    for path in offending:
+        if not _is_test_file(path):
+            return []
+        if _is_oracle_artifact(path) or _is_stack_contract_artifact(path):
+            return []
+    return list(offending)
+
+
+def _claim_files(claim: list[dict]) -> list[str]:
+    """The ``file`` paths named by a ``test_defect_claim`` (deduped, order-stable)."""
+    seen: set[str] = set()
+    files: list[str] = []
+    for entry in claim:
+        if not isinstance(entry, Mapping):
+            continue
+        path = str(entry.get("file") or "").strip()
+        if path and path not in seen:
+            seen.add(path)
+            files.append(path)
+    return files
 
 
 def _proposal_files(proposal: RepairProposal) -> list[str]:

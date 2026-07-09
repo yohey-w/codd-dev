@@ -61,7 +61,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess  # noqa: S404 — argv is from the trusted language profile, shell=False
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .builtin_adapters import ensure_builtin_adapters_registered
@@ -125,6 +125,15 @@ class VerifyExecutionResult:
     returncode: int | None
     execution: RunnerExecution | None
     detail: str
+    #: F7b — the executor's captured stdout / stderr from the run (empty when the
+    #: command never spawned). The PRIMARY greenfield contract path parses only a
+    #: machine-readable report (:class:`RunnerExecution`), which carries file-level
+    #: signals but NO assertion text; carrying the raw output here lets the repair
+    #: runner window it into the failure evidence so the RCA/propose prompt sees the
+    #: actual failing assertion (ending the "skipped/todo" / "fixture I/O"
+    #: hallucinations). Additive; defaults keep every existing constructor valid.
+    stdout: str = ""
+    stderr: str = ""
 
     @property
     def is_green(self) -> bool:
@@ -306,7 +315,12 @@ def execute_verify_plan(
         )
 
     # (f) Classify — not-green BEFORE any PASS (GPT §5 ordering).
-    return _classify(plan, returncode, report_path, adapter, project_root)
+    result = _classify(plan, returncode, report_path, adapter, project_root)
+    # F7b: carry the captured output on the result so a not-green contract failure
+    # can surface the actual assertion text into repair evidence (the parsed report
+    # has none). Green results carry it harmlessly; the repair runner only reads it
+    # on a failure. Only reachable when the command actually spawned (``completed``).
+    return replace(result, stdout=completed.stdout or "", stderr=completed.stderr or "")
 
 
 def _norm_rel_posix(path: str) -> str:

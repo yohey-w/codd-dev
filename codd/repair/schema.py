@@ -65,6 +65,16 @@ class RepairProposal:
     confidence: float
     proposal_timestamp: str
     rca_reference: str
+    #: F7 (T2) — the LEGAL claim channel for a defective test TRANSCRIPTION. Each
+    #: entry is ``{"file", "assertion", "reason"}``: an assertion the engine judges
+    #: unsatisfiable by ANY design-conforming implementation (a tautology, or a
+    #: contradiction of a design pin / sibling design-pinned assertion). It is NOT a
+    #: patch (repair may never edit a test); a CLAIM-ONLY proposal (no ``patches``)
+    #: is a STRUCTURED terminal that the loop threads into the outcome so the
+    #: greenfield pipeline can re-derive the test from the design. The claim is
+    #: NEVER trusted — it is checked by re-derivation + fresh verify. Additive; the
+    #: default keeps positional constructors valid.
+    test_defect_claim: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.patches = [patch if isinstance(patch, FilePatch) else FilePatch(**patch) for patch in self.patches]

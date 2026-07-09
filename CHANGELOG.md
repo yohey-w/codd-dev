@@ -13,6 +13,59 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.24.0] - 2026-07-10 — Impl-blind test re-derivation: arbitration without an arbiter (F7)
+
+After F1-F6, JavaScript greenfields greened only ~1/3 of runs — below the ② bar (≥2/3). Fable5, given the
+ACTUAL failure artifacts (repair history + generated src/tests + a green contrast, copied in-repo since
+it can't read the run workspaces), overturned the framing twice: there were NO impl bugs and NO
+repair-direction defect. All residual failures were ONE class — **generated test assertions that no
+design-conforming implementation can satisfy** (tautologies like `expect(false).toBe(true)`, a leaked
+TypeScript `never` reducing to `not.toBeInstanceOf(Object)`, and a wrong transcription constant `toBe(4)`
+where the design pins 2). The implementations were verify-green-capable in 3 of 3 runs; the tests were
+broken transcriptions of the design. The run died because **test-write authority does not exist anywhere
+in the verify/repair phase** — repair correctly won't edit a test (anti-false-green), so a defective
+transcription is a guaranteed death with budget unspent. Sampling more can't help (arithmetic: ~0.6%
+defective assertions × ~170/run ⇒ P(clean) ≈ 36% ≈ the observed rate; sampling estimates a rate, it can't
+raise it).
+
+F7 — impl-blind test re-derivation (Fable5, self-approvable; the constructive form of the Inc1-revert
+principle "a gate may only fire on defects repairable within the firing phase's write authority"): route
+a defective transcription to the phase that HAS test-authoring authority (implement), instead of
+dead-ending. There is **no arbiter** — the design remains the only oracle:
+- **Trigger, deterministic, no LLM verdict in routing.** T1: when the auto-scope-guard rejects a
+  proposal and EVERY offending path is a test file under a `verify_contract_not_green` failure (mixed
+  proposals stay hard terminals), the loop threads a structured `blocked_test_paths` into
+  `final_status.yaml`. T2: a new optional `test_defect_claim` in the propose schema + one propose-prompt
+  rule — "if an assertion cannot be satisfied by ANY design-conforming implementation, do NOT patch the
+  test; emit the claim (checked by re-derivation, never trusted)"; a claim-only proposal is a structured
+  terminal, not an engine-failure strike. This removes the perversity that reporting a broken test
+  required attempting a forbidden edit.
+- **Route (`codd/greenfield/test_rederivation.py`, new).** On a qualifying outcome, for each blocked
+  path gated by: it maps to a derived-task output, it bears the codd generation header (**a header-less
+  human-authored test is NEVER re-derived — brownfield safety**), and the task's re-derivation budget is
+  unspent (`repair.test_rederivation.max_per_task`, default 1) — re-run ONLY the owning tasks' tests-spec
+  under an impl-blind feedback ("re-derive EVERY expected value strictly from the design + VB contract;
+  carry over nothing"), write-fenced to the test paths, re-check the unchanged implement-side gates
+  (coverage + VB marker-authenticity), then GREEN only via a fresh verify. Records
+  `<session>/test_rederivation.yaml`. Modeled on the shipped `_drive_vb_authenticity_rework`. Default-ON
+  (unlike the reverted Inc1, this adds no new red source — its worst case is one wasted fenced rerun at a
+  currently-guaranteed-death point; opt-out `repair.test_rederivation.enabled`).
+- **F7b (subordinate) — evidence-complete on the contract path.** v3.23.0's F3/F5 shipped but the primary
+  greenfield contract path (`_tuple_from_execution`) never fed them: it now surfaces per-test failure
+  entries + captured assertion text (windowed) and runs B0 attribution as READ-ONLY evidence, ending the
+  RCA hallucinations. Evidence-only — it does not alter routing (preserves `verify_contract_not_green`).
+
+Anti-false-green (Fable5-verified): the re-derivation prompt is conditioned on the ORIGINAL authoring
+distribution MINUS the SUT — design closure + VB contract + (B′) dependency-producer files + the current
+test file — and NEVER the owning task's src bodies, NEVER verify observations. So no information can flow
+from a buggy impl into the regenerated test; the false-green channel does not exist structurally. Copying
+the old broken assertion keeps the run RED (a convergence miss, not a correctness miss). The scope guard
+is byte-unchanged; repair still cannot edit tests; GREEN is decided solely by fresh verify. No
+`language ==`. Red-first (9 DoD tests incl. replaying the two real failing runs as fixtures → trigger →
+re-derivation → green). Full suite 7346 passed / 1 xfailed / 0 skipped. Self-approvable (Fable5-authorized,
+exercising the delegated designer-reserved arbitration authority). Expected JS green rate after F7 ≈ 0.9,
+over the ≥2/3 ② bar. MINOR.
+
 ## [3.23.0] - 2026-07-09 — Auto-repair: budget-gated, evidence-complete convergence (F1-F6)
 
 With the infrastructure failures fixed, dogfood runs began failing verify on genuine generated-impl bugs

@@ -119,6 +119,13 @@ class LlmRepairEngine(RepairEngine):
             payload = _parse_json_object(self._invoke("repair_propose", prompt), "RepairProposal")
             proposal = _repair_proposal(payload, rca)
             if not proposal.patches:
+                # F7 (T2): a CLAIM-ONLY proposal (no patches, but a test_defect_claim)
+                # is a legal structured terminal — the model reported an unsatisfiable
+                # test transcription instead of attempting a forbidden test edit. Let
+                # it surface so the loop can thread it into the outcome; the claim is
+                # checked by re-derivation, never trusted.
+                if proposal.test_defect_claim:
+                    return proposal
                 raise RepairFailed("repair proposal selected no-patch")
 
             last_error = self._proposal_validation_error(proposal)
@@ -380,10 +387,37 @@ def _repair_proposal(payload: Mapping[str, Any], rca: RootCauseAnalysis) -> Repa
             confidence=float(payload.get("confidence", 0.0)),
             proposal_timestamp=str(payload.get("proposal_timestamp") or _timestamp()),
             rca_reference=str(payload.get("rca_reference") or rca.analysis_timestamp),
+            test_defect_claim=_test_defect_claims(payload.get("test_defect_claim")),
         )
     except (TypeError, ValueError) as exc:
         LOGGER.warning("Repair proposal output did not match schema: %s", exc)
         raise RepairFailed("repair proposal output did not match schema") from exc
+
+
+def _test_defect_claims(payload: Any) -> list[dict]:
+    """Parse the optional ``test_defect_claim`` array (F7 T2), best-effort.
+
+    Each entry is normalized to ``{"file", "assertion", "reason"}`` strings. A
+    non-list, or an entry with no ``file``, contributes nothing — the claim only
+    unlocks bounded re-derivation, and a malformed claim must never abort propose.
+    """
+    if not isinstance(payload, list):
+        return []
+    claims: list[dict] = []
+    for item in payload:
+        if not isinstance(item, Mapping):
+            continue
+        file_path = str(item.get("file") or item.get("file_path") or "").strip()
+        if not file_path:
+            continue
+        claims.append(
+            {
+                "file": file_path,
+                "assertion": str(item.get("assertion") or "").strip(),
+                "reason": str(item.get("reason") or "").strip(),
+            }
+        )
+    return claims
 
 
 def _selects_no_patch(payload: Mapping[str, Any]) -> bool:

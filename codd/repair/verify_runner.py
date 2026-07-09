@@ -853,17 +853,47 @@ class VerifyRunner:
         if result.verify_class is VerifyClass.PASS:
             return True, command, result.detail, None
 
+        # F7b — evidence-complete the contract path. The parsed RunnerExecution
+        # carries FILE-level signals but NO assertion text, so historically this
+        # failure shipped a bare ``result.detail`` and the RCA hallucinated
+        # ("skipped/todo", "fixture I/O"). Surface (1) the per-test-FILE failure
+        # entries from ``result.execution`` and (2) the executor's captured
+        # stdout/stderr (windowed) — the actual assertion text — so the repair
+        # engine localizes from real evidence.
+        details: dict[str, Any] = {
+            "command": command,
+            "verify_class": result.verify_class.value,
+            "verify_path": "contract",
+            "returncode": result.returncode,
+            # The contract executor's verdict class is authoritative for routing
+            # (T1 keys on it); B0's finer sub-class rides ``failure_diagnosis``.
+            "failure_class": "verify_contract_not_green",
+        }
+        failed_files = sorted(getattr(result.execution, "executed_failed_files", ()) or ()) if result.execution else []
+        message_lines = [result.detail]
+        if failed_files:
+            details["failed_test_files"] = failed_files
+            message_lines.append(
+                "failed/skipped test file(s): [" + ", ".join(failed_files) + "]"
+            )
+        captured = _command_output_tail(result.stdout, result.stderr)
+        if captured:
+            details["output"] = captured
+            # The parsed report has no assertion text; the captured output does.
+            message_lines.append(captured)
+        message = "\n".join(line for line in message_lines if line)
+        # Attribution as READ-ONLY evidence (F3) — populates ``evidence_nodes`` +
+        # per-path ``attribution`` + a diagnosis WITHOUT overwriting the contract
+        # verdict class / code-addressability (that would flip the T1 routing class
+        # and hand the engine an inferred source target the contract path
+        # deliberately withholds). Best-effort; never aborts verify.
+        self._attach_contract_failure_evidence(details, command, result.stdout, result.stderr)
+
         failure = VerificationFailure(
             check_name="test_command",
             source="test_command",
-            message=result.detail,
-            details={
-                "command": command,
-                "verify_class": result.verify_class.value,
-                "verify_path": "contract",
-                "returncode": result.returncode,
-                "failure_class": "verify_contract_not_green",
-            },
+            message=message,
+            details=details,
         )
         if result.verify_class is VerifyClass.TOOL_MISSING:
             # Did not run AND is a failure — never green.
@@ -871,6 +901,46 @@ class VerifyRunner:
         # FAIL / ZERO_TESTS / REPORT_MISSING / REPORT_UNREADABLE / SCOPE_MISSING:
         # the command executed and the observation is not-green.
         return True, command, result.detail, failure
+
+    def _attach_contract_failure_evidence(
+        self, details: dict[str, Any], command: str, stdout: str | None, stderr: str | None
+    ) -> None:
+        """F7b — fold READ-ONLY B0 attribution EVIDENCE into a contract failure.
+
+        Runs the shared B0 attribution (:func:`attribute_command_failure`) over the
+        executor's captured output and threads its ``evidence_nodes`` (the failing
+        test files), per-path ``attribution``, and ``failure_diagnosis`` into
+        ``details`` — the same F3 evidence the legacy path already gets. It does NOT
+        overwrite ``failure_class`` / ``code_addressable`` / ``failed_nodes``: the
+        contract executor's verdict (``verify_contract_not_green``) is authoritative
+        for routing (F7 T1 depends on it), and the contract path deliberately does
+        not hand the engine an import-inferred source EDIT target. Best-effort: any
+        parser error leaves ``details`` unchanged.
+        """
+        full_output = "\n".join(part for part in (stdout, stderr) if part)
+        if not full_output.strip():
+            return
+        try:
+            attribution = attribute_command_failure(
+                command=command,
+                output=full_output,
+                project_root=self.project_root,
+                check_name="test_command",
+            )
+        except Exception:  # noqa: BLE001 — attribution must never abort verify.
+            return
+        if attribution is None:
+            return
+        if attribution.diagnosis:
+            details["failure_diagnosis"] = attribution.diagnosis
+        if attribution.attributed:
+            details["attribution"] = [
+                {"path": item.path, "provenance": item.provenance, "editable": item.editable}
+                for item in attribution.attributed
+            ]
+        evidence_nodes = attribution.evidence_nodes
+        if evidence_nodes:
+            details["evidence_nodes"] = evidence_nodes
 
     def _run_evidence_command(
         self,
