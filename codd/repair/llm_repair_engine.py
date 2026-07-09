@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from codd.config import load_project_config
 from codd.deployment.providers.ai_command import AiCommandError
 from codd.deployment.providers.ai_command_factory import get_ai_command
+from codd.repair.design_context import render_design_context
 from codd.repair.engine import RepairEngine, register_repair_engine
 from codd.repair.git_patcher import GitPatcher
 from codd.repair.schema import (
@@ -47,15 +48,22 @@ class LlmRepairEngine(RepairEngine):
     def __post_init__(self) -> None:
         if self.project_root is not None:
             self.project_root = Path(self.project_root)
+        #: Design-doc closure prose resolved for the failing nodes during
+        #: :meth:`analyze`, reused by :meth:`propose_fix` (which has no DAG). See
+        #: :func:`codd.repair.design_context.render_design_context`.
+        self._design_context_cache: str = ""
 
     def analyze(self, failure: VerificationFailureReport, dag: Any) -> RootCauseAnalysis:
         """Analyze a verification failure and return a structured root cause."""
 
+        self._design_context_cache = render_design_context(
+            dag, list(failure.failed_nodes), self.project_root
+        )
         prompt = _render_template(
             TEMPLATE_DIR / "analyze_meta.md",
             failure_report=_json_dumps(_to_plain_data(failure)),
             dag_context=_json_dumps(_dag_to_plain_data(dag)),
-            project_context=self._project_context(),
+            project_context=self._composed_project_context(),
         )
         payload = _parse_json_object(self._invoke("repair_analyze", prompt), "RootCauseAnalysis")
         try:
@@ -76,7 +84,7 @@ class LlmRepairEngine(RepairEngine):
         prompt_values = {
             "root_cause_analysis": _json_dumps(_to_plain_data(rca)),
             "file_contents": _json_dumps(file_contents),
-            "project_context": self._project_context(),
+            "project_context": self._composed_project_context(),
         }
         prompt = _render_template(TEMPLATE_DIR / "propose_meta.md", **prompt_values)
         last_error: str | None = None
@@ -179,6 +187,22 @@ class LlmRepairEngine(RepairEngine):
             return load_project_config(Path(self.project_root))
         except (FileNotFoundError, ValueError):
             return {}
+
+    def _composed_project_context(self) -> str:
+        """Base project context (config ``context_path``) plus the design-doc
+        closure prose resolved for the failing nodes during :meth:`analyze`.
+
+        The design section is what steers a repair toward the CANONICAL design
+        pins / producer declarations instead of the test text; it is empty when
+        the failure does not map to any design doc, so the prompt is unchanged in
+        that case.
+        """
+        parts = [
+            part
+            for part in (self._project_context(), getattr(self, "_design_context_cache", ""))
+            if part and part.strip()
+        ]
+        return "\n\n".join(parts)
 
     def _project_context(self) -> str:
         config = self._effective_config()

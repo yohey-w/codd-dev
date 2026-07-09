@@ -788,6 +788,85 @@ def test_test_generation_prompt_binds_assertions_to_design_pinned_surface_forms(
         assert literal not in prompt
 
 
+def test_test_generation_prompt_gates_structural_tests_and_binds_shape_to_declared_surface():
+    """Increment 2 (v3.22.0): the test-authoring contract must add two rules.
+
+    (2a) Structural/governance tests are DESIGN-GATED: a generated test must not
+    read, glob, or parse the project's own source tree, nor assert its internal
+    module/layer/dependency structure, unless the design explicitly declares such
+    a governance test — and when declared, the allowed-dependency data is taken
+    VERBATIM from the design's declared dependencies (no hand-authored layer map).
+
+    (2b) Shape assertions BIND TO DECLARED SHAPE: when a test asserts the shape of
+    a produced value (property/field names, key presence, discriminator/tag
+    strings) through means a typechecker cannot see, every such key string must be
+    verbatim-traceable to the design's pinned surface or the injected producer
+    files; where a typechecker exists, prefer typed access so the compiler proves
+    the binding. Both rules ship in the test-authoring block ONLY.
+    """
+    test_prompt = _build_implementation_prompt(
+        config={"project": {"language": "python", "frameworks": ["flask"]}},
+        design_context=DesignContext(
+            node_id="test:acceptance",
+            path=Path("docs/test/acceptance_criteria.md"),
+            content="# Acceptance criteria\n",
+        ),
+        spec=ImplementSpec("docs/test/acceptance_criteria.md", ["src/tests"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    # (2a) structural/governance tests are design-gated, data derived verbatim.
+    assert "DESIGN-GATED" in test_prompt
+    assert "parse the project's OWN source tree" in test_prompt
+    assert "hand-author a layer map or an allowed-imports table" in test_prompt
+    assert (
+        "assert the system's designed BEHAVIOR, not the shape of its source tree"
+        in test_prompt
+    )
+
+    # (2b) shape assertions bind to the design's pinned surface / producer files.
+    assert "SHAPE of a produced value" in test_prompt
+    assert "a typechecker cannot see" in test_prompt
+    assert "verbatim-traceable to the design's pinned surface" in test_prompt
+    assert "PREFER importing the producer's declared types" in test_prompt
+    assert "typed access" in test_prompt
+    # class-1's non-weakening clause is preserved (an unpinned shape is freedom,
+    # but a broken designed behavior must still fail RED).
+    assert "must still FAIL when the designed behavior is broken" in test_prompt
+
+    # Both rules are gated to test-targeting runs: a plain source-implementation
+    # prompt must carry NEITHER.
+    source_prompt = _build_implementation_prompt(
+        config={"project": {"language": "python", "frameworks": ["flask"]}},
+        design_context=DesignContext(
+            node_id="design:summary",
+            path=Path("docs/design/summary.md"),
+            content="# Summary design\n",
+        ),
+        spec=ImplementSpec("docs/design/summary.md", ["src/app"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+    assert "DESIGN-GATED" not in source_prompt
+    assert "SHAPE of a produced value" not in source_prompt
+    assert "PREFER importing the producer's declared types" not in source_prompt
+
+    # Domain-generic: no project/instance literals and no per-language/framework/
+    # filename tokens leaked into the guidance (mirrors :787-788).
+    for literal in (
+        "kakeibo",
+        "ParseError",
+        "14.0",
+        "toHaveProperty",
+        "LAYER",
+        ".test.ts",
+    ):
+        assert literal not in test_prompt
+
+
 def test_non_test_generation_prompt_omits_scoped_assertion_block():
     """The scoped-assertion guidance is gated to test-targeting runs only, so a
     plain source-implementation prompt must not carry it."""

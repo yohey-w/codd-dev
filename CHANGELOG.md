@@ -13,6 +13,67 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.22.0] - 2026-07-09 — Verify-stage structural/shape coherence (statically-typed ② verify unblocker)
+
+After v3.21.0 (B′) unblocked the implement stage for statically-typed languages, both fresh TypeScript
+greenfields advanced to and failed at VERIFY (2/2): test↔impl mismatches auto-repair cannot reconcile —
+the class-1 meta-class at the VALUE/STRUCTURAL level a typechecker cannot catch. ts-v3: a generated
+`dependency-boundary.test.ts` (an undeclared architecture test embedding an INVENTED layer map) that the
+generated source violated. ts-v4: an AST-introspection test asserting node shape by string-keyed/`in`/
+`toHaveProperty` access, whose property names the impl didn't match (typechecker-invisible). Python hid
+both (dynamic typing tolerates shape/import drift at runtime). Fable5-authorized (owner delegated all
+decisions to Fable5) three-increment fix, one canonical contract — the design DAG's declared
+`depends_on` plus the (B′) producer artifacts — enforced at the two seams that already exist (the
+implement oracle deterministically, the test-authoring prompt generatively); repair-side arbitration was
+rejected as the primary path (least deterministic, latest in the pipeline). All F4 self-approvable
+(Fable5-authorized; test immutability preserved as the anti-false-green core).
+
+- **Increment 1 — implement-oracle dependency-conformance gate** (`codd/dependency_boundary_coherence.py`
+  new; `implement_oracle.py`, `implement_oracle_types.py`). A language-free check, sibling to the
+  orphan-artifact gate: every generated SOURCE file's internal imports must resolve into {its owning
+  design doc} ∪ {that doc's transitive `depends_on` closure}; a resolved internal import to a doc
+  PROVABLY outside the closure is a violation (frontmatter `depends_on` = data; suffix-map import
+  extractors + shape-driven resolvers = shared machinery; zero language literals). Failure policy is the
+  oracle's "provably-absent → fail; unknown → never fail" — unresolvable/undecidable degrade to logged
+  residue. Violations normalize under the already-reserved `EVIDENCE_BOUNDARY_VIOLATION` category and
+  feed the existing bounded rerun loop (default 5) via `build_contract_feedback` → `_invoke_rerun`, so
+  the impl's imports are fixed BEFORE verify — the impl-side fix auto-repair never derived, done
+  deterministically. Rerun feedback states the dual: import from a declared dependency, or it's a
+  design-level gap (a missing `depends_on`) — do not inline/duplicate to dodge the boundary. Source-only
+  v1 (test-tree imports excluded + logged); default-ON with an `implement.dependency_boundary_gate`
+  opt-out.
+- **Increment 2 — two test-authoring contract rules** (`implementer.py` `_spec_targets_tests` block).
+  (2a) Structural/architecture-governance tests are DESIGN-GATED — a generated test must not read/glob/
+  parse the source tree or assert internal module/layer/dependency structure unless the design declares
+  such a governance test, and then its allowed-dependency data is derived verbatim from the design (no
+  invented layer map); generalizes the shipped e2e-governance conditional. (2b) Shape assertions bind to
+  declared shape — property/field names, key presence, discriminator strings asserted via
+  typechecker-invisible means (string-keyed access, membership checks, property-name matchers,
+  reflection) must be verbatim-traceable to the design's pinned surface or the (B′)-injected producer
+  files; where a type system exists, prefer importing the producer's declared types and asserting
+  through typed access so the compiler proves the binding (residual drift → a type error the oracle
+  already catches). Extends class-1 pinnedness + the (B′) binding contract; keeps the non-weakening
+  clause.
+- **Increment 3 — repair honesty (arbitration-LITE)** (`codd/repair/design_context.py` new;
+  `llm_repair_engine.py`, `loop.py`). Repair now receives the failing nodes' design-doc bodies
+  (transitive closure, budget-capped) with the rule "tests are immutable; design pins + producer
+  declarations are canonical; align the IMPL toward them." And a deterministic terminal reason
+  `TEST_CONTRACT_OVERREACH` is emitted only when the failing assertion's surface tokens are provably
+  absent from the design closure + producer files — a red-only LABEL on an already-RED terminal (no test
+  edits, no patch-scope change, no green path), replacing the unhelpful
+  `ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING` and pointing diagnosis at generation. Full arbitration
+  (B-full) remains unbuilt.
+
+Anti-false-green (Fable5): arbitration order is design-pinned surface / `depends_on` frontmatter →
+producer-artifact declarations → unpinned (not structurally assertable). Every enforcement point moves
+only the IMPL toward the canonical source, or blocks a test from asserting the unpinned; a genuinely
+wrong impl still fails RED; a test that contradicts the design stays RED with `TEST_CONTRACT_OVERREACH`;
+reconcile-to-a-wrong-test cannot occur. The `dependency-boundary.test.ts` overreach is fixed BOTH by not
+generating it (2a) and by CoDD enforcing the invariant itself from the single source of truth
+(Increment 1). Full suite 7322 passed / 1 xfailed / 0 skipped; generality ratchet green (no
+`language ==` / per-language literal added). Behavioral change (new implement gate reds earlier on
+silent boundary drift) → MINOR.
+
 ## [3.21.0] - 2026-07-09 — Cross-artifact symbol/type coherence (statically-typed ② unblocker)
 
 The ② campaign cleared Python (3 unattended greens on v3.20.0) but TypeScript failed 2/2 at the

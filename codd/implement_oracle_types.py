@@ -32,10 +32,15 @@ from typing import Any
 #
 # The whole point of normalization: a Go/Rust adapter later emits the SAME
 # vocabulary so the SUT-facing feedback and any downstream policy are stack-
-# agnostic. ``boundary_violation`` (an e2e/modality contract breach) is in the
-# vocabulary for completeness but is NOT something a pure typechecker emits — the
-# existing AST e2e-contract gate owns that axis; it is here so the category set is
-# the full design set and a future composite/boundary adapter can use it.
+# agnostic. ``boundary_violation`` is the general "a generated artifact crossed a
+# DECLARED contract boundary" category — it covers BOTH the e2e/modality contract
+# breach the AST e2e-contract gate owns AND, since v3.22.0, the SOURCE dependency-
+# boundary breach the language-free dependency-conformance gate emits (a source
+# file importing across its owning design doc's declared ``depends_on`` closure;
+# see :mod:`codd.dependency_boundary_coherence`). It is NOT something a pure
+# typechecker emits — it is produced by the coherence gates that read the ACG's
+# declared boundaries, normalized into the same category set so the SUT-facing
+# feedback and any future composite/boundary adapter share one vocabulary.
 EVIDENCE_MISSING_SYMBOL = "missing_symbol"
 EVIDENCE_MODULE_RESOLUTION = "module_resolution_error"
 EVIDENCE_TEST_NOT_COLLECTED = "test_not_collected"

@@ -17,6 +17,7 @@ from codd.repair.approval_repair import (
     approve_repair_proposal,
 )
 from codd.repair.auto_scope_guard import evaluate_auto_patch_scope
+from codd.repair.design_context import classify_terminal_reason
 from codd.repair.engine import get_repair_engine
 from codd.repair.history import RepairHistory
 from codd.repair.repair_result import RepairResult
@@ -203,7 +204,7 @@ class RepairLoop:
                     remaining_violations=pre_existing + unrepairable,
                     partial_success_patches=applied_patch_files,
                     baseline_ref=resolved_baseline_ref,
-                    reason="ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING",
+                    reason=self._terminal_reason(pre_existing + unrepairable, dag),
                 )
 
             current_failure = self._pick_primary_violation(classification.repairable, dag)
@@ -226,7 +227,7 @@ class RepairLoop:
                         remaining_violations=pre_existing + unrepairable,
                         partial_success_patches=applied_patch_files,
                         baseline_ref=resolved_baseline_ref,
-                        reason="ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING",
+                        reason=self._terminal_reason(pre_existing + unrepairable, dag),
                     )
                 continue
 
@@ -361,7 +362,7 @@ class RepairLoop:
                             remaining_violations=pre_existing + unrepairable,
                             partial_success_patches=applied_patch_files,
                             baseline_ref=resolved_baseline_ref,
-                            reason="ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING",
+                            reason=self._terminal_reason(pre_existing + unrepairable, dag),
                         )
                 continue
             if post_verify_passed:
@@ -559,6 +560,21 @@ class RepairLoop:
         except TypeError:
             raw = self.repairability_classifier.classify(violations)
         return _coerce_classification(raw)
+
+    def _terminal_reason(
+        self, violations: list[VerificationFailureReport], dag: DAG
+    ) -> str:
+        """Deterministic terminal-reason LABEL for an already-RED exhaustion.
+
+        Rides the structured ``reason`` field: returns ``TEST_CONTRACT_OVERREACH``
+        when the failing assertions' surface tokens are PROVABLY absent from the
+        design closure + producer files (generation overreach, not an impl bug),
+        else the default ``ALL_REMAINING_UNREPAIRABLE_OR_PRE_EXISTING``. This is a
+        label ONLY — it never edits a test, never changes patch scope, and never
+        alters the RED/GREEN outcome; it is consulted only where the loop already
+        terminates RED with nothing left to repair.
+        """
+        return classify_terminal_reason(violations, dag, self.project_root)
 
     def _pick_primary_violation(self, violations: list[VerificationFailureReport], dag: DAG) -> VerificationFailureReport:
         try:
