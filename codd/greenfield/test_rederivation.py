@@ -42,6 +42,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 import hashlib
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
@@ -164,49 +165,169 @@ def has_codd_generation_header(project_root: Path, rel_path: str) -> bool:
     return _CODD_GENERATION_HEADER in text
 
 
+#: The provenance marker naming the SOURCE design node a codd-generated file was
+#: authored from (``@generated-from: <design-doc-path> (<node-id>)`` — see
+#: ``codd.implementer._build_traceability_comment``). This is AUTHORSHIP ground
+#: truth: the file itself records which design node produced it.
+_GENERATED_FROM_MARKER = "@generated-from:"
+
+
+def first_generated_from(project_root: Path, rel_path: str) -> tuple[str | None, str | None]:
+    """Parse ``(design-doc-path, node-id)`` from a file's FIRST ``@generated-from``
+    header, or ``(None, None)`` when the file is absent/unreadable/header-less.
+
+    Comment-prefix-agnostic and language-free: the marker is located ANYWHERE on a
+    line (past any ``//`` / ``#`` / ``--`` / ``/*`` banner), so every language's
+    comment style parses identically — no per-language literal. Either half of the
+    value may be empty (a path-only or node-id-only header)."""
+    resolved = Path(project_root) / rel_path
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except OSError:
+        return (None, None)
+    return _parse_generated_from(text)
+
+
+def _parse_generated_from(text: str) -> tuple[str | None, str | None]:
+    """Pure-text sibling of :func:`first_generated_from` (testable without a file)."""
+    for line in text.splitlines():
+        idx = line.find(_GENERATED_FROM_MARKER)
+        if idx == -1:
+            continue
+        value = line[idx + len(_GENERATED_FROM_MARKER):].strip()
+        if value.endswith("*/"):  # a block-comment banner close, if any.
+            value = value[:-2].strip()
+        if not value:
+            continue
+        node_id: str | None = None
+        path = value
+        if value.endswith(")") and "(" in value:
+            open_idx = value.rfind("(")
+            node_id = value[open_idx + 1:-1].strip() or None
+            path = value[:open_idx].strip()
+        return (_norm(path) or None, node_id)
+    return (None, None)
+
+
+# Owner-resolution ranks: an exact/glob declared match outranks a dir-prefix match.
+_RANK_NONE = 0
+_RANK_PREFIX = 1
+_RANK_EXACT = 2
+
+
 def owning_task_for_path(
+    project_root: Path,
     rel_path: str,
     tasks: list[Any],
     *,
     config: Mapping[str, Any] | None,
-    path_resolver: Callable[[Mapping[str, Any], Any], list[str]] | None,
 ) -> Any | None:
-    """The implement task whose declared/resolved outputs OWN ``rel_path``.
+    """The implement task that AUTHORED the test file at ``rel_path``.
 
-    A task owns the path when the path equals — or sits under — one of its output
-    paths (declared ``output_paths``, else resolved via ``path_resolver``) or its
-    declared ``expected_outputs``. Returns the FIRST such task, or ``None`` when no
-    derived task claims the path (a path with no owning task is never re-derived).
-    """
+    Resolved by AUTHORSHIP EVIDENCE ONLY — NEVER the write-fence path resolver
+    (which prefix-owns every test file and would mis-award a test to a no-output
+    requirements gate task; that was the F7 live crash). In order:
+
+    1. PROVENANCE (ground truth): the file's first ``@generated-from`` design node
+       (path OR node-id) is matched to the task whose ``design_node`` equals it.
+       Within that provenance-matched set, DECLARED evidence
+       (``output_paths`` ∪ ``expected_outputs``) is ranked exact/glob (posix
+       ``fnmatch``) ABOVE dir-prefix; a singleton owns outright.
+    2. No provenance match → the SAME declared-evidence ranking across ALL tasks.
+    3. Nothing resolves → ``None`` (fail-closed; the caller keeps the honest
+       terminal — ``pipeline.py`` re-derivation-did-not-apply path).
+
+    A task that authors no artifact (:func:`_task_declares_no_authored_artifact`)
+    can NEVER own a test file and is excluded up front (belt-and-suspenders with
+    provenance: a gate task neither matches provenance nor survives this filter)."""
     target = _norm(rel_path)
     if not target:
         return None
+
+    # A no-authored-artifact task (a verification/gate task) can never own a test.
+    candidates = [t for t in tasks if not _declares_no_authored_artifact(t, config)]
+    if not candidates:
+        return None
+
+    prov_path, prov_node = first_generated_from(project_root, rel_path)
+    if prov_path or prov_node:
+        provenance_set = [t for t in candidates if _provenance_matches(t, prov_path, prov_node)]
+        if provenance_set:
+            if len(provenance_set) == 1:
+                return provenance_set[0]  # provenance alone: a singleton owns outright
+            ranked = _best_declared_owner(provenance_set, target)
+            if ranked is not None:
+                return ranked
+            # Provenance vouches but no declared evidence disambiguates the shared
+            # design node → first in order (stable), still within the provenance set.
+            return provenance_set[0]
+
+    # No provenance match (or a header-less file) → declared evidence across ALL tasks.
+    return _best_declared_owner(candidates, target)
+
+
+def _provenance_matches(task: Any, prov_path: str | None, prov_node: str | None) -> bool:
+    design_raw = str(getattr(task, "design_node", "") or "").strip()
+    if not design_raw:
+        return False
+    design_norm = _norm(design_raw)
+    if prov_path and design_norm == prov_path:
+        return True
+    if prov_node:
+        node = str(prov_node).strip()
+        if node and (design_raw == node or design_norm == _norm(node)):
+            return True
+    return False
+
+
+def _best_declared_owner(tasks: list[Any], target: str) -> Any | None:
+    """The task with the strongest DECLARED-evidence match against ``target``
+    (exact/glob outranks dir-prefix), order-stable on ties. ``None`` when no task
+    declares evidence that owns the target."""
+    best_task: Any | None = None
+    best_rank = _RANK_NONE
     for task in tasks:
-        for candidate in _task_output_paths(task, config, path_resolver):
-            owned = _norm(candidate)
-            if owned and (target == owned or target.startswith(owned + "/")):
-                return task
-        for candidate in getattr(task, "expected_outputs", ()) or ():
-            owned = _norm(candidate)
-            if owned and (target == owned or target.startswith(owned + "/")):
-                return task
-    return None
+        rank = _declared_owner_rank(task, target)
+        if rank > best_rank:
+            best_rank = rank
+            best_task = task
+    return best_task
 
 
-def _task_output_paths(
-    task: Any,
-    config: Mapping[str, Any] | None,
-    path_resolver: Callable[[Mapping[str, Any], Any], list[str]] | None,
-) -> list[str]:
-    declared = list(getattr(task, "output_paths", ()) or [])
-    if declared:
-        return declared
-    if path_resolver is not None:
-        try:
-            return list(path_resolver(dict(config or {}), task) or [])
-        except Exception:  # noqa: BLE001 — a task whose paths fail contributes none.
-            return []
-    return []
+def _declared_owner_rank(task: Any, target: str) -> int:
+    best = _RANK_NONE
+    for candidate in _declared_evidence(task):
+        owned = _norm(candidate)
+        if not owned:
+            continue
+        if owned == target or fnmatchcase(target, owned):
+            return _RANK_EXACT  # exact / glob match — the strongest, short-circuit.
+        if target.startswith(owned + "/"):
+            best = _RANK_PREFIX  # dir-prefix — keep looking for a stronger match.
+    return best
+
+
+def _declared_evidence(task: Any) -> list[Any]:
+    """Declared authorship evidence: ``output_paths`` ∪ ``expected_outputs``."""
+    evidence: list[Any] = []
+    evidence.extend(getattr(task, "output_paths", ()) or ())
+    evidence.extend(getattr(task, "expected_outputs", ()) or ())
+    return evidence
+
+
+def _declares_no_authored_artifact(task: Any, config: Mapping[str, Any] | None) -> bool:
+    """Whether ``task`` authors no codebase artifact (a verification / release-gate
+    or non-codebase task). Delegates to the pipeline classifier (lazy import to
+    avoid a module-load cycle). A resolution failure fails OPEN (the task may own),
+    so ownership is never silently lost to an import hiccup."""
+    try:
+        from codd.greenfield.pipeline import _task_declares_no_authored_artifact
+    except Exception:  # noqa: BLE001 — classifier unavailable ⇒ do not exclude.
+        return False
+    try:
+        return bool(_task_declares_no_authored_artifact(task, dict(config or {})))
+    except Exception:  # noqa: BLE001 — a task the classifier cannot judge may own.
+        return False
 
 
 # ── the route ────────────────────────────────────────────────────────────────
@@ -220,7 +341,6 @@ def run_test_rederivation(
     implement_runner: Callable[[Any, str], None],
     verify: Callable[[], Any],
     echo: Callable[[str], None] = print,
-    path_resolver: Callable[[Mapping[str, Any], Any], list[str]] | None = None,
     implement_gate: Callable[[], None] | None = None,
     budget_used: dict[str, int] | None = None,
     history_session_dir: Path | None = None,
@@ -271,7 +391,7 @@ def run_test_rederivation(
             header_missing = True
             echo(f"[greenfield] test re-derivation: '{path}' has no codd generation header — human-authored, never re-derived.")
             continue
-        task = owning_task_for_path(path, tasks, config=config, path_resolver=path_resolver)
+        task = owning_task_for_path(project_root, path, tasks, config=config)
         if task is None:
             skipped.append(path)
             echo(f"[greenfield] test re-derivation: '{path}' maps to no derived task — not re-derived.")
@@ -318,13 +438,25 @@ def run_test_rederivation(
         f"{len(eligible_paths)} test file(s) from the design across {len(eligible_tasks)} "
         f"task(s); fenced to {len(allowed)} test path(s)."
     )
+    crash: Exception | None = None
     with _OracleWriteFence(project_root, allowed_paths=allowed, echo=echo) as fence:
-        for task in eligible_tasks:
-            implement_runner(task, REDERIVATION_FEEDBACK)
-        fence.enforce()
+        try:
+            for task in eligible_tasks:
+                implement_runner(task, REDERIVATION_FEEDBACK)
+            fence.enforce()
+        except Exception as exc:  # noqa: BLE001 — a crashed draw must NOT escape.
+            # CRASH CONTAINMENT (the honesty fix). A draw that raised (e.g. the
+            # implementer honestly emitting 0 files → an unhandled CoddCLIError, the
+            # F7 live crash) must never surface as a misleading stage crash. Roll the
+            # write-fence back to its ENTRY snapshot so a crashed draw leaves NO
+            # partial transcription (in- OR out-of-scope), then fall through to the
+            # honest RED terminal.
+            crash = exc
+            fence.rollback()
 
-    # Consume the budget for every re-driven task (a second claim on the same task
-    # this run is now budget-blocked → no oscillation).
+    # Consume the budget for every re-driven task — a crash counts as a spent draw
+    # (attempted == spent), so a crash cannot grant a re-roll. A second claim on the
+    # same task this run is now budget-blocked → no oscillation.
     for task_id in eligible_task_ids:
         budget[task_id] = budget.get(task_id, 0) + 1
 
@@ -336,7 +468,20 @@ def run_test_rederivation(
         tasks=eligible_task_ids,
         old_hashes=old_hashes,
         new_hashes=new_hashes,
+        error=str(crash) if crash is not None else None,
     )
+
+    if crash is not None:
+        echo(
+            "[greenfield] test re-derivation: the re-derivation draw crashed "
+            f"({crash}); the write-fence rolled the tree back to entry (no partial "
+            "transcription) and the task budget is consumed (a crash is not a re-roll)."
+        )
+        return RederivationOutcome(
+            STATUS_RED, trigger=trigger, rederived_paths=eligible_paths,
+            rederived_tasks=eligible_task_ids, skipped_paths=skipped,
+            reason=f"re-derivation draw crashed: {crash}",
+        )
 
     # The regenerated test file must pass the UNCHANGED implement-side gates (VB
     # marker-authenticity + coverage reconciliation) BEFORE verify runs — dropping a
@@ -449,11 +594,13 @@ def _record_event(
     tasks: list[str],
     old_hashes: dict[str, str],
     new_hashes: dict[str, str],
+    error: str | None = None,
 ) -> None:
     """Append the re-derivation event to ``<session>/test_rederivation.yaml``.
 
-    Records paths, owning tasks, the trigger, and old/new content hashes so a run's
-    re-derivation history is auditable. Best-effort: a write failure never aborts the
+    Records paths, owning tasks, the trigger, old/new content hashes, and — when the
+    draw crashed — the ``error`` field, so a run's re-derivation history (including a
+    contained crash) is auditable. Best-effort: a write failure never aborts the
     route (the verdict already stands on the fresh verify)."""
     if history_session_dir is None:
         return
@@ -468,16 +615,17 @@ def _record_event(
             loaded = yaml.safe_load(record_path.read_text(encoding="utf-8"))
             if isinstance(loaded, list):
                 events = loaded
-        events.append(
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "trigger": trigger,
-                "paths": list(paths),
-                "tasks": list(tasks),
-                "old_hashes": dict(old_hashes),
-                "new_hashes": dict(new_hashes),
-            }
-        )
+        event: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trigger": trigger,
+            "paths": list(paths),
+            "tasks": list(tasks),
+            "old_hashes": dict(old_hashes),
+            "new_hashes": dict(new_hashes),
+        }
+        if error is not None:
+            event["error"] = error
+        events.append(event)
         record_path.write_text(yaml.safe_dump(events, sort_keys=False), encoding="utf-8")
     except Exception:  # noqa: BLE001 — recording is observability, never a gate.
         return
@@ -506,6 +654,7 @@ __all__ = [
     "STATUS_NOT_APPLICABLE",
     "STATUS_RED",
     "blocked_test_paths",
+    "first_generated_from",
     "has_codd_generation_header",
     "owning_task_for_path",
     "rederivation_enabled",

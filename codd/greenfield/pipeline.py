@@ -3089,6 +3089,41 @@ class _OracleWriteFence:
         # propagates with the tree left for the caller's error handling.
         return None
 
+    def rollback(self) -> None:
+        """Revert the ENTIRE tracked tree to the entry snapshot — for a CRASHED
+        scoped rerun, which must leave NO partial transcription (in- OR out-of-scope).
+
+        Unlike :meth:`enforce`, which KEEPS in-scope writes (the success path's whole
+        purpose), rollback restores every tracked file to its pre-rerun bytes: an
+        out-of-scope OR in-scope MODIFY is restored, a CREATE is deleted, a DELETE is
+        recreated. Used by the F7 re-derivation runner's crash-containment path so a
+        draw that raised (e.g. an implementer honestly emitting 0 files) is undone in
+        full before the honest RED terminal — no half-written test survives."""
+        current = self._capture()
+        reverted_modified: list[str] = []
+        reverted_created: list[str] = []
+        for rel, content in current.items():
+            if rel in self._snapshot:
+                if self._snapshot[rel] != content:
+                    self._restore(rel, self._snapshot[rel])
+                    reverted_modified.append(rel)
+            else:
+                self._remove(rel)
+                reverted_created.append(rel)
+        reverted_deleted: list[str] = []
+        for rel, content in self._snapshot.items():
+            if rel not in current:
+                self._restore(rel, content)
+                reverted_deleted.append(rel)
+        total = len(reverted_modified) + len(reverted_created) + len(reverted_deleted)
+        if total:
+            self._echo(
+                "[greenfield] implement-oracle: write-fence ROLLED BACK "
+                f"{total} change(s) after a crashed scoped rerun "
+                f"(modified={len(reverted_modified)}, created={len(reverted_created)}, "
+                f"deleted={len(reverted_deleted)}); the tree is restored to entry."
+            )
+
     def enforce(self) -> None:
         """Revert every out-of-scope create/modify made since entry."""
         current = self._capture()
@@ -4618,8 +4653,9 @@ def _default_verify_runner(
         # to the phase that HAS test-write authority: re-derive the named test(s)
         # STRICTLY from the design + VB contract (write-fenced), then let a FRESH
         # verify decide green. No arbiter — the design arbitrates operationally. On
-        # RED, one more repair loop runs (a second claim on the same task is
-        # budget-blocked → no oscillation) before the honest terminal.
+        # RED, a BOUNDED FIXPOINT loop re-enters re-derivation while follow-up repair
+        # keeps surfacing FRESH blocked tests for DISTINCT tasks (the per-task budget
+        # bounds it → no oscillation) before the honest terminal.
         rederived = _drive_test_rederivation(
             project_root, outcome, config, ai_command, echo, run_repair=_run_repair
         )
@@ -4654,12 +4690,23 @@ def _drive_test_rederivation(
 ) -> str | None:
     """F7 route — re-derive blocked test transcription(s), then fresh-verify + certify.
 
+    A BOUNDED FIXPOINT LOOP (F7.1 part C). One re-derivation draw per RUN is at most
+    ``max_per_task`` per task; when a post-re-derivation follow-up repair surfaces
+    FRESH blocked test(s) for a DIFFERENT (not-yet-spent) task, the loop RE-ENTERS
+    ``run_test_rederivation`` with the SAME ``budget_used`` dict. Termination is
+    guaranteed: every RUNNING iteration strictly consumes ≥1 unspent per-task budget,
+    so Σ ≤ ``max_per_task`` × |tasks|; a repeat claim on an already-spent task returns
+    ``not_applicable`` → the loop exits. There is NO new knob — the per-run budget is
+    emergent (Σ per-task). This SUPERSEDES the old hard ONE-loop count, which wrongly
+    capped the independent-second-task case (the per-task budget IS the oscillation
+    guard).
+
     Returns a success detail string when a fresh verify goes GREEN after
-    re-derivation (the caller returns it), or ``None`` when re-derivation does not
-    apply (the caller keeps the original honest terminal). Raises :class:`StageError`
-    when re-derivation ran but the re-derived test still fails (an honest terminal
-    that NAMES the re-derivation state). Budget (``repair.test_rederivation.max_per_task``)
-    is enforced across the bounded second repair loop so there is no oscillation.
+    re-derivation (the caller returns it), or ``None`` when re-derivation never
+    applied at all (the caller keeps the original honest terminal). Raises
+    :class:`StageError` on an honest terminal that NAMES the re-derivation state — it
+    NEVER surfaces a "produced 0 generated files" stage crash for a blocked-test
+    outcome (a crashed draw is contained inside ``run_test_rederivation`` as RED).
     """
     from codd.greenfield.test_rederivation import (
         STATUS_GREEN,
@@ -4679,6 +4726,8 @@ def _drive_test_rederivation(
         return None
 
     def _implement_runner(task: ImplementTaskRef, feedback: str) -> None:
+        # The implement WRITE-FENCE (:4682-4684 vicinity) KEEPS the path resolver —
+        # that's correct HERE (where MAY this task write). Ownership no longer uses it.
         output_paths = (
             list(task.output_paths) if task.output_paths else _output_paths_for_task(config, task)
         )
@@ -4695,74 +4744,90 @@ def _drive_test_rederivation(
         )
 
     budget_used: dict[str, int] = {}
-    # ONE re-derivation of the blocked test transcription(s) from the design.
-    rederived = run_test_rederivation(
-        project_root,
-        outcome=outcome,
-        config=config,
-        tasks=tasks,
-        path_resolver=_output_paths_for_task,
-        implement_runner=_implement_runner,
-        verify=lambda: run_standalone_verify(project_root),
-        echo=echo,
-        budget_used=budget_used,
-        history_session_dir=getattr(outcome, "history_session_dir", None),
-        trigger="T2" if getattr(outcome, "test_defect_claim", None) else "T1",
-    )
-
-    if rederived.status == STATUS_GREEN:
-        # GREEN only via fresh verify; re-run standalone once more so the
-        # executed-anything honesty gate also covers the re-derived state
-        # (pipeline.py:4608-4614 re-check parity).
-        final = run_standalone_verify(project_root)
-        if not final.passed:
-            raise StageError(
-                "test re-derivation reported green but a fresh verification failed "
-                f"({len(final.failures)} failure(s))"
-            )
-        _certify_verify_executed(project_root, final)
-        return (
-            "verification passed after impl-blind test re-derivation "
-            f"(tasks: {', '.join(rederived.rederived_tasks) or 'n/a'})"
+    current = outcome
+    any_ran = False
+    while True:
+        rederived = run_test_rederivation(
+            project_root,
+            outcome=current,
+            config=config,
+            tasks=tasks,
+            implement_runner=_implement_runner,
+            verify=lambda: run_standalone_verify(project_root),
+            echo=echo,
+            budget_used=budget_used,
+            history_session_dir=getattr(outcome, "history_session_dir", None),
+            trigger="T2" if getattr(current, "test_defect_claim", None) else "T1",
         )
 
-    if not rederived.ran:
-        # Re-derivation did not apply. Header-less (human) / unmapped test →
-        # keep the original honest terminal (return None). A budget-block only
-        # arises when re-derivation ALREADY ran this run for the owning task —
-        # an honest terminal, no oscillation.
-        if rederived.skipped_paths:
-            raise StageError(
-                "verification failed and automatic repair blocked test edit(s); "
-                f"test re-derivation did not apply ({rederived.reason}). "
-                f"Blocked test path(s): {', '.join(blocked_test_paths(outcome))}."
+        if rederived.status == STATUS_GREEN:
+            # GREEN only via fresh verify; re-run standalone once more so the
+            # executed-anything honesty gate also covers the re-derived state
+            # (pipeline.py:4608-4614 re-check parity).
+            final = run_standalone_verify(project_root)
+            if not final.passed:
+                raise StageError(
+                    "test re-derivation reported green but a fresh verification failed "
+                    f"({len(final.failures)} failure(s))"
+                )
+            _certify_verify_executed(project_root, final)
+            return (
+                "verification passed after impl-blind test re-derivation "
+                f"(tasks: {', '.join(rederived.rederived_tasks) or 'n/a'})"
             )
-        return None
 
-    # RED after re-derivation: ONE more repair loop (a second claim on the same
-    # task is now budget-blocked → no oscillation), then an honest terminal that
-    # NAMES the re-derivation state.
-    result2 = run_standalone_verify(project_root)
-    if result2.passed:
-        _certify_verify_executed(project_root, result2)
-        return "verification passed after impl-blind test re-derivation"
-    followup = run_repair(result2)
-    if followup.status == "REPAIR_SUCCESS":
-        final = run_standalone_verify(project_root)
-        if not final.passed:
-            raise StageError(
-                "automatic repair reported success but a fresh verification failed "
-                f"({len(final.failures)} failure(s))"
-            )
-        _certify_verify_executed(project_root, final)
-        return "verification passed after test re-derivation + repair"
+        if not rederived.ran:
+            # Re-derivation did not apply THIS iteration. A budget-block (skipped)
+            # arises when the owning task's budget is already spent — an honest
+            # terminal (no oscillation). A re-entry that resolves to nothing (empty
+            # skipped) after we ALREADY re-derived is still an honest terminal.
+            if rederived.skipped_paths:
+                raise StageError(
+                    "verification failed and automatic repair blocked test edit(s); "
+                    f"test re-derivation did not apply ({rederived.reason}). "
+                    f"Blocked test path(s): {', '.join(blocked_test_paths(current))}."
+                )
+            if any_ran:
+                raise StageError(
+                    "verification failed; impl-blind test re-derivation occurred but "
+                    f"did not converge ({rederived.reason})."
+                )
+            return None  # nothing ever re-derived → keep the original honest terminal
 
-    raise StageError(
-        "verification failed; impl-blind test re-derivation occurred "
-        f"(tasks: {', '.join(rederived.rederived_tasks) or 'n/a'}) and the re-derived "
-        "test still fails a fresh verify (a genuine impl/design defect, or the "
-        "transcription did not converge within the re-derivation budget)."
-    )
+        any_ran = True
+        # RED after re-derivation. A fresh verify (a re-derivation may already be
+        # green even though the outcome carried RED), else a follow-up repair.
+        result2 = run_standalone_verify(project_root)
+        if result2.passed:
+            _certify_verify_executed(project_root, result2)
+            return "verification passed after impl-blind test re-derivation"
+        followup = run_repair(result2)
+        if followup.status == "REPAIR_SUCCESS":
+            final = run_standalone_verify(project_root)
+            if not final.passed:
+                raise StageError(
+                    "automatic repair reported success but a fresh verification failed "
+                    f"({len(final.failures)} failure(s))"
+                )
+            _certify_verify_executed(project_root, final)
+            return "verification passed after test re-derivation + repair"
+
+        # FIXPOINT: does the follow-up name FRESH blocked test(s)? If so, re-enter
+        # with the SAME budget dict. A repeat claim on an already-spent task will hit
+        # the budget gate inside run_test_rederivation next iteration (→ not_applicable
+        # → honest StageError above); an independent second task consumes its own
+        # unspent budget. Either way the loop is bounded by Σ per-task budget.
+        if blocked_test_paths(followup):
+            current = followup
+            continue
+
+        # No new blocked test path → honest terminal naming the re-derivation state.
+        raise StageError(
+            "verification failed; impl-blind test re-derivation occurred "
+            f"(tasks: {', '.join(rederived.rederived_tasks) or 'n/a'}) and the re-derived "
+            "test still fails a fresh verify (a genuine impl/design defect, or the "
+            "transcription did not converge within the re-derivation budget)."
+        )
 
 
 def _certify_verify_executed(project_root: Path, result: Any) -> str:

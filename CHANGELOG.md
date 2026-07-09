@@ -13,6 +13,46 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.24.1] - 2026-07-10 — F7.1: make test re-derivation actually complete a live draw (evidence ownership + crash containment + fixpoint)
+
+v3.24.0's F7 had NEVER completed a live re-derivation. Given the actual first-firing artifacts, Fable5
+found the shipped code resolved a blocked test file's OWNING task via the write-fence path-resolver —
+whose config-wide roots `['src','tests']` prefix-own every test file — so ownership was awarded to the
+plan-order-first requirements **gate task** (which authors nothing). Implement then ran on that
+no-artifact task → "produced 0 generated files" → an unhandled `CoddCLIError` **escaped** the
+re-derivation runner → a misleading stage crash that skipped budget accounting, the audit event, and the
+shipped honest-RED path. Because a no-output doc task always precedes authoring tasks, this was
+deterministic for every greenfield plan; F7 crashed at its first live implement call. Unit tests (mocked
+ownership) never exercised it — only the 現物 did.
+
+F7.1 (Fable5-authorized; self-approvable — conformance of the implementation to the already-ruled F7
+design, no new concept; language-free):
+- **A — evidence-based ownership (root fix).** `owning_task_for_path` now resolves by AUTHORSHIP
+  EVIDENCE only, never the write-fence resolver: the test file's first `@generated-from:` header
+  (provenance = ground truth) matched to `task.design_node`, then declared evidence
+  (`output_paths ∪ expected_outputs`, `fnmatchcase`) ranked exact/glob above dir-prefix; no match →
+  `None` (fail-closed → the existing honest terminal). A `_task_declares_no_authored_artifact` task can
+  never own a test file. The header parse is comment-prefix-agnostic and language-free.
+- **B — crash containment + rollback (honesty fix).** The re-derivation runner loop is wrapped; on any
+  exception the write-fence rolls the tracked tree back to its entry snapshot (new
+  `_OracleWriteFence.rollback()` — a crashed draw leaves no partial transcription), the task's budget is
+  consumed (a crash is not a re-roll), the audit event records the error, and it returns STATUS_RED. The
+  escaped-CoddCLIError path is gone; a blocked-test outcome never again terminates as "produced 0
+  generated files".
+- **C — fixpoint iteration.** `_drive_test_rederivation` is now a bounded loop that re-enters
+  re-derivation with the same per-task budget map when the follow-up surfaces fresh `blocked_test_paths`
+  for a DIFFERENT task — exiting on GREEN, not-ran, or no-new-blocked-paths. Each running iteration
+  consumes ≥1 unspent per-task budget (Σ ≤ max_per_task × |tasks|), so it terminates; the per-task
+  budget is the oscillation guard, superseding v3.24.0's hard "one more loop" count (which wrongly capped
+  the genuinely-independent-second-broken-test case). No new knob.
+
+Anti-false-green (unchanged): draws-per-oracle ≤ 1/run; every draw impl-blind (no verify output, no SUT
+src) through the unchanged VB/authenticity gates; GREEN only via full fresh verify; a genuinely buggy
+impl keeps its re-derived test red forever (second claim budget-blocked → honest StageError); the scope
+guard is byte-unchanged; B-full stays rejected. Red-first (10 tests incl. replaying the real js-v7
+first-firing artifacts — the terminal is never "produced 0 generated files" for a blocked-test outcome).
+Full suite 7356 passed / 1 xfailed / 0 skipped. No `language ==`. PATCH.
+
 ## [3.24.0] - 2026-07-10 — Impl-blind test re-derivation: arbitration without an arbiter (F7)
 
 After F1-F6, JavaScript greenfields greened only ~1/3 of runs — below the ② bar (≥2/3). Fable5, given the
