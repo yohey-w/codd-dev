@@ -165,28 +165,6 @@ _WRAPPER_TASK_KEYWORDS = frozenset(
         "ラッパー",
     }
 )
-EXPORT_TYPE_RE = re.compile(
-    r"^\s*export\s+(?:declare\s+)?(?:type|interface|enum)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
-    re.MULTILINE,
-)
-EXPORT_CLASS_RE = re.compile(
-    r"^\s*export\s+(?:default\s+)?class\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
-    re.MULTILINE,
-)
-EXPORT_FUNCTION_RE = re.compile(
-    r"^\s*export\s+(?:default\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
-    re.MULTILINE,
-)
-EXPORT_VALUE_RE = re.compile(
-    r"^\s*export\s+(?:const|let|var)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
-    re.MULTILINE,
-)
-EXPORT_NAMED_BLOCK_RE = re.compile(
-    r"^\s*export\s+(?P<type_prefix>type\s+)?{\s*(?P<body>[^}]+)\s*}(?:\s+from\s+['\"].+['\"])?\s*;?",
-    re.MULTILINE,
-)
-
-
 @dataclass(frozen=True)
 class ImplementSpec:
     design_node: str
@@ -1325,7 +1303,96 @@ def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
                     "description": task.description,
                 }
             )
-    return entries
+    return _topologically_order_implement_tasks(entries, project_root, config)
+
+
+def _topologically_order_implement_tasks(
+    entries: list[dict[str, Any]],
+    project_root: Path,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Producer-first ordering of derived implement-task entries.
+
+    Re-applies ``codd generate``'s wave semantics to implement UNITS: order each
+    task by its design node's ``depends_on`` closure (the same frontmatter edges
+    :func:`_collect_dependency_documents` walks), so a producer design node's
+    tasks run before a consumer design node's tasks — a consumer never runs
+    before the files it imports exist on disk. Within one multi-task design doc,
+    source-kind tasks (empty ``test_kinds``) precede test-kind tasks.
+
+    Ordering is a pure function of STATIC DAG data (design-node ``depends_on`` +
+    ``test_kinds``) — never disk state — so a mid-run resume produces the
+    IDENTICAL order (no task skipped or repeated under reordering). The original
+    enumeration order is the final, deterministic tiebreak. A missing/unparseable
+    design doc degrades to "no dependencies" (rank 0) rather than raising: this
+    is best-effort ordering, not a validation gate.
+    """
+    if len(entries) < 2:
+        return entries
+
+    node_paths = build_document_node_path_map(project_root, config)
+
+    def _node_key(ref: Any) -> str:
+        """Canonical key for a design-node reference (rel posix path if
+        resolvable to a known document, else the raw ref)."""
+        text = str(ref or "").strip()
+        if not text:
+            return ""
+        mapped = node_paths.get(text)
+        if mapped is not None:
+            return mapped.as_posix()
+        return text
+
+    deps_cache: dict[str, set[str]] = {}
+
+    def _node_deps(key: str) -> set[str]:
+        cached = deps_cache.get(key)
+        if cached is not None:
+            return cached
+        deps: set[str] = set()
+        mapped = node_paths.get(key)
+        candidate = (project_root / mapped) if mapped is not None else (project_root / key)
+        try:
+            is_file = candidate.is_file()
+        except OSError:
+            is_file = False
+        if is_file:
+            try:
+                codd = _extract_frontmatter(candidate) or {}
+                normalized = generator_module._normalize_dependencies(codd.get("depends_on", []))
+            except (OSError, ValueError):
+                normalized = []
+            for dependency in normalized:
+                dep_key = _node_key(dependency.get("id"))
+                if dep_key and dep_key != key:
+                    deps.add(dep_key)
+        deps_cache[key] = deps
+        return deps
+
+    rank_cache: dict[str, int] = {}
+
+    def _rank(key: str, stack: frozenset[str]) -> int:
+        cached = rank_cache.get(key)
+        if cached is not None:
+            return cached
+        if key in stack:
+            return 0  # cycle guard: break without recursing further
+        best = 0
+        for dep in _node_deps(key):
+            best = max(best, _rank(dep, stack | {key}) + 1)
+        rank_cache[key] = best
+        return best
+
+    indexed = list(enumerate(entries))
+
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int]:
+        index, entry = item
+        key = _node_key(entry.get("design_node"))
+        is_test = 1 if entry.get("test_kinds") else 0
+        return (_rank(key, frozenset()), is_test, index)
+
+    indexed.sort(key=_sort_key)
+    return [entry for _index, entry in indexed]
 
 
 def auto_detect_task(project_root: Path) -> str:
@@ -2193,6 +2260,152 @@ def _existing_output_files_context(project_root: Path, expected_outputs: list[st
     return "\n\n".join(sections)
 
 
+#: Cap on total bytes of dependency-produced file content folded into an
+#: implement prompt by ``_dependency_artifact_files_context`` (PART 2 of the
+#: cross-artifact symbol-coherence fix). Mirrors
+#: ``EXISTING_OUTPUT_FILES_PROMPT_LIMIT``: full producer content is the
+#: load-bearing signal (it carries signatures/shapes a name list cannot), but a
+#: pathological producer must never blow the prompt budget — on overflow the
+#: block degrades to a name-level surface, then to paths only.
+DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT = 20000
+
+
+def _dependency_artifact_degraded_entry(project_root: Path, path_text: str) -> str:
+    """Budget-overflow fallback for one producer file: a name-level public
+    surface if the language-adapter seam can extract one, else paths-only.
+
+    Dispatches through the shipped ``extract_public_surface`` extractor (which
+    returns ``None`` for a file kind it has no extractor for — graceful
+    degradation, never a crash); this shared core adds NO per-language literal
+    of its own. Imported locally so the language-zone dependency stays off the
+    module's import surface.
+    """
+    try:
+        from codd.implement_oracle_scope import extract_public_surface
+
+        surface = extract_public_surface(path_text, project_root)
+    except Exception:  # pragma: no cover - defensive: never fail the prompt build
+        surface = None
+    if surface:
+        names = ", ".join(str(name) for name in surface)
+        return (
+            f"--- DEPENDENCY ARTIFACT {path_text} (public surface only — content exceeded budget) ---\n"
+            f"Exported symbols: {names}"
+        )
+    return f"--- DEPENDENCY ARTIFACT {path_text} (path only — content exceeded budget) ---"
+
+
+def _render_dependency_artifact_files(project_root: Path, output_paths: list[str]) -> str | None:
+    """Render producer files' on-disk content as budget-capped prompt blocks.
+
+    Full content per file while the budget lasts (a file IS its own surface —
+    signatures included — so this fixes signature/shape-level ``type_error``s a
+    name list cannot, and contains ZERO per-language code by construction). On
+    overflow the current and every subsequent file degrade via
+    :func:`_dependency_artifact_degraded_entry` (name-level surface, then
+    paths-only). Best-effort/read-only: a missing/binary/out-of-project path is
+    skipped, exactly like :func:`_existing_output_files_context`.
+    """
+    sections: list[str] = []
+    budget = DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT
+    for raw in output_paths:
+        text = str(raw).strip()
+        if not text:
+            continue
+        candidate = project_root / text
+        try:
+            _ensure_inside_project(project_root, candidate, "dependency artifact")
+        except ValueError:
+            continue
+        if not candidate.is_file():
+            continue
+        try:
+            content = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if budget <= 0 or len(content) > budget:
+            # This file (and, once the budget is spent, every later file)
+            # overflows the full-content budget: degrade rather than truncate a
+            # source file mid-declaration (a half-file misleads more than a
+            # name list). Spend the remaining budget so subsequent files degrade
+            # too.
+            sections.append(_dependency_artifact_degraded_entry(project_root, text))
+            budget = 0
+            continue
+        budget -= len(content)
+        sections.append(
+            f"--- BEGIN DEPENDENCY ARTIFACT {text} ---\n{content.rstrip()}\n--- END DEPENDENCY ARTIFACT {text} ---"
+        )
+    if not sections:
+        return None
+    return "\n\n".join(sections)
+
+
+def _dependency_artifact_files_context(
+    project_root: Path,
+    config: dict[str, Any],
+    dependency_documents: list[DependencyDocument],
+) -> str | None:
+    """On-disk content of the files produced by the derived tasks that OWN this
+    task's dependency design nodes — the binding import contract (PART 2).
+
+    Resolution: this task's dependency design nodes (``dependency_documents``,
+    already the transitive ``depends_on`` closure) → the approved derived tasks
+    whose ``source_design_doc`` is one of those nodes → their declared
+    ``expected_outputs`` files, WHERE THEY EXIST ON DISK → their content.
+    Language-blind (full content, no symbol extraction). Returns ``None`` when
+    there are no dependency nodes, no owning tasks, or none of their outputs
+    exist yet — a strict no-op that changes nothing for the common shape.
+    """
+    if not dependency_documents:
+        return None
+
+    from codd.llm.plan_deriver import iter_derived_task_records
+
+    node_paths = build_document_node_path_map(project_root, config)
+
+    def _canonical(ref: Any) -> str:
+        text = str(ref or "").strip()
+        if not text:
+            return ""
+        mapped = node_paths.get(text)
+        return mapped.as_posix() if mapped is not None else text
+
+    # The producer design nodes we want files for, keyed by BOTH their raw refs
+    # (node id + rel path) and their canonicalized path, so a task that names its
+    # source doc in either form still matches.
+    wanted_refs: set[str] = set()
+    wanted_canonical: set[str] = set()
+    for document in dependency_documents:
+        posix = document.path.as_posix()
+        wanted_refs.add(document.node_id)
+        wanted_refs.add(posix)
+        wanted_canonical.add(_canonical(document.node_id))
+        wanted_canonical.add(posix)
+
+    def _owns_dependency(source_design_doc: Any) -> bool:
+        ref = str(source_design_doc or "").strip()
+        if not ref:
+            return False
+        return ref in wanted_refs or _canonical(ref) in wanted_canonical
+
+    producer_outputs: list[str] = []
+    seen: set[str] = set()
+    for _cache_path, record in iter_derived_task_records(project_root):
+        for task in record.tasks:
+            if not task.approved or not _owns_dependency(task.source_design_doc):
+                continue
+            for output in task.expected_outputs:
+                text = str(output).strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    producer_outputs.append(text)
+    if not producer_outputs:
+        return None
+
+    return _render_dependency_artifact_files(project_root, producer_outputs)
+
+
 def _build_implementation_prompt(
     *,
     config: dict[str, Any],
@@ -2201,7 +2414,6 @@ def _build_implementation_prompt(
     dependency_documents: list[DependencyDocument],
     conventions: list[dict[str, Any]],
     coding_principles: str | None,
-    prior_task_outputs: list[dict[str, Any]] | None = None,
     design_md_content: str | None = None,
     screen_flow_content: str | None = None,
     screen_flow_routes: list[str] | None = None,
@@ -2247,7 +2459,6 @@ def _build_implementation_prompt(
     else:
         extension_guidance = f"- Use {default_extension} files for generated source unless the design explicitly requires another file type."
 
-    prior_task_outputs = prior_task_outputs or []
     output_text = ", ".join(spec.output_paths)
     example_output = spec.output_paths[0]
     lines = [
@@ -2507,20 +2718,6 @@ def _build_implementation_prompt(
             lines.append(f"{index}. Targets: {targets or '(no explicit targets)'}")
             lines.append(f"   Reason: {reason}")
 
-    successful_prior_outputs = [s for s in prior_task_outputs if not s.get("error")]
-    if successful_prior_outputs:
-        lines.extend(
-            [
-                "",
-                "Prior implementations:",
-                "- The following summaries describe code that was already generated.",
-                "- ABSOLUTE PROHIBITION: Re-implementing the same type definitions, utility functions, classes, guards, middleware, or helpers is a CRITICAL ERROR.",
-                "- Reuse these implementations via imports. If a needed symbol already exists below, import it instead of redefining it.",
-            ]
-        )
-        for summary in successful_prior_outputs:
-            lines.extend(_format_prior_task_summary(summary))
-
     existing_files_context = (
         _existing_output_files_context(project_root, spec.expected_outputs)
         if project_root is not None and spec.expected_outputs
@@ -2536,6 +2733,24 @@ def _build_implementation_prompt(
                 "- Do not leave a file below out of your response just because your only change to it is small (e.g. one docstring/comment addition) — a small in-place edit still requires the full file content in your response.",
                 "",
                 existing_files_context,
+            ]
+        )
+
+    dependency_artifact_context = (
+        _dependency_artifact_files_context(project_root, config, dependency_documents)
+        if project_root is not None
+        else None
+    )
+    if dependency_artifact_context:
+        lines.extend(
+            [
+                "",
+                "Existing content of this task's dependency-produced files (binding import contract):",
+                "- The files below were produced by the task(s) this task depends on and ALREADY EXIST on disk — they are the real artifacts, not a summary.",
+                "- These dependency files already exist. WHEN YOU IMPORT FROM THEM, bind to their exported symbols, signatures, and module paths VERBATIM — do not re-declare, rename, or invent members not present in them.",
+                "- Identifier spellings bind to these producer files; BEHAVIORAL requirements bind to the design documents. If the design demands a distinction these files do not express, follow the DESIGN and let the mismatch surface — do not silently conform to a wrong artifact.",
+                "",
+                dependency_artifact_context,
             ]
         )
 
@@ -3065,88 +3280,6 @@ def _parse_file_payloads(
 
 def _path_starts_with(path: PurePosixPath, prefix: PurePosixPath) -> bool:
     return tuple(path.parts[: len(prefix.parts)]) == prefix.parts
-
-
-def _summarize_generated_task_output(
-    project_root: Path,
-    spec: ImplementSpec,
-    generated_files: list[Path],
-) -> dict[str, Any]:
-    exported_types: list[str] = []
-    exported_functions: list[str] = []
-    exported_classes: list[str] = []
-    exported_values: list[str] = []
-    relative_files: list[str] = []
-
-    for file_path in generated_files:
-        relative_files.append(file_path.relative_to(project_root).as_posix())
-        summary = _extract_export_summary(file_path.read_text(encoding="utf-8"))
-        exported_types.extend(summary["exported_types"])
-        exported_functions.extend(summary["exported_functions"])
-        exported_classes.extend(summary["exported_classes"])
-        exported_values.extend(summary["exported_values"])
-
-    return {
-        "task_id": spec.task_id,
-        "task_title": spec.title,
-        "directory": ", ".join(spec.output_paths),
-        "files": relative_files,
-        "exported_types": _ordered_unique(exported_types),
-        "exported_functions": _ordered_unique(exported_functions),
-        "exported_classes": _ordered_unique(exported_classes),
-        "exported_values": _ordered_unique(exported_values),
-    }
-
-
-def _extract_export_summary(content: str) -> dict[str, list[str]]:
-    summary = {
-        "exported_types": [match.group("name") for match in EXPORT_TYPE_RE.finditer(content)],
-        "exported_functions": [match.group("name") for match in EXPORT_FUNCTION_RE.finditer(content)],
-        "exported_classes": [match.group("name") for match in EXPORT_CLASS_RE.finditer(content)],
-        "exported_values": [match.group("name") for match in EXPORT_VALUE_RE.finditer(content)],
-    }
-
-    for match in EXPORT_NAMED_BLOCK_RE.finditer(content):
-        body = match.group("body")
-        block_is_type = bool(match.group("type_prefix"))
-        for raw_item in body.split(","):
-            item = raw_item.strip()
-            if not item:
-                continue
-            item_is_type = block_is_type
-            if item.startswith("type "):
-                item_is_type = True
-                item = item[5:].strip()
-            exported_name = item.split(" as ")[-1].strip()
-            if not exported_name:
-                continue
-            bucket = "exported_types" if item_is_type else "exported_values"
-            summary[bucket].append(exported_name)
-
-    return {key: _ordered_unique(values) for key, values in summary.items()}
-
-
-def _format_prior_task_summary(summary: dict[str, Any]) -> list[str]:
-    lines = [
-        f"- Task {summary.get('task_id') or '(unknown)'}: {summary.get('task_title') or '(untitled task)'}",
-        f"  Directory: {summary.get('directory') or '(unknown directory)'}",
-    ]
-
-    files = [str(item) for item in summary.get("files", []) if str(item).strip()]
-    if files:
-        lines.append(f"  Files: {', '.join(files)}")
-
-    for label, key in (
-        ("Exported types", "exported_types"),
-        ("Exported functions", "exported_functions"),
-        ("Exported classes", "exported_classes"),
-        ("Other exported values", "exported_values"),
-    ):
-        items = [str(item) for item in summary.get(key, []) if str(item).strip()]
-        if items:
-            lines.append(f"  {label}: {', '.join(items)}")
-
-    return lines
 
 
 def _build_traceability_comment(

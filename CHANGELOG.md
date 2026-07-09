@@ -13,6 +13,53 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.21.0] - 2026-07-09 — Cross-artifact symbol/type coherence (statically-typed ② unblocker)
+
+The ② campaign cleared Python (3 unattended greens on v3.20.0) but TypeScript failed 2/2 at the
+implement-time native-oracle typecheck: `independently-generated artifacts disagree on the
+symbols/modules they import`. Root cause (Fable5-diagnosed): CoDD generates each source/test file
+from its own design node in a separate model call, and NOTHING made those files agree on the shared
+surface (public type/function/error names, signatures, module paths) before generation. Each call
+independently spelled the same concept differently (AST type `Expr` vs `ExprNode`; tokenizer as a
+class vs a function). Python's dynamic typing HID these disagreements (imports resolve lazily); a
+static typechecker turns them into hard compile errors — so Python greened and TS did not. CoDD
+actually HAD a cross-task symbol contract, but it was dead code (unwired when the sprint concept was
+removed) whose extractors were JS/TS regex literals sitting in shared core (a latent generality
+violation).
+
+Fix (Fable5 (B′) — a self-approvable re-application of shipped machinery, no new gate/concept):
+- **Producer-first ordering** — implement tasks now execute in topological order over the design
+  DAG's `depends_on` closure (longest-chain rank, cycle-safe), source-kind before test-kind within a
+  doc — the same wave semantics `generate` already applies to design docs, re-applied to implement
+  units at the `list_implement_tasks` chokepoint. Ordering is a pure function of static DAG data, so
+  a resumed run reproduces the identical order (no task skipped/repeated).
+- **Dependency-artifact content as a binding import contract** — each implement task's prompt now
+  carries the FULL on-disk content of its dependency design nodes' already-generated files (budget-
+  capped, mirroring the existing own-output block; overflow degrades to name-level surface via the
+  language-adapter seam, then paths-only). Contract wording is conditional: "when you import from
+  these files, bind to their exported symbols, signatures, and module paths VERBATIM — do not
+  re-declare, rename, or invent members." Full content (not symbol extraction) fixes signature/shape
+  type-errors and contains zero per-language code by construction.
+- **Anti-false-green discriminator (in the contract):** identifier spellings bind to the producer
+  artifact (the first real declaration, itself generated under full design+lexicon context);
+  behavioral requirements bind to the design; on conflict the design wins and the mismatch surfaces
+  at the gate — never silently reconciled. The native-oracle gate is UNTOUCHED — it still proves
+  agreement post-hoc; only what generation SEES beforehand changed.
+- **Deleted the dead, language-hardcoded machinery** — `prior_task_outputs` plumbing, the "Prior
+  implementations" prompt section, `_summarize_generated_task_output` (zero callers),
+  `_format_prior_task_summary`, and the JS/TS `EXPORT_*_RE` regex literals in shared core (subsumed by
+  the content injection; the language-zone adapter's own extractors are untouched). Shared core is
+  now cleaner; the generality ratchet stays green.
+
+Also folds in (committed post-3.20.0 without a CHANGELOG bullet): **honest terminal error on 0 files
+from unparseable/empty AI output** — the `_zero_generated_files_error` message now carries the
+per-attempt no-usable trail and drops the design-blaming `skip_generation` hint when every attempt
+was empty/unparseable AI output (it was that ambiguity that caused a throttle event to be
+mis-read as the class-2 doc-only variance). Append-only, terminal state byte-identical.
+
+Full suite 7309 passed / 1 xfailed / 0 skipped. F4 self-approvable (re-application; no new
+gate/concept/arbitration authority). Behavioral change (execution order) → MINOR.
+
 ## [3.20.0] - 2026-07-08 — ② mop-up: two implement-stage variance classes + verify-repair in non-git
 
 Post-v3.19.0 hardening from the ② measurement endgame (repeated fresh unattended Python pure-library

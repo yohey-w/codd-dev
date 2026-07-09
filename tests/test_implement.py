@@ -362,46 +362,35 @@ def test_get_valid_task_slugs_no_mapping(tmp_path):
     assert get_valid_task_slugs(project) == set()
 
 
-def test_error_summaries_excluded_from_prompt():
-    prompt = _build_implementation_prompt(
-        config={"project": {"language": "typescript", "frameworks": ["next.js"]}},
-        design_context=DesignContext(
-            node_id="design:test",
-            path=Path("docs/design/test.md"),
-            content="# Test design\n",
-        ),
-        spec=ImplementSpec("docs/design/test.md", ["src/test"]),
-        dependency_documents=[],
-        conventions=[],
-        coding_principles=None,
-        prior_task_outputs=[
-            {
-                "task_id": "success",
-                "task_title": "Successful Task",
-                "directory": "src/test",
-                "files": ["service.ts"],
-                "exported_types": ["User"],
-                "exported_functions": [],
-                "exported_classes": [],
-                "exported_values": [],
-            },
-            {
-                "task_id": "failed",
-                "task_title": "Failed Task",
-                "directory": "src/failed",
-                "files": [],
-                "exported_types": [],
-                "exported_functions": [],
-                "exported_classes": [],
-                "exported_values": [],
-                "error": "AI command returned empty implementation output",
-            },
-        ],
-    )
+def test_prior_task_output_machinery_is_deleted():
+    # The dead, JS/TS-hardcoded ``prior_task_outputs`` cross-task summary
+    # machinery (regex export extractors + "Prior implementations" prompt
+    # section) was subsumed by dependency-artifact CONTENT injection
+    # (see tests/test_dependency_artifact_coherence.py) and deleted. Guard the
+    # deletion: the parameter, the extractors, and the helpers must all be gone,
+    # so the language-hardcoded regexes cannot re-enter shared core.
+    import inspect
 
-    assert "Successful Task" in prompt
-    assert "Failed Task" not in prompt
-    assert "empty implementation output" not in prompt
+    import codd.implementer as implementer_module
+
+    signature = inspect.signature(_build_implementation_prompt)
+    assert "prior_task_outputs" not in signature.parameters
+
+    for symbol in (
+        "EXPORT_TYPE_RE",
+        "EXPORT_CLASS_RE",
+        "EXPORT_FUNCTION_RE",
+        "EXPORT_VALUE_RE",
+        "EXPORT_NAMED_BLOCK_RE",
+        "_summarize_generated_task_output",
+        "_extract_export_summary",
+        "_format_prior_task_summary",
+    ):
+        assert not hasattr(implementer_module, symbol), symbol
+
+    # And the deleted prompt section's wording must be gone from the source.
+    source = inspect.getsource(_build_implementation_prompt)
+    assert "Prior implementations:" not in source
 
 
 # ═══════════════════════════════════════════════════════════
