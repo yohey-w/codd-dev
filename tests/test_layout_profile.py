@@ -512,12 +512,22 @@ class TestOptionalSurfaces:
         assert surface.paths == ("src/todo_cli/__main__.py",)
 
     @pytest.mark.parametrize("language", ["javascript", "typescript", "java", "cpp", "csharp"])
-    def test_non_python_stacks_declare_no_optional_surface(self, language):
-        # STRICT no-op: no non-Python stack declares an optional surface, so its
-        # tuple is empty BY CONSTRUCTION (no `language ==` branch anywhere).
+    def test_non_python_stacks_declare_cli_backing_runnable_entrypoint(self, language):
+        # GENERAL parity (was: "declare no optional surface" — the K3 leak). Every
+        # buildable non-Python stack now declares the SAME CLI-backing surface (via
+        # the shared constructor, no `language ==` branch), so a pure-library project
+        # in ANY stack can downgrade its CLI e2e modality. ``paths`` is empty for
+        # these path/glob-resolved stacks (nothing to TRUE-SUBTRACT), so the surface
+        # is byte-neutral to scaffolding — it is purely the e2e-modality marker.
         profile = self._resolve(language)
         assert profile is not None
-        assert profile.optional_surfaces == ()
+        surfaces = {s.id: s for s in profile.optional_surfaces}
+        assert "runnable-entrypoint" in surfaces
+        surface = surfaces["runnable-entrypoint"]
+        assert surface.backs_e2e_modality == "cli"
+        assert surface.paths == ()
+        # No scaffold path to subtract even under exclusion (empty paths).
+        assert profile.excluded_surface_paths() == ()
 
     def test_excluded_surface_paths_empty_without_exclusion(self):
         # Nothing excluded ⇒ the accessor is a strict no-op even though the python
@@ -606,6 +616,73 @@ class TestExcludedSurfaces:
 
 
 # ═══════════════════════════════════════════════════════════
+# runnable-entrypoint / cli-backing flag — the GENERAL regression net (K3 leak)
+# ═══════════════════════════════════════════════════════════
+#
+# The e2e cli→none downgrade (:func:`effective_e2e_modality`) is a DATA join on
+# ``SurfaceSpec.backs_e2e_modality == "cli"``. That flag lived on ONLY Python's
+# runnable-entrypoint surface, so a pure-library TS/Java/C++/C#/JS project never
+# downgraded and generated a CLI e2e suite (invokeCli.ts / tempWorkspace.ts) for a
+# CLI that does not exist → verify failed. This guard makes "a language profile
+# forgot the CLI-backing surface / flag" a TEST FAILURE, not a silent leak. It is
+# enumerated from the language REGISTRY, so a NEW language is auto-covered.
+
+
+class TestRunnableEntrypointFlagGuard:
+    def _buildable_layout_profiles(self):
+        """Every (language_id, LayoutProfile) the resolver actually BUILDS.
+
+        Registry-driven (not a hardcoded language list) so a new profile is
+        auto-guarded. A language with no layout profile (Go → resolver returns
+        None) is skipped — it declares no topology, so it has no surface to guard.
+        """
+        from codd.languages.registry import default_registry
+
+        out = []
+        for lang in default_registry.all_profiles():
+            profile = resolve_layout_profile(
+                language=lang.id,
+                project_name="guard-probe",
+                source_dirs=["src/"],
+                test_dirs=["tests/"],
+            )
+            if profile is not None:
+                out.append((lang.id, profile))
+        return out
+
+    def test_enumeration_is_non_trivial(self):
+        # Sanity: the guards below are not vacuously green — python + typescript +
+        # the greenfield-synthesis stacks all build a profile.
+        ids = {lang_id for lang_id, _ in self._buildable_layout_profiles()}
+        assert {"python", "typescript"} <= ids
+        assert len(ids) >= 3
+
+    def test_every_buildable_profile_declares_cli_backing_runnable_entrypoint(self):
+        # COMPLETENESS (RED at HEAD): every buildable layout profile MUST declare a
+        # runnable-entrypoint surface so a pure-library exclusion CAN downgrade its
+        # CLI e2e. At HEAD only Python declares it; TS + synthesized stacks do not.
+        for lang_id, profile in self._buildable_layout_profiles():
+            surfaces = {s.id: s for s in profile.optional_surfaces}
+            assert "runnable-entrypoint" in surfaces, (
+                f"{lang_id}: layout profile declares no runnable-entrypoint surface — "
+                "a pure-library project cannot downgrade its CLI e2e modality and will "
+                "leak a CLI e2e suite it cannot satisfy"
+            )
+
+    def test_any_runnable_entrypoint_surface_backs_cli(self):
+        # INVARIANT: wherever a 'runnable-entrypoint' surface appears, its DATA join
+        # key is 'cli' — a stack cannot ship the surface with a wrong/missing flag.
+        for lang_id, profile in self._buildable_layout_profiles():
+            for surface in profile.optional_surfaces:
+                if surface.id == "runnable-entrypoint":
+                    assert surface.backs_e2e_modality == "cli", (
+                        f"{lang_id}: runnable-entrypoint backs "
+                        f"{surface.backs_e2e_modality!r}, not 'cli' — the cli→none "
+                        "downgrade will never fire for this stack"
+                    )
+
+
+# ═══════════════════════════════════════════════════════════
 # effective e2e modality — data-driven downgrade  (K3 envelope alignment)
 # ═══════════════════════════════════════════════════════════
 #
@@ -649,6 +726,39 @@ class TestEffectiveE2EModality:
         caps = ProjectCapabilities(e2e_modality="cli")
         profile = self._profile(excluded=False)
         assert effective_e2e_modality(caps, profile) == "cli"
+
+    # ── NON-Python parity (the bug fix): the downgrade is per-profile DATA, so a
+    # pure-library TypeScript project must downgrade EXACTLY like Python. RED at
+    # HEAD (TS declared no runnable-entrypoint surface, so the exclusion could not
+    # fire → a CLI e2e suite leaked for a library) → GREEN after the general fix.
+
+    def _ts_profile(self, *, excluded: bool):
+        config: dict = {
+            "project": {"name": "exprcalc", "language": "typescript"},
+            "scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]},
+        }
+        if excluded:
+            config["deliverable"] = {"excluded_surfaces": ["runnable-entrypoint"]}
+        return resolve_layout_profile(
+            language="typescript",
+            project_name="exprcalc",
+            source_dirs=["src/"],
+            test_dirs=["tests/"],
+            config=config,
+        )
+
+    def test_typescript_cli_downgraded_to_none_when_entrypoint_excluded(self):
+        from codd.project_types import effective_e2e_modality
+
+        caps = ProjectCapabilities(e2e_modality="cli")
+        assert effective_e2e_modality(caps, self._ts_profile(excluded=True)) == "none"
+
+    def test_typescript_cli_kept_when_entrypoint_not_excluded(self):
+        # CONTROL (anti-false-green): a TS project that keeps the CLI stays "cli".
+        from codd.project_types import effective_e2e_modality
+
+        caps = ProjectCapabilities(e2e_modality="cli")
+        assert effective_e2e_modality(caps, self._ts_profile(excluded=False)) == "cli"
 
     def test_non_cli_modality_unchanged_even_if_entrypoint_excluded(self):
         # The join is ``backs_e2e_modality == e2e_modality``; a browser project

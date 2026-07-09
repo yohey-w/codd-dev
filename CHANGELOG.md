@@ -13,6 +13,31 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.22.2] - 2026-07-09 — Generalize the CLI-e2e-modality downgrade to all languages (K3 was Python-only)
+
+The v3.20.0 K3 fix (downgrade `e2e_modality` "cli"→"none" when the CLI-backing `runnable-entrypoint`
+surface is excluded, so a pure-library project generates no CLI-invoking e2e tests) was silently
+Python-only: only the Python layout profile declared a `runnable-entrypoint` `SurfaceSpec` (with
+`backs_e2e_modality="cli"`). The TypeScript builder and the generic language synthesizer (cpp, csharp,
+java, javascript) declared NO optional surfaces at all — so `effective_e2e_modality` had nothing to key
+on and never downgraded. Every pure-library NON-Python greenfield therefore kept `cli` and generated a
+full CLI-invoking e2e suite (`invokeCli`, `tempWorkspace`, `cli-usage.e2e.test.ts`, …) against a CLI that
+was correctly never scaffolded → verify hard-failed. Confirmed live: a TS pure-library greenfield failed
+verify on `tests/e2e/helpers/invokeCli.ts`.
+
+General fix (no per-language stopgap, per the owner's generality directive): a shared constructor
+`_runnable_entrypoint_surface()` bakes the invariant `id="runnable-entrypoint"` +
+`backs_e2e_modality="cli"` in ONE place; the Python builder now calls it (byte-identical), and the
+TypeScript builder + the generic synthesizer (cpp/csharp/java/js and any future greenfield-synthesis
+stack) now declare the runnable-entrypoint surface through it. Non-Python entrypoint surfaces carry
+`paths=()` (their scaffolders materialize no single canonical entry file), so `excluded_surface_paths()`
+stays `()` and scaffolding/placement-contract rendering is byte-neutral — the surface is purely the
+e2e-modality marker + plan-intake classification target. Go (no bridge) resolves to `None`, a correct
+no-op. A registry-driven guard test asserts EVERY buildable layout profile that declares a
+runnable-entrypoint surface backs `"cli"`, so a newly-added language auto-inherits the invariant and
+cannot silently regress. `effective_e2e_modality` itself is unchanged (only per-profile DATA was missing);
+no `language ==` added; full suite 7324 passed / 1 xfailed / 0 skipped.
+
 ## [3.22.1] - 2026-07-09 — Revert the implement-oracle dependency-boundary gate (v3.22.0 Increment 1)
 
 v3.22.0 Increment 1 (the implement-oracle dependency-boundary gate) is REVERTED in full. Its first

@@ -1011,6 +1011,40 @@ class SurfaceSpec:
         }
 
 
+# The CLI-backing optional surface EVERY stack shares: a runnable command-line
+# entry point. Its ``backs_e2e_modality="cli"`` is the DATA join key
+# :func:`effective_e2e_modality` reads to downgrade a pure library's e2e cli→none
+# (no entry point ⇒ no CLI to subprocess ⇒ a CLI e2e suite that cannot pass). This
+# is the SINGLE constructor for that surface, so every layout profile — Python's +
+# TypeScript's per-stack builders AND the generic synthesizer (C#/C++/Java/JS) —
+# carries the IDENTICAL id + backing flag by CONSTRUCTION. A new stack physically
+# cannot ship a runnable-entrypoint that forgets the flag (the flag is baked in
+# here, not restated per builder); the registry-driven guard
+# ``TestRunnableEntrypointFlagGuard`` additionally fails if a stack forgets the
+# whole surface. ``paths`` vary per stack: Python scaffolds
+# ``src/<pkg>/__main__.py`` (so exclusion TRUE-SUBTRACTS it); a stack whose
+# scaffolder materializes no single canonical entry file passes ``()`` — the
+# surface is still the e2e-modality marker + plan-intake classification target, it
+# simply subtracts no scaffold path. No language-name literal appears here: id +
+# flag are INVARIANT, only the caller-supplied paths/description differ.
+RUNNABLE_ENTRYPOINT_SURFACE_ID = "runnable-entrypoint"
+
+
+def _runnable_entrypoint_surface(
+    *, paths: tuple[str, ...] = (), description: str | None = None
+) -> SurfaceSpec:
+    """The shared CLI-backing ``runnable-entrypoint`` surface (backs the "cli" e2e modality)."""
+    return SurfaceSpec(
+        id=RUNNABLE_ENTRYPOINT_SURFACE_ID,
+        description=(
+            description
+            or "an executable command-line entry point a user invokes directly"
+        ),
+        paths=paths,
+        backs_e2e_modality="cli",
+    )
+
+
 @dataclass(frozen=True)
 class LayoutProfile:
     """Harness-owned repository topology + module-resolution contract for a stack.
@@ -1731,18 +1765,18 @@ def _python_layout_profile(
         test_import_policy="package_absolute",
         requires_package_init=True,
         requires_test_init=True,
+        # This surface BACKS the "cli" e2e modality: the CLI-subprocess e2e tests
+        # (run_cli → `python -m <pkg>`) exist only because this entry point does.
+        # Excluding it (a pure library) downgrades e2e to "none". Built through the
+        # SHARED constructor so the CLI-backing flag is identical to every other
+        # stack's runnable-entrypoint (see :func:`_runnable_entrypoint_surface`).
         optional_surfaces=(
-            SurfaceSpec(
-                id="runnable-entrypoint",
+            _runnable_entrypoint_surface(
+                paths=(f"{source_root}/{package_name}/__main__.py",),
                 description=(
                     "an executable command-line entry point a user invokes directly "
                     "(e.g. `python -m <package>`)"
                 ),
-                paths=(f"{source_root}/{package_name}/__main__.py",),
-                # This surface BACKS the "cli" e2e modality: the CLI-subprocess e2e
-                # tests (run_cli → `python -m <pkg>`) exist only because this entry
-                # point does. Excluding it (a pure library) downgrades e2e to "none".
-                backs_e2e_modality="cli",
             ),
         ),
         # A first-party module may legitimately share a bare name with the Python
@@ -2084,6 +2118,14 @@ def _typescript_layout_profile(
         test_import_policy="relative",
         requires_package_init=False,
         requires_test_init=False,
+        # OPTIONAL CLI SURFACE — the runnable command-line entry point that BACKS the
+        # "cli" e2e modality (SHARED constructor: identical id + flag as Python's).
+        # ``paths=()``: TS resolves by PATH and the scaffolder materializes no single
+        # canonical entry file to subtract — the surface exists so a pure-library TS
+        # project (CLI excluded at plan intake) downgrades e2e cli→none via
+        # :func:`effective_e2e_modality` instead of generating an invokeCli/
+        # tempWorkspace CLI e2e suite for an entry point that never exists.
+        optional_surfaces=(_runnable_entrypoint_surface(),),
         # IMPLEMENT-TIME ORACLE (TS) — ``tsc --noEmit`` is a compiler-class
         # coherence oracle: a pure typecheck (no emit) that statically proves
         # every ``import``/symbol across src + tests + e2e + helpers resolves. Run
@@ -2518,6 +2560,15 @@ def _synthesize_layout_profile_from_language(
         toolchain_dependencies=_synthesize_toolchain_dependencies(lang_profile),
         verify_campaign=_synthesize_verify_campaign(lang_profile),
         source_placements=source_placements,
+        # OPTIONAL CLI SURFACE — the shared CLI-backing runnable-entrypoint, so a
+        # synthesized stack (C#/C++/Java/JS) that EXCLUDES the CLI at plan intake
+        # downgrades its e2e cli→none exactly like Python/TS — the SAME per-profile
+        # DATA flag, in ONE locus covering every greenfield-synthesis stack (no
+        # language-name branch). ``paths=()``: the generic-template scaffolder
+        # materializes no single canonical entry file to subtract; the surface is
+        # the e2e-modality marker + intake classification target. Inert when the
+        # project type's e2e modality is not "cli" (the join never matches).
+        optional_surfaces=(_runnable_entrypoint_surface(),),
     )
 
 
