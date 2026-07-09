@@ -148,7 +148,7 @@ implement:
   # helpers -- an uncovered test tree is a HARD FAIL, never a silent pass
   # (anti-false-green). On failure it normalizes diagnostics to language-neutral
   # evidence categories (missing_symbol / module_resolution_error /
-  # test_not_collected / environment_build_error / boundary_violation) and
+  # test_not_collected / environment_build_error) and
   # re-runs implementation with that feedback (bounded), so implement does not
   # "succeed" until the oracle passes or fails honestly. A strict NO-OP for a
   # stack with no declared implement-time oracle (Python today: its backstop

@@ -33,11 +33,13 @@ from typing import Any
 # The whole point of normalization: a Go/Rust adapter later emits the SAME
 # vocabulary so the SUT-facing feedback and any downstream policy are stack-
 # agnostic. ``boundary_violation`` is the general "a generated artifact crossed a
-# DECLARED contract boundary" category — it covers BOTH the e2e/modality contract
-# breach the AST e2e-contract gate owns AND, since v3.22.0, the SOURCE dependency-
-# boundary breach the language-free dependency-conformance gate emits (a source
-# file importing across its owning design doc's declared ``depends_on`` closure;
-# see :mod:`codd.dependency_boundary_coherence`). It is NOT something a pure
+# DECLARED contract boundary" category — it covers the e2e/modality contract
+# breach the AST e2e-contract gate owns, and stays RESERVED for any FUTURE
+# design-declared governance adapter (a structural/governance TEST exists iff the
+# design explicitly declares it — rule (2a)). It is NOT emitted from an open-world
+# ``depends_on`` ordering graph: that graph STEERS (producer-first order, context)
+# and never JUDGES, so it is not an import allow-list (v3.22.0's Increment 1 tried
+# to gate on it and was reverted in v3.22.1). It is NOT something a pure
 # typechecker emits — it is produced by the coherence gates that read the ACG's
 # declared boundaries, normalized into the same category set so the SUT-facing
 # feedback and any future composite/boundary adapter share one vocabulary.

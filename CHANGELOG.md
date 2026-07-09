@@ -13,6 +13,40 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.22.1] - 2026-07-09 — Revert the implement-oracle dependency-boundary gate (v3.22.0 Increment 1)
+
+v3.22.0 Increment 1 (the implement-oracle dependency-boundary gate) is REVERTED in full. Its first
+dogfood exposed an unsound foundation: it proved each generated source file's imports against the owning
+design doc's transitive frontmatter-`depends_on` closure and FAILED any import landing outside it — but
+frontmatter `depends_on` is an OPEN-WORLD ordering/context declaration (it drives producer-first
+generation order and (B′) content injection), NOT a closed-world import allow-list. Design docs are
+coarser than modules by construction, so a correct module import graph routinely exceeds the conceptual
+doc closure. First TS dogfood on v3.22.0: 7/7 boundary findings were FALSE POSITIVES on textbook-correct
+imports (e.g. `evaluator.ts` importing the AST module it evaluates), and the gate's own prescribed repair
+(add a `depends_on` edge) lies OUTSIDE implement's write authority (source-only) — so the 5-attempt rerun
+ladder was structurally unwinnable and a correct run hard-failed where v3.21.0 had passed.
+
+Reverted (Fable5-authorized, self-critical): deleted `codd/dependency_boundary_coherence.py` + its tests;
+excised the gate, its config knob (`implement.dependency_boundary_gate`), the rerun feedback block, and
+both application sites from `codd/implement_oracle.py` (a tombstone NOTE marks the site);
+`EVIDENCE_BOUNDARY_VIOLATION` stays a reserved vocabulary constant (back-compat; reserved for e2e/modality
+breaches and any future design-declared governance adapter per rule 2a). A permanent reintroduction guard
+(`tests/test_dependency_boundary_tombstone.py`) asserts the module, the gate functions, and the
+`dependency_boundary` token are all absent.
+
+**Increments 2 and 3 STAND** — the ts-v3 class that motivated Inc 1 (a generated structural test embedding
+an invented layer map) is already killed generatively by rule (2a); real cross-module symbol/type
+incoherence is judged by the native contract oracle + v3.21.0 producer-first/(B′) (this very dogfood
+showed the rerun ladder converging type errors 58→21→1); `TEST_CONTRACT_OVERREACH` + repair design-context
+remain.
+
+Durable principles (Fable5, persisted to project memory so no future gate re-ships this class): **an
+open-world declaration may STEER (ordering, context, prompts, diagnostics) but never JUDGE — only
+closed-world contracts and native language-semantic oracles may gate**; and **a gate may only fire on
+defects repairable within the firing phase's write authority.** The sound way to enforce topology is a
+design-declared NEGATIVE constraint (a "must-not-depend-on" governance test via rule 2a) — recorded as
+the future path, deliberately left unbuilt (zero demand). Full suite 7319 passed / 1 xfailed / 0 skipped.
+
 ## [3.22.0] - 2026-07-09 — Verify-stage structural/shape coherence (statically-typed ② verify unblocker)
 
 After v3.21.0 (B′) unblocked the implement stage for statically-typed languages, both fresh TypeScript

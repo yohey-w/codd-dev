@@ -46,7 +46,7 @@ EVIDENCE NORMALIZATION + BOUNDED RETRY
 ======================================
 On oracle failure the diagnostics are normalized to language-neutral evidence
 categories (``missing_symbol`` / ``module_resolution_error`` /
-``test_not_collected`` / ``environment_build_error`` / ``boundary_violation``)
+``test_not_collected`` / ``environment_build_error``)
 and fed back to the SUT via a bounded ``rerun(feedback)`` loop (the same shape as
 ``run_implement_coverage_gate``). Implement does not "succeed" until the oracle
 passes or the bounded budget is spent — then it fails HONESTLY.
@@ -401,23 +401,6 @@ _ORPHAN_GATE_MODES = ("off", "warn", "enforce")
 DEFAULT_ORPHAN_ARTIFACT_GATE = "warn"
 
 
-def _dependency_boundary_gate_enabled(config: Mapping[str, Any] | None) -> bool:
-    """``implement.dependency_boundary_gate`` — default ON (the gate runs).
-
-    The deterministic source dependency-conformance gate (Increment 1). Opting out
-    (``implement.dependency_boundary_gate: false`` / ``off``) re-opens the silent
-    design↔code boundary-drift a project could otherwise green past, so it is never
-    the default and never silent. An unrecognized value keeps the gate ON.
-    """
-    section = (config or {}).get("implement") if isinstance(config, Mapping) else None
-    if isinstance(section, Mapping) and "dependency_boundary_gate" in section:
-        raw = section["dependency_boundary_gate"]
-        if isinstance(raw, bool):
-            return raw
-        return str(raw).strip().lower() not in {"off", "false", "0", "no", "disabled"}
-    return True
-
-
 def _orphan_artifact_gate_mode(config: Mapping[str, Any] | None) -> str:
     """``implement.orphan_artifact_gate`` → ``off`` | ``warn`` | ``enforce``.
 
@@ -517,43 +500,7 @@ def build_contract_feedback(
         if edit_block:
             blocks.append(edit_block)
 
-    # (3) Dependency-boundary DUAL — when the failure carries source dependency-
-    # boundary violations (Increment 1), the rerun MUST be told the two legitimate
-    # resolutions and forbidden the code-duplication dodge (Fable5 Q2). Independent
-    # of the finding cap so the directive is never truncated away.
-    boundary_block = _boundary_violation_block(result)
-    if boundary_block:
-        blocks.append(boundary_block)
-
     return "\n\n".join(blocks)
-
-
-def _boundary_violation_block(result: ImplementOracleResult) -> str:
-    """The dependency-boundary DUAL directive block (empty when no such finding).
-
-    States the two — and only two — legitimate fixes for a source file that
-    imports across its owning design doc's declared ``depends_on`` closure, and
-    forbids the anti-false-green dodge of inlining/duplicating the code to avoid
-    the boundary (Fable5 ``verify-coherence`` Q2, the "dual").
-    """
-    boundary = [f for f in result.findings if f.category == EVIDENCE_BOUNDARY_VIOLATION]
-    if not boundary:
-        return ""
-    lines = [
-        "DEPENDENCY-BOUNDARY VIOLATION(S): a generated SOURCE file imports across a "
-        "DECLARED dependency boundary — the imported module is owned by a design "
-        "doc that is NOT the importer's own doc and NOT in that doc's transitive "
-        "`depends_on` closure. Reconcile EACH by the dual rule (do ONE of these):",
-        "  1. Import the needed capability from a design doc that is ALREADY a "
-        "declared dependency (in the `depends_on` closure) and provides it; OR",
-        "  2. If NO declared dependency provides it, this is a DESIGN-level gap (a "
-        "missing `depends_on` edge). Do NOT inline or duplicate the code to dodge "
-        "the boundary — the correct fix is a declared dependency, not a copy.",
-    ]
-    for finding in boundary[:_FEEDBACK_FINDING_CAP]:
-        where = f"{finding.path}: " if finding.path else ""
-        lines.append(f"  - {where}{finding.message}")
-    return "\n".join(lines)
 
 
 def _is_fenced_scope(scope: Any) -> bool:
@@ -1764,18 +1711,16 @@ def run_implement_oracle_gate(
     # 3. Run + bounded retry-with-feedback, escalating the rerun scope.
     max_attempts = _oracle_max_attempts(config)
     result = _run_oracle_command(root, profile, spec, config)
-    # Deterministic source dependency-boundary gate (Increment 1): a SIBLING to the
-    # orphan gate, applied after EACH oracle run so a boundary violation feeds the
-    # bounded rerun loop below (fixing the impl's imports BEFORE verify runs).
-    result = _apply_dependency_boundary_gate(
-        result,
-        project_root=root,
-        language=language,
-        project_name=project_name,
-        config=config,
-        profile=profile,
-        echo=echo,
-    )
+    # NOTE(v3.22.1): no import-topology gate runs here. v3.22.0's Increment 1 proved
+    # source imports against the owning doc's transitive `depends_on` closure and was
+    # reverted: frontmatter `depends_on` is an OPEN-WORLD ordering/context declaration
+    # (producer-first order, (B′) injection), not a closed-world import allow-list —
+    # on correct greenfield output the module graph routinely exceeds the conceptual
+    # doc closure (first dogfood: 7/7 findings false positives), and the prescribed
+    # repair (add a `depends_on` edge) lies outside implement's write authority,
+    # making the rerun ladder unwinnable. Cross-module coherence is judged by the
+    # native contract oracle; structural/governance TESTS exist iff the design
+    # declares them (rule (2a)). Open-world graphs steer; they do not judge.
     attempt = 1
     rung = _SCOPE_NARROW if scope_index is not None else _SCOPE_BROAD
     last_signature: tuple[Any, ...] | None = None
@@ -1892,17 +1837,6 @@ def run_implement_oracle_gate(
         _invoke_rerun(rerun, feedback, scope)
         attempt += 1
         result = _run_oracle_command(root, profile, spec, config)
-        # Re-prove the dependency boundary against the just-reran sources so the
-        # loop keeps iterating until the imports conform (or the budget is spent).
-        result = _apply_dependency_boundary_gate(
-            result,
-            project_root=root,
-            language=language,
-            project_name=project_name,
-            config=config,
-            profile=profile,
-            echo=echo,
-        )
 
     if result.passed:
         echo(f"[greenfield] implement-oracle: {result.detail}")
@@ -1998,105 +1932,6 @@ def _apply_orphan_artifact_gate(
         f"only; set implement.orphan_artifact_gate: enforce to make this a hard gate.)"
     )
     return result
-
-
-def _apply_dependency_boundary_gate(
-    result: ImplementOracleResult,
-    *,
-    project_root: Path,
-    language: str | None,
-    project_name: str | None,
-    config: Mapping[str, Any] | None,
-    profile: LayoutProfile | None,
-    echo: Callable[[str], None],
-) -> ImplementOracleResult:
-    """Merge deterministic source dependency-boundary violations into ``result``.
-
-    A SIBLING to :func:`_apply_orphan_artifact_gate` (the precedent for a language-
-    free gate in the oracle), applied right after each oracle command run so its
-    findings FEED the bounded rerun loop: a resolved internal import to a design
-    doc PROVABLY outside its owning doc's declared ``depends_on`` closure becomes an
-    :data:`EVIDENCE_BOUNDARY_VIOLATION` finding, flips the result to failed (only a
-    curable, non-environment failure — the loop reruns it), and the SUT is told the
-    dual fix (declared dependency vs. design-level gap; never inline/duplicate).
-
-    Anti-false-green / anti-false-RED (the Python oracle's "PROVABLY absent → fail;
-    unknown → never fail" rule): unresolvable specifiers and undecidable closures
-    degrade to logged residue, never a failure; the SOURCE-only v1 scope excludes
-    (and LOGS) test-tree artifacts. NO-OP when opted out, when there are no derived
-    tasks, or when nothing violates. Best-effort — a computation error is swallowed
-    (the gate must never crash a build it is only proving).
-    """
-    if not _dependency_boundary_gate_enabled(config):
-        return result
-    try:
-        from codd.dependency_boundary_coherence import check_dependency_boundary_coherence
-
-        boundary = check_dependency_boundary_coherence(
-            project_root,
-            language=language,
-            project_name=project_name,
-            config=config,
-            profile=profile,
-        )
-    except Exception as exc:  # noqa: BLE001 — proving must not break the build.
-        echo(f"[greenfield] implement-oracle: dependency-boundary gate skipped ({exc}).")
-        return result
-
-    # Residue + the source-only exclusion are LOGGED (no silent cap), never a fail.
-    if boundary.residue:
-        shown = ", ".join(boundary.residue[:_FEEDBACK_FINDING_CAP])
-        extra = len(boundary.residue) - _FEEDBACK_FINDING_CAP
-        suffix = f", … (+{extra} more)" if extra > 0 else ""
-        echo(
-            f"[greenfield] implement-oracle: dependency-boundary residue "
-            f"({len(boundary.residue)} unresolved/undecidable edge(s), never a "
-            f"failure): {shown}{suffix}"
-        )
-    if boundary.excluded_test_artifacts:
-        shown = ", ".join(boundary.excluded_test_artifacts[:_FEEDBACK_FINDING_CAP])
-        extra = len(boundary.excluded_test_artifacts) - _FEEDBACK_FINDING_CAP
-        suffix = f", … (+{extra} more)" if extra > 0 else ""
-        echo(
-            f"[greenfield] implement-oracle: dependency-boundary scope=source-only, "
-            f"excluded {len(boundary.excluded_test_artifacts)} test artifact(s) "
-            f"(covered by test_import_coherence): {shown}{suffix}"
-        )
-    if not boundary.findings:
-        return result
-
-    boundary_findings = [
-        ImplementOracleFinding(
-            category=EVIDENCE_BOUNDARY_VIOLATION,
-            code="dependency_boundary_violation",
-            message=finding.message,
-            path=finding.path,
-        )
-        for finding in boundary.findings
-    ]
-    echo(
-        f"[greenfield] implement-oracle: dependency-boundary gate FAILED — "
-        f"{len(boundary_findings)} generated source import(s) cross a declared "
-        f"dependency boundary."
-    )
-
-    merged_failed_paths = list(result.failed_paths)
-    for finding in boundary.findings:
-        if finding.path not in merged_failed_paths:
-            merged_failed_paths.append(finding.path)
-    boundary_detail = f"{len(boundary_findings)} dependency-boundary violation(s)"
-    detail = f"{result.detail}; {boundary_detail}" if result.detail else boundary_detail
-    return ImplementOracleResult(
-        passed=False,
-        executed=result.executed,
-        command=result.command,
-        findings=list(result.findings) + boundary_findings,
-        failed_paths=merged_failed_paths,
-        detail=detail,
-        raw_output=result.raw_output,
-        diagnostics=result.diagnostics,
-        orphan_artifacts=result.orphan_artifacts,
-    )
 
 
 # Ladder-rung constants mirrored here so the gate does not hard-import the scope
