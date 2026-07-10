@@ -2426,23 +2426,63 @@ def _append_campaign_record(
     A write failure is swallowed (the campaign must never crash the run on an audit
     write) and only logged at debug-ish level.
     """
+    record = {
+        "event": event,
+        "phase": phase,
+        "focus_paths": list(focus_paths),
+        "task_ids": list(task_ids),
+        "before_signature": _signature_to_jsonable(before_signature),
+        "after_signature": _signature_to_jsonable(after_signature),
+        "elapsed_seconds": round(float(elapsed), 3),
+        "status": status,
+    }
     try:
         audit_dir = Path(project_root) / ".codd" / "oracle_repair"
         audit_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "event": event,
-            "phase": phase,
-            "focus_paths": list(focus_paths),
-            "task_ids": list(task_ids),
-            "before_signature": _signature_to_jsonable(before_signature),
-            "after_signature": _signature_to_jsonable(after_signature),
-            "elapsed_seconds": round(float(elapsed), 3),
-            "status": status,
-        }
         with (audit_dir / "campaign.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as exc:  # noqa: BLE001 — audit write must never break the run.
         echo(f"[greenfield] implement-oracle: campaign audit write skipped ({exc}).")
+
+    # Item 6 (Fable5 ts-v9 §(e)): mirror the same per-phase record into the
+    # SESSION-level journal ``<session>/implement_oracle_campaign.yaml`` so a future
+    # consult reads the per-phase scope + diagnostic signatures + rollback/budget
+    # events directly, instead of reconstructing the campaign from file mtimes (as
+    # this consult had to). Evidence-only — NEVER read for the green decision.
+    _append_session_campaign_journal(project_root, record, echo)
+
+
+def _append_session_campaign_journal(
+    project_root: Path, record: Mapping[str, Any], echo: Callable[[str], None]
+) -> None:
+    """Append one campaign record to ``<session>/implement_oracle_campaign.yaml``.
+
+    The session directory is ``.codd/`` (sibling of ``greenfield_session.yaml``).
+    Read-modify-write a small ``{version, records: [...]}`` YAML doc — the campaign
+    has a bounded number of phases, so the RMW cost is negligible. Best-effort: a
+    write failure is swallowed (an audit write must never crash the run).
+    """
+    try:
+        import yaml
+
+        journal = Path(project_root) / ".codd" / "implement_oracle_campaign.yaml"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {}
+        if journal.exists():
+            loaded = yaml.safe_load(journal.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+        records = payload.get("records")
+        if not isinstance(records, list):
+            records = []
+        records.append(dict(record))
+        payload["records"] = records
+        payload.setdefault("version", 1)
+        journal.write_text(
+            yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8"
+        )
+    except Exception as exc:  # noqa: BLE001 — journal write must never break the run.
+        echo(f"[greenfield] implement-oracle: campaign journal write skipped ({exc}).")
 
 
 def _signature_to_jsonable(signature: Any) -> list:

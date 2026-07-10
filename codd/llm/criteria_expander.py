@@ -564,6 +564,15 @@ def warn_if_operation_flow_unused(
     if impl_step_derive:
         return False
 
+    # FIX-5 (Fable5 ts-v9 Secondary 3): the derive step defaults to the session/base
+    # ``ai_command`` when ``impl_step_derive`` is unset (see
+    # ``implementer._load_or_derive_implementation_steps``), so a configured base
+    # command ALSO satisfies the injection path. Warn ONLY when NEITHER exists —
+    # otherwise the warning fires on every run of a project that set just ``ai_command``.
+    base_command = cfg.get("ai_command") if isinstance(cfg, Mapping) else None
+    if isinstance(base_command, str) and base_command.strip():
+        return False
+
     out = stream if stream is not None else _sys.stderr
     print(
         "WARNING: operation_flow is declared in design docs, but "

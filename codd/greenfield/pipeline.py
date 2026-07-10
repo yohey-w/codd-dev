@@ -1408,6 +1408,15 @@ class GreenfieldPipeline:
         # surfaces (a stray one would be an unowned orphan that fails the build).
         tasks = self._enforce_deliverable_surface_exclusion(project_root, tasks)
 
+        # Derive-stage plan-intake grounding gate (FIX-4, Fable5 ts-v9 Secondary 1):
+        # every authored deliverable must be declared as a CONCRETE path/glob, not as
+        # prose describing authored files. A prose declaration cannot own a path in
+        # the ownership index, so the file it emits lands as an orphan the gate
+        # correctly refuses; ground it at plan-intake with a bounded re-derivation
+        # (or honest StageError). STRICT NO-OP unless a derived task declares
+        # ungrounded prose output(s).
+        tasks = self._enforce_plan_intake_grounding(project_root, tasks)
+
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {task.task_id: units.get(task.task_id, STATUS_PENDING) for task in tasks}
 
@@ -1719,6 +1728,102 @@ class GreenfieldPipeline:
             "emitted here is an unowned orphan that fails the build. Re-derive without "
             "any task that creates them."
         )
+
+    def _enforce_plan_intake_grounding(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+    ) -> list[ImplementTaskRef]:
+        """Derive-stage gate: every authored deliverable is declared as a CONCRETE path.
+
+        FIX-4 (Fable5 ts-v9 Secondary 1): the plan deriver is the open→closed
+        boundary for artifact ownership. A design may legitimately UNDERSPECIFY a
+        path ("exact path not specified by design"), but the derived task must still
+        GROUND it — an ``expected_outputs`` entry that is PROSE describing authored
+        codebase files (rather than a concrete path/glob, a prose gate, or a
+        non-codebase artifact) reaches disk as an orphan the ownership gate correctly
+        refuses to own (the ts-v9 ``implement_ci_dependency_purity_gates`` case:
+        ``.github/scripts/*.mjs`` authored under a prose declaration, found ownerless).
+
+        On a violation this FORCES a bounded re-derivation with a deterministic
+        "declare concrete paths" directive naming the task + its prose entries,
+        re-approves, re-lists, and re-checks. Exhaustion raises :class:`StageError`
+        (honest RED naming the task). Because the re-derive overwrites the cache, a
+        ``--resume`` stays consistent.
+
+        STRICT NO-OP unless some derived task declares an ungrounded prose output.
+        Deterministic set-math over declared strings — no LLM judgment in the check
+        (choosing a path is generation; declaring it is the contract), no
+        per-language / per-symbol branch. Anti-false-green: this fails EARLIER and
+        CLOSED (a would-be orphan never reaches the tree), never greener; the orphan
+        gate stays byte-identical and header-based self-ownership is NOT conferred.
+        """
+        from codd.config import load_project_config
+
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+
+        max_retries = _plan_intake_grounding_max_retries(config)
+        attempt = 0
+        while True:
+            violations = self._plan_intake_grounding_violations(tasks, config)
+            if not violations:
+                break
+            if attempt >= max_retries:
+                detail = "; ".join(
+                    f"`{task_id}` declares prose output(s) that describe authored files "
+                    f"instead of concrete path(s): {', '.join(repr(o) for o in outs)}"
+                    for task_id, outs in sorted(violations.items())
+                )
+                raise StageError(
+                    "derive-stage plan-intake grounding gate failed — a derived task "
+                    "declares an authored deliverable as PROSE rather than a concrete "
+                    f"path/glob, so no task can own the file(s) it emits: {detail}. Each "
+                    "authored artifact must be declared as a concrete path or glob in "
+                    "expected_outputs."
+                )
+            attempt += 1
+            feedback = self._build_plan_intake_grounding_feedback(violations)
+            self.echo(
+                "[greenfield] implement: plan-intake grounding gate re-deriving with "
+                f"repair feedback (attempt {attempt}/{max_retries})"
+            )
+            deriver = self.task_deriver or _default_task_deriver
+            deriver(project_root, ai_command=self.ai_command, force=True, feedback=feedback)
+            lister = self.task_lister or _default_task_lister
+            tasks = list(lister(project_root))
+        return tasks
+
+    def _plan_intake_grounding_violations(
+        self,
+        tasks: list[ImplementTaskRef],
+        config: dict[str, Any],
+    ) -> dict[str, list[str]]:
+        """Map each task_id with ungrounded prose output(s) to those entries."""
+        violations: dict[str, list[str]] = {}
+        for task in tasks:
+            ungrounded = _ungrounded_prose_outputs(task, config)
+            if ungrounded:
+                violations[task.task_id] = ungrounded
+        return violations
+
+    def _build_plan_intake_grounding_feedback(self, violations: dict[str, list[str]]) -> str:
+        """Deterministic repair directive for a plan-intake grounding re-derivation."""
+        lines = [
+            "Each authored deliverable MUST be declared as a CONCRETE file path or glob "
+            "in expected_outputs — never as a prose description. The following task(s) "
+            "declare prose that describes authored codebase files whose path is left "
+            "unspecified; a file emitted under such a declaration is an unowned orphan "
+            "that fails the build. Re-derive each with concrete path(s) for every file "
+            "it authors (choose a conventional location if the design does not specify "
+            "one — e.g. a CI/tooling script under a concrete scripts directory):",
+        ]
+        for task_id, outs in sorted(violations.items()):
+            listed = ", ".join(f"`{o}`" for o in outs)
+            lines.append(f"- `{task_id}`: replace prose output(s) {listed} with concrete path(s).")
+        return "\n".join(lines)
 
     def _finalize_dependency_lock_coherence(self, project_root: Path) -> None:
         """Reconcile harness-owned toolchain deps + refresh the lock (implement-end).
@@ -2244,6 +2349,22 @@ class GreenfieldPipeline:
             self._reimplement_tasks(project_root, tasks, feedback, config, feedback_rows=feedback_rows)
             return
 
+        # FIX-3 (Secondary 2): drop no-authored-artifact tasks from the repair scope
+        # at CONSTRUCTION time too (belt-and-braces with the ``_reimplement_tasks``
+        # skip), so the write-fence and logs reflect only repairable tasks. A scope
+        # that RESOLVED to targets but is ALL no-op collapses to a no-op RETURN — it
+        # must NOT fall back to broad (which would wrongly re-run the whole tree);
+        # the distinction from the "empty scope" case above is exactly that the scope
+        # DID resolve, there is simply nothing here that can repair anything.
+        repairable = [t for t in scoped_tasks if not _task_declares_no_authored_artifact(t, config)]
+        if not repairable:
+            self.echo(
+                "[greenfield] implement-oracle: scope contained only no-authored-artifact "
+                "task(s) — nothing to repair (skipping)."
+            )
+            return
+        scoped_tasks = repairable
+
         allowed = tuple(getattr(scope, "allowed_paths", ()) or ())
         with _OracleWriteFence(project_root, allowed_paths=allowed, echo=self.echo) as fence:
             self._reimplement_tasks(project_root, scoped_tasks, feedback, config, feedback_rows=feedback_rows)
@@ -2324,6 +2445,22 @@ class GreenfieldPipeline:
         elapsed: dict[str, float] = {}
         failed_task_ids: list[str] = []
         for task in tasks:
+            # FIX-3 (Fable5 ts-v9 Secondary 2): a task that authors NO artifact can
+            # repair nothing, so it must never consume an AI call inside a repair
+            # scope. The first-pass runner already short-circuits these (see
+            # ``_default_implement_task_runner`` above); the rerun / broad-campaign
+            # path funnels through HERE, so this is the belt-and-braces skip that
+            # closes it for EVERY scope (legacy-broad, fenced narrow/expanded, and
+            # the chunked-broad phase that scopes all tasks). It echoes the skip —
+            # exactly like the first-pass short-circuit — instead of re-running the
+            # doc/gate task and emitting the "outside output paths ['src','tests']"
+            # noise the wasted retries produced (8 calls/campaign in the ts-v9 plan).
+            if _task_declares_no_authored_artifact(task, config):
+                self.echo(
+                    f"[greenfield] re-implement {task.task_id}: skip — verification/gate "
+                    "or non-codebase task (no authored artifact; nothing to repair)."
+                )
+                continue
             task_feedback = feedback
             if feedback_rows is not None:
                 from codd.verifiable_behavior_audit import format_gap_feedback, scope_uncovered_rows
@@ -4032,7 +4169,12 @@ def _task_declares_no_authored_artifact(task: ImplementTaskRef, config: dict[str
     failure cannot masquerade as 0-file success; a mis-derived module surfaces as a
     downstream RED (verify / VB coverage+authenticity / check), never a false-GREEN.
     """
-    outputs = [str(out).strip() for out in task.expected_outputs if str(out).strip()]
+    # ``getattr`` guard: the rerun/campaign filters (FIX-3) may hand this a
+    # duck-typed task object that carries only ``output_paths`` (no declared
+    # ``expected_outputs``). Absent/empty outputs → False (fail-closed, "repairable"),
+    # exactly the empty-contract case below.
+    declared = getattr(task, "expected_outputs", ()) or ()
+    outputs = [str(out).strip() for out in declared if str(out).strip()]
     if not outputs:
         return False
     source_roots = _scan_roots(config, "source_dirs")
@@ -4045,6 +4187,46 @@ def _task_declares_no_authored_artifact(task: ImplementTaskRef, config: dict[str
             continue
         return False  # a codebase artifact (or ambiguous bare/empty token) is owed
     return True
+
+
+def _ungrounded_prose_outputs(task: ImplementTaskRef, config: dict[str, Any]) -> list[str]:
+    """The ``expected_outputs`` entries of a CODE-AUTHORING task that are PROSE
+    DESCRIBING authored codebase files rather than concrete paths (FIX-4, Fable5
+    ts-v9 Secondary 1 — the open→closed boundary the plan deriver must ground).
+
+    A task whose outputs are ALL prose/non-codebase is a legitimate verification/
+    gate / non-codebase no-op (:func:`_task_declares_no_authored_artifact`): its
+    prose is a real declaration, and nothing is returned here. But once a task
+    authors ANY concrete codebase file, every OTHER entry must ALSO be a concrete
+    path/glob or a non-codebase artifact — a PROSE entry there (whitespace, not a
+    file path, not a glob, not under a scan root; the ts-v9
+    ``"CI ... check scripts (exact path not specified by design)"`` case) describes
+    authored codebase files whose path the design left unpinned. Prose cannot own a
+    path in the ``TaskOutputIndex``, so those files reach disk as ORPHANS the gate
+    correctly refuses to own. Returned so plan-intake can force the deriver to
+    DECLARE concrete paths.
+
+    Deterministic; reuses the existing ``_output_is_prose_declaration`` /
+    ``_output_is_non_codebase_artifact`` predicates verbatim — the CHOOSING of a
+    path is generation (open-world), only the DECLARING is the contract, so there
+    is NO LLM judgment in this check and no per-language/symbol branch.
+    """
+    declared = getattr(task, "expected_outputs", ()) or ()
+    outputs = [str(out).strip() for out in declared if str(out).strip()]
+    if not outputs:
+        return []  # no contract to ground (a configured target) — not this gate's job
+    if _task_declares_no_authored_artifact(task, config):
+        return []  # a pure gate/verification/non-codebase task — its prose is legit
+    source_roots = _scan_roots(config, "source_dirs")
+    test_roots = _scan_roots(config, "test_dirs")
+    impl_exts = _no_op_impl_extensions(config)
+    ungrounded: list[str] = []
+    for out in outputs:
+        if _output_is_non_codebase_artifact(out, source_roots, test_roots, impl_exts):
+            continue  # a later-stage-provisioned artifact — a legit declaration
+        if _output_is_prose_declaration(out, source_roots, test_roots):
+            ungrounded.append(out)  # prose in a code-authoring task → ungrounded
+    return ungrounded
 
 
 def _test_only_output_paths(config: dict[str, Any], task: ImplementTaskRef) -> list[str] | None:
@@ -4171,6 +4353,22 @@ def _deliverable_surface_max_retries(config: dict[str, Any] | None) -> int:
     section = (config or {}).get("derive")
     if isinstance(section, dict):
         value = section.get("deliverable_surface_max_retries")
+        if isinstance(value, int) and value >= 0:
+            return value
+    return 2
+
+
+def _plan_intake_grounding_max_retries(config: dict[str, Any] | None) -> int:
+    """Bounded derive-stage re-derivations for the plan-intake grounding gate
+    (``derive.plan_intake_grounding_max_retries``, default 2).
+
+    ``0`` = legacy behavior (no re-derive: a task declaring prose that describes
+    authored files fails the gate immediately). A versioned, visible default — not
+    a silent activation.
+    """
+    section = (config or {}).get("derive")
+    if isinstance(section, dict):
+        value = section.get("plan_intake_grounding_max_retries")
         if isinstance(value, int) and value >= 0:
             return value
     return 2

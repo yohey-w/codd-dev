@@ -1795,6 +1795,18 @@ def _load_or_derive_implementation_steps(
     nodes = _dependency_documents_as_nodes(dependency_documents)
 
     derive_command = _ai_command_from_config(config, "impl_step_derive")
+    if not derive_command:
+        # FIX-5 (Fable5 ts-v9 Secondary 3): default ``impl_step_derive`` to the
+        # session/base ``ai_command`` when unset. The omitted ``operation_flow``
+        # hints carry behavioral DoD obligations, so silently dropping the derive
+        # step (and warning on every run) forfeits real behavior; reusing the base
+        # command the rest of implement already runs recovers it. When NEITHER
+        # exists, ``derive_command`` stays falsy and the warn branch below fires.
+        # Config-layer only — no per-language / per-symbol logic.
+        base_command = config.get("ai_command")
+        if isinstance(base_command, str) and base_command.strip():
+            derive_command = base_command.strip()
+
     if not explicit and derive_command and nodes:
         deriver = SubprocessAiCommandImplStepDeriver(
             SubprocessAiCommand(command=derive_command, project_root=project_root, config=config),
@@ -1803,7 +1815,8 @@ def _load_or_derive_implementation_steps(
         record = read_impl_step_cache(cache_path)
         steps = list(record.steps) if record is not None else explicit
     elif not explicit and not derive_command and nodes:
-        # K-2 cmd_345: detect silent fail of operation_flow_hint injection
+        # K-2 cmd_345: detect silent fail of operation_flow_hint injection — only
+        # reachable now when NEITHER impl_step_derive NOR the base ai_command is set.
         from codd.llm.criteria_expander import warn_if_operation_flow_unused
 
         warn_if_operation_flow_unused(config, nodes)
