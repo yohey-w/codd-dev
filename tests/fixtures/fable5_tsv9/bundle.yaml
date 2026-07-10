@@ -1,0 +1,424 @@
+provider_id: subprocess_ai_command:08f2360a5254
+cache_key: 0096cfff9dd9f12c23f72d11f903eeb4a9b6cad9f0336ddfc019549f3cd15a99
+design_doc_sha: 245d1d5db1d8352a8c080c9c14c8e4573d13299b969feba83c3f4d54eb031204
+prompt_template_sha: a96545369c22478dc327f5c9900a0f47889dd05caed8775ab15e540e265c3f41
+generated_at: '2026-07-10T10:38:23.185722Z'
+design_docs:
+- docs/design/error_handling_design.md
+- docs/design/grammar_design.md
+- docs/design/public_api_design.md
+- docs/design/system_design.md
+- docs/detailed_design/evaluator_flow.md
+- docs/detailed_design/module_dependency_map.md
+- docs/detailed_design/parser_ast_flow.md
+- docs/detailed_design/tokenizer_flow.md
+- docs/governance/error_taxonomy_decision.md
+- docs/infra/build_ci_setup.md
+- docs/plan/implementation_plan.md
+- docs/requirements/requirements.md
+- docs/test/acceptance_criteria.md
+- docs/test/test_strategy.md
+tasks:
+- id: implement_expr_error_base_class
+  title: Implement ExprError hierarchy in src/errors.ts
+  description: Implement the abstract ExprError base class (extends Error, sets name
+    via new.target.name, calls Object.setPrototypeOf) and the concrete LexError(character,
+    position), ParseError(expected), and DivisionByZeroError subclasses with their
+    exact fixed message templates. This is the sole file permitted to declare a class
+    extending the native Error, per the release-blocking single-hierarchy constraint.
+  source_design_doc: docs/design/error_handling_design.md
+  v_model_layer: detailed
+  expected_outputs:
+  - src/errors.ts
+  test_kinds:
+  - unit
+  dependencies: []
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: write_error_hierarchy_unit_tests
+  title: Author tests/errors.test.ts per the error taxonomy decision record
+  description: Write Vitest tests asserting LexError/ParseError/DivisionByZeroError
+    are each instanceof ExprError and Error, that their message/character/position/expected
+    fields match the fixed constructor contract, and that ExprError itself is never
+    observed as a thrown instance's exact constructor. Follows the D6 test example
+    in the error taxonomy decision.
+  source_design_doc: docs/governance/error_taxonomy_decision.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/errors.test.ts
+  test_kinds:
+  - unit
+  dependencies:
+  - implement_expr_error_base_class
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: implement_ast_node_hierarchy
+  title: Implement ExprNode discriminated union and node factories in src/ast.ts
+  description: Declare the NumberNode/UnaryNode/BinaryNode interfaces and the ExprNode
+    union type, plus makeNumberNode/makeUnaryNode/makeBinaryNode factory functions
+    that construct and Object.freeze each node. This file is a dependency-free leaf
+    module with zero outbound src/ imports.
+  source_design_doc: docs/detailed_design/parser_ast_flow.md
+  v_model_layer: detailed
+  expected_outputs:
+  - src/ast.ts
+  test_kinds:
+  - unit
+  dependencies: []
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: implement_tokenizer_scan_state_machine
+  title: Implement tokenize() scanner state machine in src/tokenizer.ts
+  description: Implement the single-pass, forward-only scan loop (Ready/ScanningNumber/EmitNumber/EmitSymbol/LexErrorState/Done)
+    that emits number/operator/lparen/rparen tokens, skips whitespace without emitting
+    tokens, and throws LexError(character, position) at the first unmapped character.
+    tokenize is the sole construction site for LexError in the codebase.
+  source_design_doc: docs/detailed_design/tokenizer_flow.md
+  v_model_layer: detailed
+  expected_outputs:
+  - src/tokenizer.ts
+  test_kinds:
+  - unit
+  dependencies:
+  - implement_expr_error_base_class
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: write_tokenizer_unit_tests
+  title: Author tests/tokenizer.test.ts covering scan and lex-error obligations
+  description: Write Vitest tests covering dod-tok-scan-01..03 (correct kind sequence,
+    maximal-number-run, empty-input) and dod-tok-lex-01..03 (LexError character/position
+    for a mid-expression, leading-whitespace-shifted, and identifier-first-character
+    case). Assert whitespace never produces a token.
+  source_design_doc: docs/detailed_design/tokenizer_flow.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/tokenizer.test.ts
+  test_kinds:
+  - unit
+  dependencies:
+  - implement_tokenizer_scan_state_machine
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: implement_parser_grammar_descent
+  title: Implement recursive-descent grammar functions in src/parser.ts
+  description: Implement parseExpression/parseTerm/parseUnary/parsePrimary as the
+    four-level nested grammar (expression -> term -> unary -> primary), using iterative
+    left-folding loops in parseExpression and parseTerm to guarantee left-associativity,
+    and self-recursive parseUnary to bind unary minus tighter than any binary operator.
+    No precedence table or Pratt-style binding power is used.
+  source_design_doc: docs/design/grammar_design.md
+  v_model_layer: detailed
+  expected_outputs:
+  - src/parser.ts
+  test_kinds:
+  - unit
+  dependencies:
+  - implement_ast_node_hierarchy
+  - implement_tokenizer_scan_state_machine
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: implement_parser_entrypoint_and_error_sites
+  title: Implement parse() entry point and the six ParseError sites
+  description: Implement the top-level exported parse(input) function that calls tokenize
+    once, drives the grammar-descent functions, performs the trailing-token check,
+    and constructs ParseError with a site-specific expected string at each of the
+    six grammar-violation points. LexError thrown by the internal tokenize call must
+    propagate unmodified, never re-wrapped.
+  source_design_doc: docs/detailed_design/parser_ast_flow.md
+  v_model_layer: detailed
+  expected_outputs:
+  - src/parser.ts
+  test_kinds:
+  - unit
+  dependencies:
+  - implement_parser_grammar_descent
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: write_parser_ast_unit_tests
+  title: Author tests/parser.test.ts for AST shape and immutability
+  description: Write Vitest tests asserting exact ExprNode shapes for precedence/associativity/unary/parenthesized
+    cases, exact .expected strings for each ParseError site, recursive Object.isFrozen(node)
+    immutability at every level, and structural equivalence between parse(text) and
+    parse(tokenize(text)).
+  source_design_doc: docs/detailed_design/parser_ast_flow.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/parser.test.ts
+  test_kinds:
+  - unit
+  dependencies:
+  - implement_parser_entrypoint_and_error_sites
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: write_grammar_precedence_associativity_tests
+  title: Extend tests/parser.test.ts with grammar dod_obligations
+  description: Add dedicated cases to tests/parser.test.ts for dod-grammar-prec-01/02,
+    dod-grammar-assoc-01/02/03, dod-grammar-unary-01/02/03, and dod-grammar-scope-01/02/03,
+    making precedence, left-associativity, unary-minus binding, and out-of-scope-symbol
+    rejection independently traceable to the grammar design's operation_flow.
+  source_design_doc: docs/design/grammar_design.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/parser.test.ts
+  test_kinds:
+  - unit
+  - integration
+  dependencies:
+  - write_parser_ast_unit_tests
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: implement_evaluator_tree_walk
+  title: Implement evaluate() and evalNode() tree-walk in src/evaluator.ts
+  description: 'Implement the exported evaluate(input) and private evalNode(node)
+    recursive tree-walk over ExprNode: Number leaves return their value, Unary negates
+    its fully-evaluated operand, and Binary evaluates left-then-right with a right===0
+    guard placed strictly before the native ''/'' operator, throwing DivisionByZeroError
+    instead of returning Infinity/-Infinity/NaN.'
+  source_design_doc: docs/detailed_design/evaluator_flow.md
+  v_model_layer: detailed
+  expected_outputs:
+  - src/evaluator.ts
+  test_kinds:
+  - unit
+  dependencies:
+  - implement_parser_entrypoint_and_error_sites
+  - implement_expr_error_base_class
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: write_evaluator_unit_tests
+  title: Author tests/evaluator.test.ts for arithmetic, division guard, and purity
+  description: Write Vitest tests covering happy-path precedence/unary arithmetic
+    (dod-eval-happy-01..04), the division-by-zero guard including a computed zero-divisor
+    subtree (dod-eval-div-01..03), unary-minus forms (dod-eval-unary-01/02), and purity
+    via 1000 repeated calls returning identical results (dod-eval-purity-01).
+  source_design_doc: docs/detailed_design/evaluator_flow.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/evaluator.test.ts
+  test_kinds:
+  - unit
+  dependencies:
+  - implement_evaluator_tree_walk
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: write_error_boundary_propagation_tests
+  title: Add cross-module error propagation and hierarchy-integrity tests
+  description: Extend the tokenizer/parser/evaluator test suites to assert LexError
+    and ParseError propagate unmodified through parse's and evaluate's internal calls,
+    and that every invalid-input path across all three stages yields exactly one of
+    LexError/ParseError/DivisionByZeroError, never a bare Error, satisfying dod-err-hierarchy-01..03
+    and dod-err-lex/parse/div obligations.
+  source_design_doc: docs/design/error_handling_design.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/errors.test.ts
+  - tests/parser.test.ts
+  - tests/evaluator.test.ts
+  test_kinds:
+  - integration
+  dependencies:
+  - implement_evaluator_tree_walk
+  - write_parser_ast_unit_tests
+  - write_tokenizer_unit_tests
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: implement_public_api_barrel
+  title: Implement src/index.ts re-export barrel
+  description: Implement src/index.ts containing only re-export statements for tokenize,
+    Token, TokenKind, parse, ExprNode (and its node types), evaluate, and ExprError/LexError/ParseError/DivisionByZeroError.
+    This module must contain no logic of its own and must not be imported by any other
+    src/*.ts file.
+  source_design_doc: docs/design/public_api_design.md
+  v_model_layer: detailed
+  expected_outputs:
+  - src/index.ts
+  test_kinds:
+  - unit
+  dependencies:
+  - implement_tokenizer_scan_state_machine
+  - implement_parser_entrypoint_and_error_sites
+  - implement_evaluator_tree_walk
+  - implement_expr_error_base_class
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: write_public_api_integration_tests
+  title: Author tests/index.test.ts for re-export identity and API boundary contracts
+  description: Write Vitest tests asserting every symbol re-exported from src/index.ts
+    is referentially identical (===) to its source-module export, plus integration
+    tests for frozen-node immutability, string-vs-preparsed/preevaluated input equivalence
+    (dod-api-parse-01/02, dod-api-evaluate-01), and the typed-error-only boundary
+    (dod-api-errbound-01..03).
+  source_design_doc: docs/design/public_api_design.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/index.test.ts
+  test_kinds:
+  - integration
+  dependencies:
+  - implement_public_api_barrel
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: verify_module_import_dependency_graph
+  title: Implement structural import-graph verification
+  description: Implement a structural check (the design leaves open whether this is
+    a shell/grep script or a Vitest-run test) verifying src/tokenizer.ts, src/parser.ts,
+    src/evaluator.ts, src/ast.ts, and src/errors.ts satisfy the fixed tokenizer-to-parser-to-evaluator
+    import spine with no circular edges and no import of src/index.ts, satisfying
+    dod-graph-01 through dod-graph-05. This document defers the exact implementation
+    form to the test strategy, so a Vitest test file is inferred here as the concrete
+    artifact.
+  source_design_doc: docs/detailed_design/module_dependency_map.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/module-graph.test.ts
+  test_kinds:
+  - integration
+  dependencies:
+  - implement_public_api_barrel
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: implement_ci_dependency_purity_gates
+  title: Implement CI dependency-manifest and purity/determinism gates
+  description: Implement the zero-runtime-dependency manifest check described in the
+    build/CI setup (inspecting package.json's dependencies field) and author tests/purity.test.ts
+    asserting repeated-call determinism and the absence of any timer/network/filesystem
+    dependency in the library under test. The exact CI pipeline file location is not
+    specified by the design and is inferred as pipeline tooling alongside the harness-owned
+    scaffold.
+  source_design_doc: docs/infra/build_ci_setup.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/purity.test.ts
+  - CI dependency-manifest and import-graph check scripts (exact path not specified
+    by design)
+  test_kinds:
+  - integration
+  dependencies:
+  - implement_public_api_barrel
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: write_pipeline_integration_tests
+  title: Author end-to-end pipeline integration tests for the tokenize-parse-evaluate
+    chain
+  description: Write an integration test file exercising the full source-to-number
+    pipeline (tokenize -> parse -> evaluate) end to end, covering dod-tokenize-01..03,
+    dod-parse-01..06, dod-evaluate-01..07, and dod-errtype-01/02 as a single coherent
+    suite, since system design's own module-level examples are individually re-implemented
+    by the tokenizer/parser/evaluator detailed designs but no document owns the whole-chain
+    assertion.
+  source_design_doc: docs/design/system_design.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/pipeline-integration.test.ts
+  test_kinds:
+  - integration
+  - e2e
+  dependencies:
+  - implement_public_api_barrel
+  - write_evaluator_unit_tests
+  - write_parser_ast_unit_tests
+  - write_tokenizer_unit_tests
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: document_requirements_traceability
+  title: Maintain requirements-to-implementation traceability reference
+  description: docs/requirements/requirements.md is the top-level requirement document
+    and defines no code artifact of its own; every functional requirement and constraint
+    it states is realized by the downstream design and implementation tasks above.
+    This task's role is to keep the requirements document itself as the authoritative
+    traceability anchor those tasks are checked against.
+  source_design_doc: docs/requirements/requirements.md
+  v_model_layer: detailed
+  expected_outputs:
+  - docs/requirements/requirements.md
+  test_kinds: []
+  dependencies: []
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: tag_generated_tests_and_quality_gate
+  title: Tag generated test files and enforce the acceptance-criteria quality gate
+  description: Add the required @generated-from and @generated-by header comments
+    to every generated test file under tests/, preserve any @manual-marked test verbatim
+    on regeneration, and run the full Vitest suite requiring all PASS/zero SKIP with
+    full AC-01 through AC-25 coverage per the E2E test generation meta-prompt.
+  source_design_doc: docs/test/acceptance_criteria.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/errors.test.ts
+  - tests/tokenizer.test.ts
+  - tests/parser.test.ts
+  - tests/evaluator.test.ts
+  - tests/index.test.ts
+  - tests/purity.test.ts
+  test_kinds:
+  - integration
+  - e2e
+  dependencies:
+  - write_error_hierarchy_unit_tests
+  - write_tokenizer_unit_tests
+  - write_grammar_precedence_associativity_tests
+  - write_evaluator_unit_tests
+  - write_public_api_integration_tests
+  - implement_ci_dependency_purity_gates
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: consolidate_vb_registry_final_gate
+  title: Run the consolidated VB-01 through VB-37 quality gate
+  description: Execute the full Vitest suite via the fixed verify command and confirm
+    full VB-01 through VB-37 coverage per the consolidated traceability table, with
+    zero FAIL/SKIP results and no violation of the tokenizer/parser/evaluator/errors/api
+    conventions, collecting all failures from one run before any repair per the test
+    strategy's final quality-gate instruction.
+  source_design_doc: docs/test/test_strategy.md
+  v_model_layer: detailed
+  expected_outputs:
+  - tests/**/*.test.ts
+  test_kinds:
+  - unit
+  - integration
+  - e2e
+  dependencies:
+  - tag_generated_tests_and_quality_gate
+  - verify_module_import_dependency_graph
+  - write_pipeline_integration_tests
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true
+- id: document_milestone_sequencing_verification
+  title: Maintain milestone sequencing and Milestone 7 cross-cutting verification
+    record
+  description: docs/plan/implementation_plan.md defines no unique code artifact beyond
+    the module deliverables already scheduled by the tasks above; its distinct contribution
+    is the fixed build order (errors/ast before tokenizer before parser before evaluator
+    before api) and Milestone 7's re-verification of dod-graph-01..05 across the completed
+    codebase, which this task keeps as the authoritative sequencing and re-verification
+    checkpoint.
+  source_design_doc: docs/plan/implementation_plan.md
+  v_model_layer: detailed
+  expected_outputs:
+  - docs/plan/implementation_plan.md
+  test_kinds: []
+  dependencies:
+  - consolidate_vb_registry_final_gate
+  provider_id: subprocess_ai_command:08f2360a5254
+  generated_at: '2026-07-10T10:38:23.185722Z'
+  approved: true

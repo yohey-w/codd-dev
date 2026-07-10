@@ -311,6 +311,11 @@ class ImplementTaskRef:
     test_kinds: tuple[str, ...] = ()
     title: str = ""
     description: str = ""
+    #: The planner's task-level ``dependencies`` (production-graph edges). FIX-1
+    #: (Fable5 ts-v9 ruling): the owner index carries these so the repair
+    #: campaign's ``task_dependency_order`` regenerates producers before consumers.
+    #: Empty for a configured ``implement_targets`` mapping (no DerivedTask).
+    dependencies: tuple[str, ...] = ()
 
 
 # DI seam signatures (all keyword-overridable on the pipeline constructor).
@@ -3229,6 +3234,7 @@ def _default_task_lister(project_root: Path) -> list[ImplementTaskRef]:
             test_kinds=tuple(entry.get("test_kinds") or ()),
             title=str(entry.get("title") or ""),
             description=str(entry.get("description") or ""),
+            dependencies=tuple(entry.get("dependencies") or ()),
         )
         for entry in list_implement_tasks(project_root)
     ]

@@ -1301,9 +1301,60 @@ def list_implement_tasks(project_root: Path) -> list[dict[str, Any]]:
                     "test_kinds": list(task.test_kinds),
                     "title": task.title,
                     "description": task.description,
+                    #: The planner's task-level production graph (edges to the
+                    #: task ids this task consumes). FIX-1 (Fable5 ts-v9 ruling):
+                    #: ordering/injection/campaign consume THIS, not the design DAG.
+                    "dependencies": list(task.dependencies),
                 }
             )
     return _topologically_order_implement_tasks(entries, project_root, config)
+
+
+def _task_dependency_longest_chain_ranks(
+    entries: list[dict[str, Any]],
+) -> dict[int, int]:
+    """Cycle-safe longest-chain rank for each entry over the task-level
+    ``dependencies`` production graph (FIX-1, Fable5 ts-v9 ruling).
+
+    ``rank(t) = 1 + max(rank(d) for d in t.dependencies)`` (0 when a task has no
+    ``dependencies`` edges). This is the PRODUCTION order the planner emitted
+    (``bundle.dependencies``), which — unlike the design-elaboration DAG — points
+    the SAME direction as module imports, so a producer always outranks (precedes)
+    its consumers. A dependency CYCLE degrades to 0 for the tasks on the cycle
+    (a stack guard breaks the recursion WITHOUT raising) so the caller falls back
+    to the design-rank tiebreak for them. An edge to an unknown/absent task id is
+    ignored. Pure function of the static bundle ``dependencies`` field.
+
+    Keyed by ENUMERATION INDEX (not task id) so duplicate/blank ids never collide.
+    """
+    id_to_index: dict[str, int] = {}
+    deps_by_index: dict[int, list[str]] = {}
+    for index, entry in enumerate(entries):
+        task_id = str(entry.get("task_id") or "").strip()
+        if task_id and task_id not in id_to_index:
+            id_to_index[task_id] = index
+        deps_by_index[index] = [
+            str(dep).strip() for dep in (entry.get("dependencies") or []) if str(dep).strip()
+        ]
+
+    rank_cache: dict[int, int] = {}
+
+    def _rank(index: int, stack: frozenset[int]) -> int:
+        cached = rank_cache.get(index)
+        if cached is not None:
+            return cached
+        if index in stack:
+            return 0  # cycle guard: break without recursing (degrade to design-rank)
+        best = 0
+        for dep_id in deps_by_index.get(index, ()):
+            dep_index = id_to_index.get(dep_id)
+            if dep_index is None or dep_index == index:
+                continue  # unknown/self edge contributes nothing
+            best = max(best, _rank(dep_index, stack | {index}) + 1)
+        rank_cache[index] = best
+        return best
+
+    return {index: _rank(index, frozenset()) for index in range(len(entries))}
 
 
 def _topologically_order_implement_tasks(
@@ -1313,22 +1364,34 @@ def _topologically_order_implement_tasks(
 ) -> list[dict[str, Any]]:
     """Producer-first ordering of derived implement-task entries.
 
-    Re-applies ``codd generate``'s wave semantics to implement UNITS: order each
-    task by its design node's ``depends_on`` closure (the same frontmatter edges
-    :func:`_collect_dependency_documents` walks), so a producer design node's
-    tasks run before a consumer design node's tasks — a consumer never runs
-    before the files it imports exist on disk. Within one multi-task design doc,
-    source-kind tasks (empty ``test_kinds``) precede test-kind tasks.
+    PRIMARY rank (FIX-1, Fable5 ts-v9 ruling): the cycle-safe longest-chain over
+    the planner's task-level ``dependencies`` production graph
+    (:func:`_task_dependency_longest_chain_ranks`) — the CORRECT production order
+    (a producer task precedes every task that consumes it). The design-elaboration
+    ``depends_on`` DAG points OPPOSITE to module imports (a shallow public-API
+    barrel outranks the deep detailed-design producers), which inverted execution
+    order before this fix.
 
-    Ordering is a pure function of STATIC DAG data (design-node ``depends_on`` +
-    ``test_kinds``) — never disk state — so a mid-run resume produces the
-    IDENTICAL order (no task skipped or repeated under reordering). The original
-    enumeration order is the final, deterministic tiebreak. A missing/unparseable
-    design doc degrades to "no dependencies" (rank 0) rather than raising: this
-    is best-effort ordering, not a validation gate.
+    TIEBREAK / SOLE FALLBACK — the shipped ``(design-rank, is_test, enumeration
+    index)`` triple. When NO task declares a ``dependencies`` edge (configured
+    ``implement_targets`` mappings, or legacy bundles predating the field) every
+    task-rank is 0 and the order collapses to exactly this triple — byte-identical
+    to the shipped behavior. ``design-rank`` re-applies ``codd generate``'s wave
+    semantics (the design node's ``depends_on`` closure); within one multi-task
+    design doc, source-kind tasks (empty ``test_kinds``) precede test-kind tasks.
+
+    Ordering is a pure function of STATIC DAG data (task ``dependencies`` +
+    design-node ``depends_on`` + ``test_kinds``) — never disk state — so a mid-run
+    resume produces the IDENTICAL order (no task skipped or repeated under
+    reordering). The original enumeration order is the final, deterministic
+    tiebreak. A missing/unparseable design doc or a dependency cycle degrades to
+    "no dependencies" (rank 0) rather than raising: this is best-effort ordering,
+    not a validation gate.
     """
     if len(entries) < 2:
         return entries
+
+    task_ranks = _task_dependency_longest_chain_ranks(entries)
 
     node_paths = build_document_node_path_map(project_root, config)
 
@@ -1385,11 +1448,12 @@ def _topologically_order_implement_tasks(
 
     indexed = list(enumerate(entries))
 
-    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int]:
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int, int]:
         index, entry = item
         key = _node_key(entry.get("design_node"))
         is_test = 1 if entry.get("test_kinds") else 0
-        return (_rank(key, frozenset()), is_test, index)
+        # PRIMARY: task-graph production rank. TIEBREAK: the shipped triple.
+        return (task_ranks.get(index, 0), _rank(key, frozenset()), is_test, index)
 
     indexed.sort(key=_sort_key)
     return [entry for _index, entry in indexed]
@@ -2345,19 +2409,33 @@ def _dependency_artifact_files_context(
     project_root: Path,
     config: dict[str, Any],
     dependency_documents: list[DependencyDocument],
+    spec: "ImplementSpec | None" = None,
 ) -> str | None:
-    """On-disk content of the files produced by the derived tasks that OWN this
-    task's dependency design nodes — the binding import contract (PART 2).
+    """On-disk content of the files this task's producers wrote — the binding
+    import contract (PART 2).
 
-    Resolution: this task's dependency design nodes (``dependency_documents``,
-    already the transitive ``depends_on`` closure) → the approved derived tasks
-    whose ``source_design_doc`` is one of those nodes → their declared
-    ``expected_outputs`` files, WHERE THEY EXIST ON DISK → their content.
-    Language-blind (full content, no symbol extraction). Returns ``None`` when
-    there are no dependency nodes, no owning tasks, or none of their outputs
-    exist yet — a strict no-op that changes nothing for the common shape.
+    Two UNIONED producer sources (FIX-1, Fable5 ts-v9 ruling):
+
+    1. **Task-graph closure (primary).** The planner's task-level ``dependencies``
+       production graph: the approved task matching ``spec`` (its
+       ``source_design_doc`` + ``expected_outputs``) → the TRANSITIVE closure of
+       its ``dependencies`` (nearest-first, breadth-first) → those tasks'
+       ``expected_outputs``. This is the CORRECT production edge set (a barrel's
+       edge list omits ``ast`` but reaches it transitively via
+       ``parser_entrypoint → grammar_descent → ast``); the design-elaboration
+       closure below missed it entirely, so a consumer never saw its producers'
+       real surface at first pass OR at rerun.
+    2. **Design-elaboration closure (legacy, preserved).** The derived tasks whose
+       ``source_design_doc`` is one of this task's dependency design nodes
+       (``dependency_documents`` — the transitive ``depends_on`` closure).
+
+    Language-blind (full content via :func:`_render_dependency_artifact_files`, no
+    symbol extraction until the budget forces a name-level degrade). Returns
+    ``None`` when neither source yields an existing producer file — a strict no-op
+    that stays byte-identical for the edge-less shape (no ``spec`` deps and no
+    dependency documents ⇒ the legacy behavior exactly).
     """
-    if not dependency_documents:
+    if not dependency_documents and spec is None:
         return None
 
     from codd.llm.plan_deriver import iter_derived_task_records
@@ -2389,17 +2467,67 @@ def _dependency_artifact_files_context(
             return False
         return ref in wanted_refs or _canonical(ref) in wanted_canonical
 
-    producer_outputs: list[str] = []
-    seen: set[str] = set()
+    # Single pass over the bundle: build the task graph (id → deps, id → outputs),
+    # identify THIS task (for the task-graph closure), and collect the legacy
+    # design-elaboration closure outputs.
+    deps_by_id: dict[str, list[str]] = {}
+    outputs_by_id: dict[str, list[str]] = {}
+    design_closure_outputs: list[str] = []
+    design_seen: set[str] = set()
+    current_task_deps: list[str] = []
+
+    spec_design = _canonical(spec.design_node) if spec is not None else ""
+    spec_outputs = {str(o).strip() for o in (spec.expected_outputs if spec else []) if str(o).strip()}
+
     for _cache_path, record in iter_derived_task_records(project_root):
         for task in record.tasks:
-            if not task.approved or not _owns_dependency(task.source_design_doc):
+            if not task.approved:
                 continue
-            for output in task.expected_outputs:
-                text = str(output).strip()
-                if text and text not in seen:
-                    seen.add(text)
-                    producer_outputs.append(text)
+            normalized_outputs = [
+                str(o).strip()
+                for o in _normalize_declared_test_outputs(list(task.expected_outputs), config)
+                if str(o).strip()
+            ]
+            deps_by_id.setdefault(task.id, list(task.dependencies))
+            outputs_by_id.setdefault(task.id, normalized_outputs)
+            # Identify THIS task: same design node AND an expected-output overlap
+            # (design node alone is ambiguous — many tasks share one doc). Union
+            # the deps of every match so an ambiguous split never drops an edge.
+            if spec is not None and _canonical(task.source_design_doc) == spec_design:
+                if not spec_outputs or spec_outputs.intersection(normalized_outputs):
+                    current_task_deps.extend(task.dependencies)
+            # Legacy design-elaboration closure (byte-identical to the shipped path).
+            if _owns_dependency(task.source_design_doc):
+                for output in normalized_outputs:
+                    if output not in design_seen:
+                        design_seen.add(output)
+                        design_closure_outputs.append(output)
+
+    # Task-graph transitive closure of THIS task's dependencies, nearest-first.
+    task_graph_outputs: list[str] = []
+    tg_seen: set[str] = set()
+    visited: set[str] = set()
+    frontier = [d for d in dict.fromkeys(current_task_deps) if d]
+    while frontier:
+        nxt: list[str] = []
+        for dep_id in frontier:
+            if dep_id in visited:
+                continue
+            visited.add(dep_id)
+            for output in outputs_by_id.get(dep_id, ()):  # nearest-first append
+                if output not in tg_seen:
+                    tg_seen.add(output)
+                    task_graph_outputs.append(output)
+            nxt.extend(deps_by_id.get(dep_id, ()))
+        frontier = nxt
+
+    # UNION: nearest producer truth (task graph) first, then the legacy closure.
+    producer_outputs: list[str] = []
+    union_seen: set[str] = set()
+    for output in [*task_graph_outputs, *design_closure_outputs]:
+        if output not in union_seen:
+            union_seen.add(output)
+            producer_outputs.append(output)
     if not producer_outputs:
         return None
 
@@ -2744,7 +2872,7 @@ def _build_implementation_prompt(
         )
 
     dependency_artifact_context = (
-        _dependency_artifact_files_context(project_root, config, dependency_documents)
+        _dependency_artifact_files_context(project_root, config, dependency_documents, spec)
         if project_root is not None
         else None
     )

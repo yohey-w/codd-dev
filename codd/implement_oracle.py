@@ -522,36 +522,66 @@ def _is_fenced_scope(scope: Any) -> bool:
 
 
 def _exporter_surface_block(result: ImplementOracleResult, project_root: Path) -> str:
-    """The 'current public interface of the demanded module(s)' feedback block."""
+    """The 'current public interface of the demanded module(s)' feedback block,
+    plus (FIX-2) the REAL owner of each missing symbol.
+
+    Two independent, best-effort enrichments — either alone is emitted; both
+    empty ⇒ no block:
+
+    * EXPORTER SURFACE — what each broken edge's demanded module currently
+      exports (reconcile to one of THESE).
+    * SYMBOL OWNERS (FIX-2, Fable5 ts-v9 ruling) — for every missing/unexported
+      symbol, the file in the generated tree that ACTUALLY exports it, so the
+      mechanical import-source rewrite (``./parser`` → ``./ast``) is derivable
+      even when the design named the wrong module. Read-only + deterministic; a
+      symbol exported nowhere is simply omitted (stays red — invents nothing).
+    """
     if not result.diagnostics:
         return ""
+    surfaces: dict[str, list[str]] = {}
+    owners: dict[str, list[str]] = {}
     try:
-        from codd.implement_oracle_scope import exporter_surface_for_diagnostics
+        from codd.implement_oracle_scope import (
+            exporter_surface_for_diagnostics,
+            symbol_owners_for_diagnostics,
+        )
 
         surfaces = exporter_surface_for_diagnostics(result.diagnostics, project_root)
+        owners = symbol_owners_for_diagnostics(result.diagnostics, project_root)
     except Exception:  # noqa: BLE001 — surface enrichment is best-effort.
+        pass
+    if not surfaces and not owners:
         return ""
-    if not surfaces:
-        return ""
-    lines = [
-        "CURRENT PUBLIC INTERFACE of the demanded module(s) — reconcile your "
-        "imports to these EXACT exports (do not invent members not listed):",
-    ]
-    for path, names in list(surfaces.items())[:_FEEDBACK_SURFACE_CAP]:
-        if names:
-            shown = names[:_FEEDBACK_SURFACE_NAMES_CAP]
-            more = len(names) - len(shown)
-            suffix = f", … (+{more} more)" if more > 0 else ""
-            lines.append(f"  - `{path}` exports: {{{', '.join(shown)}}}{suffix}")
-        else:
-            lines.append(
-                f"  - `{path}` exports NOTHING — the module has no public exports, so "
-                f"importing any named symbol from it is wrong (add the export to it, "
-                f"or import from the correct module)."
-            )
-    extra = len(surfaces) - _FEEDBACK_SURFACE_CAP
-    if extra > 0:
-        lines.append(f"  ... and {extra} more module(s).")
+    lines: list[str] = []
+    if surfaces:
+        lines.append(
+            "CURRENT PUBLIC INTERFACE of the demanded module(s) — reconcile your "
+            "imports to these EXACT exports (do not invent members not listed):"
+        )
+        for path, names in list(surfaces.items())[:_FEEDBACK_SURFACE_CAP]:
+            if names:
+                shown = names[:_FEEDBACK_SURFACE_NAMES_CAP]
+                more = len(names) - len(shown)
+                suffix = f", … (+{more} more)" if more > 0 else ""
+                lines.append(f"  - `{path}` exports: {{{', '.join(shown)}}}{suffix}")
+            else:
+                lines.append(
+                    f"  - `{path}` exports NOTHING — the module has no public exports, so "
+                    f"importing any named symbol from it is wrong (add the export to it, "
+                    f"or import from the correct module)."
+                )
+        extra = len(surfaces) - _FEEDBACK_SURFACE_CAP
+        if extra > 0:
+            lines.append(f"  ... and {extra} more module(s).")
+    if owners:
+        lines.append(
+            "SYMBOL OWNERS — where each missing symbol is ACTUALLY exported in the "
+            "generated tree (import it FROM this module, not the one the error names):"
+        )
+        for symbol, paths in list(owners.items())[:_FEEDBACK_SURFACE_CAP]:
+            shown = paths[:_FEEDBACK_SURFACE_NAMES_CAP]
+            owner_text = ", ".join(f"`{p}`" for p in shown)
+            lines.append(f"  - `{symbol}` is exported by {owner_text}")
     return "\n".join(lines)
 
 

@@ -94,6 +94,7 @@ __all__ = [
     "exporter_surface_for_diagnostics",
     "extract_public_surface",
     "importers_of",
+    "symbol_owners_for_diagnostics",
     "task_dependency_order",
     "validate_task_output_ownership_uniqueness",
 ]
@@ -317,6 +318,11 @@ class TaskOutputIndex:
     dirs: Sequence[tuple[str, str]]
     #: every known task id, in declaration order (for the broad fallback + frac)
     all_task_ids: tuple[str, ...]
+    #: task_id → its planner task-level ``dependencies`` (the production graph).
+    #: FIX-1 (Fable5 ts-v9 ruling): :func:`task_dependency_order` ranks by the
+    #: longest-chain over THESE edges so a repair rerun regenerates producers
+    #: before consumers. Empty ⇒ the shipped declaration-order fallback.
+    dependencies: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def owner_for(self, path: str) -> str | None:
         norm = _norm(path)
@@ -960,6 +966,54 @@ def exporter_surface_for_diagnostics(
     return surfaces
 
 
+def symbol_owners_for_diagnostics(
+    diagnostics: Sequence[StructuredDiagnostic],
+    project_root: Path,
+) -> dict[str, list[str]]:
+    """Map each missing/unexported symbol → the file(s) that ACTUALLY export it.
+
+    FIX-2 (Fable5 ts-v9 ruling). The exporter-surface block names what the
+    DEMANDED module exports; it never says WHERE a missing symbol truly lives. So
+    when the design steered a consumer to import ``ExprNode`` from ``parser`` but
+    ``ast.ts`` is its real owner, the rerun had no evidence to rewrite ``./parser``
+    → ``./ast`` and re-transcribed the defect. This scans the generated tree with
+    the EXISTING name-level surface extractor (:func:`extract_public_surface`) and
+    reports the real owner ("``ExprNode`` is exported by ``src/ast.ts``").
+
+    The diagnostics' own implicated files (``primary_path``/``related_path`` — the
+    broken importer and the wrong exporter) are EXCLUDED so the broken consumer is
+    never named as the authority. Read-only, deterministic (files + owners sorted),
+    and silently empty where no owner exists — a symbol exported NOWHERE stays a
+    red (anti-false-green: this names real exporters from disk, it invents none).
+    """
+    wanted = _dedupe(str(d.symbol).strip() for d in diagnostics if d.symbol)
+    if not wanted:
+        return {}
+    wanted_set = set(wanted)
+    excluded = {
+        _norm(p)
+        for d in diagnostics
+        for p in (d.primary_path, d.related_path)
+        if p
+    }
+    owners: dict[str, list[str]] = {}
+    for file_path in sorted(_iter_project_source_files(project_root), key=lambda p: str(p)):
+        rel = _to_relative(file_path, project_root)
+        if not rel or rel in excluded:
+            continue
+        try:
+            surface = extract_public_surface(rel, project_root)
+        except Exception:  # noqa: BLE001 — one unreadable file must not kill the map.
+            continue
+        if not surface:
+            continue
+        for name in surface:
+            if name in wanted_set and rel not in owners.setdefault(name, []):
+                owners[name].append(rel)
+    # Preserve the diagnostics' symbol order; drop symbols with no real owner.
+    return {sym: owners[sym] for sym in wanted if owners.get(sym)}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Specifier resolution (relative + tsconfig baseUrl/paths)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1109,6 +1163,7 @@ def build_path_owner_index(
     exact: dict[str, str] = {}
     dir_owner: dict[str, str] = {}
     all_ids: list[str] = []
+    deps: dict[str, tuple[str, ...]] = {}
     gen = generated_files or {}
     cfg_paths = config_output_paths or {}
 
@@ -1117,6 +1172,7 @@ def build_path_owner_index(
         if task_id is None:
             continue
         all_ids.append(task_id)
+        deps.setdefault(task_id, _task_dependencies(task))
         declared = list(_task_output_paths(task) or ())
         declared += list(gen.get(task_id, ()) or ())
         declared += list(cfg_paths.get(task_id, ()) or ())
@@ -1135,7 +1191,10 @@ def build_path_owner_index(
 
     dirs_sorted = sorted(dir_owner.items(), key=lambda kv: len(kv[0]), reverse=True)
     return TaskOutputIndex(
-        exact=exact, dirs=tuple(dirs_sorted), all_task_ids=tuple(dict.fromkeys(all_ids))
+        exact=exact,
+        dirs=tuple(dirs_sorted),
+        all_task_ids=tuple(dict.fromkeys(all_ids)),
+        dependencies=deps,
     )
 
 
@@ -1636,20 +1695,55 @@ def importers_of(path: str, project_root: Path) -> tuple[str, ...]:
     return tuple(out)
 
 
-def task_dependency_order(task_ids: Sequence[str], index: TaskOutputIndex) -> tuple[str, ...]:
-    """Order ``task_ids`` by their declaration order in the owner ``index``.
+def _task_graph_longest_chain_ranks(index: TaskOutputIndex) -> dict[str, int]:
+    """Cycle-safe longest-chain rank per task over ``index.dependencies``.
 
-    The owner index records ``all_task_ids`` in declaration order (the dependency
-    order the planner emitted — earlier tasks are typically the shared/supplier
-    modules). The chunked-broad phase walks tasks in this order so suppliers are
-    re-implemented before consumers. Unknown ids (not in the index) are appended
-    last in their given order. Pure + deterministic; de-duplicated.
+    ``rank(t) = 1 + max(rank(d) for d in t.dependencies)`` (0 when edge-less). A
+    dependency cycle degrades to 0 for the tasks on it (a stack guard breaks the
+    recursion WITHOUT raising); an edge to an unknown task id is ignored. Pure.
     """
-    rank = {tid: i for i, tid in enumerate(index.all_task_ids)}
+    decl = {tid: i for i, tid in enumerate(index.all_task_ids)}
+    cache: dict[str, int] = {}
+
+    def _rank(tid: str, stack: frozenset[str]) -> int:
+        cached = cache.get(tid)
+        if cached is not None:
+            return cached
+        if tid in stack:
+            return 0  # cycle guard: degrade to the declaration-order tiebreak
+        best = 0
+        for dep in index.dependencies.get(tid, ()):
+            if dep == tid or dep not in decl:
+                continue  # self/unknown edge contributes nothing
+            best = max(best, _rank(dep, stack | {tid}) + 1)
+        cache[tid] = best
+        return best
+
+    return {tid: _rank(tid, frozenset()) for tid in index.all_task_ids}
+
+
+def task_dependency_order(task_ids: Sequence[str], index: TaskOutputIndex) -> tuple[str, ...]:
+    """Order ``task_ids`` producer-first over the planner's task ``dependencies``.
+
+    PRIMARY rank (FIX-1, Fable5 ts-v9 ruling): the cycle-safe longest-chain over
+    ``index.dependencies`` (:func:`_task_graph_longest_chain_ranks`) — the SAME
+    production rank :func:`_topologically_order_implement_tasks` now uses for
+    first-pass order, so a repair rerun regenerates producers before consumers
+    instead of re-walking the design-DAG-inverted order that regenerated the
+    barrel before its producers.
+
+    TIEBREAK / SOLE FALLBACK: the shipped declaration order (``all_task_ids``
+    position). When NO task declares a ``dependencies`` edge (legacy index) every
+    rank is 0 and the order collapses to declaration order — byte-identical to the
+    shipped behavior. Unknown ids (not in the index) are appended last in their
+    given order. Pure + deterministic; de-duplicated.
+    """
+    decl = {tid: i for i, tid in enumerate(index.all_task_ids)}
+    ranks = _task_graph_longest_chain_ranks(index)
     wanted = _dedupe(task_ids)
-    known = [t for t in wanted if t in rank]
-    unknown = [t for t in wanted if t not in rank]
-    known.sort(key=lambda t: rank[t])
+    known = [t for t in wanted if t in decl]
+    unknown = [t for t in wanted if t not in decl]
+    known.sort(key=lambda t: (ranks.get(t, 0), decl[t]))
     return tuple(known + unknown)
 
 
@@ -1895,6 +1989,18 @@ def _task_output_paths(task: object) -> tuple[str, ...] | None:
     if not val:
         return None
     return tuple(str(p) for p in val)
+
+
+def _task_dependencies(task: object) -> tuple[str, ...]:
+    """The task's planner task-level ``dependencies`` (production-graph edges).
+
+    Best-effort: a task object without the attribute (legacy/configured refs)
+    yields ``()`` so :func:`task_dependency_order` falls back to declaration order.
+    """
+    val = getattr(task, "dependencies", None)
+    if not val:
+        return ()
+    return tuple(str(d).strip() for d in val if str(d).strip())
 
 
 def _looks_like_file(norm: str) -> bool:
