@@ -13,6 +13,28 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.26.0] - 2026-07-11 — Funnel-floor: two reported CLI-robustness crashes (#33, #28)
+
+The first sprint after the v3.25.0 backlog publish closes two reported crashes on
+hand-authored / edge-case input. Both follow the same convergence doctrine — normalize
+the malformed-input *class* at one shared seam, never a per-symptom guard.
+
+- **#33 — `codd scan` no longer crashes on null `depends_on` / `depended_by`.** A bare
+  `depends_on:` / `depended_by:` frontmatter key parses to `None`; the raw
+  `.get(key, [])` + iterate raised `TypeError: 'NoneType' object is not iterable`
+  (live from v2.19.0 through v3.25.0). Both loops now route through the existing
+  None-safe `frontmatter.as_list` accessor and skip non-dict entries (malformed shape
+  the validator already reports), so a scan never crashes on hand-authored frontmatter.
+- **#28 — `codd propagate-from` no longer crashes on `date:` frontmatter.** A propagated
+  design doc whose frontmatter carries a bare `date: 2026-05-29` (PyYAML → `datetime.date`)
+  raised "Object of type date is not JSON serializable" when the propagation log serialized
+  it. A new shared date/datetime-safe JSON serializer (`codd/json_safe.py`) is now used at
+  the log write. (v3.25.0 fixed the propagation *context* path; this completes the *log* path.)
+
+Both fixes are red-before-green tested. #27 (noisy AI wave_config output) and #29 (non-TTY
+`codd init`) — also reported — were already resolved in the v3.25.0 train and are verified
+fixed as of this release.
+
 ## [3.25.0] - 2026-07-11 — Greenfield convergence: implement consumes the planner's task-dependency graph (Fable5 ts-v9 ruling, FIX-1–5)
 
 Unattended `codd greenfield` could complete design → plan but then fail during **implement**: the
