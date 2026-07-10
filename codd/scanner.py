@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 
 from codd.discovery import scan_exclude_patterns
-from codd.frontmatter import read_frontmatter
+from codd.frontmatter import as_list, read_frontmatter
 from codd.graph import CEG
 from codd.parsing import get_extractor
 from codd.path_safety import require_project_path, resolve_project_path
@@ -344,8 +344,14 @@ def _load_frontmatter(ceg: CEG, doc_path: str, codd: dict):
     node_type = codd.get("type", "document")
     ceg.upsert_node(node_id, node_type, path=doc_path, name=node_id)
 
-    # Process depends_on (outgoing edges from this document)
-    for dep in codd.get("depends_on", []):
+    # Process depends_on (outgoing edges from this document).
+    # ``as_list`` normalizes null-vs-missing: a bare ``depends_on:`` key parses
+    # to None, which would raise TypeError on iteration (issue #33). Non-dict
+    # entries are malformed shape (the validator reports them); skip them here so
+    # a scan never crashes on hand-authored frontmatter.
+    for dep in as_list(codd.get("depends_on")):
+        if not isinstance(dep, dict):
+            continue
         target_id = dep.get("id")
         if not target_id:
             continue
@@ -357,8 +363,11 @@ def _load_frontmatter(ceg: CEG, doc_path: str, codd: dict):
         ceg.add_evidence(edge_id, "frontmatter", "frontmatter", 0.9,
                          detail=f"from {doc_path}")
 
-    # Process depended_by (incoming edges — other things that depend on this)
-    for dep in codd.get("depended_by", []):
+    # Process depended_by (incoming edges — other things that depend on this).
+    # Same null-vs-missing normalization + malformed-shape skip as depends_on.
+    for dep in as_list(codd.get("depended_by")):
+        if not isinstance(dep, dict):
+            continue
         source_id = dep.get("id")
         if not source_id:
             continue

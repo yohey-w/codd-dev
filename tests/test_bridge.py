@@ -161,3 +161,42 @@ def test_load_frontmatter_bridge_edge_confidence_is_0_85(ceg):
     assert len(bridge_edges) == 1
     evidence = bridge_edges[0].get("evidence", [])
     assert any(ev["score"] == 0.85 for ev in evidence)
+
+
+# ── #33: null-vs-missing optional-list frontmatter (scan must never crash) ────
+
+def test_load_frontmatter_null_depends_on_does_not_crash(ceg):
+    """Issue #33: a bare ``depends_on:`` key parses to None; iterating it raised
+    ``TypeError: 'NoneType' object is not iterable``. It must be a no-op now."""
+    codd = {"node_id": "design:a", "type": "design", "depends_on": None}
+    _load_frontmatter(ceg, "docs/a.md", codd)  # must not raise
+    outgoing = ceg.get_outgoing_edges("design:a")
+    assert [e for e in outgoing if e["relation"] == "depends_on"] == []
+
+
+def test_load_frontmatter_null_depended_by_does_not_crash(ceg):
+    """Issue #33 sibling: a bare ``depended_by:`` key (None) must not crash."""
+    codd = {"node_id": "design:a", "type": "design", "depended_by": None}
+    _load_frontmatter(ceg, "docs/a.md", codd)  # must not raise
+    assert ceg.get_incoming_edges("design:a") == []
+
+
+def test_load_frontmatter_scalar_depends_on_skipped(ceg):
+    """A malformed scalar ``depends_on`` (not a list of ref dicts) is skipped
+    here (the validator reports the shape error), never crashes the scan."""
+    codd = {"node_id": "design:a", "type": "design", "depends_on": "design:b"}
+    _load_frontmatter(ceg, "docs/a.md", codd)  # must not raise
+    outgoing = ceg.get_outgoing_edges("design:a")
+    assert [e for e in outgoing if e["relation"] == "depends_on"] == []
+
+
+def test_load_frontmatter_valid_depends_on_still_creates_edge(ceg):
+    """Regression guard: a well-formed depends_on list still produces the edge."""
+    codd = {
+        "node_id": "design:a",
+        "type": "design",
+        "depends_on": [{"id": "design:b"}],
+    }
+    _load_frontmatter(ceg, "docs/a.md", codd)
+    outgoing = ceg.get_outgoing_edges("design:a")
+    assert "design:b" in [e["target_id"] for e in outgoing]
