@@ -7,7 +7,7 @@ from click.testing import CliRunner
 
 from codd.cli import main
 from codd.dag import DAG, Edge, Node
-from codd.watch.propagation_log import read_propagation_log
+from codd.watch.propagation_log import append_propagation_log, read_propagation_log
 from codd.watch.propagation_pipeline import PropagationResult, run_propagation_pipeline
 
 
@@ -322,3 +322,19 @@ def test_propagate_from_project_path_option(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert calls == [tmp_path.resolve()]
+
+
+def test_append_propagation_log_serializes_date_frontmatter(tmp_path):
+    """Issue #28: a propagated design doc's ``date:`` frontmatter parses to a
+    ``datetime.date``; the propagation log's raw ``json.dumps`` rejected it with
+    'Object of type date is not JSON serializable'. It must serialize to ISO."""
+    import datetime
+
+    from codd.watch.events import FileChangeEvent
+
+    event = FileChangeEvent(files=["src/index.ts"], source="manual", editor=None)
+    result = {"impacted": [{"node_id": "design:api", "date": datetime.date(2026, 5, 29)}]}
+    append_propagation_log(tmp_path, event, result)  # must not raise (#28)
+
+    entries = read_propagation_log(tmp_path)
+    assert entries[-1]["propagation_result"]["impacted"][0]["date"] == "2026-05-29"

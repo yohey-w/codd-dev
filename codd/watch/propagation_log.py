@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from codd.json_safe import json_default
 from codd.watch.events import FileChangeEvent
 
 PROPAGATION_LOG_PATH = ".codd/propagation_log.jsonl"
@@ -26,7 +27,9 @@ def append_propagation_log(
 
     with log_path.open("w", encoding="utf-8") as handle:
         for item in entries:
-            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+            # default=json_default: a propagated design doc's `date:` frontmatter
+            # parses to datetime.date, which raw json.dumps rejects (issue #28).
+            handle.write(json.dumps(item, ensure_ascii=False, default=json_default) + "\n")
 
 
 def read_propagation_log(project_root: Path) -> list[dict]:
