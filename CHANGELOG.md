@@ -13,6 +13,58 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.25.0] - 2026-07-11 — Greenfield convergence: implement consumes the planner's task-dependency graph (Fable5 ts-v9 ruling, FIX-1–5)
+
+Unattended `codd greenfield` could complete design → plan but then fail during **implement**: the
+barrel/facade was generated before the producers it re-exports, and the (B′) producer-content injection
+was starved of producer truth. Fable5's ts-v9 diagnosis (`dogfood/fable5_reply_2026-07-10_ts-v9.md`)
+found the root cause — implement derived its execution order, injection closure, and repair campaign from
+the **design-elaboration DAG** (whose `depends_on` edges point opposite to module imports, so a shallow
+public-API barrel outranks the deep producers), while the planner's task-level `dependencies` graph — the
+correct production order the planner actually emitted — was consumed by **nothing**. This release makes
+implement consume that production graph, validated by re-running unattended greenfield to green.
+
+Every change is graph/data/config-layer; the native-oracle (tsc) gate, the escalation ladder, and the
+oscillation honest-stop classifier are byte-identical (anti-false-green preserved). No `language ==` branch
+was added to shared core (ratchet: 58, unchanged). 23 red-first tests
+(`tests/test_tsv9_task_graph_convergence.py`, `tests/test_tsv9_secondary_fixes.py`), each RED before its fix.
+
+- **FIX-1 — implement consumes the planner task-`dependencies` graph at all three sites.** (a) *Ordering*
+  (`_topologically_order_implement_tasks`): primary rank is now the cycle-safe longest-chain over the task
+  `dependencies` production graph (a producer precedes every consumer), with the old
+  `(design-rank, is_test, index)` key demoted to a tiebreak; an edge-less/legacy plan collapses to the prior
+  order byte-identically. (b) *Injection* (`_dependency_artifact_files_context`): the (B′) producer-content
+  context is the nearest-first **transitive closure** over the task graph, unioned with the design-closure,
+  under the existing budget ladder. (c) *Repair campaign* (`implement_oracle_scope`, greenfield `pipeline`):
+  reruns walk the same production rank so producers regenerate before consumers.
+- **FIX-2 — symbol-owner repair evidence names the real on-disk exporter.** `symbol_owners_for_diagnostics`
+  and the exporter-surface block resolve the actual authoring file (excluding the diagnostics' own implicated
+  files and ownerless symbols) so a missing-export repair edits the producer, not the consumer.
+- **FIX-3 — rerun scope skips no-authored-artifact tasks.** `_reimplement_tasks` /
+  `_rerun_tasks_with_feedback` no longer re-run tasks that author nothing (a construction-time no-op return,
+  not a broad fallback), so a doc/gate task can't absorb a producer's rerun.
+- **FIX-4 — plan-intake grounding gate (new, default-on).** When a task's `expected_outputs` is prose that
+  describes already-authored codebase files, the derive stage performs a bounded re-derivation and, if still
+  ungrounded, fails with an honest `StageError` naming the task instead of silently mis-owning. Knob:
+  `derive.plan_intake_grounding_max_retries` (default 2; 0 = gate on, no retry).
+- **FIX-5 — `impl_step_derive` defaults to the base `ai_command`** (behavior change) and suppresses the
+  now-redundant operation-flow-unused warning.
+- **Campaign journal** — the implement repair campaign is recorded to
+  `<session>/implement_oracle_campaign.yaml` (evidence only; never read to decide green).
+
+**Empirical validation (② bar).** Fresh unattended `codd greenfield --language typescript` on a neutral
+spec, with the fixes live, reached `Greenfield autopilot: SUCCESS` on independently-generated plans (ts-v10
+and ts-v11; different task/wave shapes), clearing the ≥2-of-3 bar — the `implement_public_api_barrel` + AST +
+parser tasks that failed in ts-v9 all completed and verify passed (vitest); a third run honestly stopped at
+verify (PARTIAL_SUCCESS, no false-green). **Scope:** unattended greenfield is empirically validated
+end-to-end on **TypeScript and Python** today; the other supported languages share the same language-profile
+machinery but have not yet had unattended end-to-end validation. This release does not claim universal repair
+convergence — FIX-1–5 change implement's *inputs* (order, injection, rerun scope), and the correctness gates
+are byte-identical.
+
+This is also the first PyPI publish of the entire 3.11 → 3.25 train (the F1–F7.1 work held unpushed pending
+this ② convergence).
+
 ## [3.24.1] - 2026-07-10 — F7.1: make test re-derivation actually complete a live draw (evidence ownership + crash containment + fixpoint)
 
 v3.24.0's F7 had NEVER completed a live re-derivation. Given the actual first-firing artifacts, Fable5

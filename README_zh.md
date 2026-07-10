@@ -76,6 +76,8 @@ codd greenfield --requirements docs/requirements/requirements.md
 
 它会在每一步之后保存检查点，因此 `codd greenfield --resume` 会从上次中断的地方接着跑。加上 `--dry-run` 可以先预览计划，或用 `--ntfy-topic <topic>` 把进度通知推送到你的手机上。
 
+> **当前的语言覆盖：** 无人值守的 greenfield 已在 **TypeScript 和 Python** 上完成端到端实证验证。其他受支持的语言共享同一套语言配置机制，但尚未经过无人值守的端到端验证。
+
 这套同样的一条命令的流水线（`codd greenfield --requirements FILE`）还以三种可阅读、可改写的形式提供：一个 shell 脚本（[`examples/greenfield_autopilot.sh`](examples/greenfield_autopilot.sh)）、一个 Claude Code 工作流（[`examples/claude_workflows/codd-greenfield.js`](examples/claude_workflows/codd-greenfield.js)），以及一个 skill（`codd skills install codd-greenfield --target both`）。
 
 ### 2. 在已有代码库上工作——`codd init` + `codd scan`

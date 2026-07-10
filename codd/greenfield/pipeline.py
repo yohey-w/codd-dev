@@ -4362,9 +4362,10 @@ def _plan_intake_grounding_max_retries(config: dict[str, Any] | None) -> int:
     """Bounded derive-stage re-derivations for the plan-intake grounding gate
     (``derive.plan_intake_grounding_max_retries``, default 2).
 
-    ``0`` = legacy behavior (no re-derive: a task declaring prose that describes
-    authored files fails the gate immediately). A versioned, visible default — not
-    a silent activation.
+    ``0`` = gate on, no re-derivation retry (a task declaring prose that describes
+    authored files fails the grounding gate immediately). This differs from the
+    pre-FIX-4 behavior, which had no grounding gate at all. A versioned, visible
+    default — not a silent activation.
     """
     section = (config or {}).get("derive")
     if isinstance(section, dict):

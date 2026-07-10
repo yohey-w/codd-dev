@@ -76,6 +76,8 @@ codd greenfield --requirements docs/requirements/requirements.md
 
 各ステップごとに途中経過を保存するので、`codd greenfield --resume` で止まったところから再開できます。先に計画だけ見たいなら `--dry-run`、スマホに進捗通知を飛ばすなら `--ntfy-topic <topic>` を付けてください。
 
+> **現時点の言語カバレッジ:** 放任実行の greenfield をエンドツーエンドで実証済みなのは **TypeScript と Python** です。ほかの対応言語も同じ言語プロファイル機構を共有していますが、放任でのエンドツーエンド検証はまだ行っていません。
+
 この同じワンコマンドのパイプライン(`codd greenfield --requirements FILE`)は、中身を読んで手を加えられる3つの形でも用意しています — シェルスクリプト([`examples/greenfield_autopilot.sh`](examples/greenfield_autopilot.sh))、Claude Code ワークフロー([`examples/claude_workflows/codd-greenfield.js`](examples/claude_workflows/codd-greenfield.js))、そしてスキル(`codd skills install codd-greenfield --target both`)。
 
 ### 2. すでにあるコードベースで使う — `codd init` + `codd scan`

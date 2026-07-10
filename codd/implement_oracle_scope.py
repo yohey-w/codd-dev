@@ -1699,8 +1699,10 @@ def _task_graph_longest_chain_ranks(index: TaskOutputIndex) -> dict[str, int]:
     """Cycle-safe longest-chain rank per task over ``index.dependencies``.
 
     ``rank(t) = 1 + max(rank(d) for d in t.dependencies)`` (0 when edge-less). A
-    dependency cycle degrades to 0 for the tasks on it (a stack guard breaks the
-    recursion WITHOUT raising); an edge to an unknown task id is ignored. Pure.
+    dependency cycle is broken by a stack guard — the re-entrant edge contributes 0
+    (no infinite recursion, no raise), so ranking terminates deterministically; the
+    cycle's tasks still receive finite ranks from their acyclic edges. An edge to an
+    unknown task id is ignored. Pure.
     """
     decl = {tid: i for i, tid in enumerate(index.all_task_ids)}
     cache: dict[str, int] = {}

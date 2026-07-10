@@ -76,6 +76,8 @@ codd greenfield --requirements docs/requirements/requirements.md
 
 It saves a checkpoint after every step, so `codd greenfield --resume` continues where it left off. Add `--dry-run` to preview the plan first, or `--ntfy-topic <topic>` to get progress pings on your phone.
 
+> **Language coverage today:** unattended greenfield is empirically validated end-to-end on **TypeScript and Python**. The other supported languages share the same language-profile machinery but have not yet had unattended end-to-end validation.
+
 The same one-command pipeline (`codd greenfield --requirements FILE`) also ships as three transparent, adaptable vehicles you can read and tweak: a shell script ([`examples/greenfield_autopilot.sh`](examples/greenfield_autopilot.sh)), a Claude Code workflow ([`examples/claude_workflows/codd-greenfield.js`](examples/claude_workflows/codd-greenfield.js)), and a skill (`codd skills install codd-greenfield --target both`).
 
 ### 2. Work on an existing codebase — `codd init` + `codd scan`

@@ -1320,10 +1320,13 @@ def _task_dependency_longest_chain_ranks(
     ``dependencies`` edges). This is the PRODUCTION order the planner emitted
     (``bundle.dependencies``), which — unlike the design-elaboration DAG — points
     the SAME direction as module imports, so a producer always outranks (precedes)
-    its consumers. A dependency CYCLE degrades to 0 for the tasks on the cycle
-    (a stack guard breaks the recursion WITHOUT raising) so the caller falls back
-    to the design-rank tiebreak for them. An edge to an unknown/absent task id is
-    ignored. Pure function of the static bundle ``dependencies`` field.
+    its consumers. A dependency CYCLE is broken by a stack guard — the re-entrant
+    edge contributes 0 (no infinite recursion, no raise), so ranking terminates
+    deterministically; the tasks on the cycle still receive finite ranks from their
+    acyclic edges (the exact values depend on DFS entry order, but ordering stays
+    stable and the design-rank tiebreak still separates equal ranks). An edge to an
+    unknown/absent task id is ignored. Pure function of the static bundle
+    ``dependencies`` field.
 
     Keyed by ENUMERATION INDEX (not task id) so duplicate/blank ids never collide.
     """
