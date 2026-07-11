@@ -13,6 +13,45 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.31.0] - 2026-07-11 — C# namespace-coherence contract + source-completeness red escalation
+
+Two Fable5 rulings land together (the owner-packet items are Fable5-delegated per the
+2026-07-09/11 owner directives — the owner is never the gate).
+
+**C# namespace-coherence contract** (csharp4 stop-loss, exception cycle 3). The csharp4
+re-run died in implement with `module_resolution_error ×34`: independently-generated
+files split on the namespace convention — impl declared `namespace ExprCalc.Evaluator;
+public static class Evaluator` (a namespace segment sharing a TYPE's name), so tests
+under `using ExprCalc;` resolved `Evaluator` to the NAMESPACE and every call failed
+CS0234. The C++ sibling (v3.30.0) could make the BUILD tolerant of both conventions;
+namespace shadowing is language semantics, so C#'s convention must be pinned at
+GENERATION instead:
+
+- **`resolve_namespace_guidance`** (`codd/languages/contract.py`, exported): the profile's
+  `imports.namespace_guidance` prose, `{package_name}`-substituted — the same
+  data-driven convenience seam as `resolve_test_framework_guidance`. `None` ⇒ append
+  nothing (only csharp.yaml declares it today).
+- **csharp.yaml** declares the contract: every first-party file uses exactly
+  `namespace {package_name};` (file-scoped), no sub-namespaces, never a namespace
+  segment sharing a declared type's name. The enforcing gate is the native oracle.
+- Injected at BOTH prompt stages: generate (`_resolve_layout_placement_contract` rides
+  the pre-rendered placement string — design docs are where a namespace convention is
+  first written down) and implement (`_build_implementation_prompt`, alongside the
+  import-coherence/layout contracts).
+
+**Source-completeness RED escalation** (the ① owner-packet item, thresholds
+data-derived per the default-values policy). The `source_completeness` DAG check
+escalates amber → red / deploy-blocking when the discovery gap is SYSTEMIC — BOTH
+`missing >= 5` (small-project ratio-spike guard) AND `missing/on_disk >= 0.5`. The
+defaults never hit a measured-healthy state (②-green fleet max: java 10/31 = 32.3%,
+where the toolchain still executes the inert files); knobs
+`dag.source_completeness.red_min_missing`/`red_min_ratio`, either 0 disables.
+The ④ deep-collapse item is DEFERRED by the same ruling (documented limitation;
+revisits with S3 real-spec scale or the first real project that trips it).
+
+Both red-before-green; the namespace contract is verified rendering against the actual
+csharp4 tree config.
+
 ## [3.30.0] - 2026-07-11 — The scaffolded cpp test target resolves both intra-tree include conventions
 
 The v3.28.0 cpp re-run reached the deepest point of any C++ run — the repair loop engaged
