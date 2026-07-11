@@ -1407,3 +1407,68 @@ def test_adversarial_18_declared_root_depth_search_never_escapes_project(tmp_pat
     )
     assert ev.ok is False
     assert ev.reason == "unresolved_helper"
+
+
+# ---------------------------------------------------------------------------
+# Qualified (dotted) return types — java3 exprcalc dogfood false-red
+# (2026-07-11, stop-loss java cycle 2): a SAME-FILE private static helper
+# ``private static Expr.Literal assertLiteral(...)`` was invisible to
+# _JAVA_METHOD_DEF_RE (return type allowed only a single identifier), so the
+# delegated assertion resolved as unresolved_helper and 3 markers false-redded.
+# ---------------------------------------------------------------------------
+
+_DOTTED_RETURN_IMPORTER = """\
+package com.exprcalc.e2e;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+
+class ParserPipelineE2ETest {
+
+    private static Expr.Literal assertLiteral(Expr expr, double expectedValue) {
+        Expr.Literal literal = assertInstanceOf(Expr.Literal.class, expr);
+        assertEquals(expectedValue, literal.value());
+        return literal;
+    }
+
+    @Test
+    void parseBindsMultiplyTighterThanPlusStructurally() {
+        assertLiteral(Parser.parse("2+3*4").left(), 2.0);
+    }
+}
+"""
+
+
+def test_java_find_method_def_accepts_dotted_return_type():
+    from codd.vb_marker_authenticity import _java_find_method_def
+
+    found = _java_find_method_def(_DOTTED_RETURN_IMPORTER, "assertLiteral")
+    assert found is not None, "dotted return type (Expr.Literal) must be a visible method def"
+    body, params = found
+    assert "assertEquals" in body
+    assert params == ["expr", "expectedValue"]
+
+
+def test_same_file_helper_with_dotted_return_type_resolves(tmp_path):
+    """The hop-0 (same-file) helper with a qualified return type is REAL
+    assertion evidence — never unresolved_helper."""
+
+    root = _write_project(
+        tmp_path, {"tests/ParserPipelineE2ETest.java": _DOTTED_RETURN_IMPORTER}
+    )
+    block = TestBlock(
+        start_line=15,
+        end_line=17,
+        is_executable=True,
+        has_assertion=False,
+        label="parseBindsMultiplyTighterThanPlusStructurally",
+        body_text='assertLiteral(Parser.parse("2+3*4").left(), 2.0);',
+    )
+    ev = JavaTestBlockProfile().resolve_assertion_evidence(
+        block,
+        importer_text=_DOTTED_RETURN_IMPORTER,
+        importer_rel="tests/ParserPipelineE2ETest.java",
+        project_root=root,
+    )
+    assert ev.ok is True, ev
+    assert ev.reason == "helper_resolved"

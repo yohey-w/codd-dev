@@ -5861,10 +5861,15 @@ def _java_resolve_module(importer_rel: str, spec: str, project_root: Path) -> Pa
 #: helper like ``HarnessAssertions.assertSuccess`` is exactly this shape. A bare
 #: CALL (``assertSuccess(result, "14.0");``) never matches: it has no
 #: return-type-shaped token before it, and it ends in ``;`` rather than ``{``.
+#: The return type accepts a QUALIFIED / nested name (``Expr.Literal``,
+#: ``Map.Entry<K, V>``) — dot-separated identifier segments — not just a single
+#: identifier: a same-file helper returning a nested type was otherwise
+#: invisible, resolving as ``unresolved_helper`` and false-redding real
+#: delegated assertions (java3 exprcalc dogfood, 2026-07-11).
 _JAVA_METHOD_DEF_RE = re.compile(
     r"(?<![A-Za-z0-9_.])(?:(?:public|protected|private|static|final|synchronized|"
     r"abstract|default|native|strictfp)\s+)*"
-    r"[A-Za-z_][A-Za-z0-9_$]*(?:<[^;{}]*?>)?(?:\[\])*\s+"
+    r"[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)*(?:<[^;{}]*?>)?(?:\[\])*\s+"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^;{}]*)\)"
     r"(?:\s*throws\s+[A-Za-z0-9_.,\s<>]+?)?\s*\{",
     re.DOTALL,
