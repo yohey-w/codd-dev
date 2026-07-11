@@ -53,6 +53,7 @@ from .contract import (
     ResolvedLanguageContract,
     build_language_contract,
     resolve_assertion_guidance,
+    resolve_namespace_guidance,
     resolve_language_contract,
     resolve_language_profile,
     resolve_test_framework_guidance,
@@ -115,6 +116,7 @@ __all__ = [
     "resolve_language_profile",
     "resolve_test_framework_guidance",
     "resolve_assertion_guidance",
+    "resolve_namespace_guidance",
     # verify run plan + semantic classifier (v2.69a, shadow)
     "ShadowComparison",
     "VerifyClass",

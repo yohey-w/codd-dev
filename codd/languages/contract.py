@@ -328,6 +328,50 @@ def resolve_assertion_guidance(
     return profile.tests.assertion_guidance
 
 
+def resolve_namespace_guidance(
+    project_language: str | None,
+    *,
+    package_name: str | None = None,
+    registry: LanguageRegistry | None = None,
+) -> str | None:
+    """The optional per-language first-party NAMESPACE-coherence guidance.
+
+    Same convenience-seam contract as :func:`resolve_test_framework_guidance`
+    (an already-resolved language string, best-effort, never raises). Reads the
+    profile's ``imports.namespace_guidance`` prose from the raw view (the
+    ImportsSpec dataclass models resolver/first-party fields only; ``raw`` is
+    the documented later-phase escape hatch) and substitutes ``{package_name}``
+    when supplied. Returns ``None`` when the language is unknown or the profile
+    has not declared the field — callers MUST treat ``None`` as "append
+    nothing" (prior behavior). The enforcing gate for this contract is the
+    NATIVE ORACLE (a namespace-convention split between independently-generated
+    files fails the toolchain — csharp exprcalc dogfood, 2026-07-11: a
+    namespace segment sharing a TYPE's name shadowed the type under
+    ``using <root>;`` and every call failed CS0234); this seam states the
+    contract the gate already enforces, so prompt and gate cannot drift.
+    """
+    if not project_language:
+        return None
+    lang_registry = registry if registry is not None else default_registry
+    try:
+        profile = lang_registry.resolve(project_language)
+    except UnknownLanguageError:
+        return None
+    raw = getattr(profile, "raw", None)
+    text: str | None = None
+    if isinstance(raw, Mapping):
+        imports = raw.get("imports")
+        if isinstance(imports, Mapping):
+            declared = imports.get("namespace_guidance")
+            if isinstance(declared, str) and declared.strip():
+                text = declared.strip()
+    if not text:
+        return None
+    if package_name:
+        text = text.replace("{package_name}", str(package_name))
+    return text
+
+
 def resolve_language_contract(
     config: Mapping[str, Any] | None,
     *,

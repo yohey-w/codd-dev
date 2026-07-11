@@ -239,3 +239,32 @@ def test_generator_canonical_vb_head_has_hygiene_rules():
     assert "IMMUTABLE" in text
     assert "OBSERVABLE" in text
     assert "public" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# resolve_namespace_guidance — opt-in per-language namespace-coherence contract
+# (csharp4 exprcalc dogfood 2026-07-11: impl declared `namespace ExprCalc.Evaluator;
+#  public static class Evaluator` — a namespace segment sharing a TYPE's name —
+#  so tests under `using ExprCalc;` resolved `Evaluator` to the NAMESPACE and
+#  every call failed CS0234 ×34. The convention must be pinned at generation;
+#  the native oracle stays the enforcing gate.)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_namespace_guidance_csharp_pins_single_root_namespace():
+    from codd.languages import resolve_namespace_guidance
+
+    text = resolve_namespace_guidance("csharp", package_name="ExprCalc")
+    assert text is not None
+    assert "namespace ExprCalc;" in text
+    assert "shadow" in text.lower()
+    assert "{package_name}" not in text  # substituted
+
+
+def test_resolve_namespace_guidance_absent_is_none():
+    from codd.languages import resolve_namespace_guidance
+
+    assert resolve_namespace_guidance("python") is None
+    assert resolve_namespace_guidance("typescript") is None
+    assert resolve_namespace_guidance(None) is None
+    assert resolve_namespace_guidance("no-such-language") is None

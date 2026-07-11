@@ -2712,6 +2712,21 @@ def _build_implementation_prompt(
                 project_root=project_root,
             )
             layout_block = render_import_coherence_contract(layout_profile)
+            # NAMESPACE-coherence contract (profile-declared, {package_name}
+            # substituted) — pins the first-party namespace convention so
+            # independently-generated files cannot split on it (the native
+            # oracle is the enforcing gate; csharp4 exprcalc dogfood 2026-07-11:
+            # a namespace segment sharing a type's name shadowed the type →
+            # CS0234 ×34). None/"" for every profile that doesn't declare it.
+            from codd.languages import resolve_namespace_guidance
+
+            namespace_block = (
+                resolve_namespace_guidance(
+                    language,
+                    package_name=getattr(layout_profile, "package_name", None),
+                )
+                or ""
+            )
             # LAYOUT-PLACEMENT CONTRACT (2026-07-04): project the harness-owned
             # test-root / source-root / scaffold-owned-config topology onto the
             # SAME prompt, read from the SAME LayoutProfile. Complements the
@@ -2724,10 +2739,13 @@ def _build_implementation_prompt(
         except Exception:  # noqa: BLE001 — a projection failure must never break generation.
             layout_block = ""
             placement_block = ""
+            namespace_block = ""
         if layout_block:
             lines.extend([layout_block, ""])
         if placement_block:
             lines.extend([placement_block, ""])
+        if namespace_block:
+            lines.extend([namespace_block, ""])
 
     if _spec_targets_tests(spec, config):
         test_framework = resolve_test_framework_guidance(language)

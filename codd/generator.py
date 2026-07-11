@@ -296,7 +296,22 @@ def _resolve_layout_placement_contract(
             config=config,
             project_root=project_root,
         )
-        return render_layout_placement_contract(profile)
+        placement = render_layout_placement_contract(profile)
+        # NAMESPACE-coherence contract (profile-declared, {package_name}
+        # substituted) rides the same pre-rendered string: the design docs are
+        # where a namespace convention is first written down, so pinning it at
+        # GENERATE prevents the split the implement-stage oracle would otherwise
+        # only catch after the fact (csharp4 exprcalc dogfood, 2026-07-11).
+        # ""/None for every profile that doesn't declare it.
+        from codd.languages import resolve_namespace_guidance
+
+        namespace = resolve_namespace_guidance(
+            project.get("language") if isinstance(project, dict) else None,
+            package_name=getattr(profile, "package_name", None),
+        )
+        if namespace:
+            return f"{placement}\n\n{namespace}" if placement else namespace
+        return placement
     except Exception:  # noqa: BLE001 — a projection failure must never break generation.
         return ""
 

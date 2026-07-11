@@ -139,6 +139,23 @@ imports:
     rule: root_namespace_prefix
     base: "src"
 
+  # First-party NAMESPACE-coherence contract, projected onto generation/implement
+  # prompts via resolve_namespace_guidance ({package_name} substituted). The
+  # enforcing gate is the native oracle: independently-generated files that split
+  # on the namespace convention fail `dotnet build` (csharp4 exprcalc dogfood,
+  # 2026-07-11 — `namespace ExprCalc.Evaluator; public static class Evaluator`
+  # made the type unreachable as `Evaluator.Evaluate(...)` under
+  # `using ExprCalc;`: the identifier resolved to the NAMESPACE → CS0234 ×34).
+  namespace_guidance: |
+    NAMESPACE COHERENCE (release-blocking — the native build enforces this):
+    every first-party file MUST declare exactly `namespace {package_name};`
+    (file-scoped). Do NOT create sub-namespaces (`{package_name}.<Segment>`).
+    In particular, a namespace segment must NEVER share a declared TYPE's name
+    (e.g. `namespace {package_name}.Evaluator` containing `class Evaluator`):
+    under `using {package_name};` the identifier resolves to the NAMESPACE and
+    shadows the type, so every call site fails to compile (CS0234), and files
+    that disagree on the namespace convention cannot reference each other.
+
   stdlib:
     classifier: adapter
 
