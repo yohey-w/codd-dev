@@ -76,7 +76,7 @@ codd greenfield --requirements docs/requirements/requirements.md
 
 各ステップごとに途中経過を保存するので、`codd greenfield --resume` で止まったところから再開できます。先に計画だけ見たいなら `--dry-run`、スマホに進捗通知を飛ばすなら `--ntfy-topic <topic>` を付けてください。
 
-> **現時点の言語カバレッジ:** 放任実行の greenfield をエンドツーエンドで実証済みなのは **TypeScript と Python** です。ほかの対応言語も同じ言語プロファイル機構を共有していますが、放任でのエンドツーエンド検証はまだ行っていません。
+> **現時点の言語カバレッジ:** 放任実行の greenfield を、同一の中立要件仕様（マルチモジュール電卓ライブラリ、15〜20ファイル）から**トップ6言語すべて — Python・TypeScript・JavaScript・Java・C++・C# — でエンドツーエンド実証済み**です。検証は実行ベースで、各実行の検証可能振る舞いを言語ネイティブのテストレポート（pytest / vitest / surefire / ctest / dotnet-trx）と突き合わせ、収束しない実行は偽の合格とせず正直に停止します。反復回数は一律ではなく、TypeScript と Python は独立した green 実行が3回中2回以上、JavaScript・Java・C++・C# は n≥1 です。これはパイプラインの言語横断配線と収束機構をライブラリ規模で実証するもので、エンタープライズ規模の複雑性はまだ主張しません（後続の real-spec キャンペーンが対象）。
 
 この同じワンコマンドのパイプライン(`codd greenfield --requirements FILE`)は、中身を読んで手を加えられる3つの形でも用意しています — シェルスクリプト([`examples/greenfield_autopilot.sh`](examples/greenfield_autopilot.sh))、Claude Code ワークフロー([`examples/claude_workflows/codd-greenfield.js`](examples/claude_workflows/codd-greenfield.js))、そしてスキル(`codd skills install codd-greenfield --target both`)。
 

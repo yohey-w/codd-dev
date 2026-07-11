@@ -13,6 +13,22 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.32.1] - 2026-07-11 — Docs: Top-6 greenfield campaign CUT (all six languages ②b green)
+
+Documentation-only release marking the Top-6 Language Greenfield Campaign complete. With v3.32.0
+the sixth and final language (C#) produced an unattended `codd greenfield` SUCCESS from the neutral
+multi-module calculator spec — joining Python, TypeScript, JavaScript, Java, and C++. The campaign
+is CUT (Fable5 final-cut ruling, `dogfood/fable5_reply_2026-07-11_final-cut-and-s3.md`).
+
+- **READMEs (en/ja/zh): language-coverage note updated** to all six languages, stating the
+  asymmetry honestly (TS/Python ≥2-of-3 independent green; JS/Java/C++/C# n≥1), the
+  execution-based validation (native test-report cross-check), the honest-stop-not-false-pass
+  guarantee, and an explicit non-claim of enterprise-scale complexity (deferred to the follow-on
+  real-spec campaign).
+- No production code changed. The owner-packet items (①red-escalation thresholds, ④deep-collapse
+  deferral) were owner-delegated to Fable5 and ruled — ① shipped in v3.31.0, ④ deferral ratified as
+  a documented limitation.
+
 ## [3.32.0] - 2026-07-11 — C# verify no longer clobbers its own TRX report (the last csharp ②b blocker)
 
 The csharp5 re-run cleared implement (the v3.31.0 namespace contract held) and its SUT was

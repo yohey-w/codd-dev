@@ -39,7 +39,7 @@ wheels = [
 
 [[package]]
 name = "codd-dev"
-version = "3.32.0"
+version = "3.32.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
