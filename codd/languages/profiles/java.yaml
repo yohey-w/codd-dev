@@ -282,6 +282,20 @@ scaffold:
     compiler_plugin_version: "3.13.0"
     build_helper_plugin_version: "3.6.0"
 
+  # Host-toolchain version clamp — the environment-continuation projection of
+  # toolchain materialization (v3.15.0 lineage) applied to scaffold DEFAULTS: a
+  # declared toolchain level must never EXCEED what the host provides, or the
+  # scaffolded pom demands a --release the installed JDK cannot satisfy and the
+  # implement oracle reds on "Fatal error compiling: error: release version N
+  # not supported" (java2 exprcalc dogfood, 2026-07-11). The probe runs once at
+  # scaffold time; min semantics (declared 21 + host 17 → 17; declared 11 +
+  # host 17 → 11); probe failure keeps the declared value (fail-open).
+  # CONTENT-only: clamped variables must never appear in a template `path`.
+  host_version_clamps:
+    java_version:
+      probe_argv: ["javac", "-version"]
+      version_pattern: '(\d+)'
+
   templates:
     # Single pom.xml: Java's package_root.kind=none means there is no C#-style
     # nested lib/test project split to enforce deliverable purity. Maven's own

@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -2807,6 +2808,96 @@ def _generic_template_substitutions(
     return subst
 
 
+def _probe_host_toolchain_version(argv: tuple[str, ...], pattern: str) -> int | None:
+    """Best-effort host-toolchain MAJOR-version probe (``javac -version`` → ``17``).
+
+    Runs the profile-declared probe argv (10s timeout), searches ``pattern``
+    (first group = the major) across stdout+stderr (``javac -version`` printed to
+    stderr before JDK 9, stdout after), and returns the integer major — or
+    ``None`` on ANY failure (missing binary, timeout, no match, non-integer
+    group). The caller treats ``None`` as "keep the declared default"
+    (fail-open): the probe can only ever LOWER a doomed default, never introduce
+    a new failure mode.
+    """
+    try:
+        proc = subprocess.run(
+            list(argv), capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(pattern, f"{proc.stdout}\n{proc.stderr}")
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except (IndexError, ValueError):
+        return None
+
+
+def _generic_template_host_clamps(
+    language: str | None,
+) -> dict[str, Mapping[str, Any]]:
+    """The profile's ``scaffold.host_version_clamps`` mapping (raw view), or ``{}``.
+
+    Read from ``raw`` like ``scaffold.defaults`` (the ScaffoldSpec dataclass
+    models only adapter/owned_files/templates; ``raw`` is the documented
+    later-phase escape hatch).
+    """
+    lang_profile = _resolve_kernel_language_profile(language)
+    raw = getattr(lang_profile, "raw", None) if lang_profile is not None else None
+    if isinstance(raw, Mapping):
+        raw_scaffold = raw.get("scaffold")
+        if isinstance(raw_scaffold, Mapping):
+            clamps = raw_scaffold.get("host_version_clamps")
+            if isinstance(clamps, Mapping):
+                return {
+                    str(k): v for k, v in clamps.items() if isinstance(v, Mapping)
+                }
+    return {}
+
+
+def _resolve_host_clamped_defaults(
+    defaults: Mapping[str, str], clamps: Mapping[str, Mapping[str, Any]]
+) -> tuple[dict[str, str], list[str]]:
+    """Clamp scaffold DEFAULTS to the host toolchain — the environment-continuation
+    projection of toolchain materialization (v3.15.0 lineage) applied to the
+    generic-template scaffold's substitution variables.
+
+    For each profile-declared clamp key: probe the host (profile-declared
+    argv+pattern); when the probed major is LOWER than the declared default's
+    leading integer, replace the default with the probed major (min semantics —
+    a declared ``21`` on a JDK-17 host scaffolds ``17``; a declared ``11`` on a
+    JDK-17 host stays ``11``). A probe failure or a non-numeric declared value
+    keeps the declared default (fail-open). Returns ``(resolved defaults,
+    human-readable clamp notes)`` — the notes ride the scaffold detail so a
+    clamp is never silent. CONTENT-only: the harness-owned PATH declaration
+    (:meth:`LayoutProfile.harness_owned_scaffold_paths`) substitutes UNCLAMPED
+    defaults, so a clamped variable must never appear in a template ``path``.
+    """
+    out = dict(defaults)
+    notes: list[str] = []
+    for key, spec in (clamps or {}).items():
+        declared = out.get(key)
+        if declared is None:
+            continue
+        declared_match = re.match(r"\s*(\d+)", str(declared))
+        if declared_match is None:
+            continue  # non-numeric default → this clamp cannot reason about it
+        declared_major = int(declared_match.group(1))
+        argv = tuple(str(a) for a in (spec.get("probe_argv") or ()) if str(a).strip())
+        if not argv:
+            continue
+        pattern = str(spec.get("version_pattern") or r"(\d+)")
+        probed = _probe_host_toolchain_version(argv, pattern)
+        if probed is None or probed >= declared_major:
+            continue
+        out[key] = str(probed)
+        notes.append(
+            f"host-clamped {key} {declared}→{probed} (probe: {' '.join(argv)})"
+        )
+    return out, notes
+
+
 def _apply_template_substitutions(text: str, subst: Mapping[str, str]) -> str:
     """Replace each ``{key}`` token with its value (replace-based, NOT ``str.format`` — so
     a template's literal braces never raise; mirrors the oracle gate's ``{package_name}``
@@ -2862,6 +2953,9 @@ def _scaffold_generic_template(
     code branch — a new generic-template stack is one YAML profile + the opt-in key.
     """
     templates, defaults, _owned = spec
+    defaults, clamp_notes = _resolve_host_clamped_defaults(
+        defaults, _generic_template_host_clamps(profile.language)
+    )
     subst = _generic_template_substitutions(profile, defaults)
     created: list[str] = []
     skipped: list[str] = []
@@ -2891,6 +2985,8 @@ def _scaffold_generic_template(
         f"generic-template: {len(created)} created, {len(skipped)} skipped "
         f"(package={profile.package_name})"
     )
+    if clamp_notes:
+        detail += "; " + "; ".join(clamp_notes)
     return ScaffoldResult(
         language=profile.language,
         created=tuple(created),

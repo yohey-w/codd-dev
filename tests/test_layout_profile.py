@@ -792,3 +792,79 @@ class TestEffectiveE2EModality:
             excluded_surface_ids=frozenset({"doc-site"}),
         )
         assert effective_e2e_modality(caps, profile) == "cli"
+
+
+# ═══════════════════════════════════════════════════════════
+# host_version_clamps — toolchain-version projection onto scaffold defaults
+# (environment-continuation lineage; regression family for the java2 exprcalc
+# greenfield dogfood 2026-07-11: scaffolded pom demanded --release 21 on a
+# JDK-17 host → "Fatal error compiling: error: release version 21 not
+# supported" → opaque implement-oracle RED).
+# ═══════════════════════════════════════════════════════════
+
+
+class TestHostVersionClamps:
+    def _java_profile(self) -> LayoutProfile:
+        return LayoutProfile(
+            language="java",
+            package_name="exprcalc",
+            source_root="src/main/java",
+            package_root="src/main/java/com/example/exprcalc",
+            test_root="src/test/java",
+        )
+
+    def test_scaffolded_pom_release_is_clamped_to_host_major(self, tmp_path, monkeypatch):
+        """Host JDK (probed 17) BELOW the declared default (21) → the scaffolded
+        pom targets the HOST level, and the clamp is named in the detail (never
+        silent)."""
+        import codd.project_types as pt
+
+        monkeypatch.setattr(pt, "_probe_host_toolchain_version", lambda argv, pattern: 17)
+        result = scaffold_layout(tmp_path, self._java_profile())
+        pom = (tmp_path / "pom.xml").read_text(encoding="utf-8")
+        assert "<maven.compiler.release>17</maven.compiler.release>" in pom, pom[:400]
+        assert "<release>17</release>" in pom
+        assert "21" not in pom.split("<maven.compiler.release>")[1][:4]
+        assert "java_version" in result.detail and "17" in result.detail
+
+    def test_scaffolded_pom_keeps_declared_when_host_is_newer(self, tmp_path, monkeypatch):
+        """Host newer than declared (probed 25 ≥ 21) → declared stays (min semantics)."""
+        import codd.project_types as pt
+
+        monkeypatch.setattr(pt, "_probe_host_toolchain_version", lambda argv, pattern: 25)
+        scaffold_layout(tmp_path, self._java_profile())
+        pom = (tmp_path / "pom.xml").read_text(encoding="utf-8")
+        assert "<maven.compiler.release>21</maven.compiler.release>" in pom
+
+    def test_probe_failure_fails_open_to_declared(self, tmp_path, monkeypatch):
+        """Probe failure (None) → declared default unchanged — the clamp NEVER
+        introduces a new failure mode."""
+        import codd.project_types as pt
+
+        monkeypatch.setattr(pt, "_probe_host_toolchain_version", lambda argv, pattern: None)
+        scaffold_layout(tmp_path, self._java_profile())
+        pom = (tmp_path / "pom.xml").read_text(encoding="utf-8")
+        assert "<maven.compiler.release>21</maven.compiler.release>" in pom
+
+    def test_probe_helper_parses_stdout_and_stderr(self):
+        """The probe reads BOTH streams (javac -version printed to stderr before
+        JDK9, stdout after) and returns the first integer group."""
+        import sys
+
+        import codd.project_types as pt
+
+        out_argv = (sys.executable, "-c", "print('javac 17.0.19')")
+        assert pt._probe_host_toolchain_version(out_argv, r"(\d+)") == 17
+        err_argv = (
+            sys.executable,
+            "-c",
+            "import sys; print('javac 17.0.19', file=sys.stderr)",
+        )
+        assert pt._probe_host_toolchain_version(err_argv, r"(\d+)") == 17
+
+    def test_probe_missing_binary_is_none(self):
+        import codd.project_types as pt
+
+        assert (
+            pt._probe_host_toolchain_version(("codd-no-such-binary-xyz",), r"(\d+)") is None
+        )

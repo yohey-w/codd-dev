@@ -212,7 +212,7 @@ def test_java_toolchain_dependencies_is_none() -> None:
 # ── (4) generic-template scaffolder → single-pom Maven model ────────────────────
 
 
-def test_java_scaffolds_pom_with_defaults_substituted(tmp_path: Path) -> None:
+def test_java_scaffolds_pom_with_defaults_substituted(tmp_path: Path, monkeypatch) -> None:
     """scaffold_layout writes the SINGLE ``pom.xml`` at the repo root from java.yaml's
     template: java.yaml's ``package_root.kind: none`` means there is no C#-style
     nested lib/test project split — create-only / idempotent / non-clobber,
@@ -224,6 +224,13 @@ def test_java_scaffolds_pom_with_defaults_substituted(tmp_path: Path) -> None:
     ``tests/e2e/java`` a real, Failsafe-run second test source root."""
     profile = resolve_layout_profile(language="java", project_name="todo-cli")
     assert profile is not None
+
+    # Pin the host-toolchain probe to fail-open (None) so the DECLARED
+    # java_version default (21) flows through host-independently — the clamp
+    # behavior itself is pinned by test_layout_profile.py::TestHostVersionClamps.
+    import codd.project_types as pt
+
+    monkeypatch.setattr(pt, "_probe_host_toolchain_version", lambda argv, pattern: None)
 
     result = scaffold_layout(tmp_path, profile)
     pom = tmp_path / "pom.xml"
