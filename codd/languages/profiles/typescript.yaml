@@ -73,6 +73,27 @@ imports:
     rule: path_alias
     base: "src"
 
+  # First-party MODULE-SPECIFIER-coherence contract, projected onto the
+  # generation/implement prompts via resolve_module_specifier_guidance. The
+  # enforcing gate is the native oracle (the TS compiler): under NodeNext/Node16
+  # module resolution a relative import that omits its explicit emitted-file
+  # extension fails typecheck with TS2835 (S3 StockRoom-mini TS greenfield
+  # dogfood, 2026-07-12 — independently-generated files split on the convention:
+  # some emitted `./x.js`, some `./x` → TS2835 ×30). Because each file only
+  # compiles if it AGREES with the convention its importers use, the convention
+  # must be pinned at GENERATE, exactly like the C# namespace-coherence contract.
+  module_specifier_guidance: |
+    MODULE-SPECIFIER COHERENCE (release-blocking — the native typecheck enforces this):
+    this project uses NodeNext/Node16 module resolution, under which EVERY
+    relative import specifier MUST carry an explicit file extension naming the
+    EMITTED file — write `import { x } from "./x.js"`, never `"./x"` (and never
+    the source `"./x.ts"` extension). This applies identically to re-exports
+    (`export { x } from "./x.js"`), to default and namespace imports, and to
+    TYPE-ONLY imports (`import type { T } from "./x.js"`) — a type-only import
+    is erased at emit but its specifier is still checked. A relative import that
+    omits the `.js` extension fails to compile (TS2835), so independently-
+    generated files that disagree on the convention cannot reference each other.
+
   stdlib:
     classifier: adapter
 

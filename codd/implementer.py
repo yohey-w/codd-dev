@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import json
+import logging
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -20,6 +21,8 @@ from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 import unicodedata
 
+
+LOGGER = logging.getLogger(__name__)
 
 FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
 # Repo-root infrastructure artifacts (implement.root_artifact_patterns):
@@ -2375,7 +2378,106 @@ def _dependency_artifact_degraded_entry(project_root: Path, path_text: str) -> s
     return f"--- DEPENDENCY ARTIFACT {path_text} (path only — content exceeded budget) ---"
 
 
-def _render_dependency_artifact_files(project_root: Path, output_paths: list[str]) -> str | None:
+def _tier1_signature_entry(project_root: Path, path_text: str) -> str:
+    """Render ONE distance-1 (Tier-1) producer at the SIGNATURE FLOOR.
+
+    The Fable5 S3 Root B invariant: a consumer prompt ALWAYS carries its distance-1
+    producer surface at SIGNATURE granularity or above. So on Tier-1 budget overflow
+    this degrades to signatures (``render_public_surface``), NOT to the name-level
+    surface — the ladder for distance-1 is signature → names → paths, with signature
+    the floor whenever the language has a renderer (TS ships one; a renderer-less
+    language preserves the legacy names→paths behaviour, i.e. generality). Imported
+    locally so the language-zone dependency stays off the module's import surface.
+    """
+    signature = None
+    names = None
+    try:
+        from codd.implement_oracle_scope import extract_public_surface, render_public_surface
+
+        signature = render_public_surface(path_text, project_root)
+        if not signature:
+            names = extract_public_surface(project_root=project_root, path=path_text)
+    except Exception:  # pragma: no cover - defensive: never fail the prompt build
+        signature = None
+    if signature:
+        return (
+            f"--- DEPENDENCY ARTIFACT {path_text} "
+            f"(distance-1 producer — signature surface, full content exceeded budget) ---\n"
+            f"{signature.rstrip()}"
+        )
+    if names:
+        joined = ", ".join(str(name) for name in names)
+        return (
+            f"--- DEPENDENCY ARTIFACT {path_text} "
+            f"(distance-1 producer — public surface names, full content exceeded budget) ---\n"
+            f"Exported symbols: {joined}"
+        )
+    return (
+        f"--- DEPENDENCY ARTIFACT {path_text} "
+        f"(distance-1 producer — path only, no surface extractor for this file kind) ---"
+    )
+
+
+def _render_tier1_dependency_artifacts(
+    project_root: Path, tier1_paths: list[str], budget: int
+) -> tuple[list[str], int]:
+    """Render Tier-1 (distance-1) producer files under the SIGNATURE-FLOOR invariant.
+
+    Collective all-or-nothing on granularity: if the FULL content of every Tier-1
+    file fits ``budget``, render it full (a file IS its own surface); otherwise
+    render EVERY Tier-1 file at signature granularity (never name-only/path-only/
+    truncated while a renderer exists) — the floor holds even if the signatures
+    themselves exceed the budget, and the overflow is ECHOED as telemetry rather
+    than silently capped (Root B was precisely the silent distance-1 truncation).
+    Returns ``(sections, bytes_used)``.
+    """
+    files: list[tuple[str, str]] = []
+    for raw in tier1_paths:
+        text = str(raw).strip()
+        if not text:
+            continue
+        candidate = project_root / text
+        try:
+            _ensure_inside_project(project_root, candidate, "dependency artifact")
+        except ValueError:
+            continue
+        if not candidate.is_file():
+            continue
+        try:
+            content = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        files.append((text, content))
+    if not files:
+        return [], 0
+
+    full_total = sum(len(content) for _text, content in files)
+    if full_total <= budget:
+        sections = [
+            f"--- BEGIN DEPENDENCY ARTIFACT {text} ---\n{content.rstrip()}\n--- END DEPENDENCY ARTIFACT {text} ---"
+            for text, content in files
+        ]
+        return sections, full_total
+
+    sections = [_tier1_signature_entry(project_root, text) for text, _content in files]
+    used = sum(len(section) for section in sections)
+    LOGGER.info(
+        "PART-2 budget: distance-1 producer surface degraded to signature "
+        "granularity (%d producer(s); full=%dB > budget=%dB; degraded=%dB) — "
+        "distance-1 floor holds, never truncated below signature.",
+        len(files),
+        full_total,
+        budget,
+        used,
+    )
+    return sections, used
+
+
+def _render_dependency_artifact_files(
+    project_root: Path,
+    output_paths: list[str],
+    budget: int = DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT,
+) -> str | None:
     """Render producer files' on-disk content as budget-capped prompt blocks.
 
     Full content per file while the budget lasts (a file IS its own surface —
@@ -2384,10 +2486,10 @@ def _render_dependency_artifact_files(project_root: Path, output_paths: list[str
     overflow the current and every subsequent file degrade via
     :func:`_dependency_artifact_degraded_entry` (name-level surface, then
     paths-only). Best-effort/read-only: a missing/binary/out-of-project path is
-    skipped, exactly like :func:`_existing_output_files_context`.
+    skipped, exactly like :func:`_existing_output_files_context`. This is the Tier-2
+    renderer (remaining producers beyond distance-1) run on the budget Tier-1 left.
     """
     sections: list[str] = []
-    budget = DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT
     for raw in output_paths:
         text = str(raw).strip()
         if not text:
@@ -2430,8 +2532,13 @@ def _dependency_artifact_files_context(
     """On-disk content of the files this task's producers wrote — the binding
     import contract (PART 2).
 
-    Two UNIONED producer sources (FIX-1, Fable5 ts-v9 ruling):
+    THREE UNIONED producer sources, rendered under a TWO-TIER budget (Fable5 S3
+    Root B ruling adds the observed-import source + the distance-1 signature floor
+    on top of the ts-v9 FIX-1 union):
 
+    0. **Observed imports (highest priority, distance-1).** The producer files THIS
+       task's OWN on-disk files actually import — measured at repair time, so an
+       UNDECLARED import edge (the plan missed it) still delivers the surface.
     1. **Task-graph closure (primary).** The planner's task-level ``dependencies``
        production graph: the approved task matching ``spec`` (its
        ``source_design_doc`` + ``expected_outputs``) → the TRANSITIVE closure of
@@ -2537,17 +2644,82 @@ def _dependency_artifact_files_context(
             nxt.extend(deps_by_id.get(dep_id, ()))
         frontier = nxt
 
-    # UNION: nearest producer truth (task graph) first, then the legacy closure.
-    producer_outputs: list[str] = []
-    union_seen: set[str] = set()
+    # THIRD SOURCE (observed imports, Fable5 S3 Root B increment 2): the producer
+    # files THIS task's OWN on-disk files actually import. First-pass this is empty
+    # (the consumer files do not exist yet — the plan edge carries the surface); at
+    # REPAIR time — where the interface oscillation lives — it is accurate, so an
+    # UNDECLARED producer surface still reaches the consumer prompt. Reverse-look-up
+    # each resolved file to its owning task so the granularity matches the declared
+    # edges (task-level outputs); a resolved file with no owner is carried directly.
+    observed_outputs: list[str] = []
+    if spec is not None and spec.expected_outputs:
+        try:
+            from codd.implement_oracle_scope import resolve_local_import_targets
+
+            observed_targets = resolve_local_import_targets(
+                [str(output) for output in spec.expected_outputs], project_root
+            )
+        except Exception:  # pragma: no cover - defensive: never fail the prompt build
+            observed_targets = []
+        owner_by_output: dict[str, str] = {}
+        for task_id, outs in outputs_by_id.items():
+            for output in outs:
+                owner_by_output.setdefault(output, task_id)
+        obs_seen: set[str] = set()
+        for target in observed_targets:
+            owner = owner_by_output.get(target)
+            for output in (outputs_by_id.get(owner) if owner else None) or [target]:
+                if output and output not in obs_seen:
+                    obs_seen.add(output)
+                    observed_outputs.append(output)
+
+    # DISTANCE-1 declared producers: the outputs of THIS task's IMMEDIATE deps only
+    # (the first BFS level), NOT the transitive closure.
+    tier1_declared: list[str] = []
+    t1_seen: set[str] = set()
+    for dep_id in dict.fromkeys(dep for dep in current_task_deps if dep):
+        for output in outputs_by_id.get(dep_id, ()):
+            if output not in t1_seen:
+                t1_seen.add(output)
+                tier1_declared.append(output)
+
+    # TIER-1 = observed ∪ declared distance-1 (observed = highest priority). Its
+    # surface is ALWAYS carried at signature granularity or above (the Root B floor).
+    tier1: list[str] = []
+    tier1_set: set[str] = set()
+    for output in [*observed_outputs, *tier1_declared]:
+        if output and output not in tier1_set:
+            tier1_set.add(output)
+            tier1.append(output)
+
+    # TIER-2 = the rest of the producer union (transitive-beyond-1 + legacy design
+    # closure), minus anything already carried at Tier-1.
+    tier2: list[str] = []
+    tier2_set: set[str] = set()
     for output in [*task_graph_outputs, *design_closure_outputs]:
-        if output not in union_seen:
-            union_seen.add(output)
-            producer_outputs.append(output)
-    if not producer_outputs:
+        if output and output not in tier1_set and output not in tier2_set:
+            tier2_set.add(output)
+            tier2.append(output)
+
+    if not tier1 and not tier2:
         return None
 
-    return _render_dependency_artifact_files(project_root, producer_outputs)
+    # Two-tier budget: Tier-1 (distance-1) full content, degrading to signatures on
+    # overflow but NEVER below (with telemetry); Tier-2 gets the remaining budget
+    # under the existing full→names→paths ladder. Byte-identical to the shipped
+    # single-ladder path when Tier-1 is empty (edge-less/no-observed shape).
+    tier1_sections, tier1_used = _render_tier1_dependency_artifacts(
+        project_root, tier1, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT
+    )
+    remaining = max(0, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT - tier1_used)
+    tier2_block = _render_dependency_artifact_files(project_root, tier2, remaining)
+
+    parts = list(tier1_sections)
+    if tier2_block:
+        parts.append(tier2_block)
+    if not parts:
+        return None
+    return "\n\n".join(parts)
 
 
 def _build_implementation_prompt(
@@ -2718,12 +2890,46 @@ def _build_implementation_prompt(
             # oracle is the enforcing gate; csharp4 exprcalc dogfood 2026-07-11:
             # a namespace segment sharing a type's name shadowed the type →
             # CS0234 ×34). None/"" for every profile that doesn't declare it.
-            from codd.languages import resolve_namespace_guidance
+            from codd.languages import (
+                resolve_module_specifier_guidance,
+                resolve_namespace_guidance,
+                resolve_runtime_dependency_guidance,
+            )
 
             namespace_block = (
                 resolve_namespace_guidance(
                     language,
                     package_name=getattr(layout_profile, "package_name", None),
+                )
+                or ""
+            )
+            # MODULE-SPECIFIER-coherence contract (profile-declared) — pins the
+            # relative-import-specifier convention so independently-generated
+            # files cannot split on it (the native oracle is the enforcing gate;
+            # S3 TS greenfield NodeNext dogfood 2026-07-12: under NodeNext,
+            # relative imports missing an explicit `.js` extension failed
+            # typecheck → TS2835 ×30). None/"" for every profile that doesn't
+            # declare it.
+            module_specifier_block = resolve_module_specifier_guidance(language) or ""
+            # RUNTIME-DEPENDENCY-DECLARATION contract (2026-07-12): a design
+            # DEFERS the concrete third-party runtime packages to implement time,
+            # so the model first names them when it writes ``import <pkg>``; the
+            # scaffold seeds ONLY the harness-owned test toolchain into the
+            # manifest. Without an explicit obligation the model imports a runtime
+            # package it legitimately chose but omits it from the manifest, and
+            # the implement-time typecheck cannot resolve it (S3 StockRoom-mini TS
+            # greenfield dogfood 2026-07-12: ``import express`` / ``better-sqlite3``
+            # with neither in ``package.json`` → TS2307 ×2). The manifest-accept
+            # pipeline already consumes a SUT-declared manifest end to end (the
+            # dependency_lock_coherence refresh touches only the toolchain region);
+            # this block is the missing "declare your own region" instruction.
+            # Data-projected from the toolchain profile's manifest_filename — no
+            # framework/package hardcode; "" for a manifest-less stack (Python/C#/
+            # Java, whose toolchain_dependencies is None) — same generality guard
+            # as the other blocks.
+            runtime_dependency_block = (
+                resolve_runtime_dependency_guidance(
+                    getattr(layout_profile, "toolchain_dependencies", None)
                 )
                 or ""
             )
@@ -2740,12 +2946,18 @@ def _build_implementation_prompt(
             layout_block = ""
             placement_block = ""
             namespace_block = ""
+            module_specifier_block = ""
+            runtime_dependency_block = ""
         if layout_block:
             lines.extend([layout_block, ""])
         if placement_block:
             lines.extend([placement_block, ""])
         if namespace_block:
             lines.extend([namespace_block, ""])
+        if module_specifier_block:
+            lines.extend([module_specifier_block, ""])
+        if runtime_dependency_block:
+            lines.extend([runtime_dependency_block, ""])
 
     if _spec_targets_tests(spec, config):
         test_framework = resolve_test_framework_guidance(language)

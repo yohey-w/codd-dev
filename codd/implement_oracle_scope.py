@@ -93,6 +93,8 @@ __all__ = [
     "derive_residual_importer_scope",
     "exporter_surface_for_diagnostics",
     "extract_public_surface",
+    "render_public_surface",
+    "resolve_local_import_targets",
     "importers_of",
     "symbol_owners_for_diagnostics",
     "task_dependency_order",
@@ -924,6 +926,262 @@ def _ts_public_surface(content: str) -> list[str]:
         spec = m.group("spec")
         names.append(f"{ns} (* as) from \"{spec}\"" if ns else f"* from \"{spec}\"")
     return list(dict.fromkeys(names))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Signature-level surface (one granularity finer than the NAME surface above)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# WHY: ``extract_public_surface`` returns NAMES only. A consumer that sees the name
+# ``request`` but not its SIGNATURE ``request(method, path, options?): Promise<…>``
+# still has to INVENT the call shape — and independently-generated consumers invent
+# DIFFERENT shapes (positional-3 vs object-1 vs positional-4 for one method). That
+# is the Fable5 S3 "Root B" failure: convergence granularity ≤ circulated contract
+# granularity. Names circulated → names converged; shapes were delivered nowhere →
+# shapes oscillated. ``render_public_surface`` raises the circulated granularity to
+# SIGNATURES (interface/type bodies verbatim, function parameter+return types with
+# bodies stripped, typed const bindings, class member signatures), which brings the
+# shape-mismatch diagnostics (TS2554 arity / TS2353 excess-property / TS2339
+# missing-property) into the reconcilable set — WITHOUT emitting full bodies.
+#
+# LANGUAGE-AGNOSTIC exactly like the name surface: dispatch on file EXTENSION, TS
+# today (regex-level), ``None`` for a kind with no renderer (graceful degradation —
+# the caller falls back to the name surface, then paths). A Go/Rust port adds one
+# renderer arm; the core is never edited (no per-target-language dispatch).
+
+#: Per-file byte cap on a rendered signature slice. A pathological producer (a huge
+#: generated ``.d.ts``) must not itself blow the prompt; the distance-1 floor still
+#: emits (capped), never below signature. Callers may override.
+_SIGNATURE_SURFACE_MAX_BYTES = 4000
+
+#: An exported declaration head + its KIND (the dispatch key for signature slicing).
+_TS_EXPORT_SIG_HEAD = re.compile(
+    r"""\bexport\s+(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?"""
+    r"""(?P<kind>const|let|var|function\*?|class|interface|type|enum|namespace)\b""",
+)
+#: A whole named re-export / star re-export statement (name-transparent — it points
+#: elsewhere for the actual shape, so surface it verbatim within the same budget).
+_TS_REEXPORT_STMT = re.compile(
+    r"""\bexport\s+(?:type\s+)?(?:\{[^}]*\}|\*(?:\s+as\s+[A-Za-z_$][\w$]*)?)"""
+    r"""\s*from\s*['"][^'"]+['"]\s*;?""",
+)
+
+
+def render_public_surface(
+    path: str, project_root: Path, *, max_bytes: int = _SIGNATURE_SURFACE_MAX_BYTES
+) -> str | None:
+    """A SIGNATURE-level slice of ``path``'s public surface, or ``None``.
+
+    One granularity finer than :func:`extract_public_surface` (which returns NAMES
+    only): each exported declaration rendered WITH its signature — interface/type/
+    enum bodies verbatim (they ARE signatures), function parameter lists + return
+    types (bodies stripped), typed const/let/var bindings, class member signatures
+    (method bodies stripped) — but never a full function body. This is the
+    granularity a consumer needs to bind a CALL SHAPE (arity, positional-vs-object,
+    property set), which a bare name list cannot convey.
+
+    ``None`` == "no signature extractor for this file kind" (graceful degradation —
+    the caller falls back to the name-level surface, then paths). Dispatches on file
+    EXTENSION only (never on a configured language). An empty string means "extractor
+    ran, found no exported surface" (a real signal, distinct from ``None``).
+    """
+    suffix = PurePosixPath(path).suffix
+    if suffix in _TS_SOURCE_EXTS:
+        content = _read((project_root / path).resolve())
+        if content is None:
+            return None
+        return _ts_public_signature_surface(content, max_bytes=max_bytes)
+    return None
+
+
+def _ts_public_signature_surface(content: str, *, max_bytes: int) -> str:
+    """Render TypeScript/JavaScript exported declarations at signature granularity.
+
+    Regex + brace-balanced slicing (no compiler): interface/enum/namespace bodies
+    are captured whole (signatures/members), class bodies keep member signatures but
+    have method bodies stripped, functions keep the parameter+return signature with
+    the body removed, and const/let/var keep the typed binding without the
+    initializer. Order-stable; total output bounded by ``max_bytes``.
+    """
+    pieces: list[str] = []
+    used = 0
+
+    def _emit(fragment: str) -> bool:
+        nonlocal used
+        frag = fragment.strip()
+        if not frag:
+            return True
+        if used + len(frag) + 1 > max_bytes:
+            pieces.append("/* … signature surface truncated (per-file cap) … */")
+            return False
+        pieces.append(frag)
+        used += len(frag) + 1
+        return True
+
+    for m in _TS_EXPORT_SIG_HEAD.finditer(content):
+        rendered = _ts_render_one_declaration(content, m.start(), m.end(), m.group("kind"))
+        if not _emit(rendered):
+            return "\n".join(pieces)
+    # Name-transparent re-exports (the shape lives at the far end; surface the edge).
+    for m in _TS_REEXPORT_STMT.finditer(content):
+        if not _emit(m.group(0)):
+            return "\n".join(pieces)
+    if _TS_EXPORT_DEFAULT.search(content):
+        _emit("export default …")
+    return "\n".join(pieces)
+
+
+def _ts_render_one_declaration(content: str, start: int, head_end: int, kind: str) -> str:
+    """The signature slice of ONE exported declaration beginning at ``start``."""
+    if kind in ("interface", "enum"):
+        end = _ts_brace_span_end(content, head_end)
+        return content[start:end] if end is not None else _ts_line(content, start)
+    if kind in ("class", "namespace"):
+        end = _ts_brace_span_end(content, head_end)
+        return _ts_strip_member_bodies(content[start:end]) if end is not None else _ts_line(content, start)
+    if kind == "type":
+        return content[start : _ts_type_alias_end(content, head_end)]
+    if kind.startswith("function"):
+        return _ts_signature_head(content, start, stop_on_brace=True)
+    # const / let / var — the typed binding, initializer dropped.
+    return _ts_signature_head(content, start, stop_on_brace=False)
+
+
+def _ts_brace_span_end(content: str, from_index: int) -> int | None:
+    """Index just past the ``}`` matching the first ``{`` at/after ``from_index``."""
+    open_idx = content.find("{", from_index)
+    if open_idx == -1:
+        return None
+    depth = 0
+    for i in range(open_idx, len(content)):
+        ch = content[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
+def _ts_type_alias_end(content: str, from_index: int) -> int:
+    """End index of a ``type X = …`` declaration: the ``;`` at brace depth 0, else a
+    depth-0 line break (allowing ``|``/``&`` continuations), else EOF."""
+    depth = 0
+    n = len(content)
+    for i in range(from_index, n):
+        ch = content[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and ch == ";":
+            return i + 1
+        elif depth == 0 and ch == "\n":
+            j = i + 1
+            while j < n and content[j] in " \t":
+                j += 1
+            if j < n and content[j] in "|&":
+                continue
+            return i
+    return n
+
+
+def _ts_signature_head(content: str, start: int, *, stop_on_brace: bool) -> str:
+    """A declaration head up to its body/initializer boundary.
+
+    For a function: everything up to the body-opening ``{`` at bracket depth 0 (the
+    parameter+return signature), terminated with ``;``. For const/let/var: up to the
+    ``=`` at depth 0 (the typed binding). Both also stop at a depth-0 ``;`` (an
+    ambient/overload declaration) or line break.
+    """
+    depth = 0
+    n = len(content)
+    for i in range(start, n):
+        ch = content[i]
+        if ch in "([<":
+            depth += 1
+        elif ch in ")]>":
+            depth = max(0, depth - 1)
+        elif depth == 0 and stop_on_brace and ch == "{":
+            return content[start:i].rstrip() + ";"
+        elif depth == 0 and not stop_on_brace and ch == "=":
+            return content[start:i].rstrip()
+        elif depth == 0 and ch == ";":
+            return content[start : i + 1]
+        elif depth == 0 and ch == "\n":
+            return content[start:i].rstrip()
+    return _ts_line(content, start)
+
+
+def _ts_strip_member_bodies(text: str) -> str:
+    """Replace method/getter/constructor bodies (``) … {…}``) inside a class/namespace
+    slice with ``;`` so only member signatures remain. Best-effort (regex-level): a
+    ``{`` whose current line already contains a ``)`` opens a callable body."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "{":
+            line_start = text.rfind("\n", 0, i) + 1
+            if ")" in text[line_start:i]:
+                end = _ts_brace_span_end(text, i)
+                if end is not None:
+                    out.append(";")
+                    i = end
+                    continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _ts_line(content: str, start: int) -> str:
+    """The single source line beginning at ``start`` (fallback when brace/terminator
+    matching fails — never returns a runaway span)."""
+    end = content.find("\n", start)
+    return content[start:] if end == -1 else content[start:end]
+
+
+def resolve_local_import_targets(
+    consumer_paths: Sequence[str], project_root: Path
+) -> list[str]:
+    """Producer files the consumer's OWN on-disk files import (the OBSERVED edges).
+
+    Reads each consumer file, extracts its import specifiers, resolves each to a
+    project file (reusing :func:`_resolve_specifier`), and follows a bounded
+    re-export chain so a barrel import reaches the real owner. Returns the
+    de-duplicated producer relative paths.
+
+    This is PART-2's THIRD producer source (Fable5 S3 Root B, increment 2): at first
+    pass the consumer files may not exist yet (→ empty; the PLAN edge carries the
+    surface), but at REPAIR time — where the interface oscillation lives — they DO
+    exist, so an UNDECLARED producer surface still reaches the consumer prompt.
+
+    Best-effort + read-only + generality-safe: a missing / unparseable / unknown-kind
+    consumer file contributes nothing (dispatch on file EXTENSION, never on a
+    configured language).
+    """
+    root = Path(project_root)
+    out: list[str] = []
+    for rel in consumer_paths:
+        norm = _norm(rel)
+        if not norm or PurePosixPath(norm).suffix not in _TS_SOURCE_EXTS:
+            continue
+        abs_path = (root / norm).resolve()
+        content = _read(abs_path)
+        if content is None:
+            continue
+        for m in _TS_IMPORT_FROM.finditer(content):
+            spec = m.group("spec")
+            if not spec:
+                continue
+            target = _resolve_specifier(abs_path.parent, spec, root)
+            if target is None or target == norm:
+                continue
+            out.append(target)
+            out.extend(_follow_reexports(target, None, root, depth=_REEXPORT_FOLLOW_DEPTH))
+    return _dedupe(out)
 
 
 def exporter_surface_for_diagnostics(

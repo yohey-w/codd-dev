@@ -372,6 +372,98 @@ def resolve_namespace_guidance(
     return text
 
 
+def resolve_module_specifier_guidance(
+    project_language: str | None,
+    *,
+    registry: LanguageRegistry | None = None,
+) -> str | None:
+    """The optional per-language first-party MODULE-SPECIFIER-coherence guidance.
+
+    Same convenience-seam contract as :func:`resolve_namespace_guidance` (an
+    already-resolved language string, best-effort, never raises). Reads the
+    profile's ``imports.module_specifier_guidance`` prose from the raw view (the
+    ImportsSpec dataclass models resolver/first-party fields only; ``raw`` is the
+    documented later-phase escape hatch). This guidance carries no
+    ``{package_name}`` placeholder — a module-specifier convention is about the
+    import syntax itself, not the package identity — so no substitution is
+    performed. Returns ``None`` when the language is unknown or the profile has
+    not declared the field — callers MUST treat ``None`` as "append nothing"
+    (prior behavior). The enforcing gate for this contract is the NATIVE ORACLE
+    (a relative-import-specifier split between independently-generated files
+    fails the toolchain — TS NodeNext dogfood, 2026-07-12: files disagreed on
+    whether a relative import carries its explicit ``.js`` extension and the
+    typecheck failed TS2835 ×30); this seam states the contract the gate already
+    enforces, so prompt and gate cannot drift.
+    """
+    if not project_language:
+        return None
+    lang_registry = registry if registry is not None else default_registry
+    try:
+        profile = lang_registry.resolve(project_language)
+    except UnknownLanguageError:
+        return None
+    raw = getattr(profile, "raw", None)
+    text: str | None = None
+    if isinstance(raw, Mapping):
+        imports = raw.get("imports")
+        if isinstance(imports, Mapping):
+            declared = imports.get("module_specifier_guidance")
+            if isinstance(declared, str) and declared.strip():
+                text = declared.strip()
+    if not text:
+        return None
+    return text
+
+
+def resolve_runtime_dependency_guidance(toolchain: Any) -> str | None:
+    """The implement-phase RUNTIME-dependency-declaration obligation for a stack.
+
+    A design legitimately DEFERS the concrete third-party runtime packages to
+    scaffold/implement-time, so the model first names them only when it writes
+    ``import <pkg>``. The scaffold writes ONLY the harness-owned TEST TOOLCHAIN
+    into the dependency manifest; nothing tells the model to declare the runtime
+    packages it chose. Without this obligation the model imports a runtime
+    package it legitimately picked yet omits it from the manifest, and the
+    implement-time typecheck cannot resolve the import (S3 StockRoom-mini TS
+    greenfield dogfood 2026-07-12: ``import express`` / ``import better-sqlite3``
+    in ``src/`` with neither declared in ``package.json`` → TS2307 ×2). The
+    manifest-acceptance pipeline already consumes a SUT-declared manifest end to
+    end (root-artifact accept + non-clobber scaffold + the
+    ``dependency_lock_coherence`` refresh, which touches only the toolchain
+    region and leaves the SUT runtime-dep region free); the ONLY missing piece is
+    telling the model to fill its own region.
+
+    The single per-ecosystem datum is ``toolchain.manifest_filename`` (the
+    :class:`codd.project_types.ToolchainDependencyProfile` field), DATA-PROJECTED
+    into the prose so this generalizes to npm/pip/cargo/… with no core edit and
+    no framework or package name hardcoded. The RUNTIME-vs-toolchain section
+    split is stated generically ("the runtime-dependency section") — the model
+    maps it to its manifest's concrete key. Returns ``None`` — append nothing —
+    when *toolchain* is ``None`` (a manifest-less stack such as Python/C#/Java,
+    whose ``toolchain_dependencies`` is ``None``) or declares no manifest,
+    exactly the same opt-in guard as the other prompt-block resolvers.
+    """
+    manifest = getattr(toolchain, "manifest_filename", None) if toolchain is not None else None
+    if not isinstance(manifest, str) or not manifest.strip():
+        return None
+    manifest_name = manifest.strip()
+    return (
+        "RUNTIME DEPENDENCY DECLARATION (release-blocking — the implement-time "
+        "typecheck resolves every import against the project's declared "
+        "dependencies; an imported package the manifest never declares fails to "
+        "resolve and counts as a failed verification, never a passing one):\n"
+        f"- Any third-party RUNTIME package you import from source (not a language "
+        f"builtin/standard library, not a first-party module of this project, and "
+        f"not the test toolchain the scaffold already provides) MUST be declared, "
+        f"with a version range, in the runtime-dependency section of this "
+        f"project's dependency manifest (`{manifest_name}`).\n"
+        "- The scaffold writes ONLY the test toolchain into that manifest; "
+        "declaring the runtime packages you import is your responsibility. Add "
+        "each one with a sane, currently-published version range, and leave the "
+        "test-toolchain section the scaffold owns untouched."
+    )
+
+
 def resolve_language_contract(
     config: Mapping[str, Any] | None,
     *,

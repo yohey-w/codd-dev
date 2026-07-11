@@ -13,6 +13,49 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.33.0] - 2026-07-12 — S3-mini R&D yield: circulate contract at signature granularity + 2 companion generality fixes
+
+First yield of the S3 real-service-scale greenfield R&D (`dogfood/s3_goal.md`). The S3 StockRoom-mini
+calibration burn (a ~40-file TypeScript web service) stopped honestly at the implement-time native-oracle
+(typecheck) gate — anti-false-green working as designed — and the stop surfaced **one general class plus two
+companion fixes**, all generality-first (no `language ==` in core, no framework literal in core logic),
+red-before-green, with the native oracle remaining the only judge. Design ruling:
+`dogfood/fable5_reply_2026-07-12_s3-interface-contract.md`.
+
+- **Cross-artifact signature coherence (the general class): "convergence granularity ≤ circulated contract
+  granularity."** Independently-generated units converge on a shared emergent surface only to the granularity
+  of the contract information that circulates in the generation/repair loop. Producer *names* circulated (so
+  consumers converged on them), but producer *signatures* were delivered nowhere — so consumers each re-invented
+  the shape of a shared interface (e.g. one test called `handle.request({...})` while the producer declared
+  `request(method, path, options)`), and the repair loop oscillated instead of shrinking. Fix: raise the
+  delivery granularity to match the implement prompt's existing "signatures … VERBATIM" promise, without any
+  new artifact/node/gate.
+  - `codd/llm/templates/plan_derive_meta.md`: pin the semantics of a task's `dependencies` as the build/run
+    **import/include/invoke** edge (including the in-process harness a test drives), not merely a conceptual
+    "follows" edge. Template change auto-invalidates the plan-deriver prompt cache.
+  - `codd/implementer.py` (`_dependency_artifact_files_context`): add a third producer source that measures the
+    consumer's **actual on-disk imports** and reverse-looks-up the owning task (accurate at repair time, where
+    the oscillation lives). Two-tier dependency-artifact budget with a **distance-1 signature floor** invariant —
+    a consumer prompt always carries its distance-1 producer surface at signature granularity or above; on
+    overflow the tier degrades to signatures (never below) and emits budget telemetry (no silent cap).
+  - `codd/implement_oracle_scope.py` / `codd/implement_oracle.py`: new `render_public_surface` signature-level
+    renderer (extension-dispatched; a language without a renderer preserves prior behavior), wired into both the
+    dependency-artifact degradation path and the exporter-surface repair feedback. Ladder:
+    signature → names → paths → None.
+- **TypeScript module-specifier coherence contract** (companion; mirrors the v3.31.0 C# namespace contract):
+  under NodeNext/Node16, independently-generated files split on the relative-import `.js` extension convention
+  (some emit `./x.js`, some `./x`) → TS2835. Profile-declared `imports.module_specifier_guidance` resolved
+  through `resolve_module_specifier_guidance` and injected at both the generation and implement prompt stages;
+  the native typecheck stays the enforcing gate.
+- **Runtime-dependency manifest completeness** (companion): the SUT legitimately imports a spec-permitted
+  third-party runtime package but the generated manifest declared only the test toolchain → TS2307. Added a
+  runtime-dependency-declaration obligation to the implement prompt (`resolve_runtime_dependency_guidance`,
+  data-projected from the toolchain profile's manifest filename — no package/framework hardcode in core), so the
+  model declares the runtime packages it imports; the existing lock-refresh/materialize pipeline consumes them.
+
+The StockRoom-mini burn is an internal calibration run (R&D), **not** an evidence/marketing claim, and moves no
+conversion (K) or money (M) ledger gate.
+
 ## [3.32.1] - 2026-07-11 — Docs: Top-6 greenfield campaign CUT (all six languages ②b green)
 
 Documentation-only release marking the Top-6 Language Greenfield Campaign complete. With v3.32.0

@@ -16,6 +16,11 @@ Each task object must match this schema:
   "dependencies": ["other_task_id"]
 }
 
+Define `dependencies` precisely: dependencies = every task whose expected_outputs
+this task's own outputs will import, include, or invoke at build/run time —
+including the in-process entrypoint or harness surface a test file drives — not
+merely tasks it conceptually verifies or follows.
+
 Apply the V-model:
 - requirement layer tasks focus on acceptance evidence.
 - basic layer tasks focus on integrated behavior and boundaries.

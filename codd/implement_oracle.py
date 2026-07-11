@@ -540,14 +540,27 @@ def _exporter_surface_block(result: ImplementOracleResult, project_root: Path) -
         return ""
     surfaces: dict[str, list[str]] = {}
     owners: dict[str, list[str]] = {}
+    signatures: dict[str, str] = {}
     try:
         from codd.implement_oracle_scope import (
             exporter_surface_for_diagnostics,
+            render_public_surface,
             symbol_owners_for_diagnostics,
         )
 
         surfaces = exporter_surface_for_diagnostics(result.diagnostics, project_root)
         owners = symbol_owners_for_diagnostics(result.diagnostics, project_root)
+        # Raise the #1 anti-oscillation lever from NAMES to SIGNATURES (Fable5 S3
+        # Root B): a name list cannot disambiguate a call SHAPE, so shape errors
+        # (TS2554/TS2353/TS2339) re-guess instead of reconciling. A signature slice
+        # brings them into the reconcilable set; absent a renderer we keep names.
+        for path in surfaces:
+            try:
+                rendered = render_public_surface(path, project_root)
+            except Exception:  # noqa: BLE001 — signature enrichment is best-effort.
+                rendered = None
+            if rendered:
+                signatures[path] = rendered
     except Exception:  # noqa: BLE001 — surface enrichment is best-effort.
         pass
     if not surfaces and not owners:
@@ -556,10 +569,15 @@ def _exporter_surface_block(result: ImplementOracleResult, project_root: Path) -
     if surfaces:
         lines.append(
             "CURRENT PUBLIC INTERFACE of the demanded module(s) — reconcile your "
-            "imports to these EXACT exports (do not invent members not listed):"
+            "imports to these EXACT signatures (do not invent members/shapes not listed):"
         )
         for path, names in list(surfaces.items())[:_FEEDBACK_SURFACE_CAP]:
-            if names:
+            signature = signatures.get(path)
+            if signature:
+                lines.append(f"  - `{path}` current interface (bind to these EXACT signatures):")
+                for sig_line in signature.splitlines():
+                    lines.append(f"      {sig_line}")
+            elif names:
                 shown = names[:_FEEDBACK_SURFACE_NAMES_CAP]
                 more = len(names) - len(shown)
                 suffix = f", … (+{more} more)" if more > 0 else ""

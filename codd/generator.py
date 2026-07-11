@@ -297,21 +297,29 @@ def _resolve_layout_placement_contract(
             project_root=project_root,
         )
         placement = render_layout_placement_contract(profile)
-        # NAMESPACE-coherence contract (profile-declared, {package_name}
-        # substituted) rides the same pre-rendered string: the design docs are
-        # where a namespace convention is first written down, so pinning it at
+        # NAMESPACE- and MODULE-SPECIFIER-coherence contracts (both profile-
+        # declared) ride the same pre-rendered string: the design docs are where
+        # an import/namespace convention is first written down, so pinning it at
         # GENERATE prevents the split the implement-stage oracle would otherwise
-        # only catch after the fact (csharp4 exprcalc dogfood, 2026-07-11).
-        # ""/None for every profile that doesn't declare it.
-        from codd.languages import resolve_namespace_guidance
+        # only catch after the fact. Each is ""/None for every profile that
+        # doesn't declare it, so non-declaring languages are unaffected:
+        #   * namespace       — csharp4 exprcalc dogfood 2026-07-11 (CS0234 ×34,
+        #                        {package_name}-substituted).
+        #   * module_specifier — S3 TS greenfield NodeNext dogfood 2026-07-12
+        #                        (relative imports missing `.js` → TS2835 ×30).
+        from codd.languages import (
+            resolve_module_specifier_guidance,
+            resolve_namespace_guidance,
+        )
 
+        language = project.get("language") if isinstance(project, dict) else None
         namespace = resolve_namespace_guidance(
-            project.get("language") if isinstance(project, dict) else None,
+            language,
             package_name=getattr(profile, "package_name", None),
         )
-        if namespace:
-            return f"{placement}\n\n{namespace}" if placement else namespace
-        return placement
+        module_specifier = resolve_module_specifier_guidance(language)
+        blocks = [b for b in (placement, namespace, module_specifier) if b]
+        return "\n\n".join(blocks)
     except Exception:  # noqa: BLE001 — a projection failure must never break generation.
         return ""
 
