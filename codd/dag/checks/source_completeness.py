@@ -9,10 +9,17 @@ discovery gap and a false-green risk). This is the first-class,
 The two share the pure :func:`codd.dag.builder.compute_source_completeness`, so
 the advisory and the check can never drift.
 
-Severity is fixed ``amber`` and ``block_deploy`` is fixed ``False`` — surfacing
-only. Promoting the gap to a red / deploy-blocking gate (e.g. via a tolerance
-threshold) is a NEW gate and therefore owner-gated; it is intentionally NOT done
-here (see the ``block_deploy`` note in :class:`SourceCompletenessResult`).
+Severity is ``amber`` (surfacing) up to the RED-ESCALATION thresholds granted by
+the Fable5 ruling of 2026-07-11 (the previously owner-gated promotion): when the
+gap is SYSTEMIC — ``missing >= red_min_missing`` (default 5, the small-project
+ratio-spike guard) AND ``missing/on_disk >= red_min_ratio`` (default 0.5) — the
+check escalates to red / deploy-blocking. The defaults are DATA-DERIVED from the
+②-green dogfood fleet's healthy measurements (max observed healthy state:
+java 10 missing / 31 on disk = 32.3%, where the toolchain still executes the
+inert files — a bookkeeping gap, not an execution gap), so the shipped values
+never hit a measured-healthy project (F5). Knobs:
+``dag.source_completeness.red_min_missing`` / ``red_min_ratio`` — either set to
+0 disables the escalation (prior amber-only behavior).
 
 Generality: the check carries no ``language ==`` / framework literal. The set of
 "source" suffixes is DATA (``implementation_suffixes`` / ``test_suffixes`` from
@@ -38,10 +45,10 @@ class SourceCompletenessResult:
     findings: list[str] = field(default_factory=list)
     message: str = ""
     passed: bool = True
-    # ``block_deploy`` is fixed ``False``: a source-scope gap is advisory (amber),
-    # never a deploy gate. Promoting it to red (e.g. a "> N missing files fails"
-    # threshold) introduces a NEW gate, which is owner-gated and deliberately out
-    # of scope here.
+    # ``block_deploy`` defaults ``False`` (amber, advisory). The red escalation
+    # (Fable5 ruling 2026-07-11 — the previously owner-gated promotion) sets it
+    # ``True`` only when the gap is systemic: missing >= red_min_missing AND
+    # missing/on_disk >= red_min_ratio (both data-derived; see module docstring).
     block_deploy: bool = False
     # ``status``/``skipped``/``checked_count`` mirror ``transitive_closure`` and
     # close the vacuous-pass hole: when no source file exists on disk the check
@@ -110,12 +117,55 @@ class SourceCompletenessCheck:
 
         if report.on_disk > report.node_count and report.missing:
             examples = ", ".join(report.missing[:5])
+            missing_count = len(report.missing)
             message = (
                 f"{report.on_disk} source file(s) on disk but only {report.node_count} "
-                f"source node(s) in the DAG — {len(report.missing)} file(s) are outside the "
+                f"source node(s) in the DAG — {missing_count} file(s) are outside the "
                 f"configured source scope and will be inert (e.g. {examples}). Consider "
                 f"widening source_dirs / impl_file_patterns."
             )
+
+            # RED ESCALATION (Fable5 ruling 2026-07-11): a SYSTEMIC discovery gap
+            # — both the absolute floor and the ratio must hold — fails the check
+            # and blocks deploy. Data-derived defaults (healthy ②-green max:
+            # 10/31 = 32.3%): missing >= 5 AND ratio >= 0.5. Either knob at 0
+            # disables (prior amber-only behavior).
+            esc_raw = effective_settings.get("source_completeness") if isinstance(effective_settings, dict) else None
+            esc = esc_raw if isinstance(esc_raw, dict) else {}
+            try:
+                red_min_missing = int(esc.get("red_min_missing", 5) or 0)
+            except (TypeError, ValueError):
+                red_min_missing = 5
+            try:
+                red_min_ratio = float(esc.get("red_min_ratio", 0.5) or 0.0)
+            except (TypeError, ValueError):
+                red_min_ratio = 0.5
+            ratio = missing_count / report.on_disk
+            if (
+                red_min_missing > 0
+                and red_min_ratio > 0
+                and missing_count >= red_min_missing
+                and ratio >= red_min_ratio
+            ):
+                message += (
+                    f" RED escalation: {missing_count} missing >= {red_min_missing} and "
+                    f"{ratio:.0%} of on-disk source is outside the DAG's scope "
+                    f">= {red_min_ratio:.0%} — a systemic discovery gap "
+                    f"(dag.source_completeness.red_min_missing / red_min_ratio)."
+                )
+                return SourceCompletenessResult(
+                    severity="red",
+                    findings=list(report.missing),
+                    message=message,
+                    passed=False,
+                    block_deploy=True,
+                    status="fail",
+                    skipped=False,
+                    checked_count=report.on_disk,
+                    on_disk=report.on_disk,
+                    node_count=report.node_count,
+                )
+
             return SourceCompletenessResult(
                 findings=list(report.missing),
                 message=message,

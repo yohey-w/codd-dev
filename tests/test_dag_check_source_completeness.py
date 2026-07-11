@@ -230,3 +230,80 @@ def test_warn_source_completeness_silent_when_complete(tmp_path):
         _warn_source_completeness(tmp_path, _settings(".py"), impl_nodes, {})
 
     assert not [w for w in caught if "source file(s) on disk" in str(w.message)]
+
+
+# --- (d) red escalation — Fable5 ruling 2026-07-11 (data-derived thresholds) --
+# Healthy ②-green dogfood measurements (final states): js/csharp=0 missing,
+# ts=1/12 (8.3%), cpp=1/16 (6.3%), java=10/31 (32.3% — mvn still RUNS the inert
+# tests; a DAG-bookkeeping gap, not an execution gap). Escalation therefore
+# fires only when BOTH hold: missing >= 5 (small-project ratio-spike guard) AND
+# missing/on_disk >= 0.5 (healthy max 32.3% + margin) — a systemic discovery
+# failure, never the healthy noise floor.
+
+
+def _touch_sources(tmp_path, n: int) -> None:
+    for i in range(n):
+        (tmp_path / f"f{i}.py").write_text("x = 1\n", encoding="utf-8")
+
+
+def test_red_escalation_when_missing_dominates(tmp_path):
+    from codd.dag.checks.source_completeness import SourceCompletenessCheck
+
+    _touch_sources(tmp_path, 12)
+    dag = DAG()
+    _source_node(dag, "f0.py")
+    _source_node(dag, "f1.py")  # missing 10/12 = 83% ≥ 50%, 10 ≥ 5 → RED
+
+    result = SourceCompletenessCheck(dag, tmp_path, _settings(".py")).run()
+    assert result.severity == "red"
+    assert result.passed is False
+    assert result.status == "fail"
+    assert result.block_deploy is True
+    assert "red" in result.message.lower() or "escalat" in result.message.lower()
+
+
+def test_amber_below_absolute_floor(tmp_path):
+    """missing 4/6 = 67% ratio but BELOW the absolute floor (5) → amber (the
+    small-project ratio-spike guard)."""
+    from codd.dag.checks.source_completeness import SourceCompletenessCheck
+
+    _touch_sources(tmp_path, 6)
+    dag = DAG()
+    _source_node(dag, "f0.py")
+    _source_node(dag, "f1.py")  # missing 4
+
+    result = SourceCompletenessCheck(dag, tmp_path, _settings(".py")).run()
+    assert result.severity == "amber"
+    assert result.passed is True
+    assert result.status == "warn"
+
+
+def test_amber_at_healthy_java_measurement(tmp_path):
+    """The java4 GREEN-run measurement (10 missing / 31 on disk = 32.3%) stays
+    amber — the shipped thresholds must never hit a measured-healthy state."""
+    from codd.dag.checks.source_completeness import SourceCompletenessCheck
+
+    _touch_sources(tmp_path, 31)
+    dag = DAG()
+    for i in range(21):
+        _source_node(dag, f"f{i}.py")  # missing 10/31 ≈ 32%
+
+    result = SourceCompletenessCheck(dag, tmp_path, _settings(".py")).run()
+    assert result.severity == "amber"
+    assert result.passed is True
+
+
+def test_red_escalation_can_be_disabled(tmp_path):
+    """`source_completeness.red_min_missing: 0` (or ratio 0) disables the
+    escalation — prior amber-only behavior."""
+    from codd.dag.checks.source_completeness import SourceCompletenessCheck
+
+    _touch_sources(tmp_path, 12)
+    dag = DAG()
+    _source_node(dag, "f0.py")
+    settings = _settings(".py")
+    settings["source_completeness"] = {"red_min_missing": 0}
+
+    result = SourceCompletenessCheck(dag, tmp_path, settings).run()
+    assert result.severity == "amber"
+    assert result.passed is True
