@@ -81,6 +81,7 @@ dependency edge runs gate → executor → adapters → leaf types, never back.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from pathlib import Path, PurePosixPath
 
@@ -494,8 +495,33 @@ def _parse_cpp_tool_output(
         m = _CPP_DIAG_LINE.match(line)
         if m is not None:
             severity = (m.group("severity") or "").strip().lower()
-            if severity in ("warning", "note"):
-                continue  # a warning/note is not a failure
+            if severity == "warning":
+                continue  # a warning is not a failure
+            if severity == "note":
+                # A positioned ``note:`` is CONTEXT for the PRECEDING error — the
+                # other side of a two-sided diagnostic (``previously defined
+                # here`` names the header a redefinition collides with; candidate
+                # sites for an overload miss). Attach it to the last finding's
+                # message and attribution so the repair feedback carries BOTH
+                # sides of the disagreement (cpp3 exprcalc dogfood, 2026-07-11:
+                # feedback saw only the .cpp side and oscillated). An orphan note
+                # (no preceding finding) stays noise — a note is never a failure
+                # of its own. Capped at 2 notes per finding (overload-candidate
+                # spam adds no repair signal past the first sites).
+                if findings and findings[-1].code.startswith("CPP_"):
+                    last = findings[-1]
+                    if last.message.count(": note: ") < 2:
+                        note_txt = (
+                            f"{m.group('path')}:{m.group('line')}: note: "
+                            f"{m.group('message').strip()}"
+                        )
+                        findings[-1] = dataclasses.replace(
+                            last, message=f"{last.message} [{note_txt}]"
+                        )
+                        rel_note = _cpp_rel_path(m.group("path"), project_root)
+                        if rel_note and rel_note not in failed_paths:
+                            failed_paths.append(rel_note)
+                continue
             classified = _classify_cpp_compiler_diagnostic(
                 severity, m.group("message").strip()
             )

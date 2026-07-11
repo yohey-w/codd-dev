@@ -383,3 +383,43 @@ def test_collect2_epilog_alone_is_not_benign(tmp_path: Path) -> None:
     )
     assert obs.is_clean is False
     assert obs.findings == ()
+
+
+# ── note:-context attachment — the two-sided identity of a diagnostic ─────────
+# Regression family for the cpp3 exprcalc dogfood (2026-07-11, stop-loss cycle 2):
+# g++'s ``note: previously defined here`` names the OTHER side of a redefinition
+# (the header with inline definitions), but notes were skipped wholesale, so the
+# repair feedback saw only ONE side and oscillated (add defs ↔ remove defs).
+
+
+def test_note_context_is_attached_to_preceding_error(tmp_path: Path) -> None:
+    """A positioned ``note:`` following an error is APPENDED to that finding's
+    message and its path joins failed_paths — the note is part of the
+    diagnostic's identity, never a finding of its own."""
+    out = (
+        "src/error.cpp:25:1: error: redefinition of 'exprcalc::ExprError::ExprError(std::string)'\n"
+        "In file included from src/error.cpp:9:\n"
+        "include/exprcalc/error.h:23:14: note: 'exprcalc::ExprError::ExprError(std::string)' previously defined here\n"
+    )
+    obs = _norm(_ctx(tmp_path), returncode=1, stderr=out)
+    assert obs.is_clean is False
+    assert len(obs.findings) == 1, obs.findings  # the note is NOT a separate finding
+    f = obs.findings[0]
+    assert f.code == "CPP_COMPILE_ERROR"
+    assert "previously defined here" in f.message, f.message
+    assert "error.h" in f.message, f.message
+    # both sides of the disagreement are attributed
+    assert any("error.h" in p for p in obs.failed_paths), obs.failed_paths
+    assert any("error.cpp" in p for p in obs.failed_paths), obs.failed_paths
+
+
+def test_orphan_note_is_still_skipped(tmp_path: Path) -> None:
+    """A ``note:`` with NO preceding error stays non-finding noise (a note is
+    never a failure of its own) — nonzero exit with only notes stays benign."""
+    out = (
+        "main.cpp:3:1: note: candidate function not viable\n"
+        "[100%] Built target app\n"
+    )
+    obs = _norm(_ctx(tmp_path), returncode=1, stderr=out)
+    assert obs.is_clean is True, obs
+    assert obs.findings == ()
