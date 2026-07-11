@@ -13,6 +13,47 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.27.0] - 2026-07-11 — ②b smoke stop-loss: three recognition/projection classes (java/cpp/csharp all-red triage)
+
+The fresh Java/C++/C# exprcalc greenfield smokes all terminated red on **current-core v3.26.0** —
+each a distinct *recognition/projection* class, none an architecture-level novelty (ruling:
+`dogfood/fable5_ruling_2026-07-11_smoke-stoploss.md`). All three fixes are red-before-green
+tested and verified against the actual failing dogfood artifacts.
+
+- **Scaffold defaults are now host-toolchain-clamped** (`scaffold.host_version_clamps`,
+  java.yaml + `project_types.py`) — the environment-continuation projection of toolchain
+  materialization (v3.15.0 lineage) applied to the generic-template scaffold: a profile may
+  declare a version probe (`javac -version`) for a defaults key; when the probed host major is
+  LOWER than the declared default, the scaffolded value clamps to the host (min semantics —
+  declared 21 on a JDK-17 host scaffolds 17; declared 11 stays 11). Probe failure fails OPEN
+  (declared value unchanged); a clamp is never silent (named in the scaffold detail). Without
+  this, the scaffolded pom demanded `--release 21` on a JDK-17 host and the whole run collapsed
+  (java2 dogfood). Core stays language-free: probe argv + pattern live in the profile YAML.
+- **GNU ld diagnostics now parse** (`oracle_cpp.py`) — `undefined reference to `sym'` (with or
+  without the `/usr/bin/ld:` prefix / two-line `in function` form) becomes a `missing_symbol`
+  finding carrying the SYMBOL identity, deduped per (TU, symbol); the `collect2:` epilog is a
+  parse-side summary only and deliberately NOT benign on its own (anti-false-green). Before, a
+  pure link failure had no parseable diagnostic, was mis-synthesized as `environment_build_error`,
+  and `_only_environment` aborted the repair loop (cpp2 dogfood: header-declared accessors with
+  no definitions — the repair loop never saw the 31 missing symbols).
+- **Positionless `Fatal error compiling:` now parses** (`oracle_java.py`) — parity with the C#
+  adapter's positionless `error CS####` catch: the maven-compiler-plugin fatal (e.g.
+  `error: release version 21 not supported`), which carries no `File.java:` anchor and hid
+  inside the `Failed to execute goal …` summary-echo, becomes an `EVIDENCE_OTHER` finding
+  (message-deduped across maven's wrapped + bare echo forms) instead of an opaque env red.
+- **C# generic asserts are recognized** (`vb_marker_authenticity.py`) — the marker-authenticity
+  assertion detector's regex required `(` immediately after the method name, so EVERY
+  generic-parameterized assert (`Assert.IsType<T>(…)`, `Assert.Throws<T>(…)`,
+  `Assert.Equal<int>(…)`, nested up to depth 3) was invisible: a real 5-assertion test was
+  reported as "test with NO assertion" and the bounded authenticity rework ran dry (csharp2
+  dogfood false-red, 9→4→1). The same change closes the inverse false-green: a generic
+  constant-only `Assert.Equal<int>(1, 1)` previously fail-opened to `direct` credit; it now
+  screens as `constant_direct`.
+
+Known deferred limitation (documented in the ruling): the scoped-rerun derivation layer
+(`implement_oracle_scope.py`) remains TS-only — non-TS oracle failures still rerun broad. The
+abort root-cause fixed here was the env misclassification, not the broadness.
+
 ## [3.26.0] - 2026-07-11 — Funnel-floor: two reported CLI-robustness crashes (#33, #28)
 
 The first sprint after the v3.25.0 backlog publish closes two reported crashes on
