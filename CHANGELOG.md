@@ -13,6 +13,28 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.30.0] - 2026-07-11 — The scaffolded cpp test target resolves both intra-tree include conventions
+
+The v3.28.0 cpp re-run reached the deepest point of any C++ run — the repair loop engaged
+with two-sided (note-attached) feedback and every earlier class stayed fixed — and exposed
+the next, final ambiguity: independently-generated e2e test files disagreed on the
+quoted-include convention for the SAME same-tree helper (three used file-relative
+`"helpers/expr_fixtures.h"`, two used root-relative `"tests/e2e/helpers/expr_fixtures.h"`),
+and the scaffolded CMakeLists resolved only the file-relative form → one honest
+`module_resolution_error`.
+
+- **`cpp.yaml`: the scaffolded test target declares the repo root as a PRIVATE include
+  dir** (`target_include_directories(<name>_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")`),
+  so BOTH legitimate conventions resolve and the ambiguity class is moot — a deterministic
+  scaffold DATA fix, not an LLM-behavior nudge. PRIVATE: the repo root never leaks into the
+  library's usage requirements. Red-before-green; verified against the actual cpp4 dogfood
+  tree (the one-line change takes the generated project from the include red to a 100%
+  compile-and-link of the full test binary).
+
+Milestone recorded alongside: the java4 re-run on v3.28.0 completed the full unattended
+pipeline (elicit→…→verify 46/46 VBs execution-verified→check) — **Greenfield autopilot:
+SUCCESS** — Java joins Python/TypeScript/JavaScript in the ②b column.
+
 ## [3.29.0] - 2026-07-11 — A transcription that fails the native oracle is not a transcription (csharp stop-loss cycle 2)
 
 The csharp3 re-run walked further than any prior C# run (implement fully green through the
