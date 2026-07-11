@@ -139,6 +139,22 @@ _JAVA_ERROR_SUMMARY_RE = re.compile(
     r"after the errors? )",
 )
 
+#: A POSITIONLESS fatal compiler-plugin failure. javac/maven emit it WITHOUT any
+#: ``File.java:`` anchor — canonical shapes:
+#:   * ``[ERROR] Failed to execute goal …maven-compiler-plugin…: Fatal error
+#:     compiling: error: release version 21 not supported -> [Help 1]``
+#:   * ``[ERROR] Fatal error compiling: error: invalid target release: 21``
+#: The tail after ``Fatal error compiling:`` is the authoritative message (the
+#: trailing ``-> [Help N]`` pointer is stripped). Without this catch the whole run
+#: had NO parseable diagnostic — the ``Failed to execute goal`` wrapper is
+#: summary-echo noise — and collapsed to an opaque environment_build_error that
+#: aborts the repair loop (java2 exprcalc dogfood, 2026-07-11). The C# adapter's
+#: positionless ``error CS####`` catch (``_CS_DIAG_NO_POS``) is the parity
+#: precedent for a positionless first-class diagnostic.
+_JAVA_FATAL_COMPILING_RE = re.compile(
+    r"\bFatal error compiling:\s*(?P<message>.+?)\s*(?:->\s*\[Help[^\]]*\]?\s*)?$"
+)
+
 
 # ── pure helpers ─────────────────────────────────────────────────────────────
 
@@ -209,12 +225,31 @@ def _parse_java_tool_output(
     """
     findings: list[ImplementOracleFinding] = []
     failed_paths: list[str] = []
+    seen_fatal: set[str] = set()
     for raw_line in (output or "").splitlines():
         line = raw_line.rstrip()
         if not line.strip():
             continue
         matched = _match_java_diagnostic(line)
         if matched is None:
+            # A positionless ``Fatal error compiling: …`` (toolchain-level compile
+            # failure, e.g. a --release the installed JDK cannot satisfy) is a
+            # first-class diagnostic even without a File.java anchor. Deduped by
+            # message: maven prints the same fatal in both the Failed-to-execute-
+            # goal wrapper and the bare echo form.
+            fatal = _JAVA_FATAL_COMPILING_RE.search(line)
+            if fatal is not None:
+                message = fatal.group("message").strip()
+                if message not in seen_fatal:
+                    seen_fatal.add(message)
+                    findings.append(
+                        ImplementOracleFinding(
+                            category=EVIDENCE_OTHER,
+                            code="JAVA_FATAL_COMPILING",
+                            message=f"[{tool}] Fatal error compiling: {message}",
+                            path=None,
+                        )
+                    )
             continue
         path_raw, message = matched
         category, code = _classify_java_diagnostic(message)

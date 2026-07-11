@@ -308,3 +308,78 @@ def test_regression_system_header_with_first_party_error_still_reds(tmp_path: Pa
     obs = _norm(_ctx(tmp_path), returncode=1, stderr=out)
     assert obs.is_clean is False
     assert any(f.code == "CPP_UNDECLARED" for f in obs.findings), obs.findings
+
+
+# ── linker (ld) diagnostics — undefined reference → missing_symbol ────────────
+# Regression family for the cpp2 exprcalc greenfield dogfood (2026-07-11): the
+# whole link failure collapsed to an opaque environment_build_error and the
+# repair loop aborted, because no regex recognized GNU ld's diagnostic shapes.
+
+
+def test_linker_undefined_reference_is_red_missing_symbol(tmp_path: Path) -> None:
+    """GNU ld ``undefined reference to `sym'`` lines → EVIDENCE_MISSING_SYMBOL
+    findings whose messages carry the SYMBOL identity (the repair feedback
+    channel), never an opaque env RED."""
+    out = (
+        "[ 85%] Linking CXX executable exprcalc_tests\n"
+        "/usr/bin/ld: ast_test.cpp:(.text+0x40): undefined reference to "
+        "`exprcalc::LiteralNode::value() const'\n"
+        "/usr/bin/ld: ast_test.cpp:(.text+0x275): undefined reference to "
+        "`exprcalc::BinaryNode::op() const'\n"
+        "ast_introspection_test.cpp:(.text+0x1aa): undefined reference to "
+        "`exprcalc::BinaryNode::op() const'\n"
+        "collect2: error: ld returned 1 exit status\n"
+        "gmake[2]: *** [CMakeFiles/exprcalc_tests.dir/build.make:120: exprcalc_tests] Error 1\n"
+    )
+    obs = _norm(_ctx(tmp_path), returncode=1, stderr=out)
+    assert obs.is_clean is False
+    assert obs.findings, "ld undefined-references must parse into findings, not opaque env"
+    assert all(f.category == EVIDENCE_MISSING_SYMBOL for f in obs.findings), obs.findings
+    assert all(f.code == "CPP_LD_UNDEFINED_REFERENCE" for f in obs.findings), obs.findings
+    msgs = " | ".join(f.message for f in obs.findings)
+    assert "exprcalc::LiteralNode::value() const" in msgs
+    assert "exprcalc::BinaryNode::op() const" in msgs
+    # distinct (TU, symbol) pairs are all kept: (ast_test, value), (ast_test, op),
+    # (ast_introspection_test, op)
+    assert len(obs.findings) == 3, obs.findings
+
+
+def test_linker_same_symbol_same_tu_is_deduped(tmp_path: Path) -> None:
+    """The SAME symbol missing from the SAME TU at different offsets is ONE finding
+    (ld repeats it per call site; per-site duplicates add no repair signal)."""
+    out = (
+        "/usr/bin/ld: a_test.cpp:(.text+0x1): undefined reference to `foo()'\n"
+        "/usr/bin/ld: a_test.cpp:(.text+0x2): undefined reference to `foo()'\n"
+        "collect2: error: ld returned 1 exit status\n"
+    )
+    obs = _norm(_ctx(tmp_path), returncode=1, stderr=out)
+    assert obs.is_clean is False
+    assert len(obs.findings) == 1, obs.findings
+    assert obs.findings[0].code == "CPP_LD_UNDEFINED_REFERENCE"
+
+
+def test_linker_in_function_context_form_is_parsed(tmp_path: Path) -> None:
+    """The two-line ld form (``…o: in function `main':`` then the positioned
+    undefined-reference) parses the reference and treats the in-function line as
+    context, not an unaccounted opaque line."""
+    out = (
+        "/usr/bin/ld: CMakeFiles/app.dir/main.cpp.o: in function `main':\n"
+        "main.cpp:(.text+0x12): undefined reference to `foo()'\n"
+        "collect2: error: ld returned 1 exit status\n"
+    )
+    obs = _norm(_ctx(tmp_path), returncode=1, stderr=out)
+    assert obs.is_clean is False
+    assert any(
+        f.code == "CPP_LD_UNDEFINED_REFERENCE" and "foo()" in f.message for f in obs.findings
+    ), obs.findings
+
+
+def test_collect2_epilog_alone_is_not_benign(tmp_path: Path) -> None:
+    """Anti-false-green guard: ``collect2: error: ld returned 1 exit status`` with NO
+    accompanying diagnostic stays an opaque RED (is_clean=False, empty findings →
+    executor synthesizes environment_build_error) — never a benign pass."""
+    obs = _norm(
+        _ctx(tmp_path), returncode=1, stderr="collect2: error: ld returned 1 exit status\n"
+    )
+    assert obs.is_clean is False
+    assert obs.findings == ()

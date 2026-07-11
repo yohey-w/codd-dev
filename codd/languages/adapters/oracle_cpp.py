@@ -214,6 +214,37 @@ _CPP_HEADER_NOT_FOUND_CLANG = re.compile(
     r"^'(?P<header>[^']+)'\s+file not found\b"
 )
 
+#: GNU ld's undefined-reference diagnostic — the LINK-time analogue of the
+#: undeclared-symbol family (an implementation artifact fails to DEFINE a symbol
+#: another artifact demands). Two shapes, both anchored on the message tail:
+#:   * ``/usr/bin/ld: file.cpp:(.text+0x40): undefined reference to `sym'``
+#:   * ``file.cpp:(.text+0x40): undefined reference to `sym'``   (no ld prefix)
+#: The referencing TU (``file.cpp``) and the SYMBOL are captured: the symbol is the
+#: repair-feedback identity (WHAT is missing), the TU the best-available file
+#: attribution (WHO demands it). lld/mold keep the same message tail. Without this
+#: regex a pure link failure had NO parseable diagnostic and collapsed to an opaque
+#: environment_build_error, aborting the repair loop (cpp2 exprcalc dogfood,
+#: 2026-07-11).
+_CPP_LD_UNDEFINED_RE = re.compile(
+    r"^(?:\S*ld(?:\.\w+)?:\s*)?"
+    r"(?:(?P<path>[^\s:][^:\n]*\.(?:h|hpp|hh|hxx|c|cc|cpp|cxx|cppm|ixx)):\(\S*\):\s*)?"
+    r"undefined reference to [`'](?P<symbol>[^']+)'"
+)
+
+#: ld's two-line context header (``…/main.cpp.o: in function `main':``) — context
+#: for the positioned undefined-reference that follows, never a diagnostic itself.
+_CPP_LD_CONTEXT_RE = re.compile(
+    r"^(?:\S*ld(?:\.\w+)?:\s*)?\S+\.o(?:bj)?:\s*in function\s"
+)
+
+#: collect2's sign-off (``collect2: error: ld returned 1 exit status``) — a SUMMARY
+#: epilog after the explicit ld error lines above it. Skipped in PARSING only (the
+#: undefined-reference findings are the authority); deliberately NOT recognized in
+#: the benign-accounting path, so a collect2 line with NO accompanying parsed
+#: diagnostic stays an honest opaque RED (anti-false-green — same reasoning as the
+#: ``ninja:`` note above).
+_CPP_LD_EPILOG_RE = re.compile(r"^collect2:\s*(?:fatal error|error):\s*ld returned")
+
 #: cmake progress / informational chatter that is NOT a failure — the C++ analogue
 #: of Go's ``# pkg`` headers + ``ok``/``?`` run-summary noise. ``--`` status lines
 #: (``-- Configuring done``, ``-- Detecting C compiler ...``, ``-- Build files have
@@ -412,6 +443,7 @@ def _parse_cpp_tool_output(
     """
     findings: list[ImplementOracleFinding] = []
     failed_paths: list[str] = []
+    seen_ld_refs: set[tuple[str | None, str]] = set()
 
     def _add(category: str, code: str, message: str, rel: str | None) -> None:
         findings.append(
@@ -436,6 +468,28 @@ def _parse_cpp_tool_output(
             or _CPP_MAKE_CHATTER_RE.match(line)
         ):
             continue
+
+        # ld undefined-reference → missing_symbol, deduped per (TU, symbol): ld
+        # repeats the same reference once per call site; per-site duplicates add
+        # no repair signal. The symbol identity rides the message (feedback).
+        ld = _CPP_LD_UNDEFINED_RE.match(line)
+        if ld is not None:
+            symbol = ld.group("symbol").strip()
+            raw_path = ld.group("path")
+            rel = _cpp_rel_path(raw_path, project_root) if raw_path else None
+            key = (rel, symbol)
+            if key not in seen_ld_refs:
+                seen_ld_refs.add(key)
+                _add(
+                    EVIDENCE_MISSING_SYMBOL,
+                    "CPP_LD_UNDEFINED_REFERENCE",
+                    f"undefined reference to `{symbol}' (link-time; referenced "
+                    f"from {rel or 'unknown TU'})",
+                    rel,
+                )
+            continue
+        if _CPP_LD_CONTEXT_RE.match(line) or _CPP_LD_EPILOG_RE.match(line):
+            continue  # ld context / collect2 epilog — the reference lines above are the authority
 
         m = _CPP_DIAG_LINE.match(line)
         if m is not None:

@@ -275,3 +275,46 @@ def test_benign_accounting_is_not_blanket_no_findings(tmp_path: Path) -> None:
     obs = _norm(_ctx(tmp_path), returncode=1, stderr=out)
     assert obs.is_clean is False
     assert obs.findings == ()  # opaque → executor escalates to environment_build_error
+
+
+# ── positionless fatal compiler errors (maven-compiler-plugin) ────────────────
+# Regression family for the java2 exprcalc greenfield dogfood (2026-07-11): a pom
+# targeting ``release 21`` on a JDK-17 host failed with a POSITIONLESS
+# ``Fatal error compiling: error: release version 21 not supported`` inside the
+# ``[ERROR] Failed to execute goal …`` line; no regex saw it, so the run collapsed
+# to an opaque environment_build_error and the repair loop aborted after 1 attempt.
+
+
+def test_fatal_error_compiling_positionless_is_red_other(tmp_path: Path) -> None:
+    out = (
+        "[INFO] BUILD FAILURE\n"
+        "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:"
+        "3.13.0:compile (default-compile) on project exprcalc: Fatal error compiling: "
+        "error: release version 21 not supported -> [Help 1]\n"
+        "[ERROR] \n"
+        "[ERROR] Re-run Maven using the -X switch to enable full debug logging.\n"
+    )
+    obs = _norm(_ctx(tmp_path), returncode=1, stderr=out)
+    assert obs.is_clean is False
+    assert any(
+        f.code == "JAVA_FATAL_COMPILING" and f.category == EVIDENCE_OTHER
+        for f in obs.findings
+    ), obs.findings
+    msgs = " | ".join(f.message for f in obs.findings)
+    assert "release version 21 not supported" in msgs
+
+
+def test_fatal_error_compiling_bare_error_line_is_red(tmp_path: Path) -> None:
+    """The bare ``[ERROR] Fatal error compiling: …`` echo (without the
+    Failed-to-execute-goal wrapper) is ALSO a finding, and is deduped against the
+    wrapped form when both appear (maven prints both shapes in one run)."""
+    out = (
+        "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:"
+        "3.13.0:compile (default-compile) on project exprcalc: Fatal error compiling: "
+        "error: release version 21 not supported -> [Help 1]\n"
+        "[ERROR] Fatal error compiling: error: release version 21 not supported\n"
+    )
+    obs = _norm(_ctx(tmp_path), returncode=1, stderr=out)
+    assert obs.is_clean is False
+    fatal = [f for f in obs.findings if f.code == "JAVA_FATAL_COMPILING"]
+    assert len(fatal) == 1, obs.findings
