@@ -83,6 +83,31 @@ FIXTURES: dict[str, str] = {
         "    }\n"
         "}\n"
     ),
+    # Generic-parameterized asserts ONLY (no non-generic assert anywhere in the
+    # body). Regression fixture for the csharp2 exprcalc dogfood false-red where
+    # `Assert.IsType<T>(...)` was reported as "test with NO assertion".
+    "real_generic_assert_only": (
+        "using Xunit;\n\n"
+        "public class XTests {\n"
+        f"    {_MARKER}\n"
+        "    [Fact]\n"
+        "    public void X() {\n"
+        "        var ex = Record.Exception(() => Run());\n"
+        "        Assert.IsType<ParseError>(ex);\n"
+        "        Assert.IsNotType<LexError>(ex);\n"
+        "    }\n"
+        "}\n"
+    ),
+    "real_throws_generic_only": (
+        "using Xunit;\n\n"
+        "public class XTests {\n"
+        f"    {_MARKER}\n"
+        "    [Fact]\n"
+        "    public void X() {\n"
+        "        Assert.Throws<DivideByZeroException>(() => Divide(1, 0));\n"
+        "    }\n"
+        "}\n"
+    ),
 }
 
 #: (is_executable, has_assertion) the parser MUST report for each fixture's block.
@@ -91,6 +116,8 @@ _EXPECTED_BLOCK_FACTS: dict[str, tuple[bool, bool]] = {
     "fake_constant_only": (True, True),
     "fake_skipped": (False, True),
     "real_covering": (True, True),
+    "real_generic_assert_only": (True, True),
+    "real_throws_generic_only": (True, True),
 }
 
 
@@ -263,6 +290,11 @@ def test_parse_never_raises_on_garbage():
         ("Assert.Equal(5, Add(2, 3));", "direct", True),  # references Add
         ("Assert.True(result.IsValid());", "direct", True),  # references result
         ("Assert.AreEqual(expected, actual);", "direct", True),  # NUnit, references vars
+        ("Assert.IsType<ParseError>(ex);", "direct", True),  # generic assert, real var
+        ("Assert.Throws<DivideByZeroException>(() => Divide(1, 0));", "direct", True),
+        # nested generic type argument (depth 2)
+        ("Assert.IsType<Dictionary<string, List<int>>>(Build());", "direct", True),
+        ("Assert.Equal<int>(1, 1);", "constant_direct", False),  # generic, constant-only
     ],
 )
 def test_resolve_direct_assertion_evidence(body, expected_reason, expected_ok):
@@ -335,6 +367,8 @@ def _run_gate(tmp_path: pathlib.Path, case_name: str) -> bool:
         ("fake_constant_only", False),
         ("fake_skipped", False),
         ("real_covering", True),
+        ("real_generic_assert_only", True),
+        ("real_throws_generic_only", True),
     ],
 )
 def test_end_to_end_gate_verdicts(tmp_path, case_name, expected_passed):

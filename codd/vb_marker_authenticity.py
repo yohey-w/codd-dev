@@ -3488,8 +3488,19 @@ _CSHARP_SKIP_ARG_RE = re.compile(r"\bSkip\s*=")
 #: ``(?<![A-Za-z0-9_.])`` so a member access ``foo.Assert.X`` (an unrelated SUT
 #: type that happens to expose an ``Assert`` member) does not masquerade as the
 #: framework's static ``Assert``.
+#: Optional generic type-argument list between the method name and ``(`` —
+#: ``Assert.IsType<ParseError>(x)``, ``Assert.Throws<T>(() => …)``, nested up to
+#: depth 3 (``Assert.IsType<Dictionary<string, List<int>>>(x)``). ``;{}`` are
+#: excluded so a malformed ``<`` can never swallow past a statement boundary.
+#: Without this, generic-only asserts were reported as "test with NO assertion"
+#: (false-RED observed on the csharp exprcalc greenfield dogfood, 2026-07-11).
+_CSHARP_GENERIC_ARGS = (
+    r"<[^<>;{}]*(?:<[^<>;{}]*(?:<[^<>;{}]*>[^<>;{}]*)*>[^<>;{}]*)*>"
+)
 _CSHARP_ASSERT_CALL_RE = re.compile(
-    r"(?<![A-Za-z0-9_.])Assert\.[A-Z][A-Za-z0-9_]*\s*\("
+    r"(?<![A-Za-z0-9_.])Assert\.[A-Z][A-Za-z0-9_]*\s*(?:"
+    + _CSHARP_GENERIC_ARGS
+    + r")?\s*\("
 )
 
 
