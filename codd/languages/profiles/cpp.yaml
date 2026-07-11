@@ -318,6 +318,14 @@ scaffold:
         file(GLOB_RECURSE CODD_TEST_SOURCES CONFIGURE_DEPENDS "tests/*.cpp" "tests/*.cc" "tests/*.cxx")
         if(CODD_TEST_SOURCES)
           add_executable({package_name}_tests ${CODD_TEST_SOURCES})
+          # Repo root as a PRIVATE include dir of the TEST target only: BOTH
+          # intra-tree quoted-include conventions resolve — file-relative
+          # ("helpers/x.h", the compiler's local lookup) AND root-relative
+          # ("tests/e2e/helpers/x.h"). Independently-generated test files
+          # legitimately disagree on that convention; the scaffolded build makes
+          # the ambiguity class moot. PRIVATE — never a usage requirement of the
+          # library target.
+          target_include_directories({package_name}_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
           target_link_libraries({package_name}_tests PRIVATE GTest::gtest_main)
           if(TARGET {package_name})
             target_link_libraries({package_name}_tests PRIVATE {package_name})

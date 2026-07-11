@@ -322,3 +322,22 @@ def test_cpp_verify_argv_output_junit_path_matches_report_path(
     )
     assert cpp.commands["verify"].report is not None
     assert cpp.commands["verify"].report.path == "build/ctest-junit.xml"
+
+
+def test_cpp_scaffold_test_target_has_repo_root_include_dir(tmp_path: Path) -> None:
+    """The TEST target declares the repo root as a PRIVATE include dir, so BOTH
+    intra-tree quoted-include conventions resolve — file-relative
+    (``"helpers/x.h"``) via the compiler's local lookup AND root-relative
+    (``"tests/e2e/helpers/x.h"``). Independently-generated test files legitimately
+    disagree on the convention (cpp4 exprcalc dogfood, 2026-07-11: 3 files used
+    one form, 2 the other → module_resolution_error) — the scaffolded build makes
+    the ambiguity CLASS moot instead of policing the model's choice. PRIVATE: the
+    repo root must never leak into the library's usage requirements."""
+    profile = resolve_layout_profile(language="cpp", project_name="todo-cli")
+    assert profile is not None
+    scaffold_layout(tmp_path, profile)
+    body = (tmp_path / "CMakeLists.txt").read_text(encoding="utf-8")
+    assert (
+        'target_include_directories(todo_cli_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")'
+        in body
+    ), body
