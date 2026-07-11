@@ -149,6 +149,28 @@ def test_csharp_verify_report_adapter_is_dotnet_trx(registry: LanguageRegistry) 
     assert cs.tests.runner_report_adapter == "dotnet-trx"
 
 
+def test_csharp_verify_report_does_not_capture_stdout(registry: LanguageRegistry) -> None:
+    """dotnet's `--logger trx` WRITES the .trx FILE itself, so the verify report is
+    a FILE-writing runner (like Java surefire / C++ ctest-junit, both capture:none)
+    — NOT a stdout-streaming one (like `go test -json`). A `capture: stdout` here
+    makes the executor OVERWRITE the real TRX XML at report.path with the console
+    stdout, so the dotnet-trx adapter reads non-XML and verify false-reds even
+    though every test passed (csharp5 exprcalc dogfood, 2026-07-11: 97/0 green SUT,
+    verify FAILED on 'test.trx not parseable XML')."""
+    cs = registry.resolve("csharp")
+    # The plan builder reads the COMMAND-level report block (commands.verify.report);
+    # that is the block whose capture drove the executor to overwrite the real TRX.
+    verify_cmd = cs.commands["verify"]
+    assert verify_cmd.report is not None
+    assert (verify_cmd.report.capture or "none").lower() != "stdout", (
+        "csharp verify writes its TRX via --logger; capturing stdout to the same "
+        "path clobbers the real XML"
+    )
+    # The top-level verify.report block must be consistent (already None today).
+    if cs.verify is not None and cs.verify.report is not None:
+        assert (cs.verify.report.capture or "none").lower() != "stdout"
+
+
 # ── bundled-file sanity ────────────────────────────────────────────────────────
 
 

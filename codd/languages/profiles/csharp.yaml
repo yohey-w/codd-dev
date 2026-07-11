@@ -186,7 +186,13 @@ commands:
     argv: ["dotnet", "test", "--logger", "trx;LogFileName=test.trx", "--results-directory", "TestResults"]
     cwd: "{module_root}"
     report:
-      capture: stdout
+      # capture: none — dotnet's `--logger trx` WRITES the .trx FILE itself (a
+      # file-writing runner, like Java surefire / C++ ctest-junit; NOT a
+      # stdout-streaming one like `go test -json`). `capture: stdout` made the
+      # executor OVERWRITE the real TRX XML at report.path with the console
+      # stdout, so the dotnet-trx adapter read non-XML and verify false-red'd
+      # even with a 97/0 green SUT (csharp5 exprcalc dogfood, 2026-07-11).
+      capture: none
       path: "TestResults/test.trx"
       format: dotnet-trx
       adapter: dotnet-trx
