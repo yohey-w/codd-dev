@@ -1108,3 +1108,101 @@ def test_ensure_canonical_vb_doc_skipped_when_coverage_gate_off():
     out = planner_module._ensure_canonical_vb_doc_planned(config, wave_config, _REQ_DOCS)
     assert len([e for ents in out.values() for e in ents if e.get("node_id") == "test:test-strategy"]) == 0
     assert out == wave_config
+
+
+# ---------------------------------------------------------------------------
+# VB → task coverage-closure synthesis (plan-stage). `_ensure_canonical_vb_doc_planned`
+# only guarantees the registry DOCUMENT is planned; this extends the guarantee by one
+# level — every DECLARED VB must be CLAIMABLE by some derived task (a task whose declared
+# test outputs own the VB's declared owner test file). VBs no task can claim (cross-cutting
+# suite-level / static-source / universally-quantified invariants that map to no module) are
+# RESIDUAL, and a single cross-cutting test-authoring task is synthesized to own exactly them.
+# Reproduces the 2026-07 S3 StockRoom-mini burn: 10 declared VBs left with no owning task.
+# ---------------------------------------------------------------------------
+
+from codd.verifiable_behavior_audit import VerifiableBehavior  # noqa: E402
+
+_VB_CFG = {"scan": {"source_dirs": ["src/"], "test_dirs": ["tests/"]}}
+
+
+def _vb(vb_id, owner, desc="behaves"):
+    """A declared VB whose registry row names ``owner`` as its owning test file(s)."""
+    return VerifiableBehavior(vb_id=vb_id, description=desc, source_doc="docs/test/test_strategy.md", declared_scenarios=owner)
+
+
+def test_vb_closure_synthesizes_task_owning_exactly_residual_vbs():
+    behaviors = [
+        _vb("VB-01", "`tests/mod_a/create.test.ts`"),          # authored by a task → claimable
+        _vb("VB-06", "`tests/e2e/error-envelope.e2e.test.ts`"),  # no task authors it → residual
+        _vb("VB-38", "`tests/architecture/dependency-manifest.test.ts`"),  # residual
+    ]
+    task_expected_outputs = [
+        ["src/mod_a/create.ts", "tests/mod_a/create.test.ts"],  # authors VB-01's owner
+        ["docs/test/test_strategy.md"],                          # the doc-only registry task (authors no test)
+    ]
+    closure = planner_module.synthesize_vb_coverage_closure_task(
+        behaviors, task_expected_outputs, config=_VB_CFG
+    )
+    assert closure is not None
+    # Owns EXACTLY the residual VBs — not the module-claimed one.
+    assert set(closure.owned_vb_ids) == {"VB-06", "VB-38"}
+    # Authors the residual VBs' declared owner test files (write target = test surface).
+    assert "tests/e2e/error-envelope.e2e.test.ts" in closure.expected_outputs
+    assert "tests/architecture/dependency-manifest.test.ts" in closure.expected_outputs
+    assert all(".ts" in out for out in closure.expected_outputs)
+    # Design node = the canonical registry doc so the implement prompt reads it.
+    assert closure.design_node == "docs/test/test_strategy.md"
+    # Prompt carries the residual VB ids so the implementer emits their `covers vb=` markers.
+    assert "VB-06" in closure.description and "VB-38" in closure.description
+    assert "VB-01" not in closure.description
+
+
+def test_vb_closure_no_task_when_all_vbs_claimable():
+    """GENERALITY: when every declared VB's owner test file is authored by some
+    derived task, there is no residual — no closure task is synthesized."""
+    behaviors = [
+        _vb("VB-01", "`tests/mod_a/create.test.ts`"),
+        _vb("VB-02", "`tests/mod_b/read.test.ts`"),
+    ]
+    task_expected_outputs = [
+        ["src/mod_a/create.ts", "tests/mod_a/create.test.ts"],
+        ["src/mod_b/read.ts", "tests/mod_b/read.test.ts"],
+    ]
+    closure = planner_module.synthesize_vb_coverage_closure_task(
+        behaviors, task_expected_outputs, config=_VB_CFG
+    )
+    assert closure is None
+
+
+def test_vb_closure_no_task_when_vbs_declare_no_owner_file():
+    """No-regression: a registry with no owner-file column (VB rows name no test
+    file) yields no residual — we never force-synthesize for VBs we cannot prove
+    are orphaned (else every legacy project would gain a redundant task)."""
+    behaviors = [
+        _vb("VB-01", "scenario: happy path returns 200"),
+        _vb("VB-02", "scenario: bad input returns 400"),
+    ]
+    closure = planner_module.synthesize_vb_coverage_closure_task(
+        behaviors, [["src/app.ts", "tests/app.test.ts"]], config=_VB_CFG
+    )
+    assert closure is None
+
+
+def test_vb_closure_glob_owner_is_residual():
+    """A suite-level glob owner (`tests/e2e/*.e2e.test.ts`) names an owner intent
+    but matches no single authored file → residual (this is the universally-
+    quantified/harness-level VB shape that has no module owner)."""
+    behaviors = [_vb("VB-37", "Every e2e file uses startEphemeralApp — `tests/e2e/*.e2e.test.ts`")]
+    closure = planner_module.synthesize_vb_coverage_closure_task(
+        behaviors, [["tests/mod_a/create.test.ts"]], config=_VB_CFG
+    )
+    assert closure is not None
+    assert set(closure.owned_vb_ids) == {"VB-37"}
+
+
+def test_vb_closure_skipped_when_coverage_gate_off():
+    behaviors = [_vb("VB-06", "`tests/e2e/error-envelope.e2e.test.ts`")]
+    closure = planner_module.synthesize_vb_coverage_closure_task(
+        behaviors, [["docs/test/test_strategy.md"]], config={"test_coverage": {"gate": False}}
+    )
+    assert closure is None

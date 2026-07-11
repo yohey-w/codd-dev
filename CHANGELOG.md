@@ -13,6 +13,36 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.34.0] - 2026-07-12 — S3-mini R&D yield #2: plan-time VB-coverage closure (every declared behavior gets an owning task)
+
+Second yield of the S3 real-service-scale greenfield R&D. With v3.33.0's implement-time typecheck classes
+cleared, the StockRoom-mini re-burn advanced past the typecheck gate and honest-stopped one gate later — the
+verifiable-behavior (VB) coverage gate — with 10 of 41 declared VBs carrying no `codd: covers vb=` marker after
+all implement tasks completed. Root cause was **plan-stage**, not implement: those 10 VBs (static-source/manifest
+invariants, suite-level meta-completeness assertions, and universally-quantified cross-route invariants) are
+structurally cross-cutting and were never decomposed into an owning test-authoring task — so no task could ever
+emit their marker, and the coverage gate's own repair loop was inert (it re-ran only the no-authoring registry
+task). Generality-first, red-before-green, and the coverage gate itself is unchanged (still fails closed).
+
+- **Plan-time VB→task coverage closure** (`codd/planner.py`): new `synthesize_vb_coverage_closure_task`
+  extends the existing "the VB registry document is planned" guarantee by one level — after task derivation it
+  diffs the declared VBs against the VBs claimable by any derived task (a task whose `expected_outputs` contain
+  the VB's owning test file) and, for the residual set, synthesizes one cross-cutting test-authoring task that
+  owns exactly those VBs (design-node = the canonical registry doc; prompt = the residual VB rows + owner-file
+  appendix + the standard determinism/isolation harness contract). Reuses the existing VB parse/audit path; no
+  new gate or first-class concept. When every declared VB is already claimable, nothing is synthesized
+  (no-regression for projects whose behaviors all map to a source module).
+- **Derive-stage wiring** (`codd/greenfield/pipeline.py`): `_enforce_vb_coverage_closure` runs in the implement
+  stage before the per-task loop and the coverage-gate wiring, so the synthesized task is both implemented and
+  visible to the gate's rerun scope.
+- **Repair-loop de-inerting** (`codd/vb_rerun_scope.py`): when the gate's stage-1 rerun scope resolves only to
+  a no-authored-artifact task (the doc-only registry task, whose `test_strategy.md` filename misleadingly matches
+  the test-task heuristic), it is dropped and the scope falls through to the tasks that actually author test
+  files — the precise reactive path for the exact uncovered set, write-fenced to the test surface.
+
+Surfaced by the same StockRoom-mini calibration burn (internal R&D, **not** an evidence/marketing claim); moves
+no conversion (K) or money (M) ledger gate.
+
 ## [3.33.0] - 2026-07-12 — S3-mini R&D yield: circulate contract at signature granularity + 2 companion generality fixes
 
 First yield of the S3 real-service-scale greenfield R&D (`dogfood/s3_goal.md`). The S3 StockRoom-mini

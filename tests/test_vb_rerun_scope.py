@@ -169,3 +169,59 @@ def test_scope_uses_path_resolver_for_tasks_without_inline_paths():
     )
     assert scope.rung == SCOPE_VB_TARGETED
     assert "tests/derived" in scope.allowed_paths
+
+
+def test_scope_falls_through_when_doc_matches_only_no_authored_artifact_task():
+    """Un-inert the repair loop (2026-07 S3 StockRoom-mini burn).
+
+    The canonical registry task (design_node ``docs/test/test_strategy.md``,
+    expected_outputs = the DOC itself) is classified a "test task" by its node,
+    and stage-1 doc-matching resolves to it because its node IS the uncovered VB
+    source doc. But it authors NO test file — a rerun of it is inert ("scope
+    contained only no-authored-artifact task(s) — nothing to repair"), so the
+    residual VBs never get authored. The scope must DROP the doc-only task and
+    fall through to the test tasks that actually author test files.
+    """
+    tasks = [
+        # The doc-only canonical registry task — matches the uncovered doc but authors nothing.
+        _Task(
+            "document_test_strategy",
+            design_node="docs/test/test_strategy.md",
+            output_paths=("docs/test/test_strategy.md",),
+            expected_outputs=("docs/test/test_strategy.md",),
+        ),
+        # A real test-authoring task (does NOT match the uncovered doc by node).
+        _Task(
+            "products_http",
+            design_node="docs/detailed_design/product_catalog_module.md",
+            output_paths=("tests/products/create.test.ts",),
+            expected_outputs=("src/products/http.ts", "tests/products/create.test.ts"),
+        ),
+    ]
+    scope = derive_vb_rerun_scope(["docs/test/test_strategy.md"], tasks, config=CONFIG)
+    # Falls through to the authoring test task; the inert doc-only task is dropped.
+    assert "document_test_strategy" not in scope.task_ids
+    assert "products_http" in scope.task_ids
+    # Still test-only fenced (never source).
+    assert not any(p.startswith("src") for p in scope.allowed_paths)
+
+
+def test_scope_targets_authoring_task_over_doc_only_when_both_match():
+    """When both a doc-only registry task AND a real authoring test task match the
+    uncovered doc, the authoring one is targeted (the synthesized VB coverage-
+    closure task shares the canonical doc as its design node)."""
+    tasks = [
+        _Task(
+            "document_test_strategy",
+            design_node="docs/test/test_strategy.md",
+            expected_outputs=("docs/test/test_strategy.md",),
+        ),
+        _Task(
+            "verifiable_behavior_coverage",
+            design_node="docs/test/test_strategy.md",
+            output_paths=("tests/e2e/coverage.e2e.test.ts",),
+            expected_outputs=("tests/e2e/coverage.e2e.test.ts",),
+        ),
+    ]
+    scope = derive_vb_rerun_scope(["docs/test/test_strategy.md"], tasks, config=CONFIG)
+    assert scope.task_ids == ("verifiable_behavior_coverage",)

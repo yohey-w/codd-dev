@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 UTC = timezone.utc
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -568,6 +568,227 @@ def _ensure_canonical_vb_doc_planned(
             }
         )
     return {key: out[key] for key in sorted(out, key=_wave_key_sort_value)}
+
+
+@dataclass(frozen=True)
+class VBCoverageClosureTask:
+    """A synthesized cross-cutting test-authoring task that OWNS the residual VBs.
+
+    The residual set is the verifiable behaviors the canonical registry DECLARES
+    but that no derived task's declared test outputs can claim (see
+    :func:`synthesize_vb_coverage_closure_task`). This is the plan-stage projection
+    the greenfield pipeline turns into an ``ImplementTaskRef`` (it deliberately does
+    NOT import the pipeline's task type — keeps the planner a pure data producer,
+    mirroring :func:`_ensure_canonical_vb_doc_planned`).
+    """
+
+    task_id: str
+    design_node: str
+    expected_outputs: tuple[str, ...]
+    title: str
+    description: str
+    owned_vb_ids: tuple[str, ...]
+    test_kinds: tuple[str, ...] = ()
+
+
+#: Doc-shaped extensions: a declared output ending in one of these is a DOCUMENT
+#: (a design/registry doc), never an authored TEST file — so a task whose only
+#: "test-shaped" output is such a doc authors no covering test. This is the same
+#: distinction the greenfield pipeline's ``_task_declares_no_authored_artifact``
+#: draws (a doc under ``docs/`` is a non-codebase artifact), kept local so the
+#: planner stays import-clean of the pipeline.
+_VB_DOC_EXTENSIONS = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc"})
+
+_VB_TEST_FILENAME_RE = re.compile(
+    r"(^test_|_test|\.spec\.|\.test\.|\.e2e\.|\.e2e-spec\.|\.cy\.)", re.IGNORECASE
+)
+
+#: A path-like token inside a VB registry row's declared-owner column: a slashed
+#: path with a file extension (globs allowed). Used only to read the registry's
+#: OWN declared owner-test-file column — never to (re-)parse VB declarations.
+_VB_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./*\-]*\.[A-Za-z0-9_*]+")
+
+
+def _vb_norm_path(path: str) -> str:
+    return str(path).replace("\\", "/").strip().strip("`").strip("/")
+
+
+def _vb_test_dir_prefixes(config: dict[str, Any] | None) -> list[str]:
+    raw = ((config or {}).get("scan") or {}).get("test_dirs")
+    dirs = [str(item) for item in raw] if isinstance(raw, list) and raw else ["tests/"]
+    return [_vb_norm_path(item) for item in dirs if _vb_norm_path(item)]
+
+
+def _is_concrete_test_file(rel: str, *, test_prefixes: list[str]) -> bool:
+    """A CONCRETE authored test file: a non-glob path under a test dir (or with a
+    test-shaped filename) whose extension is a code extension, not a document."""
+    if not rel or any(ch in rel for ch in "*?["):
+        return False  # a glob is not a single file to match against
+    suffix = PurePosixPath(rel).suffix.lower()
+    if not suffix or suffix in _VB_DOC_EXTENSIONS:
+        return False
+    under_test = any(rel == prefix or rel.startswith(prefix + "/") for prefix in test_prefixes)
+    if under_test:
+        return True
+    return bool(_VB_TEST_FILENAME_RE.search(PurePosixPath(rel).name))
+
+
+def _vb_authored_test_files(task_expected_outputs: Any, test_prefixes: list[str]) -> set[str]:
+    """The concrete test files any derived task DECLARES it authors."""
+    authored: set[str] = set()
+    for outputs in task_expected_outputs or ():
+        for out in outputs or ():
+            rel = _vb_norm_path(str(out))
+            if _is_concrete_test_file(rel, test_prefixes=test_prefixes):
+                authored.add(rel)
+    return authored
+
+
+def _vb_owner_test_tokens(text: str, test_prefixes: list[str]) -> tuple[list[str], bool]:
+    """Read a VB row's DECLARED owner test file(s) from its own text.
+
+    Returns ``(concrete_owner_files, has_owner_intent)``. ``has_owner_intent`` is
+    True when the row names ANY owning test file — concrete OR a suite-level glob
+    (e.g. ``tests/e2e/*.e2e.test.ts``). A glob names an owner intent that no single
+    authored file can satisfy, so it contributes to residual without a concrete
+    match. A row that names NO owner test file returns ``([], False)`` — we then
+    treat the VB as vacuously claimable (never force a task for a VB we cannot
+    prove is orphaned; owner-column-less registries stay untouched).
+    """
+    concrete: list[str] = []
+    has_owner = False
+    for match in _VB_PATH_TOKEN_RE.finditer(text or ""):
+        tok = _vb_norm_path(match.group(0))
+        if "/" not in tok:
+            continue
+        probe = tok.replace("*", "x").replace("?", "x")
+        suffix = PurePosixPath(probe).suffix.lower()
+        if not suffix or suffix in _VB_DOC_EXTENSIONS:
+            continue
+        under_test = any(probe == prefix or probe.startswith(prefix + "/") for prefix in test_prefixes)
+        test_shaped = bool(_VB_TEST_FILENAME_RE.search(PurePosixPath(probe).name))
+        if not (under_test or test_shaped):
+            continue
+        has_owner = True
+        if not any(ch in tok for ch in "*?["):
+            if tok not in concrete:
+                concrete.append(tok)
+    return concrete, has_owner
+
+
+def synthesize_vb_coverage_closure_task(
+    behaviors: Any,
+    task_expected_outputs: Any,
+    *,
+    config: dict[str, Any] | None = None,
+) -> "VBCoverageClosureTask | None":
+    """Synthesize ONE test-authoring task owning the RESIDUAL verifiable behaviors.
+
+    Extends :func:`_ensure_canonical_vb_doc_planned` by one level. That function
+    guarantees the VB registry DOCUMENT is planned (so behaviors get DECLARED);
+    this guarantees every declared behavior is CLAIMABLE by some derived task.
+
+    A behavior is *claimable* when the registry row's declared owner test file(s)
+    include a file some derived task authors (its ``expected_outputs`` contain that
+    test file). The RESIDUAL set is the behaviors the registry declares an owner
+    test file for, that NO derived task authors — the cross-cutting suite-level /
+    static-source / universally-quantified invariants that map to no single module,
+    so the module-scoped derivation never gave them an owning test-authoring task
+    (the 2026-07 S3 StockRoom-mini burn: 10 of 41 VBs left with no owning task, the
+    post-implement coverage gate honest-stopping because no task could emit their
+    marker). For the residual set this returns a single cross-cutting task that owns
+    exactly them and authors their declared owner test files; its prompt carries the
+    residual VB rows + the standard covering-marker contract so the implementer emits
+    ``codd: covers vb=<id>`` for each. Returns ``None`` when there is no residual —
+    generality: an all-claimable project (or one whose registry declares no owner
+    test files at all) synthesizes nothing.
+
+    GENERIC: keys off the VB-registry rows (the canonical VB-parse path supplies
+    ``behaviors``) + declared test outputs. No ``language ==``, no framework/domain
+    literal, no dependency on any project-specific spec section or formatting; a
+    project whose declared behaviors all map to a module produces no task.
+    """
+
+    from codd.verifiable_behavior_audit import coverage_gate_enabled, format_gap_feedback
+
+    if not coverage_gate_enabled(config):
+        return None
+
+    behaviors = list(behaviors or [])
+    if not behaviors:
+        return None
+
+    test_prefixes = _vb_test_dir_prefixes(config)
+    authored = _vb_authored_test_files(task_expected_outputs, test_prefixes)
+
+    residual: list[Any] = []
+    owner_files: list[str] = []
+    for behavior in behaviors:
+        text = f"{getattr(behavior, 'description', '') or ''} {getattr(behavior, 'declared_scenarios', '') or ''}"
+        concrete_owners, has_owner = _vb_owner_test_tokens(text, test_prefixes)
+        if not has_owner:
+            continue  # no declared owner test file → vacuously claimable
+        if any(owner in authored for owner in concrete_owners):
+            continue  # an owner test file is authored by some task → claimable
+        residual.append(behavior)
+        for owner in concrete_owners:
+            if owner not in owner_files:
+                owner_files.append(owner)
+
+    if not residual:
+        return None
+
+    if not owner_files:
+        # Every residual VB declared only a suite-level glob owner (no concrete file
+        # to author against). Borrow the project's own test-file extension so the
+        # closure task still has a concrete write target — language-agnostic (the
+        # extension comes from the project's authored tests, never a literal).
+        borrowed = sorted(authored)
+        suffix = PurePosixPath(borrowed[0]).suffix if borrowed else ""
+        if not suffix:
+            return None  # cannot determine a concrete test file — leave to the gate
+        prefix = test_prefixes[0] if test_prefixes else "tests"
+        owner_files = [f"{prefix}/verifiable_behavior_coverage{suffix}"]
+
+    source_doc = next(
+        (getattr(b, "source_doc", "") for b in residual if getattr(b, "source_doc", "")),
+        "docs/test/test_strategy.md",
+    )
+    owned_ids = tuple(str(getattr(b, "vb_id", "")).strip() for b in residual if str(getattr(b, "vb_id", "")).strip())
+
+    owner_lines = []
+    for behavior in residual:
+        vb_id = str(getattr(behavior, "vb_id", "")).strip()
+        text = f"{getattr(behavior, 'description', '') or ''} {getattr(behavior, 'declared_scenarios', '') or ''}"
+        owners = ", ".join(_vb_owner_test_tokens(text, test_prefixes)[0]) or "(suite-level — choose a file under the test dir)"
+        owner_lines.append(f"- {vb_id} → {owners}")
+
+    description = "\n".join(
+        [
+            "This task OWNS the cross-cutting verifiable behaviors below — the ones no other "
+            "derived task's declared test outputs claim (suite-level, static-source, or "
+            "universally-quantified invariants that map to no single module, so the "
+            "module-scoped task derivation gave them no owning test-authoring task).",
+            "Author the covering test(s) under the declared owner path(s) and follow the "
+            "determinism/isolation harness contract declared in the canonical test-strategy "
+            "document (the design node of this task). Reuse the shared test harness the other "
+            "test files use — do not start external processes or read wall-clock time.",
+            "",
+            format_gap_feedback(residual),
+            "",
+            "Declared owner test file(s) for the behaviors above:",
+            *owner_lines,
+        ]
+    )
+
+    return VBCoverageClosureTask(
+        task_id="verifiable_behavior_coverage",
+        design_node=source_doc,
+        expected_outputs=tuple(sorted(owner_files)),
+        title="Verifiable Behavior Coverage Closure",
+        description=description,
+        owned_vb_ids=owned_ids,
+    )
 
 
 def _ensure_lexicon(project_root: Path) -> None:

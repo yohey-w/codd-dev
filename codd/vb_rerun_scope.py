@@ -57,6 +57,14 @@ SCOPE_VB_BROAD = SCOPE_BROAD
 
 _TEST_FILENAME_RE = re.compile(r"(^test_|_test|\.spec\.|\.test\.|\.e2e\.|\.e2e-spec\.|\.cy\.)", re.IGNORECASE)
 
+#: Doc-shaped extensions: a declared output ending in one of these is a DOCUMENT
+#: (e.g. the canonical VB registry ``docs/test/test_strategy.md``), never an
+#: authored TEST file. It matters here because such a doc's filename is itself
+#: test-shaped (``test_strategy.md`` matches ``^test_``), so ``_is_test_output``
+#: alone would misread the doc-only registry task as one that authors a covering
+#: test — which is exactly the inert-rerun trap this module must avoid.
+_DOC_EXTENSIONS = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc"})
+
 
 def _norm(path: str) -> str:
     return str(path).replace("\\", "/").strip("/")
@@ -77,6 +85,42 @@ def _is_test_output(path: str, *, test_prefixes: Sequence[str]) -> bool:
             return True
     name = PurePosixPath(rel).name
     return bool(_TEST_FILENAME_RE.search(name))
+
+
+def _authors_test_artifact_path(path: str, *, test_prefixes: Sequence[str]) -> bool:
+    """Whether a declared output is an authored TEST artifact (not a document).
+
+    A test-shaped path whose extension is a DOCUMENT extension (the canonical VB
+    registry ``docs/test/test_strategy.md``) authors no covering test — its
+    implement is a deterministic no-op, so a rerun targeting it is inert. A test
+    DIRECTORY (no extension) under a test root, or a real test FILE, does author
+    tests.
+    """
+    rel = _norm(path)
+    if not rel:
+        return False
+    if PurePosixPath(rel).suffix.lower() in _DOC_EXTENSIONS:
+        return False
+    return _is_test_output(rel, test_prefixes=test_prefixes)
+
+
+def _task_authors_test_artifact(
+    task: Any,
+    *,
+    config: dict[str, Any] | None,
+    path_resolver: Any,
+    test_prefixes: Sequence[str],
+) -> bool:
+    """Whether a test task's OWN declared outputs include an authored test artifact.
+
+    Distinguishes a genuine test-authoring task from a doc-only "test task" (the
+    canonical registry task, classified a test task by its ``docs/test/`` node but
+    whose only output is the registry document). The latter must never be the sole
+    rerun target — its rerun authors nothing.
+    """
+    candidates = list(getattr(task, "expected_outputs", ()) or [])
+    candidates.extend(_resolve_paths(task, config, path_resolver))
+    return any(_authors_test_artifact_path(path, test_prefixes=test_prefixes) for path in candidates)
 
 
 def task_is_test_task(
@@ -205,14 +249,39 @@ def derive_vb_rerun_scope(
                 return True
         return False
 
+    # A test task AUTHORS a test artifact unless its only outputs are documents
+    # (the canonical registry task): dropping the doc-only task keeps a rerun from
+    # resolving ONLY to a no-authored-artifact target (an inert rerun that authors
+    # nothing — the 2026-07 S3 StockRoom-mini burn, where every residual VB shared
+    # the registry doc, so stage-1 matched only ``document_test_strategy``).
+    authoring = [
+        task
+        for task in test_tasks
+        if _task_authors_test_artifact(
+            task, config=config, path_resolver=path_resolver, test_prefixes=test_prefixes
+        )
+    ]
+    authoring_ids = {id(task) for task in authoring}
+
     targeted = [task for task in test_tasks if _task_matches_doc(task)]
-    selected = targeted or test_tasks
+    targeted_authoring = [task for task in targeted if id(task) in authoring_ids]
+
     rung = SCOPE_VB_TARGETED
-    detail = (
-        f"VB rerun: {len(selected)} test task(s) targeted by uncovered VB source doc(s)"
-        if targeted
-        else f"VB rerun: all {len(selected)} test task(s) (no per-doc match) — batched"
-    )
+    if targeted_authoring:
+        selected = targeted_authoring
+        detail = f"VB rerun: {len(selected)} authoring test task(s) targeted by uncovered VB source doc(s)"
+    elif authoring:
+        # Stage-1 matched only no-authored-artifact task(s) (the doc-only registry
+        # task) or nothing by doc — fall through to the test tasks that actually
+        # author test files so the residual VBs get authored (was: inert rerun).
+        selected = authoring
+        detail = f"VB rerun: all {len(selected)} authoring test task(s) (doc match inert/absent) — batched"
+    elif targeted:
+        selected = targeted  # only non-authoring test task(s) exist — preserve prior scope
+        detail = f"VB rerun: {len(selected)} test task(s) targeted by uncovered VB source doc(s)"
+    else:
+        selected = test_tasks
+        detail = f"VB rerun: all {len(selected)} test task(s) (no per-doc match) — batched"
 
     allowed: list[str] = []
 

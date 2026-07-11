@@ -1417,6 +1417,16 @@ class GreenfieldPipeline:
         # ungrounded prose output(s).
         tasks = self._enforce_plan_intake_grounding(project_root, tasks)
 
+        # Derive-stage VB coverage-closure synthesis (root fix for the 2026-07 S3
+        # StockRoom-mini burn): guarantee every declared verifiable behavior has an
+        # OWNING test-authoring task, synthesizing one cross-cutting task for the
+        # residual behaviors that the module-scoped derivation left unowned (else the
+        # post-implement VB coverage gate honest-stops on a marker no task can emit).
+        # STRICT NO-OP when every declared VB is already claimable. Runs BEFORE the
+        # per-task loop AND before the VB gate is wired below, so the synthesized task
+        # is both implemented and visible to the gate's targeted rerun scope.
+        tasks = self._enforce_vb_coverage_closure(project_root, tasks)
+
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {task.task_id: units.get(task.task_id, STATUS_PENDING) for task in tasks}
 
@@ -1824,6 +1834,79 @@ class GreenfieldPipeline:
             listed = ", ".join(f"`{o}`" for o in outs)
             lines.append(f"- `{task_id}`: replace prose output(s) {listed} with concrete path(s).")
         return "\n".join(lines)
+
+    def _enforce_vb_coverage_closure(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+    ) -> list[ImplementTaskRef]:
+        """Derive-stage guarantee: every declared VB is CLAIMABLE by a derived task.
+
+        :func:`_ensure_canonical_vb_doc_planned` guarantees the VB registry DOCUMENT
+        is planned (so behaviors get declared); this extends the guarantee one level
+        — every declared behavior must have an OWNING test-authoring task. Module-
+        scoped derivation gives cross-cutting behaviors (suite-level / static-source
+        / universally-quantified invariants that map to no single module) no owning
+        task, so their covering ``codd: covers vb=`` marker can never be emitted and
+        the post-implement VB coverage gate honest-stops (the 2026-07 S3 StockRoom-
+        mini burn: 10 of 41 VBs left unowned). This synthesizes ONE cross-cutting
+        test-authoring task that owns exactly the RESIDUAL behaviors and authors
+        their declared owner test files, its prompt carrying the residual VB rows +
+        the covering-marker contract. STRICT NO-OP when every declared behavior is
+        already claimable (or the registry declares no owner test files) — see
+        :func:`codd.planner.synthesize_vb_coverage_closure_task`. It does NOT weaken
+        the coverage gate: the gate still fails-closed on a genuinely uncoverable VB;
+        this makes VBs COVERABLE by giving them an owning task.
+        """
+        from codd.config import load_project_config
+        from codd.planner import synthesize_vb_coverage_closure_task
+        from codd.verifiable_behavior_audit import coverage_gate_enabled, load_verifiable_behaviors
+
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+        if not coverage_gate_enabled(config):
+            return tasks
+
+        try:
+            behaviors = load_verifiable_behaviors(project_root, config=config)
+        except Exception as exc:  # noqa: BLE001 — no registry / parse issue ⇒ no closure.
+            self.echo(f"[greenfield] implement: VB coverage-closure skipped ({exc}).")
+            return tasks
+        if not behaviors:
+            return tasks
+
+        closure = synthesize_vb_coverage_closure_task(
+            behaviors,
+            [list(task.expected_outputs) for task in tasks],
+            config=config,
+        )
+        if closure is None:
+            return tasks
+        if any(task.task_id == closure.task_id for task in tasks):
+            return tasks  # idempotent (a --resume re-synthesizes the same task deterministically)
+
+        preview = ", ".join(closure.owned_vb_ids[:8])
+        if len(closure.owned_vb_ids) > 8:
+            preview += ", …"
+        self.echo(
+            "[greenfield] implement: VB coverage-closure synthesized 1 test-authoring task "
+            f"'{closure.task_id}' owning {len(closure.owned_vb_ids)} verifiable behavior(s) no "
+            f"derived task's test outputs claim ({preview})"
+        )
+        return list(tasks) + [
+            ImplementTaskRef(
+                task_id=closure.task_id,
+                design_node=closure.design_node,
+                output_paths=closure.expected_outputs,
+                source="synthesized",
+                expected_outputs=closure.expected_outputs,
+                test_kinds=closure.test_kinds,
+                title=closure.title,
+                description=closure.description,
+            )
+        ]
 
     def _finalize_dependency_lock_coherence(self, project_root: Path) -> None:
         """Reconcile harness-owned toolchain deps + refresh the lock (implement-end).
