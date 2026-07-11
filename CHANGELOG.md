@@ -13,6 +13,31 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.32.0] - 2026-07-11 — C# verify no longer clobbers its own TRX report (the last csharp ②b blocker)
+
+The csharp5 re-run cleared implement (the v3.31.0 namespace contract held) and its SUT was
+fully green — **97 tests passed, 0 failed** — yet verify FAILED: the dotnet-trx adapter
+found `TestResults/test.trx` unparseable ("not parseable XML: line 1, column 2"). The file
+contained the `dotnet test` CONSOLE STDOUT ("Determining projects to restore…", the
+Passed! summary), not the TRX XML.
+
+Root cause: csharp.yaml's verify `report.capture` was `stdout`, but `dotnet test --logger
+"trx;LogFileName=test.trx"` WRITES the TRX file ITSELF — it is a file-writing runner (like
+Java surefire and C++ ctest-junit, both `capture: none`), not a stdout-streaming one (like
+`go test -json`, which legitimately uses `capture: stdout`). The executor's step (d) —
+"if `report_capture == stdout`, persist captured stdout to report_path" — therefore
+OVERWROTE the real TRX (written by `--logger` to that exact path) with the console stdout,
+so the adapter read non-XML and verify false-red'd on a green SUT.
+
+- **csharp.yaml: verify `report.capture: stdout` → `none`** — a one-line profile DATA fix
+  aligning C# with the other two file-writing runners. Red-before-green; verified
+  end-to-end (`codd verify` on the actual csharp5 tree now parses the TRX and passes,
+  exit 0).
+
+This was the last blocker between csharp's already-green SUT and a clean ②b — with it,
+the Top-6 greenfield ② campaign reaches all six languages (Python, TypeScript,
+JavaScript, Java, C++, C#).
+
 ## [3.31.0] - 2026-07-11 — C# namespace-coherence contract + source-completeness red escalation
 
 Two Fable5 rulings land together (the owner-packet items are Fable5-delegated per the
