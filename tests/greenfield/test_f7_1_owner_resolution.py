@@ -250,7 +250,7 @@ def _budgeted_rtr(behavior: dict[str, str], owners: dict[str, str]):
     per task (``green``/``red``)."""
 
     def _rtr(project_root, *, outcome, config, tasks, implement_runner, verify, echo,
-             budget_used, history_session_dir, trigger):
+             budget_used, history_session_dir, trigger, oracle_check=None):
         blocked = list(getattr(outcome, "blocked_test_paths", []) or [])
         claim = [c.get("file") for c in getattr(outcome, "test_defect_claim", []) or []]
         paths = blocked or claim

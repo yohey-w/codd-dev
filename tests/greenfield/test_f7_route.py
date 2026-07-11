@@ -261,3 +261,125 @@ def test_genbutsu_replay_drives_rederivation_to_green(tmp_path: Path, run_dir: s
         assert (tmp_path / p).read_bytes() != old_bytes[p]
     # The event was recorded (paths, tasks, old/new hashes).
     assert (session / "test_rederivation.yaml").exists()
+
+
+# ── native-oracle acceptance of the transcription (csharp3 dogfood, 2026-07-11,
+# stop-loss cycle 2): a re-derived test that fails the NATIVE ORACLE (does not
+# compile — e.g. C# CS0200 assigning a read-only property to "test" immutability)
+# is NOT a transcription. It gets ONE diagnostics-informed completion retry
+# within the SAME draw (the budget is not re-claimed); still-failing → an honest
+# RED that NAMES the oracle, never a misleading "fresh verify still red". ──────
+
+
+@dataclass
+class _Oracle:
+    passed: bool
+    findings: tuple = ()
+
+
+class _Finding:
+    def __init__(self, message: str):
+        self.message = message
+
+
+def test_route_oracle_failing_transcription_gets_one_same_draw_retry(tmp_path: Path):
+    _write(tmp_path, "tests/foo.test.js", _HEADER + "expect(x).toBe(1)\n")
+    task = _Task("t_test", "test:foo", output_paths=("tests/foo.test.js",))
+    runner_feedbacks: list[str] = []
+
+    def _runner(t, fb):
+        runner_feedbacks.append(fb)
+
+    oracle_results = [
+        _Oracle(False, findings=(_Finding("error CS0200: 'Value' is read only"),)),
+        _Oracle(False, findings=(_Finding("error CS0200: 'Value' is read only"),)),
+    ]
+    verify_calls: list[int] = []
+    budget: dict[str, int] = {}
+    result = run_test_rederivation(
+        tmp_path,
+        outcome=_Outcome(blocked_test_paths=["tests/foo.test.js"]),
+        config={},
+        tasks=[task],
+        implement_runner=_runner,
+        verify=lambda: verify_calls.append(1) or _Verify(True),
+        budget_used=budget,
+        oracle_check=lambda: oracle_results.pop(0),
+    )
+    assert result.status == STATUS_RED
+    assert "oracle" in result.reason.lower(), result.reason
+    assert len(runner_feedbacks) == 2, "exactly ONE diagnostics-informed retry"
+    assert "CS0200" in runner_feedbacks[1], "retry prompt carries the oracle diagnostics"
+    assert runner_feedbacks[0] == REDERIVATION_FEEDBACK
+    assert budget == {"t_test": 1}, "the retry is the SAME draw — no second budget claim"
+    assert verify_calls == [], "a non-compiling transcription never reaches fresh verify"
+
+
+def test_route_oracle_pass_after_retry_proceeds_to_fresh_verify(tmp_path: Path):
+    _write(tmp_path, "tests/foo.test.js", _HEADER + "expect(x).toBe(1)\n")
+    task = _Task("t_test", "test:foo", output_paths=("tests/foo.test.js",))
+    runner_feedbacks: list[str] = []
+
+    def _runner(t, fb):
+        runner_feedbacks.append(fb)
+
+    oracle_results = [
+        _Oracle(False, findings=(_Finding("error CS0200: read only"),)),
+        _Oracle(True),
+    ]
+    budget: dict[str, int] = {}
+    result = run_test_rederivation(
+        tmp_path,
+        outcome=_Outcome(blocked_test_paths=["tests/foo.test.js"]),
+        config={},
+        tasks=[task],
+        implement_runner=_runner,
+        verify=lambda: _Verify(True),
+        budget_used=budget,
+        oracle_check=lambda: oracle_results.pop(0),
+    )
+    assert result.status == STATUS_GREEN
+    assert len(runner_feedbacks) == 2
+    assert budget == {"t_test": 1}
+
+
+def test_route_oracle_passing_first_time_is_single_draw(tmp_path: Path):
+    _write(tmp_path, "tests/foo.test.js", _HEADER + "expect(x).toBe(1)\n")
+    task = _Task("t_test", "test:foo", output_paths=("tests/foo.test.js",))
+    calls: list[str] = []
+    result = run_test_rederivation(
+        tmp_path,
+        outcome=_Outcome(blocked_test_paths=["tests/foo.test.js"]),
+        config={},
+        tasks=[task],
+        implement_runner=lambda t, fb: calls.append(t.task_id),
+        verify=lambda: _Verify(True),
+        oracle_check=lambda: _Oracle(True),
+    )
+    assert result.status == STATUS_GREEN
+    assert calls == ["t_test"]
+
+
+def test_route_oracle_environment_red_is_not_a_rejection(tmp_path: Path):
+    """An environment-only oracle red (missing toolchain — zero-infra clause) is
+    never the transcription's fault: no retry, no oracle RED — the fresh verify
+    stays the backstop."""
+    _write(tmp_path, "tests/foo.test.js", _HEADER + "expect(x).toBe(1)\n")
+    task = _Task("t_test", "test:foo", output_paths=("tests/foo.test.js",))
+    calls: list[str] = []
+
+    class _EnvFinding:
+        category = "environment_build_error"
+        message = "opaque environment/build error"
+
+    result = run_test_rederivation(
+        tmp_path,
+        outcome=_Outcome(blocked_test_paths=["tests/foo.test.js"]),
+        config={},
+        tasks=[task],
+        implement_runner=lambda t, fb: calls.append(t.task_id),
+        verify=lambda: _Verify(True),
+        oracle_check=lambda: _Oracle(False, findings=(_EnvFinding(),)),
+    )
+    assert result.status == STATUS_GREEN
+    assert calls == ["t_test"], "no oracle retry for an environment-only red"

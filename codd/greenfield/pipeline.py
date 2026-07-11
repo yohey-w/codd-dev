@@ -4948,6 +4948,38 @@ def _drive_test_rederivation(
             feedback=feedback,
         )
 
+    def _oracle_check() -> Any:
+        """One-shot native-oracle run for transcription acceptance (rerun=None).
+
+        Best-effort: an oracle that cannot run here (unresolvable stack /
+        uncertifiable scope) returns ``None`` → the re-derivation degrades to its
+        prior behavior with the fresh verify as the backstop — never a new
+        failure mode, never a silent pass (verify still gates)."""
+        from codd.implement_oracle import run_implement_oracle_gate
+
+        project_section = (
+            config.get("project") if isinstance(config.get("project"), dict) else {}
+        )
+        scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+        try:
+            return run_implement_oracle_gate(
+                project_root,
+                language=(
+                    project_section.get("language")
+                    if isinstance(project_section, dict)
+                    else None
+                ),
+                project_name=str(
+                    (project_section or {}).get("name") or project_root.name
+                ),
+                source_dirs=scan.get("source_dirs") if isinstance(scan, dict) else None,
+                test_dirs=scan.get("test_dirs") if isinstance(scan, dict) else None,
+                config=config,
+                echo=echo,
+            )
+        except Exception:  # noqa: BLE001 — best-effort acceptance probe.
+            return None
+
     budget_used: dict[str, int] = {}
     current = outcome
     any_ran = False
@@ -4963,6 +4995,7 @@ def _drive_test_rederivation(
             budget_used=budget_used,
             history_session_dir=getattr(outcome, "history_session_dir", None),
             trigger="T2" if getattr(current, "test_defect_claim", None) else "T1",
+            oracle_check=_oracle_check,
         )
 
         if rederived.status == STATUS_GREEN:

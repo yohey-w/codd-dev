@@ -346,6 +346,7 @@ def run_test_rederivation(
     history_session_dir: Path | None = None,
     trigger: str = "",
     test_dirs: list[str] | None = None,
+    oracle_check: Callable[[], Any] | None = None,
 ) -> RederivationOutcome:
     """Re-derive the blocked test transcription(s) from the design, then fresh-verify.
 
@@ -438,21 +439,26 @@ def run_test_rederivation(
         f"{len(eligible_paths)} test file(s) from the design across {len(eligible_tasks)} "
         f"task(s); fenced to {len(allowed)} test path(s)."
     )
-    crash: Exception | None = None
-    with _OracleWriteFence(project_root, allowed_paths=allowed, echo=echo) as fence:
-        try:
-            for task in eligible_tasks:
-                implement_runner(task, REDERIVATION_FEEDBACK)
-            fence.enforce()
-        except Exception as exc:  # noqa: BLE001 — a crashed draw must NOT escape.
-            # CRASH CONTAINMENT (the honesty fix). A draw that raised (e.g. the
-            # implementer honestly emitting 0 files → an unhandled CoddCLIError, the
-            # F7 live crash) must never surface as a misleading stage crash. Roll the
-            # write-fence back to its ENTRY snapshot so a crashed draw leaves NO
-            # partial transcription (in- OR out-of-scope), then fall through to the
-            # honest RED terminal.
-            crash = exc
-            fence.rollback()
+    def _run_draw(feedback: str) -> Exception | None:
+        """One fenced re-derivation draw with CRASH CONTAINMENT (the honesty fix).
+
+        A draw that raised (e.g. the implementer honestly emitting 0 files → an
+        unhandled CoddCLIError, the F7 live crash) must never surface as a
+        misleading stage crash: the write-fence rolls back to its ENTRY snapshot
+        so a crashed draw leaves NO partial transcription (in- OR out-of-scope),
+        and the exception is RETURNED for the caller's honest RED terminal.
+        """
+        with _OracleWriteFence(project_root, allowed_paths=allowed, echo=echo) as fence:
+            try:
+                for task in eligible_tasks:
+                    implement_runner(task, feedback)
+                fence.enforce()
+            except Exception as exc:  # noqa: BLE001 — a crashed draw must NOT escape.
+                fence.rollback()
+                return exc
+        return None
+
+    crash = _run_draw(REDERIVATION_FEEDBACK)
 
     # Consume the budget for every re-driven task — a crash counts as a spent draw
     # (attempted == spent), so a crash cannot grant a re-roll. A second claim on the
@@ -482,6 +488,72 @@ def run_test_rederivation(
             rederived_tasks=eligible_task_ids, skipped_paths=skipped,
             reason=f"re-derivation draw crashed: {crash}",
         )
+
+    # NATIVE-ORACLE ACCEPTANCE — a transcription that fails the native oracle is
+    # not a transcription. The re-derived test must COMPILE before coverage /
+    # authenticity / fresh-verify mean anything (csharp3 exprcalc dogfood,
+    # 2026-07-11: T2 re-derived an immutability test that ASSIGNED to read-only
+    # properties — CS0200 — and the compile-red fresh verify was misread as "a
+    # real impl/design defect"). One diagnostics-informed completion retry
+    # belongs to the SAME draw: the budget above is already consumed and is NOT
+    # re-claimed (a retry is a completion, not a second claim). Still failing
+    # after the retry → an honest RED that NAMES the oracle. ``oracle_check`` is
+    # opt-in (None → prior behavior; the fresh verify stays the backstop).
+    if oracle_check is not None:
+        ora = oracle_check()
+        if ora is not None and _oracle_rejects_transcription(ora):
+            diag = "; ".join(
+                str(getattr(f, "message", "")).strip()
+                for f in _non_environment_findings(ora)[:6]
+                if str(getattr(f, "message", "")).strip()
+            )
+            echo(
+                "[greenfield] test re-derivation: the transcription failed the "
+                f"NATIVE ORACLE ({diag[:300] or 'no diagnostics'}); one "
+                "diagnostics-informed completion retry (same draw, no new budget)."
+            )
+            retry_feedback = (
+                REDERIVATION_FEEDBACK
+                + "\n\nNATIVE-ORACLE DIAGNOSTICS — the re-derived test file(s) do "
+                "not pass the toolchain (they must COMPILE). Fix the TEST "
+                "transcription only; the diagnostics are:\n"
+                + (diag or "(opaque toolchain failure)")
+            )
+            crash = _run_draw(retry_feedback)
+            _record_event(
+                history_session_dir,
+                trigger=f"{trigger}-oracle-retry" if trigger else "oracle-retry",
+                paths=eligible_paths,
+                tasks=eligible_task_ids,
+                old_hashes=new_hashes,
+                new_hashes={p: _file_hash(project_root / p) for p in eligible_paths},
+                error=str(crash) if crash is not None else None,
+            )
+            if crash is not None:
+                echo(
+                    "[greenfield] test re-derivation: the oracle-retry draw crashed "
+                    f"({crash}); the write-fence rolled back (no partial transcription)."
+                )
+                return RederivationOutcome(
+                    STATUS_RED, trigger=trigger, rederived_paths=eligible_paths,
+                    rederived_tasks=eligible_task_ids, skipped_paths=skipped,
+                    reason=f"re-derivation oracle-retry draw crashed: {crash}",
+                )
+            ora = oracle_check()
+            if ora is not None and _oracle_rejects_transcription(ora):
+                echo(
+                    "[greenfield] test re-derivation: the transcription STILL fails "
+                    "the native oracle after the retry — honest RED (an invalid "
+                    "transcription, not evidence of an impl/design defect)."
+                )
+                return RederivationOutcome(
+                    STATUS_RED, trigger=trigger, rederived_paths=eligible_paths,
+                    rederived_tasks=eligible_task_ids, skipped_paths=skipped,
+                    reason=(
+                        "re-derived test failed the native oracle after one retry "
+                        "(the transcription does not compile)"
+                    ),
+                )
 
     # The regenerated test file must pass the UNCHANGED implement-side gates (VB
     # marker-authenticity + coverage reconciliation) BEFORE verify runs — dropping a
@@ -515,6 +587,30 @@ def run_test_rederivation(
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+def _non_environment_findings(ora: Any) -> list[Any]:
+    """The oracle findings that are SUT-fixable (not environment_build_error)."""
+    return [
+        f
+        for f in list(getattr(ora, "findings", ()) or ())
+        if str(getattr(f, "category", "") or "") != "environment_build_error"
+    ]
+
+
+def _oracle_rejects_transcription(ora: Any) -> bool:
+    """Whether a native-oracle result REJECTS the re-derived transcription.
+
+    Only a failed result carrying at least one NON-environment finding rejects:
+    an environment-only red (missing toolchain, opaque env failure — the
+    zero-infra clause) is never the transcription's fault, and a failed result
+    with no findings proves nothing about the test file. Both degrade to the
+    prior behavior (fresh verify stays the backstop) — anti-false-RED without a
+    false-green (verify still gates).
+    """
+    if bool(getattr(ora, "passed", True)):
+        return False
+    return bool(_non_environment_findings(ora))
+
 
 def _fence_allowed_paths(
     eligible_paths: list[str], test_dirs: list[str] | None, config: Mapping[str, Any] | None
