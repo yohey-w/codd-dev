@@ -13,6 +13,25 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.29.0] - 2026-07-11 — A transcription that fails the native oracle is not a transcription (csharp stop-loss cycle 2)
+
+The csharp3 re-run walked further than any prior C# run (implement fully green through the
+v3.27.0 authenticity fix) and died in **verify**: the F7.1 test re-derivation (T2) drew an
+immutability test that ASSIGNS to read-only properties — CS0200, a test that does not even
+compile — and the machinery misread the compile-red fresh verify as "a real impl/design
+defect or an unconverged transcription", burning the per-task budget on an invalid draw.
+
+- **`test_rederivation.py`: native-oracle acceptance for re-derived tests** (opt-in
+  `oracle_check`; the greenfield pipeline wires a one-shot `run_implement_oracle_gate`).
+  A draw whose result fails the oracle with SUT-fixable findings is an INVALID
+  transcription: it gets ONE diagnostics-informed completion retry within the SAME draw
+  (the budget is not re-claimed — a retry is a completion, not a second claim); still
+  failing → an honest RED that names the oracle. An environment-only red (zero-infra
+  clause) or a finding-less failure never rejects — the fresh verify stays the backstop,
+  so this can never manufacture a false-RED or mask one (verify still gates).
+  Red-before-green; verified against the actual csharp3 tree (the CS0200 draw is rejected
+  with 6 SUT-fixable findings).
+
 ## [3.28.0] - 2026-07-11 — Diagnostic notes + qualified-return helpers (cpp/java stop-loss cycle 2)
 
 The v3.27.0 cpp re-run proved the linker fix live (attempt 1 parsed 8 `missing_symbol`
