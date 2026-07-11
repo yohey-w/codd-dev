@@ -13,6 +13,38 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.28.0] - 2026-07-11 — Diagnostic notes + qualified-return helpers (cpp/java stop-loss cycle 2)
+
+The v3.27.0 cpp re-run proved the linker fix live (attempt 1 parsed 8 `missing_symbol`
+findings and the repair loop engaged instead of aborting) and then exposed the next
+recognition gap in the same family: the repaired `src/error.cpp` collided with a header
+that defines the same members inline — 7 `redefinition of …` errors, each followed by
+g++'s `note: 'X' previously defined here` naming the OTHER side (`include/…/error.h`).
+Notes were skipped wholesale ("a warning/note is not a failure"), so the repair feedback
+carried only the .cpp side of a two-sided disagreement and the rerun could not converge
+("signature unchanged at broad rerun — stopping").
+
+- **`oracle_cpp.py`: a positioned `note:` following an error is now ATTACHED to that
+  finding** — appended to its message and its path joined to `failed_paths` — so repair
+  feedback names both sides of the disagreement (redefinition site + previous-definition
+  site). An orphan note (no preceding finding) stays non-finding noise, and notes are
+  capped at 2 per finding (overload-candidate spam adds no repair signal). Red-before-green;
+  verified against the actual cpp3 dogfood build output (7/7 findings carry the header-side
+  note; both files attributed).
+
+The java3 re-run equally proved v3.27.0 live (the clamped pom compiled; the oracle chain
+went green) and exposed the recognizer-family's Java instance: a SAME-FILE
+`private static Expr.Literal assertLiteral(…)` helper — whose body runs real
+`assertInstanceOf`/`assertEquals` — was invisible to `_JAVA_METHOD_DEF_RE` because the
+return-type pattern allowed only a single identifier, so three delegated assertions
+false-redded as `unresolved_helper` at the marker-authenticity gate.
+
+- **`vb_marker_authenticity.py`: Java method definitions with QUALIFIED (dotted) return
+  types (`Expr.Literal`, `Map.Entry<K, V>`) are now visible** to the helper-resolution
+  def-finder, so the hop-0 (same-file) delegated-assertion path resolves them.
+  Red-before-green; verified against the actual java3 dogfood test file (3/3 flagged
+  tests now `helper_resolved`).
+
 ## [3.27.0] - 2026-07-11 — ②b smoke stop-loss: three recognition/projection classes (java/cpp/csharp all-red triage)
 
 The fresh Java/C++/C# exprcalc greenfield smokes all terminated red on **current-core v3.26.0** —
