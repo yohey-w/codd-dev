@@ -3304,6 +3304,10 @@ def _write_generated_files(
     traceability_comment = _build_traceability_comment(design_context, spec, dependency_documents)
     output_prefixes = [PurePosixPath(item) for item in spec.output_paths]
     generated_paths: list[Path] = []
+    # ``StageError`` is lazy-imported (as in ``_create_output_paths``) to avoid the
+    # greenfield<->implementer module-load cycle.
+    from codd.greenfield.pipeline import StageError
+
     for relative_path, content in file_payloads:
         destination = project_root / relative_path
         _ensure_inside_project(project_root, destination, "generated file")
@@ -3319,10 +3323,48 @@ def _write_generated_files(
                 file=sys.stderr,
             )
             continue
+        # Honest-red path-kind guard for the WRITE site, mirroring the v3.34.1 fix in
+        # ``_create_output_paths`` (which guards the DECLARE-time ``mkdir``). The AI
+        # payload's destination may collide with an existing on-disk entry of the
+        # WRONG KIND: a path already present as a DIRECTORY makes ``write_text`` die
+        # on a raw ``IsADirectoryError``; a parent that cannot be created because an
+        # ancestor component is itself a FILE makes ``mkdir`` die on a raw
+        # ``NotADirectoryError``/``FileExistsError``. Either raw exception escapes the
+        # autopilot and crashes the implement stage. Raise a clean ``StageError``
+        # (routed into the existing clean-red/regenerate path) naming the task and
+        # path instead. Path-KIND only: no language/framework knowledge.
+        if destination.is_dir():
+            raise StageError(
+                f"task {spec.task_id}: generated file {relative_path} exists on disk "
+                "as a DIRECTORY — path-kind collision"
+            )
+        blocking_ancestor = _blocking_file_ancestor(destination, project_root)
+        if blocking_ancestor is not None:
+            raise StageError(
+                f"task {spec.task_id}: generated file {relative_path} cannot be written "
+                f"— ancestor {blocking_ancestor.relative_to(project_root).as_posix()} "
+                "exists on disk as a FILE — path-kind collision"
+            )
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(_prepend_traceability_comment(relative_path, traceability_comment, content), encoding="utf-8")
         generated_paths.append(destination)
     return generated_paths
+
+
+def _blocking_file_ancestor(destination: Path, project_root: Path) -> Path | None:
+    """The nearest EXISTING ancestor of ``destination`` that is on disk as a FILE
+    (not a directory), which makes ``destination.parent.mkdir(parents=True)`` die on
+    a raw ``NotADirectoryError``/``FileExistsError``. Returns ``None`` when the parent
+    directory can be created cleanly. Path-KIND only — walks the parent chain up to
+    (but not past) ``project_root``, whose existence as a directory is a precondition.
+    """
+    root = project_root.resolve(strict=False)
+    for ancestor in destination.parents:
+        if ancestor.resolve(strict=False) == root:
+            break
+        if ancestor.exists() and not ancestor.is_dir():
+            return ancestor
+    return None
 
 
 def _root_artifact_patterns_from_config(config: dict[str, Any]) -> list[str]:

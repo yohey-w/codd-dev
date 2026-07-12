@@ -13,6 +13,28 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.34.2] - 2026-07-12 — Fix: robust AI-payload write + repair-proposal KeyError symmetry (run-killer residuals of the v3.34.1 class)
+
+Two small robustness fixes closing run-killer residuals of the same class as v3.34.1 — a raw, unhandled
+exception in a core stage that escapes and crashes an otherwise-recoverable run.
+
+- `codd/implementer.py` `_write_generated_files`: guards the AI-payload **write** site against a path-kind
+  collision, mirroring the v3.34.1 fix in `_create_output_paths` (which guarded only the declare-time `mkdir`).
+  If a payload's destination already exists on disk as a **directory**, `write_text` raised a raw
+  `IsADirectoryError`; if an ancestor path component is itself a **file**, `mkdir` raised a raw
+  `NotADirectoryError`/`FileExistsError`. Both now surface as a clean `StageError` (`path-kind collision`,
+  naming the task and path) routed into the autopilot's existing clean-red/regenerate path. Path-SHAPE/kind
+  only — no language/framework knowledge; reuses the same lazy-imported `StageError` and message style.
+- `codd/repair/llm_repair_engine.py` `_repair_proposal`: adds `KeyError` to the proposal-schema handler,
+  restoring symmetry with the sibling `analyze` handler (which already caught `KeyError`). A malformed proposal
+  (e.g. a patch entry missing the required `file_path` key, accessed in `_file_patch`) now becomes the module's
+  existing retriable `RepairFailed` (schema mismatch) instead of a raw `KeyError` that escaped `propose_fix` and
+  crashed the repair loop.
+
+Generality-first (path-shape / exception-type logic only; no `language ==`, no domain literal in core),
+red-before-green for both fixes, full suite 7452 passed / 1 xfailed / 0 skipped, `language`-free-core ratchet
+green. Release content for the separately-gated v3.34.2.
+
 ## [3.34.1] - 2026-07-12 — Fix: robust file-path outputs (IsADirectoryError from v3.34.0's VB-coverage task)
 
 Robustness fix completing v3.34.0. The v3.34.0 VB-coverage-closure task was the **first** task to declare

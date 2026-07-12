@@ -389,7 +389,11 @@ def _repair_proposal(payload: Mapping[str, Any], rca: RootCauseAnalysis) -> Repa
             rca_reference=str(payload.get("rca_reference") or rca.analysis_timestamp),
             test_defect_claim=_test_defect_claims(payload.get("test_defect_claim")),
         )
-    except (TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
+        # ``KeyError`` mirrors the sibling ``analyze`` handler: a malformed proposal
+        # (e.g. a patch entry missing the required ``file_path`` key, accessed in
+        # ``_file_patch``) becomes the module's retriable ``RepairFailed`` (schema
+        # mismatch) instead of a raw ``KeyError`` that escapes and crashes the loop.
         LOGGER.warning("Repair proposal output did not match schema: %s", exc)
         raise RepairFailed("repair proposal output did not match schema") from exc
 

@@ -164,6 +164,25 @@ def test_propose_fix_returns_full_file_replacement_proposal():
     assert proposal.patches[0].content == "two\n"
 
 
+def test_propose_fix_malformed_patch_missing_file_path_raises_repair_failed(caplog):
+    # A malformed proposal — a patch entry missing the required ``file_path`` key —
+    # accesses ``payload["file_path"]`` and raises a raw KeyError inside
+    # ``_repair_proposal``. Its handler must catch KeyError and re-raise the module's
+    # retriable RepairFailed (schema mismatch), SYMMETRIC with the analyze side
+    # (which already catches KeyError). Before the fix the raw KeyError escaped
+    # ``propose_fix`` and crashed the repair loop.
+    ai = FakeAiCommand(
+        '{"patches":[{"patch_mode":"unified_diff","content":"diff --git a/x b/x"}],'
+        '"rationale":"missing file_path key","confidence":0.8}'
+    )
+    engine = LlmRepairEngine(ai_command={"repair_propose": ai}, max_strategy_attempts=1)
+
+    with caplog.at_level("WARNING"), pytest.raises(RepairFailed):
+        engine.propose_fix(_rca(), {"sample.txt": "one\n"})
+
+    assert "did not match schema" in caplog.text
+
+
 def test_propose_fix_validates_unified_diff_when_project_root_exists(tmp_path):
     root = _init_repo(tmp_path)
     ai = FakeAiCommand(

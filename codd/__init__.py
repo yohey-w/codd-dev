@@ -1,3 +1,3 @@
 """CoDD — Coherence-Driven Development."""
 
-__version__ = "3.34.1"
+__version__ = "3.34.2"
