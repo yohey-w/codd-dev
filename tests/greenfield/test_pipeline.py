@@ -16,6 +16,7 @@ import re
 import pytest
 import yaml
 
+from codd.dag import Node
 from codd.greenfield.pipeline import (
     STAGES,
     GreenfieldPipeline,
@@ -2545,6 +2546,192 @@ def test_facade_coverage_all_configured_project_is_strict_noop(tmp_path: Path) -
     assert result == tasks
     assert deriver.calls == []
     assert lister.calls == 0
+
+
+# ═══════════════════════════════════════════════════════════
+# Derive-stage design-doc→task CLOSURE (Item ②, v3.36.0)
+# ═══════════════════════════════════════════════════════════
+#
+# ``_enforce_design_doc_task_closure`` runs at the TOP of the implement stage,
+# immediately AFTER the VB-closure gate. It maps the open-world deriver's output
+# to the DESIGN-DOC declaration universe: a deterministic diff = {design docs
+# classified into an IMPLEMENTATION layer by v_model_layer} − {docs claimed by
+# some task's design_node}. A dropped classified doc FORCES a bounded re-derive
+# with a directive NAMING it, re-lists, re-checks; exhaustion → StageError.
+# STEERED-NEVER-JUDGED: an unclassifiable (or requirement-spec) layer doc is
+# echo-only fail-open. Deriver/doc-lister/lister are injected stubs so the gate
+# math is exercised with no real LLM or DAG build. Generic scenario — the docs
+# are plain paths with a declared layer; assertions hold with ``frameworks=[]``.
+
+_DOC_A = "docs/design/alpha_design.md"
+_DOC_B = "docs/design/beta_design.md"
+
+
+def _doc_node(path: str, *, layer: str | None = "detailed") -> Node:
+    """A design-doc node with (or without) a declared ``v_model_layer``."""
+    attributes: dict = {}
+    if layer is not None:
+        attributes["v_model_layer"] = layer
+    return Node(path, "design_doc", path, attributes)
+
+
+def _task_for_doc(task_id: str, doc: str) -> ImplementTaskRef:
+    return ImplementTaskRef(
+        task_id=task_id,
+        design_node=doc,
+        source="derived",
+        expected_outputs=(f"src/stub_app/{task_id}.py",),
+    )
+
+
+def _closure_pipeline(deriver, lister, doc_lister) -> GreenfieldPipeline:
+    return GreenfieldPipeline(
+        project_name="stub-app",
+        language="python",
+        ai_command="stub-ai --print",
+        task_deriver=deriver,
+        task_lister=lister,
+        design_doc_lister=doc_lister,
+        echo=lambda _m: None,
+    )
+
+
+def test_design_doc_closure_all_classified_docs_claimed_is_noop(tmp_path: Path) -> None:
+    """Every classified design doc is claimed by a task → no re-derive, tasks
+    returned unchanged, deriver/lister never consulted."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])  # must not be consulted
+    doc_lister = lambda _pr: [_doc_node(_DOC_A), _doc_node(_DOC_B)]
+    pipeline = _closure_pipeline(deriver, lister, doc_lister)
+    tasks = [_task_for_doc("impl_alpha", _DOC_A), _task_for_doc("impl_beta", _DOC_B)]
+
+    result = pipeline._enforce_design_doc_task_closure(project, tasks)
+
+    assert result == tasks
+    assert deriver.calls == []
+    assert lister.calls == 0
+
+
+def test_design_doc_closure_dropped_tail_doc_rederives_with_feedback_then_passes(tmp_path: Path) -> None:
+    """A dropped tail-doc → re-derive with ``force=True`` and feedback NAMING the
+    dropped doc; a stateful lister returns a corrected (doc-claiming) list → OK."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    corrected = [_task_for_doc("impl_alpha", _DOC_A), _task_for_doc("impl_beta", _DOC_B)]
+    lister = _ScriptedLister([corrected])
+    doc_lister = lambda _pr: [_doc_node(_DOC_A), _doc_node(_DOC_B)]
+    pipeline = _closure_pipeline(deriver, lister, doc_lister)
+    tasks = [_task_for_doc("impl_alpha", _DOC_A)]  # beta doc's task dropped
+
+    result = pipeline._enforce_design_doc_task_closure(project, tasks)
+
+    assert len(deriver.calls) == 1
+    assert deriver.calls[0]["force"] is True
+    assert deriver.calls[0]["feedback"]
+    assert _DOC_B in deriver.calls[0]["feedback"]
+    assert lister.calls == 1
+    assert [t.task_id for t in result] == ["impl_alpha", "impl_beta"]
+
+
+def test_design_doc_closure_dropped_doc_zero_retries_raises_naming_doc(tmp_path: Path) -> None:
+    """``derive.design_doc_task_closure_max_retries: 0`` → a dropped classified doc
+    raises StageError NAMING it immediately; the deriver is never called."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    _write_derive_config(project, design_doc_task_closure_max_retries=0)
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])
+    doc_lister = lambda _pr: [_doc_node(_DOC_A), _doc_node(_DOC_B)]
+    pipeline = _closure_pipeline(deriver, lister, doc_lister)
+    tasks = [_task_for_doc("impl_alpha", _DOC_A)]  # beta dropped
+
+    with pytest.raises(StageError, match=re.escape(_DOC_B)):
+        pipeline._enforce_design_doc_task_closure(project, tasks)
+    assert deriver.calls == []
+    assert lister.calls == 0
+
+
+def test_design_doc_closure_persistent_drop_exhausts_retries(tmp_path: Path) -> None:
+    """A doc that stays dropped past the retry budget (default 2) exhausts →
+    StageError naming it, after exactly 2 forced re-derives."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    dropped_tasks = [_task_for_doc("impl_alpha", _DOC_A)]  # beta never claimed
+    lister = _ScriptedLister([dropped_tasks])  # stays dropped forever
+    doc_lister = lambda _pr: [_doc_node(_DOC_A), _doc_node(_DOC_B)]
+    pipeline = _closure_pipeline(deriver, lister, doc_lister)
+
+    with pytest.raises(StageError, match=re.escape(_DOC_B)):
+        pipeline._enforce_design_doc_task_closure(project, list(dropped_tasks))
+    assert len(deriver.calls) == 2
+    assert all(call["force"] is True for call in deriver.calls)
+
+
+def test_design_doc_closure_unclassifiable_doc_is_echo_only_fail_open(tmp_path: Path) -> None:
+    """A doc with NO declared v_model_layer is UNCLASSIFIABLE → echo-only
+    fail-open: even unclaimed it never reds, and no re-derive fires (STEERED, not
+    JUDGED)."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])
+    doc_lister = lambda _pr: [_doc_node(_DOC_A), _doc_node(_DOC_B, layer=None)]
+    pipeline = _closure_pipeline(deriver, lister, doc_lister)
+    tasks = [_task_for_doc("impl_alpha", _DOC_A)]  # DOC_B unclaimed, but fail-open
+
+    result = pipeline._enforce_design_doc_task_closure(project, tasks)
+
+    assert result == tasks
+    assert deriver.calls == []
+    assert lister.calls == 0
+
+
+def test_design_doc_closure_requirement_layer_doc_is_fail_open(tmp_path: Path) -> None:
+    """A requirement-layer doc authors acceptance evidence, not an implementation
+    unit → NOT an implementation layer → fail-open even when unclaimed."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])
+    doc_lister = lambda _pr: [_doc_node(_DOC_A), _doc_node(_DOC_B, layer="requirement")]
+    pipeline = _closure_pipeline(deriver, lister, doc_lister)
+    tasks = [_task_for_doc("impl_alpha", _DOC_A)]  # requirement doc unclaimed
+
+    result = pipeline._enforce_design_doc_task_closure(project, tasks)
+
+    assert result == tasks
+    assert deriver.calls == []
+
+
+def test_design_doc_closure_strict_noop_when_universe_undeterminable(tmp_path: Path) -> None:
+    """No design docs (unbuildable / empty universe) → strict no-op, never a red."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])
+    doc_lister = lambda _pr: []
+    pipeline = _closure_pipeline(deriver, lister, doc_lister)
+    tasks = [_task_for_doc("impl_alpha", _DOC_A)]
+
+    result = pipeline._enforce_design_doc_task_closure(project, tasks)
+
+    assert result == tasks
+    assert deriver.calls == []
+
+
+def test_design_doc_closure_task_claim_by_node_id_alias_is_not_dropped(tmp_path: Path) -> None:
+    """A task that claims a doc by its declared ``node_id`` alias (not its path)
+    keeps the doc CLAIMED — the closure matches ANY doc identifier, so no false
+    RED."""
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    deriver = _RecordingDeriver()
+    lister = _ScriptedLister([[]])
+    node = Node(_DOC_B, "design_doc", _DOC_B, {"v_model_layer": "detailed", "node_id": "design:beta"})
+    doc_lister = lambda _pr: [node]
+    pipeline = _closure_pipeline(deriver, lister, doc_lister)
+    tasks = [_task_for_doc("impl_beta", "design:beta")]  # claims by node_id, not path
+
+    result = pipeline._enforce_design_doc_task_closure(project, tasks)
+
+    assert result == tasks
+    assert deriver.calls == []
 
 
 # ═══════════════════════════════════════════════════════════

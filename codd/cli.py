@@ -7333,6 +7333,7 @@ def plan_derive_cmd(
 ):
     """Derive implementation tasks from design documents."""
     from codd.deployment.providers.ai_command_factory import get_ai_command
+    from codd.greenfield.pipeline import StageError
     from codd.llm.plan_deriver import PLAN_DERIVERS, merge_approved_tasks_into_plan
 
     project_root = Path(project_path).resolve()
@@ -7353,17 +7354,24 @@ def plan_derive_cmd(
     command = ai_cmd or _plan_derive_command(config)
     ai_command = get_ai_command(config, project_root, command_override=command)
     deriver = deriver_cls(ai_command)
-    tasks = deriver.derive_tasks(
-        nodes,
-        v_model_layer,  # type: ignore[arg-type]
-        {
-            "project_root": project_root,
-            "force": force,
-            "dry_run": dry_run,
-            "write_cache": not dry_run,
-            "project_context": {"project": config.get("project", {})},
-        },
-    )
+    try:
+        tasks = deriver.derive_tasks(
+            nodes,
+            v_model_layer,  # type: ignore[arg-type]
+            {
+                "project_root": project_root,
+                "force": force,
+                "dry_run": dry_run,
+                "write_cache": not dry_run,
+                "project_context": {"project": config.get("project", {})},
+            },
+        )
+    except StageError as exc:
+        # Honest-RED at the HITL boundary: a genuine derivation-command failure
+        # surfaces its true cause cleanly (not a traceback, and not the old
+        # silent "Derived tasks: 0" lie).
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
 
     if dry_run:
         click.echo(yaml.safe_dump([task.to_dict() for task in tasks], sort_keys=False, allow_unicode=True), nl=False)

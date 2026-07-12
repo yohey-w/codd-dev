@@ -193,6 +193,27 @@ def test_design_doc_bundle_reads_file_content(tmp_path):
     assert "File body" in bundle
 
 
+def test_deriver_logs_bundle_doc_and_byte_count(tmp_path, caplog):
+    """No-silent-scale telemetry: at derivation the deriver echoes the bundle's
+    doc-count AND byte-count (the DATA a future threshold re-measurement uses)."""
+    import logging
+
+    project = _write_project(tmp_path)
+    raw = '{"tasks": [{"id": "build_contract", "title": "Build contract", "description": "Do it.", "source_design_doc": "docs/design/contract.md", "v_model_layer": "detailed", "expected_outputs": [], "test_kinds": ["unit"], "dependencies": []}]}'
+    nodes = [_node(), _node("docs/design/second.md")]
+
+    with caplog.at_level(logging.INFO, logger="codd.llm.plan_deriver"):
+        SubprocessAiCommandPlanDeriver(FakeAiCommand([raw])).derive_tasks(
+            nodes, "detailed", {"project_root": project}
+        )
+
+    telemetry = [r.getMessage() for r in caplog.records if "Plan derivation bundle" in r.getMessage()]
+    assert telemetry, "expected bundle telemetry to be logged at derivation"
+    # doc-count is the real node count; a positive byte-count is echoed (no silent scale)
+    assert "2 design doc(s)" in telemetry[0]
+    assert "byte(s)" in telemetry[0]
+
+
 def test_cache_key_changes_when_design_sha_changes():
     first = derived_task_cache_key(design_doc_sha="a", provider_id="p", prompt_template_sha="t")
     second = derived_task_cache_key(design_doc_sha="b", provider_id="p", prompt_template_sha="t")
@@ -262,10 +283,32 @@ def test_deriver_dry_run_does_not_write_cache(tmp_path):
     assert not derived_task_cache_path([_node()], {"project_root": project}).exists()
 
 
-def test_deriver_command_error_returns_empty(tmp_path):
+def test_deriver_command_error_raises_honest_stage_error(tmp_path):
+    """A genuine derivation-command failure is HONEST-RED: it raises a StageError
+    carrying the TRUE cause (chained from the AiCommandError), not a swallowed
+    warning + empty list that later mis-points the user at "fix your config"."""
+    from codd.greenfield.pipeline import StageError
+
     project = _write_project(tmp_path)
 
-    tasks = SubprocessAiCommandPlanDeriver(FailingAiCommand()).derive_tasks([_node()], "detailed", {"project_root": project})
+    with pytest.raises(StageError, match="plan derivation AI command failed") as excinfo:
+        SubprocessAiCommandPlanDeriver(FailingAiCommand()).derive_tasks(
+            [_node()], "detailed", {"project_root": project}
+        )
+    # the real cause ("failed") is preserved and chained, so the red points at it
+    assert "failed" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, AiCommandError)
+
+
+def test_deriver_no_design_docs_returns_empty_not_red(tmp_path):
+    """The "no design docs → empty list" path stays a LEGITIMATE no-op, DISTINCT
+    from a command failure: the same failing command never runs (there is nothing
+    to derive), so derivation returns [] with NO StageError."""
+    project = _write_project(tmp_path)
+
+    tasks = SubprocessAiCommandPlanDeriver(FailingAiCommand()).derive_tasks(
+        [], "detailed", {"project_root": project}
+    )
 
     assert tasks == []
 

@@ -13,6 +13,38 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.36.0] - 2026-07-12 — Feat: derive-stage design-doc→task closure — every implementation-layer design document must be claimed by a task, or an honest RED names it
+
+v3.34.0 closed the derivation against the declared VERIFIABLE-BEHAVIOR set. This release maps that same
+closure to the next declaration universe — the **design-doc set itself**. The plan deriver is an
+open-world producer: from an untruncated full-text design-doc bundle it emits a task set whose
+cardinality the harness does not control, and as the bundle scales (S3-full is ~10× the mini bundle) a
+tail document can silently drop out. Its designed component then strands a consumer at a distant
+typecheck, and repair — seeing no producer — invents a non-existent one inside the consumer (the
+wrong-owner spiral, F7.1 family).
+
+- `codd/greenfield/pipeline.py`: new `_enforce_design_doc_task_closure`, wired at implement-stage head
+  immediately after the VB-coverage gate. Deterministic diff = {design docs classified into an
+  implementation `v_model_layer`} − {docs claimed by some task via `design_node` / `source_design_doc`};
+  a non-empty diff forces a bounded re-derivation with feedback naming the dropped docs (mirroring
+  `_enforce_api_facade_coverage`), then raises `StageError` on exhaustion. Steered-never-judged (the
+  v3.22.0 principle): an unclassifiable or top-of-V `requirement`-layer doc is echo-only fail-open, and
+  the gate is a strict no-op when the universe is undeterminable or no doc declares an implementation
+  layer — so an existing project whose docs declare no layer is unaffected. Pure id-set math over
+  classification DATA; no language / framework / domain literal, and file-exclusivity is left to the
+  owner-uniqueness gate (never duplicated here). Retry budget via `derive.design_doc_task_closure_max_retries`
+  (default 2; `0` = no re-derive), identical to its sibling gates.
+- `codd/llm/plan_deriver.py`: honest-RED — an `AiCommandError` during derivation now raises `StageError`
+  (`from exc`) instead of sinking into a warning + empty list that made the caller see "0 tasks" and
+  point the user at "fix your config" (a lying direction). The legitimate "no design docs → empty list"
+  path is preserved and distinct. Adds no-silent-scale bundle telemetry (doc-count + byte-count) — the
+  DATA a future threshold re-measurement uses, with no invented threshold.
+- `codd/cli.py`: the `plan derive` HITL boundary catches that `StageError` and prints a clean error
+  instead of a raw traceback.
+- Tests: 8 generic closure-gate tests (`tests/greenfield/test_pipeline.py`) + honest-red / no-docs /
+  bundle-telemetry tests (`tests/llm/test_plan_deriver.py`), all `tmp_path` + injected stubs, holding
+  with `frameworks=[]`. Full suite green: 7466 passed, 0 skipped.
+
 ## [3.35.0] - 2026-07-12 — Feat: regeneration parity — the mechanical contract flows to the repair path so v3.33.0's signature convergence survives repair
 
 v3.33.0 established "convergence granularity ≤ circulated contract granularity" and made producer

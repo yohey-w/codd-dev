@@ -326,6 +326,12 @@ WaveLister = Callable[[Path], list[int]]
 GenerateWaveRunner = Callable[..., str]
 TaskLister = Callable[[Path], list[ImplementTaskRef]]
 TaskDeriver = Callable[..., int]
+#: Injectable seam listing the project's design-doc nodes — the DERIVATION
+#: declaration universe the design-doc→task closure gate diffs against. Default
+#: (None) uses ``_default_design_doc_lister`` (the CLI's design-doc DAG loader);
+#: tests inject a scripted node list so the closure set-math is exercised with no
+#: real DAG build.
+DesignDocLister = Callable[[Path], list[Any]]
 ImplementTaskRunner = Callable[..., str]
 VerifyRunner = Callable[..., str]
 CiScaffoldRunner = Callable[..., str]
@@ -369,6 +375,7 @@ class GreenfieldPipeline:
         generate_wave_runner: GenerateWaveRunner | None = None,
         task_lister: TaskLister | None = None,
         task_deriver: TaskDeriver | None = None,
+        design_doc_lister: DesignDocLister | None = None,
         implement_task_runner: ImplementTaskRunner | None = None,
         verify_runner: VerifyRunner | None = None,
         ci_scaffold_runner: CiScaffoldRunner | None = None,
@@ -399,6 +406,7 @@ class GreenfieldPipeline:
         self.generate_wave_runner = generate_wave_runner
         self.task_lister = task_lister
         self.task_deriver = task_deriver
+        self.design_doc_lister = design_doc_lister
         self.implement_task_runner = implement_task_runner
         self.verify_runner = verify_runner
         self.ci_scaffold_runner = ci_scaffold_runner
@@ -1427,6 +1435,20 @@ class GreenfieldPipeline:
         # is both implemented and visible to the gate's targeted rerun scope.
         tasks = self._enforce_vb_coverage_closure(project_root, tasks)
 
+        # Derive-stage design-doc→task closure (Item ②, v3.36.0): complete the
+        # open-world deriver's output against the DESIGN-DOC declaration universe,
+        # the sibling of the VB-closure gate above (which closes against the
+        # declared VB set). The bundle is an untruncated full-text concatenation,
+        # so as it scales (S3-full ~10x mini) a tail-doc's task silently dropping
+        # is the most probable plan-stage failure — a dropped doc's component is
+        # never implemented, a consumer imports it and goes RED at a DISTANT
+        # typecheck, and repair invents a non-existent producer inside the
+        # consumer (the wrong-owner spiral). Placed immediately AFTER VB closure.
+        # STRICT NO-OP unless a design doc is classified into an implementation
+        # layer and no derived task claims it; a doc with an unclassifiable (or
+        # requirement-spec) layer is echo-only fail-open — STEERED, never JUDGED.
+        tasks = self._enforce_design_doc_task_closure(project_root, tasks)
+
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {task.task_id: units.get(task.task_id, STATUS_PENDING) for task in tasks}
 
@@ -1907,6 +1929,141 @@ class GreenfieldPipeline:
                 description=closure.description,
             )
         ]
+
+    def _enforce_design_doc_task_closure(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+    ) -> list[ImplementTaskRef]:
+        """Derive-stage closure: every implementation-layer design doc is CLAIMED.
+
+        The plan deriver is an OPEN-WORLD producer — from a full-text design-doc
+        bundle (untruncated concatenation) it emits a task set whose cardinality
+        the harness does not control. Dropping a tail document (the most probable
+        plan-stage failure as the bundle scales — S3-full is ~10x the mini
+        bundle) silently omits that document's designed component; a consumer that
+        imports it then goes RED at a DISTANT typecheck, and the repair, seeing no
+        producer, invents a non-existent one inside the consumer (the wrong-owner
+        spiral, F7.1 family).
+
+        This CLOSES the derivation against the design-doc DECLARATION UNIVERSE —
+        the sibling of the VB-closure gate just above (which closes against the
+        declared VB set) and structurally identical to
+        :meth:`_enforce_api_facade_coverage`: a deterministic diff = {design docs
+        classified into an IMPLEMENTATION layer by the ``v_model_layer``
+        classification} − {docs claimed by some task via its ``design_node`` /
+        ``source_design_doc``}. A non-empty diff FORCES a bounded re-derivation
+        with a deterministic directive enumerating the dropped doc(s), re-lists,
+        and re-checks; exhaustion raises :class:`StageError` (honest RED naming the
+        docs). Because the re-derive overwrites the cache, a ``--resume`` stays
+        consistent.
+
+        STEERED, NEVER JUDGED (the v3.22.0 principle — do not hard-fail on
+        ambiguity): a doc whose ``v_model_layer`` is UNCLASSIFIABLE (or is the
+        top-of-V ``requirement`` spec layer, which authors acceptance evidence,
+        not an implementation unit whose omission strands a consumer) is
+        ECHO-ONLY / FAIL-OPEN — never a violation source. STRICT NO-OP when the
+        universe cannot be determined (no design docs / unbuildable DAG) or no doc
+        is classified into an implementation layer, so an existing project whose
+        docs declare no layer is unaffected. Pure id-set math over classification
+        DATA — no language / framework / domain literal, and file-exclusivity is
+        left to the owner-uniqueness gate (never duplicated here).
+        """
+        from codd.config import load_project_config
+        from codd.llm.plan_deriver import VALID_V_MODEL_LAYERS, declarative_v_model_layer
+
+        doc_lister = self.design_doc_lister or _default_design_doc_lister
+        try:
+            nodes = list(doc_lister(project_root))
+        except Exception:  # noqa: BLE001 — universe undeterminable ⇒ fail-open no-op.
+            return tasks
+        if not nodes:
+            return tasks
+
+        # The V-model IMPLEMENTATION layers are every layer EXCEPT the top-of-V
+        # ``requirement`` spec layer. Derived from the deriver's own layer
+        # vocabulary — classification DATA, never a hardcoded literal set.
+        implementation_layers = set(VALID_V_MODEL_LAYERS) - {"requirement"}
+
+        classified: list[tuple[str, frozenset[str]]] = []  # (display key, claim keys)
+        fail_open = 0
+        for node in nodes:
+            keys = _design_doc_claim_keys(node)
+            if not keys:
+                continue
+            display = _norm_decl_path(getattr(node, "path", None) or getattr(node, "id", ""))
+            if declarative_v_model_layer(node) in implementation_layers:
+                classified.append((display, keys))
+            else:
+                fail_open += 1
+
+        # No-silent-scale telemetry: the DATA a future threshold re-measurement
+        # uses. Data-derived counts only — no invented doc-importance heuristic.
+        self.echo(
+            "[greenfield] implement: design-doc→task closure — "
+            f"{len(classified)} implementation-layer doc(s) gated, {fail_open} "
+            f"echo-only fail-open, of {len(nodes)} design doc(s)"
+        )
+        if not classified:
+            return tasks
+
+        try:
+            config = load_project_config(project_root)
+        except (FileNotFoundError, ValueError):
+            config = {}
+
+        max_retries = _design_doc_task_closure_max_retries(config)
+        attempt = 0
+        while True:
+            dropped = self._design_doc_closure_violations(classified, tasks)
+            if not dropped:
+                break
+            if attempt >= max_retries:
+                listed = ", ".join(f"`{doc}`" for doc in dropped)
+                raise StageError(
+                    "derive-stage design-doc→task closure gate failed — these "
+                    "design document(s) are classified into an implementation "
+                    "layer but no derived task claims them (their designed "
+                    f"component would be dropped): {listed}. Each such document "
+                    "must be the source_design_doc of at least one derived task."
+                )
+            attempt += 1
+            feedback = self._build_design_doc_closure_feedback(dropped)
+            self.echo(
+                "[greenfield] implement: design-doc→task closure gate re-deriving "
+                f"with repair feedback (attempt {attempt}/{max_retries})"
+            )
+            deriver = self.task_deriver or _default_task_deriver
+            deriver(project_root, ai_command=self.ai_command, force=True, feedback=feedback)
+            lister = self.task_lister or _default_task_lister
+            tasks = list(lister(project_root))
+        return tasks
+
+    def _design_doc_closure_violations(
+        self,
+        classified: list[tuple[str, frozenset[str]]],
+        tasks: list[ImplementTaskRef],
+    ) -> list[str]:
+        """Classified design docs whose identifiers match NO task's ``design_node``.
+
+        Returns the sorted display keys of the dropped docs. A doc is CLAIMED when
+        any of its identifiers (path / id / node_id) equals some task's
+        ``design_node``; matching ANY identifier keeps the closure conservative —
+        it never reports a doc as dropped that a task actually claims under an
+        alias (anti-false-RED)."""
+        claimed = {key for task in tasks if (key := _norm_decl_path(task.design_node))}
+        return sorted(display for display, keys in classified if not (keys & claimed))
+
+    def _build_design_doc_closure_feedback(self, dropped: list[str]) -> str:
+        """Deterministic repair directive for a design-doc→task closure re-derivation."""
+        docs = ", ".join(f"`{doc}`" for doc in dropped)
+        return (
+            "Every design document that belongs to an implementation layer MUST be "
+            "covered by at least one derived task that names it as source_design_doc. "
+            f"The following design document(s) have NO owning task and would be "
+            f"dropped: {docs}. Re-derive so that each is the source_design_doc of at "
+            "least one task that implements its designed component; do not omit any."
+        )
 
     def _finalize_dependency_lock_coherence(self, project_root: Path) -> None:
         """Reconcile harness-owned toolchain deps + refresh the lock (implement-end).
@@ -3510,6 +3667,39 @@ def _default_task_deriver(
     return len(tasks)
 
 
+def _default_design_doc_lister(project_root: Path) -> list[Any]:
+    """List the project's design-doc nodes — the derivation declaration universe.
+
+    Thin wrapper over the CLI's design-doc DAG loader (the SAME node set the
+    derive stage feeds the plan deriver). Fail-open: any failure (no design docs,
+    an unbuildable DAG) yields ``[]`` so the design-doc→task closure gate degrades
+    to a strict NO-OP rather than a false RED.
+    """
+    try:
+        import codd.cli as cli_module
+
+        return list(cli_module._plan_design_doc_nodes(project_root, ()))
+    except Exception:  # noqa: BLE001 — universe undeterminable ⇒ fail-open no-op.
+        return []
+
+
+def _design_doc_claim_keys(node: Any) -> frozenset[str]:
+    """The normalized identifiers by which a task may CLAIM a design-doc node.
+
+    A derived task references its source document by path (``design_node`` =
+    canonicalized ``source_design_doc``); a doc may also be aliased by its
+    declared ``node_id``. Collecting the doc's path / id / node_id lets the
+    closure treat a doc as claimed when a task matches ANY of them — conservative
+    (anti-false-RED)."""
+    attributes = getattr(node, "attributes", None) or {}
+    candidates = (
+        getattr(node, "path", None),
+        getattr(node, "id", None),
+        attributes.get("node_id"),
+    )
+    return frozenset(k for c in candidates if c and (k := _norm_decl_path(c)))
+
+
 # ═══════════════════════════════════════════════════════════
 # Contract-aware task verification (artifact KIND, not name/path)
 # ═══════════════════════════════════════════════════════════
@@ -4453,6 +4643,23 @@ def _plan_intake_grounding_max_retries(config: dict[str, Any] | None) -> int:
     section = (config or {}).get("derive")
     if isinstance(section, dict):
         value = section.get("plan_intake_grounding_max_retries")
+        if isinstance(value, int) and value >= 0:
+            return value
+    return 2
+
+
+def _design_doc_task_closure_max_retries(config: dict[str, Any] | None) -> int:
+    """Bounded derive-stage re-derivations for the design-doc→task closure gate
+    (``derive.design_doc_task_closure_max_retries``, default 2).
+
+    ``0`` = no re-derive (a classified-but-unclaimed design doc fails the gate
+    immediately). A versioned, visible default — not a silent activation (the gate
+    itself is a strict no-op unless a doc is classified into an implementation
+    layer and left unclaimed).
+    """
+    section = (config or {}).get("derive")
+    if isinstance(section, dict):
+        value = section.get("design_doc_task_closure_max_retries")
         if isinstance(value, int) and value >= 0:
             return value
     return 2

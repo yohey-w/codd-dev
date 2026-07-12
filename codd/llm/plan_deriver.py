@@ -153,6 +153,15 @@ class SubprocessAiCommandPlanDeriver(PlanDeriver):
 
         layer = _require_layer(v_model_layer)
         bundle = design_doc_bundle(design_docs, project_context)
+        # No-silent-scale telemetry: the untruncated full-text bundle is what a
+        # tail-doc drops out of as it scales, so echo the DATA (doc-count +
+        # byte-count) a future threshold re-measurement would use. Data-derived
+        # only — no invented threshold here.
+        LOGGER.info(
+            "Plan derivation bundle: %d design doc(s), %d byte(s)",
+            len(design_docs),
+            len(bundle.encode("utf-8")),
+        )
         provider_id = self._resolve_provider_id(project_context)
         template_text = self.template_path.read_text(encoding="utf-8")
         prompt_template_sha = sha256_text(template_text)
@@ -178,8 +187,15 @@ class SubprocessAiCommandPlanDeriver(PlanDeriver):
         try:
             raw_output = self._invoke(prompt)
         except AiCommandError as exc:
-            LOGGER.warning("Plan derivation command failed: %s", exc)
-            return []
+            # Honest-RED: the derivation AI command genuinely failed. Swallowing
+            # it into a warning + empty list makes the caller see "0 tasks" and
+            # point the user at "fix your config" (the 0-task→config StageError) —
+            # a LYING direction. Raise the true cause so the red points at it.
+            # DISTINCT from the "no design docs → empty list" path above (line
+            # ``if not design_docs: return []``), which is a legitimate no-op.
+            from codd.greenfield.pipeline import StageError
+
+            raise StageError(f"plan derivation AI command failed: {exc}") from exc
 
         generated_at = utc_timestamp()
         tasks = parse_derived_tasks(
