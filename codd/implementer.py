@@ -1561,10 +1561,43 @@ def _resolve_output_path(project_root: Path, output_path: str) -> Path:
 
 
 def _create_output_paths(project_root: Path, output_paths: list[str]) -> None:
+    # Discriminate FILE-shaped from DIRECTORY-shaped declared outputs, mirroring the
+    # sibling ``_clean_output_paths`` (which already branches on ``is_dir``). A
+    # directory declaration (``src``, ``tests``, ``src/pkg``) is created verbatim; a
+    # file declaration (``tests/e2e/helpers/workspace.ts``) has ONLY its parent dir
+    # created — the file itself is written later by ``_write_generated_files``.
+    # Blindly ``mkdir``-ing every path as a directory made the file path an empty
+    # directory, so the later ``write_text`` raised a raw unhandled
+    # ``IsADirectoryError`` (CoDD v3.34.0 VB-coverage-closure task — the first to
+    # declare file-path outputs). Path-SHAPE only: no language/framework knowledge.
+    # ``_declared_output_is_file_path`` (and ``StageError``) are lazy-imported to
+    # avoid the greenfield<->implementer module-load cycle; reusing that one predicate
+    # keeps the file-vs-dir rule identical to the completeness/kind gates.
+    from codd.greenfield.pipeline import StageError, _declared_output_is_file_path
+
     for output_path in output_paths:
         destination = _resolve_output_path(project_root, output_path)
         _ensure_inside_project(project_root, destination, "output path")
-        destination.mkdir(parents=True, exist_ok=True)
+        if _declared_output_is_file_path(output_path):
+            # Honest-red: a file-shaped output already present on disk as a DIRECTORY
+            # is a path-kind collision. Raise a clean StageError (routed into the
+            # autopilot's clean-red/regenerate path) instead of letting the later
+            # ``write_text`` die on a raw ``IsADirectoryError``.
+            if destination.is_dir():
+                raise StageError(
+                    f"declared output {output_path} is a FILE but exists on disk as a "
+                    "DIRECTORY — path-kind collision"
+                )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            # Symmetric honest-red: a directory-shaped output already present as a
+            # FILE would make ``mkdir`` raise a raw ``FileExistsError``.
+            if destination.exists() and not destination.is_dir():
+                raise StageError(
+                    f"declared output {output_path} is a DIRECTORY but exists on disk "
+                    "as a FILE — path-kind collision"
+                )
+            destination.mkdir(parents=True, exist_ok=True)
 
 
 def _clean_output_paths(project_root: Path, output_paths: list[str]) -> None:

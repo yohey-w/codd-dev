@@ -13,6 +13,26 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.34.1] - 2026-07-12 — Fix: robust file-path outputs (IsADirectoryError from v3.34.0's VB-coverage task)
+
+Robustness fix completing v3.34.0. The v3.34.0 VB-coverage-closure task was the **first** task to declare
+concrete FILE paths as `output_paths` (the residual VBs' owner test files). But `_create_output_paths`
+(`codd/implementer.py`) blindly `mkdir`'d every declared output path as a **directory** — turning those file
+paths into empty directories — so the subsequent `write_text` raised a raw, unhandled `IsADirectoryError` that
+crashed the implement stage (surfaced by an S3 StockRoom-mini re-burn). The sibling `_clean_output_paths` already
+discriminated file vs directory; `_create_output_paths` did not.
+
+- `codd/implementer.py` `_create_output_paths`: now discriminates file-shaped vs directory-shaped declared
+  outputs using the codebase's own `_declared_output_is_file_path` predicate (no new heuristic). A file-shaped
+  output (e.g. `tests/e2e/helpers/workspace.ts`) creates only its **parent** directory (the file itself is
+  written later); a directory-shaped output (`src`, `tests`) keeps the prior `mkdir`.
+- Honest-red hardening: a file-shaped output that already exists on disk as a directory (or a directory-shaped
+  one that exists as a file) now raises a clean `StageError` (`path-kind collision`) routed into the autopilot's
+  existing clean-red/regenerate path, instead of letting a raw `IsADirectoryError`/`FileExistsError` escape.
+
+Generality-first (path-shape logic only; no `language ==`, no domain literal in core), red-before-green, full
+suite 7448 passed / 1 xfailed / 0 skipped. Surfaced by the StockRoom-mini calibration burn (internal R&D).
+
 ## [3.34.0] - 2026-07-12 — S3-mini R&D yield #2: plan-time VB-coverage closure (every declared behavior gets an owning task)
 
 Second yield of the S3 real-service-scale greenfield R&D. With v3.33.0's implement-time typecheck classes
