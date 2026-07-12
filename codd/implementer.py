@@ -2755,6 +2755,90 @@ def _dependency_artifact_files_context(
     return "\n\n".join(parts)
 
 
+def build_mechanical_contract_context(
+    project_root: Path | None,
+    config: dict[str, Any],
+    *,
+    profile: Any | None = None,
+    target_files: list[str] | None = None,
+) -> str:
+    """Assemble the three profile-DATA MECHANICAL-CONTRACT blocks as one string.
+
+    In order, joined by a blank line: NAMESPACE-coherence, MODULE-SPECIFIER-
+    coherence, RUNTIME-DEPENDENCY declaration. A block the stack does not declare
+    is omitted; the result is ``""`` for a stack that declares none (a namespace-
+    less / path-relative / manifest-less stack).
+
+    Extracted verbatim from ``_build_implementation_prompt`` so the SAME mechanical
+    contract that pins a FIRST-PASS implement prompt also pins the REPAIR
+    regeneration prompt (v3.35.0 regeneration parity — the monotonicity invariant
+    "repair's mechanical contract ⊇ the first-pass's"). Pure + deterministic +
+    profile-DATA dispatch: every block is resolved from the language DATA row / the
+    resolved :class:`~codd.project_types.LayoutProfile`, so this logic carries NO
+    ``language ==`` branch and NO domain/framework literal. ``profile`` is the
+    already-resolved profile (the first-pass caller passes the one it resolved for
+    the layout/placement blocks); when ``None`` it is resolved from ``project_root``
+    + ``config`` so a caller without one (the repair engine) supplies only those.
+    ``target_files`` is accepted for call-site symmetry and reserved for a future
+    per-file arm — the three current blocks are project/language-level and do not
+    consume it. May raise on a broken config; callers wrap it exactly as the inline
+    assembly was wrapped (a projection failure must never break generation/repair).
+
+    Per-block rationale (enforced by the native oracle, not this seam):
+
+    - NAMESPACE (``resolve_namespace_guidance``): pins the first-party namespace
+      convention so independently-(re)generated files cannot split on it (csharp
+      exprcalc: a namespace segment sharing a type's name shadowed it → CS0234).
+      ``None`` for a stack that declares no namespace rule.
+    - MODULE-SPECIFIER (``resolve_module_specifier_guidance``): pins the relative-
+      import-specifier convention (TS NodeNext: the explicit ``.js`` extension, else
+      TS2835). ``None`` for a path-relative stack.
+    - RUNTIME-DEPENDENCY (``resolve_runtime_dependency_guidance``): the obligation to
+      declare a self-imported third-party runtime package in the manifest (TS: an
+      undeclared ``import express`` → TS2307). ``None`` for a manifest-less stack.
+    """
+    del target_files  # reserved for a future per-file arm; see docstring.
+    project = config.get("project") or {}
+    language = _normalize_implementation_language(project.get("language"))
+    if profile is None:
+        from codd.project_types import resolve_layout_profile
+
+        scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
+        profile = resolve_layout_profile(
+            language=project.get("language"),
+            project_name=project.get("name"),
+            source_dirs=scan.get("source_dirs") if isinstance(scan, dict) else None,
+            test_dirs=scan.get("test_dirs") if isinstance(scan, dict) else None,
+            config=config,
+            project_root=project_root,
+        )
+    from codd.languages import (
+        resolve_module_specifier_guidance,
+        resolve_namespace_guidance,
+        resolve_runtime_dependency_guidance,
+    )
+
+    namespace_block = (
+        resolve_namespace_guidance(
+            language,
+            package_name=getattr(profile, "package_name", None),
+        )
+        or ""
+    )
+    module_specifier_block = resolve_module_specifier_guidance(language) or ""
+    runtime_dependency_block = (
+        resolve_runtime_dependency_guidance(
+            getattr(profile, "toolchain_dependencies", None)
+        )
+        or ""
+    )
+    return "\n\n".join(
+        block
+        for block in (namespace_block, module_specifier_block, runtime_dependency_block)
+        if block
+    )
+
+
 def _build_implementation_prompt(
     *,
     config: dict[str, Any],
@@ -2917,54 +3001,15 @@ def _build_implementation_prompt(
                 project_root=project_root,
             )
             layout_block = render_import_coherence_contract(layout_profile)
-            # NAMESPACE-coherence contract (profile-declared, {package_name}
-            # substituted) — pins the first-party namespace convention so
-            # independently-generated files cannot split on it (the native
-            # oracle is the enforcing gate; csharp4 exprcalc dogfood 2026-07-11:
-            # a namespace segment sharing a type's name shadowed the type →
-            # CS0234 ×34). None/"" for every profile that doesn't declare it.
-            from codd.languages import (
-                resolve_module_specifier_guidance,
-                resolve_namespace_guidance,
-                resolve_runtime_dependency_guidance,
-            )
-
-            namespace_block = (
-                resolve_namespace_guidance(
-                    language,
-                    package_name=getattr(layout_profile, "package_name", None),
-                )
-                or ""
-            )
-            # MODULE-SPECIFIER-coherence contract (profile-declared) — pins the
-            # relative-import-specifier convention so independently-generated
-            # files cannot split on it (the native oracle is the enforcing gate;
-            # S3 TS greenfield NodeNext dogfood 2026-07-12: under NodeNext,
-            # relative imports missing an explicit `.js` extension failed
-            # typecheck → TS2835 ×30). None/"" for every profile that doesn't
-            # declare it.
-            module_specifier_block = resolve_module_specifier_guidance(language) or ""
-            # RUNTIME-DEPENDENCY-DECLARATION contract (2026-07-12): a design
-            # DEFERS the concrete third-party runtime packages to implement time,
-            # so the model first names them when it writes ``import <pkg>``; the
-            # scaffold seeds ONLY the harness-owned test toolchain into the
-            # manifest. Without an explicit obligation the model imports a runtime
-            # package it legitimately chose but omits it from the manifest, and
-            # the implement-time typecheck cannot resolve it (S3 StockRoom-mini TS
-            # greenfield dogfood 2026-07-12: ``import express`` / ``better-sqlite3``
-            # with neither in ``package.json`` → TS2307 ×2). The manifest-accept
-            # pipeline already consumes a SUT-declared manifest end to end (the
-            # dependency_lock_coherence refresh touches only the toolchain region);
-            # this block is the missing "declare your own region" instruction.
-            # Data-projected from the toolchain profile's manifest_filename — no
-            # framework/package hardcode; "" for a manifest-less stack (Python/C#/
-            # Java, whose toolchain_dependencies is None) — same generality guard
-            # as the other blocks.
-            runtime_dependency_block = (
-                resolve_runtime_dependency_guidance(
-                    getattr(layout_profile, "toolchain_dependencies", None)
-                )
-                or ""
+            # NAMESPACE / MODULE-SPECIFIER / RUNTIME-DEPENDENCY mechanical-contract
+            # blocks, assembled by the shared ``build_mechanical_contract_context``
+            # builder (each pinned from the SAME LayoutProfile / language DATA row).
+            # Extracted so the identical mechanical contract also flows to the REPAIR
+            # regeneration prompt (v3.35.0 regeneration parity); byte-identical to the
+            # former inline assembly for this first-pass caller. See the builder
+            # docstring for the per-block rationale (CS0234 / TS2835 / TS2307).
+            mechanical_block = build_mechanical_contract_context(
+                project_root, config, profile=layout_profile
             )
             # LAYOUT-PLACEMENT CONTRACT (2026-07-04): project the harness-owned
             # test-root / source-root / scaffold-owned-config topology onto the
@@ -2978,19 +3023,13 @@ def _build_implementation_prompt(
         except Exception:  # noqa: BLE001 — a projection failure must never break generation.
             layout_block = ""
             placement_block = ""
-            namespace_block = ""
-            module_specifier_block = ""
-            runtime_dependency_block = ""
+            mechanical_block = ""
         if layout_block:
             lines.extend([layout_block, ""])
         if placement_block:
             lines.extend([placement_block, ""])
-        if namespace_block:
-            lines.extend([namespace_block, ""])
-        if module_specifier_block:
-            lines.extend([module_specifier_block, ""])
-        if runtime_dependency_block:
-            lines.extend([runtime_dependency_block, ""])
+        if mechanical_block:
+            lines.extend([mechanical_block, ""])
 
     if _spec_targets_tests(spec, config):
         test_framework = resolve_test_framework_guidance(language)

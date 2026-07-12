@@ -39,6 +39,23 @@ IMMUTABLE_EVIDENCE_RULE = (
     "failure pass."
 )
 
+#: Header for the v3.35.0 regeneration-parity block. States the monotonicity
+#: invariant — a repair regeneration prompt carries the SAME mechanical contract
+#: that pinned the first-pass implementation (namespace / module-specifier /
+#: runtime-dependency conventions), plus, for a SOURCE file under repair, the
+#: SIGNATURE surface of its distance-1 producers — so a single repair cannot undo
+#: v3.33.0's signature convergence and re-open Root A (TS2835) / Root C (TS2307).
+#: The producer surface is signature-FLOOR-and-CEILING: never a producer body.
+REGENERATION_CONTRACT_RULE = (
+    "MECHANICAL CONTRACT (regeneration parity — this is the SAME contract that "
+    "pinned the first-pass implementation). Keep every import specifier, namespace, "
+    "and dependency-manifest declaration your patch (re)generates conformant to the "
+    "conventions below; a repair that reintroduces a specifier / namespace / "
+    "manifest drift is a FAILED repair. Where a distance-1 producer SIGNATURE "
+    "surface is shown, it is READ-ONLY context for binding your call shapes — align "
+    "to it, and NEVER emit a producer's body."
+)
+
 
 class RepairFailed(RuntimeError):
     """Raised when a repair phase cannot produce a valid result."""
@@ -111,6 +128,7 @@ class LlmRepairEngine(RepairEngine):
             "file_contents": _json_dumps(file_contents),
             "project_context": self._composed_project_context(),
             "failure_evidence": _render_failure_evidence(error_messages, evidence),
+            "mechanical_contract": self._regeneration_contract_context(file_contents),
         }
         prompt = _render_template(TEMPLATE_DIR / "propose_meta.md", **prompt_values)
         last_error: str | None = None
@@ -251,6 +269,106 @@ class LlmRepairEngine(RepairEngine):
         except OSError:
             return ""
 
+    def _regeneration_contract_context(self, file_contents: Mapping[str, str]) -> str:
+        """v3.35.0 regeneration parity: the mechanical-contract context a repair
+        regeneration prompt must carry so it is ⊇ the first-pass implement prompt's
+        (at signature granularity) — the monotonicity invariant that keeps a single
+        repair from undoing v3.33.0's signature convergence (re-opening Root A /
+        Root C). Two parts, both profile-DATA / language-blind:
+
+          (a) the three mechanical blocks (namespace / module-specifier / runtime-
+              dependency) via ``build_mechanical_contract_context`` — IDENTICAL to
+              the first-pass implement prompt (the shared builder is the one seam);
+          (b) for each SOURCE (non-test) file under repair, its DISK-MEASURED
+              distance-1 producer imports, rendered at SIGNATURE granularity
+              (``render_public_surface`` → names → path; NEVER a body).
+
+        Test-unit repair stays SUT-blind: part (b) resolves producers ONLY from the
+        non-test consumer files, so a pure test-file repair carries the mechanical
+        blocks alone — a test's distance-1 producer is its SUT, and steering an
+        impl-blind test toward the SUT's on-disk signature is a false-green vector.
+        No global cache: distance-1 differs per repair unit, so this is recomputed
+        per proposal (never co-located with ``_design_context_cache``). Empty string
+        when nothing resolves, so the prompt is byte-unchanged in that case.
+        """
+        if self.project_root is None:
+            return ""
+        project_root = Path(self.project_root)
+        config = self._effective_config()
+
+        # (a) the three profile-DATA mechanical blocks — the first-pass floor.
+        mechanical = ""
+        try:
+            from codd.implementer import build_mechanical_contract_context
+
+            mechanical = build_mechanical_contract_context(project_root, dict(config)) or ""
+        except Exception:  # noqa: BLE001 — a projection failure must never block repair.
+            mechanical = ""
+
+        # (b) distance-1 producer SIGNATURE slices for the SOURCE files under repair.
+        producer_surface = self._distance1_producer_surface(file_contents, project_root, config)
+
+        parts = [part for part in (mechanical, producer_surface) if part and part.strip()]
+        if not parts:
+            return ""
+        return "\n\n".join([REGENERATION_CONTRACT_RULE, *parts])
+
+    def _distance1_producer_surface(
+        self,
+        file_contents: Mapping[str, str],
+        project_root: Path,
+        config: Mapping[str, Any],
+    ) -> str:
+        """SIGNATURE-granularity surface of the distance-1 producers imported by the
+        SOURCE (non-test) files under repair — the repair-side of the Root B floor.
+
+        SUT-blind by construction: producers are resolved ONLY from non-test
+        consumers (a pure test repair → ``""``), and any resolved producer that is
+        itself a test file or is already under repair is skipped. Signature is FLOOR
+        and CEILING (``render_public_surface`` → names → path; never a body). Pure +
+        best-effort + language-blind (dispatch on file extension, TS today; a
+        renderer-less language degrades to names, then paths — the implement ladder).
+        """
+        try:
+            from codd.implement_oracle_scope import (
+                extract_public_surface,
+                render_public_surface,
+                resolve_local_import_targets,
+            )
+            from codd.verifiable_behavior_audit import is_test_related_implement
+        except Exception:  # noqa: BLE001 — a missing seam must never block repair.
+            return ""
+
+        cfg = dict(config) if isinstance(config, Mapping) else {}
+
+        def _is_test(path: str) -> bool:
+            try:
+                return is_test_related_implement(cfg, design_node=None, output_paths=[path])
+            except Exception:  # noqa: BLE001 — classification failure ⇒ treat as source.
+                return False
+
+        source_consumers = [path for path in file_contents if not _is_test(path)]
+        if not source_consumers:
+            # Pure test-unit repair — SUT-blind: mechanical blocks only.
+            return ""
+
+        try:
+            producers = resolve_local_import_targets(source_consumers, project_root)
+        except Exception:  # noqa: BLE001 — a resolution failure must never block repair.
+            return ""
+
+        under_repair = set(file_contents)
+        sections: list[str] = []
+        for producer in producers:
+            if producer in under_repair or _is_test(producer):
+                continue
+            entry = _render_producer_signature(
+                producer, project_root, render_public_surface, extract_public_surface
+            )
+            if entry:
+                sections.append(entry)
+        return "\n\n".join(sections)
+
 
 def resolve_repair_ai_command(config: Mapping[str, Any] | None, command_name: str) -> str:
     """Resolve a repair AI command from project config, then environment."""
@@ -302,6 +420,48 @@ def _render_failure_evidence(
             f"--- BEGIN READ-ONLY EVIDENCE {path} ---\n{body.rstrip()}\n--- END READ-ONLY EVIDENCE {path} ---"
         )
     return "\n\n".join(sections)
+
+
+def _render_producer_signature(
+    producer: str,
+    project_root: Path,
+    render_public_surface: Any,
+    extract_public_surface: Any,
+) -> str:
+    """One distance-1 producer at the SIGNATURE floor: signature → names → path.
+
+    Never full content, never a body (repair is post-verify; a producer body is a
+    false-green vector). ``render_public_surface`` yields the signature slice
+    (interface/type bodies, function param+return signatures with bodies stripped);
+    on ``None`` (no signature renderer for this file kind) it degrades to the
+    name-level surface, then to a path-only line — the same graceful-degradation
+    ladder the implement Tier-1 floor uses, so a renderer-less language keeps the
+    legacy names→paths behaviour (generality).
+    """
+    signature = None
+    names = None
+    try:
+        signature = render_public_surface(producer, project_root)
+        if not signature:
+            names = extract_public_surface(producer, project_root)
+    except Exception:  # noqa: BLE001 — never fail the repair prompt build.
+        signature = None
+    if signature:
+        return (
+            f"--- DISTANCE-1 PRODUCER {producer} "
+            f"(signature surface — READ-ONLY, never emit its body) ---\n"
+            f"{signature.rstrip()}"
+        )
+    if names:
+        joined = ", ".join(str(name) for name in names)
+        return (
+            f"--- DISTANCE-1 PRODUCER {producer} (public surface names — READ-ONLY) ---\n"
+            f"Exported symbols: {joined}"
+        )
+    return (
+        f"--- DISTANCE-1 PRODUCER {producer} "
+        f"(path only — no surface extractor for this file kind) ---"
+    )
 
 
 def _parse_json_object(raw_output: str, label: str) -> Mapping[str, Any]:

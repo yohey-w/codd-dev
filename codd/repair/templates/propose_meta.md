@@ -14,6 +14,8 @@ Target file contents:
 Project context:
 {project_context}
 
+{mechanical_contract}
+
 Rules:
 - Stay domain-neutral. Do not assume a framework, platform, vendor, or product.
 - If an assertion cannot be satisfied by ANY implementation conforming to the design (it is tautologically false, or it contradicts a design pin or a sibling design-pinned assertion), do NOT patch the test — emit a `test_defect_claim` entry instead; the claim is checked by re-derivation and re-verification, never trusted.

@@ -17,6 +17,8 @@ Target file contents:
 Project context:
 {project_context}
 
+{mechanical_contract}
+
 The previous unified-diff patch could not be applied. A unified diff is the
 format models most often get wrong, so do not retry it — escalate deterministically
 to a full-file replacement, which always applies cleanly.

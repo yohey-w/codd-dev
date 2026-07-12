@@ -13,6 +13,38 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.35.0] - 2026-07-12 — Feat: regeneration parity — the mechanical contract flows to the repair path so v3.33.0's signature convergence survives repair
+
+v3.33.0 established "convergence granularity ≤ circulated contract granularity" and made producer
+SIGNATURES circulate to consumers at first-pass implement. But the **repair regeneration path**
+(`codd/repair/llm_repair_engine.py`) regenerated code WITHOUT that mechanical contract, so a single
+repair could undo the convergence and re-open Root A (TS2835 module-specifier) and Root C (TS2307
+runtime-dep) — a repair that adds one import carried neither the specifier convention nor the manifest
+obligation. This release adds the **monotonicity invariant**: a repair regeneration prompt's
+mechanical-contract context ⊇ the first-pass implement prompt's (at signature granularity).
+
+- `codd/implementer.py`: extracts the three profile-DATA mechanical-contract blocks (namespace /
+  module-specifier / runtime-dependency), formerly assembled inline in `_build_implementation_prompt`,
+  into a shared pure/deterministic builder `build_mechanical_contract_context(project_root, config, *,
+  profile, target_files)`. Behaviour-identical (byte-identical output) for the first-pass caller; the
+  extraction exists only so the SAME contract can also feed the repair path. Profile-DATA dispatch is
+  preserved — no `language ==` branch, no domain/framework literal.
+- `codd/repair/llm_repair_engine.py`: `propose_fix` now injects, per proposal, a regeneration-parity
+  block into the propose / strategy prompts (new `{mechanical_contract}` template value, empty when
+  nothing resolves so the prompt is otherwise unchanged): (a) the three mechanical blocks via the shared
+  builder, and (b) for each SOURCE (non-test) file under repair, the **disk-measured distance-1 producer
+  imports** (`resolve_local_import_targets`) rendered at **SIGNATURE granularity** (`render_public_surface`
+  → names → path). Signature is floor AND ceiling — a producer **body is never rendered** (post-verify, a
+  body is a false-green vector). A **test-unit repair stays SUT-blind**: producers are resolved only from
+  non-test consumers, so a pure test repair carries the mechanical blocks alone (no SUT signature surface,
+  preserving the F7.1 impl-blind firewall). No global cache — distance-1 differs per repair unit.
+- Test re-derivation (`codd/greenfield/test_rederivation.py`) receives the mechanical blocks for free via
+  the shared builder on the `implement_tasks` path, and no SUT signature surface is added to it (the
+  repair-signature injection is confined to `propose_fix`).
+- Steer-only: no new gate / node / artifact, zero diff to the write-fence / ownership / F7.1 semantics.
+  Generality-safe: the distance-1 producer + signature ladder dispatch on file extension (TS today); a
+  renderer-less language degrades to names, then paths — the same graceful degradation as implement.
+
 ## [3.34.2] - 2026-07-12 — Fix: robust AI-payload write + repair-proposal KeyError symmetry (run-killer residuals of the v3.34.1 class)
 
 Two small robustness fixes closing run-killer residuals of the same class as v3.34.1 — a raw, unhandled
