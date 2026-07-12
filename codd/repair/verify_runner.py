@@ -26,6 +26,7 @@ import yaml
 from codd.config import find_codd_dir, load_project_config
 from codd.dag import DAG, reset_dag_cache
 from codd.dag.builder import build_dag, load_dag_settings
+from codd.dag.result_status import result_passed as _shared_result_passed
 from codd.dag.runner import run_checks
 from codd.deployment.providers import VERIFICATION_TEMPLATES
 from codd.discovery import iter_source_files, scan_exclude_patterns
@@ -1650,7 +1651,11 @@ def _timeout_output(node_id: str, exc: subprocess.TimeoutExpired) -> str:
 
 
 def _result_passed(result: Any) -> bool:
-    return _result_value(result, "passed") is not False
+    # Converged onto the single shared predicate (codd.dag.result_status) so the
+    # repair path cannot drift back to the ``is not False`` false-green: a
+    # verdict-less / malformed red result is now correctly treated as NOT passed
+    # and surfaced as a repairable failure.
+    return _shared_result_passed(result)
 
 
 def _result_severity(result: Any) -> str:

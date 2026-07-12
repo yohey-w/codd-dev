@@ -59,7 +59,19 @@ def result_status(result: Any) -> str:
 
 
 def result_passed(result: Any) -> bool:
-    return result_value(result, "passed") is not False
+    """True ONLY when the result explicitly declares ``passed is True``.
+
+    Anti-false-green: a result that omits ``passed`` (dict without the key, or an
+    object whose attribute is missing), or that carries ``passed=None`` — e.g. a
+    check that malfunctioned or produced no verdict — verified nothing reliable
+    and must NOT read as a clean PASS. The old ``is not False`` predicate treated
+    ``None``/missing as pass, so a check returning ``None`` or a verdict-less
+    result rendered green in the CLI summary, inflated coverage, and slipped past
+    the deploy gate. Legitimate ``skip``/``opt_out`` semantics are unaffected: a
+    real :class:`CheckResult` sets ``passed=True`` for those states (and they are
+    still filtered by ``status`` in the consumers).
+    """
+    return result_value(result, "passed") is True
 
 
 def result_has_findings(result: Any) -> bool:

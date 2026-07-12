@@ -13,6 +13,16 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.37.0] - 2026-07-13 — Fix: two anti-false-green / write-safety holes (surfaced by an independent GPT-5.6 Sol code review, each proven red-before-green)
+
+Two real bugs on the DAG-evaluation and code-writing paths were found by an independent model review and each reproduced with a FAILING test on the prior HEAD (v3.36.0) before the fix, then made green.
+
+- **`codd/dag/result_status.py` + `codd/dag/runner.py` — DAG check results no longer false-green.** `result_passed` was `result_value(result, "passed") is not False`, so a check that returned `None`, omitted the `passed` field, or malfunctioned read as PASS — inflating coverage, greening the CLI summary, and slipping past the deploy gate. It now greens ONLY on an explicit `passed is True`. The runner previously determined a check's call form by catching `TypeError`, which also swallowed a check's *internal* `TypeError` and re-ran it to a spurious green; it now binds the constructor/run signature with `inspect.signature(...).bind` before calling, invokes each once, and converts any raised `Exception` (never `KeyboardInterrupt`/`SystemExit`) or a `None` return into a red `CheckResult`. A `build_dag` failure now surfaces as a `dag_build` red on the same result path. `codd/repair/verify_runner.py` converges its duplicate predicate onto the shared function. Legitimate `skip`/`warn`/`opt_out` semantics are preserved.
+- **`codd/assembler.py` — `codd assemble` no longer writes outside the project root.** AI-chosen `=== FILE: path ===` blocks were written verbatim to `project_root / path`, so an absolute path, a `../` traversal, or an in-root symlink escape wrote OUTSIDE the tree, and a later invalid block left earlier files partially applied. Every block is now resolved and jail-confined (reusing `codd/path_safety.require_project_path`) in a PREFLIGHT pass; the write phase runs only if ALL blocks resolve in-root, so nothing is written on a partial/escaping payload. Root-level manifests stay allowed.
+- Tests: `tests/test_dag_runner_result_protocol.py` + `tests/test_assembler_path_jail.py` (10 new tests), each RED on the prior HEAD before its fix. Full suite green: 7476 passed, 0 skipped.
+
+Both fixes are pure path/set-math + exception-type + check-protocol changes — no language / framework / domain literal, holding for CLI, library, and data-pipeline projects.
+
 ## [3.36.0] - 2026-07-12 — Feat: derive-stage design-doc→task closure — every implementation-layer design document must be claimed by a task, or an honest RED names it
 
 v3.34.0 closed the derivation against the declared VERIFIABLE-BEHAVIOR set. This release maps that same

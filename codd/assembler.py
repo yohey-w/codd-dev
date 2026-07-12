@@ -220,8 +220,22 @@ Do not include explanations outside of the === FILE blocks.
 
 
 def _write_assembled_files(project_root: Path, dest_path: Path, raw_output: str) -> int:
-    """Parse === FILE: ... === blocks and write files."""
+    """Parse === FILE: ... === blocks and write files.
+
+    The block paths are chosen verbatim by the AI, so they are *untrusted*: an
+    absolute path (``project_root / "/abs"`` collapses to ``/abs``), a ``../``
+    traversal, or an in-root symlink whose target escapes the tree would each
+    write OUTSIDE ``project_root``. Every target is therefore resolved and
+    confined to the project root in a PREFLIGHT pass — before any byte is
+    written — reusing the shared :mod:`codd.path_safety` jail. Only if ALL
+    blocks resolve in-root does the write phase run, so a later out-of-jail block
+    cannot leave earlier files partially applied on disk. Root-level manifest
+    files (``package.json`` etc.) stay allowed — the jail confines to the root,
+    it does not require any subdirectory prefix.
+    """
     import re
+
+    from codd.path_safety import PathEscapeError, require_project_path
 
     file_block_re = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
     matches = list(file_block_re.finditer(raw_output))
@@ -232,7 +246,8 @@ def _write_assembled_files(project_root: Path, dest_path: Path, raw_output: str)
             "The assemble command expects the AI to output files in the === FILE: path === format."
         )
 
-    files_written = 0
+    # Preflight: resolve + jail-check every block, collecting (target, content).
+    planned: list[tuple[Path, str]] = []
     for i, match in enumerate(matches):
         file_path_str = match.group("path").strip()
         content_start = match.end()
@@ -246,10 +261,29 @@ def _write_assembled_files(project_root: Path, dest_path: Path, raw_output: str)
         if content.endswith("```"):
             content = content[:-3].rstrip()
 
-        # Write the file
-        out_path = project_root / file_path_str
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(content + "\n", encoding="utf-8")
+        if not file_path_str:
+            raise ValueError("assemble: AI output contained an empty === FILE: === path.")
+
+        try:
+            target = require_project_path(project_root, file_path_str, context="assemble file")
+        except PathEscapeError as exc:
+            raise ValueError(
+                f"assemble: refusing to write file outside the project root: "
+                f"{file_path_str!r} ({exc})."
+            ) from exc
+
+        if target.exists() and target.is_dir():
+            raise ValueError(
+                f"assemble: target path is an existing directory, not a file: {file_path_str!r}."
+            )
+
+        planned.append((target, content))
+
+    # Commit phase: all targets validated in-root, so no partial apply on failure.
+    files_written = 0
+    for target, content in planned:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content + "\n", encoding="utf-8")
         files_written += 1
 
     return files_written
