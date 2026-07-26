@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="README_ja.md">日本語</a> | English | <a href="README_zh.md">中文</a>
+  <a href="README_ja.md">日本語</a> | <strong>English</strong> | <a href="README_zh.md">中文</a>
 </p>
 
 <p align="center">
@@ -57,24 +57,48 @@ Those tools make the *AI* smarter. CoDD makes the AI's *input* smarter. It hands
 
 ```bash
 pip install codd-dev          # needs Python 3.10+   ·   the command is `codd`
-codd version
+codd version                  # confirm the install
 ```
+
+### Prerequisites
+
+- **Python 3.10+**.
+- **An AI CLI** — used by the commands that generate or update design, code, and tests (`greenfield`, `fix`, `generate`, `implement`, `brownfield`, …). The default is `claude --print`; override it with `--ai-cmd "<command>"` or `ai_command:` in `codd.yaml` (e.g. to use Codex CLI).
+- **No AI needed** for the inspection commands (`init`, `scan`, `check`, `doctor`, `measure`, `impact`, `validate`, `plan` (show), `contract verify`, `dag verify`, `lexicon`, `version`, …) — they run as-is.
 
 ---
 
-## Try it
+## Quickstart (60 seconds, no AI)
 
-There are three ways to start, depending on where you are.
+Drop CoDD into an existing repo, build the connection map, and run the health check. Everything here works without an AI CLI and is copy-paste-ready.
+
+```bash
+pip install codd-dev
+
+cd path/to/your-repo
+codd init myproject --language python   # create the CoDD config (codd/codd.yaml)
+codd scan                                # build the "connection map" from your code
+codd check                               # health check — start here
+```
+
+`codd check` is the front door: it runs `doctor` (config diagnostics) → `dag verify` (connection completeness) → `contract verify` (artifact contract) in one shot. Drill into details with `codd doctor`, or see metrics with `codd measure`.
+
+From here, pick the entry point that matches where you are — build from scratch, recover design from existing code, or fix something already shipping.
+
+---
+
+## Three ways to start
 
 ### 1. Start a brand-new project — `codd greenfield`
 
 Write what you want as a plain Markdown file, then let CoDD build the whole thing unattended (design → code → tests → verify, fixing problems as it goes):
 
 ```bash
-codd greenfield --requirements docs/requirements/requirements.md
+codd greenfield --requirements docs/requirements/requirements.md \
+                --project-name myapp --language python
 ```
 
-It saves a checkpoint after every step, so `codd greenfield --resume` continues where it left off. Add `--dry-run` to preview the plan first, or `--ntfy-topic <topic>` to get progress pings on your phone.
+It saves a checkpoint after every step, so `codd greenfield --resume` continues where it left off. Add `--dry-run` to preview the plan without calling the AI, or `--ntfy-topic <topic>` to get progress pings on your phone.
 
 > **Language coverage today:** unattended greenfield is empirically validated end-to-end on all **six top languages — Python, TypeScript, JavaScript, Java, C++, and C#** — from the same neutral requirements spec (a multi-module calculator library, 15–20 files). Validation is execution-based: each run's verifiable behaviors are cross-checked against the language's native test report (pytest / vitest / surefire / ctest / dotnet-trx), and a run that does not converge is stopped honestly rather than reported as a false pass. Repetition is not uniform — TypeScript and Python have ≥2-of-3 independent green runs; JavaScript, Java, C++, and C# have n≥1. This validates the pipeline's cross-language wiring and convergence machinery at library scale; it does **not** yet claim enterprise-scale complexity (the subject of a follow-on real-spec campaign).
 
@@ -87,7 +111,7 @@ CoDD reads your existing code, works out the design behind it, and keeps the two
 ```bash
 codd init                 # set CoDD up in your repo
 codd scan                 # build the connection map from your code
-codd brownfield           # recover design docs, compare them to reality, list the gaps
+codd brownfield .         # recover design docs, compare them to reality, list the gaps
 ```
 
 ### 3. Already shipping? Just describe the change — `codd fix`
@@ -98,13 +122,15 @@ codd fix "the login error messages are confusing"
 
 CoDD finds the design docs your request touches, updates them, then carries the change through **design → code → tests → verify**. It only edits the files the map says are involved, and if the final check fails, it rolls back exactly those files — nothing else.
 
+With no argument, `codd fix` is a legacy mode that picks up your failing tests or CI and repairs them (`codd fix --ci` / `--local` / `--dry-run`).
+
 ---
 
 ## How it works — three jobs, one map
 
 | Job | What it does | Main commands |
 | --- | --- | --- |
-| **1. Build from intent** | Turns requirements into design options, then code and test scaffolding. The AI proposes; you choose (you stay in control). | `greenfield`, `generate`, `implement`, `plan` |
+| **1. Build from intent** | Turns requirements into design options, then code and test scaffolding. The AI proposes; you choose (you stay in control). | `greenfield`, `plan`, `generate`, `implement`, `fix` |
 | **2. Trace every change** *(the core)* | A connection map across requirements, design, code, config, data, and tests. Change one thing and CoDD shows the ripple — sorted into **Green** (safe to auto-fix), **Amber** (please review), **Gray** (just so you know) — with the reason for each link. | `scan`, `impact`, `propagate`, `diff` |
 | **3. Verify for real** | Runs your actual build and tests so they can't fake a pass, and traces any failure back to the artifact that caused it. | `verify`, `check`, `coverage` |
 
@@ -112,11 +138,25 @@ These three feed each other in a loop: building decides *what* changes, tracing 
 
 ---
 
-## New in v3.0 — the Contract Kernel
+## Command map
 
-Older CoDD had knowledge of specific languages and frameworks (Go, Python, Next.js…) baked into its core. **v3.0 takes all of that out of the core** and moves it into swappable description files ("profiles") plus small adapters:
+The most-used commands, grouped by purpose. Run `codd --help` for the complete list and `codd <command> --help` for the details of any one.
 
-- **The core no longer knows any language or framework by name.** It just reads the profiles. So adding support for a new language or framework is a new profile + adapter — **no change to the core**.
+| Purpose | Commands |
+| --- | --- |
+| **Build** | `greenfield` (unattended) · `plan` (derive tasks) · `generate` (design/tests) · `implement` (code) · `assemble` (stitch fragments) · `fix` (from a phenomenon) |
+| **Trace** | `scan` (update the map) · `impact` (ripple of a diff) · `propagate` (code → design) · `diff` (implementation vs requirements) · `watch` (file changes) · `drift` (URL/design drift) |
+| **Verify** | `verify` (build + tests) · `check` (health — start here) · `doctor` (config diagnostics) · `dag` (completeness gate) · `contract` (artifact contract) · `coverage` (coverage gate) · `measure` (metrics) · `policy` (policy rules) · `validate` (frontmatter) |
+| **Elicit & shape** | `elicit` (find spec gaps) · `lexicon` (industry checklists) · `brownfield` (recover from code) · `extract` / `require` / `restore` (facts → design) · `qc` (evaluate criteria) · `preflight` (task pre-check) |
+| **Integrate & ship** | `mcp-server` (MCP) · `skills` (install skills) · `hooks` (Git hooks) · `deploy` (deploy) · `e2e` (E2E generation) |
+
+---
+
+## The Contract Kernel (introduced in v3.0)
+
+Older CoDD had knowledge of specific languages and frameworks (Go, Python, Next.js…) baked into its core. **v3.0 took all of that out of the core** and moved it into swappable description files ("profiles") plus small adapters:
+
+- **The core no longer knows any language or framework by name.** It just reads the profiles. So adding support for a new language or framework is a new profile + adapter — **no change to the core**. Bundled profiles: Python / TypeScript / JavaScript / Java / C++ / C# / Go.
 - **Frameworks compose.** Next.js + TypeScript + Playwright + Prisma combine into one resolved description that `codd verify` runs against your project, live.
 - **The "no fake green" rule belongs to the core.** A profile can adjust settings, but it can **never weaken** the anti-fake-pass guarantee. (Proven end-to-end on a real Next.js app, on the actual toolchain, with deliberate breakages that each correctly come back red.)
 
@@ -126,8 +166,11 @@ In short: one core now serves Next.js, Django, FastAPI, Rails, Go services, and 
 
 ## Use it with your AI tools
 
-- **MCP server** — `codd mcp-server` exposes CoDD to any MCP client (such as Claude Code) over stdio.
-- **Skills for Claude Code & Codex CLI** — `codd skills install <name> --target both` drops ready-made skills (e.g. the greenfield autopilot) into `~/.claude/skills/` and `~/.agents/skills/`.
+- **MCP server** — `codd mcp-server` exposes CoDD to any MCP client (such as Claude Code or Cursor) over stdio. Configure it in Claude Code with:
+  ```json
+  "mcpServers": { "codd": { "command": "codd", "args": ["mcp-server"] } }
+  ```
+- **Skills for Claude Code & Codex CLI** — `codd skills install <name> --target both` drops ready-made skills (e.g. the greenfield autopilot) into `~/.claude/skills/` and `~/.agents/skills/`. Use `codd skills list` to see them and `codd skills remove <name>` to uninstall.
 - **Codex App Server** — route AI calls through a persistent connection instead of a fresh subprocess each time (`codex_app_server.enabled: true` in `codd.yaml`), with automatic fallback.
 
 ---
@@ -136,9 +179,9 @@ In short: one core now serves Next.js, Django, FastAPI, Rails, Go services, and 
 
 CoDD ships ready-made hook recipes (under `codd/hooks/recipes/`) so coherence checks run automatically as you work:
 
-- **Claude Code `PostToolUse` hook** — runs CoDD checks right after each file edit.
-- **Git `pre-commit` hook** — blocks a commit when it would break coherence.
-- **Git `post-commit` hook** and a **Codex CLI hook** — keep the connection map fresh as you commit.
+- **Claude Code `PostToolUse` hook** (`claude_settings_example.json`) — runs CoDD checks right after each file edit.
+- **Git `pre-commit` hook** (`git_pre_commit.sh`) — blocks a commit when it would break coherence. `codd hooks install` sets this up in one command.
+- **Git `post-commit` hook** (`git_post_commit.sh`) and a **Codex CLI hook** (`codex_hook.sh`) — keep the connection map fresh as you commit.
 - **A requirements-nudge recipe** (`claude_requirements_nudge.json`) — reminds you to re-run `codd greenfield --resume` when your requirements change (print-only; it never runs a pipeline on its own).
 
 Copy the recipe you want from `codd/hooks/recipes/` into your editor or Git config to turn it on.
@@ -147,13 +190,41 @@ Copy the recipe you want from `codd/hooks/recipes/` into your editor or Git conf
 
 ## Coverage lexicons
 
-CoDD ships **39 ready-made "lexicons"** — checklists drawn from real industry standards — that you can switch on so `codd elicit` finds the gaps in your spec. They span Web (WCAG, OWASP, Web Vitals), Mobile (HIG, Material 3, MASVS), Backend (REST, GraphQL, gRPC), Data (SQL, JSON Schema), Ops (Kubernetes, Terraform, DORA), Compliance (ISO 27001, HIPAA, PCI DSS, GDPR, EU AI Act), and more. Turn on the ones that fit; add your own without touching the core.
+CoDD ships **39 ready-made "lexicons"** — checklists drawn from real industry standards — that you can switch on so `codd elicit` finds the gaps in your spec. They span Web (WCAG, OWASP, Web Vitals), Mobile (HIG, Material 3, MASVS), Backend (REST, GraphQL, gRPC), Data (SQL, JSON Schema), Ops (Kubernetes, Terraform, DORA), Compliance (ISO 27001, HIPAA, PCI DSS, GDPR, EU AI Act), and more. List them with `codd lexicon list` and enable one with `codd lexicon install <name>`. Turn on the ones that fit; add your own without touching the core.
+
+---
+
+## FAQ & troubleshooting
+
+**Q. `codd: command not found`.**
+A. pip's script directory isn't on your PATH. If you used `pip install --user`, add `~/.local/bin` to PATH. As a quick workaround, `python -m codd ...` does the same thing.
+
+**Q. Which AI CLI do I need?**
+A. The default is `claude --print`. Override it with `--ai-cmd "<command>"` or `ai_command:` in `codd.yaml` (e.g. Codex CLI). Commands like `init`, `scan`, `check`, `doctor`, and `measure` need no AI at all.
+
+**Q. `greenfield` stopped or failed partway.**
+A. Run `codd greenfield --resume` to continue from the last successful step (the checkpoint lives in `.codd/greenfield_session.yaml`).
+
+**Q. `codd check` shows mostly SKIP or "vacuous."**
+A. That's expected on a fresh project with no design docs or tests yet. As you run `scan` → `generate`/`implement`, the checks that read real data light up one by one.
+
+**Q. Where does the config live?**
+A. By default `codd/codd.yaml`. If your source directory is already `codd/`, use `codd init --config-dir .codd` to place it under `.codd/` instead.
+
+**Q. `verify` fails even though everything looks green.**
+A. That's anti-false-green at work. An empty test suite, a build that's secretly just `true`, or a missing test report is deliberately turned **red**. Check that your tests actually exercise the code.
+
+**Q. How do I add a new language or framework?**
+A. Add a profile (plus a small adapter) — the core stays untouched (that's the Contract Kernel). Bundled profiles: Python / TypeScript / JavaScript / Java / C++ / C# / Go.
+
+**Q. How do I upgrade or uninstall?**
+A. Upgrade with `pip install -U codd-dev`; uninstall with `pip uninstall codd-dev`.
 
 ---
 
 ## Documentation
 
-- [`docs/explainer.md`](docs/explainer.md) — the full idea, from the connection map to AI-driven development ([English](docs/explainer.en.md) · [简体中文](docs/explainer.zh.md))
+- [`docs/explainer.en.md`](docs/explainer.en.md) — the full idea, from the connection map to AI-driven development ([日本語](docs/explainer.md) · [简体中文](docs/explainer.zh.md))
 - [`docs/positioning.md`](docs/positioning.md) — where CoDD sits vs Spec Kit / coding agents / Copilot, on the false-green axis
 - [`CHANGELOG.md`](CHANGELOG.md) — every release
 - `codd --help` — the full command reference (in any project, `codd check` is the best place to start)

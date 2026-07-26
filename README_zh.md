@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="README_ja.md">日本語</a> | <a href="README.md">English</a> | 中文
+  <a href="README_ja.md">日本語</a> | <a href="README.md">English</a> | <strong>中文</strong>
 </p>
 
 <p align="center">
@@ -56,25 +56,49 @@ flowchart LR
 ## 安装
 
 ```bash
-pip install codd-dev          # needs Python 3.10+   ·   the command is `codd`
-codd version
+pip install codd-dev          # 需要 Python 3.10+   ·   命令名为 `codd`
+codd version                  # 确认安装成功
 ```
+
+### 前置条件
+
+- **Python 3.10 及以上**。
+- **一个 AI CLI**——用于生成或更新设计、代码和测试的命令（`greenfield`、`fix`、`generate`、`implement`、`brownfield` 等）。默认是 `claude --print`；可用 `--ai-cmd "<命令>"` 或 `codd.yaml` 里的 `ai_command:` 覆盖（例如改用 Codex CLI）。
+- **无需 AI** 的检查类命令（`init`、`scan`、`check`、`doctor`、`measure`、`impact`、`validate`、`plan`（查看）、`contract verify`、`dag verify`、`lexicon`、`version` 等）可以直接运行。
 
 ---
 
-## 试一试
+## 快速上手（60 秒，无需 AI）
 
-根据你所处的阶段，有三种入手方式。
+把 CoDD 放进一个已有的仓库，构建关联地图，再跑一遍健康检查。下面这些都不需要 AI CLI，可以直接复制粘贴运行。
+
+```bash
+pip install codd-dev
+
+cd path/to/your-repo
+codd init myproject --language python   # 创建 CoDD 配置（codd/codd.yaml）
+codd scan                                # 从你的代码构建「关联地图」
+codd check                               # 健康检查——从这里开始
+```
+
+`codd check` 是入口：它会一次性依序运行 `doctor`（配置诊断）→ `dag verify`（关联完整性）→ `contract verify`（工件契约）。想看细节用 `codd doctor`，想看指标用 `codd measure`。
+
+接下来，根据你所处的阶段选择入口——从零构建、为已有代码复原设计，或修复已经上线的东西。
+
+---
+
+## 三种入手方式
 
 ### 1. 全新项目从零开始——`codd greenfield`
 
 把你想要的东西写成一份普通的 Markdown 文件，然后让 CoDD 无人值守地把整个东西构建出来（设计 → 代码 → 测试 → 验证，一路上自行修复遇到的问题）：
 
 ```bash
-codd greenfield --requirements docs/requirements/requirements.md
+codd greenfield --requirements docs/requirements/requirements.md \
+                --project-name myapp --language python
 ```
 
-它会在每一步之后保存检查点，因此 `codd greenfield --resume` 会从上次中断的地方接着跑。加上 `--dry-run` 可以先预览计划，或用 `--ntfy-topic <topic>` 把进度通知推送到你的手机上。
+它会在每一步之后保存检查点，因此 `codd greenfield --resume` 会从上次中断的地方接着跑。加上 `--dry-run` 可以在不调用 AI 的情况下先预览计划，或用 `--ntfy-topic <topic>` 把进度通知推送到你的手机上。
 
 > **当前的语言覆盖：** 无人值守的 greenfield 已从同一份中立需求规格（一个多模块计算器库，15–20 个文件）在**全部六种主流语言 — Python、TypeScript、JavaScript、Java、C++ 和 C# — 上完成端到端实证验证**。验证基于实际执行：每次运行的可验证行为都与该语言的原生测试报告（pytest / vitest / surefire / ctest / dotnet-trx）交叉核对，未收敛的运行会诚实地停止，而不会报告为虚假通过。重复次数并不一致——TypeScript 和 Python 有 3 次中至少 2 次独立的 green 运行，JavaScript、Java、C++、C# 为 n≥1。这验证了流水线在库规模上的跨语言接线与收敛机制，但**尚未**主张企业级复杂度（那是后续 real-spec 战役的目标）。
 
@@ -85,18 +109,20 @@ codd greenfield --requirements docs/requirements/requirements.md
 CoDD 会读取你现有的代码，推断出其背后的设计，然后从此让两者保持同步：
 
 ```bash
-codd init                 # set CoDD up in your repo
-codd scan                 # build the connection map from your code
-codd brownfield           # recover design docs, compare them to reality, list the gaps
+codd init                 # 在你的仓库中初始化 CoDD
+codd scan                 # 从你的代码构建关联地图
+codd brownfield .         # 复原设计文档 → 与实现对比 → 列出缺口
 ```
 
 ### 3. 已经在持续交付了？只需描述这次改动——`codd fix`
 
 ```bash
-codd fix "the login error messages are confusing"
+codd fix "登录时的错误提示让人看不懂"
 ```
 
 CoDD 会找出你的请求所触及的设计文档，更新它们，再让这次改动一路贯穿**设计 → 代码 → 测试 → 验证**。它只会编辑地图所认定相关的那些文件；如果最终检查没通过，它只回滚那些文件——绝不波及其他。
+
+不带参数运行时，`codd fix` 是一个传统模式：它会拾取你正在失败的测试或 CI 并加以修复（`codd fix --ci` / `--local` / `--dry-run`）。
 
 ---
 
@@ -104,7 +130,7 @@ CoDD 会找出你的请求所触及的设计文档，更新它们，再让这次
 
 | 职责 | 它做什么 | 主要命令 |
 | --- | --- | --- |
-| **1. 从意图构建** | 把需求转化为设计候选方案，再生成代码和测试脚手架。AI 提出方案，由你来抉择（主动权始终在你手上）。 | `greenfield`、`generate`、`implement`、`plan` |
+| **1. 从意图构建** | 把需求转化为设计候选方案，再生成代码和测试脚手架。AI 提出方案，由你来抉择（主动权始终在你手上）。 | `greenfield`、`plan`、`generate`、`implement`、`fix` |
 | **2. 追踪每一次改动** *(核心所在)* | 一张横跨需求、设计、代码、配置、数据和测试的关联地图。改动一处，CoDD 就会把波及的连锁反应标出来——并归类为**绿色**（可放心自动修复）、**黄色**（请审查）、**灰色**（仅供知会）——每条关联都附带原因。 | `scan`、`impact`、`propagate`、`diff` |
 | **3. 真正地验证** | 运行你真实的构建与测试，让它们无法伪造通过，并把任何失败追溯回导致它的那个工件。 | `verify`、`check`、`coverage` |
 
@@ -112,11 +138,25 @@ CoDD 会找出你的请求所触及的设计文档，更新它们，再让这次
 
 ---
 
-## v3.0 新特性——Contract Kernel（契约内核）
+## 命令速查
+
+按用途分组的常用命令。完整列表见 `codd --help`，单个命令的细节见 `codd <command> --help`。
+
+| 用途 | 命令 |
+| --- | --- |
+| **构建** | `greenfield`（全自动） · `plan`（推导任务） · `generate`（设计/测试） · `implement`（代码） · `assemble`（拼装片段） · `fix`（从现象出发） |
+| **追踪** | `scan`（更新地图） · `impact`（改动的波及） · `propagate`（代码 → 设计） · `diff`（实现 vs 需求） · `watch`（文件变更） · `drift`（URL/设计漂移） |
+| **验证** | `verify`（构建 + 测试） · `check`（健康检查——从这开始） · `doctor`（配置诊断） · `dag`（完整性门禁） · `contract`（工件契约） · `coverage`（覆盖率门禁） · `measure`（指标） · `policy`（策略规则） · `validate`（frontmatter 校验） |
+| **发掘与打磨** | `elicit`（发现规格缺口） · `lexicon`（行业清单） · `brownfield`（从代码复原） · `extract` / `require` / `restore`（事实 → 设计） · `qc`（评估标准） · `preflight`（任务预检） |
+| **集成与交付** | `mcp-server`（MCP） · `skills`（安装 skills） · `hooks`（Git 钩子） · `deploy`（部署） · `e2e`（E2E 生成） |
+
+---
+
+## Contract Kernel（契约内核，v3.0 引入）
 
 旧版 CoDD 把对特定语言和框架（Go、Python、Next.js……）的认知硬编码进了核心。**v3.0 把这一切全部从核心中抽离出来**，转而放进可替换的描述文件（「profile」）外加若干小型适配器：
 
-- **核心不再认得任何语言或框架的名字。** 它只负责读取这些 profile。因此，新增对某门语言或某个框架的支持，就是写一份新的 profile 加一个适配器——**核心无需任何改动**。
+- **核心不再认得任何语言或框架的名字。** 它只负责读取这些 profile。因此，新增对某门语言或某个框架的支持，就是写一份新的 profile 加一个适配器——**核心无需任何改动**。内置 profile：Python / TypeScript / JavaScript / Java / C++ / C# / Go。
 - **框架可以组合。** Next.js + TypeScript + Playwright + Prisma 会组合成一份解析后的描述，供 `codd verify` 实时对照你的项目运行。
 - **「拒绝伪造通过」这条规则属于核心。** profile 可以调整参数，但**永远无法削弱**这条不允许伪造通过的保证。（已在一个真实的 Next.js 应用上、使用真实的工具链端到端验证过：每一处刻意植入的破坏，都正确地返回了红色。）
 
@@ -126,8 +166,11 @@ CoDD 会找出你的请求所触及的设计文档，更新它们，再让这次
 
 ## 与你的 AI 工具协同
 
-- **MCP 服务器**——`codd mcp-server` 通过 stdio 把 CoDD 暴露给任意 MCP 客户端（例如 Claude Code）。
-- **面向 Claude Code 与 Codex CLI 的 Skills**——`codd skills install <name> --target both` 会把现成的 skills（例如绿地自动驾驶）安装到 `~/.claude/skills/` 和 `~/.agents/skills/`。
+- **MCP 服务器**——`codd mcp-server` 通过 stdio 把 CoDD 暴露给任意 MCP 客户端（例如 Claude Code 或 Cursor）。在 Claude Code 中这样配置：
+  ```json
+  "mcpServers": { "codd": { "command": "codd", "args": ["mcp-server"] } }
+  ```
+- **面向 Claude Code 与 Codex CLI 的 Skills**——`codd skills install <name> --target both` 会把现成的 skills（例如绿地自动驾驶）安装到 `~/.claude/skills/` 和 `~/.agents/skills/`。用 `codd skills list` 查看，用 `codd skills remove <name>` 卸载。
 - **Codex App Server**——让 AI 调用走一条持久连接，而不是每次都重新起一个子进程（在 `codd.yaml` 中设置 `codex_app_server.enabled: true`），并带有自动回退机制。
 
 ---
@@ -136,9 +179,9 @@ CoDD 会找出你的请求所触及的设计文档，更新它们，再让这次
 
 CoDD 自带现成的 hook 配方（位于 `codd/hooks/recipes/` 下），让一致性检查能在你工作的同时自动运行：
 
-- **Claude Code `PostToolUse` hook**——在每次文件编辑之后立刻运行 CoDD 检查。
-- **Git `pre-commit` hook**——当某次提交会破坏一致性时，拦截这次提交。
-- **Git `post-commit` hook** 以及一个 **Codex CLI hook**——在你提交的同时，让这张关联地图始终保持最新。
+- **Claude Code `PostToolUse` hook**（`claude_settings_example.json`）——在每次文件编辑之后立刻运行 CoDD 检查。
+- **Git `pre-commit` hook**（`git_pre_commit.sh`）——当某次提交会破坏一致性时，拦截这次提交。用 `codd hooks install` 一条命令即可装好。
+- **Git `post-commit` hook**（`git_post_commit.sh`）以及一个 **Codex CLI hook**（`codex_hook.sh`）——在你提交的同时，让这张关联地图始终保持最新。
 - **需求变更提醒配方**（`claude_requirements_nudge.json`）——当需求发生变化时，提醒你重新运行 `codd greenfield --resume`（仅打印提示，绝不会自行运行流水线）。
 
 从 `codd/hooks/recipes/` 里把你想要的那份配方复制到你的编辑器或 Git 配置中，即可启用。
@@ -147,13 +190,42 @@ CoDD 自带现成的 hook 配方（位于 `codd/hooks/recipes/` 下），让一�
 
 ## 覆盖词典（Coverage lexicons）
 
-CoDD 内置了 **39 部现成的「词典」**——这些清单取自真实的行业标准——你可以按需启用，让 `codd elicit` 帮你找出规格中的漏洞。它们涵盖 Web（WCAG、OWASP、Web Vitals）、移动端（HIG、Material 3、MASVS）、后端（REST、GraphQL、gRPC）、数据（SQL、JSON Schema）、运维（Kubernetes、Terraform、DORA）、合规（ISO 27001、HIPAA、PCI DSS、GDPR、EU AI Act）等诸多领域。启用适合你的那些；也可以在不触碰核心的情况下添加你自己的词典。
+CoDD 内置了 **39 部现成的「词典」**——这些清单取自真实的行业标准——你可以按需启用，让 `codd elicit` 帮你找出规格中的漏洞。它们涵盖 Web（WCAG、OWASP、Web Vitals）、移动端（HIG、Material 3、MASVS）、后端（REST、GraphQL、gRPC）、数据（SQL、JSON Schema）、运维（Kubernetes、Terraform、DORA）、合规（ISO 27001、HIPAA、PCI DSS、GDPR、EU AI Act）等诸多领域。用 `codd lexicon list` 查看列表，用 `codd lexicon install <name>` 启用某一部。启用适合你的那些；也可以在不触碰核心的情况下添加你自己的词典。
+
+---
+
+## 常见问题与排错
+
+**Q. 提示 `codd: command not found`。**
+A. pip 的可执行文件目录不在 PATH 里。如果你用的是 `pip install --user`，请把 `~/.local/bin` 加入 PATH。临时办法是直接用 `python -m codd ...`，效果相同。
+
+**Q. 我需要哪个 AI CLI？**
+A. 默认是 `claude --print`。可用 `--ai-cmd "<命令>"` 或 `codd.yaml` 里的 `ai_command:` 覆盖（例如 Codex CLI）。而 `init`、`scan`、`check`、`doctor`、`measure` 等命令完全不需要 AI。
+
+**Q. `greenfield` 中途停止或失败了。**
+A. 运行 `codd greenfield --resume` 从上一个成功的步骤继续（检查点保存在 `.codd/greenfield_session.yaml`）。
+
+**Q. `codd check` 大多显示 SKIP 或「vacuous（空验证）」。**
+A. 对于还没有设计文档或测试的新项目，这是正常的。随着你运行 `scan` → `generate`/`implement`，那些读取真实数据的检查会逐一被激活。
+
+**Q. 配置文件在哪里？**
+A. 默认是 `codd/codd.yaml`。如果你的源码目录本身就叫 `codd/`，可以用 `codd init --config-dir .codd` 把它放到 `.codd/` 下。
+
+**Q. 明明看起来全绿，`verify` 却失败了。**
+A. 这正是 anti-false-green（伪造通过检测）在起作用。空的测试套件、其实只是个 `true` 的构建、缺失的测试报告，都会被故意判为**红色**。请检查你的测试是否真正执行了代码。
+
+**Q. 如何新增一门语言或一个框架？**
+A. 添加一份 profile（外加一个小型适配器）即可，核心保持不动（这就是 Contract Kernel）。内置 profile：Python / TypeScript / JavaScript / Java / C++ / C# / Go。
+
+**Q. 如何升级或卸载？**
+A. 升级用 `pip install -U codd-dev`；卸载用 `pip uninstall codd-dev`。
 
 ---
 
 ## 文档
 
-- [`docs/explainer.md`](docs/explainer.md) ——完整的理念，从关联地图一直讲到 AI 驱动的开发
+- [`docs/explainer.zh.md`](docs/explainer.zh.md) ——完整的理念，从关联地图一直讲到 AI 驱动的开发（[日本語](docs/explainer.md) · [English](docs/explainer.en.md)）
+- [`docs/positioning.md`](docs/positioning.md) ——以 false-green 为轴，对比 CoDD 与 Spec Kit / 编码代理 / Copilot 的定位
 - [`CHANGELOG.md`](CHANGELOG.md) ——每一个版本
 - `codd --help` ——完整的命令参考（在任何项目里，`codd check` 都是最好的起点）
 - [`docs/`](docs/) ——架构笔记、安装指南，以及一本操作手册
