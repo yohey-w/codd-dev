@@ -27,5 +27,13 @@ jobs:
           pip install -e ".[scan,infra]"
           pip install pytest
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install prettier (required by tests/hostile)
+        run: npm install --global prettier@3
+
       - name: Run tests
         run: pytest tests/ -v
