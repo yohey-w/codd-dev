@@ -658,3 +658,77 @@ def test_validate_opt_outs_rejects_duplicate(tmp_path):
 
     result = validate_project(project, codd_dir)
     assert any(issue.code == "opt_out_duplicate" for issue in result.issues)
+
+
+# ── scan.exclude applies to doc discovery ───────────────────────────────────
+#
+# `scan.exclude` means "not CoDD's business". Reference material parked under a
+# doc_dir — a received customer spec, a vendored upstream document, a past
+# version — is FOREIGN text that will never carry CoDD frontmatter. Without
+# this, a project could exclude such a file from scanning and still be unable
+# to validate or commit it.
+
+
+def _setup_project_with_exclude(tmp_path, docs: dict[str, str], exclude: list[str]):
+    import copy
+
+    project = tmp_path / "project"
+    project.mkdir()
+    codd_dir = project / "codd"
+    codd_dir.mkdir()
+
+    config = copy.deepcopy(BASE_CONFIG)
+    config["scan"]["exclude"] = exclude
+    (codd_dir / "codd.yaml").write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True))
+
+    for relative_path, content in docs.items():
+        doc_path = project / relative_path
+        doc_path.parent.mkdir(parents=True, exist_ok=True)
+        doc_path.write_text(content, encoding="utf-8")
+
+    return project, codd_dir
+
+
+def test_validate_skips_frontmatter_less_doc_matched_by_scan_exclude(tmp_path):
+    project, codd_dir = _setup_project_with_exclude(
+        tmp_path,
+        {"docs/source/upstream-spec.md": "# foreign document, no frontmatter\n"},
+        exclude=["docs/source/**"],
+    )
+
+    result = validate_project(project, codd_dir)
+
+    assert result.documents_checked == 0
+    assert result.error_count == 0
+
+
+def test_validate_still_errors_on_frontmatter_less_doc_outside_scan_exclude(tmp_path):
+    """Negative control: the gate must still bite for non-excluded documents."""
+    project, codd_dir = _setup_project_with_exclude(
+        tmp_path,
+        {
+            "docs/source/upstream-spec.md": "# foreign document, no frontmatter\n",
+            "docs/requirements.md": "# missing frontmatter\n",
+        },
+        exclude=["docs/source/**"],
+    )
+
+    result = validate_project(project, codd_dir)
+
+    assert result.documents_checked == 1
+    assert result.error_count == 1
+    assert any(issue.code == "missing_frontmatter" for issue in result.issues)
+
+
+def test_validate_exclude_is_opt_in_empty_exclude_checks_everything(tmp_path):
+    """No exclude configured => previous behaviour is unchanged."""
+    project, codd_dir = _setup_project_with_exclude(
+        tmp_path,
+        {"docs/source/upstream-spec.md": "# foreign document, no frontmatter\n"},
+        exclude=[],
+    )
+
+    result = validate_project(project, codd_dir)
+
+    assert result.documents_checked == 1
+    assert result.error_count == 1

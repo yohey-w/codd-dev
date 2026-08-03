@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from codd.config import find_codd_dir
+from codd.discovery import matches_exclude_pattern, scan_exclude_patterns
 from codd.scanner import _extract_frontmatter
 from codd.validator import run_validate
 
@@ -85,6 +86,14 @@ def _get_staged_markdown_files(project_root: Path, config: dict) -> list[Path]:
         raise RuntimeError(result.stderr.strip() or "git diff --cached failed")
 
     doc_dirs = ((config.get("scan") or {}).get("doc_dirs") or [])
+    # `scan.exclude` means "not CoDD's business". The hook used to ignore it,
+    # so a path the project had explicitly excluded from scanning still had to
+    # carry CoDD frontmatter or the commit was rejected — the gate contradicted
+    # the config. This matters most for reference material parked under a
+    # doc_dir (a received customer spec, a vendored upstream document): it is
+    # foreign text that will never have frontmatter, and excluding it was the
+    # documented way to say so.
+    exclude_patterns = scan_exclude_patterns(config)
     staged_docs: list[Path] = []
 
     for entry in result.stdout.splitlines():
@@ -92,6 +101,11 @@ def _get_staged_markdown_files(project_root: Path, config: dict) -> list[Path]:
         if not relative_path.endswith(".md"):
             continue
         if not _is_in_doc_dirs(relative_path, doc_dirs):
+            continue
+        if any(
+            matches_exclude_pattern(relative_path, pattern)
+            for pattern in exclude_patterns
+        ):
             continue
         staged_docs.append(Path(relative_path))
 

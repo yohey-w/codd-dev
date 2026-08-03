@@ -13,6 +13,7 @@ import yaml
 from codd.bridge import load_bridge_registry
 from codd.coherence_adapters import design_token_violation_to_event, validation_issue_to_event
 from codd.coherence_engine import EventBus
+from codd.discovery import matches_exclude_pattern, scan_exclude_patterns
 from codd.frontmatter import parse_frontmatter
 from codd.path_safety import resolve_project_path
 
@@ -465,6 +466,12 @@ class FrontmatterParseResult:
 
 def _iter_doc_files(project_root: Path, config: dict[str, Any]):
     doc_dirs = ((config.get("scan") or {}).get("doc_dirs") or [])
+    # `scan.exclude` means "not CoDD's business", and it applies here too.
+    # Reference material parked under a doc_dir (a received customer spec, a
+    # vendored upstream document, a past version) is FOREIGN text that will
+    # never carry CoDD frontmatter. Without this a project could exclude such a
+    # file from scanning and still be blocked from committing it.
+    exclude_patterns = scan_exclude_patterns(config)
     for doc_dir in doc_dirs:
         # Jail the configured doc_dir: an absolute/``../`` value resolving outside
         # the project root must not be scanned (its *.md would be read as a
@@ -480,6 +487,12 @@ def _iter_doc_files(project_root: Path, config: dict[str, Any]):
             # The original (project-rooted) path is yielded to keep callers'
             # ``relative_to(project_root)`` working.
             if resolve_project_path(project_root, file_path) is None:
+                continue
+            rel_text = file_path.relative_to(project_root).as_posix()
+            if any(
+                matches_exclude_pattern(rel_text, pattern)
+                for pattern in exclude_patterns
+            ):
                 continue
             if file_path.is_file():
                 yield file_path

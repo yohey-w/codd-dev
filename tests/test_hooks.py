@@ -150,3 +150,66 @@ codd:
     installed = project / ".git" / "hooks" / "pre-commit"
     assert installed.is_symlink()
     assert installed.resolve() == (Path(__file__).resolve().parent.parent / "codd" / "hooks" / "pre-commit").resolve()
+
+
+# ── scan.exclude applies to the pre-commit gate ─────────────────────────────
+#
+# The hook used to ignore `scan.exclude`, so a path the project had explicitly
+# excluded from scanning still had to carry CoDD frontmatter or the commit was
+# rejected — the gate contradicted the config.
+
+
+def _setup_git_project_with_exclude(
+    tmp_path: Path, docs: dict[str, str], exclude: list[str]
+) -> Path:
+    import copy
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "codd").mkdir()
+    config = copy.deepcopy(BASE_CONFIG)
+    config["scan"]["exclude"] = exclude
+    (project / "codd" / "codd.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project, check=True)
+
+    for relative_path, content in docs.items():
+        file_path = project / relative_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", relative_path], cwd=project, check=True)
+
+    return project
+
+
+def test_pre_commit_allows_frontmatter_less_doc_matched_by_scan_exclude(tmp_path):
+    from codd.hooks import run_pre_commit
+
+    project = _setup_git_project_with_exclude(
+        tmp_path,
+        {"docs/source/upstream-spec.md": "# foreign document, no frontmatter\n"},
+        exclude=["docs/source/**"],
+    )
+
+    assert run_pre_commit(project) == 0
+
+
+def test_pre_commit_still_blocks_frontmatter_less_doc_outside_scan_exclude(tmp_path):
+    """Negative control: the gate must still bite for non-excluded documents."""
+    from codd.hooks import run_pre_commit
+
+    project = _setup_git_project_with_exclude(
+        tmp_path,
+        {
+            "docs/source/upstream-spec.md": "# foreign document, no frontmatter\n",
+            "docs/notes.md": "# missing frontmatter\n",
+        },
+        exclude=["docs/source/**"],
+    )
+
+    assert run_pre_commit(project) == 1

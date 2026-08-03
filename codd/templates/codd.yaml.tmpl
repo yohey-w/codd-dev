@@ -84,6 +84,13 @@ scan:
     - "**/node_modules/**"
     - "**/__pycache__/**"
     - "**/dist/**"
+    # Reference material: received customer specs, vendored upstream docs, past
+    # versions. This is FOREIGN text — it will never carry CoDD frontmatter, and
+    # it must not be counted as requirements. Keeping it here (rather than under
+    # docs/requirements/) is what stops the silent double-counting described
+    # above; excluding it is what stops the pre-commit hook rejecting it for
+    # missing frontmatter.
+    - "docs/source/**"
 
 graph:
   store: "jsonl"
