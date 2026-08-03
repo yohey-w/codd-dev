@@ -12,7 +12,7 @@ def test_claude_command_gets_permission_bypass_by_default(monkeypatch):
         "--model",
         "claude-opus-4-8",
         "--effort",
-        "max",
+        "xhigh",
         "--permission-mode",
         "bypassPermissions",
         "--dangerously-skip-permissions",
@@ -37,7 +37,7 @@ def test_claude_command_overrides_existing_permission_mode(monkeypatch):
         "--model",
         "claude-opus-4-8",
         "--effort",
-        "max",
+        "xhigh",
         "--dangerously-skip-permissions",
     ]
 
@@ -80,5 +80,5 @@ def test_safe_permissions_env_opt_out(monkeypatch):
         "--model",
         "claude-opus-4-8",
         "--effort",
-        "max",
+        "xhigh",
     ]

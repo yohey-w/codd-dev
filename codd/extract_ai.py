@@ -861,7 +861,7 @@ def run_extract_ai(
 
     Args:
         project_root: Path to the project to extract from.
-        ai_command: AI CLI command (e.g. 'claude --print --model claude-opus-4-8 --effort max').
+        ai_command: AI CLI command (e.g. 'claude --print --model claude-opus-4-8 --effort xhigh').
         output_dir: Output directory (default: {project_root}/.codd/extract/).
         prompt_file: Path to a custom prompt file. Overrides the built-in baseline preset.
     """

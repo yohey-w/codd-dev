@@ -3,7 +3,11 @@ codd_required_version: null
 codd_required_version_strict: false
 project:
   frameworks: []
-ai_command: "claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools \"\""
+# Reasoning effort defaults to `xhigh`, NOT `max`. CoDD's AI stages run long,
+# noisy, tool-driven contexts — the regime where a larger reasoning budget is
+# not a strict upgrade. Raise to `max` per command via `ai_commands.<name>` for
+# a narrow, closed problem; do not make it the standing default.
+ai_command: "claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools \"\""
 ai_commands:
   plan_derive: null
   design_doc_extract: null

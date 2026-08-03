@@ -1,0 +1,30 @@
+# Formatters must not touch CoDD's canonical documents.
+#
+# Why: a requirement unit is a Markdown TABLE ROW. A formatter that only
+# re-aligns table pipes changes no meaning, so review will not catch it — but
+# it breaks byte-identity between the human-approved original and the document
+# CoDD reconciles against, and every check stays green while it happens.
+# Observed in the field: 440 lines of a requirements table silently reformatted
+# by `npx prettier --write .`.
+#
+# This file is written unconditionally by `codd init` because the artifact at
+# risk (Markdown under docs/) is language-independent: any repository can
+# adopt a Markdown formatter regardless of its primary language. It is inert
+# in a repository that does not use Prettier.
+
+# CoDD canon — the requirement documents CoDD parses
+docs/requirements/
+
+# Reference copies of upstream/source material (see codd.yaml). Keep these
+# OUT of docs/requirements/: every *.md under docs/requirements/ is discovered
+# and counted as requirements, so a copy placed there double-counts silently.
+docs/source/
+
+# CoDD config, scan output and reports
+{{config_dir}}/
+
+# Generated / vendored
+node_modules/
+dist/
+build/
+coverage/

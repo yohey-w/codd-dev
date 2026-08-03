@@ -6,7 +6,16 @@ import os
 from pathlib import Path
 
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
-DEFAULT_CLAUDE_EFFORT = "max"
+#: Reasoning effort injected when the caller does not specify one.
+#:
+#: NOT ``max``. CoDD's AI stages (generate / implement / extract) run long,
+#: noisy, tool-driven contexts, which is exactly the regime where a larger
+#: reasoning budget is not a strict upgrade — accuracy can DECREASE with more
+#: test-time compute on distractor-heavy tasks, and lower "overthinking"
+#: correlates with better agentic outcomes. ``max`` remains the right choice
+#: for a narrow, closed problem and is honoured whenever the caller passes it
+#: explicitly (see ``_ensure_option``: an existing ``--effort`` always wins).
+DEFAULT_CLAUDE_EFFORT = "xhigh"
 
 
 def with_default_claude_permission_bypass(command: list[str]) -> list[str]:

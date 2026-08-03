@@ -721,7 +721,7 @@ def test_claude_dynamic_workflow_plan_defaults_to_permission_bypass(tmp_path):
     assert invocation["backend"] == "claude-dynamic-workflow"
     assert invocation["dangerous_skip_permissions"] is True
     assert "--model claude-opus-4-8" in invocation["command_prefix"]
-    assert "--effort max" in invocation["command_prefix"]
+    assert "--effort xhigh" in invocation["command_prefix"]
     assert "--permission-mode bypassPermissions" in invocation["command_prefix"]
     assert "--dangerously-skip-permissions" in invocation["command_prefix"]
 
@@ -757,7 +757,7 @@ def test_claude_dynamic_workflow_cli_can_disable_permission_bypass(tmp_path):
     payload = json.loads((tmp_path / "docs" / "e2e" / "agent-workflow-plan.json").read_text(encoding="utf-8"))
     assert payload["runner_invocation"]["dangerous_skip_permissions"] is True
     assert "--model claude-opus-4-8" in payload["runner_invocation"]["command_prefix"]
-    assert "--effort max" in payload["runner_invocation"]["command_prefix"]
+    assert "--effort xhigh" in payload["runner_invocation"]["command_prefix"]
     assert "--permission-mode bypassPermissions" in payload["runner_invocation"]["command_prefix"]
     assert "--dangerously-skip-permissions" in payload["runner_invocation"]["command_prefix"]
 
@@ -777,7 +777,7 @@ def test_claude_dynamic_workflow_cli_can_disable_permission_bypass(tmp_path):
     payload = json.loads((tmp_path / "docs" / "e2e" / "agent-workflow-plan.json").read_text(encoding="utf-8"))
     assert payload["runner_invocation"]["dangerous_skip_permissions"] is False
     assert "--model claude-opus-4-8" in payload["runner_invocation"]["command_prefix"]
-    assert "--effort max" in payload["runner_invocation"]["command_prefix"]
+    assert "--effort xhigh" in payload["runner_invocation"]["command_prefix"]
     assert "--dangerously-skip-permissions" not in payload["runner_invocation"]["command_prefix"]
 
 

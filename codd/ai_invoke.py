@@ -60,7 +60,7 @@ from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 # Default AI command (moved from codd.generator; generator re-exports it).
 DEFAULT_AI_COMMAND = (
     'claude --print --permission-mode bypassPermissions '
-    '--dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools ""'
+    '--dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools ""'
 )
 
 # ── Wall-clock timeout on the AI subprocess (anti silent-hang) ──────────────

@@ -207,7 +207,7 @@ class TestBug2NoToolsPrompt:
 
         default_cmd = (
             'claude --print --permission-mode bypassPermissions '
-            '--dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools ""'
+            '--dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools ""'
         )
         assert ai_command_has_tools(default_cmd) is False
 

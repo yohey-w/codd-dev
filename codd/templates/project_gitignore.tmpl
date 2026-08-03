@@ -1,0 +1,34 @@
+# Written by `codd init` only when the project root has no .gitignore yet.
+# Minimal and deliberately conservative: the first accident on a real project
+# is a committed secret.
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+secrets.yaml
+secrets.yml
+.secrets/
+
+# Dependencies / build output
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+coverage/
+
+# CoDD scan output and reports are ignored by {{config_dir}}/.gitignore
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp

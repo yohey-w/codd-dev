@@ -8,7 +8,13 @@ project:
   language: "{{language}}"
   frameworks: []
 
-ai_command: "claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools \"\""
+# Reasoning effort is deliberately NOT `max` by default. CoDD's generate /
+# implement stages run long, noisy, tool-driven contexts — the regime where a
+# larger reasoning budget is not a strict upgrade (accuracy can DECREASE with
+# more test-time compute on distractor-heavy tasks, and lower "overthinking"
+# correlates with better agentic outcomes). Raise it to `max` per invocation
+# for a narrow, closed problem, not as the standing default.
+ai_command: "claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools \"\""
 
 # codex_app_server:
 #   enabled: false
@@ -42,6 +48,29 @@ coding_principles: null
 #         target: "session_action"
 #         outcomes: [breakpoint_available, session_absence_after_action]
 #       command: "npm run test:mobile-session-action"
+
+# requirement_reconciliation (optional — requirement text <-> declared operations).
+# Advisory only. It reconciles requirement UNITS (Markdown table rows under the
+# discovered requirement documents) against the operations declared in
+# `operation_flow`, and reports units anchored to nothing.
+#
+# ⚠ docs/requirements/ is CANON. Discovery rglobs `docs/requirements/**/*.md`,
+#   so a second copy of the same document placed beneath it (an `original/` or
+#   `reference/` folder) DOUBLES every unit with no warning. Keep reference
+#   material outside — e.g. docs/source/ — or list the canonical files
+#   explicitly in `docs:` below.
+#
+# requirement_reconciliation:
+#   enabled: true
+#   docs:                        # optional: files or dirs; overrides discovery
+#     - "docs/requirements/requirements.md"
+#   sections:                    # heading substrings whose tables are in scope
+#     - "機能要件"
+#     - "Functional Requirements"
+#   out_of_scope_markers:        # replaces the built-in marker list when set
+#     - "out of scope"
+#     - "対象外"
+#   max_unit_warnings: 20
 
 scan:
   source_dirs:

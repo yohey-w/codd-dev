@@ -46,6 +46,17 @@ from codd.skills_cli import manager as skills_manager
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
+# Every *.md under docs/requirements/ is discovered as a requirement document
+# (rglob), so a reference copy parked there doubles the unit count with no
+# warning and no way for the reader to tell which count was right. Say this
+# once, at the moment the user is first shown where requirements live.
+_REQUIREMENTS_DIR_CANON_NOTICE = (
+    "Note: docs/requirements/ is CANON — put only the authoritative requirement\n"
+    "documents there. Every *.md beneath it is read as requirements, so a copy of\n"
+    "the same document (an 'original/' or 'reference/' folder) is counted twice,\n"
+    "silently. Keep reference material outside it, e.g. docs/source/."
+)
+
 
 def project_root_option(param: str = "path", **overrides):
     """Project-root option accepted as both ``--path`` and ``--project-path``.
@@ -2395,6 +2406,8 @@ def init(
             click.echo(f"Requirements imported: {rel_req} (frontmatter added)")
             if project_type:
                 _record_project_type(dest_path, codd_dir, project_type)
+            click.echo("")
+            click.echo(_REQUIREMENTS_DIR_CANON_NOTICE)
             click.echo(f"\nNext: codd generate --wave 2  (AI generates design docs)")
             return
         click.echo(f"Error: {codd_dir} already exists. Use --requirements to import a requirements file.")
@@ -2417,6 +2430,27 @@ def init(
     })
     _render_template("gitignore.tmpl", codd_dir / ".gitignore", {})
 
+    # Project-root guard files. Both are written ONLY when absent: `codd init`
+    # commonly runs after a scaffolder (create-next-app, poetry new, ...) that
+    # already wrote its own, and clobbering a user's .gitignore is a worse
+    # regression than the gap being closed here.
+    #
+    # .prettierignore keeps formatters off CoDD's canon. A requirement unit is
+    # a Markdown table ROW, so a formatter that merely re-aligns table pipes
+    # breaks byte-identity with the approved original while every check stays
+    # green — a silent corruption with no trigger to notice it.
+    #
+    # .gitignore: a fresh project with no ignore rules leaks secrets on the
+    # first commit; codd/.gitignore only covers CoDD's own output.
+    for template_name, dest_file in (
+        ("prettierignore.tmpl", dest_path / ".prettierignore"),
+        ("project_gitignore.tmpl", dest_path / ".gitignore"),
+    ):
+        if dest_file.exists():
+            click.echo(f"  {dest_file.name} already exists — left untouched")
+            continue
+        _render_template(template_name, dest_file, {"config_dir": config_dir})
+
     # Version file
     (dest_path / ".codd_version").write_text("0.2.0\n", encoding="utf-8")
 
@@ -2432,6 +2466,8 @@ def init(
         click.echo(f"CoDD initialized in {codd_dir}")
         click.echo(f"  codd.yaml         — project config")
         click.echo(f"  {rel_req}  — requirements (frontmatter added)")
+        click.echo(f"")
+        click.echo(_REQUIREMENTS_DIR_CANON_NOTICE)
         click.echo(f"")
         click.echo(f"Next: codd generate --wave 2  (AI generates design docs)")
     else:
@@ -5938,12 +5974,12 @@ def extract(
                 cfg = load_project_config(project_root)
                 ai_cmd = cfg.get(
                     "ai_command",
-                    'claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools ""',
+                    'claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools ""',
                 )
             except FileNotFoundError:
                 ai_cmd = (
                     'claude --print --permission-mode bypassPermissions '
-                    '--dangerously-skip-permissions --model claude-opus-4-8 --effort max --tools ""'
+                    '--dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools ""'
                 )
 
         preset_name = "custom" if prompt_file else "baseline"
