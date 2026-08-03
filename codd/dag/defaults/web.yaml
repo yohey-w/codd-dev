@@ -5,6 +5,11 @@ enabled_checks:
   - dependency_freshness
   - task_completion
   - transitive_closure
+  # Byte-identity of the accepted canon documents. Project-type-independent
+  # (Markdown under docs/ is language-agnostic), so every pinned profile
+  # selects it — a profile that omitted it would silently run without the
+  # tripwire, which is the exact failure mode the check exists to prevent.
+  - canon_integrity
 design_doc_patterns:
   - "docs/design/*.md"
 impl_file_patterns:

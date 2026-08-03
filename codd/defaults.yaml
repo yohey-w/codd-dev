@@ -403,6 +403,45 @@ requirement_reconciliation:
   out_of_scope_markers: []
   # Individual unit warnings shown before aggregation into a single overflow line.
   max_unit_warnings: 30
+canon:
+  # Canon integrity tripwire (`canon_integrity` dag check, `codd canon` command
+  # group, pre-commit hook). Records a sha256 of every canon document into
+  # <codd-dir>/canon.lock when a human accepts it, then fails red when the bytes
+  # no longer match.
+  #
+  # Why: a requirement unit is a Markdown TABLE ROW, so a formatter that only
+  # re-aligns table pipes changes no meaning — review passes, every other check
+  # stays green, and byte-identity with the approved original is gone. Observed:
+  # `npx prettier --write .` rewrote 440 lines of a requirements table.
+  # `.prettierignore` (written by `codd init`) is the first, tool-SPECIFIC layer;
+  # this is the tool-independent one, and unlike a template it also reaches
+  # projects that already exist.
+  #
+  # The ledger is NEVER refreshed automatically — a self-updating ledger detects
+  # nothing. `codd canon accept` is the only writer, and it is a human act taken
+  # after reviewing the diff.
+  #
+  # NOTE: projects whose codd.yaml pins dag.enabled_checks must add
+  # `canon_integrity` to that list (codd dag verify prints a notice listing
+  # registered-but-unselected checks).
+  enabled: true
+  # Canon scope (files or directories; a directory contributes its **/*.md).
+  # Empty = the project's requirement documents, via the same discovery
+  # requirement_reconciliation uses (its `docs:` list when pinned, else
+  # docs/requirements/**/*.md plus conventional top-level files).
+  # `scan.exclude` is applied on top in both cases.
+  #
+  # Deliberately narrow by default: CoDD's own AI stages (generate, propagate,
+  # fixup-drift, extract) legitimately rewrite design/test documents, so
+  # ledgering every *.md under doc_dirs would leave this check red after every
+  # normal run and train users to run `accept` reflexively — a detector dead by
+  # alarm fatigue. Widen it here when a project's canon is broader.
+  docs: []
+  # Severity for an ALTERED or MISSING canon document. An UNTRACKED document
+  # (in scope, not yet in the ledger) is always amber: adding a file is already
+  # visible in `git status`, and hard-failing it would make a greenfield run red
+  # the moment the first requirements file is written.
+  severity: red
 operations_derive:
   # Generative complement to requirement_reconciliation (the `codd operations`
   # command group). `derive` takes requirement units that anchor to NO declared

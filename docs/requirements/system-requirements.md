@@ -67,6 +67,38 @@ CoDD (Coherence-Driven Development) is a Python CLI tool (v1.3.0) that maintains
 - **FR-HOOK-2** [observed]: The pre-commit hook SHALL reject commits containing Markdown files in `doc_dirs` that lack valid CoDD frontmatter, and SHALL run full validation via the validator module.
   - *Evidence*: `hooks.run_pre_commit()` filtering staged `.md` files, calling `_extract_frontmatter()` and `validator.run_validate()`.
 
+### 2.4a Canon Integrity
+
+- **FR-CANON-0** [observed]: The canon integrity mechanism SHALL be documented as a detector of UNAWARE change, not as an authorization gate: a deliberate edit followed by `codd canon accept` is a passing state by design, and no configuration alters that. The limit SHALL be stated in the ledger module, in the check module, and in the header of every generated ledger file.
+  - *Evidence*: module docstrings of `codd/canon.py` and `codd/dag/checks/canon_integrity.py`; `canon.LEDGER_HEADER` written by `canon.render_ledger()`.
+
+- **FR-CANON-1** [observed]: The system SHALL record a SHA-256 content digest of every canon document into a committed ledger at `<codd-dir>/canon.lock`, written only by an explicit human action (`codd canon accept`) and by `codd init`. No verification path SHALL refresh the ledger — a self-updating ledger detects nothing.
+  - *Evidence*: `canon.write_ledger()`, `canon.compute_digests()`; `cli.canon_accept` and `cli._write_initial_canon_lock` are the only callers of `write_ledger`.
+
+- **FR-CANON-1a** [observed]: `codd canon accept` SHALL require a non-empty single-line work reference, SHALL exit non-zero without writing the ledger when it is absent, SHALL print the content diff of every altered document before recording it, and SHALL persist that reference in the ledger beside each digest it records. An entry whose digest is unchanged SHALL retain the reference of the accept that originally recorded it.
+  - *Evidence*: `canon.normalize_accept_reference()`, `cli.canon_accept` (`--for`, `_canon_git_diff`), `canon.write_ledger(previous=...)`.
+
+- **FR-CANON-1b** [observed]: The ledger SHALL be a line-oriented, path-sorted, blank-line-separated text format so that two branches accepting DIFFERENT documents merge without conflict, while two branches accepting the SAME document conflict. A ledger written in the earlier nested-JSON schema SHALL still be read.
+  - *Evidence*: `canon.render_ledger()`, `canon.load_ledger()` / `_load_legacy_json_ledger()`.
+
+- **FR-CANON-2** [observed]: Canon scope SHALL default to the project's requirement documents (the discovery `requirement_reconciliation` uses) and SHALL always exclude paths matching `scan.exclude`. `canon.docs` MAY widen the scope to arbitrary files or directories. Every configured path and every glob match SHALL be confined to the project root.
+  - *Evidence*: `canon.canon_documents()` delegating to `discover_requirement_docs()` / `_expand_configured_paths()`, filtering through `discovery.matches_exclude_pattern`, jailing via `path_safety.resolve_project_path`.
+
+- **FR-CANON-2a** [observed]: Documents CoDD itself generates into the default canon directory SHALL be excluded from scope by discovery, so that regenerating them does not fail the check. An explicit `canon.docs` entry SHALL override the exclusion.
+  - *Evidence*: `canon.GENERATED_DOC_NAMES` (`coverage_audit_report.md`, written by `cli.require --audit` whose `--output` defaults to `docs/requirements/`), applied in `canon_documents()` only when `canon.docs` is unset.
+
+- **FR-CANON-3** [observed]: The `canon_integrity` DAG check SHALL fail at `canon.severity` (default `red`) when a ledgered document's digest no longer matches or the document is absent, and SHALL report an in-scope document missing from the ledger as `amber`.
+  - *Evidence*: `dag.checks.canon_integrity.CanonIntegrityCheck.run()`, `_drift_result()`, `_untracked_result()`.
+
+- **FR-CANON-4** [observed]: A project with no ledger SHALL be reported as an `amber` advisory carrying adoption guidance, never red, and the pre-commit hook SHALL NOT block it — adopting the mechanism is opt-in and a CoDD upgrade must not break an existing repository.
+  - *Evidence*: `canon_integrity._no_ledger_result()` returning `severity="amber"`; `hooks._canon_drift_blocks_commit()` returning `False` when `ledger_present` is false.
+
+- **FR-CANON-5** [observed]: The pre-commit hook SHALL reject a commit when a canon document's digest no longer matches the ledger, and SHALL degrade to non-blocking on any internal failure.
+  - *Evidence*: `hooks._canon_drift_blocks_commit()` called from `hooks.run_pre_commit()` before `run_validate()`, wrapping `evaluate_canon` in a broad `except`.
+
+- **FR-CANON-6** [observed]: A ledger that cannot be parsed, or that declares an unsupported schema version, SHALL fail red rather than being reinterpreted or silently treated as absent.
+  - *Evidence*: `canon.evaluate_canon()` setting `ledger_unreadable`; `canon_integrity` returning a `ledger_unreadable` violation.
+
 ### 2.5 Traceability & Test Coverage
 
 - **FR-TRACE-1** [observed]: The system SHALL compute per-module test coverage by matching source symbols against test file contents via substring matching.

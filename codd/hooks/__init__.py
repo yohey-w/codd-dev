@@ -71,7 +71,79 @@ def run_pre_commit(project_root: Path) -> int:
         print(f"ERROR: {relative_path} is missing CoDD YAML frontmatter")
         return 1
 
+    if _canon_drift_blocks_commit(project_root, config):
+        return 1
+
     return run_validate(project_root, codd_dir)
+
+
+def _canon_drift_blocks_commit(project_root: Path, config: dict) -> bool:
+    """Reject a commit whose canon documents no longer match ``canon.lock``.
+
+    This is the commit-time half of the canon tripwire (``codd dag verify`` is
+    the other). It catches the case the ledger exists for: a formatter rewrote a
+    requirements table — no meaning changed, so review would pass it — and the
+    corrupted bytes are about to enter history.
+
+    Deliberate scoping decisions:
+
+    * **Only when a ledger exists.** A project that has not adopted the
+      mechanism must not suddenly be unable to commit after a CoDD upgrade. The
+      adoption prompt lives in ``codd dag verify`` (amber), not here, so it is
+      not printed on every single commit.
+    * **Only altered/missing blocks.** An untracked in-scope document is
+      reported as a note and lets the commit through: adding a file is already
+      visible in ``git status``, and blocking it would stop the very commit that
+      introduces a project's first requirements document.
+    * **Working tree, not the index.** ``prettier --write .`` damages the
+      working tree wholesale while the user commits something else entirely; a
+      gate that only looked at staged paths would wave that through and the
+      corruption would ride in on a later commit. The cost is that an
+      in-progress edit to a canon document blocks unrelated commits — which is
+      the intended reading of "canon changes are deliberate", and the message
+      names both ways out.
+    * **Never raises.** Any unexpected failure inside the tripwire must not make
+      the repository uncommittable; it degrades to "not blocking" and the
+      ``dag verify`` path still reports.
+    """
+    try:
+        from codd.canon import evaluate_canon
+
+        status = evaluate_canon(project_root, config)
+    except Exception:  # a broken tripwire must not brick `git commit`
+        return False
+
+    if not status.enabled or not status.ledger_present or status.ledger_unreadable:
+        return False
+
+    if status.untracked and not status.has_drift:
+        print(
+            f"NOTE: {len(status.untracked)} canon document(s) are not in "
+            f"{status.ledger_path}: {', '.join(status.untracked[:5])}"
+            f"{' ...' if len(status.untracked) > 5 else ''}. "
+            "Run 'codd canon accept --for <work reference>' to protect them."
+        )
+        return False
+
+    if not status.has_drift:
+        return False
+
+    print("ERROR: canon changed outside the accept path.")
+    for relative_path in status.modified:
+        print(f"  ALTERED  {relative_path}")
+    for relative_path in status.missing:
+        print(f"  MISSING  {relative_path}")
+    print(
+        "A requirement unit is a Markdown table row, so a formatter that only "
+        "re-aligns table pipes passes review while breaking byte-identity with "
+        "the approved original. Check the diff (git diff -- <path>):"
+    )
+    print(
+        "  intended change   -> codd canon accept --for <work reference>   "
+        "(then commit the updated ledger)"
+    )
+    print("  unintended change -> git checkout -- <path>")
+    return True
 
 
 def _get_staged_markdown_files(project_root: Path, config: dict) -> list[Path]:

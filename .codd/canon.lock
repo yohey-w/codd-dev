@@ -1,0 +1,41 @@
+# codd-canon-lock v2
+# CoDD canon integrity ledger — COMMIT THIS FILE.
+#
+# One line per canon document, sorted by path, blank-line separated so that
+# two branches accepting DIFFERENT documents merge without a conflict:
+#   <path>\t<digest>\t<work reference of the accept that recorded it>
+#
+# `codd dag verify` and the pre-commit hook fail red when a digest no longer
+# matches the file on disk. The usual cause is a formatter (prettier, dprint,
+# markdownlint --fix, format-on-save) rewriting a requirements table: a
+# requirement unit is a table ROW, so re-aligning pipes changes no meaning,
+# passes review, and still destroys byte-identity with the approved original.
+#
+# THIS IS NOT AN AUTHORIZATION GATE. It detects change nobody decided to make.
+# A deliberate edit followed by `codd canon accept` is green — the work
+# reference recorded on each line is a review trail, not a permission check.
+#
+# Update it only via:  codd canon accept --for <work reference>
+# and only after reading the diff it prints.
+
+docs/requirements/README.md	sha256:2f7442e80f444052127d8d1a0d0f8ada3c09f24560d72b1d4459dd62a800e080	v3.39.0-canon-tripwire
+
+docs/requirements/assembler-requirements.md	sha256:b9390ac18a8a1c94a6e488c0a9b8a5781a3a6a8e6d1137af057557d61936a5ba	v3.39.0-canon-tripwire
+
+docs/requirements/cli-requirements.md	sha256:912fd57525090250045de940f101fab518f55e42a561218717909e4d7185f017	v3.39.0-canon-tripwire
+
+docs/requirements/clustering-requirements.md	sha256:e2e9cddfc54bfc4c299e1c52354e2a2e05dfa4b101927e7e323bd99c429568a2	v3.39.0-canon-tripwire
+
+docs/requirements/config-requirements.md	sha256:ea90e6a6b249adf58ae1109f61d6af68927272922c5b480d65d02b1e72d7e023	v3.39.0-canon-tripwire
+
+docs/requirements/contracts-requirements.md	sha256:9dc7971874fcb90354cc39e1e7e37f75705c7c2a90ec45e0127ef2cc02b304e3	v3.39.0-canon-tripwire
+
+docs/requirements/env-refs-requirements.md	sha256:c9d434f7fa92e59d0af2fe7029746c1eb9fa83b6d7cf61dfc7b0747a4b22f991	v3.39.0-canon-tripwire
+
+docs/requirements/extract-verify-requirements.md	sha256:115837e578cc1769cbd52020c539123b88143a2dfceb99944cf5808e52dd3dd3	v3.39.0-canon-tripwire
+
+docs/requirements/extractor-requirements.md	sha256:fa02e6eddbb42e96e693aae72ee82fcc8090dde59a69f31d9f0ca219c3c561e7	v3.39.0-canon-tripwire
+
+docs/requirements/require-command-requirements.md	sha256:5ef134be5650dd10e77de818a019f02beabec763a1794358639c706baa635b37	v3.39.0-canon-tripwire
+
+docs/requirements/system-requirements.md	sha256:9c34a9e4e20ec5d2abc99d582aeeaab2b93347c101e3edd5ab9636b4ed228aae	v3.39.0-canon-tripwire

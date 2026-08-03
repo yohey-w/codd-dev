@@ -26,6 +26,7 @@ from codd.action_outcome import (
     extract_action_requirements_from_flows,
 )
 from codd.bridge import get_command_handler
+from codd import canon as canon_module
 from codd.capability_completeness import (
     capability_completeness_warnings,
     enablement_declaration_nudges,
@@ -55,6 +56,20 @@ _REQUIREMENTS_DIR_CANON_NOTICE = (
     "documents there. Every *.md beneath it is read as requirements, so a copy of\n"
     "the same document (an 'original/' or 'reference/' folder) is counted twice,\n"
     "silently. Keep reference material outside it, e.g. docs/source/."
+)
+
+# .prettierignore stops ONE named tool. The ledger stops any of them — and is the
+# only layer that reaches a project that already exists. Say what it is at the
+# moment the file first appears, or it reads as unexplained CoDD bookkeeping.
+_CANON_LOCK_NOTICE = (
+    "Canon integrity ledger written. It records a sha256 of each requirement\n"
+    "document so a later formatter (prettier, dprint, markdownlint --fix,\n"
+    "format-on-save) cannot silently rewrite an approved requirements table and\n"
+    "still pass every check. COMMIT IT. After an intended requirement change run\n"
+    "'codd canon accept --for <work reference>' and commit the updated ledger with\n"
+    "it; 'codd dag verify' and the pre-commit hook fail red on any other change.\n"
+    "It detects UNAWARE change, not unauthorized change: a deliberate edit\n"
+    "followed by accept is green by design."
 )
 
 
@@ -2406,6 +2421,19 @@ def init(
             click.echo(f"Requirements imported: {rel_req} (frontmatter added)")
             if project_type:
                 _record_project_type(dest_path, codd_dir, project_type)
+            # An existing project may already have an ACCEPTED ledger; refreshing
+            # it here would silently absorb any drift that is already present,
+            # which is exactly what the ledger exists to prevent. Only create one
+            # when there is none.
+            rel_lock = _write_initial_canon_lock(dest_path, only_if_absent=True)
+            if rel_lock:
+                click.echo(f"Canon ledger created: {rel_lock} (commit it)")
+            else:
+                click.echo(
+                    "Canon ledger already present — run 'codd canon accept --for "
+                    "<work reference>' to record "
+                    "the imported document after reviewing it."
+                )
             click.echo("")
             click.echo(_REQUIREMENTS_DIR_CANON_NOTICE)
             click.echo(f"\nNext: codd generate --wave 2  (AI generates design docs)")
@@ -2463,17 +2491,27 @@ def init(
     if requirements:
         req_path = _import_requirements(dest_path, Path(requirements), project_name)
         rel_req = req_path.relative_to(dest_path).as_posix()
+        rel_lock = _write_initial_canon_lock(dest_path)
         click.echo(f"CoDD initialized in {codd_dir}")
         click.echo(f"  codd.yaml         — project config")
         click.echo(f"  {rel_req}  — requirements (frontmatter added)")
+        if rel_lock:
+            click.echo(f"  {rel_lock}  — canon integrity ledger (commit it)")
         click.echo(f"")
         click.echo(_REQUIREMENTS_DIR_CANON_NOTICE)
         click.echo(f"")
+        click.echo(_CANON_LOCK_NOTICE)
+        click.echo(f"")
         click.echo(f"Next: codd generate --wave 2  (AI generates design docs)")
     else:
+        rel_lock = _write_initial_canon_lock(dest_path)
         click.echo(f"CoDD initialized in {codd_dir}")
         click.echo(f"  codd.yaml    — project config")
         click.echo(f"  scan/        — JSONL scan output (nodes.jsonl, edges.jsonl)")
+        if rel_lock:
+            click.echo(f"  canon.lock   — canon integrity ledger (commit it)")
+        click.echo(f"")
+        click.echo(_CANON_LOCK_NOTICE)
         click.echo(f"")
         click.echo(f"Next: Write your requirements, then run:")
         click.echo(f"  codd init --requirements your-spec.md --dest .")
@@ -2481,6 +2519,36 @@ def init(
 
     if suggest_lexicons:
         _offer_lexicon_suggestions(dest_path, llm_enhanced=llm_enhanced, auto_approve=auto_approve)
+
+
+def _write_initial_canon_lock(project_root: Path, only_if_absent: bool = False) -> str | None:
+    """Seed ``<codd-dir>/canon.lock`` at init time; return its relative path.
+
+    Writing it here (rather than waiting for the user to discover ``codd canon
+    accept``) means the tripwire is armed from the first commit, and a project
+    that starts with zero requirement documents gets an EMPTY ledger rather than
+    the "no ledger yet" advisory — the mechanism is adopted, it simply has
+    nothing to protect yet.
+
+    Returns ``None`` when nothing was written (no config dir, an existing ledger
+    under ``only_if_absent``, or an unwritable path). Never raises: a failure to
+    seed the ledger must not fail ``codd init``.
+    """
+    try:
+        lock_path = canon_module.canon_lock_path(project_root)
+        if lock_path is None:
+            return None
+        if only_if_absent and lock_path.exists():
+            return None
+        config = load_project_config(project_root)
+        digests = canon_module.compute_digests(project_root, config=config)
+        # `codd init` is itself the work reference: these digests were recorded by
+        # project creation, not by anyone accepting a change to an approved doc.
+        canon_module.write_ledger(lock_path, digests, accepted_for="codd-init")
+    except Exception as exc:  # pragma: no cover - defensive: init must not fail here
+        click.echo(f"Warning: could not write the canon ledger: {exc}")
+        return None
+    return _display_path(lock_path, project_root)
 
 
 def _record_project_type(project_root: Path, codd_dir: Path, project_type: str) -> None:
@@ -3000,6 +3068,296 @@ def contract_apply_cmd(project_path: str, output: str | None, dry_run: bool, ena
         click.echo("artifact_contract.enabled set to true.")
     else:
         click.echo("artifact_contract.enabled left unchanged (opt-in; pass --enable to turn on).")
+
+
+@main.group("canon", cls=_AliasedGroup, aliases={"refresh": "accept", "check": "status"})
+def canon_cmd() -> None:
+    """Canon integrity ledger — byte-identity of the accepted requirement documents.
+
+    A requirement unit is a Markdown table ROW, so a formatter that only
+    re-aligns table pipes changes no meaning: review passes, every CoDD check
+    stays green, and byte-identity with the human-approved original is gone.
+    ``<codd-dir>/canon.lock`` records what was accepted; ``codd dag verify``
+    (and the pre-commit hook) fail when the bytes drift from it.
+
+    The ledger is never refreshed automatically — that would detect nothing.
+    ``codd canon accept`` is the only writer.
+    """
+
+
+def _canon_context(project_path: str) -> tuple[Path, dict[str, Any], Path]:
+    """Resolve (project_root, config, lock_path) or exit with a clear message."""
+    project_root = Path(project_path).resolve()
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+    lock_path = canon_module.canon_lock_path(project_root)
+    if lock_path is None:
+        click.echo("Error: CoDD config dir not found (looked for codd/ and .codd/).")
+        raise SystemExit(1)
+    return project_root, config, lock_path
+
+
+@canon_cmd.command("status")
+@project_root_option("project_path")
+@click.option(
+    "--format",
+    "output_format",
+    default="text",
+    type=click.Choice(["text", "json"]),
+    help="Output format",
+)
+def canon_status(project_path: str, output_format: str) -> None:
+    """Show canon scope and whether the documents still match the ledger.
+
+    Exit code 1 when an accepted document was ALTERED or is MISSING (the same
+    condition ``codd dag verify`` fails on). An untracked document or an absent
+    ledger is reported but exits 0 — adding a file is already visible in git,
+    and an existing project must not break merely by upgrading CoDD.
+    """
+    project_root, config, lock_path = _canon_context(project_path)
+    status = canon_module.evaluate_canon(project_root, config)
+    rel_lock = _display_path(lock_path, project_root)
+
+    if output_format == "json":
+        click.echo(
+            json.dumps(
+                {
+                    "enabled": status.enabled,
+                    "ledger": rel_lock,
+                    "ledger_present": status.ledger_present,
+                    "ledger_unreadable": status.ledger_unreadable,
+                    "checked_count": status.checked_count,
+                    "verified": status.verified,
+                    "modified": status.modified,
+                    "missing": status.missing,
+                    "untracked": status.untracked,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        raise SystemExit(1 if status.has_drift else 0)
+
+    if not status.enabled:
+        click.echo("canon: disabled (canon.enabled: false in codd.yaml)")
+        raise SystemExit(0)
+
+    click.echo(f"Ledger: {rel_lock}")
+    if status.ledger_unreadable:
+        click.echo(f"  UNREADABLE: {status.ledger_unreadable}")
+        click.echo(
+            "  Restore it from version control, or re-create it with "
+            "'codd canon accept --for <work reference>'."
+        )
+        raise SystemExit(1)
+    if not status.ledger_present:
+        click.echo("  not created yet")
+        click.echo(f"\n{len(status.untracked)} canon document(s) in scope, none protected:")
+        for rel in status.untracked:
+            click.echo(f"  ?  {rel}")
+        click.echo(
+            "\nRun 'codd canon accept --for <work reference>' to record their digests, "
+            "then commit the ledger."
+        )
+        raise SystemExit(0)
+
+    references: dict[str, str] = {}
+    try:
+        payload = canon_module.load_ledger(lock_path)
+    except ValueError:
+        payload = None
+    if payload:
+        references = {
+            entry.path: entry.accepted_for for entry in payload.get("entries", [])
+        }
+
+    def _suffix(rel: str) -> str:
+        reference = references.get(rel)
+        return f"   [accepted for: {reference}]" if reference else ""
+
+    for rel in status.verified:
+        click.echo(f"  OK       {rel}{_suffix(rel)}")
+    for rel in status.modified:
+        click.echo(f"  ALTERED  {rel}{_suffix(rel)}")
+    for rel in status.missing:
+        click.echo(f"  MISSING  {rel}{_suffix(rel)}")
+    for rel in status.untracked:
+        click.echo(f"  NEW      {rel}  (not in the ledger)")
+
+    if status.has_drift:
+        click.echo(
+            f"\n{len(status.modified)} altered, {len(status.missing)} missing. "
+            "Review the diff (git diff -- <path>). If the change was intended, run "
+            "'codd canon accept --for <work reference>'; if not, restore the file "
+            "(git checkout -- <path>). A formatter is the usual cause."
+        )
+        click.echo(f"\n{_CANON_ACCEPT_RULE}")
+        raise SystemExit(1)
+    if status.untracked:
+        click.echo(
+            f"\n{len(status.untracked)} document(s) not yet in the ledger — run "
+            "'codd canon accept --for <work reference>' to protect them."
+        )
+    elif status.checked_count:
+        click.echo(f"\ncanon intact: {status.checked_count} document(s) match the ledger.")
+    else:
+        click.echo("\nNo canon documents in scope — nothing was verified.")
+    raise SystemExit(0)
+
+
+#: Shown before every acceptance. The mechanism's whole value rests on `accept`
+#: being a decision rather than a reflex, and an agent reading only the failing
+#: check would otherwise learn exactly one thing: "run accept to make it green".
+_CANON_ACCEPT_RULE = (
+    "Accept only when changing this document WAS the work you were asked to do.\n"
+    "Accepting to make a red check go green — when the edit was not your goal —\n"
+    "is the one use of this command that defeats the mechanism entirely."
+)
+
+_CANON_DIFF_LINE_BUDGET = 40
+
+
+def _canon_git_diff(project_root: Path, paths: list[str]) -> tuple[str, str]:
+    """Return (stat, patch) from git for *paths*; empty strings when unavailable."""
+    if not paths:
+        return "", ""
+
+    def _git(*args: str) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", "-c", "core.quotePath=false", *args, "--", *paths],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except (OSError, ValueError):
+            return ""
+        return completed.stdout if completed.returncode == 0 else ""
+
+    return _git("diff", "--stat"), _git("diff")
+
+
+@canon_cmd.command("accept")
+@project_root_option("project_path")
+@click.option(
+    "--for",
+    "accepted_for",
+    default=None,
+    help=(
+        "REQUIRED. The work this canon change belongs to — a task id, issue, "
+        "commit or journal entry (e.g. --for cmd_042). Recorded in the ledger "
+        "next to each digest, so an acceptance with nothing behind it stays "
+        "visible in git log and git blame."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show the diff and what would be recorded, without writing the ledger.",
+)
+def canon_accept(project_path: str, accepted_for: str | None, dry_run: bool) -> None:
+    """Record the current canon documents into the ledger (the deliberate act).
+
+    This is the ONLY writer of ``canon.lock``. Nothing else refreshes it: a
+    ledger that updates itself detects nothing.
+
+    It is NOT an approval gate — it cannot tell a legitimate change from an
+    illegitimate one, and a deliberate edit followed by ``accept`` is green. What
+    it does is make the acceptance deliberate and traceable: the diff is printed,
+    a work reference is required, and that reference is committed alongside the
+    digest.
+    """
+    project_root, config, lock_path = _canon_context(project_path)
+    settings = canon_module.canon_settings(config)
+    if not settings.enabled:
+        click.echo("canon.enabled is false in codd.yaml — nothing to accept.")
+        raise SystemExit(0)
+
+    status = canon_module.evaluate_canon(project_root, config)
+    documents = canon_module.canon_documents(project_root, config)
+    digests = canon_module.compute_digests(project_root, documents)
+    rel_lock = _display_path(lock_path, project_root)
+
+    nothing_to_do = not (status.modified or status.missing or status.untracked)
+    if nothing_to_do and status.ledger_present and not status.ledger_unreadable:
+        click.echo(f"{rel_lock} already matches ({len(digests)} document(s)) — nothing to do.")
+        raise SystemExit(0)
+
+    # The reference is validated BEFORE any diff is printed, so an invocation
+    # without it cannot be completed by simply scrolling past output.
+    try:
+        reference = canon_module.normalize_accept_reference(accepted_for)
+    except ValueError as exc:
+        click.echo(f"Error: {exc}")
+        click.echo(f"\n{_CANON_ACCEPT_RULE}")
+        raise SystemExit(2)
+
+    # 1. What is about to be blessed, as content — not just a list of filenames.
+    stat, patch = _canon_git_diff(project_root, status.modified)
+    if status.modified:
+        click.echo(f"Accepting {len(status.modified)} ALTERED document(s):")
+        for rel in status.modified:
+            click.echo(f"  ALTERED  {rel}")
+        if stat.strip():
+            click.echo("")
+            for line in stat.rstrip().splitlines():
+                click.echo(f"  {line}")
+        if patch.strip():
+            patch_lines = patch.rstrip().splitlines()
+            click.echo("")
+            for line in patch_lines[:_CANON_DIFF_LINE_BUDGET]:
+                click.echo(f"  {line}")
+            if len(patch_lines) > _CANON_DIFF_LINE_BUDGET:
+                click.echo(
+                    f"  ... {len(patch_lines) - _CANON_DIFF_LINE_BUDGET} more diff "
+                    f"line(s) — read them with: git diff -- {' '.join(status.modified)}"
+                )
+        elif not stat.strip():
+            click.echo(
+                "  (no git diff available — this project is not a git repository, "
+                "or the change is already committed. Review the content by hand "
+                "before accepting.)"
+            )
+    if status.missing:
+        click.echo(f"Dropping {len(status.missing)} document(s) no longer present:")
+        for rel in status.missing:
+            click.echo(f"  MISSING  {rel}")
+    if status.untracked:
+        click.echo(f"Adding {len(status.untracked)} new document(s):")
+        for rel in status.untracked:
+            click.echo(f"  NEW      {rel}")
+
+    click.echo(f"\n{_CANON_ACCEPT_RULE}")
+    click.echo(f"Recording against work reference: {reference}")
+
+    if dry_run:
+        click.echo(f"\n(dry-run) {rel_lock} not written ({len(digests)} document(s) would be recorded).")
+        raise SystemExit(0)
+
+    # Carry forward the reference of every entry whose digest is unchanged, so an
+    # accept touches only the lines it actually changes (git blame stays useful
+    # and concurrent accepts of different documents keep merging cleanly).
+    previous: dict[str, canon_module.LedgerEntry] = {}
+    try:
+        payload = canon_module.load_ledger(lock_path)
+    except ValueError:
+        payload = None
+    if payload:
+        previous = {entry.path: entry for entry in payload.get("entries", [])}
+
+    try:
+        canon_module.write_ledger(lock_path, digests, accepted_for=reference, previous=previous)
+    except OSError as exc:
+        click.echo(f"Error: could not write {rel_lock}: {exc}")
+        raise SystemExit(1)
+    click.echo(f"\nRecorded {len(digests)} document(s) into {rel_lock}. Commit it with the change.")
+    raise SystemExit(0)
 
 
 @main.group("lexicon")
