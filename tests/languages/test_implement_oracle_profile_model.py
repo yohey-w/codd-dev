@@ -91,6 +91,7 @@ def test_implement_oracle_no_longer_in_extra(name: str) -> None:
 # only the implement_oracle block under test is the cause of any RED.
 _BASE_PROFILE = """\
 id: sample
+profile_version: "0.1.0"
 display_name: "Sample"
 strictness: strict
 file_extensions: [".smp"]

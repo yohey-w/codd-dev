@@ -13,6 +13,7 @@
 # {report} / {test_root} are LITERAL placeholders in Phase 1.
 
 id: typescript
+profile_version: "0.2.0"
 aliases: ["node", "javascript", "ts", "js"]
 display_name: "TypeScript"
 strictness: legacy_compatible

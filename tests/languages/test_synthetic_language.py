@@ -41,6 +41,7 @@ from codd.languages.verify_plan import (
 _TOYLANG_PROFILE = textwrap.dedent(
     """\
     id: toylang
+    profile_version: "0.1.0"
     display_name: ToyLang
     aliases: [toy]
     file_extensions: [".toy"]

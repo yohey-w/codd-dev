@@ -66,6 +66,7 @@ class Identity:
 
     id: str
     display_name: str
+    profile_version: str = "0.1.0"
     aliases: tuple[str, ...] = ()
     file_extensions: tuple[str, ...] = ()
     strictness: Strictness = "strict"

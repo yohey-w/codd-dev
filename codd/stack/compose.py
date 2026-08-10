@@ -410,7 +410,12 @@ def compose(
 ) -> ResolvedStackContract:
     """Merge a language ⊕ framework(s) ⊕ addon(s) into a ResolvedStackContract."""
     layers: list[ResolvedLayerRef] = [
-        ResolvedLayerRef("language", language.id, digest=_digest_profile(language.raw))
+        ResolvedLayerRef(
+            "language",
+            language.id,
+            language.identity.profile_version,
+            _digest_profile(language.raw),
+        )
     ]
     for fw in frameworks:
         layers.append(

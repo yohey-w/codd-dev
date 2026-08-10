@@ -43,6 +43,7 @@ from codd.languages.verify_plan import VerifyClass, build_verify_plan
 _PROFILE_TWO_SETS = textwrap.dedent(
     """\
     id: scopelang
+    profile_version: "0.1.0"
     display_name: ScopeLang
     file_extensions: [".sl"]
     strictness: strict
@@ -73,6 +74,7 @@ _PROFILE_TWO_SETS = textwrap.dedent(
 _PROFILE_NO_SCOPE = textwrap.dedent(
     """\
     id: scopelang
+    profile_version: "0.1.0"
     display_name: ScopeLang
     file_extensions: [".sl"]
     strictness: strict
@@ -99,6 +101,7 @@ _PROFILE_NO_SCOPE = textwrap.dedent(
 _PROFILE_COLOCATED = textwrap.dedent(
     """\
     id: scopelang
+    profile_version: "0.1.0"
     display_name: ScopeLang
     file_extensions: [".sl"]
     strictness: strict

@@ -14,6 +14,7 @@
 # {package_name} is a LITERAL placeholder in Phase 1 (PathPlanner substitutes later).
 
 id: python
+profile_version: "0.2.0"
 aliases: ["py", "python3"]
 display_name: "Python"
 strictness: legacy_compatible

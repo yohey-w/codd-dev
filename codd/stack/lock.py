@@ -10,10 +10,16 @@ profile change can never silently alter a project's contract.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import os
 from pathlib import Path
+import stat
+import tempfile
 from typing import Any, Mapping
 
 import yaml
+
+from codd.profile_version import is_strict_profile_upgrade, profile_version_key
 
 from .compose import ResolvedStackContract
 
@@ -41,6 +47,36 @@ class StackLock:
     resolved_contract_digest: str
     adapter_digests: Mapping[str, str] = field(default_factory=dict)
     permissions: Mapping[str, Any] = field(default_factory=dict)
+
+
+class StackLockUpdateError(ValueError):
+    """A committed lock cannot take the narrow, proof-backed profile-update path."""
+
+
+@dataclass(frozen=True)
+class StackLockLayerUpdate:
+    """One exact profile revision accepted by a stack-lock update plan."""
+
+    id: str
+    kind: str
+    old_version: str
+    new_version: str
+    old_digest: str
+    new_digest: str
+
+
+@dataclass(frozen=True)
+class StackLockUpdatePlan:
+    """A version-gated candidate; constructing it never writes the lock."""
+
+    current: StackLock
+    candidate: StackLock
+    layer_updates: tuple[StackLockLayerUpdate, ...]
+
+    @property
+    def candidate_fingerprint(self) -> str:
+        """Digest binding acceptance to every serialized candidate-lock field."""
+        return stack_lock_fingerprint(self.candidate)
 
 
 def build_lock(
@@ -82,6 +118,11 @@ def dump_lock(lock: StackLock) -> str:
     return yaml.safe_dump(lock_to_dict(lock), sort_keys=True, default_flow_style=False)
 
 
+def stack_lock_fingerprint(lock: StackLock) -> str:
+    """Hash the complete canonical lock, including every raw layer digest."""
+    return "sha256:" + hashlib.sha256(dump_lock(lock).encode("utf-8")).hexdigest()
+
+
 def parse_lock(data: str | Mapping[str, Any]) -> StackLock:
     doc = yaml.safe_load(data) if isinstance(data, str) else dict(data)
     if not isinstance(doc, Mapping):
@@ -96,7 +137,10 @@ def parse_lock(data: str | Mapping[str, Any]) -> StackLock:
         for l in (doc.get("layers") or [])
     )
     return StackLock(
-        schema_version=int(doc.get("schema_version", LOCK_SCHEMA_VERSION)),
+        # Missing is not silently upgraded to the current schema.  A lock that
+        # does not declare which schema produced it is unversioned input and the
+        # read-only gate must fail closed.
+        schema_version=int(doc.get("schema_version", 0)),
         stack_id=str(doc.get("stack_id", "")),
         layers=layers,
         resolved_contract_digest=str(doc.get("resolved_contract_digest", "")),
@@ -113,8 +157,21 @@ def verify_lock(contract: ResolvedStackContract, lock: StackLock) -> tuple[bool,
     resolved-contract digest (a profile edit that silently changed the contract).
     """
     diffs: list[str] = []
+    if lock.schema_version != LOCK_SCHEMA_VERSION:
+        diffs.append(
+            f"schema_version: supported={LOCK_SCHEMA_VERSION} lock={lock.schema_version}"
+        )
     if contract.stack_id != lock.stack_id:
         diffs.append(f"stack_id: contract={contract.stack_id!r} lock={lock.stack_id!r}")
+
+    contract_ids = [l.id for l in contract.layers]
+    lock_ids = [l.id for l in lock.layers]
+    duplicate_contract_ids = sorted({lid for lid in contract_ids if contract_ids.count(lid) > 1})
+    duplicate_lock_ids = sorted({lid for lid in lock_ids if lock_ids.count(lid) > 1})
+    if duplicate_contract_ids:
+        diffs.append(f"resolved contract has duplicate layer ids: {duplicate_contract_ids}")
+    if duplicate_lock_ids:
+        diffs.append(f"lock has duplicate layer ids: {duplicate_lock_ids}")
 
     contract_layers = {l.id: l for l in contract.layers}
     lock_layers = {l.id: l for l in lock.layers}
@@ -126,8 +183,14 @@ def verify_lock(contract: ResolvedStackContract, lock: StackLock) -> tuple[bool,
             diffs.append(f"layer {lid!r}: resolved but not in lock")
             continue
         c, k = contract_layers[lid], lock_layers[lid]
+        if c.kind != k.kind:
+            diffs.append(f"layer {lid!r} kind: contract={c.kind!r} lock={k.kind!r}")
         if c.profile_version != k.version:
             diffs.append(f"layer {lid!r} version: contract={c.profile_version} lock={k.version}")
+        if not k.digest:
+            diffs.append(f"layer {lid!r} digest missing from lock")
+        if not c.digest:
+            diffs.append(f"layer {lid!r} digest missing from resolved contract")
         if c.digest and k.digest and c.digest != k.digest:
             diffs.append(f"layer {lid!r} digest changed (profile edited)")
 
@@ -137,6 +200,193 @@ def verify_lock(contract: ResolvedStackContract, lock: StackLock) -> tuple[bool,
             f"(contract={contract.content_hash[:23]}… lock={lock.resolved_contract_digest[:23]}…)"
         )
     return (not diffs, diffs)
+
+
+def plan_stack_lock_update(
+    contract: ResolvedStackContract,
+    lock: StackLock,
+) -> StackLockUpdatePlan:
+    """Plan the only supported update of an EXISTING lock: profile upgrades.
+
+    This is deliberately narrower than ``build_lock(contract)``.  The declared
+    stack and ordered layer identities must be unchanged, every changed raw
+    profile digest must carry a strictly newer stable ``profile_version``, and a
+    downgrade is always rejected.  In particular, a same-version digest edit is
+    still classified as tampering/unversioned drift and remains RED.
+
+    The returned candidate is not proof and this function performs no write.  The
+    CLI binds owner intent to the complete candidate-lock fingerprint, runs the candidate's
+    real stack commands/obligations plus ordinary verification, re-resolves to
+    close the proof-to-write race, and only then calls
+    :func:`commit_stack_lock_update`.
+    """
+    if lock.schema_version != LOCK_SCHEMA_VERSION:
+        raise StackLockUpdateError(
+            f"unsupported stack lock schema {lock.schema_version}; expected "
+            f"{LOCK_SCHEMA_VERSION}"
+        )
+    if not lock.resolved_contract_digest:
+        raise StackLockUpdateError(
+            "committed stack lock has no resolved_contract_digest; an unpinned "
+            "lock cannot authorize an update"
+        )
+    if contract.stack_id != lock.stack_id:
+        raise StackLockUpdateError(
+            "stack_id changed; profile-update mode cannot accept a project stack "
+            f"declaration change ({lock.stack_id!r} -> {contract.stack_id!r})"
+        )
+
+    resolved_keys = tuple((layer.kind, layer.id) for layer in contract.layers)
+    locked_keys = tuple((layer.kind, layer.id) for layer in lock.layers)
+    if len({layer.id for layer in contract.layers}) != len(contract.layers):
+        raise StackLockUpdateError("resolved contract contains duplicate layer ids")
+    if len({layer.id for layer in lock.layers}) != len(lock.layers):
+        raise StackLockUpdateError("committed stack lock contains duplicate layer ids")
+    if resolved_keys != locked_keys:
+        raise StackLockUpdateError(
+            "ordered stack layers changed; profile-update mode requires the exact "
+            f"locked layers (lock={locked_keys!r}, resolved={resolved_keys!r})"
+        )
+
+    updates: list[StackLockLayerUpdate] = []
+    for resolved, locked in zip(contract.layers, lock.layers, strict=True):
+        try:
+            old_key = profile_version_key(
+                locked.version, where=f"locked layer {locked.id!r} profile_version"
+            )
+            new_key = profile_version_key(
+                resolved.profile_version,
+                where=f"resolved layer {resolved.id!r} profile_version",
+            )
+        except ValueError as exc:
+            raise StackLockUpdateError(str(exc)) from exc
+
+        if new_key == old_key:
+            if resolved.digest != locked.digest:
+                raise StackLockUpdateError(
+                    f"layer {resolved.id!r} digest changed without a profile_version "
+                    f"increase ({locked.version}); same-version profile drift remains RED"
+                )
+            continue
+        if not is_strict_profile_upgrade(locked.version, resolved.profile_version):
+            raise StackLockUpdateError(
+                f"layer {resolved.id!r} profile_version is not a strict upgrade "
+                f"({locked.version} -> {resolved.profile_version}); rollback/non-upgrade "
+                "updates are refused"
+            )
+        if not locked.digest or not resolved.digest:
+            raise StackLockUpdateError(
+                f"layer {resolved.id!r} lacks a profile digest; an unpinned profile "
+                "cannot be accepted as an upgrade"
+            )
+        updates.append(
+            StackLockLayerUpdate(
+                id=resolved.id,
+                kind=resolved.kind,
+                old_version=locked.version,
+                new_version=resolved.profile_version,
+                old_digest=locked.digest,
+                new_digest=resolved.digest,
+            )
+        )
+
+    if not updates:
+        ok, diffs = verify_lock(contract, lock)
+        if ok:
+            raise StackLockUpdateError("stack lock already matches the resolved contract")
+        raise StackLockUpdateError(
+            "lock drift is not attributable to a strict profile_version upgrade: "
+            + "; ".join(diffs)
+        )
+
+    candidate = build_lock(
+        contract,
+        adapter_digests=lock.adapter_digests,
+        permissions=lock.permissions,
+    )
+    candidate_ok, candidate_diffs = verify_lock(contract, candidate)
+    if not candidate_ok:  # Defensive: a plan must never emit an unverifiable candidate.
+        raise StackLockUpdateError(
+            "internal error: generated update candidate does not match the contract: "
+            + "; ".join(candidate_diffs)
+        )
+    return StackLockUpdatePlan(
+        current=lock,
+        candidate=candidate,
+        layer_updates=tuple(updates),
+    )
+
+
+def commit_stack_lock_update(
+    plan: StackLockUpdatePlan,
+    project_root: str | Path,
+    *,
+    expected_lock_text: str,
+) -> Path:
+    """Atomically commit a pre-verified update plan with stale-input defense.
+
+    This function is intentionally not a verifier.  It is the final write step
+    used by ``codd stack update-lock`` *after* candidate verification.  It refuses
+    to write if the on-disk lock differs byte-for-byte from the text that was
+    planned/proved, preventing a stale proof from overwriting a concurrent edit.
+    Normal ``codd verify`` and :func:`enforce_stack_lock` never call it.
+    """
+    path = stack_lock_path(project_root)
+    try:
+        current_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise StackLockUpdateError(f"cannot read committed stack lock {path}: {exc}") from exc
+    if current_text != expected_lock_text:
+        raise StackLockUpdateError(
+            "stack lock changed after the update was planned; refusing to overwrite "
+            "a concurrent/stale lock"
+        )
+    try:
+        parsed_current = parse_lock(current_text)
+    except Exception as exc:  # noqa: BLE001 - malformed current input must fail closed.
+        raise StackLockUpdateError(f"committed stack lock became unparseable: {exc}") from exc
+    if parsed_current != plan.current:
+        raise StackLockUpdateError(
+            "planned current lock does not equal the committed lock; refusing stale update"
+        )
+
+    candidate_text = dump_lock(plan.candidate)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(candidate_text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temp_path, stat.S_IMODE(path.stat().st_mode))
+        except OSError:
+            pass  # Permissions are not proof-bearing; content checks remain fail-closed.
+
+        # Check again immediately before the atomic replace.  The replace is one
+        # filesystem operation; cooperative writers using this API cannot clobber
+        # each other with a stale proof.
+        if path.read_text(encoding="utf-8") != expected_lock_text:
+            raise StackLockUpdateError(
+                "stack lock changed while the candidate was being written; refusing "
+                "to overwrite a concurrent/stale lock"
+            )
+        os.replace(temp_path, path)
+    except Exception as exc:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        if isinstance(exc, StackLockUpdateError):
+            raise
+        if isinstance(exc, OSError):
+            raise StackLockUpdateError(
+                f"could not atomically replace committed stack lock {path}: {exc}"
+            ) from exc
+        raise
+    return path
 
 
 # ── enforcement gate (Contract Kernel v2.77b — Stack Lock Enforcement) ───────
@@ -152,10 +402,15 @@ def verify_lock(contract: ResolvedStackContract, lock: StackLock) -> tuple[bool,
 #   * :func:`enforce_stack_lock` is STRICTLY READ-ONLY. It NEVER writes/refreshes
 #     a lock. missing → RED, parse-error → RED, drift → RED, valid → GREEN. Both
 #     the verify path and the greenfield path call THIS for the verdict.
-#   * :func:`bootstrap_stack_lock` is the ONLY writer, and it uses EXCLUSIVE
-#     create (``open(..., "x")``): it writes only when the lock is ABSENT and is
-#     invoked only on a positively-identified project-creation path (greenfield
-#     first generation). It refuses to overwrite, so it cannot refresh a drift.
+#   * :func:`bootstrap_stack_lock` is the only AUTOMATIC/creation writer and uses
+#     EXCLUSIVE create (``open(..., "x")``): it writes only when the lock is ABSENT
+#     and is invoked only on a positively-identified project-creation path
+#     (greenfield first generation). It refuses to overwrite, so it cannot refresh
+#     a drift.
+#   * An EXISTING lock can be changed only through the separate, explicit
+#     ``codd stack update-lock`` path: strict profile-version increase, digest-bound
+#     owner acceptance, real verification proof, re-resolution, then atomic replace.
+#     The enforcement gate and auto-repair never reach that writer.
 #
 # ANTI-GAMING (exit gate 3, the crux): ``verify_lock(contract,
 # build_lock(contract))`` is ALWAYS ok by construction — a drift can be MASKED by
@@ -163,9 +418,9 @@ def verify_lock(contract: ResolvedStackContract, lock: StackLock) -> tuple[bool,
 # is "who may WRITE a lock, and when". Here: the read-only gate writes nothing
 # ever, and bootstrap writes only on exclusive-create in the creation path. A
 # drift against a committed lock is RED on every path and is never refreshed by
-# either function; auto-repair re-running the gate keeps seeing drift-RED.
-# Refreshing a drifted lock requires an explicit out-of-band proof
-# (``replace_with_proof``-style; full repair governance is v2.77f).
+# either enforcement function; auto-repair re-running the gate keeps seeing
+# drift-RED. A declared profile revision is accepted only through the explicit
+# proof-backed update workflow above; same-version digest drift is never eligible.
 #
 # WHY NOT "missing + absent-session ⇒ generate": absence of a session is NOT
 # proof of first generation (it can be a deleted session, a copied project, an
@@ -233,10 +488,11 @@ class StackLockGate:
         joined = "; ".join(self.reasons) if self.reasons else "resolved contract diverges from the lock"
         return (
             f"stack lock DRIFT ({self.lock_path}): the resolved stack contract no longer "
-            f"matches the committed lock [{joined}]. This is RED. Rewriting the lock to "
-            "match does NOT clear this — the gate is read-only and never refreshes a lock; "
-            "a drift requires reverting the contract change or an explicit proof-backed "
-            "lock update (replace_with_proof)."
+            f"matches the committed lock [{joined}]. This is RED. The gate is read-only "
+            "and never refreshes a lock. Revert an unintended change; for an intentional "
+            "profile revision with a strictly newer profile_version, review "
+            "`codd stack update-lock --dry-run --reason <reason>` and accept its exact "
+            "candidate digest. Same-version profile digest drift is not update-eligible."
         )
 
 
@@ -292,7 +548,7 @@ def bootstrap_stack_lock(
     adapter_digests: Mapping[str, str] | None = None,
     permissions: Mapping[str, Any] | None = None,
 ) -> StackLockGate:
-    """Write a project's FIRST stack lock (creation path only) — the ONLY writer.
+    """Write a project's FIRST stack lock — the only automatic/creation writer.
 
     Invoked ONLY on a positively-identified project-creation path (greenfield first
     generation), never by the enforcement gate, never by verify/resume, never by

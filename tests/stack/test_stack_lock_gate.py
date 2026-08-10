@@ -406,8 +406,8 @@ def test_drift_lock_is_never_overwritten_by_the_gate(tmp_path: Path) -> None:
     assert gate.status == LOCK_DRIFT and gate.red, "drift must NOT be refreshed to green"
     assert lock_path.read_bytes() == before, "the drifted lock was silently overwritten"
 
-    # Bootstrap (the ONLY writer) also refuses: the lock EXISTS, so it does not
-    # overwrite — it enforces, and the pre-existing drift stays RED.
+    # Bootstrap (the only automatic/creation writer) also refuses: the lock EXISTS,
+    # so it does not overwrite — it enforces, and the pre-existing drift stays RED.
     boot = bootstrap_stack_lock(contract, project)
     assert boot.status == LOCK_DRIFT and boot.red, "bootstrap must NOT refresh a drift"
     assert lock_path.read_bytes() == before, "bootstrap silently overwrote a drifted lock"

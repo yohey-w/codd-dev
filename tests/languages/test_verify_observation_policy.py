@@ -96,6 +96,7 @@ def _write_profile(tmp_path, observation_block):
 
     profile = {
         "id": "toyobs",
+        "profile_version": "0.1.0",
         "commands": {"verify": {"argv": ["toy", "test"], "observation": observation_block}},
     }
     path = tmp_path / "toyobs.yaml"

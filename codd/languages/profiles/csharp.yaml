@@ -23,6 +23,7 @@
 # Placeholders ({module_root}, {package_name}, ...) are LITERAL template strings.
 
 id: csharp
+profile_version: "0.2.0"
 aliases: ["c#", "cs", "dotnet"]
 display_name: "C#"
 strictness: strict

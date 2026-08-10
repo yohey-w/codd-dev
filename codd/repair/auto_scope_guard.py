@@ -153,10 +153,12 @@ _SPEC_DIR_MARKERS: frozenset[str] = frozenset(
 # are therefore OFF-LIMITS to ANY auto-repair edit — UNCONDITIONALLY (unlike the
 # oracle/doc fence above, which is gated on a code-addressable failure). Rationale: a
 # stack profile/obligation/checker/proof is the contract, never SUT source; the lock
-# is (re)generated ONLY on the explicit ``bootstrap_stack_lock`` first-generation
-# creation path, never by an unattended repair. There is no failure class for which an
-# auto-repair legitimately rewrites a stack contract artefact (a drift is cleared by
-# reverting the contract change or by an explicit proof-backed update, not by repair)
+# is created automatically ONLY on the explicit ``bootstrap_stack_lock``
+# first-generation path. An existing lock can change only through the separate,
+# owner-accepted ``codd stack update-lock`` proof workflow, never by an unattended
+# repair. There is no failure class for which an auto-repair legitimately rewrites a
+# stack contract artefact (a drift is cleared by reverting the contract change or by
+# that explicit proof-backed update, not by repair)
 # — so this fence does not carry the harness-contract exception the oracle fence does.
 #
 # Recognition (GPT-5.5 Pro consult 2026-06-21) is deliberately CONSERVATIVE about

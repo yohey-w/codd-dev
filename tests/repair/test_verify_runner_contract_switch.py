@@ -50,6 +50,7 @@ from codd.repair.verify_runner import VerificationResult, VerifyRunner
 _STRICT_PROFILE = textwrap.dedent(
     """\
     id: ckswitchlang
+    profile_version: "0.1.0"
     display_name: CKSwitchLang
     aliases: [cksw]
     file_extensions: [". cks"]
@@ -80,6 +81,7 @@ _STRICT_PROFILE = textwrap.dedent(
 _LEGACY_COMPATIBLE_PROFILE = textwrap.dedent(
     """\
     id: ckcompatlang
+    profile_version: "0.1.0"
     display_name: CKCompatLang
     aliases: [ckcompat]
     file_extensions: [".ckc"]
@@ -110,6 +112,7 @@ _LEGACY_COMPATIBLE_PROFILE = textwrap.dedent(
 _NO_VERIFY_PROFILE = textwrap.dedent(
     """\
     id: cknoverifylang
+    profile_version: "0.1.0"
     display_name: CKNoVerifyLang
     file_extensions: [".ckn"]
     strictness: legacy_compatible

@@ -4,6 +4,7 @@
 # it is NOT the application framework.
 id: playwright
 kind: addon
+profile_version: "0.2.0"
 display_name: Playwright
 aliases: [pw]
 capability: e2e

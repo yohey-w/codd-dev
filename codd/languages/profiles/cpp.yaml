@@ -22,6 +22,7 @@
 # substitution is PathPlanner's job in a later phase.
 
 id: cpp
+profile_version: "0.2.0"
 aliases: ["c++", "cxx", "cplusplus"]
 display_name: "C++"
 strictness: strict

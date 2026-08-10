@@ -19,6 +19,8 @@ from typing import Any, Mapping
 
 import yaml
 
+from codd.profile_version import validated_profile_version
+
 from .profile import (
     ArtifactsSpec,
     CiSpec,
@@ -96,9 +98,17 @@ def _parse_identity(doc: Mapping[str, Any]) -> Identity:
             f"{where}: strictness must be 'strict' or 'legacy_compatible', "
             f"got {strictness!r}"
         )
+    try:
+        profile_version = validated_profile_version(
+            _require(doc, "profile_version", where=where),
+            where="identity.profile_version",
+        )
+    except ValueError as exc:
+        raise LanguageProfileError(str(exc)) from exc
     return Identity(
         id=str(lang_id),
         display_name=str(display),
+        profile_version=profile_version,
         aliases=_as_str_tuple(doc.get("aliases")),
         file_extensions=_as_str_tuple(doc.get("file_extensions")),
         strictness=strictness,
@@ -499,6 +509,7 @@ def _parse_implement_oracle(
 _KNOWN_TOP_LEVEL = frozenset(
     {
         "id",
+        "profile_version",
         "aliases",
         "display_name",
         "file_extensions",

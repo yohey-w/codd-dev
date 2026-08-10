@@ -3,6 +3,7 @@
 # contract (schema, migrations, generated client) but does not own the app build.
 id: prisma
 kind: addon
+profile_version: "0.2.0"
 display_name: Prisma
 aliases: [prisma-orm]
 capability: orm

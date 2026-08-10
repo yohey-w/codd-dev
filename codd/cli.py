@@ -653,6 +653,154 @@ def version_cmd(check_project: bool, strict: bool, project_path: str) -> None:
         raise SystemExit(1)
 
 
+@main.group("stack")
+def stack_cmd() -> None:
+    """Inspect and explicitly update the committed stack contract lock."""
+
+
+@stack_cmd.command("update-lock")
+@project_root_option("project_path")
+@click.option(
+    "--reason",
+    required=True,
+    help="Human review reason for accepting the declared profile revision.",
+)
+@click.option(
+    "--accept",
+    "accepted_fingerprint",
+    default=None,
+    help="Exact candidate-lock fingerprint printed by --dry-run.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show the eligible version transitions and candidate fingerprint; never verify or write.",
+)
+def stack_update_lock_cmd(
+    project_path: str,
+    reason: str,
+    accepted_fingerprint: str | None,
+    dry_run: bool,
+) -> None:
+    """Accept a strictly-versioned profile upgrade after real verification.
+
+    Normal ``codd verify`` remains strictly read-only.  This separate path can
+    replace an existing lock only when the stack/layer identities are unchanged,
+    every changed profile declares a strict version increase, the owner accepts
+    the complete candidate-lock fingerprint, and the candidate contract's real
+    gates pass.  Same-version digest drift is refused.
+    """
+    from codd.stack.lock import (
+        StackLockUpdateError,
+        commit_stack_lock_update,
+        enforce_stack_lock,
+        parse_lock,
+        plan_stack_lock_update,
+        stack_lock_path,
+    )
+    from codd.stack.project import resolve_project_stack
+
+    reason = reason.strip()
+    if not reason:
+        click.echo("Error: --reason must contain a non-whitespace review reason.", err=True)
+        raise SystemExit(2)
+
+    project_root = Path(project_path).resolve()
+    lock_path = stack_lock_path(project_root)
+    try:
+        current_text = lock_path.read_text(encoding="utf-8")
+        current_lock = parse_lock(current_text)
+        contract = resolve_project_stack(project_root)
+        if contract is None:
+            raise StackLockUpdateError(
+                "project has no `stack:` declaration; an orphan/missing declaration "
+                "cannot be repaired by updating its lock"
+            )
+        plan = plan_stack_lock_update(contract, current_lock)
+    except (OSError, ValueError, KeyError, yaml.YAMLError) as exc:
+        click.echo(f"Error: stack lock update is not eligible: {exc}", err=True)
+        raise SystemExit(1) from exc
+
+    click.echo("Stack lock profile-update candidate (lock remains unchanged):")
+    for update in plan.layer_updates:
+        click.echo(
+            f"  {update.kind}:{update.id} "
+            f"{update.old_version} -> {update.new_version}"
+        )
+        click.echo(f"    digest {update.old_digest} -> {update.new_digest}")
+    click.echo(
+        "  resolved contract: "
+        f"{plan.current.resolved_contract_digest} -> "
+        f"{plan.candidate.resolved_contract_digest}"
+    )
+    click.echo(f"  candidate lock fingerprint: {plan.candidate_fingerprint}")
+    click.echo(f"  review reason: {reason}")
+
+    if dry_run:
+        click.echo(
+            "Dry-run only: no verification ran and stack.lock was not written. "
+            "Review the transitions, then rerun with "
+            f"--accept {plan.candidate_fingerprint} using the same --reason."
+        )
+        return
+
+    if accepted_fingerprint is None:
+        click.echo(
+            "Error: refusing an unbound update. Run with --dry-run, review the complete "
+            "candidate, then pass its exact fingerprint via --accept.",
+            err=True,
+        )
+        raise SystemExit(1)
+    if accepted_fingerprint.strip() != plan.candidate_fingerprint:
+        click.echo(
+            "Error: --accept does not match the complete candidate lock fingerprint; "
+            "nothing was verified or written. Run --dry-run again.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    click.echo("[stack update-lock] accepted candidate; running proof gates before any write")
+    try:
+        _prove_stack_lock_update(contract, project_root)
+
+        # Re-resolve after all potentially long-running proof commands.  A profile
+        # or codd.yaml change during verification invalidates the accepted candidate
+        # instead of letting a stale proof authorize different bytes.
+        try:
+            fresh_contract = resolve_project_stack(project_root)
+        except (OSError, ValueError, KeyError, yaml.YAMLError) as exc:
+            raise StackLockUpdateError(
+                f"could not re-resolve the stack after verification: {exc}"
+            ) from exc
+        if fresh_contract is None:
+            raise StackLockUpdateError("stack declaration disappeared during verification")
+        fresh_plan = plan_stack_lock_update(fresh_contract, current_lock)
+        if fresh_plan.candidate != plan.candidate:
+            raise StackLockUpdateError(
+                "resolved stack contract changed during verification; the accepted "
+                "candidate/proof is stale"
+            )
+        updated_path = commit_stack_lock_update(
+            fresh_plan,
+            project_root,
+            expected_lock_text=current_text,
+        )
+        gate = enforce_stack_lock(fresh_contract, project_root)
+        if gate.red:
+            raise StackLockUpdateError(
+                "updated lock did not pass immediate read-only enforcement: " + gate.message
+            )
+    except StackLockUpdateError as exc:
+        click.echo(f"Error: stack lock update failed: {exc}", err=True)
+        raise SystemExit(1) from exc
+
+    click.echo(
+        f"Stack lock updated after proof: {_display_path(updated_path, project_root)}"
+    )
+    click.echo("Review and commit the stack.lock diff; ordinary `codd verify` remains read-only.")
+
+
 @main.command("preflight")
 @click.argument("task_yaml", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @project_root_option("project_path")
@@ -8399,6 +8547,64 @@ def _load_optional_project_config(project_root: Path) -> dict[str, Any]:
         return load_project_config(project_root)
     except (FileNotFoundError, ValueError):
         return {}
+
+
+def _prove_stack_lock_update(contract: Any, project_root: Path) -> None:
+    """Run the candidate contract's existing proof gates without touching its lock.
+
+    This is intentionally the same production machinery used after the normal
+    read-only lock gate: composed command materialization (including authenticity),
+    obligation checkers, the ordinary standalone verification, and the verify-stage
+    artifact contract.  Any failure raises before the update writer is called.
+    """
+    from codd.stack.command_authenticity import StackCommandAuthenticityError
+    from codd.stack.command_plan import (
+        StackCommandMaterializationError,
+        StackContractConflictError,
+        materialize_stack_command_plan,
+    )
+    from codd.stack.lock import StackLockUpdateError
+    from codd.stack.project import StackObligationGateError, enforce_stack_obligation_gate
+
+    try:
+        plan, _result = materialize_stack_command_plan(contract, project_root)
+    except (
+        StackContractConflictError,
+        StackCommandMaterializationError,
+        StackCommandAuthenticityError,
+    ) as exc:
+        raise StackLockUpdateError(
+            f"candidate stack command proof failed: {exc}"
+        ) from exc
+    click.echo(
+        f"[stack update-lock] command proof: {len(plan.slots)} slot(s) passed "
+        f"({', '.join(plan.command_ids)})"
+    )
+
+    try:
+        enforce_stack_obligation_gate(contract, project_root)
+    except StackObligationGateError as exc:
+        raise StackLockUpdateError(
+            f"candidate stack obligation proof failed: {exc}"
+        ) from exc
+    click.echo(
+        f"[stack update-lock] obligation proof: {len(contract.obligations)} "
+        "obligation(s) satisfied"
+    )
+
+    ordinary = _run_verify_once(path=str(project_root), prefer_standalone=True)
+    _emit_verify_summary(ordinary)
+    if not ordinary.passed:
+        raise StackLockUpdateError(
+            f"ordinary verification failed with exit code {ordinary.exit_code}"
+        )
+    try:
+        _enforce_stage_contract_gate(project_root, "verify", opt_out=False)
+    except SystemExit as exc:
+        raise StackLockUpdateError(
+            f"verify-stage artifact contract failed with exit code {_system_exit_code(exc)}"
+        ) from exc
+    click.echo("[stack update-lock] ordinary verification proof: passed")
 
 
 def _intake_stack_contract_for_verify(project_root: Path, *, stack_command_executor=None) -> None:

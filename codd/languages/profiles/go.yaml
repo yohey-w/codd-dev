@@ -15,6 +15,7 @@
 # template strings in Phase 1 — substitution is PathPlanner's job later.
 
 id: go
+profile_version: "0.2.0"
 aliases: ["golang"]
 display_name: "Go"
 strictness: strict

@@ -85,6 +85,7 @@
 # substituted later (PathPlanner / the generic-template scaffolder).
 
 id: javascript
+profile_version: "0.2.0"
 display_name: "JavaScript"
 strictness: strict
 file_extensions: [".js", ".jsx", ".mjs", ".cjs"]

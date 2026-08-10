@@ -18,6 +18,7 @@
 # in Phase 1 — substitution is PathPlanner's job later.
 
 id: java
+profile_version: "0.2.0"
 aliases: ["jvm"]
 display_name: "Java"
 strictness: strict

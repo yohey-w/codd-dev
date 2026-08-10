@@ -13,6 +13,8 @@ from typing import Any, Mapping
 
 import yaml
 
+from codd.profile_version import validated_profile_version
+
 # Reuse the language loader's primitive helpers + shared-type parsers.
 from codd.languages.loader import (
     LanguageProfileError,
@@ -60,7 +62,14 @@ class StackProfileError(LanguageProfileError):
 
 def _parse_layer_identity(doc: Mapping[str, Any], *, expected_kind: str) -> LayerIdentity:
     where = "identity"
-    layer_id = _require(doc, "id", where=where)
+    try:
+        layer_id = _require(doc, "id", where=where)
+        profile_version = validated_profile_version(
+            _require(doc, "profile_version", where=where),
+            where="identity.profile_version",
+        )
+    except ValueError as exc:
+        raise StackProfileError(str(exc)) from exc
     kind = doc.get("kind", expected_kind)
     if kind != expected_kind:
         raise StackProfileError(
@@ -77,7 +86,7 @@ def _parse_layer_identity(doc: Mapping[str, Any], *, expected_kind: str) -> Laye
         display_name=str(doc.get("display_name") or layer_id),
         aliases=_as_str_tuple(doc.get("aliases")),
         schema_version=str(doc.get("schema_version", "1")),
-        profile_version=str(doc.get("profile_version", "0.1.0")),
+        profile_version=profile_version,
         strictness=strictness,
     )
 
