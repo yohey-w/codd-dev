@@ -349,6 +349,28 @@ verify:
   # Set false to opt out; install_timeout_seconds bounds the install.
   install_preflight: true
   install_timeout_seconds: 900
+  # ── verification-node coverage (anti-false-green) ──────────────────────
+  # A skipped verification node reports NEITHER pass nor fail. So a run whose
+  # verification_timeout budget expires after a handful of nodes can finish
+  # with zero failures while most of its evidence was never gathered — green
+  # by absence. Skips are always reported (count + reason, plus a WARNING when
+  # the run skipped nodes nobody asked it to skip). Set this true to make that
+  # state RED: "passed" then means every verification node this project
+  # declared was actually executed. Nodes excluded on purpose via
+  # `--runtime-skip` are a declared contract and never trip it.
+  # Default false — a project deliberately clipping a long tail is unaffected.
+  require_complete_verification: false
+  # ── run-scoped overrides (no committed-config edit, no re-hash) ─────────
+  # verify.verification_timeout.{per_node_seconds,total_seconds} is a PERMANENT
+  # policy. To run every verification node once without changing that policy:
+  #   CODD_VERIFICATION_TIMEOUT_TOTAL_SECONDS=3600 \
+  #   CODD_VERIFY_REQUIRE_COMPLETE_VERIFICATION=1 codd verify
+  # Both accept a run-scoped value, both win over the committed one, both are
+  # inert when unset, and a malformed value is an error (never a silent
+  # fall-back to the committed value). Companion of CODD_CDP_BASE_URL.
+  # Env vars: CODD_VERIFICATION_TIMEOUT_PER_NODE_SECONDS,
+  #           CODD_VERIFICATION_TIMEOUT_TOTAL_SECONDS,
+  #           CODD_VERIFY_REQUIRE_COMPLETE_VERIFICATION.
   report_output: "docs/test/verify_report.md"
   e2e_setup_command: null  # e.g. "npx playwright install chromium"
   e2e_command: null         # all E2E tests

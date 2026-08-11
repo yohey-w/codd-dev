@@ -73,6 +73,23 @@ DEFAULT_TEST_TIMEOUT_SECONDS = 600.0
 #: runs) ⇒ no prepend ⇒ byte-identical to today. ``.codd/**`` is harness-owned.
 _EXEC_ENV_STATE_RELPATH = ".codd/verify/exec_env.json"
 
+#: Skip reasons that record an EXPLICIT request not to run a verification node
+#: (``--runtime-skip``). Every other skip is INVOLUNTARY: the run intended to
+#: verify the node and could not (a budget ran out, a precondition vanished).
+#: The distinction is the whole point — a declared exclusion is a contract, an
+#: involuntary skip is a hole in the evidence that looks exactly like one.
+USER_REQUESTED_SKIP_REASONS: frozenset[str] = frozenset({"verification-test"})
+
+#: Opt-in verdict rule for involuntary skips (``verify.require_complete_verification``).
+#: Default OFF: a project whose budget legitimately clips a long tail keeps
+#: today's behavior. Turned on, an involuntary skip is a FAILURE, because
+#: "passed" then means "everything this project declared verifiable was
+#: verified" instead of "nothing that happened to run said no".
+REQUIRE_COMPLETE_VERIFICATION_SETTING = "require_complete_verification"
+
+#: Run-scoped entry for the rule above (same reasoning as the timeout entries).
+REQUIRE_COMPLETE_VERIFICATION_ENV_VAR = "CODD_VERIFY_REQUIRE_COMPLETE_VERIFICATION"
+
 #: The honesty rule: a verification that verified nothing must say so.
 STRUCTURAL_ONLY_WARNING = (
     "verification executed no tests/typecheck/runtime checks — structural DAG checks only. "
@@ -239,6 +256,14 @@ class VerifyRunner:
                 for failure in [self._failure_from_runtime_result(result)]
                 if failure is not None
             )
+            # Anti-false-green: a skipped verification node reports neither pass
+            # nor fail, so a run whose budget expired early can end with zero
+            # failures while most of its evidence was never gathered. Opt-in,
+            # because clipping a long tail is a legitimate policy for some
+            # projects — but when it is NOT the policy, the hole must be red.
+            coverage_failure = self._incomplete_verification_failure(runtime_results, settings)
+            if coverage_failure is not None:
+                failures.append(coverage_failure)
             # FX3 execution evidence — order: cheap deterministic parse check
             # first (names broken files even when the suite cannot start),
             # then the BLOCKING dependency-install preflight (node stacks),
@@ -296,6 +321,11 @@ class VerifyRunner:
         # greenfield/pipeline.py _default_verify_runner).
         if result.passed and not result.executed_anything and not structural_only_allowed(settings):
             result.warnings.append(STRUCTURAL_ONLY_WARNING)
+        # Always-on visibility (independent of the verdict and of the opt-in
+        # rule): the run states how much of what it found it actually ran.
+        coverage_warning = incomplete_verification_warning(runtime_results)
+        if coverage_warning is not None:
+            result.warnings.append(coverage_warning)
         return result
 
     def reset_dag_cache(self) -> None:
@@ -1137,6 +1167,40 @@ class VerifyRunner:
             details=details,
         )
 
+    def _incomplete_verification_failure(
+        self, runtime_results: list[Any], settings: dict[str, Any]
+    ) -> VerificationFailure | None:
+        # Resolved FIRST and unconditionally: a malformed run-scoped value must
+        # be reported even on a run with nothing to skip, or an operator who
+        # believes the rule is armed gets a green that never evaluated it.
+        required = require_complete_verification(settings)
+        counts = involuntary_skips(runtime_results)
+        if not counts or not required:
+            return None
+        skipped_nodes = [
+            _result_node_id(item)
+            for item in runtime_results
+            if (reason := _skip_reason(item)) is not None and reason not in USER_REQUESTED_SKIP_REASONS
+        ]
+        return VerificationFailure(
+            check_name="verification_coverage",
+            source="verification_coverage",
+            message=(
+                _incomplete_verification_summary(runtime_results, counts)
+                + f". verify.{REQUIRE_COMPLETE_VERIFICATION_SETTING} is on: an unexplained "
+                "gap in the evidence is a failure, not a pass."
+            ),
+            details={
+                "skip_reasons": dict(sorted(counts.items())),
+                "skipped_nodes": skipped_nodes,
+                # ``failed_nodes`` is the key the repair/report path reads; the
+                # skipped nodes ARE the actionable set here.
+                "failed_nodes": skipped_nodes,
+                "code_addressable": False,
+                "failure_class": "environment_build_error",
+            },
+        )
+
     def _error_result(self, check_name: str, message: str) -> VerificationResult:
         failure = VerificationFailure(check_name=check_name, source="verify_runner", message=message)
         return VerificationResult(
@@ -1183,6 +1247,99 @@ def run_standalone_verify(
         except (FileNotFoundError, ValueError):
             codd_yaml = {}
     return VerifyRunner(root, codd_yaml, runtime_skip=runtime_skip).run()
+
+
+def _skip_reason(result: Any) -> str | None:
+    """The recorded skip reason of a runtime result, or ``None`` if it ran."""
+    if isinstance(result, Mapping):
+        skipped = result.get("skipped")
+        reason = result.get("skip_reason")
+    else:
+        skipped = getattr(result, "skipped", None)
+        reason = getattr(result, "skip_reason", None)
+    if not skipped:
+        return None
+    text = str(reason or "").strip()
+    return text or "skipped"
+
+
+def _result_node_id(result: Any) -> str:
+    if isinstance(result, Mapping):
+        return str(result.get("node_id") or "")
+    return str(getattr(result, "node_id", "") or "")
+
+
+def involuntary_skips(runtime_results: list[Any]) -> dict[str, int]:
+    """Count runtime results skipped for a reason nobody asked for, by reason."""
+    counts: dict[str, int] = {}
+    for result in runtime_results or []:
+        reason = _skip_reason(result)
+        if reason is None or reason in USER_REQUESTED_SKIP_REASONS:
+            continue
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def _incomplete_verification_summary(runtime_results: list[Any], counts: Mapping[str, int]) -> str:
+    total = len(runtime_results or [])
+    skipped = sum(counts.values())
+    executed = total - sum(1 for item in runtime_results or [] if _skip_reason(item) is not None)
+    breakdown = ", ".join(f"{reason}={count}" for reason, count in sorted(counts.items()))
+    return (
+        f"{skipped} of {total} verification node(s) were skipped without being asked to "
+        f"({breakdown}); only {executed} actually executed"
+    )
+
+
+def incomplete_verification_warning(runtime_results: list[Any]) -> str | None:
+    """The always-on honesty line for involuntary skips, or ``None``.
+
+    Visibility is not a behavior change, so this is NOT opt-in: a run that
+    could not verify most of what it found says so out loud whatever its
+    verdict. Only the VERDICT consequence is gated
+    (:func:`require_complete_verification`).
+    """
+    counts = involuntary_skips(runtime_results)
+    if not counts:
+        return None
+    return (
+        _incomplete_verification_summary(runtime_results, counts)
+        + ". A verdict computed from a fraction of the verification nodes is not "
+        "evidence about the rest. Raise the budget for this run "
+        f"({_VERIFICATION_TIMEOUT_ENV_VARS['total_seconds']}) or set "
+        f"verify.{REQUIRE_COMPLETE_VERIFICATION_SETTING}: true to make this state fail."
+    )
+
+
+def require_complete_verification(settings: Mapping[str, Any] | None) -> bool:
+    """``verify.require_complete_verification`` — opt in to the coverage verdict.
+
+    Off by default (F6: a new setting never silently changes an existing
+    project). The run-scoped environment entry wins, so the rule can be
+    demanded for one run without editing — and re-hashing — committed config.
+    """
+    override = _bool_env_override(REQUIRE_COMPLETE_VERIFICATION_ENV_VAR)
+    if override is not None:
+        return override
+    return _verify_setting(dict(settings or {}), REQUIRE_COMPLETE_VERIFICATION_SETTING, False) is True
+
+
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _bool_env_override(env_name: str) -> bool | None:
+    raw = os.environ.get(env_name)
+    if raw is None or not raw.strip():
+        return None
+    text = raw.strip().lower()
+    if text in _TRUE_ENV_VALUES:
+        return True
+    if text in _FALSE_ENV_VALUES:
+        return False
+    raise ValueError(
+        f"{env_name} must be one of {sorted(_TRUE_ENV_VALUES | _FALSE_ENV_VALUES)} (got {raw.strip()!r})"
+    )
 
 
 def structural_only_allowed(settings: Mapping[str, Any] | None) -> bool:
@@ -1532,11 +1689,54 @@ def _verification_total_seconds(settings: dict[str, Any]) -> float | None:
 
 
 def _verification_timeout_seconds(settings: dict[str, Any], key: str) -> float | None:
+    """Resolve one ``verify.verification_timeout`` bound, env override winning.
+
+    The committed value is a PERMANENT policy (a fast-fail CI budget, say),
+    while "run every verification node this once, however long it takes" is a
+    RUN-scoped intent. Without a run-scoped entry the only way to express the
+    second is to edit the first — which mutates the project's committed
+    contract (and anything hashed off it) to answer a one-off question.
+
+    Resolution happens HERE, at the single choke point every caller of the
+    runner shares, so the override reaches the embedded verifications too
+    (``codd stack update-lock``'s ordinary verify, the repair loop, the
+    greenfield autopilot) and not merely one CLI flag's call site.
+
+    Unset/blank ⇒ the committed value, byte-identical to before. Present but
+    not a positive number ⇒ an honest error naming the variable; a typo'd
+    budget must never silently degrade into "no override".
+    """
+    override = _timeout_env_override(_VERIFICATION_TIMEOUT_ENV_VARS[key])
+    if override is not None:
+        return override
     verify = settings.get("verify")
     timeout_config = verify.get("verification_timeout") if isinstance(verify, dict) else None
     if not isinstance(timeout_config, Mapping):
         return None
     return _positive_seconds(timeout_config.get(key))
+
+
+#: Run-scoped entry for each ``verify.verification_timeout`` bound. Mirrors the
+#: ``CODD_CDP_BASE_URL`` precedent: an environment variable, because a run-scoped
+#: override must reach every entry point that runs a verification — including the
+#: ones with no command line of their own — and must not require touching the
+#: project's committed configuration.
+_VERIFICATION_TIMEOUT_ENV_VARS: dict[str, str] = {
+    "per_node_seconds": "CODD_VERIFICATION_TIMEOUT_PER_NODE_SECONDS",
+    "total_seconds": "CODD_VERIFICATION_TIMEOUT_TOTAL_SECONDS",
+}
+
+
+def _timeout_env_override(env_name: str) -> float | None:
+    raw = os.environ.get(env_name)
+    if raw is None or not raw.strip():
+        return None
+    seconds = _positive_seconds(raw.strip())
+    if seconds is None:
+        raise ValueError(
+            f"{env_name} must be a positive number of seconds (got {raw.strip()!r})"
+        )
+    return seconds
 
 
 def _template_config_with_timeout_cap(template_config: dict[str, Any], per_node_seconds: float | None) -> dict[str, Any]:
