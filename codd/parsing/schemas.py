@@ -113,13 +113,58 @@ def _sql_first_object_name(content_bytes: bytes, node: Any) -> str:
             return _normalize_ws(_node_text(content_bytes, child))
     return ""
 
+# SQL は外部キーを2通りで書ける。両方を拾わないと FK 数を過少に報告する。
+#   表制約:  FOREIGN KEY (a) REFERENCES parent (id)
+#   列制約:  a uuid not null references parent (id)      ← FOREIGN KEY 語が無い
+# 列制約は PostgreSQL / MySQL / SQLite いずれでも一般的な書き方であり、
+# これを取りこぼすと「参照整合性が無い」という誤った所見が出る。
+_TABLE_LEVEL_FK = re.compile(
+    r"(?:CONSTRAINT\s+(?P<name>\w+)\s+)?FOREIGN\s+KEY\s*\((?P<columns>[^)]+)\)"
+    r"\s+REFERENCES\s+(?P<ref_table>[^\s(]+)\s*\((?P<ref_columns>[^)]+)\)",
+    re.IGNORECASE,
+)
+
+# 列制約。定義の区切り（行頭・"(" ・ ","）直後の列名を捕らえ、同じ定義内の REFERENCES と対にする。
+# 区切りは "(" と "," の直後（幅ゼロの後読み）。行頭を含めると "create table x (" の
+# "create" を列名として拾い、区切りを消費すると "default gen_random_uuid()," のような
+# 直前の閉じ括弧に飲まれて次の列を取りこぼす。
+# 参照列の指定は省略できる（親の主キーに解決される）ので任意扱いにする。
+_COLUMN_LEVEL_FK = re.compile(
+    r"(?<=[(,])\s*(?:CONSTRAINT\s+(?P<name>\w+)\s+)?"
+    r'(?P<column>"[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)'
+    r"(?![\w\s]*\bFOREIGN\s+KEY\b)"
+    r"[^,;\n]*?\bREFERENCES\s+(?P<ref_table>\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[\w.]+)"
+    r"\s*(?:\(\s*(?P<ref_columns>[^)]+)\))?",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_FK_COLUMN_RESERVED = {
+    "foreign",
+    "key",
+    "constraint",
+    "primary",
+    "unique",
+    "check",
+    "references",
+}
+
+_SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
+_SQL_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+def _strip_sql_comments(statement_text: str) -> str:
+    """コメントを取り除く。
+
+    列定義の直前にコメント行が挟まると、区切り（"," や "("）と列名の間に
+    別の行が入り、列制約の外部キーを取りこぼす。行数は変えず中身だけ空にする。
+    """
+    without_block = _SQL_BLOCK_COMMENT.sub("", statement_text)
+    return _SQL_LINE_COMMENT.sub("", without_block)
+
 def _regex_foreign_keys(statement_text: str, table_name: str) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
-    pattern = re.compile(
-        r"(?:CONSTRAINT\s+(?P<name>\w+)\s+)?FOREIGN\s+KEY\s*\((?P<columns>[^)]+)\)\s+REFERENCES\s+(?P<ref_table>[^\s(]+)\s*\((?P<ref_columns>[^)]+)\)",
-        re.IGNORECASE,
-    )
-    for match in pattern.finditer(statement_text):
+    statement_text = _strip_sql_comments(statement_text)
+
+    for match in _TABLE_LEVEL_FK.finditer(statement_text):
         matches.append(
             {
                 "name": match.group("name") or "",
@@ -129,7 +174,29 @@ def _regex_foreign_keys(statement_text: str, table_name: str) -> list[dict[str, 
                 "references_columns": _split_csv(match.group("ref_columns")),
             }
         )
+
+    for match in _COLUMN_LEVEL_FK.finditer(statement_text):
+        column = _strip_identifier_quotes(match.group("column"))
+        if not column or column.lower() in _FK_COLUMN_RESERVED:
+            continue
+        ref_columns_raw = match.group("ref_columns")
+        matches.append(
+            {
+                "name": match.group("name") or "",
+                "table": table_name,
+                "columns": [column],
+                "references_table": _strip_identifier_quotes(match.group("ref_table")),
+                "references_columns": _split_csv(ref_columns_raw) if ref_columns_raw else [],
+            }
+        )
+
     return matches
+
+def _strip_identifier_quotes(identifier: str) -> str:
+    value = (identifier or "").strip()
+    if len(value) >= 2 and value[0] in '"`[' and value[-1] in '"`]':
+        return value[1:-1].strip()
+    return value
 
 def _regex_create_index(statement_text: str) -> dict[str, Any] | None:
     match = re.search(
