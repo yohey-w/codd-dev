@@ -106,6 +106,7 @@ _CODE_READ_TOP_LEVEL_KEYS: tuple[str, ...] = (
     "plan_task_file",         # dag/builder.py direct_keys
     "policies",               # policy.py (config.get("policies"))
     "preflight",              # preflight/__init__.py (codd_yaml.get("preflight"))
+    "prefixes",               # validator.py:_build_allowed_prefixes
     "repair",                 # cli.py repair commands (config.get("repair"))
     "required_artifacts",     # generator.py / required_artifacts_deriver.py / artifact_ids.py
     "requirement_docs",       # required_artifacts_deriver.py / cli.py

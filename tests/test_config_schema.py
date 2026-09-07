@@ -101,6 +101,19 @@ def test_code_read_top_level_keys_are_known():
     assert validate_config_keys(config) == []
 
 
+def test_custom_node_prefixes_key_is_known_but_typo_still_warns():
+    warnings = validate_config_keys(
+        {
+            "prefixes": ["custom_probe"],
+            "prefixess": ["should_not_be_silently_accepted"],
+        }
+    )
+
+    assert len(warnings) == 1
+    assert "unknown config key 'prefixess'" in warnings[0]
+    assert "did you mean 'prefixes'?" in warnings[0]
+
+
 def test_code_read_nested_keys_are_known():
     config = {
         "scan": {"common_node_patterns": ["src/**"]},
