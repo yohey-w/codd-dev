@@ -431,6 +431,7 @@ def _format_seconds(seconds: float) -> str:
 def _invoke_subprocess(
     ai_command: str, prompt: str, *, project_root: Path | None = None,
     env: Mapping[str, str] | None = None, timeout: float | None = None,
+    working_directory: Path | None = None,
 ) -> str:
     """Single-attempt subprocess invocation (the historical generator path).
 
@@ -442,6 +443,9 @@ def _invoke_subprocess(
     spawned on timeout (no zombie/orphan) before this re-raises the stall as a
     transient ``AI command failed: AI call timed out ...`` so it flows into the
     same auto-retry as a dropped socket.
+
+    *working_directory* is independent of file-writing capture: hardened
+    text-only calls use their safe workspace while leaving project_root=None.
     """
     command = with_default_claude_permission_bypass(shlex.split(ai_command))
     if not command:
@@ -470,6 +474,8 @@ def _invoke_subprocess(
             check=False,
             timeout=call_timeout,
             env=dict(env) if env is not None else None,
+            cwd=str(working_directory if working_directory is not None else project_root)
+            if working_directory is not None or project_root is not None else None,
         )
     except FileNotFoundError as exc:
         raise ValueError(f"AI command not found: {command[0]}") from exc
@@ -691,7 +697,8 @@ def invoke_ai(
     Args:
         ai_command: Resolved command string (see :func:`resolve_ai_command`).
         prompt: Prompt passed on stdin (or to the adapter).
-        project_root: Enables file-writing-agent routing (codex / interactive
+        project_root: Working directory for stdout subprocesses; also enables
+            file-writing-agent routing (codex / interactive
             claude write files; changes are captured as ``=== FILE: ===``
             blocks and reverted) on the subprocess path.
         retries: Bounded retries on *transient* failures (nonzero exit or
@@ -758,7 +765,8 @@ def invoke_ai(
                 # with the (command, prompt, project_root[, env]) shape keep
                 # working; the resolver still honours the env vars and config.
                 return _invoke_subprocess(
-                    command_str, current_prompt, project_root=subprocess_root, env=env
+                    command_str, current_prompt, project_root=subprocess_root, env=env,
+                    **({"working_directory": effective_root} if harden_read_only else {}),
                 )
 
         current_prompt = prompt
