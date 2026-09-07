@@ -20,8 +20,14 @@ from pathlib import Path
 from typing import Callable
 
 from codd.dag import DAG, Node
+from codd.dag.builder import build_dag
+from codd.fix.design_updater import DesignUpdate
 from codd.fix.impact_planner import resolve_impact_plan
-from codd.fix.phenomenon_fixer import run_phenomenon_fix
+from codd.fix.phenomenon_fixer import (
+    PhenomenonFixResult,
+    _run_stage4_propagation,
+    run_phenomenon_fix,
+)
 from codd.fix.phenomenon_parser import PhenomenonAnalysis
 
 
@@ -430,3 +436,175 @@ def test_stage4_complete_plan_drives_propagation_with_all_surfaces(tmp_path):
     # Stage 4 ran with the planner's full 4-surface impl set as the allowlist.
     assert result.propagation is not None
     assert set(result.affected_impl_paths) == _FOUR_REQUIRED
+
+
+def test_stage4_rebuilds_dag_after_design_update_for_new_exact_references(tmp_path):
+    """A real Stage 4 must plan from the design document it just applied.
+
+    The phenomenon pipeline builds its first DAG before the design updater runs.
+    If the accepted update adds an exact implementation reference, reusing that
+    old DAG reports ``source=none`` and discards the strongest new impact fact.
+    This fixture keeps the unrelated soft-match/cardinality problem out of the
+    assertion: it checks only that the accepted document is the graph source of
+    truth for Stage-4 planning.
+    """
+    project = _write_brownfield_project(tmp_path, include_admin=False)
+    design_path = project / "design/courses.md"
+    original = design_path.read_text(encoding="utf-8")
+    initial_dag = build_dag(project)
+
+    referenced_path = "src/app/api/v1/lessons/route.ts"
+    proposed = original.replace(
+        "course design body.",
+        f"course design body. Exact implementation: `{referenced_path}`.",
+    )
+    design_path.write_text(proposed, encoding="utf-8")
+    update = DesignUpdate(
+        target_path=design_path,
+        original_content=original,
+        proposed_content=proposed,
+        diff=f"+ Exact implementation: `{referenced_path}`.",
+        changed=True,
+    )
+    result = PhenomenonFixResult(
+        phenomenon_text="a missing behavior must be corrected",
+        analysis=PhenomenonAnalysis(
+            intent="bugfix",
+            subject_terms=["missing behavior"],
+            obligations=[
+                {
+                    "id": "proof.missing",
+                    "description": "intentionally unresolved fixture obligation",
+                    "terms": ["not_present_anywhere"],
+                }
+            ],
+        ),
+    )
+
+    _run_stage4_propagation(
+        result,
+        project_root=project,
+        phenomenon_text=result.phenomenon_text,
+        applied_updates=[("design/courses.md", update)],
+        proposed_updates=[],
+        dag=initial_dag,
+        ai=lambda _prompt: "no patch",
+        config={},
+        max_attempts=1,
+        dry_run=False,
+        baseline_red=set(),
+        check_runner=lambda _root: [],
+        test_runner=lambda _root: [],
+    )
+
+    assert result.impact_plan is not None
+    assert any(
+        diagnostic == "dag-exact sources: design/courses.md=expects"
+        for diagnostic in result.impact_plan.diagnostics
+    ), result.impact_plan.diagnostics
+    assert any(
+        "expected-envelope: design/courses.md" in diagnostic
+        and referenced_path in diagnostic
+        for diagnostic in result.impact_plan.diagnostics
+    ), result.impact_plan.diagnostics
+
+
+def test_stage4_fails_closed_when_post_update_dag_rebuild_fails(tmp_path, monkeypatch):
+    """A real run must never fall back to the known-stale pre-update DAG."""
+    project = _write_brownfield_project(tmp_path, include_admin=False)
+    design_path = project / "design/courses.md"
+    original = design_path.read_text(encoding="utf-8")
+    update = DesignUpdate(
+        target_path=design_path,
+        original_content=original,
+        proposed_content=original,
+        diff="+ accepted design change",
+        changed=True,
+    )
+    result = PhenomenonFixResult(
+        phenomenon_text="accepted design change",
+        analysis=PhenomenonAnalysis(intent="bugfix", subject_terms=["change"]),
+    )
+
+    def fail_rebuild(_project_root):
+        raise ValueError("fixture graph unavailable")
+
+    monkeypatch.setattr("codd.fix.phenomenon_fixer.build_dag", fail_rebuild)
+
+    _run_stage4_propagation(
+        result,
+        project_root=project,
+        phenomenon_text=result.phenomenon_text,
+        applied_updates=[("design/courses.md", update)],
+        proposed_updates=[],
+        dag=DAG(),
+        ai=lambda _prompt: "must not run",
+        config={},
+        max_attempts=1,
+        dry_run=False,
+        baseline_red=set(),
+        check_runner=lambda _root: [],
+        test_runner=lambda _root: [],
+    )
+
+    assert result.aborted
+    assert result.abort_reason == "post-update DAG rebuild failed: fixture graph unavailable"
+    assert result.impact_plan is None
+
+
+def test_fresh_dag_does_not_disable_broad_soft_match_cardinality_gate(tmp_path):
+    """Fresh graph input must not be confused with permission to patch broadly.
+
+    This brackets the stale-DAG regression above. Even with an exact reference
+    already present in a freshly-built DAG, thirteen independently matching
+    implementation files remain ambiguous and the existing cardinality gate
+    must refuse the plan.
+    """
+    codd_dir = tmp_path / ".codd"
+    codd_dir.mkdir(parents=True)
+    (codd_dir / "codd.yaml").write_text(
+        "scan:\n  source_dirs: []\n"
+        "dag:\n"
+        "  design_doc_patterns: ['design/**/*.md']\n"
+        "  impl_file_patterns: ['src/**/*.ts']\n"
+        "  test_file_patterns: []\n",
+        encoding="utf-8",
+    )
+    exact_path = "src/pipeline/target.ts"
+    _make_file(
+        tmp_path,
+        "design/pipeline.md",
+        f"# Pipeline\n\nExact implementation: `{exact_path}`.\n",
+    )
+    for index in range(13):
+        rel = exact_path if index == 0 else f"src/pipeline/neighbor_{index}.ts"
+        _make_file(
+            tmp_path,
+            rel,
+            "export const state_digest = 'pipeline migration update';\n",
+        )
+
+    plan = resolve_impact_plan(
+        dag=build_dag(tmp_path),
+        project_root=tmp_path,
+        design_node_ids=["design/pipeline.md"],
+        phenomenon_text="pipeline migration state_digest update",
+        analysis=PhenomenonAnalysis(
+            intent="bugfix",
+            entities=["pipeline", "migration"],
+            fields=["state_digest"],
+            operations=["update"],
+            surfaces=["pipeline"],
+            obligations=[
+                {
+                    "id": "pipeline.update",
+                    "description": "update pipeline state",
+                    "terms": ["pipeline", "update", "state_digest"],
+                }
+            ],
+        ),
+    )
+
+    assert plan.status == "ambiguous"
+    assert len(plan.impl_paths) > 12
+    assert any("too many implementation targets" in item for item in plan.diagnostics)

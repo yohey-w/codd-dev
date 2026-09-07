@@ -456,9 +456,26 @@ def _run_stage4_propagation(
     if not applied_updates:
         return
 
+    # Stage 3 has just made the accepted design document the on-disk source of
+    # truth. Reusing the DAG built before that write silently drops any exact
+    # implementation references introduced by the accepted update and widens
+    # planning into fuzzy repository search. Rebuild for real runs only; a
+    # dry-run has no on-disk update to rebuild from and follows the preview path
+    # above. Fail closed rather than falling back to the known-stale graph.
+    #
+    # Do not substitute extracted ``codd.source_files`` here: that metadata is
+    # provenance (which sources the document describes), not an output-
+    # ownership contract for design-to-implementation propagation.
+    try:
+        current_dag = build_dag(project_root)
+    except Exception as exc:  # noqa: BLE001 — explicit Stage-4 availability gate
+        result.aborted = True
+        result.abort_reason = f"post-update DAG rebuild failed: {exc}"
+        return
+
     node_ids = [node_id for node_id, _update in applied_updates]
     plan = resolve_impact_plan(
-        dag=dag,
+        dag=current_dag,
         project_root=project_root,
         design_node_ids=node_ids,
         phenomenon_text=phenomenon_text,
