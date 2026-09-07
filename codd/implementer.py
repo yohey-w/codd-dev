@@ -2917,6 +2917,10 @@ def _build_implementation_prompt(
 
     output_text = ", ".join(spec.output_paths)
     example_output = spec.output_paths[0]
+    # Use the same file/directory rule as output creation and completeness.
+    from codd.greenfield.pipeline import _declared_output_is_file_path
+    if not _declared_output_is_file_path(example_output):
+        example_output = f"{example_output.rstrip('/')}/<filename>{default_extension}"
     lines = [
         "You are generating implementation code from CoDD design documents.",
         f"Project name: {project.get('name') or '(unknown)'}",
@@ -3146,7 +3150,7 @@ def _build_implementation_prompt(
 
     lines.extend([
         "Required output format (repeat this block for each file and output nothing else):",
-        f"=== FILE: {example_output}/<filename>{default_extension} ===",
+        f"=== FILE: {example_output} ===",
         f"```{code_fence_language}",
         "# code" if default_extension in {".py", ".rb"} else "// code",
         "```",
@@ -3194,9 +3198,12 @@ def _build_implementation_prompt(
             lines.append(f"{index}. Targets: {targets or '(no explicit targets)'}")
             lines.append(f"   Reason: {reason}")
 
+    # Direct --output declarations are just as authoritative as task-derived
+    # expected_outputs. The existing reader skips directories without scanning.
+    declared_outputs = list(dict.fromkeys([*spec.expected_outputs, *spec.output_paths]))
     existing_files_context = (
-        _existing_output_files_context(project_root, spec.expected_outputs)
-        if project_root is not None and spec.expected_outputs
+        _existing_output_files_context(project_root, declared_outputs)
+        if project_root is not None and declared_outputs
         else None
     )
     if existing_files_context:
