@@ -3,6 +3,11 @@ You are a repair proposal engine for a software project.
 Goal:
 Create a concrete repair proposal that addresses the root cause and only changes the target files provided below.
 
+Project context:
+{project_context}
+
+{mechanical_contract}
+
 Root cause analysis:
 {root_cause_analysis}
 
@@ -10,11 +15,6 @@ Root cause analysis:
 
 Target file contents:
 {file_contents}
-
-Project context:
-{project_context}
-
-{mechanical_contract}
 
 Rules:
 - Stay domain-neutral. Do not assume a framework, platform, vendor, or product.
@@ -46,3 +46,5 @@ Output schema:
 }
 
 Emit `test_defect_claim` ONLY for a genuinely unsatisfiable assertion; for a claim-only report, return an empty `patches` list. Otherwise omit `test_defect_claim`.
+
+{repair_context}

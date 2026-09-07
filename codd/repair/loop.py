@@ -9,7 +9,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable, Literal, Mapping
 
-from codd.config import load_project_config
+from codd.config import find_codd_dir, load_project_config
 from codd.dag import DAG
 from codd.path_safety import resolve_project_path
 from codd.repair.approval_repair import (
@@ -23,9 +23,12 @@ from codd.repair.auto_scope_guard import (
     _is_stack_contract_artifact,
     _is_test_file,
 )
-from codd.repair.design_context import classify_terminal_reason
+from codd.repair.design_context import classify_terminal_reason, design_closure_node_ids
 from codd.repair.engine import get_repair_engine
-from codd.repair.history import RepairHistory
+from codd.repair.history import (
+    HistoryUnavailableError, RepairHistory, applied_diff, capture_candidate,
+    render_repair_context, verification_remaining,
+)
 from codd.repair.repair_result import RepairResult
 from codd.repair.schema import (
     ApplyResult,
@@ -69,10 +72,11 @@ class RepairLoopConfig:
 class RepairAttemptRecord:
     attempt_n: int
     failure_report: VerificationFailureReport
-    rca: RootCauseAnalysis
-    proposal: RepairProposal
+    rca: RootCauseAnalysis | None
+    proposal: RepairProposal | None
     apply_result: ApplyResult
     post_verify_passed: bool | None
+    evidence: dict | None = None
 
 
 @dataclass
@@ -212,6 +216,11 @@ class RepairLoop:
             )
 
         current_failure = failure
+        self._evidence_paths = self._declared_evidence_paths(failure, dag, codd_yaml)
+        self._evidence_config = dict(codd_yaml or {})
+        original = capture_candidate(self.project_root, self._evidence_paths, self._evidence_config)
+        initial_plain = _to_plain_data(initial_verify_result)
+        previous_observations = initial_plain.get("observations", []) if isinstance(initial_plain, dict) else []
         effective_max_attempts = _positive_attempts(max_attempts if max_attempts is not None else self.config.max_attempts)
         for attempt_n in range(effective_max_attempts):
             classification = self._classify_violations(current_violations, resolved_baseline_ref)
@@ -234,11 +243,39 @@ class RepairLoop:
 
             current_failure = self._pick_primary_violation(classification.repairable, dag)
             failure_key = _violation_key(current_failure)
+            self._evidence_paths.update(self._declared_evidence_paths(current_failure, dag, codd_yaml))
+            candidate = capture_candidate(self.project_root, self._evidence_paths, self._evidence_config)
+            evidence = self._active_evidence = {
+                "stage": "analyze", "status": "unfinished", "original_context": original,
+                "candidate_before": candidate, "calls": [], "missing": [],
+                "known_failures": _to_plain_data(current_violations),
+                "verification": {"invoked": False, "observations": [], "remaining": []},
+                "previous_observations": previous_observations,
+            }
+            self.history.begin_attempt(session_dir, attempt_n, current_failure, evidence)
+            repair_context = render_repair_context(attempts, candidate, effective_max_attempts - attempt_n,
+                                                   failure=current_failure)
+
+            def record_call(event: str, **data: Any) -> None:
+                self.history.record_call(session_dir, attempt_n, evidence, event, **data)
+
+            rca = None
+            proposal = None
             try:
-                rca = engine.analyze(current_failure, dag)
+                rca = engine.analyze(current_failure, dag, **_supported_kwargs(
+                    engine.analyze, repair_context=repair_context, record_call=record_call))
+                evidence["stage"] = "propose"
+                self.history.update_evidence(session_dir, attempt_n, evidence)
                 file_contents = self._load_affected_file_contents(rca, dag)
-                proposal = self._propose_fix(engine, rca, file_contents, current_failure)
+                proposal = self._propose_fix(engine, rca, file_contents, current_failure,
+                                             repair_context=repair_context, record_call=record_call)
+            except HistoryUnavailableError:
+                # A logging precondition failure is NOT an engine strike/replay.
+                raise
             except Exception as exc:  # noqa: BLE001 - repair engines are plug-ins.
+                evidence.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+                attempts.append(self._record_attempt(session_dir, attempt_n, current_failure, rca, proposal,
+                                                     ApplyResult(False, [], [], "apply not executed"), None))
                 # F2: engine failure is a STRIKE, not a verdict. Consume the
                 # attempt, RETAIN the violation (do not remove it from the set),
                 # and only after N consecutive strikes on this key rule it
@@ -272,6 +309,7 @@ class RepairLoop:
             # pipeline can re-derive the named test(s). The claim is NEVER trusted
             # here; it is checked downstream by re-derivation + fresh verify.
             claim = list(getattr(proposal, "test_defect_claim", None) or [])
+            evidence["stage"] = "approval"
             if claim and not proposal.patches:
                 apply_result = ApplyResult(False, [], [], "test_defect_claim (no patch proposed)")
                 attempts.append(
@@ -357,6 +395,7 @@ class RepairLoop:
             # candidate set and role-appropriate. An out-of-scope edit is an
             # honest rejection (REPAIR_FAILED) in non-interactive auto mode.
             scope = self._auto_scope_decision(codd_yaml, proposal, current_failure, rca)
+            evidence["stage"] = "scope"
             if scope is not None and not scope.allowed:
                 apply_result = ApplyResult(False, [], _proposal_files(proposal), scope.reason)
                 attempts.append(
@@ -392,6 +431,13 @@ class RepairLoop:
                 )
 
             apply_exception = False
+            # Only approved, scope-checked targets join the snapshot. A proposal
+            # never grants read access to a secret or an out-of-project file.
+            for path in self._candidate_paths(rca, dag):
+                self._evidence_paths.setdefault(path, "target")
+            evidence["candidate_before"] = capture_candidate(self.project_root, self._evidence_paths, self._evidence_config)
+            evidence["stage"] = "apply"
+            self.history.update_evidence(session_dir, attempt_n, evidence)
             try:
                 apply_result = engine.apply(proposal)
             except Exception as exc:  # noqa: BLE001 - repair engines are plug-ins.
@@ -400,12 +446,26 @@ class RepairLoop:
 
             verify_result = None
             post_verify_passed: bool | None = None
+            evidence["candidate_after"] = capture_candidate(self.project_root, self._evidence_paths, self._evidence_config)
             if apply_result.success:
                 # A clean apply breaks the consecutive-strike chain for this key.
                 strikes.pop(failure_key, None)
                 applied_patch_files.extend(_applied_patch_files(apply_result, proposal))
-                verify_result = verify_callable()
+                evidence["stage"] = "verify"
+                evidence["verification"].update(invoked=True, started_at=datetime.now(timezone.utc).isoformat())
+                self.history.update_evidence(session_dir, attempt_n, evidence)
+                try:
+                    verify_result = verify_callable()
+                except Exception as exc:
+                    evidence.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+                    evidence["verification"]["finished_at"] = datetime.now(timezone.utc).isoformat()
+                    self._record_attempt(session_dir, attempt_n, current_failure, rca, proposal, apply_result, None)
+                    raise  # preserve the existing verify-exception control flow
+                finally:
+                    evidence["verification"]["finished_at"] = datetime.now(timezone.utc).isoformat()
                 post_verify_passed = _verification_passed(verify_result)
+                plain_verify = _to_plain_data(verify_result)
+                previous_observations = plain_verify.get("observations", []) if isinstance(plain_verify, dict) else []
 
             attempts.append(
                 self._record_attempt(
@@ -486,22 +546,50 @@ class RepairLoop:
         session_dir: Path,
         attempt_n: int,
         failure: VerificationFailureReport,
-        rca: RootCauseAnalysis,
-        proposal: RepairProposal,
+        rca: RootCauseAnalysis | None,
+        proposal: RepairProposal | None,
         apply_result: ApplyResult,
         verify_result: Any,
     ) -> RepairAttemptRecord:
         post_verify_passed = _verification_passed(verify_result) if verify_result is not None else None
-        self.history.record_attempt(
-            session_dir,
-            attempt_n,
-            failure,
-            rca,
-            proposal,
-            apply_result,
-            _to_plain_data(verify_result) if verify_result is not None else None,
-        )
-        return RepairAttemptRecord(attempt_n, failure, rca, proposal, apply_result, post_verify_passed)
+        evidence = getattr(self, "_active_evidence", None)
+        if evidence is not None:
+            if "candidate_after" not in evidence:
+                evidence["candidate_after"] = capture_candidate(self.project_root, self._evidence_paths, self._evidence_config)
+            after = evidence["candidate_after"]
+            current = capture_candidate(self.project_root, self._evidence_paths, self._evidence_config)
+            evidence["candidate_current"] = current
+            evidence["actual_diff"] = applied_diff(evidence["candidate_before"], after)
+            plain_verify = _to_plain_data(verify_result)
+            verification = evidence["verification"]
+            verification.update(candidate_changed=after["id"] != current["id"], passed=post_verify_passed,
+                                observations=plain_verify.get("observations", []) if isinstance(plain_verify, dict) else [],
+                                result_availability="captured" if verify_result is not None else "not available")
+            verification["remaining"] = verification_remaining(
+                evidence["known_failures"], verify_result, invoked=verification["invoked"],
+                changed=verification["candidate_changed"], previous_observations=evidence["previous_observations"])
+            if evidence["status"] == "unfinished":
+                evidence["status"] = "completed"
+            evidence["raw"] = {"attempt_directory": str(session_dir / f"attempt_{attempt_n}"),
+                               "post_verify": "post_repair_verify.yaml", "note": "private original; not automatically read by model"}
+        try:
+            self.history.record_attempt(
+                session_dir,
+                attempt_n,
+                failure,
+                rca,
+                proposal,
+                apply_result,
+                _to_plain_data(verify_result) if verify_result is not None else None,
+                evidence=evidence,
+            )
+        except OSError as exc:
+            # Post-execution measurement failure must not re-consume generation.
+            if evidence is None:
+                raise
+            evidence["missing"].append(f"attempt persistence failed: {type(exc).__name__}")
+            self.history.update_evidence(session_dir, attempt_n, evidence)
+        return RepairAttemptRecord(attempt_n, failure, rca, proposal, apply_result, post_verify_passed, evidence)
 
     def _finalize(
         self,
@@ -600,6 +688,7 @@ class RepairLoop:
         rca: RootCauseAnalysis,
         file_contents: dict[str, str],
         failure: VerificationFailureReport,
+        **context: Any,
     ) -> RepairProposal:
         """Call the engine's ``propose_fix``, threading F3 evidence when supported.
 
@@ -621,9 +710,41 @@ class RepairLoop:
             kwargs["error_messages"] = error_messages
         if accepts_var_kw or "evidence" in params:
             kwargs["evidence"] = evidence
+        kwargs.update(_supported_kwargs(engine.propose_fix, **context))
         if kwargs:
             return engine.propose_fix(rca, file_contents, **kwargs)
         return engine.propose_fix(rca, file_contents)
+
+    def _declared_evidence_paths(self, failure: VerificationFailureReport, dag: DAG, config: Any) -> dict[str, str]:
+        paths: dict[str, str] = {}
+        for identifier in failure.failed_nodes:
+            node = dag.nodes.get(identifier)
+            raw = (node.path or node.attributes.get("path")) if node is not None else identifier
+            if raw:
+                paths[str(raw)] = "target"
+        for raw in failure.evidence_nodes:
+            paths[str(raw)] = "immutable_test"
+        for identifier in design_closure_node_ids(dag, failure.failed_nodes):
+            node = dag.nodes[identifier]
+            raw = node.path or node.attributes.get("path")
+            if raw:
+                paths[str(raw)] = "canonical_design"
+        config_dir = find_codd_dir(self.project_root)
+        if config_dir is not None:
+            paths[str(config_dir / "codd.yaml")] = "immutable_config"
+        # Existing profile descriptors own manifest/lock naming; no language
+        # table, directory traversal or new project setting in repair core.
+        from codd.languages.contract import resolve_language_contract
+        try:
+            contract = resolve_language_contract(config)
+            if contract is not None and contract.profile.toolchain is not None:
+                toolchain = contract.profile.toolchain
+                paths[toolchain.manifest.path] = "immutable_config"
+                for item in toolchain.dependency_integrity_files:
+                    paths[item.path] = "immutable_config"
+        except (KeyError, ValueError, TypeError):
+            pass  # missing profile is unknown, not a new verification gate
+        return paths
 
     def _load_affected_file_contents(self, rca: RootCauseAnalysis, dag: DAG) -> dict[str, str]:
         contents: dict[str, str] = {}
@@ -1036,19 +1157,33 @@ def _positive_attempts(value: Any) -> int:
         return 10
 
 
+def _supported_kwargs(method: Any, **values: Any) -> dict[str, Any]:
+    """Optional context must not break pre-evidence third-party engines."""
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return values
+    return {key: value for key, value in values.items() if key in parameters
+            and parameters[key].kind is not inspect.Parameter.POSITIONAL_ONLY}
+
+
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _to_plain_data(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
-        return asdict(value)
+        return _to_plain_data(asdict(value))
     if isinstance(value, Mapping):
         return {str(key): _to_plain_data(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_to_plain_data(item) for item in value]
     if isinstance(value, tuple):
         return [_to_plain_data(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(_to_plain_data(item) for item in value)
     if isinstance(value, Path):
         return str(value)
     if hasattr(value, "__dict__"):

@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from codd.config import load_project_config
 from codd.deployment.providers.ai_command import AiCommandError
@@ -80,7 +80,8 @@ class LlmRepairEngine(RepairEngine):
         #: :func:`codd.repair.design_context.render_design_context`.
         self._design_context_cache: str = ""
 
-    def analyze(self, failure: VerificationFailureReport, dag: Any) -> RootCauseAnalysis:
+    def analyze(self, failure: VerificationFailureReport, dag: Any, *,
+                repair_context: str = "", record_call: Callable | None = None) -> RootCauseAnalysis:
         """Analyze a verification failure and return a structured root cause."""
 
         self._design_context_cache = render_design_context(
@@ -91,8 +92,9 @@ class LlmRepairEngine(RepairEngine):
             failure_report=_json_dumps(_to_plain_data(failure)),
             dag_context=_json_dumps(_dag_to_plain_data(dag)),
             project_context=self._composed_project_context(),
+            repair_context=repair_context,
         )
-        payload = _parse_json_object(self._invoke("repair_analyze", prompt), "RootCauseAnalysis")
+        payload = _parse_json_object(self._invoke("repair_analyze", prompt, record_call=record_call), "RootCauseAnalysis")
         try:
             return RootCauseAnalysis(
                 probable_cause=str(payload["probable_cause"]).strip(),
@@ -112,6 +114,8 @@ class LlmRepairEngine(RepairEngine):
         *,
         error_messages: list[str] | None = None,
         evidence: dict[str, str] | None = None,
+        repair_context: str = "",
+        record_call: Callable | None = None,
     ) -> RepairProposal:
         """Ask the AI command for patches and retry with validation feedback.
 
@@ -129,12 +133,13 @@ class LlmRepairEngine(RepairEngine):
             "project_context": self._composed_project_context(),
             "failure_evidence": _render_failure_evidence(error_messages, evidence),
             "mechanical_contract": self._regeneration_contract_context(file_contents),
+            "repair_context": repair_context,
         }
         prompt = _render_template(TEMPLATE_DIR / "propose_meta.md", **prompt_values)
         last_error: str | None = None
 
         for attempt in range(self._max_strategy_attempts()):
-            payload = _parse_json_object(self._invoke("repair_propose", prompt), "RepairProposal")
+            payload = _parse_json_object(self._invoke("repair_propose", prompt, record_call=record_call), "RepairProposal")
             proposal = _repair_proposal(payload, rca)
             if not proposal.patches:
                 # F7 (T2): a CLAIM-ONLY proposal (no patches, but a test_defect_claim)
@@ -215,19 +220,30 @@ class LlmRepairEngine(RepairEngine):
                     return _positive_int(repair_config.get(key), DEFAULT_MAX_STRATEGY_ATTEMPTS)
         return DEFAULT_MAX_STRATEGY_ATTEMPTS
 
-    def _invoke(self, command_name: str, prompt: str) -> str:
+    def _invoke(self, command_name: str, prompt: str, *, record_call: Callable | None = None) -> str:
         injected = _select_injected_ai_command(self.ai_command, command_name)
-        if injected is not None:
-            return _invoke_ai_like(injected, prompt, self.project_root, self._effective_config())
-
         config = self._effective_config()
+        adapter = None
+        if injected is None:
+            try:
+                command = resolve_repair_ai_command(config, command_name)
+                adapter = get_ai_command(config, self.project_root, command_override=command)
+            except (AiCommandError, OSError, ValueError, RepairFailed) as exc:
+                raise RepairFailed(f"repair AI command failed for {command_name}") from exc
+        if record_call is not None:
+            record_call("start", stage=command_name, prompt=prompt,
+                        executor=type(adapter if adapter is not None else injected).__name__)
         try:
-            command = resolve_repair_ai_command(config, command_name)
-            adapter = get_ai_command(config, self.project_root, command_override=command)
-            return adapter.invoke(prompt)
+            response = (_invoke_ai_like(injected, prompt, self.project_root, config)
+                        if injected is not None else adapter.invoke(prompt))
         except (AiCommandError, OSError, ValueError, RepairFailed) as exc:
+            if record_call is not None:
+                record_call("failed", error=f"{type(exc).__name__}: {exc}")
             LOGGER.warning("Repair AI command failed for %s: %s", command_name, exc)
             raise RepairFailed(f"repair AI command failed for {command_name}") from exc
+        if record_call is not None:
+            record_call("completed", response=response)
+        return response
 
     def _effective_config(self) -> Mapping[str, Any]:
         if self.config is not None:

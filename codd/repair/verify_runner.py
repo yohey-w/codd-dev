@@ -31,7 +31,7 @@ from codd.dag.runner import run_checks
 from codd.deployment.providers import VERIFICATION_TEMPLATES
 from codd.discovery import iter_source_files, scan_exclude_patterns
 from codd.project_types import node_install_command
-from codd.repair.schema import VerificationFailureReport
+from codd.repair.schema import VerificationFailureReport, VerificationObservation
 from codd.repair.test_failure_attribution import attribute_command_failure
 from codd.test_detection import detect_test_command
 
@@ -166,6 +166,8 @@ class VerificationResult:
     #: Why the fallback fired ("no_language"/"no_verify_plan"/
     #: "missing_adapter_legacy_compatible"), else ``None``.
     fallback_reason: str | None = None
+    # Additive raw observations for repair history; never change gate verdicts.
+    observations: list[VerificationObservation] = field(default_factory=list)
 
     @property
     def executed_anything(self) -> bool:
@@ -222,6 +224,7 @@ class VerifyRunner:
         self._verify_path: str = "legacy"
         self._fallback_used: bool = False
         self._fallback_reason: str | None = None
+        self._observations: list[VerificationObservation] = []
 
     def run(self) -> VerificationResult:
         """Reset DAG state, run C1-C7 checks, then run executable verification tests.
@@ -234,6 +237,7 @@ class VerifyRunner:
         again silently mean "nothing ran".
         """
 
+        self._observations = []
         self.reset_dag_cache()
         if not self._has_codd_yaml():
             return self._error_result("codd_config", f"codd.yaml not found in {self.project_root}")
@@ -310,6 +314,7 @@ class VerifyRunner:
             verify_path=self._verify_path,
             fallback_used=self._fallback_used,
             fallback_reason=self._fallback_reason,
+            observations=list(self._observations),
         )
         # The honesty rule. Plain `codd verify` stays pass-WITH-WARNING by
         # default because existing brownfield/CI configurations may be
@@ -777,13 +782,16 @@ class VerifyRunner:
         from codd.languages.verify_executor import execute_verify_plan
 
         self._mark_contract_path()
+        started_at = datetime.now(timezone.utc).isoformat()
         result = execute_verify_plan(
             plan,
             self.project_root,
             adapter_registry=registry,
             exec_path_prepend=self._exec_path_prepend(),
         )
-        return self._tuple_from_execution(plan, result)
+        mapped = self._tuple_from_execution(plan, result)
+        self._observations[-1].started_at = started_at
+        return mapped
 
     def _mark_contract_path(self) -> None:
         """Record that the live contract executor produced this run's test verdict."""
@@ -881,6 +889,16 @@ class VerifyRunner:
         from codd.languages.verify_plan import VerifyClass
 
         command = plan.command_str
+        timed_out = result.returncode is None and "timed out after" in result.detail
+        self._observations.append(VerificationObservation(
+            check_name="test_command", command=command,
+            cwd=str(self.project_root / plan.cwd if plan.cwd else self.project_root),
+            executed=result.returncode is not None or timed_out, exit_code=result.returncode,
+            timed_out=timed_out, finished_at=datetime.now(timezone.utc).isoformat(),
+            verdict="pass" if result.verify_class is VerifyClass.PASS else result.verify_class.value.lower(),
+            stdout=result.stdout, stderr=result.stderr,
+            report=asdict(result.execution) if result.execution is not None else None,
+        ))
         if result.verify_class is VerifyClass.PASS:
             return True, command, result.detail, None
 
@@ -997,6 +1015,9 @@ class VerifyRunner:
         if prepend:
             env = dict(env if env is not None else os.environ)
             env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
+        observation = VerificationObservation(check_name, command, str(self.project_root), False,
+                                              started_at=datetime.now(timezone.utc).isoformat())
+        self._observations.append(observation)
         try:
             completed = subprocess.run(
                 command,
@@ -1007,7 +1028,12 @@ class VerifyRunner:
                 timeout=timeout,
                 env=env,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            observation.executed = True
+            observation.timed_out = True
+            observation.verdict = "timeout"
+            observation.stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+            observation.stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
             message = f"[TIMEOUT] {label} exceeded {timeout:g}s: {command}"
             return (
                 True,
@@ -1019,6 +1045,13 @@ class VerifyRunner:
                     details={"command": command, "timeout_seconds": timeout},
                 ),
             )
+        finally:
+            observation.finished_at = datetime.now(timezone.utc).isoformat()
+        observation.executed = True
+        observation.exit_code = completed.returncode
+        observation.stdout = completed.stdout or ""
+        observation.stderr = completed.stderr or ""
+        observation.verdict = "fail" if completed.returncode else "command_pass"
         output = _command_output_tail(completed.stdout, completed.stderr)
         full_output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
         # ANTI-FALSE-GREEN (#4): a JS test runner (vitest/jest/playwright) that
@@ -1026,6 +1059,7 @@ class VerifyRunner:
         # exit 0 with "No test files found" / "No tests found", which must never
         # pass as green-on-nothing. Checked BEFORE the exit-0 success path.
         if _js_test_runner_collected_zero(command, full_output):
+            observation.verdict = "zero_tests"
             message = (
                 f"{label} collected/ran 0 tests (no test files / no tests found): {command}\n"
                 f"{output}"
@@ -1047,8 +1081,14 @@ class VerifyRunner:
                 ),
             )
         if completed.returncode == 0:
+            # Legacy commands expose only an exit status, not test-ID coverage.
+            # A typecheck command pass is an actual check pass; a test command's
+            # unknown collection/skip coverage must not resolve a prior test NG.
+            if check_name != "test_command":
+                observation.verdict = "pass"
             return True, _last_line(completed.stdout) or "passed", None
         if completed.returncode == 5 and "pytest" in command:
+            observation.verdict = "zero_tests"
             # pytest exit code 5 = "no tests collected": the runner started
             # but nothing was executed, which must NOT count as evidence.
             # Keyed on the command string the detector itself emits.
@@ -1207,11 +1247,12 @@ class VerifyRunner:
             passed=False,
             failures=[failure],
             failure=self._repair_failure_report([failure], None),
+            observations=list(self._observations),
         )
 
     def _warning_result(self, message: str) -> VerificationResult:
         warnings.warn(message, RuntimeWarning, stacklevel=2)
-        return VerificationResult(passed=True, warnings=[message])
+        return VerificationResult(passed=True, warnings=[message], observations=list(self._observations))
 
     def _repair_failure_report(
         self,

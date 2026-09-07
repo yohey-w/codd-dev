@@ -314,6 +314,7 @@ def test_history_writes_attempt_files_and_final_status(tmp_path: Path):
 
     assert sorted(path.name for path in (outcome.history_session_dir / "attempt_0").glob("*.yaml")) == [
         "apply_result.yaml",
+        "attempt_evidence.yaml",
         "failure_report.yaml",
         "post_repair_verify.yaml",
         "repair_proposal.yaml",

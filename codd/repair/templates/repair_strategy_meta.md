@@ -1,5 +1,10 @@
 You are a repair proposal engine for a software project.
 
+Project context:
+{project_context}
+
+{mechanical_contract}
+
 The following patch failed validation:
 Error: {error_message}
 
@@ -13,11 +18,6 @@ Root cause analysis:
 
 Target file contents:
 {file_contents}
-
-Project context:
-{project_context}
-
-{mechanical_contract}
 
 The previous unified-diff patch could not be applied. A unified diff is the
 format models most often get wrong, so do not retry it — escalate deterministically
@@ -49,3 +49,5 @@ Output schema:
   "rationale": "why this repair addresses the root cause",
   "confidence": 0.0
 }
+
+{repair_context}

@@ -89,6 +89,28 @@ class ApplyResult:
     error_message: str | None
 
 
+@dataclass
+class VerificationObservation:
+    """Captured execution, not an inferred test outcome or a second verdict."""
+
+    check_name: str
+    command: str
+    cwd: str
+    executed: bool
+    exit_code: int | None = None
+    timed_out: bool = False
+    started_at: str | None = None
+    finished_at: str | None = None
+    verdict: str = "unknown"
+    stdout: str = ""
+    stderr: str = ""
+    report: dict | None = None
+    # Current reporters do not expose assertion-level expected/actual values.
+    expected: str | None = None
+    actual: str | None = None
+    tool_version: str | None = None
+
+
 def _validate_patch_mode(value: str) -> None:
     if value not in PATCH_MODES:
         raise ValueError(f"patch_mode must be one of {sorted(PATCH_MODES)}")
@@ -107,4 +129,5 @@ __all__ = [
     "RepairProposal",
     "RootCauseAnalysis",
     "VerificationFailureReport",
+    "VerificationObservation",
 ]

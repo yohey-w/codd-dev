@@ -447,7 +447,9 @@ def test_propose_fix_exception_strikes_out_to_unrepairable_without_patch(tmp_pat
     outcome = _run_loop(tmp_path, "propose-exception-none", [], max_attempts=3)
 
     assert outcome.status == "REPAIR_FAILED"
-    assert outcome.attempts == []  # propose exceptions never record an attempt
+    assert len(outcome.attempts) == 3  # consumed strikes now have honest stage evidence
+    assert all(record.proposal is None and record.post_verify_passed is None for record in outcome.attempts)
+    assert all(record.evidence["stage"] == "propose" for record in outcome.attempts)
     assert outcome.error_message == "cannot propose"
     assert outcome.unrepairable_violations[0].check_name == "check_a"
     assert outcome.remaining_violations == outcome.unrepairable_violations
