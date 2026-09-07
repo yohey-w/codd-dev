@@ -124,6 +124,8 @@ CoDD finds the design docs your request touches, updates them, then carries the 
 
 With no argument, `codd fix` is a legacy mode that picks up your failing tests or CI and repairs them (`codd fix --ci` / `--local` / `--dry-run`).
 
+Within one automatic repair session, the built-in LLM engine carries related prior hypotheses, actual applied changes, and verification results into the next attempt, for both Codex and Claude. Private records live under `.codd/repair_history/` (owner-only and Git-ignored); prompts receive at most 16,000 characters of history excerpts, with truncation and unread originals identified. Missing observations—including model/token metadata an adapter does not expose—stay unknown. Existing retry limits and safety gates remain unchanged; this does not automatically switch to a larger model.
+
 ---
 
 ## How it works — three jobs, one map
