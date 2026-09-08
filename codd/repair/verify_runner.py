@@ -479,12 +479,37 @@ class VerifyRunner:
         ``typescript``/``node`` OR (no language declared but) a ``package.json``
         present. Non-node projects and explicitly-disabled
         (``verify.install_preflight: false``) are no-ops. No implicit global
-        ``npx``: the command is the project's own package manager.
+        ``npx``: the command is the project's own package manager. Materializing
+        through a dependency-directory symlink that resolves outside the project
+        is refused before command resolution, because an installer may erase the
+        shared target while replacing that symlink.
         """
         if _verify_setting(settings, "install_preflight", True) is False:
             return None
         if not self._is_node_project(settings):
             return None
+        dependency_dir = self.project_root / "node_modules"
+        if dependency_dir.is_symlink():
+            try:
+                dependency_target = dependency_dir.resolve(strict=False)
+            except (OSError, RuntimeError):
+                dependency_target = None
+            if dependency_target is None or not dependency_target.is_relative_to(
+                self.project_root
+            ):
+                return VerificationFailure(
+                    check_name="install_preflight",
+                    source="install_preflight",
+                    message=(
+                        "dependency install refused: node_modules symlink resolves "
+                        "outside the project root"
+                    ),
+                    details={
+                        "dependency_path": "node_modules",
+                        "failure_class": "environment_build_error",
+                        "code_addressable": False,
+                    },
+                )
         command = node_install_command(self.project_root)
         timeout = _install_timeout_seconds(settings)
         try:

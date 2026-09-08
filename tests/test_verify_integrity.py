@@ -400,6 +400,38 @@ def test_node_install_failure_skips_tests_and_typecheck(tmp_path: Path, monkeypa
     assert "skipped" in result.tests_summary
 
 
+def test_install_preflight_rejects_out_of_root_dependency_symlink_before_install(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A materializer must not write through a project dependency symlink."""
+    project = tmp_path / "project"
+    project.mkdir()
+    _patch_dag_pipeline_green(monkeypatch)
+    (project / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    shared_dependencies = tmp_path / "shared-dependencies"
+    shared_dependencies.mkdir()
+    sentinel = shared_dependencies / "sentinel.txt"
+    sentinel.write_text("must survive\n", encoding="utf-8")
+    (project / "node_modules").symlink_to(shared_dependencies, target_is_directory=True)
+
+    def _must_not_resolve_install(_root):
+        raise AssertionError("unsafe dependency layout must stop before install resolution")
+
+    monkeypatch.setattr(verify_runner_module, "node_install_command", _must_not_resolve_install)
+
+    result = VerifyRunner(project, _node_settings()).run()
+
+    failures = [item for item in result.failures if item.check_name == "install_preflight"]
+    assert result.passed is False
+    assert len(failures) == 1
+    assert failures[0].details["failure_class"] == "environment_build_error"
+    assert failures[0].details["code_addressable"] is False
+    assert result.failure is not None
+    assert result.failure.failure_class == "environment_build_error"
+    assert result.failure.code_addressable is False
+    assert sentinel.read_text(encoding="utf-8") == "must survive\n"
+
+
 def test_node_install_success_allows_typecheck_and_tests(tmp_path: Path, monkeypatch) -> None:
     _patch_dag_pipeline_green(monkeypatch)
     (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
@@ -413,17 +445,23 @@ def test_node_install_success_allows_typecheck_and_tests(tmp_path: Path, monkeyp
 
 
 def test_install_preflight_opt_out_skips_install(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
     _patch_dag_pipeline_green(monkeypatch)
-    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    (project / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    shared_dependencies = tmp_path / "shared-dependencies"
+    shared_dependencies.mkdir()
+    (project / "node_modules").symlink_to(shared_dependencies, target_is_directory=True)
 
     def _boom(root):  # would fail if called
         raise AssertionError("install must not run when opted out")
 
     monkeypatch.setattr(verify_runner_module, "node_install_command", _boom)
     result = VerifyRunner(
-        tmp_path, _node_settings(install_preflight=False, allow_structural_only=True)
+        project, _node_settings(install_preflight=False, allow_structural_only=True)
     ).run()
     assert result.passed is True
+    assert (project / "node_modules").is_symlink()
 
 
 def test_install_preflight_noop_for_python_project(tmp_path: Path, monkeypatch) -> None:
