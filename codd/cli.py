@@ -9377,9 +9377,28 @@ def dag():
     help="Output format",
 )
 @click.option("--cache", is_flag=True, help="Use cached DAG if output exists")
+@click.option(
+    "--refresh-evidence",
+    is_flag=True,
+    help=(
+        "Explicitly replace .codd/evidence_fingerprints.yaml from current "
+        "evidence-bearing sources; normal build/verify never refresh it"
+    ),
+)
 @click.option("--output", default=None, help="Output file (default: .codd/dag.json or .codd/dag.mmd)")
-def dag_build(project_path: str, output_format: str, cache: bool, output: str | None):
-    """Build the project DAG and output it under .codd/."""
+def dag_build(
+    project_path: str,
+    output_format: str,
+    cache: bool,
+    refresh_evidence: bool,
+    output: str | None,
+):
+    """Build the project DAG and output it under .codd/.
+
+    Evidence fingerprints are a prior observation, not a cache. Use
+    --refresh-evidence only when intentionally accepting the current source as
+    the new comparison baseline. A normal build or verify leaves it unchanged.
+    """
     from codd.dag.builder import (
         build_dag,
         default_dag_json_path,
@@ -9387,6 +9406,14 @@ def dag_build(project_path: str, output_format: str, cache: bool, output: str | 
         write_dag_json,
         write_dag_mermaid,
     )
+    from codd.dag.evidence_snapshot import (
+        EvidenceSnapshotError,
+        SNAPSHOT_RELATIVE_PATH,
+        collect_evidence_fingerprints,
+        load_evidence_snapshot,
+        write_evidence_snapshot,
+    )
+    from codd.path_safety import PathEscapeError, require_project_path
 
     project_root = Path(project_path).resolve()
     default_output = default_dag_json_path(project_root) if output_format == "json" else default_dag_mermaid_path(project_root)
@@ -9394,6 +9421,36 @@ def dag_build(project_path: str, output_format: str, cache: bool, output: str | 
     if not output_path.is_absolute():
         output_path = project_root / output_path
 
+    reserved_snapshot_path = project_root / SNAPSHOT_RELATIVE_PATH
+    try:
+        output_logical = Path(os.path.abspath(output_path))
+        snapshot_logical = Path(os.path.abspath(reserved_snapshot_path))
+        output_resolved = output_path.resolve()
+        snapshot_resolved = reserved_snapshot_path.resolve()
+    except OSError as exc:
+        click.echo(f"Error: cannot resolve DAG output: {exc}")
+        raise SystemExit(1)
+    if output_logical == snapshot_logical or output_resolved == snapshot_resolved:
+        click.echo("Error: DAG output must not overwrite the evidence fingerprint snapshot")
+        raise SystemExit(1)
+
+    if cache and refresh_evidence:
+        raise click.UsageError("--cache cannot be combined with --refresh-evidence")
+
+    snapshot_before = None
+    if refresh_evidence:
+        try:
+            # build_dag always writes this file before returning. Validate that
+            # whole side effect, not just the new snapshot writer, before build.
+            require_project_path(
+                project_root,
+                default_dag_json_path(project_root),
+                context="default DAG output",
+            )
+            snapshot_before = load_evidence_snapshot(project_root)
+        except (EvidenceSnapshotError, PathEscapeError) as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
     if cache and output_path.exists():
         click.echo(f"Using cached DAG: {_display_path(output_path, project_root)}")
         return
@@ -9409,6 +9466,25 @@ def dag_build(project_path: str, output_format: str, cache: bool, output: str | 
             write_dag_json(built_dag, project_root, output_path)
     else:
         write_dag_mermaid(built_dag, output_path)
+
+    if refresh_evidence:
+        try:
+            fingerprint_records = collect_evidence_fingerprints(built_dag, project_root)
+            if not fingerprint_records:
+                click.echo("Evidence fingerprints: 0 record(s); snapshot unchanged")
+                raise SystemExit(1)
+            refreshed_path = write_evidence_snapshot(
+                project_root,
+                fingerprint_records,
+                expected_bytes=snapshot_before.raw_bytes if snapshot_before is not None else None,
+            )
+        except EvidenceSnapshotError as exc:
+            click.echo(f"Error: {exc}")
+            raise SystemExit(1)
+        click.echo(
+            f"Refreshed evidence fingerprints: {len(fingerprint_records)} record(s) -> "
+            f"{_display_path(refreshed_path, project_root)}"
+        )
 
     click.echo(
         "Built DAG: "

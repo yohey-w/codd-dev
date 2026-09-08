@@ -23,6 +23,8 @@ import os
 import time
 from pathlib import Path
 
+import yaml
+
 from codd.dag import DAG, Node
 from codd.dag.checks import get_registry
 from codd.dag.checks.stale_evidence import StaleEvidenceCheck
@@ -263,3 +265,52 @@ def test_no_fingerprinted_evidence_skips(tmp_path: Path):
     assert result.passed is True
     assert result.checked_count == 0
     assert result.warnings == []
+
+
+def test_malformed_snapshot_is_amber_warn_not_skip_or_pass(tmp_path: Path):
+    snapshot = tmp_path / ".codd" / "evidence_fingerprints.yaml"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("version: [unterminated\n", encoding="utf-8")
+
+    result = _run(_dag(), tmp_path)
+
+    assert result.status == "warn"
+    assert result.skipped is False
+    assert result.passed is True
+    assert result.severity == "amber"
+    assert result.block_deploy is False
+    assert result.checked_count == 0
+    assert len(_warnings_of_type(result, "snapshot_invalid")) == 1
+
+
+def test_out_of_root_snapshot_symlink_is_amber_warn_without_reading_target(tmp_path: Path):
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    snapshot = outside / "sentinel.yaml"
+    snapshot.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "records": [
+                    {
+                        "node_id": "outside",
+                        "source_path": "outside",
+                        "source_sha256": _sha256("outside"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = snapshot.read_bytes()
+    (project / ".codd").mkdir()
+    (project / ".codd" / "evidence_fingerprints.yaml").symlink_to(snapshot)
+
+    result = _run(_dag(), project)
+
+    assert result.status == "warn"
+    assert result.checked_count == 0
+    assert len(_warnings_of_type(result, "snapshot_invalid")) == 1
+    assert snapshot.read_bytes() == before
