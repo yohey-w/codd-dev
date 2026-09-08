@@ -18,6 +18,12 @@ DETAIL_PATH_RE = re.compile(r"/[A-Za-z0-9_.-]+/(?:\[id\]|:id|\{id\}|<id>)/[A-Za-
 MASTER_DETAIL_RE = re.compile(r"master[\s_.-]?detail|list[\s_.-]?detail", re.IGNORECASE)
 DRILLDOWN_RE = re.compile(r"drill[\s_.-]?down|ドリルダウン", re.IGNORECASE)
 DETAIL_SCREEN_RE = re.compile(r"詳細.*画面|親.*画面.*子.*画面")
+FRONTMATTER_RE = re.compile(
+    r"\A(?:\ufeff)?---[ \t]*\r?\n.*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+ATOMIC_MARKDOWN_RE = re.compile(r"^(?:\||#{1,6}\s|[-+*]\s|\d+[.)]\s|>)")
+FENCE_RE = re.compile(r"^(?:```|~~~)")
 SUPPRESS_PATTERNS = {"single_form", "inline_edit"}
 MASTER_DETAIL_PATTERNS = {"master_detail", "list_detail", "drilldown"}
 
@@ -264,10 +270,7 @@ def _node_text(node: Node, project_root: Path | None) -> str:
     parts: list[str] = []
     content = attributes.get("content")
     if content is not None:
-        parts.append(str(content))
-    frontmatter = attributes.get("frontmatter")
-    if isinstance(frontmatter, Mapping):
-        parts.append(str(frontmatter))
+        parts.append(_without_frontmatter(str(content)))
     if node.path and project_root is not None:
         # ``node.path`` is user-controllable design-doc DAG data. An out-of-root
         # absolute path, a ``../`` traversal, or an in-root symlink that escapes the
@@ -278,10 +281,10 @@ def _node_text(node: Node, project_root: Path | None) -> str:
         resolved = resolve_project_path(project_root, node.path)
         if resolved is not None and resolved.is_file():
             try:
-                parts.append(resolved.read_text(encoding="utf-8"))
+                parts.append(_without_frontmatter(resolved.read_text(encoding="utf-8")))
             except OSError:
                 pass
-    return "\n".join(parts)
+    return "\n\n".join(parts)
 
 
 def _text_has_relation_ui(text: str, relation: Mapping[str, Any]) -> bool:
@@ -289,21 +292,99 @@ def _text_has_relation_ui(text: str, relation: Mapping[str, Any]) -> bool:
         return False
     parent = str(relation.get("parent") or "")
     child = str(relation.get("child") or "")
-    if not (_contains_term(text, parent) or _contains_term(text, child)):
-        return False
-    if DETAIL_PATH_RE.search(text) and _contains_term(text, child):
-        return True
-    if (MASTER_DETAIL_RE.search(text) or DRILLDOWN_RE.search(text) or DETAIL_SCREEN_RE.search(text)) and (
-        _contains_term(text, parent) or _contains_term(text, child)
-    ):
-        return True
+    for block in _prose_evidence_blocks(text):
+        if not _has_distinct_relation_mentions(block, parent, child):
+            continue
+        if DETAIL_PATH_RE.search(block):
+            return True
+        if MASTER_DETAIL_RE.search(block) or DRILLDOWN_RE.search(block) or DETAIL_SCREEN_RE.search(block):
+            return True
     return False
 
 
-def _contains_term(text: str, term: str) -> bool:
+def _without_frontmatter(text: str) -> str:
+    """Keep structured metadata out of the unstructured prose heuristic."""
+
+    return FRONTMATTER_RE.sub("", text, count=1)
+
+
+def _prose_evidence_blocks(text: str) -> list[str]:
+    """Split prose at Markdown boundaries that carry independent claims."""
+
+    blocks: list[str] = []
+    paragraph: list[str] = []
+    in_fence = False
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            blocks.append(" ".join(paragraph))
+            paragraph.clear()
+
+    for raw_line in _without_frontmatter(text).splitlines():
+        line = raw_line.strip()
+        if FENCE_RE.match(line):
+            flush_paragraph()
+            in_fence = not in_fence
+            continue
+        if not line:
+            flush_paragraph()
+            continue
+        if in_fence or ATOMIC_MARKDOWN_RE.match(line):
+            flush_paragraph()
+            blocks.append(line)
+            continue
+        paragraph.append(line)
+    flush_paragraph()
+    return blocks
+
+
+def _has_distinct_relation_mentions(text: str, parent: str, child: str) -> bool:
+    """Require separate evidence for both ends of a relation.
+
+    Normalized substring matching remains tolerant of separators and casing, but
+    occurrences wholly inside the other endpoint (``group`` in
+    ``group_entry``) cannot count as separate mentions, even when the longer
+    endpoint appears more than once.
+    """
+
+    parent_spans = _term_spans(text, parent)
+    child_spans = _term_spans(text, child)
+    if _norm(parent) != _norm(child):
+        original_parent_spans = parent_spans
+        original_child_spans = child_spans
+        parent_spans = _spans_not_contained_by(parent_spans, original_child_spans)
+        child_spans = _spans_not_contained_by(child_spans, original_parent_spans)
+    return any(
+        parent_end <= child_start or child_end <= parent_start
+        for parent_start, parent_end in parent_spans
+        for child_start, child_end in child_spans
+    )
+
+
+def _spans_not_contained_by(
+    spans: list[tuple[int, int]],
+    containers: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    return [
+        (start, end)
+        for start, end in spans
+        if not any(container_start <= start and end <= container_end for container_start, container_end in containers)
+    ]
+
+
+def _term_spans(text: str, term: str) -> list[tuple[int, int]]:
     normalized_text = _norm(text)
     normalized_term = _norm(str(term or ""))
-    return bool(normalized_term and normalized_term in normalized_text)
+    if not normalized_term:
+        return []
+    spans: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        index = normalized_text.find(normalized_term, start)
+        if index < 0:
+            return spans
+        spans.append((index, index + len(normalized_term)))
+        start = index + 1
 
 
 def _same_pair(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:

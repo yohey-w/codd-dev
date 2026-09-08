@@ -237,3 +237,169 @@ def test_t10_in_root_design_doc_file_still_credited(tmp_path):
     assert result.one_to_many_relations_total == 1
     assert result.relations_with_master_detail_ui == 1
     assert result.relations_missing_master_detail == []
+
+
+def test_t11_unrelated_drilldown_in_another_table_row_is_not_credited():
+    dag = _dag(
+        _lexicon("line_item", "line_item is many-to-one with order"),
+        _design(
+            "docs/design/tests.md",
+            "| orderPlan | order setup |\n"
+            "| customerView | customer drilldown |",
+        ),
+    )
+
+    result = _run(dag)
+
+    assert result.relations_with_master_detail_ui == 0
+    assert result.relations_missing_master_detail[0]["parent"] == "order"
+    assert result.relations_missing_master_detail[0]["child"] == "line_item"
+
+
+def test_t12_relation_terms_and_unrelated_drilldown_in_separate_blocks_are_not_credited():
+    dag = _dag(
+        _lexicon("line_item", "line_item is many-to-one with order"),
+        _design(
+            "docs/design/requirements.md",
+            "order contains line_item.\n\n"
+            "A customer can drilldown to an address.",
+        ),
+    )
+
+    result = _run(dag)
+
+    assert result.relations_with_master_detail_ui == 0
+    assert result.relations_missing_master_detail
+
+
+def test_t13_child_identifier_does_not_double_as_its_parent_term():
+    dag = _dag(
+        _lexicon("group_entry", "group_entry is many-to-one with group"),
+        _design("docs/design/ui.md", "group_entry drilldown"),
+    )
+
+    result = _run(dag)
+
+    assert result.relations_with_master_detail_ui == 0
+    assert result.relations_missing_master_detail
+
+
+def test_t13b_repeated_child_identifiers_do_not_supply_a_parent_mention():
+    dag = _dag(
+        _lexicon("group_entry", "group_entry is many-to-one with group"),
+        _design("docs/design/ui.md", "group_entry group_entry drilldown"),
+    )
+
+    result = _run(dag)
+
+    assert result.relations_with_master_detail_ui == 0
+    assert result.relations_missing_master_detail
+
+
+def test_t14_unrelated_structured_operation_metadata_is_not_prose_evidence():
+    dag = _dag(
+        _lexicon("line_item", "line_item is many-to-one with order"),
+        _design(
+            "docs/design/ui.md",
+            "",
+            {
+                "frontmatter": {
+                    "operation_flow": {
+                        "operations": [
+                            {
+                                "id": "edit_line",
+                                "parent": "order",
+                                "target": "line_item",
+                                "ui_pattern": "wizard",
+                            },
+                            {
+                                "id": "browse_team",
+                                "parent": "team",
+                                "target": "athlete",
+                                "ui_pattern": "drilldown",
+                            },
+                        ]
+                    }
+                }
+            },
+        ),
+    )
+
+    result = _run(dag)
+
+    assert result.relations_with_master_detail_ui == 0
+    assert result.relations_missing_master_detail
+
+
+def test_t15_overlapping_names_pass_with_distinct_parent_and_child_mentions():
+    dag = _dag(
+        _lexicon("group_entry", "group_entry is many-to-one with group"),
+        _design("docs/design/ui.md", "group has a group_entry drilldown"),
+    )
+
+    result = _run(dag)
+
+    assert result.relations_with_master_detail_ui == 1
+    assert result.relations_missing_master_detail == []
+
+
+def test_t16_raw_yaml_frontmatter_does_not_cross_credit_operations(tmp_path):
+    doc = tmp_path / "docs" / "design" / "ui.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(
+        """---
+operation_flow:
+  operations:
+    - id: edit_line
+      parent: order
+      target: line_item
+      ui_pattern: wizard
+    - id: browse_customer
+      parent: customer
+      target: address
+      ui_pattern: drilldown
+---
+# UI
+
+No relation-specific navigation is documented.
+""",
+        encoding="utf-8",
+    )
+    dag = _dag(
+        _lexicon("line_item", "line_item is many-to-one with order"),
+        Node(id="docs/design/ui.md", kind="design_doc", path="docs/design/ui.md", attributes={}),
+    )
+
+    result = _run_rooted(dag, tmp_path)
+
+    assert result.relations_with_master_detail_ui == 0
+    assert result.relations_missing_master_detail
+
+
+def test_t17_raw_yaml_frontmatter_keeps_relation_specific_body_evidence(tmp_path):
+    doc = tmp_path / "docs" / "design" / "ui.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(
+        """---
+operation_flow:
+  operations:
+    - id: browse_customer
+      parent: customer
+      target: address
+      ui_pattern: drilldown
+---
+# UI
+
+An order has a line_item drilldown.
+""",
+        encoding="utf-8",
+    )
+    dag = _dag(
+        _lexicon("line_item", "line_item is many-to-one with order"),
+        Node(id="docs/design/ui.md", kind="design_doc", path="docs/design/ui.md", attributes={}),
+    )
+
+    result = _run_rooted(dag, tmp_path)
+
+    assert result.relations_with_master_detail_ui == 1
+    assert result.relations_missing_master_detail == []
