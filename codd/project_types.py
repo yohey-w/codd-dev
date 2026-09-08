@@ -1089,10 +1089,10 @@ class LayoutProfile:
     # reference (anti-false-red). ``None`` (default) = no exemption, unchanged.
     ambient_modules: str | None = None
     # SOURCE PLACEMENTS — the FULL set of harness-owned source roots (a stack may
-    # own >1, e.g. C++ ``src/`` + ``include/``). Empty by default so a legacy-built
-    # profile (Python/TS) is byte-identical BY CONSTRUCTION; populated ONLY by
-    # :func:`_synthesize_layout_profile_from_language` from the declarative
-    # profile's ``source_sets``. :func:`render_layout_placement_contract` projects a
+    # own >1, e.g. C++ ``src/`` + ``include/``). Empty by default; populated by
+    # :func:`_synthesize_layout_profile_from_language` from declarative source sets,
+    # and by the TypeScript builder when its existing config declares multiple
+    # source roots. :func:`render_layout_placement_contract` projects a
     # multi-root SOURCE LOCATION rule (plus a SOURCE REFERENCE FORM rule for any
     # ``reference_base`` set) ONLY when this holds >1 DISTINCT normalized root —
     # otherwise it falls through to the single-root rule, unchanged.
@@ -1443,12 +1443,11 @@ def render_layout_placement_contract(profile: "LayoutProfile | None") -> str:
         )
 
     if not profile.requires_package_init:
-        # A stack may OWN more than one source root (C++ ``src/`` + ``include/``).
-        # ``source_placements`` is EMPTY for every legacy-built profile, so the
-        # multi-root path below is unreachable for them and the single-root rule in
-        # the ``else`` renders byte-for-byte as before. Collapse to the DISTINCT
-        # normalized roots (order-preserving) — a header-set whose root equals the
-        # source-set root dedupes back to single-root.
+        # A stack may OWN more than one source root (for example C++ ``src/`` +
+        # ``include/`` or a configured TypeScript brownfield layout). Profiles with
+        # zero or one placement still reach the single-root rule in the ``else`` and
+        # render byte-for-byte as before. Collapse to DISTINCT normalized roots
+        # (order-preserving) — duplicate configured roots dedupe back to single-root.
         ordered_placements: list[SourcePlacementSpec] = []
         seen_roots: list[str] = []
         for placement in profile.source_placements:
@@ -2106,7 +2105,16 @@ def _typescript_layout_profile(
     preflight (npm/pnpm/yarn/bun) rather than Python's editable install.
     """
     package_name = normalize_package_name(project_name)
-    source_root = _first_clean_dir(source_dirs, "src")
+    configured_source_roots = _normalize_dirs(source_dirs)
+    source_root = configured_source_roots[0] if configured_source_roots else "src"
+    source_placements = (
+        tuple(
+            SourcePlacementSpec(root=root, file_globs=(f"{root}/**/*",))
+            for root in configured_source_roots
+        )
+        if len(configured_source_roots) > 1
+        else ()
+    )
     test_root = _first_clean_dir(test_dirs, "tests")
     return LayoutProfile(
         language="typescript",
@@ -2119,6 +2127,11 @@ def _typescript_layout_profile(
         test_import_policy="relative",
         requires_package_init=False,
         requires_test_init=False,
+        # Brownfield projects may register more than one source root. Reuse the
+        # existing multi-root placement contract instead of collapsing the
+        # configured authority to its first entry. The one-root greenfield
+        # profile stays byte-identical because its placements remain empty.
+        source_placements=source_placements,
         # OPTIONAL CLI SURFACE — the runnable command-line entry point that BACKS the
         # "cli" e2e modality (SHARED constructor: identical id + flag as Python's).
         # ``paths=()``: TS resolves by PATH and the scaffolder materializes no single

@@ -105,6 +105,23 @@ def test_render_ts_legacy_profile_renders():
     assert "`src/`" in block
 
 
+def test_render_ts_profile_preserves_multiple_configured_source_roots():
+    profile = resolve_layout_profile(
+        language="typescript",
+        project_name="Demo",
+        source_dirs=["src/", "infra/", "jobs/"],
+        test_dirs=["tests/"],
+    )
+    assert profile is not None
+
+    block = render_layout_placement_contract(profile)
+    assert "owns MORE than one source root" in block
+    assert "`src/`" in block
+    assert "`infra/`" in block
+    assert "`jobs/`" in block
+    assert "put EVERY source module you author UNDER `src/`" not in block
+
+
 def test_render_brownfield_test_dir_uses_owned_root_verbatim():
     # A stack whose owned test root IS ``test`` must render ``test/`` — and must NOT
     # forbid its OWN root (no hardcoded ``tests`` literal anywhere).
