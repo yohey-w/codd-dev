@@ -96,7 +96,7 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
 
     _add_design_edges(dag, root, design_docs, impl_nodes)
     _add_design_doc_expected_extractions(dag, root, dag_settings, design_docs)
-    _add_import_edges(dag, root, impl_nodes, dag_settings)
+    _add_import_edges(dag, root, impl_nodes, test_nodes, dag_settings)
     _add_tested_by_edges(dag, root, impl_nodes, test_nodes, dag_settings)
     _add_expected_nodes(dag, root, dag_settings, impl_nodes)
     _add_design_doc_expected_outcome_edges(dag, design_docs)
@@ -405,14 +405,16 @@ def _add_import_edges(
     dag: DAG,
     project_root: Path,
     impl_nodes: dict[str, Path],
+    test_nodes: dict[str, Path],
     settings: dict[str, Any],
 ) -> None:
     aliases = _load_import_aliases(project_root, settings)
-    path_to_node = {path: node_id for node_id, path in impl_nodes.items()}
+    source_nodes = {**impl_nodes, **test_nodes}
+    path_to_node = {path: node_id for node_id, path in source_nodes.items()}
 
     residue: list[str] = []
     internal_import_count = 0
-    for node_id, file_path in impl_nodes.items():
+    for node_id, file_path in source_nodes.items():
         imports = dag.nodes[node_id].attributes.get("imports", [])
         seen_targets: set[str] = set()
         for import_ref in imports:
@@ -426,6 +428,13 @@ def _add_import_edges(
                 if target_id in seen_targets:
                     continue
                 seen_targets.add(target_id)
+                # ``tested_by`` is the canonical relationship between an
+                # implementation artifact and a test.  A test importing its
+                # implementation is therefore resolved (and is not residue),
+                # but adding the inverse ``test -> impl imports`` edge would
+                # create a two-node cycle with ``impl -> test tested_by``.
+                if node_id in test_nodes and target_id in impl_nodes:
+                    continue
                 dag.add_edge(Edge(from_id=node_id, to_id=target_id, kind="imports"))
             # GENERIC FIX 1: an INTERNAL-looking specifier (a relative import, or a
             # first-party alias-prefixed one) that resolved to NOTHING is explicit

@@ -49,10 +49,9 @@ class DeploymentCompletenessResult:
     violations: list[DeploymentChainViolation] = field(default_factory=list)
     passed: bool = True
     skipped: bool = False
-    # design_doc deploy chains actually walked. No deployment signal at all
-    # (no deployment_doc and no deploy edges) means the C6 chain is not declared
-    # for this project, so the check reports skip rather than a clean PASS that
-    # verified nothing.
+    # Declared design_doc -> deployment_doc requirement roots actually walked.
+    # A project with no such roots reports skip rather than a clean PASS that
+    # verified no deployment chain, even when downstream deploy artifacts exist.
     checked_count: int = 0
 
 
@@ -94,24 +93,49 @@ class DeploymentCompletenessCheck:
         if codd_config is not None:
             self.settings = codd_config
 
-        if not self._has_deployment_signal(target_dag):
-            # The C6 deploy chain is not declared for this project, so the check
-            # verified nothing. Emit the skip with ``severity="info"`` (not the
-            # dataclass default ``"red"``) so severity-keyed roll-ups — e.g. the
-            # coverage merge gate — never count a "verified nothing" skip as a
-            # covered red check (a systematic false-green).
+        design_docs = [
+            node
+            for node in sorted(target_dag.nodes.values(), key=lambda item: item.id)
+            if node.kind == "design_doc"
+        ]
+        declared_roots = [
+            edge
+            for node in design_docs
+            for edge in self._edges_from(
+                target_dag,
+                node.id,
+                EDGE_REQUIRES_DEPLOYMENT_STEP,
+            )
+        ]
+        if not declared_roots:
+            # Only a design-owned requirement root declares the C6 check's
+            # subject. Deployment documents and downstream inferred edges are
+            # useful context, but they do not prove that a chain was walked.
+            deployment_doc_count = sum(
+                node.kind == "deployment_doc" for node in target_dag.nodes.values()
+            )
+            downstream_edge_count = sum(
+                edge.kind
+                in {
+                    EDGE_EXECUTES_IN_ORDER,
+                    EDGE_PRODUCES_STATE,
+                    EDGE_VERIFIED_BY,
+                }
+                for edge in target_dag.edges
+            )
             return DeploymentCompletenessResult(
                 severity="info",
                 status="skip",
                 skipped=True,
                 message=(
-                    "deployment_completeness skipped: no deployment_doc or deploy edges "
-                    "(C6 deploy chain not declared)"
+                    "deployment_completeness skipped: no design_doc "
+                    "requires_deployment_step roots "
+                    f"({deployment_doc_count} deployment_doc node(s), "
+                    f"{downstream_edge_count} downstream deploy edge(s) observed)"
                 ),
             )
 
         violations: list[DeploymentChainViolation] = []
-        design_docs = [node for node in sorted(target_dag.nodes.values(), key=lambda item: item.id) if node.kind == "design_doc"]
         for node in design_docs:
             violations.extend(self._check_design_doc(target_dag, node))
 
@@ -119,7 +143,7 @@ class DeploymentCompletenessCheck:
             status="fail" if violations else "pass",
             violations=violations,
             passed=not violations,
-            checked_count=len(design_docs),
+            checked_count=len(declared_roots),
         )
 
     def _check_design_doc(self, dag: DAG, design_doc_node: Node) -> list[DeploymentChainViolation]:
@@ -142,7 +166,19 @@ class DeploymentCompletenessCheck:
                 continue
 
             if not expected_steps:
-                expected_steps = self._deployment_doc_steps(deployment_doc)
+                # A requirement root with no declared/derivable step is itself
+                # an incomplete chain.  Do not let the step loop walk zero items
+                # and turn that malformed declaration into a clean PASS.
+                violations.append(
+                    self._violation(
+                        design_doc_node.id,
+                        "missing_step_in_deployment_doc",
+                        design_doc_node.id,
+                        deployment_doc.id,
+                        step="deployment_step",
+                    )
+                )
+                continue
 
             for step in expected_steps:
                 violation = self._check_step_chain(dag, design_doc_node, deployment_doc, step)
@@ -333,21 +369,6 @@ class DeploymentCompletenessCheck:
     @staticmethod
     def _chain_line(text: str, broken: bool) -> str:
         return f"{text} [{'missing' if broken else 'ok'}]"
-
-    @staticmethod
-    def _has_deployment_signal(dag: DAG) -> bool:
-        if any(node.kind == "deployment_doc" for node in dag.nodes.values()):
-            return True
-        return any(
-            edge.kind
-            in {
-                EDGE_REQUIRES_DEPLOYMENT_STEP,
-                EDGE_EXECUTES_IN_ORDER,
-                EDGE_PRODUCES_STATE,
-                EDGE_VERIFIED_BY,
-            }
-            for edge in dag.edges
-        )
 
     def _required_steps_for_edge(
         self,
