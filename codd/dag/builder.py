@@ -32,6 +32,7 @@ from codd.path_safety import iter_project_glob, resolve_project_path
 from codd.dag import DAG, Edge, Node
 from codd.dag.coverage_axes import CoverageAxis, extract_coverage_axes_from_design_doc, extract_coverage_axes_from_lexicon
 from codd.dag.extractor import extract_design_doc_metadata, extract_imports, scan_capability_evidence
+from codd.dag.metadata_access import collect_structured_entries
 from codd.llm.design_doc_extractor import (
     ExpectedExtraction,
     extract_expected_artifacts_for_file,
@@ -748,8 +749,8 @@ def _add_design_doc_expected_outcome_edges(dag: DAG, design_docs: dict[str, dict
         for edge in dag.edges
     }
 
-    for node_id, metadata in design_docs.items():
-        attributes = metadata.get("attributes", {})
+    for node_id in design_docs:
+        attributes = dag.nodes[node_id].attributes
         journey_names = _design_doc_journey_names(attributes)
         for journey in _design_doc_journey_entries(attributes):
             journey_name = journey.get("name") if isinstance(journey.get("name"), str) else None
@@ -1109,8 +1110,7 @@ def _validate_design_doc_journey_attributes(node_id: str, attributes: dict[str, 
 
 
 def _design_doc_journey_entries(attributes: dict[str, Any]) -> list[dict[str, Any]]:
-    journeys = attributes.get("user_journeys", [])
-    return [journey for journey in journeys if isinstance(journey, dict)] if isinstance(journeys, list) else []
+    return collect_structured_entries(attributes, "user_journeys")
 
 
 def _design_doc_journey_names(attributes: dict[str, Any]) -> set[str]:
