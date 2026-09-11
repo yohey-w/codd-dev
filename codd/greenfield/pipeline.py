@@ -103,6 +103,9 @@ from typing import Any
 
 import yaml
 
+# Leaf module (stdlib-only imports): safe to import at module load, no cycle.
+from codd.path_safety import has_plausible_file_extension, is_glob_decl
+
 
 SESSION_FILENAME = "greenfield_session.yaml"
 SESSION_VERSION = 1
@@ -3817,7 +3820,7 @@ def _is_bare_directory_decl(raw: str) -> bool:
         return False
     if ":" in s:  # node-id (``module:parser.parse``), not a filesystem path
         return False
-    if any(ch in s for ch in "*?["):  # a glob denotes file(s), not a bare directory
+    if _is_glob_decl(s):  # a glob denotes file(s), not a bare directory
         return False
     return not _declared_output_is_file_path(s)
 
@@ -4035,6 +4038,16 @@ def _verify_task_contract(
         )
 
 
+# The "pattern or one concrete path?" rule lives in ``codd.path_safety`` — pure path
+# logic with no jail semantics and no imports of its own beyond the stdlib — because
+# the planner (``_is_concrete_test_file``) and the implementation-coverage matchers
+# ask the SAME question and used to answer it with their own copy of
+# ``any(ch in x for ch in "*?[")``. One definition, so the four sites cannot drift.
+# Bound to the historical private names used throughout this module.
+_is_glob_decl = is_glob_decl
+_has_plausible_file_extension = has_plausible_file_extension
+
+
 def _declared_output_is_file_path(raw: str) -> bool:
     """Whether a declared ``expected_outputs`` entry is an EXACT FILE PATH.
 
@@ -4056,7 +4069,9 @@ def _declared_output_is_file_path(raw: str) -> bool:
     # extension (``.go``), so without this guard it would be classed as a file and the
     # literal ``(root / glob).is_file()`` check below would false-flag a produced-but-
     # glob output as "absent on disk" (a WARN today, a false-RED under ``enforce``).
-    if any(ch in s for ch in "*?["):
+    # ``_is_glob_decl`` keeps ``*``/``?`` strict while letting a bracketed SEGMENT
+    # (``src/app/[id]/page.tsx``) stay an exact file path — see issue #36.
+    if _is_glob_decl(s):
         return False
     # A file path is identified by a plausible file EXTENSION on its LAST segment.
     # A "/" alone is NOT sufficient: a multi-segment DIRECTORY declaration (e.g.
@@ -4065,8 +4080,7 @@ def _declared_output_is_file_path(raw: str) -> bool:
     # check. Treating it as an exact file made ``(root / dir).is_file()`` False and
     # falsely reported a produced directory as "absent on disk" (a WARN today, a
     # false-RED under ``enforce``).
-    ext = PurePosixPath(s).suffix[1:]  # extension of the last path segment
-    return bool(ext) and len(ext) <= 6 and ext.isalnum()
+    return _has_plausible_file_extension(s)
 
 
 def _check_declared_output_completeness(

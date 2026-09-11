@@ -21,6 +21,7 @@ from codd.generator import (
     _load_wave_artifacts,
     _resolve_generation_capabilities,
 )
+from codd.path_safety import is_glob_decl
 from codd.project_types import ProjectCapabilities
 from codd.validator import _iter_doc_files, _parse_codd_frontmatter, validate_project
 
@@ -621,8 +622,14 @@ def _vb_test_dir_prefixes(config: dict[str, Any] | None) -> list[str]:
 
 def _is_concrete_test_file(rel: str, *, test_prefixes: list[str]) -> bool:
     """A CONCRETE authored test file: a non-glob path under a test dir (or with a
-    test-shaped filename) whose extension is a code extension, not a document."""
-    if not rel or any(ch in rel for ch in "*?["):
+    test-shaped filename) whose extension is a code extension, not a document.
+
+    The glob test is the shared :func:`codd.path_safety.is_glob_decl` shape rule (a
+    stdlib-only leaf module, so the planner stays import-clean of the pipeline).
+    Its own copy of ``any(ch in rel for ch in "*?[")`` read a bracketed ROUTE test
+    file (``src/app/[id]/page.test.tsx``) as a pattern, so a task that declares it
+    authored no concrete test at all (issue #36's rule, same bug, second site)."""
+    if not rel or is_glob_decl(rel):
         return False  # a glob is not a single file to match against
     suffix = PurePosixPath(rel).suffix.lower()
     if not suffix or suffix in _VB_DOC_EXTENSIONS:
@@ -670,7 +677,10 @@ def _vb_owner_test_tokens(text: str, test_prefixes: list[str]) -> tuple[list[str
         if not (under_test or test_shaped):
             continue
         has_owner = True
-        if not any(ch in tok for ch in "*?["):
+        # Same shared shape rule as ``_is_concrete_test_file``. (``_VB_PATH_TOKEN_RE``
+        # cannot emit a bracket today, so this is uniformity — not a behavior change —
+        # and it stays correct if the token pattern ever widens.)
+        if not is_glob_decl(tok):
             if tok not in concrete:
                 concrete.append(tok)
     return concrete, has_owner

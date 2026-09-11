@@ -856,3 +856,36 @@ def test_fs_glob_match_unit_rejects_symlink_escape(tmp_path):
     assert implementation_module._fs_glob_match("escape/*.py", root) is False
     # Glob that resolves to an in-root real file -> accept (regression).
     assert implementation_module._fs_glob_match("real/*.py", root) is True
+
+
+def test_fs_glob_match_reads_a_bracketed_route_path_as_one_concrete_path(tmp_path):
+    """A bracketed ROUTE hint is not a character class (issue #36 review, sibling
+    site 3 of 4).
+
+    ``app/[id]/page.ts`` names one file. Read as a class it fnmatch-ed the unrelated
+    single-character file ``app/i/page.ts``, and because ANY fs-glob hit suppresses
+    the whole additional_implementation pass, one coincidental file silenced every
+    amber for the project. A genuine class glob still takes this branch.
+    """
+    _write(tmp_path / "app" / "i" / "page.ts", "export {}\n")
+    _write(tmp_path / "internal" / "httpapi" / "a_test.go", "package httpapi\n")
+
+    assert implementation_module._fs_glob_match("app/[id]/page.ts", tmp_path) is False
+    assert implementation_module._fs_glob_match("internal/httpapi/[a-z]_test.go", tmp_path) is True
+    assert implementation_module._fs_glob_match("app/*/page.ts", tmp_path) is True
+
+
+def test_soft_path_match_accepts_a_bracketed_route_hint():
+    """Sibling site 4 of 4: a bracketed hint used to be rejected outright by the
+    soft (last-resort) matcher, which only ever meant to exclude PATTERNS. A route
+    path is an ordinary name and now soft-matches like any other concrete path;
+    a real pattern still does not."""
+    assert implementation_module._soft_path_match(
+        "app/items/[id]/handler.ts", "src/app/items/[id]/handler.ts"
+    ) is True
+    assert implementation_module._soft_path_match(
+        "app/items/[a-z]/handler.ts", "src/app/items/x/handler.ts"
+    ) is False
+    assert implementation_module._soft_path_match(
+        "app/items/*/handler.ts", "src/app/items/x/handler.ts"
+    ) is False
