@@ -399,6 +399,41 @@ orphan_cover_markers:
   # Flag `codd: covers operation=X` test markers whose operation X is not declared
   # in any operation_flow (reverse reconciliation of the audit covers path).
   enabled: true
+acceptance_evidence:
+  # The acceptance-evidence invariant (dag check `acceptance_evidence`):
+  #   for every acceptance criterion AC there is evidence E such that
+  #   (a) E is machine-executed (or an owner-attributed `manual` record),
+  #   (b) E runs through the SHIPPED PATH of the requirement,
+  #   (c) E references AC's NAMED PARAMETERS instead of a re-typed literal,
+  #   (d) E is bound to the content hash of the implementation it verified.
+  # Anything missing is a finding — "nothing declared, so a notice and pass"
+  # does not exist here. See docs/design/acceptance-evidence-invariant.md.
+  #
+  # Acceptance criteria are read from the requirement documents and the table
+  # scope requirement_reconciliation already uses; a table contributes criteria
+  # only when one of its COLUMNS is an acceptance column (built-in English +
+  # Japanese header vocabulary, EXTENDED by acceptance_columns below). The
+  # machine-readable columns `verified_by` / `params` / `critical` are optional
+  # additions to that same table, adopted incrementally.
+  #
+  # NOTE: projects whose codd.yaml pins dag.enabled_checks must add
+  # `acceptance_evidence` to that list (codd dag verify prints a notice listing
+  # registered-but-unselected checks).
+  enabled: true
+  # Requirement docs / section headings. Empty = inherit requirement_reconciliation.
+  docs: []
+  sections: []
+  # EXTRA acceptance-column header spellings (additive, never a replacement).
+  acceptance_columns: []
+  # Per-class severity (red | amber). Lower a class to amber to keep the finding
+  # visible while a project migrates; never silence it.
+  runtime_severity: red             # runtime obligation, runtime stage disabled
+  unbound_severity: red             # AC bound to no machine-checked evidence
+  param_severity: red               # declared parameter absent from its evidence
+  undeclared_numeric_severity: amber  # literal number in an AC with no params
+  reachability_severity: amber      # evidence off the shipped path / unknown
+  freshness_severity: red           # manual evidence stale against its implementation
+  max_findings: 30
 requirement_reconciliation:
   # Reconcile requirement documents against the declared operation_flow universe
   # ("required but undeclared" — the third edge next to surface_reconciliation

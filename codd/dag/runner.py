@@ -37,6 +37,7 @@ CHECK_MODULES = (
     "codd.dag.checks.source_completeness",
     "codd.dag.checks.unresolved_import_residue",
     "codd.dag.checks.canon_integrity",
+    "codd.dag.checks.acceptance_evidence",
 )
 
 
