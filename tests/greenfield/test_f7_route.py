@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.greenfield.conftest import require_dogfood_artifact
 from codd.greenfield.test_rederivation import (
     REDERIVATION_FEEDBACK,
     STATUS_GREEN,
@@ -197,9 +198,6 @@ def test_route_implement_gate_reds_before_verify(tmp_path: Path):
 
 # ── DoD (8): REPLAY THE 現物 — js-v3 / js-v5 fixtures drive trigger→re-derivation→green ──
 
-_ARTIFACTS = Path(__file__).resolve().parents[2] / "dogfood" / "artifacts_jsrepair"
-
-
 @pytest.mark.parametrize(
     "run_dir, defective",
     [
@@ -210,9 +208,7 @@ _ARTIFACTS = Path(__file__).resolve().parents[2] / "dogfood" / "artifacts_jsrepa
 def test_genbutsu_replay_drives_rederivation_to_green(tmp_path: Path, run_dir: str, defective: list[str]):
     """The ACTUAL failing artifacts: a mocked engine emitting the claim drives
     trigger → re-derivation → green end-to-end (fenced, budgeted, provenance-checked)."""
-    src_art = _ARTIFACTS / run_dir
-    if not src_art.is_dir():
-        pytest.skip(f"artifact fixture {run_dir} absent")
+    src_art = require_dogfood_artifact(f"artifacts_jsrepair/{run_dir}")
     shutil.copytree(src_art / "tests", tmp_path / "tests")
     shutil.copytree(src_art / "src", tmp_path / "src")
 

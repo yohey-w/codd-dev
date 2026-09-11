@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.greenfield.conftest import require_dogfood_artifact
 from codd.cli import CoddCLIError
 from codd.greenfield.pipeline import StageError
 from codd.greenfield.test_rederivation import (
@@ -175,19 +176,15 @@ def test_runner_crash_is_contained_red_budget_consumed_tree_rolled_back(tmp_path
 
 # ── DoD (4): replay the 現物 — js-v7 never crashes with "produced 0 generated files" ──
 
-_ARTIFACTS_V7 = Path(__file__).resolve().parents[2] / "dogfood" / "artifacts_f7residual" / "js-v7"
-
-
 def test_genbutsu_v7_replay_no_zero_generated_files_terminal(tmp_path: Path):
     """Replay the actual failure artifact: with the requirements gate task FIRST (the
     live trigger order), ownership resolves to the authoring task (Part A) and a
     crashing draw is contained to STATUS_RED (Part B) — the runner NEVER escapes with
     the misleading 'produced 0 generated files' stage crash, and the gate task is
     NEVER handed to implement."""
-    if not _ARTIFACTS_V7.is_dir():
-        pytest.skip("js-v7 artifact fixture absent")
-    shutil.copytree(_ARTIFACTS_V7 / "tests", tmp_path / "tests")
-    shutil.copytree(_ARTIFACTS_V7 / "src", tmp_path / "src")
+    artifacts_v7 = require_dogfood_artifact("artifacts_f7residual/js-v7")
+    shutil.copytree(artifacts_v7 / "tests", tmp_path / "tests")
+    shutil.copytree(artifacts_v7 / "src", tmp_path / "src")
 
     blocked = ["tests/evaluator.test.js"]  # final_status.yaml: blocked_test_paths
     gate = _Task("requirements_gate", "docs/requirements/requirements.md",

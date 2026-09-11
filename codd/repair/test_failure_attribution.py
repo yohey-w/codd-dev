@@ -34,10 +34,12 @@ behaviour for them). No project literals live here.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-import re
 from typing import Callable
+
+from codd.ansi import strip_ansi
 
 
 #: The classification taxonomy. ``environment`` is deliberately separated from
@@ -167,6 +169,13 @@ def attribute_command_failure(
     with no project frames).
     """
     root = Path(project_root)
+    # Sanitize before ANY adapter sees the text. Every parser below anchors on
+    # ``^`` (MULTILINE) or on ``\b``-delimited tokens, and a colouring runner
+    # prefixes both with escape bytes — the frames vanish, attribution comes back
+    # empty and auto-repair has no target. See :mod:`codd.ansi`. Stripping here
+    # covers every stack adapter (pytest / vitest / tsc / shell) and every caller,
+    # whatever spawned the command.
+    output = strip_ansi(output)
     adapter = _select_adapter(command, output)
     if adapter is None:
         return None
