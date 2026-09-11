@@ -19,6 +19,41 @@ import pytest
 import yaml
 
 
+#: Root of the LOCAL-ONLY dogfood corpus. ``.gitignore`` carries ``dogfood/*``
+#: with a single ``!dogfood/contract_matrix.yaml`` exception ("Internal CoDD
+#: dogfood (dev process, GPT consults, ledger, fixtures) — kept LOCAL, not
+#: published"), so every artifact directory under it is UNVERSIONED by design.
+DOGFOOD_ROOT = Path(__file__).resolve().parents[2] / "dogfood"
+
+
+def require_dogfood_artifact(relative: str) -> Path:
+    """Return ``dogfood/<relative>``, or skip with the REASON it is absent.
+
+    These are 現物 replay tests: they re-run a real recorded failure (the exact
+    js-v3 / js-v5 / js-v7 run directories) rather than a synthetic stand-in, which
+    is precisely why the fixture cannot be inlined.
+
+    The corpus is deliberately unversioned (see :data:`DOGFOOD_ROOT`). The
+    consequence, stated plainly so nobody reads the skip as a flake:
+
+    * On a developer machine that HAS the corpus, these tests run and pass.
+    * In CI, and in any fresh clone or ``git worktree``, the directory does not
+      exist, so they skip — permanently, not intermittently. **CI green does not
+      include these assertions.** Publishing the corpus (or committing a reduced
+      replay fixture) is what would close that hole; until then the skip names
+      the cause so the gap is visible rather than silent.
+    """
+    path = DOGFOOD_ROOT / relative
+    if not path.is_dir():
+        pytest.skip(
+            f"dogfood replay fixture 'dogfood/{relative}' is absent — the dogfood "
+            "corpus is gitignored (.gitignore: 'dogfood/*', local-only by policy), "
+            "so this 現物 replay cannot run in CI or a fresh clone/worktree. "
+            "It runs on a machine that has the corpus."
+        )
+    return path
+
+
 STUB_WAVE_CONFIG = {
     "1": [
         {
