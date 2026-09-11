@@ -10009,6 +10009,16 @@ def _dag_result_message(result: Any) -> str:
     return str(_dag_result_value(result, "message") or "")
 
 
+def _dag_finding_text(item: Any) -> str:
+    """Render one finding for the text summary, preferring its own message."""
+
+    if isinstance(item, dict):
+        message = item.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return str(item)
+
+
 def _dag_result_details(result: Any) -> list[str]:
     details: list[str] = []
     for key in (
@@ -10025,10 +10035,13 @@ def _dag_result_details(result: Any) -> list[str]:
         if not value:
             continue
         if isinstance(value, list):
-            rendered = ", ".join(str(item) for item in value[:5])
+            # One finding per line, rendered by its own human-readable `message`
+            # when it carries one: a comma-joined blob of dict reprs buries the
+            # sentence the check wrote for the reader.
+            details.append(f"{key}: {len(value)}")
+            details.extend(f"- {_dag_finding_text(item)}" for item in value[:5])
             if len(value) > 5:
-                rendered += f", ... {len(value) - 5} more"
-            details.append(f"{key}: {rendered}")
+                details.append(f"- ... {len(value) - 5} more")
         else:
             details.append(f"{key}: {value}")
     common_count = _dag_result_value(result, "common_node_count")

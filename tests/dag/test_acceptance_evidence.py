@@ -964,3 +964,55 @@ def test_explicit_entry_file_overrides_route_inference(tmp_path):
     result = _run_check(root)
     assert _violations(result, "reachability_unknown") == []
     assert _violations(result, "off_shipped_path") == []
+
+
+def test_manual_only_evidence_is_not_asked_to_reference_a_parameter(tmp_path):
+    """A person's verdict is not a file with a symbol in it — a red nobody can clear."""
+
+    from codd.acceptance_record import record_acceptance
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 1枚に15人 `operation_flow.sheet_print` | manual:yohey | per_sheet=15 |\n",
+            header="| ID | 要件 | 検収条件 | verified_by | params |\n| --- | --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={"tools/make-sheet.ts": "// R-1 sheet builder\nexport const build = () => 15;\n"},
+    )
+    record_acceptance(root, "R-1", status="pass", by="yohey", implementation_paths=["tools/make-sheet.ts"])
+    result = _run_check(root)
+    assert _violations(result, "param_not_referenced") == []
+    assert _violations(result, "manual_evidence_missing") == []
+    assert _violations(result, "stale_manual_evidence") == []
+
+
+def test_the_cap_is_per_finding_type_so_a_loud_red_cannot_hide_an_amber(tmp_path):
+    """A global cap would let 50 reds push the shipped-path amber out of the output."""
+
+    rows = "".join(
+        f"| R-{index} | 出す | 条件 <sub>`operation_flow.sheet_print`</sub> |\n" for index in range(1, 6)
+    )
+    rows += "| R-9 | 印刷 | 1枚に15人 <sub>`operation_flow.sheet_print`</sub> |\n"
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(rows),
+        operations=SHEET_OPERATION,
+        extra_config={
+            "filesystem_routes": FILESYSTEM_ROUTES,
+            "acceptance_evidence": {"max_findings": 2},
+        },
+        files={
+            "src/app/admin/page.tsx": "export default () => null;\n",
+            "tools/make-sheet.ts": "// R-9 sheet builder\nexport const build = () => 15;\n",
+            "tests/unit/sheet.test.ts": (
+                "import { build } from '../../tools/make-sheet';\n"
+                "test('sheet', () => { expect(build()).toBe(15); });\n"
+            ),
+        },
+    )
+    result = _run_check(root)
+    assert len(_violations(result, "runtime_evidence_not_executable")) == 2  # capped
+    assert _violations(result, "off_shipped_path"), "an amber class must survive the cap"
+    assert "off_shipped_path 1" in result.message  # per-type tally is always visible

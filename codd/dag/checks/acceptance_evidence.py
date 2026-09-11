@@ -430,7 +430,10 @@ def _parameter_violations(
 
     violations: list[dict[str, Any]] = []
     for criterion in criteria:
-        bound = bound_by_req.get(criterion.req_id) or []
+        # Only FILE-BACKED evidence can reference a parameter by name. A manual
+        # record is a person's verdict, not a file with a symbol in it; asking it
+        # to mention `per_sheet` would be a red nobody can ever clear.
+        bound = [path for path in (bound_by_req.get(criterion.req_id) or []) if not path.startswith("manual:")]
         if criterion.params:
             evidence_text = _read_all(root, bound)
             missing = [name for name in criterion.params if name not in evidence_text]
@@ -481,8 +484,6 @@ def _read_all(root: Path, relative_paths: Iterable[str]) -> str:
 
     chunks: list[str] = []
     for relative in relative_paths:
-        if ":" in relative and not (root / relative).exists():
-            continue  # a synthetic marker such as "manual:<owner>"
         try:
             chunks.append((root / relative).read_text(encoding="utf-8", errors="ignore"))
         except OSError:
@@ -771,43 +772,53 @@ def _finalize(
     checked_count: int,
     max_findings: int,
 ) -> AcceptanceEvidenceResult:
-    """Build the result, choosing severity/status from the violations present."""
+    """Build the result, choosing severity/status from the violations present.
+
+    The cap is applied PER FINDING TYPE, not across the whole list. A global cap
+    sorted by severity lets one loud red class push every amber class out of the
+    output entirely — the check would detect a shipped-path defect and then hide
+    it behind fifty unrelated rows, which is the same disappearing act it exists
+    to stop. Truncated findings still name every criterion they concern.
+    """
 
     reds = [item for item in violations if item.get("severity") == "red"]
     ambers = [item for item in violations if item.get("severity") != "red"]
-    # Reds first, so a cap never hides a hard failure behind advisories.
-    ordered = reds + ambers
-    shown = ordered[:max_findings]
-    truncated = ordered[max_findings:]
-    if truncated:
-        # The truncated findings still name every criterion they concern: a
-        # silent "...and 20 more" is exactly the kind of invisible skip this
-        # check exists to abolish.
-        remaining = ", ".join(
-            f"{item.get('req_id', '?')}({item.get('type', '?')})" for item in truncated
-        )
-        shown = list(shown) + [
-            {
-                "type": "findings_truncated",
-                "severity": "amber",
-                "message": (
-                    f"[acceptance_evidence] ...and {len(truncated)} more finding(s), "
-                    f"in full: {remaining}. Raise `acceptance_evidence.max_findings` in "
-                    "codd.yaml to expand them."
-                ),
-            }
-        ]
+
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for item in reds + ambers:
+        by_type.setdefault(str(item.get("type", "?")), []).append(item)
+
+    shown: list[dict[str, Any]] = []
+    for kind, items in by_type.items():
+        shown.extend(items[:max_findings])
+        truncated = items[max_findings:]
+        if truncated:
+            remaining = ", ".join(str(item.get("req_id", "?")) for item in truncated)
+            shown.append(
+                {
+                    "type": "findings_truncated",
+                    "severity": "amber",
+                    "req_id": kind,
+                    "message": (
+                        f"[acceptance_evidence] ...and {len(truncated)} more `{kind}` finding(s), "
+                        f"in full: {remaining}. Raise `acceptance_evidence.max_findings` in "
+                        "codd.yaml to expand them."
+                    ),
+                }
+            )
+
+    breakdown = ", ".join(f"{kind} {len(items)}" for kind, items in by_type.items())
+    tally = f" [{breakdown}]" if breakdown else ""
 
     if reds:
-        message = (
-            f"acceptance_evidence: {len(reds)} acceptance criterion violation(s) "
-            f"({len(ambers)} advisory) across {checked_count} declared criteria"
-        )
         return AcceptanceEvidenceResult(
             severity="red",
             status="fail",
             passed=False,
-            message=message,
+            message=(
+                f"acceptance_evidence: {len(reds)} red / {len(ambers)} amber finding(s) across "
+                f"{checked_count} declared acceptance criteria{tally}"
+            ),
             checked_count=checked_count,
             violations=shown,
         )
@@ -818,7 +829,7 @@ def _finalize(
             passed=True,
             message=(
                 f"acceptance_evidence: {len(ambers)} advisory finding(s) across "
-                f"{checked_count} declared acceptance criteria"
+                f"{checked_count} declared acceptance criteria{tally}"
             ),
             checked_count=checked_count,
             violations=shown,
