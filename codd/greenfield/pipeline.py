@@ -103,6 +103,9 @@ from typing import Any
 
 import yaml
 
+# Leaf module (stdlib-only imports): safe to import at module load, no cycle.
+from codd.path_safety import has_plausible_file_extension, is_glob_decl
+
 
 SESSION_FILENAME = "greenfield_session.yaml"
 SESSION_VERSION = 1
@@ -4035,50 +4038,14 @@ def _verify_task_contract(
         )
 
 
-def _has_plausible_file_extension(s: str) -> bool:
-    """Whether the LAST segment of ``s`` carries a plausible file EXTENSION.
-
-    Short + alphanumeric (``.py`` / ``.yaml`` / ``.tsx``) — the same test the
-    file-path classifier has always applied, factored out so the glob classifier
-    can consult it too."""
-    ext = PurePosixPath(s).suffix[1:]  # extension of the last path segment
-    return bool(ext) and len(ext) <= 6 and ext.isalnum()
-
-
-def _segment_has_char_class(segment: str) -> bool:
-    """Whether one path SEGMENT contains a well-formed ``[...]`` character class."""
-    start = segment.find("[")
-    if start == -1:
-        return False
-    return segment.find("]", start + 2) != -1  # at least one character inside
-
-
-def _is_glob_decl(raw: str) -> bool:
-    """Whether a declared entry is a GLOB PATTERN (matches file[s]) rather than ONE path.
-
-    ``*`` and ``?`` are unambiguous wildcards wherever they appear, so they decide
-    on their own. ``[``/``]`` are NOT: a bracketed path SEGMENT is an ordinary
-    directory or file name under several routing conventions (``src/app/[id]/
-    page.tsx``, ``pages/posts/[id].tsx``) — this is path SHAPE only, no framework
-    knowledge. Brackets therefore read as a character class only when the entry
-    cannot be read as ONE concrete file, i.e. its LAST segment carries no plausible
-    file extension.
-
-    Issue #36: the previous rule (``any(ch in s for ch in "*?[")``) classified
-    ``.../[id]/page.tsx`` as a glob, so ``_create_output_paths`` took the DIRECTORY
-    branch and ``mkdir``-ed ``page.tsx`` itself — then reported the path-kind
-    collision it had just created. Letting the trailing extension win over the
-    bracket scan fixes that without loosening ``*``/``?`` at all."""
-    s = str(raw).strip().replace("\\", "/").strip("/")
-    if not s:
-        return False
-    if any(ch in s for ch in "*?"):
-        return True
-    if any(_segment_has_char_class(seg) for seg in s.split("/")):
-        # A bracket path that still denotes one concrete FILE (trailing extension)
-        # is an exact path, not a pattern.
-        return not _has_plausible_file_extension(s)
-    return False
+# The "pattern or one concrete path?" rule lives in ``codd.path_safety`` — pure path
+# logic with no jail semantics and no imports of its own beyond the stdlib — because
+# the planner (``_is_concrete_test_file``) and the implementation-coverage matchers
+# ask the SAME question and used to answer it with their own copy of
+# ``any(ch in x for ch in "*?[")``. One definition, so the four sites cannot drift.
+# Bound to the historical private names used throughout this module.
+_is_glob_decl = is_glob_decl
+_has_plausible_file_extension = has_plausible_file_extension
 
 
 def _declared_output_is_file_path(raw: str) -> bool:

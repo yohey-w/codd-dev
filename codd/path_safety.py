@@ -24,12 +24,18 @@ file. A relative raw path (``src/x``, ``../escape``) is resolved under the root.
 Callers that must preserve the absolute-vs-root-relative distinction therefore pass
 the *raw* path (not a leading-slash-stripped form) so this function can tell them
 apart.
+
+The module also owns the sibling piece of *pure path logic* every one of those call
+sites needs BEFORE the jail: is a declared entry ONE concrete path or a GLOB PATTERN
+(:func:`is_glob_decl`)? That question was answered independently — and differently —
+at four sites, which is how a bracketed dynamic-route path became a "glob" in one
+place and an exact file in another (issue #36). Same rule, one definition.
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Union
 
 __all__ = [
@@ -38,6 +44,8 @@ __all__ = [
     "require_project_path",
     "iter_project_glob",
     "project_relative_path",
+    "is_glob_decl",
+    "has_plausible_file_extension",
 ]
 
 # A path component is "magic" (a glob wildcard) when it contains one of these.
@@ -238,3 +246,132 @@ def project_relative_path(project_root: Union[str, Path], path: Union[str, Path]
         return resolved.relative_to(root).as_posix()
     except (ValueError, OSError):
         return None
+
+
+# ─────────────────────────────────────────────────────────────
+# Declared-path SHAPE: one concrete path, or a glob PATTERN?
+# ─────────────────────────────────────────────────────────────
+
+#: A character-class body that cannot be read as a NAME: it opens with an
+#: alphanumeric RANGE (``[a-z]`` / ``[0-9]`` / ``[0-9a-f]``). A hyphen further inside
+#: the body is deliberately left alone, so a hyphenated route parameter
+#: (``[post-id]``) stays a name.
+_CHAR_CLASS_RANGE_RE = re.compile(r"[A-Za-z0-9]-[A-Za-z0-9]")
+
+#: A character class may be negated (``[!id]`` POSIX/fnmatch, ``[^id]`` regex-style).
+#: A negation is never part of a name, so it decides on its own.
+_CHAR_CLASS_NEGATIONS = ("!", "^")
+
+
+def has_plausible_file_extension(raw: str) -> bool:
+    """Whether the LAST segment of ``raw`` carries a plausible file EXTENSION.
+
+    Short + alphanumeric (``.py`` / ``.yaml`` / ``.tsx``). This is how CoDD tells a
+    file declaration from a directory declaration: a ``/`` alone is NOT sufficient
+    (``internal/httpapi`` is a Go package DIRECTORY), and a dotted SYMBOL
+    (``Version.__str__``) must not pass as a file either — hence "short and
+    alphanumeric" rather than "has a suffix".
+    """
+    ext = PurePosixPath(str(raw)).suffix[1:]
+    return bool(ext) and len(ext) <= 6 and ext.isalnum()
+
+
+def _strip_plausible_suffixes(segment: str) -> str:
+    """``[id].test.tsx`` → ``[id]``: a segment with every plausible extension removed.
+
+    Compound extensions are stripped one level at a time so the bracket group in a
+    ``[id].test.tsx`` still reads as spanning its segment.
+    """
+    name = str(segment)
+    while has_plausible_file_extension(name):
+        name = name[: -len(PurePosixPath(name).suffix)]
+    return name
+
+
+def _segment_has_char_class(segment: str) -> bool:
+    """Whether one path SEGMENT contains a WELL-FORMED ``[...]`` group.
+
+    At least one character must sit inside the brackets. An UNCLOSED ``[`` is a
+    literal character to ``fnmatch``/``Path.glob``, so it is not a class here either.
+    """
+    start = segment.find("[")
+    if start == -1:
+        return False
+    return segment.find("]", start + 2) != -1
+
+
+def _segment_is_char_class(segment: str, *, is_last: bool) -> bool:
+    """Whether a SEGMENT's bracket group is a glob CHARACTER CLASS, not a NAME.
+
+    Two shapes can only be a class:
+
+    * literal text sits BESIDE the group in the same segment — ``[a-z]_test.go``,
+      ``test_[0-9].py``, ``page[0-9].tsx`` (a file name is not assembled from a
+      route parameter and a suffix);
+    * the body opens with a negation or an alphanumeric RANGE — ``[a-z]``, ``[0-9]``,
+      ``[!id]``.
+
+    Everything else (``[id]``, ``[slug]``, ``[...slug]``, ``[[...slug]]``) reads as an
+    ordinary NAME. For the LAST segment the file extension is stripped first, so
+    ``[id].tsx`` and ``[id].test.tsx`` are names while ``[a-z]_test.go`` is not.
+    """
+    if not _segment_has_char_class(segment):
+        return False
+    name = _strip_plausible_suffixes(segment) if is_last else segment
+    if not (name.startswith("[") and name.endswith("]")):
+        return True
+    body = name[1:-1]
+    if body[:1] in _CHAR_CLASS_NEGATIONS:
+        return True
+    return bool(_CHAR_CLASS_RANGE_RE.match(body))
+
+
+def is_glob_decl(raw: str) -> bool:
+    """Whether a declared path entry is a GLOB PATTERN rather than ONE concrete path.
+
+    The single rule behind every "pattern or path?" decision: ``expected_outputs`` /
+    ``implement.default_output_paths`` classification, the planner's concrete-test-file
+    test, and the implementation-coverage matchers. Path SHAPE only — no language or
+    framework knowledge enters CoDD core.
+
+    * ``*`` and ``?`` are unambiguous wildcards wherever they appear and decide alone.
+    * ``[``/``]`` are NOT: a bracketed path SEGMENT is an ordinary directory or file
+      name under several routing conventions (``src/app/[id]/page.tsx``,
+      ``pages/posts/[id].tsx``). Brackets read as a CHARACTER CLASS only when the
+      group cannot be a name (see :func:`_segment_is_char_class`), or when the entry
+      names no concrete file at all — with no file extension there is nothing to
+      distinguish ``src/app/[id]`` from a pattern, so it stays a glob.
+
+    Issue #36: the original rule (``any(ch in s for ch in "*?[")``) made
+    ``.../[id]/page.tsx`` a glob, so ``_create_output_paths`` took the DIRECTORY
+    branch and ``mkdir``-ed ``page.tsx`` itself — then reported the path-kind
+    collision it had just created. Its first fix let a trailing extension win over
+    the whole bracket scan, which flipped the other side of the boundary: the genuine
+    Go class glob ``internal/httpapi/[a-z]_test.go`` became an "exact file", and the
+    declared-output-completeness gate false-flagged a produced deliverable as absent
+    (a WARN today, a false-RED under ``enforce``).
+
+    Residual ambiguity, stated on purpose: ``src/[abc].py`` is shape-identical to the
+    route file ``src/[id].py``; nothing in the path tells them apart. The tie is
+    broken toward "one concrete file" because that error is a WARN, while the
+    opposite one is FATAL (the ``mkdir`` collision of issue #36). Authors who mean a
+    character class can write the range form (``src/[a-c].py``) or ``*``/``?``.
+    """
+    s = str(raw).strip().replace("\\", "/").strip("/")
+    if not s:
+        return False
+    if any(ch in s for ch in "*?"):
+        return True
+    segments = s.split("/")
+    last_index = len(segments) - 1
+    if any(
+        _segment_is_char_class(segment, is_last=(index == last_index))
+        for index, segment in enumerate(segments)
+    ):
+        return True
+    if any(_segment_has_char_class(segment) for segment in segments):
+        # A bracketed NAME (``[id]``, ``[...slug]``) still denotes ONE path when the
+        # entry names a concrete file; with no file extension it is indistinguishable
+        # from a pattern, so it stays a glob (pre-#36 behavior, unchanged).
+        return not has_plausible_file_extension(s)
+    return False

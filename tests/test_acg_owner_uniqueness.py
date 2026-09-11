@@ -723,3 +723,81 @@ def test_bracketed_segment_with_extension_is_an_exact_file_path():
     assert _is_glob_decl("src/app/[id]") is True  # bracket class, no file extension
     assert _is_glob_decl("src/app/x/[id]/page.tsx") is False
     assert _is_glob_decl("src/app/page.tsx") is False
+
+
+def test_character_class_glob_with_extension_is_not_flagged_absent(tmp_path):
+    """★anti-false-RED: a GENUINE character class stays a glob even when the entry
+    carries a file extension.
+
+    ``internal/httpapi/[a-z]_test.go`` is a Go test-file glob: the literal string is
+    not a file, but ``a_test.go`` on disk satisfies it. Reading it as an EXACT file
+    path makes the completeness gate report a produced deliverable as "absent on
+    disk" — a WARN today and a false-RED under
+    ``implement.declared_output_completeness: enforce``. This is the other side of
+    the boundary the issue-#36 fix moved: the bracketed ROUTE segment
+    (``[id]/page.tsx``) had to become a file, the bracketed CHARACTER CLASS
+    (``[a-z]_test.go``) must NOT.
+    """
+    from codd.greenfield.pipeline import _declared_output_is_file_path
+
+    assert _declared_output_is_file_path("internal/httpapi/[a-z]_test.go") is False
+    assert _declared_output_is_file_path("tests/test_[0-9].py") is False
+    assert _declared_output_is_file_path("src/[a-z].py") is False
+    assert _declared_output_is_file_path("src/app/[!id]/page.tsx") is False
+
+    # End-to-end: declare the class glob, produce a matching file → no warn, and no
+    # StageError even under ``enforce``.
+    (tmp_path / "internal" / "httpapi").mkdir(parents=True)
+    (tmp_path / "internal" / "httpapi" / "a_test.go").write_text("package httpapi\n")
+    task = ImplementTaskRef(
+        task_id="t", design_node="n", expected_outputs=("internal/httpapi/[a-z]_test.go",)
+    )
+    config = {"implement": {"declared_output_completeness": "enforce"}}
+    msgs: list[str] = []
+    _check_declared_output_completeness(
+        task, [_Result(generated_files=[])], tmp_path, config, echo=msgs.append
+    )
+    assert not msgs, f"character-class glob falsely flagged absent: {msgs}"
+
+
+def test_glob_versus_bracketed_name_boundary_is_shape_only():
+    """The full boundary, both sides, in ONE table (issue #36 + its review).
+
+    A bracket group is a CHARACTER CLASS when it cannot be read as a name — literal
+    text sits beside it in the same segment (``[a-z]_test.go``), or its body opens
+    with a negation or an alphanumeric range (``[a-z]`` / ``[0-9]`` / ``[!id]``).
+    Otherwise it is an ordinary NAME (``[id]``, ``[...slug]``, ``[[...slug]]``) and
+    the entry is one concrete path. Path-SHAPE only: no framework knowledge.
+    """
+    from codd.greenfield.pipeline import _declared_output_is_file_path, _is_glob_decl
+
+    # ``*``/``?`` decide on their own, anywhere in the entry.
+    assert _is_glob_decl("src/**/*.py") is True
+    assert _is_glob_decl("internal/httpapi/*_test.go") is True
+    assert _is_glob_decl("src/**/helpers.py") is True
+    assert _is_glob_decl("src/app/x/?age.tsx") is True
+
+    # Character classes — a glob even with a trailing extension.
+    assert _is_glob_decl("internal/httpapi/[a-z]_test.go") is True  # literal text beside
+    assert _is_glob_decl("tests/test_[0-9].py") is True  # ... on the other side
+    assert _is_glob_decl("src/[a-z].py") is True  # range body
+    assert _is_glob_decl("src/[0-9a-f].py") is True  # range body, longer
+    assert _is_glob_decl("src/app/[!id]/page.tsx") is True  # negated body
+    assert _is_glob_decl("src/app/[^id]/page.tsx") is True
+    assert _is_glob_decl("src/app/[id]") is True  # bracketed name, no file extension
+
+    # Bracketed NAMES that still name ONE concrete file.
+    assert _is_glob_decl("src/app/x/[id]/page.tsx") is False
+    assert _is_glob_decl("pages/posts/[id].tsx") is False
+    assert _is_glob_decl("pages/posts/[id].test.tsx") is False  # compound extension
+    assert _is_glob_decl("src/app/blog/[...slug]/page.tsx") is False  # catch-all
+    assert _is_glob_decl("src/app/shop/[[...slug]]/page.tsx") is False  # optional catch-all
+    assert _is_glob_decl("src/app/[post-id]/page.tsx") is False  # hyphen INSIDE a name
+    assert _is_glob_decl("src/app/[unclosed/page.tsx") is False  # no class without ``]``
+    assert _is_glob_decl("src/app/page.tsx") is False  # no bracket at all
+
+    # ... and the file/dir classifier follows the same rule.
+    assert _declared_output_is_file_path("src/app/x/[id]/page.tsx") is True
+    assert _declared_output_is_file_path("pages/posts/[id].tsx") is True
+    assert _declared_output_is_file_path("src/app/[id]") is False
+    assert _declared_output_is_file_path("internal/httpapi/[a-z]_test.go") is False

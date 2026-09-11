@@ -12,7 +12,7 @@ from typing import Any
 from codd.dag import DAG, Node
 from codd.dag.checks import DagCheck, register_dag_check
 from codd.llm.design_doc_extractor import ExpectedExtraction, ExpectedNode
-from codd.path_safety import resolve_project_path
+from codd.path_safety import is_glob_decl, resolve_project_path
 
 
 DEFAULT_PATH_PREFIX_TOLERANT = ("src/", "lib/", "app/")
@@ -425,10 +425,17 @@ def _resolve_in_root(raw_hint: str, project_root: Path) -> Path | None:
 def _fs_glob_match(hint: str, project_root: Path | None) -> bool:
     """Glob-only FS lookup, kept identical to the historical fallback (raw
     fnmatch, no literal-bracket escaping) so the additional_implementation
-    pass keeps its exact pre-existing behavior."""
+    pass keeps its exact pre-existing behavior for real globs.
+
+    What IS a glob is now the shared :func:`codd.path_safety.is_glob_decl` shape
+    rule instead of a local ``any(char in hint for char in "*?[]")``: a bracketed
+    ROUTE path (``app/[id]/page.ts``) is one concrete file, and reading it as a
+    character class here let an unrelated single-character file (``app/i/page.ts``)
+    suppress the whole additional_implementation pass. Genuine class globs
+    (``[a-z]_test.go``) still take this branch, unchanged."""
     if project_root is None or not hint:
         return False
-    if not any(char in hint for char in "*?[]"):
+    if not is_glob_decl(hint):
         return False
     return any((project_root / match).is_file() for match in fnmatch.filter(_project_files(project_root), hint))
 
@@ -536,7 +543,11 @@ def _escape_literal_brackets(pattern: str) -> str:
 
 
 def _soft_path_match(hint: str, candidate: str) -> bool:
-    if any(char in hint for char in "*?[]"):
+    """Fuzzy last-resort match. A PATTERN never soft-matches (a glob is matched by
+    ``_glob_path_match``), but a bracketed ROUTE path is an ordinary name and now
+    reaches this branch like any other concrete path — the shared
+    :func:`codd.path_safety.is_glob_decl` rule decides which is which."""
+    if is_glob_decl(hint):
         return False
     hint_lower = hint.lower()
     candidate_lower = candidate.lower()

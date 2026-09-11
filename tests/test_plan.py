@@ -1206,3 +1206,37 @@ def test_vb_closure_skipped_when_coverage_gate_off():
         behaviors, [["docs/test/test_strategy.md"]], config={"test_coverage": {"gate": False}}
     )
     assert closure is None
+
+
+def test_concrete_test_file_uses_the_shared_path_shape_rule():
+    """The planner's concrete-test-file rule is the SHARED shape rule (issue #36
+    review, sibling site 2 of 4).
+
+    Its own ``any(ch in rel for ch in "*?[")`` copy read a bracketed ROUTE test file
+    as a pattern, so a task declaring ``src/app/[id]/page.test.tsx`` authored no
+    concrete test at all. Scope, measured: ``_VB_PATH_TOKEN_RE`` cannot emit a
+    bracketed owner token today, so no end-to-end closure decision moves — this pins
+    the rule itself so the two sites cannot drift again.
+    """
+    prefixes = ["tests/"]
+    # Bracketed route segments are ordinary directory names → one concrete file.
+    assert planner_module._is_concrete_test_file(
+        "src/app/[id]/page.test.tsx", test_prefixes=prefixes
+    ) is True
+    assert planner_module._is_concrete_test_file(
+        "tests/app/[...slug]/route.test.ts", test_prefixes=prefixes
+    ) is True
+    # Genuine patterns are still not single files.
+    assert planner_module._is_concrete_test_file(
+        "tests/[a-z]_test.go", test_prefixes=prefixes
+    ) is False
+    assert planner_module._is_concrete_test_file(
+        "tests/e2e/*.e2e.test.ts", test_prefixes=prefixes
+    ) is False
+    # Unchanged: a plain concrete test file, and a doc.
+    assert planner_module._is_concrete_test_file(
+        "tests/mod_a/create.test.ts", test_prefixes=prefixes
+    ) is True
+    assert planner_module._is_concrete_test_file(
+        "docs/test/test_strategy.md", test_prefixes=prefixes
+    ) is False
