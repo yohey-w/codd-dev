@@ -54,6 +54,9 @@ def _write_project(
         "requirement_reconciliation": {
             "enabled": True,
             "docs": ["docs/requirements/requirements.md"],
+            # In-scope by section heading, so a fixture row does not have to cite
+            # an operation just to be audited.
+            "sections": ["機能要件"],
         },
         # Off by default in these fixtures so each test exercises ONE rule; the
         # default-true behaviour has its own tests below.
@@ -682,3 +685,98 @@ def test_implement_gate_still_passes_a_project_with_nothing_to_certify(tmp_path)
     )
     assert passed is True
     assert any("nothing to audit" in message for message in messages)
+
+
+# ---------------------------------------------------------------------------
+# stage 3 — (c) the evidence must reference the criterion's NAMED parameters
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_literal_tokenizer_ignores_numbers_inside_other_tokens():
+    from codd.acceptance_evidence import numeric_literals
+
+    assert numeric_literals("A4 1枚に15人（5行×3列）") == ["1", "15", "5", "3"]
+    # ids, dates, versions, paths and markup are not stated values
+    assert numeric_literals("F-E2 v1.7 2026-08-22 <sub>note</sub> /r/token") == []
+    assert numeric_literals("0.5 秒以内") == ["0.5"]
+
+
+def test_bare_literal_without_declared_params_is_amber(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc("| R-1 | 出す | A4 1枚に15人が並ぶ `operation_flow.sheet_print` |\n"),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+    )
+    result = _run_check(root)
+    found = _violations(result, "undeclared_numeric")
+    assert found and found[0]["literals"] == ["1", "15"]
+    assert found[0]["severity"] == "amber"
+
+
+def test_declaring_params_silences_the_nudge(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | A4 1枚に15人が並ぶ `operation_flow.sheet_print` | per_sheet=15 |\n",
+            header="| ID | 要件 | 検収条件 | params |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+    )
+    assert _violations(_run_check(root), "undeclared_numeric") == []
+
+
+def test_declared_param_missing_from_the_bound_evidence_is_red(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 1枚に15人 | test:sheet | per_sheet=15 |\n",
+            header="| ID | 要件 | 検収条件 | verified_by | params |\n| --- | --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={"tests/unit/sheet.test.ts": "test('sheet', () => { expect(rows()).toBe(20); });\n"},
+    )
+    found = _violations(_run_check(root), "param_not_referenced")
+    assert found and found[0]["params"] == ["per_sheet"]
+    assert found[0]["severity"] == "red"
+
+
+def test_evidence_reading_the_param_by_name_passes(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 1枚に15人 | test:sheet | per_sheet=15 |\n",
+            header="| ID | 要件 | 検収条件 | verified_by | params |\n| --- | --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={
+            "tests/unit/sheet.test.ts": (
+                "import { spec } from './spec';\n"
+                "test('sheet', () => { expect(rows()).toBe(spec.per_sheet); });\n"
+            )
+        },
+    )
+    result = _run_check(root)
+    assert _violations(result, "param_not_referenced") == []
+    assert _violations(result, "undeclared_numeric") == []
+
+
+def test_params_without_any_bound_evidence_report_the_binding_not_the_param(tmp_path):
+    """An unbound criterion's parameter has nowhere to be referenced yet — the
+    finding is the missing binding, and reporting both would be noise."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 1枚に15人 | | per_sheet=15 |\n",
+            header="| ID | 要件 | 検収条件 | verified_by | params |\n| --- | --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+    )
+    result = _run_check(root)
+    assert _violations(result, "param_not_referenced") == []
+    assert _violations(result, "unbound_acceptance")

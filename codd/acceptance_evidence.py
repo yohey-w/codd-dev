@@ -540,6 +540,28 @@ def build_evidence_context(
     )
 
 
+# Invariant (c): a value an acceptance criterion states must reach its evidence
+# through a NAME, not by being retyped. A bare literal in the criterion text is
+# therefore worth a nudge — but only a bare one. The look-arounds reject every
+# number that is part of a larger token, which is where the false positives live:
+# an id (``F-E2``), a paper size (``A4``), a date (``2026-08-22``), a version
+# (``v1.7``), a path or a decimal inside one.
+_NUMERIC_LITERAL_RE = re.compile(r"(?<![A-Za-z0-9_\-./:])\d+(?:[.,]\d+)*(?![A-Za-z0-9_\-./:])")
+_MARKUP_RE = re.compile(r"<[^>]+>")
+
+
+def numeric_literals(text: str) -> list[str]:
+    """Bare numeric literals stated in an acceptance criterion, in order, deduped."""
+
+    stripped = _MARKUP_RE.sub(" ", text)
+    seen: list[str] = []
+    for match in _NUMERIC_LITERAL_RE.finditer(stripped):
+        value = match.group(0)
+        if value not in seen:
+            seen.append(value)
+    return seen
+
+
 def vb_id_for(req_id: str) -> str:
     """Canonical VB id derived from a requirement id (``F-E2`` -> ``VB-F-E2``).
 

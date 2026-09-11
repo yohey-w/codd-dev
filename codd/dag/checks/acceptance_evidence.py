@@ -29,6 +29,7 @@ from codd.acceptance_evidence import (
     AcceptanceCriterion,
     acceptance_settings,
     load_acceptance_criteria,
+    numeric_literals,
     resolve_test_targets,
     runtime_obligations,
     runtime_smoke_enabled,
@@ -114,26 +115,29 @@ class AcceptanceEvidenceCheck(DagCheck):
         violations.extend(
             _runtime_violations(criteria, declared_ids, config, resolved.runtime_severity)
         )
-        violations.extend(
-            _binding_violations(
-                root,
-                criteria,
-                config=config,
-                settings=resolved,
-                test_paths=test_paths,
-                anchors=anchors,
-                # Only an EXECUTABLE runtime obligation counts as a binding. When
-                # the runtime stage is off, the criterion really is proved by
-                # nothing, and the two findings ask for two different remedies
-                # (turn the stage on / write a test) — not one defect twice.
-                runtime_bound_ids=frozenset(
-                    criterion.req_id
-                    for criterion, _targets in runtime_obligations(criteria, declared_ids)
-                )
-                if runtime_smoke_enabled(config)
-                else frozenset(),
+        # Only an EXECUTABLE runtime obligation counts as a binding. When the
+        # runtime stage is off, the criterion really is proved by nothing, and
+        # the two findings ask for two different remedies (turn the stage on /
+        # write a test) — that is two defects, not one reported twice.
+        runtime_bound_ids = (
+            frozenset(
+                criterion.req_id
+                for criterion, _targets in runtime_obligations(criteria, declared_ids)
             )
+            if runtime_smoke_enabled(config)
+            else frozenset()
         )
+        binding_violations, bound_by_req = _binding_violations(
+            root,
+            criteria,
+            config=config,
+            settings=resolved,
+            test_paths=test_paths,
+            anchors=anchors,
+            runtime_bound_ids=runtime_bound_ids,
+        )
+        violations.extend(binding_violations)
+        violations.extend(_parameter_violations(root, criteria, bound_by_req, resolved))
 
         return _finalize(violations, checked_count=len(criteria), max_findings=resolved.max_findings)
 
@@ -197,7 +201,7 @@ def _binding_violations(
     test_paths: set[str],
     anchors: Mapping[str, set[str]],
     runtime_bound_ids: frozenset[str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     """Every acceptance criterion must reach evidence a machine can re-run.
 
     The four binding paths, in the order a project typically acquires them:
@@ -217,6 +221,7 @@ def _binding_violations(
     """
 
     violations: list[dict[str, Any]] = []
+    bound_by_req: dict[str, list[str]] = {}
     registry_exists, covered_by_req = _vb_bindings(
         root, config, (criterion.req_id for criterion in criteria)
     )
@@ -276,6 +281,7 @@ def _binding_violations(
                 if not record.is_stale(current):
                     bound.append(f"manual:{record.by}")
 
+        bound_by_req[criterion.req_id] = sorted(set(bound))
         if bound:
             continue
         if criterion.req_id in runtime_bound_ids:
@@ -297,7 +303,7 @@ def _binding_violations(
                 ),
             }
         )
-    return violations
+    return violations, bound_by_req
 
 
 def _manual_violations(
@@ -364,6 +370,96 @@ def _manual_violations(
             }
         )
     return violations
+
+
+# ---------------------------------------------------------------------------
+# (c) the evidence must reference the criterion's NAMED parameters
+# ---------------------------------------------------------------------------
+
+
+def _parameter_violations(
+    root: Path,
+    criteria: Iterable[AcceptanceCriterion],
+    bound_by_req: Mapping[str, list[str]],
+    settings: Any,
+) -> list[dict[str, Any]]:
+    """A stated value must reach its evidence through a NAME, not by being retyped.
+
+    The requirement said 15, the acceptance document said 20, the code said 20.
+    Nothing was lying: the number had been copied three times, and a copy has no
+    way to notice that the original moved. Grepping the criterion's digits out of
+    the test would only catch the same defect by luck (and fire on every date and
+    version string on the way). What is checkable, deterministically and in any
+    language, is the NAME: declare ``params: {per_sheet: 15}`` next to the
+    criterion, have the test read ``per_sheet``, and the two cannot drift.
+
+    * a declared parameter absent from every bound evidence file is red — the
+      evidence is checking something, but not the value that was agreed;
+    * a bare literal in a criterion that declares NO parameters is amber: a
+      nudge to declare, never an accusation, because the check cannot know
+      whether that number is load-bearing.
+    """
+
+    violations: list[dict[str, Any]] = []
+    for criterion in criteria:
+        bound = bound_by_req.get(criterion.req_id) or []
+        if criterion.params:
+            evidence_text = _read_all(root, bound)
+            missing = [name for name in criterion.params if name not in evidence_text]
+            if missing and bound:
+                violations.append(
+                    {
+                        "type": "param_not_referenced",
+                        "severity": settings.param_severity,
+                        "req_id": criterion.req_id,
+                        "source": criterion.source,
+                        "params": missing,
+                        "message": (
+                            f"[acceptance_evidence] Acceptance criterion `{criterion.req_id}` "
+                            f"declares parameter(s) {', '.join(missing)}, but no evidence file "
+                            f"bound to it ({', '.join(bound)}) mentions them — the evidence is "
+                            "asserting a value that was retyped, so the criterion and the test "
+                            "can drift apart without either turning red. Read the parameter by "
+                            "name in the test."
+                        ),
+                    }
+                )
+            continue
+
+        literals = numeric_literals(criterion.text)
+        if not literals:
+            continue
+        violations.append(
+            {
+                "type": "undeclared_numeric",
+                "severity": settings.undeclared_numeric_severity,
+                "req_id": criterion.req_id,
+                "source": criterion.source,
+                "literals": literals,
+                "message": (
+                    f"[acceptance_evidence] Acceptance criterion `{criterion.req_id}` "
+                    f"({criterion.source}) states the value(s) {', '.join(literals)} as bare "
+                    "literals and declares no `params:`. A number written in three places "
+                    "drifts in three places. Declare it once — `params: <name>=<value>` in the "
+                    "criterion's row — and have the evidence read it by name."
+                ),
+            }
+        )
+    return violations
+
+
+def _read_all(root: Path, relative_paths: Iterable[str]) -> str:
+    """Concatenated text of the given project files (unreadable ones contribute nothing)."""
+
+    chunks: list[str] = []
+    for relative in relative_paths:
+        if ":" in relative and not (root / relative).exists():
+            continue  # a synthetic marker such as "manual:<owner>"
+        try:
+            chunks.append((root / relative).read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+    return "\n".join(chunks)
 
 
 def _vb_bindings(
