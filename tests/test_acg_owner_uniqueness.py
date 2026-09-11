@@ -694,3 +694,32 @@ def test_required_kinds_still_gates_concrete_test_file_and_glob(tmp_path):
         expected_outputs=("tests/test_x.py",),
     )
     assert _required_kinds(task, py) == {"test"}
+
+
+def test_bracketed_segment_with_extension_is_an_exact_file_path():
+    """``[`` / ``]`` do not make a declared output a glob when the entry still names
+    ONE concrete file (issue #36).
+
+    ``*`` and ``?`` remain unconditional wildcards; brackets are only a character
+    class when the trailing segment carries no plausible file extension. Path-SHAPE
+    only — bracketed path segments are ordinary directory/file names in several
+    routing conventions, and CoDD carries no framework knowledge about them.
+    """
+    from codd.greenfield.pipeline import _declared_output_is_file_path, _is_glob_decl
+
+    # Bracketed DIRECTORY segment + a real extension on the last segment → a file.
+    assert _declared_output_is_file_path("src/app/x/[id]/page.tsx") is True
+    assert _declared_output_is_file_path("src/app/coach/athlete/[athleteId]/page.tsx") is True
+    # Bracketed FILE segment with an extension → still one file.
+    assert _declared_output_is_file_path("pages/posts/[id].tsx") is True
+    # No extension on the last segment → not an exact file path (unchanged).
+    assert _declared_output_is_file_path("src/app/[id]") is False
+
+    # The glob rule itself: ``*``/``?`` anywhere still win, brackets do not.
+    assert _is_glob_decl("src/**/*.py") is True
+    assert _is_glob_decl("internal/httpapi/*_test.go") is True
+    assert _is_glob_decl("src/**/helpers.py") is True
+    assert _is_glob_decl("src/app/x/?age.tsx") is True
+    assert _is_glob_decl("src/app/[id]") is True  # bracket class, no file extension
+    assert _is_glob_decl("src/app/x/[id]/page.tsx") is False
+    assert _is_glob_decl("src/app/page.tsx") is False

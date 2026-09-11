@@ -3817,7 +3817,7 @@ def _is_bare_directory_decl(raw: str) -> bool:
         return False
     if ":" in s:  # node-id (``module:parser.parse``), not a filesystem path
         return False
-    if any(ch in s for ch in "*?["):  # a glob denotes file(s), not a bare directory
+    if _is_glob_decl(s):  # a glob denotes file(s), not a bare directory
         return False
     return not _declared_output_is_file_path(s)
 
@@ -4035,6 +4035,52 @@ def _verify_task_contract(
         )
 
 
+def _has_plausible_file_extension(s: str) -> bool:
+    """Whether the LAST segment of ``s`` carries a plausible file EXTENSION.
+
+    Short + alphanumeric (``.py`` / ``.yaml`` / ``.tsx``) — the same test the
+    file-path classifier has always applied, factored out so the glob classifier
+    can consult it too."""
+    ext = PurePosixPath(s).suffix[1:]  # extension of the last path segment
+    return bool(ext) and len(ext) <= 6 and ext.isalnum()
+
+
+def _segment_has_char_class(segment: str) -> bool:
+    """Whether one path SEGMENT contains a well-formed ``[...]`` character class."""
+    start = segment.find("[")
+    if start == -1:
+        return False
+    return segment.find("]", start + 2) != -1  # at least one character inside
+
+
+def _is_glob_decl(raw: str) -> bool:
+    """Whether a declared entry is a GLOB PATTERN (matches file[s]) rather than ONE path.
+
+    ``*`` and ``?`` are unambiguous wildcards wherever they appear, so they decide
+    on their own. ``[``/``]`` are NOT: a bracketed path SEGMENT is an ordinary
+    directory or file name under several routing conventions (``src/app/[id]/
+    page.tsx``, ``pages/posts/[id].tsx``) — this is path SHAPE only, no framework
+    knowledge. Brackets therefore read as a character class only when the entry
+    cannot be read as ONE concrete file, i.e. its LAST segment carries no plausible
+    file extension.
+
+    Issue #36: the previous rule (``any(ch in s for ch in "*?[")``) classified
+    ``.../[id]/page.tsx`` as a glob, so ``_create_output_paths`` took the DIRECTORY
+    branch and ``mkdir``-ed ``page.tsx`` itself — then reported the path-kind
+    collision it had just created. Letting the trailing extension win over the
+    bracket scan fixes that without loosening ``*``/``?`` at all."""
+    s = str(raw).strip().replace("\\", "/").strip("/")
+    if not s:
+        return False
+    if any(ch in s for ch in "*?"):
+        return True
+    if any(_segment_has_char_class(seg) for seg in s.split("/")):
+        # A bracket path that still denotes one concrete FILE (trailing extension)
+        # is an exact path, not a pattern.
+        return not _has_plausible_file_extension(s)
+    return False
+
+
 def _declared_output_is_file_path(raw: str) -> bool:
     """Whether a declared ``expected_outputs`` entry is an EXACT FILE PATH.
 
@@ -4056,7 +4102,9 @@ def _declared_output_is_file_path(raw: str) -> bool:
     # extension (``.go``), so without this guard it would be classed as a file and the
     # literal ``(root / glob).is_file()`` check below would false-flag a produced-but-
     # glob output as "absent on disk" (a WARN today, a false-RED under ``enforce``).
-    if any(ch in s for ch in "*?["):
+    # ``_is_glob_decl`` keeps ``*``/``?`` strict while letting a bracketed SEGMENT
+    # (``src/app/[id]/page.tsx``) stay an exact file path — see issue #36.
+    if _is_glob_decl(s):
         return False
     # A file path is identified by a plausible file EXTENSION on its LAST segment.
     # A "/" alone is NOT sufficient: a multi-segment DIRECTORY declaration (e.g.
@@ -4065,8 +4113,7 @@ def _declared_output_is_file_path(raw: str) -> bool:
     # check. Treating it as an exact file made ``(root / dir).is_file()`` False and
     # falsely reported a produced directory as "absent on disk" (a WARN today, a
     # false-RED under ``enforce``).
-    ext = PurePosixPath(s).suffix[1:]  # extension of the last path segment
-    return bool(ext) and len(ext) <= 6 and ext.isalnum()
+    return _has_plausible_file_extension(s)
 
 
 def _check_declared_output_completeness(

@@ -62,3 +62,37 @@ def test_directory_shaped_output_that_exists_as_file_raises_stage_error(tmp_path
 
     with pytest.raises(StageError):
         _create_output_paths(tmp_path, ["src"])
+
+
+def test_bracketed_route_segment_output_is_created_as_a_file_path(tmp_path: Path):
+    """A declared output whose DIRECTORY segment is bracketed (``[id]``) is one
+    concrete file, not a glob (issue #36).
+
+    Path-SHAPE only: a bracketed segment is a legal directory name, and the entry's
+    trailing segment carries a real extension, so it must take the FILE branch —
+    parent directories created, the file itself left for the generator to write.
+    Before the fix the whole-path bracket scan classified it as a glob, so
+    ``_create_output_paths`` ``mkdir``-ed ``page.tsx`` itself as a directory and the
+    next run reported the ``path-kind collision`` CoDD had just manufactured.
+    """
+    file_output = "src/app/x/[id]/page.tsx"
+
+    _create_output_paths(tmp_path, [file_output])
+
+    dest = tmp_path / "src" / "app" / "x" / "[id]" / "page.tsx"
+    assert dest.parent.is_dir()  # the bracketed segment IS a directory
+    assert not dest.exists()  # ... and the file path itself was NOT mkdir'd
+
+    # The generator's write now succeeds, and a re-run raises no path-kind collision.
+    dest.write_text("export default function Page() {}\n", encoding="utf-8")
+    _create_output_paths(tmp_path, [file_output])
+    assert dest.is_file()
+
+
+def test_bracketed_directory_output_without_extension_is_unchanged(tmp_path: Path):
+    """A bracketed entry with NO trailing extension keeps its previous, non-file
+    treatment — the file-vs-glob rule only moved for entries that name one concrete
+    file."""
+    _create_output_paths(tmp_path, ["src/app/[id]"])
+
+    assert (tmp_path / "src" / "app" / "[id]").is_dir()
