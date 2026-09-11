@@ -16,13 +16,23 @@ breaks those regexes in BOTH directions:
   ``^``-anchored path regex, so attribution returns no target and auto-repair
   has nothing to engage.
 * false GREEN — the zero-collected guard looks for the literal substring
-  ``collected 0 items``; a colour code inserted mid-phrase hides it, and a run
-  that executed nothing passes.
+  ``collected 0 items``; a colour code inserted mid-phrase hides it. Scope of
+  what was actually OBSERVED: only the false RED was reproduced live. The false
+  GREEN is verified at the guard level (a split marker does defeat the substring
+  match) but plain pytest exits 5 on an empty run, and the exit-code check fires
+  first — so this half is a defensive hole, reachable only through a wrapper
+  that swallows exit 5. It is guarded because the guard exists precisely for
+  that wrapper case, not because it was seen in the wild.
 
 These tests feed LITERAL escape sequences rather than relying on the ambient
 environment, because CI does not set ``FORCE_COLOR`` — an environment-driven
 test would be green in CI while the defect it guards is live for users. One test
 sets ``FORCE_COLOR`` explicitly to pin the real end-to-end reproduction.
+
+Falsification (measured, not asserted): replacing ``strip_ansi`` with the
+identity function fails 6 of the 9 tests below. The other 3 are property tests
+(idempotence, clean-text no-op, and the zero-guard's behaviour on already-clean
+text) that hold either way.
 """
 
 from __future__ import annotations
@@ -38,7 +48,9 @@ from codd.deployment.providers.verification.pytest_http import (
 from codd.repair.test_failure_attribution import attribute_command_failure
 
 
-# Verbatim pytest output as captured with FORCE_COLOR=3 (escapes written out).
+# pytest output as captured with FORCE_COLOR=3, escapes written out. Adapted, not
+# verbatim: the traceback line is given in pytest's ``path:line: in func`` long-tb
+# form (``--tb=long``), which is the shape the attributor's frame regex targets.
 COLOURED_GREEN_SUMMARY = "\x1b[32m.\x1b[0m\x1b[32m   [100%]\x1b[0m\n\x1b[32m\x1b[32m\x1b[1m1 passed\x1b[0m\x1b[32m in 0.00s\x1b[0m\x1b[0m\n"
 # Both zero-markers deliberately SPLIT by an escape (pytest colours the count
 # separately from the label), so neither literal substring survives verbatim —
