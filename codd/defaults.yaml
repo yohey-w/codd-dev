@@ -303,8 +303,18 @@ test_coverage:
   # Verifiable-Behavior (VB) coverage audit: every VB id declared in a test
   # document's VB table must be claimed by a `codd: covers vb=<id>` marker in a
   # test file. `codd test audit` reports gaps; `codd implement` enforces the
-  # same gate (projects with no VB table pass with a one-line notice).
+  # same gate.
   gate: true       # set false to turn the implement-time gate into advisory-only
+  # An EMPTY registry used to be the safest registry: "no VB table -> one-line
+  # notice -> pass" made a project that never declared a verifiable behavior
+  # permanently green, and every acceptance criterion it wrote stayed connected
+  # to nothing. Empty is now RED for a project that has something to certify —
+  # it declares acceptance criteria in its requirement documents, or it
+  # structurally expects a canonical registry (planned/pinned/present). A project
+  # with neither is untouched (nothing to verify). Set false to restore the old
+  # behaviour for a project that verifies its criteria some other way; the
+  # acceptance_evidence check honors the same switch.
+  require_vb_table: true
   max_retries: 2   # bounded re-implementation attempts before the gate fails
   docs: []         # explicit VB-table documents (empty = auto-discovery)
 verify:

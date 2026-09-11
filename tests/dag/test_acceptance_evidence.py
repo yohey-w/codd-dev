@@ -41,6 +41,7 @@ def _write_project(
     runtime_smoke: dict | None = None,
     extra_config: dict | None = None,
     files: dict[str, str] | None = None,
+    require_vb_table: bool = False,
 ) -> Path:
     root = tmp_path / "project"
     (root / "docs" / "requirements").mkdir(parents=True, exist_ok=True)
@@ -54,6 +55,9 @@ def _write_project(
             "enabled": True,
             "docs": ["docs/requirements/requirements.md"],
         },
+        # Off by default in these fixtures so each test exercises ONE rule; the
+        # default-true behaviour has its own tests below.
+        "test_coverage": {"require_vb_table": require_vb_table},
     }
     if operations is not None:
         config["operation_flow"] = {"operations": operations}
@@ -265,12 +269,15 @@ def test_runtime_severity_is_configurable_to_amber(tmp_path):
             "| R-1 | 出す | 15人が並ぶ <sub>`operation_flow.sheet_print`</sub> |\n"
         ),
         operations=[{"id": "sheet_print", "actor": "operator", "verb": "print", "target": "sheet"}],
-        extra_config={"acceptance_evidence": {"runtime_severity": "amber"}},
+        extra_config={
+            "acceptance_evidence": {"runtime_severity": "amber", "unbound_severity": "amber"}
+        },
     )
     result = _run_check(root)
     assert result.passed is True
     assert result.status == "warn"
-    assert _violations(result, "runtime_evidence_not_executable")
+    found = _violations(result, "runtime_evidence_not_executable")
+    assert found and found[0]["severity"] == "amber"
 
 
 def test_project_without_acceptance_criteria_is_dormant_not_green(tmp_path):
@@ -332,3 +339,346 @@ def test_dag_build_is_not_required_for_the_operation_universe(tmp_path):
         codd_config=yaml.safe_load((root / "codd" / "codd.yaml").read_text(encoding="utf-8"))
     )
     assert _violations(result, "runtime_evidence_not_executable")
+
+
+# ---------------------------------------------------------------------------
+# stage 2 — (a) wiring: every criterion reaches machine-checked evidence
+# ---------------------------------------------------------------------------
+
+ROW_WITH_OPERATION = "| R-1 | 出す | 15人が並ぶ <sub>`operation_flow.sheet_print`</sub> |\n"
+SHEET_OPERATION = [{"id": "sheet_print", "actor": "operator", "verb": "print", "target": "sheet", "route": "/admin"}]
+RUNTIME_ON = {"enabled": True, "dev_server": {"url": "http://localhost:3000"}}
+
+
+def test_no_vb_registry_is_red_when_the_project_has_criteria_to_certify(tmp_path):
+    """The "empty registry passes with a notice" rule made empty the safest state."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(ROW_WITH_OPERATION),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        require_vb_table=True,
+    )
+    result = _run_check(root)
+    assert result.passed is False
+    assert _violations(result, "vb_registry_missing")
+
+
+def test_require_vb_table_false_restores_the_old_pass(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(ROW_WITH_OPERATION),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        require_vb_table=False,
+    )
+    assert _violations(_run_check(root), "vb_registry_missing") == []
+
+
+def test_criterion_bound_to_nothing_is_red(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc("| R-1 | 出す | 15人が並ぶ `operation_flow.sheet_print` |\n"),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={"tests/unit/other.test.ts": "test('other', () => {});\n"},
+    )
+    # runtime_smoke is ON, so the operation anchor is executable evidence.
+    assert _violations(_run_check(root), "unbound_acceptance") == []
+
+    root2 = _write_project(
+        tmp_path / "b",
+        requirements=_requirements_doc("| R-1 | 出す | 15人 `operation_flow.sheet_print` | |\n",
+                                       header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n"),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+    )
+    found = _violations(_run_check(root2), "unbound_acceptance")
+    assert [item["req_id"] for item in found] == ["R-1"]
+
+
+def test_a_test_file_naming_the_requirement_id_binds_the_criterion(tmp_path):
+    """The brownfield path: no document surgery, just the id in the test."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 | |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        extra_config={"requirement_reconciliation": {"enabled": True, "sections": ["機能要件"],
+                                                     "docs": ["docs/requirements/requirements.md"]}},
+        files={"tests/unit/sheet.test.ts": "// R-1: 15 per sheet\ntest('sheet', () => {});\n"},
+    )
+    assert _violations(_run_check(root), "unbound_acceptance") == []
+
+
+def test_requirement_id_anchor_matches_whole_tokens_only(tmp_path):
+    """`R-1` must not be bound by a file that only mentions `R-12`."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 | |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        extra_config={"requirement_reconciliation": {"enabled": True, "sections": ["機能要件"],
+                                                     "docs": ["docs/requirements/requirements.md"]}},
+        files={"tests/unit/sheet.test.ts": "// R-12 only\ntest('sheet', () => {});\n"},
+    )
+    assert [item["req_id"] for item in _violations(_run_check(root), "unbound_acceptance")] == ["R-1"]
+
+
+def test_verified_by_test_pointer_must_resolve(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 `operation_flow.sheet_print` | test:nosuchtest |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={"tests/unit/sheet.test.ts": "test('sheet', () => {});\n"},
+    )
+    assert _violations(_run_check(root), "unresolved_evidence")
+
+    root2 = _write_project(
+        tmp_path / "b",
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 `operation_flow.sheet_print` | test:sheet |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={"tests/unit/sheet.test.ts": "test('sheet', () => {});\n"},
+    )
+    result = _run_check(root2)
+    assert _violations(result, "unresolved_evidence") == []
+    assert _violations(result, "unbound_acceptance") == []
+
+
+def test_a_covered_vb_row_naming_the_requirement_binds_it(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 | |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        require_vb_table=True,
+        extra_config={"requirement_reconciliation": {"enabled": True, "sections": ["機能要件"],
+                                                     "docs": ["docs/requirements/requirements.md"]}},
+        files={
+            "docs/test/test_strategy.md": (
+                "# Test strategy\n\n| VB ID | behavior | Requirement |\n| --- | --- | --- |\n"
+                "| VB-R-1 | 15 per sheet | R-1 |\n"
+            ),
+            "tests/unit/sheet.test.ts": "// codd: covers vb=VB-R-1\ntest('sheet', () => {});\n",
+        },
+    )
+    result = _run_check(root)
+    assert _violations(result, "vb_registry_missing") == []
+    assert _violations(result, "unbound_acceptance") == []
+
+
+def test_an_uncovered_vb_row_does_not_launder_into_acceptance(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 | |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        require_vb_table=True,
+        extra_config={"requirement_reconciliation": {"enabled": True, "sections": ["機能要件"],
+                                                     "docs": ["docs/requirements/requirements.md"]}},
+        files={
+            "docs/test/test_strategy.md": (
+                "# Test strategy\n\n| VB ID | behavior | Requirement |\n| --- | --- | --- |\n"
+                "| VB-R-1 | 15 per sheet | R-1 |\n"
+            ),
+        },
+    )
+    assert _violations(_run_check(root), "unbound_acceptance")
+
+
+# ---------------------------------------------------------------------------
+# stage 2 — (d) freshness: a manual verdict expires with its implementation
+# ---------------------------------------------------------------------------
+
+
+def _manual_project(tmp_path, *, critical: str = "") -> Path:
+    header = "| ID | 要件 | 検収条件 | verified_by | critical |\n| --- | --- | --- | --- | --- |\n"
+    return _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            f"| R-1 | 出す | 15人 `operation_flow.sheet_print` | manual:yohey | {critical} |\n",
+            header=header,
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={"tools/make-sheet.ts": "// R-1 sheet builder\nexport const build = () => 15;\n"},
+    )
+
+
+def test_manual_evidence_without_a_record_is_red(tmp_path):
+    result = _run_check(_manual_project(tmp_path))
+    assert _violations(result, "manual_evidence_missing")
+
+
+def test_recorded_manual_evidence_binds_and_then_goes_stale(tmp_path):
+    from codd.acceptance_record import load_ledger, record_acceptance
+
+    root = _manual_project(tmp_path)
+    record_acceptance(root, "R-1", status="pass", by="yohey", implementation_paths=["tools/make-sheet.ts"])
+    result = _run_check(root)
+    assert _violations(result, "manual_evidence_missing") == []
+    assert _violations(result, "stale_manual_evidence") == []
+    assert _violations(result, "unbound_acceptance") == []
+    assert load_ledger(root)["R-1"].by == "yohey"
+
+    (root / "tools" / "make-sheet.ts").write_text(
+        "// R-1 sheet builder\nexport const build = () => 20;\n", encoding="utf-8"
+    )
+    stale = _violations(_run_check(root), "stale_manual_evidence")
+    assert stale and "R-1" in stale[0]["message"]
+
+
+def test_a_new_implementer_also_invalidates_the_manual_record(tmp_path):
+    from codd.acceptance_record import record_acceptance
+
+    root = _manual_project(tmp_path)
+    record_acceptance(root, "R-1", status="pass", by="yohey", implementation_paths=["tools/make-sheet.ts"])
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    (root / "src" / "panel.tsx").write_text("// R-1 shipped here too\n", encoding="utf-8")
+    assert _violations(_run_check(root), "stale_manual_evidence")
+
+
+def test_critical_criterion_on_manual_evidence_alone_is_amber(tmp_path):
+    from codd.acceptance_record import record_acceptance
+
+    root = _manual_project(tmp_path, critical="true")
+    record_acceptance(root, "R-1", status="pass", by="yohey", implementation_paths=["tools/make-sheet.ts"])
+    result = _run_check(root)
+    found = _violations(result, "critical_manual_only")
+    assert found and found[0]["severity"] == "amber"
+    assert result.passed is True
+
+
+def test_a_malformed_ledger_reads_as_no_evidence(tmp_path):
+    from codd.acceptance_record import ledger_path
+
+    root = _manual_project(tmp_path)
+    ledger_path(root).write_text("{ not json", encoding="utf-8")
+    assert _violations(_run_check(root), "manual_evidence_missing")
+
+
+# ---------------------------------------------------------------------------
+# stage 2 — `codd acceptance sync` derives the registry the gate demands
+# ---------------------------------------------------------------------------
+
+
+def test_sync_derives_one_vb_row_per_criterion_and_is_idempotent(tmp_path):
+    from codd.acceptance_evidence import build_evidence_context
+    from codd.acceptance_sync import sync_vb_registry
+    from codd.config import load_project_config
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | A4 1枚に15人 <br>並ぶ `operation_flow.sheet_print` |\n"
+            "| R-2 | 消す | 消える `operation_flow.sheet_print` |\n"
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+    )
+    config = load_project_config(root)
+    context = build_evidence_context(root, config)
+    first = sync_vb_registry(root, context.criteria, config=config)
+    assert first.created is True
+    assert first.added == ("VB-R-1", "VB-R-2")
+    text = first.path.read_text(encoding="utf-8")
+    assert "| VB-R-1 |" in text and "<br>" not in text
+
+    second = sync_vb_registry(root, context.criteria, config=config)
+    assert second.added == ()
+    assert second.already_present == ("VB-R-1", "VB-R-2")
+    assert first.path.read_text(encoding="utf-8") == text
+
+
+def test_sync_dry_run_writes_nothing(tmp_path):
+    from codd.acceptance_evidence import build_evidence_context
+    from codd.acceptance_sync import sync_vb_registry
+    from codd.config import load_project_config
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(ROW_WITH_OPERATION),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+    )
+    result = sync_vb_registry(root, build_evidence_context(root, load_project_config(root)).criteria,
+                              dry_run=True)
+    assert result.added == ("VB-R-1",)
+    assert not result.path.exists()
+
+
+# ---------------------------------------------------------------------------
+# stage 2 — the implement-time gate honours the same switch
+# ---------------------------------------------------------------------------
+
+
+def test_implement_gate_fails_on_an_empty_registry_when_criteria_exist(tmp_path):
+    from codd.config import load_project_config
+    from codd.verifiable_behavior_audit import run_implement_coverage_gate
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(ROW_WITH_OPERATION),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        require_vb_table=True,
+        files={"tests/unit/sheet.test.ts": "test('sheet', () => {});\n"},
+    )
+    messages: list[str] = []
+    passed = run_implement_coverage_gate(
+        root,
+        config=load_project_config(root),
+        design_node=None,
+        output_paths=["tests/unit/sheet.test.ts"],
+        echo=messages.append,
+        echo_error=messages.append,
+    )
+    assert passed is False
+    assert any("require_vb_table" in message for message in messages)
+
+
+def test_implement_gate_still_passes_a_project_with_nothing_to_certify(tmp_path):
+    from codd.config import load_project_config
+    from codd.verifiable_behavior_audit import run_implement_coverage_gate
+
+    root = _write_project(
+        tmp_path,
+        requirements="## 3. 機能要件\n\n本文だけの文書。\n",
+        operations=SHEET_OPERATION,
+        require_vb_table=True,
+        files={"tests/unit/sheet.test.ts": "test('sheet', () => {});\n"},
+    )
+    messages: list[str] = []
+    passed = run_implement_coverage_gate(
+        root,
+        config=load_project_config(root),
+        design_node=None,
+        output_paths=["tests/unit/sheet.test.ts"],
+        echo=messages.append,
+        echo_error=messages.append,
+    )
+    assert passed is True
+    assert any("nothing to audit" in message for message in messages)

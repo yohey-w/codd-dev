@@ -411,6 +411,147 @@ def runtime_obligations(
 
 
 # ---------------------------------------------------------------------------
+# Anchors: which files claim to implement / verify a requirement
+# ---------------------------------------------------------------------------
+
+# A requirement id written into a file (``QR sheet (F-E2 / design C-1)``) is an
+# explicit claim by whoever wrote it: "this file is here because of F-E2". The
+# boundary look-arounds keep ``F-E2`` from matching inside ``F-E21`` or
+# ``PREF-E2X`` — an id must appear as a whole token.
+_ID_BOUNDARY = r"[A-Za-z0-9_.\-]"
+
+# Bound each read so one large artifact cannot stall verification.
+_MAX_ANCHOR_SCAN_BYTES = 512 * 1024
+
+
+def requirement_anchor_pattern(req_ids: Iterable[str]) -> re.Pattern[str] | None:
+    """A single alternation matching any of ``req_ids`` as a whole token."""
+
+    ids = sorted({req_id for req_id in req_ids if req_id}, key=len, reverse=True)
+    if not ids:
+        return None
+    body = "|".join(re.escape(req_id) for req_id in ids)
+    return re.compile(rf"(?<!{_ID_BOUNDARY})(?P<id>{body})(?!{_ID_BOUNDARY})")
+
+
+def scan_requirement_anchors(
+    project_root: Path | str,
+    relative_paths: Iterable[str],
+    req_ids: Iterable[str],
+) -> dict[str, set[str]]:
+    """Map each requirement id to the files that write its id as a token.
+
+    One pass over the candidate files with one combined pattern; unreadable or
+    over-sized files are skipped (they anchor nothing rather than raising).
+    """
+
+    pattern = requirement_anchor_pattern(req_ids)
+    anchors: dict[str, set[str]] = {}
+    if pattern is None:
+        return anchors
+    root = Path(project_root).resolve()
+    for relative in relative_paths:
+        path = root / relative
+        try:
+            if path.stat().st_size > _MAX_ANCHOR_SCAN_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for match in pattern.finditer(text):
+            anchors.setdefault(match.group("id"), set()).add(relative)
+    return anchors
+
+
+def resolve_test_targets(
+    target: str,
+    test_paths: Iterable[str],
+) -> list[str]:
+    """Resolve a ``verified_by: test:<target>`` pointer to test file paths.
+
+    ``<target>`` matches a path, a filename, or a filename stem (so both
+    ``test:tests/unit/qrSheet.test.ts`` and ``test:qrSheet`` resolve). Matching
+    is case-insensitive because filename case conventions differ per language.
+    """
+
+    needle = target.strip().strip("`").replace("\\", "/").casefold()
+    if not needle:
+        return []
+    matches: list[str] = []
+    for relative in test_paths:
+        normalized = relative.replace("\\", "/").casefold()
+        name = normalized.rsplit("/", 1)[-1]
+        stem = name.split(".", 1)[0]
+        if needle in (normalized, name, stem) or normalized.endswith("/" + needle):
+            matches.append(relative)
+    return sorted(matches)
+
+
+@dataclass(frozen=True)
+class EvidenceContext:
+    """Everything the gate and the ``codd acceptance`` commands both need.
+
+    Assembled once from the DAG (whose node ids ARE the project-relative file
+    paths) so the check and the CLI cannot drift into two different notions of
+    "the tests" or "the implementers of R".
+    """
+
+    criteria: tuple[AcceptanceCriterion, ...]
+    test_paths: frozenset[str]
+    impl_paths: frozenset[str]
+    anchors: Mapping[str, frozenset[str]]
+
+    def implementers(self, req_id: str) -> tuple[str, ...]:
+        return tuple(sorted(self.anchors.get(req_id, frozenset()) & self.impl_paths))
+
+    def anchored_tests(self, req_id: str) -> tuple[str, ...]:
+        return tuple(sorted(self.anchors.get(req_id, frozenset()) & self.test_paths))
+
+
+def build_evidence_context(
+    project_root: Path | str,
+    config: Mapping[str, Any] | None = None,
+    dag: Any | None = None,
+) -> EvidenceContext:
+    """Load acceptance criteria plus the file anchors that claim them."""
+
+    root = Path(project_root).resolve()
+    config = config or {}
+    criteria = load_acceptance_criteria(root, config)
+    if dag is None:
+        from codd.dag.builder import build_dag
+
+        dag = build_dag(root)
+    nodes = getattr(dag, "nodes", {})
+    test_paths = frozenset(node.id for node in nodes.values() if getattr(node, "kind", "") == "test_file")
+    impl_paths = frozenset(
+        node.id for node in nodes.values() if getattr(node, "kind", "") in {"impl_file", "common"}
+    )
+    anchors = scan_requirement_anchors(
+        root,
+        sorted(test_paths | impl_paths),
+        (criterion.req_id for criterion in criteria),
+    )
+    return EvidenceContext(
+        criteria=tuple(criteria),
+        test_paths=test_paths,
+        impl_paths=impl_paths,
+        anchors={req_id: frozenset(paths) for req_id, paths in anchors.items()},
+    )
+
+
+def vb_id_for(req_id: str) -> str:
+    """Canonical VB id derived from a requirement id (``F-E2`` -> ``VB-F-E2``).
+
+    Deterministic and reversible by eye, so a generated registry row is
+    obviously about the criterion it came from.
+    """
+
+    body = re.sub(r"[^A-Za-z0-9_.-]", "-", req_id.strip()).strip("-")
+    return f"VB-{body}" if body else ""
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
