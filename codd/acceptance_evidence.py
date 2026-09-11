@@ -562,6 +562,96 @@ def numeric_literals(text: str) -> list[str]:
     return seen
 
 
+def entry_files_by_operation(
+    project_root: Path | str,
+    config: Mapping[str, Any] | None,
+    operations: Mapping[str, Mapping[str, Any]],
+) -> dict[str, tuple[str, ...]]:
+    """Map each operation id to the ENTRY files a user's request arrives at.
+
+    The entry point is where the shipped path starts: the route/page/handler the
+    user actually touches. CoDD already knows how to derive those — a project's
+    ``filesystem_routes`` config drives the same extractor the scanner uses — so
+    this reads the project's declarations rather than guessing at a framework.
+
+    An operation may also name its entry explicitly (``entry_file:``); that wins,
+    because an explicit declaration should never be second-guessed by inference.
+    """
+
+    from codd.parsing.filesystem_routes import FileSystemRouteExtractor
+    from codd.requirement_reconciliation import _normalize_route
+
+    root = Path(project_root).resolve()
+    route_configs = (config or {}).get("filesystem_routes")
+    routes_by_url: dict[str, list[str]] = {}
+    if isinstance(route_configs, list) and route_configs:
+        info = FileSystemRouteExtractor().extract_routes(root, route_configs)
+        for route in info.routes:
+            try:
+                relative = Path(route["file"]).resolve().relative_to(root).as_posix()
+            except (ValueError, OSError):
+                continue
+            normalized = _normalize_route(str(route.get("url", "")))
+            if normalized:
+                routes_by_url.setdefault(normalized, []).append(relative)
+
+    entries: dict[str, tuple[str, ...]] = {}
+    for operation_id, operation in operations.items():
+        explicit = operation.get("entry_file") or operation.get("entry")
+        if isinstance(explicit, str) and explicit.strip():
+            entries[operation_id] = (explicit.strip(),)
+            continue
+        found: list[str] = []
+        raw_routes = operation.get("route") or operation.get("routes")
+        values = raw_routes if isinstance(raw_routes, (list, tuple)) else [raw_routes]
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            normalized = _normalize_route(value)
+            if normalized:
+                found.extend(routes_by_url.get(normalized, ()))
+        if found:
+            entries[operation_id] = tuple(sorted(set(found)))
+    return entries
+
+
+def import_closure(dag: Any, starts: Iterable[str]) -> set[str]:
+    """Files reachable from ``starts`` by following the DAG's ``imports`` edges.
+
+    The DAG's import edges are the same per-language extraction the scanner
+    builds the graph from, so this inherits both its reach and its limits — a
+    dynamic import, a DI container or reflection produces no edge. That is why
+    every finding derived from this closure is amber and why an unfollowable
+    entry is reported as unknown rather than treated as "not reachable".
+    """
+
+    adjacency: dict[str, set[str]] = {}
+    for edge in getattr(dag, "edges", ()) or ():
+        if getattr(edge, "kind", "") == "imports":
+            adjacency.setdefault(edge.from_id, set()).add(edge.to_id)
+
+    seen: set[str] = set()
+    stack = [start for start in starts]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(adjacency.get(current, ()))
+    return seen
+
+
+def tested_subjects(dag: Any, test_paths: Iterable[str]) -> dict[str, set[str]]:
+    """For each test file, the implementation files the DAG says it exercises."""
+
+    wanted = set(test_paths)
+    subjects: dict[str, set[str]] = {}
+    for edge in getattr(dag, "edges", ()) or ():
+        if getattr(edge, "kind", "") == "tested_by" and edge.to_id in wanted:
+            subjects.setdefault(edge.to_id, set()).add(edge.from_id)
+    return subjects
+
+
 def vb_id_for(req_id: str) -> str:
     """Canonical VB id derived from a requirement id (``F-E2`` -> ``VB-F-E2``).
 

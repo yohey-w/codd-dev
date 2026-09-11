@@ -74,14 +74,27 @@ markers), and adopting a column makes its declaration authoritative for that row
 | Stage | Invariant | Finding | Severity |
 |---|---|---|---|
 | 1 | (a) demotion | `runtime_evidence_not_executable` — the criterion declares a runtime obligation and `runtime_smoke` is not enabled, so the stage is skipped silently | red |
-| 2 | (a) wiring, (d) freshness | `vb_registry_missing`, `unbound_acceptance`, `stale_manual_evidence` | red |
+| 2 | (a) wiring, (d) freshness | `vb_registry_missing`, `unbound_acceptance`, `unresolved_evidence`, `manual_evidence_missing`, `stale_manual_evidence` | red |
 | 3 | (c) parameters | `param_not_referenced` (red), `undeclared_numeric` (amber) | red / amber |
-| 4 | (b) shipped path | `multiple_implementers`, `off_shipped_path`, `reachability_unknown` | amber |
+| 4 | (b) shipped path | `off_shipped_path`, `multiple_implementers`, `reachability_unknown` | amber |
+
+Stage 4 asks its question about **evidence**, not about every file that mentions
+a requirement id. A requirement legitimately spans layers — a page, a library, a
+migration — and a migration being unreachable from a page is architecture, not a
+defect. What is a defect is proof that lives off the path that ships. Concretely,
+the evidence for a criterion is the tests bound to it plus the tests of any file
+that claims its id; if none of them, nor anything they exercise, appears in the
+import closure of the requirement's entry point, that is `off_shipped_path`.
 
 Stage 4 is amber on purpose. Reachability depends on per-language import
 extraction, and dynamic imports / DI / reflection cannot always be followed; an
 unfollowable edge is reported as `reachability_unknown` rather than guessed at
 in either direction. It is never silent.
+
+Entry points come from the requirement's own `operation_flow.<id>` reference:
+the operation's `route:` resolved through the project's declared
+`filesystem_routes`, or an explicit `entry_file:` on the operation, which always
+wins over inference.
 
 ## What stays outside
 

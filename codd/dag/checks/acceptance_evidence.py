@@ -7,10 +7,20 @@ The gate for the invariant documented in :mod:`codd.acceptance_evidence`:
     references AC's named parameters, and (d) E is bound to the content of the
     implementation it verified.
 
-Stage 1 of the check implements (a)'s **demotion** half: an acceptance
-criterion that declares a RUNTIME obligation, in a project whose runtime stage
-is switched off, is RED — never a silent skip. The remaining halves land in the
-following stages and are listed in ``docs/design/acceptance-evidence-invariant.md``.
+Findings, by the half of the invariant they defend:
+
+* (a) ``runtime_evidence_not_executable`` — a runtime obligation in a project
+  whose runtime stage is switched off (a silent skip that used to read green);
+  ``unbound_acceptance`` / ``unresolved_evidence`` / ``manual_evidence_missing``
+  — a criterion that reaches no machine-checked evidence at all.
+* (b) ``off_shipped_path`` / ``multiple_implementers`` / ``reachability_unknown``
+  — evidence that does not run through the code a user's request reaches.
+* (c) ``param_not_referenced`` / ``undeclared_numeric`` — a value retyped instead
+  of referenced by name.
+* (d) ``stale_manual_evidence`` — a human verdict about an implementation that
+  has since changed.
+
+See ``docs/design/acceptance-evidence-invariant.md``.
 
 Generality: the check reads the project's own declarations (requirement tables,
 ``operation_flow``, ``runtime_smoke``) and carries no project, framework or
@@ -28,12 +38,16 @@ from typing import Any, Iterable, Mapping
 from codd.acceptance_evidence import (
     AcceptanceCriterion,
     acceptance_settings,
+    entry_files_by_operation,
+    import_closure,
     load_acceptance_criteria,
     numeric_literals,
+    SETTINGS_KEY,
     resolve_test_targets,
     runtime_obligations,
     runtime_smoke_enabled,
     scan_requirement_anchors,
+    tested_subjects,
 )
 from codd.acceptance_record import implementation_digest, load_ledger
 from codd.dag.checks import DagCheck, register_dag_check
@@ -138,6 +152,20 @@ class AcceptanceEvidenceCheck(DagCheck):
         )
         violations.extend(binding_violations)
         violations.extend(_parameter_violations(root, criteria, bound_by_req, resolved))
+        violations.extend(
+            _shipped_path_violations(
+                target_dag,
+                criteria,
+                config=config,
+                settings=resolved,
+                operations=_declared_operations(config, target_dag),
+                anchors=anchors,
+                impl_paths=impl_paths,
+                test_paths=test_paths,
+                bound_by_req=bound_by_req,
+                project_root=root,
+            )
+        )
 
         return _finalize(violations, checked_count=len(criteria), max_findings=resolved.max_findings)
 
@@ -537,6 +565,163 @@ def _require_vb_table(config: Mapping[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# (b) the evidence must run through the SHIPPED PATH
+# ---------------------------------------------------------------------------
+
+
+def _shipped_path_violations(
+    dag: Any,
+    criteria: Iterable[AcceptanceCriterion],
+    *,
+    config: Mapping[str, Any],
+    settings: Any,
+    operations: Mapping[str, Mapping[str, Any]],
+    anchors: Mapping[str, set[str]],
+    impl_paths: set[str],
+    test_paths: set[str],
+    bound_by_req: Mapping[str, list[str]],
+    project_root: Path,
+) -> list[dict[str, Any]]:
+    """"There was a test" is not the same as "the thing users press was tested".
+
+    One requirement, two implementations: a command-line script and a button on
+    a page. The test exercised the script. The button shipped. Every gate was
+    green, because nothing in the system asked the only question that mattered —
+    does the evidence run through the code a user's request actually reaches?
+
+    The shipped path is the import closure of the entry point the requirement's
+    own operation declares. The question is asked about EVIDENCE — the files
+    offered as proof, and what they exercise — not about every file that mentions
+    the requirement id. A requirement legitimately spans layers (a page, a
+    library, a migration); a migration being unreachable from a page is
+    architecture, not a defect. What is a defect is proof that lives off the path
+    that ships.
+
+    Three findings, all amber, because reachability is only as good as the
+    language's import extraction:
+
+    * ``off_shipped_path`` — the evidence and everything it exercises sit outside
+      the closure;
+    * ``multiple_implementers`` — the evidence proves an implementation off the
+      path while another implementation of the same requirement is on it;
+    * ``reachability_unknown`` — there is something to place on a path and no
+      path could be resolved. Never silent: an unknown that prints nothing is the
+      exact failure this check exists to end.
+    """
+
+    entries_by_operation = entry_files_by_operation(project_root, config, operations)
+    section = config.get(SETTINGS_KEY) if isinstance(config, Mapping) else None
+    allow_multiple = bool(section.get("allow_multiple_implementers", False)) if isinstance(section, Mapping) else False
+    subjects_by_test = tested_subjects(dag, test_paths)
+    tests_by_subject: dict[str, set[str]] = {}
+    for test_path, subjects in subjects_by_test.items():
+        for subject in subjects:
+            tests_by_subject.setdefault(subject, set()).add(test_path)
+    severity = settings.reachability_severity
+
+    violations: list[dict[str, Any]] = []
+    for criterion in criteria:
+        implementers = sorted(set(anchors.get(criterion.req_id, set())) & impl_paths)
+        evidence_tests = set(bound_by_req.get(criterion.req_id) or []) & test_paths
+        for implementer in implementers:
+            # A test of a file that CLAIMS the requirement is evidence about that
+            # requirement even when the test never names the id — which is the
+            # usual brownfield state, and precisely the case that shipped wrong.
+            evidence_tests |= tests_by_subject.get(implementer, set())
+        if not evidence_tests:
+            continue  # nothing is being offered as proof; other rules speak
+
+        entries = sorted(
+            {
+                entry
+                for operation_id in criterion.operation_refs
+                for entry in entries_by_operation.get(operation_id, ())
+            }
+        )
+        if not entries:
+            violations.append(
+                {
+                    "type": "reachability_unknown",
+                    "severity": severity,
+                    "req_id": criterion.req_id,
+                    "source": criterion.source,
+                    "message": (
+                        f"[acceptance_evidence] No entry point could be resolved for "
+                        f"`{criterion.req_id}`, so whether its evidence runs through the shipped "
+                        "path is UNKNOWN — not verified. Reference the operation that ships it "
+                        "(`operation_flow.<id>`) and give that operation a `route:` (or an "
+                        "explicit `entry_file:`), and declare `filesystem_routes` so routes "
+                        "resolve to files."
+                    ),
+                }
+            )
+            continue
+
+        closure = import_closure(dag, entries)
+        subjects: set[str] = set()
+        for test_path in evidence_tests:
+            subjects |= subjects_by_test.get(test_path) or set()
+            subjects |= import_closure(dag, [test_path])
+        if subjects & closure:
+            continue
+
+        off_path = sorted(evidence_tests | (subjects & set(implementers)))
+        on_path = [path for path in implementers if path in closure]
+        violations.append(
+            {
+                "type": "off_shipped_path",
+                "severity": severity,
+                "req_id": criterion.req_id,
+                "source": criterion.source,
+                "entries": entries,
+                "off_path": off_path,
+                "message": (
+                    f"[acceptance_evidence] The evidence offered for `{criterion.req_id}` "
+                    f"({', '.join(off_path)}) never touches the code reachable from the entry "
+                    f"point(s) users go through ({', '.join(entries)}). Whatever it proves, it "
+                    "does not prove the path that ships — the code behind the entry point is "
+                    "verified by nothing here. Point the evidence at the shipped implementation, "
+                    "or ship the implementation the evidence covers."
+                ),
+            }
+        )
+        if on_path and not allow_multiple:
+            violations.append(
+                {
+                    "type": "multiple_implementers",
+                    "severity": severity,
+                    "req_id": criterion.req_id,
+                    "source": criterion.source,
+                    "on_path": on_path,
+                    "off_path": off_path,
+                    "message": (
+                        f"[acceptance_evidence] `{criterion.req_id}` is implemented on both sides "
+                        f"of the shipped path: {', '.join(on_path)} is reachable from "
+                        f"{', '.join(entries)}, and the evidence proves {', '.join(off_path)}, "
+                        "which is not. The implementation users reach is the untested one. Retire "
+                        "the superseded implementation, or set "
+                        "`acceptance_evidence.allow_multiple_implementers: true` if both ship."
+                    ),
+                }
+            )
+    return violations
+
+
+def _declared_operations(config: Mapping[str, Any], dag: Any) -> dict[str, dict[str, Any]]:
+    """Declared operations by id (codd.yaml + design-doc frontmatter)."""
+
+    from codd.requirements_meta import operation_flow_operations
+
+    operations: dict[str, dict[str, Any]] = {}
+    for payload in _operation_flow_payloads(config, dag):
+        for operation in operation_flow_operations(payload):
+            raw = operation.get("id")
+            if isinstance(raw, str) and raw.strip():
+                operations.setdefault(raw.strip(), dict(operation))
+    return operations
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
@@ -548,20 +733,18 @@ def _nodes_of_kind(dag: Any, kinds: set[str]) -> set[str]:
     return {node.id for node in nodes.values() if getattr(node, "kind", "") in kinds}
 
 
-def _declared_operation_ids(config: Mapping[str, Any], dag: Any) -> frozenset[str]:
-    """Operation ids declared in codd.yaml or in any design-doc frontmatter.
+def _operation_flow_payloads(config: Mapping[str, Any], dag: Any) -> list[Any]:
+    """Every declared ``operation_flow`` payload: codd.yaml + design-doc frontmatter.
 
-    Mirrors ``cli._operation_flows_from_project`` without importing the CLI: the
-    DAG already carries every design document's parsed frontmatter, so the doc
-    side needs no second filesystem walk.
+    Mirrors ``cli._operation_flows_from_project`` without importing the CLI — the
+    DAG already carries each design document's parsed frontmatter, so the doc side
+    costs no second filesystem walk.
     """
-
-    from codd.requirements_meta import operation_flow_operations
 
     payloads: list[Any] = []
     if isinstance(config, Mapping) and isinstance(config.get("operation_flow"), Mapping):
         payloads.append(config["operation_flow"])
-    for node in getattr(dag, "nodes", {}).values() if dag is not None else ():
+    for node in (getattr(dag, "nodes", {}) or {}).values():
         attributes = getattr(node, "attributes", None)
         if not isinstance(attributes, Mapping):
             continue
@@ -571,14 +754,15 @@ def _declared_operation_ids(config: Mapping[str, Any], dag: Any) -> frozenset[st
         for container in (frontmatter, frontmatter.get("codd")):
             if isinstance(container, Mapping) and isinstance(container.get("operation_flow"), Mapping):
                 payloads.append(container["operation_flow"])
+    return payloads
 
-    ids: set[str] = set()
-    for payload in payloads:
-        for operation in operation_flow_operations(payload):
-            raw = operation.get("id")
-            if isinstance(raw, str) and raw.strip():
-                ids.add(raw.strip().lower())
-    return frozenset(ids)
+
+def _declared_operation_ids(config: Mapping[str, Any], dag: Any) -> frozenset[str]:
+    """Normalized ids of every declared operation."""
+
+    return frozenset(
+        operation_id.lower() for operation_id in _declared_operations(config, dag)
+    )
 
 
 def _finalize(

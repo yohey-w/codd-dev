@@ -780,3 +780,187 @@ def test_params_without_any_bound_evidence_report_the_binding_not_the_param(tmp_
     result = _run_check(root)
     assert _violations(result, "param_not_referenced") == []
     assert _violations(result, "unbound_acceptance")
+
+
+# ---------------------------------------------------------------------------
+# stage 4 — (b) the evidence must run through the SHIPPED PATH
+# ---------------------------------------------------------------------------
+
+FILESYSTEM_ROUTES = [
+    {
+        "base_dir": "src/app/",
+        "page_pattern": "page.{tsx,jsx}",
+        "api_pattern": "route.{ts,js}",
+        "url_template": "/{relative_dir}",
+        "dynamic_segment": {"from": "\\[(.+)\\]", "to": ":$1"},
+    }
+]
+
+
+def _shipped_path_project(tmp_path, *, entry_imports_sheet: bool) -> Path:
+    """The miniature of the failure: a page users press, and a script a test covers."""
+
+    page = (
+        "import { panel } from './panels';\nexport default function Page() { return panel(); }\n"
+        if not entry_imports_sheet
+        else "import { build } from '../../../tools/make-sheet';\nexport default function Page() { return build(); }\n"
+    )
+    return _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 印刷 | 1枚に15人 <sub>`operation_flow.sheet_print`</sub> |\n"
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        extra_config={"filesystem_routes": FILESYSTEM_ROUTES},
+        files={
+            "src/app/admin/page.tsx": page,
+            "src/app/admin/panels.tsx": "export const panel = () => 'sheet';\n",
+            "tools/make-sheet.ts": "// R-1 sheet builder\nexport const build = () => 15;\n",
+            "tests/unit/sheet.test.ts": (
+                "import { build } from '../../tools/make-sheet';\n"
+                "test('sheet', () => { expect(build()).toBe(15); });\n"
+            ),
+        },
+    )
+
+
+def test_evidence_that_never_reaches_the_entry_point_is_amber(tmp_path):
+    result = _run_check(_shipped_path_project(tmp_path, entry_imports_sheet=False))
+    found = _violations(result, "off_shipped_path")
+    assert found, "the test covers a script the entry point does not import"
+    assert found[0]["severity"] == "amber"
+    assert "tools/make-sheet.ts" in found[0]["off_path"]
+    assert found[0]["entries"] == ["src/app/admin/page.tsx"]
+    assert result.passed is True  # amber: visible, not blocking
+
+
+def test_evidence_on_the_shipped_path_is_clean(tmp_path):
+    result = _run_check(_shipped_path_project(tmp_path, entry_imports_sheet=True))
+    assert _violations(result, "off_shipped_path") == []
+    assert _violations(result, "multiple_implementers") == []
+
+
+def test_an_implementation_on_each_side_of_the_path_is_flagged(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 印刷 | 1枚に15人 <sub>`operation_flow.sheet_print`</sub> |\n"
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        extra_config={"filesystem_routes": FILESYSTEM_ROUTES},
+        files={
+            "src/app/admin/page.tsx": "import { panel } from './panels';\nexport default () => panel();\n",
+            # on the shipped path AND claims the requirement
+            "src/app/admin/panels.tsx": "// R-1 printed here\nexport const panel = () => 20;\n",
+            # off the path, claims the same requirement, and owns the only test
+            "tools/make-sheet.ts": "// R-1 sheet builder\nexport const build = () => 15;\n",
+            "tests/unit/sheet.test.ts": (
+                "import { build } from '../../tools/make-sheet';\n"
+                "test('sheet', () => { expect(build()).toBe(15); });\n"
+            ),
+        },
+    )
+    found = _violations(_run_check(root), "multiple_implementers")
+    assert found
+    assert found[0]["on_path"] == ["src/app/admin/panels.tsx"]
+    assert "tools/make-sheet.ts" in found[0]["off_path"]
+
+
+def test_allow_multiple_implementers_silences_only_that_finding(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 印刷 | 1枚に15人 <sub>`operation_flow.sheet_print`</sub> |\n"
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        extra_config={
+            "filesystem_routes": FILESYSTEM_ROUTES,
+            "acceptance_evidence": {"allow_multiple_implementers": True},
+        },
+        files={
+            "src/app/admin/page.tsx": "import { panel } from './panels';\nexport default () => panel();\n",
+            "src/app/admin/panels.tsx": "// R-1 printed here\nexport const panel = () => 20;\n",
+            "tools/make-sheet.ts": "// R-1 sheet builder\nexport const build = () => 15;\n",
+            "tests/unit/sheet.test.ts": (
+                "import { build } from '../../tools/make-sheet';\n"
+                "test('sheet', () => { expect(build()).toBe(15); });\n"
+            ),
+        },
+    )
+    result = _run_check(root)
+    assert _violations(result, "multiple_implementers") == []
+    assert _violations(result, "off_shipped_path")
+
+
+def test_an_unresolvable_entry_point_is_reported_as_unknown_not_silence(tmp_path):
+    """No route -> no closure -> the question is unanswered. Say so."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 印刷 | 1枚に15人 <sub>`operation_flow.sheet_print`</sub> |\n"
+        ),
+        operations=[{"id": "sheet_print", "actor": "operator", "verb": "print", "target": "sheet"}],
+        runtime_smoke=RUNTIME_ON,
+        files={
+            "tools/make-sheet.ts": "// R-1 sheet builder\nexport const build = () => 15;\n",
+            "tests/unit/sheet.test.ts": (
+                "import { build } from '../../tools/make-sheet';\n"
+                "test('sheet', () => { expect(build()).toBe(15); });\n"
+            ),
+        },
+    )
+    found = _violations(_run_check(root), "reachability_unknown")
+    assert found and found[0]["severity"] == "amber"
+
+
+def test_a_criterion_with_no_evidence_at_all_does_not_add_path_noise(tmp_path):
+    """Nothing is offered as proof, so (b) has nothing to place — (a) already speaks."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 印刷 | 1枚に15人 | |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        extra_config={"filesystem_routes": FILESYSTEM_ROUTES},
+        files={"src/app/admin/page.tsx": "export default () => null;\n"},
+    )
+    result = _run_check(root)
+    assert _violations(result, "off_shipped_path") == []
+    assert _violations(result, "reachability_unknown") == []
+    assert _violations(result, "unbound_acceptance")
+
+
+def test_explicit_entry_file_overrides_route_inference(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 印刷 | 1枚に15人 <sub>`operation_flow.sheet_print`</sub> |\n"
+        ),
+        operations=[
+            {
+                "id": "sheet_print",
+                "actor": "operator",
+                "verb": "print",
+                "target": "sheet",
+                "entry_file": "tools/make-sheet.ts",
+            }
+        ],
+        runtime_smoke=RUNTIME_ON,
+        files={
+            "tools/make-sheet.ts": "// R-1 sheet builder\nexport const build = () => 15;\n",
+            "tests/unit/sheet.test.ts": (
+                "import { build } from '../../tools/make-sheet';\n"
+                "test('sheet', () => { expect(build()).toBe(15); });\n"
+            ),
+        },
+    )
+    result = _run_check(root)
+    assert _violations(result, "reachability_unknown") == []
+    assert _violations(result, "off_shipped_path") == []

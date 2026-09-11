@@ -443,6 +443,11 @@ acceptance_evidence:
   undeclared_numeric_severity: amber  # literal number in an AC with no params
   reachability_severity: amber      # evidence off the shipped path / unknown
   freshness_severity: red           # manual evidence stale against its implementation
+  # A requirement legitimately spans layers, so several files claiming the same
+  # id is normal. The finding fires only when a requirement is implemented on
+  # BOTH sides of the shipped path and the evidence proves the off-path side.
+  # Set true when both implementations genuinely ship.
+  allow_multiple_implementers: false
   max_findings: 30
 requirement_reconciliation:
   # Reconcile requirement documents against the declared operation_flow universe
