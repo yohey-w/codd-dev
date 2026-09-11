@@ -208,6 +208,12 @@ Opt out entirely with `acceptance_evidence: {enabled: false}` — the findings d
 Write the tests those rows name, mark each with `codd: covers vb=<id>`, and add `verified_by: test:<name>` / `params: <name>=<value>` columns to the requirement table as you go.
 For a criterion only a person can check, `codd acceptance record <ID> pass --by <owner>` stores the verdict bound to the implementation it accepted — it expires when that implementation changes.
 
+**Known limits — what it does not catch, and who has to.** These are boundaries of the mechanism, not bugs; a reviewer still has to look.
+
+- **A test that asserts, but asserts nothing real.** The check asks whether the test attached to a marker runs and asserts — never whether the assertion is meaningful. `expect(true).toBe(true)`, or re-typing the criterion's own number on both sides (`expect(15).toBe(15)`), binds the criterion. Look at the assertions during code review; the check cannot.
+- **Dependencies resolved at runtime.** The shipped-path closure and the freshness hash both follow static imports (including barrel re-exports, `await import()`, `require()` and `tsconfig` path aliases). A computed specifier — `require('../tools/' + name)`, `` import(`${dir}/x`) `` — is invisible to both: expect a false `off_shipped_path` (amber), and know that changing such a dependency does **not** expire a manual record. Check those by hand when a criterion depends on one.
+- **A marker attaches to the test written under it.** Not to the file. A `codd: covers vb=` line above a skipped test proves nothing even if the file's other tests pass.
+
 ---
 
 ## FAQ & troubleshooting

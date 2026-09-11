@@ -1054,7 +1054,10 @@ def test_the_cap_is_per_finding_type_so_a_loud_red_cannot_hide_an_amber(tmp_path
 
 
 def test_default_mode_is_advisory_so_an_upgrade_does_not_turn_a_project_red(tmp_path):
-    """An existing brownfield project must not go red just by upgrading CoDD."""
+    """An existing brownfield project must not go red just by upgrading CoDD.
+
+    codd: covers vb=VB-AC-ACC-1
+    """
 
     root = _write_project(
         tmp_path,
@@ -1195,7 +1198,7 @@ def test_a_skipped_test_does_not_bind(tmp_path):
         _vb_project(tmp_path / "c", "test.skip('sheet', () => { expect(1).toBe(2); });\n")
     )
     found = _violations(result, "vacuous_evidence")
-    assert found and "all_tests_skipped" in found[0]["message"]
+    assert found and "test_skipped" in found[0]["message"]
     assert _violations(result, "unbound_acceptance")
 
 
@@ -1324,3 +1327,101 @@ def test_a_caller_supplied_config_still_wins_over_the_file():
         codd_config={"acceptance_evidence": {"enabled": False}}
     )
     assert result.skipped is True
+
+
+# ---------------------------------------------------------------------------
+# re-review N1 — substantiveness is judged per TEST, not per file
+# ---------------------------------------------------------------------------
+
+VB_STRATEGY_DOC = (
+    "# Test strategy\n\n| VB ID | behavior | Requirement |\n| --- | --- | --- |\n"
+    "| VB-R-1 | 15 per sheet | R-1 |\n"
+)
+
+
+def _marker_project(tmp_path, body: str) -> Path:
+    return _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 | |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        require_vb_table=True,
+        files={"docs/test/test_strategy.md": VB_STRATEGY_DOC, "tests/unit/sheet.test.ts": body},
+    )
+
+
+def test_one_real_test_cannot_certify_a_marker_on_a_skipped_neighbour(tmp_path):
+    """File granularity let an unrelated passing test in the same file bind a
+    marker attached to the SKIPPED test that was supposed to prove it."""
+
+    root = _marker_project(
+        tmp_path,
+        "test('unrelated', () => { expect(1 + 1).toBe(2); });\n"
+        "// codd: covers vb=VB-R-1\n"
+        "test.skip('the criterion', () => { expect(rows).toBe(15); });\n",
+    )
+    result = _run_check(root)
+    vacuous = _violations(result, "vacuous_evidence")
+    assert vacuous, "the marker attaches to the skipped test, not to the file"
+    assert "test_skipped" in vacuous[0]["message"]
+    assert _violations(result, "unbound_acceptance")
+
+
+def test_the_same_file_binds_when_the_marked_test_is_the_real_one(tmp_path):
+    root = _marker_project(
+        tmp_path / "b",
+        "test.skip('unrelated', () => { expect(1 + 1).toBe(3); });\n"
+        "// codd: covers vb=VB-R-1\n"
+        "test('the criterion', () => { expect(rows).toBe(15); });\n",
+    )
+    result = _run_check(root)
+    assert _violations(result, "vacuous_evidence") == []
+    assert _violations(result, "unbound_acceptance") == []
+
+
+def test_a_requirement_id_anchor_is_also_judged_per_test(tmp_path):
+    root = _write_project(
+        tmp_path / "c",
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 | |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={
+            "tests/unit/sheet.test.ts": (
+                "test('unrelated', () => { expect(1 + 1).toBe(2); });\n"
+                "// R-1\n"
+                "test.skip('the criterion', () => { expect(rows).toBe(15); });\n"
+            )
+        },
+    )
+    assert _violations(_run_check(root), "unbound_acceptance")
+
+
+def test_a_marker_attaches_to_the_test_written_under_it():
+    from codd.acceptance_evidence import cover_marker_offsets, substance_at
+
+    text = (
+        "test('first', () => { expect(1).toBe(1); });\n"
+        "// codd: covers vb=VB-1\n"
+        "test.skip('second', () => { expect(2).toBe(2); });\n"
+    )
+    assert substance_at(text, cover_marker_offsets(text, "VB-1")[0]) == (False, "test_skipped")
+
+    flipped = (
+        "test.skip('first', () => { expect(1).toBe(1); });\n"
+        "// codd: covers vb=VB-1\n"
+        "test('second', () => { expect(2).toBe(2); });\n"
+    )
+    assert substance_at(flipped, cover_marker_offsets(flipped, "VB-1")[0]) == (True, "")
+
+
+def test_a_marker_with_no_test_under_it_falls_back_to_the_test_it_sits_in():
+    from codd.acceptance_evidence import substance_at
+
+    text = "test('only', () => { expect(1).toBe(1); /* codd: covers vb=VB-1 */ });\n"
+    assert substance_at(text, text.index("codd:")) == (True, "")

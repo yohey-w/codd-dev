@@ -48,7 +48,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from codd.requirement_reconciliation import (
     _OPERATION_REFERENCE_RE,
@@ -463,21 +463,23 @@ def requirement_anchor_pattern(req_ids: Iterable[str]) -> re.Pattern[str] | None
     return re.compile(rf"(?<!{_ID_BOUNDARY})(?P<id>{body})(?!{_ID_BOUNDARY})")
 
 
-def scan_requirement_anchors(
+def scan_requirement_anchor_hits(
     project_root: Path | str,
     relative_paths: Iterable[str],
     req_ids: Iterable[str],
-) -> dict[str, set[str]]:
-    """Map each requirement id to the files that write its id as a token.
+) -> dict[str, dict[str, tuple[int, ...]]]:
+    """Map each requirement id to {file: offsets where its id is written}.
 
-    One pass over the candidate files with one combined pattern; unreadable or
-    over-sized files are skipped (they anchor nothing rather than raising).
+    Offsets matter: in a test file the id is a positioned claim, and the test it
+    attaches to is found by position. One pass over the candidate files with one
+    combined pattern; unreadable or over-sized files are skipped (they anchor
+    nothing rather than raising).
     """
 
     pattern = requirement_anchor_pattern(req_ids)
-    anchors: dict[str, set[str]] = {}
+    hits: dict[str, dict[str, list[int]]] = {}
     if pattern is None:
-        return anchors
+        return {}
     root = Path(project_root).resolve()
     for relative in relative_paths:
         path = root / relative
@@ -488,8 +490,26 @@ def scan_requirement_anchors(
         except OSError:
             continue
         for match in pattern.finditer(text):
-            anchors.setdefault(match.group("id"), set()).add(relative)
-    return anchors
+            hits.setdefault(match.group("id"), {}).setdefault(relative, []).append(match.start())
+    return {
+        req_id: {path: tuple(offsets) for path, offsets in by_path.items()}
+        for req_id, by_path in hits.items()
+    }
+
+
+def scan_requirement_anchors(
+    project_root: Path | str,
+    relative_paths: Iterable[str],
+    req_ids: Iterable[str],
+) -> dict[str, set[str]]:
+    """Map each requirement id to the files that write its id as a token."""
+
+    return {
+        req_id: set(by_path)
+        for req_id, by_path in scan_requirement_anchor_hits(
+            project_root, relative_paths, req_ids
+        ).items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -544,32 +564,136 @@ _ASSERTION_RE = re.compile(
 
 
 def strip_comments(text: str) -> str:
-    """Remove line and block comments so a claim in prose cannot pass as code."""
+    """Blank out comments, PRESERVING offsets.
 
-    return _LINE_COMMENT_RE.sub(" ", _BLOCK_COMMENT_RE.sub(" ", text))
+    Each comment character becomes a space (newlines kept), so a marker found in
+    the raw text still points at the same index in the stripped text. Attribution
+    depends on that: a ``codd: covers vb=`` line lives in a comment, and the test
+    it belongs to is found by offset.
+    """
+
+    def blank(match: re.Match[str]) -> str:
+        return "".join("\n" if character == "\n" else " " for character in match.group(0))
+
+    return _LINE_COMMENT_RE.sub(blank, _BLOCK_COMMENT_RE.sub(blank, text))
 
 
-def test_substance(text: str) -> tuple[bool, str]:
-    """Whether a test file actually proves something. Returns (substantive, reason).
+@dataclass(frozen=True)
+class TestBlock:
+    """One test declaration and the span of source that belongs to it."""
 
-    Three ways to be vacuous, all observed in the wild:
+    start: int
+    end: int
+    skipped: bool
+    has_assertion: bool
 
-    * ``no_test_body`` — the file declares no test at all (a stray marker, a
-      comment, a helper);
-    * ``all_tests_skipped`` — every declaration it has is skipped/todo;
-    * ``no_assertion`` — a test that runs and checks nothing.
+    @property
+    def substantive(self) -> bool:
+        return not self.skipped and self.has_assertion
+
+    @property
+    def reason(self) -> str:
+        if self.skipped:
+            return "test_skipped"
+        if not self.has_assertion:
+            return "no_assertion"
+        return ""
+
+
+def test_blocks(text: str) -> list[TestBlock]:
+    """Split a test file into blocks, one per test declaration.
+
+    A block runs from its declaration to the next one (or end of file) — shallow
+    on purpose, because this is a presence test, not a parser. That is enough for
+    the question being asked: does THIS test, the one the marker is attached to,
+    run and assert something?
     """
 
     code = strip_comments(text)
-    declarations = len(_TEST_DECLARATION_RE.findall(code))
-    skipped = len(_SKIPPED_DECLARATION_RE.findall(code))
-    if declarations == 0:
+    starts = [match.start() for match in _TEST_DECLARATION_RE.finditer(code)]
+    if not starts:
+        return []
+    bounds = starts + [len(code)]
+    skips = [match.start() for match in _SKIPPED_DECLARATION_RE.finditer(code)]
+
+    blocks: list[TestBlock] = []
+    for index, start in enumerate(starts):
+        end = bounds[index + 1]
+        # A skip marker either coincides with the declaration (``test.skip(``) or
+        # precedes it as a decorator (``@pytest.mark.skip``), so it belongs to the
+        # first declaration at or after it. The lower bound is EXCLUSIVE of the
+        # previous declaration's own offset, or a skipped test would also mark the
+        # test that follows it as skipped.
+        lower = starts[index - 1] + 1 if index else 0
+        skipped = any(lower <= position <= start for position in skips)
+        blocks.append(
+            TestBlock(
+                start=start,
+                end=end,
+                skipped=skipped,
+                has_assertion=bool(_ASSERTION_RE.search(code, start, end)),
+            )
+        )
+    return blocks
+
+
+def block_at(blocks: Sequence[TestBlock], offset: int) -> TestBlock | None:
+    """The test a marker at ``offset`` belongs to: **the one that follows it**.
+
+    A ``codd: covers vb=`` line introduces the test written under it — that is
+    the form CoDD's own generated test documents ask for, and it is the only
+    reading that cannot be gamed. "Somewhere in this file" was the previous rule,
+    and it let one unrelated passing test in the same file certify a marker
+    attached to a SKIPPED one.
+
+    A marker with nothing after it falls back to the test it sits inside (the
+    last declaration before it), so a marker written at the end of a test body
+    still attaches to that test. A marker with no test either side proves
+    nothing.
+    """
+
+    for block in blocks:
+        if block.start >= offset:
+            return block
+    for block in reversed(list(blocks)):
+        if block.start < offset:
+            return block
+    return None
+
+
+def substance_at(text: str, offset: int) -> tuple[bool, str]:
+    """Whether the test a marker at ``offset`` belongs to actually proves something.
+
+    File-level was not enough: one unrelated real test in the same file made a
+    ``covers vb=`` marker over a SKIPPED test read as coverage. The claim has to
+    be judged against the test it is attached to, not against the file's best
+    test.
+    """
+
+    blocks = test_blocks(text)
+    block = block_at(blocks, offset)
+    if block is None:
         return False, "no_test_body"
-    if declarations - skipped <= 0:
-        return False, "all_tests_skipped"
-    if not _ASSERTION_RE.search(code):
-        return False, "no_assertion"
-    return True, ""
+    return block.substantive, block.reason
+
+
+def test_substance(text: str) -> tuple[bool, str]:
+    """Whether a file contains at least one test that runs and asserts something.
+
+    File granularity, for a claim that names a FILE (``verified_by: test:<name>``)
+    rather than a position. A claim that has a position is judged by
+    :func:`substance_at` instead.
+    """
+
+    blocks = test_blocks(text)
+    if not blocks:
+        return False, "no_test_body"
+    for block in blocks:
+        if block.substantive:
+            return True, ""
+    return False, blocks[0].reason if len(blocks) == 1 else (
+        "test_skipped" if all(block.skipped for block in blocks) else "no_assertion"
+    )
 
 
 def substantive_tests(
@@ -582,9 +706,8 @@ def substantive_tests(
     good: set[str] = set()
     vacuous: dict[str, str] = {}
     for relative in relative_paths:
-        try:
-            text = (root / relative).read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+        text = read_test_text(root, relative)
+        if text is None:
             vacuous[relative] = "unreadable"
             continue
         substantive, reason = test_substance(text)
@@ -593,6 +716,25 @@ def substantive_tests(
         else:
             vacuous[relative] = reason
     return good, vacuous
+
+
+def read_test_text(project_root: Path | str, relative: str) -> str | None:
+    """Read a project file for substantiveness analysis (None when unreadable)."""
+
+    try:
+        return (Path(project_root).resolve() / relative).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+
+def cover_marker_offsets(text: str, vb_id: str) -> list[int]:
+    """Offsets of ``codd: covers ... vb=<id>`` markers in ``text``."""
+
+    pattern = re.compile(
+        r"codd\s*:\s*covers\b[^\n]*?vb\s*=\s*" + re.escape(vb_id) + r"(?![A-Za-z0-9_.:-])",
+        re.IGNORECASE,
+    )
+    return [match.start() for match in pattern.finditer(text)]
 
 
 def resolve_test_targets(

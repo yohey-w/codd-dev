@@ -36,19 +36,24 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from codd.acceptance_evidence import (
+    SETTINGS_KEY,
     AcceptanceCriterion,
     acceptance_settings,
+    cover_marker_offsets,
     entry_files_by_operation,
+    implementation_closure,
     import_closure,
     load_acceptance_criteria,
     numeric_literals,
-    SETTINGS_KEY,
-    implementation_closure,
+    read_test_text,
+    requirement_anchor_pattern,
     resolve_test_targets,
     runtime_obligations,
     runtime_smoke_enabled,
-    scan_requirement_anchors,
+    scan_requirement_anchor_hits,
+    substance_at,
     substantive_tests,
+    test_substance,
     tested_subjects,
 )
 from codd.acceptance_record import implementation_digest, load_ledger
@@ -126,11 +131,12 @@ class AcceptanceEvidenceCheck(DagCheck):
         declared_ids = _declared_operation_ids(config, target_dag)
         test_paths = _nodes_of_kind(target_dag, {"test_file"})
         impl_paths = _nodes_of_kind(target_dag, {"impl_file", "common"})
-        anchors = scan_requirement_anchors(
+        anchor_hits = scan_requirement_anchor_hits(
             root,
             sorted(test_paths | impl_paths),
             (criterion.req_id for criterion in criteria),
         )
+        anchors = {req_id: set(by_path) for req_id, by_path in anchor_hits.items()}
 
         violations: list[dict[str, Any]] = []
         violations.extend(
@@ -157,6 +163,7 @@ class AcceptanceEvidenceCheck(DagCheck):
             impl_paths=impl_paths,
             test_paths=test_paths,
             anchors=anchors,
+            anchor_offsets=anchor_hits,
             runtime_bound_ids=runtime_bound_ids,
         )
         violations.extend(binding_violations)
@@ -239,6 +246,7 @@ def _binding_violations(
     test_paths: set[str],
     impl_paths: set[str],
     anchors: Mapping[str, set[str]],
+    anchor_offsets: Mapping[str, Mapping[str, tuple[int, ...]]],
     runtime_bound_ids: frozenset[str],
 ) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     """Every acceptance criterion must reach evidence a machine can re-run.
@@ -253,12 +261,19 @@ def _binding_violations(
     4. an explicit ``verified_by: manual:<owner>`` with a ledger record that is
        still fresh against the implementation it accepted.
 
-    Paths 1-3 all end at a FILE, and a file only binds when it actually proves
-    something (:func:`test_substance`). A marker over an empty test, a test that
-    is skipped, or a comment that merely mentions the requirement id — including
-    one that mentions it to say the opposite, ``// R-1 NOT implemented`` — is a
-    claim, not evidence. Those are reported as ``vacuous_evidence`` and do NOT
-    bind, so the criterion stays unbound instead of going quietly green.
+    A claim only binds when the test it points at actually proves something. A
+    claim with a POSITION — a ``codd: covers vb=`` marker, a requirement id
+    written into a file — is judged against the test it introduces
+    (:func:`substance_at`), not against the file's best test: one unrelated
+    passing test in the same file must not certify a marker attached to a skipped
+    one. A claim that names a FILE (``verified_by: test:<name>``) is judged at
+    file granularity, because that is the granularity it was written at.
+
+    A marker over an empty test, over a skipped test, or a comment that merely
+    mentions the requirement id — including one that mentions it to say the
+    opposite, ``// R-1 NOT implemented`` — is a claim, not evidence. Those are
+    reported as ``vacuous_evidence`` and do NOT bind, so the criterion stays
+    unbound instead of going quietly green.
 
     A criterion reaching none of them is ``unbound_acceptance``: it is written
     down, agreed with a customer, and connected to nothing. That state used to
@@ -319,14 +334,34 @@ def _binding_violations(
                     }
                 )
 
-        claimed.extend(sorted(covered_by_req.get(criterion.req_id, set())))
-        claimed.extend(sorted(anchors.get(criterion.req_id, set()) & test_paths))
+        # File-granularity claims (``verified_by: test:<name>``) keep file-level
+        # judgement; positioned claims are judged per test block.
+        file_claims = dict.fromkeys(claimed)
+        positioned: dict[str, tuple[bool, str]] = {}
+        for path, offsets in covered_by_req.get(criterion.req_id, {}).items():
+            positioned[path] = _positioned_substance(root, path, offsets)
+        for path in sorted(anchors.get(criterion.req_id, set()) & test_paths):
+            offsets = anchor_offsets.get(criterion.req_id, {}).get(path, ())
+            verdict = _positioned_substance(root, path, offsets)
+            if path in positioned and positioned[path][0]:
+                continue  # already bound by a marker
+            positioned[path] = verdict
 
-        # A claim binds only when the file it points at actually asserts something.
-        for path in dict.fromkeys(claimed):
+        for path in file_claims:
             if path in substantive:
                 bound.append(path)
-        empty_claims = [path for path in dict.fromkeys(claimed) if path not in substantive]
+        for path, (ok, _reason) in positioned.items():
+            if ok:
+                bound.append(path)
+
+        empty_claims = [path for path in file_claims if path not in substantive]
+        empty_claims.extend(
+            path for path, (ok, _reason) in positioned.items() if not ok and path not in empty_claims
+        )
+        vacuity_reason = dict(vacuity_reason)
+        vacuity_reason.update(
+            {path: reason for path, (ok, reason) in positioned.items() if not ok and reason}
+        )
         if empty_claims:
             violations.append(
                 {
@@ -341,9 +376,11 @@ def _binding_violations(
                             f"{path} ({vacuity_reason.get(path, 'vacuous')})" for path in empty_claims
                         )
                         + " proves nothing: a marker or the requirement id appears there, but the "
-                        "file has no running test with an assertion (empty body, every test "
-                        "skipped, or only a comment). A claim in a comment is a claim; only an "
-                        "executed assertion is evidence. Write the assertion, or un-skip the test."
+                        "test it attaches to does not run and assert (empty body, skipped, or no "
+                        "test under the marker at all). A claim in a comment is a claim; only an "
+                        "executed assertion is evidence. To go green: write the assertion, "
+                        "un-skip the test, or move the marker onto the test that proves the "
+                        "criterion — a marker attaches to the test written UNDER it."
                     ),
                 }
             )
@@ -550,8 +587,8 @@ def _vb_bindings(
     root: Path,
     config: Mapping[str, Any],
     req_ids: Iterable[str],
-) -> tuple[bool, dict[str, set[str]]]:
-    """(registry_exists, requirement id -> covering test paths via the VB registry).
+) -> tuple[bool, dict[str, dict[str, tuple[int, ...]]]]:
+    """(registry_exists, requirement id -> {covering test path: marker offsets}).
 
     Two links, both already part of CoDD's vocabulary:
 
@@ -568,7 +605,6 @@ def _vb_bindings(
     uncovered behaviour into an accepted one.
     """
 
-    from codd.acceptance_evidence import requirement_anchor_pattern
     from codd.verifiable_behavior_audit import (
         build_vb_coverage_audit,
         discover_vb_documents,
@@ -587,8 +623,15 @@ def _vb_bindings(
         for row in report.rows
         if row.coverage_status == "covered"
     }
-    bindings: dict[str, set[str]] = {}
+    bindings: dict[str, dict[str, tuple[int, ...]]] = {}
+    vb_of_row = {row.vb_id.casefold(): row.vb_id for row in report.rows}
     pattern = requirement_anchor_pattern(req_ids)
+
+    def add(req_id: str, vb_id: str, paths: Iterable[str]) -> None:
+        for path in paths:
+            text = read_test_text(root, path)
+            offsets = tuple(cover_marker_offsets(text, vb_id)) if text is not None else ()
+            bindings.setdefault(req_id, {}).setdefault(path, offsets)
 
     # Link 2: the declared row names the requirement id.
     if pattern is not None:
@@ -597,7 +640,7 @@ def _vb_bindings(
             if not matched:
                 continue
             for match in pattern.finditer(f"{row.description} {row.declared_scenarios}"):
-                bindings.setdefault(match.group("id"), set()).update(matched)
+                add(match.group("id"), row.vb_id, matched)
 
     # Link 1: another document's row references the canonical id.
     for doc_path in discover_vb_documents(root, config=dict(config)):
@@ -608,8 +651,31 @@ def _vb_bindings(
         for reference in parse_vb_references(text, source_doc=doc_path.name):
             matched = covered_tests.get(reference.vb_id.casefold())
             if matched and reference.row_id:
-                bindings.setdefault(reference.row_id, set()).update(matched)
+                add(reference.row_id, vb_of_row.get(reference.vb_id.casefold(), reference.vb_id), matched)
     return True, bindings
+
+
+def _positioned_substance(root: Path, relative: str, offsets: Iterable[int]) -> tuple[bool, str]:
+    """Judge a POSITIONED claim against the test it attaches to.
+
+    A marker binds when at least one of its occurrences introduces a test that
+    runs and asserts. With no offsets (the claim exists but could not be located
+    in the file) the file-level verdict is the honest fallback.
+    """
+
+    text = read_test_text(root, relative)
+    if text is None:
+        return False, "unreadable"
+    positions = list(offsets)
+    if not positions:
+        return test_substance(text)
+    best_reason = ""
+    for offset in positions:
+        ok, reason = substance_at(text, offset)
+        if ok:
+            return True, ""
+        best_reason = best_reason or reason
+    return False, best_reason or "no_assertion"
 
 
 def _vb_table_opt_out(config: Mapping[str, Any]) -> bool:
