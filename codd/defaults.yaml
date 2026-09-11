@@ -308,13 +308,13 @@ test_coverage:
   # An EMPTY registry used to be the safest registry: "no VB table -> one-line
   # notice -> pass" made a project that never declared a verifiable behavior
   # permanently green, and every acceptance criterion it wrote stayed connected
-  # to nothing. Empty is now RED for a project that has something to certify —
-  # it declares acceptance criteria in its requirement documents, or it
-  # structurally expects a canonical registry (planned/pinned/present). A project
-  # with neither is untouched (nothing to verify). Set false to restore the old
-  # behaviour for a project that verifies its criteria some other way; the
-  # acceptance_evidence check honors the same switch.
-  require_vb_table: true
+  # to nothing. That state is now always REPORTED (the acceptance_evidence check
+  # raises `vb_registry_missing`), and this switch decides only whether it also
+  # FAILS the implement-time gate. Unset = follow `acceptance_evidence.mode`
+  # (strict -> fail, advisory -> report only), so upgrading CoDD does not break a
+  # project that never opted in. Set `false` to declare that this project
+  # verifies its criteria some other way — that also silences the finding.
+  # require_vb_table: <unset: follows acceptance_evidence.mode>
   max_retries: 2   # bounded re-implementation attempts before the gate fails
   docs: []         # explicit VB-table documents (empty = auto-discovery)
 verify:
@@ -435,14 +435,25 @@ acceptance_evidence:
   sections: []
   # EXTRA acceptance-column header spellings (additive, never a replacement).
   acceptance_columns: []
-  # Per-class severity (red | amber). Lower a class to amber to keep the finding
-  # visible while a project migrates; never silence it.
-  runtime_severity: red             # runtime obligation, runtime stage disabled
-  unbound_severity: red             # AC bound to no machine-checked evidence
-  param_severity: red               # declared parameter absent from its evidence
-  undeclared_numeric_severity: amber  # literal number in an AC with no params
-  reachability_severity: amber      # evidence off the shipped path / unknown
-  freshness_severity: red           # manual evidence stale against its implementation
+  # mode: advisory | strict. `mode` chooses the DEFAULT severity of every finding
+  # class and nothing else — advisory reports exactly the same findings as strict,
+  # it just does not fail the build with them. Advisory is the default so that
+  # upgrading CoDD never turns an existing project red on its own; the holes stay
+  # visible (named, with a remedy) until the project is ready to say `strict`.
+  # `codd init` writes `mode: strict` for a NEW project, which has nothing to
+  # retrofit.
+  mode: advisory
+  # Per-class severity (red | amber) — OPTIONAL overrides. An explicit value here
+  # always wins over the mode, so a project can run advisory overall and hard-fail
+  # the one class it has already cleaned up, or run strict with one class still
+  # amber while it migrates. Commented out = follow the mode.
+  #   runtime_severity            runtime obligation, runtime stage disabled
+  #   unbound_severity            AC bound to no machine-checked evidence
+  #   vacuous_severity            evidence that runs nothing / asserts nothing
+  #   param_severity              declared parameter absent from its evidence
+  #   undeclared_numeric_severity literal number in an AC with no params
+  #   reachability_severity       evidence off the shipped path / unknown
+  #   freshness_severity          manual evidence stale against its implementation
   # A requirement legitimately spans layers, so several files claiming the same
   # id is normal. The finding fires only when a requirement is implemented on
   # BOTH sides of the shipped path and the evidence proves the off-path side.

@@ -1070,24 +1070,28 @@ def coverage_gate_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def require_vb_table(config: dict[str, Any] | None) -> bool:
-    """Whether a project with NO VB table fails the coverage gate (default ON).
+    """Whether a project with NO VB table FAILS the implement-time coverage gate.
 
-    The old behaviour — "projects with no VB table pass with a one-line notice"
-    — made the EMPTY registry the safest registry: a project that never declared
-    a verifiable behavior was permanently green, and every acceptance criterion
-    it wrote stayed unconnected to any test. Empty is now red for a project that
-    has something to certify (it declares acceptance criteria, or it structurally
-    expects a registry via :func:`project_expects_vb_registry`); a project that
-    declares neither is still untouched.
+    The old behaviour — "projects with no VB table pass with a one-line notice" —
+    made the EMPTY registry the safest registry: a project that never declared a
+    verifiable behavior was permanently green, and every acceptance criterion it
+    wrote stayed unconnected to any test.
 
-    ``test_coverage.require_vb_table: false`` restores the old behaviour for a
-    project that verifies its criteria some other way.
+    That is still reported, but it is not a hard failure by default. Failing an
+    existing project the moment it upgrades CoDD is a change nobody asked for, so
+    the gate follows the project's declared posture: ON when
+    ``acceptance_evidence.mode: strict``, OFF otherwise. The state never becomes
+    invisible either way — the ``acceptance_evidence`` check reports the missing
+    registry as an amber finding in advisory mode. Explicit
+    ``test_coverage.require_vb_table`` always wins over the mode.
     """
 
     section = (config or {}).get("test_coverage")
     if isinstance(section, dict) and "require_vb_table" in section:
         return bool(section["require_vb_table"])
-    return True
+    from codd.acceptance_evidence import acceptance_settings
+
+    return acceptance_settings(config or {}).strict
 
 
 def coverage_gate_max_retries(config: dict[str, Any] | None) -> int:

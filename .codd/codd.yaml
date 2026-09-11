@@ -33,6 +33,12 @@ bands:
   amber:
     min_confidence: 0.50
 
+# CoDD holds itself to the invariant it ships: an acceptance criterion in
+# docs/requirements must reach evidence a machine runs. Strict = those findings
+# are red here, not advisories.
+acceptance_evidence:
+  mode: strict
+
 propagation:
   max_depth: 10
   stop_at_contract_boundary: true

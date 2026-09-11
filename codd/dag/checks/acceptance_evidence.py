@@ -43,10 +43,12 @@ from codd.acceptance_evidence import (
     load_acceptance_criteria,
     numeric_literals,
     SETTINGS_KEY,
+    implementation_closure,
     resolve_test_targets,
     runtime_obligations,
     runtime_smoke_enabled,
     scan_requirement_anchors,
+    substantive_tests,
     tested_subjects,
 )
 from codd.acceptance_record import implementation_digest, load_ledger
@@ -93,10 +95,15 @@ class AcceptanceEvidenceCheck(DagCheck):
             self.settings = settings
         root = (self.project_root or Path.cwd()).resolve()
 
-        # Acceptance criteria, operation_flow and runtime_smoke all live at the
-        # TOP level of codd.yaml, so prefer the full config the runner passes in
-        # over the merged ``dag:`` section.
-        config = codd_config if codd_config is not None else dict(self.settings or {})
+        # Acceptance criteria, operation_flow, runtime_smoke and this check's own
+        # settings all live at the TOP level of codd.yaml, and not every caller
+        # passes it: `VerifyRunner` hands its checks the merged ``dag:`` section
+        # only. Reading a project through that section alone would find no
+        # requirements, no operations and no settings — and report a clean
+        # "nothing to certify" for a project full of acceptance criteria, which
+        # is the false green this check exists to end. So load codd.yaml here and
+        # let whatever the caller passed win over it.
+        config = _project_config(root, codd_config if codd_config is not None else self.settings)
         resolved = acceptance_settings(config)
         if not resolved.enabled:
             return AcceptanceEvidenceResult(
@@ -146,6 +153,8 @@ class AcceptanceEvidenceCheck(DagCheck):
             criteria,
             config=config,
             settings=resolved,
+            dag=target_dag,
+            impl_paths=impl_paths,
             test_paths=test_paths,
             anchors=anchors,
             runtime_bound_ids=runtime_bound_ids,
@@ -226,7 +235,9 @@ def _binding_violations(
     *,
     config: Mapping[str, Any],
     settings: Any,
+    dag: Any,
     test_paths: set[str],
+    impl_paths: set[str],
     anchors: Mapping[str, set[str]],
     runtime_bound_ids: frozenset[str],
 ) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
@@ -242,6 +253,13 @@ def _binding_violations(
     4. an explicit ``verified_by: manual:<owner>`` with a ledger record that is
        still fresh against the implementation it accepted.
 
+    Paths 1-3 all end at a FILE, and a file only binds when it actually proves
+    something (:func:`test_substance`). A marker over an empty test, a test that
+    is skipped, or a comment that merely mentions the requirement id — including
+    one that mentions it to say the opposite, ``// R-1 NOT implemented`` — is a
+    claim, not evidence. Those are reported as ``vacuous_evidence`` and do NOT
+    bind, so the criterion stays unbound instead of going quietly green.
+
     A criterion reaching none of them is ``unbound_acceptance``: it is written
     down, agreed with a customer, and connected to nothing. That state used to
     be invisible — and, for a project with no VB table at all, was announced as
@@ -250,12 +268,13 @@ def _binding_violations(
 
     violations: list[dict[str, Any]] = []
     bound_by_req: dict[str, list[str]] = {}
+    substantive, vacuity_reason = substantive_tests(root, sorted(test_paths))
     registry_exists, covered_by_req = _vb_bindings(
         root, config, (criterion.req_id for criterion in criteria)
     )
     ledger = load_ledger(root)
 
-    if not registry_exists and _require_vb_table(config):
+    if not registry_exists and not _vb_table_opt_out(config):
         violations.append(
             {
                 "type": "vb_registry_missing",
@@ -267,18 +286,20 @@ def _binding_violations(
                     "(`docs/test/test_strategy.md`), so not one of them is reconciled against "
                     "a test marker. Run `codd acceptance sync` to derive the registry from the "
                     "acceptance criteria, or set `test_coverage.require_vb_table: false` to "
-                    "declare that this project verifies its criteria some other way."
+                    "declare that this project verifies its criteria some other way. "
+                    "(`acceptance_evidence.mode: strict` makes this red instead of advisory.)"
                 ),
             }
         )
 
     for criterion in criteria:
         bound: list[str] = []
+        claimed: list[str] = []
 
         for ref in criterion.evidence_of("test"):
             resolved_tests = resolve_test_targets(ref.target, test_paths)
             if resolved_tests:
-                bound.extend(resolved_tests)
+                claimed.extend(resolved_tests)
             else:
                 violations.append(
                     {
@@ -290,23 +311,54 @@ def _binding_violations(
                             f"[acceptance_evidence] Acceptance criterion `{criterion.req_id}` "
                             f"({criterion.source}) declares `verified_by: test:{ref.target}`, but "
                             "no test file matches that name. A pointer to a test that does not "
-                            "exist is worse than no pointer: it reads as evidence."
+                            "exist is worse than no pointer: it reads as evidence. To go green: "
+                            "point it at a test file that exists (its path, filename or stem — "
+                            "`codd acceptance list` prints the test files CoDD can see), or write "
+                            f"`{criterion.req_id}` into the test that proves this criterion."
                         ),
                     }
                 )
 
-        bound.extend(sorted(covered_by_req.get(criterion.req_id, set())))
-        bound.extend(sorted(anchors.get(criterion.req_id, set()) & test_paths))
+        claimed.extend(sorted(covered_by_req.get(criterion.req_id, set())))
+        claimed.extend(sorted(anchors.get(criterion.req_id, set()) & test_paths))
+
+        # A claim binds only when the file it points at actually asserts something.
+        for path in dict.fromkeys(claimed):
+            if path in substantive:
+                bound.append(path)
+        empty_claims = [path for path in dict.fromkeys(claimed) if path not in substantive]
+        if empty_claims:
+            violations.append(
+                {
+                    "type": "vacuous_evidence",
+                    "severity": settings.vacuous_severity,
+                    "req_id": criterion.req_id,
+                    "source": criterion.source,
+                    "files": empty_claims,
+                    "message": (
+                        f"[acceptance_evidence] The evidence claimed for `{criterion.req_id}` "
+                        + ", ".join(
+                            f"{path} ({vacuity_reason.get(path, 'vacuous')})" for path in empty_claims
+                        )
+                        + " proves nothing: a marker or the requirement id appears there, but the "
+                        "file has no running test with an assertion (empty body, every test "
+                        "skipped, or only a comment). A claim in a comment is a claim; only an "
+                        "executed assertion is evidence. Write the assertion, or un-skip the test."
+                    ),
+                }
+            )
 
         manual_refs = criterion.evidence_of("manual")
         if manual_refs:
+            accepted = implementation_closure(
+                dag, anchors.get(criterion.req_id, set()), impl_paths
+            )
             violations.extend(
-                _manual_violations(root, criterion, manual_refs, ledger, anchors, settings)
+                _manual_violations(root, criterion, manual_refs, ledger, accepted, settings)
             )
             record = ledger.get(criterion.req_id)
             if record is not None and record.status == "pass":
-                current = implementation_digest(root, sorted(anchors.get(criterion.req_id, set())))
-                if not record.is_stale(current):
+                if not record.is_stale(implementation_digest(root, accepted)):
                     bound.append(f"manual:{record.by}")
 
         bound_by_req[criterion.req_id] = sorted(set(bound))
@@ -339,7 +391,7 @@ def _manual_violations(
     criterion: AcceptanceCriterion,
     manual_refs: tuple[Any, ...],
     ledger: Mapping[str, Any],
-    anchors: Mapping[str, set[str]],
+    accepted: list[str],
     settings: Any,
 ) -> list[dict[str, Any]]:
     """(d): a manual verdict expires when the implementation it accepted changes."""
@@ -365,7 +417,7 @@ def _manual_violations(
         )
         return violations
 
-    current = implementation_digest(root, sorted(anchors.get(criterion.req_id, set())))
+    current = implementation_digest(root, accepted)
     if record.is_stale(current):
         violations.append(
             {
@@ -393,7 +445,10 @@ def _manual_violations(
                     f"[acceptance_evidence] `{criterion.req_id}` is marked critical but its only "
                     "evidence is a manual record. A criterion that must not regress should have "
                     "evidence that re-runs itself; the manual record proves one moment, not the "
-                    "next release."
+                    "next release. To go green: add `test:<name>` (or `runtime:<case>`) to this "
+                    "row's `verified_by` alongside the manual owner — or, if a person really is "
+                    "the only possible check, drop `critical` from the row, since the flag means "
+                    "\"must not regress unattended\"."
                 ),
             }
         )
@@ -557,12 +612,19 @@ def _vb_bindings(
     return True, bindings
 
 
-def _require_vb_table(config: Mapping[str, Any]) -> bool:
-    """Shared with the implement-time gate — one switch, two enforcement points."""
+def _vb_table_opt_out(config: Mapping[str, Any]) -> bool:
+    """Whether the project EXPLICITLY declared that it owns no VB registry.
 
-    from codd.verifiable_behavior_audit import require_vb_table
+    The missing registry is reported whether or not the implement-time gate is
+    armed: `test_coverage.require_vb_table` decides whether it FAILS a build,
+    never whether it is visible — a finding nobody can see is the "one-line
+    notice and pass" this work exists to end. Only an explicit
+    `require_vb_table: false` (the project saying "I verify some other way")
+    silences it.
+    """
 
-    return require_vb_table(dict(config))
+    section = config.get("test_coverage") if isinstance(config, Mapping) else None
+    return isinstance(section, Mapping) and section.get("require_vb_table") is False
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +787,20 @@ def _declared_operations(config: Mapping[str, Any], dag: Any) -> dict[str, dict[
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _project_config(root: Path, passed: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The project's codd.yaml, with anything the caller passed layered on top."""
+
+    from codd.config import load_project_config
+
+    try:
+        config = dict(load_project_config(root))
+    except (FileNotFoundError, ValueError):
+        config = {}
+    for key, value in dict(passed or {}).items():
+        config[key] = value
+    return config
 
 
 def _nodes_of_kind(dag: Any, kinds: set[str]) -> set[str]:

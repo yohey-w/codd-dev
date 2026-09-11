@@ -145,6 +145,37 @@ def implementation_digest(project_root: Path | str, paths: Iterable[str]) -> dic
     return digest
 
 
+def expand_to_closure(project_root: Path | str, paths: Iterable[str]) -> list[str]:
+    """Grow a set of implementation files to include what they import.
+
+    A verdict about ``make-sheet.ts`` is really a verdict about the behaviour
+    that file produces, which usually lives partly in the modules it imports.
+    Recording only the named file would let the accepted behaviour move one file
+    sideways and keep the record looking current — so the ledger stores the same
+    closure the check re-hashes. Best effort: if the DAG cannot be built (a
+    project with no CoDD config, a test harness), the paths are recorded as
+    given rather than failing the record.
+    """
+
+    given = sorted({path for path in paths if path})
+    if not given:
+        return []
+    try:
+        from codd.acceptance_evidence import implementation_closure
+        from codd.dag.builder import build_dag
+
+        dag = build_dag(Path(project_root).resolve())
+        impl_paths = {
+            node.id
+            for node in getattr(dag, "nodes", {}).values()
+            if getattr(node, "kind", "") in {"impl_file", "common"}
+        }
+        expanded = implementation_closure(dag, given, impl_paths)
+    except Exception:  # never block a human verdict on graph construction
+        return given
+    return sorted(set(expanded) | set(given))
+
+
 def record_acceptance(
     project_root: Path | str,
     req_id: str,
@@ -155,17 +186,23 @@ def record_acceptance(
     note: str = "",
     now: datetime | None = None,
     codd_dir: Path | None = None,
+    expand_closure: bool = True,
 ) -> AcceptanceRecord:
     """Record a human verdict, bound to the current implementation content."""
 
     records = load_ledger(project_root, codd_dir)
+    paths = (
+        expand_to_closure(project_root, implementation_paths)
+        if expand_closure
+        else sorted(set(implementation_paths))
+    )
     record = AcceptanceRecord(
         req_id=req_id,
         status=status,
         by=by,
         recorded_at=(now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
         note=note,
-        implementation=implementation_digest(project_root, implementation_paths),
+        implementation=implementation_digest(project_root, paths),
     )
     records[req_id] = record
     write_ledger(project_root, records, codd_dir)

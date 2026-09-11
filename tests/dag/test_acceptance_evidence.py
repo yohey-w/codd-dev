@@ -10,6 +10,7 @@ check's behaviour is pinned by structure, not by one repository's contents.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -41,7 +42,8 @@ def _write_project(
     runtime_smoke: dict | None = None,
     extra_config: dict | None = None,
     files: dict[str, str] | None = None,
-    require_vb_table: bool = False,
+    require_vb_table: bool | None = False,
+    strict: bool = False,
 ) -> Path:
     root = tmp_path / "project"
     (root / "docs" / "requirements").mkdir(parents=True, exist_ok=True)
@@ -58,16 +60,25 @@ def _write_project(
             # an operation just to be audited.
             "sections": ["機能要件"],
         },
-        # Off by default in these fixtures so each test exercises ONE rule; the
-        # default-true behaviour has its own tests below.
-        "test_coverage": {"require_vb_table": require_vb_table},
     }
+    if strict:
+        # `mode: strict` = the finding severities the invariant asks for. Tests that
+        # pin a RED must say so, because advisory is what a real upgrade gets.
+        config["acceptance_evidence"] = {"mode": "strict"}
+    if require_vb_table is not None:
+        # Pinned in these fixtures so each test exercises ONE rule; pass None to
+        # let the project's mode decide, as a real project would.
+        config["test_coverage"] = {"require_vb_table": require_vb_table}
     if operations is not None:
         config["operation_flow"] = {"operations": operations}
     if runtime_smoke is not None:
         config["runtime_smoke"] = runtime_smoke
     if extra_config:
-        config.update(extra_config)
+        for key, value in extra_config.items():
+            if isinstance(value, dict) and isinstance(config.get(key), dict):
+                config[key] = {**config[key], **value}
+            else:
+                config[key] = value
     (root / "codd").mkdir(parents=True, exist_ok=True)
     (root / "codd" / "codd.yaml").write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
 
@@ -201,6 +212,7 @@ def test_runtime_obligation_without_runtime_smoke_is_red(tmp_path):
         operations=[
             {"id": "sheet_print", "actor": "operator", "verb": "print", "target": "sheet", "route": "/admin"}
         ],
+        strict=True,
     )
     result = _run_check(root)
     assert result.passed is False
@@ -362,6 +374,7 @@ def test_no_vb_registry_is_red_when_the_project_has_criteria_to_certify(tmp_path
         operations=SHEET_OPERATION,
         runtime_smoke=RUNTIME_ON,
         require_vb_table=True,
+        strict=True,
     )
     result = _run_check(root)
     assert result.passed is False
@@ -414,7 +427,12 @@ def test_a_test_file_naming_the_requirement_id_binds_the_criterion(tmp_path):
         runtime_smoke=RUNTIME_ON,
         extra_config={"requirement_reconciliation": {"enabled": True, "sections": ["機能要件"],
                                                      "docs": ["docs/requirements/requirements.md"]}},
-        files={"tests/unit/sheet.test.ts": "// R-1: 15 per sheet\ntest('sheet', () => {});\n"},
+        files={
+            "tests/unit/sheet.test.ts": (
+                "// R-1: 15 per sheet\n"
+                "test('sheet', () => { expect(rows()).toBe(15); });\n"
+            )
+        },
     )
     assert _violations(_run_check(root), "unbound_acceptance") == []
 
@@ -432,7 +450,11 @@ def test_requirement_id_anchor_matches_whole_tokens_only(tmp_path):
         runtime_smoke=RUNTIME_ON,
         extra_config={"requirement_reconciliation": {"enabled": True, "sections": ["機能要件"],
                                                      "docs": ["docs/requirements/requirements.md"]}},
-        files={"tests/unit/sheet.test.ts": "// R-12 only\ntest('sheet', () => {});\n"},
+        files={
+            "tests/unit/sheet.test.ts": (
+                "// R-12 only\ntest('sheet', () => { expect(rows()).toBe(15); });\n"
+            )
+        },
     )
     assert [item["req_id"] for item in _violations(_run_check(root), "unbound_acceptance")] == ["R-1"]
 
@@ -446,7 +468,9 @@ def test_verified_by_test_pointer_must_resolve(tmp_path):
         ),
         operations=SHEET_OPERATION,
         runtime_smoke=RUNTIME_ON,
-        files={"tests/unit/sheet.test.ts": "test('sheet', () => {});\n"},
+        files={
+            "tests/unit/sheet.test.ts": "test('sheet', () => { expect(rows()).toBe(15); });\n"
+        },
     )
     assert _violations(_run_check(root), "unresolved_evidence")
 
@@ -458,7 +482,9 @@ def test_verified_by_test_pointer_must_resolve(tmp_path):
         ),
         operations=SHEET_OPERATION,
         runtime_smoke=RUNTIME_ON,
-        files={"tests/unit/sheet.test.ts": "test('sheet', () => {});\n"},
+        files={
+            "tests/unit/sheet.test.ts": "test('sheet', () => { expect(rows()).toBe(15); });\n"
+        },
     )
     result = _run_check(root2)
     assert _violations(result, "unresolved_evidence") == []
@@ -482,7 +508,10 @@ def test_a_covered_vb_row_naming_the_requirement_binds_it(tmp_path):
                 "# Test strategy\n\n| VB ID | behavior | Requirement |\n| --- | --- | --- |\n"
                 "| VB-R-1 | 15 per sheet | R-1 |\n"
             ),
-            "tests/unit/sheet.test.ts": "// codd: covers vb=VB-R-1\ntest('sheet', () => {});\n",
+            "tests/unit/sheet.test.ts": (
+                "// codd: covers vb=VB-R-1\n"
+                "test('sheet', () => { expect(rows()).toBe(15); });\n"
+            ),
         },
     )
     result = _run_check(root)
@@ -737,6 +766,7 @@ def test_declared_param_missing_from_the_bound_evidence_is_red(tmp_path):
         operations=SHEET_OPERATION,
         runtime_smoke=RUNTIME_ON,
         files={"tests/unit/sheet.test.ts": "test('sheet', () => { expect(rows()).toBe(20); });\n"},
+        strict=True,
     )
     found = _violations(_run_check(root), "param_not_referenced")
     assert found and found[0]["params"] == ["per_sheet"]
@@ -1016,3 +1046,281 @@ def test_the_cap_is_per_finding_type_so_a_loud_red_cannot_hide_an_amber(tmp_path
     assert len(_violations(result, "runtime_evidence_not_executable")) == 2  # capped
     assert _violations(result, "off_shipped_path"), "an amber class must survive the cap"
     assert "off_shipped_path 1" in result.message  # per-type tally is always visible
+
+
+# ---------------------------------------------------------------------------
+# review follow-up — defaults: advisory by default, strict on request
+# ---------------------------------------------------------------------------
+
+
+def test_default_mode_is_advisory_so_an_upgrade_does_not_turn_a_project_red(tmp_path):
+    """An existing brownfield project must not go red just by upgrading CoDD."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc("| R-1 | 出す | 15人が並ぶ `operation_flow.sheet_print` |\n"),
+        operations=SHEET_OPERATION,
+        require_vb_table=None,
+    )
+    result = _run_check(root)
+    assert result.passed is True
+    assert result.status == "warn"
+    assert result.severity == "amber"
+    # but the holes are still NAMED — advisory is not silence
+    assert _violations(result, "runtime_evidence_not_executable")
+    assert _violations(result, "vb_registry_missing")
+    assert all(item["severity"] == "amber" for item in result.violations)
+
+
+def test_strict_mode_makes_the_same_findings_red(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc("| R-1 | 出す | 15人が並ぶ `operation_flow.sheet_print` |\n"),
+        operations=SHEET_OPERATION,
+        extra_config={"acceptance_evidence": {"mode": "strict"}},
+    )
+    result = _run_check(root)
+    assert result.passed is False
+    assert result.severity == "red"
+    assert _violations(result, "runtime_evidence_not_executable")[0]["severity"] == "red"
+
+
+def test_per_class_severity_wins_over_the_mode(tmp_path):
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc("| R-1 | 出す | 15人が並ぶ `operation_flow.sheet_print` |\n"),
+        operations=SHEET_OPERATION,
+        extra_config={"acceptance_evidence": {"runtime_severity": "red"}},  # advisory overall
+    )
+    result = _run_check(root)
+    assert result.passed is False
+    assert _violations(result, "runtime_evidence_not_executable")[0]["severity"] == "red"
+
+
+def test_require_vb_table_follows_the_mode(tmp_path):
+    from codd.config import load_project_config
+    from codd.verifiable_behavior_audit import run_implement_coverage_gate
+
+    def gate(extra):
+        root = _write_project(
+            tmp_path / ("m" + str(len(extra))),
+            requirements=_requirements_doc(ROW_WITH_OPERATION),
+            operations=SHEET_OPERATION,
+            extra_config=extra,
+            files={"tests/unit/sheet.test.ts": "test('s', () => { expect(1).toBe(1); });\n"},
+        )
+        # drop the fixture's explicit switch so the MODE decides
+        config = load_project_config(root)
+        config.pop("test_coverage", None)
+        messages: list[str] = []
+        return run_implement_coverage_gate(
+            root,
+            config=config,
+            design_node=None,
+            output_paths=["tests/unit/sheet.test.ts"],
+            echo=messages.append,
+            echo_error=messages.append,
+        ), messages
+
+    passed, messages = gate({})
+    assert passed is True, "an upgrade must not fail the implement gate by itself"
+    assert any("nothing to audit" in message for message in messages)
+
+    passed, messages = gate({"acceptance_evidence": {"mode": "strict"}})
+    assert passed is False
+    assert any("require_vb_table" in message for message in messages)
+
+
+def test_acceptance_evidence_is_in_the_plain_verify_default_checks():
+    """The flagship gate must run in the command the design document names."""
+
+    from codd.repair.verify_runner import DEFAULT_CHECKS
+
+    assert "acceptance_evidence" in DEFAULT_CHECKS
+
+
+def test_dag_json_carries_no_machine_specific_path(tmp_path):
+    from codd.dag.builder import build_dag, dag_to_dict
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(ROW_WITH_OPERATION),
+        operations=SHEET_OPERATION,
+    )
+    payload = dag_to_dict(build_dag(root), root)
+    assert payload["project_root"] == "."
+    assert str(root) not in json.dumps(payload)
+
+
+# ---------------------------------------------------------------------------
+# review follow-up — (a) substantiveness: a marker is a claim, not evidence
+# ---------------------------------------------------------------------------
+
+
+def _vb_project(tmp_path, body: str) -> Path:
+    return _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 | |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        require_vb_table=True,
+        files={
+            "docs/test/test_strategy.md": (
+                "# Test strategy\n\n| VB ID | behavior | Requirement |\n| --- | --- | --- |\n"
+                "| VB-R-1 | 15 per sheet | R-1 |\n"
+            ),
+            "tests/unit/sheet.test.ts": "// codd: covers vb=VB-R-1\n" + body,
+        },
+    )
+
+
+def test_a_covers_marker_over_an_empty_test_does_not_bind(tmp_path):
+    result = _run_check(_vb_project(tmp_path, "test('sheet', () => {});\n"))
+    assert _violations(result, "vacuous_evidence")
+    assert _violations(result, "unbound_acceptance")
+
+
+def test_a_covers_marker_with_no_test_at_all_does_not_bind(tmp_path):
+    result = _run_check(_vb_project(tmp_path / "b", "// nothing here\n"))
+    found = _violations(result, "vacuous_evidence")
+    assert found and "no_test_body" in found[0]["message"]
+    assert _violations(result, "unbound_acceptance")
+
+
+def test_a_skipped_test_does_not_bind(tmp_path):
+    result = _run_check(
+        _vb_project(tmp_path / "c", "test.skip('sheet', () => { expect(1).toBe(2); });\n")
+    )
+    found = _violations(result, "vacuous_evidence")
+    assert found and "all_tests_skipped" in found[0]["message"]
+    assert _violations(result, "unbound_acceptance")
+
+
+def test_a_requirement_id_in_a_comment_only_file_does_not_bind(tmp_path):
+    """`// R-1 NOT implemented` used to silence the very finding it describes."""
+
+    for index, content in enumerate(
+        ["// R-1 is out of scope for now\n", "// R-1\ntest.todo('later');\n", "/* R-1 NOT implemented */\n"]
+    ):
+        root = _write_project(
+            tmp_path / f"n{index}",
+            requirements=_requirements_doc("| R-1 | 出す | 15人 `operation_flow.sheet_print` |\n"),
+            operations=SHEET_OPERATION,
+            files={"tests/unit/sheet.test.ts": content},
+        )
+        assert _violations(_run_check(root), "unbound_acceptance"), content
+
+
+def test_substance_recognizes_real_tests_in_several_languages():
+    from codd.acceptance_evidence import test_substance
+
+    assert test_substance("test('r',()=>{expect(rows).toBe(15);});")[0] is True
+    assert test_substance("def test_rows():\n    assert rows == 15\n")[0] is True
+    assert test_substance("func TestRows(t *testing.T){ if x {t.Fatalf(\"no\")} }")[0] is True
+    assert test_substance("#[test]\nfn rows(){ assert_eq!(rows, 15); }")[0] is True
+    # an assertion written INSIDE a comment is prose, not evidence
+    assert test_substance("// expect(rows).toBe(15)\ntest('r',()=>{});")[0] is False
+
+
+# ---------------------------------------------------------------------------
+# review follow-up — (d) freshness follows the implementation, not the anchor
+# ---------------------------------------------------------------------------
+
+
+def test_manual_evidence_expires_when_an_imported_file_changes(tmp_path):
+    """The value moved one file sideways and the verdict still read as current."""
+
+    from codd.acceptance_record import record_acceptance
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 `operation_flow.sheet_print` | manual:yohey |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={
+            "tools/make-sheet.ts": "// R-1 builder\nimport { rows } from './cfg';\nexport { rows };\n",
+            "tools/cfg.ts": "export const rows = 15;\n",
+        },
+    )
+    from codd.acceptance_evidence import build_evidence_context
+    from codd.config import load_project_config
+
+    accepted = build_evidence_context(root, load_project_config(root)).accepted_implementation("R-1")
+    assert "tools/cfg.ts" in accepted, "the accepted set must follow the imports"
+    record_acceptance(root, "R-1", status="pass", by="yohey", implementation_paths=accepted)
+    assert _violations(_run_check(root), "stale_manual_evidence") == []
+
+    (root / "tools" / "cfg.ts").write_text("export const rows = 20;\n", encoding="utf-8")
+    assert _violations(_run_check(root), "stale_manual_evidence"), "15 -> 20 must expire the verdict"
+
+
+def test_remedy_lines_are_present_on_the_two_findings_that_lacked_them(tmp_path):
+    from codd.acceptance_record import record_acceptance
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人 `operation_flow.sheet_print` | test:nosuchtest |\n"
+            "| R-2 | 出す | 15人 `operation_flow.sheet_print` | manual:yohey | true |\n",
+            header="| ID | 要件 | 検収条件 | verified_by | critical |\n| --- | --- | --- | --- | --- |\n",
+        ),
+        operations=SHEET_OPERATION,
+        runtime_smoke=RUNTIME_ON,
+        files={"tools/make-sheet.ts": "// R-2 builder\nexport const rows = 15;\n"},
+    )
+    record_acceptance(root, "R-2", status="pass", by="yohey", implementation_paths=["tools/make-sheet.ts"])
+    result = _run_check(root)
+    unresolved = _violations(result, "unresolved_evidence")
+    assert unresolved and "To go green" in unresolved[0]["message"]
+    critical = _violations(result, "critical_manual_only")
+    assert critical and "To go green" in critical[0]["message"]
+
+
+def test_the_check_reads_codd_yaml_even_when_handed_only_the_dag_section():
+    """`VerifyRunner` passes its checks the merged `dag:` section, nothing else.
+
+    Reading a project through that alone finds no requirements, no operations and
+    no settings — and reports a clean "nothing to certify" for a project full of
+    acceptance criteria. The check therefore loads codd.yaml itself, and lets
+    whatever the caller passed win over it.
+    """
+
+    import tempfile
+
+    root = _write_project(
+        Path(tempfile.mkdtemp()),
+        requirements=_requirements_doc(ROW_WITH_OPERATION),
+        operations=SHEET_OPERATION,
+        strict=True,
+    )
+    reset_dag_cache(root)
+    # settings as VerifyRunner would pass them: the dag section, with no
+    # operation_flow / requirement_reconciliation / acceptance_evidence in sight.
+    result = AcceptanceEvidenceCheck(
+        dag=build_dag(root), project_root=root, settings={"project_type": "generic"}
+    ).run()
+    assert result.skipped is False, "the criteria must be found without an explicit config"
+    assert result.checked_count == 1
+    assert result.severity == "red", "the project's own `mode: strict` must be honoured"
+
+
+def test_a_caller_supplied_config_still_wins_over_the_file():
+    import tempfile
+
+    root = _write_project(
+        Path(tempfile.mkdtemp()),
+        requirements=_requirements_doc(ROW_WITH_OPERATION),
+        operations=SHEET_OPERATION,
+        strict=True,
+    )
+    reset_dag_cache(root)
+    result = AcceptanceEvidenceCheck(dag=build_dag(root), project_root=root, settings={}).run(
+        codd_config={"acceptance_evidence": {"enabled": False}}
+    )
+    assert result.skipped is True

@@ -167,21 +167,39 @@ class AcceptanceCriterion:
         return tuple(ref for ref in self.verified_by if ref.kind == kind)
 
 
+# ``mode`` decides the DEFAULT severity of every finding class, and nothing else.
+# Advisory (the default) reports exactly the same findings as strict — it just
+# does not fail the build with them. That split exists because the two things a
+# new check can get wrong are opposite: fail an existing project on an upgrade
+# nobody asked for, or stay so quiet that the hole it was written for is
+# invisible again. Advisory refuses both: every finding is still a finding, in
+# the report, named, with a remedy — it is simply amber until the project says
+# `mode: strict`.
+MODE_ADVISORY = "advisory"
+MODE_STRICT = "strict"
+
+
 @dataclass(frozen=True)
 class AcceptanceSettings:
     """``acceptance_evidence:`` section of codd.yaml."""
 
     enabled: bool = True
+    mode: str = MODE_ADVISORY
     docs: tuple[str, ...] = ()
     sections: tuple[str, ...] = ()
     acceptance_columns: tuple[str, ...] = ()
-    runtime_severity: str = "red"
-    unbound_severity: str = "red"
-    param_severity: str = "red"
+    runtime_severity: str = "amber"
+    unbound_severity: str = "amber"
+    param_severity: str = "amber"
     undeclared_numeric_severity: str = "amber"
     reachability_severity: str = "amber"
-    freshness_severity: str = "red"
+    freshness_severity: str = "amber"
+    vacuous_severity: str = "amber"
     max_findings: int = 30
+
+    @property
+    def strict(self) -> bool:
+        return self.mode == MODE_STRICT
 
     @property
     def effective_acceptance_columns(self) -> tuple[str, ...]:
@@ -202,7 +220,16 @@ def acceptance_settings(config: Mapping[str, Any] | None) -> AcceptanceSettings:
     docs = _string_tuple(section.get("docs")) or reconciliation.docs
     sections = _string_tuple(section.get("sections")) or reconciliation.sections
 
-    def severity(key: str, default: str) -> str:
+    mode = str(section.get("mode", MODE_ADVISORY) or MODE_ADVISORY).strip().lower()
+    if mode not in {MODE_ADVISORY, MODE_STRICT}:
+        mode = MODE_ADVISORY
+
+    def severity(key: str, strict_default: str) -> str:
+        # Explicit per-class configuration always wins; `mode` only chooses the
+        # default. A project can therefore run advisory overall and still hard-fail
+        # the one class it has already cleaned up, or run strict and keep one class
+        # amber while it migrates.
+        default = strict_default if mode == MODE_STRICT else "amber"
         value = str(section.get(key, default) or default).strip().lower()
         return value if value in {"red", "amber"} else default
 
@@ -214,6 +241,7 @@ def acceptance_settings(config: Mapping[str, Any] | None) -> AcceptanceSettings:
 
     return AcceptanceSettings(
         enabled=bool(section.get("enabled", True)),
+        mode=mode,
         docs=docs,
         sections=sections,
         acceptance_columns=_string_tuple(section.get("acceptance_columns")),
@@ -223,6 +251,7 @@ def acceptance_settings(config: Mapping[str, Any] | None) -> AcceptanceSettings:
         undeclared_numeric_severity=severity("undeclared_numeric_severity", "amber"),
         reachability_severity=severity("reachability_severity", "amber"),
         freshness_severity=severity("freshness_severity", "red"),
+        vacuous_severity=severity("vacuous_severity", "red"),
         max_findings=max(1, max_findings),
     )
 
@@ -463,6 +492,109 @@ def scan_requirement_anchors(
     return anchors
 
 
+# ---------------------------------------------------------------------------
+# Substantiveness: a marker is a claim, a test body is the evidence
+# ---------------------------------------------------------------------------
+
+# Comments are stripped before any of this is measured. A file that only TALKS
+# about a requirement — "// R-1 is out of scope", "/* R-1 NOT implemented */",
+# a bare `codd: covers vb=` line with no test under it — was being counted as
+# proof that the requirement works, which is the exact false-green this module
+# exists to abolish. A claim in a comment is a claim; only an executed assertion
+# is evidence.
+# ``#[`` is NOT a comment: it opens a Rust attribute (``#[test]`` / ``#[ignore]``),
+# and stripping it would erase the very declaration this module looks for.
+_LINE_COMMENT_RE = re.compile(r"(?m)(?:^|\s)(?://|#(?!\[))[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+# Test DECLARATIONS across the languages CoDD scans. Deliberately shallow: this
+# is a presence test, not a parser.
+_TEST_DECLARATION_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9_.])(?:test|it|describe|context)\s*(?:\.\s*(?:each|concurrent|only|skip|todo|failing)\s*)?[(`])"
+    r"|(?:^|\n)\s*(?:async\s+)?def\s+test\w*\s*\("
+    r"|(?:^|\n)\s*func\s+Test\w*\s*\("
+    r"|(?:^|\n)\s*@Test\b"
+    r"|(?:^|\n)\s*#\[test\]",
+)
+
+# SKIPPED declarations. A skipped test reports neither pass nor fail — treating
+# it as coverage is the same "green by absence" the verification-coverage rule
+# already refuses elsewhere in CoDD.
+_SKIPPED_DECLARATION_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9_.])(?:test|it|describe|context)\s*\.\s*(?:skip|todo|failing)\s*[(`])"
+    r"|(?:(?<![A-Za-z0-9_.])(?:xit|xtest|xdescribe)\s*[(`])"
+    r"|(?:@\s*pytest\s*\.\s*mark\s*\.\s*(?:skip|skipif|xfail))"
+    r"|(?:@\s*unittest\s*\.\s*(?:skip|expectedFailure))"
+    r"|(?:^|\n)\s*#\[ignore\]"
+    r"|(?:^|\n)\s*@Disabled\b",
+)
+
+# Assertion vocabulary. One hit is enough — the question is whether the file
+# asserts anything at all, not how well.
+_ASSERTION_RE = re.compile(
+    # `assert` is a STATEMENT in several languages (`assert rows == 15`), so it
+    # may be followed by whitespace; the call-shaped forms must be followed by a
+    # call/member character so a bare word in an identifier does not count.
+    r"(?<![A-Za-z0-9_])assert\w*[\s(!]"
+    r"|(?<![A-Za-z0-9_])(?:"
+    r"expect|should\w*|verify|EXPECT_\w+|ASSERT_\w+|XCTAssert\w*"
+    r"|t\.(?:Error|Fatal|Errorf|Fatalf)|require\.\w+|chai|panic!"
+    r")\s*[(!.]"
+)
+
+
+def strip_comments(text: str) -> str:
+    """Remove line and block comments so a claim in prose cannot pass as code."""
+
+    return _LINE_COMMENT_RE.sub(" ", _BLOCK_COMMENT_RE.sub(" ", text))
+
+
+def test_substance(text: str) -> tuple[bool, str]:
+    """Whether a test file actually proves something. Returns (substantive, reason).
+
+    Three ways to be vacuous, all observed in the wild:
+
+    * ``no_test_body`` — the file declares no test at all (a stray marker, a
+      comment, a helper);
+    * ``all_tests_skipped`` — every declaration it has is skipped/todo;
+    * ``no_assertion`` — a test that runs and checks nothing.
+    """
+
+    code = strip_comments(text)
+    declarations = len(_TEST_DECLARATION_RE.findall(code))
+    skipped = len(_SKIPPED_DECLARATION_RE.findall(code))
+    if declarations == 0:
+        return False, "no_test_body"
+    if declarations - skipped <= 0:
+        return False, "all_tests_skipped"
+    if not _ASSERTION_RE.search(code):
+        return False, "no_assertion"
+    return True, ""
+
+
+def substantive_tests(
+    project_root: Path | str,
+    relative_paths: Iterable[str],
+) -> tuple[set[str], dict[str, str]]:
+    """Split candidate test files into (substantive, {path: vacuity reason})."""
+
+    root = Path(project_root).resolve()
+    good: set[str] = set()
+    vacuous: dict[str, str] = {}
+    for relative in relative_paths:
+        try:
+            text = (root / relative).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            vacuous[relative] = "unreadable"
+            continue
+        substantive, reason = test_substance(text)
+        if substantive:
+            good.add(relative)
+        else:
+            vacuous[relative] = reason
+    return good, vacuous
+
+
 def resolve_test_targets(
     target: str,
     test_paths: Iterable[str],
@@ -500,9 +632,21 @@ class EvidenceContext:
     test_paths: frozenset[str]
     impl_paths: frozenset[str]
     anchors: Mapping[str, frozenset[str]]
+    dag: Any = None
 
     def implementers(self, req_id: str) -> tuple[str, ...]:
         return tuple(sorted(self.anchors.get(req_id, frozenset()) & self.impl_paths))
+
+    def accepted_implementation(self, req_id: str) -> tuple[str, ...]:
+        """What a manual verdict on ``req_id`` is about: implementers + their imports.
+
+        The CLI records exactly what the check later re-hashes; if the two
+        disagreed, every record would read as stale the moment it was written.
+        """
+
+        return tuple(
+            implementation_closure(self.dag, self.implementers(req_id), self.impl_paths)
+        )
 
     def anchored_tests(self, req_id: str) -> tuple[str, ...]:
         return tuple(sorted(self.anchors.get(req_id, frozenset()) & self.test_paths))
@@ -537,6 +681,7 @@ def build_evidence_context(
         test_paths=test_paths,
         impl_paths=impl_paths,
         anchors={req_id: frozenset(paths) for req_id, paths in anchors.items()},
+        dag=dag,
     )
 
 
@@ -639,6 +784,29 @@ def import_closure(dag: Any, starts: Iterable[str]) -> set[str]:
         seen.add(current)
         stack.extend(adjacency.get(current, ()))
     return seen
+
+
+def implementation_closure(
+    dag: Any,
+    anchored: Iterable[str],
+    impl_paths: Iterable[str],
+) -> list[str]:
+    """The implementation a manual verdict is really about: anchors + what they import.
+
+    Hashing only the files that write the requirement id lets the behaviour walk
+    one file sideways and escape (d) entirely: accept ``make-sheet.ts``, then
+    change ``15`` to ``20`` in the ``cfg.ts`` it imports, and the recorded
+    verdict still looks current — the exact "15 vs 20" drift the invariant was
+    written for. The accepted set is therefore the anchors plus their in-tree
+    import closure, intersected with the project's implementation files (the
+    closure never leaves the DAG, so third-party code is already out).
+    """
+
+    anchors = set(anchored)
+    if not anchors:
+        return []
+    reachable = import_closure(dag, anchors)
+    return sorted((reachable & set(impl_paths)) | anchors)
 
 
 def tested_subjects(dag: Any, test_paths: Iterable[str]) -> dict[str, set[str]]:

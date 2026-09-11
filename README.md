@@ -196,6 +196,20 @@ CoDD ships **39 ready-made "lexicons"** — checklists drawn from real industry 
 
 ---
 
+## Acceptance evidence
+
+**What becomes visible.** Every acceptance criterion in your requirement tables is reconciled against evidence a machine runs: `codd verify` now reports criteria bound to no test, evidence that asserts nothing or is skipped, runtime obligations in a project whose runtime stage is off, values retyped instead of read by name, and evidence that never runs through the entry point users actually reach.
+Findings are **advisory (amber) by default** — upgrading CoDD never turns your build red on its own — and they are never silent: each one names the criterion and what to do about it.
+
+**Turning it into a gate.** Put `acceptance_evidence: {mode: strict}` in `codd.yaml` (`codd init` writes it for new projects) and the same findings become red. Per-class overrides let you hard-fail one class while the rest stay advisory: `acceptance_evidence: {unbound_severity: red}`.
+Opt out entirely with `acceptance_evidence: {enabled: false}` — the findings disappear with it, which is the point of choosing.
+
+**Migrating an existing project.** Run `codd acceptance list` to see what each criterion is bound to today, then `codd acceptance sync` to derive one verifiable-behavior row per criterion into `docs/test/test_strategy.md` (deterministic, no AI, append-only, safe to re-run).
+Write the tests those rows name, mark each with `codd: covers vb=<id>`, and add `verified_by: test:<name>` / `params: <name>=<value>` columns to the requirement table as you go.
+For a criterion only a person can check, `codd acceptance record <ID> pass --by <owner>` stores the verdict bound to the implementation it accepted — it expires when that implementation changes.
+
+---
+
 ## FAQ & troubleshooting
 
 **Q. `codd: command not found`.**

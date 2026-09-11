@@ -3338,7 +3338,9 @@ def acceptance_record(
         )
         raise SystemExit(1)
 
-    implementation = list(files) or list(context.implementers(req_id))
+    # Default to the implementation the CHECK will re-hash (the anchored files
+    # plus what they import), so a record is not stale the moment it is written.
+    implementation = list(files) or list(context.accepted_implementation(req_id))
     if not implementation:
         click.echo(
             f"Error: no implementation is anchored to `{req_id}`, so the verdict could not be "
@@ -3347,6 +3349,16 @@ def acceptance_record(
         )
         raise SystemExit(1)
 
+    anchored = set(context.implementers(req_id))
+    if files and anchored - set(implementation):
+        # The check re-hashes what the REQUIREMENT points at, so a record over a
+        # different file set reads as stale the moment it is written. Say so now
+        # rather than letting it look accepted and then expire silently.
+        click.echo(
+            "WARN: --file does not cover "
+            + ", ".join(sorted(anchored - set(implementation)))
+            + ", which the requirement id anchors to; this record will read as stale."
+        )
     record = record_acceptance(
         project_root,
         req_id,

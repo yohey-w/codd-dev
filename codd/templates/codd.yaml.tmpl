@@ -112,6 +112,16 @@ typecheck:
   command: null
   max_repair_attempts: 3
 
+# Acceptance-evidence invariant: every acceptance criterion in the requirement
+# documents must reach evidence a machine runs, through the shipped path, by
+# name, bound to the implementation it verified.
+# `strict` here because a NEW project has nothing to retrofit — it is far cheaper
+# to write the evidence as you go than to reconnect it later. An existing project
+# adopting CoDD leaves this at the `advisory` default (findings visible, amber)
+# until it has caught up.
+acceptance_evidence:
+  mode: strict
+
 # verify:
 #   verification_timeout:
 #     per_node_seconds: 60    # optional: hard cap for each verification_test node
