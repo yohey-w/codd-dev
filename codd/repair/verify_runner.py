@@ -217,20 +217,49 @@ def _linked_installed_dependencies(project_root: Path) -> Path | None:
     to a skip, with the SHAPE of the dependency directory (link vs directory)
     nowhere in the message (issue #37).
 
-    Anti-false-green: only a link that resolves to a NON-EMPTY directory counts as
-    an already-installed tree. A dangling link, or one pointing at an empty
-    directory, is NOT installed and must still reach the installer so a genuinely
-    missing dependency tree stays red.
+    Anti-false-green: only a link that resolves to a directory holding at least one
+    PACKAGE counts as an already-installed tree (see :func:`_has_installed_packages`).
+    A dangling link, a link to an empty directory, and a symlink LOOP (``is_dir()``
+    swallows ``ELOOP``) are NOT installations and must still reach the installer so a
+    genuinely missing dependency tree stays red.
     """
     candidate = Path(project_root) / NODE_MODULES_DIRNAME
     try:
         if not candidate.is_symlink() or not candidate.is_dir():
             return None
-        if not any(candidate.iterdir()):
+        if not _has_installed_packages(candidate):
             return None
     except OSError:
         return None
     return candidate
+
+
+def _has_installed_packages(tree: Path) -> bool:
+    """Whether a dependency tree holds at least one real PACKAGE directory.
+
+    "Non-empty" is too weak a test for "installed". A package manager writes its
+    BOOKKEEPING independently of the packages themselves — npm's
+    ``.package-lock.json`` and ``.bin/`` survive an interrupted install, a pruned
+    tree, and a ``node_modules`` that never received a single package — so a
+    directory that is merely non-empty can still have nothing importable in it.
+    Short-circuiting the installer on that shape hands the test stage a tree that
+    fails with "Cannot find module", i.e. an ENVIRONMENT fault misread as a code
+    defect. A dot-prefixed entry is bookkeeping, never a package (a scoped
+    ``@scope/`` directory is not dot-prefixed and counts); a loose FILE is not a
+    package either.
+
+    Cost: ``iterdir`` is lazy and this returns on the first package directory, so a
+    50,000-file store is still an O(1) read.
+    """
+    for entry in tree.iterdir():
+        if entry.name.startswith("."):
+            continue
+        try:
+            if entry.is_dir():
+                return True
+        except OSError:  # an unreadable/looping entry proves nothing — keep looking.
+            continue
+    return False
 
 
 def _link_target_note(path: Path) -> str:
@@ -544,7 +573,7 @@ class VerifyRunner:
         if linked is not None:
             self._install_preflight_note = (
                 "dependency install skipped: "
-                f"{_link_target_note(linked)} is a symlink to an existing, non-empty "
+                f"{_link_target_note(linked)} is a symlink to an existing, populated "
                 "dependency tree (treated as already installed)"
             )
             return None
@@ -561,13 +590,19 @@ class VerifyRunner:
                 env=_go_aware_env(self.project_root),  # None → inherit ambient (non-Go)
             )
         except subprocess.TimeoutExpired:
+            # The stage summary is built from ``details["skip_reason"]``; without one
+            # here the timeout fell back to the generic "dependency install failed"
+            # and the ``[TIMEOUT]`` marker — the word that says "a clock, not a broken
+            # dependency" — survived only inside the failure message.
+            timeout_reason = f"[TIMEOUT] dependency install exceeded {timeout:g}s"
             return VerificationFailure(
                 check_name="install_preflight",
                 source="install_preflight",
-                message=f"[TIMEOUT] dependency install exceeded {timeout:g}s: {command}",
+                message=f"{timeout_reason}: {command}",
                 details={
                     "command": command,
                     "timeout_seconds": timeout,
+                    "skip_reason": timeout_reason,
                     "failure_class": "environment_build_error",
                     "code_addressable": False,
                 },

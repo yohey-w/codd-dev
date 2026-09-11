@@ -604,3 +604,93 @@ def test_real_directory_node_modules_is_unaffected(tmp_path, monkeypatch) -> Non
     assert install_failures[0].details["node_modules_is_symlink"] is False
     assert result.tests_summary == "skipped (dependency install failed)"
     assert not any("symlink" in w for w in result.warnings)
+
+
+def test_bookkeeping_only_linked_tree_still_runs_the_installer(tmp_path, monkeypatch) -> None:
+    """★anti-false-green: an INTERRUPTED or pruned install is not an installation.
+
+    npm writes its bookkeeping (``.package-lock.json``, ``.bin/``) before — and
+    keeps it after — the packages themselves are gone, so "the directory has at
+    least one entry" says nothing about whether dependencies are present. Such a
+    tree used to short-circuit the installer, and the test run then failed with
+    "Cannot find module" — an ENVIRONMENT fault misattributed to the code. Only a
+    real package directory (a non-dot-prefixed DIRECTORY) counts as installed.
+    """
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    store = tmp_path.parent / f"{tmp_path.name}-marker-store" / "node_modules"
+    store.mkdir(parents=True)
+    (store / ".package-lock.json").write_text("{}", encoding="utf-8")  # npm bookkeeping only
+    (store / ".bin").mkdir()  # ... and its bin shims
+    (tmp_path / "node_modules").symlink_to(store, target_is_directory=True)
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "false")
+
+    result = VerifyRunner(tmp_path, _node_settings()).run()
+
+    install_failures = [f for f in result.failures if f.check_name == "install_preflight"]
+    assert install_failures, "a bookkeeping-only linked tree must still reach the installer"
+    assert not any("dependency install skipped" in w for w in result.warnings)
+
+
+def test_linked_tree_with_one_package_directory_counts_as_installed(tmp_path, monkeypatch) -> None:
+    """The other side of the same boundary: bookkeeping PLUS one real package
+    directory is a populated tree, so the installer is still skipped."""
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    store = tmp_path.parent / f"{tmp_path.name}-mixed-store" / "node_modules"
+    (store / ".bin").mkdir(parents=True)
+    (store / "left-pad").mkdir()
+    (tmp_path / "node_modules").symlink_to(store, target_is_directory=True)
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "false")
+
+    result = VerifyRunner(tmp_path, _node_settings(test_command="true")).run()
+
+    assert not [f for f in result.failures if f.check_name == "install_preflight"]
+    assert result.tests_executed is True
+    assert any("symlink" in w for w in result.warnings)
+
+
+def test_install_timeout_keeps_its_marker_in_the_stage_summary(tmp_path, monkeypatch) -> None:
+    """A TIMEOUT must survive into the stage summary.
+
+    The skip reason introduced for the symlink case is read from
+    ``details["skip_reason"]``; the timeout branch carried none, so the summary fell
+    back to the generic "dependency install failed" and the ``[TIMEOUT]`` marker —
+    the one word that tells an operator this was a clock, not a broken dependency —
+    survived only inside the failure message.
+    """
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "sleep 30")
+
+    result = VerifyRunner(tmp_path, _node_settings(install_timeout_seconds=1)).run()
+
+    install_failures = [f for f in result.failures if f.check_name == "install_preflight"]
+    assert install_failures
+    assert "[TIMEOUT]" in install_failures[0].message
+    assert "[TIMEOUT]" in install_failures[0].details["skip_reason"]
+    assert "[TIMEOUT]" in result.tests_summary
+
+
+def test_circular_symlinked_node_modules_is_not_installed(tmp_path) -> None:
+    """A symlink LOOP resolves to no tree at all, so it is not an installation:
+    ``_linked_installed_dependencies`` returns ``None`` (the installer runs and the
+    red stays honest) instead of walking the loop. Both shapes: a self-referential
+    link and a two-hop cycle."""
+    self_loop = tmp_path / "self"
+    self_loop.mkdir()
+    (self_loop / "node_modules").symlink_to(self_loop / "node_modules")
+
+    two_hop = tmp_path / "cycle"
+    two_hop.mkdir()
+    (two_hop / "a").symlink_to(two_hop / "b")
+    (two_hop / "b").symlink_to(two_hop / "a")
+    (two_hop / "node_modules").symlink_to(two_hop / "a")
+
+    dangling = tmp_path / "dangling"
+    dangling.mkdir()
+    (dangling / "node_modules").symlink_to(dangling / "nope")
+
+    assert verify_runner_module._linked_installed_dependencies(self_loop) is None
+    assert verify_runner_module._linked_installed_dependencies(two_hop) is None
+    assert verify_runner_module._linked_installed_dependencies(dangling) is None
